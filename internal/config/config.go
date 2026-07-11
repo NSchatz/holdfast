@@ -36,7 +36,7 @@ var knownKeys = map[string]bool{
 	"min_savings_percent": true, "duration_tolerance_sec": true,
 	"max_failures": true, "skip_hardlinked": true, "state_dir": true,
 	"vmaf_enable": true, "min_vmaf": true, "vmaf_min_pool": true,
-	"vmaf_subsample": true, "vmaf_model": true,
+	"vmaf_subsample": true, "vmaf_model": true, "workers": true,
 }
 
 // defaultLayer is the built-in default configuration, loaded as koanf's base layer.
@@ -62,6 +62,7 @@ func defaultLayer() map[string]any {
 		"vmaf_min_pool":          0.0,
 		"vmaf_subsample":         1,
 		"vmaf_model":             "auto",
+		"workers":                1,
 	}
 }
 
@@ -118,7 +119,8 @@ type Config struct {
 	// SkipHardlinked skips files with >1 hard link (an active seed/dup). A nil
 	// pointer means the default (true); use HardlinkSkip() to read it.
 	SkipHardlinked *bool `yaml:"skip_hardlinked"`
-	// StateDir holds the ledger + heartbeat (relative paths are resolved by callers).
+	// StateDir holds the job store (jobs.db) + heartbeat (relative paths are
+	// resolved by callers).
 	StateDir string `yaml:"state_dir"`
 
 	// --- VMAF perceptual-quality gate (TRANSCODE-4) ---
@@ -142,6 +144,24 @@ type Config struct {
 	// height > 1440 else the HD model; any other value is passed through as the model
 	// version/spec.
 	VmafModel string `yaml:"vmaf_model"`
+
+	// --- worker pool (TRANSCODE-5) ---
+
+	// Workers is the number of concurrent encode workers RunOneshot fans out to.
+	// 0 (absent/default) means 1 — the original sequential behaviour. CPU libx265
+	// already saturates available cores for a single encode, so raising this above
+	// 1 is an explicit opt-in (e.g. many small/low-resolution files, or a hardware
+	// encoder in a later phase). Use EffectiveWorkers() to read the resolved value.
+	Workers int `yaml:"workers"`
+}
+
+// EffectiveWorkers returns the number of workers to run, defaulting 0 (absent) or
+// a negative value to 1 — matching the pre-TRANSCODE-5 sequential behaviour.
+func (c *Config) EffectiveWorkers() int {
+	if c.Workers < 1 {
+		return 1
+	}
+	return c.Workers
 }
 
 // VmafGate reports whether the VMAF gate is enabled, defaulting to true when unset.
@@ -338,6 +358,9 @@ func (c *Config) Validate() error {
 	// min_vmaf=95, so a real config never trips this by omission.)
 	if c.VmafEnable != nil && *c.VmafEnable && c.MinVmaf == 0 && c.VmafMinPool == 0 {
 		return errors.New("vmaf_enable is true but both min_vmaf and vmaf_min_pool are 0 — the VMAF gate would never reject; set min_vmaf (e.g. 95) or disable the gate")
+	}
+	if c.Workers < 0 || c.Workers > 1024 {
+		return fmt.Errorf("workers %d out of range (0-1024; 0 means the default of 1)", c.Workers)
 	}
 	return nil
 }

@@ -6,9 +6,9 @@
 // discards the temp and leaves the source byte-for-byte untouched.
 //
 // Scope (TRANSCODE-1): the structural safety contract + the CPU libx265 encode +
-// the resumable ledger, oneshot. Colour/HDR (TRANSCODE-3), VMAF (TRANSCODE-4), the
-// SQLite queue + worker pool (TRANSCODE-5), and hardware codecs (TRANSCODE-6) build
-// on this without weakening the invariant.
+// the resumable ledger, oneshot. Colour/HDR (TRANSCODE-3), VMAF (TRANSCODE-4), and
+// the SQLite queue + worker pool (TRANSCODE-5, this file) build on this without
+// weakening the invariant. Hardware codecs (TRANSCODE-6) are next.
 package engine
 
 import (
@@ -18,13 +18,14 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/NSchatz/transcode/internal/config"
 	"github.com/NSchatz/transcode/internal/hdr"
-	"github.com/NSchatz/transcode/internal/ledger"
 	"github.com/NSchatz/transcode/internal/probe"
+	"github.com/NSchatz/transcode/internal/store"
 	"github.com/NSchatz/transcode/internal/vmaf"
 )
 
@@ -38,7 +39,7 @@ type Engine struct {
 	Cfg   config.Config
 	Probe *probe.Prober
 	Enc   Encoder
-	Led   *ledger.Ledger
+	Store store.Store
 	Log   *slog.Logger
 
 	// staticMetadataIncomplete, when non-nil, replaces hdr.StaticMetadataIncomplete
@@ -51,45 +52,33 @@ type Engine struct {
 	// gate. Unexported test seam — lets a test force a low score or an unavailable-
 	// libvmaf error without a second real encode. Production leaves it nil.
 	vmafScore func(ctx context.Context, distorted, reference string, subsample int, model string) (vmaf.Result, error)
-
-	mu         sync.Mutex
-	currentTmp string // the in-flight temp (removed on Stop); guarded by mu
 }
 
 // New constructs an Engine. All dependencies are injected so tests can supply a
-// deterministic Encoder while using the real Prober/Ledger over real fixtures.
-func New(cfg config.Config, p *probe.Prober, enc Encoder, led *ledger.Ledger, log *slog.Logger) *Engine {
+// deterministic Encoder while using the real Prober/Store over real fixtures.
+func New(cfg config.Config, p *probe.Prober, enc Encoder, st store.Store, log *slog.Logger) *Engine {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Engine{Cfg: cfg, Probe: p, Enc: enc, Led: led, Log: log}
+	return &Engine{Cfg: cfg, Probe: p, Enc: enc, Store: st, Log: log}
 }
 
-func (e *Engine) setCurrentTmp(s string) {
-	e.mu.Lock()
-	e.currentTmp = s
-	e.mu.Unlock()
-}
-
-// discardInFlightTemp removes the in-flight temp (if any) and clears it. Called on
-// a failure path and on shutdown. The source is never touched here — the swap is
-// the only mutation and only runs after a full verify, which a discarded temp by
-// definition never reached.
-func (e *Engine) discardInFlightTemp() {
-	e.mu.Lock()
-	t := e.currentTmp
-	e.currentTmp = ""
-	e.mu.Unlock()
-	if t != "" {
-		_ = os.Remove(t)
-	}
-}
-
-// RunOneshot discards orphaned temps from any prior killed run, then scans every
-// library root once. It is the TRANSCODE-1 entrypoint (resident/queue mode is
-// TRANSCODE-5). A cancelled ctx (e.g. SIGTERM) stops the scan promptly and leaves
-// the source untouched.
+// RunOneshot discards orphaned temps from any prior killed run, resets any job left
+// active by a prior crashed run back to pending, then scans every library root once
+// and fans the discovered files out to a pool of workers. It is the TRANSCODE-1
+// (sequential) / TRANSCODE-5 (worker pool) entrypoint. A cancelled ctx (e.g.
+// SIGTERM) stops workers from picking up new files and lets the in-flight encode's
+// subprocess be killed via ctx (CommandContext); the temp it was writing is orphaned
+// but never swapped in, and cleanStaleTemps sweeps it on the next startup — the
+// source is untouched either way.
 func (e *Engine) RunOneshot(ctx context.Context) error {
+	if _, err := e.Store.RecoverStale(ctx); err != nil {
+		// Fail safe: if we can't tell what was left active by a prior crash, log and
+		// continue — a stuck "active" row just means that one file is skipped this
+		// pass (Claim treats it as held), never a false completion. It will be
+		// picked up once the store is healthy again.
+		e.Log.Warn("recover stale jobs failed (continuing)", "err", err)
+	}
 	e.cleanStaleTemps(ctx)
 	return e.scanOnce(ctx)
 }
@@ -120,8 +109,11 @@ func (e *Engine) cleanStaleTemps(ctx context.Context) {
 	}
 }
 
-// scanOnce walks the roots, sorts matches for deterministic order, and processes
-// each source file. It stops promptly if ctx is cancelled.
+// scanOnce walks the roots, sorts matches for deterministic order, and fans them
+// out to a pool of workers (Cfg.EffectiveWorkers(), default/minimum 1 — the
+// pre-TRANSCODE-5 behaviour). It stops promptly if ctx is cancelled: workers stop
+// pulling new files from the channel, and the in-flight ffmpeg subprocess (if any)
+// is killed via ctx cancellation propagating through exec.CommandContext.
 func (e *Engine) scanOnce(ctx context.Context) error {
 	var files []string
 	for _, root := range e.Cfg.LibraryRoots {
@@ -143,36 +135,85 @@ func (e *Engine) scanOnce(ctx context.Context) error {
 		})
 	}
 	sort.Strings(files)
-	for _, f := range files {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err := e.ProcessFile(ctx, f); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
+
+	n := e.Cfg.EffectiveWorkers()
+	ch := make(chan string)
+	var wg sync.WaitGroup
+	// firstCancelErr captures the first context-cancellation error surfaced by any
+	// worker, so RunOneshot propagates it exactly as the sequential version did. In
+	// practice this is close to the `return ctx.Err()` fallback below (a worker only
+	// sees Canceled/DeadlineExceeded because ctx was cancelled), but it is kept
+	// explicit so a future child-context deadline inside ProcessFile would still be
+	// surfaced rather than masked by a not-yet-done parent ctx.
+	var mu sync.Mutex
+	var firstCancelErr error
+
+	for i := 0; i < n; i++ {
+		workerID := "w" + strconv.Itoa(i)
+		wg.Add(1)
+		go func(workerID string) {
+			defer wg.Done()
+			for f := range ch {
+				if ctx.Err() != nil {
+					return
+				}
+				if err := e.ProcessFile(ctx, workerID, f); err != nil {
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						mu.Lock()
+						if firstCancelErr == nil {
+							firstCancelErr = err
+						}
+						mu.Unlock()
+						return
+					}
+					// A per-file error is logged and recorded inside ProcessFile; it
+					// never takes down the scan. (ProcessFile returns nil for handled
+					// per-file outcomes; a non-context error here is unexpected but
+					// non-fatal.)
+					e.Log.Warn("process file error (continuing)", "file", f, "err", err)
+				}
 			}
-			// A per-file error is logged and recorded inside ProcessFile; it never
-			// takes down the scan. (ProcessFile returns nil for handled per-file
-			// outcomes; a non-context error here is unexpected but non-fatal.)
-			e.Log.Warn("process file error (continuing)", "file", f, "err", err)
+		}(workerID)
+	}
+
+feed:
+	for _, f := range files {
+		select {
+		case <-ctx.Done():
+			break feed
+		case ch <- f:
 		}
 	}
-	return nil
+	close(ch)
+	wg.Wait()
+
+	if firstCancelErr != nil {
+		return firstCancelErr
+	}
+	return ctx.Err()
 }
 
-// ProcessFile applies the full safety pipeline to one source file. It returns
-// context.Canceled/DeadlineExceeded if interrupted (source untouched, temp
-// discarded); for every other outcome it records the result in the ledger and
-// returns nil — a single bad file must never abort the scan.
-func (e *Engine) ProcessFile(ctx context.Context, f string) error {
+// ProcessFile applies the full safety pipeline to one source file on behalf of
+// worker. It returns context.Canceled/DeadlineExceeded if interrupted (source
+// untouched, temp discarded); for every other outcome it records the result in the
+// store and returns nil — a single bad file must never abort the scan.
+//
+// The store.Claim call is the mutual-exclusion guard: it is the ONLY thing that
+// stands between two workers (or two overlapping runs) both encoding the same
+// source. Everything before Claim (the tab/newline and hardlink skips) is
+// deliberately unrecorded and must stay before Claim so it never creates a store
+// row.
+func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	fi, err := os.Stat(f)
 	if err != nil || fi.IsDir() {
 		return nil
 	}
 
-	// A path containing a literal tab or newline cannot be represented in the TSV
-	// ledger (the row would mis-parse and the file re-encode every scan). Such names
-	// are pathological — skip them, unrecorded.
+	// A path containing a literal tab or newline is pathological — skip it,
+	// unrecorded, same as before the store existed (a store row keyed on such a
+	// path would still be legal SQL, but there is no reason to track it and the
+	// bash-ledger-era rationale for staying unrecorded still applies: keep the
+	// no-op explicit and obvious).
 	if strings.ContainsAny(f, "\t\n") {
 		e.Log.Info("skip (path contains a tab/newline — unsupported)", "file", f)
 		return nil
@@ -180,44 +221,48 @@ func (e *Engine) ProcessFile(ctx context.Context, f string) error {
 
 	key := probe.Fingerprint(f)
 
-	// Resume short-circuit. done/skipped are permanent; failed is retryable up to
-	// MaxFailures (a transient ENOSPC/OOM must not exclude a file forever).
-	prev, _ := e.Led.Status(f, key)
-	switch prev {
-	case ledger.Done, ledger.Skipped:
-		return nil
-	case ledger.Failed:
-		fails, _ := e.Led.FailCount(f, key)
-		if fails >= e.Cfg.MaxFailures {
-			return nil // parked after MaxFailures attempts
-		}
-		// else fall through and retry
-	}
-
 	// Hardlink guard. A file with >1 hard link is almost always an *arr import that
 	// is also an active seed. Replacing it via rename breaks the link — reclaiming
 	// no space and silently breaking the seed. Skip, and DON'T record: the link
-	// count is mutable (the seed may finish), so re-evaluate every scan.
+	// count is mutable (the seed may finish), so re-evaluate every scan. Must run
+	// before Claim so it never creates a store row.
 	if e.Cfg.HardlinkSkip() && probe.NLink(f) > 1 {
 		e.Log.Info("skip (hardlinked — swap would break a seed and reclaim nothing)", "file", f, "links", probe.NLink(f))
+		return nil
+	}
+
+	// Claim: the resume short-circuit AND the cross-worker mutual-exclusion guard
+	// in one atomic call. done/skipped are permanent; failed is retryable up to
+	// MaxFailures (a transient ENOSPC/OOM must not exclude a file forever); active
+	// (probing/encoding/verifying) means another worker holds it (or it's stale,
+	// awaiting the next RunOneshot's RecoverStale). Any of these => not claimed =>
+	// nothing to do here.
+	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures)
+	if err != nil {
+		// Fail safe: a store error must never be treated as "done". Log and skip
+		// this pass; the file is retried on the next scan once the store recovers.
+		e.Log.Warn("claim error (skipping this pass, will retry)", "file", f, "err", err)
+		return nil
+	}
+	if !claimed {
 		return nil
 	}
 
 	codec := e.Probe.VideoCodec(ctx, f)
 	if codec == "" {
 		e.Log.Info("skip (unreadable / no video stream)", "file", f)
-		_ = e.Led.Record(ledger.Failed, key, f)
+		e.finish(ctx, f, key, store.Failed)
 		return nil
 	}
 	if codec == "hevc" || codec == "h265" {
 		e.Log.Info("skip (already HEVC)", "file", f)
-		_ = e.Led.Record(ledger.Skipped, key, f)
+		e.finish(ctx, f, key, store.Skipped)
 		return nil
 	}
 
 	if br := e.Probe.BitrateKbps(ctx, f); br > 0 && br < e.Cfg.MinBitrateKbps {
 		e.Log.Info("skip (low bitrate)", "file", f, "kbps", br, "min", e.Cfg.MinBitrateKbps)
-		_ = e.Led.Record(ledger.Skipped, key, f)
+		e.finish(ctx, f, key, store.Skipped)
 		return nil
 	}
 
@@ -227,7 +272,7 @@ func (e *Engine) ProcessFile(ctx context.Context, f string) error {
 	switch e.Probe.FieldOrder(ctx, f) {
 	case "tt", "bb", "tb", "bt":
 		e.Log.Info("skip (interlaced — not deinterlacing)", "file", f)
-		_ = e.Led.Record(ledger.Skipped, key, f)
+		e.finish(ctx, f, key, store.Skipped)
 		return nil
 	}
 
@@ -242,11 +287,11 @@ func (e *Engine) ProcessFile(ctx context.Context, f string) error {
 	switch hdr.Classify(ctx, e.Probe, f) {
 	case hdr.ClassDV:
 		e.Log.Info("skip (Dolby Vision — RPU cannot survive a generic re-encode)", "file", f)
-		_ = e.Led.Record(ledger.Skipped, key, f)
+		e.finish(ctx, f, key, store.Skipped)
 		return nil
 	case hdr.ClassHDR10Plus:
 		e.Log.Info("skip (HDR10+ dynamic metadata — cannot survive a generic re-encode)", "file", f)
-		_ = e.Led.Record(ledger.Skipped, key, f)
+		e.finish(ctx, f, key, store.Skipped)
 		return nil
 	case hdr.ClassHDR10:
 		// HDR10 static metadata IS carried through the encode — but if the source
@@ -260,7 +305,7 @@ func (e *Engine) ProcessFile(ctx context.Context, f string) error {
 		}
 		if incomplete(e.Probe.FrameSideDataFlat(ctx, f)) {
 			e.Log.Info("skip (HDR10 static metadata present but incomplete/unparseable — refusing to re-encode and drop it)", "file", f)
-			_ = e.Led.Record(ledger.Skipped, key, f)
+			e.finish(ctx, f, key, store.Skipped)
 			return nil
 		}
 	}
@@ -273,7 +318,7 @@ func (e *Engine) ProcessFile(ctx context.Context, f string) error {
 		srcPixFmt := e.Probe.PixFmt(ctx, f)
 		if _, ok := hdr.DerivePixFmt(srcPixFmt); !ok {
 			e.Log.Info("skip (unrecognized/exotic pixel format — refusing to silently subsample)", "file", f, "pix_fmt", srcPixFmt)
-			_ = e.Led.Record(ledger.Skipped, key, f)
+			e.finish(ctx, f, key, store.Skipped)
 			return nil
 		}
 	}
@@ -290,6 +335,13 @@ func (e *Engine) ProcessFile(ctx context.Context, f string) error {
 	dir := filepath.Dir(f)
 	base := filepath.Base(f)
 	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	// tmp is local to this call (and thus to this worker) — TRANSCODE-5 runs N
+	// workers concurrently, each on a different source file, so each needs its own
+	// in-flight-temp tracking rather than one shared field. Correctness doesn't
+	// depend on tracking it in the Engine at all: on any failure path below we
+	// remove tmp directly, and on a ctx-cancel (SIGTERM) the ffmpeg subprocess is
+	// killed by exec.CommandContext leaving tmp orphaned on disk — cleanStaleTemps
+	// sweeps it on the next startup, exactly like the pre-worker-pool code path.
 	tmp := filepath.Join(dir, stem+"."+TempMarker+"."+outExt)
 	final := filepath.Join(dir, stem+"."+outExt)
 
@@ -301,7 +353,7 @@ func (e *Engine) ProcessFile(ctx context.Context, f string) error {
 	if final != f {
 		if _, err := os.Lstat(final); err == nil {
 			e.Log.Info("skip (target already exists as a distinct file — refusing to clobber)", "file", f, "target", final)
-			_ = e.Led.Record(ledger.Skipped, key, f)
+			e.finish(ctx, f, key, store.Skipped)
 			return nil
 		}
 	}
@@ -312,28 +364,29 @@ func (e *Engine) ProcessFile(ctx context.Context, f string) error {
 	}
 
 	_ = os.Remove(tmp) // clear any stale temp for this file
-	e.Log.Info("transcode", "file", f, "codec", codec, "-> ", "hevc")
-	e.setCurrentTmp(tmp)
+	e.Log.Info("transcode", "file", f, "codec", codec, "-> ", "hevc", "worker", worker)
+	e.advance(ctx, f, key, store.Encoding)
 
 	if err := e.Enc.Encode(ctx, f, tmp); err != nil {
-		if ctx.Err() != nil { // interrupted: discard temp, DON'T record failed
-			e.discardInFlightTemp()
+		if ctx.Err() != nil { // interrupted: discard temp, DON'T finish — leave active for RecoverStale
+			_ = os.Remove(tmp)
 			return ctx.Err()
 		}
 		e.Log.Warn("FAIL (encode error, source untouched)", "file", f, "err", err)
-		e.discardInFlightTemp()
-		_ = e.Led.Record(ledger.Failed, key, f)
+		_ = os.Remove(tmp)
+		e.finish(ctx, f, key, store.Failed)
 		return nil
 	}
 
+	e.advance(ctx, f, key, store.Verifying)
 	if reason := e.verifyOutput(ctx, f, tmp); reason != nil {
 		if ctx.Err() != nil {
-			e.discardInFlightTemp()
+			_ = os.Remove(tmp)
 			return ctx.Err()
 		}
 		e.Log.Warn("FAIL (verify rejected, source untouched)", "file", f, "reason", reason.Error())
-		e.discardInFlightTemp()
-		_ = e.Led.Record(ledger.Failed, key, f)
+		_ = os.Remove(tmp)
+		e.finish(ctx, f, key, store.Failed)
 		return nil
 	}
 
@@ -343,8 +396,8 @@ func (e *Engine) ProcessFile(ctx context.Context, f string) error {
 	if final != f {
 		if _, err := os.Lstat(final); err == nil {
 			e.Log.Warn("FAIL (target appeared during encode — refusing to clobber)", "file", f, "target", final)
-			e.discardInFlightTemp()
-			_ = e.Led.Record(ledger.Failed, key, f)
+			_ = os.Remove(tmp)
+			e.finish(ctx, f, key, store.Failed)
 			return nil
 		}
 	}
@@ -354,19 +407,55 @@ func (e *Engine) ProcessFile(ctx context.Context, f string) error {
 	// rename to the new name then remove the now-orphaned source.
 	if err := os.Rename(tmp, final); err != nil {
 		e.Log.Warn("FAIL (swap error, source untouched)", "file", f, "err", err)
-		e.discardInFlightTemp()
-		_ = e.Led.Record(ledger.Failed, key, f)
+		_ = os.Remove(tmp)
+		e.finish(ctx, f, key, store.Failed)
 		return nil
 	}
-	e.setCurrentTmp("")
 	if final != f {
 		if err := os.Remove(f); err != nil {
 			e.Log.Warn("transcoded ok but could not remove original", "file", f, "err", err)
 		}
 	}
 	e.Log.Info("DONE", "file", final, "bytes", probe.FileSize(final))
-	_ = e.Led.Record(ledger.Done, probe.Fingerprint(final), final)
+	// The done row is keyed under the FINAL file's own path+fingerprint (mirroring
+	// the pre-TRANSCODE-5 ledger behaviour) so a resume short-circuits on the new
+	// file's identity, not the pre-swap source's. The post-swap fingerprint (new
+	// size/mtime) is ALWAYS a fresh key with no existing row — even when
+	// final == f, the rename changed the file's size/mtime in place — so Claim it
+	// first (Finish alone would be a no-op UPDATE against a nonexistent row and the
+	// done outcome would be silently lost).
+	finalKey := probe.Fingerprint(final)
+	if _, err := e.Store.Claim(ctx, final, finalKey, worker, e.Cfg.MaxFailures); err != nil {
+		e.Log.Warn("claim of final key failed (done outcome still applies on disk)", "file", final, "err", err)
+	}
+	e.finish(ctx, final, finalKey, store.Done)
+	// Prune the superseded pre-swap row (the source's old identity), so the table
+	// doesn't accumulate one dangling row per transcoded file. The swap always
+	// changes the file's size/mtime, so (f,key) is never the same row as the fresh
+	// (final,finalKey) done row just written — but guard it anyway.
+	if f != final || key != finalKey {
+		if err := e.Store.Delete(ctx, f, key); err != nil {
+			e.Log.Warn("could not prune superseded job row", "file", f, "err", err)
+		}
+	}
 	return nil
+}
+
+// advance is a small logged wrapper around Store.Advance — a store error here is
+// never fatal to the pipeline (the encode/verify still proceeds), it just means the
+// store's picture of this job's sub-state may lag; RecoverStale's active-state
+// sweep still eventually reconciles it via the next Claim/Finish call.
+func (e *Engine) advance(ctx context.Context, path, key string, s store.Status) {
+	if err := e.Store.Advance(ctx, path, key, s); err != nil {
+		e.Log.Warn("store advance failed (continuing)", "file", path, "status", s, "err", err)
+	}
+}
+
+// finish is a small logged wrapper around Store.Finish.
+func (e *Engine) finish(ctx context.Context, path, key string, s store.Status) {
+	if err := e.Store.Finish(ctx, path, key, s); err != nil {
+		e.Log.Warn("store finish failed", "file", path, "status", s, "err", err)
+	}
 }
 
 // isTempName reports whether a basename is a transcoder work-in-progress temp.

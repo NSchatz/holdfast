@@ -15,6 +15,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -25,8 +26,8 @@ import (
 
 	"github.com/NSchatz/transcode/internal/config"
 	"github.com/NSchatz/transcode/internal/hdr"
-	"github.com/NSchatz/transcode/internal/ledger"
 	"github.com/NSchatz/transcode/internal/probe"
+	"github.com/NSchatz/transcode/internal/store"
 	"github.com/NSchatz/transcode/internal/vmaf"
 )
 
@@ -110,36 +111,80 @@ func nTemp(t *testing.T, dir string) int {
 	return n
 }
 
-// ledgerHas reports whether the ledger holds a row with the given status whose path
-// contains pathSub.
-func ledgerHas(t *testing.T, led *ledger.Ledger, status, pathSub string) bool {
-	t.Helper()
-	b, err := os.ReadFile(led.Path)
-	if err != nil {
-		return false
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		parts := strings.SplitN(line, "\t", 3)
-		if len(parts) == 3 && parts[0] == status && strings.Contains(parts[2], pathSub) {
-			return true
-		}
-	}
-	return false
+// testStore wraps a *store.SQLite plus the directory it scans, so assertion
+// helpers can find "the row for this file" the same way the tests used to grep the
+// flat ledger file for a path substring — the store is keyed by (path,
+// fingerprint), not by path alone, so helpers resolve pathSub to an actual on-disk
+// path under root first (walking the directory, mirroring ledgerHas's old
+// substring-of-the-recorded-path semantics) and then look up its CURRENT
+// fingerprint. That is exactly the row a real caller would have written: a
+// skipped/failed row is keyed by the source's fingerprint, which is never mutated
+// on those paths; a done row is keyed by the FINAL file's post-swap fingerprint,
+// which is what's on disk once the swap has happened.
+type testStore struct {
+	*store.SQLite
+	root string
 }
 
-func failCount(t *testing.T, led *ledger.Ledger) int {
+// findPath walks root for the first file whose path contains sub. Returns "" if
+// none found.
+func (ts *testStore) findPath(t *testing.T, sub string) string {
 	t.Helper()
-	b, err := os.ReadFile(led.Path)
+	var exact, contains string
+	_ = filepath.WalkDir(ts.root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		// Prefer an exact basename match (robust when two files in a dir share a
+		// substring, e.g. movie.mkv + movie.mp4); fall back to a substring contains.
+		if filepath.Base(path) == sub && exact == "" {
+			exact = path
+		} else if strings.Contains(path, sub) && contains == "" {
+			contains = path
+		}
+		return nil
+	})
+	if exact != "" {
+		return exact
+	}
+	return contains
+}
+
+// ledgerHas reports whether the store holds a row with the given status for the
+// file whose path contains pathSub (resolved against its CURRENT on-disk
+// fingerprint — see testStore's doc comment).
+func ledgerHas(t *testing.T, ts *testStore, status store.Status, pathSub string) bool {
+	t.Helper()
+	path := ts.findPath(t, pathSub)
+	if path == "" {
+		return false
+	}
+	got, _, exists, err := ts.Get(context.Background(), path, probe.Fingerprint(path))
 	if err != nil {
+		t.Fatalf("store.Get(%s): %v", path, err)
+	}
+	return exists && got == status
+}
+
+// failCount returns the fail_count recorded for the file whose path contains
+// pathSub. root is needed because failCount is called across multiple RunOneshot
+// passes in TestCase13, where the file's fingerprint is stable (the encode always
+// fails, so the source is never mutated) — so a single lookup by current
+// fingerprint is correct on every call.
+func failCount(t *testing.T, ts *testStore, pathSub string) int {
+	t.Helper()
+	path := ts.findPath(t, pathSub)
+	if path == "" {
 		return 0
 	}
-	n := 0
-	for _, line := range strings.Split(string(b), "\n") {
-		if strings.HasPrefix(line, ledger.Failed+"\t") {
-			n++
-		}
+	_, fc, exists, err := ts.Get(context.Background(), path, probe.Fingerprint(path))
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", path, err)
 	}
-	return n
+	if !exists {
+		return 0
+	}
+	return fc
 }
 
 // ---- harness -----------------------------------------------------------------
@@ -170,24 +215,37 @@ func baseCfg(root string) config.Config {
 
 func boolPtr(b bool) *bool { return &b }
 
+// newTestStore opens a fresh SQLite-backed store under root (a temp DB file, not
+// under root itself so it's never mistaken for a video file by the scan).
+func newTestStore(t *testing.T, root string) *testStore {
+	t.Helper()
+	dbDir := t.TempDir() // sibling temp dir, never scanned as a library root
+	st, err := store.Open(filepath.Join(dbDir, "jobs.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return &testStore{SQLite: st, root: root}
+}
+
 // run builds an engine over root with the given encoder and config mutation, then
-// runs one oneshot pass. Returns the ledger for assertions.
-func run(t *testing.T, ffmpeg, ffprobe, root string, enc Encoder, mutate func(*config.Config)) *ledger.Ledger {
+// runs one oneshot pass. Returns the store for assertions.
+func run(t *testing.T, ffmpeg, ffprobe, root string, enc Encoder, mutate func(*config.Config)) *testStore {
 	t.Helper()
 	cfg := baseCfg(root)
 	if mutate != nil {
 		mutate(&cfg)
 	}
-	led := ledger.New(filepath.Join(root, "l.ledger"))
+	ts := newTestStore(t, root)
 	prober := probe.New(ffmpeg, ffprobe)
 	if enc == nil {
 		enc = FFmpegEncoder{FFmpeg: ffmpeg, Cfg: cfg, Probe: prober}
 	}
-	eng := New(cfg, prober, enc, led, discardLogger())
+	eng := New(cfg, prober, enc, ts, discardLogger())
 	if err := eng.RunOneshot(context.Background()); err != nil {
 		t.Fatalf("RunOneshot: %v", err)
 	}
-	return led
+	return ts
 }
 
 func codecOf(t *testing.T, ffprobe, path string) string {
@@ -198,18 +256,20 @@ func codecOf(t *testing.T, ffprobe, path string) string {
 
 // buildEngine constructs an Engine over root without running it, so a test can set
 // a seam (e.g. StaticMetadataIncomplete) before calling RunOneshot itself — mirrors
-// the bash suite's TRANSCODER_TEST_HOOKS.
-func buildEngine(ffmpeg, ffprobe, root string, enc Encoder, mutate func(*config.Config)) *Engine {
+// the bash suite's TRANSCODER_TEST_HOOKS. t is needed to open the backing store
+// (temp-dir cleanup); pass the *testing.T from the calling test.
+func buildEngine(t *testing.T, ffmpeg, ffprobe, root string, enc Encoder, mutate func(*config.Config)) *Engine {
+	t.Helper()
 	cfg := baseCfg(root)
 	if mutate != nil {
 		mutate(&cfg)
 	}
-	led := ledger.New(filepath.Join(root, "l.ledger"))
+	ts := newTestStore(t, root)
 	prober := probe.New(ffmpeg, ffprobe)
 	if enc == nil {
 		enc = FFmpegEncoder{FFmpeg: ffmpeg, Cfg: cfg, Probe: prober}
 	}
-	return New(cfg, prober, enc, led, discardLogger())
+	return New(cfg, prober, enc, ts, discardLogger())
 }
 
 // ---- HDR / source-property fixture builders (real ffmpeg) --------------------
@@ -333,7 +393,7 @@ func TestCase1_AlreadyHEVCSkipped(t *testing.T) {
 	if md5f(t, filepath.Join(d, "movie.mkv")) != before {
 		t.Error("already-HEVC source was modified")
 	}
-	if !ledgerHas(t, led, ledger.Skipped, "movie.mkv") {
+	if !ledgerHas(t, led, store.Skipped, "movie.mkv") {
 		t.Error("expected skipped row")
 	}
 	if nTemp(t, d) != 0 {
@@ -357,7 +417,7 @@ func TestCase2_EncodeErrorSourceUntouched(t *testing.T) {
 	if nTemp(t, d) != 0 {
 		t.Error("temp not discarded")
 	}
-	if !ledgerHas(t, led, ledger.Failed, "movie.mkv") {
+	if !ledgerHas(t, led, store.Failed, "movie.mkv") {
 		t.Error("expected failed row")
 	}
 }
@@ -377,7 +437,7 @@ func TestCase3_CorruptOutputRejected(t *testing.T) {
 	if nTemp(t, d) != 0 {
 		t.Error("temp not discarded")
 	}
-	if !ledgerHas(t, led, ledger.Failed, "movie.mkv") {
+	if !ledgerHas(t, led, store.Failed, "movie.mkv") {
 		t.Error("expected failed row")
 	}
 }
@@ -410,7 +470,7 @@ func TestCase4_LargerOutputRejected(t *testing.T) {
 	if nTemp(t, d) != 0 {
 		t.Error("temp not discarded")
 	}
-	if !ledgerHas(t, led, ledger.Failed, "movie.mkv") {
+	if !ledgerHas(t, led, store.Failed, "movie.mkv") {
 		t.Error("expected failed row")
 	}
 }
@@ -428,7 +488,7 @@ func TestCase5_GoodSmallerSwapAndCase6_Resume(t *testing.T) {
 	if probe.FileSize(src) >= inSize {
 		t.Error("case5: output not smaller")
 	}
-	if !ledgerHas(t, led, ledger.Done, "movie.mkv") {
+	if !ledgerHas(t, led, store.Done, "movie.mkv") {
 		t.Error("case5: expected done row")
 	}
 	if nTemp(t, d) != 0 {
@@ -456,7 +516,7 @@ func TestCase7_LowBitrateSkipped(t *testing.T) {
 	if md5f(t, src) != before {
 		t.Error("low-bitrate source modified")
 	}
-	if !ledgerHas(t, led, ledger.Skipped, "movie.mp4") {
+	if !ledgerHas(t, led, store.Skipped, "movie.mp4") {
 		t.Error("expected skipped row")
 	}
 }
@@ -491,7 +551,7 @@ func TestCase9_UnreadableNeverDeleted(t *testing.T) {
 	if md5f(t, src) != before {
 		t.Error("non-video source modified")
 	}
-	if !ledgerHas(t, led, ledger.Failed, "movie.mkv") {
+	if !ledgerHas(t, led, store.Failed, "movie.mkv") {
 		t.Error("expected failed row")
 	}
 }
@@ -516,7 +576,7 @@ func TestCase10_CollisionVsHEVCMasterNotClobbered(t *testing.T) {
 	if !exists(filepath.Join(d, "movie.mkv")) || !exists(filepath.Join(d, "movie.mp4")) {
 		t.Error("a file went missing")
 	}
-	if !ledgerHas(t, led, ledger.Skipped, "movie.mp4") {
+	if !ledgerHas(t, led, store.Skipped, "movie.mp4") {
 		t.Error("expected skipped row for the collision")
 	}
 }
@@ -558,7 +618,7 @@ func TestCase12_HardlinkedSkipped(t *testing.T) {
 	if !exists(src) || !exists(filepath.Join(d, "seed.mkv")) {
 		t.Error("a link went missing")
 	}
-	if ledgerHas(t, led, ledger.Skipped, "movie.mkv") {
+	if ledgerHas(t, led, store.Skipped, "movie.mkv") {
 		t.Error("hardlinked file must NOT be recorded (re-evaluated later)")
 	}
 }
@@ -570,31 +630,31 @@ func TestCase13_FailedRetriedThenParked(t *testing.T) {
 	mkH264(t, ffmpeg, src, "3M")
 	before := md5f(t, src)
 	enc := EncoderFunc(func(ctx context.Context, in, out string) error { return errFake })
-	led := ledger.New(filepath.Join(d, "l.ledger"))
+	ts := newTestStore(t, d)
 	cfg := baseCfg(d)
 	cfg.MaxFailures = 3
 	prober := probe.New(ffmpeg, ffprobe)
 	do := func() {
-		eng := New(cfg, prober, enc, led, discardLogger())
+		eng := New(cfg, prober, enc, ts, discardLogger())
 		if err := eng.RunOneshot(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 	}
 	do()
-	if failCount(t, led) != 1 {
-		t.Fatalf("attempt 1: failCount=%d want 1", failCount(t, led))
+	if failCount(t, ts, "movie.mkv") != 1 {
+		t.Fatalf("attempt 1: failCount=%d want 1", failCount(t, ts, "movie.mkv"))
 	}
 	do()
-	if failCount(t, led) != 2 {
-		t.Fatalf("attempt 2 (retry): failCount=%d want 2", failCount(t, led))
+	if failCount(t, ts, "movie.mkv") != 2 {
+		t.Fatalf("attempt 2 (retry): failCount=%d want 2", failCount(t, ts, "movie.mkv"))
 	}
 	do()
-	if failCount(t, led) != 3 {
-		t.Fatalf("attempt 3: failCount=%d want 3", failCount(t, led))
+	if failCount(t, ts, "movie.mkv") != 3 {
+		t.Fatalf("attempt 3: failCount=%d want 3", failCount(t, ts, "movie.mkv"))
 	}
 	do() // parked now — no new attempt
-	if failCount(t, led) != 3 {
-		t.Fatalf("after MAX_FAILURES: failCount=%d want 3 (parked)", failCount(t, led))
+	if failCount(t, ts, "movie.mkv") != 3 {
+		t.Fatalf("after MAX_FAILURES: failCount=%d want 3 (parked)", failCount(t, ts, "movie.mkv"))
 	}
 	if md5f(t, src) != before {
 		t.Error("source modified across retries")
@@ -607,15 +667,19 @@ func TestCase14_TabPathSkipped(t *testing.T) {
 	tabName := filepath.Join(d, "mo\tvie.mkv")
 	mkH264(t, ffmpeg, tabName, "8M")
 	before := md5f(t, tabName)
-	led := run(t, ffmpeg, ffprobe, d, nil, nil)
+	ts := run(t, ffmpeg, ffprobe, d, nil, nil)
 	if md5f(t, tabName) != before {
 		t.Error("tab-named file modified")
 	}
 	if codecOf(t, ffprobe, tabName) != "h264" {
 		t.Error("tab-named file transcoded")
 	}
-	if fi, err := os.Stat(led.Path); err == nil && fi.Size() > 0 {
-		t.Error("ledger should be empty (tab path unrecorded)")
+	_, _, exists, err := ts.Get(context.Background(), tabName, probe.Fingerprint(tabName))
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if exists {
+		t.Error("store should have no row for the tab-named path (unrecorded)")
 	}
 }
 
@@ -635,7 +699,7 @@ func TestCase15_UnknownDurationTranscodes(t *testing.T) {
 	if exists(raw) {
 		t.Error("original raw source not removed")
 	}
-	if !ledgerHas(t, led, ledger.Done, "movie.mkv") {
+	if !ledgerHas(t, led, store.Done, "movie.mkv") {
 		t.Error("expected done row")
 	}
 }
@@ -661,7 +725,7 @@ func TestCase16_TruncatedUnknownDurationRejected(t *testing.T) {
 	if exists(filepath.Join(d, "movie.mkv")) {
 		t.Error("truncated encode: a HEVC output was swapped in")
 	}
-	if !ledgerHas(t, led, ledger.Failed, "movie.h264") {
+	if !ledgerHas(t, led, store.Failed, "movie.h264") {
 		t.Error("expected failed row")
 	}
 }
@@ -701,7 +765,7 @@ func TestCase17_DroppedAudioTrackRejected(t *testing.T) {
 	if nTemp(t, d) != 0 {
 		t.Error("temp not discarded")
 	}
-	if !ledgerHas(t, led, ledger.Failed, "movie.mkv") {
+	if !ledgerHas(t, led, store.Failed, "movie.mkv") {
 		t.Error("expected failed row")
 	}
 }
@@ -745,7 +809,7 @@ func TestCase18_NonHEVCHDR10ColorPreserved(t *testing.T) {
 	if !hasSideData(t, ffprobe, src, "Content light level metadata") {
 		t.Error("case18: output lost content-light (MaxCLL)")
 	}
-	if !ledgerHas(t, led, ledger.Done, "movie.mkv") {
+	if !ledgerHas(t, led, store.Done, "movie.mkv") {
 		t.Error("case18: expected done row")
 	}
 }
@@ -775,7 +839,7 @@ func TestCase19_NonHEVCSDRNoInventedHDR(t *testing.T) {
 	if hasSideData(t, ffprobe, src, "Mastering display metadata") {
 		t.Error("case19: SDR output must NOT carry an invented mastering-display block")
 	}
-	if !ledgerHas(t, led, ledger.Done, "movie.mkv") {
+	if !ledgerHas(t, led, store.Done, "movie.mkv") {
 		t.Error("case19: expected done row")
 	}
 }
@@ -840,7 +904,8 @@ func TestCase22_HDR10IncompleteSkipWired(t *testing.T) {
 	mkH264HDR10(t, ffmpeg, src, "8M")
 	before := md5f(t, src)
 
-	eng := buildEngine(ffmpeg, ffprobe, d, nil, nil)
+	eng := buildEngine(t, ffmpeg, ffprobe, d, nil, nil)
+	ts := eng.Store.(*testStore)
 	eng.staticMetadataIncomplete = func(flat string) bool { return true }
 	if err := eng.RunOneshot(context.Background()); err != nil {
 		t.Fatalf("RunOneshot: %v", err)
@@ -852,7 +917,7 @@ func TestCase22_HDR10IncompleteSkipWired(t *testing.T) {
 	if codecOf(t, ffprobe, src) != "h264" {
 		t.Error("case22: source was transcoded despite the forced-incomplete predicate")
 	}
-	if !ledgerHas(t, eng.Led, ledger.Skipped, "movie.mkv") {
+	if !ledgerHas(t, ts, store.Skipped, "movie.mkv") {
 		t.Error("case22: expected skipped row (not failed/done)")
 	}
 	if nTemp(t, d) != 0 {
@@ -884,7 +949,7 @@ func TestCaseA_InterlacedSkipped(t *testing.T) {
 	if codecOf(t, ffprobe, src) != "h264" {
 		t.Error("caseA: interlaced source was transcoded")
 	}
-	if !ledgerHas(t, led, ledger.Skipped, "movie.mkv") {
+	if !ledgerHas(t, led, store.Skipped, "movie.mkv") {
 		t.Error("caseA: expected skipped row")
 	}
 	if nTemp(t, d) != 0 {
@@ -918,7 +983,7 @@ func TestCaseB_Chroma422Preserved(t *testing.T) {
 	if got := prober.PixFmt(context.Background(), src); got != "yuv422p10le" {
 		t.Errorf("caseB: output pix_fmt = %q, want yuv422p10le (chroma subsampling must be preserved, not flattened to 4:2:0)", got)
 	}
-	if !ledgerHas(t, led, ledger.Done, "movie.mkv") {
+	if !ledgerHas(t, led, store.Done, "movie.mkv") {
 		t.Error("caseB: expected done row")
 	}
 }
@@ -956,7 +1021,7 @@ func TestCaseC_MP4SubtitlesContainerMatch(t *testing.T) {
 	if got := prober.StreamCount(context.Background(), src, "s"); got != 1 {
 		t.Error("caseC: subtitle track was dropped")
 	}
-	if !ledgerHas(t, led, ledger.Done, "movie.mp4") {
+	if !ledgerHas(t, led, store.Done, "movie.mp4") {
 		t.Error("caseC: expected done row")
 	}
 }
@@ -978,7 +1043,7 @@ func TestCaseD_VFRNotFalseRejected(t *testing.T) {
 	if probe.FileSize(src) >= inSize {
 		t.Error("caseD: output not smaller")
 	}
-	if !ledgerHas(t, led, ledger.Done, "movie.mkv") {
+	if !ledgerHas(t, led, store.Done, "movie.mkv") {
 		t.Error("caseD: expected done row (VFR source false-rejected by a parity/timing gate)")
 	}
 	if nTemp(t, d) != 0 {
@@ -1013,7 +1078,7 @@ func TestCaseE_ExoticPixFmtSkipped(t *testing.T) {
 	if codecOf(t, ffprobe, src) != "ffv1" {
 		t.Error("caseE: exotic-pix_fmt source was transcoded")
 	}
-	if !ledgerHas(t, led, ledger.Skipped, "movie.mkv") {
+	if !ledgerHas(t, led, store.Skipped, "movie.mkv") {
 		t.Error("caseE: expected skipped row")
 	}
 	if nTemp(t, d) != 0 {
@@ -1055,7 +1120,7 @@ func TestVmaf_RejectsDegradedOutput(t *testing.T) {
 	if nTemp(t, d) != 0 {
 		t.Error("temp not discarded")
 	}
-	if !ledgerHas(t, led, ledger.Failed, "movie.mkv") {
+	if !ledgerHas(t, led, store.Failed, "movie.mkv") {
 		t.Error("expected a failed row (VMAF rejection)")
 	}
 }
@@ -1073,7 +1138,7 @@ func TestVmaf_AcceptsNormalEncode(t *testing.T) {
 	if codecOf(t, ffprobe, src) != "hevc" {
 		t.Error("a normal encode was not accepted under the VMAF gate")
 	}
-	if !ledgerHas(t, led, ledger.Done, "movie.mkv") {
+	if !ledgerHas(t, led, store.Done, "movie.mkv") {
 		t.Error("expected a done row")
 	}
 }
@@ -1091,7 +1156,7 @@ func TestVmaf_DisabledAcceptsDegraded(t *testing.T) {
 	if codecOf(t, ffprobe, src) != "hevc" {
 		t.Error("VMAF-off did not accept the (structurally-valid) degraded output")
 	}
-	if !ledgerHas(t, led, ledger.Done, "movie.mkv") {
+	if !ledgerHas(t, led, store.Done, "movie.mkv") {
 		t.Error("expected a done row with VMAF disabled")
 	}
 }
@@ -1104,14 +1169,14 @@ func TestVmaf_UnavailableWhileEnabledRejects(t *testing.T) {
 	before := md5f(t, src)
 	// Inject a scorer that reports libvmaf unavailable. The gate must REJECT (never
 	// accept an unmeasured encode).
-	eng := buildEngine(ffmpeg, ffprobe, d, nil, func(c *config.Config) {
+	eng := buildEngine(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
 		c.VmafEnable = boolPtr(true)
 		c.MinVmaf = 95
 	})
+	ts := eng.Store.(*testStore)
 	eng.vmafScore = func(ctx context.Context, distorted, reference string, sub int, model string) (vmaf.Result, error) {
 		return vmaf.Result{}, vmaf.ErrUnavailable
 	}
-	led := eng.Led
 	if err := eng.RunOneshot(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -1121,7 +1186,7 @@ func TestVmaf_UnavailableWhileEnabledRejects(t *testing.T) {
 	if codecOf(t, ffprobe, src) != "h264" {
 		t.Error("source swapped when VMAF unavailable (should reject an unmeasured encode)")
 	}
-	if !ledgerHas(t, led, ledger.Failed, "movie.mkv") {
+	if !ledgerHas(t, ts, store.Failed, "movie.mkv") {
 		t.Error("expected a failed row (unmeasured encode rejected)")
 	}
 }
@@ -1168,7 +1233,157 @@ func TestVmaf_MinPoolFloorRejects(t *testing.T) {
 	if codecOf(t, ffprobe, src) != "h264" {
 		t.Error("source was swapped (min-pool floor not enforced)")
 	}
-	if !ledgerHas(t, led, ledger.Failed, "movie.mkv") {
+	if !ledgerHas(t, led, store.Failed, "movie.mkv") {
 		t.Error("expected a failed row (min-pool rejection)")
+	}
+}
+
+// ---- TRANSCODE-5: SQLite store + worker pool ----------------------------------
+
+// TestWorkerPool_ConcurrentWorkersProcessEachFileExactlyOnce runs RunOneshot with
+// Workers=4 over six independent H.264 sources. It proves the worker pool fans out
+// correctly AND that store.Claim's mutual exclusion holds under real concurrency: no
+// source is encoded twice (which would show up as either a double-processing race
+// or, since a second Claim on an already-active/-done job must fail, simply as every
+// file ending HEVC+done exactly once with no error). Each source gets its own
+// distinguishing byte-size (via a different bitrate) so a "swapped source" bug
+// (worker A's output landing on worker B's file) would show up as a wrong-content
+// swap; codec+done-per-file is the primary assertion, matching how the rest of this
+// suite verifies outcomes.
+func TestWorkerPool_ConcurrentWorkersProcessEachFileExactlyOnce(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	const n = 6
+	var srcs []string
+	for i := 0; i < n; i++ {
+		p := filepath.Join(d, fmt.Sprintf("movie%d.mkv", i))
+		// Vary bitrate slightly per file — inflated so real libx265 reliably shrinks
+		// every one of them regardless of which worker/order handles it.
+		mkH264(t, ffmpeg, p, fmt.Sprintf("%dM", 6+i))
+		srcs = append(srcs, p)
+	}
+
+	ts := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) { c.Workers = 4 }) // REAL libx265
+
+	for _, src := range srcs {
+		if codecOf(t, ffprobe, src) != "hevc" {
+			t.Errorf("%s: not transcoded to HEVC by the worker pool", src)
+		}
+		if !ledgerHas(t, ts, store.Done, filepath.Base(src)) {
+			t.Errorf("%s: expected a done row", src)
+		}
+	}
+	if nTemp(t, d) != 0 {
+		t.Error("worker pool left a temp file behind")
+	}
+
+	// Every source has its OWN done row (no collapsing / cross-assignment): six
+	// distinct files means six distinct current fingerprints, each independently
+	// resolvable via ledgerHas above; as a second, more direct check, confirm every
+	// file's content is unique (no worker accidentally wrote another worker's output
+	// onto more than one path).
+	seen := map[string]bool{}
+	for _, src := range srcs {
+		sum := md5f(t, src)
+		if seen[sum] {
+			t.Errorf("%s: duplicate output content — a source may have been double-processed or cross-assigned", src)
+		}
+		seen[sum] = true
+	}
+}
+
+// TestCrashRecovery_StaleActiveJobIsReclaimedAndCompleted seeds the store with a job
+// left in `encoding` for an existing, untouched source (simulating a worker that was
+// killed mid-encode in a PRIOR process — store.Advance(Encoding) had committed, but
+// the process died before Finish). A fresh Engine (new *Engine, SAME store/db) must
+// call RecoverStale on RunOneshot, which resets that job back to pending; the
+// source, having never been touched by the dead worker (the swap never happened —
+// that's the whole invariant), is then reprocessed normally and ends done.
+func TestCrashRecovery_StaleActiveJobIsReclaimedAndCompleted(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+	before := md5f(t, src)
+	inSize := probe.FileSize(src)
+
+	// Simulate a crash: a prior process claimed and advanced this job to encoding,
+	// then died before ever touching the filesystem (no temp, no swap — consistent
+	// with the invariant that the swap is the only mutation and it happens last).
+	cfg := baseCfg(d)
+	dbDir := t.TempDir()
+	dbPath := filepath.Join(dbDir, "jobs.db")
+	seedStore, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	key := probe.Fingerprint(src)
+	if ok, err := seedStore.Claim(context.Background(), src, key, "dead-worker", cfg.MaxFailures); err != nil || !ok {
+		t.Fatalf("seed claim: ok=%v err=%v", ok, err)
+	}
+	if err := seedStore.Advance(context.Background(), src, key, store.Encoding); err != nil {
+		t.Fatalf("seed advance: %v", err)
+	}
+	if err := seedStore.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+	if md5f(t, src) != before {
+		t.Fatal("seeding the store must not touch the filesystem")
+	}
+
+	// Fresh Engine, SAME db path — mirrors a process restart after a crash.
+	reopened, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open (reopen): %v", err)
+	}
+	defer reopened.Close()
+	prober := probe.New(ffmpeg, ffprobe)
+	enc := FFmpegEncoder{FFmpeg: ffmpeg, Cfg: cfg, Probe: prober}
+	eng := New(cfg, prober, enc, reopened, discardLogger())
+
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+
+	if codecOf(t, ffprobe, src) != "hevc" {
+		t.Error("crash-recovered job was not reprocessed to HEVC")
+	}
+	if probe.FileSize(src) >= inSize {
+		t.Error("crash-recovered job: output not smaller")
+	}
+	if nTemp(t, d) != 0 {
+		t.Error("crash-recovered job left a temp behind")
+	}
+	finalKey := probe.Fingerprint(src)
+	status, _, exists, err := reopened.Get(context.Background(), src, finalKey)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !exists || status != store.Done {
+		t.Errorf("crash-recovered job: final status = %q exists=%v, want done/true", status, exists)
+	}
+}
+
+func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+	oldFp := probe.Fingerprint(src) // the source's identity before the transcode
+	ts := run(t, ffmpeg, ffprobe, d, nil, nil)
+	// The file transcoded to HEVC (its fingerprint changed).
+	if codecOf(t, ffprobe, src) != "hevc" {
+		t.Fatal("source was not transcoded")
+	}
+	// The pre-swap row (old fingerprint) is pruned — the table self-prunes rather
+	// than accumulating one dangling row per transcoded file.
+	if st, _, exists, err := ts.Get(context.Background(), src, oldFp); err != nil {
+		t.Fatalf("Get: %v", err)
+	} else if exists {
+		t.Errorf("superseded pre-swap row not pruned (status=%s)", st)
+	}
+	// The current file's row is done (short-circuits a resume).
+	if !ledgerHas(t, ts, store.Done, "movie.mkv") {
+		t.Error("expected a done row under the transcoded file's identity")
 	}
 }
