@@ -86,4 +86,7 @@ dry_run: false
 # vmaf_model: auto           # auto = vmaf_4k for height>1440 else HD; or a model version/spec
 
 # --- runtime ---
-# state_dir: state           # holds the resume ledger
+# state_dir: state           # holds the resumable SQLite job store (jobs.db)
+# workers: 1                 # concurrent encode workers (default 1 = sequential;
+#                             # CPU libx265 already saturates cores per encode, so
+#                             # raising this is an opt-in for many small/low-res files)

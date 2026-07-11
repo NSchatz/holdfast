@@ -24,9 +24,9 @@ import (
 
 	"github.com/NSchatz/transcode/internal/config"
 	"github.com/NSchatz/transcode/internal/engine"
-	"github.com/NSchatz/transcode/internal/ledger"
 	"github.com/NSchatz/transcode/internal/logging"
 	"github.com/NSchatz/transcode/internal/probe"
+	"github.com/NSchatz/transcode/internal/store"
 	"github.com/NSchatz/transcode/internal/version"
 )
 
@@ -137,8 +137,19 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 
 	prober := probe.New(ffmpeg, ffprobe)
 	enc := engine.FFmpegEncoder{FFmpeg: ffmpeg, Cfg: *cfg, Probe: prober}
-	led := ledger.New(filepath.Join(cfg.StateDir, "processed.ledger"))
-	eng := engine.New(*cfg, prober, enc, led, log)
+	// Belt: an explicit empty state_dir must not silently write the job DB into the
+	// process CWD (Load defaults it to "state"; this covers `state_dir: ""`).
+	stateDir := cfg.StateDir
+	if stateDir == "" {
+		stateDir = "state"
+	}
+	st, err := store.Open(filepath.Join(stateDir, "jobs.db"))
+	if err != nil {
+		fmt.Fprintf(stderr, "transcode: opening job store: %v\n", err)
+		return 1
+	}
+	defer st.Close()
+	eng := engine.New(*cfg, prober, enc, st, log)
 
 	// SIGINT/SIGTERM cancels the context: the in-flight ffmpeg is killed, the temp
 	// discarded, and the source left untouched (the swap is the only mutation and

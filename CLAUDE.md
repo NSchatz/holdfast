@@ -28,7 +28,7 @@ error**, never a confident wrong result and never a silent loss.
 Built phase by phase. `TRANSCODE-0` wired CLI + config + logging + CI + packaging. `TRANSCODE-1`
 implemented the **data-safety core**: `run` does one oneshot scan — skip guards → same-dir temp encode
 (CPU libx265) → the full verify gate → atomic swap → delete — proven by a real-ffmpeg fixture suite (cases
-1–17). `TRANSCODE-3` (this is the current state) added **colour/HDR + source-property fidelity**: HDR10
+1–17). `TRANSCODE-3` added **colour/HDR + source-property fidelity**: HDR10
 static metadata (mastering-display + MaxCLL) and colour primaries/transfer/matrix are now carried through
 the encode instead of silently dropped; Dolby Vision / HDR10+ (dynamic metadata a generic re-encode can't
 preserve) are detected and SKIPPED; an interlaced source is SKIPPED (never deinterlaced); an exotic/
@@ -40,7 +40,15 @@ Proven by fixture cases 18–22 (HDR) plus source-property cases (a)-(e). `TRANS
 perceptual-quality gate** — the last no-loss layer: after the structural checks pass, VMAF compares the
 output against the source and rejects an encode that decodes fine but *looks* worse (default-on, pooled
 harmonic-mean < 95 → reject; libvmaf-unavailable-while-enabled → reject, never accept an unmeasured
-output). Next: the SQLite/WAL queue + worker pool (`TRANSCODE-5`), hardware/AV1 (`TRANSCODE-6`), API/UI
+output). `TRANSCODE-5` (this is the current state) replaced the flat-file ledger with a **persistent,
+crash-safe SQLite/WAL job store + worker pool**: `internal/store` is a `path+fingerprint`-keyed jobs table
+(`pending/probing/encoding/verifying/done/skipped/failed`) opened with `SetMaxOpenConns(1)` (serializes
+every access — the actual fix for "database is locked" under concurrency) and an explicit transaction
+around `Claim`'s read-modify-write (the mutual-exclusion guard so two workers can never encode the same
+source); `RunOneshot` calls `RecoverStale` first (resets any job a prior crashed run left active back to
+pending — safe because the swap, the only mutation, never ran) then fans the scanned file list out to
+`Cfg.EffectiveWorkers()` goroutines over a channel. The data-safety invariant is unchanged: the store only
+ever records job STATE, never touches the filesystem. Next: hardware/AV1 (`TRANSCODE-6`), API/UI
 (`TRANSCODE-7`). The full phased plan lives in the umbrella that tracks this repo
 (`operations/roadmaps/transcode.md`).
 
@@ -65,13 +73,20 @@ output). Next: the SQLite/WAL queue + worker pool (`TRANSCODE-5`), hardware/AV1 
 - `internal/vmaf` (TRANSCODE-4) — runs libvmaf (via ffmpeg) to score an output vs its source; `Available`
   reports whether the build has libvmaf, `Score` returns the pooled harmonic-mean + min VMAF. The engine's
   `verifyOutput` rejects a below-threshold or unmeasurable encode (never accept an unmeasured output).
-- `internal/ledger` — the resumable size:mtime TSV (done/skipped/failed; failed is retryable). SQLite in T-5.
+- `internal/store` (TRANSCODE-5) — the persistent, crash-safe SQLite/WAL job store that replaced
+  `internal/ledger`: a `path+fingerprint`-keyed `jobs` table with `Claim`/`Advance`/`Finish`/`RecoverStale`/
+  `Get`. `Claim` is the cross-worker mutual-exclusion guard (an explicit transaction around its
+  read-modify-write); `SetMaxOpenConns(1)` + `busy_timeout` + WAL + `synchronous=NORMAL` avoid "database is
+  locked" under concurrent workers without serializing on fsync-per-commit latency.
 - `internal/engine` — the orchestrator: `ProcessFile` (skip guards — already-HEVC, low-bitrate, hardlinked,
-  **interlaced, DV/HDR10+, HDR10-with-incomplete-metadata, exotic pixel format** (TRANSCODE-3) — → encode →
-  verify → atomic swap → delete), `verifyOutput` (the layered no-loss gate), `Encoder` (interface;
-  `FFmpegEncoder` + test fakes — `FFmpegEncoder` now derives colour args, x265 colour params, and the output
-  pixel format from the source via `internal/hdr`, and adds `-fps_mode passthrough`), scan + crash-safe temp
-  cleanup. **This is the risk-critical heart — do not weaken the invariant.**
+  **interlaced, DV/HDR10+, HDR10-with-incomplete-metadata, exotic pixel format** (TRANSCODE-3) — →
+  **`Store.Claim`** (TRANSCODE-5) → encode → verify → atomic swap → delete), `verifyOutput` (the layered
+  no-loss gate), `Encoder` (interface; `FFmpegEncoder` + test fakes — `FFmpegEncoder` now derives colour
+  args, x265 colour params, and the output pixel format from the source via `internal/hdr`, and adds
+  `-fps_mode passthrough`), `RunOneshot` (`RecoverStale` → stale-temp cleanup → scan → fan out to a
+  `Cfg.EffectiveWorkers()`-sized worker pool over a channel; a worker's in-flight temp is local to its own
+  `ProcessFile` call, never a shared field, since N workers each hold at most one temp at a time).
+  **This is the risk-critical heart — do not weaken the invariant.**
 - `internal/logging`, `internal/version` — logger construction, build-stamped version.
 - `.github/workflows/ci.yml` — the gate (installs ffmpeg for the engine proof). `Dockerfile` — packaging
   stub (hardened in TRANSCODE-9).
