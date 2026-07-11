@@ -28,9 +28,11 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) error {
 		return fmt.Errorf("temp missing or empty")
 	}
 
-	// 2. output codec must be HEVC
-	if oc := e.Probe.VideoCodec(ctx, tmp); oc != "hevc" {
-		return fmt.Errorf("output codec is %q, not hevc", oc)
+	// 2. output codec must be the engine's configured target codec (hevc or av1 —
+	// TRANSCODE-6 generalizes this away from a hardcoded "hevc" so a hardware/AV1
+	// encode is held to exactly the same bar as CPU libx265).
+	if oc := e.Probe.VideoCodec(ctx, tmp); oc != e.targetCodec {
+		return fmt.Errorf("output codec is %q, not %s", oc, e.targetCodec)
 	}
 
 	// 3. length: the encode must not be truncated.

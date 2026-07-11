@@ -40,7 +40,7 @@ Proven by fixture cases 18–22 (HDR) plus source-property cases (a)-(e). `TRANS
 perceptual-quality gate** — the last no-loss layer: after the structural checks pass, VMAF compares the
 output against the source and rejects an encode that decodes fine but *looks* worse (default-on, pooled
 harmonic-mean < 95 → reject; libvmaf-unavailable-while-enabled → reject, never accept an unmeasured
-output). `TRANSCODE-5` (this is the current state) replaced the flat-file ledger with a **persistent,
+output). `TRANSCODE-5` replaced the flat-file ledger with a **persistent,
 crash-safe SQLite/WAL job store + worker pool**: `internal/store` is a `path+fingerprint`-keyed jobs table
 (`pending/probing/encoding/verifying/done/skipped/failed`) opened with `SetMaxOpenConns(1)` (serializes
 every access — the actual fix for "database is locked" under concurrency) and an explicit transaction
@@ -48,9 +48,23 @@ around `Claim`'s read-modify-write (the mutual-exclusion guard so two workers ca
 source); `RunOneshot` calls `RecoverStale` first (resets any job a prior crashed run left active back to
 pending — safe because the swap, the only mutation, never ran) then fans the scanned file list out to
 `Cfg.EffectiveWorkers()` goroutines over a channel. The data-safety invariant is unchanged: the store only
-ever records job STATE, never touches the filesystem. Next: hardware/AV1 (`TRANSCODE-6`), API/UI
-(`TRANSCODE-7`). The full phased plan lives in the umbrella that tracks this repo
-(`operations/roadmaps/transcode.md`).
+ever records job STATE, never touches the filesystem. `TRANSCODE-6` (this is the current state)
+generalized the CPU-libx265-only encoder into a **codec matrix**: `internal/encoder` is a registry of
+`Spec`s (`cpu`→libx265/hevc — the archival default, `svtav1`→libsvtav1/av1, plus the hardware encoders
+`nvenc`/`av1_nvenc`/`qsv`/`vaapi`/`amf`) with a ROBUST runtime capability check (`Available`) that actually
+encodes a tiny real clip to a temp file and ffprobes the result — exit-code alone is unreliable for
+hardware encoders (`hevc_nvenc` can exit 0 while writing nothing when no device is present). The engine now
+knows its `targetCodec` (hevc or av1, derived from the configured encoder in `New`); the skip-already-
+target guard and `verifyOutput`'s output-codec check are both generalized off it (no longer hardcoded
+"hevc"). `FFmpegEncoder.Encode` builds per-encoder args from the `Spec`: colour (`-color_*`), pixel format,
+and `-fps_mode passthrough` are universal; libx265 alone gets `-x265-params` (HDR10 static-metadata
+master-display/max-cll is a libx265-only mechanism — AV1/hardware carry colour tags but not that block, an
+explicitly out-of-scope, documented limitation matching the bash transcoder's pre-existing NVENC gap).
+`cmd/transcode`'s `cmdRun` calls `encoder.RequireAvailable` before building the engine — a configured-but-
+unavailable encoder (e.g. `nvenc` with no GPU) fails LOUD and exits non-zero, **never** a silent fallback to
+cpu. The verify/VMAF gate is unchanged and fully encoder-agnostic: a hardware/AV1 encode is held to the
+exact same no-loss bar as CPU libx265. Next: API/UI (`TRANSCODE-7`). The full phased plan lives in the
+umbrella that tracks this repo (`operations/roadmaps/transcode.md`).
 
 ## Layout
 
@@ -73,20 +87,29 @@ ever records job STATE, never touches the filesystem. Next: hardware/AV1 (`TRANS
 - `internal/vmaf` (TRANSCODE-4) — runs libvmaf (via ffmpeg) to score an output vs its source; `Available`
   reports whether the build has libvmaf, `Score` returns the pooled harmonic-mean + min VMAF. The engine's
   `verifyOutput` rejects a below-threshold or unmeasurable encode (never accept an unmeasured output).
+- `internal/encoder` (TRANSCODE-6) — the codec matrix registry: `Spec` (config key, ffmpeg `-c:v` codec,
+  output target codec, hardware flag) + `Lookup`/`Known` + a robust `Available` capability check (encodes a
+  tiny real clip to a temp file and ffprobes the RESULT rather than trusting ffmpeg's exit code — the only
+  way to catch a hardware encoder that exits 0 while writing nothing when no device is present) +
+  `RequireAvailable` (fail-loud helper for `cmd/transcode`). No import of `internal/config` (avoids a
+  cycle) — `internal/config.Validate` imports `internal/encoder` instead.
 - `internal/store` (TRANSCODE-5) — the persistent, crash-safe SQLite/WAL job store that replaced
   `internal/ledger`: a `path+fingerprint`-keyed `jobs` table with `Claim`/`Advance`/`Finish`/`RecoverStale`/
   `Get`. `Claim` is the cross-worker mutual-exclusion guard (an explicit transaction around its
   read-modify-write); `SetMaxOpenConns(1)` + `busy_timeout` + WAL + `synchronous=NORMAL` avoid "database is
   locked" under concurrent workers without serializing on fsync-per-commit latency.
-- `internal/engine` — the orchestrator: `ProcessFile` (skip guards — already-HEVC, low-bitrate, hardlinked,
-  **interlaced, DV/HDR10+, HDR10-with-incomplete-metadata, exotic pixel format** (TRANSCODE-3) — →
-  **`Store.Claim`** (TRANSCODE-5) → encode → verify → atomic swap → delete), `verifyOutput` (the layered
-  no-loss gate), `Encoder` (interface; `FFmpegEncoder` + test fakes — `FFmpegEncoder` now derives colour
-  args, x265 colour params, and the output pixel format from the source via `internal/hdr`, and adds
-  `-fps_mode passthrough`), `RunOneshot` (`RecoverStale` → stale-temp cleanup → scan → fan out to a
-  `Cfg.EffectiveWorkers()`-sized worker pool over a channel; a worker's in-flight temp is local to its own
-  `ProcessFile` call, never a shared field, since N workers each hold at most one temp at a time).
-  **This is the risk-critical heart — do not weaken the invariant.**
+- `internal/engine` — the orchestrator: `ProcessFile` (skip guards — already-at-TARGET-CODEC (TRANSCODE-6
+  generalized this off a hardcoded "already HEVC"), low-bitrate, hardlinked, **interlaced, DV/HDR10+,
+  HDR10-with-incomplete-metadata, exotic pixel format** (TRANSCODE-3) — → **`Store.Claim`** (TRANSCODE-5) →
+  encode → verify → atomic swap → delete), `verifyOutput` (the layered no-loss gate — its output-codec
+  check is also generalized off the engine's `targetCodec`, TRANSCODE-6), `Encoder` (interface;
+  `FFmpegEncoder` + test fakes — `FFmpegEncoder.Encode`/`buildArgs` now select the ffmpeg codec and
+  per-encoder quality args from `internal/encoder.Lookup(Cfg.Encoder)`; colour args, derived pixel format,
+  and `-fps_mode passthrough` stay universal across every encoder via `internal/hdr`), `RunOneshot`
+  (`RecoverStale` → stale-temp cleanup → scan → fan out to a `Cfg.EffectiveWorkers()`-sized worker pool over
+  a channel; a worker's in-flight temp is local to its own `ProcessFile` call, never a shared field, since N
+  workers each hold at most one temp at a time). **This is the risk-critical heart — do not weaken the
+  invariant.**
 - `internal/logging`, `internal/version` — logger construction, build-stamped version.
 - `.github/workflows/ci.yml` — the gate (installs ffmpeg for the engine proof). `Dockerfile` — packaging
   stub (hardened in TRANSCODE-9).

@@ -25,10 +25,53 @@ dry_run: false
 # File extensions considered (case-insensitive).
 # video_exts: [mkv, mp4, avi, mov, m4v, ts, m2ts, wmv, flv]
 
-# --- codec / quality (CPU libx265; hardware + AV1 arrive in TRANSCODE-6) ---
-# encoder: cpu           # only "cpu" today
-# crf: 22                # libx265 constant-rate-factor (lower = bigger/better)
-# preset: slow           # libx265 preset (slower = smaller)
+# --- codec / quality: the codec matrix (TRANSCODE-6) ---
+# encoder: cpu           # cpu (libx265/hevc) is the ARCHIVAL DEFAULT — best
+#                         # quality-per-bit, always available, no external device.
+#                         # Everything else is opt-in, for draining a backlog
+#                         # faster at a lower quality-per-bit:
+#                         #   svtav1     libsvtav1  -> av1   (CPU, no device needed)
+#                         #   nvenc      hevc_nvenc -> hevc  (needs an NVIDIA GPU)
+#                         #   av1_nvenc  av1_nvenc  -> av1   (needs an NVIDIA GPU)
+#                         #   qsv        hevc_qsv   -> hevc  (needs Intel Quick Sync)
+#                         #   vaapi      hevc_vaapi -> hevc  (needs a VAAPI device,
+#                         #                                   e.g. /dev/dri/renderD128)
+#                         #   amf        hevc_amf   -> hevc  (needs an AMD GPU)
+#                         # The raw ffmpeg -c:v codec name (e.g. libsvtav1) also
+#                         # works as an alias for its short key.
+#                         #
+#                         # CAPABILITY CHECK: at `run` startup the configured
+#                         # encoder is actually exercised against a tiny real clip
+#                         # (not just an exit-code check — a hardware encoder can
+#                         # exit 0 while writing nothing when no device is
+#                         # present). If it's not available in this ffmpeg build /
+#                         # on this host, `run` FAILS LOUD and exits non-zero —
+#                         # it never silently falls back to cpu.
+#                         #
+#                         # Whichever encoder produces the output, it is verified
+#                         # against the EXACT SAME no-loss gate as cpu: correct
+#                         # codec, duration/packet parity, strictly-smaller,
+#                         # stream-count parity, full decode-integrity, and VMAF.
+#                         # A hardware/av1 encode that fails any gate is rejected
+#                         # and the source is kept — no encoder is special-cased.
+# crf: 22                # quality knob (lower = bigger/better): libx265/libsvtav1
+#                         # constant-rate-factor, or reused as the CQ/
+#                         # global_quality/QP target for nvenc/qsv/vaapi/amf.
+# preset: slow           # speed/quality preset. A libx265 preset word for cpu;
+#                         # mapped to SVT-AV1's numeric 0-13 scale for svtav1
+#                         # (slow -> 6, medium -> 8, fast -> 10; unrecognized
+#                         # words fall back to 8). Ignored by the hardware
+#                         # encoders.
+#
+# AV1/hardware HDR limitation: HDR10 static metadata (the mastering-display +
+# MaxCLL block) is carried through the encode ONLY for cpu (libx265's
+# -x265-params mechanism). svtav1 and every hardware encoder still carry the
+# colour PRIMARIES/TRANSFER/MATRIX/RANGE tags (via the universal -color_* flags)
+# but NOT the mastering-display block — AV1 static-metadata carriage would need
+# svt-av1-params mastering-display/content-light options, which is out of scope
+# here. This mirrors the pre-existing NVENC limitation the original bash
+# transcoder already documented; a source needing full HDR10 static-metadata
+# carriage should stay on encoder: cpu.
 
 # pixel_format: auto     # "auto" (default): derive per source — preserve chroma
 #                         # subsampling (4:2:0/4:2:2/4:4:4), floor bit-depth at 10

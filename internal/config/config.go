@@ -22,6 +22,8 @@ import (
 	koanfenv "github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
+
+	"github.com/NSchatz/transcode/internal/encoder"
 )
 
 // envPrefix is the prefix for environment overrides: TRANSCODE_CRF=20 sets crf.
@@ -86,12 +88,21 @@ type Config struct {
 
 	// VideoExts is the set of file extensions scanned (case-insensitive).
 	VideoExts []string `yaml:"video_exts"`
-	// Encoder selects the encode path. TRANSCODE-1 supports "cpu" (libx265);
-	// hardware encoders + SVT-AV1 arrive in TRANSCODE-6.
+	// Encoder selects the encode path — one of the internal/encoder registry keys:
+	// "cpu" (libx265/hevc, the archival default), "svtav1" (libsvtav1/av1, CPU),
+	// or the hardware encoders "nvenc" (hevc_nvenc), "av1_nvenc" (av1_nvenc),
+	// "qsv" (hevc_qsv), "vaapi" (hevc_vaapi), "amf" (hevc_amf) — all opt-in,
+	// gated behind a runtime capability check (never assumed to work; see
+	// internal/encoder.Available and cmd/transcode's cmdRun). The raw ffmpeg -c:v
+	// codec name (e.g. "libsvtav1") is also accepted as an alias.
 	Encoder string `yaml:"encoder"`
-	// CRF is the libx265 constant-rate-factor (lower = bigger/better).
+	// CRF is the encoder's quality knob (lower = bigger/better): libx265/libsvtav1
+	// constant-rate-factor, or reused as the CQ/global_quality/QP target for the
+	// hardware encoders (see internal/engine.buildArgs).
 	CRF int `yaml:"crf"`
-	// Preset is the libx265 preset (slower = smaller).
+	// Preset is the encoder's speed/quality preset: a libx265 preset word for
+	// "cpu" ("slow" etc.), or mapped to SVT-AV1's numeric 0-13 scale for "svtav1"
+	// (see internal/engine.svtav1Preset). Ignored by the hardware encoders.
 	Preset string `yaml:"preset"`
 	// PixelFormat is the output pixel format. "auto" (default) derives it per
 	// source — preserve chroma subsampling, floor bit-depth at 10 (see
@@ -318,11 +329,10 @@ func (c *Config) Validate() error {
 	}
 
 	// Engine knobs (validated against their effective values).
-	switch c.Encoder {
-	case "", "cpu":
-		// ok (TRANSCODE-1 supports cpu; more encoders in TRANSCODE-6)
-	default:
-		return fmt.Errorf("encoder %q is not supported (TRANSCODE-1 supports: cpu)", c.Encoder)
+	if c.Encoder != "" {
+		if _, ok := encoder.Lookup(c.Encoder); !ok {
+			return fmt.Errorf("encoder %q is not supported (known: %v)", c.Encoder, encoder.Known())
+		}
 	}
 	if c.CRF < 0 || c.CRF > 51 {
 		return fmt.Errorf("crf %d out of range (0-51)", c.CRF)
