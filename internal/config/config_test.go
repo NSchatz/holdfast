@@ -172,6 +172,11 @@ func TestValidateEngineKnobs(t *testing.T) {
 		{"negative scan interval", func(c *Config) { c.ScanIntervalSec = -1 }, "scan_interval_sec"},
 		{"empty server_addr ok (defaulted at serve)", func(c *Config) { c.ServerAddr = "" }, ""},
 		{"valid server config", func(c *Config) { c.ServerAddr = "0.0.0.0:9000"; c.ScanIntervalSec = 30 }, ""},
+		{"bad run_window", func(c *Config) { c.RunWindow = "25:00-06:00" }, "run_window"},
+		{"equal run_window", func(c *Config) { c.RunWindow = "02:00-02:00" }, "run_window"},
+		{"negative max_load", func(c *Config) { c.MaxLoad = -1 }, "max_load"},
+		{"valid schedule config", func(c *Config) { c.RunWindow = "01:00-06:00"; c.MaxLoad = 0.8 }, ""},
+		{"empty run_window ok", func(c *Config) { c.RunWindow = "" }, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -255,6 +260,34 @@ func TestLoadLayered(t *testing.T) {
 		}
 		if c2.ScanIntervalSec != 45 {
 			t.Errorf("scan_interval_sec = %d, want env value 45", c2.ScanIntervalSec)
+		}
+	})
+
+	t.Run("observability defaults + notify env", func(t *testing.T) {
+		p := filepath.Join(dir, "obs.yaml")
+		writeFile(t, p, "library_roots:\n  - /mnt/media\n")
+		c, err := Load(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !c.MetricsEnable {
+			t.Error("metrics_enable should default true")
+		}
+		if c.NotifyURL != "" || c.RunWindow != "" || c.MaxLoad != 0 {
+			t.Errorf("obs knobs should default off: %+v", c)
+		}
+		// notify_url via env (so no secret need land in the file), and metrics off.
+		t.Setenv("TRANSCODE_NOTIFY_URL", "ntfy://topic")
+		t.Setenv("TRANSCODE_METRICS_ENABLE", "false")
+		c2, err := Load(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c2.NotifyURL != "ntfy://topic" {
+			t.Errorf("notify_url = %q, want env value", c2.NotifyURL)
+		}
+		if c2.MetricsEnable {
+			t.Error("metrics_enable=false env override should disable")
 		}
 	})
 

@@ -82,7 +82,7 @@ func newHarness(t *testing.T, token string) *harness {
 	h.hub = NewHub(st, h.ctrl, discard())
 	h.ctrl.SetOnChange(h.hub.Trigger)
 	cfg := config.Config{ServerAuthToken: token}
-	h.srv = New(ctx, cfg, st, h.ctrl, h.hub, nil, discard())
+	h.srv = New(ctx, cfg, st, h.ctrl, h.hub, nil, nil, discard())
 	return h
 }
 

@@ -132,6 +132,10 @@ func TestServeSmoke(t *testing.T) {
 	if bdy := httpGet(t, base+"/"); !strings.Contains(bdy, "<title>transcode</title>") {
 		t.Fatalf("UI not served from binary: %q", bdy[:min(80, len(bdy))])
 	}
+	// TRANSCODE-8: metrics endpoint is served (default-on) and exposes our series.
+	if bdy := httpGet(t, base+"/metrics"); !strings.Contains(bdy, "transcode_files_total") {
+		t.Fatalf("/metrics did not expose transcode metrics: %q", bdy[:min(120, len(bdy))])
+	}
 	// A control action requires the token: without it, 403/401; with it, accepted.
 	if code := httpPostCode(t, base+"/api/pause", "tok"); code != 200 {
 		t.Fatalf("authorized pause: code %d, want 200", code)
