@@ -25,17 +25,28 @@ error**, never a confident wrong result and never a silent loss.
 
 ## Status & roadmap
 
-Built phase by phase. `TRANSCODE-0` (this scaffold) wires CLI + config + logging + CI + packaging; the
-engine is not implemented yet (`run` touches no files). Next: `TRANSCODE-1` (data-safety core port with a
-ported real-ffmpeg fixture suite). The full phased plan lives in the umbrella that tracks this repo
-(`operations/roadmaps/transcode.md`).
+Built phase by phase. `TRANSCODE-0` wired CLI + config + logging + CI + packaging. `TRANSCODE-1`
+implemented the **data-safety core** (this is the current state): `run` does one oneshot scan — skip
+guards → same-dir temp encode (CPU libx265) → the full verify gate → atomic swap → delete — proven by a
+real-ffmpeg fixture suite (cases 1–17). Next: colour/HDR (`TRANSCODE-3`), VMAF (`TRANSCODE-4`), the
+SQLite/WAL queue + worker pool (`TRANSCODE-5`), hardware/AV1 (`TRANSCODE-6`), API/UI (`TRANSCODE-7`). The
+full phased plan lives in the umbrella that tracks this repo (`operations/roadmaps/transcode.md`).
 
 ## Layout
 
-- `cmd/transcode` — the CLI (`run` / `validate` / `version`), structured `slog` logging.
-- `internal/config` — YAML config load + strict validation (refuses `/` or `$HOME` as a library root).
+- `cmd/transcode` — the CLI (`run` / `validate` / `version`), structured `slog` logging; `run` builds and
+  drives the engine oneshot with signal-cancellable context.
+- `internal/config` — YAML config load + strict validation (refuses `/` or `$HOME` as a library root) +
+  the engine knobs (`ApplyDefaults`). koanf + env/flag overrides + a CI schema self-test is TRANSCODE-2.
+- `internal/probe` — ffprobe/ffmpeg inspection helpers (codec, bitrate, duration, packet count, decode
+  healthcheck, stream counts, fingerprint, nlink); UNKNOWN values are never coerced to 0.
+- `internal/ledger` — the resumable size:mtime TSV (done/skipped/failed; failed is retryable). SQLite in T-5.
+- `internal/engine` — the orchestrator: `ProcessFile` (skip guards → encode → verify → atomic swap →
+  delete), `verifyOutput` (the layered no-loss gate), `Encoder` (interface; `FFmpegEncoder` + test fakes),
+  scan + crash-safe temp cleanup. **This is the risk-critical heart — do not weaken the invariant.**
 - `internal/logging`, `internal/version` — logger construction, build-stamped version.
-- `.github/workflows/ci.yml` — the gate (see below). `Dockerfile` — packaging stub (hardened in TRANSCODE-9).
+- `.github/workflows/ci.yml` — the gate (installs ffmpeg for the engine proof). `Dockerfile` — packaging
+  stub (hardened in TRANSCODE-9).
 
 ## Build / test / gate
 

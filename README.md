@@ -8,10 +8,12 @@ faithful**. It is configured entirely by **YAML** (config-as-code), so what it d
 reproducible from git, not hidden in a UI database.
 
 > **Status: early build-out.** This repository is being built phase by phase from a mature, battle-tested
-> Bash predecessor (see _Provenance_). **This commit is the genesis scaffold (`TRANSCODE-0`)**: the CLI,
-> config loading/validation, logging, CI, and packaging are wired, but **the transcode engine is not yet
-> implemented** — `transcode run` validates your config and then deliberately touches no files. The
-> data-safety core lands next (`TRANSCODE-1`). See the roadmap for the full plan.
+> Bash predecessor (see _Provenance_). **The data-safety core is implemented (`TRANSCODE-1`)**: `transcode
+> run` performs one oneshot scan of the library roots — skip guards → same-directory temp encode → the full
+> verify gate → atomic swap → delete — and is proven by a real-ffmpeg fixture suite (cases 1–17) that reds
+> on the specific regression. Still to come: colour/HDR preservation (`TRANSCODE-3`), the VMAF perceptual
+> gate (`TRANSCODE-4`), a persistent crash-safe queue + worker pool (`TRANSCODE-5`), hardware/AV1 encoders
+> (`TRANSCODE-6`), and the web UI (`TRANSCODE-7`). See the roadmap for the full plan.
 
 ## Why another transcoder?
 
@@ -41,12 +43,15 @@ it is not a media server or library manager.
 ```bash
 cp config.example.yaml config.yaml   # then edit library_roots
 transcode validate --config config.yaml
-transcode run --config config.yaml   # (genesis: validates, then touches nothing)
+transcode run --config config.yaml   # one scan: re-encode bloated non-HEVC video, safely
 ```
+
+`run` needs `ffmpeg` and `ffprobe` on `PATH` (or set `TRANSCODE_FFMPEG` / `TRANSCODE_FFPROBE`); it exits
+non-zero if they are missing rather than silently doing nothing. Use a build with **libx265**.
 
 ## Build
 
-Requires Go 1.23+.
+Requires Go 1.25+.
 
 ```bash
 make build      # -> ./transcode

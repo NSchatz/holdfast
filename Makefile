@@ -1,6 +1,6 @@
 # transcode — developer tasks. The CI gate is `make check`.
-STATICCHECK_VERSION ?= 2024.1.1
-GOVULNCHECK_VERSION ?= v1.1.3
+STATICCHECK_VERSION ?= 2025.1.1
+GOVULNCHECK_VERSION ?= v1.1.4
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)

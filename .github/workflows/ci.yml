@@ -14,11 +14,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Pinned for reproducibility — a patched 1.23 (>= 1.23.10 clears a Windows-only
-  # stdlib advisory govulncheck would otherwise flag). Tool versions pinned below.
-  GO_VERSION: "1.23.12"
-  STATICCHECK_VERSION: "2024.1.1"
-  GOVULNCHECK_VERSION: "v1.1.3"
+  # Pinned for reproducibility. Go 1.25.x clears the os.Root-escape stdlib advisory
+  # (GO-2026-4602, fixed in go1.25.8) that govulncheck flags on older lines; keep
+  # this at a patched >= 1.25.8. Tool versions pinned below.
+  GO_VERSION: "1.25.12"
+  STATICCHECK_VERSION: "2025.1.1"
+  GOVULNCHECK_VERSION: "v1.1.4"
 
 jobs:
   build:
@@ -43,6 +44,12 @@ jobs:
 
       - name: go build
         run: go build ./...
+
+      # The engine safety proof drives REAL ffmpeg (libx265) fixtures — it fails loud
+      # if ffmpeg/ffprobe are missing (a skip would be a false green), so CI must
+      # provide them. Ubuntu's ffmpeg ships libx265/libx264.
+      - name: install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
 
       - name: go test (race + coverage)
         run: go test -race -covermode=atomic ./...
