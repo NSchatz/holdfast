@@ -3,10 +3,11 @@
 # Copy to config.yaml (gitignored) and edit. Validate it any time with:
 #   transcode validate --config config.yaml
 #
-# Every knob below has a sensible default and may be omitted. env/flag overrides and
-# a CI schema self-test arrive with the koanf-backed schema in TRANSCODE-2; VMAF
-# thresholds (T-4), the queue (T-5), hardware codecs (T-6), and the API/UI (T-7)
-# add their own fields later — see the roadmap.
+# Every knob below has a sensible default and may be omitted. Any value can be
+# overridden by an environment variable named TRANSCODE_<KEY> (e.g. TRANSCODE_CRF=20,
+# TRANSCODE_LOG_LEVEL=debug) — env wins over the file. An unknown key here is a hard
+# error (typo protection). VMAF thresholds (T-4), the queue (T-5), hardware codecs
+# (T-6), and the API/UI (T-7) add their own fields later — see the roadmap.
 
 # Directory trees to scan and re-encode files under. This is the ONLY place transcode
 # ever mutates the filesystem, so it is validated strictly: each root must be absolute

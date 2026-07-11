@@ -36,8 +36,10 @@ full phased plan lives in the umbrella that tracks this repo (`operations/roadma
 
 - `cmd/transcode` — the CLI (`run` / `validate` / `version`), structured `slog` logging; `run` builds and
   drives the engine oneshot with signal-cancellable context.
-- `internal/config` — YAML config load + strict validation (refuses `/` or `$HOME` as a library root) +
-  the engine knobs (`ApplyDefaults`). koanf + env/flag overrides + a CI schema self-test is TRANSCODE-2.
+- `internal/config` — **koanf** layered config (defaults ← YAML file ← `TRANSCODE_*` env), unknown-key
+  rejection, and strict `Validate()` (refuses `/`, `$HOME`, or a symlink resolving to either; refuses when
+  `$HOME` is unknown). An explicit zero in the file/env overrides a default (not clobbered). The `validate`
+  subcommand + a CI schema self-test (reds on an invalid config) back it.
 - `internal/probe` — ffprobe/ffmpeg inspection helpers (codec, bitrate, duration, packet count, decode
   healthcheck, stream counts, fingerprint, nlink); UNKNOWN values are never coerced to 0.
 - `internal/ledger` — the resumable size:mtime TSV (done/skipped/failed; failed is retryable). SQLite in T-5.
@@ -50,7 +52,7 @@ full phased plan lives in the umbrella that tracks this repo (`operations/roadma
 
 ## Build / test / gate
 
-Requires Go 1.23+. The CI gate (and `make check`) is: **`gofmt -l` clean, `go vet`, `go build`,
+Requires Go 1.25+. The CI gate (and `make check`) is: **`gofmt -l` clean, `go vet`, `go build`,
 `go test -race`, `staticcheck` (pinned), `govulncheck` (pinned)**. All pinned in `.github/workflows/ci.yml`
 for reproducibility. **Never claim green without running it.** Every phase that touches the engine must
 also extend the fixture suite so it *reds on the specific regression* — a data-safety tool proves its

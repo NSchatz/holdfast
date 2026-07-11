@@ -1,0 +1,6 @@
+# Invalid via the VALIDATE path: keys are all valid (passes Load), but crf is out of
+# range (0-51). The CI self-test asserts `transcode validate` REJECTS this too, so the
+# self-test covers both rejection paths (unknown-key schema AND value validation).
+library_roots:
+  - /mnt/media
+crf: 99

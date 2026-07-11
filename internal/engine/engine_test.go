@@ -142,8 +142,8 @@ func failCount(t *testing.T, led *ledger.Ledger) int {
 
 // ---- harness -----------------------------------------------------------------
 
-// baseCfg is a fully-explicit engine config for tests (ApplyDefaults is NOT used, so
-// an explicit MinBitrateKbps=0 is honoured — matching the bash MIN_BITRATE_KBPS=0).
+// baseCfg is a fully-explicit engine config for tests, so an explicit
+// MinBitrateKbps=0 is honoured — matching the bash MIN_BITRATE_KBPS=0.
 // Preset ultrafast keeps the real-libx265 cases fast; on a 320x240 clip it still
 // shrinks an 8 Mbit source far below it, so the size guard is unaffected.
 func baseCfg(root string) config.Config {

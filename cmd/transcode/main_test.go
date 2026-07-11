@@ -19,6 +19,10 @@ func TestDispatch(t *testing.T) {
 	if err := os.WriteFile(badCfg, []byte("library_roots: []\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	typoCfg := filepath.Join(dir, "typo.yaml")
+	if err := os.WriteFile(typoCfg, []byte("library_roots:\n  - /mnt/media\ncrff: 22\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	tests := []struct {
 		name     string
@@ -32,6 +36,7 @@ func TestDispatch(t *testing.T) {
 		{"validate ok", []string{"validate", "--config", goodCfg}, 0, "config OK"},
 		{"validate missing flag", []string{"validate"}, 2, ""},
 		{"validate bad config", []string{"validate", "--config", badCfg}, 1, ""},
+		{"validate unknown key", []string{"validate", "--config", typoCfg}, 1, ""},
 		{"run bad config", []string{"run", "--config", badCfg}, 1, ""},
 		{"subcommand help exits zero", []string{"validate", "-h"}, 0, ""},
 		{"top-level help exits zero", []string{"help"}, 0, "Usage"},

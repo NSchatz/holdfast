@@ -1,12 +1,12 @@
-// Package config loads and validates the transcode YAML configuration.
+// Package config loads and validates the transcode configuration.
 //
-// This is the genesis (TRANSCODE-0) config surface: a minimal, strictly-validated
-// struct sufficient to prove the config-as-code contract and to guarantee the tool
-// refuses to run against a dangerous or unspecified library root. The full schema —
-// koanf-backed, env-overridable, with a CI schema self-test — arrives in TRANSCODE-2
-// (see operations/roadmaps/transcode.md §8). Fields are deliberately few here; the
-// invariant that matters now is Validate(): a delete-capable tool must never start
-// pointed at "/" or a home directory.
+// Load is layered (TRANSCODE-2, koanf): built-in defaults ← the YAML file ← the
+// environment (TRANSCODE_*). Loading defaults as their own layer means an explicit
+// zero in the file/env OVERRIDES a default while an absent key keeps it — resolving
+// the zero-vs-absent ambiguity a plain struct-zero default has. Unknown YAML keys
+// are rejected (a typo is a loud error, never a silent default). Validate() is the
+// fail-safe backstop: a delete-capable tool must never start pointed at "/", a
+// home directory, or a symlink that resolves to either.
 package config
 
 import (
@@ -16,17 +16,51 @@ import (
 	"path/filepath"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"github.com/go-viper/mapstructure/v2"
+	"github.com/knadh/koanf/parsers/yaml"
+	"github.com/knadh/koanf/providers/confmap"
+	koanfenv "github.com/knadh/koanf/providers/env"
+	"github.com/knadh/koanf/providers/file"
+	"github.com/knadh/koanf/v2"
 )
 
-// Config is the declarative, YAML-authored configuration for the transcoder.
-//
-// TRANSCODE-1 adds the engine knobs below with sensible defaults (ApplyDefaults).
-// The koanf-backed schema with env/flag overrides and a CI schema self-test is
-// TRANSCODE-2 — until then these are a minimal, defaulted surface. Because a plain
-// zero value cannot be distinguished from "absent" in yaml.v3, a zero for an
-// int/string knob is treated as "use the default" (documented limitation resolved
-// in TRANSCODE-2); construct a Config directly in tests to set an explicit zero.
+// envPrefix is the prefix for environment overrides: TRANSCODE_CRF=20 sets crf.
+const envPrefix = "TRANSCODE_"
+
+// knownKeys are the top-level keys accepted in the YAML file. Any other key is a
+// typo and is rejected — fail-safe: never a silent default.
+var knownKeys = map[string]bool{
+	"library_roots": true, "log_level": true, "dry_run": true,
+	"video_exts": true, "encoder": true, "crf": true, "preset": true,
+	"pixel_format": true, "container_ext": true, "min_bitrate_kbps": true,
+	"min_savings_percent": true, "duration_tolerance_sec": true,
+	"max_failures": true, "skip_hardlinked": true, "state_dir": true,
+}
+
+// defaultLayer is the built-in default configuration, loaded as koanf's base layer.
+// It is the single source of truth for defaults.
+func defaultLayer() map[string]any {
+	return map[string]interface{}{
+		"log_level":              "info",
+		"dry_run":                false,
+		"video_exts":             []string{"mkv", "mp4", "avi", "mov", "m4v", "ts", "m2ts", "wmv", "flv"},
+		"encoder":                "cpu",
+		"crf":                    22,
+		"preset":                 "slow",
+		"pixel_format":           "yuv420p10le",
+		"container_ext":          "mkv",
+		"min_bitrate_kbps":       2500,
+		"min_savings_percent":    0,
+		"duration_tolerance_sec": 1.0,
+		"max_failures":           3,
+		"skip_hardlinked":        true,
+		"state_dir":              "state",
+	}
+}
+
+// Config is the declarative, YAML-authored configuration for the transcoder. Field
+// tags are `yaml` (koanf unmarshals with Tag "yaml"). Load returns a fully-defaulted
+// Config via koanf's defaults layer (defaultLayer) — the single source of defaults.
 type Config struct {
 	// LibraryRoots are the directory trees the tool scans and re-encodes files
 	// under. It is the ONLY place the tool ever mutates the filesystem, so it is
@@ -77,63 +111,62 @@ type Config struct {
 // seed via rename would break the link and reclaim nothing.
 func (c *Config) HardlinkSkip() bool { return c.SkipHardlinked == nil || *c.SkipHardlinked }
 
-// ApplyDefaults fills unset engine knobs with their built-in defaults. It is
-// called by the production load path (not by tests, which set explicit values).
-func (c *Config) ApplyDefaults() {
-	if len(c.VideoExts) == 0 {
-		c.VideoExts = []string{"mkv", "mp4", "avi", "mov", "m4v", "ts", "m2ts", "wmv", "flv"}
-	}
-	if c.Encoder == "" {
-		c.Encoder = "cpu"
-	}
-	if c.CRF == 0 {
-		c.CRF = 22
-	}
-	if c.Preset == "" {
-		c.Preset = "slow"
-	}
-	if c.PixelFormat == "" {
-		c.PixelFormat = "yuv420p10le"
-	}
-	if c.ContainerExt == "" {
-		c.ContainerExt = "mkv"
-	}
-	if c.MinBitrateKbps == 0 {
-		c.MinBitrateKbps = 2500
-	}
-	if c.DurationToleranceSec == 0 {
-		c.DurationToleranceSec = 1
-	}
-	if c.MaxFailures == 0 {
-		c.MaxFailures = 3
-	}
-	if c.StateDir == "" {
-		c.StateDir = "state"
-	}
-}
-
 // ErrNoConfig is returned by Load when the path is empty.
 var ErrNoConfig = errors.New("no config path provided")
 
-// Load reads and parses a YAML config file. It does NOT validate — callers run
-// Validate() explicitly so `validate` and `run` share one code path. Unknown
-// keys are rejected (KnownFields) so a typo becomes a loud error, never a silent
-// default — the fail-safe posture the whole tool is built on.
+// Load builds the effective config from three layers, later overriding earlier:
+// built-in defaults ← the YAML file at path ← the environment (TRANSCODE_*). It
+// does NOT validate — callers run Validate() explicitly so `validate` and `run`
+// share one code path. Unknown top-level keys in the file are rejected (a typo is a
+// loud error, never a silent default). A returned Config is fully defaulted.
 func Load(path string) (*Config, error) {
 	if path == "" {
 		return nil, ErrNoConfig
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open config %q: %w", path, err)
-	}
-	defer f.Close()
 
-	dec := yaml.NewDecoder(f)
-	dec.KnownFields(true)
-	var c Config
-	if err := dec.Decode(&c); err != nil {
+	k := koanf.New(".")
+	// 1. defaults layer.
+	if err := k.Load(confmap.Provider(defaultLayer(), "."), nil); err != nil {
+		return nil, fmt.Errorf("load defaults: %w", err)
+	}
+
+	// 2. the YAML file — loaded into its own instance first so we can reject unknown
+	// keys before merging (koanf itself does not error on unknown keys).
+	kf := koanf.New(".")
+	if err := kf.Load(file.Provider(path), yaml.Parser()); err != nil {
 		return nil, fmt.Errorf("parse config %q: %w", path, err)
+	}
+	for _, key := range kf.Keys() {
+		top := key
+		if i := strings.IndexByte(key, '.'); i >= 0 {
+			top = key[:i] // a list/nested key like "library_roots.0" -> "library_roots"
+		}
+		if !knownKeys[top] {
+			return nil, fmt.Errorf("unknown config key %q in %s (typo?)", top, path)
+		}
+	}
+	if err := k.Merge(kf); err != nil {
+		return nil, fmt.Errorf("merge config %q: %w", path, err)
+	}
+
+	// 3. environment overrides (TRANSCODE_CRF=20 -> crf). Values arrive as strings;
+	// WeaklyTypedInput (below) coerces them to the field types.
+	err := k.Load(koanfenv.Provider(envPrefix, ".", func(s string) string {
+		return strings.ToLower(strings.TrimPrefix(s, envPrefix))
+	}), nil)
+	if err != nil {
+		return nil, fmt.Errorf("load env overrides: %w", err)
+	}
+
+	var c Config
+	if err := k.UnmarshalWithConf("", &c, koanf.UnmarshalConf{
+		Tag: "yaml",
+		DecoderConfig: &mapstructure.DecoderConfig{
+			WeaklyTypedInput: true,
+			Result:           &c,
+		},
+	}); err != nil {
+		return nil, fmt.Errorf("decode config %q: %w", path, err)
 	}
 	return &c, nil
 }
@@ -146,7 +179,26 @@ func (c *Config) Validate() error {
 		return errors.New("library_roots is empty: refusing to run with nothing to scan")
 	}
 
-	home, _ := os.UserHomeDir()
+	// A delete-capable tool must be able to check that no root is the home dir; if
+	// HOME can't be determined we refuse rather than silently skip the check.
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return errors.New("cannot determine the home directory (set $HOME) — refusing to validate library roots safely")
+	}
+	cleanHome := filepath.Clean(home)
+
+	// isDangerous reports whether a cleaned absolute path is one we must never
+	// operate on (the filesystem root or the home directory).
+	dangerous := func(p string) string {
+		switch p {
+		case "/":
+			return "the filesystem root"
+		case cleanHome:
+			return "the home directory"
+		}
+		return ""
+	}
+
 	seen := make(map[string]struct{}, len(c.LibraryRoots))
 	for i, root := range c.LibraryRoots {
 		if root == "" {
@@ -156,11 +208,18 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("library_roots[%d] %q must be an absolute path", i, root)
 		}
 		clean := filepath.Clean(root)
-		if clean == "/" {
-			return fmt.Errorf("library_roots[%d] resolves to %q: refusing to operate on the filesystem root", i, clean)
+		if what := dangerous(clean); what != "" {
+			return fmt.Errorf("library_roots[%d] resolves to %s (%q): refusing", i, what, clean)
 		}
-		if home != "" && clean == filepath.Clean(home) {
-			return fmt.Errorf("library_roots[%d] resolves to the home directory %q: refusing", i, clean)
+		// Symlink resolution: filepath.Clean is purely lexical, so a symlinked root
+		// pointing at "/" or $HOME would pass the check above. If the path EXISTS,
+		// re-check its real target. A not-yet-existent root (EvalSymlinks errors)
+		// keeps only the lexical guard — validating before the mount exists is fine.
+		if resolved, rerr := filepath.EvalSymlinks(clean); rerr == nil {
+			rc := filepath.Clean(resolved)
+			if what := dangerous(rc); what != "" {
+				return fmt.Errorf("library_roots[%d] %q resolves via symlink to %s (%q): refusing", i, clean, what, rc)
+			}
 		}
 		if _, dup := seen[clean]; dup {
 			return fmt.Errorf("library_roots[%d] %q is a duplicate", i, clean)
@@ -175,7 +234,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("log_level %q is not one of debug|info|warn|error", c.LogLevel)
 	}
 
-	// Engine knobs (validated against their effective, post-ApplyDefaults values).
+	// Engine knobs (validated against their effective values).
 	switch c.Encoder {
 	case "", "cpu":
 		// ok (TRANSCODE-1 supports cpu; more encoders in TRANSCODE-6)

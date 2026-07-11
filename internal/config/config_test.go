@@ -136,26 +136,6 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-func TestApplyDefaults(t *testing.T) {
-	c := Config{LibraryRoots: []string{"/mnt/media"}}
-	c.ApplyDefaults()
-	if c.Encoder != "cpu" || c.CRF != 22 || c.Preset != "slow" || c.ContainerExt != "mkv" {
-		t.Errorf("defaults not applied: %+v", c)
-	}
-	if c.MinBitrateKbps != 2500 || c.MaxFailures != 3 || c.DurationToleranceSec != 1 {
-		t.Errorf("numeric defaults not applied: %+v", c)
-	}
-	if len(c.VideoExts) == 0 {
-		t.Error("video_exts default not applied")
-	}
-	// Explicit values are preserved.
-	c2 := Config{LibraryRoots: []string{"/mnt"}, CRF: 18, Encoder: "cpu", MinBitrateKbps: 5000}
-	c2.ApplyDefaults()
-	if c2.CRF != 18 || c2.MinBitrateKbps != 5000 {
-		t.Errorf("explicit values overwritten: %+v", c2)
-	}
-}
-
 func TestHardlinkSkipDefault(t *testing.T) {
 	var c Config // nil pointer
 	if !c.HardlinkSkip() {
@@ -198,4 +178,93 @@ func TestValidateEngineKnobs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoadLayered(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("defaults applied when absent", func(t *testing.T) {
+		p := filepath.Join(dir, "min.yaml")
+		writeFile(t, p, "library_roots:\n  - /mnt/media\n")
+		c, err := Load(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.CRF != 22 || c.Encoder != "cpu" || c.Preset != "slow" || c.ContainerExt != "mkv" ||
+			c.MinBitrateKbps != 2500 || c.MaxFailures != 3 || c.DurationToleranceSec != 1 || !c.HardlinkSkip() {
+			t.Fatalf("defaults not applied by Load: %+v", c)
+		}
+		if len(c.VideoExts) == 0 {
+			t.Error("video_exts default not applied")
+		}
+	})
+
+	t.Run("explicit zero overrides default (not clobbered)", func(t *testing.T) {
+		p := filepath.Join(dir, "zero.yaml")
+		writeFile(t, p, "library_roots:\n  - /mnt/media\ncrf: 0\nmin_bitrate_kbps: 0\n")
+		c, err := Load(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.CRF != 0 {
+			t.Errorf("crf = %d, want explicit 0 (default must not clobber)", c.CRF)
+		}
+		if c.MinBitrateKbps != 0 {
+			t.Errorf("min_bitrate_kbps = %d, want explicit 0", c.MinBitrateKbps)
+		}
+	})
+
+	t.Run("env overrides file", func(t *testing.T) {
+		p := filepath.Join(dir, "envtest.yaml")
+		writeFile(t, p, "library_roots:\n  - /mnt/media\ncrf: 22\nlog_level: info\n")
+		t.Setenv("TRANSCODE_CRF", "17")
+		t.Setenv("TRANSCODE_LOG_LEVEL", "debug")
+		t.Setenv("TRANSCODE_SKIP_HARDLINKED", "false")
+		c, err := Load(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.CRF != 17 {
+			t.Errorf("crf = %d, want 17 (env overrides file's 22)", c.CRF)
+		}
+		if c.LogLevel != "debug" {
+			t.Errorf("log_level = %q, want debug (env override)", c.LogLevel)
+		}
+		if c.HardlinkSkip() {
+			t.Error("skip_hardlinked = true, want false (env override of bool)")
+		}
+	})
+}
+
+func TestValidateSymlinkAndHome(t *testing.T) {
+	t.Run("symlink to / refused", func(t *testing.T) {
+		dir := t.TempDir()
+		link := filepath.Join(dir, "root-link")
+		if err := os.Symlink("/", link); err != nil {
+			t.Skipf("cannot symlink: %v", err)
+		}
+		c := Config{LibraryRoots: []string{link}}
+		err := c.Validate()
+		if err == nil || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("Validate() = %v, want a symlink-to-root refusal", err)
+		}
+	})
+
+	t.Run("non-existent root passes (validate-before-mount)", func(t *testing.T) {
+		// A root that doesn't exist yet keeps only the lexical guard — it must not
+		// error just because EvalSymlinks can't resolve it.
+		c := Config{LibraryRoots: []string{"/mnt/does-not-exist-yet"}}
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate(non-existent root) = %v, want nil", err)
+		}
+	})
+
+	t.Run("HOME unset refused", func(t *testing.T) {
+		t.Setenv("HOME", "")
+		c := Config{LibraryRoots: []string{"/mnt/media"}}
+		err := c.Validate()
+		if err == nil || !strings.Contains(err.Error(), "home directory") {
+			t.Fatalf("Validate() with HOME unset = %v, want a 'cannot determine home' refusal", err)
+		}
+	})
 }
