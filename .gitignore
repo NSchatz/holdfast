@@ -1,0 +1,19 @@
+# Build output
+/transcode
+/dist/
+/out/
+
+# Local state / runtime
+*.db
+*.db-wal
+*.db-shm
+/state/
+
+# Local config (never commit a real one — see config.example.yaml)
+config.yaml
+config.yml
+*.local.yaml
+
+# Editor / OS
+.DS_Store
+*.swp
