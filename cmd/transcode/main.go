@@ -23,6 +23,7 @@ import (
 	"syscall"
 
 	"github.com/NSchatz/transcode/internal/config"
+	"github.com/NSchatz/transcode/internal/encoder"
 	"github.com/NSchatz/transcode/internal/engine"
 	"github.com/NSchatz/transcode/internal/logging"
 	"github.com/NSchatz/transcode/internal/probe"
@@ -134,6 +135,21 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		"encoder", cfg.Encoder, "crf", cfg.CRF, "preset", cfg.Preset,
 		"dry_run", cfg.DryRun,
 	)
+
+	// Capability check: Validate only confirms the encoder KEY is known — it has no
+	// ffmpeg to actually test with. Here, with ffmpeg in hand, confirm the
+	// configured encoder actually WORKS in this build/on this host before doing
+	// anything else. This is a hard, loud failure — NEVER a silent fallback to cpu.
+	// A hardware encoder (nvenc/qsv/vaapi/amf) with no matching device, or an
+	// ffmpeg build missing a codec, must stop the run rather than let every file
+	// either fail its encode one-by-one or (worse, for some hardware encoders)
+	// appear to "succeed" while writing nothing.
+	// cfg.Encoder is always a valid registry key here (Load defaults it to "cpu";
+	// Validate rejects an unknown/empty encoder), so no empty-belt is needed.
+	if _, err := encoder.RequireAvailable(context.Background(), ffmpeg, ffprobe, cfg.Encoder); err != nil {
+		fmt.Fprintf(stderr, "transcode: %v\n", err)
+		return 1
+	}
 
 	prober := probe.New(ffmpeg, ffprobe)
 	enc := engine.FFmpegEncoder{FFmpeg: ffmpeg, Cfg: *cfg, Probe: prober}

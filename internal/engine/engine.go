@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"github.com/NSchatz/transcode/internal/config"
+	"github.com/NSchatz/transcode/internal/encoder"
 	"github.com/NSchatz/transcode/internal/hdr"
 	"github.com/NSchatz/transcode/internal/probe"
 	"github.com/NSchatz/transcode/internal/store"
@@ -42,6 +43,16 @@ type Engine struct {
 	Store store.Store
 	Log   *slog.Logger
 
+	// targetCodec is what ffprobe should report codec_name as for a SUCCESSFUL
+	// output — "hevc" for the cpu/nvenc/qsv/vaapi/amf encoders, "av1" for
+	// svtav1/av1_nvenc. Set in New from encoder.Lookup(cfg.Encoder).TargetCodec,
+	// defaulting "hevc" for an unknown/empty key (Validate rejects an unknown
+	// encoder before the engine is ever built, so this default is a defensive
+	// fallback, not a real code path). Drives the skip-already-target guard
+	// (ProcessFile) and the output-codec check (verifyOutput) — TRANSCODE-6
+	// generalizes both away from a hardcoded "hevc".
+	targetCodec string
+
 	// staticMetadataIncomplete, when non-nil, replaces hdr.StaticMetadataIncomplete
 	// for the HDR10 static-metadata guard. Unexported test seam (mirrors the bash
 	// suite's TRANSCODER_TEST_HOOKS; the engine tests are in this package) —
@@ -60,7 +71,11 @@ func New(cfg config.Config, p *probe.Prober, enc Encoder, st store.Store, log *s
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Engine{Cfg: cfg, Probe: p, Enc: enc, Store: st, Log: log}
+	target := "hevc"
+	if spec, ok := encoder.Lookup(cfg.Encoder); ok {
+		target = spec.TargetCodec
+	}
+	return &Engine{Cfg: cfg, Probe: p, Enc: enc, Store: st, Log: log, targetCodec: target}
 }
 
 // RunOneshot discards orphaned temps from any prior killed run, resets any job left
@@ -254,8 +269,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		e.finish(ctx, f, key, store.Failed)
 		return nil
 	}
-	if codec == "hevc" || codec == "h265" {
-		e.Log.Info("skip (already HEVC)", "file", f)
+	if e.isAlreadyTargetCodec(codec) {
+		e.Log.Info("skip (already at target codec)", "file", f, "codec", codec, "target", e.targetCodec)
 		e.finish(ctx, f, key, store.Skipped)
 		return nil
 	}
@@ -364,7 +379,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	}
 
 	_ = os.Remove(tmp) // clear any stale temp for this file
-	e.Log.Info("transcode", "file", f, "codec", codec, "-> ", "hevc", "worker", worker)
+	e.Log.Info("transcode", "file", f, "codec", codec, "-> ", e.targetCodec, "worker", worker)
 	e.advance(ctx, f, key, store.Encoding)
 
 	if err := e.Enc.Encode(ctx, f, tmp); err != nil {
@@ -455,6 +470,20 @@ func (e *Engine) advance(ctx context.Context, path, key string, s store.Status) 
 func (e *Engine) finish(ctx context.Context, path, key string, s store.Status) {
 	if err := e.Store.Finish(ctx, path, key, s); err != nil {
 		e.Log.Warn("store finish failed", "file", path, "status", s, "err", err)
+	}
+}
+
+// isAlreadyTargetCodec reports whether a source's probed video codec already IS
+// the engine's configured target codec, generalizing the pre-TRANSCODE-6 hardcoded
+// "already HEVC" check: for an hevc target, "hevc" and its legacy ffprobe alias
+// "h265" both count; for an av1 target, "av1" counts. A source already at the
+// target is skipped rather than pointlessly re-encoded.
+func (e *Engine) isAlreadyTargetCodec(codec string) bool {
+	switch e.targetCodec {
+	case "hevc":
+		return codec == "hevc" || codec == "h265"
+	default:
+		return codec == e.targetCodec
 	}
 }
 

@@ -154,13 +154,20 @@ func TestValidateEngineKnobs(t *testing.T) {
 		mutate  func(*Config)
 		wantErr string
 	}{
-		{"unknown encoder", func(c *Config) { c.Encoder = "nvenc" }, "not supported"},
+		{"unknown encoder", func(c *Config) { c.Encoder = "quicksync_turbo" }, "not supported"},
 		{"crf too high", func(c *Config) { c.CRF = 52 }, "crf"},
 		{"crf negative", func(c *Config) { c.CRF = -1 }, "crf"},
 		{"savings out of range", func(c *Config) { c.MinSavingsPercent = 100 }, "min_savings_percent"},
 		{"negative max_failures", func(c *Config) { c.MaxFailures = -1 }, "max_failures"},
 		{"container ext with dot", func(c *Config) { c.ContainerExt = ".mkv" }, "container_ext"},
 		{"valid cpu config", func(c *Config) { c.Encoder = "cpu"; c.CRF = 20 }, ""},
+		{"valid svtav1 config", func(c *Config) { c.Encoder = "svtav1"; c.CRF = 30 }, ""},
+		{"valid nvenc config", func(c *Config) { c.Encoder = "nvenc"; c.CRF = 23 }, ""},
+		{"valid av1_nvenc config", func(c *Config) { c.Encoder = "av1_nvenc"; c.CRF = 30 }, ""},
+		{"valid qsv config", func(c *Config) { c.Encoder = "qsv"; c.CRF = 23 }, ""},
+		{"valid vaapi config", func(c *Config) { c.Encoder = "vaapi"; c.CRF = 23 }, ""},
+		{"valid amf config", func(c *Config) { c.Encoder = "amf"; c.CRF = 23 }, ""},
+		{"raw ffmpeg codec alias accepted", func(c *Config) { c.Encoder = "libsvtav1"; c.CRF = 30 }, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

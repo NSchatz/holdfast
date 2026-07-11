@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/NSchatz/transcode/internal/config"
+	"github.com/NSchatz/transcode/internal/encoder"
 	"github.com/NSchatz/transcode/internal/probe"
 )
 
@@ -180,5 +182,223 @@ func TestEncode_ExoticPixFmtRefusesToEncode(t *testing.T) {
 	}
 	if _, statErr := os.Stat(out); statErr == nil {
 		t.Error("Encode wrote an output despite refusing the exotic pix_fmt")
+	}
+}
+
+// TestEncode_UnknownEncoderErrors proves Encode refuses an unrecognized
+// Cfg.Encoder rather than silently falling back to any default codec.
+func TestEncode_UnknownEncoderErrors(t *testing.T) {
+	realFFmpeg, realFFprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, realFFmpeg, src, "3M")
+
+	cfg := baseCfg(d)
+	cfg.Encoder = "not_a_real_encoder"
+	prober := probe.New(realFFmpeg, realFFprobe)
+	enc := FFmpegEncoder{FFmpeg: realFFmpeg, Cfg: cfg, Probe: prober}
+
+	out := filepath.Join(d, "out.mkv")
+	if err := enc.Encode(context.Background(), src, out); err == nil {
+		t.Fatal("Encode succeeded with an unknown encoder key — should have refused")
+	}
+}
+
+// TestEncode_SVTAV1WiresCodecColorAndPreset proves the SVT-AV1 path selects the
+// correct ffmpeg codec, still applies the universal -color_*/-fps_mode passthrough
+// args, uses the numeric preset mapping, and — critically — does NOT append
+// x265-params (that mechanism is libx265-only; AV1 HDR10 static-metadata carriage
+// is out of scope, see encode.go's buildArgs doc comment).
+func TestEncode_SVTAV1WiresCodecColorAndPreset(t *testing.T) {
+	realFFmpeg, realFFprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264SDR(t, realFFmpeg, src, "3M")
+
+	fakeFFmpeg, argvLog := captureFFmpeg(t, d, realFFmpeg)
+	cfg := baseCfg(d)
+	cfg.Encoder = "svtav1"
+	cfg.Preset = "fast" // -> numeric 10
+	cfg.CRF = 30
+	prober := probe.New(realFFmpeg, realFFprobe)
+	enc := FFmpegEncoder{FFmpeg: fakeFFmpeg, Cfg: cfg, Probe: prober}
+
+	out := filepath.Join(d, "out.mkv")
+	if err := enc.Encode(context.Background(), src, out); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+
+	args := readArgv(t, argvLog)
+	if !hasArgPair(args, "-c:v", "libsvtav1") {
+		t.Errorf("ffmpeg argv missing -c:v libsvtav1: %v", args)
+	}
+	if !hasArgPair(args, "-preset", "10") {
+		t.Errorf("ffmpeg argv missing -preset 10 (mapped from Preset=fast): %v", args)
+	}
+	if !hasArgPair(args, "-crf", "30") {
+		t.Errorf("ffmpeg argv missing -crf 30: %v", args)
+	}
+	if !hasArgPair(args, "-colorspace", "bt709") {
+		t.Errorf("ffmpeg argv missing universal -colorspace bt709: %v", args)
+	}
+	if !hasArgPair(args, "-fps_mode", "passthrough") {
+		t.Errorf("ffmpeg argv missing universal -fps_mode passthrough: %v", args)
+	}
+	for _, a := range args {
+		if a == "-x265-params" {
+			t.Errorf("ffmpeg argv unexpectedly includes -x265-params for an svtav1 encode: %v", args)
+		}
+	}
+}
+
+// TestBuildArgs_HardwareEncoderShapes is a unit test (no real ffmpeg invocation
+// needed — pure function) proving buildArgs assembles the documented arg shape
+// for each hardware Spec. These encoders are gated behind capability detection
+// and cannot be run end-to-end in this container (no GPU/device), so this is the
+// direct proof that the arg-builder logic itself is wired as designed; combined
+// with TestHardwareEncoders_AvailabilityTable's honest runtime skip, both the
+// "what would we send" and "do we ever send it without checking" halves of the
+// hardware story are covered.
+func TestBuildArgs_HardwareEncoderShapes(t *testing.T) {
+	cfg := config.Config{CRF: 23, Preset: "slow"}
+
+	nvencSpec, _ := encoder.Lookup("nvenc")
+	nvencArgs := buildArgs(nvencSpec, cfg, "yuv420p10le", nil, "")
+	if !hasArgPair(nvencArgs, "-cq", "23") || !hasArgPair(nvencArgs, "-rc", "vbr") {
+		t.Errorf("nvenc buildArgs missing -rc vbr / -cq 23: %v", nvencArgs)
+	}
+
+	av1NvencSpec, _ := encoder.Lookup("av1_nvenc")
+	av1NvencArgs := buildArgs(av1NvencSpec, cfg, "yuv420p10le", nil, "")
+	if !hasArgPair(av1NvencArgs, "-cq", "23") {
+		t.Errorf("av1_nvenc buildArgs missing -cq 23: %v", av1NvencArgs)
+	}
+
+	qsvSpec, _ := encoder.Lookup("qsv")
+	qsvArgs := buildArgs(qsvSpec, cfg, "yuv420p10le", nil, "")
+	if !hasArgPair(qsvArgs, "-global_quality", "23") {
+		t.Errorf("qsv buildArgs missing -global_quality 23: %v", qsvArgs)
+	}
+
+	vaapiSpec, _ := encoder.Lookup("vaapi")
+	vaapiArgs := buildArgs(vaapiSpec, cfg, "nv12", nil, "")
+	if !hasArgPair(vaapiArgs, "-qp", "23") {
+		t.Errorf("vaapi buildArgs missing -qp 23: %v", vaapiArgs)
+	}
+	foundHwupload := false
+	for _, a := range vaapiArgs {
+		if strings.Contains(a, "hwupload") {
+			foundHwupload = true
+		}
+	}
+	if !foundHwupload {
+		t.Errorf("vaapi buildArgs missing hwupload filter: %v", vaapiArgs)
+	}
+
+	amfSpec, _ := encoder.Lookup("amf")
+	amfArgs := buildArgs(amfSpec, cfg, "yuv420p10le", nil, "")
+	if !hasArgPair(amfArgs, "-qp_i", "23") || !hasArgPair(amfArgs, "-qp_p", "23") {
+		t.Errorf("amf buildArgs missing -qp_i/-qp_p 23: %v", amfArgs)
+	}
+
+	// Every hardware Spec still gets the universal args (pix_fmt/fps_mode), and
+	// none of them get x265-params (libx265-only).
+	for _, args := range [][]string{nvencArgs, av1NvencArgs, qsvArgs, vaapiArgs, amfArgs} {
+		if !hasArgPair(args, "-fps_mode", "passthrough") {
+			t.Errorf("hardware buildArgs missing universal -fps_mode passthrough: %v", args)
+		}
+		for _, a := range args {
+			if a == "-x265-params" {
+				t.Errorf("hardware buildArgs unexpectedly includes -x265-params: %v", args)
+			}
+		}
+	}
+}
+
+// TestEncode_VaapiDeviceFlagPrecedesInput proves the -vaapi_device global option
+// is placed BEFORE -i in the assembled argv. This matters: -vaapi_device
+// establishes the hardware device context that the hwupload filter (added by
+// buildArgs) needs, so if it landed after -i (as it would from a naive
+// buildArgs-only assembly) ffmpeg would reject the command. Untestable via a real
+// encode in this container (no VAAPI device), so this inspects the argv directly
+// — the same "capture what ffmpeg would receive" technique the other Encode wiring
+// tests use, applied to a fake ffmpeg that just echoes argv (no real run needed
+// since a real VAAPI encode would fail here regardless).
+func TestEncode_VaapiDeviceFlagPrecedesInput(t *testing.T) {
+	realFFmpeg, realFFprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, realFFmpeg, src, "3M")
+
+	// A fake ffmpeg that just logs argv and exits 0 without touching real VAAPI —
+	// this test proves ARG ORDER, not that vaapi actually encodes (which needs a
+	// real device this container doesn't have).
+	fakeFFmpeg := filepath.Join(d, "fake-ffmpeg-noop.sh")
+	argvLog := filepath.Join(d, "argv.log")
+	script := "#!/bin/sh\n" +
+		"for a in \"$@\"; do printf '%s\\n' \"$a\"; done >> \"" + argvLog + "\"\n" +
+		"printf -- '---\\n' >> \"" + argvLog + "\"\n" +
+		"exit 0\n"
+	if err := os.WriteFile(fakeFFmpeg, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake ffmpeg: %v", err)
+	}
+
+	cfg := baseCfg(d)
+	cfg.Encoder = "vaapi"
+	prober := probe.New(realFFmpeg, realFFprobe)
+	enc := FFmpegEncoder{FFmpeg: fakeFFmpeg, Cfg: cfg, Probe: prober}
+
+	out := filepath.Join(d, "out.mkv")
+	if err := enc.Encode(context.Background(), src, out); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+
+	args := readArgv(t, argvLog)
+	deviceIdx, inputIdx := -1, -1
+	for i, a := range args {
+		if a == "-vaapi_device" {
+			deviceIdx = i
+		}
+		if a == "-i" {
+			inputIdx = i
+		}
+	}
+	if deviceIdx == -1 {
+		t.Fatalf("ffmpeg argv missing -vaapi_device: %v", args)
+	}
+	if inputIdx == -1 {
+		t.Fatalf("ffmpeg argv missing -i: %v", args)
+	}
+	if deviceIdx > inputIdx {
+		t.Errorf("-vaapi_device (index %d) must precede -i (index %d): %v", deviceIdx, inputIdx, args)
+	}
+}
+
+// TestSvtav1Preset_MapsPresetWords proves the config Preset word -> SVT-AV1
+// numeric preset mapping matches the documented table, and that an unrecognized
+// word falls back to the documented middle-ground default (8) rather than an
+// extreme.
+func TestSvtav1Preset_MapsPresetWords(t *testing.T) {
+	cases := []struct {
+		word string
+		want int
+	}{
+		{"placebo", 2},
+		{"veryslow", 2},
+		{"slower", 4},
+		{"slow", 6},
+		{"medium", 8},
+		{"fast", 10},
+		{"faster", 11},
+		{"veryfast", 11},
+		{"superfast", 12},
+		{"ultrafast", 12},
+		{"", 8},
+		{"not_a_real_preset", 8},
+	}
+	for _, tc := range cases {
+		if got := svtav1Preset(tc.word); got != tc.want {
+			t.Errorf("svtav1Preset(%q) = %d, want %d", tc.word, got, tc.want)
+		}
 	}
 }
