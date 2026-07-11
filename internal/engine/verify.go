@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/NSchatz/transcode/internal/probe"
+	"github.com/NSchatz/transcode/internal/vmaf"
 )
 
 // verifyOutput checks a freshly-encoded temp file before it may replace the source.
@@ -73,9 +75,65 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) error {
 		}
 	}
 
-	// 6. decode-integrity healthcheck on EVERY encode (costliest, so last).
+	// 6. decode-integrity healthcheck on EVERY encode.
 	if !e.Probe.DecodeOK(ctx, tmp) {
 		return fmt.Errorf("decode-integrity check failed (output does not fully decode)")
 	}
+
+	// 7. VMAF perceptual-quality gate (costliest — a second full decode — so last).
+	// The structural checks prove the output exists/decodes/carries the tracks; VMAF
+	// proves it still LOOKS like the source. Same resolution (codec-only), so no
+	// scaling. When enabled and libvmaf is unavailable, or the measurement fails, the
+	// encode is REJECTED — never accept an unmeasured output.
+	if e.Cfg.VmafGate() {
+		if err := e.vmafGate(ctx, tmp, in); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// vmafGate measures the output (distorted) against the source (reference) and
+// rejects an encode whose pooled harmonic-mean VMAF is below MinVmaf, or (when
+// VmafMinPool > 0) whose worst-frame VMAF is below that floor.
+func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) error {
+	model := resolveVmafModel(e.Cfg.VmafModel, e.Probe.Height(ctx, distorted))
+
+	score := e.vmafScore
+	if score == nil {
+		if !vmaf.Available(ctx, e.Probe.FFmpeg) {
+			return fmt.Errorf("VMAF gate enabled but libvmaf is not available in the ffmpeg build (refusing to accept an unmeasured encode)")
+		}
+		score = func(ctx context.Context, d, r string, sub int, m string) (vmaf.Result, error) {
+			return vmaf.Score(ctx, e.Probe.FFmpeg, d, r, sub, m)
+		}
+	}
+
+	res, err := score(ctx, distorted, reference, e.Cfg.VmafSubsample, model)
+	if err != nil {
+		return fmt.Errorf("VMAF measurement failed (refusing to accept an unmeasured encode): %w", err)
+	}
+	if res.HarmonicMean < e.Cfg.MinVmaf {
+		return fmt.Errorf("VMAF below threshold (harmonic_mean=%.2f < min_vmaf=%.2f)", res.HarmonicMean, e.Cfg.MinVmaf)
+	}
+	if e.Cfg.VmafMinPool > 0 && res.Min < e.Cfg.VmafMinPool {
+		return fmt.Errorf("VMAF worst-frame below floor (min=%.2f < vmaf_min_pool=%.2f)", res.Min, e.Cfg.VmafMinPool)
+	}
+	return nil
+}
+
+// resolveVmafModel maps the config VmafModel to a libvmaf model spec. "auto"/""
+// picks the UHD model for output height > 1440, else the HD model; any other value
+// is passed through (prefixed with "version=" when it looks like a bare version id).
+func resolveVmafModel(cfg string, height int) string {
+	if cfg == "" || cfg == "auto" {
+		if height > 1440 {
+			return "version=vmaf_4k_v0.6.1"
+		}
+		return "version=vmaf_v0.6.1"
+	}
+	if !strings.Contains(cfg, "=") {
+		return "version=" + cfg
+	}
+	return cfg
 }

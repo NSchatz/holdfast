@@ -27,6 +27,7 @@ import (
 	"github.com/NSchatz/transcode/internal/hdr"
 	"github.com/NSchatz/transcode/internal/ledger"
 	"github.com/NSchatz/transcode/internal/probe"
+	"github.com/NSchatz/transcode/internal/vmaf"
 )
 
 // errFake is the deterministic error returned by fake encoders simulating a failure.
@@ -160,8 +161,14 @@ func baseCfg(root string) config.Config {
 		MinSavingsPercent:    0,
 		DurationToleranceSec: 1,
 		MaxFailures:          3,
+		// VMAF is a second full decode; leave it OFF for the structural cases (they
+		// assert the size/parity/decode gates). The VMAF gate is exercised by its own
+		// dedicated cases below with VmafEnable=true + MinVmaf set.
+		VmafEnable: boolPtr(false),
 	}
 }
+
+func boolPtr(b bool) *bool { return &b }
 
 // run builds an engine over root with the given encoder and config mutation, then
 // runs one oneshot pass. Returns the ledger for assertions.
@@ -1011,5 +1018,157 @@ func TestCaseE_ExoticPixFmtSkipped(t *testing.T) {
 	}
 	if nTemp(t, d) != 0 {
 		t.Error("caseE: temp left behind")
+	}
+}
+
+// ---- VMAF perceptual-quality gate (TRANSCODE-4) ------------------------------
+
+// degradedEncoder produces a same-resolution but heavily-degraded HEVC (downscale
+// to 64x48 then back to 320x240 + high CRF) — structurally valid (right codec,
+// decodes, smaller, same duration/streams) but perceptually bad, so ONLY the VMAF
+// gate can reject it. This is the anti-advisory proof for the VMAF gate.
+func degradedEncoder(ffmpeg string) EncoderFunc {
+	return func(ctx context.Context, in, out string) error {
+		return exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-y", "-i", in,
+			"-vf", "scale=64:48,scale=320:240:flags=neighbor",
+			"-c:v", "libx265", "-crf", "45", "-x265-params", "log-level=error",
+			"-pix_fmt", "yuv420p10le", "--", out).Run()
+	}
+}
+
+func TestVmaf_RejectsDegradedOutput(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+	before := md5f(t, src)
+	led := run(t, ffmpeg, ffprobe, d, degradedEncoder(ffmpeg), func(c *config.Config) {
+		c.VmafEnable = boolPtr(true)
+		c.MinVmaf = 95
+	})
+	if md5f(t, src) != before {
+		t.Error("source modified by a low-VMAF output")
+	}
+	if codecOf(t, ffprobe, src) != "h264" {
+		t.Error("source was swapped despite a low VMAF")
+	}
+	if nTemp(t, d) != 0 {
+		t.Error("temp not discarded")
+	}
+	if !ledgerHas(t, led, ledger.Failed, "movie.mkv") {
+		t.Error("expected a failed row (VMAF rejection)")
+	}
+}
+
+func TestVmaf_AcceptsNormalEncode(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+	// Real libx265 crf22 encode + VMAF gate on: a faithful encode scores ~99 → accepted.
+	led := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
+		c.VmafEnable = boolPtr(true)
+		c.MinVmaf = 95
+	})
+	if codecOf(t, ffprobe, src) != "hevc" {
+		t.Error("a normal encode was not accepted under the VMAF gate")
+	}
+	if !ledgerHas(t, led, ledger.Done, "movie.mkv") {
+		t.Error("expected a done row")
+	}
+}
+
+func TestVmaf_DisabledAcceptsDegraded(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+	// VMAF OFF: the same degraded output passes the structural gates → accepted.
+	// Proves the VMAF gate (not a structural check) is what rejects it when on.
+	led := run(t, ffmpeg, ffprobe, d, degradedEncoder(ffmpeg), func(c *config.Config) {
+		c.VmafEnable = boolPtr(false)
+	})
+	if codecOf(t, ffprobe, src) != "hevc" {
+		t.Error("VMAF-off did not accept the (structurally-valid) degraded output")
+	}
+	if !ledgerHas(t, led, ledger.Done, "movie.mkv") {
+		t.Error("expected a done row with VMAF disabled")
+	}
+}
+
+func TestVmaf_UnavailableWhileEnabledRejects(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+	before := md5f(t, src)
+	// Inject a scorer that reports libvmaf unavailable. The gate must REJECT (never
+	// accept an unmeasured encode).
+	eng := buildEngine(ffmpeg, ffprobe, d, nil, func(c *config.Config) {
+		c.VmafEnable = boolPtr(true)
+		c.MinVmaf = 95
+	})
+	eng.vmafScore = func(ctx context.Context, distorted, reference string, sub int, model string) (vmaf.Result, error) {
+		return vmaf.Result{}, vmaf.ErrUnavailable
+	}
+	led := eng.Led
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if md5f(t, src) != before {
+		t.Error("source modified when VMAF was unavailable")
+	}
+	if codecOf(t, ffprobe, src) != "h264" {
+		t.Error("source swapped when VMAF unavailable (should reject an unmeasured encode)")
+	}
+	if !ledgerHas(t, led, ledger.Failed, "movie.mkv") {
+		t.Error("expected a failed row (unmeasured encode rejected)")
+	}
+}
+
+func TestResolveVmafModel(t *testing.T) {
+	cases := []struct {
+		cfg    string
+		height int
+		want   string
+	}{
+		{"auto", 1080, "version=vmaf_v0.6.1"},
+		{"", 720, "version=vmaf_v0.6.1"},
+		{"auto", 1440, "version=vmaf_v0.6.1"}, // boundary: not > 1440 -> HD
+		{"auto", 1441, "version=vmaf_4k_v0.6.1"},
+		{"auto", 2160, "version=vmaf_4k_v0.6.1"},
+		{"vmaf_4k_v0.6.1", 1080, "version=vmaf_4k_v0.6.1"}, // bare id -> prefixed
+		{"version=custom", 1080, "version=custom"},         // already a spec -> passthrough
+	}
+	for _, tc := range cases {
+		if got := resolveVmafModel(tc.cfg, tc.height); got != tc.want {
+			t.Errorf("resolveVmafModel(%q, %d) = %q, want %q", tc.cfg, tc.height, got, tc.want)
+		}
+	}
+}
+
+func TestVmaf_MinPoolFloorRejects(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+	before := md5f(t, src)
+	// A faithful crf22 encode clears the harmonic-mean gate (MinVmaf=90) but its worst
+	// (sub)sampled frame falls below a high worst-frame floor (99) → rejected by the
+	// min-pool branch. Proves VmafMinPool is wired (the harmonic-mean gate alone accepts
+	// this same encode — see TestVmaf_AcceptsNormalEncode).
+	led := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
+		c.VmafEnable = boolPtr(true)
+		c.MinVmaf = 90
+		c.VmafMinPool = 99
+	})
+	if md5f(t, src) != before {
+		t.Error("source modified despite the worst-frame VMAF below the min-pool floor")
+	}
+	if codecOf(t, ffprobe, src) != "h264" {
+		t.Error("source was swapped (min-pool floor not enforced)")
+	}
+	if !ledgerHas(t, led, ledger.Failed, "movie.mkv") {
+		t.Error("expected a failed row (min-pool rejection)")
 	}
 }

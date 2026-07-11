@@ -25,6 +25,7 @@ import (
 	"github.com/NSchatz/transcode/internal/hdr"
 	"github.com/NSchatz/transcode/internal/ledger"
 	"github.com/NSchatz/transcode/internal/probe"
+	"github.com/NSchatz/transcode/internal/vmaf"
 )
 
 // TempMarker is the fixed infix in a work-in-progress temp file's name, so a
@@ -45,6 +46,11 @@ type Engine struct {
 	// suite's TRANSCODER_TEST_HOOKS; the engine tests are in this package) —
 	// production leaves it nil and uses the real predicate.
 	staticMetadataIncomplete func(flatSideData string) bool
+
+	// vmafScore, when non-nil, replaces the real libvmaf measurement in the VMAF
+	// gate. Unexported test seam — lets a test force a low score or an unavailable-
+	// libvmaf error without a second real encode. Production leaves it nil.
+	vmafScore func(ctx context.Context, distorted, reference string, subsample int, model string) (vmaf.Result, error)
 
 	mu         sync.Mutex
 	currentTmp string // the in-flight temp (removed on Stop); guarded by mu

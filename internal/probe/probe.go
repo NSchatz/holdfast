@@ -258,3 +258,15 @@ func (p *Prober) SideDataFlat(ctx context.Context, f string) string {
 func (p *Prober) FrameSideDataFlat(ctx context.Context, f string) string {
 	return p.frameSideDataFlat(ctx, f)
 }
+
+// Height returns the coded height of the first video stream in pixels, or 0 if
+// unknown. Used to auto-select the VMAF model (UHD vs HD).
+func (p *Prober) Height(ctx context.Context, f string) int {
+	s := firstLine(ctx, p.FFprobe, "-v", "error", "-select_streams", "v:0",
+		"-show_entries", "stream=height", "-of", "default=nw=1:nk=1", "--", f)
+	if !intRe.MatchString(s) {
+		return 0
+	}
+	n, _ := strconv.Atoi(s)
+	return n
+}

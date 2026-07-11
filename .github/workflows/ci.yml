@@ -61,11 +61,23 @@ jobs:
           done
           echo "config schema self-test OK (valid accepted; unknown-key + bad-value rejected)"
 
-      # The engine safety proof drives REAL ffmpeg (libx265) fixtures — it fails loud
-      # if ffmpeg/ffprobe are missing (a skip would be a false green), so CI must
-      # provide them. Ubuntu's ffmpeg ships libx265/libx264.
-      - name: install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      # The engine safety proof drives REAL ffmpeg fixtures — it fails loud if
+      # ffmpeg/ffprobe (or, for the VMAF gate, libvmaf) are missing (a skip would be a
+      # false green). Ubuntu's apt ffmpeg does NOT ship libvmaf, so install a static
+      # build that carries libx265 + libvmaf (matching the local dev + Docker-image
+      # ffmpeg). This is the environment the transcoder is actually tested against.
+      - name: install ffmpeg (libx265 + libvmaf)
+        run: |
+          url="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
+          curl -fsSL -o /tmp/ffmpeg.tar.xz "$url"
+          sudo mkdir -p /opt/ffmpeg
+          sudo tar -C /opt/ffmpeg --strip-components=1 -xf /tmp/ffmpeg.tar.xz
+          echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
+          /opt/ffmpeg/bin/ffmpeg -hide_banner -filters | grep -q libvmaf \
+            || { echo "::error::the installed ffmpeg lacks libvmaf"; exit 1; }
+          /opt/ffmpeg/bin/ffmpeg -hide_banner -encoders | grep -q libx265 \
+            || { echo "::error::the installed ffmpeg lacks libx265"; exit 1; }
+          echo "ffmpeg with libx265 + libvmaf installed"
 
       - name: go test (race + coverage)
         run: go test -race -covermode=atomic ./...

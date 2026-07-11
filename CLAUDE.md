@@ -36,9 +36,13 @@ unrecognized source pixel format is SKIPPED (never silently subsampled) while a 
 chroma subsampling preserved and bit-depth floored at 10; a VFR source is no longer forced to CFR; and the
 output container now matches the source's own extension by default (in-place transcode) so a stream type
 that doesn't round-trip through a different container (e.g. MP4 `mov_text` into MKV) isn't force-migrated.
-Proven by fixture cases 18–22 (HDR) plus source-property cases (a)-(e). Next: VMAF (`TRANSCODE-4`), the
-SQLite/WAL queue + worker pool (`TRANSCODE-5`), hardware/AV1 (`TRANSCODE-6`), API/UI (`TRANSCODE-7`). The
-full phased plan lives in the umbrella that tracks this repo (`operations/roadmaps/transcode.md`).
+Proven by fixture cases 18–22 (HDR) plus source-property cases (a)-(e). `TRANSCODE-4` added the **VMAF
+perceptual-quality gate** — the last no-loss layer: after the structural checks pass, VMAF compares the
+output against the source and rejects an encode that decodes fine but *looks* worse (default-on, pooled
+harmonic-mean < 95 → reject; libvmaf-unavailable-while-enabled → reject, never accept an unmeasured
+output). Next: the SQLite/WAL queue + worker pool (`TRANSCODE-5`), hardware/AV1 (`TRANSCODE-6`), API/UI
+(`TRANSCODE-7`). The full phased plan lives in the umbrella that tracks this repo
+(`operations/roadmaps/transcode.md`).
 
 ## Layout
 
@@ -58,6 +62,9 @@ full phased plan lives in the umbrella that tracks this repo (`operations/roadma
   are unit-tested with no ffmpeg dependency, plus prober-backed `Classify`/`DeriveColorArgs` used by the
   engine and encoder. **Fail-safe by construction**: an incomplete HDR10 static-metadata block, or an
   unrecognized pixel format, is never guessed — the caller skips.
+- `internal/vmaf` (TRANSCODE-4) — runs libvmaf (via ffmpeg) to score an output vs its source; `Available`
+  reports whether the build has libvmaf, `Score` returns the pooled harmonic-mean + min VMAF. The engine's
+  `verifyOutput` rejects a below-threshold or unmeasurable encode (never accept an unmeasured output).
 - `internal/ledger` — the resumable size:mtime TSV (done/skipped/failed; failed is retryable). SQLite in T-5.
 - `internal/engine` — the orchestrator: `ProcessFile` (skip guards — already-HEVC, low-bitrate, hardlinked,
   **interlaced, DV/HDR10+, HDR10-with-incomplete-metadata, exotic pixel format** (TRANSCODE-3) — → encode →

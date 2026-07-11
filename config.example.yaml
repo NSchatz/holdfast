@@ -74,5 +74,16 @@ dry_run: false
 # max_failures: 3            # retry a failing file this many times before parking it
 # skip_hardlinked: true      # skip files with >1 hard link (an active seed/dup)
 
+# --- VMAF perceptual-quality gate (the last no-loss layer) ---
+# After the structural checks pass, VMAF compares the output against the source and
+# REJECTS an encode that decodes fine but looks worse. When enabled and libvmaf is
+# unavailable (or the measurement fails), the encode is rejected — never accept an
+# unmeasured output. VMAF is a second full decode; raise vmaf_subsample on big libraries.
+# vmaf_enable: true          # turn the gate on/off
+# min_vmaf: 95               # reject if pooled harmonic-mean VMAF < this (~95 = visually lossless)
+# vmaf_min_pool: 0           # >0 also rejects if the worst-frame VMAF < this (0 = off)
+# vmaf_subsample: 1          # frame-sampling interval (1 = every frame; higher = cheaper)
+# vmaf_model: auto           # auto = vmaf_4k for height>1440 else HD; or a model version/spec
+
 # --- runtime ---
 # state_dir: state           # holds the resume ledger

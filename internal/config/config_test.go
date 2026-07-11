@@ -269,3 +269,48 @@ func TestValidateSymlinkAndHome(t *testing.T) {
 		}
 	})
 }
+
+func TestVmafConfig(t *testing.T) {
+	// VmafGate defaults to true when unset.
+	var c Config
+	if !c.VmafGate() {
+		t.Error("VmafGate() = false for nil, want true (default on)")
+	}
+	f := false
+	c.VmafEnable = &f
+	if c.VmafGate() {
+		t.Error("VmafGate() = true when explicitly false")
+	}
+
+	// Validation of the VMAF knobs.
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{"min_vmaf too high", func(c *Config) { c.MinVmaf = 101 }, "min_vmaf"},
+		{"min_vmaf negative", func(c *Config) { c.MinVmaf = -1 }, "min_vmaf"},
+		{"vmaf_min_pool too high", func(c *Config) { c.VmafMinPool = 150 }, "vmaf_min_pool"},
+		{"vmaf_subsample negative", func(c *Config) { c.VmafSubsample = -1 }, "vmaf_subsample"},
+		{"vmaf_subsample zero is ok (defaults at runtime)", func(c *Config) { c.VmafSubsample = 0 }, ""},
+		{"enabled gate with no threshold refused", func(c *Config) { on := true; c.VmafEnable = &on; c.MinVmaf = 0; c.VmafMinPool = 0 }, "never reject"},
+		{"enabled gate with a min-pool floor ok", func(c *Config) { on := true; c.VmafEnable = &on; c.MinVmaf = 0; c.VmafMinPool = 80 }, ""},
+		{"valid vmaf knobs", func(c *Config) { c.MinVmaf = 95; c.VmafMinPool = 80; c.VmafSubsample = 5 }, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Config{LibraryRoots: []string{"/mnt/media"}, VmafSubsample: 1}
+			tc.mutate(&c)
+			err := c.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Validate() = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
