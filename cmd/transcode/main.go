@@ -12,6 +12,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -67,6 +68,11 @@ func loadConfig(fs *flag.FlagSet, args []string, stderr io.Writer) (*config.Conf
 	path := fs.String("config", "", "path to the YAML config file (required)")
 	fs.SetOutput(stderr)
 	if err := fs.Parse(args); err != nil {
+		// -h/--help: flag already printed usage; exit cleanly (success), and the
+		// caller must not proceed to use the nil config (it checks cfg == nil).
+		if errors.Is(err, flag.ErrHelp) {
+			return nil, 0
+		}
 		return nil, 2
 	}
 	if *path == "" {
@@ -88,7 +94,7 @@ func loadConfig(fs *flag.FlagSet, args []string, stderr io.Writer) (*config.Conf
 func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	cfg, code := loadConfig(fs, args, stderr)
-	if code != 0 {
+	if cfg == nil {
 		return code
 	}
 	fmt.Fprintf(stdout, "config OK: %d library root(s)\n", len(cfg.LibraryRoots))
@@ -98,7 +104,7 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 func cmdRun(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	cfg, code := loadConfig(fs, args, stderr)
-	if code != 0 {
+	if cfg == nil {
 		return code
 	}
 	log := logging.New(cfg.LogLevel)

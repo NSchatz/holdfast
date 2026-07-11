@@ -33,6 +33,8 @@ func TestDispatch(t *testing.T) {
 		{"validate bad config", []string{"validate", "--config", badCfg}, 1, ""},
 		{"run refuses to touch files", []string{"run", "--config", goodCfg}, 0, "No files were touched"},
 		{"run bad config", []string{"run", "--config", badCfg}, 1, ""},
+		{"subcommand help exits zero", []string{"validate", "-h"}, 0, ""},
+		{"top-level help exits zero", []string{"help"}, 0, "Usage"},
 	}
 
 	for _, tc := range tests {

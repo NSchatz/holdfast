@@ -91,7 +91,7 @@ func (c *Config) Validate() error {
 	}
 
 	switch c.LogLevel {
-	case "", "debug", "info", "warn", "warning", "error":
+	case "", "debug", "info", "warn", "error":
 		// ok
 	default:
 		return fmt.Errorf("log_level %q is not one of debug|info|warn|error", c.LogLevel)
