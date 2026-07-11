@@ -91,7 +91,8 @@ func loadConfig(fs *flag.FlagSet, args []string, stderr io.Writer) (*config.Conf
 		fmt.Fprintf(stderr, "transcode: %v\n", err)
 		return nil, 1
 	}
-	cfg.ApplyDefaults()
+	// Load already returns a fully-defaulted config (koanf defaults layer) and
+	// distinguishes an explicit zero (e.g. crf: 0) from an absent key.
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(stderr, "transcode: invalid config: %v\n", err)
 		return nil, 1

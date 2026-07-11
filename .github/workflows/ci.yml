@@ -45,6 +45,22 @@ jobs:
       - name: go build
         run: go build ./...
 
+      # Config schema self-test (anti-advisory-only): the committed example must
+      # validate, and each known-invalid config must be REJECTED — one via the schema
+      # (unknown key) and one via value validation (out-of-range crf), so both
+      # rejection paths are covered. Proves the `validate` subcommand + schema wire
+      # together end to end, and that the gate actually reds — not just that go test passed.
+      - name: config schema self-test
+        run: |
+          go build -o /tmp/transcode ./cmd/transcode
+          /tmp/transcode validate --config config.example.yaml
+          for bad in testdata/config-invalid.yaml testdata/config-invalid-value.yaml; do
+            if /tmp/transcode validate --config "$bad"; then
+              echo "::error::invalid config $bad was ACCEPTED — schema gate is broken"; exit 1
+            fi
+          done
+          echo "config schema self-test OK (valid accepted; unknown-key + bad-value rejected)"
+
       # The engine safety proof drives REAL ffmpeg (libx265) fixtures — it fails loud
       # if ffmpeg/ffprobe are missing (a skip would be a false green), so CI must
       # provide them. Ubuntu's ffmpeg ships libx265/libx264.
