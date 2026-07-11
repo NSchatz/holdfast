@@ -35,6 +35,8 @@ var knownKeys = map[string]bool{
 	"pixel_format": true, "container_ext": true, "min_bitrate_kbps": true,
 	"min_savings_percent": true, "duration_tolerance_sec": true,
 	"max_failures": true, "skip_hardlinked": true, "state_dir": true,
+	"vmaf_enable": true, "min_vmaf": true, "vmaf_min_pool": true,
+	"vmaf_subsample": true, "vmaf_model": true,
 }
 
 // defaultLayer is the built-in default configuration, loaded as koanf's base layer.
@@ -55,6 +57,11 @@ func defaultLayer() map[string]any {
 		"max_failures":           3,
 		"skip_hardlinked":        true,
 		"state_dir":              "state",
+		"vmaf_enable":            true,
+		"min_vmaf":               95.0,
+		"vmaf_min_pool":          0.0,
+		"vmaf_subsample":         1,
+		"vmaf_model":             "auto",
 	}
 }
 
@@ -113,7 +120,32 @@ type Config struct {
 	SkipHardlinked *bool `yaml:"skip_hardlinked"`
 	// StateDir holds the ledger + heartbeat (relative paths are resolved by callers).
 	StateDir string `yaml:"state_dir"`
+
+	// --- VMAF perceptual-quality gate (TRANSCODE-4) ---
+
+	// VmafEnable turns on the perceptual VMAF accept/reject gate (default true). When
+	// enabled and libvmaf is unavailable, an encode is REJECTED (never accept an
+	// unmeasured output).
+	VmafEnable *bool `yaml:"vmaf_enable"`
+	// MinVmaf is the pooled harmonic-mean VMAF below which an encode is rejected
+	// (0-100; default 95 ≈ visually lossless / point of diminishing returns).
+	MinVmaf float64 `yaml:"min_vmaf"`
+	// VmafMinPool, when > 0, additionally rejects an encode whose worst (sub)sampled
+	// frame VMAF (the `min` pool) falls below it — catches a worst-segment collapse.
+	// 0 (default) disables the floor, leaving the harmonic-mean the sole VMAF gate.
+	VmafMinPool float64 `yaml:"vmaf_min_pool"`
+	// VmafSubsample is the frame-sampling interval for VMAF (>=1; 1 = every frame;
+	// higher is cheaper but less precise). VMAF is a second full decode, so large
+	// libraries may raise this.
+	VmafSubsample int `yaml:"vmaf_subsample"`
+	// VmafModel selects the libvmaf model: "auto" (default) picks vmaf_4k for output
+	// height > 1440 else the HD model; any other value is passed through as the model
+	// version/spec.
+	VmafModel string `yaml:"vmaf_model"`
 }
+
+// VmafGate reports whether the VMAF gate is enabled, defaulting to true when unset.
+func (c *Config) VmafGate() bool { return c.VmafEnable == nil || *c.VmafEnable }
 
 // HardlinkSkip reports whether hard-linked sources are skipped, defaulting to true
 // when unset (nil). Skipping them is the safe default — replacing a hard-linked
@@ -286,6 +318,26 @@ func (c *Config) Validate() error {
 	}
 	if strings.ContainsAny(c.ContainerExt, "./\\") {
 		return fmt.Errorf("container_ext %q must be a bare extension (no dot or slash)", c.ContainerExt)
+	}
+	if c.MinVmaf < 0 || c.MinVmaf > 100 {
+		return fmt.Errorf("min_vmaf %g out of range (0-100)", c.MinVmaf)
+	}
+	if c.VmafMinPool < 0 || c.VmafMinPool > 100 {
+		return fmt.Errorf("vmaf_min_pool %g out of range (0-100)", c.VmafMinPool)
+	}
+	if c.VmafSubsample < 0 {
+		// 0 means "use the default" (Load's koanf layer sets 1; the VMAF scorer also
+		// floors <1 to 1) — consistent with the other zero-defaulted knobs. Only a
+		// negative interval is invalid.
+		return fmt.Errorf("vmaf_subsample %d must be >= 0", c.VmafSubsample)
+	}
+	// Fail-safe: an explicitly-enabled VMAF gate with no effective threshold (both
+	// min_vmaf and vmaf_min_pool 0) is enabled-but-never-rejecting — a silent no-op on
+	// a delete-capable tool. Refuse it. (Checked only when vmaf_enable is EXPLICIT: a
+	// nil pointer is the default-on state, and Load always resolves it to true with
+	// min_vmaf=95, so a real config never trips this by omission.)
+	if c.VmafEnable != nil && *c.VmafEnable && c.MinVmaf == 0 && c.VmafMinPool == 0 {
+		return errors.New("vmaf_enable is true but both min_vmaf and vmaf_min_pool are 0 — the VMAF gate would never reject; set min_vmaf (e.g. 95) or disable the gate")
 	}
 	return nil
 }
