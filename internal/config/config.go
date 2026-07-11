@@ -47,8 +47,8 @@ func defaultLayer() map[string]any {
 		"encoder":                "cpu",
 		"crf":                    22,
 		"preset":                 "slow",
-		"pixel_format":           "yuv420p10le",
-		"container_ext":          "mkv",
+		"pixel_format":           "auto",
+		"container_ext":          "source",
 		"min_bitrate_kbps":       2500,
 		"min_savings_percent":    0,
 		"duration_tolerance_sec": 1.0,
@@ -85,10 +85,19 @@ type Config struct {
 	CRF int `yaml:"crf"`
 	// Preset is the libx265 preset (slower = smaller).
 	Preset string `yaml:"preset"`
-	// PixelFormat is the output pixel format (10-bit for compression + no banding).
+	// PixelFormat is the output pixel format. "auto" (default) derives it per
+	// source — preserve chroma subsampling, floor bit-depth at 10 (see
+	// internal/hdr.DerivePixFmt); an exotic/unrecognized source pix_fmt is SKIPPED,
+	// never silently subsampled. Any other value forces that pix_fmt for every
+	// source (back-compat with TRANSCODE-1's fixed yuv420p10le behaviour).
 	PixelFormat string `yaml:"pixel_format"`
-	// ContainerExt is the output container extension. TRANSCODE-1 uses a fixed
-	// default; source-container matching is TRANSCODE-3.
+	// ContainerExt is the output container extension. "source"/"auto" (default,
+	// sentinels) match the SOURCE file's own extension (in-place transcode, e.g.
+	// mp4 -> mp4) so a container whose stream types don't round-trip through a
+	// different container (e.g. MP4 mov_text subtitles into MKV) isn't forced to
+	// change. Any other value forces that extension for every source (TRANSCODE-1
+	// behaviour) — the collision guard still applies whenever the effective
+	// extension differs from the source's own.
 	ContainerExt string `yaml:"container_ext"`
 	// MinBitrateKbps skips sources below this (re-encoding them only bloats). 0
 	// disables the skip (but see the zero-vs-absent note above for YAML).
@@ -110,6 +119,28 @@ type Config struct {
 // when unset (nil). Skipping them is the safe default — replacing a hard-linked
 // seed via rename would break the link and reclaim nothing.
 func (c *Config) HardlinkSkip() bool { return c.SkipHardlinked == nil || *c.SkipHardlinked }
+
+// ContainerMatchesSource reports whether ContainerExt is the "match the source"
+// sentinel ("source"/"auto"/"") rather than a forced extension.
+func (c *Config) ContainerMatchesSource() bool {
+	switch c.ContainerExt {
+	case "source", "auto", "":
+		return true
+	default:
+		return false
+	}
+}
+
+// PixelFormatAuto reports whether PixelFormat is the "derive per source" sentinel
+// ("auto"/"") rather than a forced pixel format.
+func (c *Config) PixelFormatAuto() bool {
+	switch c.PixelFormat {
+	case "auto", "":
+		return true
+	default:
+		return false
+	}
+}
 
 // ErrNoConfig is returned by Load when the path is empty.
 var ErrNoConfig = errors.New("no config path provided")

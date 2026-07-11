@@ -1,10 +1,10 @@
 package engine
 
 // The DATA-SAFETY proof for the transcode engine — a Go port of the bash suite
-// homelab/scripts/test-transcoder.sh (cases 1–17; the HDR cases 18–22 arrive with
-// TRANSCODE-3). It drives the engine over REAL ffmpeg fixtures and asserts the
-// no-loss contract holds on every unhappy path. It is anti-advisory-only: it
-// exercises the code, reds on a regression, and FAILS LOUD (never skips) if
+// homelab/scripts/test-transcoder.sh (cases 1–17 plus the HDR/source-property cases
+// 18–22 + (a)-(d), TRANSCODE-3). It drives the engine over REAL ffmpeg fixtures and
+// asserts the no-loss contract holds on every unhappy path. It is anti-advisory-only:
+// it exercises the code, reds on a regression, and FAILS LOUD (never skips) if
 // ffmpeg/ffprobe are missing — a skip would be a false green.
 //
 // Cases 2/3/4/16/17 inject a deterministic Encoder so the safety branches are proven
@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/NSchatz/transcode/internal/config"
+	"github.com/NSchatz/transcode/internal/hdr"
 	"github.com/NSchatz/transcode/internal/ledger"
 	"github.com/NSchatz/transcode/internal/probe"
 )
@@ -173,7 +174,7 @@ func run(t *testing.T, ffmpeg, ffprobe, root string, enc Encoder, mutate func(*c
 	led := ledger.New(filepath.Join(root, "l.ledger"))
 	prober := probe.New(ffmpeg, ffprobe)
 	if enc == nil {
-		enc = FFmpegEncoder{FFmpeg: ffmpeg, Cfg: cfg}
+		enc = FFmpegEncoder{FFmpeg: ffmpeg, Cfg: cfg, Probe: prober}
 	}
 	eng := New(cfg, prober, enc, led, discardLogger())
 	if err := eng.RunOneshot(context.Background()); err != nil {
@@ -186,6 +187,132 @@ func codecOf(t *testing.T, ffprobe, path string) string {
 	// VideoCodec uses ffprobe only; let probe.New default the (unused) ffmpeg binary
 	// rather than hardcode a literal here.
 	return probe.New("", ffprobe).VideoCodec(context.Background(), path)
+}
+
+// buildEngine constructs an Engine over root without running it, so a test can set
+// a seam (e.g. StaticMetadataIncomplete) before calling RunOneshot itself — mirrors
+// the bash suite's TRANSCODER_TEST_HOOKS.
+func buildEngine(ffmpeg, ffprobe, root string, enc Encoder, mutate func(*config.Config)) *Engine {
+	cfg := baseCfg(root)
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	led := ledger.New(filepath.Join(root, "l.ledger"))
+	prober := probe.New(ffmpeg, ffprobe)
+	if enc == nil {
+		enc = FFmpegEncoder{FFmpeg: ffmpeg, Cfg: cfg, Probe: prober}
+	}
+	return New(cfg, prober, enc, led, discardLogger())
+}
+
+// ---- HDR / source-property fixture builders (real ffmpeg) --------------------
+
+// mkH264HDR10 writes a NON-HEVC (h264) 10-bit HDR10 clip: bt2020/PQ colour tags +
+// a complete mastering-display + MaxCLL block via -x264-params. Mirrors the bash
+// mk_h264_hdr10 fixture recipe exactly.
+func mkH264HDR10(t *testing.T, ffmpeg, path, bitrate string) {
+	t.Helper()
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=2:size=320x240:rate=10",
+		"-c:v", "libx264", "-preset", "ultrafast", "-b:v", bitrate, "-pix_fmt", "yuv420p10le", "-profile:v", "high10",
+		"-color_primaries", "bt2020", "-color_trc", "smpte2084", "-colorspace", "bt2020nc", "-color_range", "tv",
+		"-x264-params", "mastering-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):cll=1000,400",
+		"--", path)
+}
+
+// mkH264SDR writes a NON-HEVC SDR (bt709) source with explicit colour tags — must
+// survive the transcode unflattened and get NO HDR params. Mirrors bash mk_h264_sdr.
+func mkH264SDR(t *testing.T, ffmpeg, path, bitrate string) {
+	t.Helper()
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=2:size=320x240:rate=10",
+		"-c:v", "libx264", "-preset", "ultrafast", "-b:v", bitrate, "-pix_fmt", "yuv420p",
+		"-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "--", path)
+}
+
+// mkH264Interlaced writes a NON-HEVC interlaced source (field_order tt/bb/tb/bt).
+func mkH264Interlaced(t *testing.T, ffmpeg, path, bitrate string) {
+	t.Helper()
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=2:size=320x240:rate=10",
+		"-vf", "tinterlace=4", "-c:v", "libx264", "-preset", "ultrafast", "-b:v", bitrate,
+		"-pix_fmt", "yuv420p", "-flags", "+ilme+ildct", "-field_order", "tt", "--", path)
+}
+
+// mkH264Chroma422 writes a NON-HEVC 4:2:2 8-bit source.
+func mkH264Chroma422(t *testing.T, ffmpeg, path, bitrate string) {
+	t.Helper()
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=2:size=320x240:rate=10",
+		"-c:v", "libx264", "-preset", "ultrafast", "-b:v", bitrate, "-pix_fmt", "yuv422p", "--", path)
+}
+
+// mkMP4WithSubs writes an MP4 with an h264 video track and a mov_text subtitle
+// track (the container type that doesn't round-trip cleanly into MKV).
+func mkMP4WithSubs(t *testing.T, ffmpeg, path, bitrate string) {
+	t.Helper()
+	srtPath := path + ".srt"
+	if err := os.WriteFile(srtPath, []byte("1\n00:00:00,000 --> 00:00:01,000\nHello\n\n"), 0o644); err != nil {
+		t.Fatalf("write srt: %v", err)
+	}
+	defer os.Remove(srtPath)
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "testsrc2=duration=2:size=320x240:rate=10",
+		"-i", srtPath,
+		"-map", "0:v", "-map", "1:s", "-c:v", "libx264", "-preset", "ultrafast", "-b:v", bitrate,
+		"-pix_fmt", "yuv420p", "-c:s", "mov_text", "--", path)
+}
+
+// mkH264VFR writes a NON-HEVC variable-frame-rate source (frame-selective drop +
+// fps_mode vfr on encode), so a naive forced-CFR pipeline would be exercised.
+func mkH264VFR(t *testing.T, ffmpeg, path, bitrate string) {
+	t.Helper()
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=2:size=320x240:rate=30",
+		"-vf", "select='not(mod(n\\,3))',setpts=N/(30*TB)",
+		"-c:v", "libx264", "-preset", "ultrafast", "-b:v", bitrate, "-pix_fmt", "yuv420p",
+		"-fps_mode", "vfr", "--", path)
+}
+
+// mkHevcDVTagged writes an HEVC clip tagged with the Dolby Vision codec tag dvh1 —
+// a real, buildable DV *signal* (the RPU itself needs an external toolchain and
+// cannot be synthesized with ffmpeg+libx265, but the codec-tag detection path can be
+// proven against a real file).
+func mkHevcDVTagged(t *testing.T, ffmpeg, path string) {
+	t.Helper()
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=1:size=320x240:rate=10",
+		"-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-x265-params", "log-level=error",
+		"-tag:v", "dvh1", "--", path)
+}
+
+// ---- HDR / source-property assertion helpers ----------------------------------
+
+// frameColor reads one colour tag from the first video frame (robust across
+// MKV/MP4 — MKV keeps colour tags at frame level, not the container stream
+// header). Mirrors the bash frame_color helper.
+func frameColor(t *testing.T, ffprobe, path, field string) string {
+	t.Helper()
+	out, err := exec.Command(ffprobe, "-v", "error", "-select_streams", "v:0",
+		"-read_intervals", "%+#1", "-show_frames", "-show_entries", "frame="+field,
+		"-of", "default=nw=1:nk=1", "--", path).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
+}
+
+// hasSideData reports whether the first video frame carries a side-data block
+// whose type contains want. Mirrors the bash has_sd helper.
+func hasSideData(t *testing.T, ffprobe, path, want string) bool {
+	t.Helper()
+	out, err := exec.Command(ffprobe, "-v", "error", "-select_streams", "v:0",
+		"-read_intervals", "%+#1", "-show_frames", "-show_entries", "frame=side_data_list",
+		"-of", "default=nw=1", "--", path).Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(out)), strings.ToLower(want))
 }
 
 // ---- the cases ---------------------------------------------------------------
@@ -569,5 +696,320 @@ func TestCase17_DroppedAudioTrackRejected(t *testing.T) {
 	}
 	if !ledgerHas(t, led, ledger.Failed, "movie.mkv") {
 		t.Error("expected failed row")
+	}
+}
+
+// --- case 18: non-HEVC HDR10 source -> HDR10 static metadata carried through -----
+// The centrepiece of TRANSCODE-3: a generic re-encode silently drops HDR10 static
+// metadata. Source is a NON-HEVC (h264) 10-bit clip with bt2020/PQ + mastering-
+// display + MaxCLL, inflated so libx265 shrinks it (size guard passes). The output
+// must be HEVC AND re-probe with the colour + HDR10 metadata intact.
+func TestCase18_NonHEVCHDR10ColorPreserved(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264HDR10(t, ffmpeg, src, "8M")
+	if !hasSideData(t, ffprobe, src, "Mastering display metadata") {
+		t.Fatal("fixture not built with mastering-display")
+	}
+	if codecOf(t, ffprobe, src) != "h264" {
+		t.Fatal("fixture is not non-HEVC (would be skipped before reaching the encode)")
+	}
+	inSize := probe.FileSize(src)
+	led := run(t, ffmpeg, ffprobe, d, nil, nil)
+	if codecOf(t, ffprobe, src) != "hevc" {
+		t.Fatal("case18: output is not HEVC")
+	}
+	if probe.FileSize(src) >= inSize {
+		t.Error("case18: output not smaller")
+	}
+	if frameColor(t, ffprobe, src, "color_transfer") != "smpte2084" {
+		t.Error("case18: output transfer is not PQ (smpte2084)")
+	}
+	if frameColor(t, ffprobe, src, "color_primaries") != "bt2020" {
+		t.Error("case18: output primaries are not bt2020")
+	}
+	if frameColor(t, ffprobe, src, "color_space") != "bt2020nc" {
+		t.Error("case18: output matrix is not bt2020nc")
+	}
+	if !hasSideData(t, ffprobe, src, "Mastering display metadata") {
+		t.Error("case18: output lost mastering-display")
+	}
+	if !hasSideData(t, ffprobe, src, "Content light level metadata") {
+		t.Error("case18: output lost content-light (MaxCLL)")
+	}
+	if !ledgerHas(t, led, ledger.Done, "movie.mkv") {
+		t.Error("case18: expected done row")
+	}
+}
+
+// --- case 19: non-HEVC SDR source -> colour tags preserved, no HDR params ---------
+// The other side of the coin: an SDR (bt709) source must not be flattened OR
+// wrongly tagged HDR. Output stays HEVC, smaller, keeps bt709, and carries NO
+// mastering-display (a generic re-encode must not invent HDR metadata). This test
+// REDS if the "under-signalled HDR10 defaults" branch in DeriveColorArgs is ever
+// applied unconditionally instead of gated on smpte2084/mastering-display.
+func TestCase19_NonHEVCSDRNoInventedHDR(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264SDR(t, ffmpeg, src, "8M")
+	inSize := probe.FileSize(src)
+	led := run(t, ffmpeg, ffprobe, d, nil, nil)
+	if codecOf(t, ffprobe, src) != "hevc" {
+		t.Fatal("case19: output is not HEVC")
+	}
+	if probe.FileSize(src) >= inSize {
+		t.Error("case19: output not smaller")
+	}
+	if frameColor(t, ffprobe, src, "color_space") != "bt709" {
+		t.Error("case19: output lost bt709 matrix")
+	}
+	if hasSideData(t, ffprobe, src, "Mastering display metadata") {
+		t.Error("case19: SDR output must NOT carry an invented mastering-display block")
+	}
+	if !ledgerHas(t, led, ledger.Done, "movie.mkv") {
+		t.Error("case19: expected done row")
+	}
+}
+
+// --- case 20: DV detection (Classify + ClassFrom across every branch) ------------
+// The end-to-end DV/HDR10+ SKIP cannot be fixture-driven: a NON-HEVC DV or HDR10+
+// source (the only kind that reaches the guard — HEVC HDR is skipped at case 1)
+// can't be produced with ffmpeg+libx265 (DV needs an external RPU toolchain;
+// HDR10+ needs a libx265 built with libhdr10plus). So detection is proven against
+// the shipping classifier two ways: (a) hdr.Classify on a real DV-codec-tagged
+// file, (b) hdr.ClassFrom across every branch (also unit-tested directly in
+// internal/hdr/hdr_test.go — repeated here against the real Prober plumbing).
+func TestCase20_DVDetection(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	dv := filepath.Join(d, "dv.mp4")
+	mkHevcDVTagged(t, ffmpeg, dv)
+	prober := probe.New(ffmpeg, ffprobe)
+	if got := hdr.Classify(context.Background(), prober, dv); got != hdr.ClassDV {
+		t.Errorf("case20: hdr.Classify on a dvh1-tagged file = %q, want %q", got, hdr.ClassDV)
+	}
+
+	cases := []struct {
+		name string
+		tag  string
+		flat string
+		trc  string
+		want string
+	}{
+		{"dvh1 tag -> dv", "dvh1", "", "", hdr.ClassDV},
+		{"dvhe tag -> dv", "dvhe", "", "", hdr.ClassDV},
+		{"DOVI config record -> dv", "hev1", `side_data_type="DOVI configuration record"`, "", hdr.ClassDV},
+		{"SMPTE2094-40 -> hdr10plus", "hev1", "HDR Dynamic Metadata SMPTE2094-40 (HDR10+)", "", hdr.ClassHDR10Plus},
+		{"PQ transfer -> hdr10", "hev1", "", "smpte2084", hdr.ClassHDR10},
+		{"mastering-display -> hdr10", "hev1", `side_data_type="Mastering display metadata"`, "bt709", hdr.ClassHDR10},
+		{"plain bt709 -> other", "hev1", "", "bt709", hdr.ClassOther},
+	}
+	for _, tc := range cases {
+		if got := hdr.ClassFrom(tc.tag, tc.flat, tc.trc); got != tc.want {
+			t.Errorf("case20: %s: ClassFrom = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// --- case 21: numeric mapping unit tests -----------------------------------------
+// Covered directly (and more exhaustively) in internal/hdr/hdr_test.go
+// (TestMasterDisplay_KnownBlob, TestMaxCLL_KnownBlob, TestMasterDisplay_PartialIsEmpty,
+// TestStaticMetadataIncomplete) against the exact bash case-21 blob. No engine-level
+// fixture is needed since these are pure functions — see that file.
+
+// --- case 22: the HDR10-incomplete SKIP is actually WIRED into ProcessFile -------
+// Case 21 (in internal/hdr) unit-tests the predicate; this proves ProcessFile's
+// hdr10 branch actually calls it and SKIPS on true. A real non-HEVC PARTIAL-
+// metadata source can't be synthesized reliably, so the test seam
+// (Engine.StaticMetadataIncomplete) forces the predicate true and asserts a
+// COMPLETE HDR10 source is skipped untouched — reverting the wiring in ProcessFile
+// would transcode it and RED these checks.
+func TestCase22_HDR10IncompleteSkipWired(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264HDR10(t, ffmpeg, src, "8M")
+	before := md5f(t, src)
+
+	eng := buildEngine(ffmpeg, ffprobe, d, nil, nil)
+	eng.staticMetadataIncomplete = func(flat string) bool { return true }
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+
+	if md5f(t, src) != before {
+		t.Error("case22: incomplete-HDR10 source was modified")
+	}
+	if codecOf(t, ffprobe, src) != "h264" {
+		t.Error("case22: source was transcoded despite the forced-incomplete predicate")
+	}
+	if !ledgerHas(t, eng.Led, ledger.Skipped, "movie.mkv") {
+		t.Error("case22: expected skipped row (not failed/done)")
+	}
+	if nTemp(t, d) != 0 {
+		t.Error("case22: temp left behind")
+	}
+}
+
+// --- case (a): interlaced source is SKIPPED, never deinterlaced ------------------
+// This tool never deinterlaces; re-encoding an interlaced source with a
+// progressive-assuming pipeline bakes in permanent combing artifacts. REDS if the
+// field_order guard in ProcessFile is removed.
+func TestCaseA_InterlacedSkipped(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264Interlaced(t, ffmpeg, src, "8M")
+	prober := probe.New(ffmpeg, ffprobe)
+	switch fo := prober.FieldOrder(context.Background(), src); fo {
+	case "tt", "bb", "tb", "bt":
+		// fixture confirmed interlaced
+	default:
+		t.Fatalf("fixture not interlaced (field_order=%q)", fo)
+	}
+	before := md5f(t, src)
+	led := run(t, ffmpeg, ffprobe, d, nil, nil)
+	if md5f(t, src) != before {
+		t.Error("caseA: interlaced source was modified")
+	}
+	if codecOf(t, ffprobe, src) != "h264" {
+		t.Error("caseA: interlaced source was transcoded")
+	}
+	if !ledgerHas(t, led, ledger.Skipped, "movie.mkv") {
+		t.Error("caseA: expected skipped row")
+	}
+	if nTemp(t, d) != 0 {
+		t.Error("caseA: temp left behind")
+	}
+}
+
+// --- case (b): 4:2:2 source transcodes and PRESERVES chroma subsampling ----------
+// A naive fixed yuv420p10le output would silently subsample a 4:2:2 source. REDS if
+// hdr.DerivePixFmt (or its wiring into FFmpegEncoder) stops preserving chroma
+// subsampling.
+func TestCaseB_Chroma422Preserved(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264Chroma422(t, ffmpeg, src, "8M")
+	prober := probe.New(ffmpeg, ffprobe)
+	if got := prober.PixFmt(context.Background(), src); got != "yuv422p" {
+		t.Fatalf("fixture not 4:2:2 (pix_fmt=%q)", got)
+	}
+	inSize := probe.FileSize(src)
+	// PixelFormat must be "auto" to exercise per-source derivation — baseCfg forces
+	// yuv420p10le (TRANSCODE-1 back-compat default), which would flatten 4:2:2.
+	led := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) { c.PixelFormat = "auto" })
+	if codecOf(t, ffprobe, src) != "hevc" {
+		t.Fatal("caseB: 4:2:2 source not transcoded")
+	}
+	if probe.FileSize(src) >= inSize {
+		t.Error("caseB: output not smaller")
+	}
+	if got := prober.PixFmt(context.Background(), src); got != "yuv422p10le" {
+		t.Errorf("caseB: output pix_fmt = %q, want yuv422p10le (chroma subsampling must be preserved, not flattened to 4:2:0)", got)
+	}
+	if !ledgerHas(t, led, ledger.Done, "movie.mkv") {
+		t.Error("caseB: expected done row")
+	}
+}
+
+// --- case (c): MP4 with mov_text subtitles transcodes in place (.mp4), track kept -
+// Container-match by default: the output container = the source's own extension, so
+// an MP4 with mov_text subtitles is never forced into MKV (which cannot carry
+// mov_text) and aborted by the stream-count parity gate. REDS if ContainerExt
+// stops defaulting to "source" or the container-match wiring in ProcessFile regresses.
+func TestCaseC_MP4SubtitlesContainerMatch(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mp4")
+	mkMP4WithSubs(t, ffmpeg, src, "8M")
+	prober := probe.New(ffmpeg, ffprobe)
+	if got := prober.StreamCount(context.Background(), src, "s"); got != 1 {
+		t.Fatalf("fixture does not have exactly 1 subtitle stream (got %d)", got)
+	}
+	inSize := probe.FileSize(src)
+	// ContainerExt left at the "source" sentinel (default Load() behaviour) — do
+	// NOT force mkv here, that's the whole point of this case.
+	led := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) { c.ContainerExt = "source" })
+	if !exists(src) {
+		t.Fatal("caseC: movie.mp4 no longer exists (container-match should keep the .mp4 path)")
+	}
+	if exists(filepath.Join(d, "movie.mkv")) {
+		t.Error("caseC: an unexpected movie.mkv was created — container-match should stay .mp4")
+	}
+	if codecOf(t, ffprobe, src) != "hevc" {
+		t.Fatal("caseC: output is not HEVC")
+	}
+	if probe.FileSize(src) >= inSize {
+		t.Error("caseC: output not smaller")
+	}
+	if got := prober.StreamCount(context.Background(), src, "s"); got != 1 {
+		t.Error("caseC: subtitle track was dropped")
+	}
+	if !ledgerHas(t, led, ledger.Done, "movie.mp4") {
+		t.Error("caseC: expected done row")
+	}
+}
+
+// --- case (d): VFR source is not false-rejected ----------------------------------
+// -fps_mode passthrough must be wired into the encode so a variable-frame-rate
+// source is not forced to CFR (which would fail duration/packet parity or silently
+// alter timing). REDS if -fps_mode passthrough is removed from FFmpegEncoder.Encode.
+func TestCaseD_VFRNotFalseRejected(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264VFR(t, ffmpeg, src, "8M")
+	inSize := probe.FileSize(src)
+	led := run(t, ffmpeg, ffprobe, d, nil, nil)
+	if codecOf(t, ffprobe, src) != "hevc" {
+		t.Fatal("caseD: VFR source not transcoded to HEVC")
+	}
+	if probe.FileSize(src) >= inSize {
+		t.Error("caseD: output not smaller")
+	}
+	if !ledgerHas(t, led, ledger.Done, "movie.mkv") {
+		t.Error("caseD: expected done row (VFR source false-rejected by a parity/timing gate)")
+	}
+	if nTemp(t, d) != 0 {
+		t.Error("caseD: temp left behind")
+	}
+}
+
+// --- case (e): exotic pix_fmt source is SKIPPED, never silently subsampled ------
+// ProcessFile's chroma/bit-depth guard must catch an unrecognized source pix_fmt
+// BEFORE the encoder is even invoked (Encode's own refusal in encode_test.go is a
+// defence-in-depth backstop, not the primary guard). REDS if the pix_fmt guard in
+// ProcessFile is removed — the file would then reach Encode and fail loud there
+// instead of being cleanly skipped-and-recorded.
+func TestCaseE_ExoticPixFmtSkipped(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	// yuv411p via ffv1 — libx264/libx265 can't produce it, so ffv1 is the only way
+	// to actually land this exotic pix_fmt on disk as a real (non-HEVC) source.
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=1:size=320x240:rate=10",
+		"-c:v", "ffv1", "-pix_fmt", "yuv411p", "--", src)
+	prober := probe.New(ffmpeg, ffprobe)
+	if got := prober.PixFmt(context.Background(), src); got != "yuv411p" {
+		t.Fatalf("fixture not yuv411p (pix_fmt=%q)", got)
+	}
+	before := md5f(t, src)
+	led := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) { c.PixelFormat = "auto" })
+	if md5f(t, src) != before {
+		t.Error("caseE: exotic-pix_fmt source was modified")
+	}
+	if codecOf(t, ffprobe, src) != "ffv1" {
+		t.Error("caseE: exotic-pix_fmt source was transcoded")
+	}
+	if !ledgerHas(t, led, ledger.Skipped, "movie.mkv") {
+		t.Error("caseE: expected skipped row")
+	}
+	if nTemp(t, d) != 0 {
+		t.Error("caseE: temp left behind")
 	}
 }
