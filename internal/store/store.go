@@ -55,6 +55,18 @@ func (s Status) Active() bool {
 	}
 }
 
+// Job is a read-only snapshot of one row in the job ledger, returned by List. It
+// is a reporting view (the API/UI in TRANSCODE-7 renders it) — never a handle the
+// engine writes back through, so exposing it cannot affect file handling.
+type Job struct {
+	Path        string
+	Fingerprint string
+	Status      Status
+	FailCount   int
+	Worker      string // "" when the row carries no worker (e.g. a terminal row)
+	UpdatedAt   int64  // unix seconds of the last state transition
+}
+
 // Store is the persistent job ledger. Every method is safe for concurrent use by
 // multiple workers (goroutines) within one process.
 type Store interface {
@@ -89,6 +101,17 @@ type Store interface {
 	// Get returns the current status and fail_count for path+fingerprint, and
 	// whether a row exists at all (exists=false + status="" means never seen).
 	Get(ctx context.Context, path, fingerprint string) (status Status, failCount int, exists bool, err error)
+
+	// List returns job rows for reporting (TRANSCODE-7's API/UI), newest-updated
+	// first. If statuses is non-empty only rows in that set are returned; an empty
+	// statuses returns every row. limit > 0 caps the result to that many rows
+	// (0 or negative = no cap). It is a pure read: it never mutates a row, so no
+	// amount of API traffic can alter file handling.
+	List(ctx context.Context, statuses []Status, limit int) ([]Job, error)
+
+	// Summary returns a count of rows per status (only statuses with at least one
+	// row appear). Used by the API/UI for at-a-glance queue/history totals.
+	Summary(ctx context.Context) (map[Status]int, error)
 
 	// Close releases the underlying database handle.
 	Close() error

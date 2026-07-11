@@ -312,3 +312,122 @@ type claimError struct{ path string }
 func (e *claimError) Error() string {
 	return "claim on fresh distinct key unexpectedly failed: " + e.path
 }
+
+// ---- List + Summary (TRANSCODE-7 read model) --------------------------------
+
+// withClock swaps the package now() seam for a deterministic counter so
+// updated_at ordering is testable, restoring it on cleanup.
+func withClock(t *testing.T, start int64) *int64 {
+	t.Helper()
+	tick := start
+	prev := now
+	now = func() int64 { tick++; return tick }
+	t.Cleanup(func() { now = prev })
+	return &tick
+}
+
+// seed claims path and drives it to a terminal status, so the row exists with a
+// deterministic updated_at (each store call advances the withClock counter).
+func seed(t *testing.T, s *SQLite, path, fp string, final Status) {
+	t.Helper()
+	ctx := context.Background()
+	ok, err := s.Claim(ctx, path, fp, "w0", 3)
+	if err != nil || !ok {
+		t.Fatalf("seed Claim(%s): ok=%v err=%v", path, ok, err)
+	}
+	if final.Active() { // leave it in an active state (don't finish)
+		if err := s.Advance(ctx, path, fp, final); err != nil {
+			t.Fatalf("seed Advance(%s,%s): %v", path, final, err)
+		}
+		return
+	}
+	if err := s.Finish(ctx, path, fp, final); err != nil {
+		t.Fatalf("seed Finish(%s,%s): %v", path, final, err)
+	}
+}
+
+func TestList_FilterAndOrder(t *testing.T) {
+	withClock(t, 1000)
+	s := openTest(t)
+	ctx := context.Background()
+
+	seed(t, s, "/lib/a.mkv", "1:1", Done)     // updated earliest
+	seed(t, s, "/lib/b.mkv", "2:2", Skipped)  // then
+	seed(t, s, "/lib/c.mkv", "3:3", Encoding) // active, latest
+
+	// All rows, newest-updated first.
+	all, err := s.List(ctx, nil, 0)
+	if err != nil {
+		t.Fatalf("List all: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("List all: want 3 rows, got %d", len(all))
+	}
+	if all[0].Path != "/lib/c.mkv" || all[2].Path != "/lib/a.mkv" {
+		t.Fatalf("List all: wrong order: %s ... %s", all[0].Path, all[2].Path)
+	}
+	if all[0].Status != Encoding || all[0].Worker != "w0" {
+		t.Fatalf("List all: active row lost status/worker: %+v", all[0])
+	}
+
+	// Terminal filter (done+skipped): excludes the active row.
+	term, err := s.List(ctx, []Status{Done, Skipped}, 0)
+	if err != nil {
+		t.Fatalf("List terminal: %v", err)
+	}
+	if len(term) != 2 {
+		t.Fatalf("List terminal: want 2, got %d (%v)", len(term), term)
+	}
+	for _, j := range term {
+		if j.Status == Encoding {
+			t.Fatalf("terminal filter leaked an active row: %+v", j)
+		}
+	}
+
+	// Limit caps the result.
+	one, err := s.List(ctx, nil, 1)
+	if err != nil {
+		t.Fatalf("List limit: %v", err)
+	}
+	if len(one) != 1 || one[0].Path != "/lib/c.mkv" {
+		t.Fatalf("List limit 1: want just newest c.mkv, got %v", one)
+	}
+}
+
+func TestList_EmptyStore(t *testing.T) {
+	s := openTest(t)
+	got, err := s.List(context.Background(), nil, 0)
+	if err != nil {
+		t.Fatalf("List empty: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("List empty: want 0 rows, got %d", len(got))
+	}
+}
+
+func TestSummary_CountsPerStatus(t *testing.T) {
+	withClock(t, 2000)
+	s := openTest(t)
+
+	seed(t, s, "/lib/a.mkv", "1:1", Done)
+	seed(t, s, "/lib/b.mkv", "2:2", Done)
+	seed(t, s, "/lib/c.mkv", "3:3", Skipped)
+	seed(t, s, "/lib/d.mkv", "4:4", Verifying) // active
+
+	sum, err := s.Summary(context.Background())
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if sum[Done] != 2 {
+		t.Fatalf("Summary done: want 2, got %d", sum[Done])
+	}
+	if sum[Skipped] != 1 {
+		t.Fatalf("Summary skipped: want 1, got %d", sum[Skipped])
+	}
+	if sum[Verifying] != 1 {
+		t.Fatalf("Summary verifying: want 1, got %d", sum[Verifying])
+	}
+	if _, ok := sum[Failed]; ok {
+		t.Fatalf("Summary: failed should be absent (no such rows), got %d", sum[Failed])
+	}
+}

@@ -168,6 +168,10 @@ func TestValidateEngineKnobs(t *testing.T) {
 		{"valid vaapi config", func(c *Config) { c.Encoder = "vaapi"; c.CRF = 23 }, ""},
 		{"valid amf config", func(c *Config) { c.Encoder = "amf"; c.CRF = 23 }, ""},
 		{"raw ffmpeg codec alias accepted", func(c *Config) { c.Encoder = "libsvtav1"; c.CRF = 30 }, ""},
+		{"bad server_addr", func(c *Config) { c.ServerAddr = "not-a-host-port" }, "server_addr"},
+		{"negative scan interval", func(c *Config) { c.ScanIntervalSec = -1 }, "scan_interval_sec"},
+		{"empty server_addr ok (defaulted at serve)", func(c *Config) { c.ServerAddr = "" }, ""},
+		{"valid server config", func(c *Config) { c.ServerAddr = "0.0.0.0:9000"; c.ScanIntervalSec = 30 }, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -219,6 +223,38 @@ func TestLoadLayered(t *testing.T) {
 		}
 		if c.MinBitrateKbps != 0 {
 			t.Errorf("min_bitrate_kbps = %d, want explicit 0", c.MinBitrateKbps)
+		}
+	})
+
+	t.Run("server defaults + env token override", func(t *testing.T) {
+		p := filepath.Join(dir, "server.yaml")
+		writeFile(t, p, "library_roots:\n  - /mnt/media\n")
+		c, err := Load(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Defaults: localhost bind, no token (mutations disabled), no periodic scan.
+		if c.ServerAddr != "127.0.0.1:8080" {
+			t.Errorf("server_addr default = %q, want 127.0.0.1:8080 (localhost)", c.ServerAddr)
+		}
+		if c.ServerAuthToken != "" {
+			t.Errorf("server_auth_token default = %q, want empty", c.ServerAuthToken)
+		}
+		if c.ScanIntervalSec != 0 {
+			t.Errorf("scan_interval_sec default = %d, want 0", c.ScanIntervalSec)
+		}
+		// The token must be settable via env (so no secret need land in the file).
+		t.Setenv("TRANSCODE_SERVER_AUTH_TOKEN", "s3cr3t")
+		t.Setenv("TRANSCODE_SCAN_INTERVAL_SEC", "45")
+		c2, err := Load(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c2.ServerAuthToken != "s3cr3t" {
+			t.Errorf("server_auth_token = %q, want env value s3cr3t", c2.ServerAuthToken)
+		}
+		if c2.ScanIntervalSec != 45 {
+			t.Errorf("scan_interval_sec = %d, want env value 45", c2.ScanIntervalSec)
 		}
 	})
 

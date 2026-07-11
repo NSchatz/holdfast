@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>transcode</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --line:#252a34; --fg:#e6e9ef; --muted:#8b93a3;
+    --accent:#5b9dd9; --ok:#3fb950; --warn:#d29922; --bad:#f85149;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+    font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+  header { display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+    padding:14px 20px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { font-size:18px; margin:0; letter-spacing:.5px; }
+  header h1 .mono { color:var(--accent); }
+  .badges { display:flex; gap:8px; flex-wrap:wrap; }
+  .badge { font-size:12px; padding:2px 9px; border-radius:20px; border:1px solid var(--line);
+    color:var(--muted); }
+  .badge.on { color:var(--bg); background:var(--warn); border-color:var(--warn); font-weight:600; }
+  .badge.scan.on { background:var(--accent); border-color:var(--accent); }
+  .grow { flex:1 1 auto; }
+  .reclaimed { font-size:13px; color:var(--muted); }
+  .reclaimed b { color:var(--ok); font-size:15px; }
+  main { padding:20px; max-width:1100px; margin:0 auto; }
+  .chips { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px; }
+  .chip { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+    padding:10px 14px; min-width:96px; }
+  .chip .n { font-size:22px; font-weight:700; }
+  .chip .k { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+  .chip.done .n { color:var(--ok); } .chip.failed .n { color:var(--bad); }
+  .chip.encoding .n, .chip.probing .n, .chip.verifying .n { color:var(--accent); }
+  .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:22px; }
+  .controls input { background:var(--bg); border:1px solid var(--line); color:var(--fg);
+    padding:7px 10px; border-radius:6px; width:220px; }
+  button { background:var(--panel); border:1px solid var(--line); color:var(--fg);
+    padding:7px 14px; border-radius:6px; cursor:pointer; font-size:13px; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:var(--bg); font-weight:600; }
+  #msg { font-size:13px; color:var(--muted); min-height:18px; margin-left:6px; }
+  #msg.err { color:var(--bad); }
+  section h2 { font-size:14px; text-transform:uppercase; letter-spacing:.5px;
+    color:var(--muted); border-bottom:1px solid var(--line); padding-bottom:6px; margin:26px 0 10px; }
+  table { width:100%; border-collapse:collapse; }
+  th,td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line);
+    font-size:13px; vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:12px; }
+  td.path { font-family:ui-monospace,Menlo,Consolas,monospace; word-break:break-all; }
+  td.st { white-space:nowrap; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px;
+    background:var(--muted); vertical-align:middle; }
+  .st-done .dot { background:var(--ok); } .st-failed .dot { background:var(--bad); }
+  .st-skipped .dot { background:var(--muted); }
+  .st-encoding .dot,.st-probing .dot,.st-verifying .dot,.st-pending .dot { background:var(--accent); }
+  .empty { color:var(--muted); font-style:italic; padding:10px; }
+  footer { color:var(--muted); font-size:12px; text-align:center; padding:22px; }
+  #conn { font-size:12px; color:var(--muted); }
+  #conn.live { color:var(--ok); } #conn.down { color:var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>trans<span class="mono">code</span></h1>
+  <div class="badges">
+    <span id="b-paused" class="badge">running</span>
+    <span id="b-scan" class="badge scan">idle</span>
+  </div>
+  <span class="grow"></span>
+  <span class="reclaimed">reclaimed this session: <b id="reclaimed">0 B</b></span>
+  <span id="conn">connecting…</span>
+</header>
+<main>
+  <div class="chips" id="chips"></div>
+
+  <div class="controls">
+    <input id="token" type="password" placeholder="control token (for pause / rescan)" autocomplete="off">
+    <button id="rescan" class="primary">Rescan</button>
+    <button id="pause">Pause</button>
+    <button id="resume">Resume</button>
+    <span id="msg"></span>
+  </div>
+
+  <section>
+    <h2>Queue &amp; active</h2>
+    <table><thead><tr><th>File</th><th>Status</th><th>Worker</th></tr></thead>
+      <tbody id="queue"></tbody></table>
+  </section>
+
+  <section>
+    <h2>Recent history</h2>
+    <table><thead><tr><th>File</th><th>Status</th><th>Fails</th><th>Updated</th></tr></thead>
+      <tbody id="history"></tbody></table>
+  </section>
+</main>
+<footer>transcode — config-as-code, data-safe media transcoder. The YAML config is the source of truth; this page reads and controls.</footer>
+
+<script>
+"use strict";
+const STATUSES = ["pending","probing","encoding","verifying","done","skipped","failed"];
+const $ = (id) => document.getElementById(id);
+
+// Persist the control token locally so an operator doesn't retype it each visit.
+const tokenInput = $("token");
+tokenInput.value = localStorage.getItem("transcode_token") || "";
+tokenInput.addEventListener("change", () => localStorage.setItem("transcode_token", tokenInput.value));
+
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  const neg = n < 0; n = Math.abs(n);
+  const u = ["B","KB","MB","GB","TB","PB"]; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (neg ? "-" : "") + n.toFixed(i ? 1 : 0) + " " + u[i];
+}
+function fmtTime(sec) {
+  if (!sec) return "";
+  const d = new Date(sec * 1000);
+  return d.toLocaleString();
+}
+function esc(s) { const e = document.createElement("span"); e.textContent = s; return e.innerHTML; }
+
+function render(snap) {
+  // Badges.
+  const bp = $("b-paused");
+  bp.textContent = snap.paused ? "paused" : "running";
+  bp.classList.toggle("on", !!snap.paused);
+  const bs = $("b-scan");
+  bs.textContent = snap.scanning ? "scanning" : "idle";
+  bs.classList.toggle("on", !!snap.scanning);
+
+  $("reclaimed").textContent = fmtBytes(snap.bytes_reclaimed_session);
+
+  // Summary chips.
+  const sum = snap.summary || {};
+  $("chips").innerHTML = STATUSES.map((s) => {
+    const n = sum[s] || 0;
+    return `<div class="chip ${s}"><div class="n">${n}</div><div class="k">${s}</div></div>`;
+  }).join("");
+
+  // Queue.
+  const q = snap.queue || [];
+  $("queue").innerHTML = q.length ? q.map((j) =>
+    `<tr><td class="path">${esc(j.path)}</td>`
+    + `<td class="st st-${j.status}"><span class="dot"></span>${j.status}</td>`
+    + `<td>${esc(j.worker || "")}</td></tr>`).join("")
+    : `<tr><td colspan="3" class="empty">Nothing queued.</td></tr>`;
+
+  // History.
+  const h = snap.history || [];
+  $("history").innerHTML = h.length ? h.map((j) =>
+    `<tr><td class="path">${esc(j.path)}</td>`
+    + `<td class="st st-${j.status}"><span class="dot"></span>${j.status}</td>`
+    + `<td>${j.fail_count || 0}</td>`
+    + `<td>${esc(fmtTime(j.updated_at))}</td></tr>`).join("")
+    : `<tr><td colspan="4" class="empty">No history yet.</td></tr>`;
+}
+
+// Live updates over SSE (EventSource auto-reconnects on drop).
+let es;
+function connect() {
+  es = new EventSource("/api/events");
+  const conn = $("conn");
+  es.addEventListener("snapshot", (e) => {
+    conn.textContent = "live"; conn.className = "live";
+    try { render(JSON.parse(e.data)); } catch (_) {}
+  });
+  es.onopen = () => { conn.textContent = "live"; conn.className = "live"; };
+  es.onerror = () => { conn.textContent = "reconnecting…"; conn.className = "down"; };
+}
+connect();
+
+// Controls: POST with the bearer token; show the server's reason on refusal.
+async function control(path) {
+  const msg = $("msg"); msg.className = ""; msg.textContent = "…";
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: tokenInput.value ? { "Authorization": "Bearer " + tokenInput.value } : {},
+    });
+    let body = {};
+    try { body = await res.json(); } catch (_) {}
+    if (res.status === 403) { msg.className = "err"; msg.textContent = "control disabled — set server_auth_token on the server."; return; }
+    if (res.status === 401) { msg.className = "err"; msg.textContent = "unauthorized — check the control token."; return; }
+    if (res.status === 409) { msg.textContent = "not started: " + (body.reason || "busy"); return; }
+    msg.textContent = "ok";
+  } catch (err) {
+    msg.className = "err"; msg.textContent = "request failed";
+  }
+}
+$("rescan").addEventListener("click", () => control("/api/rescan"));
+$("pause").addEventListener("click", () => control("/api/pause"));
+$("resume").addEventListener("click", () => control("/api/resume"));
+</script>
+</body>
+</html>

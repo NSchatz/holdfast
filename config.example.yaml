@@ -133,3 +133,20 @@ dry_run: false
 # workers: 1                 # concurrent encode workers (default 1 = sequential;
 #                             # CPU libx265 already saturates cores per encode, so
 #                             # raising this is an opt-in for many small/low-res files)
+
+# --- HTTP API + web UI (`transcode serve`) ---
+# `transcode serve` runs a REST API + SSE live stream + an embedded web dashboard
+# (single binary). It is a READ-AND-CONTROL surface: this YAML stays the source of
+# truth, and the API can only start a scan and pause/resume new-file feeding — it
+# never touches a media file.
+# server_addr: 127.0.0.1:8080  # bind address. LOCALHOST by default (fail-safe: the
+#                              #   control surface is not network-exposed unless you
+#                              #   opt in — then front it with a reverse proxy).
+# server_auth_token: ""        # bearer token required for the MUTATING endpoints
+#                              #   (rescan/pause/resume). Empty = those endpoints are
+#                              #   DISABLED (read-only). Prefer the environment
+#                              #   variable TRANSCODE_SERVER_AUTH_TOKEN so no secret
+#                              #   lands in this file.
+# scan_interval_sec: 0         # 0 = scan once on startup + on demand (via the API).
+#                              #   >0 = also re-scan every N seconds. (Host-fair
+#                              #   scheduling — run-windows, CPU caps — is a later phase.)
