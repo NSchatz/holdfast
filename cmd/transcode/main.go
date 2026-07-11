@@ -136,7 +136,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	)
 
 	prober := probe.New(ffmpeg, ffprobe)
-	enc := engine.FFmpegEncoder{FFmpeg: ffmpeg, Cfg: *cfg}
+	enc := engine.FFmpegEncoder{FFmpeg: ffmpeg, Cfg: *cfg, Probe: prober}
 	led := ledger.New(filepath.Join(cfg.StateDir, "processed.ledger"))
 	eng := engine.New(*cfg, prober, enc, led, log)
 

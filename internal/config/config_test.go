@@ -190,7 +190,8 @@ func TestLoadLayered(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if c.CRF != 22 || c.Encoder != "cpu" || c.Preset != "slow" || c.ContainerExt != "mkv" ||
+		if c.CRF != 22 || c.Encoder != "cpu" || c.Preset != "slow" || c.ContainerExt != "source" ||
+			c.PixelFormat != "auto" ||
 			c.MinBitrateKbps != 2500 || c.MaxFailures != 3 || c.DurationToleranceSec != 1 || !c.HardlinkSkip() {
 			t.Fatalf("defaults not applied by Load: %+v", c)
 		}

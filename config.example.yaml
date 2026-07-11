@@ -29,8 +29,43 @@ dry_run: false
 # encoder: cpu           # only "cpu" today
 # crf: 22                # libx265 constant-rate-factor (lower = bigger/better)
 # preset: slow           # libx265 preset (slower = smaller)
-# pixel_format: yuv420p10le  # 10-bit: better compression, no banding
-# container_ext: mkv     # output container (source-container matching is TRANSCODE-3)
+
+# pixel_format: auto     # "auto" (default): derive per source — preserve chroma
+#                         # subsampling (4:2:0/4:2:2/4:4:4), floor bit-depth at 10
+#                         # (8-bit -> 10-bit; 10/12/16-bit sources keep their own
+#                         # depth). An exotic/unrecognized source pix_fmt is
+#                         # SKIPPED, never silently subsampled. Set a literal value
+#                         # (e.g. yuv420p10le) to force that pix_fmt for every
+#                         # source instead (TRANSCODE-1 back-compat behaviour).
+
+# container_ext: source  # "source" or "auto" (default, equivalent): output
+#                         # container = the SOURCE file's own extension, so the
+#                         # transcode happens in place (mp4 -> mp4, mkv -> mkv).
+#                         # This avoids force-migrating a container whose stream
+#                         # types don't round-trip elsewhere (e.g. an MP4 with
+#                         # mov_text subtitles into MKV, which can't carry them).
+#                         # Set a literal value (e.g. mkv) to force that extension
+#                         # for every source instead — the collision guard (never
+#                         # clobber a distinct existing file at the target name)
+#                         # still applies whenever the effective extension differs
+#                         # from the source's own.
+
+# --- HDR / colour + source-property fidelity (TRANSCODE-3; not separately
+# configurable — always on) ---
+# SKIPPED, never silently converted:
+#   - an interlaced source (field_order tt/bb/tb/bt) — this tool never deinterlaces
+#   - Dolby Vision (codec tag dvhe/dvh1/dvav/dav1, or a DOVI configuration record)
+#     — the RPU cannot survive a generic re-encode
+#   - HDR10+ (SMPTE2094-40 dynamic metadata) — cannot survive a generic re-encode
+#   - an HDR10 source whose mastering-display or content-light block is PRESENT
+#     but unparseable — re-encoding would silently drop metadata that IS there
+#   - a source with an exotic/unrecognized pixel format (see pixel_format above)
+# PRESERVED through the encode, never flattened or invented:
+#   - HDR10 static metadata (mastering-display SMPTE ST 2086 + MaxCLL/FALL) and the
+#     colour primaries/transfer/matrix/range tags — an SDR source is never wrongly
+#     tagged HDR, and an HDR source never has metadata invented that it didn't signal
+#   - 4:2:2 / 4:4:4 chroma subsampling (not flattened to 4:2:0)
+#   - variable frame-rate timing (`-fps_mode passthrough` — not forced to CFR)
 
 # --- data-safety guards (do not loosen without understanding them) ---
 # min_bitrate_kbps: 2500     # skip sources below this — re-encoding them only bloats
