@@ -63,13 +63,35 @@ explicitly out-of-scope, documented limitation matching the bash transcoder's pr
 `cmd/transcode`'s `cmdRun` calls `encoder.RequireAvailable` before building the engine — a configured-but-
 unavailable encoder (e.g. `nvenc` with no GPU) fails LOUD and exits non-zero, **never** a silent fallback to
 cpu. The verify/VMAF gate is unchanged and fully encoder-agnostic: a hardware/AV1 encode is held to the
-exact same no-loss bar as CPU libx265. Next: API/UI (`TRANSCODE-7`). The full phased plan lives in the
-umbrella that tracks this repo (`operations/roadmaps/transcode.md`).
+exact same no-loss bar as CPU libx265. `TRANSCODE-7` (this is the current state) added the **HTTP API +
+embedded web UI** via a new `transcode serve` command: a **chi** REST API (`/api/summary|queue|history`),
+an **SSE** live stream (`/api/events`) that pushes a fresh store-derived snapshot on every job-state
+change, and a single self-contained dashboard **embedded with `go:embed`** (served at `/`). It is a
+**read-and-control** surface — the YAML config stays the source of truth and the SQLite store stays the
+source of job state; the API can only read the store, start a scan, and pause/resume the feeding of NEW
+files. Nothing in `internal/server`/`internal/webui` ever touches a media file: the data-safety invariant
+lives entirely in the engine. Additive, non-invasive wiring — the engine gained an optional `Observer`
+(fire-and-forget Event on each transition, carrying reclaimed bytes on a swap) and a `Paused func() bool`
+hook checked between files (pause DELAYS work, never interrupts an in-flight encode/swap); the store
+gained read-only `List`/`Summary`. Fail-safes: bind **`127.0.0.1` by default**, a bearer token on the
+mutating endpoints (disabled entirely when unset), constant-time token compare. Next: observability +
+host-fair scheduling (`TRANSCODE-8`). The full phased plan lives in the umbrella that tracks this repo
+(`operations/roadmaps/transcode.md`).
 
 ## Layout
 
-- `cmd/transcode` — the CLI (`run` / `validate` / `version`), structured `slog` logging; `run` builds and
-  drives the engine oneshot with signal-cancellable context.
+- `cmd/transcode` — the CLI (`run` / `serve` / `validate` / `version`), structured `slog` logging. `run`
+  builds and drives the engine oneshot with a signal-cancellable context; `serve` (TRANSCODE-7) wires the
+  same engine to the API/UI and runs until SIGTERM (graceful HTTP drain). Engine setup shared by both is
+  factored into `buildEngine`.
+- `internal/server` (TRANSCODE-7) — the HTTP surface: a `Controller` (pause flag + scan orchestration, the
+  single source of truth for both, wired into `engine.Paused`), an SSE `Hub` (the `engine.Observer`;
+  coalesces events off the engine's critical path and broadcasts store-derived snapshots — an engine
+  worker never blocks on a slow client), and the chi router with read endpoints, token-gated mutating
+  endpoints, and the SSE stream. Imports `engine`/`store`/`config`; the engine does NOT import it (the
+  Observer is a func the engine defines and `server` supplies — no cycle).
+- `internal/webui` (TRANSCODE-7) — the single `go:embed`-ed dashboard (`index.html`, vanilla JS + inline
+  CSS, no external/CDN assets) + its handler, served at `/` under a tight CSP.
 - `internal/config` — **koanf** layered config (defaults ← YAML file ← `TRANSCODE_*` env), unknown-key
   rejection, and strict `Validate()` (refuses `/`, `$HOME`, or a symlink resolving to either; refuses when
   `$HOME` is unknown). An explicit zero in the file/env overrides a default (not clobbered). `PixelFormat`

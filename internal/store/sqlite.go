@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver, no CGO; registers as "sqlite"
@@ -222,6 +223,75 @@ func (s *SQLite) Delete(ctx context.Context, path, fingerprint string) error {
 		return fmt.Errorf("store: delete: %w", err)
 	}
 	return nil
+}
+
+// List is documented on the Store interface. It builds a parameterized query — the
+// status filter is expanded to a placeholder list so a Status value can never be
+// interpolated into SQL text (the values are a closed internal vocabulary anyway,
+// but parameterizing keeps the read injection-proof by construction).
+func (s *SQLite) List(ctx context.Context, statuses []Status, limit int) ([]Job, error) {
+	q := `SELECT path, fingerprint, status, fail_count, worker, updated_at FROM jobs`
+	args := make([]any, 0, len(statuses)+1)
+	if len(statuses) > 0 {
+		ph := make([]string, len(statuses))
+		for i, st := range statuses {
+			ph[i] = "?"
+			args = append(args, string(st))
+		}
+		q += " WHERE status IN (" + strings.Join(ph, ", ") + ")"
+	}
+	// Newest transition first — the API/UI shows the most recent activity at the top.
+	q += " ORDER BY updated_at DESC, path ASC"
+	if limit > 0 {
+		q += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: list: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Job
+	for rows.Next() {
+		var j Job
+		var status string
+		var worker sql.NullString // worker is NULL for a pending/recovered row
+		if err := rows.Scan(&j.Path, &j.Fingerprint, &status, &j.FailCount, &worker, &j.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("store: list scan: %w", err)
+		}
+		j.Status = Status(status)
+		j.Worker = worker.String
+		out = append(out, j)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list rows: %w", err)
+	}
+	return out, nil
+}
+
+// Summary is documented on the Store interface.
+func (s *SQLite) Summary(ctx context.Context) (map[Status]int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT status, COUNT(*) FROM jobs GROUP BY status`)
+	if err != nil {
+		return nil, fmt.Errorf("store: summary: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[Status]int)
+	for rows.Next() {
+		var status string
+		var n int
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, fmt.Errorf("store: summary scan: %w", err)
+		}
+		out[Status(status)] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: summary rows: %w", err)
+	}
+	return out, nil
 }
 
 // Get returns the current status and fail_count for path+fingerprint.

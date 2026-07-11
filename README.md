@@ -2,6 +2,8 @@
 
 **A config-as-code, data-safe, self-hosted media transcoder — an open-source [Tdarr](https://tdarr.io) replacement.**
 
+![The transcode web dashboard: live queue, per-status summary, reclaimed-space total, and history — served from the single binary by `transcode serve`.](docs/dashboard.png)
+
 `transcode` watches a media library, re-encodes bloated non-HEVC/non-AV1 video to a smaller modern codec
 to reclaim disk space, and — the whole point — **never destroys a source until a replacement is provably
 faithful**. It is configured entirely by **YAML** (config-as-code), so what it does is reviewable and
@@ -11,9 +13,11 @@ reproducible from git, not hidden in a UI database.
 > Bash predecessor (see _Provenance_). **The data-safety core is implemented (`TRANSCODE-1`)**: `transcode
 > run` performs one oneshot scan of the library roots — skip guards → same-directory temp encode → the full
 > verify gate → atomic swap → delete — and is proven by a real-ffmpeg fixture suite (cases 1–17) that reds
-> on the specific regression. Still to come: colour/HDR preservation (`TRANSCODE-3`), the VMAF perceptual
+> on the specific regression. Built since: colour/HDR preservation (`TRANSCODE-3`), the VMAF perceptual
 > gate (`TRANSCODE-4`), a persistent crash-safe queue + worker pool (`TRANSCODE-5`), hardware/AV1 encoders
-> (`TRANSCODE-6`), and the web UI (`TRANSCODE-7`). See the roadmap for the full plan.
+> (`TRANSCODE-6`), and the **REST/SSE API + embedded web UI** (`TRANSCODE-7`, `transcode serve` — shown
+> above). Still to come: observability + host-fair scheduling (`TRANSCODE-8`), packaging + release
+> (`TRANSCODE-9`). See the roadmap for the full plan.
 
 ## Why another transcoder?
 
@@ -44,10 +48,37 @@ it is not a media server or library manager.
 cp config.example.yaml config.yaml   # then edit library_roots
 transcode validate --config config.yaml
 transcode run --config config.yaml   # one scan: re-encode bloated non-HEVC video, safely
+transcode serve --config config.yaml # HTTP API + web dashboard (scan on demand / on an interval)
 ```
 
-`run` needs `ffmpeg` and `ffprobe` on `PATH` (or set `TRANSCODE_FFMPEG` / `TRANSCODE_FFPROBE`); it exits
-non-zero if they are missing rather than silently doing nothing. Use a build with **libx265**.
+`run`/`serve` need `ffmpeg` and `ffprobe` on `PATH` (or set `TRANSCODE_FFMPEG` / `TRANSCODE_FFPROBE`); they
+exit non-zero if they are missing rather than silently doing nothing. Use a build with **libx265**.
+
+### Web API + UI (`serve`)
+
+`transcode serve` runs a REST API + [SSE](https://developer.mozilla.org/docs/Web/API/Server-sent_events)
+live stream and an **embedded web dashboard** (baked into the single binary — no assets to deploy). It is
+a **read-and-control** surface on top of the config-as-code engine: the YAML file stays the source of
+truth and the SQLite store stays the source of job state. The API can only **read the store, start a
+scan, and pause/resume the feeding of new files** — it never touches a media file, so the data-safety
+invariant is entirely unaffected.
+
+| Method & path | Auth | Purpose |
+|---|---|---|
+| `GET /` | — | the embedded dashboard |
+| `GET /api/summary` | — | counts per status + session bytes reclaimed + paused/scanning |
+| `GET /api/queue` | — | pending + active jobs |
+| `GET /api/history?limit=N` | — | recent terminal jobs (done/skipped/failed, with reason) |
+| `GET /api/events` | — | SSE: a fresh snapshot on every state change |
+| `POST /api/rescan` | token | start a library scan (409 if paused / already scanning) |
+| `POST /api/pause` | token | stop feeding **new** files (in-flight encodes finish safely) |
+| `POST /api/resume` | token | clear the pause flag |
+
+Fail-safes: the server **binds `127.0.0.1` by default** (front it with a reverse proxy for real
+multi-user); the mutating endpoints require a bearer token (`server_auth_token`, best set via
+`TRANSCODE_SERVER_AUTH_TOKEN`) and are **disabled entirely when no token is set**; pause only ever
+*delays* work — it never interrupts an encode or the atomic swap. **Known limitation:** single-token auth
+(no per-user accounts); the queue/history views are capped at the most recent rows, not the whole ledger.
 
 ## Build
 

@@ -12,6 +12,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,11 @@ import (
 // envPrefix is the prefix for environment overrides: TRANSCODE_CRF=20 sets crf.
 const envPrefix = "TRANSCODE_"
 
+// defaultServerAddr is the `serve` bind address default — LOCALHOST, so the control
+// surface is never network-exposed by accident. Shared by defaultLayer() and
+// EffectiveServerAddr() so the two can't drift.
+const defaultServerAddr = "127.0.0.1:8080"
+
 // knownKeys are the top-level keys accepted in the YAML file. Any other key is a
 // typo and is rejected — fail-safe: never a silent default.
 var knownKeys = map[string]bool{
@@ -39,6 +45,7 @@ var knownKeys = map[string]bool{
 	"max_failures": true, "skip_hardlinked": true, "state_dir": true,
 	"vmaf_enable": true, "min_vmaf": true, "vmaf_min_pool": true,
 	"vmaf_subsample": true, "vmaf_model": true, "workers": true,
+	"server_addr": true, "server_auth_token": true, "scan_interval_sec": true,
 }
 
 // defaultLayer is the built-in default configuration, loaded as koanf's base layer.
@@ -65,6 +72,9 @@ func defaultLayer() map[string]any {
 		"vmaf_subsample":         1,
 		"vmaf_model":             "auto",
 		"workers":                1,
+		"server_addr":            defaultServerAddr,
+		"server_auth_token":      "",
+		"scan_interval_sec":      0,
 	}
 }
 
@@ -164,6 +174,38 @@ type Config struct {
 	// 1 is an explicit opt-in (e.g. many small/low-resolution files, or a hardware
 	// encoder in a later phase). Use EffectiveWorkers() to read the resolved value.
 	Workers int `yaml:"workers"`
+
+	// --- server / API+UI (TRANSCODE-7, `transcode serve`) ---
+
+	// ServerAddr is the host:port the `serve` HTTP API + web UI binds to. Default
+	// "127.0.0.1:8080" — LOCALHOST by design (fail-safe: the control surface is not
+	// exposed to the network unless the operator opts in, then fronts it with a
+	// reverse proxy). An empty value is treated as the default by `serve` (never a
+	// bare ":8080" all-interfaces bind by accident).
+	ServerAddr string `yaml:"server_addr"`
+	// ServerAuthToken is the bearer token required on MUTATING endpoints
+	// (rescan/pause/resume). Empty (default) DISABLES those endpoints entirely —
+	// remote control is off until a token is explicitly set (fail-safe). Read
+	// endpoints and the UI never require it. Prefer supplying it via the
+	// TRANSCODE_SERVER_AUTH_TOKEN environment variable rather than the YAML file so
+	// no secret lands in a committed config.
+	ServerAuthToken string `yaml:"server_auth_token"`
+	// ScanIntervalSec, when > 0, makes `serve` re-scan the library every N seconds
+	// (in addition to an initial scan on startup and manual rescans via the API).
+	// 0 (default) = no periodic scan: `serve` scans once on startup and thereafter
+	// only when the API is asked to. Host-fair scheduling (run-windows, CPU caps) is
+	// TRANSCODE-8; this is the plain interval.
+	ScanIntervalSec int `yaml:"scan_interval_sec"`
+}
+
+// EffectiveServerAddr returns the bind address `serve` should use, defaulting an
+// empty ServerAddr to the localhost default rather than a bare ":8080" (which would
+// listen on every interface). This keeps "unset" and "explicitly empty" both safe.
+func (c *Config) EffectiveServerAddr() string {
+	if strings.TrimSpace(c.ServerAddr) == "" {
+		return defaultServerAddr
+	}
+	return c.ServerAddr
 }
 
 // EffectiveWorkers returns the number of workers to run, defaulting 0 (absent) or
@@ -371,6 +413,17 @@ func (c *Config) Validate() error {
 	}
 	if c.Workers < 0 || c.Workers > 1024 {
 		return fmt.Errorf("workers %d out of range (0-1024; 0 means the default of 1)", c.Workers)
+	}
+
+	// Server knobs (TRANSCODE-7). A non-empty bind address must be a valid
+	// host:port; an empty one is fine (EffectiveServerAddr defaults it to localhost).
+	if strings.TrimSpace(c.ServerAddr) != "" {
+		if _, _, err := net.SplitHostPort(c.ServerAddr); err != nil {
+			return fmt.Errorf("server_addr %q is not a valid host:port: %w", c.ServerAddr, err)
+		}
+	}
+	if c.ScanIntervalSec < 0 {
+		return fmt.Errorf("scan_interval_sec %d must be >= 0 (0 = scan once on startup + on demand)", c.ScanIntervalSec)
 	}
 	return nil
 }

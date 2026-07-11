@@ -63,6 +63,30 @@ type Engine struct {
 	// gate. Unexported test seam — lets a test force a low score or an unavailable-
 	// libvmaf error without a second real encode. Production leaves it nil.
 	vmafScore func(ctx context.Context, distorted, reference string, subsample int, model string) (vmaf.Result, error)
+
+	// Observer, when non-nil, receives an Event on every job-state transition
+	// (TRANSCODE-7's API/SSE hub subscribes here). It is a fire-and-forget
+	// NOTIFICATION beside the store writes — never a substitute for them and never
+	// on the critical path: emit calls it directly, so the Observer contract
+	// requires it to be non-blocking and concurrency-safe (see Observer). nil =
+	// no emission, the pre-TRANSCODE-7 behaviour.
+	Observer Observer
+
+	// Paused, when non-nil and returning true, tells scanOnce to stop feeding NEW
+	// files to workers this pass (TRANSCODE-7's pause control). It is checked
+	// between files only — an in-flight encode is NEVER interrupted (that would
+	// risk the invariant); paused work is simply left pending for the next scan
+	// after resume. nil = never paused.
+	Paused func() bool
+}
+
+// emit delivers ev to the Observer if one is set. It is deliberately trivial and
+// must stay cheap + non-blocking: it runs inline on a worker goroutine, so the
+// Observer (not the engine) owns any buffering/decoupling from slow consumers.
+func (e *Engine) emit(ev Event) {
+	if e.Observer != nil {
+		e.Observer(ev)
+	}
 }
 
 // New constructs an Engine. All dependencies are injected so tests can supply a
@@ -193,6 +217,15 @@ func (e *Engine) scanOnce(ctx context.Context) error {
 
 feed:
 	for _, f := range files {
+		// Pause control (TRANSCODE-7): stop handing out NEW files the moment we're
+		// paused. Workers already mid-file finish safely (the atomic swap is never
+		// interrupted); the not-yet-fed files stay pending for the next scan after
+		// resume. Checked here — before the send — so pause only ever DELAYS work,
+		// never touches an in-flight encode.
+		if e.Paused != nil && e.Paused() {
+			e.Log.Info("paused — stopping feed of new files; in-flight encodes finish safely")
+			break feed
+		}
 		select {
 		case <-ctx.Done():
 			break feed
@@ -262,6 +295,10 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	if !claimed {
 		return nil
 	}
+	// The claim moved this row to probing — surface that as a live "started" signal
+	// (carrying the worker) so the API/UI shows the file entering the pipeline
+	// immediately, not only once it advances to encoding.
+	e.emit(Event{Path: f, Status: store.Probing, Worker: worker})
 
 	codec := e.Probe.VideoCodec(ctx, f)
 	if codec == "" {
@@ -431,7 +468,18 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			e.Log.Warn("transcoded ok but could not remove original", "file", f, "err", err)
 		}
 	}
-	e.Log.Info("DONE", "file", final, "bytes", probe.FileSize(final))
+	// Reclaimed space = original source size − final output size. fi was stat'd at
+	// entry (the pre-encode source), so this is accurate even though f may already
+	// be gone (a container-changing swap removed it). A byte-carrying Done event
+	// lets the API/UI total reclaimed space live; the generic Done emit from the
+	// finish wrapper below carries 0, so summing the field never double-counts.
+	newSize := probe.FileSize(final)
+	reclaimed := fi.Size() - newSize
+	if reclaimed < 0 {
+		reclaimed = 0 // defensive: the strictly-smaller gate should preclude this
+	}
+	e.Log.Info("DONE", "file", final, "bytes", newSize, "reclaimed", reclaimed)
+	e.emit(Event{Path: final, Status: store.Done, Worker: worker, BytesReclaimed: reclaimed})
 	// The done row is keyed under the FINAL file's own path+fingerprint (mirroring
 	// the pre-TRANSCODE-5 ledger behaviour) so a resume short-circuits on the new
 	// file's identity, not the pre-swap source's. The post-swap fingerprint (new
@@ -464,6 +512,7 @@ func (e *Engine) advance(ctx context.Context, path, key string, s store.Status) 
 	if err := e.Store.Advance(ctx, path, key, s); err != nil {
 		e.Log.Warn("store advance failed (continuing)", "file", path, "status", s, "err", err)
 	}
+	e.emit(Event{Path: path, Status: s})
 }
 
 // finish is a small logged wrapper around Store.Finish.
@@ -471,6 +520,7 @@ func (e *Engine) finish(ctx context.Context, path, key string, s store.Status) {
 	if err := e.Store.Finish(ctx, path, key, s); err != nil {
 		e.Log.Warn("store finish failed", "file", path, "status", s, "err", err)
 	}
+	e.emit(Event{Path: path, Status: s})
 }
 
 // isAlreadyTargetCodec reports whether a source's probed video codec already IS
