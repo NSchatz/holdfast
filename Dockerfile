@@ -8,7 +8,7 @@
 # stub exists so the packaging path is real from day one.
 
 # --- build the binary -------------------------------------------------------
-FROM golang:1.23.12-bookworm AS build
+FROM golang:1.25.12-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

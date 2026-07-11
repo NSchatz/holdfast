@@ -3,13 +3,14 @@
 # Copy to config.yaml (gitignored) and edit. Validate it any time with:
 #   transcode validate --config config.yaml
 #
-# This is the GENESIS surface (TRANSCODE-0): only the fields below are read today.
-# The full, koanf-backed schema (codec/quality knobs, VMAF thresholds, queue,
-# scheduling, notifications, API/UI) arrives in later phases — see the roadmap.
+# Every knob below has a sensible default and may be omitted. env/flag overrides and
+# a CI schema self-test arrive with the koanf-backed schema in TRANSCODE-2; VMAF
+# thresholds (T-4), the queue (T-5), hardware codecs (T-6), and the API/UI (T-7)
+# add their own fields later — see the roadmap.
 
-# Directory trees to scan and (in later phases) re-encode files under. This is the
-# ONLY place transcode ever mutates the filesystem, so it is validated strictly:
-# each root must be absolute and must not be "/" or your home directory.
+# Directory trees to scan and re-encode files under. This is the ONLY place transcode
+# ever mutates the filesystem, so it is validated strictly: each root must be absolute
+# and must not be "/" or your home directory.
 library_roots:
   - /mnt/media
 
@@ -18,3 +19,24 @@ log_level: info
 
 # When true, report intended actions without changing any file.
 dry_run: false
+
+# --- what to scan ---
+# File extensions considered (case-insensitive).
+# video_exts: [mkv, mp4, avi, mov, m4v, ts, m2ts, wmv, flv]
+
+# --- codec / quality (CPU libx265; hardware + AV1 arrive in TRANSCODE-6) ---
+# encoder: cpu           # only "cpu" today
+# crf: 22                # libx265 constant-rate-factor (lower = bigger/better)
+# preset: slow           # libx265 preset (slower = smaller)
+# pixel_format: yuv420p10le  # 10-bit: better compression, no banding
+# container_ext: mkv     # output container (source-container matching is TRANSCODE-3)
+
+# --- data-safety guards (do not loosen without understanding them) ---
+# min_bitrate_kbps: 2500     # skip sources below this — re-encoding them only bloats
+# min_savings_percent: 0     # accept only if output <= input*(1-this/100); 0 = strictly smaller
+# duration_tolerance_sec: 1  # reject if output duration drifts more than this
+# max_failures: 3            # retry a failing file this many times before parking it
+# skip_hardlinked: true      # skip files with >1 hard link (an active seed/dup)
+
+# --- runtime ---
+# state_dir: state           # holds the resume ledger

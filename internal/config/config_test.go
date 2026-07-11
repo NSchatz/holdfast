@@ -135,3 +135,67 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 }
+
+func TestApplyDefaults(t *testing.T) {
+	c := Config{LibraryRoots: []string{"/mnt/media"}}
+	c.ApplyDefaults()
+	if c.Encoder != "cpu" || c.CRF != 22 || c.Preset != "slow" || c.ContainerExt != "mkv" {
+		t.Errorf("defaults not applied: %+v", c)
+	}
+	if c.MinBitrateKbps != 2500 || c.MaxFailures != 3 || c.DurationToleranceSec != 1 {
+		t.Errorf("numeric defaults not applied: %+v", c)
+	}
+	if len(c.VideoExts) == 0 {
+		t.Error("video_exts default not applied")
+	}
+	// Explicit values are preserved.
+	c2 := Config{LibraryRoots: []string{"/mnt"}, CRF: 18, Encoder: "cpu", MinBitrateKbps: 5000}
+	c2.ApplyDefaults()
+	if c2.CRF != 18 || c2.MinBitrateKbps != 5000 {
+		t.Errorf("explicit values overwritten: %+v", c2)
+	}
+}
+
+func TestHardlinkSkipDefault(t *testing.T) {
+	var c Config // nil pointer
+	if !c.HardlinkSkip() {
+		t.Error("HardlinkSkip() = false for nil, want true (safe default)")
+	}
+	f := false
+	c.SkipHardlinked = &f
+	if c.HardlinkSkip() {
+		t.Error("HardlinkSkip() = true when explicitly false")
+	}
+}
+
+func TestValidateEngineKnobs(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{"unknown encoder", func(c *Config) { c.Encoder = "nvenc" }, "not supported"},
+		{"crf too high", func(c *Config) { c.CRF = 52 }, "crf"},
+		{"crf negative", func(c *Config) { c.CRF = -1 }, "crf"},
+		{"savings out of range", func(c *Config) { c.MinSavingsPercent = 100 }, "min_savings_percent"},
+		{"negative max_failures", func(c *Config) { c.MaxFailures = -1 }, "max_failures"},
+		{"container ext with dot", func(c *Config) { c.ContainerExt = ".mkv" }, "container_ext"},
+		{"valid cpu config", func(c *Config) { c.Encoder = "cpu"; c.CRF = 20 }, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Config{LibraryRoots: []string{"/mnt/media"}}
+			tc.mutate(&c)
+			err := c.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Validate() = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}

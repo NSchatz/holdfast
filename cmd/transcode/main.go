@@ -3,23 +3,30 @@
 // to a smaller modern codec and NEVER destroys a source until a replacement is
 // provably faithful.
 //
-// This is the genesis scaffold (TRANSCODE-0): it wires the CLI, config loading,
-// logging, and version stamping. The transcode engine (verify-then-swap-then-delete,
-// the queue, the API/UI) lands in later phases — see the roadmap at
-// operations/roadmaps/transcode.md in the umbrella. Until then, `run` deliberately
-// refuses to touch any file: a delete-capable tool must not do anything surprising
-// on first run.
+// `run` performs a single oneshot scan of the configured library roots (the
+// TRANSCODE-1 data-safety core: skip guards → same-dir temp encode → verify → atomic
+// swap → delete). The persistent queue + worker pool (TRANSCODE-5), colour/HDR
+// (TRANSCODE-3), VMAF (TRANSCODE-4), and the API/UI (TRANSCODE-7) build on it — see
+// operations/roadmaps/transcode.md in the umbrella.
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"syscall"
 
 	"github.com/NSchatz/transcode/internal/config"
+	"github.com/NSchatz/transcode/internal/engine"
+	"github.com/NSchatz/transcode/internal/ledger"
 	"github.com/NSchatz/transcode/internal/logging"
+	"github.com/NSchatz/transcode/internal/probe"
 	"github.com/NSchatz/transcode/internal/version"
 )
 
@@ -33,7 +40,7 @@ Usage:
   transcode <command> [flags]
 
 Commands:
-  run        Load config and start the transcoder (engine arrives in TRANSCODE-1)
+  run        Load config and run one transcode scan over the library roots
   validate   Load and validate a config file, then exit
   version    Print version and exit
 
@@ -84,6 +91,7 @@ func loadConfig(fs *flag.FlagSet, args []string, stderr io.Writer) (*config.Conf
 		fmt.Fprintf(stderr, "transcode: %v\n", err)
 		return nil, 1
 	}
+	cfg.ApplyDefaults()
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(stderr, "transcode: invalid config: %v\n", err)
 		return nil, 1
@@ -108,17 +116,51 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 	log := logging.New(cfg.LogLevel)
+
+	ffmpeg := envOr("TRANSCODE_FFMPEG", "ffmpeg")
+	ffprobe := envOr("TRANSCODE_FFPROBE", "ffprobe")
+	// Fail loud if the tools are missing — never a false green / silent no-op.
+	for _, bin := range []string{ffmpeg, ffprobe} {
+		if _, err := exec.LookPath(bin); err != nil {
+			fmt.Fprintf(stderr, "transcode: required binary %q not found: %v\n", bin, err)
+			return 1
+		}
+	}
+
 	log.Info("transcode starting",
 		"version", version.Version,
 		"library_roots", cfg.LibraryRoots,
+		"encoder", cfg.Encoder, "crf", cfg.CRF, "preset", cfg.Preset,
 		"dry_run", cfg.DryRun,
 	)
-	// Fail-safe: the transcode engine is not implemented yet (TRANSCODE-1). We
-	// have proven the config is valid and safe, but we will NOT scan or mutate any
-	// file until the verify-then-swap-then-delete engine exists. Exit cleanly with
-	// a clear message rather than pretending to work.
-	log.Warn("transcode engine not yet implemented — no files will be touched",
-		"next", "TRANSCODE-1 (data-safety core port)")
-	fmt.Fprintln(stdout, "transcode: config validated; engine not yet implemented (TRANSCODE-1). No files were touched.")
+
+	prober := probe.New(ffmpeg, ffprobe)
+	enc := engine.FFmpegEncoder{FFmpeg: ffmpeg, Cfg: *cfg}
+	led := ledger.New(filepath.Join(cfg.StateDir, "processed.ledger"))
+	eng := engine.New(*cfg, prober, enc, led, log)
+
+	// SIGINT/SIGTERM cancels the context: the in-flight ffmpeg is killed, the temp
+	// discarded, and the source left untouched (the swap is the only mutation and
+	// only runs after a full verify, which an interrupted encode never reaches).
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := eng.RunOneshot(ctx); err != nil {
+		if errors.Is(err, context.Canceled) {
+			log.Warn("interrupted — stopped safely; in-flight temp discarded, source untouched")
+			return 0
+		}
+		fmt.Fprintf(stderr, "transcode: %v\n", err)
+		return 1
+	}
+	log.Info("scan complete")
 	return 0
+}
+
+// envOr returns the environment value for key, or def if unset/empty.
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
