@@ -28,6 +28,7 @@ type Server struct {
 	ctrl    *Controller
 	hub     *Hub
 	ui      http.Handler
+	metrics http.Handler
 	log     *slog.Logger
 	mux     http.Handler
 }
@@ -35,16 +36,17 @@ type Server struct {
 // New builds the Server and its router. baseCtx bounds long-lived handlers (the SSE
 // stream watches it, so a shutdown that cancels baseCtx releases open streams
 // promptly instead of hanging graceful shutdown). ui is the embedded web UI handler
-// (served at "/"); pass nil to serve a minimal API-only page. The caller starts
-// hub.Run and listens on cfg.EffectiveServerAddr() with s as the handler.
-func New(baseCtx context.Context, cfg config.Config, st store.Store, ctrl *Controller, hub *Hub, ui http.Handler, log *slog.Logger) *Server {
+// (served at "/"); pass nil to serve a minimal API-only page. metrics is the
+// Prometheus /metrics handler (TRANSCODE-8); pass nil to omit the route. The caller
+// starts hub.Run and listens on cfg.EffectiveServerAddr() with s as the handler.
+func New(baseCtx context.Context, cfg config.Config, st store.Store, ctrl *Controller, hub *Hub, ui, metrics http.Handler, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
-	s := &Server{baseCtx: baseCtx, cfg: cfg, store: st, ctrl: ctrl, hub: hub, ui: ui, log: log}
+	s := &Server{baseCtx: baseCtx, cfg: cfg, store: st, ctrl: ctrl, hub: hub, ui: ui, metrics: metrics, log: log}
 	s.mux = s.routes()
 	return s
 }
@@ -73,6 +75,11 @@ func (s *Server) routes() http.Handler {
 			r.Post("/resume", s.handleResume)
 		})
 	})
+
+	// Prometheus metrics (TRANSCODE-8), when enabled.
+	if s.metrics != nil {
+		r.Handle("/metrics", s.metrics)
+	}
 
 	// The embedded UI at the root.
 	if s.ui != nil {

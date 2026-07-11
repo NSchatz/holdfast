@@ -25,6 +25,7 @@ import (
 	"github.com/knadh/koanf/v2"
 
 	"github.com/NSchatz/transcode/internal/encoder"
+	"github.com/NSchatz/transcode/internal/schedule"
 )
 
 // envPrefix is the prefix for environment overrides: TRANSCODE_CRF=20 sets crf.
@@ -46,6 +47,8 @@ var knownKeys = map[string]bool{
 	"vmaf_enable": true, "min_vmaf": true, "vmaf_min_pool": true,
 	"vmaf_subsample": true, "vmaf_model": true, "workers": true,
 	"server_addr": true, "server_auth_token": true, "scan_interval_sec": true,
+	"metrics_enable": true, "notify_url": true, "run_window": true,
+	"max_load": true, "tautulli_url": true, "tautulli_api_key": true,
 }
 
 // defaultLayer is the built-in default configuration, loaded as koanf's base layer.
@@ -75,6 +78,12 @@ func defaultLayer() map[string]any {
 		"server_addr":            defaultServerAddr,
 		"server_auth_token":      "",
 		"scan_interval_sec":      0,
+		"metrics_enable":         true,
+		"notify_url":             "",
+		"run_window":             "",
+		"max_load":               0.0,
+		"tautulli_url":           "",
+		"tautulli_api_key":       "",
 	}
 }
 
@@ -193,9 +202,31 @@ type Config struct {
 	// ScanIntervalSec, when > 0, makes `serve` re-scan the library every N seconds
 	// (in addition to an initial scan on startup and manual rescans via the API).
 	// 0 (default) = no periodic scan: `serve` scans once on startup and thereafter
-	// only when the API is asked to. Host-fair scheduling (run-windows, CPU caps) is
-	// TRANSCODE-8; this is the plain interval.
+	// only when the API is asked to.
 	ScanIntervalSec int `yaml:"scan_interval_sec"`
+
+	// --- observability + host-fair scheduling (TRANSCODE-8, `serve` only) ---
+
+	// MetricsEnable exposes Prometheus metrics at /metrics (default true). Metrics
+	// are read-only instrumentation — best-effort, never affecting file handling.
+	MetricsEnable bool `yaml:"metrics_enable"`
+	// NotifyURL is a shoutrrr service URL (e.g. ntfy/Discord/Gotify) for best-effort
+	// notifications — a message per failed file + a per-scan summary. Empty (default)
+	// disables notifications. May carry a secret; prefer TRANSCODE_NOTIFY_URL over the
+	// YAML file.
+	NotifyURL string `yaml:"notify_url"`
+	// RunWindow is a daily host-fair window "HH:MM-HH:MM" (local time) during which
+	// new work may start; empty (default) = always. Outside it, `serve` stops feeding
+	// NEW files (an in-flight encode always finishes) — scheduling only DELAYS work.
+	RunWindow string `yaml:"run_window"`
+	// MaxLoad is a per-core 1-minute load-average cap; while the host is above it,
+	// `serve` stops feeding new files. 0 (default) disables the check.
+	MaxLoad float64 `yaml:"max_load"`
+	// TautulliURL + TautulliAPIKey enable an optional Plex-aware pause: while Tautulli
+	// reports an active stream, `serve` stops feeding new files. Both must be set to
+	// enable it (default off). A Tautulli outage fails OPEN (never halts transcoding).
+	TautulliURL    string `yaml:"tautulli_url"`
+	TautulliAPIKey string `yaml:"tautulli_api_key"`
 }
 
 // EffectiveServerAddr returns the bind address `serve` should use, defaulting an
@@ -424,6 +455,14 @@ func (c *Config) Validate() error {
 	}
 	if c.ScanIntervalSec < 0 {
 		return fmt.Errorf("scan_interval_sec %d must be >= 0 (0 = scan once on startup + on demand)", c.ScanIntervalSec)
+	}
+
+	// Host-fair scheduling knobs (TRANSCODE-8).
+	if _, err := schedule.ParseWindow(c.RunWindow); err != nil {
+		return err
+	}
+	if c.MaxLoad < 0 {
+		return fmt.Errorf("max_load %g must be >= 0 (0 disables the CPU-load cap)", c.MaxLoad)
 	}
 	return nil
 }

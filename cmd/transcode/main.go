@@ -30,7 +30,10 @@ import (
 	"github.com/NSchatz/transcode/internal/encoder"
 	"github.com/NSchatz/transcode/internal/engine"
 	"github.com/NSchatz/transcode/internal/logging"
+	"github.com/NSchatz/transcode/internal/metrics"
+	"github.com/NSchatz/transcode/internal/notify"
 	"github.com/NSchatz/transcode/internal/probe"
+	"github.com/NSchatz/transcode/internal/schedule"
 	"github.com/NSchatz/transcode/internal/server"
 	"github.com/NSchatz/transcode/internal/store"
 	"github.com/NSchatz/transcode/internal/version"
@@ -239,13 +242,45 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	ctrl := server.NewController(ctx, eng.RunOneshot, log)
 	hub := server.NewHub(st, ctrl, log)
 	ctrl.SetOnChange(hub.Trigger) // a pause/scan-state flip broadcasts to SSE clients
-	eng.Observer = hub.Observe    // live job-state → SSE
-	eng.Paused = ctrl.Paused      // the engine consults the pause flag between files
 
-	srv := server.New(ctx, *cfg, st, ctrl, hub, webui.Handler(), log)
+	// Observability + host-fair scheduling (TRANSCODE-8), all optional and additive.
+	// The engine's single Observer fans out to every consumer; each consumer is
+	// non-blocking, so none can stall an encode.
+	observers := []engine.Observer{hub.Observe}
+
+	var metricsHandler http.Handler
+	if cfg.MetricsEnable {
+		mx := metrics.New(st)
+		observers = append(observers, mx.Observe)
+		metricsHandler = mx.Handler()
+	}
+
+	notifier := notify.New(cfg.NotifyURL, log)
+	if notifier.Enabled() {
+		observers = append(observers, notifier.Observe)
+		ctrl.SetScanHooks(notifier.ScanStarted, notifier.ScanFinished)
+	}
+	eng.Observer = fanout(observers) // live job-state → SSE + metrics + notifications
+
+	// Host-fair scheduler: run-window + CPU-load cap + optional Tautulli pause. It
+	// only ever DELAYS work. The engine consults it (throttled) between files; Rescan
+	// consults it before starting a scan.
+	window, _ := schedule.ParseWindow(cfg.RunWindow) // already validated
+	sched := schedule.New(window, cfg.MaxLoad, schedule.NewTautulli(cfg.TautulliURL, cfg.TautulliAPIKey), log)
+	ctrl.SetGate(func() (bool, string) { return sched.MayRun(ctx) })
+	eng.Paused = func() bool {
+		if ctrl.Paused() {
+			return true
+		}
+		ok, _ := sched.MayRunThrottled(ctx)
+		return !ok
+	}
+
+	srv := server.New(ctx, *cfg, st, ctrl, hub, webui.Handler(), metricsHandler, log)
 	var bg sync.WaitGroup
-	bg.Add(2)
+	bg.Add(3)
 	go func() { defer bg.Done(); hub.Run(ctx) }()
+	go func() { defer bg.Done(); notifier.Run(ctx) }()
 	go func() { defer bg.Done(); srv.StartScanLoop(ctx, cfg.ScanIntervalSec) }() // initial scan + optional interval
 
 	addr := cfg.EffectiveServerAddr()
@@ -256,6 +291,11 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 			"addr", addr,
 			"control_enabled", cfg.ServerAuthToken != "",
 			"scan_interval_sec", cfg.ScanIntervalSec,
+			"metrics", cfg.MetricsEnable,
+			"notify", notifier.Enabled(),
+			"run_window", window.String(),
+			"max_load", cfg.MaxLoad,
+			"tautulli", cfg.TautulliURL != "" && cfg.TautulliAPIKey != "",
 			"version", version.Version,
 		)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -286,6 +326,17 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	ctrl.Wait()
 	bg.Wait()
 	return 0
+}
+
+// fanout composes several observers into one engine.Observer, calling each in
+// order on every event. Every observer is contractually non-blocking, so the
+// fan-out is too — it never stalls an engine worker.
+func fanout(obs []engine.Observer) engine.Observer {
+	return func(ev engine.Event) {
+		for _, o := range obs {
+			o(ev)
+		}
+	}
 }
 
 // envOr returns the environment value for key, or def if unset/empty.

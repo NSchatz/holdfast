@@ -70,7 +70,8 @@ invariant is entirely unaffected.
 | `GET /api/queue` | — | pending + active jobs |
 | `GET /api/history?limit=N` | — | recent terminal jobs (done/skipped/failed, with reason) |
 | `GET /api/events` | — | SSE: a fresh snapshot on every state change |
-| `POST /api/rescan` | token | start a library scan (409 if paused / already scanning) |
+| `GET /metrics` | — | Prometheus metrics (when `metrics_enable`, default on) |
+| `POST /api/rescan` | token | start a library scan (409 if paused / scanning / outside the run window) |
 | `POST /api/pause` | token | stop feeding **new** files (in-flight encodes finish safely) |
 | `POST /api/resume` | token | clear the pause flag |
 
@@ -79,6 +80,21 @@ multi-user); the mutating endpoints require a bearer token (`server_auth_token`,
 `TRANSCODE_SERVER_AUTH_TOKEN`) and are **disabled entirely when no token is set**; pause only ever
 *delays* work — it never interrupts an encode or the atomic swap. **Known limitation:** single-token auth
 (no per-user accounts); the queue/history views are capped at the most recent rows, not the whole ledger.
+
+### Observability & host-fair scheduling (`serve`)
+
+- **Prometheus** (`/metrics`, default on): `transcode_files_total{outcome}`, `transcode_bytes_reclaimed_total`,
+  `transcode_encode_duration_seconds`, `transcode_vmaf_score` (perceptual-quality distribution), and a
+  `transcode_queue_depth{state}` gauge read live from the store. Metrics are read-only instrumentation —
+  best-effort, never affecting file handling.
+- **Notifications** (`notify_url`, [shoutrrr](https://shoutrrr.nickfedor.com/)): one service URL fans out to
+  ntfy/Discord/Gotify/… — a message per failed file and a per-scan summary. Sends run off the engine's path,
+  and a send failure is logged, never crashing the daemon or altering files. Empty URL disables it.
+- **Host-fair scheduling**: a daily `run_window` (`HH:MM-HH:MM`), a per-core `max_load` cap, and an optional
+  Tautulli-aware pause (`tautulli_url` + `tautulli_api_key`) that holds off while someone is streaming.
+  Scheduling only ever **delays** new work — it never interrupts an in-flight encode or bypasses a gate, and
+  a Tautulli outage **fails open** (never halts transcoding). **Known limitation:** Plex-aware pause needs an
+  operator-supplied Tautulli endpoint; otherwise the run-window + load cap are the fairness mechanism.
 
 ## Build
 

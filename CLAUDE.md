@@ -74,8 +74,19 @@ lives entirely in the engine. Additive, non-invasive wiring — the engine gaine
 (fire-and-forget Event on each transition, carrying reclaimed bytes on a swap) and a `Paused func() bool`
 hook checked between files (pause DELAYS work, never interrupts an in-flight encode/swap); the store
 gained read-only `List`/`Summary`. Fail-safes: bind **`127.0.0.1` by default**, a bearer token on the
-mutating endpoints (disabled entirely when unset), constant-time token compare. Next: observability +
-host-fair scheduling (`TRANSCODE-8`). The full phased plan lives in the umbrella that tracks this repo
+mutating endpoints (disabled entirely when unset), constant-time token compare. `TRANSCODE-8` (this is the
+current state) added **observability + host-fair scheduling** to `serve`: **Prometheus** metrics at
+`/metrics` (`internal/metrics` — files_total{outcome}, bytes_reclaimed_total, encode_duration + VMAF
+histograms, and a queue_depth gauge read from the store on scrape), best-effort **shoutrrr** notifications
+(`internal/notify` — per-file failure + per-scan summary, sent off the engine's path via a buffered worker
+so a slow endpoint never stalls an encode; disabled when `notify_url` is empty), and **host-fair
+scheduling** (`internal/schedule` — a daily run-window, a per-core CPU-load cap, and an optional
+Tautulli-aware pause; it only ever DELAYS new work and a Tautulli outage fails OPEN). All additive: the
+engine's single `Observer` now fans out to hub+metrics+notify (each non-blocking); the `Paused` hook now
+also consults the scheduler (throttled) so a closing run-window stops feeding NEW files without touching an
+in-flight encode; the `Event` gained `EncodeDuration` + `VmafScore` (surfaced from a now-score-returning
+`verifyOutput` — the error still governs the gate) and Done is emitted exactly once. Next: packaging +
+release (`TRANSCODE-9`). The full phased plan lives in the umbrella that tracks this repo
 (`operations/roadmaps/transcode.md`).
 
 ## Layout
@@ -92,6 +103,19 @@ host-fair scheduling (`TRANSCODE-8`). The full phased plan lives in the umbrella
   Observer is a func the engine defines and `server` supplies — no cycle).
 - `internal/webui` (TRANSCODE-7) — the single `go:embed`-ed dashboard (`index.html`, vanilla JS + inline
   CSS, no external/CDN assets) + its handler, served at `/` under a tight CSP.
+- `internal/metrics` (TRANSCODE-8) — Prometheus `client_golang` collectors on a private registry: an
+  `engine.Observer` adapter (counts terminal outcomes; records reclaimed bytes + encode-duration + VMAF on
+  the Done event) + a queue-depth collector that reads `store.Summary` at scrape time + a `/metrics`
+  handler. Read-only; a store hiccup on scrape just omits the gauge.
+- `internal/notify` (TRANSCODE-8) — best-effort shoutrrr notifications: an `engine.Observer` that tallies a
+  scan and fires a per-file-failure message + a per-scan summary. Sends run on a background worker over a
+  buffered channel (never on an engine goroutine), and a send failure is logged, never propagated — it can
+  never crash the daemon or alter file handling. Empty URL = disabled.
+- `internal/schedule` (TRANSCODE-8) — host-fair scheduling: a pure, unit-tested run-window predicate
+  (`Window.Contains`, wrap-around aware), a per-core load cap (from `/proc/loadavg`), and an optional
+  minimal Tautulli client. `MayRun`/`MayRunThrottled` answer "may new work start now?" — advisory only
+  (delays, never a gate), fail-open on a monitoring outage. No internal imports (so `config.Validate` can
+  import it to check `run_window`).
 - `internal/config` — **koanf** layered config (defaults ← YAML file ← `TRANSCODE_*` env), unknown-key
   rejection, and strict `Validate()` (refuses `/`, `$HOME`, or a symlink resolving to either; refuses when
   `$HOME` is unknown). An explicit zero in the file/env overrides a default (not clobbered). `PixelFormat`

@@ -1,6 +1,10 @@
 package engine
 
-import "github.com/NSchatz/transcode/internal/store"
+import (
+	"time"
+
+	"github.com/NSchatz/transcode/internal/store"
+)
 
 // Event is a job-state change the engine emits to an optional Observer so a
 // reporting surface (TRANSCODE-7's API/SSE) can react live. It is a NOTIFICATION
@@ -20,9 +24,17 @@ type Event struct {
 	Worker string
 	// BytesReclaimed is the space a successful swap freed (source size − output
 	// size), set ONLY on the Done event that follows an atomic swap; 0 everywhere
-	// else. A consumer sums this field, so the always-zero generic Done emit from
-	// the finish wrapper contributes nothing and never double-counts.
+	// else. Done is emitted exactly once (the rich event from ProcessFile's swap
+	// path — the store-only finish on that path does not emit), so a consumer may
+	// safely sum this field.
 	BytesReclaimed int64
+	// EncodeDuration is the wall-clock time the encoder ran, set ONLY on the Done
+	// event (0 elsewhere). Feeds the encode-duration metric histogram (TRANSCODE-8).
+	EncodeDuration time.Duration
+	// VmafScore is the measured pooled harmonic-mean VMAF of the accepted output,
+	// set on the Done event when the VMAF gate ran (0 when VMAF was disabled or the
+	// score is otherwise unavailable). Feeds the VMAF-distribution metric.
+	VmafScore float64
 }
 
 // Observer receives engine Events. It MUST be non-blocking and safe for concurrent

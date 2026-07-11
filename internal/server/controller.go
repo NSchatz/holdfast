@@ -47,6 +47,17 @@ type Controller struct {
 	// onChange is notified (best-effort, outside the lock) whenever paused/scanning
 	// changes, so the SSE hub can broadcast a fresh snapshot. nil = no listener.
 	onChange func()
+
+	// gate, when set, is an extra admission check consulted by Rescan (host-fair
+	// scheduling, TRANSCODE-8): it returns (false, reason) to refuse starting a scan
+	// now (e.g. outside the run window). nil = always admitted. It may do I/O, so it
+	// is called OUTSIDE the lock.
+	gate func() (bool, string)
+
+	// onScanStart/onScanEnd bracket each scan goroutine (TRANSCODE-8: notify's
+	// per-scan summary). Non-blocking, best-effort. nil = no hook.
+	onScanStart func()
+	onScanEnd   func()
 }
 
 // NewController builds a Controller. baseCtx bounds all scans (cancel it on
@@ -63,6 +74,22 @@ func NewController(baseCtx context.Context, scan Scanner, log *slog.Logger) *Con
 func (c *Controller) SetOnChange(fn func()) {
 	c.mu.Lock()
 	c.onChange = fn
+	c.mu.Unlock()
+}
+
+// SetGate registers the host-fair admission check (TRANSCODE-8). Set it once, before
+// serving. gate may do I/O; Rescan calls it outside the lock.
+func (c *Controller) SetGate(gate func() (bool, string)) {
+	c.mu.Lock()
+	c.gate = gate
+	c.mu.Unlock()
+}
+
+// SetScanHooks registers per-scan start/end callbacks (TRANSCODE-8). Set once,
+// before serving. Both must be non-blocking.
+func (c *Controller) SetScanHooks(onStart, onEnd func()) {
+	c.mu.Lock()
+	c.onScanStart, c.onScanEnd = onStart, onEnd
 	c.mu.Unlock()
 }
 
@@ -125,6 +152,18 @@ func (c *Controller) Resume() {
 // keeps two scans from double-claiming — though the store's Claim is the actual
 // mutual-exclusion guard, so an overlap would be safe regardless.
 func (c *Controller) Rescan() (started bool, reason string) {
+	// Host-fair admission check first (TRANSCODE-8) — it may do I/O, so it runs
+	// outside the lock. Refusing here only DELAYS work; it never bypasses a gate.
+	c.mu.Lock()
+	gate := c.gate
+	onStart, onEnd := c.onScanStart, c.onScanEnd
+	c.mu.Unlock()
+	if gate != nil {
+		if ok, why := gate(); !ok {
+			return false, why
+		}
+	}
+
 	c.mu.Lock()
 	switch {
 	case c.paused:
@@ -141,6 +180,9 @@ func (c *Controller) Rescan() (started bool, reason string) {
 
 	go func() {
 		defer c.wg.Done()
+		if onStart != nil {
+			onStart()
+		}
 		c.log.Info("scan started")
 		if err := c.scan(c.baseCtx); err != nil && c.baseCtx.Err() == nil {
 			// A cancelled baseCtx (shutdown) is expected and already handled by the
@@ -150,6 +192,9 @@ func (c *Controller) Rescan() (started bool, reason string) {
 		c.mu.Lock()
 		c.scanning = false
 		c.mu.Unlock()
+		if onEnd != nil {
+			onEnd()
+		}
 		c.log.Info("scan finished")
 		c.notify() // scanning -> false
 	}()

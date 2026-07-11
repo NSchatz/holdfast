@@ -148,5 +148,23 @@ dry_run: false
 #                              #   variable TRANSCODE_SERVER_AUTH_TOKEN so no secret
 #                              #   lands in this file.
 # scan_interval_sec: 0         # 0 = scan once on startup + on demand (via the API).
-#                              #   >0 = also re-scan every N seconds. (Host-fair
-#                              #   scheduling — run-windows, CPU caps — is a later phase.)
+#                              #   >0 = also re-scan every N seconds.
+
+# --- observability + host-fair scheduling (`transcode serve`) ---
+# metrics_enable: true         # expose Prometheus metrics at /metrics (read-only
+#                              #   instrumentation; best-effort, never affects files)
+# notify_url: ""               # a shoutrrr service URL for best-effort notifications
+#                              #   (per-file failure + per-scan summary), e.g.
+#                              #   ntfy://ntfy.sh/mytopic or a Discord/Gotify URL.
+#                              #   Empty disables. May carry a secret — prefer the env
+#                              #   var TRANSCODE_NOTIFY_URL over this file.
+# run_window: ""               # daily host-fair window "HH:MM-HH:MM" (local time)
+#                              #   during which new work may start; empty = always.
+#                              #   Outside it, serve stops feeding NEW files (an
+#                              #   in-flight encode always finishes) — it only DELAYS.
+# max_load: 0                  # per-core 1-min load-average cap; while the host is
+#                              #   above it, stop feeding new files. 0 disables.
+# tautulli_url: ""             # optional Plex-aware pause: while Tautulli reports an
+# tautulli_api_key: ""         #   active stream, stop feeding new files. Both required
+#                              #   to enable; a Tautulli outage fails OPEN (never halts
+#                              #   transcoding). Prefer env vars for the API key.

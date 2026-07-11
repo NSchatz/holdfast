@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/NSchatz/transcode/internal/config"
 	"github.com/NSchatz/transcode/internal/encoder"
@@ -419,6 +420,10 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	e.Log.Info("transcode", "file", f, "codec", codec, "-> ", e.targetCodec, "worker", worker)
 	e.advance(ctx, f, key, store.Encoding)
 
+	// Time the encode purely for the metrics histogram (TRANSCODE-8). This is a
+	// measurement only — it wraps nothing but time.Since around the existing call and
+	// changes no behaviour on any path.
+	encStart := time.Now()
 	if err := e.Enc.Encode(ctx, f, tmp); err != nil {
 		if ctx.Err() != nil { // interrupted: discard temp, DON'T finish — leave active for RecoverStale
 			_ = os.Remove(tmp)
@@ -429,9 +434,11 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		e.finish(ctx, f, key, store.Failed)
 		return nil
 	}
+	encodeDur := time.Since(encStart)
 
 	e.advance(ctx, f, key, store.Verifying)
-	if reason := e.verifyOutput(ctx, f, tmp); reason != nil {
+	vmafScore, reason := e.verifyOutput(ctx, f, tmp)
+	if reason != nil {
 		if ctx.Err() != nil {
 			_ = os.Remove(tmp)
 			return ctx.Err()
@@ -478,8 +485,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	if reclaimed < 0 {
 		reclaimed = 0 // defensive: the strictly-smaller gate should preclude this
 	}
-	e.Log.Info("DONE", "file", final, "bytes", newSize, "reclaimed", reclaimed)
-	e.emit(Event{Path: final, Status: store.Done, Worker: worker, BytesReclaimed: reclaimed})
+	e.Log.Info("DONE", "file", final, "bytes", newSize, "reclaimed", reclaimed,
+		"encode_ms", encodeDur.Milliseconds(), "vmaf", vmafScore)
 	// The done row is keyed under the FINAL file's own path+fingerprint (mirroring
 	// the pre-TRANSCODE-5 ledger behaviour) so a resume short-circuits on the new
 	// file's identity, not the pre-swap source's. The post-swap fingerprint (new
@@ -491,7 +498,20 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	if _, err := e.Store.Claim(ctx, final, finalKey, worker, e.Cfg.MaxFailures); err != nil {
 		e.Log.Warn("claim of final key failed (done outcome still applies on disk)", "file", final, "err", err)
 	}
-	e.finish(ctx, final, finalKey, store.Done)
+	// Record the terminal Done state in the store WITHOUT emitting (finishStore), then
+	// emit ONE rich Done event carrying the reclaimed bytes, encode duration, and VMAF
+	// score. Emitting exactly once here (rather than a generic finish emit plus a
+	// separate byte emit) keeps a metrics consumer's per-outcome counters from
+	// double-counting done.
+	e.finishStore(ctx, final, finalKey, store.Done)
+	e.emit(Event{
+		Path:           final,
+		Status:         store.Done,
+		Worker:         worker,
+		BytesReclaimed: reclaimed,
+		EncodeDuration: encodeDur,
+		VmafScore:      vmafScore,
+	})
 	// Prune the superseded pre-swap row (the source's old identity), so the table
 	// doesn't accumulate one dangling row per transcoded file. The swap always
 	// changes the file's size/mtime, so (f,key) is never the same row as the fresh
@@ -515,11 +535,20 @@ func (e *Engine) advance(ctx context.Context, path, key string, s store.Status) 
 	e.emit(Event{Path: path, Status: s})
 }
 
-// finish is a small logged wrapper around Store.Finish.
-func (e *Engine) finish(ctx context.Context, path, key string, s store.Status) {
+// finishStore records a terminal outcome in the store WITHOUT emitting an event.
+// The Done swap path uses this (then emits one rich Done event itself); every other
+// terminal path uses finish, which emits a generic event.
+func (e *Engine) finishStore(ctx context.Context, path, key string, s store.Status) {
 	if err := e.Store.Finish(ctx, path, key, s); err != nil {
 		e.Log.Warn("store finish failed", "file", path, "status", s, "err", err)
 	}
+}
+
+// finish records a terminal outcome AND emits a generic event for it — used for the
+// skipped/failed terminal transitions (the Done swap path uses finishStore + its own
+// rich emit, so Done is emitted exactly once).
+func (e *Engine) finish(ctx context.Context, path, key string, s store.Status) {
+	e.finishStore(ctx, path, key, s)
 	e.emit(Event{Path: path, Status: s})
 }
 
