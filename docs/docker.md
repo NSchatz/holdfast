@@ -98,18 +98,7 @@ Only needed if `config.yaml` sets a hardware `encoder:`. Hardware encoders are a
 which stays the archival default. The output is held to the **identical** no-loss gate either
 way, so a bad hardware encode is rejected rather than shipped.
 
-**Intel Quick Sync (`qsv`) / VAAPI (`vaapi`)** — pass the render node, and put the container's
-user in the host's `render` group (the device being present but unopenable is the usual
-failure):
-
-```yaml
-devices:
-  - /dev/dri:/dev/dri
-group_add:
-  - "993"     # the HOST's render gid — check: getent group render
-```
-
-**NVIDIA (`nvenc`, `av1_nvenc`)** — needs the [NVIDIA Container
+**NVIDIA (`nvenc`, `av1_nvenc`) — supported.** Needs the [NVIDIA Container
 Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/) on the host:
 
 ```yaml
@@ -122,8 +111,22 @@ deploy:
           capabilities: [gpu]
 ```
 
-The bundled ffmpeg is dynamically linked against glibc precisely so it can `dlopen` the vendor
-libraries these need (a fully-static ffmpeg could not).
+This works because the NVIDIA toolkit **injects the driver libraries** (`libnvidia-encode`) into
+the container, and the bundled ffmpeg is dynamically linked against glibc precisely so it can
+`dlopen` them (a fully-static ffmpeg could not).
+
+**Intel Quick Sync (`qsv`), VAAPI (`vaapi`), AMD (`amf`) — NOT supported by this image.** Be clear
+about why, because the failure is otherwise baffling: ffmpeg *is* built with `--enable-vaapi` and
+`--enable-libvpl`, but a VA-API encode needs a **userspace driver** (`iHD_drv_video.so` and
+friends) inside the container, and passing `/dev/dri` supplies only the *kernel* device node.
+Nothing injects the driver the way the NVIDIA toolkit does, and the distroless base has no package
+manager to install one. So `encoder: qsv` in this image fails its startup capability check and
+exits non-zero — loudly, never silently falling back to CPU, but it does not work.
+
+If you need QSV/VAAPI: run the binary on the host with your distro's ffmpeg (built with libvmaf),
+or build your own image on a base that carries the VA driver stack and copy the `transcode` binary
+into it. Note the fixture suite is gated against the pinned ffmpeg, so a different ffmpeg is a
+different measuring instrument.
 
 **There is no silent fallback.** If the configured encoder cannot actually encode on this host,
 `transcode` fails loud at startup and exits non-zero. The capability check really encodes a
@@ -144,11 +147,13 @@ behind. Run it against any image you are about to trust.
 
 ## Known limitations
 
+- **Only NVIDIA hardware encoding works in this image.** `qsv` / `vaapi` / `amf` need a VA-API
+  userspace driver the image does not carry — see "GPU passthrough" above for why and what to do
+  instead. `cpu` (libx265, the archival default) and `svtav1` need no device at all.
 - **arm64 is built and its ffmpeg is checksum-verified, but CI only runs the full encode smoke
   test on amd64** — the arm64 image is exercised under QEMU far enough to prove it *executes*
   (binary, glibc, bundled ffmpeg), which is what a cross-built image gets wrong. A real arm64
   encode has not been timed on real hardware; an SBC will be slow with libx265.
 - **No shell in the image.** `docker exec ... sh` will not work. To poke at the bundled ffmpeg:
   `docker run --rm --entrypoint /usr/local/bin/ffmpeg ghcr.io/nschatz/transcode:latest -version`.
-- Hardware encoders need the host's drivers and devices; the image cannot supply those.
 - The image is **private until the repository is** — GHCR package visibility follows the repo.

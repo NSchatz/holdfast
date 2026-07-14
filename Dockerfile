@@ -17,7 +17,12 @@
 
 ARG GO_IMAGE=golang:1.25.12-bookworm@sha256:a9c020ee3d1508c7be5435c262434e3d3fc1d0e76a11afeb9ddae7d60bc86aa4
 ARG FETCH_IMAGE=debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
-ARG RUNTIME_IMAGE=gcr.io/distroless/base-debian12:nonroot@sha256:4b5196599229a5cf312a676cfe1ee8587ecf2371dcc22620f8c7a66d77d125c8
+# distroless CC, not BASE. ffmpeg/ffprobe carry a DT_NEEDED on libgcc_s.so.1, and the
+# `base` variant ships glibc WITHOUT libgcc — so `base` builds perfectly and then dies
+# at the dynamic loader the first time the engine execs ffmpeg ("libgcc_s.so.1: cannot
+# open shared object file"). `cc` is `base` + libgcc_s + libstdc++, still no shell, still
+# nonroot. Verified against the registry: base ships libc/libm/libmvec and no libgcc.
+ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot@sha256:ce0d66bc0f64aae46e6a03add867b07f42cc7b8799c949c2e898057b7f75a151
 
 # --- ffmpeg: a pinned static build, verified by hash before it is trusted -----
 # BtbN's builds link only glibc (>= 2.28), so they run on the distroless runtime while
@@ -74,8 +79,16 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -o /out/transcode ./cmd/transcode
 
 # --- runtime -----------------------------------------------------------------
-# distroless: glibc + ca-certificates, no shell, no package manager, non-root by
-# default. Nothing RUNs in this stage, so it cross-builds without emulation.
+# distroless cc: glibc + libgcc_s + ca-certificates, no shell, no package manager,
+# non-root by default. Nothing RUNs in this stage, so it cross-builds without emulation.
+#
+# NOTE what this base deliberately does NOT carry: the VA-API userspace driver stack
+# (libva's iHD/i965 .so, mesa). ffmpeg is built --enable-vaapi/--enable-libvpl and
+# dlopens the driver at runtime, and passing /dev/dri only supplies the KERNEL device —
+# nothing injects the driver. So `encoder: qsv|vaapi|amf` cannot start in this image.
+# NVIDIA is different and does work: the NVIDIA Container Toolkit injects
+# libnvidia-encode into the container, which is exactly what nvenc dlopens. See
+# docs/docker.md "GPU passthrough" — this is a documented limitation, not an oversight.
 FROM ${RUNTIME_IMAGE}
 
 ARG VERSION=0.0.0-dev

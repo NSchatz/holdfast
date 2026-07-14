@@ -65,15 +65,10 @@ jobs:
           prerelease=false
           case "$version" in *-*) prerelease=true ;; esac
 
-          # printf, not an embedded newline: this is inside an indented YAML block, so a
-          # literal line break would carry the indentation into the tag.
-          tags="$image:$version"
-          if [ "$publish" = true ] && [ "$prerelease" = false ]; then
-            tags="$(printf '%s\n%s' "$tags" "$image:latest")"
-          fi
           # NOTE the remaining footgun: a BACKPORT tag (v1.2.4 cut after v2.0.0) is not a
-          # pre-release, so it would still move `:latest` backwards. Cut backports from a
-          # maintenance branch and accept that, or gate this on a version comparison.
+          # pre-release, so promoting it would still move `:latest` backwards. Cut
+          # backports from a maintenance branch and accept that, or gate the promotion
+          # below on a version comparison.
 
           {
             echo "publish=$publish"
@@ -81,9 +76,6 @@ jobs:
             echo "image=$image"
             echo "date=$date"
             echo "prerelease=$prerelease"
-            echo "tags<<__TAGS__"
-            echo "$tags"
-            echo "__TAGS__"
           } >> "$GITHUB_OUTPUT"
           echo "publish=$publish  version=$version  prerelease=$prerelease  image=$image  date=$date"
 
@@ -93,9 +85,22 @@ jobs:
           check-latest: false
 
       # A release re-gates itself rather than trusting that CI ran on this commit — a tag
-      # can point at anything. A known-vulnerable binary must not be the thing we ship.
-      - name: govulncheck (pinned)
-        run: go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" ./...
+      # can point at ANY commit, including one CI never ran on or one CI failed on, and
+      # ci.yml does not trigger on tags. So run the repo's whole gate here, not a token
+      # slice of it: `make check` is gofmt + vet + build + `go test -race` (which is the
+      # real-ffmpeg fixture suite — the data-safety proof) + staticcheck + govulncheck.
+      # A release whose only gate was govulncheck would happily publish an image whose
+      # verify/swap logic is red. "Zero runs is not a pass, it is an unknown."
+      - name: install ffmpeg (the pin the image ships) — the fixture suite needs it
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /opt/ffmpeg
+          sudo chown "$USER" /opt/ffmpeg
+          ./scripts/install-ffmpeg.sh /opt/ffmpeg
+          echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
+
+      - name: the full gate (make check)
+        run: make check
 
       # QEMU is only needed to EXECUTE the arm64 image; building it cross-compiles.
       - uses: docker/setup-qemu-action@v3
@@ -143,6 +148,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
+          # The licence text travels INSIDE each archive. transcode is AGPL-3.0-only, so
+          # a tarball carrying the binary and nothing else distributes it with no licence
+          # at all — which is the gap the NOTICE file was added to close, and it does not
+          # close it by sitting next to the tarball in a CI artifact that expires.
+          cp LICENSE NOTICE dist/
           for target in linux/amd64 linux/arm64; do
             os="${target%/*}"; arch="${target#*/}"
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
@@ -151,11 +161,12 @@ jobs:
                 -X github.com/NSchatz/transcode/internal/version.Commit=${GITHUB_SHA} \
                 -X github.com/NSchatz/transcode/internal/version.Date=${DATE}" \
               -o dist/transcode ./cmd/transcode
-            tar -C dist -czf "dist/transcode_${VERSION}_${os}_${arch}.tar.gz" transcode
+            tar -C dist -czf "dist/transcode_${VERSION}_${os}_${arch}.tar.gz" \
+              transcode LICENSE NOTICE
             rm dist/transcode
           done
-          cp LICENSE NOTICE dist/
           ( cd dist && sha256sum ./*.tar.gz > SHA256SUMS )
+          tar -tzf "dist/transcode_${VERSION}_linux_amd64.tar.gz"
           ls -l dist
 
       # Uploaded even on a dry run, so "the release is green" is inspectable rather than
@@ -180,32 +191,55 @@ jobs:
       # locally. The inputs are identical and ffmpeg is sha-pinned, so it is equivalent
       # — but "equivalent" is not "the same artifact", and this repo does not accept a
       # gate by equivalence. So we pull the pushed image back and smoke it below.
-      - name: push the multi-arch image
+      #
+      # ONLY the version tag is pushed here. `:latest` is NOT — because a tag push is
+      # immediately pullable, and if the gate below then reds, `:latest` would already be
+      # pointing at an image that failed it, for every user running `docker compose pull`.
+      # `:latest` is promoted only AFTER the pushed artifact passes, further down.
+      - name: push the multi-arch image (version tag only)
         if: steps.plan.outputs.publish == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.plan.outputs.tags }}
+          tags: ${{ steps.plan.outputs.image }}:${{ steps.plan.outputs.version }}
           build-args: |
             VERSION=${{ steps.plan.outputs.version }}
             COMMIT=${{ github.sha }}
             DATE=${{ steps.plan.outputs.date }}
           cache-from: type=gha
 
-      # The gate on the ARTIFACT, not on a local build of it: pull what was actually
-      # pushed and drive a real encode through it. If the rebuild diverged, this reds
-      # BEFORE the GitHub release exists.
-      - name: smoke test the PUSHED image
+      # The gate on the ARTIFACT, not on a local build of it: pull back what was actually
+      # pushed, for BOTH architectures of the manifest, and drive a real encode through
+      # the native one. An unqualified `docker pull` resolves only the runner's own arch,
+      # so the arm64 half would otherwise ship having been gated only as a local build —
+      # the exact gate-by-equivalence this step exists to reject.
+      - name: smoke test the PUSHED image (both arches)
         if: steps.plan.outputs.publish == 'true'
         env:
           REF: ${{ steps.plan.outputs.image }}:${{ steps.plan.outputs.version }}
         run: |
           set -euo pipefail
           docker image rm -f "$REF" >/dev/null 2>&1 || true   # never smoke a local leftover
-          docker pull "$REF"
+          docker pull --platform linux/amd64 "$REF"
           ./scripts/smoke-image.sh "$REF"
+
+          docker pull --platform linux/arm64 "$REF"
+          ./scripts/smoke-image.sh "$REF" linux/arm64 --no-encode
+
+      # Now, and only now, does `:latest` move — onto the exact digest that just passed.
+      # imagetools retags the existing manifest; it does not rebuild, so `:latest` and
+      # `:<version>` are the same bytes, not two builds that ought to agree.
+      - name: promote :latest to the gated image
+        if: steps.plan.outputs.publish == 'true' && steps.plan.outputs.prerelease == 'false'
+        env:
+          IMAGE: ${{ steps.plan.outputs.image }}
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create -t "${IMAGE}:latest" "${IMAGE}:${VERSION}"
+          docker buildx imagetools inspect "${IMAGE}:latest" | head -20
 
       - name: cut the GitHub release
         if: steps.plan.outputs.publish == 'true'

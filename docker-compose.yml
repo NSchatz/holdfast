@@ -30,13 +30,18 @@ services:
     environment:
       # `run_window` is evaluated in LOCAL time. Without this the container is UTC and
       # your "encode overnight" window silently runs at the wrong hours.
-      TZ: Etc/UTC
+      - TZ=Etc/UTC
       # The bearer token for the MUTATING endpoints (rescan/pause/resume). Put it in a
       # .env file next to this one; leave it unset and those endpoints stay DISABLED
       # (the read-only API and the dashboard still work).
-      # Set it HERE, not in config.yaml: an env var beats the file, so an empty value
-      # here would override a token set there.
-      TRANSCODE_SERVER_AUTH_TOKEN: ${TRANSCODE_SERVER_AUTH_TOKEN:-}
+      #
+      # This is the PASS-THROUGH form (a bare name, no `=`) on purpose. Writing
+      # `TRANSCODE_SERVER_AUTH_TOKEN=${TRANSCODE_SERVER_AUTH_TOKEN:-}` would always SET
+      # the variable — to "" when you have no .env — and an env var BEATS the YAML file,
+      # so it would silently wipe a token you had configured in config.yaml and leave
+      # rescan/pause/resume returning 403 for no visible reason. The bare form passes the
+      # variable only when it is actually set, so config.yaml keeps working.
+      - TRANSCODE_SERVER_AUTH_TOKEN
 
     volumes:
       # The config. Read-only: transcode never writes it.
@@ -82,15 +87,8 @@ services:
     # is held to the identical no-loss gate either way, so a bad hardware encode is
     # rejected rather than shipped — but the right default is still cpu.
     #
-    # Intel Quick Sync (encoder: qsv) or VAAPI (encoder: vaapi):
-    # devices:
-    #   - /dev/dri:/dev/dri
-    # ...and `user:` above must be in the `render` group of the HOST (add its gid to
-    # group_add), or /dev/dri is present but unopenable:
-    # group_add:
-    #   - "993"   # the host's `render` group id — check with: getent group render
-    #
-    # NVIDIA (encoder: nvenc / av1_nvenc) — needs the NVIDIA Container Toolkit:
+    # NVIDIA (encoder: nvenc / av1_nvenc) — needs the NVIDIA Container Toolkit, which
+    # INJECTS the driver libraries ffmpeg dlopens. This is the supported GPU path:
     # deploy:
     #   resources:
     #     reservations:
@@ -98,6 +96,12 @@ services:
     #         - driver: nvidia
     #           count: 1
     #           capabilities: [gpu]
+    #
+    # Intel Quick Sync (qsv), VAAPI (vaapi) and AMD (amf) do NOT work in this image, and
+    # /dev/dri passthrough does not change that: a VA-API encode needs a userspace DRIVER
+    # inside the container, /dev/dri is only the kernel device, and nothing injects the
+    # driver the way the NVIDIA toolkit does. See docs/docker.md — it is a documented
+    # limitation with a workaround, not an oversight.
     #
     # There is no silent fallback: if the configured encoder cannot actually encode on
     # this host, transcode fails loud at startup and exits non-zero. That check really

@@ -90,16 +90,28 @@ the current state) is **packaging + release + migration**: a production **multi-
 **non-root**, **distroless** image bundling ffmpeg **pinned by release tag AND verified by SHA-256** — the
 same build CI runs the fixture safety proof against, so the image ships the ffmpeg that was actually proven
 (note an ffmpeg lacking libvmaf would not silently weaken the gate, it would STOP the tool: an unmeasured
-output is rejected, never accepted). Every stage that RUNs anything is pinned to `$BUILDPLATFORM` and the
-binary cross-compiles (`CGO_ENABLED=0`, pure-Go SQLite), so the arm64 image needs no QEMU. The image bakes
-**no `TRANSCODE_*` env vars**, deliberately: env BEATS the YAML file, so a baked default would silently
-override the user's config-as-code — and for `server_addr` it would quietly widen the 127.0.0.1 fail-safe.
+output is rejected, never accepted). The pin lives in the **Dockerfile's `FFMPEG_*` ARGs and nowhere else**:
+`scripts/install-ffmpeg.sh` PARSES them, and CI/release call it, because a pin duplicated into a workflow
+and held in step by a comment is not a pin — both files would stay internally consistent while the proof
+silently detached from the artifact. The runtime base is distroless **`cc`**, not `base`: ffmpeg carries a
+`DT_NEEDED` on **`libgcc_s.so.1`**, which `base` does not ship, so `base` builds perfectly and then dies at
+the dynamic loader the first time the engine execs ffmpeg. Every stage that RUNs anything is pinned to
+`$BUILDPLATFORM` and the binary cross-compiles (`CGO_ENABLED=0`, pure-Go SQLite), so the arm64 image needs
+no QEMU. The image bakes **no `TRANSCODE_*` env vars**, deliberately: env BEATS the YAML file, so a baked
+default would silently override the user's config-as-code — and for `server_addr` it would quietly widen the
+127.0.0.1 fail-safe. **Only NVIDIA hardware encoding works in the image** (the NVIDIA toolkit injects the
+libs ffmpeg dlopens); `qsv`/`vaapi`/`amf` need a VA-API userspace driver a distroless image cannot carry —
+`/dev/dri` is only the kernel device — so they are a documented limitation, not a supported path.
 `scripts/smoke-image.sh` is the packaging gate, and it is the SHARED unit: `ci.yml`'s `package` job runs it
-on every PR, and `release.yml` runs the same script — before it pushes, and then AGAIN against the image it
-pulls back from the registry. That second run is not belt-and-braces: buildx cannot push a multi-arch
-manifest it only loaded locally, so the push is a cache REBUILD, and "equivalent inputs" is a gate by
-equivalence, which this repo does not accept. Smoking the pulled artifact gates the thing that actually
-ships, and it reds before the GitHub release exists. (The gate is a script, not a workflow, precisely so a
+on every PR, and `release.yml` runs the same script — before it pushes, and then AGAIN against **both arches
+of** the image it pulls back from the registry. That second run is not belt-and-braces: buildx cannot push a
+multi-arch manifest it only loaded locally, so the push is a cache REBUILD, and "equivalent inputs" is a
+gate by equivalence, which this repo does not accept. Note the ordering, which is load-bearing: the push
+publishes the **version tag only**, and **`:latest` is promoted (by `imagetools`, same digest, no rebuild)
+only after the pushed artifact passes** — push `:latest` first and a failing gate has already handed every
+`docker compose pull` user an image it just rejected. A release also runs the **full** `make check`, not
+just govulncheck: `ci.yml` does not trigger on tags, a tag can point at any commit, and a release gated only
+on a vuln scan would happily publish an image whose verify/swap logic is red. (The gate is a script, not a workflow, precisely so a
 human can run it too: `make image-smoke`.) It does not check that the image *built* — that proves nothing
 about the engine; it drives a REAL oneshot encode inside the container and asserts the source was replaced
 by a smaller HEVC file with no temp left behind. Its fixture is CBR-padded on purpose: x264 ABR does not
@@ -186,16 +198,18 @@ in the umbrella that tracks this repo (`operations/roadmaps/transcode.md`).
   workers each hold at most one temp at a time). **This is the risk-critical heart — do not weaken the
   invariant.**
 - `internal/logging`, `internal/version` — logger construction, build-stamped version.
-- `.github/workflows/ci.yml` — the gate (installs the PINNED, checksum-verified ffmpeg for the engine
-  proof; its `FFMPEG_*` env must stay in step with the Dockerfile's, or CI stops gating the ffmpeg we
-  actually ship) + a `package` job (TRANSCODE-9) that builds BOTH arches and runs the image smoke gate.
-  `.github/workflows/release.yml` (TRANSCODE-9) — tag-triggered: re-gates with govulncheck, builds both
-  arches, runs the SAME smoke script, then pushes the image and cuts the release. Publishing happens on a
-  **tag push only**; `workflow_dispatch` is always a dry run.
-- `Dockerfile` (TRANSCODE-9) — the production image (multi-arch, distroless, non-root, pinned ffmpeg).
-  `docker-compose.yml` — the example deployment. `scripts/smoke-image.sh` — the packaging gate: a real
-  encode inside the built image, asserting the no-loss contract. `NOTICE` — the image redistributes GPL
-  ffmpeg binaries, so it carries their licence and source offer.
+- `.github/workflows/ci.yml` — the gate (installs the pinned ffmpeg via `scripts/install-ffmpeg.sh` for the
+  engine proof) + a `package` job (TRANSCODE-9) that builds BOTH arches and runs the image smoke gate.
+  `.github/workflows/release.yml` (TRANSCODE-9) — tag-triggered: runs the full `make check`, builds both
+  arches, smokes them, pushes the version tag, re-smokes what it pulled back, and only then promotes
+  `:latest` and cuts the release. Publishing happens on a **tag push only**; `workflow_dispatch` is always
+  a dry run.
+- `Dockerfile` (TRANSCODE-9) — the production image (multi-arch, distroless `cc`, non-root, pinned ffmpeg);
+  its `FFMPEG_*` ARGs are the single source of truth for the pin. `scripts/install-ffmpeg.sh` — installs
+  exactly that pin by parsing them (CI + release + local dev all use it). `docker-compose.yml` — the example
+  deployment. `scripts/smoke-image.sh` — the packaging gate: a real encode inside the image, asserting the
+  no-loss contract. `NOTICE` — the image redistributes GPL ffmpeg binaries, so it carries their licence and
+  source offer.
 
 ## Build / test / gate
 

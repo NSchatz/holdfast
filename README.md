@@ -51,8 +51,17 @@ rejected rather than accepted, so the right ffmpeg is not a convenience:
 
 ```bash
 mkdir -p state && sudo chown 1000:1000 state   # must be writable by the user: in the compose file
-cp config.example.yaml config.yaml             # edit library_roots -> your CONTAINER media path
+cp config.example.yaml config.yaml             # then edit the three container keys below
 docker compose config -q && docker compose up -d
+```
+
+A container config differs from a bare-metal one in exactly three places — miss the third and the
+dashboard is unreachable from the host (the API would be bound to the *container's* loopback):
+
+```yaml
+library_roots: [/media]     # the CONTAINER path your library is mounted at
+state_dir: /state           # the mounted volume — it must survive restarts
+server_addr: 0.0.0.0:8080   # compose publishes it on 127.0.0.1 only
 ```
 
 See **[docs/docker.md](docs/docker.md)** for volumes, permissions, timezone, GPU passthrough and the

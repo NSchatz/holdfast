@@ -20,12 +20,6 @@ env:
   GO_VERSION: "1.25.12"
   STATICCHECK_VERSION: "2025.1.1"
   GOVULNCHECK_VERSION: "v1.1.4"
-  # The ffmpeg the safety proof runs against. MUST stay in step with the Dockerfile's
-  # FFMPEG_* args: the image ships this exact build, so CI has to be gating the ffmpeg
-  # we actually ship, not merely a similar one.
-  FFMPEG_BUILD: "autobuild-2026-07-13-14-11"
-  FFMPEG_VERSION: "N-125573-g90436de5e1"
-  FFMPEG_SHA256: "d7c3084807d14c868eface59617107ec29a8ae729413d7c133d1bcf6ffe39f01"
 
 jobs:
   build:
@@ -72,25 +66,18 @@ jobs:
       # false green). Ubuntu's apt ffmpeg does NOT ship libvmaf, so install the static
       # build that carries libx265 + libvmaf.
       #
-      # PINNED BY TAG AND VERIFIED BY HASH — not the rolling `latest` release. VMAF is
-      # the gate that catches an encode which decodes fine but LOOKS worse, so the
-      # measuring instrument moving underneath the proof is not a cosmetic concern: it
-      # is the proof drifting. This is the same build the Dockerfile bundles.
-      - name: install ffmpeg (pinned; libx265 + libvmaf)
+      # The pin is READ OUT OF THE DOCKERFILE, never restated here. VMAF is the gate that
+      # catches an encode which decodes fine but LOOKS worse, so the measuring instrument
+      # drifting away from the one in the shipped image is not cosmetic — it is the proof
+      # detaching from the artifact. Duplicating the pin and asking the next person to
+      # keep the two in step is not a pin; parsing it is.
+      - name: install ffmpeg (the pin the image ships; libx265 + libvmaf)
         run: |
           set -euo pipefail
-          tarball="ffmpeg-${FFMPEG_VERSION}-linux64-gpl.tar.xz"
-          curl -fsSL -o /tmp/ffmpeg.tar.xz \
-            "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD}/${tarball}"
-          echo "${FFMPEG_SHA256}  /tmp/ffmpeg.tar.xz" | sha256sum -c -
           sudo mkdir -p /opt/ffmpeg
-          sudo tar -C /opt/ffmpeg --strip-components=1 -xf /tmp/ffmpeg.tar.xz
+          sudo chown "$USER" /opt/ffmpeg
+          ./scripts/install-ffmpeg.sh /opt/ffmpeg
           echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
-          /opt/ffmpeg/bin/ffmpeg -hide_banner -filters | grep -q libvmaf \
-            || { echo "::error::the installed ffmpeg lacks libvmaf"; exit 1; }
-          /opt/ffmpeg/bin/ffmpeg -hide_banner -encoders | grep -q libx265 \
-            || { echo "::error::the installed ffmpeg lacks libx265"; exit 1; }
-          echo "ffmpeg ${FFMPEG_VERSION} (libx265 + libvmaf) installed, checksum verified"
 
       - name: go test (race + coverage)
         run: go test -race -covermode=atomic ./...

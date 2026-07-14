@@ -24,9 +24,22 @@
 # not a smoke test.
 set -euo pipefail
 
-IMAGE="${1:?usage: smoke-image.sh <image-ref> [platform] [--no-encode]}"
-PLATFORM="${2:-}"
-MODE="${3:-}"
+IMAGE=""
+PLATFORM=""
+MODE=""
+# --no-encode is parsed as a FLAG, in any position. Binding it positionally means the
+# obvious `smoke-image.sh transcode:dev --no-encode` silently becomes
+# `docker run --platform --no-encode`, and this script is advertised as the gate a human
+# runs by hand.
+for arg in "$@"; do
+  case "$arg" in
+    --no-encode) MODE=--no-encode ;;
+    -*) echo "unknown flag: $arg" >&2
+        echo "usage: smoke-image.sh <image-ref> [platform] [--no-encode]" >&2; exit 2 ;;
+    *)  if [ -z "$IMAGE" ]; then IMAGE="$arg"; else PLATFORM="$arg"; fi ;;
+  esac
+done
+[ -n "$IMAGE" ] || { echo "usage: smoke-image.sh <image-ref> [platform] [--no-encode]" >&2; exit 2; }
 
 PLATFORM_ARGS=()
 [ -n "$PLATFORM" ] && PLATFORM_ARGS=(--platform "$PLATFORM")
