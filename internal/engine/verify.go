@@ -100,10 +100,26 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (float64, err
 }
 
 // vmafGate measures the output (distorted) against the source (reference) and
-// rejects an encode whose pooled harmonic-mean VMAF is below MinVmaf, or (when
-// VmafMinPool > 0) whose worst-frame VMAF is below that floor. It returns the
-// measured harmonic-mean (informational, for metrics) alongside the gate error; the
-// score is only meaningful when the error is nil.
+// rejects an encode on EITHER of two independent conditions:
+//
+//  1. pooled harmonic mean < MinVmaf — the average is too low; and
+//  2. worst (sub)sampled frame < VmafMinPool — some part of the output collapsed,
+//     however good the average is.
+//
+// Both are needed, and (2) is the one that closes the real hole. The mean is an
+// average, so it hides local damage — Netflix documents exactly this ("mean pooling
+// has the risk of hiding poor quality frames"). Measured on real libvmaf: an encode
+// with 4 of 240 frames destroyed to VMAF ~43 pools to a harmonic mean of ~97.5 and
+// sails through (1). Every structural gate passes it too: a degraded segment still
+// decodes cleanly and still carries the right duration, packets and stream counts.
+// The source would then be atomically swapped and DELETED. Only (2) sees it.
+//
+// TestVmaf_MeanOnlyGateIsBlindToLocalDamage asserts precisely that (the mean-only
+// gate ACCEPTS it), which is what makes TestVmaf_WorstFrameFloorRejectsLocally-
+// BrokenEncode meaningful rather than vacuous.
+//
+// It returns the measured harmonic-mean (informational, for metrics) alongside the
+// gate error; the score is only meaningful when the error is nil.
 func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (float64, error) {
 	model := resolveVmafModel(e.Cfg.VmafModel, e.Probe.Height(ctx, distorted))
 
@@ -124,8 +140,14 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (flo
 	if res.HarmonicMean < e.Cfg.MinVmaf {
 		return res.HarmonicMean, fmt.Errorf("VMAF below threshold (harmonic_mean=%.2f < min_vmaf=%.2f)", res.HarmonicMean, e.Cfg.MinVmaf)
 	}
+	// The worst-frame floor. On by default (vmaf_min_pool=60): a locally-broken
+	// encode is invisible to the mean above and to every structural check, so this
+	// is the only gate standing between it and the deletion of the source.
 	if e.Cfg.VmafMinPool > 0 && res.Min < e.Cfg.VmafMinPool {
-		return res.HarmonicMean, fmt.Errorf("VMAF worst-frame below floor (min=%.2f < vmaf_min_pool=%.2f)", res.Min, e.Cfg.VmafMinPool)
+		return res.HarmonicMean, fmt.Errorf(
+			"VMAF worst-frame below floor (min=%.2f < vmaf_min_pool=%.2f) — the encode is locally broken: "+
+				"its average is fine (harmonic_mean=%.2f) but at least one frame collapsed, so the source is kept",
+			res.Min, e.Cfg.VmafMinPool, res.HarmonicMean)
 	}
 	return res.HarmonicMean, nil
 }

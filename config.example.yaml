@@ -126,11 +126,38 @@ dry_run: false
 # REJECTS an encode that decodes fine but looks worse. When enabled and libvmaf is
 # unavailable (or the measurement fails), the encode is rejected — never accept an
 # unmeasured output. VMAF is a second full decode; raise vmaf_subsample on big libraries.
+#
+# THE GATE IS TWO NUMBERS, AND YOU NEED BOTH.
+#   min_vmaf      bounds the AVERAGE quality of the encode.
+#   vmaf_min_pool bounds the WORST part of it.
+# An average hides local damage — Netflix says so outright: mean pooling "has the risk
+# of hiding poor quality frames". Measured on real libvmaf against these defaults: an
+# encode with ~1% of its frames destroyed (VMAF ~35) still pools to a harmonic mean
+# above 95 and PASSES. In a 2-hour film that is over a minute of ruined video — and it
+# passes every structural check too, because a destroyed segment still decodes cleanly
+# and still carries the right duration, packets and streams. The source is then deleted.
+# vmaf_min_pool is what catches that. Turning it off restores the blind spot.
+#
 # vmaf_enable: true          # turn the gate on/off
-# min_vmaf: 95               # reject if pooled harmonic-mean VMAF < this (~95 = visually lossless)
-# vmaf_min_pool: 0           # >0 also rejects if the worst-frame VMAF < this (0 = off)
-# vmaf_subsample: 1          # frame-sampling interval (1 = every frame; higher = cheaper)
+# min_vmaf: 95               # reject if the pooled harmonic-mean VMAF < this (the AVERAGE)
+# vmaf_min_pool: 60          # reject if the worst frame's VMAF < this (the FLOOR; 0 = off, not advised)
+# vmaf_subsample: 1          # frame-sampling interval (1 = every frame; higher = cheaper, but it
+#                            # WEAKENS the floor above: an unsampled frame is an unseen frame)
 # vmaf_model: auto           # auto = vmaf_4k for height>1440 else HD; or a model version/spec
+#
+# If honest encodes are being rejected: LOWER the floor, do not switch it off. The worst
+# frame of a faithful encode sits far above 60 even on the content VMAF handles worst
+# (dark, grainy) — but grain and very dark scenes are where a legitimate encode dips
+# lowest, so 45 is a reasonable retreat if your library is full of them. `vmaf_min_pool:
+# 45` still bounds how bad any single frame may get. `vmaf_min_pool: 0` bounds nothing,
+# and hands you back the blind spot described above.
+#
+# What the score does NOT mean: VMAF is a regression onto a subjective opinion scale, not
+# a measure of signal identity — 100 is a scale anchor, not "identical to the source", and
+# a bit-identical file is not guaranteed to score it. A pass means "no worse than this
+# against your source, under this model" and nothing stronger. The default model is also
+# LUMA-ONLY: it cannot see chroma damage (the structural checks catch that), and it is
+# documented-weak on banding and dark scenes.
 
 # --- runtime ---
 # state_dir: state           # holds the resumable SQLite job store (jobs.db)

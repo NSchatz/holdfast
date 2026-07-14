@@ -76,6 +76,31 @@ func mkH264(t *testing.T, ffmpeg, path, bitrate string) {
 		"-c:v", "libx264", "-preset", "ultrafast", "-b:v", bitrate, "-pix_fmt", "yuv420p", "--", path)
 }
 
+// mkH264Long writes a LONGER h264 clip: 240 frames (10s @ 24fps) rather than the 20
+// of mkH264. The worst-frame-floor cases (TRANSCODE-11) need a realistic frame count,
+// because the blind spot they prove only exists when the damaged frames are a small
+// enough FRACTION of the file for the pooled mean to average them away. With 20
+// frames a single bad frame is 5% of the file and the mean catches it on its own,
+// which would prove nothing.
+func mkH264Long(t *testing.T, ffmpeg, path, bitrate string) {
+	t.Helper()
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=10:size=320x240:rate=24",
+		"-c:v", "libx264", "-preset", "ultrafast", "-b:v", bitrate, "-pix_fmt", "yuv420p", "--", path)
+}
+
+// mkH264DarkGrainy writes a LONG clip that is dark AND grainy — precisely the content
+// VMAF is documented to handle worst (weak on banding and dark-region blockiness;
+// grain is expensive to reproduce, so a faithful encode still scores lower there).
+// It is the anti-flake fixture: if a worst-frame floor is going to false-reject an
+// honest encode anywhere, it is here.
+func mkH264DarkGrainy(t *testing.T, ffmpeg, path, bitrate string) {
+	t.Helper()
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=10:size=320x240:rate=24,noise=alls=10:allf=t+u,eq=brightness=-0.30:contrast=0.9",
+		"-c:v", "libx264", "-preset", "ultrafast", "-b:v", bitrate, "-pix_fmt", "yuv420p", "--", path)
+}
+
 // mkHevc writes an HEVC clip.
 func mkHevc(t *testing.T, ffmpeg, path, bitrate string) {
 	t.Helper()
@@ -1140,6 +1165,123 @@ func TestVmaf_AcceptsNormalEncode(t *testing.T) {
 	}
 	if !ledgerHas(t, led, store.Done, "movie.mkv") {
 		t.Error("expected a done row")
+	}
+}
+
+// ---- the worst-frame floor (TRANSCODE-11) ------------------------------------
+
+// locallyBrokenEncoder is the adversary the pooled mean cannot see.
+//
+// It produces a HIGH-QUALITY HEVC encode (crf 18 — the bulk of the frames score ~99)
+// with a SHORT DESTROYED SEGMENT inside it: frames 100-103 are replaced by a 56x42
+// nearest-neighbour upscale, a blocky ruin scoring VMAF ~43. Everything else about
+// the file is impeccable, and that is the point:
+//
+//   - every STRUCTURAL gate passes — right codec, decodes cleanly under
+//     -xerror -err_detect +explode, strictly smaller, identical duration, identical
+//     packet count (the overlay is frame-for-frame), identical stream counts;
+//   - the POOLED HARMONIC MEAN passes — 4 ruined frames out of 240 pool to ~97.5,
+//     comfortably clear of min_vmaf=95.
+//
+// So on the shipped pre-TRANSCODE-11 defaults this file is ACCEPTED, the source is
+// atomically swapped, and the original is DELETED. Only the worst-frame floor sees
+// it. In a real 2-hour film the same arithmetic buys an attacker — or a flaky
+// encoder — over a minute of ruined video through the same gate.
+func locallyBrokenEncoder(ffmpeg string) EncoderFunc {
+	return func(ctx context.Context, in, out string) error {
+		return exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-y", "-i", in,
+			"-filter_complex",
+			"[0:v]split=2[cl][dm];"+
+				"[dm]scale=56:42,scale=320:240:flags=neighbor[bad];"+
+				"[cl][bad]overlay=enable='between(n,100,103)'[v]",
+			"-map", "[v]",
+			"-c:v", "libx265", "-crf", "18", "-preset", "veryfast", "-x265-params", "log-level=error",
+			"-pix_fmt", "yuv420p10le", "--", out).Run()
+	}
+}
+
+// TestVmaf_MeanOnlyGateIsBlindToLocalDamage is the RED: it pins the bug in place.
+//
+// With the worst-frame floor off (vmaf_min_pool=0 — what the repo shipped before
+// TRANSCODE-11), a locally-broken encode sails through every gate and the source is
+// destroyed. This test asserts that broken behaviour ON PURPOSE, because it is the
+// only thing that makes the next test meaningful: without it, a green
+// "floor rejects the broken encode" could be the MEAN doing the rejecting, and the
+// floor could be dead code. This proves the mean genuinely cannot see the damage.
+func TestVmaf_MeanOnlyGateIsBlindToLocalDamage(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264Long(t, ffmpeg, src, "8M")
+	led := run(t, ffmpeg, ffprobe, d, locallyBrokenEncoder(ffmpeg), func(c *config.Config) {
+		c.VmafEnable = boolPtr(true)
+		c.MinVmaf = 95
+		c.VmafMinPool = 0 // the pre-TRANSCODE-11 default: mean pooling is the sole gate
+	})
+	// The source is GONE — swapped for a file with four destroyed frames in it.
+	if codecOf(t, ffprobe, src) != "hevc" {
+		t.Fatal("fixture is not exercising the blind spot: the mean-only gate rejected the " +
+			"locally-broken encode, so the harmonic mean is NOT blind to this damage and the " +
+			"floor test below would prove nothing. Re-tune locallyBrokenEncoder.")
+	}
+	if !ledgerHas(t, led, store.Done, "movie.mkv") {
+		t.Error("expected a done row (the mean-only gate accepts the locally-broken encode)")
+	}
+}
+
+// TestVmaf_WorstFrameFloorRejectsLocallyBrokenEncode is the GREEN: the same encode,
+// the same gates, the floor now on by default — REJECTED, and the source survives
+// byte-for-byte. This is the whole of TRANSCODE-11.
+func TestVmaf_WorstFrameFloorRejectsLocallyBrokenEncode(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264Long(t, ffmpeg, src, "8M")
+	before := md5f(t, src)
+	led := run(t, ffmpeg, ffprobe, d, locallyBrokenEncoder(ffmpeg), func(c *config.Config) {
+		c.VmafEnable = boolPtr(true)
+		c.MinVmaf = 95
+		c.VmafMinPool = 60 // the shipped default
+	})
+	if md5f(t, src) != before {
+		t.Error("source modified by a locally-broken output")
+	}
+	if codecOf(t, ffprobe, src) != "h264" {
+		t.Error("source was SWAPPED for a locally-broken encode — the worst-frame floor did not hold")
+	}
+	if nTemp(t, d) != 0 {
+		t.Error("temp not discarded")
+	}
+	if !ledgerHas(t, led, store.Failed, "movie.mkv") {
+		t.Error("expected a failed row (worst-frame floor rejection)")
+	}
+}
+
+// TestVmaf_WorstFrameFloorDoesNotFalseRejectDarkGrainyEncode is the anti-flake
+// counterpart the roadmap demands: a floor that rejects honest encodes is worse than
+// no floor, because it teaches operators to switch it off — which reopens the hole.
+//
+// The content is dark AND grainy — VMAF's documented worst case. Measured on real
+// libvmaf, an honest crf-22 encode of it bottoms out at a worst frame of ~91, which
+// is 31 points clear of the default floor of 60. (min_vmaf is relaxed to 90 here
+// only because dark/grainy content legitimately pools near ~94 at this CRF; the mean
+// gate has its own cases above. What is under test here is the FLOOR, and the floor
+// stays at its shipped default.)
+func TestVmaf_WorstFrameFloorDoesNotFalseRejectDarkGrainyEncode(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264DarkGrainy(t, ffmpeg, src, "8M")
+	led := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
+		c.VmafEnable = boolPtr(true)
+		c.MinVmaf = 90
+		c.VmafMinPool = 60 // the shipped default
+	})
+	if codecOf(t, ffprobe, src) != "hevc" {
+		t.Error("the worst-frame floor FALSE-REJECTED an honest encode of dark/grainy content")
+	}
+	if !ledgerHas(t, led, store.Done, "movie.mkv") {
+		t.Error("expected a done row (an honest dark/grainy encode must clear the floor)")
 	}
 }
 

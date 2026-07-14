@@ -120,6 +120,12 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 	fmt.Fprintf(stdout, "config OK: %d library root(s)\n", len(cfg.LibraryRoots))
+	// Valid, but a safety gate is weakened — say so. These are not errors (each is a
+	// legitimate choice), but a config that has quietly lost its worst-frame floor
+	// must not look identical to one that still has it.
+	for _, w := range cfg.Warnings() {
+		fmt.Fprintf(stdout, "warning: %s\n", w)
+	}
 	return 0
 }
 
@@ -183,6 +189,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		"encoder", cfg.Encoder, "crf", cfg.CRF, "preset", cfg.Preset,
 		"dry_run", cfg.DryRun,
 	)
+	logConfigWarnings(cfg, log)
 
 	eng, st, code := buildEngine(cfg, log, stderr)
 	if code != 0 {
@@ -220,6 +227,7 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 	log := logging.New(cfg.LogLevel)
+	logConfigWarnings(cfg, log)
 
 	// One context for the whole daemon: SIGINT/SIGTERM cancels it, which stops the
 	// scan loop, releases SSE streams, and cancels any in-flight encode (ffmpeg
@@ -227,6 +235,16 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return runServer(ctx, cfg, log, stderr)
+}
+
+// logConfigWarnings emits the "valid, but a safety gate is weakened" warnings at
+// daemon startup. A tool that deletes originals should say out loud when the gate
+// protecting them has been narrowed — silence here is how a weakened config becomes
+// invisible.
+func logConfigWarnings(cfg *config.Config, log *slog.Logger) {
+	for _, w := range cfg.Warnings() {
+		log.Warn(w)
+	}
 }
 
 // runServer is the serve core, parameterized on ctx so it is testable without

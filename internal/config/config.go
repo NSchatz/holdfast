@@ -71,7 +71,7 @@ func defaultLayer() map[string]any {
 		"state_dir":              "state",
 		"vmaf_enable":            true,
 		"min_vmaf":               95.0,
-		"vmaf_min_pool":          0.0,
+		"vmaf_min_pool":          60.0,
 		"vmaf_subsample":         1,
 		"vmaf_model":             "auto",
 		"workers":                1,
@@ -160,15 +160,46 @@ type Config struct {
 	// unmeasured output).
 	VmafEnable *bool `yaml:"vmaf_enable"`
 	// MinVmaf is the pooled harmonic-mean VMAF below which an encode is rejected
-	// (0-100; default 95 ≈ visually lossless / point of diminishing returns).
+	// (0-100; default 95). It is an AVERAGE, and an average hides local damage:
+	// Netflix documents that mean pooling "has the risk of hiding poor quality
+	// frames", and the harmonic mean is only a weak correction. Measured against
+	// this default, ~1% of frames can collapse to VMAF ~35 and the pooled mean
+	// still clears 95 — in a 2-hour film that is over a minute of destroyed video
+	// passing the gate. MinVmaf is therefore NOT sufficient on its own; the
+	// worst-frame floor below is what bounds local damage. Do not disable it.
 	MinVmaf float64 `yaml:"min_vmaf"`
-	// VmafMinPool, when > 0, additionally rejects an encode whose worst (sub)sampled
-	// frame VMAF (the `min` pool) falls below it — catches a worst-segment collapse.
-	// 0 (default) disables the floor, leaving the harmonic-mean the sole VMAF gate.
+	// VmafMinPool is the worst-frame floor: an encode is rejected when its worst
+	// (sub)sampled frame VMAF (libvmaf's `min` pool) falls below it. Default 60.
+	//
+	// This is the gate that catches a locally-broken encode — a short segment
+	// destroyed inside an otherwise-clean file, which every structural check passes
+	// (it decodes cleanly and carries the right duration, packets and streams) and
+	// which the pooled mean averages away.
+	//
+	// It is the raw minimum, deliberately, and NOT a low-percentile (1st-pct /
+	// worst-5%) statistic. A percentile tolerates a FRACTION of frames — but a
+	// segment small enough to sneak past the mean gate is by construction a small
+	// fraction of frames, so a percentile floor tolerates exactly the damage the
+	// mean already tolerates, and its blind spot GROWS with runtime (1% of a 2-hour
+	// film is ~72 seconds). The raw min is the only candidate whose guarantee does
+	// not decay with duration.
+	//
+	// That is measured, not argued: vmaf.TestPoolingStatistic_OnlyRawMinSeesSubOne-
+	// PercentDamage builds an encode with 1 of 240 frames destroyed and shows the
+	// harmonic mean (~99) and the 1st percentile (~98) are BOTH blind to it while
+	// the raw min reads ~43. That test reds if this reasoning ever stops holding.
+	//
+	// 0 disables the floor, restoring the mean-only gate and its blind spot.
+	// `validate` warns when you do. The floor only ever REJECTS (the source is
+	// kept), so the failure it can cause is a wasted encode, never a lost original.
 	VmafMinPool float64 `yaml:"vmaf_min_pool"`
 	// VmafSubsample is the frame-sampling interval for VMAF (>=1; 1 = every frame;
 	// higher is cheaper but less precise). VMAF is a second full decode, so large
 	// libraries may raise this.
+	//
+	// It WEAKENS THE WORST-FRAME FLOOR: only sampled frames are measured, so a
+	// damaged frame that is never sampled is never seen, and VmafMinPool degrades
+	// from a guarantee into a sample. `validate` warns when this is > 1.
 	VmafSubsample int `yaml:"vmaf_subsample"`
 	// VmafModel selects the libvmaf model: "auto" (default) picks vmaf_4k for output
 	// height > 1440 else the HD model; any other value is passed through as the model
@@ -465,4 +496,39 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("max_load %g must be >= 0 (0 disables the CPU-load cap)", c.MaxLoad)
 	}
 	return nil
+}
+
+// Warnings reports configurations that are VALID but weaken a safety gate — the
+// things a delete-capable tool must say out loud rather than absorb silently. They
+// are not errors: each is a legitimate choice, and refusing to start would be
+// wrong. Staying quiet about them would also be wrong, because the config still
+// LOOKS like it has a worst-frame floor when it no longer meaningfully does.
+//
+// `validate` prints these, and `run`/`serve` log them at startup.
+func (c *Config) Warnings() []string {
+	var w []string
+	// The gate off entirely is the operator's call — but it is also the WEAKEST
+	// configuration this tool has, strictly weaker than "gate on, floor off" (which
+	// warns below). Staying silent about the dangerous one while nagging about the
+	// safer one would be exactly backwards.
+	if !c.VmafGate() {
+		return []string{"vmaf_enable is false — there is NO perceptual gate. The structural checks " +
+			"(codec, duration/packet parity, size, stream counts, decode-integrity) all pass on an " +
+			"encode that decodes perfectly and looks terrible, and the source is then deleted. This is " +
+			"the weakest setting available; prefer lowering min_vmaf/vmaf_min_pool over disabling the gate."}
+	}
+	if c.VmafMinPool <= 0 {
+		w = append(w, "vmaf_min_pool is 0 — the worst-frame floor is DISABLED, leaving the pooled "+
+			"harmonic mean as the only VMAF gate. A mean hides local damage: ~1% of frames can collapse "+
+			"to VMAF ~35 while the mean still clears min_vmaf, and the source is then deleted. "+
+			"If honest encodes are being rejected, LOWER the floor (e.g. 45) rather than setting it to 0 — "+
+			"a lower floor still bounds local damage; 0 bounds nothing.")
+	}
+	if c.VmafSubsample > 1 {
+		w = append(w, fmt.Sprintf("vmaf_subsample is %d — VMAF measures only every %dth frame, so the "+
+			"vmaf_min_pool worst-frame floor is a SAMPLE, not a guarantee: a damaged frame that is never "+
+			"sampled is never seen. Use vmaf_subsample: 1 on content you cannot re-acquire.",
+			c.VmafSubsample, c.VmafSubsample))
+	}
+	return w
 }

@@ -157,3 +157,24 @@ output which decodes cleanly but looks worse, and it is why this tool can be tru
 things — but it is not free. On a large library, raise `vmaf_subsample` (sample every Nth frame)
 before you consider turning the gate off. If you turn it off, you have given up the guarantee
 that made you switch.
+
+**Know what raising `vmaf_subsample` costs you.** The gate has two floors: `min_vmaf` bounds the
+encode's *average* quality, and `vmaf_min_pool` bounds its *worst frame* — the one that catches a
+short destroyed segment an average would smooth away. Subsampling only measures every Nth frame,
+so a damaged frame that is never sampled is never seen, and the worst-frame floor degrades from a
+guarantee into a sample. `transcode validate` warns you when this is set. Leave it at `1` for
+content you cannot re-acquire.
+
+**If the gate rejects an encode you believe is fine, lower a threshold — don't disable one.**
+The two knobs fail in opposite ways. `min_vmaf: 90` or `vmaf_min_pool: 45` still *bound* how bad
+the result may get; `vmaf_min_pool: 0` or `vmaf_enable: false` bound nothing at all, and the tool
+goes on deleting sources. Grain-heavy and very dark libraries are where an honest encode legitimately
+scores lowest, so they are the real reason to retreat — retreat by a few points, not to zero.
+`transcode validate` warns whenever the gate has been weakened this way.
+
+**What a VMAF score does not mean.** It is a regression onto a *subjective* opinion scale, not a
+measure of signal identity: 100 is a scale anchor, not "identical to the source", and a
+bit-identical file is not guaranteed to score it. A pass means *"no worse than this against your
+source, under this model"* — nothing stronger. The default model is also **luma-only** (blind to
+chroma damage, which the structural checks catch instead) and is documented-weak on banding and
+dark scenes.
