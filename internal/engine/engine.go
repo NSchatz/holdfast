@@ -36,6 +36,32 @@ import (
 // of which file/pid produced it: `<name>.__transcoding__.<ext>`.
 const TempMarker = "__transcoding__"
 
+// The reasons a job reaches a terminal state, recorded on the row (TRANSCODE-13).
+//
+// The SKIP reasons are a closed, stable VOCABULARY, not prose: an operator seeing the
+// bare word "skipped" has to go and read the logs to find out which of eight guards
+// fired, and a UI cannot key off a sentence. These tokens are the answer to "which
+// guard", so treat them as a wire format — add to them freely, but renaming one
+// changes what a stored row means.
+//
+// FAILURE reasons are NOT in this set, with one exception: a failure's reason is the
+// error text itself (the encode error, or the gate that rejected the output), because
+// unlike a guard it is not drawn from a fixed set and the detail is the whole value.
+const (
+	SkipAlreadyTargetCodec    = "already-at-target-codec"
+	SkipLowBitrate            = "low-bitrate"
+	SkipInterlaced            = "interlaced"
+	SkipDolbyVision           = "dolby-vision"
+	SkipHDR10Plus             = "hdr10-plus"
+	SkipIncompleteHDRMetadata = "incomplete-hdr-metadata"
+	SkipExoticPixelFormat     = "exotic-pixel-format"
+	SkipTargetExists          = "target-already-exists"
+
+	// FailUnreadable is the one failure whose reason is a token: there is no error to
+	// quote, because the probe simply reported no video stream.
+	FailUnreadable = "unreadable-or-no-video-stream"
+)
+
 // Engine drives the transcode over a set of library roots.
 type Engine struct {
 	Cfg   config.Config
@@ -304,18 +330,18 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	codec := e.Probe.VideoCodec(ctx, f)
 	if codec == "" {
 		e.Log.Info("skip (unreadable / no video stream)", "file", f)
-		e.finish(ctx, f, key, store.Failed)
+		e.finish(ctx, f, key, store.Failed, because(FailUnreadable))
 		return nil
 	}
 	if e.isAlreadyTargetCodec(codec) {
 		e.Log.Info("skip (already at target codec)", "file", f, "codec", codec, "target", e.targetCodec)
-		e.finish(ctx, f, key, store.Skipped)
+		e.finish(ctx, f, key, store.Skipped, because(SkipAlreadyTargetCodec))
 		return nil
 	}
 
 	if br := e.Probe.BitrateKbps(ctx, f); br > 0 && br < e.Cfg.MinBitrateKbps {
 		e.Log.Info("skip (low bitrate)", "file", f, "kbps", br, "min", e.Cfg.MinBitrateKbps)
-		e.finish(ctx, f, key, store.Skipped)
+		e.finish(ctx, f, key, store.Skipped, because(SkipLowBitrate))
 		return nil
 	}
 
@@ -325,7 +351,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	switch e.Probe.FieldOrder(ctx, f) {
 	case "tt", "bb", "tb", "bt":
 		e.Log.Info("skip (interlaced — not deinterlacing)", "file", f)
-		e.finish(ctx, f, key, store.Skipped)
+		e.finish(ctx, f, key, store.Skipped, because(SkipInterlaced))
 		return nil
 	}
 
@@ -340,11 +366,11 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	switch hdr.Classify(ctx, e.Probe, f) {
 	case hdr.ClassDV:
 		e.Log.Info("skip (Dolby Vision — RPU cannot survive a generic re-encode)", "file", f)
-		e.finish(ctx, f, key, store.Skipped)
+		e.finish(ctx, f, key, store.Skipped, because(SkipDolbyVision))
 		return nil
 	case hdr.ClassHDR10Plus:
 		e.Log.Info("skip (HDR10+ dynamic metadata — cannot survive a generic re-encode)", "file", f)
-		e.finish(ctx, f, key, store.Skipped)
+		e.finish(ctx, f, key, store.Skipped, because(SkipHDR10Plus))
 		return nil
 	case hdr.ClassHDR10:
 		// HDR10 static metadata IS carried through the encode — but if the source
@@ -358,7 +384,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		}
 		if incomplete(e.Probe.FrameSideDataFlat(ctx, f)) {
 			e.Log.Info("skip (HDR10 static metadata present but incomplete/unparseable — refusing to re-encode and drop it)", "file", f)
-			e.finish(ctx, f, key, store.Skipped)
+			e.finish(ctx, f, key, store.Skipped, because(SkipIncompleteHDRMetadata))
 			return nil
 		}
 	}
@@ -371,7 +397,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		srcPixFmt := e.Probe.PixFmt(ctx, f)
 		if _, ok := hdr.DerivePixFmt(srcPixFmt); !ok {
 			e.Log.Info("skip (unrecognized/exotic pixel format — refusing to silently subsample)", "file", f, "pix_fmt", srcPixFmt)
-			e.finish(ctx, f, key, store.Skipped)
+			e.finish(ctx, f, key, store.Skipped, because(SkipExoticPixelFormat))
 			return nil
 		}
 	}
@@ -406,7 +432,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	if final != f {
 		if _, err := os.Lstat(final); err == nil {
 			e.Log.Info("skip (target already exists as a distinct file — refusing to clobber)", "file", f, "target", final)
-			e.finish(ctx, f, key, store.Skipped)
+			e.finish(ctx, f, key, store.Skipped, because(SkipTargetExists))
 			return nil
 		}
 	}
@@ -420,9 +446,13 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	e.Log.Info("transcode", "file", f, "codec", codec, "-> ", e.targetCodec, "worker", worker)
 	e.advance(ctx, f, key, store.Encoding)
 
-	// Time the encode purely for the metrics histogram (TRANSCODE-8). This is a
-	// measurement only — it wraps nothing but time.Since around the existing call and
-	// changes no behaviour on any path.
+	// out is the PROOF, accumulated as the pipeline learns each fact (TRANSCODE-13).
+	// Every terminal path below hands this same value to both the store and the
+	// Observer, so the ledger and the live UI cannot disagree about what happened.
+	// From here on the file has reached the encoder, so the encoder is attributable —
+	// on a failure as much as on a success.
+	out := &store.Outcome{Encoder: e.Cfg.Encoder}
+
 	encStart := time.Now()
 	if err := e.Enc.Encode(ctx, f, tmp); err != nil {
 		if ctx.Err() != nil { // interrupted: discard temp, DON'T finish — leave active for RecoverStale
@@ -431,13 +461,19 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		}
 		e.Log.Warn("FAIL (encode error, source untouched)", "file", f, "err", err)
 		_ = os.Remove(tmp)
-		e.finish(ctx, f, key, store.Failed)
+		out.Reason = err.Error() // the failure error — previously computed and dropped
+		e.finish(ctx, f, key, store.Failed, out)
 		return nil
 	}
 	encodeDur := time.Since(encStart)
+	out.EncodeMs = ptr(encodeDur.Milliseconds())
 
 	e.advance(ctx, f, key, store.Verifying)
-	vmafScore, reason := e.verifyOutput(ctx, f, tmp)
+	proof, reason := e.verifyOutput(ctx, f, tmp)
+	// Record whatever VMAF measured, on the reject path too: the numbers that rejected
+	// an encode are exactly the ones an operator wants to see, and a rejection whose
+	// score is thrown away is the defect this phase exists to fix.
+	out.VmafMean, out.VmafMin, out.VmafModel = proof.Mean, proof.Min, proof.Model
 	if reason != nil {
 		if ctx.Err() != nil {
 			_ = os.Remove(tmp)
@@ -445,7 +481,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		}
 		e.Log.Warn("FAIL (verify rejected, source untouched)", "file", f, "reason", reason.Error())
 		_ = os.Remove(tmp)
-		e.finish(ctx, f, key, store.Failed)
+		out.Reason = reason.Error()
+		e.finish(ctx, f, key, store.Failed, out)
 		return nil
 	}
 
@@ -456,7 +493,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		if _, err := os.Lstat(final); err == nil {
 			e.Log.Warn("FAIL (target appeared during encode — refusing to clobber)", "file", f, "target", final)
 			_ = os.Remove(tmp)
-			e.finish(ctx, f, key, store.Failed)
+			out.Reason = "target appeared during encode — refused to clobber " + final
+			e.finish(ctx, f, key, store.Failed, out)
 			return nil
 		}
 	}
@@ -467,7 +505,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	if err := os.Rename(tmp, final); err != nil {
 		e.Log.Warn("FAIL (swap error, source untouched)", "file", f, "err", err)
 		_ = os.Remove(tmp)
-		e.finish(ctx, f, key, store.Failed)
+		out.Reason = err.Error()
+		e.finish(ctx, f, key, store.Failed, out)
 		return nil
 	}
 	if final != f {
@@ -475,18 +514,16 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			e.Log.Warn("transcoded ok but could not remove original", "file", f, "err", err)
 		}
 	}
-	// Reclaimed space = original source size − final output size. fi was stat'd at
-	// entry (the pre-encode source), so this is accurate even though f may already
-	// be gone (a container-changing swap removed it). A byte-carrying Done event
-	// lets the API/UI total reclaimed space live; the generic Done emit from the
-	// finish wrapper below carries 0, so summing the field never double-counts.
+	// The sizes either side of the swap. fi was stat'd at entry (the pre-encode
+	// source), so SourceBytes is accurate even though f may already be gone (a
+	// container-changing swap removed it). BOTH are persisted, not just their
+	// difference: that is what makes the reclaimed total survive a restart (see
+	// store.Reclaimed) and what lets a UI show "before → after" instead of a delta.
 	newSize := probe.FileSize(final)
-	reclaimed := fi.Size() - newSize
-	if reclaimed < 0 {
-		reclaimed = 0 // defensive: the strictly-smaller gate should preclude this
-	}
-	e.Log.Info("DONE", "file", final, "bytes", newSize, "reclaimed", reclaimed,
-		"encode_ms", encodeDur.Milliseconds(), "vmaf", vmafScore)
+	out.SourceBytes, out.OutputBytes = ptr(fi.Size()), ptr(newSize)
+
+	e.Log.Info("DONE", "file", final, "bytes", newSize, "reclaimed", fi.Size()-newSize,
+		"encode_ms", encodeDur.Milliseconds(), "vmaf", proof.Mean, "vmaf_min", proof.Min)
 	// The done row is keyed under the FINAL file's own path+fingerprint (mirroring
 	// the pre-TRANSCODE-5 ledger behaviour) so a resume short-circuits on the new
 	// file's identity, not the pre-swap source's. The post-swap fingerprint (new
@@ -499,19 +536,11 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		e.Log.Warn("claim of final key failed (done outcome still applies on disk)", "file", final, "err", err)
 	}
 	// Record the terminal Done state in the store WITHOUT emitting (finishStore), then
-	// emit ONE rich Done event carrying the reclaimed bytes, encode duration, and VMAF
-	// score. Emitting exactly once here (rather than a generic finish emit plus a
-	// separate byte emit) keeps a metrics consumer's per-outcome counters from
-	// double-counting done.
-	e.finishStore(ctx, final, finalKey, store.Done)
-	e.emit(Event{
-		Path:           final,
-		Status:         store.Done,
-		Worker:         worker,
-		BytesReclaimed: reclaimed,
-		EncodeDuration: encodeDur,
-		VmafScore:      vmafScore,
-	})
+	// emit ONE rich Done event carrying the same proof. Emitting exactly once here
+	// (rather than a generic finish emit plus a separate rich one) keeps a metrics
+	// consumer's per-outcome counters from double-counting done.
+	e.finishStore(ctx, final, finalKey, store.Done, out)
+	e.emit(Event{Path: final, Status: store.Done, Worker: worker, Outcome: out})
 	// Prune the superseded pre-swap row (the source's old identity), so the table
 	// doesn't accumulate one dangling row per transcoded file. The swap always
 	// changes the file's size/mtime, so (f,key) is never the same row as the fresh
@@ -535,22 +564,31 @@ func (e *Engine) advance(ctx context.Context, path, key string, s store.Status) 
 	e.emit(Event{Path: path, Status: s})
 }
 
-// finishStore records a terminal outcome in the store WITHOUT emitting an event.
-// The Done swap path uses this (then emits one rich Done event itself); every other
-// terminal path uses finish, which emits a generic event.
-func (e *Engine) finishStore(ctx context.Context, path, key string, s store.Status) {
-	if err := e.Store.Finish(ctx, path, key, s); err != nil {
+// finishStore records a terminal outcome + its proof in the store WITHOUT emitting an
+// event. The Done swap path uses this (then emits one rich Done event itself); every
+// other terminal path uses finish, which emits as well.
+func (e *Engine) finishStore(ctx context.Context, path, key string, s store.Status, o *store.Outcome) {
+	if err := e.Store.Finish(ctx, path, key, s, o); err != nil {
 		e.Log.Warn("store finish failed", "file", path, "status", s, "err", err)
 	}
 }
 
-// finish records a terminal outcome AND emits a generic event for it — used for the
-// skipped/failed terminal transitions (the Done swap path uses finishStore + its own
-// rich emit, so Done is emitted exactly once).
-func (e *Engine) finish(ctx context.Context, path, key string, s store.Status) {
-	e.finishStore(ctx, path, key, s)
-	e.emit(Event{Path: path, Status: s})
+// finish records a terminal outcome AND emits an event carrying the SAME proof — used
+// for the skipped/failed terminal transitions (the Done swap path uses finishStore +
+// its own rich emit, so Done is emitted exactly once).
+func (e *Engine) finish(ctx context.Context, path, key string, s store.Status, o *store.Outcome) {
+	e.finishStore(ctx, path, key, s, o)
+	e.emit(Event{Path: path, Status: s, Outcome: o})
 }
+
+// because builds the one-field Outcome that a guard records: WHICH guard fired. Skips
+// happen before the encoder runs, so there is nothing else to prove about them.
+func because(reason string) *store.Outcome { return &store.Outcome{Reason: reason} }
+
+// ptr takes the address of a value — the Outcome's numeric fields are pointers so that
+// "not recorded" (nil) stays distinct from a recorded zero, and Go has no way to take
+// the address of a method call's result without this.
+func ptr[T any](v T) *T { return &v }
 
 // isAlreadyTargetCodec reports whether a source's probed video codec already IS
 // the engine's configured target codec, generalizing the pre-TRANSCODE-6 hardcoded

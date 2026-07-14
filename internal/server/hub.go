@@ -28,12 +28,37 @@ var terminal = []store.Status{store.Done, store.Skipped, store.Failed}
 
 // jobDTO is the wire shape of one job row (a reporting projection of store.Job —
 // fingerprint is intentionally omitted; it is an internal dedup key, not UI data).
+//
+// The outcome fields (TRANSCODE-13) are what makes `GET /api/history` honest: the
+// README has always documented it as returning terminal jobs "with reason", and until
+// now there was no reason field to return.
+//
+// The numeric outcome fields are POINTERS and are deliberately NOT `omitempty`: they
+// serialize as an explicit JSON `null` when the fact was never recorded, so a client
+// can tell "not recorded" from a real 0 and render it as such. Dropping the key (or
+// emitting 0) would hand the UI a fabricated fidelity score — precisely the overclaim
+// the whole fidelity track exists to prevent.
 type jobDTO struct {
 	Path      string `json:"path"`
 	Status    string `json:"status"`
 	Worker    string `json:"worker,omitempty"`
 	FailCount int    `json:"fail_count"`
 	UpdatedAt int64  `json:"updated_at"`
+
+	// Reason: the error text for a failed job, or WHICH GUARD skipped a skipped one
+	// (a stable token — see internal/engine's Skip* constants).
+	Reason string `json:"reason,omitempty"`
+	// Encoder that ran (cpu / svtav1 / nvenc / …).
+	Encoder string `json:"encoder,omitempty"`
+	// The VMAF pair and the model that produced it. A score is meaningless without its
+	// model, so they travel together or not at all.
+	VmafMean  *float64 `json:"vmaf_mean"`
+	VmafMin   *float64 `json:"vmaf_min"`
+	VmafModel string   `json:"vmaf_model,omitempty"`
+	// The sizes either side of the swap, and how long the encode took.
+	SourceBytes *int64 `json:"source_bytes"`
+	OutputBytes *int64 `json:"output_bytes"`
+	EncodeMs    *int64 `json:"encode_ms"`
 }
 
 func toDTOs(jobs []store.Job) []jobDTO {
@@ -45,6 +70,15 @@ func toDTOs(jobs []store.Job) []jobDTO {
 			Worker:    j.Worker,
 			FailCount: j.FailCount,
 			UpdatedAt: j.UpdatedAt,
+
+			Reason:      j.Outcome.Reason,
+			Encoder:     j.Outcome.Encoder,
+			VmafMean:    j.Outcome.VmafMean,
+			VmafMin:     j.Outcome.VmafMin,
+			VmafModel:   j.Outcome.VmafModel,
+			SourceBytes: j.Outcome.SourceBytes,
+			OutputBytes: j.Outcome.OutputBytes,
+			EncodeMs:    j.Outcome.EncodeMs,
 		})
 	}
 	return out
@@ -52,12 +86,18 @@ func toDTOs(jobs []store.Job) []jobDTO {
 
 // snapshot is the full state the SSE stream pushes and the read endpoints compose.
 type snapshot struct {
-	Summary               map[string]int `json:"summary"`
-	Queue                 []jobDTO       `json:"queue"`
-	History               []jobDTO       `json:"history"`
-	BytesReclaimedSession int64          `json:"bytes_reclaimed_session"`
-	Paused                bool           `json:"paused"`
-	Scanning              bool           `json:"scanning"`
+	Summary map[string]int `json:"summary"`
+	Queue   []jobDTO       `json:"queue"`
+	History []jobDTO       `json:"history"`
+	// BytesReclaimedSession is this process's running total; BytesReclaimedTotal is the
+	// LIFETIME figure read from the ledger (TRANSCODE-13). Both are reported because
+	// they answer different questions — but only the latter survives a restart, which
+	// is why the session counter alone was a bug: a long-running install's headline
+	// "reclaimed" number silently reset to 0 every time the daemon bounced.
+	BytesReclaimedSession int64 `json:"bytes_reclaimed_session"`
+	BytesReclaimedTotal   int64 `json:"bytes_reclaimed_total"`
+	Paused                bool  `json:"paused"`
+	Scanning              bool  `json:"scanning"`
 }
 
 // Hub is the engine.Observer and the SSE fan-out. Engine workers call Observe
@@ -102,8 +142,8 @@ func NewHub(st store.Store, ctrl *Controller, log *slog.Logger) *Hub {
 // only does two cheap, non-blocking things: bump the reclaimed-bytes counter and
 // hand the event to Run (dropping it if the buffer is full — coalesced).
 func (h *Hub) Observe(ev engine.Event) {
-	if ev.BytesReclaimed > 0 {
-		h.bytesReclaimed.Add(ev.BytesReclaimed)
+	if n := ev.BytesReclaimed(); n > 0 {
+		h.bytesReclaimed.Add(n)
 	}
 	select {
 	case h.events <- ev:
@@ -204,6 +244,10 @@ func (h *Hub) buildSnapshot(ctx context.Context) (snapshot, error) {
 	if err != nil {
 		return snapshot{}, err
 	}
+	total, err := h.store.Reclaimed(ctx)
+	if err != nil {
+		return snapshot{}, err
+	}
 	counts := make(map[string]int, len(sum))
 	for st, n := range sum {
 		counts[string(st)] = n
@@ -213,6 +257,7 @@ func (h *Hub) buildSnapshot(ctx context.Context) (snapshot, error) {
 		Queue:                 toDTOs(queue),
 		History:               toDTOs(hist),
 		BytesReclaimedSession: h.bytesReclaimed.Load(),
+		BytesReclaimedTotal:   total,
 		Paused:                h.ctrl.Paused(),
 		Scanning:              h.ctrl.Scanning(),
 	}, nil

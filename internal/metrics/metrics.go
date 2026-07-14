@@ -71,14 +71,21 @@ func (m *Metrics) Observe(ev engine.Event) {
 	switch ev.Status {
 	case store.Done:
 		m.filesTotal.WithLabelValues("done").Inc()
-		if ev.BytesReclaimed > 0 {
-			m.bytesReclaimed.Add(float64(ev.BytesReclaimed))
+		if n := ev.BytesReclaimed(); n > 0 {
+			m.bytesReclaimed.Add(float64(n))
 		}
-		if ev.EncodeDuration > 0 {
-			m.encodeDuration.Observe(ev.EncodeDuration.Seconds())
-		}
-		if ev.VmafScore > 0 {
-			m.vmaf.Observe(ev.VmafScore)
+		// The encode duration and the VMAF score now come off the event's Outcome — the
+		// same value the ledger stores (TRANSCODE-13). Note the nil checks rather than
+		// `> 0`: a pointer distinguishes "not measured" from a measured zero, and the
+		// old `ev.VmafScore > 0` would have silently dropped a genuine VMAF of 0.0 —
+		// the single most alarming score there is — from the distribution.
+		if o := ev.Outcome; o != nil {
+			if o.EncodeMs != nil {
+				m.encodeDuration.Observe(float64(*o.EncodeMs) / 1000.0) // the histogram is in seconds
+			}
+			if o.VmafMean != nil {
+				m.vmaf.Observe(*o.VmafMean)
+			}
 		}
 	case store.Skipped:
 		m.filesTotal.WithLabelValues("skipped").Inc()

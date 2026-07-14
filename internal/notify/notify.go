@@ -130,7 +130,7 @@ func (n *Notifier) Observe(ev engine.Event) {
 	case store.Done:
 		n.mu.Lock()
 		n.tally.done++
-		n.tally.reclaimed += ev.BytesReclaimed
+		n.tally.reclaimed += ev.BytesReclaimed()
 		n.mu.Unlock()
 	case store.Skipped:
 		n.mu.Lock()
@@ -140,7 +140,16 @@ func (n *Notifier) Observe(ev engine.Event) {
 		n.mu.Lock()
 		n.tally.failed++
 		n.mu.Unlock()
-		n.enqueue(fmt.Sprintf("holdfast: FAILED to transcode %s (source left untouched)", ev.Path))
+		// The failure REASON now rides on the event (TRANSCODE-13), so the notification
+		// can finally say what went wrong instead of sending an operator to the logs to
+		// find out. It is still best-effort: an event with no recorded reason (there is
+		// no such path in the engine today) degrades to the bare message rather than
+		// printing an empty parenthetical.
+		msg := fmt.Sprintf("holdfast: FAILED to transcode %s (source left untouched)", ev.Path)
+		if ev.Outcome != nil && ev.Outcome.Reason != "" {
+			msg = fmt.Sprintf("holdfast: FAILED to transcode %s: %s (source left untouched)", ev.Path, ev.Outcome.Reason)
+		}
+		n.enqueue(msg)
 	}
 }
 

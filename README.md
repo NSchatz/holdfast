@@ -113,9 +113,9 @@ invariant is entirely unaffected.
 | Method & path | Auth | Purpose |
 |---|---|---|
 | `GET /` | — | the embedded dashboard |
-| `GET /api/summary` | — | counts per status + session bytes reclaimed + paused/scanning |
+| `GET /api/summary` | — | counts per status + bytes reclaimed (lifetime **and** this session) + paused/scanning |
 | `GET /api/queue` | — | pending + active jobs |
-| `GET /api/history?limit=N` | — | recent terminal jobs (done/skipped/failed, with reason) |
+| `GET /api/history?limit=N` | — | recent terminal jobs (done/skipped/failed) with their recorded outcome — see below |
 | `GET /api/events` | — | SSE: a fresh snapshot on every state change |
 | `GET /metrics` | — | Prometheus metrics (when `metrics_enable`, default on) |
 | `POST /api/rescan` | token | start a library scan (409 if paused / scanning / outside the run window) |
@@ -127,6 +127,47 @@ multi-user); the mutating endpoints require a bearer token (`server_auth_token`,
 `HOLDFAST_SERVER_AUTH_TOKEN`) and are **disabled entirely when no token is set**; pause only ever
 *delays* work — it never interrupts an encode or the atomic swap. **Known limitation:** single-token auth
 (no per-user accounts); the queue/history views are capped at the most recent rows, not the whole ledger.
+
+### The recorded outcome — the proof a swap was safe
+
+A terminal job carries the evidence the engine used to decide, so you can audit a swap after the fact
+instead of trusting it. Every terminal row in `/api/history` (and in the SSE snapshot) reports:
+
+| Field | On | What it is |
+|---|---|---|
+| `reason` | failed | the error that rejected it (the encode error, or **which gate** refused the output) |
+| `reason` | skipped | **which guard** fired — `already-at-target-codec`, `low-bitrate`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `target-already-exists` |
+| `encoder` | done, failed | the encoder that ran (`cpu`, `svtav1`, `nvenc`, …) |
+| `vmaf_mean`, `vmaf_min` | done, and a VMAF-rejected failure | the pooled harmonic mean **and the worst frame** |
+| `vmaf_model` | as above | the libvmaf model that produced them |
+| `source_bytes`, `output_bytes` | done | the sizes either side of the swap |
+| `encode_ms` | done, failed-after-encode | wall-clock encode time |
+
+**A `null` means "not recorded", and you must read it that way.** It is never a zero. A numeric field is
+`null` — not `0` — whenever the fact was not measured (VMAF disabled, or a row written before these
+columns existed), because a VMAF of `0.0` is a *destroyed frame*, not a missing measurement, and rendering
+one as the other would be inventing evidence about a swap nobody checked.
+
+**A VMAF score is not interpretable without its model**, which is why the two always travel together.
+Read `vmaf_mean`/`vmaf_min` with the limits in mind: VMAF is a regression onto a *subjective* opinion
+scale under one viewing condition, `vmaf_v0.6.1` is **luma-only** (structurally blind to chroma damage),
+and the scores are **not comparable across different sources**. The number bounds measured perceptual
+quality against *your* source; it is not a proof of fidelity.
+
+Bytes reclaimed is reported two ways: `bytes_reclaimed_total` is the **lifetime** figure, summed from the
+recorded sizes in the ledger, and survives a restart; `bytes_reclaimed_session` is this process's running
+total and resets when the daemon does.
+
+**Known limitation:** rows written before these columns existed carry no outcome and read as "not
+recorded" — there is no way to reconstruct a measurement that was never taken.
+
+#### Schema versioning
+
+The job store (`<state_dir>/jobs.db`) carries a schema version in SQLite's `PRAGMA user_version` and is
+migrated forward on startup, in a transaction per step, so the version and the shape move together or not
+at all. **A migration failure is a refusal to start**, never a silent downgrade to a partial schema — and
+a database written by a *newer* holdfast is likewise refused rather than opened and quietly written
+through a schema that cannot see all of its columns.
 
 ### Observability & host-fair scheduling (`serve`)
 

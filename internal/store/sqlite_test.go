@@ -60,7 +60,7 @@ func TestClaim_AfterDoneFails(t *testing.T) {
 	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
-	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Done); err != nil {
+	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Done, nil); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 	ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3)
@@ -78,7 +78,7 @@ func TestClaim_AfterSkippedFails(t *testing.T) {
 	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
-	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Skipped); err != nil {
+	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Skipped, nil); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 	ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3)
@@ -102,7 +102,7 @@ func TestClaim_FailedRetriesThenParks(t *testing.T) {
 		if !ok {
 			t.Fatalf("claim attempt %d: expected true (fail_count=%d < max=%d)", i, i-1, maxFailures)
 		}
-		if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Failed); err != nil {
+		if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Failed, nil); err != nil {
 			t.Fatalf("Finish attempt %d: %v", i, err)
 		}
 		_, fc, _, err := s.Get(ctx, "/a/movie.mkv", "fp1")
@@ -182,7 +182,7 @@ func TestRecoverStale_LeavesTerminalAndPendingAlone(t *testing.T) {
 	if ok, _ := s.Claim(ctx, "/a/done.mkv", "fp1", "w0", 3); !ok {
 		t.Fatal("claim done.mkv")
 	}
-	if err := s.Finish(ctx, "/a/done.mkv", "fp1", Done); err != nil {
+	if err := s.Finish(ctx, "/a/done.mkv", "fp1", Done, nil); err != nil {
 		t.Fatal(err)
 	}
 	n, err := s.RecoverStale(ctx)
@@ -285,7 +285,7 @@ func TestHammer_DifferentKeysNoDatabaseLocked(t *testing.T) {
 					errCh <- err
 					continue
 				}
-				if err := s.Finish(ctx, path, fp, Done); err != nil {
+				if err := s.Finish(ctx, path, fp, Done, nil); err != nil {
 					errCh <- err
 					continue
 				}
@@ -341,7 +341,7 @@ func seed(t *testing.T, s *SQLite, path, fp string, final Status) {
 		}
 		return
 	}
-	if err := s.Finish(ctx, path, fp, final); err != nil {
+	if err := s.Finish(ctx, path, fp, final, nil); err != nil {
 		t.Fatalf("seed Finish(%s,%s): %v", path, final, err)
 	}
 }
@@ -429,5 +429,164 @@ func TestSummary_CountsPerStatus(t *testing.T) {
 	}
 	if _, ok := sum[Failed]; ok {
 		t.Fatalf("Summary: failed should be absent (no such rows), got %d", sum[Failed])
+	}
+}
+
+// --- outcome columns (TRANSCODE-13) ------------------------------------------
+
+func f64(v float64) *float64 { return &v }
+func i64(v int64) *int64     { return &v }
+
+// A Done row keeps the whole proof, and it round-trips: every field written comes back
+// as itself, and NULL comes back as nil rather than as a zero anyone could mistake for a
+// measurement.
+func TestFinish_RecordsAndRoundTripsTheOutcome(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	want := &Outcome{
+		Encoder:     "cpu",
+		VmafMean:    f64(97.25),
+		VmafMin:     f64(88.5),
+		VmafModel:   "version=vmaf_v0.6.1",
+		SourceBytes: i64(5_000_000),
+		OutputBytes: i64(2_000_000),
+		EncodeMs:    i64(12_345),
+	}
+	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Done, want); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+
+	rows, err := s.List(ctx, []Status{Done}, 0)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("List: rows=%d err=%v", len(rows), err)
+	}
+	got := rows[0].Outcome
+	if got.Encoder != want.Encoder || got.VmafModel != want.VmafModel {
+		t.Errorf("strings: got %+v, want %+v", got, want)
+	}
+	if got.VmafMean == nil || *got.VmafMean != *want.VmafMean ||
+		got.VmafMin == nil || *got.VmafMin != *want.VmafMin {
+		t.Errorf("vmaf pair: got mean=%v min=%v", got.VmafMean, got.VmafMin)
+	}
+	if got.SourceBytes == nil || *got.SourceBytes != *want.SourceBytes ||
+		got.OutputBytes == nil || *got.OutputBytes != *want.OutputBytes ||
+		got.EncodeMs == nil || *got.EncodeMs != *want.EncodeMs {
+		t.Errorf("numbers: got src=%v out=%v ms=%v", got.SourceBytes, got.OutputBytes, got.EncodeMs)
+	}
+	// A Done needs no excuse.
+	if got.Reason != "" {
+		t.Errorf("Reason = %q, want empty", got.Reason)
+	}
+}
+
+// A nil outcome (and an unset field within one) stores NULL, and NULL reads back as
+// "not recorded" — nil, never 0. This is the fail-safe the whole schema rests on: a
+// fabricated 0.0 VMAF is a claim about a swap nobody measured.
+func TestFinish_NilOutcomeReadsAsNotRecordedNotZero(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Done, nil); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	rows, err := s.List(ctx, []Status{Done}, 0)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("List: rows=%d err=%v", len(rows), err)
+	}
+	o := rows[0].Outcome
+	if o.VmafMean != nil || o.VmafMin != nil || o.SourceBytes != nil || o.OutputBytes != nil || o.EncodeMs != nil {
+		t.Errorf("an unrecorded outcome must read back as nil, got %+v", o)
+	}
+	if o.Reason != "" || o.Encoder != "" || o.VmafModel != "" {
+		t.Errorf("an unrecorded outcome must read back with empty strings, got %+v", o)
+	}
+}
+
+// A retried job that finally succeeds must not carry the PREVIOUS attempt's failure
+// reason next to its "done". Finish fully defines a row's proof, so the stale reason is
+// cleared rather than merged forward — a "done · reason: simulated encode failure" row
+// would be a lie the ledger tells forever.
+func TestFinish_LaterOutcomeReplacesTheEarlierOne(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Failed, &Outcome{Reason: "encode blew up", Encoder: "cpu"}); err != nil {
+		t.Fatalf("Finish(failed): %v", err)
+	}
+	// Retry (failed is retryable under MaxFailures) and succeed this time.
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
+		t.Fatalf("re-claim after failure: ok=%v err=%v", ok, err)
+	}
+	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Done, &Outcome{
+		Encoder: "cpu", SourceBytes: i64(100), OutputBytes: i64(40),
+	}); err != nil {
+		t.Fatalf("Finish(done): %v", err)
+	}
+
+	rows, err := s.List(ctx, []Status{Done}, 0)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("List: rows=%d err=%v", len(rows), err)
+	}
+	if got := rows[0].Outcome.Reason; got != "" {
+		t.Errorf("the done row still carries the failed attempt's reason %q — Finish merged instead of replacing", got)
+	}
+}
+
+// The lifetime reclaimed total is derived from the stored sizes, so it survives a
+// restart. Before TRANSCODE-13 the only reclaimed figure anywhere was an in-process
+// counter, and the number an operator saw reset to 0 on every daemon bounce.
+func TestReclaimed_IsDurableAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.db")
+	ctx := context.Background()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	for _, r := range []struct {
+		path     string
+		st       Status
+		src, out int64
+		recorded bool
+	}{
+		{"/a/one.mkv", Done, 1000, 400, true},    // reclaims 600
+		{"/a/two.mkv", Done, 500, 200, true},     // reclaims 300
+		{"/a/three.mkv", Done, 0, 0, false},      // a pre-TRANSCODE-13 row: NOT recorded
+		{"/a/four.mkv", Skipped, 900, 100, true}, // skipped — reclaims nothing, ever
+	} {
+		if ok, err := s.Claim(ctx, r.path, "fp", "w0", 3); err != nil || !ok {
+			t.Fatalf("claim %s: ok=%v err=%v", r.path, ok, err)
+		}
+		var o *Outcome
+		if r.recorded {
+			o = &Outcome{SourceBytes: i64(r.src), OutputBytes: i64(r.out)}
+		}
+		if err := s.Finish(ctx, r.path, "fp", r.st, o); err != nil {
+			t.Fatalf("finish %s: %v", r.path, err)
+		}
+	}
+	if got, err := s.Reclaimed(ctx); err != nil || got != 900 {
+		t.Fatalf("Reclaimed = %d (err %v), want 900 (600+300; the unrecorded row contributes nothing, the skipped row is not a transcode)", got, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// The whole point: reopen the process and the number is still there.
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+	if got, err := s2.Reclaimed(ctx); err != nil || got != 900 {
+		t.Fatalf("Reclaimed after reopen = %d (err %v), want 900 — the total must survive a restart", got, err)
 	}
 }
