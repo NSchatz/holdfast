@@ -95,11 +95,19 @@ binary cross-compiles (`CGO_ENABLED=0`, pure-Go SQLite), so the arm64 image need
 **no `TRANSCODE_*` env vars**, deliberately: env BEATS the YAML file, so a baked default would silently
 override the user's config-as-code — and for `server_addr` it would quietly widen the 127.0.0.1 fail-safe.
 `scripts/smoke-image.sh` is the packaging gate, and it is the SHARED unit: `ci.yml`'s `package` job runs it
-on every PR, and `release.yml` runs the same script before it pushes anything — so the image a tag ships is
-the image that has been gated all along. (The gate is a script, not a workflow, precisely so a human can run
-it too: `make image-smoke`.) It does not check that the image *built* — that proves nothing about the
-engine; it drives a REAL oneshot encode inside the built container and asserts the source was replaced by a
-smaller HEVC file with no temp left behind. `release.yml` publishes on a **tag push only** — a deliberate
+on every PR, and `release.yml` runs the same script — before it pushes, and then AGAIN against the image it
+pulls back from the registry. That second run is not belt-and-braces: buildx cannot push a multi-arch
+manifest it only loaded locally, so the push is a cache REBUILD, and "equivalent inputs" is a gate by
+equivalence, which this repo does not accept. Smoking the pulled artifact gates the thing that actually
+ships, and it reds before the GitHub release exists. (The gate is a script, not a workflow, precisely so a
+human can run it too: `make image-smoke`.) It does not check that the image *built* — that proves nothing
+about the engine; it drives a REAL oneshot encode inside the container and asserts the source was replaced
+by a smaller HEVC file with no temp left behind. Its fixture is CBR-padded on purpose: x264 ABR does not
+pad and `testsrc2` is trivially compressible, so a plain `-b:v 8M` lands at ~873 kbps — under the default
+`min_bitrate_kbps`, whereupon the engine correctly SKIPS the file and the smoke test asserts against a file
+the encoder never touched. **A fixture that never reaches the encoder is not a smoke test** (this shipped
+broken once and the refuter caught it); the script now asserts the fixture is above the guard, so that
+failure mode is loud. `release.yml` publishes on a **tag push only** — a deliberate
 human act, never on a merge — and `workflow_dispatch` is ALWAYS a full dry run (both arches, both smoke
 tests, the real binaries; pushes nothing). There is deliberately no `publish` input to tick: the only thing
 that can publish is a tag, so a release always carries a real tag name — a dispatch-publish could only ever

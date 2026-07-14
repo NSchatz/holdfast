@@ -91,8 +91,11 @@ LABEL org.opencontainers.image.title="transcode" \
 
 COPY --from=ffmpeg /ffmpeg/bin/ffmpeg  /usr/local/bin/ffmpeg
 COPY --from=ffmpeg /ffmpeg/bin/ffprobe /usr/local/bin/ffprobe
-# `run_window` is evaluated in LOCAL time, so the zone database must be present for a
-# TZ= setting to mean anything. Carry it explicitly instead of assuming the base has it.
+# `run_window` is evaluated in LOCAL time, so the zone database has to be present for a
+# TZ= setting to mean anything at all. The distroless base does ship one today — this
+# COPY pins that fact down rather than depending on it, because if a base change ever
+# dropped it, the failure is silent: no error, no wrong result, just an overnight window
+# running on UTC. Cheap insurance against a failure mode that does not announce itself.
 COPY --from=build /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=build /out/transcode /usr/local/bin/transcode
 # The image redistributes prebuilt GPL ffmpeg binaries, so it ships their licence and

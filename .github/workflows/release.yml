@@ -58,13 +58,34 @@ jobs:
           image="ghcr.io/$(echo "$REPO" | tr '[:upper:]' '[:lower:]')"
           # One timestamp for every artifact this run produces.
           date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          # A pre-release tag (v1.0.0-rc1, v2.0.0-beta.1 — anything with a suffix) must
+          # NOT become `:latest`, or `docker pull` hands a release candidate to everyone
+          # who did not ask for one.
+          prerelease=false
+          case "$version" in *-*) prerelease=true ;; esac
+
+          # printf, not an embedded newline: this is inside an indented YAML block, so a
+          # literal line break would carry the indentation into the tag.
+          tags="$image:$version"
+          if [ "$publish" = true ] && [ "$prerelease" = false ]; then
+            tags="$(printf '%s\n%s' "$tags" "$image:latest")"
+          fi
+          # NOTE the remaining footgun: a BACKPORT tag (v1.2.4 cut after v2.0.0) is not a
+          # pre-release, so it would still move `:latest` backwards. Cut backports from a
+          # maintenance branch and accept that, or gate this on a version comparison.
+
           {
             echo "publish=$publish"
             echo "version=$version"
             echo "image=$image"
             echo "date=$date"
+            echo "prerelease=$prerelease"
+            echo "tags<<__TAGS__"
+            echo "$tags"
+            echo "__TAGS__"
           } >> "$GITHUB_OUTPUT"
-          echo "publish=$publish  version=$version  image=$image  date=$date"
+          echo "publish=$publish  version=$version  prerelease=$prerelease  image=$image  date=$date"
 
       - uses: actions/setup-go@v5
         with:
@@ -154,8 +175,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Rebuilds from the buildx cache the two smoke-tested builds just populated, and
-      # pushes them as one multi-arch manifest.
+      # This is a REBUILD from the buildx cache, not a push of the exact bits the two
+      # smoke steps loaded — buildx cannot push a multi-arch manifest it only loaded
+      # locally. The inputs are identical and ffmpeg is sha-pinned, so it is equivalent
+      # — but "equivalent" is not "the same artifact", and this repo does not accept a
+      # gate by equivalence. So we pull the pushed image back and smoke it below.
       - name: push the multi-arch image
         if: steps.plan.outputs.publish == 'true'
         uses: docker/build-push-action@v6
@@ -163,14 +187,25 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ steps.plan.outputs.image }}:${{ steps.plan.outputs.version }}
-            ${{ steps.plan.outputs.image }}:latest
+          tags: ${{ steps.plan.outputs.tags }}
           build-args: |
             VERSION=${{ steps.plan.outputs.version }}
             COMMIT=${{ github.sha }}
             DATE=${{ steps.plan.outputs.date }}
           cache-from: type=gha
+
+      # The gate on the ARTIFACT, not on a local build of it: pull what was actually
+      # pushed and drive a real encode through it. If the rebuild diverged, this reds
+      # BEFORE the GitHub release exists.
+      - name: smoke test the PUSHED image
+        if: steps.plan.outputs.publish == 'true'
+        env:
+          REF: ${{ steps.plan.outputs.image }}:${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker image rm -f "$REF" >/dev/null 2>&1 || true   # never smoke a local leftover
+          docker pull "$REF"
+          ./scripts/smoke-image.sh "$REF"
 
       - name: cut the GitHub release
         if: steps.plan.outputs.publish == 'true'
@@ -178,11 +213,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.plan.outputs.version }}
           IMAGE: ${{ steps.plan.outputs.image }}
+          PRERELEASE: ${{ steps.plan.outputs.prerelease }}
         run: |
           set -euo pipefail
-          gh release create "$VERSION" \
-            --title "$VERSION" \
-            --generate-notes \
+          args=(--title "$VERSION" --generate-notes)
+          [ "$PRERELEASE" = "true" ] && args+=(--prerelease)
+          gh release create "$VERSION" "${args[@]}" \
             --notes "Container image: \`${IMAGE}:${VERSION}\` (linux/amd64, linux/arm64).
 
           The binaries need \`ffmpeg\`/\`ffprobe\` **with libx265 and libvmaf** on PATH. The image bundles a pinned, checksum-verified build — it is the supported way to run this." \
