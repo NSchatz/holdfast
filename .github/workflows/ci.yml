@@ -20,6 +20,12 @@ env:
   GO_VERSION: "1.25.12"
   STATICCHECK_VERSION: "2025.1.1"
   GOVULNCHECK_VERSION: "v1.1.4"
+  # The ffmpeg the safety proof runs against. MUST stay in step with the Dockerfile's
+  # FFMPEG_* args: the image ships this exact build, so CI has to be gating the ffmpeg
+  # we actually ship, not merely a similar one.
+  FFMPEG_BUILD: "autobuild-2026-07-13-14-11"
+  FFMPEG_VERSION: "N-125573-g90436de5e1"
+  FFMPEG_SHA256: "d7c3084807d14c868eface59617107ec29a8ae729413d7c133d1bcf6ffe39f01"
 
 jobs:
   build:
@@ -63,13 +69,20 @@ jobs:
 
       # The engine safety proof drives REAL ffmpeg fixtures — it fails loud if
       # ffmpeg/ffprobe (or, for the VMAF gate, libvmaf) are missing (a skip would be a
-      # false green). Ubuntu's apt ffmpeg does NOT ship libvmaf, so install a static
-      # build that carries libx265 + libvmaf (matching the local dev + Docker-image
-      # ffmpeg). This is the environment the transcoder is actually tested against.
-      - name: install ffmpeg (libx265 + libvmaf)
+      # false green). Ubuntu's apt ffmpeg does NOT ship libvmaf, so install the static
+      # build that carries libx265 + libvmaf.
+      #
+      # PINNED BY TAG AND VERIFIED BY HASH — not the rolling `latest` release. VMAF is
+      # the gate that catches an encode which decodes fine but LOOKS worse, so the
+      # measuring instrument moving underneath the proof is not a cosmetic concern: it
+      # is the proof drifting. This is the same build the Dockerfile bundles.
+      - name: install ffmpeg (pinned; libx265 + libvmaf)
         run: |
-          url="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
-          curl -fsSL -o /tmp/ffmpeg.tar.xz "$url"
+          set -euo pipefail
+          tarball="ffmpeg-${FFMPEG_VERSION}-linux64-gpl.tar.xz"
+          curl -fsSL -o /tmp/ffmpeg.tar.xz \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD}/${tarball}"
+          echo "${FFMPEG_SHA256}  /tmp/ffmpeg.tar.xz" | sha256sum -c -
           sudo mkdir -p /opt/ffmpeg
           sudo tar -C /opt/ffmpeg --strip-components=1 -xf /tmp/ffmpeg.tar.xz
           echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
@@ -77,7 +90,7 @@ jobs:
             || { echo "::error::the installed ffmpeg lacks libvmaf"; exit 1; }
           /opt/ffmpeg/bin/ffmpeg -hide_banner -encoders | grep -q libx265 \
             || { echo "::error::the installed ffmpeg lacks libx265"; exit 1; }
-          echo "ffmpeg with libx265 + libvmaf installed"
+          echo "ffmpeg ${FFMPEG_VERSION} (libx265 + libvmaf) installed, checksum verified"
 
       - name: go test (race + coverage)
         run: go test -race -covermode=atomic ./...
@@ -87,3 +100,61 @@ jobs:
 
       - name: govulncheck (pinned)
         run: go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" ./...
+
+  # The packaging gate. It runs on every PR the same script the release workflow runs
+  # before it pushes anything (scripts/smoke-image.sh), so the image a tag ships is the
+  # image that has been gated all along.
+  #
+  # It does NOT check that the image built — that proves nothing about the engine. It
+  # drives a REAL oneshot encode inside the built container with the bundled ffmpeg and
+  # asserts the no-loss contract held: the source was replaced by a smaller HEVC file
+  # that passed every gate, and no work-in-progress temp survived.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # QEMU is needed only to EXECUTE the arm64 image. Building it cross-compiles
+      # (CGO_ENABLED=0, and no RUN in the runtime stage), so no emulation is involved.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: build the image (linux/amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: transcode:ci
+          build-args: |
+            VERSION=0.0.0-ci-${{ github.sha }}
+            COMMIT=${{ github.sha }}
+            DATE=1970-01-01T00:00:00Z
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: smoke test the image (real encode, real gate)
+        run: ./scripts/smoke-image.sh transcode:ci
+
+      - name: build the image (linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          load: true
+          tags: transcode:ci-arm64
+          build-args: |
+            VERSION=0.0.0-ci-${{ github.sha }}
+            COMMIT=${{ github.sha }}
+            DATE=1970-01-01T00:00:00Z
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # An encode under QEMU would be glacial — but "does the cross-built arm64 image
+      # actually execute" (binary, glibc, bundled ffmpeg) is exactly what cross-building
+      # gets wrong, and that is cheap to check.
+      - name: smoke test the arm64 image (exec only, under QEMU)
+        run: ./scripts/smoke-image.sh transcode:ci-arm64 linux/arm64 --no-encode
+
+      - name: the compose example must be valid
+        run: docker compose -f docker-compose.yml config -q

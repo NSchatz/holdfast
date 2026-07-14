@@ -1,0 +1,105 @@
+# transcode — example deployment. Copy it, edit the two paths, run it.
+#
+#   mkdir -p state && sudo chown 1000:1000 state       # must be writable by `user:` below
+#   cp config.example.yaml config.yaml                 # then edit it (see docs/docker.md)
+#   docker compose config -q                           # validate before you run it
+#   docker compose up -d
+#
+# The YAML config is the source of truth for what transcode DOES; this file only says
+# where it runs. See docs/docker.md for the full reference (GPU passthrough, volumes,
+# the security posture) and docs/migration.md if you are coming from Tdarr or the bash
+# transcoder.
+
+services:
+  transcode:
+    image: ghcr.io/nschatz/transcode:latest
+    # Build it yourself instead of pulling (the image is private until the repo is
+    # public — see the roadmap's PUB-FLIP gate):
+    # build:
+    #   context: .
+    container_name: transcode
+    command: ["serve", "--config", "/config/config.yaml"]
+    restart: unless-stopped
+
+    # THE UID:GID THAT OWNS YOUR MEDIA. transcode encodes to a temp file NEXT TO the
+    # source and replaces it with an atomic rename, so it needs write access to the
+    # library directory itself, not just the files. Get this wrong and every file
+    # fails the encode step — which is safe (the source is never touched), but useless.
+    user: "1000:1000"
+
+    environment:
+      # `run_window` is evaluated in LOCAL time. Without this the container is UTC and
+      # your "encode overnight" window silently runs at the wrong hours.
+      TZ: Etc/UTC
+      # The bearer token for the MUTATING endpoints (rescan/pause/resume). Put it in a
+      # .env file next to this one; leave it unset and those endpoints stay DISABLED
+      # (the read-only API and the dashboard still work).
+      # Set it HERE, not in config.yaml: an env var beats the file, so an empty value
+      # here would override a token set there.
+      TRANSCODE_SERVER_AUTH_TOKEN: ${TRANSCODE_SERVER_AUTH_TOKEN:-}
+
+    volumes:
+      # The config. Read-only: transcode never writes it.
+      - ./config.yaml:/config/config.yaml:ro
+      # The resumable SQLite job store. A named volume or a host dir — but it must
+      # SURVIVE RESTARTS, or a crashed run cannot resume and every file is rescanned.
+      - ./state:/state
+      # YOUR MEDIA LIBRARY. This is the only place transcode ever mutates anything, and
+      # it deletes a source once a replacement has passed every gate — so mount exactly
+      # the tree you want re-encoded, and nothing else. The container path here must be
+      # what `library_roots` says in config.yaml.
+      - /srv/media:/media
+
+    # The control surface is HTTP. Publish it on LOOPBACK ONLY unless you have set an
+    # auth token and put it behind a reverse proxy with TLS. (config.yaml must say
+    # `server_addr: 0.0.0.0:8080` for the container to accept the forwarded connection
+    # at all — 127.0.0.1 inside a container namespace is not reachable from the host.)
+    ports:
+      - "127.0.0.1:8080:8080"
+
+    # Hardening. The engine writes only to the media tree, /state, and /tmp (ffmpeg's
+    # VMAF log + the encoder capability probe), so the root filesystem can be read-only.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # Transcoding is deliberately greedy with CPU. Cap it so the host stays usable —
+    # this is the blunt instrument; `run_window` and `max_load` in config.yaml are the
+    # ones that know what time it is.
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: "4.0"
+    #       memory: 4g
+
+    # --- GPU passthrough (only if config.yaml sets a hardware `encoder:`) ----------
+    # A hardware encoder is a BACKLOG-DRAIN tool, not the archival default: it is far
+    # faster and meaningfully worse per bit than `encoder: cpu` (libx265). The output
+    # is held to the identical no-loss gate either way, so a bad hardware encode is
+    # rejected rather than shipped — but the right default is still cpu.
+    #
+    # Intel Quick Sync (encoder: qsv) or VAAPI (encoder: vaapi):
+    # devices:
+    #   - /dev/dri:/dev/dri
+    # ...and `user:` above must be in the `render` group of the HOST (add its gid to
+    # group_add), or /dev/dri is present but unopenable:
+    # group_add:
+    #   - "993"   # the host's `render` group id — check with: getent group render
+    #
+    # NVIDIA (encoder: nvenc / av1_nvenc) — needs the NVIDIA Container Toolkit:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    #
+    # There is no silent fallback: if the configured encoder cannot actually encode on
+    # this host, transcode fails loud at startup and exits non-zero. That check really
+    # encodes a clip and probes the result — a hardware encoder can exit 0 while
+    # writing nothing when no device is present.

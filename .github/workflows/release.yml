@@ -1,0 +1,190 @@
+name: Release
+
+# Publishing happens on a TAG PUSH ONLY — a deliberate human act. Nothing here fires on
+# a merge to main, and the image stays private while the repository is (GHCR package
+# visibility follows the repo — see the umbrella's PUB-FLIP gate).
+#
+# `workflow_dispatch` with publish unchecked is a DRY RUN: it does everything a tag does
+# — builds both architectures, drives a real encode inside the built image, and produces
+# the exact binaries a release would ship — and pushes nothing. Run it once before you
+# cut the first tag.
+#
+# The packaging gate itself (scripts/smoke-image.sh) is not duplicated here: it is the
+# same script CI runs on every PR, so what a tag ships is what has been gated all along.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Push the image and cut the GitHub release. Leave UNCHECKED for a dry run."
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25.12"
+  GOVULNCHECK_VERSION: "v1.1.4"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # cut the GitHub release
+      packages: write # push the image to GHCR
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: plan (publish? version? image?)
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          WANT_PUBLISH: ${{ inputs.publish }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # A tag push always publishes. A manual dispatch publishes only if asked.
+          if [ "$EVENT" = "push" ]; then
+            publish=true
+            version="$REF_NAME"
+          else
+            publish="${WANT_PUBLISH:-false}"
+            version="0.0.0-dev-${GITHUB_SHA::7}"
+          fi
+          # GHCR rejects uppercase; github.repository preserves the owner's case.
+          image="ghcr.io/$(echo "$REPO" | tr '[:upper:]' '[:lower:]')"
+          # One timestamp for every artifact this run produces.
+          date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          {
+            echo "publish=$publish"
+            echo "version=$version"
+            echo "image=$image"
+            echo "date=$date"
+          } >> "$GITHUB_OUTPUT"
+          echo "publish=$publish  version=$version  image=$image  date=$date"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
+      # A release re-gates itself rather than trusting that CI ran on this commit — a tag
+      # can point at anything. A known-vulnerable binary must not be the thing we ship.
+      - name: govulncheck (pinned)
+        run: go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" ./...
+
+      # QEMU is only needed to EXECUTE the arm64 image; building it cross-compiles.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: build the image (linux/amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: transcode:release
+          build-args: |
+            VERSION=${{ steps.plan.outputs.version }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ steps.plan.outputs.date }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The image we are about to push must pass a REAL encode, not merely build.
+      - name: smoke test the image (real encode, real gate)
+        run: ./scripts/smoke-image.sh transcode:release
+
+      - name: build the image (linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          load: true
+          tags: transcode:release-arm64
+          build-args: |
+            VERSION=${{ steps.plan.outputs.version }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ steps.plan.outputs.date }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: smoke test the arm64 image (exec only, under QEMU)
+        run: ./scripts/smoke-image.sh transcode:release-arm64 linux/arm64 --no-encode
+
+      - name: build the release binaries
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          DATE: ${{ steps.plan.outputs.date }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64; do
+            os="${target%/*}"; arch="${target#*/}"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
+              -ldflags="-s -w \
+                -X github.com/NSchatz/transcode/internal/version.Version=${VERSION} \
+                -X github.com/NSchatz/transcode/internal/version.Commit=${GITHUB_SHA} \
+                -X github.com/NSchatz/transcode/internal/version.Date=${DATE}" \
+              -o dist/transcode ./cmd/transcode
+            tar -C dist -czf "dist/transcode_${VERSION}_${os}_${arch}.tar.gz" transcode
+            rm dist/transcode
+          done
+          cp LICENSE NOTICE dist/
+          ( cd dist && sha256sum ./*.tar.gz > SHA256SUMS )
+          ls -l dist
+
+      # Uploaded even on a dry run, so "the release is green" is inspectable rather than
+      # asserted: the artifacts a tag WOULD ship are downloadable from the run.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-dist-${{ steps.plan.outputs.version }}
+          path: dist/
+          if-no-files-found: error
+
+      # --- everything below this line only happens on a real release ------------------
+      - name: log in to GHCR
+        if: steps.plan.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Rebuilds from the buildx cache the two smoke-tested builds just populated, and
+      # pushes them as one multi-arch manifest.
+      - name: push the multi-arch image
+        if: steps.plan.outputs.publish == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.plan.outputs.image }}:${{ steps.plan.outputs.version }}
+            ${{ steps.plan.outputs.image }}:latest
+          build-args: |
+            VERSION=${{ steps.plan.outputs.version }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ steps.plan.outputs.date }}
+          cache-from: type=gha
+
+      - name: cut the GitHub release
+        if: steps.plan.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          IMAGE: ${{ steps.plan.outputs.image }}
+        run: |
+          set -euo pipefail
+          gh release create "$VERSION" \
+            --title "$VERSION" \
+            --generate-notes \
+            --notes "Container image: \`${IMAGE}:${VERSION}\` (linux/amd64, linux/arm64).
+
+          The binaries need \`ffmpeg\`/\`ffprobe\` **with libx265 and libvmaf** on PATH. The image bundles a pinned, checksum-verified build — it is the supported way to run this." \
+            dist/*.tar.gz dist/SHA256SUMS

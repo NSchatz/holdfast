@@ -85,9 +85,28 @@ Tautulli-aware pause; it only ever DELAYS new work and a Tautulli outage fails O
 engine's single `Observer` now fans out to hub+metrics+notify (each non-blocking); the `Paused` hook now
 also consults the scheduler (throttled) so a closing run-window stops feeding NEW files without touching an
 in-flight encode; the `Event` gained `EncodeDuration` + `VmafScore` (surfaced from a now-score-returning
-`verifyOutput` — the error still governs the gate) and Done is emitted exactly once. Next: packaging +
-release (`TRANSCODE-9`). The full phased plan lives in the umbrella that tracks this repo
-(`operations/roadmaps/transcode.md`).
+`verifyOutput` — the error still governs the gate) and Done is emitted exactly once. `TRANSCODE-9` (this is
+the current state) is **packaging + release + migration**: a production **multi-arch** (amd64/arm64),
+**non-root**, **distroless** image bundling ffmpeg **pinned by release tag AND verified by SHA-256** — the
+same build CI runs the fixture safety proof against, so the image ships the ffmpeg that was actually proven
+(note an ffmpeg lacking libvmaf would not silently weaken the gate, it would STOP the tool: an unmeasured
+output is rejected, never accepted). Every stage that RUNs anything is pinned to `$BUILDPLATFORM` and the
+binary cross-compiles (`CGO_ENABLED=0`, pure-Go SQLite), so the arm64 image needs no QEMU. The image bakes
+**no `TRANSCODE_*` env vars**, deliberately: env BEATS the YAML file, so a baked default would silently
+override the user's config-as-code — and for `server_addr` it would quietly widen the 127.0.0.1 fail-safe.
+`scripts/smoke-image.sh` is the packaging gate, and it is the SHARED unit: `ci.yml`'s `package` job runs it
+on every PR, and `release.yml` runs the same script before it pushes anything — so the image a tag ships is
+the image that has been gated all along. (The gate is a script, not a workflow, precisely so a human can run
+it too: `make image-smoke`.) It does not check that the image *built* — that proves nothing about the
+engine; it drives a REAL oneshot encode inside the built container and asserts the source was replaced by a
+smaller HEVC file with no temp left behind. `release.yml` publishes on a **tag push only** — a deliberate
+human act, never on a merge — and `workflow_dispatch` with `publish` unchecked is a full dry run (both
+arches, both smoke tests, the real binaries; pushes nothing). Note it is NOT a reusable workflow called from
+CI: a called workflow cannot hold permissions its caller lacks, so a PR-triggered call declaring
+`packages: write` would fail to load — hence the shared *script* rather than a shared workflow. **Not yet released** (cutting a tag is a human call — the umbrella's `PUB-FLIP` gate).
+`docs/docker.md` is the deployment reference (volumes, permissions, TZ, GPU passthrough, security posture);
+`docs/migration.md` covers the cutover from the Bash transcoder and from Tdarr. The full phased plan lives
+in the umbrella that tracks this repo (`operations/roadmaps/transcode.md`).
 
 ## Layout
 
@@ -157,8 +176,16 @@ release (`TRANSCODE-9`). The full phased plan lives in the umbrella that tracks 
   workers each hold at most one temp at a time). **This is the risk-critical heart — do not weaken the
   invariant.**
 - `internal/logging`, `internal/version` — logger construction, build-stamped version.
-- `.github/workflows/ci.yml` — the gate (installs ffmpeg for the engine proof). `Dockerfile` — packaging
-  stub (hardened in TRANSCODE-9).
+- `.github/workflows/ci.yml` — the gate (installs the PINNED, checksum-verified ffmpeg for the engine
+  proof; its `FFMPEG_*` env must stay in step with the Dockerfile's, or CI stops gating the ffmpeg we
+  actually ship) + a `package` job (TRANSCODE-9) that builds BOTH arches and runs the image smoke gate.
+  `.github/workflows/release.yml` (TRANSCODE-9) — tag-triggered: re-gates with govulncheck, builds both
+  arches, runs the SAME smoke script, then pushes the image and cuts the release. Publishing happens on a
+  **tag push only**; `workflow_dispatch` with `publish` unchecked is a full dry run.
+- `Dockerfile` (TRANSCODE-9) — the production image (multi-arch, distroless, non-root, pinned ffmpeg).
+  `docker-compose.yml` — the example deployment. `scripts/smoke-image.sh` — the packaging gate: a real
+  encode inside the built image, asserting the no-loss contract. `NOTICE` — the image redistributes GPL
+  ffmpeg binaries, so it carries their licence and source offer.
 
 ## Build / test / gate
 

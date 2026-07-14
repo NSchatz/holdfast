@@ -10,7 +10,10 @@ LDFLAGS := -s -w \
   -X github.com/NSchatz/transcode/internal/version.Commit=$(COMMIT) \
   -X github.com/NSchatz/transcode/internal/version.Date=$(DATE)
 
-.PHONY: build test check fmt vet staticcheck govulncheck tidy clean
+IMAGE    ?= transcode:dev
+PLATFORM ?= linux/amd64
+
+.PHONY: build test check fmt vet staticcheck govulncheck tidy clean image image-smoke compose-check
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o transcode ./cmd/transcode
@@ -32,6 +35,21 @@ govulncheck:
 
 # The full CI gate, locally.
 check: fmt vet build test staticcheck govulncheck
+
+# --- packaging (TRANSCODE-9) --------------------------------------------------
+# The same commands CI runs, so the packaging gate is reproducible by a human and not
+# something only the runner can do.
+image:
+	docker buildx build --platform $(PLATFORM) --load -t $(IMAGE) \
+	  --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) .
+
+# Builds the image, then drives a REAL oneshot encode inside it and asserts the
+# no-loss contract held. This — not "the build succeeded" — is the packaging gate.
+image-smoke: image
+	./scripts/smoke-image.sh $(IMAGE)
+
+compose-check:
+	docker compose -f docker-compose.yml config -q && echo "docker-compose.yml is valid"
 
 tidy:
 	go mod tidy

@@ -9,15 +9,16 @@ to reclaim disk space, and — the whole point — **never destroys a source unt
 faithful**. It is configured entirely by **YAML** (config-as-code), so what it does is reviewable and
 reproducible from git, not hidden in a UI database.
 
-> **Status: early build-out.** This repository is being built phase by phase from a mature, battle-tested
-> Bash predecessor (see _Provenance_). **The data-safety core is implemented (`TRANSCODE-1`)**: `transcode
-> run` performs one oneshot scan of the library roots — skip guards → same-directory temp encode → the full
-> verify gate → atomic swap → delete — and is proven by a real-ffmpeg fixture suite (cases 1–17) that reds
-> on the specific regression. Built since: colour/HDR preservation (`TRANSCODE-3`), the VMAF perceptual
-> gate (`TRANSCODE-4`), a persistent crash-safe queue + worker pool (`TRANSCODE-5`), hardware/AV1 encoders
-> (`TRANSCODE-6`), and the **REST/SSE API + embedded web UI** (`TRANSCODE-7`, `transcode serve` — shown
-> above). Still to come: observability + host-fair scheduling (`TRANSCODE-8`), packaging + release
-> (`TRANSCODE-9`). See the roadmap for the full plan.
+> **Status: feature-complete for a first release, not yet released.** This repository was built phase by
+> phase from a mature, battle-tested Bash predecessor (see _Provenance_). **The data-safety core
+> (`TRANSCODE-1`)** is the heart of it: `transcode run` performs one oneshot scan of the library roots —
+> skip guards → same-directory temp encode → the full verify gate → atomic swap → delete — proven by a
+> real-ffmpeg fixture suite that reds on the specific regression. Built on top of it: colour/HDR
+> preservation (`TRANSCODE-3`), the VMAF perceptual gate (`TRANSCODE-4`), a persistent crash-safe queue +
+> worker pool (`TRANSCODE-5`), hardware/AV1 encoders (`TRANSCODE-6`), the REST/SSE API + embedded web UI
+> (`TRANSCODE-7`, shown above), observability + host-fair scheduling (`TRANSCODE-8`), and **packaging: a
+> multi-arch, non-root container image bundling a pinned ffmpeg (`TRANSCODE-9`)**. The first tagged release
+> is a deliberate human act and has not been cut. See the roadmap for the full plan.
 
 ## Why another transcoder?
 
@@ -44,6 +45,22 @@ it is not a media server or library manager.
 
 ## Quick start
 
+**Docker (the supported path).** The image bundles a pinned, checksum-verified ffmpeg with libx265,
+libsvtav1 and **libvmaf** — the perceptual gate needs it, and an output that cannot be measured is
+rejected rather than accepted, so the right ffmpeg is not a convenience:
+
+```bash
+mkdir -p state && sudo chown 1000:1000 state   # must be writable by the user: in the compose file
+cp config.example.yaml config.yaml             # edit library_roots -> your CONTAINER media path
+docker compose config -q && docker compose up -d
+```
+
+See **[docs/docker.md](docs/docker.md)** for volumes, permissions, timezone, GPU passthrough and the
+security posture — and **[docs/migration.md](docs/migration.md)** if you are coming from Tdarr or from the
+Bash transcoder.
+
+**From source:**
+
 ```bash
 cp config.example.yaml config.yaml   # then edit library_roots
 transcode validate --config config.yaml
@@ -52,7 +69,8 @@ transcode serve --config config.yaml # HTTP API + web dashboard (scan on demand 
 ```
 
 `run`/`serve` need `ffmpeg` and `ffprobe` on `PATH` (or set `TRANSCODE_FFMPEG` / `TRANSCODE_FFPROBE`); they
-exit non-zero if they are missing rather than silently doing nothing. Use a build with **libx265**.
+exit non-zero if they are missing rather than silently doing nothing. Use a build with **libx265** and
+**libvmaf** — a distro ffmpeg typically lacks the latter, which is why the image exists.
 
 ### Web API + UI (`serve`)
 
@@ -101,10 +119,17 @@ multi-user); the mutating endpoints require a bearer token (`server_auth_token`,
 Requires Go 1.25+.
 
 ```bash
-make build      # -> ./transcode
-make test       # go test -race ./...
-make check      # gofmt + vet + staticcheck + govulncheck + test (the CI gate)
+make build        # -> ./transcode
+make test         # go test -race ./...
+make check        # gofmt + vet + staticcheck + govulncheck + test (the CI gate)
+
+make image        # build the container image (docker buildx)
+make image-smoke  # build it, then drive a REAL encode inside it and assert the no-loss
+                  # contract held. This — not "it built" — is the packaging gate CI runs.
 ```
+
+The Go test suite drives **real ffmpeg**: it fails loudly if `ffmpeg`/`ffprobe` (or `libvmaf`) are
+missing rather than skipping, because a skipped safety proof is a false green.
 
 ## Provenance
 
