@@ -37,7 +37,7 @@ func newStore(t *testing.T) *store.SQLite {
 		t.Fatal(err)
 	}
 	mustClaim(t, st, "/lib/done.mkv", "2:2")
-	if err := st.Finish(ctx, "/lib/done.mkv", "2:2", store.Done); err != nil {
+	if err := st.Finish(ctx, "/lib/done.mkv", "2:2", store.Done, nil); err != nil {
 		t.Fatal(err)
 	}
 	return st
@@ -56,6 +56,9 @@ type harness struct {
 	srv  *Server
 	ctrl *Controller
 	hub  *Hub
+	// st is the harness's store, exposed so a test can seed extra rows (the outcome
+	// tests need failed/skipped rows that newStore does not create).
+	st *store.SQLite
 	// scanStarted receives once per scan invocation; scanRelease gates each scan's
 	// completion (buffered so a test can pre-fill it for auto-completing scans).
 	scanStarted chan struct{}
@@ -66,6 +69,7 @@ func newHarness(t *testing.T, token string) *harness {
 	t.Helper()
 	st := newStore(t)
 	h := &harness{
+		st:          st,
 		scanStarted: make(chan struct{}, 8),
 		scanRelease: make(chan struct{}, 8),
 	}
@@ -237,10 +241,21 @@ func TestHub_BroadcastsSnapshotOnEvent(t *testing.T) {
 	}
 }
 
+// doneEvent builds the Done event the engine emits for a swap that reclaimed n bytes.
+// Since TRANSCODE-13 the reclaimed figure is DERIVED from the two sizes the Outcome
+// records rather than carried as its own field, so a test states both.
+func doneEvent(reclaimed int64) engine.Event {
+	src, out := reclaimed+1000, int64(1000)
+	return engine.Event{
+		Status:  store.Done,
+		Outcome: &store.Outcome{SourceBytes: &src, OutputBytes: &out},
+	}
+}
+
 func TestHub_BytesReclaimedAccumulates(t *testing.T) {
 	h := newHarness(t, "")
-	h.hub.Observe(engine.Event{Status: store.Done, BytesReclaimed: 100})
-	h.hub.Observe(engine.Event{Status: store.Done, BytesReclaimed: 250})
+	h.hub.Observe(doneEvent(100))
+	h.hub.Observe(doneEvent(250))
 	h.hub.Observe(engine.Event{Status: store.Skipped}) // 0 — must not change the total
 	if got := h.hub.BytesReclaimed(); got != 350 {
 		t.Fatalf("bytes reclaimed = %d, want 350", got)
@@ -340,4 +355,169 @@ func readSSEFrame(t *testing.T, body io.Reader, timeout time.Duration) (event, d
 		t.Fatal("timed out reading an SSE frame")
 		return "", ""
 	}
+}
+
+// --- the persisted proof on the wire (TRANSCODE-13) --------------------------
+
+// The README documents `GET /api/history` as returning terminal jobs
+// "(done/skipped/failed, with reason)". Until TRANSCODE-13 there was no reason field at
+// all — the doc was an overclaim. This asserts the claim is now TRUE for both kinds of
+// row that have one: a FAILED job (the error) and a SKIPPED job (which guard fired).
+func TestHistoryEndpoint_ReturnsAReasonForFailedAndSkipped(t *testing.T) {
+	h := newHarness(t, "")
+	st := h.st
+	ctx := context.Background()
+
+	mustClaim(t, st, "/lib/broke.mkv", "3:3")
+	if err := st.Finish(ctx, "/lib/broke.mkv", "3:3", store.Failed,
+		&store.Outcome{Reason: "decode-integrity check failed (output does not fully decode)", Encoder: "cpu"}); err != nil {
+		t.Fatal(err)
+	}
+	mustClaim(t, st, "/lib/thin.mkv", "4:4")
+	if err := st.Finish(ctx, "/lib/thin.mkv", "4:4", store.Skipped,
+		&store.Outcome{Reason: engine.SkipLowBitrate}); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(h.srv)
+	defer ts.Close()
+
+	var got struct {
+		History []jobDTO `json:"history"`
+	}
+	getJSON(t, ts.URL+"/api/history", &got)
+
+	byPath := make(map[string]jobDTO, len(got.History))
+	for _, j := range got.History {
+		byPath[j.Path] = j
+	}
+
+	failed, ok := byPath["/lib/broke.mkv"]
+	if !ok {
+		t.Fatalf("failed job absent from history: %+v", got.History)
+	}
+	if !strings.Contains(failed.Reason, "decode-integrity") {
+		t.Errorf("failed job reason = %q, want the gate error that rejected it", failed.Reason)
+	}
+	if failed.Encoder != "cpu" {
+		t.Errorf("failed job encoder = %q, want %q", failed.Encoder, "cpu")
+	}
+
+	skipped, ok := byPath["/lib/thin.mkv"]
+	if !ok {
+		t.Fatalf("skipped job absent from history: %+v", got.History)
+	}
+	if skipped.Reason != engine.SkipLowBitrate {
+		t.Errorf("skipped job reason = %q, want the guard token %q — an operator must not have to read the logs to learn WHICH guard fired",
+			skipped.Reason, engine.SkipLowBitrate)
+	}
+}
+
+// A done row carries the fidelity proof, and an UNRECORDED field goes out as an explicit
+// JSON `null` — never as 0. Asserted on the raw bytes, because that distinction only
+// exists on the wire: decoding into a struct would turn both into the same Go value, and
+// a client that reads 0 for "vmaf_min" would render a fabricated fidelity score for a
+// swap nobody measured. That is the exact overclaim this whole track exists to prevent.
+func TestHistoryEndpoint_UnrecordedOutcomeIsNullNotZero(t *testing.T) {
+	h := newHarness(t, "")
+	st := h.st
+	ctx := context.Background()
+
+	mean, min := 97.25, 88.5
+	src, out, ms := int64(5_000_000), int64(2_000_000), int64(12_345)
+	mustClaim(t, st, "/lib/proved.mkv", "5:5")
+	if err := st.Finish(ctx, "/lib/proved.mkv", "5:5", store.Done, &store.Outcome{
+		Encoder: "cpu", VmafMean: &mean, VmafMin: &min, VmafModel: "version=vmaf_v0.6.1",
+		SourceBytes: &src, OutputBytes: &out, EncodeMs: &ms,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(h.srv)
+	defer ts.Close()
+
+	body := getRaw(t, ts.URL+"/api/history")
+
+	// The proved row carries the whole thing — including the model, without which the
+	// score is not an interpretable number.
+	for _, want := range []string{
+		`"vmaf_mean":97.25`, `"vmaf_min":88.5`, `"vmaf_model":"version=vmaf_v0.6.1"`,
+		`"source_bytes":5000000`, `"output_bytes":2000000`, `"encode_ms":12345`, `"encoder":"cpu"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("history body missing %s\nbody: %s", want, body)
+		}
+	}
+	// /lib/done.mkv was seeded by newStore with a nil outcome — the shape of every row
+	// written before this phase. It must serialize as null, not 0.
+	for _, want := range []string{`"vmaf_mean":null`, `"vmaf_min":null`, `"source_bytes":null`, `"encode_ms":null`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("an unrecorded outcome must serialize as %s (a 0 would be a fabricated measurement)\nbody: %s", want, body)
+		}
+	}
+	if strings.Contains(body, `"vmaf_mean":0`) || strings.Contains(body, `"vmaf_min":0`) {
+		t.Errorf("an unrecorded VMAF must NEVER go out as 0\nbody: %s", body)
+	}
+}
+
+// An in-flight retry must not advertise the PREVIOUS attempt's fidelity score on
+// /api/queue. The queue and history views share one projection, so a stale outcome left
+// on a re-claimed row would be served next to a file that is still encoding — a score
+// belonging to an encode that was rejected and deleted.
+func TestQueueEndpoint_InFlightRetryCarriesNoStaleProof(t *testing.T) {
+	h := newHarness(t, "")
+	st := h.st
+	ctx := context.Background()
+
+	mean, min := 87.5, 41.0
+	mustClaim(t, st, "/lib/retry.mkv", "7:7")
+	if err := st.Finish(ctx, "/lib/retry.mkv", "7:7", store.Failed, &store.Outcome{
+		Reason: "VMAF worst-frame below floor", Encoder: "cpu", VmafMean: &mean, VmafMin: &min,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Retry: claim it again and put it in flight.
+	mustClaim(t, st, "/lib/retry.mkv", "7:7")
+	if err := st.Advance(ctx, "/lib/retry.mkv", "7:7", store.Encoding); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(h.srv)
+	defer ts.Close()
+
+	var got struct {
+		Queue []jobDTO `json:"queue"`
+	}
+	getJSON(t, ts.URL+"/api/queue", &got)
+
+	var found bool
+	for _, j := range got.Queue {
+		if j.Path != "/lib/retry.mkv" {
+			continue
+		}
+		found = true
+		if j.VmafMean != nil || j.VmafMin != nil {
+			t.Errorf("an encoding job is advertising the rejected attempt's VMAF (mean=%v min=%v)", j.VmafMean, j.VmafMin)
+		}
+		if j.Reason != "" {
+			t.Errorf("an encoding job still carries the previous failure's reason: %q", j.Reason)
+		}
+	}
+	if !found {
+		t.Fatalf("the retried job is not in the queue: %+v", got.Queue)
+	}
+}
+
+func getRaw(t *testing.T, url string) string {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s: %v", url, err)
+	}
+	return string(b)
 }

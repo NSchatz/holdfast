@@ -61,6 +61,18 @@ func TestNotify_PerFileFailure(t *testing.T) {
 	}
 }
 
+// doneEvent builds the Done event the engine emits for a swap that reclaimed n bytes.
+// Since TRANSCODE-13 the reclaimed figure is DERIVED from the two recorded sizes
+// rather than carried as its own field, so a test has to state both — which is the
+// point: the ledger and the event can no longer disagree about it.
+func doneEvent(reclaimed int64) engine.Event {
+	src, out := reclaimed+1000, int64(1000)
+	return engine.Event{
+		Status:  store.Done,
+		Outcome: &store.Outcome{SourceBytes: &src, OutputBytes: &out},
+	}
+}
+
 func TestNotify_ScanSummary(t *testing.T) {
 	n, sink := newWithSink(t, "generic://example")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -68,8 +80,8 @@ func TestNotify_ScanSummary(t *testing.T) {
 	go n.Run(ctx)
 
 	n.ScanStarted()
-	n.Observe(engine.Event{Status: store.Done, BytesReclaimed: 3 * 1024 * 1024})
-	n.Observe(engine.Event{Status: store.Done, BytesReclaimed: 1 * 1024 * 1024})
+	n.Observe(doneEvent(3 * 1024 * 1024))
+	n.Observe(doneEvent(1 * 1024 * 1024))
 	n.Observe(engine.Event{Status: store.Skipped})
 	n.Observe(engine.Event{Status: store.Failed, Path: "/x"}) // also fires a per-file msg
 	n.ScanFinished()
@@ -105,7 +117,7 @@ func TestNotify_DisabledSendsNothing(t *testing.T) {
 	}
 	n.Observe(engine.Event{Status: store.Failed, Path: "/x"})
 	n.ScanStarted()
-	n.Observe(engine.Event{Status: store.Done, BytesReclaimed: 100})
+	n.Observe(doneEvent(100))
 	n.ScanFinished()
 
 	if _, ok := recv(t, sink, 300*time.Millisecond); ok {

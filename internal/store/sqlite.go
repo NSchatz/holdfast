@@ -56,7 +56,7 @@ func Open(path string) (*SQLite, error) {
 	db.SetMaxOpenConns(1)
 
 	s := &SQLite{db: db}
-	if err := s.init(); err != nil {
+	if err := migrate(context.Background(), db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -64,33 +64,14 @@ func Open(path string) (*SQLite, error) {
 }
 
 // New wraps an already-open *sql.DB (test seam — e.g. an in-memory database) and
-// initializes the schema. The caller is responsible for any connection-limit
+// migrates the schema up to date. The caller is responsible for any connection-limit
 // pragmas it wants (Open sets MaxOpenConns(1); New leaves db as given).
 func New(db *sql.DB) (*SQLite, error) {
 	s := &SQLite{db: db}
-	if err := s.init(); err != nil {
+	if err := migrate(context.Background(), db); err != nil {
 		return nil, err
 	}
 	return s, nil
-}
-
-func (s *SQLite) init() error {
-	const schema = `
-CREATE TABLE IF NOT EXISTS jobs (
-	path        TEXT NOT NULL,
-	fingerprint TEXT NOT NULL,
-	status      TEXT NOT NULL,
-	fail_count  INTEGER NOT NULL DEFAULT 0,
-	worker      TEXT,
-	updated_at  INTEGER NOT NULL,
-	PRIMARY KEY (path, fingerprint)
-);
-CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
-`
-	if _, err := s.db.Exec(schema); err != nil {
-		return fmt.Errorf("store: init schema: %w", err)
-	}
-	return nil
 }
 
 // Close releases the underlying database handle.
@@ -176,8 +157,21 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 		return false, fmt.Errorf("store: claim: unrecognized status %q for %s", status, path)
 	}
 
+	// Claiming BEGINS A NEW ATTEMPT, so it clears the outcome columns. Only a retry of
+	// a Failed row can reach here with an outcome already on it, and that outcome
+	// describes the PREVIOUS attempt — an encode that was rejected and whose temp was
+	// deleted. Leaving it in place would mean a job sitting in probing/encoding/
+	// verifying (for hours) still carrying the failed attempt's reason and, worse, its
+	// VMAF score: /api/queue projects the same columns as /api/history, so an in-flight
+	// file would be served with a fidelity number belonging to an encode that no longer
+	// exists. A fabricated score is exactly what this schema exists to prevent, and the
+	// rule in Finish's doc — a row's proof always describes its CURRENT status — has to
+	// hold on the way IN as well as on the way out.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE jobs SET status = ?, worker = ?, updated_at = ? WHERE path = ? AND fingerprint = ?`,
+		`UPDATE jobs SET status = ?, worker = ?, updated_at = ?,
+			reason = NULL, encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
+			source_bytes = NULL, output_bytes = NULL, encode_ms = NULL
+		 WHERE path = ? AND fingerprint = ?`,
 		string(Probing), worker, now(), path, fingerprint); err != nil {
 		return false, fmt.Errorf("store: claim update: %w", err)
 	}
@@ -198,22 +192,92 @@ func (s *SQLite) Advance(ctx context.Context, path, fingerprint string, st Statu
 	return nil
 }
 
-// Finish records a terminal outcome. Failed increments fail_count.
-func (s *SQLite) Finish(ctx context.Context, path, fingerprint string, st Status) error {
-	var err error
-	if st == Failed {
-		_, err = s.db.ExecContext(ctx,
-			`UPDATE jobs SET status = ?, fail_count = fail_count + 1, updated_at = ? WHERE path = ? AND fingerprint = ?`,
-			string(st), now(), path, fingerprint)
-	} else {
-		_, err = s.db.ExecContext(ctx,
-			`UPDATE jobs SET status = ?, updated_at = ? WHERE path = ? AND fingerprint = ?`,
-			string(st), now(), path, fingerprint)
+// Finish is documented on the Store interface. Failed increments fail_count.
+//
+// The outcome columns are written UNCONDITIONALLY from o (nil o => all NULL), never
+// merged into whatever was there before. See the interface doc: a retried job that
+// finally succeeds must not carry the previous attempt's failure reason next to its
+// "done", and the only way to guarantee that without a special case per column is to
+// let every Finish fully define the row's proof.
+func (s *SQLite) Finish(ctx context.Context, path, fingerprint string, st Status, o *Outcome) error {
+	if o == nil {
+		o = &Outcome{}
 	}
-	if err != nil {
+	// A "" string is stored as NULL, not as an empty string, so "not recorded" has ONE
+	// representation in the column rather than two the readers would both have to know
+	// about.
+	q := `UPDATE jobs SET status = ?, updated_at = ?,
+		reason = ?, encoder = ?, vmaf_mean = ?, vmaf_min = ?, vmaf_model = ?,
+		source_bytes = ?, output_bytes = ?, encode_ms = ?`
+	if st == Failed {
+		q += `, fail_count = fail_count + 1`
+	}
+	q += ` WHERE path = ? AND fingerprint = ?`
+
+	if _, err := s.db.ExecContext(ctx, q,
+		string(st), now(),
+		nullString(o.Reason), nullString(o.Encoder),
+		nullFloat(o.VmafMean), nullFloat(o.VmafMin), nullString(o.VmafModel),
+		nullInt(o.SourceBytes), nullInt(o.OutputBytes), nullInt(o.EncodeMs),
+		path, fingerprint,
+	); err != nil {
 		return fmt.Errorf("store: finish: %w", err)
 	}
 	return nil
+}
+
+// --- NULL helpers -------------------------------------------------------------
+//
+// "Not recorded" is NULL in the column, and NULL only. These four keep that mapping
+// in one place instead of scattering sql.Null* literals through the queries.
+
+func nullString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func nullFloat(f *float64) any {
+	if f == nil {
+		return nil
+	}
+	return *f
+}
+
+func nullInt(i *int64) any {
+	if i == nil {
+		return nil
+	}
+	return *i
+}
+
+// scanOutcome reads the eight nullable outcome columns into an Outcome, mapping SQL
+// NULL back to the nil pointer / empty string that means "not recorded". The inverse
+// of the null* helpers above; the round-trip is asserted by the store tests.
+func scanOutcome(reason, encoder, model sql.NullString, mean, worst sql.NullFloat64, src, out, ms sql.NullInt64) Outcome {
+	o := Outcome{Reason: reason.String, Encoder: encoder.String, VmafModel: model.String}
+	if mean.Valid {
+		v := mean.Float64
+		o.VmafMean = &v
+	}
+	if worst.Valid {
+		v := worst.Float64
+		o.VmafMin = &v
+	}
+	if src.Valid {
+		v := src.Int64
+		o.SourceBytes = &v
+	}
+	if out.Valid {
+		v := out.Int64
+		o.OutputBytes = &v
+	}
+	if ms.Valid {
+		v := ms.Int64
+		o.EncodeMs = &v
+	}
+	return o
 }
 
 // Delete removes the row for path+fingerprint (a no-op if absent).
@@ -230,7 +294,9 @@ func (s *SQLite) Delete(ctx context.Context, path, fingerprint string) error {
 // interpolated into SQL text (the values are a closed internal vocabulary anyway,
 // but parameterizing keeps the read injection-proof by construction).
 func (s *SQLite) List(ctx context.Context, statuses []Status, limit int) ([]Job, error) {
-	q := `SELECT path, fingerprint, status, fail_count, worker, updated_at FROM jobs`
+	q := `SELECT path, fingerprint, status, fail_count, worker, updated_at,
+		reason, encoder, vmaf_mean, vmaf_min, vmaf_model, source_bytes, output_bytes, encode_ms
+		FROM jobs`
 	args := make([]any, 0, len(statuses)+1)
 	if len(statuses) > 0 {
 		ph := make([]string, len(statuses))
@@ -258,11 +324,18 @@ func (s *SQLite) List(ctx context.Context, statuses []Status, limit int) ([]Job,
 		var j Job
 		var status string
 		var worker sql.NullString // worker is NULL for a pending/recovered row
-		if err := rows.Scan(&j.Path, &j.Fingerprint, &status, &j.FailCount, &worker, &j.UpdatedAt); err != nil {
+		// Every outcome column is nullable: NULL is "not recorded" and must not be
+		// scanned into a bare 0/"" that a reader would mistake for a measurement.
+		var reason, encoder, model sql.NullString
+		var mean, vmin sql.NullFloat64
+		var src, outB, ms sql.NullInt64
+		if err := rows.Scan(&j.Path, &j.Fingerprint, &status, &j.FailCount, &worker, &j.UpdatedAt,
+			&reason, &encoder, &mean, &vmin, &model, &src, &outB, &ms); err != nil {
 			return nil, fmt.Errorf("store: list scan: %w", err)
 		}
 		j.Status = Status(status)
 		j.Worker = worker.String
+		j.Outcome = scanOutcome(reason, encoder, model, mean, vmin, src, outB, ms)
 		out = append(out, j)
 	}
 	if err := rows.Err(); err != nil {

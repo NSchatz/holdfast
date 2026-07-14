@@ -95,7 +95,9 @@ func (s *Server) routes() http.Handler {
 
 // --- read endpoints ----------------------------------------------------------
 
-// controlState is the at-a-glance status payload (no per-job rows).
+// controlState is the at-a-glance status payload (no per-job rows). The reclaimed
+// figure is still session-scoped — see snapshot: making it a durable lifetime total is
+// TRANSCODE-14's, on the sizes TRANSCODE-13 now persists.
 type controlState struct {
 	Summary               map[string]int `json:"summary"`
 	BytesReclaimedSession int64          `json:"bytes_reclaimed_session"`

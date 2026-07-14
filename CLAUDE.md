@@ -179,6 +179,82 @@ part of the same irreversible set, not a cosmetic follow-up. GitHub redirects th
 `NSchatz/transcode` is **left permanently vacant**: reclaim that name and the redirect dies and the new
 repo is served silently in its place.
 
+`TRANSCODE-13` (this is the current state) **persisted the proof**. The engine computed everything needed
+to show a swap was safe and the store kept **none** of it: `store.Job` was
+`{path, fingerprint, status, fail_count, worker, updated_at}`, so the VMAF mean **and min**, the model,
+the encoder, both file sizes, the encode duration, the failure error and **which guard** skipped a file
+were all computed and thrown away. Hence: the dashboard could not show fidelity, "reclaimed" reset to `0`
+on every restart (it lived only in an in-process counter in the SSE hub), and the README **overclaimed** —
+it documented `GET /api/history` as returning jobs *"with reason"* when there was no reason field at all.
+
+The load-bearing half is the **migration mechanism**, and it had to come first. `initSchema` was a bare
+`CREATE TABLE IF NOT EXISTS jobs (…)` with **no `PRAGMA user_version`** — which is not a schema, it is a
+schema for a database that never changes. `IF NOT EXISTS` matches on the table's NAME, not its SHAPE, so
+adding a column to that statement is a **silent no-op against every database that already exists**: the
+file keeps its old columns, `Open` reports success, and the process dies later, on a live install, on the
+first query naming the column that isn't there. `internal/store/migrate.go` is now an **append-only**
+`migrations` slice (the version IS its length — there is no second place to bump), each step applied in a
+transaction that **stamps `user_version` in the same transaction**, so a database can never claim a
+version whose columns it does not have. v1 is the original schema *with* its `IF NOT EXISTS` — load-bearing,
+because a pre-versioning database reports `user_version = 0` and is otherwise indistinguishable from a
+fresh file, so v1 must be a no-op on the former and a real create on the latter. **Never edit, reorder or
+delete a shipped migration** — a database in the field has already run the old text, so rewriting it
+changes only what a FRESH database gets and silently forks the two shapes apart. To change the schema,
+append. A migration failure is a **startup refusal** (`store.Open` errors → `cmd/holdfast` exits non-zero),
+and a database from the FUTURE is refused too rather than written through a schema that cannot see all of
+its columns.
+
+The proof itself is `store.Outcome`, built up in `ProcessFile` as the pipeline learns each fact and handed
+to **both** `Store.Finish` and the `Observer` as the *same value* — so the ledger and the live UI cannot
+disagree about what happened. **Absence is representable and must stay that way**: every numeric field is a
+**pointer**, because `0` is legal for all of them and a VMAF of `0.0` is a *destroyed frame*, not a missing
+measurement. NULL/nil is **"not recorded"** and a reader must render it as such — never as `0`, never as a
+fabricated score (the API serializes them as explicit JSON `null`, asserted on the raw bytes because
+decoding into a struct would erase the distinction). Skip reasons are a **closed vocabulary** (the `Skip*`
+constants — treat them as a wire format), because an operator seeing the bare word "skipped" had to go read
+the logs to learn which of eight guards fired; a failure's reason is the error text itself.
+
+**An outcome belongs to an ATTEMPT, not to a file, and both ends of that have to hold.** `Finish` writes
+the FULL outcome column set every time (nil clears), so a retried job that finally succeeds cannot sit in
+the ledger as "done" still wearing the previous attempt's failure reason. And **`Claim` NULLs the outcome
+columns**, because claiming is what BEGINS an attempt: only a `Failed` row can be re-claimed with an
+outcome already on it, and that outcome describes an encode that was *rejected and deleted*. Leaving it
+would park a job in probing/encoding/verifying — for hours, on a real film — still advertising the dead
+encode's VMAF score, and `/api/queue` projects the same columns as `/api/history`, so an operator would
+watch an in-flight file display a fidelity number for a file that no longer exists. (The gate-refuter
+caught exactly this; `TestClaim_RetryClearsThePreviousAttemptsOutcome` pins it. `fail_count` is retry
+ACCOUNTING, not proof, and deliberately survives.)
+
+The anti-vacuity proof is `TestMigrate_V0DatabaseOnDiskGainsTheOutcomeColumns`: it seeds a **real
+pre-migration database** (the frozen v0 DDL, with rows) and proves opening it migrates in place and keeps
+every row. **A fresh-schema test would pass against the very bug** — a fresh file gets the columns either
+way — which is why the v0 fixture is the one that matters; it is mutation-tested against a
+`CREATE TABLE IF NOT EXISTS`-only migrate and reds.
+
+The migration is **re-entrant**, which is a separate property from idempotent and is what a second writer
+needs. The transaction is **`BEGIN IMMEDIATE`** (take the write lock up front, where the busy handler can
+wait on it, rather than DEFERRED's mid-transaction upgrade, which deadlocks instead of waiting), and it
+**re-reads `user_version` INSIDE that transaction** — because `migrate` reads the version *before* taking
+the lock, so between the read and the lock the step may already have run, and the `ALTER` would then die on
+`duplicate column name`. Re-reading under the lock makes check-and-apply atomic, so losing the race is a
+no-op. `TestApplyMigration_IsANoOpWhenAlreadyApplied` pins it and reds without the re-read.
+
+**Known limitation (deliberate, do not "fix" it with a flaky test).** holdfast is a **single-daemon** tool
+and the store is single-writer by design; several processes opening the *same* `jobs.db` at the same
+instant is not a supported deployment, and on a not-yet-WAL database that race can still transiently refuse
+to start with `SQLITE_BUSY` during SQLite's WAL conversion. That is **fail-safe** — a refusal, never a
+partial schema — and the next start succeeds. An N-way concurrent-`Open` test was written for this and
+**deleted**: it was flaky, and a flaky test is one that gets deleted later anyway, by someone who no longer
+knows what it was for. (A `busy_timeout`-before-`journal_mode` DSN reorder was tried as the fix and
+**measured not to be one** — both pragma orderings wait correctly on a held lock — so it was reverted rather
+than shipped with a rationale that does not hold.)
+
+**Deferred to `-14`:** the dashboard renders none of this (`internal/webui` is untouched), and the
+reclaimed figure is still the **session** counter. `-13` persists BOTH sizes on every done row, which is
+what makes a durable lifetime total *derivable* — but summing it on every SSE snapshot would be an
+unbounded scan over the single serialized connection the engine writes through, on a table whose
+retention/pruning this phase explicitly defers. That sum belongs with the dashboard that shows it.
+
 **The rule when you touch this: hyphen is history, underscore is an identifier.** The phase IDs
 `TRANSCODE-1`…`TRANSCODE-15` are **historical labels and must survive** — they are how git log and the
 roadmap name the work, and renumbering them would rewrite those references for no gain. The underscore
@@ -246,11 +322,16 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   way to catch a hardware encoder that exits 0 while writing nothing when no device is present) +
   `RequireAvailable` (fail-loud helper for `cmd/holdfast`). No import of `internal/config` (avoids a
   cycle) — `internal/config.Validate` imports `internal/encoder` instead.
-- `internal/store` (TRANSCODE-5) — the persistent, crash-safe SQLite/WAL job store that replaced
-  `internal/ledger`: a `path+fingerprint`-keyed `jobs` table with `Claim`/`Advance`/`Finish`/`RecoverStale`/
-  `Get`. `Claim` is the cross-worker mutual-exclusion guard (an explicit transaction around its
-  read-modify-write); `SetMaxOpenConns(1)` + `busy_timeout` + WAL + `synchronous=NORMAL` avoid "database is
-  locked" under concurrent workers without serializing on fsync-per-commit latency.
+- `internal/store` (TRANSCODE-5; outcome columns + versioning TRANSCODE-13) — the persistent, crash-safe
+  SQLite/WAL job store that replaced `internal/ledger`: a `path+fingerprint`-keyed `jobs` table with
+  `Claim`/`Advance`/`Finish`/`RecoverStale`/`Get`/`List`/`Summary`. `Claim` is the cross-worker
+  mutual-exclusion guard (an explicit transaction around its read-modify-write); `SetMaxOpenConns(1)` +
+  `busy_timeout` + WAL + `synchronous=NORMAL` avoid "database is locked" under concurrent workers without
+  serializing on fsync-per-commit latency. `migrate.go` owns the schema: an **append-only** `migrations`
+  slice versioned by `PRAGMA user_version`, each step + its version stamp in one `BEGIN IMMEDIATE`
+  transaction. `Finish` carries a `store.Outcome` — the durable proof of a terminal job (reason / encoder /
+  VMAF mean+min+model / both sizes / encode ms), with **nullable** columns so "not recorded" never reads as
+  `0`; `Claim` clears them, because it begins a new attempt.
 - `internal/engine` — the orchestrator: `ProcessFile` (skip guards — already-at-TARGET-CODEC (TRANSCODE-6
   generalized this off a hardcoded "already HEVC"), low-bitrate, hardlinked, **interlaced, DV/HDR10+,
   HDR10-with-incomplete-metadata, exotic pixel format** (TRANSCODE-3) — → **`Store.Claim`** (TRANSCODE-5) →

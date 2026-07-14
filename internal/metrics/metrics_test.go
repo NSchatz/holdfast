@@ -36,11 +36,26 @@ func scrape(t *testing.T, m *Metrics) string {
 	return string(b)
 }
 
+// doneEvent builds the Done event the engine emits (TRANSCODE-13): the reclaimed bytes
+// and the encode duration are now read off the event's Outcome — the same value handed
+// to the store — rather than from fields duplicated onto the event.
+func doneEvent(reclaimed int64, encode time.Duration, vmaf float64) engine.Event {
+	src, out := reclaimed+1000, int64(1000)
+	ms := encode.Milliseconds()
+	return engine.Event{
+		Status: store.Done,
+		Outcome: &store.Outcome{
+			SourceBytes: &src, OutputBytes: &out,
+			EncodeMs: &ms, VmafMean: &vmaf, VmafModel: "version=vmaf_v0.6.1",
+		},
+	}
+}
+
 func TestMetrics_CountersAndHistogramsFromEvents(t *testing.T) {
 	m := New(openStore(t))
 
-	m.Observe(engine.Event{Status: store.Done, BytesReclaimed: 1000, EncodeDuration: 2 * time.Second, VmafScore: 96})
-	m.Observe(engine.Event{Status: store.Done, BytesReclaimed: 500, EncodeDuration: 1 * time.Second, VmafScore: 98})
+	m.Observe(doneEvent(1000, 2*time.Second, 96))
+	m.Observe(doneEvent(500, 1*time.Second, 98))
 	m.Observe(engine.Event{Status: store.Skipped})
 	m.Observe(engine.Event{Status: store.Failed})
 	m.Observe(engine.Event{Status: store.Encoding}) // non-terminal — must NOT be counted
@@ -86,7 +101,7 @@ func TestMetrics_QueueDepthReadsStore(t *testing.T) {
 		}
 	}
 	if ok, _ := st.Claim(ctx, "/lib/c.mkv", "2:2", "w0", 3); ok {
-		_ = st.Finish(ctx, "/lib/c.mkv", "2:2", store.Done)
+		_ = st.Finish(ctx, "/lib/c.mkv", "2:2", store.Done, nil)
 	}
 
 	m := New(st)

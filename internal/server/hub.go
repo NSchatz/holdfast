@@ -28,12 +28,37 @@ var terminal = []store.Status{store.Done, store.Skipped, store.Failed}
 
 // jobDTO is the wire shape of one job row (a reporting projection of store.Job —
 // fingerprint is intentionally omitted; it is an internal dedup key, not UI data).
+//
+// The outcome fields (TRANSCODE-13) are what makes `GET /api/history` honest: the
+// README has always documented it as returning terminal jobs "with reason", and until
+// now there was no reason field to return.
+//
+// The numeric outcome fields are POINTERS and are deliberately NOT `omitempty`: they
+// serialize as an explicit JSON `null` when the fact was never recorded, so a client
+// can tell "not recorded" from a real 0 and render it as such. Dropping the key (or
+// emitting 0) would hand the UI a fabricated fidelity score — precisely the overclaim
+// the whole fidelity track exists to prevent.
 type jobDTO struct {
 	Path      string `json:"path"`
 	Status    string `json:"status"`
 	Worker    string `json:"worker,omitempty"`
 	FailCount int    `json:"fail_count"`
 	UpdatedAt int64  `json:"updated_at"`
+
+	// Reason: the error text for a failed job, or WHICH GUARD skipped a skipped one
+	// (a stable token — see internal/engine's Skip* constants).
+	Reason string `json:"reason,omitempty"`
+	// Encoder that ran (cpu / svtav1 / nvenc / …).
+	Encoder string `json:"encoder,omitempty"`
+	// The VMAF pair and the model that produced it. A score is meaningless without its
+	// model, so they travel together or not at all.
+	VmafMean  *float64 `json:"vmaf_mean"`
+	VmafMin   *float64 `json:"vmaf_min"`
+	VmafModel string   `json:"vmaf_model,omitempty"`
+	// The sizes either side of the swap, and how long the encode took.
+	SourceBytes *int64 `json:"source_bytes"`
+	OutputBytes *int64 `json:"output_bytes"`
+	EncodeMs    *int64 `json:"encode_ms"`
 }
 
 func toDTOs(jobs []store.Job) []jobDTO {
@@ -45,12 +70,28 @@ func toDTOs(jobs []store.Job) []jobDTO {
 			Worker:    j.Worker,
 			FailCount: j.FailCount,
 			UpdatedAt: j.UpdatedAt,
+
+			Reason:      j.Outcome.Reason,
+			Encoder:     j.Outcome.Encoder,
+			VmafMean:    j.Outcome.VmafMean,
+			VmafMin:     j.Outcome.VmafMin,
+			VmafModel:   j.Outcome.VmafModel,
+			SourceBytes: j.Outcome.SourceBytes,
+			OutputBytes: j.Outcome.OutputBytes,
+			EncodeMs:    j.Outcome.EncodeMs,
 		})
 	}
 	return out
 }
 
 // snapshot is the full state the SSE stream pushes and the read endpoints compose.
+//
+// BytesReclaimedSession is still a per-PROCESS counter and still resets when the daemon
+// does. TRANSCODE-13 makes a durable lifetime total POSSIBLE — both file sizes are now
+// on every done row — but deriving and surfacing it is TRANSCODE-14's job, along with
+// the dashboard that displays it. Summing it here would mean an unbounded scan of the
+// jobs table on every state change, over the single serialized connection the engine
+// writes through, on a table whose retention/pruning this phase explicitly defers.
 type snapshot struct {
 	Summary               map[string]int `json:"summary"`
 	Queue                 []jobDTO       `json:"queue"`
@@ -75,9 +116,12 @@ type Hub struct {
 	// re-reads full state anyway — granularity is lost, never correctness.
 	events chan engine.Event
 
-	// bytesReclaimed accumulates the reclaimed-space total for this process
-	// (session-scoped: the store does not persist original sizes). Updated in
-	// Observe with atomics so it is never lost even when the event is coalesced.
+	// bytesReclaimed accumulates the reclaimed-space total for this PROCESS, and
+	// resets when the daemon does. The store now persists both file sizes on every
+	// done row (TRANSCODE-13), so a durable lifetime total is derivable — but deriving
+	// it belongs with the dashboard that shows it (TRANSCODE-14); see snapshot.
+	// Updated in Observe with atomics so it is never lost even when the event is
+	// coalesced.
 	bytesReclaimed atomic.Int64
 
 	mu   sync.Mutex
@@ -102,8 +146,8 @@ func NewHub(st store.Store, ctrl *Controller, log *slog.Logger) *Hub {
 // only does two cheap, non-blocking things: bump the reclaimed-bytes counter and
 // hand the event to Run (dropping it if the buffer is full — coalesced).
 func (h *Hub) Observe(ev engine.Event) {
-	if ev.BytesReclaimed > 0 {
-		h.bytesReclaimed.Add(ev.BytesReclaimed)
+	if n := ev.BytesReclaimed(); n > 0 {
+		h.bytesReclaimed.Add(n)
 	}
 	select {
 	case h.events <- ev:

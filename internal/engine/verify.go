@@ -22,22 +22,39 @@ import (
 // track that size/duration cannot; duration/packet parity catches truncation;
 // strictly-smaller enforces the space-reclamation purpose. None is sufficient
 // alone; VMAF (TRANSCODE-4) adds the perceptual layer.
-// verifyOutput returns the measured VMAF harmonic-mean of the accepted output
-// alongside its pass/fail error. The score is purely informational (it feeds the
-// TRANSCODE-8 metric) — the error is what governs the gate, exactly as before; the
-// score is 0 whenever VMAF did not run (disabled) and is only meaningful when the
-// returned error is nil.
-func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (float64, error) {
+// vmafProof is what the VMAF gate MEASURED — carried out of verifyOutput rather than
+// discarded, so the terminal ledger row can keep it (TRANSCODE-13). Its zero value
+// means the gate did not run (VMAF disabled), which is why the scores are pointers:
+// nil is "not measured", and 0.0 is a real, terrible score. Collapsing the two is
+// exactly how a store ends up displaying a fabricated fidelity number.
+//
+// Model is the libvmaf model spec actually passed to the filter, not the config's
+// possibly-"auto" request — a score without the model that produced it is not
+// interpretable, so the resolved value is the only one worth persisting.
+type vmafProof struct {
+	Mean  *float64
+	Min   *float64
+	Model string
+}
+
+// verifyOutput returns the VMAF proof it measured alongside its pass/fail error. The
+// error is what governs the gate, exactly as before; the proof is evidence, and is
+// returned on the REJECT paths too — a VMAF rejection whose score is then thrown away
+// would be re-committing the very defect this phase exists to fix. The proof is the
+// zero value whenever VMAF did not run.
+func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (vmafProof, error) {
+	var none vmafProof
+
 	// 1. exists & non-empty
 	if probe.FileSize(tmp) <= 0 {
-		return 0, fmt.Errorf("temp missing or empty")
+		return none, fmt.Errorf("temp missing or empty")
 	}
 
 	// 2. output codec must be the engine's configured target codec (hevc or av1 —
 	// TRANSCODE-6 generalizes this away from a hardcoded "hevc" so a hardware/AV1
 	// encode is held to exactly the same bar as CPU libx265).
 	if oc := e.Probe.VideoCodec(ctx, tmp); oc != e.targetCodec {
-		return 0, fmt.Errorf("output codec is %q, not %s", oc, e.targetCodec)
+		return none, fmt.Errorf("output codec is %q, not %s", oc, e.targetCodec)
 	}
 
 	// 3. length: the encode must not be truncated.
@@ -46,7 +63,7 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (float64, err
 	if okIn && okOut {
 		// Both durations known: strict parity — a truncated encode is shorter.
 		if math.Abs(din-dout) > e.Cfg.DurationToleranceSec {
-			return 0, fmt.Errorf("duration parity failed (in=%.3fs out=%.3fs tol=%gs)", din, dout, e.Cfg.DurationToleranceSec)
+			return none, fmt.Errorf("duration parity failed (in=%.3fs out=%.3fs tol=%gs)", din, dout, e.Cfg.DurationToleranceSec)
 		}
 	} else {
 		// Duration unknown (e.g. MPEG-TS reports N/A) — use video-packet-count
@@ -57,7 +74,7 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (float64, err
 		if okp && pin > 0 && okpo {
 			// Same tolerance as the bash: |pin-pout| <= pin*0.02 + 2.
 			if math.Abs(float64(pin-pout)) > float64(pin)*0.02+2 {
-				return 0, fmt.Errorf("packet-count parity failed (in=%d out=%d — truncated encode?)", pin, pout)
+				return none, fmt.Errorf("packet-count parity failed (in=%d out=%d — truncated encode?)", pin, pout)
 			}
 		}
 	}
@@ -67,7 +84,7 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (float64, err
 	sout := probe.FileSize(tmp)
 	limit := float64(sin) * (1 - float64(e.Cfg.MinSavingsPercent)/100.0)
 	if !(sout > 0 && float64(sout) <= limit && sout < sin) {
-		return 0, fmt.Errorf("size-increase reject (in=%dB out=%dB min_savings=%d%%)", sin, sout, e.Cfg.MinSavingsPercent)
+		return none, fmt.Errorf("size-increase reject (in=%dB out=%dB min_savings=%d%%)", sin, sout, e.Cfg.MinSavingsPercent)
 	}
 
 	// 5. per-type stream-count parity: no audio/subtitle/attachment track dropped.
@@ -78,25 +95,24 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (float64, err
 		cin := e.Probe.StreamCount(ctx, in, typ)
 		cout := e.Probe.StreamCount(ctx, tmp, typ)
 		if cout < cin {
-			return 0, fmt.Errorf("stream-count parity failed (type=%s in=%d out=%d — a track was dropped)", typ, cin, cout)
+			return none, fmt.Errorf("stream-count parity failed (type=%s in=%d out=%d — a track was dropped)", typ, cin, cout)
 		}
 	}
 
 	// 6. decode-integrity healthcheck on EVERY encode.
 	if !e.Probe.DecodeOK(ctx, tmp) {
-		return 0, fmt.Errorf("decode-integrity check failed (output does not fully decode)")
+		return none, fmt.Errorf("decode-integrity check failed (output does not fully decode)")
 	}
 
 	// 7. VMAF perceptual-quality gate (costliest — a second full decode — so last).
 	// The structural checks prove the output exists/decodes/carries the tracks; VMAF
 	// proves it still LOOKS like the source. Same resolution (codec-only), so no
 	// scaling. When enabled and libvmaf is unavailable, or the measurement fails, the
-	// encode is REJECTED — never accept an unmeasured output. The returned score is
-	// informational (metrics); the error is the gate.
+	// encode is REJECTED — never accept an unmeasured output.
 	if e.Cfg.VmafGate() {
 		return e.vmafGate(ctx, tmp, in)
 	}
-	return 0, nil
+	return none, nil
 }
 
 // vmafGate measures the output (distorted) against the source (reference) and
@@ -118,15 +134,17 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (float64, err
 // gate ACCEPTS it), which is what makes TestVmaf_WorstFrameFloorRejectsLocally-
 // BrokenEncode meaningful rather than vacuous.
 //
-// It returns the measured harmonic-mean (informational, for metrics) alongside the
-// gate error; the score is only meaningful when the error is nil.
-func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (float64, error) {
+// It returns the measured proof (mean + worst frame + the model that produced them)
+// alongside the gate error. The proof is returned on BOTH outcomes: a rejected encode
+// is exactly the case where an operator most wants to see the numbers that rejected
+// it, so it is persisted onto the failed row rather than living only in a log line.
+func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (vmafProof, error) {
 	model := resolveVmafModel(e.Cfg.VmafModel, e.Probe.Height(ctx, distorted))
 
 	score := e.vmafScore
 	if score == nil {
 		if !vmaf.Available(ctx, e.Probe.FFmpeg) {
-			return 0, fmt.Errorf("VMAF gate enabled but libvmaf is not available in the ffmpeg build (refusing to accept an unmeasured encode)")
+			return vmafProof{}, fmt.Errorf("VMAF gate enabled but libvmaf is not available in the ffmpeg build (refusing to accept an unmeasured encode)")
 		}
 		score = func(ctx context.Context, d, r string, sub int, m string) (vmaf.Result, error) {
 			return vmaf.Score(ctx, e.Probe.FFmpeg, d, r, sub, m)
@@ -135,21 +153,26 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (flo
 
 	res, err := score(ctx, distorted, reference, e.Cfg.VmafSubsample, model)
 	if err != nil {
-		return 0, fmt.Errorf("VMAF measurement failed (refusing to accept an unmeasured encode): %w", err)
+		// Nothing was measured, so there is nothing to record: an empty proof, NOT a
+		// zeroed one. (vmaf.Score already refuses a log missing either pooled statistic
+		// — TRANSCODE-11 — so this really is "no measurement", not a partial one.)
+		return vmafProof{}, fmt.Errorf("VMAF measurement failed (refusing to accept an unmeasured encode): %w", err)
 	}
+	proof := vmafProof{Mean: &res.HarmonicMean, Min: &res.Min, Model: model}
+
 	if res.HarmonicMean < e.Cfg.MinVmaf {
-		return res.HarmonicMean, fmt.Errorf("VMAF below threshold (harmonic_mean=%.2f < min_vmaf=%.2f)", res.HarmonicMean, e.Cfg.MinVmaf)
+		return proof, fmt.Errorf("VMAF below threshold (harmonic_mean=%.2f < min_vmaf=%.2f)", res.HarmonicMean, e.Cfg.MinVmaf)
 	}
 	// The worst-frame floor. On by default (vmaf_min_pool=60): a locally-broken
 	// encode is invisible to the mean above and to every structural check, so this
 	// is the only gate standing between it and the deletion of the source.
 	if e.Cfg.VmafMinPool > 0 && res.Min < e.Cfg.VmafMinPool {
-		return res.HarmonicMean, fmt.Errorf(
+		return proof, fmt.Errorf(
 			"VMAF worst-frame below floor (min=%.2f < vmaf_min_pool=%.2f) — the encode is locally broken: "+
 				"its average is fine (harmonic_mean=%.2f) but at least one frame collapsed, so the source is kept",
 			res.Min, e.Cfg.VmafMinPool, res.HarmonicMean)
 	}
-	return res.HarmonicMean, nil
+	return proof, nil
 }
 
 // resolveVmafModel maps the config VmafModel to a libvmaf model spec. "auto"/""

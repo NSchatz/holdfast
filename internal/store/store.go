@@ -55,6 +55,53 @@ func (s Status) Active() bool {
 	}
 }
 
+// Outcome is the durable PROOF of a terminal job's result — the facts the engine
+// computed while deciding whether a swap was safe (TRANSCODE-13). Before this phase
+// every one of them was computed and then thrown away, which is precisely why the
+// ledger could not show fidelity, why a "reclaimed" total reset to zero on every
+// restart, and why the API documented a failure `reason` field that did not exist.
+//
+// Absence is REPRESENTABLE, and must stay that way. Every numeric field is a POINTER
+// for one reason: 0 is a legal value for all of them, so a plain zero cannot mean
+// "nobody measured this". A VMAF of 0.0 is a destroyed frame, not a missing
+// measurement. nil means NOT RECORDED, and a reader (the API, the UI) is required to
+// render it as such — never as 0, never as a fabricated score. The string fields use
+// "" for the same purpose, unambiguously: an empty reason/encoder/model carries no
+// meaning of its own.
+type Outcome struct {
+	// Reason is WHY the job reached this status. For Failed it is the error text (the
+	// encode error, or the gate that rejected the output). For Skipped it is the name
+	// of the GUARD that fired — a stable token from internal/engine, not prose, so a
+	// UI can key off it. Done needs no excuse and leaves it "".
+	Reason string
+
+	// Encoder is the encoder key (cpu / svtav1 / nvenc / …) the job actually ran, set
+	// on every row that reached the encoder at all — a failure is as worth attributing
+	// to its encoder as a success is.
+	Encoder string
+
+	// VmafMean and VmafMin are the pooled harmonic-mean and the worst-frame VMAF, and
+	// VmafModel names the libvmaf model that produced them. All are nil/"" when the
+	// VMAF gate did not run (disabled). The model is NOT decoration: a VMAF score
+	// without the model and pooling that produced it is not a number anyone can
+	// interpret, and displaying one without the other is the exact overclaim the
+	// fidelity work exists to prevent.
+	VmafMean  *float64
+	VmafMin   *float64
+	VmafModel string
+
+	// SourceBytes and OutputBytes are the file sizes either side of the swap (Done).
+	// BOTH are persisted rather than only their difference: that is what makes a
+	// durable lifetime reclaimed total DERIVABLE (TRANSCODE-14 computes and shows it;
+	// this phase only has to keep the facts) and what lets a UI show "before → after"
+	// instead of a bare delta.
+	SourceBytes *int64
+	OutputBytes *int64
+
+	// EncodeMs is the wall-clock encode duration in milliseconds (Done).
+	EncodeMs *int64
+}
+
 // Job is a read-only snapshot of one row in the job ledger, returned by List. It
 // is a reporting view (the API/UI in TRANSCODE-7 renders it) — never a handle the
 // engine writes back through, so exposing it cannot affect file handling.
@@ -65,6 +112,11 @@ type Job struct {
 	FailCount   int
 	Worker      string // "" when the row carries no worker (e.g. a terminal row)
 	UpdatedAt   int64  // unix seconds of the last state transition
+
+	// Outcome is the recorded proof for a terminal row (TRANSCODE-13). Its fields are
+	// all zero/nil on a non-terminal row, and on a terminal row written before this
+	// phase existed — "not recorded", which a reader must show as such.
+	Outcome Outcome
 }
 
 // Store is the persistent job ledger. Every method is safe for concurrent use by
@@ -90,7 +142,14 @@ type Store interface {
 
 	// Finish records a terminal outcome for path+fingerprint. Failed increments
 	// fail_count (retry accounting); Done/Skipped do not.
-	Finish(ctx context.Context, path, fingerprint string, s Status) error
+	//
+	// o is the proof of that outcome (TRANSCODE-13); nil records none. Finish always
+	// writes the FULL outcome column set, so a nil o — or a nil field within it —
+	// CLEARS the corresponding column. That is deliberate: a row's proof must always
+	// describe its CURRENT status. A file that failed (reason recorded), was retried,
+	// and then succeeded must not sit in the ledger as "done" with the old failure's
+	// reason still attached to it.
+	Finish(ctx context.Context, path, fingerprint string, s Status, o *Outcome) error
 
 	// Delete removes the row for path+fingerprint (a no-op if absent). Used to prune
 	// a job row that has been superseded — after a successful transcode the pre-swap
