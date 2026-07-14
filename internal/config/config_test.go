@@ -136,6 +136,98 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// TestLoad_WorstFrameFloorIsOnByDefault pins the DEFAULT, which is the entire
+// substance of TRANSCODE-11: the gate's protection against a locally-broken encode
+// is only real if it is on for the operator who wrote a three-line config and never
+// read the VMAF section. It shipped as 0 (off), leaving the pooled mean — which
+// Netflix documents as hiding poor-quality frames — as the sole VMAF gate.
+//
+// This asserts through the real Load path (koanf defaults ← YAML), not the struct
+// zero value, because that is what an operator actually gets.
+func TestLoad_WorstFrameFloorIsOnByDefault(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "minimal.yaml")
+	writeFile(t, p, "library_roots:\n  - /mnt/media\n")
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.VmafGate() {
+		t.Fatal("the VMAF gate is off by default")
+	}
+	if c.VmafMinPool <= 0 {
+		t.Fatalf("vmaf_min_pool = %g — the worst-frame floor is OFF by default, so the pooled "+
+			"harmonic mean is the sole VMAF gate and a locally-broken encode passes it", c.VmafMinPool)
+	}
+	if c.VmafMinPool != 60 {
+		t.Errorf("vmaf_min_pool default = %g, want 60", c.VmafMinPool)
+	}
+	if c.MinVmaf != 95 {
+		t.Errorf("min_vmaf default = %g, want 95", c.MinVmaf)
+	}
+	// A default config must be quiet: warnings exist to flag a WEAKENED gate, so if
+	// the shipped defaults trip one, the warning is noise and will be tuned out.
+	if w := c.Warnings(); len(w) != 0 {
+		t.Errorf("the default config emits warnings, which trains operators to ignore them: %v", w)
+	}
+}
+
+// An explicit 0 must still disable the floor (config-as-code: the operator's stated
+// intent wins over our default) — but it must WARN, because a config that has
+// silently lost its worst-frame floor otherwise looks exactly like one that has it.
+func TestWarnings(t *testing.T) {
+	on, off := true, false
+	tests := []struct {
+		name  string
+		cfg   Config
+		want  string // substring the warning must contain ("" = expect no warnings)
+		nWant int
+	}{
+		{
+			name:  "defaults are quiet",
+			cfg:   Config{VmafEnable: &on, MinVmaf: 95, VmafMinPool: 60, VmafSubsample: 1},
+			nWant: 0,
+		},
+		{
+			name:  "floor explicitly disabled warns",
+			cfg:   Config{VmafEnable: &on, MinVmaf: 95, VmafMinPool: 0, VmafSubsample: 1},
+			want:  "worst-frame floor is DISABLED",
+			nWant: 1,
+		},
+		{
+			name:  "subsampling weakens the floor and warns",
+			cfg:   Config{VmafEnable: &on, MinVmaf: 95, VmafMinPool: 60, VmafSubsample: 10},
+			want:  "SAMPLE, not a guarantee",
+			nWant: 1,
+		},
+		{
+			name:  "both at once warn twice",
+			cfg:   Config{VmafEnable: &on, MinVmaf: 95, VmafMinPool: 0, VmafSubsample: 10},
+			nWant: 2,
+		},
+		{
+			// The gate off entirely is the WEAKEST setting there is — strictly weaker
+			// than "gate on, floor off", which warns. Warning about the safer config
+			// while staying silent about the more dangerous one would be backwards, so
+			// this warns too (once — the floor/subsample knobs are moot with no gate).
+			name:  "gate off entirely warns loudest",
+			cfg:   Config{VmafEnable: &off, VmafMinPool: 0, VmafSubsample: 10},
+			want:  "there is NO perceptual gate",
+			nWant: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.cfg.Warnings()
+			if len(got) != tc.nWant {
+				t.Fatalf("Warnings() = %d warnings %v, want %d", len(got), got, tc.nWant)
+			}
+			if tc.want != "" && !strings.Contains(strings.Join(got, " "), tc.want) {
+				t.Errorf("Warnings() = %v, want one containing %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestHardlinkSkipDefault(t *testing.T) {
 	var c Config // nil pointer
 	if !c.HardlinkSkip() {

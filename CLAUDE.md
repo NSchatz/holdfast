@@ -40,7 +40,35 @@ Proven by fixture cases 18–22 (HDR) plus source-property cases (a)-(e). `TRANS
 perceptual-quality gate** — the last no-loss layer: after the structural checks pass, VMAF compares the
 output against the source and rejects an encode that decodes fine but *looks* worse (default-on, pooled
 harmonic-mean < 95 → reject; libvmaf-unavailable-while-enabled → reject, never accept an unmeasured
-output). `TRANSCODE-5` replaced the flat-file ledger with a **persistent,
+output). `TRANSCODE-11` closed that gate's **pooling blind spot**. The harmonic mean is an AVERAGE, and an
+average hides local damage — Netflix documents this outright ("mean pooling has the risk of hiding poor
+quality frames"). `vmaf_min_pool` shipped defaulting to **0 = off**, so the mean was the *sole* VMAF gate,
+and `vmaf.Result.Min` — the worst-frame score that would have caught it — was computed and then discarded.
+Measured on real libvmaf: an encode with 6 of 720 frames destroyed to VMAF ~37 pools to a harmonic mean of
+**98.2** and passes cleanly, whereupon the source is atomically swapped and **deleted**. Every structural
+gate passes it too, because a destroyed segment still decodes cleanly and still carries the right duration,
+packets and stream counts. In a 2-hour film the same arithmetic buys **over a minute** of ruined video
+through the gate. The **worst-frame floor is now ON by default (`vmaf_min_pool: 60`)**. It is the **raw
+min**, deliberately, and NOT a low-percentile statistic: a percentile tolerates a *fraction* of frames, but
+a segment small enough to sneak past the mean is *by construction* a small fraction of frames — so a
+1st-percentile floor tolerates exactly the damage the mean already tolerates, and its blind spot **grows
+with runtime** (1% of a 2-hour film is ~72s). The raw min is the only statistic whose guarantee does not
+decay with duration. That is **proved by a committed test, not an argument**:
+`vmaf.TestPoolingStatistic_OnlyRawMinSeesSubOnePercentDamage` destroys 1 frame of 240 (0.42%) and shows the
+harmonic mean (~99) **and** the 1st percentile (~98) are BOTH blind while the raw min reads ~43 — it reds if
+anyone "improves" the floor into a percentile. Anti-flake is measured, not assumed:
+an honest encode of dark+grainy content — VMAF's documented worst case — bottoms out at a worst frame of
+~91, 31 points clear of the floor. Fail-closed throughout: an incomplete libvmaf log (either pooled
+statistic absent) is a **rejection**, never a silent fall-back to mean-only, and `vmaf_subsample > 1`
+WARNS (it makes the floor a sample, not a guarantee) rather than silently degrading. The fixture pair is
+the proof and is a controlled experiment: `TestVmaf_MeanOnlyGateIsBlindToLocalDamage` asserts the
+mean-only gate **accepts** the locally-broken encode (pinning the bug, so the floor cannot be dead code),
+and `TestVmaf_WorstFrameFloorRejectsLocallyBrokenEncode` asserts the floor **rejects** the identical
+encode with the source byte-for-byte intact. **Do not restate "~95 = visually lossless"** — it was asserted
+in three files and Netflix's own docs do not support it (VMAF is a regression onto a *subjective* ACR
+opinion scale; 100 is a label-normalisation anchor, not "identical to the source"), and the widely-repeated
+"~6 VMAF points = 1 JND" figure has **no primary source**. The model is also **luma-only** — structurally
+blind to chroma damage, which only the structural gates catch. `TRANSCODE-5` replaced the flat-file ledger with a **persistent,
 crash-safe SQLite/WAL job store + worker pool**: `internal/store` is a `path+fingerprint`-keyed jobs table
 (`pending/probing/encoding/verifying/done/skipped/failed`) opened with `SetMaxOpenConns(1)` (serializes
 every access — the actual fix for "database is locked" under concurrency) and an explicit transaction
@@ -179,9 +207,12 @@ in the umbrella that tracks this repo (`operations/roadmaps/transcode.md`).
   are unit-tested with no ffmpeg dependency, plus prober-backed `Classify`/`DeriveColorArgs` used by the
   engine and encoder. **Fail-safe by construction**: an incomplete HDR10 static-metadata block, or an
   unrecognized pixel format, is never guessed — the caller skips.
-- `internal/vmaf` (TRANSCODE-4) — runs libvmaf (via ffmpeg) to score an output vs its source; `Available`
-  reports whether the build has libvmaf, `Score` returns the pooled harmonic-mean + min VMAF. The engine's
-  `verifyOutput` rejects a below-threshold or unmeasurable encode (never accept an unmeasured output).
+- `internal/vmaf` (TRANSCODE-4, hardened by TRANSCODE-11) — runs libvmaf (via ffmpeg) to score an output vs
+  its source; `Available` reports whether the build has libvmaf, `Score` returns the pooled harmonic-mean +
+  min VMAF. Both pooled fields are parsed as **pointers** so "libvmaf did not emit this" is distinguishable
+  from "libvmaf measured 0.0" — an incomplete log is a REJECTION, never a zero the gate would read as a real
+  score. The engine's `verifyOutput` rejects an encode that is below the mean threshold, **below the
+  worst-frame floor**, or unmeasurable (never accept an unmeasured output).
 - `internal/encoder` (TRANSCODE-6) — the codec matrix registry: `Spec` (config key, ffmpeg `-c:v` codec,
   output target codec, hardware flag) + `Lookup`/`Known` + a robust `Available` capability check (encodes a
   tiny real clip to a temp file and ffprobes the RESULT rather than trusting ffmpeg's exit code — the only

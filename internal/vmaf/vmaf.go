@@ -1,9 +1,13 @@
 // Package vmaf runs libvmaf (via ffmpeg) to measure the perceptual quality of a
 // transcoded output against its source — the last no-loss layer (TRANSCODE-4). The
 // structural gates (codec/parity/size/stream-count/decode-integrity) prove an output
-// exists, decodes, and carries the tracks; VMAF proves it still LOOKS like the
-// source. A codec-only transcode keeps the resolution identical, so VMAF applies
-// with no scaling.
+// exists, decodes, and carries the tracks; VMAF ESTIMATES whether it still looks
+// like the source. A codec-only transcode keeps the resolution identical, so VMAF
+// applies with no scaling.
+//
+// Two pooled statistics come back, and the gate needs BOTH (see Result): the
+// harmonic mean bounds average quality, and the min bounds LOCAL quality. A mean
+// alone is not a gate — it averages a destroyed segment away.
 //
 // libvmaf's filter takes the DISTORTED stream as its first input and the REFERENCE
 // as its second — getting this backwards inverts the meaning, so it is fixed here.
@@ -20,9 +24,31 @@ import (
 )
 
 // Result is the pooled VMAF over the (sub)sampled frames.
+//
+// What a VMAF score does and does not license: VMAF is a regression onto a
+// SUBJECTIVE opinion scale (ACR), not a measure of signal identity. 100 is a
+// label-normalisation anchor, not "identical to the source" — a bit-identical file
+// is not guaranteed to score it. So a high score means "no worse than X against
+// your source, under this model and viewing condition", and nothing stronger. It is
+// not a proof of fidelity, and the widely-repeated "~6 VMAF points = 1 JND" figure
+// is practitioner folklore with no primary source — do not repeat it.
+//
+// The default model (vmaf_v0.6.1) extracts LUMA FEATURES ONLY: it is structurally
+// blind to chroma damage, and Netflix names it weak on banding and dark-region
+// blockiness, and prone to OVER-predicting quality on high-motion scenes — the
+// dangerous direction for a pass/fail gate. Chroma corruption is caught here only
+// by the structural checks, never by VMAF.
 type Result struct {
-	HarmonicMean float64 // the primary "visually lossless" measure (Netflix: ~95 = diminishing returns)
-	Min          float64 // the worst single (sub)sampled frame — catches a worst-segment collapse
+	// HarmonicMean is the pooled mean over the (sub)sampled frames. It is an
+	// AVERAGE, and Netflix documents that mean pooling "has the risk of hiding poor
+	// quality frames" — the harmonic mean is a weak correction, not a fix. It must
+	// never be the sole gate; see Min.
+	HarmonicMean float64
+	// Min is the worst single (sub)sampled frame — the statistic that bounds LOCAL
+	// damage, which the mean averages away. A short destroyed segment inside an
+	// otherwise-clean encode passes every structural check and the pooled mean;
+	// only this catches it.
+	Min float64
 }
 
 // ErrUnavailable indicates the ffmpeg build has no libvmaf filter, so quality
@@ -45,12 +71,18 @@ func Available(ctx context.Context, ffmpeg string) bool {
 	return false
 }
 
-// vmafLog is the subset of libvmaf's JSON log we consume.
+// vmafLog is the subset of libvmaf's JSON log we consume. Both pooled statistics
+// are POINTERS so that "libvmaf did not emit this field" is distinguishable from
+// "libvmaf measured 0.0". That distinction is load-bearing: the worst-frame floor
+// is enforced as `Min < vmaf_min_pool`, so an absent Min silently unmarshalling to
+// 0.0 would either reject everything or — if the floor were ever read as optional —
+// quietly degrade the gate back to mean-only. An unparseable or incomplete log is a
+// REJECTION, never a fallback.
 type vmafLog struct {
 	PooledMetrics struct {
 		VMAF struct {
-			Min          float64 `json:"min"`
-			HarmonicMean float64 `json:"harmonic_mean"`
+			Min          *float64 `json:"min"`
+			HarmonicMean *float64 `json:"harmonic_mean"`
 		} `json:"vmaf"`
 	} `json:"pooled_metrics"`
 }
@@ -96,9 +128,20 @@ func Score(ctx context.Context, ffmpeg, distorted, reference string, subsample i
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return Result{}, fmt.Errorf("vmaf: parse log: %w", err)
 	}
+	// Fail CLOSED on an incomplete log. Either pooled statistic missing means the
+	// measurement did not actually produce the numbers the gate is built on, and the
+	// caller must reject rather than proceed on a zero value it would misread as a
+	// real score.
+	pooled := parsed.PooledMetrics.VMAF
+	if pooled.HarmonicMean == nil || pooled.Min == nil {
+		return Result{}, fmt.Errorf(
+			"vmaf: log is missing a pooled statistic (harmonic_mean present=%t, min present=%t) — "+
+				"refusing to accept an encode whose quality was not fully measured",
+			pooled.HarmonicMean != nil, pooled.Min != nil)
+	}
 	return Result{
-		HarmonicMean: parsed.PooledMetrics.VMAF.HarmonicMean,
-		Min:          parsed.PooledMetrics.VMAF.Min,
+		HarmonicMean: *pooled.HarmonicMean,
+		Min:          *pooled.Min,
 	}, nil
 }
 

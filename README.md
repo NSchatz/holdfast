@@ -32,7 +32,13 @@ and fixes the trust gaps:
 - **Never replace before verify.** Encode to a same-directory temp; the source is replaced only by an
   **atomic same-filesystem rename**, and only after the output passes *every* gate: correct codec,
   duration/packet parity, strictly smaller, per-type stream-count parity, full decode-integrity, and a
-  **VMAF** perceptual-quality check. Any failure leaves the source byte-for-byte untouched.
+  **VMAF** perceptual-quality check — both its **average** (`min_vmaf`) *and* its **worst frame**
+  (`vmaf_min_pool`). Any failure leaves the source byte-for-byte untouched.
+- **The quality gate bounds the worst frame, not just the average.** An average hides local damage —
+  Netflix says so outright — so a short destroyed segment inside an otherwise-clean encode passes a
+  mean-only gate, and passes every structural check too (it decodes fine and carries the right duration,
+  packets and streams). Both floors are **on by default**. An output that cannot be *measured* is
+  rejected, not assumed good.
 - **Config-as-code.** YAML, validated, in git — not clickops that vanishes on rebuild.
 - **Open source** (AGPL-3.0).
 
