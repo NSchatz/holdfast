@@ -157,8 +157,21 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 		return false, fmt.Errorf("store: claim: unrecognized status %q for %s", status, path)
 	}
 
+	// Claiming BEGINS A NEW ATTEMPT, so it clears the outcome columns. Only a retry of
+	// a Failed row can reach here with an outcome already on it, and that outcome
+	// describes the PREVIOUS attempt — an encode that was rejected and whose temp was
+	// deleted. Leaving it in place would mean a job sitting in probing/encoding/
+	// verifying (for hours) still carrying the failed attempt's reason and, worse, its
+	// VMAF score: /api/queue projects the same columns as /api/history, so an in-flight
+	// file would be served with a fidelity number belonging to an encode that no longer
+	// exists. A fabricated score is exactly what this schema exists to prevent, and the
+	// rule in Finish's doc — a row's proof always describes its CURRENT status — has to
+	// hold on the way IN as well as on the way out.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE jobs SET status = ?, worker = ?, updated_at = ? WHERE path = ? AND fingerprint = ?`,
+		`UPDATE jobs SET status = ?, worker = ?, updated_at = ?,
+			reason = NULL, encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
+			source_bytes = NULL, output_bytes = NULL, encode_ms = NULL
+		 WHERE path = ? AND fingerprint = ?`,
 		string(Probing), worker, now(), path, fingerprint); err != nil {
 		return false, fmt.Errorf("store: claim update: %w", err)
 	}
@@ -211,23 +224,6 @@ func (s *SQLite) Finish(ctx context.Context, path, fingerprint string, st Status
 		return fmt.Errorf("store: finish: %w", err)
 	}
 	return nil
-}
-
-// Reclaimed is documented on the Store interface.
-func (s *SQLite) Reclaimed(ctx context.Context) (int64, error) {
-	// COALESCE turns SUM-over-no-rows (which is NULL) into 0 — an honest zero: no
-	// completed transcode has recorded its sizes, so nothing has been reclaimed as far
-	// as the ledger can prove. The IS NOT NULL guards keep an unmeasured row from
-	// being read as a 0-byte source.
-	var total int64
-	err := s.db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(source_bytes - output_bytes), 0) FROM jobs
-		  WHERE status = ? AND source_bytes IS NOT NULL AND output_bytes IS NOT NULL`,
-		string(Done)).Scan(&total)
-	if err != nil {
-		return 0, fmt.Errorf("store: reclaimed: %w", err)
-	}
-	return total, nil
 }
 
 // --- NULL helpers -------------------------------------------------------------

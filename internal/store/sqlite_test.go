@@ -540,10 +540,12 @@ func TestFinish_LaterOutcomeReplacesTheEarlierOne(t *testing.T) {
 	}
 }
 
-// The lifetime reclaimed total is derived from the stored sizes, so it survives a
-// restart. Before TRANSCODE-13 the only reclaimed figure anywhere was an in-process
-// counter, and the number an operator saw reset to 0 on every daemon bounce.
-func TestReclaimed_IsDurableAcrossReopen(t *testing.T) {
+// The recorded proof is DURABLE — it survives closing and reopening the database. This
+// is the point of the phase: before it, the sizes lived only in an in-process counter,
+// so an operator's "reclaimed" figure reset to 0 on every daemon bounce. Deriving a
+// lifetime total from these columns is TRANSCODE-14's; persisting them so it CAN be is
+// this phase's, and this is the proof that it is.
+func TestOutcome_SurvivesAReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "jobs.db")
 	ctx := context.Background()
 
@@ -551,42 +553,92 @@ func TestReclaimed_IsDurableAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	for _, r := range []struct {
-		path     string
-		st       Status
-		src, out int64
-		recorded bool
-	}{
-		{"/a/one.mkv", Done, 1000, 400, true},    // reclaims 600
-		{"/a/two.mkv", Done, 500, 200, true},     // reclaims 300
-		{"/a/three.mkv", Done, 0, 0, false},      // a pre-TRANSCODE-13 row: NOT recorded
-		{"/a/four.mkv", Skipped, 900, 100, true}, // skipped — reclaims nothing, ever
-	} {
-		if ok, err := s.Claim(ctx, r.path, "fp", "w0", 3); err != nil || !ok {
-			t.Fatalf("claim %s: ok=%v err=%v", r.path, ok, err)
-		}
-		var o *Outcome
-		if r.recorded {
-			o = &Outcome{SourceBytes: i64(r.src), OutputBytes: i64(r.out)}
-		}
-		if err := s.Finish(ctx, r.path, "fp", r.st, o); err != nil {
-			t.Fatalf("finish %s: %v", r.path, err)
-		}
+	if ok, err := s.Claim(ctx, "/a/one.mkv", "fp", "w0", 3); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
-	if got, err := s.Reclaimed(ctx); err != nil || got != 900 {
-		t.Fatalf("Reclaimed = %d (err %v), want 900 (600+300; the unrecorded row contributes nothing, the skipped row is not a transcode)", got, err)
+	if err := s.Finish(ctx, "/a/one.mkv", "fp", Done, &Outcome{
+		Encoder: "cpu", VmafMean: f64(97.25), VmafMin: f64(88.5), VmafModel: "version=vmaf_v0.6.1",
+		SourceBytes: i64(1000), OutputBytes: i64(400), EncodeMs: i64(12_345),
+	}); err != nil {
+		t.Fatalf("Finish: %v", err)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// The whole point: reopen the process and the number is still there.
 	s2, err := Open(path)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer func() { _ = s2.Close() }()
-	if got, err := s2.Reclaimed(ctx); err != nil || got != 900 {
-		t.Fatalf("Reclaimed after reopen = %d (err %v), want 900 — the total must survive a restart", got, err)
+
+	rows, err := s2.List(ctx, []Status{Done}, 0)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("List after reopen: rows=%d err=%v", len(rows), err)
+	}
+	o := rows[0].Outcome
+	if o.SourceBytes == nil || *o.SourceBytes != 1000 || o.OutputBytes == nil || *o.OutputBytes != 400 {
+		t.Errorf("sizes did not survive the reopen: src=%v out=%v", o.SourceBytes, o.OutputBytes)
+	}
+	if o.VmafMean == nil || *o.VmafMean != 97.25 || o.VmafMin == nil || *o.VmafMin != 88.5 || o.VmafModel != "version=vmaf_v0.6.1" {
+		t.Errorf("the fidelity proof did not survive the reopen: %+v", o)
+	}
+	if o.Encoder != "cpu" || o.EncodeMs == nil || *o.EncodeMs != 12_345 {
+		t.Errorf("encoder/duration did not survive the reopen: %+v", o)
+	}
+}
+
+// A RETRY must not serve the previous attempt's proof.
+//
+// Claim is the transition that begins a new attempt, and only a Failed row can reach it
+// with an outcome already attached — an outcome describing an encode that was REJECTED
+// and whose temp was deleted. If Claim left it there, the row would sit in probing/
+// encoding/verifying (for hours, on a real film) still carrying that dead encode's
+// failure reason and, far worse, its VMAF score. /api/queue projects the same columns as
+// /api/history, so an operator would watch an in-flight file advertise a fidelity number
+// belonging to a file that no longer exists. That is a fabricated score — precisely what
+// this schema exists to prevent — so Claim clears the columns.
+func TestClaim_RetryClearsThePreviousAttemptsOutcome(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	// A VMAF rejection: the row records why, and what it measured.
+	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Failed, &Outcome{
+		Reason:  "VMAF worst-frame below floor (min=41.00 < vmaf_min_pool=60.00)",
+		Encoder: "cpu", VmafMean: f64(87.5), VmafMin: f64(41.0), VmafModel: "version=vmaf_v0.6.1",
+		EncodeMs: i64(12_345),
+	}); err != nil {
+		t.Fatalf("Finish(failed): %v", err)
+	}
+
+	// Retry it (failed is retryable under MaxFailures) and inspect the row MID-FLIGHT.
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w1", 3); err != nil || !ok {
+		t.Fatalf("re-claim: ok=%v err=%v", ok, err)
+	}
+	if err := s.Advance(ctx, "/a/movie.mkv", "fp1", Encoding); err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+
+	rows, err := s.List(ctx, []Status{Encoding}, 0)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("List: rows=%d err=%v", len(rows), err)
+	}
+	o := rows[0].Outcome
+	if o.Reason != "" {
+		t.Errorf("an in-flight retry still carries the previous attempt's reason %q", o.Reason)
+	}
+	if o.VmafMean != nil || o.VmafMin != nil {
+		t.Errorf("an in-flight retry is advertising the REJECTED encode's VMAF score (mean=%v min=%v) — that encode was deleted",
+			o.VmafMean, o.VmafMin)
+	}
+	if o.VmafModel != "" || o.Encoder != "" || o.EncodeMs != nil {
+		t.Errorf("an in-flight retry still carries stale outcome data: %+v", o)
+	}
+	// fail_count is retry ACCOUNTING, not proof of an outcome — it must survive.
+	if rows[0].FailCount != 1 {
+		t.Errorf("fail_count = %d, want 1 — clearing the outcome must not reset retry accounting", rows[0].FailCount)
 	}
 }

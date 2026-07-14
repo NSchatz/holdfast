@@ -113,7 +113,7 @@ invariant is entirely unaffected.
 | Method & path | Auth | Purpose |
 |---|---|---|
 | `GET /` | — | the embedded dashboard |
-| `GET /api/summary` | — | counts per status + bytes reclaimed (lifetime **and** this session) + paused/scanning |
+| `GET /api/summary` | — | counts per status + session bytes reclaimed + paused/scanning |
 | `GET /api/queue` | — | pending + active jobs |
 | `GET /api/history?limit=N` | — | recent terminal jobs (done/skipped/failed) with their recorded outcome — see below |
 | `GET /api/events` | — | SSE: a fresh snapshot on every state change |
@@ -137,11 +137,11 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 |---|---|---|
 | `reason` | failed | the error that rejected it (the encode error, or **which gate** refused the output) |
 | `reason` | skipped | **which guard** fired — `already-at-target-codec`, `low-bitrate`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `target-already-exists` |
-| `encoder` | done, failed | the encoder that ran (`cpu`, `svtav1`, `nvenc`, …) |
+| `encoder` | any job that reached the encoder | the encoder that ran (`cpu`, `svtav1`, `nvenc`, …) — a skip, or a file with no readable video stream, never gets that far and records none |
 | `vmaf_mean`, `vmaf_min` | done, and a VMAF-rejected failure | the pooled harmonic mean **and the worst frame** |
 | `vmaf_model` | as above | the libvmaf model that produced them |
 | `source_bytes`, `output_bytes` | done | the sizes either side of the swap |
-| `encode_ms` | done, failed-after-encode | wall-clock encode time |
+| `encode_ms` | done, and a failure after the encode ran | wall-clock encode time |
 
 **A `null` means "not recorded", and you must read it that way.** It is never a zero. A numeric field is
 `null` — not `0` — whenever the fact was not measured (VMAF disabled, or a row written before these
@@ -154,12 +154,13 @@ scale under one viewing condition, `vmaf_v0.6.1` is **luma-only** (structurally 
 and the scores are **not comparable across different sources**. The number bounds measured perceptual
 quality against *your* source; it is not a proof of fidelity.
 
-Bytes reclaimed is reported two ways: `bytes_reclaimed_total` is the **lifetime** figure, summed from the
-recorded sizes in the ledger, and survives a restart; `bytes_reclaimed_session` is this process's running
-total and resets when the daemon does.
+An outcome is recorded per *attempt*, not per file: **claiming a job for a retry clears it**, so a file
+that is being re-encoded never advertises the rejected attempt's score while it is in flight.
 
-**Known limitation:** rows written before these columns existed carry no outcome and read as "not
-recorded" — there is no way to reconstruct a measurement that was never taken.
+**Known limitations.** Rows written before these columns existed carry no outcome and read as "not
+recorded" — a measurement never taken cannot be reconstructed. And `bytes_reclaimed_session` is still a
+**per-process** total that resets when the daemon restarts; the recorded sizes now make a durable lifetime
+figure derivable, but computing and displaying it comes with the dashboard.
 
 #### Schema versioning
 

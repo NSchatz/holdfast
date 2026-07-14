@@ -171,17 +171,6 @@ type Store interface {
 	// row appear). Used by the API/UI for at-a-glance queue/history totals.
 	Summary(ctx context.Context) (map[Status]int, error)
 
-	// Reclaimed returns the LIFETIME bytes reclaimed: the sum of
-	// (source_bytes - output_bytes) over every done row that recorded both
-	// (TRANSCODE-13). Before this phase the only reclaimed figure anywhere was an
-	// in-process counter in the SSE hub, so the number an operator saw silently reset
-	// to 0 on every restart — for a tool whose entire purpose is reclaiming disk.
-	//
-	// Rows that recorded no sizes (every terminal row written before this phase) are
-	// excluded rather than counted as zero: the total is over what was measured, and
-	// what was never measured contributes nothing to it. A pure read.
-	Reclaimed(ctx context.Context) (int64, error)
-
 	// Close releases the underlying database handle.
 	Close() error
 }

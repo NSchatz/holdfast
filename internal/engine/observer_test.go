@@ -207,15 +207,6 @@ func TestObserver_DoneEventAndLedgerCarryTheFullProof(t *testing.T) {
 		t.Errorf("the ledger row does not carry the same proof as the event:\n row=%+v\n ev =%+v", got, *o)
 	}
 
-	// And the lifetime reclaimed total is now durable — it is derived from the stored
-	// sizes, not from an in-process counter that resets on restart.
-	total, err := eng.Store.Reclaimed(context.Background())
-	if err != nil {
-		t.Fatalf("Reclaimed: %v", err)
-	}
-	if want := srcSize - *o.OutputBytes; total != want {
-		t.Errorf("Reclaimed() = %d, want %d", total, want)
-	}
 }
 
 // TRANSCODE-13: a SKIPPED job must record WHICH GUARD skipped it. Before this phase an

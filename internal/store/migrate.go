@@ -133,21 +133,65 @@ func migrate(ctx context.Context, db *sql.DB) error {
 // way through rolls the whole step back — the database can never end up claiming a
 // version whose columns it does not have, which is the one way a versioned schema can
 // still lie to you.
+//
+// The transaction is BEGIN IMMEDIATE, not the default DEFERRED, and that matters. A
+// deferred transaction takes no write lock until its first write, so two processes
+// opening the same un-migrated database (a `serve` daemon and an operator's `holdfast
+// run`, on the first start after an upgrade) both begin, both try to upgrade to a write
+// lock, and one gets SQLITE_BUSY — which busy_timeout will NOT retry, because the
+// deadlock is already established. IMMEDIATE takes the write lock up front, where the
+// busy handler CAN wait on it, so the second process simply blocks until the first has
+// migrated and then finds nothing left to do. Migrating is not the place to introduce a
+// startup failure the old (idempotent, lock-free) schema init did not have.
 func applyMigration(ctx context.Context, db *sql.DB, version int, m migration) error {
-	tx, err := db.BeginTx(ctx, nil)
+	// A dedicated connection: BEGIN/COMMIT are statements here rather than
+	// database/sql's tx API (which offers no way to ask for IMMEDIATE), so they must
+	// all land on the same connection.
+	conn, err := db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("begin: %w", err)
+		return fmt.Errorf("connect: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }() // no-op once committed
+	defer func() { _ = conn.Close() }()
 
-	if _, err := tx.ExecContext(ctx, m.sql); err != nil {
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("begin immediate: %w", err)
+	}
+	// Roll back on any failure below. Uses a background context deliberately: if ctx is
+	// what failed (cancelled), a rollback on ctx would fail too and leak the write lock
+	// for as long as the connection lives.
+	rollback := func() { _, _ = conn.ExecContext(context.Background(), `ROLLBACK`) }
+
+	// RE-READ the version under the write lock. migrate() read it before calling us,
+	// but between that read and our acquiring this lock another process may have run
+	// this very migration — and then our ALTER would die on "duplicate column name",
+	// turning a concurrent first-open into a startup failure for whoever lost the race.
+	// The check and the apply have to be atomic TOGETHER, which means the check belongs
+	// inside the transaction that does the applying. Losing the race is now a no-op: the
+	// work is already done.
+	var cur int
+	if err := conn.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&cur); err != nil {
+		rollback()
+		return fmt.Errorf("re-read user_version: %w", err)
+	}
+	if cur >= version {
+		rollback() // nothing to do; another process applied it while we waited
+		return nil
+	}
+
+	if _, err := conn.ExecContext(ctx, m.sql); err != nil {
+		rollback()
 		return err
 	}
 	// PRAGMA takes no bound parameters, so the version is formatted into the text. It
 	// is an int derived from len(migrations) — never anything a caller supplies — so
 	// there is no injection surface here, only an API limitation.
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, version)); err != nil {
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, version)); err != nil {
+		rollback()
 		return fmt.Errorf("stamp user_version: %w", err)
 	}
-	return tx.Commit()
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		rollback()
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
 }

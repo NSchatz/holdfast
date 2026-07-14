@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -191,14 +192,30 @@ func TestMigrate_V0DatabaseOnDiskGainsTheOutcomeColumns(t *testing.T) {
 		}
 	}
 
-	// 5. The lifetime reclaimed total over unmeasured rows is 0 — honestly, because
-	// nothing was ever measured, not because a NULL was read as a zero size.
-	total, err := s.Reclaimed(ctx)
-	if err != nil {
-		t.Fatalf("Reclaimed: %v", err)
+	// 5. And the migrated database is WRITABLE through the new columns — the migration
+	// is not merely cosmetic. (Without the ALTER this would fail with "no such column",
+	// which is exactly how the silent-no-op bug surfaces on a live install: not at
+	// startup, but later, on a query.)
+	if ok, err := s.Claim(ctx, "/lib/fresh.mkv", "50:500", "w0", 3); err != nil || !ok {
+		t.Fatalf("Claim on a migrated database: ok=%v err=%v", ok, err)
 	}
-	if total != 0 {
-		t.Errorf("Reclaimed over pre-migration rows = %d, want 0", total)
+	if err := s.Finish(ctx, "/lib/fresh.mkv", "50:500", Done, &Outcome{
+		Encoder: "cpu", VmafMean: f64(97.0), VmafMin: f64(90.0), VmafModel: "version=vmaf_v0.6.1",
+		SourceBytes: i64(1000), OutputBytes: i64(400), EncodeMs: i64(999),
+	}); err != nil {
+		t.Fatalf("Finish on a migrated database: %v", err)
+	}
+	got, err := s.List(ctx, []Status{Done}, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, j := range got {
+		if j.Path != "/lib/fresh.mkv" {
+			continue
+		}
+		if j.Outcome.VmafMin == nil || *j.Outcome.VmafMin != 90.0 || j.Outcome.SourceBytes == nil {
+			t.Errorf("a row written AFTER the migration lost its proof: %+v", j.Outcome)
+		}
 	}
 }
 
@@ -227,6 +244,67 @@ func TestMigrate_IsIdempotent(t *testing.T) {
 		if err := s.Close(); err != nil {
 			t.Fatalf("Close #%d: %v", i, err)
 		}
+	}
+}
+
+// Two processes opening the same UN-MIGRATED database at once must both come up. This
+// is the real first-start-after-upgrade shape: a `serve` daemon and an operator running
+// `holdfast run` against the same jobs.db, neither of which has migrated it yet.
+//
+// It is easy to get two ways wrong at once, and both were:
+//   - a DEFERRED transaction takes no write lock until its first write, so both
+//     processes begin, both try to upgrade, and the loser gets SQLITE_BUSY — which
+//     busy_timeout will NOT retry, because the deadlock is already established.
+//     Hence BEGIN IMMEDIATE.
+//   - checking the version OUTSIDE the transaction lets both processes read 0, and then
+//     the loser's ALTER dies on "duplicate column name". Hence the re-read under the
+//     lock.
+//
+// Migrating must not introduce a startup failure the old lock-free schema init did not
+// have, so this runs the real Open concurrently and demands every one of them succeed.
+func TestMigrate_ConcurrentFirstOpenOfAV0Database(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.db")
+	seedV0(t, path)
+
+	const n = 6
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			s, err := Open(path)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			errs[i] = s.Close()
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("concurrent Open #%d failed — a first-start race must not refuse to boot: %v", i, err)
+		}
+	}
+
+	// Exactly one migration actually ran: the schema is at the current version, and the
+	// rows are all still there (nobody applied it twice or half-applied it).
+	if got, want := userVersion(t, path), schemaVersion(); got != want {
+		t.Errorf("user_version = %d, want %d", got, want)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open after the race: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	rows, err := s.List(context.Background(), nil, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 4 {
+		t.Errorf("row count after a concurrent migration = %d, want 4", len(rows))
 	}
 }
 

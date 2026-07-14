@@ -212,16 +212,35 @@ measurement. NULL/nil is **"not recorded"** and a reader must render it as such 
 fabricated score (the API serializes them as explicit JSON `null`, asserted on the raw bytes because
 decoding into a struct would erase the distinction). Skip reasons are a **closed vocabulary** (the `Skip*`
 constants — treat them as a wire format), because an operator seeing the bare word "skipped" had to go read
-the logs to learn which of eight guards fired; a failure's reason is the error text itself. `Finish` writes
-the FULL outcome column set every time, so a retried job that finally succeeds cannot sit in the ledger as
-"done" still wearing the previous attempt's failure reason. `store.Reclaimed` sums the recorded sizes, so
-the lifetime total is durable — persisting **both** sizes rather than just their delta is what buys that.
+the logs to learn which of eight guards fired; a failure's reason is the error text itself.
+
+**An outcome belongs to an ATTEMPT, not to a file, and both ends of that have to hold.** `Finish` writes
+the FULL outcome column set every time (nil clears), so a retried job that finally succeeds cannot sit in
+the ledger as "done" still wearing the previous attempt's failure reason. And **`Claim` NULLs the outcome
+columns**, because claiming is what BEGINS an attempt: only a `Failed` row can be re-claimed with an
+outcome already on it, and that outcome describes an encode that was *rejected and deleted*. Leaving it
+would park a job in probing/encoding/verifying — for hours, on a real film — still advertising the dead
+encode's VMAF score, and `/api/queue` projects the same columns as `/api/history`, so an operator would
+watch an in-flight file display a fidelity number for a file that no longer exists. (The gate-refuter
+caught exactly this; `TestClaim_RetryClearsThePreviousAttemptsOutcome` pins it. `fail_count` is retry
+ACCOUNTING, not proof, and deliberately survives.)
+
 The anti-vacuity proof is `TestMigrate_V0DatabaseOnDiskGainsTheOutcomeColumns`: it seeds a **real
 pre-migration database** (the frozen v0 DDL, with rows) and proves opening it migrates in place and keeps
 every row. **A fresh-schema test would pass against the very bug** — a fresh file gets the columns either
 way — which is why the v0 fixture is the one that matters; it is mutation-tested against a
-`CREATE TABLE IF NOT EXISTS`-only migrate and reds. **Deferred to `-14`:** the dashboard still renders none
-of this (`internal/webui` is untouched) and still shows only the session counter.
+`CREATE TABLE IF NOT EXISTS`-only migrate and reds. The migration transaction is **`BEGIN IMMEDIATE`**, not
+the default DEFERRED: two processes opening the same un-migrated database (a `serve` daemon and an
+operator's `holdfast run`, on the first start after an upgrade) would both begin, both try to upgrade to a
+write lock, and one would get `SQLITE_BUSY` — which `busy_timeout` will NOT retry, because the deadlock is
+already established. IMMEDIATE takes the lock up front where the busy handler can wait on it. Migrating is
+not the place to introduce a startup failure the old lock-free schema init did not have.
+
+**Deferred to `-14`:** the dashboard renders none of this (`internal/webui` is untouched), and the
+reclaimed figure is still the **session** counter. `-13` persists BOTH sizes on every done row, which is
+what makes a durable lifetime total *derivable* — but summing it on every SSE snapshot would be an
+unbounded scan over the single serialized connection the engine writes through, on a table whose
+retention/pruning this phase explicitly defers. That sum belongs with the dashboard that shows it.
 
 **The rule when you touch this: hyphen is history, underscore is an identifier.** The phase IDs
 `TRANSCODE-1`…`TRANSCODE-15` are **historical labels and must survive** — they are how git log and the
@@ -292,13 +311,14 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   cycle) — `internal/config.Validate` imports `internal/encoder` instead.
 - `internal/store` (TRANSCODE-5; outcome columns + versioning TRANSCODE-13) — the persistent, crash-safe
   SQLite/WAL job store that replaced `internal/ledger`: a `path+fingerprint`-keyed `jobs` table with
-  `Claim`/`Advance`/`Finish`/`RecoverStale`/`Get`/`List`/`Summary`/`Reclaimed`. `Claim` is the cross-worker
+  `Claim`/`Advance`/`Finish`/`RecoverStale`/`Get`/`List`/`Summary`. `Claim` is the cross-worker
   mutual-exclusion guard (an explicit transaction around its read-modify-write); `SetMaxOpenConns(1)` +
   `busy_timeout` + WAL + `synchronous=NORMAL` avoid "database is locked" under concurrent workers without
   serializing on fsync-per-commit latency. `migrate.go` owns the schema: an **append-only** `migrations`
-  slice versioned by `PRAGMA user_version`, each step + its version stamp in one transaction. `Finish`
-  carries a `store.Outcome` — the durable proof of a terminal job (reason / encoder / VMAF mean+min+model /
-  both sizes / encode ms), with **nullable** columns so "not recorded" never reads as `0`.
+  slice versioned by `PRAGMA user_version`, each step + its version stamp in one `BEGIN IMMEDIATE`
+  transaction. `Finish` carries a `store.Outcome` — the durable proof of a terminal job (reason / encoder /
+  VMAF mean+min+model / both sizes / encode ms), with **nullable** columns so "not recorded" never reads as
+  `0`; `Claim` clears them, because it begins a new attempt.
 - `internal/engine` — the orchestrator: `ProcessFile` (skip guards — already-at-TARGET-CODEC (TRANSCODE-6
   generalized this off a hardcoded "already HEVC"), low-bitrate, hardlinked, **interlaced, DV/HDR10+,
   HDR10-with-incomplete-metadata, exotic pixel format** (TRANSCODE-3) — → **`Store.Claim`** (TRANSCODE-5) →

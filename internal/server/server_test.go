@@ -460,32 +460,51 @@ func TestHistoryEndpoint_UnrecordedOutcomeIsNullNotZero(t *testing.T) {
 	}
 }
 
-// The lifetime reclaimed total is served from the ledger, so it does not reset when the
-// daemon restarts — unlike the session counter, which is (still) a per-process figure.
-func TestSummaryEndpoint_ReportsLifetimeReclaimedFromTheLedger(t *testing.T) {
+// An in-flight retry must not advertise the PREVIOUS attempt's fidelity score on
+// /api/queue. The queue and history views share one projection, so a stale outcome left
+// on a re-claimed row would be served next to a file that is still encoding — a score
+// belonging to an encode that was rejected and deleted.
+func TestQueueEndpoint_InFlightRetryCarriesNoStaleProof(t *testing.T) {
 	h := newHarness(t, "")
 	st := h.st
 	ctx := context.Background()
 
-	src, out := int64(1_000), int64(400)
-	mustClaim(t, st, "/lib/reclaimed.mkv", "6:6")
-	if err := st.Finish(ctx, "/lib/reclaimed.mkv", "6:6", store.Done,
-		&store.Outcome{SourceBytes: &src, OutputBytes: &out}); err != nil {
+	mean, min := 87.5, 41.0
+	mustClaim(t, st, "/lib/retry.mkv", "7:7")
+	if err := st.Finish(ctx, "/lib/retry.mkv", "7:7", store.Failed, &store.Outcome{
+		Reason: "VMAF worst-frame below floor", Encoder: "cpu", VmafMean: &mean, VmafMin: &min,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Retry: claim it again and put it in flight.
+	mustClaim(t, st, "/lib/retry.mkv", "7:7")
+	if err := st.Advance(ctx, "/lib/retry.mkv", "7:7", store.Encoding); err != nil {
 		t.Fatal(err)
 	}
 
 	ts := httptest.NewServer(h.srv)
 	defer ts.Close()
 
-	var got controlState
-	getJSON(t, ts.URL+"/api/summary", &got)
-	// The hub's session counter saw no engine event in this test — which is precisely
-	// the point: the LEDGER knows, and the session counter does not.
-	if got.BytesReclaimedSession != 0 {
-		t.Errorf("session counter = %d, want 0 (no engine event was observed)", got.BytesReclaimedSession)
+	var got struct {
+		Queue []jobDTO `json:"queue"`
 	}
-	if got.BytesReclaimedTotal != 600 {
-		t.Errorf("lifetime reclaimed = %d, want 600 — it must come from the ledger, not a process counter", got.BytesReclaimedTotal)
+	getJSON(t, ts.URL+"/api/queue", &got)
+
+	var found bool
+	for _, j := range got.Queue {
+		if j.Path != "/lib/retry.mkv" {
+			continue
+		}
+		found = true
+		if j.VmafMean != nil || j.VmafMin != nil {
+			t.Errorf("an encoding job is advertising the rejected attempt's VMAF (mean=%v min=%v)", j.VmafMean, j.VmafMin)
+		}
+		if j.Reason != "" {
+			t.Errorf("an encoding job still carries the previous failure's reason: %q", j.Reason)
+		}
+	}
+	if !found {
+		t.Fatalf("the retried job is not in the queue: %+v", got.Queue)
 	}
 }
 

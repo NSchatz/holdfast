@@ -85,19 +85,20 @@ func toDTOs(jobs []store.Job) []jobDTO {
 }
 
 // snapshot is the full state the SSE stream pushes and the read endpoints compose.
+//
+// BytesReclaimedSession is still a per-PROCESS counter and still resets when the daemon
+// does. TRANSCODE-13 makes a durable lifetime total POSSIBLE — both file sizes are now
+// on every done row — but deriving and surfacing it is TRANSCODE-14's job, along with
+// the dashboard that displays it. Summing it here would mean an unbounded scan of the
+// jobs table on every state change, over the single serialized connection the engine
+// writes through, on a table whose retention/pruning this phase explicitly defers.
 type snapshot struct {
-	Summary map[string]int `json:"summary"`
-	Queue   []jobDTO       `json:"queue"`
-	History []jobDTO       `json:"history"`
-	// BytesReclaimedSession is this process's running total; BytesReclaimedTotal is the
-	// LIFETIME figure read from the ledger (TRANSCODE-13). Both are reported because
-	// they answer different questions — but only the latter survives a restart, which
-	// is why the session counter alone was a bug: a long-running install's headline
-	// "reclaimed" number silently reset to 0 every time the daemon bounced.
-	BytesReclaimedSession int64 `json:"bytes_reclaimed_session"`
-	BytesReclaimedTotal   int64 `json:"bytes_reclaimed_total"`
-	Paused                bool  `json:"paused"`
-	Scanning              bool  `json:"scanning"`
+	Summary               map[string]int `json:"summary"`
+	Queue                 []jobDTO       `json:"queue"`
+	History               []jobDTO       `json:"history"`
+	BytesReclaimedSession int64          `json:"bytes_reclaimed_session"`
+	Paused                bool           `json:"paused"`
+	Scanning              bool           `json:"scanning"`
 }
 
 // Hub is the engine.Observer and the SSE fan-out. Engine workers call Observe
@@ -244,10 +245,6 @@ func (h *Hub) buildSnapshot(ctx context.Context) (snapshot, error) {
 	if err != nil {
 		return snapshot{}, err
 	}
-	total, err := h.store.Reclaimed(ctx)
-	if err != nil {
-		return snapshot{}, err
-	}
 	counts := make(map[string]int, len(sum))
 	for st, n := range sum {
 		counts[string(st)] = n
@@ -257,7 +254,6 @@ func (h *Hub) buildSnapshot(ctx context.Context) (snapshot, error) {
 		Queue:                 toDTOs(queue),
 		History:               toDTOs(hist),
 		BytesReclaimedSession: h.bytesReclaimed.Load(),
-		BytesReclaimedTotal:   total,
 		Paused:                h.ctrl.Paused(),
 		Scanning:              h.ctrl.Scanning(),
 	}, nil

@@ -95,24 +95,18 @@ func (s *Server) routes() http.Handler {
 
 // --- read endpoints ----------------------------------------------------------
 
-// controlState is the at-a-glance status payload (no per-job rows).
+// controlState is the at-a-glance status payload (no per-job rows). The reclaimed
+// figure is still session-scoped — see snapshot: making it a durable lifetime total is
+// TRANSCODE-14's, on the sizes TRANSCODE-13 now persists.
 type controlState struct {
-	Summary map[string]int `json:"summary"`
-	// Session vs lifetime: see snapshot. The session counter resets on restart; the
-	// total is read from the ledger and does not (TRANSCODE-13).
-	BytesReclaimedSession int64 `json:"bytes_reclaimed_session"`
-	BytesReclaimedTotal   int64 `json:"bytes_reclaimed_total"`
-	Paused                bool  `json:"paused"`
-	Scanning              bool  `json:"scanning"`
+	Summary               map[string]int `json:"summary"`
+	BytesReclaimedSession int64          `json:"bytes_reclaimed_session"`
+	Paused                bool           `json:"paused"`
+	Scanning              bool           `json:"scanning"`
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	sum, err := s.store.Summary(r.Context())
-	if err != nil {
-		s.fail(w, "summary", err)
-		return
-	}
-	total, err := s.store.Reclaimed(r.Context())
 	if err != nil {
 		s.fail(w, "summary", err)
 		return
@@ -124,7 +118,6 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, controlState{
 		Summary:               counts,
 		BytesReclaimedSession: s.hub.BytesReclaimed(),
-		BytesReclaimedTotal:   total,
 		Paused:                s.ctrl.Paused(),
 		Scanning:              s.ctrl.Scanning(),
 	})
