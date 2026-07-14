@@ -1,6 +1,6 @@
-# Running transcode in Docker
+# Running holdfast in Docker
 
-The container image is the supported way to run `transcode`. It bundles a **pinned,
+The container image is the supported way to run `holdfast`. It bundles a **pinned,
 checksum-verified ffmpeg** carrying **libx265, libsvtav1 and libvmaf** — which matters more
 than convenience: VMAF is the gate that rejects an encode which decodes cleanly but *looks*
 worse, and a distro ffmpeg without `libvmaf` cannot measure it. The engine refuses to accept
@@ -37,9 +37,9 @@ server_addr: 0.0.0.0:8080   # see "The control surface" below before you change 
 | User | non-root by default (`nonroot`, uid 65532); override with `user:` |
 | ffmpeg | pinned by release tag **and verified by SHA-256** before it is trusted |
 | Config | **nothing is baked in** — see below |
-| Licences | `/usr/share/doc/transcode/` (AGPL-3.0 + the bundled-ffmpeg NOTICE) |
+| Licences | `/usr/share/doc/holdfast/` (AGPL-3.0 + the bundled-ffmpeg NOTICE) |
 
-**The image sets no `TRANSCODE_*` environment variables, on purpose.** An env var *beats* the
+**The image sets no `HOLDFAST_*` environment variables, on purpose.** An env var *beats* the
 YAML file, so a baked-in default would silently override your config-as-code — and for
 `server_addr` it would quietly widen a deliberate `127.0.0.1` fail-safe. The compose file sets
 container paths in the open, where you can review them.
@@ -52,11 +52,11 @@ question green. Watch `/metrics` (Prometheus) or point an external check at `/ap
 
 | Mount | Why |
 |---|---|
-| `/media` (your library) | **The only place transcode ever mutates anything.** Mount exactly the tree you want re-encoded — nothing more. |
+| `/media` (your library) | **The only place holdfast ever mutates anything.** Mount exactly the tree you want re-encoded — nothing more. |
 | `/state` | The resumable SQLite job store. **Must survive restarts**, or a crashed run cannot resume and the whole library is rescanned. |
-| `/config/config.yaml` | Read-only. transcode never writes it. |
+| `/config/config.yaml` | Read-only. holdfast never writes it. |
 
-`user:` **must be the uid:gid that owns the media**. transcode encodes to a temp file *next to
+`user:` **must be the uid:gid that owns the media**. holdfast encodes to a temp file *next to
 the source* and replaces it with an atomic same-directory rename, so it needs write access to
 the library **directories**, not just the files. Getting this wrong is safe but useless: every
 encode fails at the write step, and every source is left byte-for-byte intact.
@@ -73,7 +73,7 @@ wrong hours, silently and correctly, on the wrong clock.
 
 ## The control surface
 
-`transcode serve` exposes the API + dashboard. Its default bind is `127.0.0.1`, which inside a
+`holdfast serve` exposes the API + dashboard. Its default bind is `127.0.0.1`, which inside a
 container namespace means *nothing outside the container can reach it* — so a containerised
 `serve` needs `server_addr: 0.0.0.0:8080`, and the real boundary moves to the **published
 port**:
@@ -84,7 +84,7 @@ ports:
 ```
 
 That is the shipped default, and it is the one to keep unless you have set
-`TRANSCODE_SERVER_AUTH_TOKEN` **and** put a TLS-terminating reverse proxy in front. Without a
+`HOLDFAST_SERVER_AUTH_TOKEN` **and** put a TLS-terminating reverse proxy in front. Without a
 token the mutating endpoints (`rescan` / `pause` / `resume`) are **disabled entirely**, which
 is a safe default, not a broken one — the dashboard and the read API still work.
 
@@ -127,18 +127,18 @@ falling back to CPU, but it does not work.
 
 If you need QSV/VAAPI/AMF: run the binary on the host with an ffmpeg that has libvmaf, or build
 your own image **on a base that carries the vendor driver stack** (not distroless — it has no
-package manager) and copy the `transcode` binary into it. Note the fixture suite is gated against
+package manager) and copy the `holdfast` binary into it. Note the fixture suite is gated against
 the pinned ffmpeg, so a different ffmpeg is a different measuring instrument.
 
 **There is no silent fallback.** If the configured encoder cannot actually encode on this host,
-`transcode` fails loud at startup and exits non-zero. The capability check really encodes a
+`holdfast` fails loud at startup and exits non-zero. The capability check really encodes a
 clip and probes the result, because a hardware encoder can exit 0 while writing nothing when no
 device is present.
 
 ## Building and verifying it yourself
 
 ```bash
-make image                     # docker buildx, single platform, tagged transcode:dev
+make image                     # docker buildx, single platform, tagged holdfast:dev
 make image-smoke               # build, then drive a REAL encode inside the image
 ```
 
@@ -158,5 +158,5 @@ behind. Run it against any image you are about to trust.
   (binary, glibc, bundled ffmpeg), which is what a cross-built image gets wrong. A real arm64
   encode has not been timed on real hardware; an SBC will be slow with libx265.
 - **No shell in the image.** `docker exec ... sh` will not work. To poke at the bundled ffmpeg:
-  `docker run --rm --entrypoint /usr/local/bin/ffmpeg ghcr.io/nschatz/transcode:latest -version`.
+  `docker run --rm --entrypoint /usr/local/bin/ffmpeg ghcr.io/nschatz/holdfast:latest -version`.
 - The image is **private until the repository is** — GHCR package visibility follows the repo.

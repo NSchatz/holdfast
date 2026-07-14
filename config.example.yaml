@@ -1,11 +1,11 @@
-# transcode — example configuration (config-as-code).
+# holdfast — example configuration (config-as-code).
 #
 # Copy to config.yaml (gitignored) and edit. Validate it any time with:
-#   transcode validate --config config.yaml
+#   holdfast validate --config config.yaml
 #
 # Every knob below has a sensible default and may be omitted. Any value can be
-# overridden by an environment variable named TRANSCODE_<KEY> (e.g. TRANSCODE_CRF=20,
-# TRANSCODE_LOG_LEVEL=debug) — env wins over the file. An unknown key here is a hard
+# overridden by an environment variable named HOLDFAST_<KEY> (e.g. HOLDFAST_CRF=20,
+# HOLDFAST_LOG_LEVEL=debug) — env wins over the file. An unknown key here is a hard
 # error (typo protection).
 #
 # Running in a container? Three keys change: library_roots and state_dir become the
@@ -13,7 +13,7 @@
 # namespace is unreachable from the host — publish the port on loopback instead).
 # See docs/docker.md.
 
-# Directory trees to scan and re-encode files under. This is the ONLY place transcode
+# Directory trees to scan and re-encode files under. This is the ONLY place holdfast
 # ever mutates the filesystem, so it is validated strictly: each root must be absolute
 # and must not be "/" or your home directory.
 library_roots:
@@ -165,8 +165,8 @@ dry_run: false
 #                             # CPU libx265 already saturates cores per encode, so
 #                             # raising this is an opt-in for many small/low-res files)
 
-# --- HTTP API + web UI (`transcode serve`) ---
-# `transcode serve` runs a REST API + SSE live stream + an embedded web dashboard
+# --- HTTP API + web UI (`holdfast serve`) ---
+# `holdfast serve` runs a REST API + SSE live stream + an embedded web dashboard
 # (single binary). It is a READ-AND-CONTROL surface: this YAML stays the source of
 # truth, and the API can only start a scan and pause/resume new-file feeding — it
 # never touches a media file.
@@ -176,19 +176,19 @@ dry_run: false
 # server_auth_token: ""        # bearer token required for the MUTATING endpoints
 #                              #   (rescan/pause/resume). Empty = those endpoints are
 #                              #   DISABLED (read-only). Prefer the environment
-#                              #   variable TRANSCODE_SERVER_AUTH_TOKEN so no secret
+#                              #   variable HOLDFAST_SERVER_AUTH_TOKEN so no secret
 #                              #   lands in this file.
 # scan_interval_sec: 0         # 0 = scan once on startup + on demand (via the API).
 #                              #   >0 = also re-scan every N seconds.
 
-# --- observability + host-fair scheduling (`transcode serve`) ---
+# --- observability + host-fair scheduling (`holdfast serve`) ---
 # metrics_enable: true         # expose Prometheus metrics at /metrics (read-only
 #                              #   instrumentation; best-effort, never affects files)
 # notify_url: ""               # a shoutrrr service URL for best-effort notifications
 #                              #   (per-file failure + per-scan summary), e.g.
 #                              #   ntfy://ntfy.sh/mytopic or a Discord/Gotify URL.
 #                              #   Empty disables. May carry a secret — prefer the env
-#                              #   var TRANSCODE_NOTIFY_URL over this file.
+#                              #   var HOLDFAST_NOTIFY_URL over this file.
 # run_window: ""               # daily host-fair window "HH:MM-HH:MM" (local time)
 #                              #   during which new work may start; empty = always.
 #                              #   Outside it, serve stops feeding NEW files (an

@@ -1,4 +1,4 @@
 # Invalid via the SCHEMA/Load path: `librery_roots` is a typo of `library_roots`,
-# an unknown key. The CI self-test asserts `transcode validate` REJECTS this.
+# an unknown key. The CI self-test asserts `holdfast validate` REJECTS this.
 librery_roots:
   - /mnt/media

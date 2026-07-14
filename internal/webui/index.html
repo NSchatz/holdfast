@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>transcode</title>
+<title>holdfast</title>
 <style>
   :root {
     --bg:#0f1115; --panel:#171a21; --line:#252a34; --fg:#e6e9ef; --muted:#8b93a3;
@@ -94,7 +94,7 @@
       <tbody id="history"></tbody></table>
   </section>
 </main>
-<footer>transcode — config-as-code, data-safe media transcoder. The YAML config is the source of truth; this page reads and controls.</footer>
+<footer>holdfast — config-as-code, data-safe media transcoder. The YAML config is the source of truth; this page reads and controls.</footer>
 
 <script>
 "use strict";
@@ -103,8 +103,8 @@ const $ = (id) => document.getElementById(id);
 
 // Persist the control token locally so an operator doesn't retype it each visit.
 const tokenInput = $("token");
-tokenInput.value = localStorage.getItem("transcode_token") || "";
-tokenInput.addEventListener("change", () => localStorage.setItem("transcode_token", tokenInput.value));
+tokenInput.value = localStorage.getItem("holdfast_token") || "";
+tokenInput.addEventListener("change", () => localStorage.setItem("holdfast_token", tokenInput.value));
 
 function fmtBytes(n) {
   n = Number(n) || 0;

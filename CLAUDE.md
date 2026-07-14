@@ -4,7 +4,7 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 
 ## What this is
 
-`transcode` — a **config-as-code, data-safe, self-hosted media transcoder**; an open-source Tdarr
+`holdfast` — a **config-as-code, data-safe, self-hosted media transcoder**; an open-source Tdarr
 replacement written in **Go**. It reclaims disk by re-encoding bloated video to a smaller modern codec and
 **never destroys a source until a replacement is provably faithful**.
 
@@ -88,11 +88,11 @@ target guard and `verifyOutput`'s output-codec check are both generalized off it
 and `-fps_mode passthrough` are universal; libx265 alone gets `-x265-params` (HDR10 static-metadata
 master-display/max-cll is a libx265-only mechanism — AV1/hardware carry colour tags but not that block, an
 explicitly out-of-scope, documented limitation matching the bash transcoder's pre-existing NVENC gap).
-`cmd/transcode`'s `cmdRun` calls `encoder.RequireAvailable` before building the engine — a configured-but-
+`cmd/holdfast`'s `cmdRun` calls `encoder.RequireAvailable` before building the engine — a configured-but-
 unavailable encoder (e.g. `nvenc` with no GPU) fails LOUD and exits non-zero, **never** a silent fallback to
 cpu. The verify/VMAF gate is unchanged and fully encoder-agnostic: a hardware/AV1 encode is held to the
 exact same no-loss bar as CPU libx265. `TRANSCODE-7` (this is the current state) added the **HTTP API +
-embedded web UI** via a new `transcode serve` command: a **chi** REST API (`/api/summary|queue|history`),
+embedded web UI** via a new `holdfast serve` command: a **chi** REST API (`/api/summary|queue|history`),
 an **SSE** live stream (`/api/events`) that pushes a fresh store-derived snapshot on every job-state
 change, and a single self-contained dashboard **embedded with `go:embed`** (served at `/`). It is a
 **read-and-control** surface — the YAML config stays the source of truth and the SQLite store stays the
@@ -128,7 +128,7 @@ Dockerfile. Where a value must appear twice, the agreement is enforced, never re
 `DT_NEEDED` on **`libgcc_s.so.1`**, which `base` does not ship, so `base` builds perfectly and then dies at
 the dynamic loader the first time the engine execs ffmpeg. Every stage that RUNs anything is pinned to
 `$BUILDPLATFORM` and the binary cross-compiles (`CGO_ENABLED=0`, pure-Go SQLite), so the arm64 image needs
-no QEMU. The image bakes **no `TRANSCODE_*` env vars**, deliberately: env BEATS the YAML file, so a baked
+no QEMU. The image bakes **no `HOLDFAST_*` env vars**, deliberately: env BEATS the YAML file, so a baked
 default would silently override the user's config-as-code — and for `server_addr` it would quietly widen the
 127.0.0.1 fail-safe. **Only NVIDIA hardware encoding works in the image** (the NVIDIA toolkit injects the
 libs ffmpeg dlopens); `qsv`/`vaapi`/`amf` each need a vendor userspace library a distroless image cannot
@@ -162,13 +162,40 @@ from a PR — dispatch it once after this lands and **before the first tag**, or
 never run. Note it is NOT a reusable workflow called from
 CI: a called workflow cannot hold permissions its caller lacks, so a PR-triggered call declaring
 `packages: write` would fail to load — hence the shared *script* rather than a shared workflow. **Not yet released** (cutting a tag is a human call — the umbrella's `PUB-FLIP` gate).
+`TRANSCODE-12` **renamed the project `transcode` → `holdfast`**, and it had to land before the first tag
+because not one of these surfaces can be redirected afterwards: Go has **no module-path rename primitive**
+(golang/go#59766, closed *not planned*), **nothing** rewrites a container-image reference in a user's
+compose file, and a renamed Prometheus metric **silently** breaks every dashboard built on it. Blast radius
+at rename time was **zero** (private, no tags, nothing on the module proxy, no image ever pushed) — which is
+exactly why it went before `PUB-FLIP` and not after. Renamed: the module path, `cmd/holdfast`, the binary,
+the image (`ghcr.io/nschatz/holdfast`), the `HOLDFAST_*` env prefix and the `holdfast_*` metric namespace.
+
+**The GitHub repo itself must carry the new name before the first tag.** `release.yml` derives the image
+from `github.repository` (`ghcr.io/${owner}/${repo}`, lowercased) — it is not spelled out in the workflow.
+So if the repo were still named `transcode` at tag time, the release would publish
+`ghcr.io/nschatz/transcode` <!-- rename-guard-allow --> while `docker-compose.yml` and `docs/docker.md` point users at
+`ghcr.io/nschatz/holdfast` — **an image that does not exist**. The rename of the GitHub repo is therefore
+part of the same irreversible set, not a cosmetic follow-up. GitHub redirects the old name, but only while
+`NSchatz/transcode` is **left permanently vacant**: reclaim that name and the redirect dies and the new
+repo is served silently in its place.
+
+**The rule when you touch this: hyphen is history, underscore is an identifier.** The phase IDs
+`TRANSCODE-1`…`TRANSCODE-15` are **historical labels and must survive** — they are how git log and the
+roadmap name the work, and renumbering them would rewrite those references for no gain. The underscore
+forms — the old env prefix and the old metric namespace — are pre-rename **identifiers** and must not <!-- rename-guard-allow: TRANSCODE_ transcode_ -->
+exist; `scripts/check-pins.sh` FAILS on any that reappear, and it is mutation-tested to prove it still
+bites. "transcode" also survives as an ordinary English **verb** ("an in-place transcode") and in
+`transcode.conf`, the Bash predecessor's config file named in `docs/migration.md`. A line may quote a
+banned identifier only to prohibit it, and only with the `rename-guard-allow` marker — which keeps every
+exemption greppable instead of letting a file-level exclusion hide a real leak.
+
 `docs/docker.md` is the deployment reference (volumes, permissions, TZ, GPU passthrough, security posture);
 `docs/migration.md` covers the cutover from the Bash transcoder and from Tdarr. The full phased plan lives
-in the umbrella that tracks this repo (`operations/roadmaps/transcode.md`).
+in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
 
 ## Layout
 
-- `cmd/transcode` — the CLI (`run` / `serve` / `validate` / `version`), structured `slog` logging. `run`
+- `cmd/holdfast` — the CLI (`run` / `serve` / `validate` / `version`), structured `slog` logging. `run`
   builds and drives the engine oneshot with a signal-cancellable context; `serve` (TRANSCODE-7) wires the
   same engine to the API/UI and runs until SIGTERM (graceful HTTP drain). Engine setup shared by both is
   factored into `buildEngine`.
@@ -193,7 +220,7 @@ in the umbrella that tracks this repo (`operations/roadmaps/transcode.md`).
   minimal Tautulli client. `MayRun`/`MayRunThrottled` answer "may new work start now?" — advisory only
   (delays, never a gate), fail-open on a monitoring outage. No internal imports (so `config.Validate` can
   import it to check `run_window`).
-- `internal/config` — **koanf** layered config (defaults ← YAML file ← `TRANSCODE_*` env), unknown-key
+- `internal/config` — **koanf** layered config (defaults ← YAML file ← `HOLDFAST_*` env), unknown-key
   rejection, and strict `Validate()` (refuses `/`, `$HOME`, or a symlink resolving to either; refuses when
   `$HOME` is unknown). An explicit zero in the file/env overrides a default (not clobbered). `PixelFormat`
   defaults to `"auto"` (derive per source; a forced value is back-compat); `ContainerExt` defaults to
@@ -217,7 +244,7 @@ in the umbrella that tracks this repo (`operations/roadmaps/transcode.md`).
   output target codec, hardware flag) + `Lookup`/`Known` + a robust `Available` capability check (encodes a
   tiny real clip to a temp file and ffprobes the RESULT rather than trusting ffmpeg's exit code — the only
   way to catch a hardware encoder that exits 0 while writing nothing when no device is present) +
-  `RequireAvailable` (fail-loud helper for `cmd/transcode`). No import of `internal/config` (avoids a
+  `RequireAvailable` (fail-loud helper for `cmd/holdfast`). No import of `internal/config` (avoids a
   cycle) — `internal/config.Validate` imports `internal/encoder` instead.
 - `internal/store` (TRANSCODE-5) — the persistent, crash-safe SQLite/WAL job store that replaced
   `internal/ledger`: a `path+fingerprint`-keyed `jobs` table with `Claim`/`Advance`/`Finish`/`RecoverStale`/

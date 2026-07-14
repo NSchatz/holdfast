@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke-test a built transcode image: does the thing we are about to ship actually
+# Smoke-test a built holdfast image: does the thing we are about to ship actually
 # reclaim space without destroying a source, INSIDE the container?
 #
 # This is not a "did the image build" check — that proves nothing about the engine. It
@@ -7,8 +7,8 @@
 # no-loss contract held: the source was replaced by a smaller HEVC file, and no
 # work-in-progress temp was left behind.
 #
-#   ./scripts/smoke-image.sh transcode:ci            # native
-#   ./scripts/smoke-image.sh transcode:ci linux/arm64 --no-encode   # exec-only (QEMU)
+#   ./scripts/smoke-image.sh holdfast:ci            # native
+#   ./scripts/smoke-image.sh holdfast:ci linux/arm64 --no-encode   # exec-only (QEMU)
 #
 # The fixture is a 320x240 H.264 clip forced to a REAL ~7.6 Mbps by CBR padding, and the
 # config leaves every guard at its shipped default — so this drives the same engine a
@@ -19,7 +19,7 @@
 # The CBR padding is load-bearing, not incidental. x264 in ABR mode does not pad, and
 # testsrc2 is trivially compressible, so a plain `-b:v 8M` lands at ~873 kbps — under
 # the default min_bitrate_kbps of 2500. The engine would then SKIP the file (correctly),
-# `transcode run` would exit 0 having done nothing, and this script would be asserting
+# `holdfast run` would exit 0 having done nothing, and this script would be asserting
 # against a file the encoder never touched. A fixture that never reaches the encoder is
 # not a smoke test.
 set -euo pipefail
@@ -28,7 +28,7 @@ IMAGE=""
 PLATFORM=""
 MODE=""
 # --no-encode is parsed as a FLAG, in any position. Binding it positionally means the
-# obvious `smoke-image.sh transcode:dev --no-encode` silently becomes
+# obvious `smoke-image.sh holdfast:dev --no-encode` silently becomes
 # `docker run --platform --no-encode`, and this script is advertised as the gate a human
 # runs by hand.
 for arg in "$@"; do
@@ -52,9 +52,9 @@ run_in_image() { docker run --rm "${PLATFORM_ARGS[@]}" "$@"; }
 echo "== smoke: $IMAGE ${PLATFORM:+($PLATFORM)}"
 
 # 1. The binary runs, and is the version we stamped.
-version_out="$(run_in_image "$IMAGE" version)" || fail "'transcode version' did not run"
-echo "$version_out" | grep -qi transcode || fail "unexpected 'version' output: $version_out"
-ok "transcode version runs: $(echo "$version_out" | head -1)"
+version_out="$(run_in_image "$IMAGE" version)" || fail "'holdfast version' did not run"
+echo "$version_out" | grep -qi holdfast || fail "unexpected 'version' output: $version_out"
+ok "holdfast version runs: $(echo "$version_out" | head -1)"
 
 # 2. The bundled ffmpeg carries the codecs the safety gate DEPENDS on. Without libvmaf
 #    the perceptual gate is unmeasurable — and an unmeasured output is rejected, not
@@ -121,14 +121,14 @@ ok "fixture: 320x240 H.264, ~${before_kbps} kbps, ${before_size} bytes (above th
 # The config must survive the real validator before it drives an encode.
 run_in_image -u "$uid:$gid" -v "$work/config.yaml:/config/config.yaml:ro" \
   "$IMAGE" validate --config /config/config.yaml >/dev/null \
-  || fail "'transcode validate' rejected the smoke config"
-ok "transcode validate accepts the smoke config"
+  || fail "'holdfast validate' rejected the smoke config"
+ok "holdfast validate accepts the smoke config"
 
 run_in_image -u "$uid:$gid" \
   -v "$work/media:/media" -v "$work/state:/state" \
   -v "$work/config.yaml:/config/config.yaml:ro" \
   "$IMAGE" run --config /config/config.yaml \
-  || fail "'transcode run' exited non-zero inside the image"
+  || fail "'holdfast run' exited non-zero inside the image"
 
 # --- assert the no-loss contract held ----------------------------------------------
 probe() {

@@ -14,8 +14,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"github.com/NSchatz/transcode/internal/config"
-	"github.com/NSchatz/transcode/internal/store"
+	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/store"
 )
 
 // Server is the HTTP surface: chi router + read endpoints + SSE + token-gated
@@ -87,7 +87,7 @@ func (s *Server) routes() http.Handler {
 	} else {
 		r.Get("/", func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			_, _ = w.Write([]byte("transcode API is running. See /api/summary, /api/queue, /api/history, /api/events.\n"))
+			_, _ = w.Write([]byte("holdfast API is running. See /api/summary, /api/queue, /api/history, /api/events.\n"))
 		})
 	}
 	return r
@@ -225,12 +225,12 @@ func (s *Server) requireToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := s.cfg.ServerAuthToken
 		if token == "" {
-			http.Error(w, "control disabled: set server_auth_token (or TRANSCODE_SERVER_AUTH_TOKEN) to enable rescan/pause/resume", http.StatusForbidden)
+			http.Error(w, "control disabled: set server_auth_token (or HOLDFAST_SERVER_AUTH_TOKEN) to enable rescan/pause/resume", http.StatusForbidden)
 			return
 		}
 		got := bearerToken(r.Header.Get("Authorization"))
 		if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="transcode"`)
+			w.Header().Set("WWW-Authenticate", `Bearer realm="holdfast"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

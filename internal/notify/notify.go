@@ -1,4 +1,4 @@
-// Package notify sends best-effort notifications about transcode activity
+// Package notify sends best-effort notifications about holdfast activity
 // (TRANSCODE-8) via shoutrrr — one service URL fans out to ntfy/Discord/Gotify/etc.
 // It is strictly a side-channel: a send runs on a background goroutine (never on an
 // engine worker, so a slow/hanging notification endpoint can never stall an encode),
@@ -15,8 +15,8 @@ import (
 
 	"github.com/nicholas-fedor/shoutrrr"
 
-	"github.com/NSchatz/transcode/internal/engine"
-	"github.com/NSchatz/transcode/internal/store"
+	"github.com/NSchatz/holdfast/internal/engine"
+	"github.com/NSchatz/holdfast/internal/store"
 )
 
 // humanBytes renders a byte count in binary units for a human-readable summary.
@@ -140,7 +140,7 @@ func (n *Notifier) Observe(ev engine.Event) {
 		n.mu.Lock()
 		n.tally.failed++
 		n.mu.Unlock()
-		n.enqueue(fmt.Sprintf("transcode: FAILED to transcode %s (source left untouched)", ev.Path))
+		n.enqueue(fmt.Sprintf("holdfast: FAILED to transcode %s (source left untouched)", ev.Path))
 	}
 }
 

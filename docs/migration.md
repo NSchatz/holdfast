@@ -1,10 +1,10 @@
-# Migrating to transcode
+# Migrating to holdfast
 
 Two starting points are covered: the **Bash transcoder** this project grew out of, and
 **Tdarr**, which it was written to replace.
 
 The good news in both cases is the same, and it is a consequence of the design rather than a
-migration feature: **there is no state to import.** `transcode` decides what to do with a file
+migration feature: **there is no state to import.** `holdfast` decides what to do with a file
 by *looking at the file* — a source already in the target codec is skipped after a cheap
 `ffprobe`. So pointing it at a library another tool has already processed is safe and cheap: it
 re-examines everything and re-encodes only what is still bloated. A migration that needs no
@@ -19,7 +19,7 @@ of them racing.
 ## From the Bash transcoder (`homelab: media/transcoder/`)
 
 Same contract, same guards, same defaults — this is a port, not a rewrite. `transcode.conf`
-became YAML, and the environment-variable overrides became `TRANSCODE_<KEY>`.
+became YAML, and the environment-variable overrides became `HOLDFAST_<KEY>`.
 
 ### Config mapping
 
@@ -40,8 +40,8 @@ became YAML, and the environment-variable overrides became `TRANSCODE_<KEY>`.
 | `MAX_FAILURES=3` | `max_failures: 3` | Identical. The counter resets on migration (the old ledger is not imported). |
 | `SKIP_HARDLINKED=1` | `skip_hardlinked: true` | Identical. |
 | `DRY_RUN=1` | `dry_run: true` | Identical. |
-| `ONESHOT=1` | `transcode run` | Oneshot is now a **subcommand**, not a flag. |
-| `SLEEP_INTERVAL=3600` | `scan_interval_sec: 3600` | Only meaningful under `transcode serve`. |
+| `ONESHOT=1` | `holdfast run` | Oneshot is now a **subcommand**, not a flag. |
+| `SLEEP_INTERVAL=3600` | `scan_interval_sec: 3600` | Only meaningful under `holdfast serve`. |
 
 The ledger and heartbeat under `/config/state/` have no equivalent and are not imported. Their
 replacement is the SQLite job store in `state_dir` — which is *crash-safe*, so a killed run
@@ -79,15 +79,15 @@ docker compose -f media/transcoder/docker-compose.yml down
 **2. Translate `transcode.conf`** using the table above, then prove it parses:
 
 ```bash
-transcode validate --config config.yaml
-# in a container: docker compose run --rm transcode validate --config /config/config.yaml
+holdfast validate --config config.yaml
+# in a container: docker compose run --rm holdfast validate --config /config/config.yaml
 ```
 
 **3. Rehearse.** Set `dry_run: true` in `config.yaml` — it changes nothing and tells you exactly
 what it *would* do. Read the skip reasons: that is where the two behaviour changes above show up.
 
 ```bash
-transcode run --config config.yaml
+holdfast run --config config.yaml
 ```
 
 **4. Go.** Set `dry_run: false` again, then:
@@ -102,22 +102,22 @@ old one trips over (its state lives in `state_dir`, its outputs are ordinary med
 **One regression to plan for:** the Bash deployment had a compose `healthcheck` watching a
 heartbeat file, so a hung script was caught even mid-encode. The image ships no `HEALTHCHECK`
 (it has no shell, and "the HTTP port is up" would answer green for a wedged encode). Use the
-Prometheus metrics at `/metrics` instead — a `transcode_files_total` that stops advancing is
+Prometheus metrics at `/metrics` instead — a `holdfast_files_total` that stops advancing is
 the honest version of that signal.
 
 ---
 
 ## From Tdarr
 
-`transcode` is not a Tdarr clone, and a migration is not a port of your Tdarr setup — it is a
+`holdfast` is not a Tdarr clone, and a migration is not a port of your Tdarr setup — it is a
 replacement of it. Read this before you switch.
 
 ### What you give up
 
 - **Plugins and flows.** Tdarr's plugin/flow system is its whole extensibility model.
-  `transcode` has none. It does exactly one job — re-encode bloated video to a smaller modern
+  `holdfast` has none. It does exactly one job — re-encode bloated video to a smaller modern
   codec, safely — and it is configured by a YAML file, not by assembling a pipeline.
-- **The Server/Node model.** `transcode` is single-host. (Distributed worker nodes are a
+- **The Server/Node model.** `holdfast` is single-host. (Distributed worker nodes are a
   possible later phase, not a shipped feature.)
 - **Anything that is not codec-only re-encoding.** No downscaling, no remuxing-as-a-feature, no
   audio/subtitle mangling, no library management.
@@ -128,7 +128,7 @@ replacement of it. Read this before you switch.
   project exists. Tdarr has a documented history of replacing the original file before (or
   regardless of) its health check ([#355](https://github.com/HaveAGitGat/Tdarr/issues/355),
   [#511](https://github.com/HaveAGitGat/Tdarr/issues/511),
-  [#683](https://github.com/HaveAGitGat/Tdarr/issues/683)). `transcode` encodes to a temp file
+  [#683](https://github.com/HaveAGitGat/Tdarr/issues/683)). `holdfast` encodes to a temp file
   beside the source, and the source is replaced only by an atomic same-filesystem rename, only
   after the output passes *every* gate: correct codec, duration and packet parity, strictly
   smaller, per-type stream-count parity, full decode-integrity, and VMAF. Any failure discards
@@ -162,7 +162,7 @@ that made you switch.
 encode's *average* quality, and `vmaf_min_pool` bounds its *worst frame* — the one that catches a
 short destroyed segment an average would smooth away. Subsampling only measures every Nth frame,
 so a damaged frame that is never sampled is never seen, and the worst-frame floor degrades from a
-guarantee into a sample. `transcode validate` warns you when this is set. Leave it at `1` for
+guarantee into a sample. `holdfast validate` warns you when this is set. Leave it at `1` for
 content you cannot re-acquire.
 
 **If the gate rejects an encode you believe is fine, lower a threshold — don't disable one.**
@@ -170,7 +170,7 @@ The two knobs fail in opposite ways. `min_vmaf: 90` or `vmaf_min_pool: 45` still
 the result may get; `vmaf_min_pool: 0` or `vmaf_enable: false` bound nothing at all, and the tool
 goes on deleting sources. Grain-heavy and very dark libraries are where an honest encode legitimately
 scores lowest, so they are the real reason to retreat — retreat by a few points, not to zero.
-`transcode validate` warns whenever the gate has been weakened this way.
+`holdfast validate` warns whenever the gate has been weakened this way.
 
 **What a VMAF score does not mean.** It is a regression onto a *subjective* opinion scale, not a
 measure of signal identity: 100 is a scale anchor, not "identical to the source", and a

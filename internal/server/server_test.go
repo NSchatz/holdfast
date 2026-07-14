@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NSchatz/transcode/internal/config"
-	"github.com/NSchatz/transcode/internal/engine"
-	"github.com/NSchatz/transcode/internal/store"
+	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/engine"
+	"github.com/NSchatz/holdfast/internal/store"
 )
 
 func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

@@ -7,8 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/NSchatz/transcode/internal/engine"
-	"github.com/NSchatz/transcode/internal/store"
+	"github.com/NSchatz/holdfast/internal/engine"
+	"github.com/NSchatz/holdfast/internal/store"
 )
 
 // Reporting caps. A library can hold hundreds of thousands of rows; the API never

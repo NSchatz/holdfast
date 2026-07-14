@@ -13,8 +13,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/NSchatz/transcode/internal/engine"
-	"github.com/NSchatz/transcode/internal/store"
+	"github.com/NSchatz/holdfast/internal/engine"
+	"github.com/NSchatz/holdfast/internal/store"
 )
 
 // Metrics holds the transcoder's Prometheus collectors on a private registry (so a
@@ -33,20 +33,20 @@ func New(st store.Store) *Metrics {
 	m := &Metrics{
 		reg: prometheus.NewRegistry(),
 		filesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "transcode_files_total",
+			Name: "holdfast_files_total",
 			Help: "Total files reaching a terminal outcome, by outcome (done|skipped|failed).",
 		}, []string{"outcome"}),
 		bytesReclaimed: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "transcode_bytes_reclaimed_total",
+			Name: "holdfast_bytes_reclaimed_total",
 			Help: "Total bytes of disk reclaimed by successful transcodes (source size minus output size).",
 		}),
 		encodeDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name:    "transcode_encode_duration_seconds",
+			Name:    "holdfast_encode_duration_seconds",
 			Help:    "Wall-clock encode duration of successful transcodes.",
 			Buckets: prometheus.ExponentialBuckets(1, 2, 13), // 1s → ~68m
 		}),
 		vmaf: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name:    "transcode_vmaf_score",
+			Name:    "holdfast_vmaf_score",
 			Help:    "VMAF harmonic-mean of accepted outputs (perceptual-quality distribution).",
 			Buckets: []float64{80, 85, 90, 92, 94, 95, 96, 97, 98, 99, 100},
 		}),
@@ -105,7 +105,7 @@ func newQueueCollector(st store.Store) *queueCollector {
 	return &queueCollector{
 		st: st,
 		desc: prometheus.NewDesc(
-			"transcode_queue_depth",
+			"holdfast_queue_depth",
 			"Current number of jobs in each status (pending/probing/encoding/verifying/done/skipped/failed).",
 			[]string{"state"}, nil),
 	}

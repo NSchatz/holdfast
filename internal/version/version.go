@@ -1,4 +1,4 @@
-// Package version carries the build-stamped identity of the transcode binary.
+// Package version carries the build-stamped identity of the holdfast binary.
 // The values are overridden at build time via -ldflags (see the Dockerfile and
 // the release workflow); the defaults are what a plain `go build` produces.
 package version
@@ -16,5 +16,5 @@ var (
 
 // String renders a single-line human-readable version banner.
 func String() string {
-	return fmt.Sprintf("transcode %s (commit %s, built %s)", Version, Commit, Date)
+	return fmt.Sprintf("holdfast %s (commit %s, built %s)", Version, Commit, Date)
 }

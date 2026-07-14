@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NSchatz/transcode/internal/config"
+	"github.com/NSchatz/holdfast/internal/config"
 )
 
 func TestDispatch(t *testing.T) {
@@ -39,7 +39,7 @@ func TestDispatch(t *testing.T) {
 		wantOut  string // substring in stdout
 	}{
 		{"no args", nil, 2, ""},
-		{"version", []string{"version"}, 0, "transcode "},
+		{"version", []string{"version"}, 0, "holdfast "},
 		{"unknown command", []string{"frobnicate"}, 2, ""},
 		{"validate ok", []string{"validate", "--config", goodCfg}, 0, "config OK"},
 		{"validate missing flag", []string{"validate"}, 2, ""},
@@ -66,10 +66,10 @@ func TestDispatch(t *testing.T) {
 
 // TestRunEmptyDir exercises the full run wiring: a valid config pointing at an
 // empty library root scans cleanly and exits 0 (no files, nothing to do). Requires
-// ffmpeg/ffprobe on PATH (or TRANSCODE_FFMPEG/FFPROBE); skips otherwise, since this
+// ffmpeg/ffprobe on PATH (or HOLDFAST_FFMPEG/FFPROBE); skips otherwise, since this
 // is the CLI-wiring check, not the engine safety proof (which fails loud instead).
 func TestRunEmptyDir(t *testing.T) {
-	if _, err := exec.LookPath(envOr("TRANSCODE_FFMPEG", "ffmpeg")); err != nil {
+	if _, err := exec.LookPath(envOr("HOLDFAST_FFMPEG", "ffmpeg")); err != nil {
 		t.Skip("ffmpeg not on PATH")
 	}
 	dir := t.TempDir()
@@ -94,7 +94,7 @@ func TestRunEmptyDir(t *testing.T) {
 // capability check runs); skips otherwise, since this is the serve-wiring check,
 // not the engine safety proof.
 func TestServeSmoke(t *testing.T) {
-	if _, err := exec.LookPath(envOr("TRANSCODE_FFMPEG", "ffmpeg")); err != nil {
+	if _, err := exec.LookPath(envOr("HOLDFAST_FFMPEG", "ffmpeg")); err != nil {
 		t.Skip("ffmpeg not on PATH")
 	}
 	// Grab a free localhost port, then release it for the server to bind.
@@ -129,12 +129,12 @@ func TestServeSmoke(t *testing.T) {
 	waitHTTP(t, base+"/api/summary", 3*time.Second)
 
 	// The embedded UI serves from the binary.
-	if bdy := httpGet(t, base+"/"); !strings.Contains(bdy, "<title>transcode</title>") {
+	if bdy := httpGet(t, base+"/"); !strings.Contains(bdy, "<title>holdfast</title>") {
 		t.Fatalf("UI not served from binary: %q", bdy[:min(80, len(bdy))])
 	}
 	// TRANSCODE-8: metrics endpoint is served (default-on) and exposes our series.
-	if bdy := httpGet(t, base+"/metrics"); !strings.Contains(bdy, "transcode_files_total") {
-		t.Fatalf("/metrics did not expose transcode metrics: %q", bdy[:min(120, len(bdy))])
+	if bdy := httpGet(t, base+"/metrics"); !strings.Contains(bdy, "holdfast_files_total") {
+		t.Fatalf("/metrics did not expose holdfast metrics: %q", bdy[:min(120, len(bdy))])
 	}
 	// A control action requires the token: without it, 403/401; with it, accepted.
 	if code := httpPostCode(t, base+"/api/pause", "tok"); code != 200 {

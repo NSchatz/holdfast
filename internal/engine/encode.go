@@ -6,10 +6,10 @@ import (
 	"os/exec"
 	"strconv"
 
-	"github.com/NSchatz/transcode/internal/config"
-	"github.com/NSchatz/transcode/internal/encoder"
-	"github.com/NSchatz/transcode/internal/hdr"
-	"github.com/NSchatz/transcode/internal/probe"
+	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/encoder"
+	"github.com/NSchatz/holdfast/internal/hdr"
+	"github.com/NSchatz/holdfast/internal/probe"
 )
 
 // Encoder produces the re-encoded output file. It is an interface so tests can
@@ -42,7 +42,7 @@ func (f EncoderFunc) Encode(ctx context.Context, in, out string) error { return 
 // CPU libx265 is the archival default; SVT-AV1 and the hardware encoders (NVENC/
 // QSV/VAAPI/AMF, TRANSCODE-6) are opt-in and gated behind a runtime capability
 // check (internal/encoder.Available) BEFORE the engine ever calls Encode — see
-// cmd/transcode's cmdRun. Encode itself never re-derives availability; it trusts
+// cmd/holdfast's cmdRun. Encode itself never re-derives availability; it trusts
 // the caller checked, and simply builds and runs the command for whatever Spec the
 // configured Cfg.Encoder resolves to.
 type FFmpegEncoder struct {

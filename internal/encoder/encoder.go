@@ -15,7 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/NSchatz/transcode/internal/probe"
+	"github.com/NSchatz/holdfast/internal/probe"
 )
 
 // Spec describes one selectable encoder.
@@ -95,7 +95,7 @@ func Known() []string {
 func Available(ctx context.Context, ffmpeg, ffprobe string, spec Spec) bool {
 	prober := probe.New(ffmpeg, ffprobe)
 
-	dir, err := os.MkdirTemp("", "transcode-cap-*")
+	dir, err := os.MkdirTemp("", "holdfast-cap-*")
 	if err != nil {
 		return false
 	}

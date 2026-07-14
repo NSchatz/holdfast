@@ -11,8 +11,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
-	"github.com/NSchatz/transcode/internal/engine"
-	"github.com/NSchatz/transcode/internal/store"
+	"github.com/NSchatz/holdfast/internal/engine"
+	"github.com/NSchatz/holdfast/internal/store"
 )
 
 func openStore(t *testing.T) *store.SQLite {
@@ -61,11 +61,11 @@ func TestMetrics_CountersAndHistogramsFromEvents(t *testing.T) {
 	// Histograms: assert the sample counts via the scrape body.
 	body := scrape(t, m)
 	for _, want := range []string{
-		`transcode_files_total{outcome="done"} 2`,
-		`transcode_files_total{outcome="failed"} 1`,
-		`transcode_bytes_reclaimed_total 1500`,
-		`transcode_encode_duration_seconds_count 2`,
-		`transcode_vmaf_score_count 2`,
+		`holdfast_files_total{outcome="done"} 2`,
+		`holdfast_files_total{outcome="failed"} 1`,
+		`holdfast_bytes_reclaimed_total 1500`,
+		`holdfast_encode_duration_seconds_count 2`,
+		`holdfast_vmaf_score_count 2`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/metrics body missing %q", want)
@@ -91,10 +91,10 @@ func TestMetrics_QueueDepthReadsStore(t *testing.T) {
 
 	m := New(st)
 	body := scrape(t, m)
-	if !strings.Contains(body, `transcode_queue_depth{state="encoding"} 2`) {
+	if !strings.Contains(body, `holdfast_queue_depth{state="encoding"} 2`) {
 		t.Errorf("queue_depth encoding gauge wrong; body:\n%s", body)
 	}
-	if !strings.Contains(body, `transcode_queue_depth{state="done"} 1`) {
+	if !strings.Contains(body, `holdfast_queue_depth{state="done"} 1`) {
 		t.Errorf("queue_depth done gauge wrong; body:\n%s", body)
 	}
 }
@@ -103,7 +103,7 @@ func TestMetrics_PrecreatedSeriesReadZero(t *testing.T) {
 	m := New(openStore(t))
 	// Before any event the outcome series should already exist at 0 (not absent).
 	body := scrape(t, m)
-	if !strings.Contains(body, `transcode_files_total{outcome="done"} 0`) {
+	if !strings.Contains(body, `holdfast_files_total{outcome="done"} 0`) {
 		t.Errorf("expected pre-created done series at 0; body:\n%s", body)
 	}
 }

@@ -1,4 +1,4 @@
-module github.com/NSchatz/transcode
+module github.com/NSchatz/holdfast
 
 go 1.25.0
 
