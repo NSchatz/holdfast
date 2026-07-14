@@ -14,7 +14,7 @@ import (
 )
 
 func ffmpegBin() string {
-	if v := os.Getenv("TRANSCODE_FFMPEG"); v != "" {
+	if v := os.Getenv("HOLDFAST_FFMPEG"); v != "" {
 		return v
 	}
 	return "ffmpeg"

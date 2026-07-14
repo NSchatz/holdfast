@@ -6,8 +6,8 @@ import (
 	"math"
 	"strings"
 
-	"github.com/NSchatz/transcode/internal/probe"
-	"github.com/NSchatz/transcode/internal/vmaf"
+	"github.com/NSchatz/holdfast/internal/probe"
+	"github.com/NSchatz/holdfast/internal/vmaf"
 )
 
 // verifyOutput checks a freshly-encoded temp file before it may replace the source.

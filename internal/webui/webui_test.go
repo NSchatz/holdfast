@@ -37,7 +37,7 @@ func TestHandlerServesIndexAtRoot(t *testing.T) {
 		t.Fatal("missing Content-Security-Policy header")
 	}
 	body, _ := io.ReadAll(rec.Body)
-	if !strings.Contains(string(body), "<title>transcode</title>") {
+	if !strings.Contains(string(body), "<title>holdfast</title>") {
 		t.Fatal("served body is not the dashboard page")
 	}
 }

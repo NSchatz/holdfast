@@ -114,7 +114,7 @@ jobs:
           context: .
           platforms: linux/amd64
           load: true
-          tags: transcode:release
+          tags: holdfast:release
           build-args: |
             VERSION=${{ steps.plan.outputs.version }}
             COMMIT=${{ github.sha }}
@@ -124,7 +124,7 @@ jobs:
 
       # The image we are about to push must pass a REAL encode, not merely build.
       - name: smoke test the image (real encode, real gate)
-        run: ./scripts/smoke-image.sh transcode:release
+        run: ./scripts/smoke-image.sh holdfast:release
 
       - name: build the image (linux/arm64)
         uses: docker/build-push-action@v6
@@ -132,7 +132,7 @@ jobs:
           context: .
           platforms: linux/arm64
           load: true
-          tags: transcode:release-arm64
+          tags: holdfast:release-arm64
           build-args: |
             VERSION=${{ steps.plan.outputs.version }}
             COMMIT=${{ github.sha }}
@@ -141,7 +141,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: smoke test the arm64 image (exec only, under QEMU)
-        run: ./scripts/smoke-image.sh transcode:release-arm64 linux/arm64 --no-encode
+        run: ./scripts/smoke-image.sh holdfast:release-arm64 linux/arm64 --no-encode
 
       - name: build the release binaries
         env:
@@ -150,7 +150,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          # The licence text travels INSIDE each archive. transcode is AGPL-3.0-only, so
+          # The licence text travels INSIDE each archive. holdfast is AGPL-3.0-only, so
           # a tarball carrying the binary and nothing else distributes it with no licence
           # at all — which is the gap the NOTICE file was added to close, and it does not
           # close it by sitting next to the tarball in a CI artifact that expires.
@@ -159,16 +159,16 @@ jobs:
             os="${target%/*}"; arch="${target#*/}"
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
               -ldflags="-s -w \
-                -X github.com/NSchatz/transcode/internal/version.Version=${VERSION} \
-                -X github.com/NSchatz/transcode/internal/version.Commit=${GITHUB_SHA} \
-                -X github.com/NSchatz/transcode/internal/version.Date=${DATE}" \
-              -o dist/transcode ./cmd/transcode
-            tar -C dist -czf "dist/transcode_${VERSION}_${os}_${arch}.tar.gz" \
-              transcode LICENSE NOTICE
-            rm dist/transcode
+                -X github.com/NSchatz/holdfast/internal/version.Version=${VERSION} \
+                -X github.com/NSchatz/holdfast/internal/version.Commit=${GITHUB_SHA} \
+                -X github.com/NSchatz/holdfast/internal/version.Date=${DATE}" \
+              -o dist/holdfast ./cmd/holdfast
+            tar -C dist -czf "dist/holdfast_${VERSION}_${os}_${arch}.tar.gz" \
+              holdfast LICENSE NOTICE
+            rm dist/holdfast
           done
           ( cd dist && sha256sum ./*.tar.gz > SHA256SUMS )
-          tar -tzf "dist/transcode_${VERSION}_linux_amd64.tar.gz"
+          tar -tzf "dist/holdfast_${VERSION}_linux_amd64.tar.gz"
           ls -l dist
 
       # Uploaded even on a dry run, so "the release is green" is inspectable rather than

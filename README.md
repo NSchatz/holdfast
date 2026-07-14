@@ -1,17 +1,17 @@
-# transcode
+# holdfast
 
 **A config-as-code, data-safe, self-hosted media transcoder — an open-source [Tdarr](https://tdarr.io) replacement.**
 
-![The transcode web dashboard: live queue, per-status summary, reclaimed-space total, and history — served from the single binary by `transcode serve`.](docs/dashboard.png)
+![The holdfast web dashboard: live queue, per-status summary, reclaimed-space total, and history — served from the single binary by `holdfast serve`.](docs/dashboard.png)
 
-`transcode` watches a media library, re-encodes bloated non-HEVC/non-AV1 video to a smaller modern codec
+`holdfast` watches a media library, re-encodes bloated non-HEVC/non-AV1 video to a smaller modern codec
 to reclaim disk space, and — the whole point — **never destroys a source until a replacement is provably
 faithful**. It is configured entirely by **YAML** (config-as-code), so what it does is reviewable and
 reproducible from git, not hidden in a UI database.
 
 > **Status: feature-complete for a first release, not yet released.** This repository was built phase by
 > phase from a mature, battle-tested Bash predecessor (see _Provenance_). **The data-safety core
-> (`TRANSCODE-1`)** is the heart of it: `transcode run` performs one oneshot scan of the library roots —
+> (`TRANSCODE-1`)** is the heart of it: `holdfast run` performs one oneshot scan of the library roots —
 > skip guards → same-directory temp encode → the full verify gate → atomic swap → delete — proven by a
 > real-ffmpeg fixture suite that reds on the specific regression. Built on top of it: colour/HDR
 > preservation (`TRANSCODE-3`), the VMAF perceptual gate (`TRANSCODE-4`), a persistent crash-safe queue +
@@ -26,7 +26,7 @@ Tdarr is capable but **closed-source** and **UI/DB-configured** (state can be lo
 and it historically **replaced the original file before/regardless of its health check** — a documented
 data-loss class ([#355](https://github.com/HaveAGitGat/Tdarr/issues/355),
 [#511](https://github.com/HaveAGitGat/Tdarr/issues/511),
-[#683](https://github.com/HaveAGitGat/Tdarr/issues/683)). `transcode` takes the useful capability surface
+[#683](https://github.com/HaveAGitGat/Tdarr/issues/683)). `holdfast` takes the useful capability surface
 and fixes the trust gaps:
 
 - **Never replace before verify.** Encode to a same-directory temp; the source is replaced only by an
@@ -41,6 +41,20 @@ and fixes the trust gaps:
   rejected, not assumed good.
 - **Config-as-code.** YAML, validated, in git — not clickops that vanishes on rebuild.
 - **Open source** (AGPL-3.0).
+
+### We are not the only tool that verifies before it replaces
+
+[**Alchemist**](https://github.com/bybrooklyn/alchemist) (AGPL-3.0, Rust) works the same axis: it validates
+output quality before promoting the result, keeps your originals untouched until the new file passes, and
+ships its own *Migrate from Tdarr* guide. If you are choosing between us, choose on the difference, not on
+a claim of uniqueness we would not be able to defend.
+
+**The difference is where the default sits.** Alchemist's VMAF scoring is **opt-in**. `holdfast`'s gate is
+**default-on, layered, and fails closed**: structural parity (codec, duration, packets, per-type stream
+counts, strictly-smaller) *and* full decode-integrity *and* VMAF — both its average **and** its worst
+frame. An output that cannot be **measured** is **rejected**, never assumed good; an ffmpeg without libvmaf
+stops the tool rather than quietly downgrading the gate. That is the whole claim, and it is narrower and
+truer than "the only one that checks".
 
 ## Non-goals
 
@@ -78,18 +92,18 @@ Bash transcoder.
 
 ```bash
 cp config.example.yaml config.yaml   # then edit library_roots
-transcode validate --config config.yaml
-transcode run --config config.yaml   # one scan: re-encode bloated non-HEVC video, safely
-transcode serve --config config.yaml # HTTP API + web dashboard (scan on demand / on an interval)
+holdfast validate --config config.yaml
+holdfast run --config config.yaml   # one scan: re-encode bloated non-HEVC video, safely
+holdfast serve --config config.yaml # HTTP API + web dashboard (scan on demand / on an interval)
 ```
 
-`run`/`serve` need `ffmpeg` and `ffprobe` on `PATH` (or set `TRANSCODE_FFMPEG` / `TRANSCODE_FFPROBE`); they
+`run`/`serve` need `ffmpeg` and `ffprobe` on `PATH` (or set `HOLDFAST_FFMPEG` / `HOLDFAST_FFPROBE`); they
 exit non-zero if they are missing rather than silently doing nothing. Use a build with **libx265** and
 **libvmaf** — a distro ffmpeg typically lacks the latter, which is why the image exists.
 
 ### Web API + UI (`serve`)
 
-`transcode serve` runs a REST API + [SSE](https://developer.mozilla.org/docs/Web/API/Server-sent_events)
+`holdfast serve` runs a REST API + [SSE](https://developer.mozilla.org/docs/Web/API/Server-sent_events)
 live stream and an **embedded web dashboard** (baked into the single binary — no assets to deploy). It is
 a **read-and-control** surface on top of the config-as-code engine: the YAML file stays the source of
 truth and the SQLite store stays the source of job state. The API can only **read the store, start a
@@ -110,15 +124,15 @@ invariant is entirely unaffected.
 
 Fail-safes: the server **binds `127.0.0.1` by default** (front it with a reverse proxy for real
 multi-user); the mutating endpoints require a bearer token (`server_auth_token`, best set via
-`TRANSCODE_SERVER_AUTH_TOKEN`) and are **disabled entirely when no token is set**; pause only ever
+`HOLDFAST_SERVER_AUTH_TOKEN`) and are **disabled entirely when no token is set**; pause only ever
 *delays* work — it never interrupts an encode or the atomic swap. **Known limitation:** single-token auth
 (no per-user accounts); the queue/history views are capped at the most recent rows, not the whole ledger.
 
 ### Observability & host-fair scheduling (`serve`)
 
-- **Prometheus** (`/metrics`, default on): `transcode_files_total{outcome}`, `transcode_bytes_reclaimed_total`,
-  `transcode_encode_duration_seconds`, `transcode_vmaf_score` (perceptual-quality distribution), and a
-  `transcode_queue_depth{state}` gauge read live from the store. Metrics are read-only instrumentation —
+- **Prometheus** (`/metrics`, default on): `holdfast_files_total{outcome}`, `holdfast_bytes_reclaimed_total`,
+  `holdfast_encode_duration_seconds`, `holdfast_vmaf_score` (perceptual-quality distribution), and a
+  `holdfast_queue_depth{state}` gauge read live from the store. Metrics are read-only instrumentation —
   best-effort, never affecting file handling.
 - **Notifications** (`notify_url`, [shoutrrr](https://shoutrrr.nickfedor.com/)): one service URL fans out to
   ntfy/Discord/Gotify/… — a message per failed file and a per-scan summary. Sends run off the engine's path,
@@ -134,7 +148,7 @@ multi-user); the mutating endpoints require a bearer token (`server_auth_token`,
 Requires Go 1.25+.
 
 ```bash
-make build        # -> ./transcode
+make build        # -> ./holdfast
 make test         # go test -race ./...
 make check        # THE gate — see the `check:` target in the Makefile for what it runs.
                   # CI and the release workflow run this same target, not a copy of it.
@@ -149,7 +163,7 @@ missing rather than skipping, because a skipped safety proof is a false green.
 
 ## Provenance
 
-`transcode` is the standalone extraction and full build-out of a config-as-code HEVC transcoder that began
+`holdfast` is the standalone extraction and full build-out of a config-as-code HEVC transcoder that began
 life as a Bash script inside a private homelab repo. That predecessor already proved the no-loss contract
 (verify-then-swap-then-delete, HDR-aware, crash-safe) against a real-ffmpeg fixture suite; this project
 ports it to Go and grows it into a production application (persistent queue, worker pool, hardware-encoder

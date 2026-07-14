@@ -23,12 +23,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NSchatz/transcode/internal/config"
-	"github.com/NSchatz/transcode/internal/encoder"
-	"github.com/NSchatz/transcode/internal/hdr"
-	"github.com/NSchatz/transcode/internal/probe"
-	"github.com/NSchatz/transcode/internal/store"
-	"github.com/NSchatz/transcode/internal/vmaf"
+	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/encoder"
+	"github.com/NSchatz/holdfast/internal/hdr"
+	"github.com/NSchatz/holdfast/internal/probe"
+	"github.com/NSchatz/holdfast/internal/store"
+	"github.com/NSchatz/holdfast/internal/vmaf"
 )
 
 // TempMarker is the fixed infix in a work-in-progress temp file's name, so a

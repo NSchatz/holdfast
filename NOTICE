@@ -1,4 +1,4 @@
-transcode
+holdfast
 Copyright (C) 2026 Noah Schatz
 Licensed under the GNU Affero General Public License v3.0 only (AGPL-3.0-only).
 See LICENSE.
@@ -7,7 +7,7 @@ See LICENSE.
 Bundled third-party binaries (container image only)
 --------------------------------------------------------------------------------
 
-The `transcode` container image does not merely depend on ffmpeg — it REDISTRIBUTES
+The `holdfast` container image does not merely depend on ffmpeg — it REDISTRIBUTES
 prebuilt ffmpeg and ffprobe binaries, so it carries their licence and their source
 offer with it.
 
@@ -35,7 +35,7 @@ The Dockerfile pins that build by tag AND verifies the tarball's SHA-256 before
 trusting it, so the ffmpeg in any given image is the exact one named here.
 
 The ffmpeg binaries are invoked as separate programs (`exec`), not linked into the
-`transcode` binary; `transcode` itself is AGPL-3.0-only and contains no ffmpeg code.
+`holdfast` binary; `holdfast` itself is AGPL-3.0-only and contains no ffmpeg code.
 
 --------------------------------------------------------------------------------
 

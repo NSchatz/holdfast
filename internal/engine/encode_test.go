@@ -16,9 +16,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NSchatz/transcode/internal/config"
-	"github.com/NSchatz/transcode/internal/encoder"
-	"github.com/NSchatz/transcode/internal/probe"
+	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/encoder"
+	"github.com/NSchatz/holdfast/internal/probe"
 )
 
 // captureFFmpeg writes a fake "ffmpeg" shell script to dir that logs its argv to

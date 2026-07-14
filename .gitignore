@@ -1,4 +1,9 @@
 # Build output
+/holdfast
+# The pre-rename binary name (TRANSCODE-12). Kept ignored deliberately: renaming this
+# entry instead of adding to it un-ignored a stale ./transcode from an earlier build,
+# and a blanket `git add` swept an 18MB binary into the commit. A blob in git history
+# outlives a tag. Leave both.
 /transcode
 /dist/
 /out/

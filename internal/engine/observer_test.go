@@ -10,8 +10,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/NSchatz/transcode/internal/config"
-	"github.com/NSchatz/transcode/internal/store"
+	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/store"
 )
 
 // collector is a concurrency-safe Observer that records every Event (workers emit

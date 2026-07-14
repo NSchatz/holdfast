@@ -1,27 +1,27 @@
-# transcode — example deployment. Copy it, edit the two paths, run it.
+# holdfast — example deployment. Copy it, edit the two paths, run it.
 #
 #   mkdir -p state && sudo chown 1000:1000 state       # must be writable by `user:` below
 #   cp config.example.yaml config.yaml                 # then edit it (see docs/docker.md)
 #   docker compose config -q                           # validate before you run it
 #   docker compose up -d
 #
-# The YAML config is the source of truth for what transcode DOES; this file only says
+# The YAML config is the source of truth for what holdfast DOES; this file only says
 # where it runs. See docs/docker.md for the full reference (GPU passthrough, volumes,
 # the security posture) and docs/migration.md if you are coming from Tdarr or the bash
 # transcoder.
 
 services:
-  transcode:
-    image: ghcr.io/nschatz/transcode:latest
+  holdfast:
+    image: ghcr.io/nschatz/holdfast:latest
     # Build it yourself instead of pulling (the image is private until the repo is
     # public — see the roadmap's PUB-FLIP gate):
     # build:
     #   context: .
-    container_name: transcode
+    container_name: holdfast
     command: ["serve", "--config", "/config/config.yaml"]
     restart: unless-stopped
 
-    # THE UID:GID THAT OWNS YOUR MEDIA. transcode encodes to a temp file NEXT TO the
+    # THE UID:GID THAT OWNS YOUR MEDIA. holdfast encodes to a temp file NEXT TO the
     # source and replaces it with an atomic rename, so it needs write access to the
     # library directory itself, not just the files. Get this wrong and every file
     # fails the encode step — which is safe (the source is never touched), but useless.
@@ -36,20 +36,20 @@ services:
       # (the read-only API and the dashboard still work).
       #
       # This is the PASS-THROUGH form (a bare name, no `=`) on purpose. Writing
-      # `TRANSCODE_SERVER_AUTH_TOKEN=${TRANSCODE_SERVER_AUTH_TOKEN:-}` would always SET
+      # `HOLDFAST_SERVER_AUTH_TOKEN=${HOLDFAST_SERVER_AUTH_TOKEN:-}` would always SET
       # the variable — to "" when you have no .env — and an env var BEATS the YAML file,
       # so it would silently wipe a token you had configured in config.yaml and leave
       # rescan/pause/resume returning 403 for no visible reason. The bare form passes the
       # variable only when it is actually set, so config.yaml keeps working.
-      - TRANSCODE_SERVER_AUTH_TOKEN
+      - HOLDFAST_SERVER_AUTH_TOKEN
 
     volumes:
-      # The config. Read-only: transcode never writes it.
+      # The config. Read-only: holdfast never writes it.
       - ./config.yaml:/config/config.yaml:ro
       # The resumable SQLite job store. A named volume or a host dir — but it must
       # SURVIVE RESTARTS, or a crashed run cannot resume and every file is rescanned.
       - ./state:/state
-      # YOUR MEDIA LIBRARY. This is the only place transcode ever mutates anything, and
+      # YOUR MEDIA LIBRARY. This is the only place holdfast ever mutates anything, and
       # it deletes a source once a replacement has passed every gate — so mount exactly
       # the tree you want re-encoded, and nothing else. The container path here must be
       # what `library_roots` says in config.yaml.
@@ -104,6 +104,6 @@ services:
     # docs/docker.md — a documented limitation with a workaround, not an oversight.
     #
     # There is no silent fallback: if the configured encoder cannot actually encode on
-    # this host, transcode fails loud at startup and exits non-zero. That check really
+    # this host, holdfast fails loud at startup and exits non-zero. That check really
     # encodes a clip and probes the result — a hardware encoder can exit 0 while
     # writing nothing when no device is present.

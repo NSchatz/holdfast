@@ -1,4 +1,4 @@
-// Command transcode is a config-as-code, data-safe, self-hosted media transcoder —
+// Command holdfast is a config-as-code, data-safe, self-hosted media transcoder —
 // an open-source Tdarr replacement. It reclaims disk by re-encoding bloated video
 // to a smaller modern codec and NEVER destroys a source until a replacement is
 // provably faithful.
@@ -7,7 +7,7 @@
 // TRANSCODE-1 data-safety core: skip guards → same-dir temp encode → verify → atomic
 // swap → delete). The persistent queue + worker pool (TRANSCODE-5), colour/HDR
 // (TRANSCODE-3), VMAF (TRANSCODE-4), and the API/UI (TRANSCODE-7) build on it — see
-// operations/roadmaps/transcode.md in the umbrella.
+// operations/roadmaps/holdfast.md in the umbrella.
 package main
 
 import (
@@ -26,28 +26,28 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/NSchatz/transcode/internal/config"
-	"github.com/NSchatz/transcode/internal/encoder"
-	"github.com/NSchatz/transcode/internal/engine"
-	"github.com/NSchatz/transcode/internal/logging"
-	"github.com/NSchatz/transcode/internal/metrics"
-	"github.com/NSchatz/transcode/internal/notify"
-	"github.com/NSchatz/transcode/internal/probe"
-	"github.com/NSchatz/transcode/internal/schedule"
-	"github.com/NSchatz/transcode/internal/server"
-	"github.com/NSchatz/transcode/internal/store"
-	"github.com/NSchatz/transcode/internal/version"
-	"github.com/NSchatz/transcode/internal/webui"
+	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/encoder"
+	"github.com/NSchatz/holdfast/internal/engine"
+	"github.com/NSchatz/holdfast/internal/logging"
+	"github.com/NSchatz/holdfast/internal/metrics"
+	"github.com/NSchatz/holdfast/internal/notify"
+	"github.com/NSchatz/holdfast/internal/probe"
+	"github.com/NSchatz/holdfast/internal/schedule"
+	"github.com/NSchatz/holdfast/internal/server"
+	"github.com/NSchatz/holdfast/internal/store"
+	"github.com/NSchatz/holdfast/internal/version"
+	"github.com/NSchatz/holdfast/internal/webui"
 )
 
 func main() {
 	os.Exit(dispatch(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-const usage = `transcode — config-as-code, data-safe media transcoder (open-source Tdarr replacement)
+const usage = `holdfast — config-as-code, data-safe media transcoder (open-source Tdarr replacement)
 
 Usage:
-  transcode <command> [flags]
+  holdfast <command> [flags]
 
 Commands:
   run        Load config and run one transcode scan over the library roots
@@ -55,7 +55,7 @@ Commands:
   validate   Load and validate a config file, then exit
   version    Print version and exit
 
-Run "transcode <command> -h" for command flags.
+Run "holdfast <command> -h" for command flags.
 `
 
 func dispatch(args []string, stdout, stderr io.Writer) int {
@@ -77,7 +77,7 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, usage)
 		return 0
 	default:
-		fmt.Fprintf(stderr, "transcode: unknown command %q\n\n%s", args[0], usage)
+		fmt.Fprintf(stderr, "holdfast: unknown command %q\n\n%s", args[0], usage)
 		return 2
 	}
 }
@@ -96,18 +96,18 @@ func loadConfig(fs *flag.FlagSet, args []string, stderr io.Writer) (*config.Conf
 		return nil, 2
 	}
 	if *path == "" {
-		fmt.Fprintln(stderr, "transcode: --config is required")
+		fmt.Fprintln(stderr, "holdfast: --config is required")
 		return nil, 2
 	}
 	cfg, err := config.Load(*path)
 	if err != nil {
-		fmt.Fprintf(stderr, "transcode: %v\n", err)
+		fmt.Fprintf(stderr, "holdfast: %v\n", err)
 		return nil, 1
 	}
 	// Load already returns a fully-defaulted config (koanf defaults layer) and
 	// distinguishes an explicit zero (e.g. crf: 0) from an absent key.
 	if err := cfg.Validate(); err != nil {
-		fmt.Fprintf(stderr, "transcode: invalid config: %v\n", err)
+		fmt.Fprintf(stderr, "holdfast: invalid config: %v\n", err)
 		return nil, 1
 	}
 	return cfg, 0
@@ -135,12 +135,12 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 // engine. It returns the engine, the store (the caller MUST Close it), and a
 // nonzero exit code on failure (with a message already written to stderr).
 func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engine.Engine, store.Store, int) {
-	ffmpeg := envOr("TRANSCODE_FFMPEG", "ffmpeg")
-	ffprobe := envOr("TRANSCODE_FFPROBE", "ffprobe")
+	ffmpeg := envOr("HOLDFAST_FFMPEG", "ffmpeg")
+	ffprobe := envOr("HOLDFAST_FFPROBE", "ffprobe")
 	// Fail loud if the tools are missing — never a false green / silent no-op.
 	for _, bin := range []string{ffmpeg, ffprobe} {
 		if _, err := exec.LookPath(bin); err != nil {
-			fmt.Fprintf(stderr, "transcode: required binary %q not found: %v\n", bin, err)
+			fmt.Fprintf(stderr, "holdfast: required binary %q not found: %v\n", bin, err)
 			return nil, nil, 1
 		}
 	}
@@ -155,7 +155,7 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 	// "succeed" while writing nothing. cfg.Encoder is always a valid registry key
 	// here (Load defaults it to "cpu"; Validate rejects an unknown/empty encoder).
 	if _, err := encoder.RequireAvailable(context.Background(), ffmpeg, ffprobe, cfg.Encoder); err != nil {
-		fmt.Fprintf(stderr, "transcode: %v\n", err)
+		fmt.Fprintf(stderr, "holdfast: %v\n", err)
 		return nil, nil, 1
 	}
 
@@ -169,7 +169,7 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 	}
 	st, err := store.Open(filepath.Join(stateDir, "jobs.db"))
 	if err != nil {
-		fmt.Fprintf(stderr, "transcode: opening job store: %v\n", err)
+		fmt.Fprintf(stderr, "holdfast: opening job store: %v\n", err)
 		return nil, nil, 1
 	}
 	return engine.New(*cfg, prober, enc, st, log), st, 0
@@ -183,7 +183,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	}
 	log := logging.New(cfg.LogLevel)
 
-	log.Info("transcode starting",
+	log.Info("holdfast starting",
 		"version", version.Version,
 		"library_roots", cfg.LibraryRoots,
 		"encoder", cfg.Encoder, "crf", cfg.CRF, "preset", cfg.Preset,
@@ -208,7 +208,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 			log.Warn("interrupted — stopped safely; in-flight temp discarded, source untouched")
 			return 0
 		}
-		fmt.Fprintf(stderr, "transcode: %v\n", err)
+		fmt.Fprintf(stderr, "holdfast: %v\n", err)
 		return 1
 	}
 	log.Info("scan complete")
@@ -325,7 +325,7 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	case <-ctx.Done():
 		log.Info("shutting down (signal) — draining connections")
 	case err := <-errCh:
-		fmt.Fprintf(stderr, "transcode: server error: %v\n", err)
+		fmt.Fprintf(stderr, "holdfast: server error: %v\n", err)
 		return 1
 	}
 	// Graceful shutdown: stop accepting, let handlers return (SSE streams already

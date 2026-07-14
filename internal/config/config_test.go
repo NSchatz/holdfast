@@ -341,8 +341,8 @@ func TestLoadLayered(t *testing.T) {
 			t.Errorf("scan_interval_sec default = %d, want 0", c.ScanIntervalSec)
 		}
 		// The token must be settable via env (so no secret need land in the file).
-		t.Setenv("TRANSCODE_SERVER_AUTH_TOKEN", "s3cr3t")
-		t.Setenv("TRANSCODE_SCAN_INTERVAL_SEC", "45")
+		t.Setenv("HOLDFAST_SERVER_AUTH_TOKEN", "s3cr3t")
+		t.Setenv("HOLDFAST_SCAN_INTERVAL_SEC", "45")
 		c2, err := Load(p)
 		if err != nil {
 			t.Fatal(err)
@@ -369,8 +369,8 @@ func TestLoadLayered(t *testing.T) {
 			t.Errorf("obs knobs should default off: %+v", c)
 		}
 		// notify_url via env (so no secret need land in the file), and metrics off.
-		t.Setenv("TRANSCODE_NOTIFY_URL", "ntfy://topic")
-		t.Setenv("TRANSCODE_METRICS_ENABLE", "false")
+		t.Setenv("HOLDFAST_NOTIFY_URL", "ntfy://topic")
+		t.Setenv("HOLDFAST_METRICS_ENABLE", "false")
 		c2, err := Load(p)
 		if err != nil {
 			t.Fatal(err)
@@ -386,9 +386,9 @@ func TestLoadLayered(t *testing.T) {
 	t.Run("env overrides file", func(t *testing.T) {
 		p := filepath.Join(dir, "envtest.yaml")
 		writeFile(t, p, "library_roots:\n  - /mnt/media\ncrf: 22\nlog_level: info\n")
-		t.Setenv("TRANSCODE_CRF", "17")
-		t.Setenv("TRANSCODE_LOG_LEVEL", "debug")
-		t.Setenv("TRANSCODE_SKIP_HARDLINKED", "false")
+		t.Setenv("HOLDFAST_CRF", "17")
+		t.Setenv("HOLDFAST_LOG_LEVEL", "debug")
+		t.Setenv("HOLDFAST_SKIP_HARDLINKED", "false")
 		c, err := Load(p)
 		if err != nil {
 			t.Fatal(err)

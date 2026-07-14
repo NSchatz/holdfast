@@ -12,11 +12,11 @@ import (
 // own fixture-suite discipline.
 func tools(t *testing.T) (ffmpeg, ffprobe string) {
 	t.Helper()
-	ffmpeg = os.Getenv("TRANSCODE_FFMPEG")
+	ffmpeg = os.Getenv("HOLDFAST_FFMPEG")
 	if ffmpeg == "" {
 		ffmpeg = "ffmpeg"
 	}
-	ffprobe = os.Getenv("TRANSCODE_FFPROBE")
+	ffprobe = os.Getenv("HOLDFAST_FFPROBE")
 	if ffprobe == "" {
 		ffprobe = "ffprobe"
 	}

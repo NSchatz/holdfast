@@ -9,6 +9,7 @@ README.md
 CLAUDE.md
 
 # Local artifacts, and anything that could carry real config or state into an image.
+holdfast
 transcode
 dist
 out

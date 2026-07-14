@@ -1,7 +1,7 @@
-// Package config loads and validates the transcode configuration.
+// Package config loads and validates the holdfast configuration.
 //
 // Load is layered (TRANSCODE-2, koanf): built-in defaults ← the YAML file ← the
-// environment (TRANSCODE_*). Loading defaults as their own layer means an explicit
+// environment (HOLDFAST_*). Loading defaults as their own layer means an explicit
 // zero in the file/env OVERRIDES a default while an absent key keeps it — resolving
 // the zero-vs-absent ambiguity a plain struct-zero default has. Unknown YAML keys
 // are rejected (a typo is a loud error, never a silent default). Validate() is the
@@ -24,12 +24,12 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
 
-	"github.com/NSchatz/transcode/internal/encoder"
-	"github.com/NSchatz/transcode/internal/schedule"
+	"github.com/NSchatz/holdfast/internal/encoder"
+	"github.com/NSchatz/holdfast/internal/schedule"
 )
 
-// envPrefix is the prefix for environment overrides: TRANSCODE_CRF=20 sets crf.
-const envPrefix = "TRANSCODE_"
+// envPrefix is the prefix for environment overrides: HOLDFAST_CRF=20 sets crf.
+const envPrefix = "HOLDFAST_"
 
 // defaultServerAddr is the `serve` bind address default — LOCALHOST, so the control
 // surface is never network-exposed by accident. Shared by defaultLayer() and
@@ -112,7 +112,7 @@ type Config struct {
 	// or the hardware encoders "nvenc" (hevc_nvenc), "av1_nvenc" (av1_nvenc),
 	// "qsv" (hevc_qsv), "vaapi" (hevc_vaapi), "amf" (hevc_amf) — all opt-in,
 	// gated behind a runtime capability check (never assumed to work; see
-	// internal/encoder.Available and cmd/transcode's cmdRun). The raw ffmpeg -c:v
+	// internal/encoder.Available and cmd/holdfast's cmdRun). The raw ffmpeg -c:v
 	// codec name (e.g. "libsvtav1") is also accepted as an alias.
 	Encoder string `yaml:"encoder"`
 	// CRF is the encoder's quality knob (lower = bigger/better): libx265/libsvtav1
@@ -215,7 +215,7 @@ type Config struct {
 	// encoder in a later phase). Use EffectiveWorkers() to read the resolved value.
 	Workers int `yaml:"workers"`
 
-	// --- server / API+UI (TRANSCODE-7, `transcode serve`) ---
+	// --- server / API+UI (TRANSCODE-7, `holdfast serve`) ---
 
 	// ServerAddr is the host:port the `serve` HTTP API + web UI binds to. Default
 	// "127.0.0.1:8080" — LOCALHOST by design (fail-safe: the control surface is not
@@ -227,7 +227,7 @@ type Config struct {
 	// (rescan/pause/resume). Empty (default) DISABLES those endpoints entirely —
 	// remote control is off until a token is explicitly set (fail-safe). Read
 	// endpoints and the UI never require it. Prefer supplying it via the
-	// TRANSCODE_SERVER_AUTH_TOKEN environment variable rather than the YAML file so
+	// HOLDFAST_SERVER_AUTH_TOKEN environment variable rather than the YAML file so
 	// no secret lands in a committed config.
 	ServerAuthToken string `yaml:"server_auth_token"`
 	// ScanIntervalSec, when > 0, makes `serve` re-scan the library every N seconds
@@ -243,7 +243,7 @@ type Config struct {
 	MetricsEnable bool `yaml:"metrics_enable"`
 	// NotifyURL is a shoutrrr service URL (e.g. ntfy/Discord/Gotify) for best-effort
 	// notifications — a message per failed file + a per-scan summary. Empty (default)
-	// disables notifications. May carry a secret; prefer TRANSCODE_NOTIFY_URL over the
+	// disables notifications. May carry a secret; prefer HOLDFAST_NOTIFY_URL over the
 	// YAML file.
 	NotifyURL string `yaml:"notify_url"`
 	// RunWindow is a daily host-fair window "HH:MM-HH:MM" (local time) during which
@@ -313,7 +313,7 @@ func (c *Config) PixelFormatAuto() bool {
 var ErrNoConfig = errors.New("no config path provided")
 
 // Load builds the effective config from three layers, later overriding earlier:
-// built-in defaults ← the YAML file at path ← the environment (TRANSCODE_*). It
+// built-in defaults ← the YAML file at path ← the environment (HOLDFAST_*). It
 // does NOT validate — callers run Validate() explicitly so `validate` and `run`
 // share one code path. Unknown top-level keys in the file are rejected (a typo is a
 // loud error, never a silent default). A returned Config is fully defaulted.
@@ -347,7 +347,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("merge config %q: %w", path, err)
 	}
 
-	// 3. environment overrides (TRANSCODE_CRF=20 -> crf). Values arrive as strings;
+	// 3. environment overrides (HOLDFAST_CRF=20 -> crf). Values arrive as strings;
 	// WeaklyTypedInput (below) coerces them to the field types.
 	err := k.Load(koanfenv.Provider(envPrefix, ".", func(s string) string {
 		return strings.ToLower(strings.TrimPrefix(s, envPrefix))

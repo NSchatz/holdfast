@@ -78,10 +78,10 @@ ARG COMMIT=unknown
 ARG DATE=unknown
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -ldflags="-s -w \
-      -X github.com/NSchatz/transcode/internal/version.Version=${VERSION} \
-      -X github.com/NSchatz/transcode/internal/version.Commit=${COMMIT} \
-      -X github.com/NSchatz/transcode/internal/version.Date=${DATE}" \
-    -o /out/transcode ./cmd/transcode
+      -X github.com/NSchatz/holdfast/internal/version.Version=${VERSION} \
+      -X github.com/NSchatz/holdfast/internal/version.Commit=${COMMIT} \
+      -X github.com/NSchatz/holdfast/internal/version.Date=${DATE}" \
+    -o /out/holdfast ./cmd/holdfast
 
 # --- runtime -----------------------------------------------------------------
 # distroless cc: glibc + libgcc_s + ca-certificates, no shell, no package manager,
@@ -99,9 +99,9 @@ FROM ${RUNTIME_IMAGE}
 ARG VERSION=0.0.0-dev
 ARG COMMIT=unknown
 ARG DATE=unknown
-LABEL org.opencontainers.image.title="transcode" \
+LABEL org.opencontainers.image.title="holdfast" \
       org.opencontainers.image.description="Config-as-code, data-safe, self-hosted media transcoder — never destroys a source until a replacement is provably faithful." \
-      org.opencontainers.image.source="https://github.com/NSchatz/transcode" \
+      org.opencontainers.image.source="https://github.com/NSchatz/holdfast" \
       org.opencontainers.image.licenses="AGPL-3.0-only" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${COMMIT}" \
@@ -115,13 +115,13 @@ COPY --from=ffmpeg /ffmpeg/bin/ffprobe /usr/local/bin/ffprobe
 # dropped it, the failure is silent: no error, no wrong result, just an overnight window
 # running on UTC. Cheap insurance against a failure mode that does not announce itself.
 COPY --from=build /usr/share/zoneinfo /usr/share/zoneinfo
-COPY --from=build /out/transcode /usr/local/bin/transcode
+COPY --from=build /out/holdfast /usr/local/bin/holdfast
 # The image redistributes prebuilt GPL ffmpeg binaries, so it ships their licence and
-# source offer with them (NOTICE), alongside transcode's own AGPL text.
-COPY --from=build /src/LICENSE /src/NOTICE /usr/share/doc/transcode/
+# source offer with them (NOTICE), alongside holdfast's own AGPL text.
+COPY --from=build /src/LICENSE /src/NOTICE /usr/share/doc/holdfast/
 
 # Deliberately NO ENV defaults for CONFIG keys. An env var BEATS the YAML file
-# (TRANSCODE_<KEY>), so baking one here would silently override the user's
+# (HOLDFAST_<KEY>), so baking one here would silently override the user's
 # config-as-code — and for server_addr it would quietly widen a deliberate 127.0.0.1
 # fail-safe. docker-compose.yml sets the container paths explicitly instead, in the
 # open, where they are reviewable.
@@ -136,5 +136,5 @@ COPY --from=build /src/LICENSE /src/NOTICE /usr/share/doc/transcode/
 ENV HOME=/home/nonroot
 EXPOSE 8080
 USER nonroot:nonroot
-ENTRYPOINT ["/usr/local/bin/transcode"]
+ENTRYPOINT ["/usr/local/bin/holdfast"]
 CMD ["version"]

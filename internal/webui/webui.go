@@ -1,6 +1,6 @@
-// Package webui serves the transcode web UI. The UI is a single self-contained
+// Package webui serves the holdfast web UI. The UI is a single self-contained
 // HTML page (vanilla JS, inline CSS, no external/CDN assets) embedded into the
-// binary via go:embed, so `transcode serve` ships one binary with the dashboard
+// binary via go:embed, so `holdfast serve` ships one binary with the dashboard
 // baked in. The page is a READ-AND-CONTROL view over the API — it holds no state of
 // its own; the YAML config and the SQLite store remain the sources of truth.
 package webui

@@ -1,4 +1,4 @@
-# transcode — developer tasks.
+# holdfast — developer tasks.
 #
 # `make check` IS the gate, and this file is where it is defined: CI runs it, the release
 # workflow runs it, and so do you. The tool pins below are therefore the only ones — they
@@ -12,17 +12,17 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w \
-  -X github.com/NSchatz/transcode/internal/version.Version=$(VERSION) \
-  -X github.com/NSchatz/transcode/internal/version.Commit=$(COMMIT) \
-  -X github.com/NSchatz/transcode/internal/version.Date=$(DATE)
+  -X github.com/NSchatz/holdfast/internal/version.Version=$(VERSION) \
+  -X github.com/NSchatz/holdfast/internal/version.Commit=$(COMMIT) \
+  -X github.com/NSchatz/holdfast/internal/version.Date=$(DATE)
 
-IMAGE    ?= transcode:dev
+IMAGE    ?= holdfast:dev
 PLATFORM ?= linux/amd64
 
-.PHONY: build test check fmt vet staticcheck govulncheck check-pins tidy clean image image-smoke compose-check
+.PHONY: build test check fmt vet staticcheck govulncheck check-pins check-pins-selftest tidy clean image image-smoke compose-check
 
 build:
-	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o transcode ./cmd/transcode
+	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o holdfast ./cmd/holdfast
 
 test:
 	go test -race -covermode=atomic ./...
@@ -45,8 +45,14 @@ govulncheck:
 check-pins:
 	./scripts/check-pins.sh
 
+# Proves check-pins.sh still BITES. While being written, the rename guard degraded to a
+# silent GREEN seven times — each while printing "ok" — for seven different reasons (see the
+# script's header). A guard nobody tries to defeat is a guard nobody knows works.
+check-pins-selftest:
+	./scripts/check-pins-selftest.sh
+
 # THE gate. CI and the release workflow both run exactly this.
-check: check-pins fmt vet build test staticcheck govulncheck
+check: check-pins check-pins-selftest fmt vet build test staticcheck govulncheck
 
 # --- packaging (TRANSCODE-9) --------------------------------------------------
 # The same commands CI runs, so the packaging gate is reproducible by a human and not
@@ -67,5 +73,5 @@ tidy:
 	go mod tidy
 
 clean:
-	rm -f transcode
+	rm -f holdfast transcode
 	rm -rf dist out

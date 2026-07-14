@@ -3,7 +3,7 @@ package engine
 import (
 	"time"
 
-	"github.com/NSchatz/transcode/internal/store"
+	"github.com/NSchatz/holdfast/internal/store"
 )
 
 // Event is a job-state change the engine emits to an optional Observer so a

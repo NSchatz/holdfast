@@ -95,7 +95,7 @@ func Score(ctx context.Context, ffmpeg, distorted, reference string, subsample i
 	if subsample < 1 {
 		subsample = 1
 	}
-	logf, err := os.CreateTemp("", "transcode-vmaf-*.json")
+	logf, err := os.CreateTemp("", "holdfast-vmaf-*.json")
 	if err != nil {
 		return Result{}, fmt.Errorf("vmaf: temp log: %w", err)
 	}

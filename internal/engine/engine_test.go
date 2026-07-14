@@ -24,11 +24,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NSchatz/transcode/internal/config"
-	"github.com/NSchatz/transcode/internal/hdr"
-	"github.com/NSchatz/transcode/internal/probe"
-	"github.com/NSchatz/transcode/internal/store"
-	"github.com/NSchatz/transcode/internal/vmaf"
+	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/hdr"
+	"github.com/NSchatz/holdfast/internal/probe"
+	"github.com/NSchatz/holdfast/internal/store"
+	"github.com/NSchatz/holdfast/internal/vmaf"
 )
 
 // errFake is the deterministic error returned by fake encoders simulating a failure.
@@ -42,11 +42,11 @@ func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Disca
 
 func tools(t *testing.T) (ffmpeg, ffprobe string) {
 	t.Helper()
-	ffmpeg = envOr("TRANSCODE_FFMPEG", "ffmpeg")
-	ffprobe = envOr("TRANSCODE_FFPROBE", "ffprobe")
+	ffmpeg = envOr("HOLDFAST_FFMPEG", "ffmpeg")
+	ffprobe = envOr("HOLDFAST_FFPROBE", "ffprobe")
 	for _, b := range []string{ffmpeg, ffprobe} {
 		if _, err := exec.LookPath(b); err != nil {
-			t.Fatalf("::error:: %q not found — the transcoder safety proof requires ffmpeg+ffprobe (set TRANSCODE_FFMPEG/FFPROBE): %v", b, err)
+			t.Fatalf("::error:: %q not found — the transcoder safety proof requires ffmpeg+ffprobe (set HOLDFAST_FFMPEG/FFPROBE): %v", b, err)
 		}
 	}
 	return ffmpeg, ffprobe

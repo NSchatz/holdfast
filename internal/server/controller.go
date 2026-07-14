@@ -1,5 +1,5 @@
 // Package server is TRANSCODE-7: a chi REST API + SSE live stream + embedded web
-// UI over the transcode engine. It is a READ-AND-CONTROL surface on top of the
+// UI over the holdfast engine. It is a READ-AND-CONTROL surface on top of the
 // config-as-code engine — the YAML file remains the source of truth, the SQLite
 // store remains the source of job state, and NOTHING here ever touches a media file
 // or weakens the data-safety invariant. The API can only: read the store, start a
