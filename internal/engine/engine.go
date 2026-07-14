@@ -517,13 +517,14 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// The sizes either side of the swap. fi was stat'd at entry (the pre-encode
 	// source), so SourceBytes is accurate even though f may already be gone (a
 	// container-changing swap removed it). BOTH are persisted, not just their
-	// difference: that is what makes the reclaimed total survive a restart (see
-	// store.Reclaimed) and what lets a UI show "before → after" instead of a delta.
+	// difference: that is what makes a durable lifetime reclaimed total derivable
+	// (TRANSCODE-14) and what lets a UI show "before → after" instead of a bare delta.
 	newSize := probe.FileSize(final)
 	out.SourceBytes, out.OutputBytes = ptr(fi.Size()), ptr(newSize)
 
 	e.Log.Info("DONE", "file", final, "bytes", newSize, "reclaimed", fi.Size()-newSize,
-		"encode_ms", encodeDur.Milliseconds(), "vmaf", proof.Mean, "vmaf_min", proof.Min)
+		"encode_ms", encodeDur.Milliseconds(),
+		"vmaf", logScore(proof.Mean), "vmaf_min", logScore(proof.Min))
 	// The done row is keyed under the FINAL file's own path+fingerprint (mirroring
 	// the pre-TRANSCODE-5 ledger behaviour) so a resume short-circuits on the new
 	// file's identity, not the pre-swap source's. The post-swap fingerprint (new
@@ -589,6 +590,18 @@ func because(reason string) *store.Outcome { return &store.Outcome{Reason: reaso
 // "not recorded" (nil) stays distinct from a recorded zero, and Go has no way to take
 // the address of a method call's result without this.
 func ptr[T any](v T) *T { return &v }
+
+// logScore renders an optional VMAF score for a log line: the number, or "not recorded"
+// when the gate did not run. Handing slog the *float64 directly would print the POINTER
+// — `vmaf=0xc000012120` — because slog formats an unknown type with %v and a pointer's
+// %v is its address. That would silently gut the one operator-facing line that reports
+// what a swap was worth.
+func logScore(p *float64) any {
+	if p == nil {
+		return "not recorded"
+	}
+	return *p
+}
 
 // isAlreadyTargetCodec reports whether a source's probed video codec already IS
 // the engine's configured target codec, generalizing the pre-TRANSCODE-6 hardcoded

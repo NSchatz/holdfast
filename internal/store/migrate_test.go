@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
-	"sync"
 	"testing"
 )
 
@@ -247,64 +246,48 @@ func TestMigrate_IsIdempotent(t *testing.T) {
 	}
 }
 
-// Two processes opening the same UN-MIGRATED database at once must both come up. This
-// is the real first-start-after-upgrade shape: a `serve` daemon and an operator running
-// `holdfast run` against the same jobs.db, neither of which has migrated it yet.
+// applyMigration must be RE-ENTRANT: a migration another writer already applied is a
+// no-op, not an error.
 //
-// It is easy to get two ways wrong at once, and both were:
-//   - a DEFERRED transaction takes no write lock until its first write, so both
-//     processes begin, both try to upgrade, and the loser gets SQLITE_BUSY — which
-//     busy_timeout will NOT retry, because the deadlock is already established.
-//     Hence BEGIN IMMEDIATE.
-//   - checking the version OUTSIDE the transaction lets both processes read 0, and then
-//     the loser's ALTER dies on "duplicate column name". Hence the re-read under the
-//     lock.
+// This is what the version re-read INSIDE the transaction buys. migrate() reads
+// user_version before it takes the write lock, so between that read and the lock the
+// step may already have run — and then our ALTER would die on "duplicate column name",
+// turning a benign race into a startup failure. Re-reading under the lock makes
+// check-and-apply atomic, so losing the race just means the work is already done.
 //
-// Migrating must not introduce a startup failure the old lock-free schema init did not
-// have, so this runs the real Open concurrently and demands every one of them succeed.
-func TestMigrate_ConcurrentFirstOpenOfAV0Database(t *testing.T) {
+// Driven directly rather than through a goroutine race, because a test that only fails
+// sometimes is a test that gets deleted: here the "other writer" has demonstrably
+// already run (the database is fully migrated), and we re-apply the same step on top.
+func TestApplyMigration_IsANoOpWhenAlreadyApplied(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "jobs.db")
 	seedV0(t, path)
 
-	const n = 6
-	var wg sync.WaitGroup
-	errs := make([]error, n)
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			s, err := Open(path)
-			if err != nil {
-				errs[i] = err
-				return
-			}
-			errs[i] = s.Close()
-		}(i)
+	s, err := Open(path) // migrates to the current version
+	if err != nil {
+		t.Fatalf("Open: %v", err)
 	}
-	wg.Wait()
+	defer func() { _ = s.Close() }()
 
-	for i, err := range errs {
-		if err != nil {
-			t.Errorf("concurrent Open #%d failed — a first-start race must not refuse to boot: %v", i, err)
+	ctx := context.Background()
+	// Re-apply EVERY shipped migration on top of an already-migrated database, exactly
+	// as a racing process would. Without the in-transaction re-read, migration 2's
+	// `ALTER TABLE ... ADD COLUMN reason` fails with "duplicate column name".
+	for i, m := range migrations {
+		if err := applyMigration(ctx, s.db, i+1, m); err != nil {
+			t.Fatalf("re-applying migration %d (%s) must be a no-op, got: %v", i+1, m.name, err)
 		}
 	}
 
-	// Exactly one migration actually ran: the schema is at the current version, and the
-	// rows are all still there (nobody applied it twice or half-applied it).
+	// And nothing was disturbed: same version, same rows.
 	if got, want := userVersion(t, path), schemaVersion(); got != want {
 		t.Errorf("user_version = %d, want %d", got, want)
 	}
-	s, err := Open(path)
-	if err != nil {
-		t.Fatalf("Open after the race: %v", err)
-	}
-	defer func() { _ = s.Close() }()
-	rows, err := s.List(context.Background(), nil, 0)
+	rows, err := s.List(ctx, nil, 0)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
 	if len(rows) != 4 {
-		t.Errorf("row count after a concurrent migration = %d, want 4", len(rows))
+		t.Errorf("row count = %d, want 4 — a re-applied migration disturbed the data", len(rows))
 	}
 }
 

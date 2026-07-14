@@ -255,14 +255,14 @@ func nullInt(i *int64) any {
 // scanOutcome reads the eight nullable outcome columns into an Outcome, mapping SQL
 // NULL back to the nil pointer / empty string that means "not recorded". The inverse
 // of the null* helpers above; the round-trip is asserted by the store tests.
-func scanOutcome(reason, encoder, model sql.NullString, mean, min sql.NullFloat64, src, out, ms sql.NullInt64) Outcome {
+func scanOutcome(reason, encoder, model sql.NullString, mean, worst sql.NullFloat64, src, out, ms sql.NullInt64) Outcome {
 	o := Outcome{Reason: reason.String, Encoder: encoder.String, VmafModel: model.String}
 	if mean.Valid {
 		v := mean.Float64
 		o.VmafMean = &v
 	}
-	if min.Valid {
-		v := min.Float64
+	if worst.Valid {
+		v := worst.Float64
 		o.VmafMin = &v
 	}
 	if src.Valid {

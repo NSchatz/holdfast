@@ -5,7 +5,10 @@ package engine
 // touches a source). Real-ffmpeg, fail-loud like the rest of the safety suite.
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -133,6 +136,13 @@ func TestObserver_DoneEventAndLedgerCarryTheFullProof(t *testing.T) {
 	})
 	col := &collector{}
 	eng.Observer = col.observe
+	// Capture the engine's own logs: the DONE line is the operator-facing report of what
+	// a swap was worth, and the scores on it are *float64 now. slog formats an unknown
+	// type with %v, and a pointer's %v is its ADDRESS — so handing it the pointer prints
+	// `vmaf=0xc000012120` and silently guts the line. Asserted below.
+	var logs bytes.Buffer
+	eng.Log = slog.New(slog.NewTextHandler(&logs, nil))
+
 	if err := eng.RunOneshot(context.Background()); err != nil {
 		t.Fatalf("RunOneshot: %v", err)
 	}
@@ -186,6 +196,15 @@ func TestObserver_DoneEventAndLedgerCarryTheFullProof(t *testing.T) {
 	}
 	if got, want := done.BytesReclaimed(), srcSize-*o.OutputBytes; got != want {
 		t.Errorf("BytesReclaimed() = %d, want %d (derived from the recorded sizes)", got, want)
+	}
+
+	// The DONE log line reports the real numbers, not pointer addresses.
+	line := logs.String()
+	if strings.Contains(line, "vmaf=0x") || strings.Contains(line, "vmaf_min=0x") {
+		t.Errorf("the DONE log line is printing POINTER ADDRESSES instead of VMAF scores:\n%s", line)
+	}
+	if !strings.Contains(line, fmt.Sprintf("vmaf=%v", *o.VmafMean)) {
+		t.Errorf("the DONE log line does not carry the measured VMAF mean %v:\n%s", *o.VmafMean, line)
 	}
 
 	// And the ledger kept it — not just the live event. This is the actual bug: the

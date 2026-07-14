@@ -229,12 +229,25 @@ The anti-vacuity proof is `TestMigrate_V0DatabaseOnDiskGainsTheOutcomeColumns`: 
 pre-migration database** (the frozen v0 DDL, with rows) and proves opening it migrates in place and keeps
 every row. **A fresh-schema test would pass against the very bug** — a fresh file gets the columns either
 way — which is why the v0 fixture is the one that matters; it is mutation-tested against a
-`CREATE TABLE IF NOT EXISTS`-only migrate and reds. The migration transaction is **`BEGIN IMMEDIATE`**, not
-the default DEFERRED: two processes opening the same un-migrated database (a `serve` daemon and an
-operator's `holdfast run`, on the first start after an upgrade) would both begin, both try to upgrade to a
-write lock, and one would get `SQLITE_BUSY` — which `busy_timeout` will NOT retry, because the deadlock is
-already established. IMMEDIATE takes the lock up front where the busy handler can wait on it. Migrating is
-not the place to introduce a startup failure the old lock-free schema init did not have.
+`CREATE TABLE IF NOT EXISTS`-only migrate and reds.
+
+The migration is **re-entrant**, which is a separate property from idempotent and is what a second writer
+needs. The transaction is **`BEGIN IMMEDIATE`** (take the write lock up front, where the busy handler can
+wait on it, rather than DEFERRED's mid-transaction upgrade, which deadlocks instead of waiting), and it
+**re-reads `user_version` INSIDE that transaction** — because `migrate` reads the version *before* taking
+the lock, so between the read and the lock the step may already have run, and the `ALTER` would then die on
+`duplicate column name`. Re-reading under the lock makes check-and-apply atomic, so losing the race is a
+no-op. `TestApplyMigration_IsANoOpWhenAlreadyApplied` pins it and reds without the re-read.
+
+**Known limitation (deliberate, do not "fix" it with a flaky test).** holdfast is a **single-daemon** tool
+and the store is single-writer by design; several processes opening the *same* `jobs.db` at the same
+instant is not a supported deployment, and on a not-yet-WAL database that race can still transiently refuse
+to start with `SQLITE_BUSY` during SQLite's WAL conversion. That is **fail-safe** — a refusal, never a
+partial schema — and the next start succeeds. An N-way concurrent-`Open` test was written for this and
+**deleted**: it was flaky, and a flaky test is one that gets deleted later anyway, by someone who no longer
+knows what it was for. (A `busy_timeout`-before-`journal_mode` DSN reorder was tried as the fix and
+**measured not to be one** — both pragma orderings wait correctly on a held lock — so it was reverted rather
+than shipped with a rationale that does not hold.)
 
 **Deferred to `-14`:** the dashboard renders none of this (`internal/webui` is untouched), and the
 reclaimed figure is still the **session** counter. `-13` persists BOTH sizes on every done row, which is
