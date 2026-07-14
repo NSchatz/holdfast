@@ -90,10 +90,13 @@ the current state) is **packaging + release + migration**: a production **multi-
 **non-root**, **distroless** image bundling ffmpeg **pinned by release tag AND verified by SHA-256** — the
 same build CI runs the fixture safety proof against, so the image ships the ffmpeg that was actually proven
 (note an ffmpeg lacking libvmaf would not silently weaken the gate, it would STOP the tool: an unmeasured
-output is rejected, never accepted). The pin lives in the **Dockerfile's `FFMPEG_*` ARGs and nowhere else**:
-`scripts/install-ffmpeg.sh` PARSES them, and CI/release call it, because a pin duplicated into a workflow
-and held in step by a comment is not a pin — both files would stay internally consistent while the proof
-silently detached from the artifact. The runtime base is distroless **`cc`**, not `base`: ffmpeg carries a
+output is rejected, never accepted). The pin lives in the **Dockerfile's `FFMPEG_*` ARGs**, and
+`scripts/install-ffmpeg.sh` PARSES them (CI/release call it) — because a pin duplicated into a workflow and
+held in step by a comment is not a pin: both files stay internally consistent while the proof silently
+detaches from the artifact. The **one** place it must be restated is `NOTICE`, which is the GPL source offer
+and ships *inside* the image and every tarball, where no Dockerfile is available to point at — so
+`scripts/check-pins.sh` (wired into `make check`) FAILS if `NOTICE` or the Go version drifts from the
+Dockerfile. Where a value must appear twice, the agreement is enforced, never requested. The runtime base is distroless **`cc`**, not `base`: ffmpeg carries a
 `DT_NEEDED` on **`libgcc_s.so.1`**, which `base` does not ship, so `base` builds perfectly and then dies at
 the dynamic loader the first time the engine execs ffmpeg. Every stage that RUNs anything is pinned to
 `$BUILDPLATFORM` and the binary cross-compiles (`CGO_ENABLED=0`, pure-Go SQLite), so the arm64 image needs

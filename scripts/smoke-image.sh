@@ -110,8 +110,12 @@ run_in_image -u "$uid:$gid" -v "$work/media:/media" \
 
 before_size="$(stat -c %s "$work/media/sample.mkv")"
 before_kbps=$(( before_size * 8 / 2 / 1000 ))   # 2-second clip
+# 2500 mirrors the shipped default of min_bitrate_kbps (internal/config). It is a copy,
+# and copies drift — but this one cannot cause a FALSE GREEN: if the default ever rises
+# above the fixture's real bitrate the engine skips the file, the `hevc` assertion below
+# reds, and the run fails loudly. This pre-check exists only so that failure says WHY.
 [ "$before_kbps" -gt 2500 ] \
-  || fail "fixture is only ${before_kbps} kbps — under the default min_bitrate_kbps (2500), so the engine would SKIP it and this test would assert nothing"
+  || fail "fixture is only ${before_kbps} kbps — at or under the default min_bitrate_kbps (2500), so the engine will SKIP it and this test would assert against a file the encoder never touched"
 ok "fixture: 320x240 H.264, ~${before_kbps} kbps, ${before_size} bytes (above the skip guard)"
 
 # The config must survive the real validator before it drives an encode.

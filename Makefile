@@ -19,7 +19,7 @@ LDFLAGS := -s -w \
 IMAGE    ?= transcode:dev
 PLATFORM ?= linux/amd64
 
-.PHONY: build test check fmt vet staticcheck govulncheck tidy clean image image-smoke compose-check
+.PHONY: build test check fmt vet staticcheck govulncheck check-pins tidy clean image image-smoke compose-check
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o transcode ./cmd/transcode
@@ -39,8 +39,14 @@ staticcheck:
 govulncheck:
 	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
+# Cross-file pins must AGREE, not merely be asked to. NOTICE has to name the exact ffmpeg
+# the image bundles (it is the GPL source offer, and it ships inside the image), and the
+# gate has to run on the Go that builds the shipped binary. Nothing else forces either.
+check-pins:
+	./scripts/check-pins.sh
+
 # THE gate. CI and the release workflow both run exactly this.
-check: fmt vet build test staticcheck govulncheck
+check: check-pins fmt vet build test staticcheck govulncheck
 
 # --- packaging (TRANSCODE-9) --------------------------------------------------
 # The same commands CI runs, so the packaging gate is reproducible by a human and not
