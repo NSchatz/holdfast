@@ -116,9 +116,12 @@ type Hub struct {
 	// re-reads full state anyway — granularity is lost, never correctness.
 	events chan engine.Event
 
-	// bytesReclaimed accumulates the reclaimed-space total for this process
-	// (session-scoped: the store does not persist original sizes). Updated in
-	// Observe with atomics so it is never lost even when the event is coalesced.
+	// bytesReclaimed accumulates the reclaimed-space total for this PROCESS, and
+	// resets when the daemon does. The store now persists both file sizes on every
+	// done row (TRANSCODE-13), so a durable lifetime total is derivable — but deriving
+	// it belongs with the dashboard that shows it (TRANSCODE-14); see snapshot.
+	// Updated in Observe with atomics so it is never lost even when the event is
+	// coalesced.
 	bytesReclaimed atomic.Int64
 
 	mu   sync.Mutex

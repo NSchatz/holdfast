@@ -91,9 +91,10 @@ type Outcome struct {
 	VmafModel string
 
 	// SourceBytes and OutputBytes are the file sizes either side of the swap (Done).
-	// BOTH are persisted rather than only their difference, which is what makes a
-	// lifetime reclaimed total survive a restart (see Reclaimed) and lets a UI show
-	// "before → after" instead of a bare delta.
+	// BOTH are persisted rather than only their difference: that is what makes a
+	// durable lifetime reclaimed total DERIVABLE (TRANSCODE-14 computes and shows it;
+	// this phase only has to keep the facts) and what lets a UI show "before → after"
+	// instead of a bare delta.
 	SourceBytes *int64
 	OutputBytes *int64
 
