@@ -16,10 +16,15 @@ concurrency:
 env:
   # Pinned for reproducibility. Go 1.25.x clears the os.Root-escape stdlib advisory
   # (GO-2026-4602, fixed in go1.25.8) that govulncheck flags on older lines; keep
-  # this at a patched >= 1.25.8. Tool versions pinned below.
+  # this at a patched >= 1.25.8.
+  #
+  # staticcheck/govulncheck are NOT pinned here: the gate below is `make check`, so the
+  # Makefile owns those versions. They used to be pinned in both places, which meant a
+  # Makefile bump left the PR gate and the release gate (which has always gone through
+  # `make check`) silently running different tools — the same "duplicated and held in
+  # step by hope" failure as the ffmpeg pin. One gate, defined once, run by CI, by the
+  # release, and by a human typing `make check`.
   GO_VERSION: "1.25.12"
-  STATICCHECK_VERSION: "2025.1.1"
-  GOVULNCHECK_VERSION: "v1.1.4"
 
 jobs:
   build:
@@ -32,26 +37,40 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           check-latest: false
 
-      - name: gofmt (must be clean)
+      # The engine safety proof drives REAL ffmpeg fixtures — it fails loud if
+      # ffmpeg/ffprobe (or, for the VMAF gate, libvmaf) are missing (a skip would be a
+      # false green). Ubuntu's apt ffmpeg does NOT ship libvmaf, so install the static
+      # build that carries libx265 + libvmaf.
+      #
+      # The pin is READ OUT OF THE DOCKERFILE, never restated here. VMAF is the gate that
+      # catches an encode which decodes fine but LOOKS worse, so the measuring instrument
+      # drifting away from the one in the shipped image is not cosmetic — it is the proof
+      # detaching from the artifact. Duplicating the pin and asking the next person to
+      # keep the two in step is not a pin; parsing it is.
+      - name: install ffmpeg (the pin the image ships; libx265 + libvmaf)
         run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "::error::gofmt found unformatted files:"; echo "$unformatted"; exit 1
-          fi
+          set -euo pipefail
+          sudo mkdir -p /opt/ffmpeg
+          sudo chown "$USER" /opt/ffmpeg
+          ./scripts/install-ffmpeg.sh /opt/ffmpeg
+          echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
 
-      - name: go vet
-        run: go vet ./...
+      # THE gate. Invoked through the Makefile, and deliberately NOT re-listed as steps
+      # here: the Makefile's `check:` target is the definition, so CI, the release workflow
+      # and a human run the identical gate, and adding to it lands in one file. (Restating
+      # what it contains would just be one more copy to drift — the mistake this repo has
+      # made with the ffmpeg pin, the tool pins, and the base image.)
+      - name: make check (the gate)
+        run: make check
 
-      - name: go build
-        run: go build ./...
-
-      # Config schema self-test (anti-advisory-only): the committed example must
-      # validate, and each known-invalid config must be REJECTED — one via the schema
-      # (unknown key) and one via value validation (out-of-range crf), so both
+      # Config schema self-test (anti-advisory-only), on top of the gate: the committed
+      # example must validate, and each known-invalid config must be REJECTED — one via
+      # the schema (unknown key), one via value validation (out-of-range crf), so both
       # rejection paths are covered. Proves the `validate` subcommand + schema wire
-      # together end to end, and that the gate actually reds — not just that go test passed.
+      # together end to end, and that the gate actually REDS — not just that tests passed.
       - name: config schema self-test
         run: |
+          set -euo pipefail
           go build -o /tmp/transcode ./cmd/transcode
           /tmp/transcode validate --config config.example.yaml
           for bad in testdata/config-invalid.yaml testdata/config-invalid-value.yaml; do
@@ -61,29 +80,60 @@ jobs:
           done
           echo "config schema self-test OK (valid accepted; unknown-key + bad-value rejected)"
 
-      # The engine safety proof drives REAL ffmpeg fixtures — it fails loud if
-      # ffmpeg/ffprobe (or, for the VMAF gate, libvmaf) are missing (a skip would be a
-      # false green). Ubuntu's apt ffmpeg does NOT ship libvmaf, so install a static
-      # build that carries libx265 + libvmaf (matching the local dev + Docker-image
-      # ffmpeg). This is the environment the transcoder is actually tested against.
-      - name: install ffmpeg (libx265 + libvmaf)
-        run: |
-          url="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
-          curl -fsSL -o /tmp/ffmpeg.tar.xz "$url"
-          sudo mkdir -p /opt/ffmpeg
-          sudo tar -C /opt/ffmpeg --strip-components=1 -xf /tmp/ffmpeg.tar.xz
-          echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
-          /opt/ffmpeg/bin/ffmpeg -hide_banner -filters | grep -q libvmaf \
-            || { echo "::error::the installed ffmpeg lacks libvmaf"; exit 1; }
-          /opt/ffmpeg/bin/ffmpeg -hide_banner -encoders | grep -q libx265 \
-            || { echo "::error::the installed ffmpeg lacks libx265"; exit 1; }
-          echo "ffmpeg with libx265 + libvmaf installed"
+  # The packaging gate. It runs on every PR the same script the release workflow runs
+  # before it pushes anything (scripts/smoke-image.sh), so the image a tag ships is the
+  # image that has been gated all along.
+  #
+  # It does NOT check that the image built — that proves nothing about the engine. It
+  # drives a REAL oneshot encode inside the built container with the bundled ffmpeg and
+  # asserts the no-loss contract held: the source was replaced by a smaller HEVC file
+  # that passed every gate, and no work-in-progress temp survived.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: go test (race + coverage)
-        run: go test -race -covermode=atomic ./...
+      # QEMU is needed only to EXECUTE the arm64 image. Building it cross-compiles
+      # (CGO_ENABLED=0, and no RUN in the runtime stage), so no emulation is involved.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
 
-      - name: staticcheck (pinned)
-        run: go run "honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}" ./...
+      - name: build the image (linux/amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: transcode:ci
+          build-args: |
+            VERSION=0.0.0-ci-${{ github.sha }}
+            COMMIT=${{ github.sha }}
+            DATE=1970-01-01T00:00:00Z
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: govulncheck (pinned)
-        run: go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" ./...
+      - name: smoke test the image (real encode, real gate)
+        run: ./scripts/smoke-image.sh transcode:ci
+
+      - name: build the image (linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          load: true
+          tags: transcode:ci-arm64
+          build-args: |
+            VERSION=0.0.0-ci-${{ github.sha }}
+            COMMIT=${{ github.sha }}
+            DATE=1970-01-01T00:00:00Z
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # An encode under QEMU would be glacial — but "does the cross-built arm64 image
+      # actually execute" (binary, glibc, bundled ffmpeg) is exactly what cross-building
+      # gets wrong, and that is cheap to check.
+      - name: smoke test the arm64 image (exec only, under QEMU)
+        run: ./scripts/smoke-image.sh transcode:ci-arm64 linux/arm64 --no-encode
+
+      - name: the compose example must be valid
+        run: docker compose -f docker-compose.yml config -q

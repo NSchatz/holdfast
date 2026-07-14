@@ -6,8 +6,12 @@
 # Every knob below has a sensible default and may be omitted. Any value can be
 # overridden by an environment variable named TRANSCODE_<KEY> (e.g. TRANSCODE_CRF=20,
 # TRANSCODE_LOG_LEVEL=debug) — env wins over the file. An unknown key here is a hard
-# error (typo protection). VMAF thresholds (T-4), the queue (T-5), hardware codecs
-# (T-6), and the API/UI (T-7) add their own fields later — see the roadmap.
+# error (typo protection).
+#
+# Running in a container? Three keys change: library_roots and state_dir become the
+# paths you MOUNTED, and server_addr must be 0.0.0.0 (127.0.0.1 inside a container
+# namespace is unreachable from the host — publish the port on loopback instead).
+# See docs/docker.md.
 
 # Directory trees to scan and re-encode files under. This is the ONLY place transcode
 # ever mutates the filesystem, so it is validated strictly: each root must be absolute

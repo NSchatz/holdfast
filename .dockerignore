@@ -1,0 +1,17 @@
+# Keep the build context to what the image actually needs: the Go source, LICENSE and
+# NOTICE (the image redistributes binaries, so it carries its licences with it). The
+# version stamp comes from build ARGs (VERSION/COMMIT/DATE), never from .git.
+.git
+.github
+.gitignore
+docs
+README.md
+CLAUDE.md
+
+# Local artifacts, and anything that could carry real config or state into an image.
+transcode
+dist
+out
+state
+config.yaml
+docker-compose.yml

@@ -85,9 +85,58 @@ Tautulli-aware pause; it only ever DELAYS new work and a Tautulli outage fails O
 engine's single `Observer` now fans out to hub+metrics+notify (each non-blocking); the `Paused` hook now
 also consults the scheduler (throttled) so a closing run-window stops feeding NEW files without touching an
 in-flight encode; the `Event` gained `EncodeDuration` + `VmafScore` (surfaced from a now-score-returning
-`verifyOutput` — the error still governs the gate) and Done is emitted exactly once. Next: packaging +
-release (`TRANSCODE-9`). The full phased plan lives in the umbrella that tracks this repo
-(`operations/roadmaps/transcode.md`).
+`verifyOutput` — the error still governs the gate) and Done is emitted exactly once. `TRANSCODE-9` (this is
+the current state) is **packaging + release + migration**: a production **multi-arch** (amd64/arm64),
+**non-root**, **distroless** image bundling ffmpeg **pinned by release tag AND verified by SHA-256** — the
+same build CI runs the fixture safety proof against, so the image ships the ffmpeg that was actually proven
+(note an ffmpeg lacking libvmaf would not silently weaken the gate, it would STOP the tool: an unmeasured
+output is rejected, never accepted). The pin lives in the **Dockerfile's `FFMPEG_*` ARGs**, and
+`scripts/install-ffmpeg.sh` PARSES them (CI/release call it) — because a pin duplicated into a workflow and
+held in step by a comment is not a pin: both files stay internally consistent while the proof silently
+detaches from the artifact. The **one** place it must be restated is `NOTICE`, which is the GPL source offer
+and ships *inside* the image and every tarball, where no Dockerfile is available to point at — so
+`scripts/check-pins.sh` (wired into `make check`) FAILS if `NOTICE` or the Go version drifts from the
+Dockerfile. Where a value must appear twice, the agreement is enforced, never requested. The runtime base is distroless **`cc`**, not `base`: ffmpeg carries a
+`DT_NEEDED` on **`libgcc_s.so.1`**, which `base` does not ship, so `base` builds perfectly and then dies at
+the dynamic loader the first time the engine execs ffmpeg. Every stage that RUNs anything is pinned to
+`$BUILDPLATFORM` and the binary cross-compiles (`CGO_ENABLED=0`, pure-Go SQLite), so the arm64 image needs
+no QEMU. The image bakes **no `TRANSCODE_*` env vars**, deliberately: env BEATS the YAML file, so a baked
+default would silently override the user's config-as-code — and for `server_addr` it would quietly widen the
+127.0.0.1 fail-safe. **Only NVIDIA hardware encoding works in the image** (the NVIDIA toolkit injects the
+libs ffmpeg dlopens); `qsv`/`vaapi`/`amf` each need a vendor userspace library a distroless image cannot
+carry (a VA driver for QSV/VAAPI; AMD's `libamfrt64` for AMF, which does NOT go through VA-API) — and
+`/dev/dri` is only the kernel device, not a driver — so they are a documented limitation, not a supported
+path.
+`scripts/smoke-image.sh` is the packaging gate, and it is the SHARED unit: `ci.yml`'s `package` job runs it
+on every PR, and `release.yml` runs the same script — before it pushes, and then AGAIN against **both arches
+of** the image it pulls back from the registry. That second run is not belt-and-braces: buildx cannot push a
+multi-arch manifest it only loaded locally, so the push is a cache REBUILD, and "equivalent inputs" is a
+gate by equivalence, which this repo does not accept. Note the ordering, which is load-bearing: the push
+publishes the **version tag only**, and **`:latest` is promoted (by `imagetools`, same digest, no rebuild)
+only after the pushed artifact passes** — push `:latest` first and a failing gate has already handed every
+`docker compose pull` user an image it just rejected. A release also runs the **full** `make check`, not
+just govulncheck: `ci.yml` does not trigger on tags, a tag can point at any commit, and a release gated only
+on a vuln scan would happily publish an image whose verify/swap logic is red. (The gate is a script, not a workflow, precisely so a
+human can run it too: `make image-smoke`.) It does not check that the image *built* — that proves nothing
+about the engine; it drives a REAL oneshot encode inside the container and asserts the source was replaced
+by a smaller HEVC file with no temp left behind. Its fixture is CBR-padded on purpose: x264 ABR does not
+pad and `testsrc2` is trivially compressible, so a plain `-b:v 8M` lands at ~873 kbps — under the default
+`min_bitrate_kbps`, whereupon the engine correctly SKIPS the file and the smoke test asserts against a file
+the encoder never touched. **A fixture that never reaches the encoder is not a smoke test** (this shipped
+broken once and the refuter caught it); the script now asserts the fixture is above the guard, so that
+failure mode is loud. `release.yml` publishes on a **tag push only** — a deliberate
+human act, never on a merge — and `workflow_dispatch` is ALWAYS a full dry run (both arches, both smoke
+tests, the real binaries; pushes nothing). There is deliberately no `publish` input to tick: the only thing
+that can publish is a tag, so a release always carries a real tag name — a dispatch-publish could only ever
+push `0.0.0-dev-<sha>` and move `:latest` onto it. **Outstanding: `release.yml` has never executed.** GitHub
+offers `workflow_dispatch` only for workflows already on the default branch, so its dry run is unrunnable
+from a PR — dispatch it once after this lands and **before the first tag**, or the release path ships having
+never run. Note it is NOT a reusable workflow called from
+CI: a called workflow cannot hold permissions its caller lacks, so a PR-triggered call declaring
+`packages: write` would fail to load — hence the shared *script* rather than a shared workflow. **Not yet released** (cutting a tag is a human call — the umbrella's `PUB-FLIP` gate).
+`docs/docker.md` is the deployment reference (volumes, permissions, TZ, GPU passthrough, security posture);
+`docs/migration.md` covers the cutover from the Bash transcoder and from Tdarr. The full phased plan lives
+in the umbrella that tracks this repo (`operations/roadmaps/transcode.md`).
 
 ## Layout
 
@@ -157,16 +206,31 @@ release (`TRANSCODE-9`). The full phased plan lives in the umbrella that tracks 
   workers each hold at most one temp at a time). **This is the risk-critical heart — do not weaken the
   invariant.**
 - `internal/logging`, `internal/version` — logger construction, build-stamped version.
-- `.github/workflows/ci.yml` — the gate (installs ffmpeg for the engine proof). `Dockerfile` — packaging
-  stub (hardened in TRANSCODE-9).
+- `.github/workflows/ci.yml` — the gate (installs the pinned ffmpeg via `scripts/install-ffmpeg.sh` for the
+  engine proof) + a `package` job (TRANSCODE-9) that builds BOTH arches and runs the image smoke gate.
+  `.github/workflows/release.yml` (TRANSCODE-9) — tag-triggered: runs the full `make check`, builds both
+  arches, smokes them, pushes the version tag, re-smokes what it pulled back, and only then promotes
+  `:latest` and cuts the release. Publishing happens on a **tag push only**; `workflow_dispatch` is always
+  a dry run.
+- `Dockerfile` (TRANSCODE-9) — the production image (multi-arch, distroless `cc`, non-root, pinned ffmpeg);
+  its `FFMPEG_*` ARGs are the single source of truth for the pin. `scripts/install-ffmpeg.sh` — installs
+  exactly that pin by parsing them (CI + release + local dev all use it). `docker-compose.yml` — the example
+  deployment. `scripts/smoke-image.sh` — the packaging gate: a real encode inside the image, asserting the
+  no-loss contract. `NOTICE` — the image redistributes GPL ffmpeg binaries, so it carries their licence and
+  source offer.
 
 ## Build / test / gate
 
-Requires Go 1.25+. The CI gate (and `make check`) is: **`gofmt -l` clean, `go vet`, `go build`,
-`go test -race`, `staticcheck` (pinned), `govulncheck` (pinned)**. All pinned in `.github/workflows/ci.yml`
-for reproducibility. **Never claim green without running it.** Every phase that touches the engine must
-also extend the fixture suite so it *reds on the specific regression* — a data-safety tool proves its
-unhappy paths, not just that tests pass.
+Requires Go 1.25+. The gate is **`make check`** — and the `check:` target in the `Makefile` is its
+definition, not this sentence. (Enumerating its steps here would be one more copy to drift, which is the
+mistake this repo keeps making; read the target.) It covers the real-ffmpeg fixture suite, the linters, and
+`scripts/check-pins.sh`. The **Makefile owns the tool pins** and CI
+invokes that same target, so the PR gate, the release gate and a human all run the identical thing — the
+versions were once restated in `ci.yml` too, which meant bumping one silently drifted the gates apart. CI
+adds two things on top: the **config-schema self-test** (proves `validate` REDS on a bad config, not merely
+that tests passed) and the **image smoke gate** (`scripts/smoke-image.sh`, needs Docker). **Never claim green
+without running it.** Every phase that touches the engine must also extend the fixture suite so it *reds on
+the specific regression* — a data-safety tool proves its unhappy paths, not just that tests pass.
 
 ## Conventions
 

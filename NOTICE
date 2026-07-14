@@ -1,0 +1,43 @@
+transcode
+Copyright (C) 2026 Noah Schatz
+Licensed under the GNU Affero General Public License v3.0 only (AGPL-3.0-only).
+See LICENSE.
+
+--------------------------------------------------------------------------------
+Bundled third-party binaries (container image only)
+--------------------------------------------------------------------------------
+
+The `transcode` container image does not merely depend on ffmpeg — it REDISTRIBUTES
+prebuilt ffmpeg and ffprobe binaries, so it carries their licence and their source
+offer with it.
+
+  Component : ffmpeg + ffprobe (static builds carrying libx265, libsvtav1, libvmaf)
+  Source of : https://github.com/BtbN/FFmpeg-Builds
+  Build tag : autobuild-2026-07-13-14-11
+  Version   : N-125573-g90436de5e1
+  Licence   : GPL-3.0 (these are the "-gpl" builds — ffmpeg configured with
+              --enable-gpl, which is what makes libx265 usable)
+
+  (These two values are the ONLY restatement of the ffmpeg pin in the repository —
+  everything else parses it from the Dockerfile's FFMPEG_* ARGs. They have to be
+  written out here because this file is the source offer that travels INSIDE the
+  image and inside every release tarball, where no Dockerfile is available to point
+  at. `make check` runs scripts/check-pins.sh, which fails if these drift from the
+  Dockerfile — so a pin bump cannot silently leave the licence record naming a
+  different build.)
+
+  Corresponding source: FFmpeg's own source is at https://github.com/FFmpeg/FFmpeg
+  (revision g90436de5e1 above), and the exact build recipe — the configure flags and
+  the pinned versions of every bundled library — is the BtbN/FFmpeg-Builds repository
+  at the build tag above.
+
+The Dockerfile pins that build by tag AND verifies the tarball's SHA-256 before
+trusting it, so the ffmpeg in any given image is the exact one named here.
+
+The ffmpeg binaries are invoked as separate programs (`exec`), not linked into the
+`transcode` binary; `transcode` itself is AGPL-3.0-only and contains no ffmpeg code.
+
+--------------------------------------------------------------------------------
+
+Go module dependencies are listed in go.mod and are fetched, not vendored; each
+carries its own licence.
