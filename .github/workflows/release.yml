@@ -89,10 +89,10 @@ jobs:
       # A release re-gates itself rather than trusting that CI ran on this commit — a tag
       # can point at ANY commit, including one CI never ran on or one CI failed on, and
       # ci.yml does not trigger on tags. So run the repo's whole gate here, not a token
-      # slice of it: `make check` is gofmt + vet + build + `go test -race` (which is the
-      # real-ffmpeg fixture suite — the data-safety proof) + staticcheck + govulncheck.
-      # A release whose only gate was govulncheck would happily publish an image whose
-      # verify/swap logic is red. "Zero runs is not a pass, it is an unknown."
+      # slice of it: `make check` — the same target CI and a human run, whose definition
+      # lives in the Makefile (it includes the real-ffmpeg fixture suite, the data-safety
+      # proof). A release whose only gate was govulncheck would happily publish an image
+      # whose verify/swap logic is red. "Zero runs is not a pass, it is an unknown."
       - name: install ffmpeg (the pin the image ships) — the fixture suite needs it
         run: |
           set -euo pipefail

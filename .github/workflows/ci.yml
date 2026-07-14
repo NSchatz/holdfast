@@ -55,10 +55,11 @@ jobs:
           ./scripts/install-ffmpeg.sh /opt/ffmpeg
           echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
 
-      # THE gate: gofmt + vet + build + `go test -race` (the real-ffmpeg fixture suite) +
-      # staticcheck + govulncheck. Invoked through the Makefile, not re-listed as steps,
-      # so CI, the release workflow and a human all run the identical gate — and a tool
-      # bump lands in one file instead of drifting between three.
+      # THE gate. Invoked through the Makefile, and deliberately NOT re-listed as steps
+      # here: the Makefile's `check:` target is the definition, so CI, the release workflow
+      # and a human run the identical gate, and adding to it lands in one file. (Restating
+      # what it contains would just be one more copy to drift — the mistake this repo has
+      # made with the ffmpeg pin, the tool pins, and the base image.)
       - name: make check (the gate)
         run: make check
 

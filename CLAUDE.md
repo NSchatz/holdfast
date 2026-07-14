@@ -221,8 +221,10 @@ in the umbrella that tracks this repo (`operations/roadmaps/transcode.md`).
 
 ## Build / test / gate
 
-Requires Go 1.25+. The gate is **`make check`**: `gofmt -l` clean, `go vet`, `go build`, `go test -race`
-(the real-ffmpeg fixture suite), `staticcheck`, `govulncheck`. The **Makefile owns the tool pins** and CI
+Requires Go 1.25+. The gate is **`make check`** — and the `check:` target in the `Makefile` is its
+definition, not this sentence. (Enumerating its steps here would be one more copy to drift, which is the
+mistake this repo keeps making; read the target.) It covers the real-ffmpeg fixture suite, the linters, and
+`scripts/check-pins.sh`. The **Makefile owns the tool pins** and CI
 invokes that same target, so the PR gate, the release gate and a human all run the identical thing — the
 versions were once restated in `ci.yml` too, which meant bumping one silently drifted the gates apart. CI
 adds two things on top: the **config-schema self-test** (proves `validate` REDS on a bad config, not merely
