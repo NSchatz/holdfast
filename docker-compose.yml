@@ -98,10 +98,10 @@ services:
     #           capabilities: [gpu]
     #
     # Intel Quick Sync (qsv), VAAPI (vaapi) and AMD (amf) do NOT work in this image, and
-    # /dev/dri passthrough does not change that: a VA-API encode needs a userspace DRIVER
-    # inside the container, /dev/dri is only the kernel device, and nothing injects the
-    # driver the way the NVIDIA toolkit does. See docs/docker.md — it is a documented
-    # limitation with a workaround, not an oversight.
+    # /dev/dri passthrough does not change that: each needs a vendor USERSPACE library in
+    # the container (a VA driver for qsv/vaapi, libamfrt64 for amf), /dev/dri is only the
+    # kernel device, and nothing injects those the way the NVIDIA toolkit does. See
+    # docs/docker.md — a documented limitation with a workaround, not an oversight.
     #
     # There is no silent fallback: if the configured encoder cannot actually encode on
     # this host, transcode fails loud at startup and exits non-zero. That check really

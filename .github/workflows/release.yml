@@ -26,8 +26,10 @@ permissions:
   contents: read
 
 env:
+  # No tool pins here. The gate below is `make check`, so the Makefile owns the
+  # staticcheck/govulncheck versions — restating them here would be a second pin that
+  # nothing reads, which is the failure this branch removed from ci.yml.
   GO_VERSION: "1.25.12"
-  GOVULNCHECK_VERSION: "v1.1.4"
 
 jobs:
   release:

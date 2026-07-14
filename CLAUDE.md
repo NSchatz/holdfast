@@ -123,7 +123,10 @@ failure mode is loud. `release.yml` publishes on a **tag push only** — a delib
 human act, never on a merge — and `workflow_dispatch` is ALWAYS a full dry run (both arches, both smoke
 tests, the real binaries; pushes nothing). There is deliberately no `publish` input to tick: the only thing
 that can publish is a tag, so a release always carries a real tag name — a dispatch-publish could only ever
-push `0.0.0-dev-<sha>` and move `:latest` onto it. Note it is NOT a reusable workflow called from
+push `0.0.0-dev-<sha>` and move `:latest` onto it. **Outstanding: `release.yml` has never executed.** GitHub
+offers `workflow_dispatch` only for workflows already on the default branch, so its dry run is unrunnable
+from a PR — dispatch it once after this lands and **before the first tag**, or the release path ships having
+never run. Note it is NOT a reusable workflow called from
 CI: a called workflow cannot hold permissions its caller lacks, so a PR-triggered call declaring
 `packages: write` would fail to load — hence the shared *script* rather than a shared workflow. **Not yet released** (cutting a tag is a human call — the umbrella's `PUB-FLIP` gate).
 `docs/docker.md` is the deployment reference (volumes, permissions, TZ, GPU passthrough, security posture);

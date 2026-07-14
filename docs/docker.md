@@ -32,7 +32,7 @@ server_addr: 0.0.0.0:8080   # see "The control surface" below before you change 
 
 | | |
 |---|---|
-| Base | `gcr.io/distroless/base-debian12:nonroot` — glibc + CA certs, **no shell, no package manager** |
+| Base | `gcr.io/distroless/cc-debian12:nonroot` — glibc **+ libgcc_s/libstdc++** + CA certs, **no shell, no package manager**. It must be `cc`, not `base`: ffmpeg has a `DT_NEEDED` on `libgcc_s.so.1`, which `base` does not ship, so `base` builds fine and then cannot exec ffmpeg at all. |
 | Platforms | `linux/amd64`, `linux/arm64` |
 | User | non-root by default (`nonroot`, uid 65532); override with `user:` |
 | ffmpeg | pinned by release tag **and verified by SHA-256** before it is trusted |
@@ -116,17 +116,19 @@ the container, and the bundled ffmpeg is dynamically linked against glibc precis
 `dlopen` them (a fully-static ffmpeg could not).
 
 **Intel Quick Sync (`qsv`), VAAPI (`vaapi`), AMD (`amf`) — NOT supported by this image.** Be clear
-about why, because the failure is otherwise baffling: ffmpeg *is* built with `--enable-vaapi` and
-`--enable-libvpl`, but a VA-API encode needs a **userspace driver** (`iHD_drv_video.so` and
-friends) inside the container, and passing `/dev/dri` supplies only the *kernel* device node.
-Nothing injects the driver the way the NVIDIA toolkit does, and the distroless base has no package
-manager to install one. So `encoder: qsv` in this image fails its startup capability check and
-exits non-zero — loudly, never silently falling back to CPU, but it does not work.
+about why, because the failure is otherwise baffling. ffmpeg *is* built with `--enable-vaapi` and
+`--enable-libvpl`, but each of these needs a **vendor userspace library inside the container** that
+nothing puts there: QSV/VAAPI need a VA driver (`iHD_drv_video.so` and friends), and AMF needs
+AMD's own `libamfrt64.so` (it does not go through VA-API at all). Passing `/dev/dri` supplies only
+the *kernel* device node — it is not a driver, and there is no Intel/AMD equivalent of the NVIDIA
+toolkit's library injection. The distroless base has no package manager to install one either. So
+`encoder: qsv` here fails its startup capability check and exits non-zero — loudly, never silently
+falling back to CPU, but it does not work.
 
-If you need QSV/VAAPI: run the binary on the host with your distro's ffmpeg (built with libvmaf),
-or build your own image on a base that carries the VA driver stack and copy the `transcode` binary
-into it. Note the fixture suite is gated against the pinned ffmpeg, so a different ffmpeg is a
-different measuring instrument.
+If you need QSV/VAAPI/AMF: run the binary on the host with an ffmpeg that has libvmaf, or build
+your own image **on a base that carries the vendor driver stack** (not distroless — it has no
+package manager) and copy the `transcode` binary into it. Note the fixture suite is gated against
+the pinned ffmpeg, so a different ffmpeg is a different measuring instrument.
 
 **There is no silent fallback.** If the configured encoder cannot actually encode on this host,
 `transcode` fails loud at startup and exits non-zero. The capability check really encodes a
