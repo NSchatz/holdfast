@@ -10,9 +10,18 @@
 #   ./scripts/smoke-image.sh transcode:ci            # native
 #   ./scripts/smoke-image.sh transcode:ci linux/arm64 --no-encode   # exec-only (QEMU)
 #
-# The fixture is the same 320x240 / 8Mbps H.264 clip the Go fixture suite uses, so an
-# encode that passes here passes the full gate: correct codec, duration/packet parity,
-# strictly smaller, stream-count parity, decode integrity, and VMAF >= 95.
+# The fixture is a 320x240 H.264 clip forced to a REAL ~7.6 Mbps by CBR padding, and the
+# config leaves every guard at its shipped default — so this drives the same engine a
+# stranger gets: the low-bitrate skip guard has to LET THE FILE THROUGH, and then the
+# full gate has to accept the encode (correct codec, duration/packet parity, strictly
+# smaller, stream-count parity, decode integrity, VMAF >= 95).
+#
+# The CBR padding is load-bearing, not incidental. x264 in ABR mode does not pad, and
+# testsrc2 is trivially compressible, so a plain `-b:v 8M` lands at ~873 kbps — under
+# the default min_bitrate_kbps of 2500. The engine would then SKIP the file (correctly),
+# `transcode run` would exit 0 having done nothing, and this script would be asserting
+# against a file the encoder never touched. A fixture that never reaches the encoder is
+# not a smoke test.
 set -euo pipefail
 
 IMAGE="${1:?usage: smoke-image.sh <image-ref> [platform] [--no-encode]}"
@@ -40,8 +49,12 @@ ok "transcode version runs: $(echo "$version_out" | head -1)"
 #    would stop the tool. Fail here instead, loudly, before anyone ships it.
 for want in libvmaf:filters libx265:encoders libsvtav1:encoders; do
   lib="${want%%:*}"; kind="${want##*:}"
-  run_in_image --entrypoint /usr/local/bin/ffmpeg "$IMAGE" -hide_banner "-${kind}" \
-    | grep -q "$lib" || fail "bundled ffmpeg lacks $lib (checked -${kind})"
+  # Captured, not piped: `ffmpeg ... | grep -q` lets grep exit on first match and
+  # SIGPIPE ffmpeg, which under `set -o pipefail` fails the whole check for the wrong
+  # reason the moment the capability list outgrows the pipe buffer.
+  caps="$(run_in_image --entrypoint /usr/local/bin/ffmpeg "$IMAGE" -hide_banner "-${kind}")" \
+    || fail "could not list the bundled ffmpeg's ${kind}"
+  grep -q "$lib" <<<"$caps" || fail "bundled ffmpeg lacks $lib (checked -${kind})"
   ok "bundled ffmpeg has $lib"
 done
 
@@ -70,16 +83,23 @@ log_level: debug
 YAML
 
 # The fixture is built with the IMAGE's ffmpeg — so this also proves the bundled ffmpeg
-# can encode, not just report its capabilities.
+# can encode, not just report its capabilities. nal-hrd=cbr + filler forces x264 to
+# actually HIT the requested bitrate (see the header): the source must be genuinely
+# bloated, or the default low-bitrate guard skips it and this test proves nothing.
 run_in_image -u "$uid:$gid" -v "$work/media:/media" \
   --entrypoint /usr/local/bin/ffmpeg "$IMAGE" \
   -hide_banner -loglevel error -y -f lavfi \
   -i testsrc2=duration=2:size=320x240:rate=10 \
-  -c:v libx264 -preset ultrafast -b:v 8M -pix_fmt yuv420p -- /media/sample.mkv \
+  -c:v libx264 -preset ultrafast \
+  -b:v 8M -minrate 8M -maxrate 8M -bufsize 8M -x264-params nal-hrd=cbr:filler=1 \
+  -pix_fmt yuv420p -- /media/sample.mkv \
   || fail "could not build the fixture with the image's ffmpeg"
 
 before_size="$(stat -c %s "$work/media/sample.mkv")"
-ok "fixture: 320x240 H.264 @8Mbps, ${before_size} bytes"
+before_kbps=$(( before_size * 8 / 2 / 1000 ))   # 2-second clip
+[ "$before_kbps" -gt 2500 ] \
+  || fail "fixture is only ${before_kbps} kbps — under the default min_bitrate_kbps (2500), so the engine would SKIP it and this test would assert nothing"
+ok "fixture: 320x240 H.264, ~${before_kbps} kbps, ${before_size} bytes (above the skip guard)"
 
 # The config must survive the real validator before it drives an encode.
 run_in_image -u "$uid:$gid" -v "$work/config.yaml:/config/config.yaml:ro" \

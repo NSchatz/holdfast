@@ -70,19 +70,29 @@ logged reason**. That is the tool working.
 
 ### Cutover
 
+**1. Stop the old one.** Do not run both.
+
 ```bash
-# 1. Stop the old one. Do not run both.
 docker compose -f media/transcoder/docker-compose.yml down
+```
 
-# 2. Translate transcode.conf using the table above, then prove it parses.
-transcode validate --config config.yaml        # or: docker compose run --rm transcode validate --config /config/config.yaml
+**2. Translate `transcode.conf`** using the table above, then prove it parses:
 
-# 3. Rehearse. dry_run changes nothing and tells you exactly what it WOULD do.
-#    Read the skip reasons — that is where the two behaviour changes above show up.
-dry_run: true
+```bash
+transcode validate --config config.yaml
+# in a container: docker compose run --rm transcode validate --config /config/config.yaml
+```
+
+**3. Rehearse.** Set `dry_run: true` in `config.yaml` — it changes nothing and tells you exactly
+what it *would* do. Read the skip reasons: that is where the two behaviour changes above show up.
+
+```bash
 transcode run --config config.yaml
+```
 
-# 4. Go.
+**4. Go.** Set `dry_run: false` again, then:
+
+```bash
 docker compose up -d
 ```
 

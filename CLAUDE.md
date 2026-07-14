@@ -100,8 +100,10 @@ the image that has been gated all along. (The gate is a script, not a workflow, 
 it too: `make image-smoke`.) It does not check that the image *built* — that proves nothing about the
 engine; it drives a REAL oneshot encode inside the built container and asserts the source was replaced by a
 smaller HEVC file with no temp left behind. `release.yml` publishes on a **tag push only** — a deliberate
-human act, never on a merge — and `workflow_dispatch` with `publish` unchecked is a full dry run (both
-arches, both smoke tests, the real binaries; pushes nothing). Note it is NOT a reusable workflow called from
+human act, never on a merge — and `workflow_dispatch` is ALWAYS a full dry run (both arches, both smoke
+tests, the real binaries; pushes nothing). There is deliberately no `publish` input to tick: the only thing
+that can publish is a tag, so a release always carries a real tag name — a dispatch-publish could only ever
+push `0.0.0-dev-<sha>` and move `:latest` onto it. Note it is NOT a reusable workflow called from
 CI: a called workflow cannot hold permissions its caller lacks, so a PR-triggered call declaring
 `packages: write` would fail to load — hence the shared *script* rather than a shared workflow. **Not yet released** (cutting a tag is a human call — the umbrella's `PUB-FLIP` gate).
 `docs/docker.md` is the deployment reference (volumes, permissions, TZ, GPU passthrough, security posture);
@@ -181,7 +183,7 @@ in the umbrella that tracks this repo (`operations/roadmaps/transcode.md`).
   actually ship) + a `package` job (TRANSCODE-9) that builds BOTH arches and runs the image smoke gate.
   `.github/workflows/release.yml` (TRANSCODE-9) — tag-triggered: re-gates with govulncheck, builds both
   arches, runs the SAME smoke script, then pushes the image and cuts the release. Publishing happens on a
-  **tag push only**; `workflow_dispatch` with `publish` unchecked is a full dry run.
+  **tag push only**; `workflow_dispatch` is always a dry run.
 - `Dockerfile` (TRANSCODE-9) — the production image (multi-arch, distroless, non-root, pinned ffmpeg).
   `docker-compose.yml` — the example deployment. `scripts/smoke-image.sh` — the packaging gate: a real
   encode inside the built image, asserting the no-loss contract. `NOTICE` — the image redistributes GPL

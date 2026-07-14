@@ -4,10 +4,15 @@ name: Release
 # a merge to main, and the image stays private while the repository is (GHCR package
 # visibility follows the repo — see the umbrella's PUB-FLIP gate).
 #
-# `workflow_dispatch` with publish unchecked is a DRY RUN: it does everything a tag does
-# — builds both architectures, drives a real encode inside the built image, and produces
-# the exact binaries a release would ship — and pushes nothing. Run it once before you
-# cut the first tag.
+# `workflow_dispatch` is ALWAYS a dry run: it does everything a tag does — builds both
+# architectures, drives a real encode inside the built image, and produces the exact
+# binaries a release would ship — and pushes nothing. Run it once before you cut the
+# first tag.
+#
+# There is deliberately no "publish" input to tick. The only thing that can publish is a
+# tag, so the version a release carries is always a real tag name — a dispatch-publish
+# would push `0.0.0-dev-<sha>`, move `:latest` onto it, and cut a GitHub release named
+# after a sha. An escape hatch that can only be used wrongly should not exist.
 #
 # The packaging gate itself (scripts/smoke-image.sh) is not duplicated here: it is the
 # same script CI runs on every PR, so what a tag ships is what has been gated all along.
@@ -16,11 +21,6 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      publish:
-        description: "Push the image and cut the GitHub release. Leave UNCHECKED for a dry run."
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -43,16 +43,15 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
-          WANT_PUBLISH: ${{ inputs.publish }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # A tag push always publishes. A manual dispatch publishes only if asked.
+          # A tag push publishes. Nothing else does — see the header.
           if [ "$EVENT" = "push" ]; then
             publish=true
             version="$REF_NAME"
           else
-            publish="${WANT_PUBLISH:-false}"
+            publish=false
             version="0.0.0-dev-${GITHUB_SHA::7}"
           fi
           # GHCR rejects uppercase; github.repository preserves the owner's case.
