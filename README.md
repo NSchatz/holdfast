@@ -130,7 +130,8 @@ Requires Go 1.25+.
 ```bash
 make build        # -> ./transcode
 make test         # go test -race ./...
-make check        # gofmt + vet + staticcheck + govulncheck + test (the CI gate)
+make check        # gofmt + vet + build + test -race + staticcheck + govulncheck.
+                  # THE gate — CI and the release workflow run this same target.
 
 make image        # build the container image (docker buildx)
 make image-smoke  # build it, then drive a REAL encode inside it and assert the no-loss

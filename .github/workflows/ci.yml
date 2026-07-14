@@ -16,10 +16,15 @@ concurrency:
 env:
   # Pinned for reproducibility. Go 1.25.x clears the os.Root-escape stdlib advisory
   # (GO-2026-4602, fixed in go1.25.8) that govulncheck flags on older lines; keep
-  # this at a patched >= 1.25.8. Tool versions pinned below.
+  # this at a patched >= 1.25.8.
+  #
+  # staticcheck/govulncheck are NOT pinned here: the gate below is `make check`, so the
+  # Makefile owns those versions. They used to be pinned in both places, which meant a
+  # Makefile bump left the PR gate and the release gate (which has always gone through
+  # `make check`) silently running different tools — the same "duplicated and held in
+  # step by hope" failure as the ffmpeg pin. One gate, defined once, run by CI, by the
+  # release, and by a human typing `make check`.
   GO_VERSION: "1.25.12"
-  STATICCHECK_VERSION: "2025.1.1"
-  GOVULNCHECK_VERSION: "v1.1.4"
 
 jobs:
   build:
@@ -31,35 +36,6 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           check-latest: false
-
-      - name: gofmt (must be clean)
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "::error::gofmt found unformatted files:"; echo "$unformatted"; exit 1
-          fi
-
-      - name: go vet
-        run: go vet ./...
-
-      - name: go build
-        run: go build ./...
-
-      # Config schema self-test (anti-advisory-only): the committed example must
-      # validate, and each known-invalid config must be REJECTED — one via the schema
-      # (unknown key) and one via value validation (out-of-range crf), so both
-      # rejection paths are covered. Proves the `validate` subcommand + schema wire
-      # together end to end, and that the gate actually reds — not just that go test passed.
-      - name: config schema self-test
-        run: |
-          go build -o /tmp/transcode ./cmd/transcode
-          /tmp/transcode validate --config config.example.yaml
-          for bad in testdata/config-invalid.yaml testdata/config-invalid-value.yaml; do
-            if /tmp/transcode validate --config "$bad"; then
-              echo "::error::invalid config $bad was ACCEPTED — schema gate is broken"; exit 1
-            fi
-          done
-          echo "config schema self-test OK (valid accepted; unknown-key + bad-value rejected)"
 
       # The engine safety proof drives REAL ffmpeg fixtures — it fails loud if
       # ffmpeg/ffprobe (or, for the VMAF gate, libvmaf) are missing (a skip would be a
@@ -79,14 +55,29 @@ jobs:
           ./scripts/install-ffmpeg.sh /opt/ffmpeg
           echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
 
-      - name: go test (race + coverage)
-        run: go test -race -covermode=atomic ./...
+      # THE gate: gofmt + vet + build + `go test -race` (the real-ffmpeg fixture suite) +
+      # staticcheck + govulncheck. Invoked through the Makefile, not re-listed as steps,
+      # so CI, the release workflow and a human all run the identical gate — and a tool
+      # bump lands in one file instead of drifting between three.
+      - name: make check (the gate)
+        run: make check
 
-      - name: staticcheck (pinned)
-        run: go run "honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}" ./...
-
-      - name: govulncheck (pinned)
-        run: go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" ./...
+      # Config schema self-test (anti-advisory-only), on top of the gate: the committed
+      # example must validate, and each known-invalid config must be REJECTED — one via
+      # the schema (unknown key), one via value validation (out-of-range crf), so both
+      # rejection paths are covered. Proves the `validate` subcommand + schema wire
+      # together end to end, and that the gate actually REDS — not just that tests passed.
+      - name: config schema self-test
+        run: |
+          set -euo pipefail
+          go build -o /tmp/transcode ./cmd/transcode
+          /tmp/transcode validate --config config.example.yaml
+          for bad in testdata/config-invalid.yaml testdata/config-invalid-value.yaml; do
+            if /tmp/transcode validate --config "$bad"; then
+              echo "::error::invalid config $bad was ACCEPTED — schema gate is broken"; exit 1
+            fi
+          done
+          echo "config schema self-test OK (valid accepted; unknown-key + bad-value rejected)"
 
   # The packaging gate. It runs on every PR the same script the release workflow runs
   # before it pushes anything (scripts/smoke-image.sh), so the image a tag ships is the

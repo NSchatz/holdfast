@@ -149,9 +149,10 @@ behind. Run it against any image you are about to trust.
 
 ## Known limitations
 
-- **Only NVIDIA hardware encoding works in this image.** `qsv` / `vaapi` / `amf` need a VA-API
-  userspace driver the image does not carry — see "GPU passthrough" above for why and what to do
-  instead. `cpu` (libx265, the archival default) and `svtav1` need no device at all.
+- **Only NVIDIA hardware encoding works in this image.** `qsv` / `vaapi` / `amf` each need a vendor
+  userspace library the image does not carry (a VA driver for QSV/VAAPI; `libamfrt64` for AMF) —
+  see "GPU passthrough" above for why and what to do instead. `cpu` (libx265, the archival default)
+  and `svtav1` need no device at all.
 - **arm64 is built and its ffmpeg is checksum-verified, but CI only runs the full encode smoke
   test on amd64** — the arm64 image is exercised under QEMU far enough to prove it *executes*
   (binary, glibc, bundled ffmpeg), which is what a cross-built image gets wrong. A real arm64

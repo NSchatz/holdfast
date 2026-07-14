@@ -100,8 +100,10 @@ the dynamic loader the first time the engine execs ffmpeg. Every stage that RUNs
 no QEMU. The image bakes **no `TRANSCODE_*` env vars**, deliberately: env BEATS the YAML file, so a baked
 default would silently override the user's config-as-code — and for `server_addr` it would quietly widen the
 127.0.0.1 fail-safe. **Only NVIDIA hardware encoding works in the image** (the NVIDIA toolkit injects the
-libs ffmpeg dlopens); `qsv`/`vaapi`/`amf` need a VA-API userspace driver a distroless image cannot carry —
-`/dev/dri` is only the kernel device — so they are a documented limitation, not a supported path.
+libs ffmpeg dlopens); `qsv`/`vaapi`/`amf` each need a vendor userspace library a distroless image cannot
+carry (a VA driver for QSV/VAAPI; AMD's `libamfrt64` for AMF, which does NOT go through VA-API) — and
+`/dev/dri` is only the kernel device, not a driver — so they are a documented limitation, not a supported
+path.
 `scripts/smoke-image.sh` is the packaging gate, and it is the SHARED unit: `ci.yml`'s `package` job runs it
 on every PR, and `release.yml` runs the same script — before it pushes, and then AGAIN against **both arches
 of** the image it pulls back from the registry. That second run is not belt-and-braces: buildx cannot push a
@@ -216,11 +218,14 @@ in the umbrella that tracks this repo (`operations/roadmaps/transcode.md`).
 
 ## Build / test / gate
 
-Requires Go 1.25+. The CI gate (and `make check`) is: **`gofmt -l` clean, `go vet`, `go build`,
-`go test -race`, `staticcheck` (pinned), `govulncheck` (pinned)**. All pinned in `.github/workflows/ci.yml`
-for reproducibility. **Never claim green without running it.** Every phase that touches the engine must
-also extend the fixture suite so it *reds on the specific regression* — a data-safety tool proves its
-unhappy paths, not just that tests pass.
+Requires Go 1.25+. The gate is **`make check`**: `gofmt -l` clean, `go vet`, `go build`, `go test -race`
+(the real-ffmpeg fixture suite), `staticcheck`, `govulncheck`. The **Makefile owns the tool pins** and CI
+invokes that same target, so the PR gate, the release gate and a human all run the identical thing — the
+versions were once restated in `ci.yml` too, which meant bumping one silently drifted the gates apart. CI
+adds two things on top: the **config-schema self-test** (proves `validate` REDS on a bad config, not merely
+that tests passed) and the **image smoke gate** (`scripts/smoke-image.sh`, needs Docker). **Never claim green
+without running it.** Every phase that touches the engine must also extend the fixture suite so it *reds on
+the specific regression* — a data-safety tool proves its unhappy paths, not just that tests pass.
 
 ## Conventions
 

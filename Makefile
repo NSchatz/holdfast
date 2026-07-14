@@ -1,4 +1,10 @@
-# transcode — developer tasks. The CI gate is `make check`.
+# transcode — developer tasks.
+#
+# `make check` IS the gate, and this file is where it is defined: CI runs it, the release
+# workflow runs it, and so do you. The tool pins below are therefore the only ones — they
+# used to be restated in ci.yml, which meant bumping one drifted the PR gate away from
+# the release gate. (CI adds two things on top: a config-schema self-test, and the image
+# smoke gate — scripts/smoke-image.sh — which needs Docker.)
 STATICCHECK_VERSION ?= 2025.1.1
 GOVULNCHECK_VERSION ?= v1.1.4
 
@@ -33,7 +39,7 @@ staticcheck:
 govulncheck:
 	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
-# The full CI gate, locally.
+# THE gate. CI and the release workflow both run exactly this.
 check: fmt vet build test staticcheck govulncheck
 
 # --- packaging (TRANSCODE-9) --------------------------------------------------

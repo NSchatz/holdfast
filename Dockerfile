@@ -26,9 +26,14 @@ ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot@sha256:ce0d66bc0f64aae46
 
 # --- ffmpeg: a pinned static build, verified by hash before it is trusted -----
 # BtbN's builds link only glibc (>= 2.28), so they run on the distroless runtime while
-# still being able to dlopen the vendor libraries a hardware encoder needs (NVENC,
-# VAAPI) — which a fully-static binary could not do. Keep FFMPEG_* in step with
-# .github/workflows/ci.yml: the image and the safety proof must run the same ffmpeg.
+# still being able to dlopen the vendor libraries a hardware encoder needs (NVENC) —
+# which a fully-static binary could not do.
+#
+# THESE FOUR ARGs ARE THE PIN, and this is the only place it exists. CI and the release
+# workflow do not restate it — scripts/install-ffmpeg.sh PARSES it from here and installs
+# exactly this build, so the ffmpeg the fixture safety proof runs against cannot drift
+# away from the ffmpeg the image ships. Do not copy these values anywhere; change them
+# here and everything follows.
 FROM --platform=$BUILDPLATFORM ${FETCH_IMAGE} AS ffmpeg
 # Unpinned apt versions are fine HERE and only here: this stage is a throwaway fetcher
 # that ships nothing into the final image, and the one artifact it does produce is
@@ -82,13 +87,13 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
 # distroless cc: glibc + libgcc_s + ca-certificates, no shell, no package manager,
 # non-root by default. Nothing RUNs in this stage, so it cross-builds without emulation.
 #
-# NOTE what this base deliberately does NOT carry: the VA-API userspace driver stack
-# (libva's iHD/i965 .so, mesa). ffmpeg is built --enable-vaapi/--enable-libvpl and
-# dlopens the driver at runtime, and passing /dev/dri only supplies the KERNEL device —
-# nothing injects the driver. So `encoder: qsv|vaapi|amf` cannot start in this image.
-# NVIDIA is different and does work: the NVIDIA Container Toolkit injects
+# NOTE what this base deliberately does NOT carry: any vendor userspace GPU library.
+# ffmpeg dlopens those at runtime — a VA driver (iHD/i965) for qsv/vaapi, and AMD's own
+# libamfrt64 for amf, which does NOT go through VA-API — and passing /dev/dri supplies
+# only the KERNEL device, not a driver. So `encoder: qsv|vaapi|amf` cannot start here.
+# NVIDIA is different and does work: the NVIDIA Container Toolkit INJECTS
 # libnvidia-encode into the container, which is exactly what nvenc dlopens. See
-# docs/docker.md "GPU passthrough" — this is a documented limitation, not an oversight.
+# docs/docker.md "GPU passthrough" — a documented limitation, not an oversight.
 FROM ${RUNTIME_IMAGE}
 
 ARG VERSION=0.0.0-dev
