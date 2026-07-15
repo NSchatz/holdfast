@@ -25,8 +25,12 @@ func Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		// A tight CSP: the page is fully self-contained, so nothing but its own
 		// inline script/style is ever allowed to load — defence in depth for a tool
-		// that may sit on a home LAN.
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'")
+		// that may sit on a home LAN. `require-trusted-types-for 'script'` enforces
+		// Trusted Types (TRANSCODE-15): the page renders rows as DOM nodes and never
+		// assigns a string to an HTML sink, so this turns that discipline into a
+		// browser-enforced guarantee — a regression that string-builds from an
+		// attacker-influencable media path would throw, not silently reintroduce a sink.
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; require-trusted-types-for 'script'")
 		_, _ = w.Write(indexHTML)
 	})
 }
