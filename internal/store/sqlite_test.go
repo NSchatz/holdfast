@@ -642,3 +642,151 @@ func TestClaim_RetryClearsThePreviousAttemptsOutcome(t *testing.T) {
 		t.Errorf("fail_count = %d, want 1 — clearing the outcome must not reset retry accounting", rows[0].FailCount)
 	}
 }
+
+// --- TRANSCODE-14: lifetime reclaimed total ----------------------------------
+
+// ReclaimedTotal sums (source - output) over done rows that recorded BOTH sizes, and
+// is what makes the dashboard's reclaimed figure durable across restarts.
+func TestReclaimedTotal_SumsDoneRowsWithBothSizes(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	// Two real reclaims: 3 MB and 1.5 MB.
+	done := func(path string, src, out int64) {
+		if ok, err := s.Claim(ctx, path, "fp", "w0", 3); err != nil || !ok {
+			t.Fatalf("claim %s: ok=%v err=%v", path, ok, err)
+		}
+		if err := s.Finish(ctx, path, "fp", Done, &Outcome{SourceBytes: i64(src), OutputBytes: i64(out)}); err != nil {
+			t.Fatalf("finish %s: %v", path, err)
+		}
+	}
+	done("/a/one.mkv", 5_000_000, 2_000_000)
+	done("/a/two.mkv", 4_000_000, 2_500_000)
+
+	// A done row with NO sizes (a pre-outcome-columns row) must contribute 0, never be
+	// read as a 0-byte-reclaimed row — and never crash the SUM on a NULL.
+	if ok, err := s.Claim(ctx, "/a/legacy.mkv", "fp", "w0", 3); err != nil || !ok {
+		t.Fatalf("claim legacy: ok=%v err=%v", ok, err)
+	}
+	if err := s.Finish(ctx, "/a/legacy.mkv", "fp", Done, nil); err != nil {
+		t.Fatalf("finish legacy: %v", err)
+	}
+	// A skipped row is not a reclaim and must not count.
+	if _, err := s.RecordSkip(ctx, "/a/skip.mkv", "fp", "low-bitrate"); err != nil {
+		t.Fatalf("record skip: %v", err)
+	}
+
+	total, err := s.ReclaimedTotal(ctx)
+	if err != nil {
+		t.Fatalf("ReclaimedTotal: %v", err)
+	}
+	if want := int64(3_000_000 + 1_500_000); total != want {
+		t.Errorf("ReclaimedTotal = %d, want %d", total, want)
+	}
+}
+
+func TestReclaimedTotal_EmptyStoreIsZero(t *testing.T) {
+	s := openTest(t)
+	total, err := s.ReclaimedTotal(context.Background())
+	if err != nil {
+		t.Fatalf("ReclaimedTotal: %v", err)
+	}
+	if total != 0 {
+		t.Errorf("ReclaimedTotal on empty store = %d, want 0", total)
+	}
+}
+
+// --- TRANSCODE-14: RecordSkip / ClearSkip (the hardlink guard's report path) --
+
+// RecordSkip writes a skipped row a pre-Claim guard can show in the UI, and reports
+// whether it actually recorded one — so a caller emits/counts the skip exactly once.
+func TestRecordSkip_InsertsThenIsIdempotent(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	changed, err := s.RecordSkip(ctx, "/a/seed.mkv", "fp", "hardlinked")
+	if err != nil {
+		t.Fatalf("RecordSkip: %v", err)
+	}
+	if !changed {
+		t.Fatal("first RecordSkip must report changed=true")
+	}
+	st, _, exists, err := s.Get(ctx, "/a/seed.mkv", "fp")
+	if err != nil || !exists || st != Skipped {
+		t.Fatalf("after RecordSkip: status=%q exists=%v err=%v, want skipped", st, exists, err)
+	}
+	rows, _ := s.List(ctx, []Status{Skipped}, 0)
+	if len(rows) != 1 || rows[0].Outcome.Reason != "hardlinked" {
+		t.Fatalf("reason not recorded: rows=%+v", rows)
+	}
+
+	// A second call on the already-skipped row is a no-op: changed=false, so the caller
+	// does not re-emit the skip on every scan.
+	changed, err = s.RecordSkip(ctx, "/a/seed.mkv", "fp", "hardlinked")
+	if err != nil {
+		t.Fatalf("RecordSkip 2: %v", err)
+	}
+	if changed {
+		t.Error("second RecordSkip on an existing skip must report changed=false")
+	}
+}
+
+// RecordSkip must NEVER clobber a row that already carries a real terminal outcome:
+// a mutable guard's report is worth less than measured proof.
+func TestRecordSkip_DoesNotClobberARealOutcome(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp", "w0", 3); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	proof := &Outcome{Encoder: "cpu", VmafMean: f64(97.0), VmafMin: f64(90.0),
+		SourceBytes: i64(5_000_000), OutputBytes: i64(2_000_000)}
+	if err := s.Finish(ctx, "/a/movie.mkv", "fp", Done, proof); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+
+	changed, err := s.RecordSkip(ctx, "/a/movie.mkv", "fp", "hardlinked")
+	if err != nil {
+		t.Fatalf("RecordSkip: %v", err)
+	}
+	if changed {
+		t.Error("RecordSkip over a done row must not change it (changed=true)")
+	}
+	rows, _ := s.List(ctx, []Status{Done}, 0)
+	if len(rows) != 1 || rows[0].Outcome.VmafMean == nil || *rows[0].Outcome.VmafMean != 97.0 {
+		t.Fatalf("done proof was clobbered: rows=%+v", rows)
+	}
+	if rows[0].Status != Done {
+		t.Errorf("status = %q, want done (untouched)", rows[0].Status)
+	}
+}
+
+// ClearSkip deletes ONLY a skipped row whose reason matches — the re-evaluation half of
+// a mutable guard. It must leave a done/failed/other-skip row alone.
+func TestClearSkip_RemovesMatchingSkipOnly(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	if _, err := s.RecordSkip(ctx, "/a/seed.mkv", "fp", "hardlinked"); err != nil {
+		t.Fatalf("record hardlink skip: %v", err)
+	}
+	if _, err := s.RecordSkip(ctx, "/a/small.mkv", "fp", "low-bitrate"); err != nil {
+		t.Fatalf("record low-bitrate skip: %v", err)
+	}
+
+	// Clearing "hardlinked" removes the seed's skip so it re-enters the normal path.
+	if err := s.ClearSkip(ctx, "/a/seed.mkv", "fp", "hardlinked"); err != nil {
+		t.Fatalf("ClearSkip: %v", err)
+	}
+	if _, _, exists, _ := s.Get(ctx, "/a/seed.mkv", "fp"); exists {
+		t.Error("hardlinked skip should have been cleared")
+	}
+	// A different reason must be untouched by a hardlinked clear.
+	if _, _, exists, _ := s.Get(ctx, "/a/small.mkv", "fp"); !exists {
+		t.Error("ClearSkip('hardlinked') must not delete a low-bitrate skip")
+	}
+	// Clearing a non-existent row is a no-op, not an error.
+	if err := s.ClearSkip(ctx, "/a/nope.mkv", "fp", "hardlinked"); err != nil {
+		t.Errorf("ClearSkip on absent row: %v", err)
+	}
+}

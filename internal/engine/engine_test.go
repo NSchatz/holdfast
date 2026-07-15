@@ -191,6 +191,26 @@ func ledgerHas(t *testing.T, ts *testStore, status store.Status, pathSub string)
 	return exists && got == status
 }
 
+// skipReason returns the recorded Outcome.Reason for the file whose path contains
+// pathSub (resolved against its current on-disk fingerprint). "" if there is no row.
+func skipReason(t *testing.T, ts *testStore, pathSub string) string {
+	t.Helper()
+	path := ts.findPath(t, pathSub)
+	if path == "" {
+		return ""
+	}
+	rows, err := ts.List(context.Background(), []store.Status{store.Skipped}, 0)
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	for _, r := range rows {
+		if r.Path == path {
+			return r.Outcome.Reason
+		}
+	}
+	return ""
+}
+
 // failCount returns the fail_count recorded for the file whose path contains
 // pathSub. root is needed because failCount is called across multiple RunOneshot
 // passes in TestCase13, where the file's fingerprint is stable (the encode always
@@ -643,8 +663,64 @@ func TestCase12_HardlinkedSkipped(t *testing.T) {
 	if !exists(src) || !exists(filepath.Join(d, "seed.mkv")) {
 		t.Error("a link went missing")
 	}
-	if ledgerHas(t, led, store.Skipped, "movie.mkv") {
-		t.Error("hardlinked file must NOT be recorded (re-evaluated later)")
+	// TRANSCODE-14: the hardlink skip is now RECORDED as a skipped/"hardlinked" row so
+	// the dashboard can show WHICH guard fired — it must not read as a bare "skipped".
+	// The source is still byte-for-byte intact (asserted above); recording the reason
+	// is report-only and never claims or touches the file.
+	if !ledgerHas(t, led, store.Skipped, "movie.mkv") {
+		t.Error("hardlinked file must be recorded as skipped (so the UI can show the guard)")
+	}
+	if got := skipReason(t, led, "movie.mkv"); got != SkipHardlinked {
+		t.Errorf("hardlink skip reason = %q, want %q", got, SkipHardlinked)
+	}
+}
+
+// TestCase12b_HardlinkSkipIsReEvaluatedWhenTheSeedFinishes proves the recorded
+// hardlink skip does NOT permanently park the file: once the extra link is gone (the
+// seed finished), the next scan clears the stale skip and reclaims the file. This is
+// the property that let the guard stay unrecorded before TRANSCODE-14 — it must
+// survive the row now being written.
+func TestCase12b_HardlinkSkipIsReEvaluatedWhenTheSeedFinishes(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+	seed := filepath.Join(d, "seed.mkv")
+	if err := os.Link(src, seed); err != nil {
+		t.Fatalf("hardlink: %v", err)
+	}
+
+	// One engine over ONE store, run twice across a filesystem change (the same backing
+	// store must persist between scans, so build it directly rather than via run()).
+	ts := newTestStore(t, d)
+	cfg := baseCfg(d)
+	prober := probe.New(ffmpeg, ffprobe)
+	eng := New(cfg, prober, FFmpegEncoder{FFmpeg: ffmpeg, Cfg: cfg, Probe: prober}, ts, discardLogger())
+	scan := func() {
+		if err := eng.RunOneshot(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Scan 1: hardlinked → skipped(hardlinked), source untouched.
+	scan()
+	if codecOf(t, ffprobe, src) != "h264" {
+		t.Fatal("scan 1: hardlinked source was transcoded")
+	}
+	if got := skipReason(t, ts, "movie.mkv"); got != SkipHardlinked {
+		t.Fatalf("scan 1: reason = %q, want %q", got, SkipHardlinked)
+	}
+
+	// The seed finishes: remove the extra link. The file's content — and therefore its
+	// fingerprint — is unchanged, so a permanent skip row would park it forever.
+	if err := os.Remove(seed); err != nil {
+		t.Fatalf("remove seed: %v", err)
+	}
+
+	// Scan 2: no longer hardlinked → the stale skip is cleared and the file is reclaimed.
+	scan()
+	if codecOf(t, ffprobe, src) != "hevc" {
+		t.Error("scan 2: file was not transcoded after the seed finished (stale hardlink skip not cleared)")
 	}
 }
 

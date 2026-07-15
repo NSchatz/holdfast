@@ -50,6 +50,7 @@ const TempMarker = "__transcoding__"
 const (
 	SkipAlreadyTargetCodec    = "already-at-target-codec"
 	SkipLowBitrate            = "low-bitrate"
+	SkipHardlinked            = "hardlinked"
 	SkipInterlaced            = "interlaced"
 	SkipDolbyVision           = "dolby-vision"
 	SkipHDR10Plus             = "hdr10-plus"
@@ -275,9 +276,10 @@ feed:
 //
 // The store.Claim call is the mutual-exclusion guard: it is the ONLY thing that
 // stands between two workers (or two overlapping runs) both encoding the same
-// source. Everything before Claim (the tab/newline and hardlink skips) is
-// deliberately unrecorded and must stay before Claim so it never creates a store
-// row.
+// source. The tab/newline skip before it stays unrecorded (a pathological path is
+// not worth a row); the hardlink guard runs before Claim too but DOES record a
+// "hardlinked" skip via RecordSkip/ClearSkip — a report-only write that never claims
+// the file, so it cannot let two workers encode the same source.
 func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	fi, err := os.Stat(f)
 	if err != nil || fi.IsDir() {
@@ -298,12 +300,36 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 
 	// Hardlink guard. A file with >1 hard link is almost always an *arr import that
 	// is also an active seed. Replacing it via rename breaks the link — reclaiming
-	// no space and silently breaking the seed. Skip, and DON'T record: the link
-	// count is mutable (the seed may finish), so re-evaluate every scan. Must run
-	// before Claim so it never creates a store row.
-	if e.Cfg.HardlinkSkip() && probe.NLink(f) > 1 {
-		e.Log.Info("skip (hardlinked — swap would break a seed and reclaim nothing)", "file", f, "links", probe.NLink(f))
-		return nil
+	// no space and silently breaking the seed. Skip — and RECORD the skip as
+	// "hardlinked" so an operator sees WHICH guard fired (TRANSCODE-14) instead of the
+	// bare word "skipped". This still runs before Claim (the file never enters the
+	// encode pipeline), and re-evaluation is preserved because the link count is
+	// MUTABLE: RecordSkip only writes a skipped/hardlinked row where none with a real
+	// outcome exists, and once the file is no longer hardlinked the else-branch's
+	// ClearSkip removes that stale row so the file is reclaimed on the normal path.
+	if e.Cfg.HardlinkSkip() {
+		if links := probe.NLink(f); links > 1 {
+			e.Log.Info("skip (hardlinked — swap would break a seed and reclaim nothing)", "file", f, "links", links)
+			changed, err := e.Store.RecordSkip(ctx, f, key, SkipHardlinked)
+			if err != nil {
+				// Fail safe: recording the skip is a reporting nicety, never the decision.
+				// If the store hiccups, still skip the file (the point of the guard) — the
+				// UI just won't show this particular hardlink skip until the next scan.
+				e.Log.Warn("record hardlink skip failed (still skipping the file)", "file", f, "err", err)
+			} else if changed {
+				// Emit once, only when the skip was newly recorded, so a live client
+				// (and the metrics/notify observers) see this skip exactly once — not
+				// once per scan for the lifetime of the seed.
+				e.emit(Event{Path: f, Status: store.Skipped, Outcome: because(SkipHardlinked)})
+			}
+			return nil
+		}
+		// Not (or no longer) hardlinked: drop any stale "hardlinked" skip we recorded on
+		// a previous scan (the seed finished), so this file re-enters the normal Claim
+		// path below and gets reclaimed. A no-op for a file that was never hardlinked.
+		if err := e.Store.ClearSkip(ctx, f, key, SkipHardlinked); err != nil {
+			e.Log.Warn("clear stale hardlink skip failed (continuing)", "file", f, "err", err)
+		}
 	}
 
 	// Claim: the resume short-circuit AND the cross-worker mutual-exclusion guard
