@@ -113,7 +113,7 @@ invariant is entirely unaffected.
 | Method & path | Auth | Purpose |
 |---|---|---|
 | `GET /` | — | the embedded dashboard |
-| `GET /api/summary` | — | counts per status + session bytes reclaimed + paused/scanning |
+| `GET /api/summary` | — | counts per status + bytes reclaimed (**lifetime** and this-run) + paused/scanning |
 | `GET /api/queue` | — | pending + active jobs |
 | `GET /api/history?limit=N` | — | recent terminal jobs (done/skipped/failed) with their recorded outcome — see below |
 | `GET /api/events` | — | SSE: a fresh snapshot on every state change |
@@ -136,7 +136,7 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | Field | On | What it is |
 |---|---|---|
 | `reason` | failed | the error that rejected it (the encode error, or **which gate** refused the output) |
-| `reason` | skipped | **which guard** fired — `already-at-target-codec`, `low-bitrate`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `target-already-exists` |
+| `reason` | skipped | **which guard** fired — `already-at-target-codec`, `low-bitrate`, `hardlinked`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `target-already-exists` |
 | `encoder` | any job that reached the encoder | the encoder that ran (`cpu`, `svtav1`, `nvenc`, …) — a skip, or a file with no readable video stream, never gets that far and records none |
 | `vmaf_mean`, `vmaf_min` | done, and a VMAF-rejected failure | the pooled harmonic mean **and the worst frame** |
 | `vmaf_model` | as above | the libvmaf model that produced them |
@@ -157,10 +157,20 @@ quality against *your* source; it is not a proof of fidelity.
 An outcome is recorded per *attempt*, not per file: **claiming a job for a retry clears it**, so a file
 that is being re-encoded never advertises the rejected attempt's score while it is in flight.
 
+The **dashboard renders all of this per file** — size before → after and percent reclaimed, the encoder,
+the encode duration, and the VMAF pair shown with its model, its pooling and its luma-only blind spot — so
+the proof is on the page, not only in the JSON. A skipped row names its guard; a failed row shows its
+reason; a fact that was never recorded reads "not recorded", never `0`.
+
+The reclaimed figure is a **durable lifetime total** (`bytes_reclaimed_lifetime`): a one-time baseline
+summed from the recorded `source_bytes`/`output_bytes` on every done row, plus this process's reclaims — so
+it survives a restart rather than resetting to zero. `bytes_reclaimed_session` is kept alongside it as the
+honest this-run number.
+
 **Known limitations.** Rows written before these columns existed carry no outcome and read as "not
-recorded" — a measurement never taken cannot be reconstructed. And `bytes_reclaimed_session` is still a
-**per-process** total that resets when the daemon restarts; the recorded sizes now make a durable lifetime
-figure derivable, but computing and displaying it comes with the dashboard.
+recorded" — a measurement never taken cannot be reconstructed, and such a row also contributes nothing to
+the lifetime total (never counted as a zero-reclaim). Queue/history views are still capped at the most
+recent rows, not the whole ledger.
 
 #### Schema versioning
 

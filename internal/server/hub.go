@@ -86,19 +86,23 @@ func toDTOs(jobs []store.Job) []jobDTO {
 
 // snapshot is the full state the SSE stream pushes and the read endpoints compose.
 //
-// BytesReclaimedSession is still a per-PROCESS counter and still resets when the daemon
-// does. TRANSCODE-13 makes a durable lifetime total POSSIBLE — both file sizes are now
-// on every done row — but deriving and surfacing it is TRANSCODE-14's job, along with
-// the dashboard that displays it. Summing it here would mean an unbounded scan of the
-// jobs table on every state change, over the single serialized connection the engine
-// writes through, on a table whose retention/pruning this phase explicitly defers.
+// BytesReclaimedLifetime is the DURABLE total the dashboard leads with (TRANSCODE-14):
+// it survives restarts, where BytesReclaimedSession — a per-PROCESS counter — resets to
+// 0. It is computed WITHOUT the unbounded per-snapshot table scan the phase warned
+// against: a one-time baseline (SUM over done rows, read once when the Hub is built) plus
+// the session counter the engine already maintains with atomics. Because the baseline is
+// read before this process encodes anything, and the session counter accrues exactly this
+// process's Done reclaims, baseline + session is the true lifetime total with no double
+// counting and O(1) per snapshot. BytesReclaimedSession is kept for continuity (the old
+// header figure) and because it is the honest "this run" number.
 type snapshot struct {
-	Summary               map[string]int `json:"summary"`
-	Queue                 []jobDTO       `json:"queue"`
-	History               []jobDTO       `json:"history"`
-	BytesReclaimedSession int64          `json:"bytes_reclaimed_session"`
-	Paused                bool           `json:"paused"`
-	Scanning              bool           `json:"scanning"`
+	Summary                map[string]int `json:"summary"`
+	Queue                  []jobDTO       `json:"queue"`
+	History                []jobDTO       `json:"history"`
+	BytesReclaimedSession  int64          `json:"bytes_reclaimed_session"`
+	BytesReclaimedLifetime int64          `json:"bytes_reclaimed_lifetime"`
+	Paused                 bool           `json:"paused"`
+	Scanning               bool           `json:"scanning"`
 }
 
 // Hub is the engine.Observer and the SSE fan-out. Engine workers call Observe
@@ -117,30 +121,51 @@ type Hub struct {
 	events chan engine.Event
 
 	// bytesReclaimed accumulates the reclaimed-space total for this PROCESS, and
-	// resets when the daemon does. The store now persists both file sizes on every
-	// done row (TRANSCODE-13), so a durable lifetime total is derivable — but deriving
-	// it belongs with the dashboard that shows it (TRANSCODE-14); see snapshot.
-	// Updated in Observe with atomics so it is never lost even when the event is
-	// coalesced.
+	// resets when the daemon does. Updated in Observe with atomics so it is never lost
+	// even when the event is coalesced.
 	bytesReclaimed atomic.Int64
+
+	// reclaimedBaseline is the lifetime reclaimed total AS OF Hub construction — a
+	// single SUM over the store's done rows, read once (never per snapshot). The
+	// durable lifetime total the dashboard shows is reclaimedBaseline + bytesReclaimed:
+	// the baseline is everything reclaimed before this process started, the counter is
+	// what this process has reclaimed since, and the two never overlap because the
+	// baseline is frozen at startup. Immutable after NewHub, so it needs no lock.
+	reclaimedBaseline int64
 
 	mu   sync.Mutex
 	subs map[chan []byte]struct{}
 }
 
-// NewHub builds a Hub over the store and controller.
+// NewHub builds a Hub over the store and controller. It reads the durable lifetime
+// reclaimed baseline ONCE here (a single SUM over done rows) — before the engine has
+// encoded anything this process, so it captures exactly "everything reclaimed before
+// now". A read error is non-fatal: the baseline falls back to 0 and the lifetime
+// figure degrades to this-process-only until the next restart, which is a display
+// nicety, never correctness — so a store hiccup must not stop the server coming up.
 func NewHub(st store.Store, ctrl *Controller, log *slog.Logger) *Hub {
 	if log == nil {
 		log = slog.Default()
 	}
+	baseline, err := st.ReclaimedTotal(context.Background())
+	if err != nil {
+		log.Warn("reclaimed baseline read failed (lifetime total starts from this run only)", "err", err)
+		baseline = 0
+	}
 	return &Hub{
-		store:  st,
-		ctrl:   ctrl,
-		log:    log,
-		events: make(chan engine.Event, 256),
-		subs:   make(map[chan []byte]struct{}),
+		store:             st,
+		ctrl:              ctrl,
+		log:               log,
+		events:            make(chan engine.Event, 256),
+		subs:              make(map[chan []byte]struct{}),
+		reclaimedBaseline: baseline,
 	}
 }
+
+// ReclaimedLifetime is the durable lifetime reclaimed total: the startup baseline plus
+// everything this process has reclaimed since. See snapshot for why this is O(1) and
+// double-count-free.
+func (h *Hub) ReclaimedLifetime() int64 { return h.reclaimedBaseline + h.bytesReclaimed.Load() }
 
 // Observe implements engine.Observer. It runs on an engine worker goroutine, so it
 // only does two cheap, non-blocking things: bump the reclaimed-bytes counter and
@@ -253,11 +278,12 @@ func (h *Hub) buildSnapshot(ctx context.Context) (snapshot, error) {
 		counts[string(st)] = n
 	}
 	return snapshot{
-		Summary:               counts,
-		Queue:                 toDTOs(queue),
-		History:               toDTOs(hist),
-		BytesReclaimedSession: h.bytesReclaimed.Load(),
-		Paused:                h.ctrl.Paused(),
-		Scanning:              h.ctrl.Scanning(),
+		Summary:                counts,
+		Queue:                  toDTOs(queue),
+		History:                toDTOs(hist),
+		BytesReclaimedSession:  h.bytesReclaimed.Load(),
+		BytesReclaimedLifetime: h.ReclaimedLifetime(),
+		Paused:                 h.ctrl.Paused(),
+		Scanning:               h.ctrl.Scanning(),
 	}, nil
 }

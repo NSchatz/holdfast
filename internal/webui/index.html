@@ -22,9 +22,10 @@
   .badge.on { color:var(--bg); background:var(--warn); border-color:var(--warn); font-weight:600; }
   .badge.scan.on { background:var(--accent); border-color:var(--accent); }
   .grow { flex:1 1 auto; }
-  .reclaimed { font-size:13px; color:var(--muted); }
-  .reclaimed b { color:var(--ok); font-size:15px; }
-  main { padding:20px; max-width:1100px; margin:0 auto; }
+  .reclaimed { font-size:13px; color:var(--muted); text-align:right; }
+  .reclaimed b { color:var(--ok); font-size:16px; }
+  .reclaimed .sub { display:block; font-size:11px; color:var(--muted); }
+  main { padding:20px; max-width:1180px; margin:0 auto; }
   .chips { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px; }
   .chip { background:var(--panel); border:1px solid var(--line); border-radius:8px;
     padding:10px 14px; min-width:96px; }
@@ -42,33 +43,54 @@
   #msg { font-size:13px; color:var(--muted); min-height:18px; margin-left:6px; }
   #msg.err { color:var(--bad); }
   section h2 { font-size:14px; text-transform:uppercase; letter-spacing:.5px;
-    color:var(--muted); border-bottom:1px solid var(--line); padding-bottom:6px; margin:26px 0 10px; }
+    color:var(--muted); border-bottom:1px solid var(--line); padding-bottom:6px; margin:26px 0 6px; }
+  section .note { font-size:12px; color:var(--muted); margin:0 0 10px; max-width:70ch; }
+  .tablewrap { overflow-x:auto; }
   table { width:100%; border-collapse:collapse; }
-  th,td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line);
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);
     font-size:13px; vertical-align:top; }
-  th { color:var(--muted); font-weight:600; font-size:12px; }
+  th { color:var(--muted); font-weight:600; font-size:12px; white-space:nowrap; }
   td.path { font-family:ui-monospace,Menlo,Consolas,monospace; word-break:break-all; }
+  /* The history table is FIXED-width so its wide free-text cells (the VMAF viewing
+     condition, a failed row's reason) WRAP inside their column instead of blowing the
+     table past the viewport and pushing the fidelity proof off-screen. */
+  table.hist { table-layout:fixed; }
+  table.hist td { overflow-wrap:anywhere; }
+  /* The Result cell reuses the status styling but, unlike the queue, must WRAP — a
+     failed row's reason is long free text and td.st's nowrap would run it off-screen. */
+  table.hist td.st { white-space:normal; }
   td.st { white-space:nowrap; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px;
     background:var(--muted); vertical-align:middle; }
   .st-done .dot { background:var(--ok); } .st-failed .dot { background:var(--bad); }
   .st-skipped .dot { background:var(--muted); }
   .st-encoding .dot,.st-probing .dot,.st-verifying .dot,.st-pending .dot { background:var(--accent); }
+  .reason { color:var(--muted); font-size:12px; }
+  .reason.fail { color:var(--bad); word-break:break-word; }
+  .size .before { color:var(--muted); }
+  .size .arrow { color:var(--muted); margin:0 4px; }
+  .size .pct { display:block; color:var(--ok); font-weight:600; margin-top:2px; }
+  .vmaf .pair { white-space:nowrap; }
+  .vmaf .mean { font-weight:600; }
+  .vmaf .worst { color:var(--fg); }
+  .vmaf .cond { display:block; color:var(--muted); font-size:11px; margin-top:2px; }
+  .nr { color:var(--muted); font-style:italic; }
   .empty { color:var(--muted); font-style:italic; padding:10px; }
-  footer { color:var(--muted); font-size:12px; text-align:center; padding:22px; }
+  footer { color:var(--muted); font-size:12px; text-align:center; padding:22px; max-width:80ch; margin:0 auto; }
   #conn { font-size:12px; color:var(--muted); }
   #conn.live { color:var(--ok); } #conn.down { color:var(--bad); }
 </style>
 </head>
 <body>
 <header>
-  <h1>trans<span class="mono">code</span></h1>
+  <h1>hold<span class="mono">fast</span></h1>
   <div class="badges">
     <span id="b-paused" class="badge">running</span>
     <span id="b-scan" class="badge scan">idle</span>
   </div>
   <span class="grow"></span>
-  <span class="reclaimed">reclaimed this session: <b id="reclaimed">0 B</b></span>
+  <span class="reclaimed">reclaimed: <b id="reclaimed-lifetime">0 B</b>
+    <span class="sub">lifetime · this run <span id="reclaimed-session">0 B</span></span></span>
   <span id="conn">connecting…</span>
 </header>
 <main>
@@ -84,17 +106,34 @@
 
   <section>
     <h2>Queue &amp; active</h2>
-    <table><thead><tr><th>File</th><th>Status</th><th>Worker</th></tr></thead>
-      <tbody id="queue"></tbody></table>
+    <div class="tablewrap">
+      <table><thead><tr><th>File</th><th>Status</th><th>Worker</th></tr></thead>
+        <tbody id="queue"></tbody></table>
+    </div>
   </section>
 
   <section>
     <h2>Recent history</h2>
-    <table><thead><tr><th>File</th><th>Status</th><th>Fails</th><th>Updated</th></tr></thead>
-      <tbody id="history"></tbody></table>
+    <p class="note">Each finished file, with the proof its swap was safe. A skipped file shows which
+      guard held it back; a failed one shows why. VMAF is a perceptual estimate under one viewing
+      condition — the model, its pooling, and its luma-only blind spot are shown with every score, and
+      scores are never compared across files (VMAF is not comparable between different sources).</p>
+    <div class="tablewrap">
+      <table class="hist">
+        <colgroup>
+          <col style="width:19%"><col style="width:17%"><col style="width:12%"><col style="width:23%">
+          <col style="width:8%"><col style="width:9%"><col style="width:12%">
+        </colgroup>
+        <thead><tr>
+          <th>File</th><th>Result</th><th>Size</th><th>VMAF</th><th>Encoder</th><th>Encode</th><th>Updated</th>
+        </tr></thead>
+        <tbody id="history"></tbody>
+      </table>
+    </div>
   </section>
 </main>
-<footer>holdfast — config-as-code, data-safe media transcoder. The YAML config is the source of truth; this page reads and controls.</footer>
+<footer>holdfast — config-as-code, data-safe media transcoder. The YAML config is the source of truth;
+  this page reads and controls. It reports what was measured, and only that.</footer>
 
 <script>
 "use strict";
@@ -105,6 +144,20 @@ const $ = (id) => document.getElementById(id);
 const tokenInput = $("token");
 tokenInput.value = localStorage.getItem("holdfast_token") || "";
 tokenInput.addEventListener("change", () => localStorage.setItem("holdfast_token", tokenInput.value));
+
+// Human labels for the closed vocabulary of skip guards (internal/engine's Skip*
+// constants). An unknown token falls back to itself, so a new guard is never hidden.
+const GUARD_LABELS = {
+  "already-at-target-codec": "already at target codec",
+  "low-bitrate": "already efficient (low bitrate)",
+  "hardlinked": "hardlinked (would break a seed)",
+  "interlaced": "interlaced",
+  "dolby-vision": "Dolby Vision (dynamic metadata)",
+  "hdr10-plus": "HDR10+ (dynamic metadata)",
+  "incomplete-hdr-metadata": "incomplete HDR metadata",
+  "exotic-pixel-format": "exotic pixel format",
+  "target-already-exists": "target file already exists",
+};
 
 function fmtBytes(n) {
   n = Number(n) || 0;
@@ -118,7 +171,63 @@ function fmtTime(sec) {
   const d = new Date(sec * 1000);
   return d.toLocaleString();
 }
+function fmtDur(ms) {
+  ms = Number(ms) || 0;
+  if (ms < 1000) return ms + " ms";
+  let s = Math.round(ms / 1000);
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60); s = s % 60;
+  if (m < 60) return m + "m " + s + "s";
+  const h = Math.floor(m / 60);
+  return h + "h " + (m % 60) + "m";
+}
+// A pointer field arrives as JSON null when the fact was never recorded. Render that
+// honestly — never as 0, never as an invented value.
+function isNum(v) { return typeof v === "number" && isFinite(v); }
+const NR = '<span class="nr">not recorded</span>';
+
 function esc(s) { const e = document.createElement("span"); e.textContent = s; return e.innerHTML; }
+
+// The size cell: before → after with the percent reclaimed. Only meaningful on a done
+// row that recorded both sizes.
+function sizeCell(j) {
+  if (!isNum(j.source_bytes) || !isNum(j.output_bytes)) return NR;
+  // Clamp at 0 for the same reason the server does (Event.BytesReclaimed / ReclaimedTotal):
+  // the strictly-smaller gate precludes output > source, but a defensive clamp means a
+  // future bug there can never render a nonsensical negative "% smaller".
+  const saved = Math.max(0, j.source_bytes - j.output_bytes);
+  const pct = j.source_bytes > 0 ? Math.round((saved / j.source_bytes) * 100) : 0;
+  return `<span class="before">${esc(fmtBytes(j.source_bytes))}</span>`
+    + `<span class="arrow">→</span>${esc(fmtBytes(j.output_bytes))}`
+    + `<span class="pct">${pct}% smaller</span>`;
+}
+
+// The VMAF cell states exactly what the number licenses and no more: the two pooled
+// statistics (harmonic mean AND worst frame), the model that produced them, its pooling,
+// its luma-only blind spot, and that it was measured against the operator's own source.
+// It never grades the result, never claims perfect fidelity, and never compares files.
+function vmafCell(j) {
+  if (!isNum(j.vmaf_mean) && !isNum(j.vmaf_min)) return NR;
+  const mean = isNum(j.vmaf_mean) ? j.vmaf_mean.toFixed(1) : "?";
+  const worst = isNum(j.vmaf_min) ? j.vmaf_min.toFixed(1) : "?";
+  const model = j.vmaf_model ? esc(j.vmaf_model.replace(/^version=/, "")) : "unspecified model";
+  return `<span class="pair"><span class="mean">${mean}</span> mean`
+    + ` · <span class="worst">${worst}</span> worst frame</span>`
+    + `<span class="cond">model ${model} · harmonic-mean + worst-frame pooling`
+    + ` · luma-only · measured vs your source</span>`;
+}
+
+// The result cell: the status, plus WHY for the two states that have a reason. A skipped
+// row names the guard; a failed row shows the error text verbatim.
+function resultCell(j) {
+  let html = `<span class="st st-${esc(j.status)}"><span class="dot"></span>${esc(j.status)}</span>`;
+  if (j.status === "skipped" && j.reason) {
+    html += `<div class="reason">${esc(GUARD_LABELS[j.reason] || j.reason)}</div>`;
+  } else if (j.status === "failed") {
+    html += `<div class="reason fail">${j.reason ? esc(j.reason) : "reason not recorded"}</div>`;
+  }
+  return html;
+}
 
 function render(snap) {
   // Badges.
@@ -129,7 +238,9 @@ function render(snap) {
   bs.textContent = snap.scanning ? "scanning" : "idle";
   bs.classList.toggle("on", !!snap.scanning);
 
-  $("reclaimed").textContent = fmtBytes(snap.bytes_reclaimed_session);
+  // Reclaimed: the durable lifetime figure leads; the per-run figure is the subline.
+  $("reclaimed-lifetime").textContent = fmtBytes(snap.bytes_reclaimed_lifetime);
+  $("reclaimed-session").textContent = fmtBytes(snap.bytes_reclaimed_session);
 
   // Summary chips.
   const sum = snap.summary || {};
@@ -142,18 +253,23 @@ function render(snap) {
   const q = snap.queue || [];
   $("queue").innerHTML = q.length ? q.map((j) =>
     `<tr><td class="path">${esc(j.path)}</td>`
-    + `<td class="st st-${j.status}"><span class="dot"></span>${j.status}</td>`
+    + `<td class="st st-${esc(j.status)}"><span class="dot"></span>${esc(j.status)}</td>`
     + `<td>${esc(j.worker || "")}</td></tr>`).join("")
     : `<tr><td colspan="3" class="empty">Nothing queued.</td></tr>`;
 
-  // History.
+  // History — the trust surface: per file, the evidence its swap was safe.
   const h = snap.history || [];
   $("history").innerHTML = h.length ? h.map((j) =>
-    `<tr><td class="path">${esc(j.path)}</td>`
-    + `<td class="st st-${j.status}"><span class="dot"></span>${j.status}</td>`
-    + `<td>${j.fail_count || 0}</td>`
-    + `<td>${esc(fmtTime(j.updated_at))}</td></tr>`).join("")
-    : `<tr><td colspan="4" class="empty">No history yet.</td></tr>`;
+    `<tr>`
+    + `<td class="path">${esc(j.path)}</td>`
+    + `<td class="st">${resultCell(j)}</td>`
+    + `<td class="size">${j.status === "done" ? sizeCell(j) : ""}</td>`
+    + `<td class="vmaf">${j.status === "done" ? vmafCell(j) : ""}</td>`
+    + `<td>${j.encoder ? esc(j.encoder) : (j.status === "done" ? NR : "")}</td>`
+    + `<td>${isNum(j.encode_ms) ? esc(fmtDur(j.encode_ms)) : (j.status === "done" ? NR : "")}</td>`
+    + `<td>${esc(fmtTime(j.updated_at))}</td>`
+    + `</tr>`).join("")
+    : `<tr><td colspan="7" class="empty">No history yet.</td></tr>`;
 }
 
 // Live updates over SSE (EventSource auto-reconnects on drop).

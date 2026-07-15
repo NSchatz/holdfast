@@ -262,6 +262,60 @@ func TestHub_BytesReclaimedAccumulates(t *testing.T) {
 	}
 }
 
+// The dashboard's reclaimed figure must be DURABLE: a lifetime total that survives a
+// restart, not a per-process counter that resets to 0. The Hub reads a baseline from
+// the store's already-recorded done rows at construction, and the live figure is that
+// baseline plus this process's reclaims. (TRANSCODE-14.)
+func TestHub_ReclaimedLifetimeIsBaselinePlusSession(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+
+	// Seed a prior-session done row worth 3,000,000 bytes reclaimed.
+	mustClaim(t, st, "/lib/old.mkv", "9:9")
+	src, out := int64(5_000_000), int64(2_000_000)
+	if err := st.Finish(ctx, "/lib/old.mkv", "9:9", store.Done,
+		&store.Outcome{SourceBytes: &src, OutputBytes: &out}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctrl := NewController(ctx, func(context.Context) error { return nil }, discard())
+	hub := NewHub(st, ctrl, discard()) // reads the 3,000,000 baseline here
+
+	if got := hub.ReclaimedLifetime(); got != 3_000_000 {
+		t.Fatalf("lifetime at startup = %d, want 3,000,000 (the baseline)", got)
+	}
+
+	// This process reclaims another 500,000. Lifetime is baseline + session; session
+	// alone is only this run's number.
+	hub.Observe(doneEvent(500_000))
+	if got := hub.ReclaimedLifetime(); got != 3_500_000 {
+		t.Errorf("lifetime after a reclaim = %d, want 3,500,000", got)
+	}
+	if got := hub.BytesReclaimed(); got != 500_000 {
+		t.Errorf("session = %d, want 500,000 (this run only)", got)
+	}
+
+	// It rides the snapshot the SSE stream and /api/summary both serve.
+	data, err := hub.SnapshotJSON(ctx)
+	if err != nil {
+		t.Fatalf("SnapshotJSON: %v", err)
+	}
+	var snap snapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if snap.BytesReclaimedLifetime != 3_500_000 {
+		t.Errorf("snapshot lifetime = %d, want 3,500,000", snap.BytesReclaimedLifetime)
+	}
+	if snap.BytesReclaimedSession != 500_000 {
+		t.Errorf("snapshot session = %d, want 500,000", snap.BytesReclaimedSession)
+	}
+}
+
 func TestSSEEndpoint_StreamsInitialSnapshot(t *testing.T) {
 	h := newHarness(t, "")
 	ctx, cancel := context.WithCancel(context.Background())

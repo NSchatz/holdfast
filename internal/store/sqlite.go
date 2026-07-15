@@ -367,6 +367,66 @@ func (s *SQLite) Summary(ctx context.Context) (map[Status]int, error) {
 	return out, nil
 }
 
+// ReclaimedTotal is documented on the Store interface. The WHERE clause requires
+// BOTH sizes to be non-NULL, so a pre-outcome-columns Done row (no sizes recorded)
+// contributes nothing rather than reading a NULL as 0. COALESCE turns the no-rows
+// case into 0. The result is clamped at 0 for the same reason Event.BytesReclaimed
+// is: the strictly-smaller gate precludes output > source, but a defensive clamp
+// means a future bug there can never make a lifetime total run backwards.
+func (s *SQLite) ReclaimedTotal(ctx context.Context) (int64, error) {
+	var total int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(source_bytes - output_bytes), 0) FROM jobs
+		 WHERE status = ? AND source_bytes IS NOT NULL AND output_bytes IS NOT NULL`,
+		string(Done)).Scan(&total); err != nil {
+		return 0, fmt.Errorf("store: reclaimed total: %w", err)
+	}
+	if total < 0 {
+		total = 0
+	}
+	return total, nil
+}
+
+// RecordSkip is documented on the Store interface. The ON CONFLICT DO UPDATE is
+// gated by `WHERE jobs.status = 'pending'`, which is what keeps a mutable guard from
+// clobbering a real outcome: on a fresh key the INSERT runs (1 row); on a pending
+// row it converts to skipped (1 row); on a row that is already skipped/done/failed
+// the DO UPDATE's WHERE excludes it and nothing changes (0 rows). RowsAffected is
+// therefore exactly "did this call newly record the skip", which the caller uses to
+// emit — and count — the skip once, not once per scan. The outcome columns are
+// cleared so a converted row carries no stale proof (the same discipline as Claim).
+func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason string) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, reason)
+		 VALUES (?, ?, ?, 0, NULL, ?, ?)
+		 ON CONFLICT(path, fingerprint) DO UPDATE SET
+			status = excluded.status, reason = excluded.reason, worker = NULL, updated_at = excluded.updated_at,
+			encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
+			source_bytes = NULL, output_bytes = NULL, encode_ms = NULL
+		 WHERE jobs.status = ?`,
+		path, fingerprint, string(Skipped), now(), nullString(reason), string(Pending))
+	if err != nil {
+		return false, fmt.Errorf("store: record skip: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: record skip rows affected: %w", err)
+	}
+	return n > 0, nil
+}
+
+// ClearSkip is documented on the Store interface. The status+reason match in the
+// WHERE is the safety: it can only ever delete the specific skipped row the mutable
+// guard itself wrote, never a done/failed/other-skip row.
+func (s *SQLite) ClearSkip(ctx context.Context, path, fingerprint, reason string) error {
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM jobs WHERE path = ? AND fingerprint = ? AND status = ? AND reason = ?`,
+		path, fingerprint, string(Skipped), nullString(reason)); err != nil {
+		return fmt.Errorf("store: clear skip: %w", err)
+	}
+	return nil
+}
+
 // Get returns the current status and fail_count for path+fingerprint.
 func (s *SQLite) Get(ctx context.Context, path, fingerprint string) (Status, int, bool, error) {
 	var status string

@@ -95,14 +95,16 @@ func (s *Server) routes() http.Handler {
 
 // --- read endpoints ----------------------------------------------------------
 
-// controlState is the at-a-glance status payload (no per-job rows). The reclaimed
-// figure is still session-scoped — see snapshot: making it a durable lifetime total is
-// TRANSCODE-14's, on the sizes TRANSCODE-13 now persists.
+// controlState is the at-a-glance status payload (no per-job rows). It carries BOTH
+// the durable lifetime reclaimed total (TRANSCODE-14 — the figure that survives a
+// restart) and the per-process session figure, mirroring the SSE snapshot so a client
+// polling /api/summary sees the same two numbers the live stream pushes.
 type controlState struct {
-	Summary               map[string]int `json:"summary"`
-	BytesReclaimedSession int64          `json:"bytes_reclaimed_session"`
-	Paused                bool           `json:"paused"`
-	Scanning              bool           `json:"scanning"`
+	Summary                map[string]int `json:"summary"`
+	BytesReclaimedSession  int64          `json:"bytes_reclaimed_session"`
+	BytesReclaimedLifetime int64          `json:"bytes_reclaimed_lifetime"`
+	Paused                 bool           `json:"paused"`
+	Scanning               bool           `json:"scanning"`
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
@@ -116,10 +118,11 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		counts[string(st)] = n
 	}
 	writeJSON(w, http.StatusOK, controlState{
-		Summary:               counts,
-		BytesReclaimedSession: s.hub.BytesReclaimed(),
-		Paused:                s.ctrl.Paused(),
-		Scanning:              s.ctrl.Scanning(),
+		Summary:                counts,
+		BytesReclaimedSession:  s.hub.BytesReclaimed(),
+		BytesReclaimedLifetime: s.hub.ReclaimedLifetime(),
+		Paused:                 s.ctrl.Paused(),
+		Scanning:               s.ctrl.Scanning(),
 	})
 }
 

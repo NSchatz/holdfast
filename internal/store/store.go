@@ -172,6 +172,35 @@ type Store interface {
 	// row appear). Used by the API/UI for at-a-glance queue/history totals.
 	Summary(ctx context.Context) (map[Status]int, error)
 
+	// ReclaimedTotal is the durable lifetime reclaimed-space total: the sum of
+	// (source_bytes - output_bytes) over every Done row that recorded both sizes
+	// (TRANSCODE-13 persists them, TRANSCODE-14 shows this). It is what a "reclaimed"
+	// figure must be built on instead of a per-process counter that resets to 0 on
+	// every restart. Rows written before the outcome columns existed carry no sizes
+	// and are simply not counted (never counted as 0-reclaimed). A pure read.
+	ReclaimedTotal(ctx context.Context) (int64, error)
+
+	// RecordSkip persists a Skipped row carrying reason for a guard that fires BEFORE
+	// Claim — today only the hardlink guard, whose decision must stay unclaimed (it
+	// never enters the encode pipeline) yet must still be visible as a skip in the UI
+	// (TRANSCODE-14: "which guard fired"). It INSERTs a fresh skipped row, or converts
+	// a pending row; it deliberately does NOT overwrite a row that already carries a
+	// terminal outcome (done/failed/another skip), so a real proof is never clobbered
+	// by a mutable guard. Reports changed=true only when it actually inserted/converted
+	// a row (not on the idempotent re-run where the skipped row already exists), so a
+	// caller emits an event — and a metrics/notify observer counts the skip — exactly
+	// once, not once per scan.
+	RecordSkip(ctx context.Context, path, fingerprint, reason string) (changed bool, err error)
+
+	// ClearSkip deletes the row for path+fingerprint ONLY when it is a Skipped row
+	// whose reason matches — the re-evaluation half of a MUTABLE guard. The hardlink
+	// guard re-checks every scan (a seed may finish, dropping the link count); when a
+	// file it once skipped as "hardlinked" is no longer hardlinked, this removes that
+	// stale skip so the file is reclaimed on the normal path. It never touches a
+	// done/failed/other-skip row (the reason+status match guards that), so a real
+	// outcome is never deleted. No-op when no such row exists.
+	ClearSkip(ctx context.Context, path, fingerprint, reason string) error
+
 	// Close releases the underlying database handle.
 	Close() error
 }
