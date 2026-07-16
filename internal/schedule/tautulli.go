@@ -1,12 +1,14 @@
 package schedule
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -57,11 +59,19 @@ func (t *Tautulli) httpGet(ctx context.Context, rawURL string) ([]byte, error) {
 }
 
 // activityResponse is the subset of Tautulli's get_activity payload we read.
+//
+// stream_count is captured as RawMessage, NOT json.Number, deliberately. Real
+// Tautulli deployments send it in several shapes — a JSON number (2), a numeric
+// STRING ("2"), an empty string (""), null, or the field omitted entirely — and a
+// json.Number field makes the WHOLE response fail to unmarshal on the empty-string
+// case, turning an ordinary idle response into a spurious error. RawMessage never
+// fails to unmarshal; streamCount interprets the shape, so "blank = not streaming"
+// is actually reachable rather than a dead comment.
 type activityResponse struct {
 	Response struct {
 		Result string `json:"result"`
 		Data   struct {
-			StreamCount json.Number `json:"stream_count"`
+			StreamCount json.RawMessage `json:"stream_count"`
 		} `json:"data"`
 	} `json:"response"`
 }
@@ -82,10 +92,33 @@ func (t *Tautulli) Streaming(ctx context.Context) (bool, error) {
 	if ar.Response.Result != "" && ar.Response.Result != "success" {
 		return false, fmt.Errorf("tautulli: result %q", ar.Response.Result)
 	}
-	n, err := ar.Response.Data.StreamCount.Int64()
-	if err != nil {
-		// A missing/blank stream_count means no activity data — treat as not streaming.
-		return false, nil
+	return streamCount(ar.Response.Data.StreamCount) > 0, nil
+}
+
+// streamCount extracts a non-negative active-stream count from Tautulli's
+// stream_count field. It tolerates every shape a real deployment sends: a bare
+// number (2), a numeric string ("2"), an empty string (""), null, or an omitted
+// field. Only the two numeric shapes carry a count; every other shape means "no
+// activity data" and reads as 0 — the fail-safe "blank means nobody is streaming"
+// intent, which a json.Number field silently defeated by failing the parse first.
+// Any value it cannot make sense of is treated as 0 (not streaming): a monitor that
+// returns garbage must never permanently block transcoding.
+func streamCount(raw json.RawMessage) int64 {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0
 	}
-	return n > 0, nil
+	// Unwrap a JSON string ("2" or "") to its contents; a bare number (2) has no
+	// quotes and is parsed directly.
+	s := string(raw)
+	if raw[0] == '"' {
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return 0
+		}
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }

@@ -105,7 +105,10 @@ type Config struct {
 
 	// --- engine knobs (TRANSCODE-1) ---
 
-	// VideoExts is the set of file extensions scanned (case-insensitive).
+	// VideoExts is the set of file extensions scanned. Load normalizes each entry to
+	// a lowercase, dot-free token (so ".MKV", "MKV", and "mkv" are equivalent and a
+	// natural leading dot is not silently un-matchable); the scan compares
+	// case-insensitively against a file's dot-stripped extension.
 	VideoExts []string `yaml:"video_exts"`
 	// Encoder selects the encode path — one of the internal/encoder registry keys:
 	// "cpu" (libx265/hevc, the archival default), "svtav1" (libsvtav1/av1, CPU),
@@ -366,7 +369,38 @@ func Load(path string) (*Config, error) {
 	}); err != nil {
 		return nil, fmt.Errorf("decode config %q: %w", path, err)
 	}
+
+	// video_exts is user-authored and the scan compares it against dot-free,
+	// lowercase, filepath.Ext-derived tokens. Normalize it here so the natural
+	// forms — ".MKV", "Mp4", " mkv " — all match. Without this a leading dot is
+	// SILENTLY un-matchable: ".mkv" in the YAML would make the scan find nothing and
+	// report no error, the worst kind of config-edge failure for a stranger pointing
+	// the tool at their library. Case was already normalized at match time; the dot
+	// and surrounding whitespace were not.
+	c.VideoExts = normalizeExts(c.VideoExts)
+
 	return &c, nil
+}
+
+// normalizeExts lowercases each video extension and strips a leading dot and any
+// surrounding whitespace, so ".MKV", "MKV", and "mkv" are one token. An entry that
+// normalizes to empty (a stray "" or a bare ".") is dropped rather than kept as a
+// token that can never match a real file's extension. It never errors — an
+// unusable entry is simply removed.
+func normalizeExts(exts []string) []string {
+	if exts == nil {
+		return nil
+	}
+	out := make([]string, 0, len(exts))
+	for _, e := range exts {
+		e = strings.ToLower(strings.TrimSpace(e))
+		e = strings.TrimSpace(strings.TrimPrefix(e, "."))
+		if e == "" {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // Validate refuses a configuration that could cause harm or is under-specified.

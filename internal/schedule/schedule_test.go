@@ -140,6 +140,52 @@ func TestMayRun_TautulliStreamingBlocksButOutageFailsOpen(t *testing.T) {
 	}
 }
 
+// TestTautulli_StreamCountShapesAreTolerated pins that Streaming survives every
+// shape a real Tautulli sends stream_count in. The load-bearing case is the empty
+// string (""): with the previous json.Number field the WHOLE response failed to
+// unmarshal on it, so Streaming returned an ERROR rather than the intended
+// "blank = not streaming" — defeating a code path whose own comment claimed to
+// handle it. This reds against that json.Number implementation.
+func TestTautulli_StreamCountShapesAreTolerated(t *testing.T) {
+	cases := []struct {
+		name          string
+		body          string
+		wantStreaming bool
+	}{
+		{"numeric string", `{"response":{"result":"success","data":{"stream_count":"2"}}}`, true},
+		{"bare number", `{"response":{"result":"success","data":{"stream_count":2}}}`, true},
+		{"zero string", `{"response":{"result":"success","data":{"stream_count":"0"}}}`, false},
+		{"empty string", `{"response":{"result":"success","data":{"stream_count":""}}}`, false},
+		{"null", `{"response":{"result":"success","data":{"stream_count":null}}}`, false},
+		{"field omitted", `{"response":{"result":"success","data":{}}}`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			taut := &Tautulli{baseURL: "x", apiKey: "y"}
+			taut.get = func(ctx context.Context, u string) ([]byte, error) {
+				return []byte(c.body), nil
+			}
+			streaming, err := taut.Streaming(context.Background())
+			if err != nil {
+				t.Fatalf("Streaming returned error for a well-formed response: %v", err)
+			}
+			if streaming != c.wantStreaming {
+				t.Fatalf("Streaming = %v, want %v", streaming, c.wantStreaming)
+			}
+		})
+	}
+
+	// A genuine Tautulli-reported failure (result != success) is still a real error —
+	// leniency about the count must not swallow an actual API error.
+	taut := &Tautulli{baseURL: "x", apiKey: "y"}
+	taut.get = func(ctx context.Context, u string) ([]byte, error) {
+		return []byte(`{"response":{"result":"error","message":"bad apikey"}}`), nil
+	}
+	if _, err := taut.Streaming(context.Background()); err == nil {
+		t.Fatal("result=error must surface as an error")
+	}
+}
+
 func TestTautulli_NewRequiresBoth(t *testing.T) {
 	if NewTautulli("", "key") != nil {
 		t.Error("empty base URL must yield nil")

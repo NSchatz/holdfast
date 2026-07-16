@@ -136,6 +136,30 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// TestLoad_VideoExtsNormalized pins that Load normalizes user-authored extensions
+// to the dot-free, lowercase tokens the scan compares against. A leading dot is the
+// defect that matters: the scan derives a file's extension via filepath.Ext and
+// strips the dot, so a config of ".mkv" would match NOTHING and report no error —
+// a stranger's whole library silently skipped. It reds on the un-normalized Load.
+func TestLoad_VideoExtsNormalized(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "exts.yaml")
+	writeFile(t, p, "library_roots:\n  - /mnt/media\nvideo_exts: [\".MKV\", \"Mp4\", \" .m2ts \", \"\", \".\"]\n")
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"mkv", "mp4", "m2ts"}
+	if len(c.VideoExts) != len(want) {
+		t.Fatalf("video_exts = %#v, want %#v", c.VideoExts, want)
+	}
+	for i, w := range want {
+		if c.VideoExts[i] != w {
+			t.Fatalf("video_exts[%d] = %q, want %q (full: %#v)", i, c.VideoExts[i], w, c.VideoExts)
+		}
+	}
+}
+
 // TestLoad_WorstFrameFloorIsOnByDefault pins the DEFAULT, which is the entire
 // substance of TRANSCODE-11: the gate's protection against a locally-broken encode
 // is only real if it is on for the operator who wrote a three-line config and never
