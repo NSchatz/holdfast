@@ -14,6 +14,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -93,6 +94,15 @@ type Engine struct {
 	// libvmaf error without a second real encode. Production leaves it nil.
 	vmafScore func(ctx context.Context, distorted, reference string, subsample int, model string) (vmaf.Result, error)
 
+	// fsyncPath, when non-nil, replaces the real fsync in the durable swap
+	// (TRANSCODE-17). A test uses it to observe or force-fail the fsync of the temp
+	// (before the rename) or the parent directory (after it), proving the durability
+	// discipline is present and fails safe on an fsync error — the code discipline is
+	// testable even though power-loss durability itself is not (that needs a power-cut
+	// harness; see the "Durability" comment on the swap). Production leaves it nil and
+	// fsyncs for real via the package-level fsyncPath.
+	fsyncPath func(path string) error
+
 	// hookAfterRename, when non-nil, is called immediately after a successful
 	// ext-CHANGING rename (final != f) and BEFORE the now-orphaned source is removed.
 	// Production leaves it nil; it exists only so a test can simulate a crash in that
@@ -125,6 +135,37 @@ func (e *Engine) emit(ev Event) {
 	if e.Observer != nil {
 		e.Observer(ev)
 	}
+}
+
+// fsync flushes path (a regular file OR a directory) to durable storage, routing
+// through the test seam when one is set. It is the core of TRANSCODE-17's power-loss
+// durability discipline (see the "Durability" comment in ProcessFile).
+func (e *Engine) fsync(path string) error {
+	if e.fsyncPath != nil {
+		return e.fsyncPath(path)
+	}
+	return fsyncPath(path)
+}
+
+// fsyncPath opens path and fsyncs it. For a regular file this forces its data blocks
+// to disk; for a DIRECTORY it forces the directory's name entries to disk — which is
+// what makes a rename() into (or a remove() from) that directory survive a power loss,
+// not merely a clean crash. os.Rename is atomic w.r.t. a concurrent reader, but POSIX
+// does not make the rename PERSISTENT until the containing directory is fsync'd. On
+// Linux fsync of an O_RDONLY fd flushes both a file's dirty pages and a directory's
+// entries, so a read-only open suffices for both. The Sync error is the one that
+// matters (it is what reports a failed flush); a Close error on an fd we only read is
+// surfaced only when Sync itself succeeded.
+func fsyncPath(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // New constructs an Engine. All dependencies are injected so tests can supply a
@@ -549,6 +590,31 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		}
 	}
 
+	// Durability before the swap (TRANSCODE-17). os.Rename is atomic w.r.t. a
+	// concurrent reader, but atomicity is not PERSISTENCE: after Encode returns, the
+	// temp's data blocks may still live only in the page cache, so a POWER LOSS (not a
+	// clean crash — fixture (3) already proves the clean-crash window fails safe) could
+	// make the rename durable while the bytes it now names are not, yielding a
+	// zero-length or torn file where the source used to be. The POSIX/Linux
+	// durable-rename discipline is: fsync the temp's DATA before the rename (so the
+	// bytes are on disk before any name points at them), then fsync the parent
+	// DIRECTORY after the rename (below, so the rename entry itself survives). If the
+	// temp cannot be made durable, do NOT swap — discard it and fail, source untouched.
+	//
+	// This runs BEFORE the TRANSCODE-16 source re-fingerprint below, deliberately: the
+	// temp fsync can be slow (it flushes the encode's residual dirty pages), and the
+	// re-fingerprint's guarantee is that its window is the microseconds between IT and
+	// the rename syscall — so the fsync must not sit inside that window. Ordering here
+	// is independent of the re-fingerprint (fsyncing the temp neither reads nor depends
+	// on the source), so moving it up is free and keeps the -16 TOCTOU window tight.
+	if err := e.fsync(tmp); err != nil {
+		e.Log.Warn("FAIL (could not fsync the encode before the swap, source untouched)", "file", f, "err", err)
+		_ = os.Remove(tmp)
+		out.Reason = "fsync temp before swap: " + err.Error()
+		e.finish(ctx, f, key, store.Failed, out)
+		return nil
+	}
+
 	// Re-fingerprint the SOURCE right before the swap (TRANSCODE-16 — the headline
 	// no-loss hazard). ProcessFile fingerprinted the source ONCE at entry (key) and
 	// has re-checked only the TARGET since; the source's own identity was never
@@ -561,9 +627,11 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// ext-change swap removes f afterwards, deleting the new content. If the
 	// fingerprint moved, discard the temp and FAIL with a logged reason — never swap.
 	// This narrows the TOCTOU to the microseconds between this stat and the rename
-	// syscall; it cannot close it entirely (only an exclusive lock on a file another
-	// process owns could), but it turns "guaranteed loss on any mid-encode rewrite"
-	// into "loss only on a sub-millisecond race". Symmetric with the target re-check.
+	// syscall (nothing slow runs between them — the temp fsync above is deliberately
+	// hoisted out of this window); it cannot close it entirely (only an exclusive lock
+	// on a file another process owns could), but it turns "guaranteed loss on any
+	// mid-encode rewrite" into "loss only on a sub-millisecond race". Symmetric with
+	// the target re-check.
 	if cur := probe.Fingerprint(f); cur != key {
 		e.Log.Warn("FAIL (source changed during encode — refusing to overwrite the newer content)", "file", f, "entry", key, "now", cur)
 		_ = os.Remove(tmp)
@@ -582,7 +650,25 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		e.finish(ctx, f, key, store.Failed, out)
 		return nil
 	}
+
+	// Durability after the swap (TRANSCODE-17). fsync the parent directory so the
+	// rename above survives a power loss. dir is the source's directory and, because
+	// the temp is same-dir, also final's directory, so one fsync covers the whole swap.
+	dirErr := e.fsync(dir)
+
 	if final != f {
+		if dirErr != nil {
+			// The rename is not provably durable. Removing the source now would risk a
+			// power-loss window where the rename is lost AND the source removal persists,
+			// leaving the library entry pointing at nothing — the exact hazard this phase
+			// closes. Leave BOTH files (a duplicate, never a loss), identical to a crash
+			// in this window (fixture 3): the store row stays active for the next
+			// RunOneshot's RecoverStale, and the collision guard reconciles the duplicate
+			// on the next scan. Return a non-context error — it is logged and the scan
+			// continues; the source is never removed under an unproven rename.
+			e.Log.Warn("swap durability unproven (parent dir fsync failed) — leaving both files for the next scan to reconcile", "file", f, "final", final, "err", dirErr)
+			return fmt.Errorf("fsync parent dir after rename of %s: %w", final, dirErr)
+		}
 		// Test seam (TRANSCODE-16 fixture c): simulate a crash in the window between the
 		// rename and the delete. nil in production, so this is a no-op there.
 		if e.hookAfterRename != nil {
@@ -597,6 +683,18 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		if err := os.Remove(f); err != nil {
 			e.Log.Warn("transcoded ok but could not remove original", "file", f, "err", err)
 		}
+		// Persist the removal too. Unlike the rename this is best-effort: a lost removal
+		// only leaves a duplicate (fail-safe, reconciled on the next scan), never a loss,
+		// so a failure here is logged, not a gate.
+		if err := e.fsync(dir); err != nil {
+			e.Log.Warn("could not fsync parent dir after removing original (durability not guaranteed)", "file", f, "err", err)
+		}
+	} else if dirErr != nil {
+		// In-place swap: the rename already atomically replaced the source, so a reader
+		// always sees either the old or the new file, never nothing — a dir-fsync failure
+		// here cannot lose data, it only means the swap's durability isn't guaranteed
+		// across a power loss. There is nothing to roll back; log and proceed.
+		e.Log.Warn("swap durability unproven (parent dir fsync failed) — in-place swap already applied", "file", f, "err", dirErr)
 	}
 	// The sizes either side of the swap. fi was stat'd at entry (the pre-encode
 	// source), so SourceBytes is accurate even though f may already be gone (a

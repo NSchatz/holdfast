@@ -159,4 +159,14 @@ behind. Run it against any image you are about to trust.
   encode has not been timed on real hardware; an SBC will be slow with libx265.
 - **No shell in the image.** `docker exec ... sh` will not work. To poke at the bundled ffmpeg:
   `docker run --rm --entrypoint /usr/local/bin/ffmpeg ghcr.io/nschatz/holdfast:latest -version`.
+- **Power-loss durability of the swap is filesystem-dependent.** holdfast follows the POSIX
+  durable-rename discipline — `fsync` the encode before the rename, `fsync` the parent directory
+  after it, and (in the container-changing case) never remove the source until that directory
+  `fsync` has succeeded. On a local journaled or copy-on-write filesystem (ext4, XFS, Btrfs, ZFS)
+  that makes the completed swap survive a power cut. On a **networked or stacked** library mount
+  (NFS, SMB/CIFS, overlayfs) the durability of a directory `fsync` is weaker or server-defined, so
+  a power loss there can still lose a just-completed swap — it fails *safe* (a duplicate or the
+  original, never a torn or missing file), but the reclaim may not persist. This cannot be proven
+  in CI (it needs a power-cut harness), so it is stated as a limitation, not a guarantee; prefer a
+  local filesystem for the `/media` mount.
 - The image is **private until the repository is** — GHCR package visibility follows the repo.
