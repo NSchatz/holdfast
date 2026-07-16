@@ -165,6 +165,22 @@ func Fingerprint(f string) string {
 	return strconv.FormatInt(fi.Size(), 10) + ":" + strconv.FormatInt(fi.ModTime().Unix(), 10)
 }
 
+// IsSymlink reports whether f is itself a symbolic link (Lstat, so it does NOT
+// follow the link). The engine's other stat-based guards (Fingerprint, NLink) use
+// os.Stat, which resolves a symlink to its target — so a symlinked source file has
+// nlink == 1 and slips the hardlink guard. Replacing such a file via rename would
+// swap the LINK for a regular file, silently orphaning the real target it pointed
+// at and changing what the library entry means. A stat error is reported as "not a
+// symlink" so an unreadable entry falls through to the normal path (where the next
+// probe fails safe) rather than being force-skipped here on an ambiguous stat.
+func IsSymlink(f string) bool {
+	fi, err := os.Lstat(f)
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeSymlink != 0
+}
+
 // NLink returns the hard-link count of f, or 1 if it cannot be determined (so a
 // stat failure never trips the hardlink guard). A count > 1 means the file is an
 // active seed / dup: replacing it via rename would break the link and reclaim

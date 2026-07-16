@@ -34,6 +34,11 @@ and fixes the trust gaps:
   duration/packet parity, strictly smaller, per-type stream-count parity, full decode-integrity, and a
   **VMAF** perceptual-quality check — both its **average** (`min_vmaf`) *and* its **worst frame**
   (`vmaf_min_pool`). Any failure leaves the source byte-for-byte untouched.
+- **The source can't be swapped out from under a running encode.** The source's `size:mtime` is
+  re-checked immediately before the swap: if something else (Plex, an *arr, you) rewrote or replaced it
+  while the encode ran — hours, on a real film — the swap is **refused** rather than atomically
+  overwriting the newer content with a re-encode of the stale bytes. A **symlinked** source is
+  **skipped**, never replaced in place (which would orphan the real file it points at).
 - **The quality gate bounds the worst frame, not just the average.** An average hides local damage —
   Netflix says so outright — so a short destroyed segment inside an otherwise-clean encode passes a
   mean-only gate, and passes every structural check too (it decodes fine and carries the right duration,
@@ -136,7 +141,7 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | Field | On | What it is |
 |---|---|---|
 | `reason` | failed | the error that rejected it (the encode error, or **which gate** refused the output) |
-| `reason` | skipped | **which guard** fired — `already-at-target-codec`, `low-bitrate`, `hardlinked`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `target-already-exists` |
+| `reason` | skipped | **which guard** fired — `already-at-target-codec`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `target-already-exists` |
 | `encoder` | any job that reached the encoder | the encoder that ran (`cpu`, `svtav1`, `nvenc`, …) — a skip, or a file with no readable video stream, never gets that far and records none |
 | `vmaf_mean`, `vmaf_min` | done, and a VMAF-rejected failure | the pooled harmonic mean **and the worst frame** |
 | `vmaf_model` | as above | the libvmaf model that produced them |

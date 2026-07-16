@@ -57,6 +57,7 @@ const (
 	SkipIncompleteHDRMetadata = "incomplete-hdr-metadata"
 	SkipExoticPixelFormat     = "exotic-pixel-format"
 	SkipTargetExists          = "target-already-exists"
+	SkipSymlink               = "symlinked-source"
 
 	// FailUnreadable is the one failure whose reason is a token: there is no error to
 	// quote, because the probe simply reported no video stream.
@@ -91,6 +92,15 @@ type Engine struct {
 	// gate. Unexported test seam — lets a test force a low score or an unavailable-
 	// libvmaf error without a second real encode. Production leaves it nil.
 	vmafScore func(ctx context.Context, distorted, reference string, subsample int, model string) (vmaf.Result, error)
+
+	// hookAfterRename, when non-nil, is called immediately after a successful
+	// ext-CHANGING rename (final != f) and BEFORE the now-orphaned source is removed.
+	// Production leaves it nil; it exists only so a test can simulate a crash in that
+	// exact window (TRANSCODE-16 fixture c) through the REAL swap path — the only way
+	// to prove the two-step rename+delete fails safe. When it returns a non-nil error,
+	// ProcessFile aborts before the delete, exactly as a crashed process would, leaving
+	// BOTH files on disk (a duplicate, never a loss) for the next scan to reconcile.
+	hookAfterRename func() error
 
 	// Observer, when non-nil, receives an Event on every job-state transition
 	// (TRANSCODE-7's API/SSE hub subscribes here). It is a fire-and-forget
@@ -353,6 +363,20 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// immediately, not only once it advances to encoding.
 	e.emit(Event{Path: f, Status: store.Probing, Worker: worker})
 
+	// Symlink guard (TRANSCODE-16). The hardlink guard above catches nlink > 1, but a
+	// symlink has nlink == 1 (os.Stat resolves it to its target) and slips through;
+	// config.Validate refuses a symlinked ROOT but not a symlinked file WITHIN the
+	// tree. The swap is os.Rename(tmp, final) with final == f — which replaces the
+	// LINK itself with a regular file, silently orphaning the real target it pointed
+	// at and changing what the library entry means. Resolving and transcoding the
+	// target is a deliberate non-goal here, so a symlinked source is SKIPPED with a
+	// logged reason, never swapped in place.
+	if probe.IsSymlink(f) {
+		e.Log.Info("skip (symlinked source — swap would replace the link, orphaning its target)", "file", f)
+		e.finish(ctx, f, key, store.Skipped, because(SkipSymlink))
+		return nil
+	}
+
 	codec := e.Probe.VideoCodec(ctx, f)
 	if codec == "" {
 		e.Log.Info("skip (unreadable / no video stream)", "file", f)
@@ -525,6 +549,29 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		}
 	}
 
+	// Re-fingerprint the SOURCE right before the swap (TRANSCODE-16 — the headline
+	// no-loss hazard). ProcessFile fingerprinted the source ONCE at entry (key) and
+	// has re-checked only the TARGET since; the source's own identity was never
+	// re-verified. An encode can run for hours, and if Plex / an *arr / a user
+	// rewrote or replaced the source in that window, its size:mtime moved. The swap
+	// below would then atomically overwrite the NEWER content with a re-encode of the
+	// stale bytes — silent data loss that every structural and VMAF gate "passed"
+	// only because they ran against the OLD file. This bites BOTH swap shapes: an
+	// in-place rename (final == f) overwrites the new source directly, and an
+	// ext-change swap removes f afterwards, deleting the new content. If the
+	// fingerprint moved, discard the temp and FAIL with a logged reason — never swap.
+	// This narrows the TOCTOU to the microseconds between this stat and the rename
+	// syscall; it cannot close it entirely (only an exclusive lock on a file another
+	// process owns could), but it turns "guaranteed loss on any mid-encode rewrite"
+	// into "loss only on a sub-millisecond race". Symmetric with the target re-check.
+	if cur := probe.Fingerprint(f); cur != key {
+		e.Log.Warn("FAIL (source changed during encode — refusing to overwrite the newer content)", "file", f, "entry", key, "now", cur)
+		_ = os.Remove(tmp)
+		out.Reason = "source changed during encode (fingerprint " + key + " -> " + cur + ") — refused to overwrite newer content"
+		e.finish(ctx, f, key, store.Failed, out)
+		return nil
+	}
+
 	// Atomic swap. Same directory => same filesystem => rename() is atomic. If the
 	// ext is unchanged the rename replaces the source in one step; if it changed we
 	// rename to the new name then remove the now-orphaned source.
@@ -536,6 +583,17 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		return nil
 	}
 	if final != f {
+		// Test seam (TRANSCODE-16 fixture c): simulate a crash in the window between the
+		// rename and the delete. nil in production, so this is a no-op there.
+		if e.hookAfterRename != nil {
+			if err := e.hookAfterRename(); err != nil {
+				// Both files are on disk now (final = the new encode, f = the original):
+				// a duplicate, never a loss. Abort exactly as a crashed process would —
+				// the store row stays active for the next RunOneshot's RecoverStale, and
+				// the collision guard reconciles the duplicate on the next scan.
+				return err
+			}
+		}
 		if err := os.Remove(f); err != nil {
 			e.Log.Warn("transcoded ok but could not remove original", "file", f, "err", err)
 		}
