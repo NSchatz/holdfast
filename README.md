@@ -39,6 +39,14 @@ and fixes the trust gaps:
   while the encode ran — hours, on a real film — the swap is **refused** rather than atomically
   overwriting the newer content with a re-encode of the stale bytes. A **symlinked** source is
   **skipped**, never replaced in place (which would orphan the real file it points at).
+- **The swap is made durable, not just atomic.** A `rename` is atomic for a concurrent reader, but
+  POSIX does not make it *persistent* until the containing directory is `fsync`'d — a power loss an
+  instant after `rename()` returns can otherwise lose it, and in the container-changing case the
+  source was already removed, leaving the entry pointing at nothing. holdfast `fsync`s the encode
+  **before** the rename and the parent directory **after** it (the POSIX durable-rename recipe); if
+  that directory `fsync` fails the source is **kept**, never removed under an unproven rename. True
+  power-loss survival is filesystem- and hardware-dependent (and untestable in CI without a power-cut
+  harness) — this is the portable discipline, documented as such, not an absolute guarantee.
 - **The quality gate bounds the worst frame, not just the average.** An average hides local damage —
   Netflix says so outright — so a short destroyed segment inside an otherwise-clean encode passes a
   mean-only gate, and passes every structural check too (it decodes fine and carries the right duration,
