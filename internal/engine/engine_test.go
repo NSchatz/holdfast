@@ -451,7 +451,7 @@ func TestCase2_EncodeErrorSourceUntouched(t *testing.T) {
 	d := t.TempDir()
 	mkH264(t, ffmpeg, filepath.Join(d, "movie.mkv"), "3M")
 	before := md5f(t, filepath.Join(d, "movie.mkv"))
-	enc := EncoderFunc(func(ctx context.Context, in, out string) error { return errFake })
+	enc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error { return errFake })
 	led := run(t, ffmpeg, ffprobe, d, enc, nil)
 	if md5f(t, filepath.Join(d, "movie.mkv")) != before {
 		t.Error("source modified after encode failure")
@@ -472,7 +472,7 @@ func TestCase3_CorruptOutputRejected(t *testing.T) {
 	d := t.TempDir()
 	mkH264(t, ffmpeg, filepath.Join(d, "movie.mkv"), "3M")
 	before := md5f(t, filepath.Join(d, "movie.mkv"))
-	enc := EncoderFunc(func(ctx context.Context, in, out string) error {
+	enc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
 		return os.WriteFile(out, make([]byte, 200), 0o644) // garbage, not a video
 	})
 	led := run(t, ffmpeg, ffprobe, d, enc, nil)
@@ -501,7 +501,7 @@ func TestCase4_LargerOutputRejected(t *testing.T) {
 		t.Fatal("fixture not actually larger")
 	}
 	before := md5f(t, filepath.Join(d, "movie.mkv"))
-	enc := EncoderFunc(func(ctx context.Context, in, out string) error {
+	enc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
 		b, err := os.ReadFile(big)
 		if err != nil {
 			return err
@@ -730,7 +730,7 @@ func TestCase13_FailedRetriedThenParked(t *testing.T) {
 	src := filepath.Join(d, "movie.mkv")
 	mkH264(t, ffmpeg, src, "3M")
 	before := md5f(t, src)
-	enc := EncoderFunc(func(ctx context.Context, in, out string) error { return errFake })
+	enc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error { return errFake })
 	ts := newTestStore(t, d)
 	cfg := baseCfg(d)
 	cfg.MaxFailures = 3
@@ -815,7 +815,7 @@ func TestCase16_TruncatedUnknownDurationRejected(t *testing.T) {
 	before := md5f(t, raw)
 	// A clean-but-short HEVC (3 frames): decodes fine, smaller, right codec — only
 	// packet-count parity can reject it (source has ~20 frames).
-	enc := EncoderFunc(func(ctx context.Context, in, out string) error {
+	enc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
 		return exec.Command(ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-y", "-i", in,
 			"-c:v", "libx265", "-frames:v", "3", "-x265-params", "log-level=error", "--", out).Run()
 	})
@@ -848,7 +848,7 @@ func TestCase17_DroppedAudioTrackRejected(t *testing.T) {
 	before := md5f(t, src)
 	// hooked encode maps video only -> a valid, smaller, right-duration HEVC with NO
 	// audio; only per-type stream-count parity can catch the loss.
-	enc := EncoderFunc(func(ctx context.Context, in, out string) error {
+	enc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
 		return exec.Command(ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-y", "-i", in,
 			"-map", "0:v:0", "-c:v", "libx265", "-x265-params", "log-level=error",
 			"-pix_fmt", "yuv420p10le", "--", out).Run()
@@ -1194,7 +1194,7 @@ func TestCaseE_ExoticPixFmtSkipped(t *testing.T) {
 // decodes, smaller, same duration/streams) but perceptually bad, so ONLY the VMAF
 // gate can reject it. This is the anti-advisory proof for the VMAF gate.
 func degradedEncoder(ffmpeg string) EncoderFunc {
-	return func(ctx context.Context, in, out string) error {
+	return func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
 		return exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-y", "-i", in,
 			"-vf", "scale=64:48,scale=320:240:flags=neighbor",
 			"-c:v", "libx265", "-crf", "45", "-x265-params", "log-level=error",
@@ -1264,7 +1264,7 @@ func TestVmaf_AcceptsNormalEncode(t *testing.T) {
 // it. In a real 2-hour film the same arithmetic buys an attacker — or a flaky
 // encoder — over a minute of ruined video through the same gate.
 func locallyBrokenEncoder(ffmpeg string) EncoderFunc {
-	return func(ctx context.Context, in, out string) error {
+	return func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
 		return exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-y", "-i", in,
 			"-filter_complex",
 			"[0:v]split=2[cl][dm];"+

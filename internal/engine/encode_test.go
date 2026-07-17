@@ -82,7 +82,7 @@ func TestEncode_FpsModePassthroughWired(t *testing.T) {
 	enc := FFmpegEncoder{FFmpeg: fakeFFmpeg, Cfg: cfg, Probe: prober}
 
 	out := filepath.Join(d, "out.mkv")
-	if err := enc.Encode(context.Background(), src, out); err != nil {
+	if err := enc.Encode(context.Background(), src, out, nil); err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
 
@@ -108,7 +108,7 @@ func TestEncode_ColorArgsWiredForHDR10(t *testing.T) {
 	enc := FFmpegEncoder{FFmpeg: fakeFFmpeg, Cfg: cfg, Probe: prober}
 
 	out := filepath.Join(d, "out.mkv")
-	if err := enc.Encode(context.Background(), src, out); err != nil {
+	if err := enc.Encode(context.Background(), src, out, nil); err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
 
@@ -146,7 +146,7 @@ func TestEncode_PixFmtAutoDerivesFromSource(t *testing.T) {
 	enc := FFmpegEncoder{FFmpeg: fakeFFmpeg, Cfg: cfg, Probe: prober}
 
 	out := filepath.Join(d, "out.mkv")
-	if err := enc.Encode(context.Background(), src, out); err != nil {
+	if err := enc.Encode(context.Background(), src, out, nil); err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
 
@@ -176,7 +176,7 @@ func TestEncode_ExoticPixFmtRefusesToEncode(t *testing.T) {
 	enc := FFmpegEncoder{FFmpeg: realFFmpeg, Cfg: cfg, Probe: prober}
 
 	out := filepath.Join(d, "out.mkv")
-	err := enc.Encode(context.Background(), src, out)
+	err := enc.Encode(context.Background(), src, out, nil)
 	if err == nil {
 		t.Fatal("Encode succeeded on an exotic pix_fmt source — should have refused")
 	}
@@ -199,7 +199,7 @@ func TestEncode_UnknownEncoderErrors(t *testing.T) {
 	enc := FFmpegEncoder{FFmpeg: realFFmpeg, Cfg: cfg, Probe: prober}
 
 	out := filepath.Join(d, "out.mkv")
-	if err := enc.Encode(context.Background(), src, out); err == nil {
+	if err := enc.Encode(context.Background(), src, out, nil); err == nil {
 		t.Fatal("Encode succeeded with an unknown encoder key — should have refused")
 	}
 }
@@ -224,7 +224,7 @@ func TestEncode_SVTAV1WiresCodecColorAndPreset(t *testing.T) {
 	enc := FFmpegEncoder{FFmpeg: fakeFFmpeg, Cfg: cfg, Probe: prober}
 
 	out := filepath.Join(d, "out.mkv")
-	if err := enc.Encode(context.Background(), src, out); err != nil {
+	if err := enc.Encode(context.Background(), src, out, nil); err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
 
@@ -349,7 +349,7 @@ func TestEncode_VaapiDeviceFlagPrecedesInput(t *testing.T) {
 	enc := FFmpegEncoder{FFmpeg: fakeFFmpeg, Cfg: cfg, Probe: prober}
 
 	out := filepath.Join(d, "out.mkv")
-	if err := enc.Encode(context.Background(), src, out); err != nil {
+	if err := enc.Encode(context.Background(), src, out, nil); err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
 

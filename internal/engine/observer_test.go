@@ -286,7 +286,7 @@ func TestObserver_FailedJobRecordsTheError(t *testing.T) {
 
 	// A deterministic encoder failure — the safety suite's standard seam, so the test
 	// asserts the failure PATH rather than depending on codec luck.
-	enc := EncoderFunc(func(ctx context.Context, in, out string) error { return errFake })
+	enc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error { return errFake })
 	eng := buildEngine(t, ffmpeg, ffprobe, root, enc, func(c *config.Config) {
 		c.MinBitrateKbps = 0
 	})

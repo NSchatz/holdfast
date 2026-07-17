@@ -64,15 +64,9 @@ func (p *Prober) VideoCodec(ctx context.Context, f string) string {
 func (p *Prober) BitrateKbps(ctx context.Context, f string) int {
 	br := firstLine(ctx, p.FFprobe, "-v", "error", "-select_streams", "v:0",
 		"-show_entries", "stream=bit_rate", "-of", "default=nw=1:nk=1", "--", f)
-	if !intRe.MatchString(br) {
-		br = firstLine(ctx, p.FFprobe, "-v", "error",
-			"-show_entries", "format=bit_rate", "-of", "default=nw=1:nk=1", "--", f)
-	}
-	if intRe.MatchString(br) {
-		n, _ := strconv.Atoi(br)
-		return n / 1000
-	}
-	return 0
+	// resolveBitrate applies the container fallback + kbps conversion, shared with the
+	// VideoProps snapshot (TRANSCODE-PERF) so the two can never disagree.
+	return p.resolveBitrate(ctx, f, br)
 }
 
 // DurationSec returns the container duration (falling back to the video stream's)
@@ -205,12 +199,9 @@ func NLink(f string) uint64 {
 func (p *Prober) ColorField(ctx context.Context, f, field string) string {
 	v := firstLine(ctx, p.FFprobe, "-v", "error", "-select_streams", "v:0",
 		"-show_entries", "stream="+field, "-of", "default=nw=1:nk=1", "--", f)
-	switch v {
-	case "unknown", "reserved", "N/A", "":
-		return ""
-	default:
-		return v
-	}
+	// normColorValue is shared with the VideoProps snapshot (TRANSCODE-PERF) so a
+	// single-field probe and a batched one normalise identically.
+	return normColorValue(v)
 }
 
 // CodecTagString returns the video stream's codec_tag_string (e.g. "dvh1", "hev1")
@@ -232,12 +223,8 @@ func (p *Prober) PixFmt(ctx context.Context, f string) string {
 func (p *Prober) FieldOrder(ctx context.Context, f string) string {
 	v := firstLine(ctx, p.FFprobe, "-v", "error", "-select_streams", "v:0",
 		"-show_entries", "stream=field_order", "-of", "default=nw=1:nk=1", "--", f)
-	switch v {
-	case "unknown", "N/A", "":
-		return ""
-	default:
-		return v
-	}
+	// normFieldOrder is shared with the VideoProps snapshot (TRANSCODE-PERF).
+	return normFieldOrder(v)
 }
 
 // frameSideDataFlat returns the flat FIRST-FRAME side-data of the video stream —

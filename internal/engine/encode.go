@@ -19,15 +19,24 @@ import (
 // An Encoder must write its result to out and return nil only if it believes the
 // encode succeeded; the engine independently VERIFIES the output before any swap,
 // so an Encoder is never trusted on its word.
+//
+// props is the source's probe snapshot the engine already took for its skip guards
+// (TRANSCODE-PERF), threaded in so a production encoder reuses it instead of
+// re-spawning ffprobe for pix_fmt and the colour tags. It may be nil (a direct caller
+// — chiefly the tests — that did not pre-probe); FFmpegEncoder then takes its own
+// snapshot of the same source, so behaviour is identical, just an extra probe this
+// path avoids when the engine supplies one.
 type Encoder interface {
-	Encode(ctx context.Context, in, out string) error
+	Encode(ctx context.Context, in, out string, props *probe.VideoProps) error
 }
 
 // EncoderFunc adapts a plain function to Encoder (used by tests).
-type EncoderFunc func(ctx context.Context, in, out string) error
+type EncoderFunc func(ctx context.Context, in, out string, props *probe.VideoProps) error
 
 // Encode calls the wrapped function.
-func (f EncoderFunc) Encode(ctx context.Context, in, out string) error { return f(ctx, in, out) }
+func (f EncoderFunc) Encode(ctx context.Context, in, out string, props *probe.VideoProps) error {
+	return f(ctx, in, out, props)
+}
 
 // FFmpegEncoder is the production encoder. It carries every stream but data
 // streams (-map 0 -map -0:d?), stream-copies audio/subtitle/attachment, and
@@ -54,7 +63,7 @@ type FFmpegEncoder struct {
 // Encode runs ffmpeg. It returns an error if the configured encoder is unknown, if
 // ffmpeg exits non-zero, or if colour/pixel-format derivation fails (the engine
 // then discards the temp and leaves the source untouched).
-func (e FFmpegEncoder) Encode(ctx context.Context, in, out string) error {
+func (e FFmpegEncoder) Encode(ctx context.Context, in, out string, props *probe.VideoProps) error {
 	spec, ok := encoder.Lookup(e.Cfg.Encoder)
 	if !ok {
 		return fmt.Errorf("unknown encoder %q (known: %v)", e.Cfg.Encoder, encoder.Known())
@@ -62,10 +71,17 @@ func (e FFmpegEncoder) Encode(ctx context.Context, in, out string) error {
 	if e.Probe == nil {
 		return fmt.Errorf("FFmpegEncoder.Probe is nil (required to derive colour/pixel-format args from the source)")
 	}
+	// The engine threads in the snapshot it already probed for its skip guards
+	// (TRANSCODE-PERF). A direct caller that did not pre-probe passes nil, so take one
+	// here — it snapshots the same source file the guards read, so a fresh snapshot is
+	// equivalent; this only avoids a duplicate probe when the engine supplies one.
+	if props == nil {
+		props = e.Probe.VideoProps(ctx, in)
+	}
 
 	pixFmt := e.Cfg.PixelFormat
 	if e.Cfg.PixelFormatAuto() {
-		derived, ok := hdr.DerivePixFmt(e.Probe.PixFmt(ctx, in))
+		derived, ok := hdr.DerivePixFmt(props.PixFmt())
 		if !ok {
 			// The engine's pix_fmt guard runs before Encode and should already have
 			// skipped an exotic source — this is a defence-in-depth backstop so the
@@ -80,7 +96,13 @@ func (e FFmpegEncoder) Encode(ctx context.Context, in, out string) error {
 	// are encoder-agnostic and applied to every Spec. x265Color (HDR10 static
 	// master-display/max-cll) is libx265-only — see buildArgs. DV/HDR10+ were
 	// already detected-and-skipped upstream by the engine.
-	colorArgs, x265Color := hdr.DeriveColorArgs(ctx, e.Probe, in)
+	colorArgs, x265Color := hdr.DeriveColorArgsFrom(
+		props.Color("color_primaries"),
+		props.Color("color_transfer"),
+		props.Color("color_space"),
+		props.Color("color_range"),
+		props.SideData(),
+	)
 
 	args := []string{"-hide_banner", "-nostdin", "-loglevel", "error", "-y"}
 	if spec.Key == "vaapi" {
