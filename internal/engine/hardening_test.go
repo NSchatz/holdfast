@@ -108,7 +108,7 @@ func TestHardening_SourceRewrittenMidEncodeIsNotOverwritten(t *testing.T) {
 
 	// The adversary: a real, faithful HEVC encode of `in`, THEN the source is rewritten
 	// with B. Order matters — encode reads the original, then B overwrites it.
-	racingEncoder := EncoderFunc(func(ctx context.Context, in, out string) error {
+	racingEncoder := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
 		if err := realHEVCEncode(ctx, ffmpeg, in, out); err != nil {
 			return err
 		}

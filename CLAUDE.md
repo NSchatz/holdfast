@@ -304,7 +304,10 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   a CI schema self-test (reds on an invalid config) back it.
 - `internal/probe` — ffprobe/ffmpeg inspection helpers (codec, bitrate, duration, packet count, decode
   healthcheck, stream counts, fingerprint, nlink, colour fields, side-data (frame + stream, flat), pix_fmt,
-  field_order, codec_tag_string); UNKNOWN values are never coerced to 0.
+  field_order, codec_tag_string); UNKNOWN values are never coerced to 0. `VideoProps` (TRANSCODE-PERF) takes
+  **one** source snapshot of every stream-level field a guard/encoder reads and exposes it through accessors
+  that return exactly what the single-field methods do (shared normalisation, byte-identical side data) —
+  so `ProcessFile` probes a file once instead of spawning ~15 ffprobe processes, behaviour unchanged.
 - `internal/hdr` (TRANSCODE-3) — the colour/HDR + pixel-format port of the bash transcoder's HDR logic:
   pure functions (`ClassFrom`, `MasterDisplay`, `MaxCLL`, `StaticMetadataIncomplete`, `DerivePixFmt`) that
   are unit-tested with no ffmpeg dependency, plus prober-backed `Classify`/`DeriveColorArgs` used by the

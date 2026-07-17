@@ -418,7 +418,19 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		return nil
 	}
 
-	codec := e.Probe.VideoCodec(ctx, f)
+	// One probe snapshot of the source, shared by every skip guard below AND handed to
+	// the encoder (TRANSCODE-PERF). This replaces the ~15 separate ffprobe/ffmpeg
+	// processes a single encode-bound file used to spawn — codec, bitrate, field_order,
+	// codec tag, the four colour tags, pix_fmt, and the side data, each fetched more
+	// than once across the guards, Classify, the HDR-incomplete check and the encoder.
+	// Behaviour-preserving: each accessor returns exactly what its old Prober method
+	// did (shared normalisation, byte-identical side data), and reading the guards off
+	// one snapshot is if anything MORE self-consistent than re-probing a file mid-
+	// pipeline. The costly whole-file checks (DecodeOK, packet count, output duration/
+	// stream counts) are NOT here — they run in verifyOutput against the encoded temp.
+	props := e.Probe.VideoProps(ctx, f)
+
+	codec := props.Codec()
 	if codec == "" {
 		e.Log.Info("skip (unreadable / no video stream)", "file", f)
 		e.finish(ctx, f, key, store.Failed, because(FailUnreadable))
@@ -430,7 +442,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		return nil
 	}
 
-	if br := e.Probe.BitrateKbps(ctx, f); br > 0 && br < e.Cfg.MinBitrateKbps {
+	if br := props.BitrateKbps(); br > 0 && br < e.Cfg.MinBitrateKbps {
 		e.Log.Info("skip (low bitrate)", "file", f, "kbps", br, "min", e.Cfg.MinBitrateKbps)
 		e.finish(ctx, f, key, store.Skipped, because(SkipLowBitrate))
 		return nil
@@ -439,7 +451,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// Interlace guard. This tool never deinterlaces — re-encoding an interlaced
 	// source with a progressive-assuming pipeline bakes in combing artifacts
 	// permanently. Progressive or unknown field_order proceeds.
-	switch e.Probe.FieldOrder(ctx, f) {
+	switch props.FieldOrder() {
 	case "tt", "bb", "tb", "bt":
 		e.Log.Info("skip (interlaced — not deinterlacing)", "file", f)
 		e.finish(ctx, f, key, store.Skipped, because(SkipInterlaced))
@@ -454,7 +466,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// FFmpegEncoder). Probed only here, on a non-HEVC encode-bound file
 	// (already-HEVC HDR was skipped above), so the cost falls on the small
 	// minority actually re-encoded.
-	switch hdr.Classify(ctx, e.Probe, f) {
+	switch hdr.ClassFrom(props.CodecTag(), props.SideData(), props.Color("color_transfer")) {
 	case hdr.ClassDV:
 		e.Log.Info("skip (Dolby Vision — RPU cannot survive a generic re-encode)", "file", f)
 		e.finish(ctx, f, key, store.Skipped, because(SkipDolbyVision))
@@ -473,7 +485,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		if incomplete == nil {
 			incomplete = hdr.StaticMetadataIncomplete
 		}
-		if incomplete(e.Probe.FrameSideDataFlat(ctx, f)) {
+		if incomplete(props.FrameSideData()) {
 			e.Log.Info("skip (HDR10 static metadata present but incomplete/unparseable — refusing to re-encode and drop it)", "file", f)
 			e.finish(ctx, f, key, store.Skipped, because(SkipIncompleteHDRMetadata))
 			return nil
@@ -485,7 +497,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// silently subsampled or guessed. A forced (non-"auto") PixelFormat bypasses
 	// derivation entirely (back-compat).
 	if e.Cfg.PixelFormatAuto() {
-		srcPixFmt := e.Probe.PixFmt(ctx, f)
+		srcPixFmt := props.PixFmt()
 		if _, ok := hdr.DerivePixFmt(srcPixFmt); !ok {
 			e.Log.Info("skip (unrecognized/exotic pixel format — refusing to silently subsample)", "file", f, "pix_fmt", srcPixFmt)
 			e.finish(ctx, f, key, store.Skipped, because(SkipExoticPixelFormat))
@@ -545,7 +557,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	out := &store.Outcome{Encoder: e.Cfg.Encoder}
 
 	encStart := time.Now()
-	if err := e.Enc.Encode(ctx, f, tmp); err != nil {
+	if err := e.Enc.Encode(ctx, f, tmp, props); err != nil {
 		if ctx.Err() != nil { // interrupted: discard temp, DON'T finish — leave active for RecoverStale
 			_ = os.Remove(tmp)
 			return ctx.Err()

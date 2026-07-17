@@ -36,12 +36,23 @@ func Classify(ctx context.Context, p prober, f string) string {
 // HDR). SDR/HLG get their tags passed through with no HDR10 params. Port of bash
 // derive_color_args.
 func DeriveColorArgs(ctx context.Context, p prober, f string) (ffmpegFlags []string, x265Params string) {
-	prim := p.ColorField(ctx, f, "color_primaries")
-	trc := p.ColorField(ctx, f, "color_transfer")
-	spc := p.ColorField(ctx, f, "color_space")
-	rng := p.ColorField(ctx, f, "color_range")
-	flat := p.SideDataFlat(ctx, f)
+	return DeriveColorArgsFrom(
+		p.ColorField(ctx, f, "color_primaries"),
+		p.ColorField(ctx, f, "color_transfer"),
+		p.ColorField(ctx, f, "color_space"),
+		p.ColorField(ctx, f, "color_range"),
+		p.SideDataFlat(ctx, f),
+	)
+}
 
+// DeriveColorArgsFrom is the pure core of DeriveColorArgs: it derives the encoder args
+// from a source's already-probed colour tags (prim/trc/spc/rng — each already
+// normalised: "" means "not signalled") and its flat side data, with no ffprobe
+// dependency. TRANSCODE-PERF calls this directly from a single probe.VideoProps
+// snapshot instead of re-probing four colour fields plus the side data at encode time;
+// DeriveColorArgs is the thin prober-backed wrapper over it, so the two cannot drift
+// (the unit tests exercise both). See DeriveColorArgs for the propagation semantics.
+func DeriveColorArgsFrom(prim, trc, spc, rng, flat string) (ffmpegFlags []string, x265Params string) {
 	hasMD := strings.Contains(flat, "Mastering display metadata")
 	isHDR10 := trc == "smpte2084" || hasMD
 	if isHDR10 {

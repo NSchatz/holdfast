@@ -105,7 +105,7 @@ func TestSVTAV1_VmafRejectsDegradedOutput(t *testing.T) {
 	mkH264(t, ffmpeg, src, "8M")
 	before := md5f(t, src)
 
-	degradedAV1 := EncoderFunc(func(ctx context.Context, in, out string) error {
+	degradedAV1 := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
 		return exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-y", "-i", in,
 			"-vf", "scale=64:48,scale=320:240:flags=neighbor",
 			"-c:v", "libsvtav1", "-preset", "10", "-crf", "55",
