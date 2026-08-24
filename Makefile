@@ -19,7 +19,8 @@ LDFLAGS := -s -w \
 IMAGE    ?= holdfast:dev
 PLATFORM ?= linux/amd64
 
-.PHONY: build test check fmt vet staticcheck govulncheck check-pins check-pins-selftest tidy clean image image-smoke compose-check
+.PHONY: build test check fmt vet staticcheck govulncheck check-pins check-pins-selftest \
+        install-ffmpeg-selftest check-pin-live tidy clean image image-smoke compose-check
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o holdfast ./cmd/holdfast
@@ -51,8 +52,27 @@ check-pins:
 check-pins-selftest:
 	./scripts/check-pins-selftest.sh
 
+# Proves scripts/install-ffmpeg.sh FAILS THE WAY IT SAYS IT DOES. The pinned ffmpeg is
+# both the encoder the image ships and the libvmaf instrument the no-loss verdict is
+# measured with, so the one thing its installer must never do is quietly end up with
+# some other ffmpeg, or a half-unpacked one, on disk. Every failure mode (expired pin,
+# unreachable upstream, digest mismatch, unusable archive, unwritable destination) is
+# driven for real here, offline, and each is asserted to be distinct, self-describing
+# and to leave NO ffmpeg behind. A guard nobody tries to defeat is a guard nobody knows
+# works.
+install-ffmpeg-selftest:
+	./scripts/install-ffmpeg-selftest.sh
+
 # THE gate. CI and the release workflow both run exactly this.
-check: check-pins check-pins-selftest fmt vet build test staticcheck govulncheck
+check: check-pins check-pins-selftest install-ffmpeg-selftest fmt vet build test staticcheck govulncheck
+
+# Asks UPSTREAM whether the pinned ffmpeg release is still served. Deliberately NOT part
+# of `check`: the PR gate must not red because a third party had a bad afternoon. CI runs
+# this on a schedule (.github/workflows/pin-health.yml) so the next expiry reports itself
+# instead of surfacing as an unexplained red job on an unrelated pull request, which is
+# exactly how the last one surfaced. Needs network.
+check-pin-live:
+	./scripts/check-pin-live.sh
 
 # --- packaging (TRANSCODE-9) --------------------------------------------------
 # The same commands CI runs, so the packaging gate is reproducible by a human and not
