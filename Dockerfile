@@ -15,7 +15,7 @@
 # cross-compiled (CGO_ENABLED=0 — pure-Go SQLite, no cgo), so the arm64 image needs no
 # QEMU: its runtime stage only COPYs.
 
-ARG GO_IMAGE=golang:1.25.12-bookworm@sha256:a9c020ee3d1508c7be5435c262434e3d3fc1d0e76a11afeb9ddae7d60bc86aa4
+ARG GO_IMAGE=golang:1.25.14-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437
 ARG FETCH_IMAGE=debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
 # distroless CC, not BASE. ffmpeg/ffprobe carry a DT_NEEDED on libgcc_s.so.1, and the
 # `base` variant ships glibc WITHOUT libgcc — so `base` builds perfectly and then dies
@@ -75,6 +75,25 @@ RUN set -eu; \
 
 # --- build the binary --------------------------------------------------------
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS build
+
+# The DIGEST is what Docker pulls; the tag beside it is a label the registry does not
+# enforce. scripts/check-pins.sh holds the Go version together across this file, ci.yml
+# and release.yml, but it can only compare the TAG it parses out of GO_IMAGE, because
+# nothing outside the image can see which toolchain a digest actually contains. So bump
+# the tag, leave the stale digest, and every file agrees, check-pins prints "ok", and the
+# shipped binary is built by the superseded Go. That is the same silent detachment the
+# ffmpeg pin is guarded against, in the one place the script cannot reach, so ask the
+# image what it is, from inside it, where the answer is authoritative.
+ARG GO_IMAGE
+RUN set -eu; \
+    want="${GO_IMAGE#*:}"; want="${want%%@*}"; want="${want%%-*}"; \
+    got="$(go env GOVERSION)"; \
+    if [ "$got" != "go${want}" ]; then \
+      echo "GO_IMAGE tag names go${want} but its pinned digest ships ${got}: the digest was left at a superseded toolchain" >&2; \
+      exit 1; \
+    fi; \
+    echo "go toolchain in the image matches the GO_IMAGE tag (${got})"
+
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

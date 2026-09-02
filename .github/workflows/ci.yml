@@ -14,9 +14,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Pinned for reproducibility. Go 1.25.x clears the os.Root-escape stdlib advisory
-  # (GO-2026-4602, fixed in go1.25.8) that govulncheck flags on older lines; keep
-  # this at a patched >= 1.25.8.
+  # Pinned for reproducibility, and NOT free to be any 1.25.x: the gate below runs
+  # govulncheck, which reports stdlib advisories against the toolchain it is running on.
+  # So this must be at or above every `Fixed in` version govulncheck names for the
+  # standard library, or the gate is red by construction. Raise it to a released patch,
+  # never lower it, and let scripts/check-pins.sh (part of the gate) hold it equal to the
+  # Dockerfile and release.yml.
   #
   # staticcheck/govulncheck are NOT pinned here: the gate below is `make check`, so the
   # Makefile owns those versions. They used to be pinned in both places, which meant a
@@ -24,7 +27,7 @@ env:
   # `make check`) silently running different tools — the same "duplicated and held in
   # step by hope" failure as the ffmpeg pin. One gate, defined once, run by CI, by the
   # release, and by a human typing `make check`.
-  GO_VERSION: "1.25.12"
+  GO_VERSION: "1.25.14"
 
 jobs:
   build:

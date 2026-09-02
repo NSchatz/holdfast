@@ -29,7 +29,11 @@ env:
   # No staticcheck/govulncheck pins here: the gate is `make check`, so the Makefile owns
   # those versions — and ci.yml goes through the same target, so the PR gate and the
   # release gate cannot run different tools. One gate, defined once.
-  GO_VERSION: "1.25.12"
+  #
+  # This value is not free: govulncheck reports stdlib advisories against the toolchain
+  # it runs on, so it must be at or above every `Fixed in` version it names for the
+  # standard library. scripts/check-pins.sh holds it equal to the Dockerfile and ci.yml.
+  GO_VERSION: "1.25.14"
 
 jobs:
   release:

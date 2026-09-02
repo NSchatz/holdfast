@@ -124,7 +124,7 @@ done
 # --- 3. One Go version across the proof and the artifact ---------------------------
 # The gate must run on the Go that builds the binary we ship. Nothing forces these three
 # together but this check.
-go_image="$(arg GO_IMAGE)"                       # golang:1.25.12-bookworm@sha256:...
+go_image="$(arg GO_IMAGE)"                       # golang:1.25.14-bookworm@sha256:...
 docker_go="${go_image#golang:}"; docker_go="${docker_go%%-*}"
 ci_go="$(sed -n 's/^ *GO_VERSION: *"\(.*\)"$/\1/p' "$here/.github/workflows/ci.yml" | head -1)"
 rel_go="$(sed -n 's/^ *GO_VERSION: *"\(.*\)"$/\1/p' "$here/.github/workflows/release.yml" | head -1)"
@@ -136,6 +136,25 @@ else
        Dockerfile GO_IMAGE: $docker_go
        ci.yml GO_VERSION:   $ci_go
        release.yml:         $rel_go"
+fi
+
+# The tag above is only a LABEL. What Docker pulls is the digest beside it, and this
+# script cannot look inside an image to learn which toolchain a digest carries, so the
+# tag comparison is satisfied by a GO_IMAGE whose digest was never moved. Two halves
+# close that: the Dockerfile's build stage asks the pulled image its own `go env
+# GOVERSION` and refuses when it disagrees with the tag, and this checks the half that
+# the build cannot: that a digest is pinned AT ALL. Drop the `@sha256:` and the tag
+# floats to whatever the registry serves today, and the in-image assertion still passes
+# because a floating tag is self-consistent.
+go_digest=""
+case "$go_image" in *@*) go_digest="${go_image##*@}" ;; esac
+if printf '%s' "$go_digest" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+  note "ok: GO_IMAGE is digest-pinned ($go_digest)"
+else
+  bad "GO_IMAGE is not pinned to a well-formed @sha256: digest. The toolchain would float to
+       whatever the registry serves today, and the in-image assertion cannot catch that
+       because a floating tag agrees with itself.
+       Dockerfile GO_IMAGE: $go_image"
 fi
 
 # --- 4. No pre-rename identifier survives (TRANSCODE-12) ---------------------------

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Prove the guards in check-pins.sh still BITE. Part of `make check`.
+# Prove the guards in check-pins.sh still BITE: the rename guard and the pin assertions.
+# Part of `make check`.
 #
-# Two families of case live here. Cases 0-6 defeat the RENAME guard; cases 7-17 (S0022)
+# Three families of case live here. Cases 0-6 defeat the RENAME guard; cases 7-17 (S0022)
 # defeat the FFMPEG PIN guard - the floating alias, the short-retention daily build, a
 # blanked digest, and a NOTICE that has drifted from the Dockerfile it is supposed to be
-# the source offer for.
+# the source offer for; case 18 (S0024) defeats the GO TOOLCHAIN pin's digest half.
 #
 # It exists because that guard degraded to a silent GREEN — printing "ok" over a real leak —
 # several times while it was being written, and every one of those was invisible in a green
@@ -39,7 +40,7 @@ OLD_ENV="TRANSCODE""_SERVER_AUTH_TOKEN"
 OLD_CRF="TRANSCODE""_CRF"
 OLD_METRIC="transcode""_files_total"
 
-declared=18
+declared=19
 pass=0; failed=0
 repo="$work/repo"
 
@@ -222,6 +223,22 @@ reset
 #        naming a build the image no longer contains.
 printf '\n  (previously built from revision g90436de5e1.)\n' >>"$repo/NOTICE"
 expect 1 "a stray ffmpeg build identifier elsewhere in NOTICE is refused" "identifier that is NOT the pinned one"
+reset
+
+# =====================================================================================
+# The Go-toolchain pin assertion (S0024). Same failure shape as the ffmpeg block above,
+# on the other pin: the half of a pin that names the BYTES rather than the URL.
+# =====================================================================================
+
+# --- 18. GO_IMAGE with its digest dropped. Section 3 compares only the TAG, so the three
+#         files still agree and it prints "ok" while the toolchain floats to whatever the
+#         registry serves that day. The Dockerfile's in-image `go env GOVERSION` assertion
+#         cannot catch this one either (a floating tag agrees with itself), so the "is a
+#         digest pinned at all" half has to hold here.
+sed -i 's/^\(ARG GO_IMAGE=[^@]*\)@sha256:[0-9a-f]*$/\1/' "$repo/Dockerfile"
+grep -qE '^ARG GO_IMAGE=golang:[^@]+$' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not strip the GO_IMAGE digest, so this case did NOT run" >&2; exit 1; }
+expect 1 "a GO_IMAGE whose digest was dropped is caught (the tag alone still agrees)" "GO_IMAGE is not pinned to a well-formed"
 reset
 
 echo
