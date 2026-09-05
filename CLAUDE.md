@@ -313,7 +313,12 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   endpoints, and the SSE stream. Imports `engine`/`store`/`config`; the engine does NOT import it (the
   Observer is a func the engine defines and `server` supplies — no cycle).
 - `internal/webui` (TRANSCODE-7) — the single `go:embed`-ed dashboard (`index.html`, vanilla JS + inline
-  CSS, no external/CDN assets) + its handler, served at `/` under a tight CSP.
+  CSS, no external/CDN assets) + its handler, served at `/` under a tight CSP. Its "Across the whole
+  ledger" cards (DASH-7) render the server-computed aggregates: each states the set it covers (and the
+  window, when a figure is bounded), reports the rows excluded for want of a recorded value, shows "not
+  recorded" rather than `0` when nothing contributed, and renders an unreadable figure as **unavailable**
+  while the rest of the page still draws. Each card is built independently and after the tables, so no
+  figure can cost an operator the rows.
 - `internal/metrics` (TRANSCODE-8) — Prometheus `client_golang` collectors on a private registry: an
   `engine.Observer` adapter (counts terminal outcomes; records reclaimed bytes + encode-duration + VMAF on
   the Done event) + a queue-depth collector that reads `store.Summary` at scrape time + a `/metrics`
@@ -365,7 +370,12 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   slice versioned by `PRAGMA user_version`, each step + its version stamp in one `BEGIN IMMEDIATE`
   transaction. `Finish` carries a `store.Outcome` — the durable proof of a terminal job (reason / encoder /
   VMAF mean+min+model / both sizes / encode ms), with **nullable** columns so "not recorded" never reads as
-  `0`; `Claim` clears them, because it begins a new attempt.
+  `0`; `Claim` clears them, because it begins a new attempt. `aggregate.go` (DASH-7) adds the
+  **whole-ledger** read surface `Aggregates` (terminal counts, skips by guard, and the size-ratio /
+  encode-duration / VMAF spreads), each computed over EVERY matching row, each carrying the set it covers,
+  the rows it excluded for want of a recorded value, and **its own error** so one unreadable figure cannot
+  fail the others. It uses only COUNT/MIN/AVG/MAX: `median()`/`percentile()` are gated on SQLite 3.51.0 plus
+  `-DSQLITE_ENABLE_PERCENTILE`, and the pinned build has neither (a test probes for it and says so).
 - `internal/engine` — the orchestrator: `ProcessFile` (skip guards — already-at-TARGET-CODEC (TRANSCODE-6
   generalized this off a hardcoded "already HEVC"), low-bitrate, hardlinked, **interlaced, DV/HDR10+,
   HDR10-with-incomplete-metadata, exotic pixel format** (TRANSCODE-3) — → **`Store.Claim`** (TRANSCODE-5) →
