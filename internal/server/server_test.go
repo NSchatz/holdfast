@@ -562,6 +562,308 @@ func TestQueueEndpoint_InFlightRetryCarriesNoStaleProof(t *testing.T) {
 	}
 }
 
+// --- live progress on the wire (S0030) ---------------------------------------
+//
+// The page these fields feed is the only place an operator can answer "is this moving?".
+// So the bar is not "a number appears" — it is that an unmeasured figure is visibly
+// unmeasured, a measured one is in range, and a finished job stops carrying either.
+
+// progressEvent builds the live progress report the engine emits for a running encode.
+// dur is the source duration the position is measured against; nil is UNKNOWN.
+func progressEvent(path string, positionSec float64, dur *float64) engine.Event {
+	return engine.Event{
+		Path:     path,
+		Status:   store.Encoding,
+		Progress: &engine.Progress{PositionSec: positionSec, DurationSec: dur},
+	}
+}
+
+func snapshotRaw(t *testing.T, h *harness) string {
+	t.Helper()
+	data, err := h.hub.SnapshotJSON(context.Background())
+	if err != nil {
+		t.Fatalf("SnapshotJSON: %v", err)
+	}
+	return string(data)
+}
+
+func snapshotOf(t *testing.T, h *harness) snapshot {
+	t.Helper()
+	var snap snapshot
+	if err := json.Unmarshal([]byte(snapshotRaw(t, h)), &snap); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+	return snap
+}
+
+func queueRowFor(t *testing.T, snap snapshot, path string) jobDTO {
+	t.Helper()
+	for _, j := range snap.Queue {
+		if j.Path == path {
+			return j
+		}
+	}
+	t.Fatalf("%s is not in the queue: %+v", path, snap.Queue)
+	return jobDTO{}
+}
+
+// TestSnapshot_ActiveJobWithNoProgressIsUnknownNotZero is AC3 and AC10 together. A job
+// whose encoder has reported nothing yet is still shown as running — it just has no
+// figure — and "no figure" goes out as an explicit null. A zero here would read as "0%
+// encoded", a measurement nobody took, on the page an operator uses to decide whether
+// the tool is stuck.
+func TestSnapshot_ActiveJobWithNoProgressIsUnknownNotZero(t *testing.T) {
+	h := newHarness(t, "")
+
+	snap := snapshotOf(t, h)
+	row := queueRowFor(t, snap, "/lib/active.mkv")
+	if row.Status != string(store.Encoding) {
+		t.Errorf("status = %q, want encoding — an unmeasured job is still a RUNNING job", row.Status)
+	}
+	if row.ProgressSeconds != nil || row.ProgressDuration != nil || row.ProgressFraction != nil {
+		t.Errorf("a job whose encoder reported nothing is carrying a figure: %+v", row)
+	}
+
+	raw := snapshotRaw(t, h)
+	for _, want := range []string{
+		`"progress_seconds":null`, `"progress_duration_seconds":null`, `"progress_fraction":null`,
+	} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("unreported progress must serialize as %s\nbody: %s", want, raw)
+		}
+	}
+	for _, banned := range []string{`"progress_fraction":0`, `"progress_seconds":0`} {
+		if strings.Contains(raw, banned) {
+			t.Errorf("unreported progress went out as %s — a fabricated zero\nbody: %s", banned, raw)
+		}
+	}
+	// The elapsed basis rides the same frame (AC1's "derived from the timestamp on the
+	// wire": the page needs the server's own clock to read updated_at against).
+	if snap.Now <= 0 {
+		t.Errorf("snapshot carries no server clock (now=%d) — elapsed would have to be guessed from the client's", snap.Now)
+	}
+	if row.UpdatedAt <= 0 {
+		t.Errorf("the active row carries no transition timestamp (updated_at=%d)", row.UpdatedAt)
+	}
+}
+
+// TestSnapshot_ReportedProgressRidesTheQueue is the positive case: once the encoder has
+// reported a position, the queue row carries it, the duration it is measured against,
+// and the two divided.
+func TestSnapshot_ReportedProgressRidesTheQueue(t *testing.T) {
+	h := newHarness(t, "")
+	dur := 400.0
+	h.hub.Observe(progressEvent("/lib/active.mkv", 100, &dur))
+
+	row := queueRowFor(t, snapshotOf(t, h), "/lib/active.mkv")
+	if row.ProgressSeconds == nil || *row.ProgressSeconds != 100 {
+		t.Fatalf("progress_seconds = %v, want 100", row.ProgressSeconds)
+	}
+	if row.ProgressDuration == nil || *row.ProgressDuration != 400 {
+		t.Fatalf("progress_duration_seconds = %v, want 400", row.ProgressDuration)
+	}
+	if row.ProgressFraction == nil || *row.ProgressFraction != 0.25 {
+		t.Fatalf("progress_fraction = %v, want 0.25", row.ProgressFraction)
+	}
+
+	// GET /api/queue serves the same picture as the stream — a client that polls must
+	// not see a different running job than one that watches.
+	ts := httptest.NewServer(h.srv)
+	defer ts.Close()
+	var got struct {
+		Queue []jobDTO `json:"queue"`
+		Now   int64    `json:"now"`
+	}
+	getJSON(t, ts.URL+"/api/queue", &got)
+	if len(got.Queue) != 1 || got.Queue[0].ProgressFraction == nil || *got.Queue[0].ProgressFraction != 0.25 {
+		t.Errorf("/api/queue does not carry the live figure the stream does: %+v", got.Queue)
+	}
+	if got.Now <= 0 {
+		t.Errorf("/api/queue carries no server clock (now=%d)", got.Now)
+	}
+}
+
+// TestSnapshot_UnknownSourceDurationPublishesNoFraction is AC5. Some containers report
+// no duration at all (MPEG-TS is the standing example, and the probe layer refuses to
+// coerce that to 0). With no length to measure against there is no fraction to compute,
+// and computing one anyway is precisely the invented figure this surface must not carry.
+func TestSnapshot_UnknownSourceDurationPublishesNoFraction(t *testing.T) {
+	h := newHarness(t, "")
+
+	for _, tc := range []struct {
+		name string
+		dur  *float64
+	}{
+		{"unknown duration", nil},
+		{"zero duration", func() *float64 { z := 0.0; return &z }()},
+		{"negative duration", func() *float64 { n := -5.0; return &n }()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h.hub.Observe(progressEvent("/lib/active.mkv", 90, tc.dur))
+			row := queueRowFor(t, snapshotOf(t, h), "/lib/active.mkv")
+			if row.ProgressFraction != nil {
+				t.Errorf("a %s published a fraction of %v — there is nothing to measure against", tc.name, *row.ProgressFraction)
+			}
+			if row.ProgressDuration != nil {
+				t.Errorf("a %s published a duration of %v", tc.name, *row.ProgressDuration)
+			}
+			raw := snapshotRaw(t, h)
+			if !strings.Contains(raw, `"progress_fraction":null`) {
+				t.Errorf("an unmeasurable fraction must serialize as null\nbody: %s", raw)
+			}
+		})
+	}
+}
+
+// TestSnapshot_PositionOutOfRangeIsClamped is AC7. An encoder legitimately reports a
+// position at or slightly past the source duration on its final report (a container's
+// duration is itself an approximation), and ffmpeg emits negative timestamps during
+// pre-roll on some inputs. Neither may reach the page as "103% encoded" or a negative.
+func TestSnapshot_PositionOutOfRangeIsClamped(t *testing.T) {
+	h := newHarness(t, "")
+	dur := 120.0
+
+	h.hub.Observe(progressEvent("/lib/active.mkv", 126, &dur)) // past the end
+	row := queueRowFor(t, snapshotOf(t, h), "/lib/active.mkv")
+	if row.ProgressFraction == nil || *row.ProgressFraction != 1 {
+		t.Errorf("a position past the source duration gave fraction %v, want exactly 1 (fully encoded)", row.ProgressFraction)
+	}
+	if row.ProgressSeconds == nil || *row.ProgressSeconds != 120 {
+		t.Errorf("progress_seconds = %v, want it clamped to the 120s duration beside it", row.ProgressSeconds)
+	}
+
+	h.hub.Observe(progressEvent("/lib/active.mkv", -3, &dur)) // pre-roll
+	row = queueRowFor(t, snapshotOf(t, h), "/lib/active.mkv")
+	if row.ProgressSeconds == nil || *row.ProgressSeconds != 0 {
+		t.Errorf("a negative position gave progress_seconds %v, want 0", row.ProgressSeconds)
+	}
+	if row.ProgressFraction == nil || *row.ProgressFraction != 0 {
+		t.Errorf("a negative position gave fraction %v, want 0", row.ProgressFraction)
+	}
+}
+
+// TestSnapshot_TerminalJobStopsReportingProgress is AC8. The moment a job finishes it
+// leaves the queue, its live entry is dropped, and no history row carries a progress
+// figure — so nothing on a finished row can keep moving.
+func TestSnapshot_TerminalJobStopsReportingProgress(t *testing.T) {
+	h := newHarness(t, "")
+	dur := 200.0
+	h.hub.Observe(progressEvent("/lib/active.mkv", 50, &dur))
+	if h.hub.liveProgressCount() != 1 {
+		t.Fatalf("live progress entries = %d, want 1 before the job finishes", h.hub.liveProgressCount())
+	}
+
+	// The engine finishes the job: the store row goes terminal and a terminal event is
+	// emitted, exactly as ProcessFile does.
+	if err := h.st.Finish(context.Background(), "/lib/active.mkv", "1:1", store.Done, nil); err != nil {
+		t.Fatal(err)
+	}
+	h.hub.Observe(engine.Event{Path: "/lib/active.mkv", Status: store.Done})
+
+	if got := h.hub.liveProgressCount(); got != 0 {
+		t.Errorf("live progress entries = %d after the job went terminal, want 0", got)
+	}
+	snap := snapshotOf(t, h)
+	for _, j := range snap.Queue {
+		if j.Path == "/lib/active.mkv" {
+			t.Errorf("a finished job is still in the queue: %+v", j)
+		}
+	}
+	for _, j := range snap.History {
+		if j.ProgressSeconds != nil || j.ProgressDuration != nil || j.ProgressFraction != nil {
+			t.Errorf("a terminal history row carries a live progress figure: %+v", j)
+		}
+	}
+}
+
+// TestSnapshot_ProgressReachesAConnectedClientWithNoTransition is AC9: an encode that
+// advances with no state change still pushes a fresh frame down the stream a client is
+// already holding open. Without this the figure would only ever move when the job
+// changed state, which is the illegibility this whole item exists to fix.
+func TestSnapshot_ProgressReachesAConnectedClientWithNoTransition(t *testing.T) {
+	h := newHarness(t, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.hub.Run(ctx)
+
+	ts := httptest.NewServer(h.srv)
+	defer ts.Close()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/events", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/events: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// Frame 1: the initial snapshot, before any progress has been reported.
+	_, first := readSSEFrame(t, resp.Body, 2*time.Second)
+	var before snapshot
+	if err := json.Unmarshal([]byte(first), &before); err != nil {
+		t.Fatalf("initial frame: %v", err)
+	}
+	if queueRowFor(t, before, "/lib/active.mkv").ProgressFraction != nil {
+		t.Fatal("the initial frame already carries a figure — the test would prove nothing")
+	}
+
+	// The encode advances. No transition: the job is still `encoding` in the store.
+	dur := 300.0
+	h.hub.Observe(progressEvent("/lib/active.mkv", 150, &dur))
+
+	// Frame 2 arrives on the SAME connection, with no request from the client.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, data := readSSEFrame(t, resp.Body, 2*time.Second)
+		var snap snapshot
+		if err := json.Unmarshal([]byte(data), &snap); err != nil {
+			t.Fatalf("later frame: %v", err)
+		}
+		row := queueRowFor(t, snap, "/lib/active.mkv")
+		if row.Status != string(store.Encoding) {
+			t.Fatalf("the job changed state (%q) — this must prove delivery WITHOUT a transition", row.Status)
+		}
+		if row.ProgressFraction != nil {
+			if *row.ProgressFraction != 0.5 {
+				t.Errorf("delivered fraction = %v, want 0.5", *row.ProgressFraction)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the advanced figure never reached the already-connected client")
+		}
+	}
+}
+
+// TestSnapshot_NoActiveJobsPublishNoLiveProgress is AC13: with nothing running there are
+// no live entries at all — including any left behind by a job that finished under a
+// different path than it started under (a container-changing swap renames the file, so
+// the Done event names the POST-swap path).
+func TestSnapshot_NoActiveJobsPublishNoLiveProgress(t *testing.T) {
+	h := newHarness(t, "")
+	ctx := context.Background()
+
+	// A stale entry under the PRE-swap name, of the kind a rename would strand.
+	dur := 60.0
+	h.hub.Observe(progressEvent("/lib/active.mkv", 30, &dur))
+	h.hub.Observe(progressEvent("/lib/gone.mp4", 10, &dur))
+
+	// Everything finishes; the queue empties.
+	if err := h.st.Finish(ctx, "/lib/active.mkv", "1:1", store.Done, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := snapshotOf(t, h)
+	if len(snap.Queue) != 0 {
+		t.Fatalf("queue is not empty: %+v", snap.Queue)
+	}
+	if got := h.hub.liveProgressCount(); got != 0 {
+		t.Errorf("live progress entries = %d with no active job, want 0 — a stranded entry would grow without bound", got)
+	}
+	raw := snapshotRaw(t, h)
+	if strings.Contains(raw, `"progress_fraction":0.`) || strings.Contains(raw, `"progress_fraction":1`) {
+		t.Errorf("a snapshot with no active jobs published a progress figure\nbody: %s", raw)
+	}
+}
+
 func getRaw(t *testing.T, url string) string {
 	t.Helper()
 	resp, err := http.Get(url)

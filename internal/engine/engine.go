@@ -137,6 +137,60 @@ func (e *Engine) emit(ev Event) {
 	}
 }
 
+// progressEmitInterval throttles live progress reporting to at most one event per job
+// per interval (S0030). ffmpeg's default -stats_period is 0.5s and every event costs the
+// reporting hub a full store-derived snapshot rebuild, so an unthrottled two-hour film
+// would drive thousands of them on the same machine that is doing the encoding. Dropping
+// an update is granularity lost, never correctness lost — the same trade the hub already
+// makes when it coalesces events and drops frames for a slow subscriber.
+const progressEmitInterval = time.Second
+
+// encode runs the configured Encoder over one file, collecting live progress when there
+// is both an Encoder that can report it and an Observer to receive it. Anything else
+// falls straight through to Encode — an Encoder with no progress capability is not a
+// failure, it is a job whose progress is simply never reported, which is a state the
+// reporting surface already has to handle.
+func (e *Engine) encode(ctx context.Context, worker, in, out string, props *probe.VideoProps) error {
+	pe, ok := e.Enc.(ProgressEncoder)
+	if !ok || e.Observer == nil {
+		return e.Enc.Encode(ctx, in, out, props)
+	}
+	return pe.EncodeWithProgress(ctx, in, out, props, e.progressSink(worker, in, sourceDuration(props)))
+}
+
+// sourceDuration is the length a live progress figure is measured against, taken from
+// the snapshot ProcessFile ALREADY probed (TRANSCODE-PERF) so establishing it costs no
+// additional subprocess. nil means UNKNOWN and is the honest answer for a container that
+// reports no duration; a non-positive value is treated as unknown too, because dividing
+// by it would fabricate a fraction rather than measure one.
+func sourceDuration(props *probe.VideoProps) *float64 {
+	if props == nil {
+		return nil
+	}
+	d, ok := props.DurationSec()
+	if !ok || !(d > 0) {
+		return nil
+	}
+	return &d
+}
+
+// progressSink builds the per-job ProgressSink handed to a ProgressEncoder. It is called
+// only from the single goroutine draining that job's progress pipe, so the throttle state
+// needs no lock; and all it does is emit, which the Observer contract already requires to
+// be non-blocking — the reporting path must never be able to slow an encode.
+func (e *Engine) progressSink(worker, path string, dur *float64) ProgressSink {
+	var last time.Time
+	return func(p Progress) {
+		now := time.Now()
+		if !last.IsZero() && now.Sub(last) < progressEmitInterval {
+			return
+		}
+		last = now
+		p.DurationSec = dur
+		e.emit(Event{Path: path, Status: store.Encoding, Worker: worker, Progress: &p})
+	}
+}
+
 // fsync flushes path (a regular file OR a directory) to durable storage, routing
 // through the test seam when one is set. It is the core of TRANSCODE-17's power-loss
 // durability discipline (see the "Durability" comment in ProcessFile).
@@ -557,7 +611,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	out := &store.Outcome{Encoder: e.Cfg.Encoder}
 
 	encStart := time.Now()
-	if err := e.Enc.Encode(ctx, f, tmp, props); err != nil {
+	if err := e.encode(ctx, worker, f, tmp, props); err != nil {
 		if ctx.Err() != nil { // interrupted: discard temp, DON'T finish — leave active for RecoverStale
 			_ = os.Remove(tmp)
 			return ctx.Err()

@@ -51,6 +51,23 @@ type VideoProps struct {
 const scalarStreamEntries = "codec_name,bit_rate,field_order,codec_tag_string,pix_fmt," +
 	"color_primaries,color_transfer,color_space,color_range"
 
+// snapshotEntries is the single -show_entries argument the snapshot probe issues: the
+// scalar stream fields above PLUS the CONTAINER duration.
+//
+// The duration rides along deliberately (S0030). A live progress figure is meaningless
+// without the length it is measured against, and that length has to be known BEFORE the
+// encode starts — but a second ffprobe per job would be a real regression on a tool that
+// walks a whole library (TRANSCODE-PERF exists because of exactly that). ffprobe answers
+// stream and format sections in one call, so this costs zero extra subprocesses.
+//
+// Only `format=duration` is asked for, never `stream=duration`: with `-of default=nw=1`
+// there are no section wrappers, so both would print the same bare `duration=` key and
+// the later one would silently overwrite the earlier — inverting the format-then-stream
+// preference Prober.DurationSec applies. A container that reports no duration therefore
+// leaves the snapshot's duration UNKNOWN rather than guessed, which the reporting
+// surface renders as unknown progress (never as zero, never as a fabricated fraction).
+const snapshotEntries = "stream=" + scalarStreamEntries + ":format=duration"
+
 // VideoProps takes one snapshot of f's source properties. The constructor runs a
 // single ffprobe (all scalar stream fields at once); the side-data probes and the
 // bit_rate container fallback are fetched lazily on first access (see the accessors).
@@ -67,16 +84,16 @@ func (p *Prober) VideoProps(ctx context.Context, f string) *VideoProps {
 	return &VideoProps{p: p, ctx: ctx, f: f, fields: p.scalarFields(ctx, f)}
 }
 
-// scalarFields fetches every scalar stream entry in one ffprobe call and parses the
-// `key=value` lines into a map. Uses `-of default=nw=1` (no section wrappers, keys
-// kept) so each value is byte-identical to what the single-field `default=nw=1:nk=1`
-// probes returned — the same ffprobe formatting, just batched. A field the stream
-// does not carry is simply absent from the map (lookup yields ""), matching a
-// single-field probe's empty result on a non-zero exit / unknown value.
+// scalarFields fetches every scalar stream entry (plus the container duration) in one
+// ffprobe call and parses the `key=value` lines into a map. Uses `-of default=nw=1` (no
+// section wrappers, keys kept) so each value is byte-identical to what the single-field
+// `default=nw=1:nk=1` probes returned — the same ffprobe formatting, just batched. A
+// field the stream does not carry is simply absent from the map (lookup yields ""),
+// matching a single-field probe's empty result on a non-zero exit / unknown value.
 func (p *Prober) scalarFields(ctx context.Context, f string) map[string]string {
 	m := map[string]string{}
 	out, err := exec.CommandContext(ctx, p.FFprobe, "-v", "error", "-select_streams", "v:0",
-		"-show_entries", "stream="+scalarStreamEntries, "-of", "default=nw=1", "--", f).Output()
+		"-show_entries", snapshotEntries, "-of", "default=nw=1", "--", f).Output()
 	if err != nil {
 		return m
 	}
@@ -104,6 +121,29 @@ func (vp *VideoProps) BitrateKbps() int {
 		vp.bitrate = vp.p.resolveBitrate(vp.ctx, vp.f, vp.fields["bit_rate"])
 	})
 	return vp.bitrate
+}
+
+// DurationSec returns the CONTAINER duration in seconds from the eager snapshot probe,
+// with ok=false when the container reports none (ffprobe prints the literal "N/A" for
+// some containers — MPEG-TS most notably). An unknown duration is NEVER coerced to 0:
+// that is the same fail-safe every other field in this package keeps, and here a zero
+// would be read downstream as "a zero-length source", i.e. an instantly-complete encode.
+//
+// This is deliberately NOT Prober.DurationSec: it takes no subprocess of its own and it
+// applies no stream-level fallback, because that fallback would be a second ffprobe on
+// exactly the files that lack a container duration. The caller (a live progress figure)
+// treats false as "unknown length" and publishes no fraction at all, which is the
+// honest answer; the verify gate keeps using Prober.DurationSec, untouched.
+func (vp *VideoProps) DurationSec() (sec float64, ok bool) {
+	d := vp.fields["duration"]
+	if !floatRe.MatchString(d) {
+		return 0, false
+	}
+	v, err := strconv.ParseFloat(d, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
 
 // FieldOrder returns the normalised field_order (unknown/N/A/"" → ""), identical to

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1603,5 +1604,212 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 	// The current file's row is done (short-circuits a resume).
 	if !ledgerHas(t, ts, store.Done, "movie.mkv") {
 		t.Error("expected a done row under the transcoded file's identity")
+	}
+}
+
+// ---- S0030: live progress, and what it must not cost -------------------------
+
+// The measured per-job subprocess budget for one done job with the VMAF gate off, taken
+// against the tree BEFORE progress collection existed: 13 ffprobe invocations (the
+// source snapshot plus verifyOutput's codec/duration/packet/stream-count probes) and 2
+// ffmpeg invocations (the encode and the decode-integrity check). These are the numbers
+// TestProbeBudget_ProgressAddsNoSubprocess holds the line at; they are a ceiling, not a
+// target, so a change that removes a probe is free and one that adds one reds.
+const (
+	probeBudgetFFprobe = 13
+	probeBudgetFFmpeg  = 2
+)
+
+// countingWrapper writes a shell wrapper for a real binary that appends one line per
+// invocation to a log and then delegates. Pointing the engine's Prober and Encoder at
+// the wrappers turns "how many subprocesses did this job spawn?" into a countable fact
+// rather than an argument.
+func countingWrapper(t *testing.T, dir, name, real string) (wrapper, log string) {
+	t.Helper()
+	wrapper = filepath.Join(dir, "counting-"+name+".sh")
+	log = filepath.Join(dir, "counting-"+name+".log")
+	script := "#!/bin/sh\n" +
+		"printf 'call\\n' >> \"" + log + "\"\n" +
+		"exec \"" + real + "\" \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+		t.Fatalf("write %s wrapper: %v", name, err)
+	}
+	return wrapper, log
+}
+
+func countCalls(t *testing.T, log string) int {
+	t.Helper()
+	b, err := os.ReadFile(log)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("read %s: %v", log, err)
+	}
+	n := 0
+	for _, l := range strings.Split(string(b), "\n") {
+		if strings.TrimSpace(l) != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// TestProbeBudget_ProgressAddsNoSubprocess is AC12: a job processed end to end spawns no
+// more probe subprocesses than it did before live progress existed.
+//
+// This is the guard on the obvious wrong way to build this feature. A progress figure is
+// meaningless without the source length it is measured against, and the easy way to get
+// that length is a second ffprobe per job — on a tool that walks a whole library, which
+// is exactly the regression TRANSCODE-PERF was raised to remove. So the duration rides
+// the snapshot ProcessFile ALREADY takes: one more -show_entries section on a call that
+// was being made anyway.
+func TestProbeBudget_ProgressAddsNoSubprocess(t *testing.T) {
+	realFFmpeg, realFFprobe := tools(t)
+	root := t.TempDir()
+	src := filepath.Join(root, "movie.mkv")
+	mkH264(t, realFFmpeg, src, "8M") // fixtures use the REAL binaries — never counted
+
+	d := t.TempDir()
+	countedFFmpeg, ffmpegLog := countingWrapper(t, d, "ffmpeg", realFFmpeg)
+	countedFFprobe, ffprobeLog := countingWrapper(t, d, "ffprobe", realFFprobe)
+
+	eng := buildEngine(t, countedFFmpeg, countedFFprobe, root, nil, nil)
+	// An Observer is set, so progress collection is fully live on this run — the budget
+	// is measured with the feature ON, not with it quietly disabled.
+	var c collector
+	eng.Observer = c.observe
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+	if codecOf(t, realFFprobe, src) != "hevc" {
+		t.Fatal("the fixture job did not complete — a budget measured over a job that did nothing proves nothing")
+	}
+
+	probes := countCalls(t, ffprobeLog)
+	ffmpegs := countCalls(t, ffmpegLog)
+	if probes > probeBudgetFFprobe {
+		t.Errorf("one job spawned %d ffprobe subprocesses, budget is %d — progress collection must not add a probe",
+			probes, probeBudgetFFprobe)
+	}
+	if ffmpegs > probeBudgetFFmpeg {
+		t.Errorf("one job spawned %d ffmpeg subprocesses, budget is %d — progress collection must not add a subprocess",
+			ffmpegs, probeBudgetFFmpeg)
+	}
+}
+
+// TestEngine_ReportsLiveProgressWithTheSourceDuration is the wiring proof: a real encode
+// driven through ProcessFile reaches the Observer as PROGRESS events (no state
+// transition), each carrying a real position and the source duration it is measured
+// against. It is what makes the dashboard's figure a measurement rather than a guess.
+func TestEngine_ReportsLiveProgressWithTheSourceDuration(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	root := t.TempDir()
+	src := filepath.Join(root, "movie.mkv")
+	mkH264Long(t, ffmpeg, src, "8M") // 10s, so the encode is long enough to report
+
+	srcDur, ok := probe.New(ffmpeg, ffprobe).DurationSec(context.Background(), src)
+	if !ok {
+		t.Fatal("fixture has no readable duration")
+	}
+
+	eng := buildEngine(t, ffmpeg, ffprobe, root, nil, nil)
+	var c collector
+	eng.Observer = c.observe
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+
+	var progress []Event
+	for _, ev := range c.snapshot() {
+		if ev.Progress != nil {
+			progress = append(progress, ev)
+		}
+	}
+	if len(progress) == 0 {
+		t.Fatal("a real encode produced no progress events — an in-flight job stays as illegible as it was")
+	}
+	for _, ev := range progress {
+		if ev.Status != store.Encoding {
+			t.Errorf("a progress event must carry the state the job is still IN, got %q", ev.Status)
+		}
+		if ev.Outcome != nil {
+			t.Error("a progress event must carry no Outcome — it is not a terminal transition")
+		}
+		if ev.Path != src {
+			t.Errorf("progress event path = %q, want the source %q", ev.Path, src)
+		}
+		if ev.Progress.DurationSec == nil {
+			t.Fatal("progress carries no source duration — there is nothing to measure it against")
+		}
+		if math.Abs(*ev.Progress.DurationSec-srcDur) > 0.01 {
+			t.Errorf("progress duration = %v, want the source duration %v", *ev.Progress.DurationSec, srcDur)
+		}
+		if ev.Progress.PositionSec < 0 {
+			t.Errorf("negative reported position %v", ev.Progress.PositionSec)
+		}
+	}
+}
+
+// TestEngine_FailedEncodeWithProgressStillRecordsTheError is the engine half of AC6: the
+// job a failing encoder produces is the same job it produced before progress collection
+// existed — failed, source untouched, with the encoder's error text as the reason.
+func TestEngine_FailedEncodeWithProgressStillRecordsTheError(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	root := t.TempDir()
+	src := filepath.Join(root, "movie.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+	before := md5f(t, src)
+
+	d := t.TempDir()
+	// A fake ffmpeg that emits a valid progress report and THEN fails.
+	fake := progressFake(t, d, "engine-failing", oneReport(500_000, "continue"),
+		"", "Conversion failed! the encoder gave up", 4)
+	cfg := baseCfg(root)
+	prober := probe.New(ffmpeg, ffprobe)
+	ts := newTestStore(t, root)
+	eng := New(cfg, prober, FFmpegEncoder{FFmpeg: fake, Cfg: cfg, Probe: prober}, ts, discardLogger())
+	var c collector
+	eng.Observer = c.observe
+
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+
+	if md5f(t, src) != before {
+		t.Fatal("source modified by a failed encode")
+	}
+	if nTemp(t, root) != 0 {
+		t.Error("a failed encode left a temp behind")
+	}
+	if !ledgerHas(t, ts, store.Failed, "movie.mkv") {
+		t.Fatal("expected a failed row")
+	}
+	rows, err := ts.List(context.Background(), []store.Status{store.Failed}, 0)
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	reason := ""
+	for _, r := range rows {
+		if r.Path == src {
+			reason = r.Outcome.Reason
+		}
+	}
+	if !strings.Contains(reason, "Conversion failed!") {
+		t.Errorf("the failed row lost the encoder's error text: %q", reason)
+	}
+	if !strings.Contains(reason, "exit status 4") {
+		t.Errorf("the failed row lost the encoder's exit status: %q", reason)
+	}
+	// Progress really was collected on that run, so the assertions above are not
+	// vacuously true of a run where collection never happened.
+	sawProgress := false
+	for _, ev := range c.snapshot() {
+		if ev.Progress != nil {
+			sawProgress = true
+		}
+	}
+	if !sawProgress {
+		t.Error("no progress was collected on the failing run — the proof would be vacuous")
 	}
 }

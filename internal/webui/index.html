@@ -93,6 +93,11 @@
   .vmaf .mean { font-weight:600; }
   .vmaf .worst { color:var(--fg); }
   .vmaf .cond { display:block; color:var(--muted); font-size:11px; margin-top:2px; }
+  /* In-state age and the encoder's own progress figure, for the active queue only. */
+  td.elapsed { white-space:nowrap; font-variant-numeric:tabular-nums; }
+  td.prog { white-space:nowrap; }
+  td.prog .pctv { font-weight:600; font-variant-numeric:tabular-nums; }
+  td.prog .of { display:block; color:var(--muted); font-size:11px; margin-top:2px; }
   .nr { color:var(--muted); font-style:italic; }
   .empty { color:var(--muted); font-style:italic; padding:10px; }
   footer { color:var(--muted); font-size:12px; text-align:center; padding:22px; max-width:80ch; margin:0 auto; }
@@ -135,9 +140,14 @@
 
   <section>
     <h2>Queue &amp; active</h2>
+    <p class="note">Elapsed is how long the file has been in the state it is in now, recomputed from the
+      transition timestamp on each update rather than counted in this page. Progress is read from the
+      encoder's own progress stream and measured against the source duration; where the encoder has
+      reported nothing yet, or the container reports no duration, it reads <i>unknown</i> — never an
+      estimate, and never a stale figure.</p>
     <p class="note cap" id="queue-cap" hidden></p>
     <div class="tablewrap">
-      <table><thead><tr><th>File</th><th>Status</th><th>Worker</th></tr></thead>
+      <table><thead><tr><th>File</th><th>Status</th><th>Elapsed</th><th>Progress</th><th>Worker</th></tr></thead>
         <tbody id="queue"></tbody></table>
     </div>
   </section>
@@ -174,6 +184,8 @@
   <tr>
     <td class="path"></td>
     <td class="st"><span class="dot"></span><span class="stlabel"></span></td>
+    <td class="elapsed"></td>
+    <td class="prog"></td>
     <td class="worker"></td>
   </tr>
 </template>
@@ -193,6 +205,7 @@
 "use strict";
 const STATUSES = ["pending","probing","encoding","verifying","done","skipped","failed"];
 const QUEUE_STATUSES = ["pending","probing","encoding","verifying"];
+const ACTIVE_STATUSES = ["probing","encoding","verifying"];
 const TERMINAL_STATUSES = ["done","skipped","failed"];
 const $ = (id) => document.getElementById(id);
 
@@ -238,9 +251,30 @@ function fmtDur(ms) {
   const h = Math.floor(m / 60);
   return h + "h " + (m % 60) + "m";
 }
+// fmtSpan renders a duration in seconds as a compact H/M/S span. Used for how long a job
+// has been in its state and for a position within the source.
+function fmtSpan(sec) {
+  sec = Math.floor(Number(sec));
+  if (!isFinite(sec) || sec < 0) return "";
+  const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, s = sec % 60;
+  if (h) return h + "h " + m + "m";
+  if (m) return m + "m " + s + "s";
+  return s + "s";
+}
+
 // A pointer field arrives as JSON null when the fact was never recorded. Render that
 // honestly — never as 0, never as an invented value.
 function isNum(v) { return typeof v === "number" && isFinite(v); }
+
+// The offset between this page's clock and the server's, taken from the snapshot's own
+// `now` field. Every elapsed figure is DERIVED from it on each tick — never accumulated
+// in a counter here. Two reasons, both load-bearing: a background tab's timers are
+// throttled by policies with no normative guarantee, so a counter ticking in the page
+// would silently drift while a value recomputed from the transition timestamp cannot;
+// and a client whose clock is skewed against the server's would otherwise read a
+// nonsensical (or negative) age straight off updated_at.
+let clockOffset = 0;
+function serverNow() { return Date.now() / 1000 + clockOffset; }
 
 // mk(tag, class, text): the one DOM-node factory. textContent means any string it is
 // handed — a media path, a failure reason — is inert text, never parsed as markup.
@@ -301,12 +335,47 @@ function resultCell(td, j) {
   }
 }
 
+// The progress cell for a queue row. It shows a figure ONLY when the encoder reported a
+// position AND the source duration is known; anything else reads "unknown". There is no
+// interpolation, no estimate from elapsed time, and no carry-over of the last figure —
+// an absent measurement is displayed as absent.
+function progressCell(td, j) {
+  if (!ACTIVE_STATUSES.includes(j.status)) return; // queued, not started: nothing to report
+  if (!isNum(j.progress_fraction)) {
+    td.appendChild(mk("span", "nr", "unknown"));
+    return;
+  }
+  const frac = Math.min(1, Math.max(0, j.progress_fraction));
+  td.appendChild(mk("span", "pctv", Math.round(frac * 100) + "%"));
+  if (isNum(j.progress_seconds) && isNum(j.progress_duration_seconds)) {
+    td.appendChild(mk("span", "of",
+      fmtSpan(Math.min(j.progress_seconds, j.progress_duration_seconds))
+      + " of " + fmtSpan(j.progress_duration_seconds)));
+  }
+}
+
+// refreshElapsed recomputes every active row's in-state age from the transition
+// timestamp the row carries. It runs on render AND on a timer, which is what makes the
+// figure move with no page reload and no state transition.
+function refreshElapsed() {
+  const now = serverNow();
+  for (const td of $("queue").querySelectorAll("td.elapsed")) {
+    const since = Number(td.dataset.since);
+    if (!isFinite(since) || since <= 0) { td.textContent = ""; continue; }
+    td.textContent = fmtSpan(Math.max(0, now - since));
+  }
+}
+
 function queueRow(j) {
   const tr = $("tpl-queue-row").content.cloneNode(true).firstElementChild;
   tr.dataset.path = (j.path || "").toLowerCase();
   tr.querySelector(".path").textContent = j.path;
   tr.querySelector(".st").classList.add("st-" + j.status);
   tr.querySelector(".stlabel").textContent = j.status;
+  // The elapsed basis is the transition timestamp already on the wire; the cell itself
+  // is filled by refreshElapsed, so the row and the ticker can never disagree.
+  tr.querySelector(".elapsed").dataset.since = String(j.updated_at || 0);
+  progressCell(tr.querySelector(".prog"), j);
   tr.querySelector(".worker").textContent = j.worker || "";
   return tr;
 }
@@ -377,6 +446,9 @@ function announce(sum) {
 }
 
 function render(snap) {
+  // Re-anchor the elapsed basis to the server's clock as of this frame.
+  if (isNum(snap.now)) clockOffset = snap.now - Date.now() / 1000;
+
   // Badges.
   const bp = $("b-paused");
   bp.textContent = snap.paused ? "paused" : "running";
@@ -408,8 +480,9 @@ function render(snap) {
   const q = snap.queue || [];
   const qbody = $("queue");
   qbody.replaceChildren();
-  if (!q.length) qbody.appendChild(emptyRow(3, "Nothing queued."));
+  if (!q.length) qbody.appendChild(emptyRow(5, "Nothing queued."));
   else for (const j of q) qbody.appendChild(queueRow(j));
+  refreshElapsed();
 
   // History — the trust surface: per file, the evidence its swap was safe.
   const h = snap.history || [];
@@ -427,6 +500,11 @@ function render(snap) {
 }
 
 $("filter").addEventListener("input", applyFilter);
+
+// The elapsed ticker. It recomputes from each row's own transition timestamp, so a
+// throttled or long-delayed tick produces a correct figure rather than a lagging one —
+// the tick decides only HOW OFTEN the page refreshes, never WHAT it says.
+setInterval(refreshElapsed, 1000);
 
 // Live updates over SSE (EventSource auto-reconnects on drop).
 let es;
