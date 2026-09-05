@@ -329,6 +329,93 @@ func TestQueue_ProgressAddsNoHTMLSinkAndNoExternalAsset(t *testing.T) {
 	}
 }
 
+// --- DASH-7: the whole-ledger aggregates on the page -------------------------
+
+// The page renders each published aggregate with the set it covers and the rows that
+// were excluded for want of a recorded value. Rendering is client-side, so these are
+// properties of the page SOURCE: the keys it reads, the statements it draws.
+func TestDashboard_RendersTheWholeLedgerAggregatesWithTheirCoverage(t *testing.T) {
+	s := string(indexHTML)
+	for _, want := range []string{
+		// every published figure is read by name
+		`"outcomes"`, `"skips_by_guard"`, `"size_ratio"`, `"encode_ms"`, `"vmaf_mean"`, `"vmaf_min"`,
+		// and each is drawn with its coverage, its window when bounded, and its exclusions
+		`"over " + (a.covers`, "a.window", "excluded: no recorded value",
+		"Across the whole ledger",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("index.html does not render the aggregates properly: missing %q", want)
+		}
+	}
+	// The figures must come from the snapshot's aggregates, not be recomputed in the
+	// browser from the capped rows the tables were handed.
+	if !strings.Contains(s, "renderAggregates(snap.aggregates)") {
+		t.Error("the page does not render the server-computed aggregates from the snapshot")
+	}
+}
+
+// An aggregate that could not be read is drawn AS unavailable, and the rest of the page
+// still draws. Three independent guarantees, each asserted: the card checks its own
+// `available` flag, each card is built inside its own try/catch so one throwing figure
+// cannot take the others, and the whole aggregate render happens AFTER the queue and
+// history rows are already on the page.
+func TestDashboard_AnUnavailableAggregateStillLeavesThePageRendering(t *testing.T) {
+	s := string(indexHTML)
+	if !strings.Contains(s, "a.available !== true") {
+		t.Error("a card does not check whether its figure is available, so an unreadable figure would render as data")
+	}
+	if !strings.Contains(s, `v.appendChild(mk("span", "nr", "unavailable"))`) {
+		t.Error("an unavailable figure is not drawn as unavailable")
+	}
+	if !strings.Contains(s, "card = aggCard(null, title, nodes);") {
+		t.Error("cards are not built independently - one figure that throws would take the others with it")
+	}
+	hist := strings.Index(s, "hbody.appendChild(histRow(j))")
+	agg := strings.Index(s, "renderAggregates(snap.aggregates)")
+	if hist < 0 || agg < 0 || agg < hist {
+		t.Errorf("the aggregates render before the tables (history at %d, aggregates at %d) - an aggregate failure could then cost the rows", hist, agg)
+	}
+	if !strings.Contains(s, "try { renderAggregates(snap.aggregates); } catch (_) {}") {
+		t.Error("the aggregate render is not guarded, so a throw inside it would abort the rest of render()")
+	}
+	// A figure with nothing recorded reads as "not recorded", never as 0.
+	if !strings.Contains(s, "if (counted === 0) {") || !strings.Contains(s, "v.appendChild(nrNode());") {
+		t.Error("an aggregate with no contributing row is not rendered as 'not recorded'")
+	}
+}
+
+// The response the page is served with is unchanged by this phase: the same
+// Content-Security-Policy, byte for byte, and Trusted Types still required. Asserted
+// against the literal policy rather than a substring, because a widened CSP is exactly
+// the kind of change that passes a "contains" check.
+func TestCSP_ByteForByteUnchangedAndStillEnforcesTrustedTypes(t *testing.T) {
+	const want = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; " +
+		"connect-src 'self'; require-trusted-types-for 'script'"
+	rec := httptest.NewRecorder()
+	Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if got := rec.Header().Get("Content-Security-Policy"); got != want {
+		t.Errorf("Content-Security-Policy changed\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// The page fetches nothing from outside the binary that served it. `default-src 'none'`
+// would block it anyway, but a page that TRIES is a page that renders broken behind the
+// policy, so the source itself must name no off-binary origin.
+func TestPage_FetchesNothingFromOutsideTheBinaryThatServedIt(t *testing.T) {
+	s := string(indexHTML)
+	for _, banned := range []string{"http://", "https://", "//cdn", "@import", "<script src", "<link rel"} {
+		if strings.Contains(s, banned) {
+			t.Errorf("index.html reaches outside the binary: %q", banned)
+		}
+	}
+	// The only origin the page talks to is its own server.
+	for _, want := range []string{`new EventSource("/api/events")`} {
+		if !strings.Contains(s, want) {
+			t.Errorf("index.html no longer talks to its own API: missing %q", want)
+		}
+	}
+}
+
 func TestHandler404sOtherPaths(t *testing.T) {
 	h := Handler()
 	req := httptest.NewRequest(http.MethodGet, "/nope.js", nil)

@@ -126,7 +126,7 @@ invariant is entirely unaffected.
 | Method & path | Auth | Purpose |
 |---|---|---|
 | `GET /` | — | the embedded dashboard |
-| `GET /api/summary` | — | counts per status + bytes reclaimed (**lifetime** and this-run) + paused/scanning |
+| `GET /api/summary` | — | counts per status + bytes reclaimed (**lifetime** and this-run) + paused/scanning + the **whole-ledger aggregates** (see below) |
 | `GET /api/queue` | — | pending + active jobs |
 | `GET /api/history?limit=N` | — | recent terminal jobs (done/skipped/failed) with their recorded outcome — see below |
 | `GET /api/events` | — | SSE: a fresh snapshot on every state change |
@@ -207,7 +207,41 @@ honest this-run number.
 **Known limitations.** Rows written before these columns existed carry no outcome and read as "not
 recorded" — a measurement never taken cannot be reconstructed, and such a row also contributes nothing to
 the lifetime total (never counted as a zero-reclaim). Queue/history views are still capped at the most
-recent rows, not the whole ledger.
+recent rows, not the whole ledger; the aggregate figures below are not.
+
+### Whole-ledger figures
+
+The queue and history views ship at most a few hundred rows, so any statistic derived from that payload
+would describe the most recent files while looking exactly like a statistic about your library. Every
+published figure is therefore computed **in the server, over every matching row in the `jobs` table**, and
+rides both `GET /api/summary` and the SSE snapshot under `aggregates`:
+
+| Figure | What it is |
+|---|---|
+| `outcomes` | how many rows reached each terminal status (done / skipped / failed) |
+| `skips_by_guard` | every skipped row broken down by **which guard** skipped it |
+| `size_ratio` | replacement size as a fraction of the original (0.35 = 35% of the original), low / mean / high |
+| `encode_ms` | recorded encode wall-clock time, low / mean / high |
+| `vmaf_mean`, `vmaf_min` | the spread of the two pooled VMAF statistics across files |
+
+Each one carries the same envelope, and every part of it is load-bearing:
+
+- **`covers`** names the SET the figure is over, and **`window`** is `""` unless the figure is bounded, in
+  which case it names the bound. A number whose set is unstated gets read as covering everything you own.
+- **`counted`** is how many rows contributed a value; **`excluded`** is how many matching rows recorded
+  none. An unrecorded value is **excluded and reported**, never read as `0`: a VMAF of `0.0` is a destroyed
+  frame, and an absent size would invent a 100% reclaim.
+- **`min` / `mean` / `max`** are `null` (never `0`) when `counted` is 0. A figure nothing contributed to is
+  "no data", not an average of zero. They are deliberately **not** a median or a percentile: those SQL
+  functions are gated on the SQLite version AND a build flag, and a query that resolves on one build and
+  fails on another is a runtime failure on somebody else's machine.
+- **`available`** is `false` when the figure could not be read at all, with a fixed `unavailable`
+  statement. One unreadable figure never suppresses the rest: the summary, the queue rows and the history
+  rows still ship, the SSE broadcast still fires, and the dashboard draws that one card as unavailable
+  while the rest of the page renders.
+
+The dashboard shows all of it under **Across the whole ledger**, each figure beside the set it covers and
+the count of rows it had to leave out.
 
 #### Schema versioning
 

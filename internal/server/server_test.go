@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -562,6 +564,68 @@ func TestQueueEndpoint_InFlightRetryCarriesNoStaleProof(t *testing.T) {
 	}
 }
 
+// --- the whole-ledger aggregates (DASH-7) ------------------------------------
+
+// aggStore is the seam for the failure-isolation criteria: a real store whose aggregate
+// report is post-processed, so a test can make exactly ONE figure unreadable and watch
+// what happens to the rest of the snapshot. Everything else is the real SQLite store, so
+// the summary/queue/history the test asserts on are genuinely read from a database.
+type aggStore struct {
+	*store.SQLite
+	breakOne func(store.Aggregates) store.Aggregates
+}
+
+func (s aggStore) Aggregates(ctx context.Context) store.Aggregates {
+	return s.breakOne(s.SQLite.Aggregates(ctx))
+}
+
+// seedOverCap fills st with more terminal rows than historyLimit and more non-terminal
+// rows than queueLimit, and returns what the WHOLE table then holds. This is the shape
+// of ledger every figure on the page has to survive: the views truncate, the figures
+// must not.
+func seedOverCap(t *testing.T, st *store.SQLite) (done, skipped, queued int) {
+	t.Helper()
+	ctx := context.Background()
+	done, skipped, queued = historyLimit+11, historyLimit+7, queueLimit+3
+
+	for i := 0; i < done; i++ {
+		p := "/lib/over/done" + strconv.Itoa(i) + ".mkv"
+		mustClaim(t, st, p, "d:d")
+		src, out, ms := int64(4_000_000+i), int64(1_000_000+i), int64(30_000+i)
+		mean, worst := 95.0+float64(i%10)/10.0, 70.0+float64(i%20)/10.0
+		if err := st.Finish(ctx, p, "d:d", store.Done, &store.Outcome{
+			Encoder: "cpu", VmafMean: &mean, VmafMin: &worst, VmafModel: "version=vmaf_v0.6.1",
+			SourceBytes: &src, OutputBytes: &out, EncodeMs: &ms,
+		}); err != nil {
+			t.Fatalf("seed done: %v", err)
+		}
+	}
+	for i := 0; i < skipped; i++ {
+		p := "/lib/over/skip" + strconv.Itoa(i) + ".mkv"
+		mustClaim(t, st, p, "s:s")
+		if err := st.Finish(ctx, p, "s:s", store.Skipped, &store.Outcome{Reason: engine.SkipLowBitrate}); err != nil {
+			t.Fatalf("seed skipped: %v", err)
+		}
+	}
+	for i := 0; i < queued; i++ {
+		mustClaim(t, st, "/lib/over/queued"+strconv.Itoa(i)+".mkv", "q:q")
+	}
+	return done, skipped, queued
+}
+
+func snapshotOf(t *testing.T, hub *Hub) snapshot {
+	t.Helper()
+	data, err := hub.SnapshotJSON(context.Background())
+	if err != nil {
+		t.Fatalf("SnapshotJSON: %v", err)
+	}
+	var snap snapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+	return snap
+}
+
 // --- live progress on the wire (S0030) ---------------------------------------
 //
 // The page these fields feed is the only place an operator can answer "is this moving?".
@@ -578,22 +642,16 @@ func progressEvent(path string, positionSec float64, dur *float64) engine.Event 
 	}
 }
 
-func snapshotRaw(t *testing.T, h *harness) string {
+// snapshotRaw is snapshotOf's counterpart for the assertions that must read the RAW
+// bytes: the explicit-null convention only exists on the wire, and decoding into a
+// struct would erase the very distinction those tests are pinning.
+func snapshotRaw(t *testing.T, hub *Hub) string {
 	t.Helper()
-	data, err := h.hub.SnapshotJSON(context.Background())
+	data, err := hub.SnapshotJSON(context.Background())
 	if err != nil {
 		t.Fatalf("SnapshotJSON: %v", err)
 	}
 	return string(data)
-}
-
-func snapshotOf(t *testing.T, h *harness) snapshot {
-	t.Helper()
-	var snap snapshot
-	if err := json.Unmarshal([]byte(snapshotRaw(t, h)), &snap); err != nil {
-		t.Fatalf("unmarshal snapshot: %v", err)
-	}
-	return snap
 }
 
 func queueRowFor(t *testing.T, snap snapshot, path string) jobDTO {
@@ -615,7 +673,7 @@ func queueRowFor(t *testing.T, snap snapshot, path string) jobDTO {
 func TestSnapshot_ActiveJobWithNoProgressIsUnknownNotZero(t *testing.T) {
 	h := newHarness(t, "")
 
-	snap := snapshotOf(t, h)
+	snap := snapshotOf(t, h.hub)
 	row := queueRowFor(t, snap, "/lib/active.mkv")
 	if row.Status != string(store.Encoding) {
 		t.Errorf("status = %q, want encoding — an unmeasured job is still a RUNNING job", row.Status)
@@ -624,7 +682,7 @@ func TestSnapshot_ActiveJobWithNoProgressIsUnknownNotZero(t *testing.T) {
 		t.Errorf("a job whose encoder reported nothing is carrying a figure: %+v", row)
 	}
 
-	raw := snapshotRaw(t, h)
+	raw := snapshotRaw(t, h.hub)
 	for _, want := range []string{
 		`"progress_seconds":null`, `"progress_duration_seconds":null`, `"progress_fraction":null`,
 	} {
@@ -655,7 +713,7 @@ func TestSnapshot_ReportedProgressRidesTheQueue(t *testing.T) {
 	dur := 400.0
 	h.hub.Observe(progressEvent("/lib/active.mkv", 100, &dur))
 
-	row := queueRowFor(t, snapshotOf(t, h), "/lib/active.mkv")
+	row := queueRowFor(t, snapshotOf(t, h.hub), "/lib/active.mkv")
 	if row.ProgressSeconds == nil || *row.ProgressSeconds != 100 {
 		t.Fatalf("progress_seconds = %v, want 100", row.ProgressSeconds)
 	}
@@ -700,14 +758,14 @@ func TestSnapshot_UnknownSourceDurationPublishesNoFraction(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h.hub.Observe(progressEvent("/lib/active.mkv", 90, tc.dur))
-			row := queueRowFor(t, snapshotOf(t, h), "/lib/active.mkv")
+			row := queueRowFor(t, snapshotOf(t, h.hub), "/lib/active.mkv")
 			if row.ProgressFraction != nil {
 				t.Errorf("a %s published a fraction of %v — there is nothing to measure against", tc.name, *row.ProgressFraction)
 			}
 			if row.ProgressDuration != nil {
 				t.Errorf("a %s published a duration of %v", tc.name, *row.ProgressDuration)
 			}
-			raw := snapshotRaw(t, h)
+			raw := snapshotRaw(t, h.hub)
 			if !strings.Contains(raw, `"progress_fraction":null`) {
 				t.Errorf("an unmeasurable fraction must serialize as null\nbody: %s", raw)
 			}
@@ -724,7 +782,7 @@ func TestSnapshot_PositionOutOfRangeIsClamped(t *testing.T) {
 	dur := 120.0
 
 	h.hub.Observe(progressEvent("/lib/active.mkv", 126, &dur)) // past the end
-	row := queueRowFor(t, snapshotOf(t, h), "/lib/active.mkv")
+	row := queueRowFor(t, snapshotOf(t, h.hub), "/lib/active.mkv")
 	if row.ProgressFraction == nil || *row.ProgressFraction != 1 {
 		t.Errorf("a position past the source duration gave fraction %v, want exactly 1 (fully encoded)", row.ProgressFraction)
 	}
@@ -733,7 +791,7 @@ func TestSnapshot_PositionOutOfRangeIsClamped(t *testing.T) {
 	}
 
 	h.hub.Observe(progressEvent("/lib/active.mkv", -3, &dur)) // pre-roll
-	row = queueRowFor(t, snapshotOf(t, h), "/lib/active.mkv")
+	row = queueRowFor(t, snapshotOf(t, h.hub), "/lib/active.mkv")
 	if row.ProgressSeconds == nil || *row.ProgressSeconds != 0 {
 		t.Errorf("a negative position gave progress_seconds %v, want 0", row.ProgressSeconds)
 	}
@@ -763,7 +821,7 @@ func TestSnapshot_TerminalJobStopsReportingProgress(t *testing.T) {
 	if got := h.hub.liveProgressCount(); got != 0 {
 		t.Errorf("live progress entries = %d after the job went terminal, want 0", got)
 	}
-	snap := snapshotOf(t, h)
+	snap := snapshotOf(t, h.hub)
 	for _, j := range snap.Queue {
 		if j.Path == "/lib/active.mkv" {
 			t.Errorf("a finished job is still in the queue: %+v", j)
@@ -851,16 +909,308 @@ func TestSnapshot_NoActiveJobsPublishNoLiveProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snap := snapshotOf(t, h)
+	snap := snapshotOf(t, h.hub)
 	if len(snap.Queue) != 0 {
 		t.Fatalf("queue is not empty: %+v", snap.Queue)
 	}
 	if got := h.hub.liveProgressCount(); got != 0 {
 		t.Errorf("live progress entries = %d with no active job, want 0 — a stranded entry would grow without bound", got)
 	}
-	raw := snapshotRaw(t, h)
+	raw := snapshotRaw(t, h.hub)
 	if strings.Contains(raw, `"progress_fraction":0.`) || strings.Contains(raw, `"progress_fraction":1`) {
 		t.Errorf("a snapshot with no active jobs published a progress figure\nbody: %s", raw)
+	}
+}
+
+// The criterion this phase exists for. Against a ledger holding MORE terminal rows than
+// the history view ships and MORE non-terminal rows than the queue view ships, every
+// published figure equals the whole-table value - while the rows on the wire are still
+// capped exactly as before. Both halves matter: an aggregate that matched by shipping
+// more rows would have fixed the number by breaking the payload.
+func TestSnapshot_AggregatesAreWholeLedgerWhileRowsStayCapped(t *testing.T) {
+	h := newHarness(t, "")
+	done, skipped, _ := seedOverCap(t, h.st)
+	// newStore seeds one done row and one active row on top of the over-cap seed.
+	done++
+
+	snap := snapshotOf(t, h.hub)
+
+	if len(snap.Queue) != queueLimit {
+		t.Errorf("queue shipped %d rows, want the unchanged cap of %d", len(snap.Queue), queueLimit)
+	}
+	if len(snap.History) != historyLimit {
+		t.Errorf("history shipped %d rows, want the unchanged cap of %d", len(snap.History), historyLimit)
+	}
+
+	counts := map[string]int64{}
+	for _, b := range snap.Aggregates.Outcomes.Buckets {
+		counts[b.Key] = b.Count
+	}
+	if counts[string(store.Done)] != int64(done) || counts[string(store.Skipped)] != int64(skipped) {
+		t.Errorf("outcome counts = %v, want done=%d skipped=%d - the whole table, not the %d rows shipped",
+			counts, done, skipped, len(snap.History))
+	}
+	if got := snap.Aggregates.SkipsByGuard.Buckets; len(got) != 1 || got[0].Key != engine.SkipLowBitrate || got[0].Count != int64(skipped) {
+		t.Errorf("skip breakdown = %+v, want %d rows under %q", got, skipped, engine.SkipLowBitrate)
+	}
+	if snap.Aggregates.SizeRatio.Counted != int64(done-1) {
+		t.Errorf("size ratio counted %d rows, want the %d done rows that recorded sizes",
+			snap.Aggregates.SizeRatio.Counted, done-1)
+	}
+	// The one done row newStore seeds carries no outcome at all - excluded and counted,
+	// never folded in as a zero.
+	if snap.Aggregates.SizeRatio.Excluded != 1 {
+		t.Errorf("size ratio excluded = %d, want 1 (the outcome-less done row)", snap.Aggregates.SizeRatio.Excluded)
+	}
+	if snap.Aggregates.EncodeMs.Counted != int64(done-1) || snap.Aggregates.VmafMean.Counted != int64(done-1) {
+		t.Errorf("encode/vmaf counted %d/%d, want %d each",
+			snap.Aggregates.EncodeMs.Counted, snap.Aggregates.VmafMean.Counted, done-1)
+	}
+}
+
+// Every published figure states the set it covers, and a figure that is NOT over its
+// whole set has to say what bounds it. Nothing published today is bounded - which is the
+// assertion, not an omission: an unstated window is exactly the failure mode the phase
+// names, so `window` is on the wire for every figure and empty for every figure, and the
+// projection is proved to carry a bound when one exists.
+func TestSnapshot_EveryAggregateStatesTheSetItCovers(t *testing.T) {
+	h := newHarness(t, "")
+	snap := snapshotOf(t, h.hub)
+	a := snap.Aggregates
+
+	for name, cov := range map[string][2]string{
+		"outcomes":       {a.Outcomes.Covers, a.Outcomes.Window},
+		"skips_by_guard": {a.SkipsByGuard.Covers, a.SkipsByGuard.Window},
+		"size_ratio":     {a.SizeRatio.Covers, a.SizeRatio.Window},
+		"encode_ms":      {a.EncodeMs.Covers, a.EncodeMs.Window},
+		"vmaf_mean":      {a.VmafMean.Covers, a.VmafMean.Window},
+		"vmaf_min":       {a.VmafMin.Covers, a.VmafMin.Window},
+	} {
+		if cov[0] == "" {
+			t.Errorf("%s ships no `covers` - a figure whose set is unstated will be read as covering the whole library", name)
+		}
+		if !strings.Contains(cov[0], "ledger") {
+			t.Errorf("%s covers %q, which does not name the ledger it is over", name, cov[0])
+		}
+		if cov[1] != "" {
+			t.Errorf("%s claims window %q but is computed over its whole matching set", name, cov[1])
+		}
+	}
+
+	// A bounded figure states its bound ALONGSIDE the figure, on the wire, in the same
+	// object. This drives the projection with a windowed aggregate to prove the
+	// statement travels rather than being dropped on the way out.
+	windowed := (&Hub{log: discard()}).spread("windowed", store.Spread{
+		Coverage: store.Coverage{Set: "done rows in the ledger", Window: "the most recent 200 rows"},
+		Counted:  5,
+	})
+	if windowed.Window != "the most recent 200 rows" || windowed.Covers != "done rows in the ledger" {
+		t.Errorf("a bounded figure lost its window on the wire: %+v", windowed)
+	}
+	body, err := json.Marshal(windowed)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(body), `"window":"the most recent 200 rows"`) {
+		t.Errorf("the window is not stated alongside the figure: %s", body)
+	}
+}
+
+// A figure nobody could compute is "no data", on the wire, as explicit nulls - never 0,
+// never an average of 0, and never an empty breakdown that reads as a set of zero
+// counts. Asserted on the raw bytes, because the distinction only exists there:
+// decoding into a struct turns null and 0 into the same Go value, and a client that
+// read 0 would publish a fabricated library-wide statistic.
+func TestSnapshot_AnAggregateWithNoDataIsNullNotZero(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	// A done row with NO recorded outcome: the shape of every row written before the
+	// outcome columns existed.
+	mustClaim(t, st, "/lib/unmeasured.mkv", "1:1")
+	if err := st.Finish(ctx, "/lib/unmeasured.mkv", "1:1", store.Done, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	ctrl := NewController(ctx, func(context.Context) error { return nil }, discard())
+	hub := NewHub(st, ctrl, discard())
+	data, err := hub.SnapshotJSON(ctx)
+	if err != nil {
+		t.Fatalf("SnapshotJSON: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{`"min":null`, `"mean":null`, `"max":null`, `"excluded":1`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("an unmeasured aggregate must ship %s\nbody: %s", want, body)
+		}
+	}
+	if strings.Contains(body, `"mean":0`) || strings.Contains(body, `"min":0`) {
+		t.Errorf("an unmeasured aggregate went out as a zero - that is a claim about a library nobody measured\nbody: %s", body)
+	}
+}
+
+// One unreadable figure must cost exactly itself. buildSnapshot returns an error on any
+// store read failure and broadcast then SKIPS the frame, so an aggregate read on that
+// path would blank the live page for every subscriber the moment one query failed. This
+// breaks a single aggregate and asserts the summary, the queue and the history still
+// ship, the other figures still compute, and the broadcast still fires.
+func TestSnapshot_OneUnreadableAggregateStillShipsEverythingElse(t *testing.T) {
+	real := newStore(t)
+	broken := aggStore{SQLite: real, breakOne: func(a store.Aggregates) store.Aggregates {
+		a.VmafMean.Err = errors.New("simulated aggregate read failure")
+		a.VmafMean.Counted, a.VmafMean.Mean = 0, nil
+		return a
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctrl := NewController(ctx, func(context.Context) error { return nil }, discard())
+	hub := NewHub(broken, ctrl, discard())
+	srv := New(ctx, config.Config{}, broken, ctrl, hub, nil, nil, discard())
+
+	snap := snapshotOf(t, hub)
+	if snap.Summary[string(store.Done)] != 1 || len(snap.Queue) != 1 || len(snap.History) != 1 {
+		t.Fatalf("a failing aggregate suppressed the snapshot's rows: summary=%v queue=%d history=%d",
+			snap.Summary, len(snap.Queue), len(snap.History))
+	}
+	if snap.Aggregates.VmafMean.Available {
+		t.Error("the broken figure is marked available")
+	}
+	if snap.Aggregates.VmafMean.Unavailable == "" {
+		t.Error("the broken figure ships no unavailable statement, so the page cannot say why it is blank")
+	}
+	if snap.Aggregates.VmafMean.Mean != nil {
+		t.Errorf("an unreadable figure published a value: %v", *snap.Aggregates.VmafMean.Mean)
+	}
+	for name, ok := range map[string]bool{
+		"outcomes": snap.Aggregates.Outcomes.Available, "skips_by_guard": snap.Aggregates.SkipsByGuard.Available,
+		"size_ratio": snap.Aggregates.SizeRatio.Available, "encode_ms": snap.Aggregates.EncodeMs.Available,
+		"vmaf_min": snap.Aggregates.VmafMin.Available,
+	} {
+		if !ok {
+			t.Errorf("%s went unavailable because a DIFFERENT figure failed", name)
+		}
+	}
+
+	// The broadcast still fires - a subscriber gets the frame, it is not skipped.
+	go hub.Run(ctx)
+	sub, unsub := hub.Subscribe()
+	defer unsub()
+	hub.Observe(engine.Event{Path: "/lib/x.mkv", Status: store.Encoding})
+	select {
+	case data := <-sub:
+		var got snapshot
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("broadcast frame is not a snapshot: %v", err)
+		}
+		if got.Summary[string(store.Done)] != 1 {
+			t.Errorf("the broadcast frame lost its summary: %+v", got.Summary)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no broadcast after an event - one failing aggregate skipped the frame for every subscriber")
+	}
+
+	// And the read endpoints answer too, rather than 500ing on the failed figure.
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	var state controlState
+	getJSON(t, ts.URL+"/api/summary", &state)
+	if state.Summary[string(store.Done)] != 1 {
+		t.Errorf("/api/summary lost its counts to a failing aggregate: %+v", state)
+	}
+	if state.Aggregates.VmafMean.Available || !state.Aggregates.SizeRatio.Available {
+		t.Errorf("/api/summary reported the wrong figures as unavailable: %+v", state.Aggregates)
+	}
+	var q struct {
+		Queue []jobDTO `json:"queue"`
+	}
+	getJSON(t, ts.URL+"/api/queue", &q)
+	if len(q.Queue) != 1 {
+		t.Errorf("/api/queue lost its rows to a failing aggregate: %+v", q.Queue)
+	}
+}
+
+// The new fields widen what the unauthenticated read surface says about the LIBRARY and
+// must widen nothing about a FILE. Two halves: the endpoints carrying them still need no
+// authorization (the localhost bind stays the control, exactly as before), and the
+// aggregates object contains no per-file datum - no path, no worker, no fingerprint, and
+// no key outside the published aggregate vocabulary.
+func TestSnapshot_AggregatesAddNoAuthorizationAndNoPerFileDatum(t *testing.T) {
+	h := newHarness(t, "a-token-is-configured") // control IS gated; reads must not be
+	ctx := context.Background()
+	mustClaim(t, h.st, "/lib/a-very-distinctive-path.mkv", "9:9")
+	src, out := int64(9_000_000), int64(3_000_000)
+	if err := h.st.Finish(ctx, "/lib/a-very-distinctive-path.mkv", "9:9", store.Done,
+		&store.Outcome{Encoder: "cpu", SourceBytes: &src, OutputBytes: &out}); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(h.srv)
+	defer ts.Close()
+
+	// No Authorization header anywhere below.
+	for _, path := range []string{"/api/summary", "/api/events"} {
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+path, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		code := resp.StatusCode
+		_ = resp.Body.Close()
+		if code != http.StatusOK {
+			t.Errorf("GET %s with no token = %d, want 200 - the aggregates must not add an authorization requirement", path, code)
+		}
+	}
+
+	// Peel the aggregates object out of the summary response and inspect it on its own.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(getRaw(t, ts.URL+"/api/summary")), &raw); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	aggRaw, ok := raw["aggregates"]
+	if !ok {
+		t.Fatal("/api/summary carries no aggregates")
+	}
+	agg := string(aggRaw)
+	for _, forbidden := range []string{"a-very-distinctive-path", "/lib/", ".mkv", `"path"`, `"worker"`, `"fingerprint"`} {
+		if strings.Contains(agg, forbidden) {
+			t.Errorf("the aggregates expose %q - a per-file datum has leaked into a library-wide figure\n%s", forbidden, agg)
+		}
+	}
+
+	// Stronger than a substring hunt: every key inside every aggregate is from the
+	// published vocabulary, so a future field cannot arrive here unnoticed.
+	var members map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(aggRaw, &members); err != nil {
+		t.Fatalf("decode aggregates: %v", err)
+	}
+	allowed := map[string]bool{
+		"available": true, "unavailable": true, "covers": true, "window": true,
+		"counted": true, "excluded": true, "min": true, "mean": true, "max": true, "buckets": true,
+	}
+	for name, fields := range members {
+		for k := range fields {
+			if !allowed[k] {
+				t.Errorf("aggregate %q ships unpublished key %q", name, k)
+			}
+		}
+	}
+	// A breakdown's bucket keys are the closed vocabularies the API already ships per
+	// row (a status, or an engine guard token) - never anything file-specific.
+	var breakdown struct {
+		Buckets []bucketDTO `json:"buckets"`
+	}
+	if err := json.Unmarshal(members["skips_by_guard"]["buckets"], &breakdown.Buckets); err != nil && len(members["skips_by_guard"]["buckets"]) > 4 {
+		t.Fatalf("decode buckets: %v", err)
+	}
+	for _, b := range breakdown.Buckets {
+		if strings.ContainsAny(b.Key, "/.") {
+			t.Errorf("skip bucket key %q looks like a path, not a guard token", b.Key)
+		}
 	}
 }
 

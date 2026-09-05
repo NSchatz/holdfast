@@ -114,6 +114,10 @@ func toDTOs(jobs []store.Job) []jobDTO {
 // counting and O(1) per snapshot. BytesReclaimedSession is kept for continuity (the old
 // header figure) and because it is the honest "this run" number.
 //
+// Aggregates carries the whole-ledger figures (DASH-7) - the ones Queue and History
+// arithmetically cannot give, because those ship at most queueLimit / historyLimit rows
+// while the table holds the operator's entire library.
+//
 // Now is the server's wall clock when the frame was built, in unix seconds. It is the
 // BASIS for every in-state elapsed figure the page shows (S0030): a client derives
 // elapsed from `now - updated_at` plus the time since the frame arrived, rather than
@@ -130,6 +134,72 @@ type snapshot struct {
 	Paused                 bool           `json:"paused"`
 	Scanning               bool           `json:"scanning"`
 	Now                    int64          `json:"now"`
+	Aggregates             aggregatesDTO  `json:"aggregates"`
+}
+
+// aggregateUnavailable is the ONE text an unreadable figure ships, and it is a fixed
+// string rather than the store's error on purpose. The read endpoints need no
+// authorization and already return full media paths; they must not additionally start
+// leaking whatever a driver put in an error message. The real error is logged, where an
+// operator with server access can read it - the page is told only that the figure could
+// not be read, which is the whole of what it needs to render honestly.
+const aggregateUnavailable = "this figure could not be read from the ledger"
+
+// bucketDTO is one keyed count - a status, or a skip guard's token (which /api/history
+// already ships per row as `reason`, so the breakdown exposes no new kind of fact).
+type bucketDTO struct {
+	Key   string `json:"key"`
+	Count int64  `json:"count"`
+}
+
+// The two aggregate wire shapes. Their field names FREEZE at the first published tag,
+// so they are chosen to say what they mean without a legend:
+//
+//	available   - false when the figure could not be read; the page renders it as
+//	              unavailable and keeps drawing everything else.
+//	unavailable - why, in fixed words (see aggregateUnavailable); "" when available.
+//	covers      - the SET the figure is over, always stated, never implied.
+//	window      - "" for a figure over that whole set; otherwise the bound narrowing it.
+//	counted     - rows that contributed a value.
+//	excluded    - matching rows that recorded none, reported rather than dropped.
+//
+// min/mean/max are pointers and deliberately NOT omitempty: they serialize as explicit
+// null when nothing was recorded, the same discipline the per-row outcome fields keep,
+// so a client can tell "no data" from a real 0 and can never render an average of zero
+// for a library nobody measured.
+type spreadDTO struct {
+	Available   bool     `json:"available"`
+	Unavailable string   `json:"unavailable"`
+	Covers      string   `json:"covers"`
+	Window      string   `json:"window"`
+	Counted     int64    `json:"counted"`
+	Excluded    int64    `json:"excluded"`
+	Min         *float64 `json:"min"`
+	Mean        *float64 `json:"mean"`
+	Max         *float64 `json:"max"`
+}
+
+type breakdownDTO struct {
+	Available   bool        `json:"available"`
+	Unavailable string      `json:"unavailable"`
+	Covers      string      `json:"covers"`
+	Window      string      `json:"window"`
+	Counted     int64       `json:"counted"`
+	Excluded    int64       `json:"excluded"`
+	Buckets     []bucketDTO `json:"buckets"`
+}
+
+// aggregatesDTO is the published set. Every member is an aggregate - a count, a
+// breakdown or a spread - and never a per-file datum: the figures widen what the
+// unauthenticated read surface says about the LIBRARY, and nothing about a file that
+// /api/queue and /api/history did not already say.
+type aggregatesDTO struct {
+	Outcomes     breakdownDTO `json:"outcomes"`
+	SkipsByGuard breakdownDTO `json:"skips_by_guard"`
+	SizeRatio    spreadDTO    `json:"size_ratio"`
+	EncodeMs     spreadDTO    `json:"encode_ms"`
+	VmafMean     spreadDTO    `json:"vmaf_mean"`
+	VmafMin      spreadDTO    `json:"vmaf_min"`
 }
 
 // Hub is the engine.Observer and the SSE fan-out. Engine workers call Observe
@@ -444,5 +514,67 @@ func (h *Hub) buildSnapshot(ctx context.Context) (snapshot, error) {
 		Paused:                 h.ctrl.Paused(),
 		Scanning:               h.ctrl.Scanning(),
 		Now:                    time.Now().Unix(),
+		Aggregates:             h.aggregates(ctx),
 	}, nil
+}
+
+// aggregates reads the whole-ledger figures for a snapshot. It CANNOT fail the
+// snapshot, and that is the point: buildSnapshot returns an error on any store read
+// failure and broadcast then skips the frame entirely, so an aggregate read on that
+// all-or-nothing path would let one unreadable figure blank the live page for every
+// subscriber. Each figure carries its own error out of the store instead, and an
+// unreadable one is marked unavailable while the summary, the queue and the history
+// still ship and the broadcast still fires.
+func (h *Hub) aggregates(ctx context.Context) aggregatesDTO {
+	a := h.store.Aggregates(ctx)
+	return aggregatesDTO{
+		Outcomes:     h.breakdown("outcomes", a.Outcomes),
+		SkipsByGuard: h.breakdown("skips_by_guard", a.SkipsByGuard),
+		SizeRatio:    h.spread("size_ratio", a.SizeRatio),
+		EncodeMs:     h.spread("encode_ms", a.EncodeMs),
+		VmafMean:     h.spread("vmaf_mean", a.VmafMean),
+		VmafMin:      h.spread("vmaf_min", a.VmafMin),
+	}
+}
+
+// breakdown projects one keyed aggregate, logging the real error where an operator can
+// read it and shipping only the fixed unavailable text. A failed figure carries NO
+// counts and NO buckets: an unreadable breakdown that reported zeros would be
+// indistinguishable from a ledger in which nothing has happened yet.
+func (h *Hub) breakdown(name string, b store.Breakdown) breakdownDTO {
+	out := breakdownDTO{
+		Available: b.Err == nil,
+		Covers:    b.Coverage.Set,
+		Window:    b.Coverage.Window,
+	}
+	if b.Err != nil {
+		h.log.Warn("aggregate unavailable (the rest of the snapshot still ships)", "aggregate", name, "err", b.Err)
+		out.Unavailable = aggregateUnavailable
+		return out
+	}
+	out.Counted, out.Excluded = b.Counted, b.Excluded
+	out.Buckets = make([]bucketDTO, 0, len(b.Buckets))
+	for _, x := range b.Buckets {
+		out.Buckets = append(out.Buckets, bucketDTO{Key: x.Key, Count: x.Count})
+	}
+	return out
+}
+
+// spread projects one numeric aggregate. See breakdown - and note that min/mean/max stay
+// nil on a failure as well as on an empty set, so a figure that could not be read never
+// goes out as a number.
+func (h *Hub) spread(name string, s store.Spread) spreadDTO {
+	out := spreadDTO{
+		Available: s.Err == nil,
+		Covers:    s.Coverage.Set,
+		Window:    s.Coverage.Window,
+	}
+	if s.Err != nil {
+		h.log.Warn("aggregate unavailable (the rest of the snapshot still ships)", "aggregate", name, "err", s.Err)
+		out.Unavailable = aggregateUnavailable
+		return out
+	}
+	out.Counted, out.Excluded = s.Counted, s.Excluded
+	out.Min, out.Mean, out.Max = s.Min, s.Mean, s.Max
+	return out
 }
