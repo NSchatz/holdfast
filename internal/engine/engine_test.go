@@ -1609,12 +1609,16 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 
 // ---- S0030: live progress, and what it must not cost -------------------------
 
-// The measured per-job subprocess budget for one done job with the VMAF gate off, taken
-// against the tree BEFORE progress collection existed: 13 ffprobe invocations (the
-// source snapshot plus verifyOutput's codec/duration/packet/stream-count probes) and 2
-// ffmpeg invocations (the encode and the decode-integrity check). These are the numbers
-// TestProbeBudget_ProgressAddsNoSubprocess holds the line at; they are a ceiling, not a
-// target, so a change that removes a probe is free and one that adds one reds.
+// The per-job subprocess budget for one done job with the VMAF gate off: 13 ffprobe
+// invocations (the source snapshot plus verifyOutput's codec/duration/packet/stream-count
+// probes) and 2 ffmpeg invocations (the encode and the decode-integrity check).
+//
+// These constants are NOT the evidence for AC12 and must not be read as it — they are a
+// long-run ceiling, so that a per-PR "no worse than last time" cannot ratchet the cost up
+// one probe at a time across many changes. The criterion itself is proved by MEASURING
+// both arms in the same run: see TestProbeBudget_ProgressAddsNoSubprocess, which also
+// fails if these numbers ever stop matching what it measures, so they cannot decay into
+// folklore.
 const (
 	probeBudgetFFprobe = 13
 	probeBudgetFFmpeg  = 2
@@ -1655,16 +1659,18 @@ func countCalls(t *testing.T, log string) int {
 	return n
 }
 
-// TestProbeBudget_ProgressAddsNoSubprocess is AC12: a job processed end to end spawns no
-// more probe subprocesses than it did before live progress existed.
+// countJobSubprocesses runs ONE job end to end under counting wrappers and returns how
+// many ffprobe and ffmpeg subprocesses it spawned. progress selects whether live progress
+// collection is active.
 //
-// This is the guard on the obvious wrong way to build this feature. A progress figure is
-// meaningless without the source length it is measured against, and the easy way to get
-// that length is a second ffprobe per job — on a tool that walks a whole library, which
-// is exactly the regression TRANSCODE-PERF was raised to remove. So the duration rides
-// the snapshot ProcessFile ALREADY takes: one more -show_entries section on a call that
-// was being made anyway.
-func TestProbeBudget_ProgressAddsNoSubprocess(t *testing.T) {
+// The progress=false arm is the load-bearing one: the engine collects progress only when
+// an Observer is set (see Engine.encode), and with none it takes EXACTLY the path this
+// package took before progress collection existed. So that arm is not a stand-in for the
+// pre-change tree, it IS the pre-change per-job subprocess behaviour, executed in the same
+// process, on the same machine, against the same ffmpeg, in the same run as the arm it is
+// compared with.
+func countJobSubprocesses(t *testing.T, progress bool) (probes, ffmpegs int) {
+	t.Helper()
 	realFFmpeg, realFFprobe := tools(t)
 	root := t.TempDir()
 	src := filepath.Join(root, "movie.mkv")
@@ -1675,26 +1681,70 @@ func TestProbeBudget_ProgressAddsNoSubprocess(t *testing.T) {
 	countedFFprobe, ffprobeLog := countingWrapper(t, d, "ffprobe", realFFprobe)
 
 	eng := buildEngine(t, countedFFmpeg, countedFFprobe, root, nil, nil)
-	// An Observer is set, so progress collection is fully live on this run — the budget
-	// is measured with the feature ON, not with it quietly disabled.
 	var c collector
-	eng.Observer = c.observe
+	if progress {
+		eng.Observer = c.observe
+	}
 	if err := eng.RunOneshot(context.Background()); err != nil {
-		t.Fatalf("RunOneshot: %v", err)
+		t.Fatalf("RunOneshot(progress=%v): %v", progress, err)
 	}
 	if codecOf(t, realFFprobe, src) != "hevc" {
-		t.Fatal("the fixture job did not complete — a budget measured over a job that did nothing proves nothing")
+		t.Fatalf("the fixture job did not complete (progress=%v) — a budget measured over a job that did nothing proves nothing", progress)
+	}
+	if progress && len(c.snapshot()) == 0 {
+		t.Fatal("no events were observed on the progress arm — the budget would be measured with the feature quietly off")
+	}
+	return countCalls(t, ffprobeLog), countCalls(t, ffmpegLog)
+}
+
+// TestProbeBudget_ProgressAddsNoSubprocess is AC12: a job processed end to end spawns no
+// more probe subprocesses than the same job spawns before this change.
+//
+// This is the guard on the obvious wrong way to build this feature. A progress figure is
+// meaningless without the source length it is measured against, and the easy way to get
+// that length is a second ffprobe per job — on a tool that walks a whole library, which
+// is exactly the regression TRANSCODE-PERF was raised to remove. So the duration rides
+// the snapshot ProcessFile ALREADY takes: one more -show_entries section on a call that
+// was being made anyway.
+//
+// It is a CONTROLLED EXPERIMENT rather than a constant with a ceiling under it. The same
+// job is run twice in the same environment, once with progress collection off (the
+// pre-change path, exactly) and once with it on, and the criterion is asserted between the
+// two MEASURED numbers. A recorded constant can only ever hold the line at a number
+// somebody wrote down; the control arm holds it at what this tree actually costs today.
+// The constants stay as a long-run ceiling and are themselves re-measured here, so they
+// can never drift into being a comment about a tree nobody has run.
+//
+// Honest about its reach: a count is blind to a change that ADDS one probe and REMOVES
+// another, which nets zero. That limit is AC12's own ("no more ... than"), and closing it
+// would need per-call-site identity rather than a total.
+func TestProbeBudget_ProgressAddsNoSubprocess(t *testing.T) {
+	baseProbes, baseFFmpegs := countJobSubprocesses(t, false)
+	liveProbes, liveFFmpegs := countJobSubprocesses(t, true)
+	t.Logf("one done job, progress collection off -> on: ffprobe %d -> %d, ffmpeg %d -> %d (long-run ceiling %d / %d)",
+		baseProbes, liveProbes, baseFFmpegs, liveFFmpegs, probeBudgetFFprobe, probeBudgetFFmpeg)
+
+	// The criterion, measured on both sides.
+	if liveProbes > baseProbes {
+		t.Errorf("one job spawned %d ffprobe subprocesses with progress collection on and %d with it off — progress collection must not add a probe",
+			liveProbes, baseProbes)
+	}
+	if liveFFmpegs > baseFFmpegs {
+		t.Errorf("one job spawned %d ffmpeg subprocesses with progress collection on and %d with it off — progress collection must not add a subprocess",
+			liveFFmpegs, baseFFmpegs)
 	}
 
-	probes := countCalls(t, ffprobeLog)
-	ffmpegs := countCalls(t, ffmpegLog)
-	if probes > probeBudgetFFprobe {
-		t.Errorf("one job spawned %d ffprobe subprocesses, budget is %d — progress collection must not add a probe",
-			probes, probeBudgetFFprobe)
+	// The long-run ceiling, so a sequence of individually-innocent changes cannot walk
+	// the per-job cost upwards a probe at a time.
+	if liveProbes > probeBudgetFFprobe || liveFFmpegs > probeBudgetFFmpeg {
+		t.Errorf("one job spawned %d ffprobe / %d ffmpeg subprocesses, over the recorded ceiling of %d / %d",
+			liveProbes, liveFFmpegs, probeBudgetFFprobe, probeBudgetFFmpeg)
 	}
-	if ffmpegs > probeBudgetFFmpeg {
-		t.Errorf("one job spawned %d ffmpeg subprocesses, budget is %d — progress collection must not add a subprocess",
-			ffmpegs, probeBudgetFFmpeg)
+	// ...and the ceiling is held to the measurement, so it stays a number somebody can
+	// still reproduce rather than one somebody once wrote down.
+	if baseProbes != probeBudgetFFprobe || baseFFmpegs != probeBudgetFFmpeg {
+		t.Errorf("the recorded per-job baseline is stale: measured %d ffprobe / %d ffmpeg with progress collection off, the constants say %d / %d. Re-measure and move the constants in the same commit that moved the cost.",
+			baseProbes, baseFFmpegs, probeBudgetFFprobe, probeBudgetFFmpeg)
 	}
 }
 

@@ -300,6 +300,36 @@ func TestQueue_RendersProgressAndShowsUnknownAsUnknown(t *testing.T) {
 	}
 }
 
+// TestQueue_ProgressIsShownForARunningEncodeOnly is the page half of the rule the hub
+// enforces on the wire. A progress figure is a measurement taken BY the encoder against
+// the source duration, so it exists while the encoder runs and at no other time, and the
+// spec puts the rest of the pipeline outside it in terms:
+//
+//	Out (explicit):
+//	- A progress percentage for the verify/VMAF phase. `internal/vmaf` keeps its
+//	  current invocation; the verifying state is covered by elapsed alone (AC1).
+//
+// Gating the cell on the whole active set is what put the finished encode's last
+// percentage on a verifying row and left it frozen there for the whole verify phase —
+// which on a feature-length source is the longest stretch an operator watches.
+func TestQueue_ProgressIsShownForARunningEncodeOnly(t *testing.T) {
+	s := string(indexHTML)
+	if !strings.Contains(s, `const PROGRESS_STATUS = "encoding";`) {
+		t.Error("the page does not name the one state a progress figure can exist in")
+	}
+	if !strings.Contains(s, `if (j.status !== PROGRESS_STATUS) return;`) {
+		t.Error("the progress cell is not restricted to a running encode")
+	}
+	if strings.Contains(s, "ACTIVE_STATUSES") {
+		t.Error("the progress cell is gated on the whole active set again — a verifying row would carry the finished encode's figure")
+	}
+	// And the copy says so, because the operator reading an empty Progress cell on a
+	// verifying row is owed the reason.
+	if !strings.Contains(s, "covered by\n      Elapsed alone") && !strings.Contains(s, "covered by Elapsed alone") {
+		t.Error("the queue note does not say that a probed/verified file is covered by Elapsed alone")
+	}
+}
+
 // TestQueue_ProgressAddsNoHTMLSinkAndNoExternalAsset is AC11. The new cells are built
 // with the same DOM-node idiom as every other row (TestRenderIdiom already forbids the
 // string sinks page-wide), the CSP is unchanged, and the page still fetches nothing from

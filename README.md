@@ -192,6 +192,12 @@ An **encoding** row additionally carries what the encoder itself reports, read f
 | `progress_duration_seconds` | the source duration that position is measured against |
 | `progress_fraction` | the two divided, in `[0,1]` |
 
+**Only** an encoding row. A figure here is a measurement taken by the encoder, so it is live exactly
+while that encoder is running: the moment a job moves on — to `verifying`, or back to `pending` after a
+crash, or to a terminal state — all three fields go back to `null`, because the process that produced the
+figure has exited and nothing is measuring the verify phase. A carried-over percentage frozen beside a
+state it does not describe is the one thing this surface must never show.
+
 The same `null` rule applies, and it bites harder here: an encoder that has not reported yet, and a
 source whose container reports no duration, are both **unrecorded**, and a `0` would read as "0% encoded"
 — a figure nobody measured. The dashboard shows those as *unknown*. Progress is **not persisted**: it is

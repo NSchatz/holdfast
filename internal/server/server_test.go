@@ -922,6 +922,72 @@ func TestSnapshot_NoActiveJobsPublishNoLiveProgress(t *testing.T) {
 	}
 }
 
+// TestSnapshot_LiveProgressIsDroppedOnAnyExitFromEncoding is the general rule AC8's
+// terminal case is one instance of, and the rule the spec states from the other side:
+// "A progress percentage for the verify/VMAF phase" is out of scope and "the verifying
+// state is covered by elapsed alone".
+//
+// A progress figure is a measurement taken BY A PROCESS, so it is live exactly while that
+// process is running. The moment a job leaves `encoding` — terminal or not — the encoder
+// that produced the figure has exited and the figure describes nothing that is still
+// happening. Publishing it anyway would freeze a percentage next to a state it does not
+// describe for the whole verify/VMAF phase, which on a feature-length source is the
+// longest stretch an operator watches.
+//
+// Both routes out of `encoding` are covered, because the hub may only ever see one of
+// them: the transition EVENT, and the STORE alone (the events channel drops when it is
+// full, and RecoverStale returns a job to pending with no event at all).
+func TestSnapshot_LiveProgressIsDroppedOnAnyExitFromEncoding(t *testing.T) {
+	ctx := context.Background()
+	dur := 400.0
+
+	for _, tc := range []struct {
+		name      string
+		status    store.Status
+		announced bool
+	}{
+		{"verifying, transition observed", store.Verifying, true},
+		{"verifying, store only (the event was coalesced away)", store.Verifying, false},
+		{"back to pending, store only (RecoverStale after a crash)", store.Pending, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, "")
+			h.hub.Observe(progressEvent("/lib/active.mkv", 300, &dur))
+			if h.hub.liveProgressCount() != 1 {
+				t.Fatal("there was no live entry to drop — the case would prove nothing")
+			}
+
+			if err := h.st.Advance(ctx, "/lib/active.mkv", "1:1", tc.status); err != nil {
+				t.Fatalf("Advance to %s: %v", tc.status, err)
+			}
+			if tc.announced {
+				h.hub.Observe(engine.Event{Path: "/lib/active.mkv", Status: tc.status, Worker: "w0"})
+			}
+
+			row := queueRowFor(t, snapshotOf(t, h.hub), "/lib/active.mkv")
+			if row.Status != string(tc.status) {
+				t.Fatalf("fixture is in %q, not %q", row.Status, tc.status)
+			}
+			if row.ProgressSeconds != nil || row.ProgressDuration != nil || row.ProgressFraction != nil {
+				t.Errorf("a %s row still carries the finished encode's figure: seconds=%v duration=%v fraction=%v",
+					tc.status, row.ProgressSeconds, row.ProgressDuration, row.ProgressFraction)
+			}
+			if got := h.hub.liveProgressCount(); got != 0 {
+				t.Errorf("the hub holds %d live entries for a job whose encoder has exited, want 0", got)
+			}
+			// And it is absent the way this repo says absent: an explicit null, never a 0.
+			raw := snapshotRaw(t, h.hub)
+			for _, want := range []string{
+				`"progress_seconds":null`, `"progress_duration_seconds":null`, `"progress_fraction":null`,
+			} {
+				if !strings.Contains(raw, want) {
+					t.Errorf("a %s row does not carry %s\nbody: %s", tc.status, want, raw)
+				}
+			}
+		})
+	}
+}
+
 // The criterion this phase exists for. Against a ledger holding MORE terminal rows than
 // the history view ships and MORE non-terminal rows than the queue view ships, every
 // published figure equals the whole-table value - while the rows on the wire are still

@@ -167,9 +167,10 @@
     <h2>Queue &amp; active</h2>
     <p class="note">Elapsed is how long the file has been in the state it is in now, recomputed from the
       transition timestamp on each update rather than counted in this page. Progress is read from the
-      encoder's own progress stream and measured against the source duration; where the encoder has
-      reported nothing yet, or the container reports no duration, it reads <i>unknown</i> — never an
-      estimate, and never a stale figure.</p>
+      encoder's own progress stream and measured against the source duration, so it is shown while a file
+      is <i>encoding</i> and not in any other state — a file being probed or verified is covered by
+      Elapsed alone. Where the encoder has reported nothing yet, or the container reports no duration, it
+      reads <i>unknown</i> — never an estimate, and never a stale figure.</p>
     <p class="note cap" id="queue-cap" hidden></p>
     <div class="tablewrap">
       <table><thead><tr><th>File</th><th>Status</th><th>Elapsed</th><th>Progress</th><th>Worker</th></tr></thead>
@@ -238,7 +239,11 @@
 "use strict";
 const STATUSES = ["pending","probing","encoding","verifying","done","skipped","failed"];
 const QUEUE_STATUSES = ["pending","probing","encoding","verifying"];
-const ACTIVE_STATUSES = ["probing","encoding","verifying"];
+// The one state a progress figure can exist in. Progress is measured BY the encoder
+// against the source duration, so it is defined while the encoder runs and at no other
+// time: a probing row has not started one and a verifying row's encoder has exited. Those
+// states are covered by Elapsed alone, which is exactly what the phase scoped them to.
+const PROGRESS_STATUS = "encoding";
 const TERMINAL_STATUSES = ["done","skipped","failed"];
 const $ = (id) => document.getElementById(id);
 
@@ -368,12 +373,14 @@ function resultCell(td, j) {
   }
 }
 
-// The progress cell for a queue row. It shows a figure ONLY when the encoder reported a
-// position AND the source duration is known; anything else reads "unknown". There is no
-// interpolation, no estimate from elapsed time, and no carry-over of the last figure —
-// an absent measurement is displayed as absent.
+// The progress cell for a queue row. It shows a figure ONLY when the row is a RUNNING
+// encode AND that encoder reported a position AND the source duration is known; a running
+// encode with no usable figure reads "unknown", and every other state leaves the cell
+// empty because it has no progress to have. There is no interpolation, no estimate from
+// elapsed time, and no carry-over of the last figure — an absent measurement is displayed
+// as absent, including the instant the encode ends and the verify begins.
 function progressCell(td, j) {
-  if (!ACTIVE_STATUSES.includes(j.status)) return; // queued, not started: nothing to report
+  if (j.status !== PROGRESS_STATUS) return; // not encoding: nothing measures a fraction here
   if (!isNum(j.progress_fraction)) {
     td.appendChild(mk("span", "nr", "unknown"));
     return;

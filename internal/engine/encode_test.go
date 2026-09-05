@@ -517,6 +517,36 @@ func TestScanProgressStream_ParsesTheDocumentedShape(t *testing.T) {
 			t.Fatalf("garbage published %v", got)
 		}
 	})
+
+	// The two below are the parser-level half of AC6's "never an encode stalled". This
+	// reader is one end of a pipe whose other end a RUNNING encoder holds, so "stop
+	// reading" is not a way to give up on unparseable bytes — it is a way to fill the
+	// pipe, block the encoder's next write forever and wedge the worker. Both cases
+	// therefore assert the stream was consumed to EOF, not merely that nothing bogus
+	// was published.
+	t.Run("an over-long line is discarded and the stream keeps parsing", func(t *testing.T) {
+		var got []float64
+		r := strings.NewReader(strings.Repeat("a", 512*1024) + "\n" + oneReport(4_000_000, "end"))
+		scanProgressStream(r, func(sec float64) { got = append(got, sec) })
+		if r.Len() != 0 {
+			t.Errorf("%d bytes were left unread — on a real pipe the encoder would block writing them", r.Len())
+		}
+		if len(got) != 1 || math.Abs(got[0]-4) > 1e-9 {
+			t.Fatalf("got %v, want [4] — an unusable line may cost its own report and never the reports after it", got)
+		}
+	})
+
+	t.Run("a stream with no newline at all is still consumed to EOF", func(t *testing.T) {
+		var got []float64
+		r := strings.NewReader(strings.Repeat("z", 512*1024)) // past every buffer, no line ever ends
+		scanProgressStream(r, func(sec float64) { got = append(got, sec) })
+		if r.Len() != 0 {
+			t.Errorf("the reader stopped with %d bytes still in the stream — that is how the encoder gets stalled", r.Len())
+		}
+		if len(got) != 0 {
+			t.Fatalf("a stream with no report in it published %v", got)
+		}
+	})
 }
 
 // TestEncodeWithProgress_ReportsRealPositionsAgainstTheSource is AC2 end to end against

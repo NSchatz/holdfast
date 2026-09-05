@@ -71,6 +71,11 @@ type jobDTO struct {
 	// explicit null. A zero here would say "0% encoded" — a figure nobody measured, on
 	// the one page an operator uses to decide whether the tool is working.
 	//
+	// They are carried for a job in `encoding` and for no other state. A row that has
+	// moved on to verifying carries three nulls, because the encoder whose position this
+	// was has exited and nothing is measuring the verify phase (that is out of scope by
+	// the spec, and elapsed covers it).
+	//
 	// ProgressSeconds is the encoder's position in the source timeline; ProgressDuration
 	// is the length it is measured against; ProgressFraction is the two divided, clamped
 	// into [0,1], and present only when BOTH of the others are.
@@ -236,9 +241,10 @@ type Hub struct {
 	progMu sync.Mutex
 	// progress is the live position of each RUNNING encode, keyed by job path. It is the
 	// one piece of hub state that is not derived from the store, because it describes a
-	// process rather than a row — so it is never persisted, it is dropped the moment a
-	// job goes terminal, and it is pruned against the active list on every snapshot (a
-	// Done event names the POST-swap path, so the pre-swap key would otherwise linger).
+	// process rather than a row — so it is never persisted, it is dropped the moment the
+	// job leaves `encoding` for ANY state (see Observe), and it is pruned against the
+	// store's own encoding rows on every snapshot (a Done event names the POST-swap path,
+	// so the pre-swap key would otherwise linger).
 	progress map[string]engine.Progress
 
 	mu   sync.Mutex
@@ -280,6 +286,20 @@ func (h *Hub) ReclaimedLifetime() int64 { return h.reclaimedBaseline + h.bytesRe
 // progress report, on the goroutine draining a running encoder's progress pipe — so it
 // only does cheap, non-blocking things: bump the reclaimed-bytes counter, record or drop
 // the job's live progress, and hand the event to Run (dropping it if the buffer is full).
+//
+// The live-progress rule is deliberately narrow: an entry exists WHILE THE ENCODER IS
+// RUNNING and at no other time. So any transition that is not into `encoding` drops it —
+// not merely a terminal one. A position measured by a process that has exited describes
+// nothing that is still happening, and the page would render it as a frozen percentage
+// beside a state it does not describe: for the whole verify/VMAF phase, which on a
+// feature-length source is the longest stretch an operator watches, and equally for a job
+// RecoverStale returns to `pending`. The spec puts a verify figure out of scope ("the
+// verifying state is covered by elapsed alone") and the page promises "no carry-over of
+// the last figure"; both are the same rule, enforced here.
+//
+// Note the drop happens BEFORE the hand-off below, which may be dropped when the buffer
+// is full. Losing an event costs granularity; losing this would leave a stale figure on
+// the wire, which is correctness.
 func (h *Hub) Observe(ev engine.Event) {
 	if n := ev.BytesReclaimed(); n > 0 {
 		h.bytesReclaimed.Add(n)
@@ -287,25 +307,15 @@ func (h *Hub) Observe(ev engine.Event) {
 	switch {
 	case ev.Progress != nil:
 		h.setProgress(ev.Path, *ev.Progress)
-	case isTerminalStatus(ev.Status):
-		// A finished job reports no live progress, ever: no terminal row may carry a
-		// progress figure or a still-growing age.
+	case ev.Status == store.Encoding:
+		// Still encoding: whatever its encoder last reported still describes it.
+	default:
 		h.clearProgress(ev.Path)
 	}
 	select {
 	case h.events <- ev:
 	default: // buffer full: coalesce — the next broadcast re-reads full state
 	}
-}
-
-// isTerminalStatus reports whether s is one of the states a job never leaves.
-func isTerminalStatus(s store.Status) bool {
-	for _, t := range terminal {
-		if s == t {
-			return true
-		}
-	}
-	return false
 }
 
 func (h *Hub) setProgress(path string, p engine.Progress) {
@@ -318,25 +328,37 @@ func (h *Hub) setProgress(path string, p engine.Progress) {
 }
 
 func (h *Hub) clearProgress(path string) {
+	if path == "" {
+		return // Trigger's synthetic event names no job
+	}
 	h.progMu.Lock()
 	delete(h.progress, path)
 	h.progMu.Unlock()
 }
 
-// liveProgressFor prunes the live progress table down to the jobs still in the active
-// list and returns what remains. The prune is what makes the "no active jobs, no live
-// progress" property hold on its own rather than depending on every terminal event
-// arriving: a Done event names the POST-swap path, so a container-changing swap would
-// otherwise strand the source path's entry here forever.
+// liveProgressFor prunes the live progress table down to the jobs the STORE still has in
+// `encoding` and returns what remains. The prune is what makes the live table's rule hold
+// on its own rather than depending on every transition event arriving: the events channel
+// drops when it is full, a Done event names the POST-swap path (so a container-changing
+// swap would strand the source path's entry), and a job can leave `encoding` in the store
+// without this process seeing the event at all.
+//
+// It prunes against `encoding` specifically, not against the whole active list, for the
+// reason Observe spells out: the figure is a measurement taken by a process, and it is
+// live only while that process is running. A verifying or re-pended row is an active row
+// with NO progress figure — which the wire states as an explicit null, never as the
+// finished encode's last percentage frozen in place.
 func (h *Hub) liveProgressFor(jobs []store.Job) map[string]engine.Progress {
-	active := make(map[string]struct{}, len(jobs))
+	encoding := make(map[string]struct{}, len(jobs))
 	for _, j := range jobs {
-		active[j.Path] = struct{}{}
+		if j.Status == store.Encoding {
+			encoding[j.Path] = struct{}{}
+		}
 	}
 	h.progMu.Lock()
 	defer h.progMu.Unlock()
 	for path := range h.progress {
-		if _, ok := active[path]; !ok {
+		if _, ok := encoding[path]; !ok {
 			delete(h.progress, path)
 		}
 	}
