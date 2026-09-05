@@ -11,9 +11,14 @@ package engine
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/NSchatz/holdfast/internal/config"
@@ -371,6 +376,349 @@ func TestEncode_VaapiDeviceFlagPrecedesInput(t *testing.T) {
 	}
 	if deviceIdx > inputIdx {
 		t.Errorf("-vaapi_device (index %d) must precede -i (index %d): %v", deviceIdx, inputIdx, args)
+	}
+}
+
+// --- live progress collection (S0030) ----------------------------------------
+//
+// The claim under test is that collecting progress is ADDITIVE. holdfast deletes a
+// source once its replacement is judged faithful, and the error EncodeWithProgress
+// returns is what the engine turns into a failed job's reason — so a collector that
+// swallowed a non-zero exit would hand a failed encode to the verify gate as a
+// candidate, and one that took stdout for itself would empty the failure text an
+// operator reads. Every unhappy path below is driven for real against a fake ffmpeg.
+
+// collectProgress is a concurrency-safe ProgressSink that records every report.
+type collectProgress struct {
+	mu  sync.Mutex
+	got []Progress
+}
+
+func (c *collectProgress) sink(p Progress) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.got = append(c.got, p)
+}
+
+func (c *collectProgress) all() []Progress {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]Progress, len(c.got))
+	copy(out, c.got)
+	return out
+}
+
+// progressFake writes a fake "ffmpeg" that: emits progressPayload on fd 3 IF the caller
+// supplied one (so the same script is usable with and without progress collection),
+// writes the given stdout/stderr text, and exits with code exitCode. The payload goes
+// through a file so no shell quoting can distort the progress stream under test.
+func progressFake(t *testing.T, dir, name, progressPayload, stdoutText, stderrText string, exitCode int) string {
+	t.Helper()
+	payload := filepath.Join(dir, name+".progress")
+	if err := os.WriteFile(payload, []byte(progressPayload), 0o644); err != nil {
+		t.Fatalf("write progress payload: %v", err)
+	}
+	script := "#!/bin/sh\n" +
+		// `( : >&3 ) 2>/dev/null` is a portable "is fd 3 open for writing?" test: with no
+		// -progress option there is no fd 3 and the block is simply skipped.
+		"if ( : >&3 ) 2>/dev/null; then cat \"" + payload + "\" >&3; fi\n" +
+		"printf '%s' '" + stdoutText + "'\n" +
+		"printf '%s' '" + stderrText + "' >&2\n" +
+		fmt.Sprintf("exit %d\n", exitCode)
+	path := filepath.Join(dir, name+".sh")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake ffmpeg: %v", err)
+	}
+	return path
+}
+
+// oneReport is a documented-shape progress report, verbatim in the key set ffmpeg 8.0.1
+// was MEASURED to emit (see scanProgressStream's doc comment for the captured sample).
+// out_time_ms deliberately carries the SAME microsecond value out_time_us does, because
+// that is what the real build emits — reading it as its name suggests is the unit trap
+// this fixture exists to keep closed.
+func oneReport(us int64, terminator string) string {
+	return fmt.Sprintf(
+		"frame=27\nfps=0.00\nstream_0_0_q=26.1\nbitrate=   9.4kbits/s\ntotal_size=2942\n"+
+			"out_time_us=%d\nout_time_ms=%d\nout_time=%s\ndup_frames=0\ndrop_frames=0\nspeed=   5x\n"+
+			"progress=%s\n",
+		us, us, clockOf(us), terminator)
+}
+
+func clockOf(us int64) string {
+	sec := us / 1e6
+	return fmt.Sprintf("%02d:%02d:%02d.%06d", sec/3600, (sec/60)%60, sec%60, us%1e6)
+}
+
+// TestScanProgressStream_ParsesTheDocumentedShape is the parser proof (AC2/AC3/AC6). The
+// documentation guarantees only the line shape and that "progress" is the LAST key of a
+// report; every other key here was measured off the real build. So: a report is
+// published at its terminator and nowhere else, out_time_us is read as MICROSECONDS, the
+// mis-named out_time_ms is never read, and a report whose keys are all unrecognised (or
+// which never reaches a terminator) publishes nothing at all.
+func TestScanProgressStream_ParsesTheDocumentedShape(t *testing.T) {
+	t.Run("two reports, microseconds", func(t *testing.T) {
+		var got []float64
+		scanProgressStream(strings.NewReader(oneReport(2_500_000, "continue")+oneReport(5_800_000, "end")),
+			func(sec float64) { got = append(got, sec) })
+		want := []float64{2.5, 5.8}
+		if len(got) != len(want) {
+			t.Fatalf("got %v reports, want %v", got, want)
+		}
+		for i := range want {
+			if math.Abs(got[i]-want[i]) > 1e-9 {
+				t.Errorf("report %d = %vs, want %vs — out_time_us is microseconds", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("out_time_ms is never read as milliseconds", func(t *testing.T) {
+		// The real build emits out_time_ms=2500000 at the 2.5s mark. Reading that key as
+		// its name suggests would report 2500s, and on a two-hour film would peg every
+		// encode near 0% for its whole run.
+		var got []float64
+		scanProgressStream(strings.NewReader("out_time_ms=2500000\nprogress=continue\n"),
+			func(sec float64) { got = append(got, sec) })
+		if len(got) != 0 {
+			t.Fatalf("out_time_ms alone produced %v — it is mis-named and must not be parsed", got)
+		}
+	})
+
+	t.Run("out_time is the fallback when out_time_us is absent", func(t *testing.T) {
+		var got []float64
+		scanProgressStream(strings.NewReader("out_time=01:02:03.500000\nprogress=end\n"),
+			func(sec float64) { got = append(got, sec) })
+		if len(got) != 1 || math.Abs(got[0]-3723.5) > 1e-6 {
+			t.Fatalf("out_time fallback gave %v, want [3723.5]", got)
+		}
+	})
+
+	t.Run("no terminator publishes nothing", func(t *testing.T) {
+		var got []float64
+		scanProgressStream(strings.NewReader("out_time_us=9000000\n"), func(sec float64) { got = append(got, sec) })
+		if len(got) != 0 {
+			t.Fatalf("a report with no progress= terminator published %v — a half-written final block is not a position", got)
+		}
+	})
+
+	t.Run("unrecognised keys are no progress at all", func(t *testing.T) {
+		var got []float64
+		scanProgressStream(strings.NewReader("elapsed_ticks=4\nwhat=ever\nprogress=end\n"),
+			func(sec float64) { got = append(got, sec) })
+		if len(got) != 0 {
+			t.Fatalf("an unrecognised key set published %v — it must read as no progress reported", got)
+		}
+	})
+
+	t.Run("garbage is no progress at all", func(t *testing.T) {
+		var got []float64
+		scanProgressStream(strings.NewReader("\x00\x01 not even lines "), func(sec float64) { got = append(got, sec) })
+		if len(got) != 0 {
+			t.Fatalf("garbage published %v", got)
+		}
+	})
+
+	// The two below are the parser-level half of AC6's "never an encode stalled". This
+	// reader is one end of a pipe whose other end a RUNNING encoder holds, so "stop
+	// reading" is not a way to give up on unparseable bytes — it is a way to fill the
+	// pipe, block the encoder's next write forever and wedge the worker. Both cases
+	// therefore assert the stream was consumed to EOF, not merely that nothing bogus
+	// was published.
+	t.Run("an over-long line is discarded and the stream keeps parsing", func(t *testing.T) {
+		var got []float64
+		r := strings.NewReader(strings.Repeat("a", 512*1024) + "\n" + oneReport(4_000_000, "end"))
+		scanProgressStream(r, func(sec float64) { got = append(got, sec) })
+		if r.Len() != 0 {
+			t.Errorf("%d bytes were left unread — on a real pipe the encoder would block writing them", r.Len())
+		}
+		if len(got) != 1 || math.Abs(got[0]-4) > 1e-9 {
+			t.Fatalf("got %v, want [4] — an unusable line may cost its own report and never the reports after it", got)
+		}
+	})
+
+	t.Run("a stream with no newline at all is still consumed to EOF", func(t *testing.T) {
+		var got []float64
+		r := strings.NewReader(strings.Repeat("z", 512*1024)) // past every buffer, no line ever ends
+		scanProgressStream(r, func(sec float64) { got = append(got, sec) })
+		if r.Len() != 0 {
+			t.Errorf("the reader stopped with %d bytes still in the stream — that is how the encoder gets stalled", r.Len())
+		}
+		if len(got) != 0 {
+			t.Fatalf("a stream with no report in it published %v", got)
+		}
+	})
+}
+
+// TestEncodeWithProgress_ReportsRealPositionsAgainstTheSource is AC2 end to end against
+// the REAL ffmpeg the rest of the safety suite runs on: the option actually reaches the
+// command line, the stream actually arrives on its own descriptor, and the positions it
+// carries are real positions in the source timeline — measured by the encoder, not
+// estimated from elapsed time. This is the test that would red if a future ffmpeg
+// renamed or re-united the keys the parser was pinned to.
+func TestEncodeWithProgress_ReportsRealPositionsAgainstTheSource(t *testing.T) {
+	realFFmpeg, realFFprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264Long(t, realFFmpeg, src, "3M") // 10s @ 24fps
+
+	fakeFFmpeg, argvLog := captureFFmpeg(t, d, realFFmpeg)
+	cfg := baseCfg(d)
+	prober := probe.New(realFFmpeg, realFFprobe)
+	enc := FFmpegEncoder{FFmpeg: fakeFFmpeg, Cfg: cfg, Probe: prober}
+
+	var c collectProgress
+	out := filepath.Join(d, "out.mkv")
+	if err := enc.EncodeWithProgress(context.Background(), src, out, nil, c.sink); err != nil {
+		t.Fatalf("EncodeWithProgress: %v", err)
+	}
+
+	args := readArgv(t, argvLog)
+	if !hasArgPair(args, "-progress", "pipe:3") {
+		t.Fatalf("ffmpeg argv missing -progress pipe:3 (and it must be pipe:3, not pipe:1 — stdout is captured error text): %v", args)
+	}
+
+	reports := c.all()
+	if len(reports) == 0 {
+		t.Fatal("a real encode reported no progress at all — the documented -progress stream was not collected")
+	}
+	srcDur, ok := prober.DurationSec(context.Background(), src)
+	if !ok || srcDur <= 0 {
+		t.Fatalf("fixture duration unknown (%v, %v)", srcDur, ok)
+	}
+	last := reports[len(reports)-1].PositionSec
+	if last <= 0 {
+		t.Errorf("final reported position is %vs — a running encode must report a real position", last)
+	}
+	// The final report lands at the end of the encode, so it is the source duration to
+	// within the container's own rounding. A position wildly off it is a UNIT error.
+	if last < srcDur*0.9 || last > srcDur*1.1 {
+		t.Errorf("final reported position %vs is not the source duration %vs — the progress unit is wrong", last, srcDur)
+	}
+	for i, r := range reports {
+		if r.PositionSec < 0 {
+			t.Errorf("report %d has a negative position %v", i, r.PositionSec)
+		}
+	}
+}
+
+// TestEncodeWithProgress_FailurePathIsByteIdentical is AC4, and it is the blast-radius
+// guard for this whole change. The SAME fake ffmpeg is run twice — once with progress
+// collection, once without — and the two errors must be the same string: same wrapped
+// exit status, same captured text. It also proves stdout is still captured (progress
+// went to fd 3, not pipe:1) and that a failure still produces no output file.
+func TestEncodeWithProgress_FailurePathIsByteIdentical(t *testing.T) {
+	realFFmpeg, realFFprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, realFFmpeg, src, "3M")
+
+	const stderrText = "Conversion failed! x265 [error]: encoder blew up"
+	const stdoutText = "a line that ffmpeg put on stdout"
+	fake := progressFake(t, d, "failing", oneReport(1_000_000, "continue"), stdoutText, stderrText, 3)
+
+	cfg := baseCfg(d)
+	prober := probe.New(realFFmpeg, realFFprobe)
+	enc := FFmpegEncoder{FFmpeg: fake, Cfg: cfg, Probe: prober}
+
+	var c collectProgress
+	withErr := enc.EncodeWithProgress(context.Background(), src, filepath.Join(d, "a.mkv"), nil, c.sink)
+	withoutErr := enc.Encode(context.Background(), src, filepath.Join(d, "b.mkv"), nil)
+
+	if withErr == nil || withoutErr == nil {
+		t.Fatalf("a non-zero ffmpeg exit must be an error (with=%v without=%v)", withErr, withoutErr)
+	}
+	if withErr.Error() != withoutErr.Error() {
+		t.Errorf("progress collection changed the failure text.\n with progress: %q\n without:       %q", withErr.Error(), withoutErr.Error())
+	}
+	// The exit status itself still surfaces, wrapped, so errors.As still finds it.
+	var exitErr *exec.ExitError
+	if !errors.As(withErr, &exitErr) {
+		t.Fatalf("the ffmpeg exit status no longer surfaces as an *exec.ExitError: %v", withErr)
+	}
+	if exitErr.ExitCode() != 3 {
+		t.Errorf("exit code = %d, want 3", exitErr.ExitCode())
+	}
+	if !strings.Contains(withErr.Error(), stderrText) {
+		t.Errorf("the captured stderr is missing from the failure reason: %q", withErr.Error())
+	}
+	if !strings.Contains(withErr.Error(), stdoutText) {
+		t.Errorf("stdout is no longer captured — the progress stream must not take pipe:1: %q", withErr.Error())
+	}
+	// And progress really was collected on that failing run, so the equality above is
+	// not vacuously true of a run that quietly did nothing.
+	if len(c.all()) == 0 {
+		t.Error("no progress was collected on the failing run — the equality proof would be vacuous")
+	}
+}
+
+// TestEncodeWithProgress_SilentOrMalformedStreamChangesNothing is AC6: an encoder that
+// reports nothing, or nonsense, still finishes exactly as it would with no progress
+// collection at all. Silence reads as unknown, never as stalled and never as an error.
+func TestEncodeWithProgress_SilentOrMalformedStreamChangesNothing(t *testing.T) {
+	realFFmpeg, realFFprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, realFFmpeg, src, "3M")
+	cfg := baseCfg(d)
+	prober := probe.New(realFFmpeg, realFFprobe)
+
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{"silent", ""},
+		{"malformed", "\x00\x01garbage with no newline and no keys"},
+		{"partial", "out_time_us=1200000\n"}, // no terminator: never a published position
+		{"unknown keys", "position_ticks=7\nprogress=end\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := progressFake(t, d, "ok-"+strings.ReplaceAll(tc.name, " ", "-"), tc.payload, "", "", 0)
+			enc := FFmpegEncoder{FFmpeg: fake, Cfg: cfg, Probe: prober}
+			var c collectProgress
+			if err := enc.EncodeWithProgress(context.Background(), src, filepath.Join(d, "out.mkv"), nil, c.sink); err != nil {
+				t.Fatalf("a zero-exit encode must succeed regardless of its progress stream: %v", err)
+			}
+			if got := c.all(); len(got) != 0 {
+				t.Errorf("published %v from a %s progress stream — an unusable stream is NO progress, never a guess", got, tc.name)
+			}
+		})
+	}
+}
+
+// TestEncodeWithProgress_UnstartableCollectionFallsBackToThePlainEncode is the other
+// half of AC6: if the progress channel cannot be opened at all, the option is never
+// passed and the encode runs exactly as it did before progress collection existed.
+func TestEncodeWithProgress_UnstartableCollectionFallsBackToThePlainEncode(t *testing.T) {
+	realFFmpeg, realFFprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, realFFmpeg, src, "3M")
+
+	fakeFFmpeg, argvLog := captureFFmpeg(t, d, realFFmpeg)
+	cfg := baseCfg(d)
+	prober := probe.New(realFFmpeg, realFFprobe)
+	enc := FFmpegEncoder{
+		FFmpeg: fakeFFmpeg, Cfg: cfg, Probe: prober,
+		newProgressPipe: func() (*os.File, *os.File, error) { return nil, nil, errors.New("no descriptors") },
+	}
+
+	var c collectProgress
+	out := filepath.Join(d, "out.mkv")
+	if err := enc.EncodeWithProgress(context.Background(), src, out, nil, c.sink); err != nil {
+		t.Fatalf("an unopenable progress pipe must not fail the encode: %v", err)
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Fatalf("the encode produced no output: %v", err)
+	}
+	args := readArgv(t, argvLog)
+	for _, a := range args {
+		if a == "-progress" {
+			t.Fatalf("-progress was passed with no reader for it: %v", args)
+		}
+	}
+	if got := c.all(); len(got) != 0 {
+		t.Errorf("progress was reported with no pipe to report over: %v", got)
 	}
 }
 

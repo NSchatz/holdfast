@@ -34,6 +34,18 @@ type Event struct {
 	// store-only finish on that path does not emit), so a consumer may safely sum
 	// across Done events without double-counting.
 	Outcome *store.Outcome
+
+	// Progress, when non-nil, makes this event a live PROGRESS report rather than a
+	// state TRANSITION: the job has not moved, it has simply got further through the
+	// source (S0030). Status is the state it is still in, so a consumer that switches on
+	// Status — the metrics and notification observers both do, on the terminal states —
+	// is unaffected by these events and must stay that way: they carry no Outcome and
+	// count towards nothing.
+	//
+	// It is deliberately NOT persisted anywhere. This is live state about a running
+	// process, not a fact about a finished job, so after a restart an in-flight job
+	// simply has no progress reported yet.
+	Progress *Progress
 }
 
 // BytesReclaimed is the space a successful swap freed (source size − output size),

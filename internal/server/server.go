@@ -140,7 +140,13 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, "queue", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"queue": toDTOs(jobs)})
+	// Same projection the SSE snapshot uses, live progress included, and the same "now"
+	// basis for an in-state age — a client that polls this endpoint must not see a
+	// different picture of a running job than one watching the stream.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"queue": s.hub.queueDTOs(jobs),
+		"now":   time.Now().Unix(),
+	})
 }
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/NSchatz/holdfast/internal/engine"
 	"github.com/NSchatz/holdfast/internal/store"
@@ -59,6 +60,28 @@ type jobDTO struct {
 	SourceBytes *int64 `json:"source_bytes"`
 	OutputBytes *int64 `json:"output_bytes"`
 	EncodeMs    *int64 `json:"encode_ms"`
+
+	// Live progress of a RUNNING encode (S0030). These are the only fields here that do
+	// not come from the store: progress is state about a process, not a ledger fact, so
+	// it is never persisted and a terminal row never carries it.
+	//
+	// They follow the same pointer discipline as the outcome fields above, for the same
+	// reason and with a sharper edge: an encoder that has reported nothing yet, and a
+	// source whose container reports no duration, are both UNRECORDED and go out as an
+	// explicit null. A zero here would say "0% encoded" — a figure nobody measured, on
+	// the one page an operator uses to decide whether the tool is working.
+	//
+	// They are carried for a job in `encoding` and for no other state. A row that has
+	// moved on to verifying carries three nulls, because the encoder whose position this
+	// was has exited and nothing is measuring the verify phase (that is out of scope by
+	// the spec, and elapsed covers it).
+	//
+	// ProgressSeconds is the encoder's position in the source timeline; ProgressDuration
+	// is the length it is measured against; ProgressFraction is the two divided, clamped
+	// into [0,1], and present only when BOTH of the others are.
+	ProgressSeconds  *float64 `json:"progress_seconds"`
+	ProgressDuration *float64 `json:"progress_duration_seconds"`
+	ProgressFraction *float64 `json:"progress_fraction"`
 }
 
 func toDTOs(jobs []store.Job) []jobDTO {
@@ -99,6 +122,14 @@ func toDTOs(jobs []store.Job) []jobDTO {
 // Aggregates carries the whole-ledger figures (DASH-7) - the ones Queue and History
 // arithmetically cannot give, because those ship at most queueLimit / historyLimit rows
 // while the table holds the operator's entire library.
+//
+// Now is the server's wall clock when the frame was built, in unix seconds. It is the
+// BASIS for every in-state elapsed figure the page shows (S0030): a client derives
+// elapsed from `now - updated_at` plus the time since the frame arrived, rather than
+// ticking a counter of its own. That matters twice over — a browser throttles a
+// background tab's timers under policies with no normative guarantee, so an accumulated
+// counter drifts while a derived one cannot; and a client whose clock is skewed against
+// the server's would otherwise render nonsense (or a negative age) from updated_at alone.
 type snapshot struct {
 	Summary                map[string]int `json:"summary"`
 	Queue                  []jobDTO       `json:"queue"`
@@ -107,6 +138,7 @@ type snapshot struct {
 	BytesReclaimedLifetime int64          `json:"bytes_reclaimed_lifetime"`
 	Paused                 bool           `json:"paused"`
 	Scanning               bool           `json:"scanning"`
+	Now                    int64          `json:"now"`
 	Aggregates             aggregatesDTO  `json:"aggregates"`
 }
 
@@ -203,6 +235,18 @@ type Hub struct {
 	// baseline is frozen at startup. Immutable after NewHub, so it needs no lock.
 	reclaimedBaseline int64
 
+	// progMu guards progress. It is deliberately NOT mu: mu is held across the whole
+	// subscriber fan-out in broadcast, and an engine worker reporting progress must
+	// never queue behind that.
+	progMu sync.Mutex
+	// progress is the live position of each RUNNING encode, keyed by job path. It is the
+	// one piece of hub state that is not derived from the store, because it describes a
+	// process rather than a row — so it is never persisted, it is dropped the moment the
+	// job leaves `encoding` for ANY state (see Observe), and it is pruned against the
+	// store's own encoding rows on every snapshot (a Done event names the POST-swap path,
+	// so the pre-swap key would otherwise linger).
+	progress map[string]engine.Progress
+
 	mu   sync.Mutex
 	subs map[chan []byte]struct{}
 }
@@ -228,6 +272,7 @@ func NewHub(st store.Store, ctrl *Controller, log *slog.Logger) *Hub {
 		log:               log,
 		events:            make(chan engine.Event, 256),
 		subs:              make(map[chan []byte]struct{}),
+		progress:          make(map[string]engine.Progress),
 		reclaimedBaseline: baseline,
 	}
 }
@@ -237,17 +282,150 @@ func NewHub(st store.Store, ctrl *Controller, log *slog.Logger) *Hub {
 // double-count-free.
 func (h *Hub) ReclaimedLifetime() int64 { return h.reclaimedBaseline + h.bytesReclaimed.Load() }
 
-// Observe implements engine.Observer. It runs on an engine worker goroutine, so it
-// only does two cheap, non-blocking things: bump the reclaimed-bytes counter and
-// hand the event to Run (dropping it if the buffer is full — coalesced).
+// Observe implements engine.Observer. It runs on an engine worker goroutine — and, for a
+// progress report, on the goroutine draining a running encoder's progress pipe — so it
+// only does cheap, non-blocking things: bump the reclaimed-bytes counter, record or drop
+// the job's live progress, and hand the event to Run (dropping it if the buffer is full).
+//
+// The live-progress rule is deliberately narrow: an entry exists WHILE THE ENCODER IS
+// RUNNING and at no other time. So any transition that is not into `encoding` drops it —
+// not merely a terminal one. A position measured by a process that has exited describes
+// nothing that is still happening, and the page would render it as a frozen percentage
+// beside a state it does not describe: for the whole verify/VMAF phase, which on a
+// feature-length source is the longest stretch an operator watches, and equally for a job
+// RecoverStale returns to `pending`. The spec puts a verify figure out of scope ("the
+// verifying state is covered by elapsed alone") and the page promises "no carry-over of
+// the last figure"; both are the same rule, enforced here.
+//
+// Note the drop happens BEFORE the hand-off below, which may be dropped when the buffer
+// is full. Losing an event costs granularity; losing this would leave a stale figure on
+// the wire, which is correctness.
 func (h *Hub) Observe(ev engine.Event) {
 	if n := ev.BytesReclaimed(); n > 0 {
 		h.bytesReclaimed.Add(n)
+	}
+	switch {
+	case ev.Progress != nil:
+		h.setProgress(ev.Path, *ev.Progress)
+	case ev.Status == store.Encoding:
+		// Still encoding: whatever its encoder last reported still describes it.
+	default:
+		h.clearProgress(ev.Path)
 	}
 	select {
 	case h.events <- ev:
 	default: // buffer full: coalesce — the next broadcast re-reads full state
 	}
+}
+
+func (h *Hub) setProgress(path string, p engine.Progress) {
+	if path == "" {
+		return
+	}
+	h.progMu.Lock()
+	h.progress[path] = p
+	h.progMu.Unlock()
+}
+
+func (h *Hub) clearProgress(path string) {
+	if path == "" {
+		return // Trigger's synthetic event names no job
+	}
+	h.progMu.Lock()
+	delete(h.progress, path)
+	h.progMu.Unlock()
+}
+
+// liveProgressFor prunes the live progress table down to the jobs the STORE still has in
+// `encoding` and returns what remains. The prune is what makes the live table's rule hold
+// on its own rather than depending on every transition event arriving: the events channel
+// drops when it is full, a Done event names the POST-swap path (so a container-changing
+// swap would strand the source path's entry), and a job can leave `encoding` in the store
+// without this process seeing the event at all.
+//
+// It prunes against `encoding` specifically, not against the whole active list, for the
+// reason Observe spells out: the figure is a measurement taken by a process, and it is
+// live only while that process is running. A verifying or re-pended row is an active row
+// with NO progress figure — which the wire states as an explicit null, never as the
+// finished encode's last percentage frozen in place.
+func (h *Hub) liveProgressFor(jobs []store.Job) map[string]engine.Progress {
+	encoding := make(map[string]struct{}, len(jobs))
+	for _, j := range jobs {
+		if j.Status == store.Encoding {
+			encoding[j.Path] = struct{}{}
+		}
+	}
+	h.progMu.Lock()
+	defer h.progMu.Unlock()
+	for path := range h.progress {
+		if _, ok := encoding[path]; !ok {
+			delete(h.progress, path)
+		}
+	}
+	out := make(map[string]engine.Progress, len(h.progress))
+	for path, p := range h.progress {
+		out[path] = p
+	}
+	return out
+}
+
+// liveProgressCount is the number of jobs currently reporting live progress. Test-only
+// accessor: "publishes no live progress entries" is otherwise invisible from outside,
+// since an empty queue trivially carries no rows to hang a figure on.
+func (h *Hub) liveProgressCount() int {
+	h.progMu.Lock()
+	defer h.progMu.Unlock()
+	return len(h.progress)
+}
+
+// queueDTOs projects active jobs and annotates each with whatever live progress its
+// encoder has reported. Both the SSE snapshot and GET /api/queue go through here, so the
+// stream and the read endpoint cannot disagree about a running job.
+func (h *Hub) queueDTOs(jobs []store.Job) []jobDTO {
+	dtos := toDTOs(jobs)
+	live := h.liveProgressFor(jobs)
+	for i := range dtos {
+		p, ok := live[dtos[i].Path]
+		if !ok {
+			continue
+		}
+		applyProgress(&dtos[i], p)
+	}
+	return dtos
+}
+
+// applyProgress writes one live report onto a job's wire shape, clamping it into a range
+// that can be rendered honestly.
+//
+// The clamps are not defensive noise. An encoder legitimately reports a position at or
+// slightly past the source duration on its final report (a container's duration is
+// itself an approximation), and an unclamped divide would publish "103% encoded"; a
+// negative position — ffmpeg emits negative timestamps during pre-roll on some inputs —
+// would publish a negative one. Neither is a figure an operator can act on. The fraction
+// is published ONLY when the duration is known and positive: with no length to measure
+// against there is no fraction to compute, and inventing one is the failure mode this
+// whole surface exists to avoid.
+func applyProgress(d *jobDTO, p engine.Progress) {
+	pos := p.PositionSec
+	if !(pos > 0) { // also catches NaN
+		pos = 0
+	}
+	if p.DurationSec == nil || !(*p.DurationSec > 0) {
+		// No length to measure against: the position stands alone and there is no
+		// fraction, because there is nothing to divide by.
+		d.ProgressSeconds = &pos
+		return
+	}
+	dur := *p.DurationSec
+	if pos > dur {
+		// At or past the end: report it as fully encoded. The position is clamped as
+		// well as the fraction, so nothing on the wire reads past the length beside it.
+		pos = dur
+	}
+	frac := pos / dur
+	d.ProgressSeconds = &pos
+	d.ProgressDuration = &dur
+	d.ProgressFraction = &frac
 }
 
 // Trigger forces a broadcast without an engine event (used by the controller's
@@ -348,13 +526,16 @@ func (h *Hub) buildSnapshot(ctx context.Context) (snapshot, error) {
 		counts[string(st)] = n
 	}
 	return snapshot{
-		Summary:                counts,
-		Queue:                  toDTOs(queue),
+		Summary: counts,
+		Queue:   h.queueDTOs(queue),
+		// History rows are terminal, so they are projected WITHOUT live progress — a
+		// finished file carries the proof its swap was safe, never a running figure.
 		History:                toDTOs(hist),
 		BytesReclaimedSession:  h.bytesReclaimed.Load(),
 		BytesReclaimedLifetime: h.ReclaimedLifetime(),
 		Paused:                 h.ctrl.Paused(),
 		Scanning:               h.ctrl.Scanning(),
+		Now:                    time.Now().Unix(),
 		Aggregates:             h.aggregates(ctx),
 	}, nil
 }

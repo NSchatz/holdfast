@@ -238,6 +238,127 @@ func TestInteraction_CapsSurfacedAndPauseDisabled(t *testing.T) {
 	}
 }
 
+// --- in-flight legibility (S0030) --------------------------------------------
+
+// TestQueue_RendersInStateElapsedDerivedFromTheWireTimestamp is AC1. The elapsed figure
+// must be DERIVED from the transition timestamp on every tick, never accumulated in a
+// counter here: a background tab's timers are throttled by policies with no normative
+// guarantee, so a counter would drift while a recomputed value cannot. The proof is
+// structural, because the render is client-side: the page must read updated_at into the
+// row, take the server's own clock off the snapshot, recompute on a timer, and hold no
+// running total of its own.
+func TestQueue_RendersInStateElapsedDerivedFromTheWireTimestamp(t *testing.T) {
+	s := string(indexHTML)
+	for _, want := range []string{
+		"j.updated_at", // the transition timestamp already on the wire is the basis
+		"snap.now",     // ...read against the SERVER's clock, not the client's alone
+		"clockOffset",  // ...so a skewed client clock cannot invent an age
+		"refreshElapsed",
+		"setInterval(refreshElapsed, 1000)", // refreshed with no page reload
+		"dataset.since",                     // each row carries its own basis
+		"<th>Elapsed</th>",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("index.html missing the elapsed-from-timestamp element %q", want)
+		}
+	}
+	// An accumulating counter is the specific thing AC1 forbids. `now - since` is the
+	// only arithmetic that may produce the figure.
+	if !strings.Contains(s, "now - since") {
+		t.Error("the elapsed figure is not computed as (server now - transition timestamp)")
+	}
+	for _, banned := range []string{"elapsed++", "elapsed += ", "seconds++", "+= 1000"} {
+		if strings.Contains(s, banned) {
+			t.Errorf("index.html accumulates elapsed time (%q) instead of deriving it — a throttled tab would drift", banned)
+		}
+	}
+}
+
+// TestQueue_RendersProgressAndShowsUnknownAsUnknown is AC3's page half: a running encode
+// shows a figure taken from the encoder's own stream, and an absent one reads "unknown"
+// — never a stale figure, never an interpolated one, never a zero.
+func TestQueue_RendersProgressAndShowsUnknownAsUnknown(t *testing.T) {
+	s := string(indexHTML)
+	for _, want := range []string{
+		"progress_fraction", "progress_seconds", "progress_duration_seconds",
+		"<th>Progress</th>",
+		`mk("span", "nr", "unknown")`, // the honest absent-figure node
+		"never a stale figure",        // the copy says what the figure is and is not
+		"encoder's own progress stream",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("index.html missing progress element %q", want)
+		}
+	}
+	// The empty-queue rendering is unchanged in wording; only its column span moved with
+	// the two new columns.
+	if !strings.Contains(s, `"Nothing queued."`) {
+		t.Error("the empty-queue rendering was changed")
+	}
+	if !strings.Contains(s, `emptyRow(5, "Nothing queued.")`) {
+		t.Error("the empty-queue row does not span the queue table's columns")
+	}
+}
+
+// TestQueue_ProgressIsShownForARunningEncodeOnly is the page half of the rule the hub
+// enforces on the wire. A progress figure is a measurement taken BY the encoder against
+// the source duration, so it exists while the encoder runs and at no other time, and the
+// spec puts the rest of the pipeline outside it in terms:
+//
+//	Out (explicit):
+//	- A progress percentage for the verify/VMAF phase. `internal/vmaf` keeps its
+//	  current invocation; the verifying state is covered by elapsed alone (AC1).
+//
+// Gating the cell on the whole active set is what put the finished encode's last
+// percentage on a verifying row and left it frozen there for the whole verify phase —
+// which on a feature-length source is the longest stretch an operator watches.
+func TestQueue_ProgressIsShownForARunningEncodeOnly(t *testing.T) {
+	s := string(indexHTML)
+	if !strings.Contains(s, `const PROGRESS_STATUS = "encoding";`) {
+		t.Error("the page does not name the one state a progress figure can exist in")
+	}
+	if !strings.Contains(s, `if (j.status !== PROGRESS_STATUS) return;`) {
+		t.Error("the progress cell is not restricted to a running encode")
+	}
+	if strings.Contains(s, "ACTIVE_STATUSES") {
+		t.Error("the progress cell is gated on the whole active set again — a verifying row would carry the finished encode's figure")
+	}
+	// And the copy says so, because the operator reading an empty Progress cell on a
+	// verifying row is owed the reason.
+	if !strings.Contains(s, "covered by\n      Elapsed alone") && !strings.Contains(s, "covered by Elapsed alone") {
+		t.Error("the queue note does not say that a probed/verified file is covered by Elapsed alone")
+	}
+}
+
+// TestQueue_ProgressAddsNoHTMLSinkAndNoExternalAsset is AC11. The new cells are built
+// with the same DOM-node idiom as every other row (TestRenderIdiom already forbids the
+// string sinks page-wide), the CSP is unchanged, and the page still fetches nothing from
+// outside the binary that served it.
+func TestQueue_ProgressAddsNoHTMLSinkAndNoExternalAsset(t *testing.T) {
+	s := string(indexHTML)
+	// No off-binary fetch: no absolute URL, no protocol-relative one, and the only
+	// network call is to this server's own API.
+	for _, banned := range []string{"http://", "https://", "//cdn", "src=\"//", "@import", "url(http"} {
+		if strings.Contains(s, banned) {
+			t.Errorf("index.html would fetch %q from outside the binary that served it", banned)
+		}
+	}
+	// The CSP is exactly the one that was already enforced, Trusted Types included.
+	rec := httptest.NewRecorder()
+	Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	const want = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; require-trusted-types-for 'script'"
+	if got := rec.Header().Get("Content-Security-Policy"); got != want {
+		t.Errorf("the response CSP changed.\n got: %q\nwant: %q", got, want)
+	}
+	// The progress cell is assembled from nodes and text, like every other cell.
+	if !strings.Contains(s, "function progressCell(td, j)") {
+		t.Fatal("no progressCell renderer")
+	}
+	if !strings.Contains(s, "td.textContent = fmtSpan(") {
+		t.Error("the elapsed cell is not filled with textContent")
+	}
+}
+
 // --- DASH-7: the whole-ledger aggregates on the page -------------------------
 
 // The page renders each published aggregate with the set it covers and the rows that

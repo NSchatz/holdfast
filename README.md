@@ -175,6 +175,36 @@ the encode duration, and the VMAF pair shown with its model, its pooling and its
 the proof is on the page, not only in the JSON. A skipped row names its guard; a failed row shows its
 reason; a fact that was never recorded reads "not recorded", never `0`.
 
+### An in-flight job — how far it has got
+
+A terminal row says what happened; an **active** row says what is happening. Every job in `/api/queue`
+(and in the SSE snapshot's `queue`) carries `updated_at`, the timestamp of its last transition, and the
+snapshot carries `now`, the server's clock when the frame was built — together those are how the
+dashboard shows **how long a file has been in the state it is in**, recomputed from the timestamp on
+every tick rather than counted up in the page.
+
+An **encoding** row additionally carries what the encoder itself reports, read from ffmpeg's documented
+`-progress` stream rather than estimated from elapsed time:
+
+| Field | What it is |
+|---|---|
+| `progress_seconds` | the encoder's position in the source timeline |
+| `progress_duration_seconds` | the source duration that position is measured against |
+| `progress_fraction` | the two divided, in `[0,1]` |
+
+**Only** an encoding row. A figure here is a measurement taken by the encoder, so it is live exactly
+while that encoder is running: the moment a job moves on — to `verifying`, or back to `pending` after a
+crash, or to a terminal state — all three fields go back to `null`, because the process that produced the
+figure has exited and nothing is measuring the verify phase. A carried-over percentage frozen beside a
+state it does not describe is the one thing this surface must never show.
+
+The same `null` rule applies, and it bites harder here: an encoder that has not reported yet, and a
+source whose container reports no duration, are both **unrecorded**, and a `0` would read as "0% encoded"
+— a figure nobody measured. The dashboard shows those as *unknown*. Progress is **not persisted**: it is
+state about a running process, so after a restart an in-flight job simply has none reported yet, and a
+finished row never carries one. There is deliberately **no ETA** — every figure here is measured, and a
+predicted finish time is not.
+
 The reclaimed figure is a **durable lifetime total** (`bytes_reclaimed_lifetime`): a one-time baseline
 summed from the recorded `source_bytes`/`output_bytes` on every done row, plus this process's reclaims — so
 it survives a restart rather than resetting to zero. `bytes_reclaimed_session` is kept alongside it as the

@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 
@@ -58,12 +60,37 @@ type FFmpegEncoder struct {
 	FFmpeg string
 	Cfg    config.Config
 	Probe  *probe.Prober
+
+	// newProgressPipe, when non-nil, replaces os.Pipe when opening the channel ffmpeg
+	// writes -progress reports to. Unexported test seam (the engine tests are in this
+	// package): returning an error from it is how a test drives the "progress collection
+	// could not be started at all" path, which must degrade to exactly the encode this
+	// package performed before progress existed. Production leaves it nil.
+	newProgressPipe func() (r *os.File, w *os.File, err error)
 }
 
 // Encode runs ffmpeg. It returns an error if the configured encoder is unknown, if
 // ffmpeg exits non-zero, or if colour/pixel-format derivation fails (the engine
 // then discards the temp and leaves the source untouched).
 func (e FFmpegEncoder) Encode(ctx context.Context, in, out string, props *probe.VideoProps) error {
+	return e.EncodeWithProgress(ctx, in, out, props, nil)
+}
+
+// EncodeWithProgress is Encode plus live progress reporting: while the encode runs, sink
+// is called with the encoder's position in the source timeline (see scanProgressStream
+// for the stream format and the measured key set). A nil sink is exactly Encode.
+//
+// Everything about the SUBPROCESS is unchanged by the collection, on purpose. holdfast
+// deletes a source once its replacement is judged faithful, and the error this function
+// returns is what the engine turns into a failed job's reason — so a collector that
+// swallowed a non-zero exit would turn a failed encode into a candidate for verification,
+// and one that reallocated stdout would empty the failure text an operator reads. The
+// progress stream therefore goes to its OWN file descriptor (fd 3, handed to the child
+// via ExtraFiles), never to stdout; stdout and stderr are still both captured into one
+// buffer and truncated into the returned error exactly as CombinedOutput did. If the
+// pipe cannot be opened at all, the -progress option is simply not passed and the encode
+// runs precisely as it did before this existed.
+func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, props *probe.VideoProps, sink ProgressSink) error {
 	spec, ok := encoder.Lookup(e.Cfg.Encoder)
 	if !ok {
 		return fmt.Errorf("unknown encoder %q (known: %v)", e.Cfg.Encoder, encoder.Known())
@@ -104,7 +131,18 @@ func (e FFmpegEncoder) Encode(ctx context.Context, in, out string, props *probe.
 		props.SideData(),
 	)
 
+	// Open the progress channel BEFORE the argv is assembled: the -progress option is
+	// only ever passed when there is a reader for it. A sink-less call, or a pipe we
+	// could not open, produces byte-identical argv to the pre-progress encoder.
+	pr, pw := e.openProgressPipe(sink)
+
 	args := []string{"-hide_banner", "-nostdin", "-loglevel", "error", "-y"}
+	if pr != nil {
+		// A GLOBAL option, so it belongs in this leading block. "pipe:3" is the third
+		// file descriptor of the child, which is where ExtraFiles[0] lands — chosen over
+		// "pipe:1" precisely because stdout is part of the captured error text.
+		args = append(args, "-progress", "pipe:3")
+	}
 	if spec.Key == "vaapi" {
 		// -vaapi_device is a GLOBAL option that must precede -i so the hwupload
 		// filter (added below by buildArgs) has a device to target. Every other
@@ -119,10 +157,80 @@ func (e FFmpegEncoder) Encode(ctx context.Context, in, out string, props *probe.
 	args = append(args, "--", out)
 
 	cmd := exec.CommandContext(ctx, e.FFmpeg, args...)
-	if outb, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("ffmpeg encode: %w: %s", err, truncate(string(outb), 500))
+	// exec.Cmd.CombinedOutput is exactly this: one buffer behind both streams, then
+	// Run (= Start + Wait). It is spelled out rather than called because the progress
+	// drain has to happen BETWEEN Start and Wait — the captured bytes, the returned
+	// error and its wrapping are otherwise identical, which is the point.
+	var outb bytes.Buffer
+	cmd.Stdout = &outb
+	cmd.Stderr = &outb
+	if pr != nil {
+		cmd.ExtraFiles = []*os.File{pw}
+	}
+
+	if err := cmd.Start(); err != nil {
+		closeProgressPipe(pr, pw)
+		return fmt.Errorf("ffmpeg encode: %w: %s", err, truncate(outb.String(), 500))
+	}
+
+	drained := make(chan struct{})
+	if pr != nil {
+		// The child now holds the only writer, so closing ours is what lets the reader
+		// below ever see EOF.
+		_ = pw.Close()
+		go func() {
+			defer close(drained)
+			scanProgressStream(pr, func(positionSec float64) {
+				sink(Progress{PositionSec: positionSec})
+			})
+		}()
+	} else {
+		close(drained)
+	}
+
+	err := cmd.Wait()
+	// The encoder has exited, so its end of the progress pipe is closed and the drain
+	// has finished (or is about to); waiting for it keeps the reader from outliving the
+	// call and reporting progress for a job that is already terminal.
+	<-drained
+	if pr != nil {
+		_ = pr.Close()
+	}
+	if err != nil {
+		return fmt.Errorf("ffmpeg encode: %w: %s", err, truncate(outb.String(), 500))
 	}
 	return nil
+}
+
+// openProgressPipe opens the channel the encoder writes -progress reports to, or returns
+// (nil, nil) when there is nothing to report to or the pipe cannot be opened. A failure
+// here is NOT an encode failure: progress is a reporting nicety and the encode must run
+// exactly as it did before progress collection existed, so the caller simply omits the
+// option. (There is nowhere to log from here — FFmpegEncoder holds no logger — and a
+// silently absent figure is already the documented "no progress reported" state.)
+func (e FFmpegEncoder) openProgressPipe(sink ProgressSink) (r *os.File, w *os.File) {
+	if sink == nil {
+		return nil, nil
+	}
+	newPipe := e.newProgressPipe
+	if newPipe == nil {
+		newPipe = os.Pipe
+	}
+	pr, pw, err := newPipe()
+	if err != nil || pr == nil || pw == nil {
+		closeProgressPipe(pr, pw)
+		return nil, nil
+	}
+	return pr, pw
+}
+
+func closeProgressPipe(r, w *os.File) {
+	if r != nil {
+		_ = r.Close()
+	}
+	if w != nil {
+		_ = w.Close()
+	}
 }
 
 // buildArgs assembles the per-encoder ffmpeg args (everything after `-c:v

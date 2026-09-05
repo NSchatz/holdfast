@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1603,5 +1604,262 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 	// The current file's row is done (short-circuits a resume).
 	if !ledgerHas(t, ts, store.Done, "movie.mkv") {
 		t.Error("expected a done row under the transcoded file's identity")
+	}
+}
+
+// ---- S0030: live progress, and what it must not cost -------------------------
+
+// The per-job subprocess budget for one done job with the VMAF gate off: 13 ffprobe
+// invocations (the source snapshot plus verifyOutput's codec/duration/packet/stream-count
+// probes) and 2 ffmpeg invocations (the encode and the decode-integrity check).
+//
+// These constants are NOT the evidence for AC12 and must not be read as it — they are a
+// long-run ceiling, so that a per-PR "no worse than last time" cannot ratchet the cost up
+// one probe at a time across many changes. The criterion itself is proved by MEASURING
+// both arms in the same run: see TestProbeBudget_ProgressAddsNoSubprocess, which also
+// fails if these numbers ever stop matching what it measures, so they cannot decay into
+// folklore.
+const (
+	probeBudgetFFprobe = 13
+	probeBudgetFFmpeg  = 2
+)
+
+// countingWrapper writes a shell wrapper for a real binary that appends one line per
+// invocation to a log and then delegates. Pointing the engine's Prober and Encoder at
+// the wrappers turns "how many subprocesses did this job spawn?" into a countable fact
+// rather than an argument.
+func countingWrapper(t *testing.T, dir, name, real string) (wrapper, log string) {
+	t.Helper()
+	wrapper = filepath.Join(dir, "counting-"+name+".sh")
+	log = filepath.Join(dir, "counting-"+name+".log")
+	script := "#!/bin/sh\n" +
+		"printf 'call\\n' >> \"" + log + "\"\n" +
+		"exec \"" + real + "\" \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+		t.Fatalf("write %s wrapper: %v", name, err)
+	}
+	return wrapper, log
+}
+
+func countCalls(t *testing.T, log string) int {
+	t.Helper()
+	b, err := os.ReadFile(log)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("read %s: %v", log, err)
+	}
+	n := 0
+	for _, l := range strings.Split(string(b), "\n") {
+		if strings.TrimSpace(l) != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// countJobSubprocesses runs ONE job end to end under counting wrappers and returns how
+// many ffprobe and ffmpeg subprocesses it spawned. progress selects whether live progress
+// collection is active.
+//
+// The progress=false arm is the load-bearing one: the engine collects progress only when
+// an Observer is set (see Engine.encode), and with none it takes EXACTLY the path this
+// package took before progress collection existed. So that arm is not a stand-in for the
+// pre-change tree, it IS the pre-change per-job subprocess behaviour, executed in the same
+// process, on the same machine, against the same ffmpeg, in the same run as the arm it is
+// compared with.
+func countJobSubprocesses(t *testing.T, progress bool) (probes, ffmpegs int) {
+	t.Helper()
+	realFFmpeg, realFFprobe := tools(t)
+	root := t.TempDir()
+	src := filepath.Join(root, "movie.mkv")
+	mkH264(t, realFFmpeg, src, "8M") // fixtures use the REAL binaries — never counted
+
+	d := t.TempDir()
+	countedFFmpeg, ffmpegLog := countingWrapper(t, d, "ffmpeg", realFFmpeg)
+	countedFFprobe, ffprobeLog := countingWrapper(t, d, "ffprobe", realFFprobe)
+
+	eng := buildEngine(t, countedFFmpeg, countedFFprobe, root, nil, nil)
+	var c collector
+	if progress {
+		eng.Observer = c.observe
+	}
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot(progress=%v): %v", progress, err)
+	}
+	if codecOf(t, realFFprobe, src) != "hevc" {
+		t.Fatalf("the fixture job did not complete (progress=%v) — a budget measured over a job that did nothing proves nothing", progress)
+	}
+	if progress && len(c.snapshot()) == 0 {
+		t.Fatal("no events were observed on the progress arm — the budget would be measured with the feature quietly off")
+	}
+	return countCalls(t, ffprobeLog), countCalls(t, ffmpegLog)
+}
+
+// TestProbeBudget_ProgressAddsNoSubprocess is AC12: a job processed end to end spawns no
+// more probe subprocesses than the same job spawns before this change.
+//
+// This is the guard on the obvious wrong way to build this feature. A progress figure is
+// meaningless without the source length it is measured against, and the easy way to get
+// that length is a second ffprobe per job — on a tool that walks a whole library, which
+// is exactly the regression TRANSCODE-PERF was raised to remove. So the duration rides
+// the snapshot ProcessFile ALREADY takes: one more -show_entries section on a call that
+// was being made anyway.
+//
+// It is a CONTROLLED EXPERIMENT rather than a constant with a ceiling under it. The same
+// job is run twice in the same environment, once with progress collection off (the
+// pre-change path, exactly) and once with it on, and the criterion is asserted between the
+// two MEASURED numbers. A recorded constant can only ever hold the line at a number
+// somebody wrote down; the control arm holds it at what this tree actually costs today.
+// The constants stay as a long-run ceiling and are themselves re-measured here, so they
+// can never drift into being a comment about a tree nobody has run.
+//
+// Honest about its reach: a count is blind to a change that ADDS one probe and REMOVES
+// another, which nets zero. That limit is AC12's own ("no more ... than"), and closing it
+// would need per-call-site identity rather than a total.
+func TestProbeBudget_ProgressAddsNoSubprocess(t *testing.T) {
+	baseProbes, baseFFmpegs := countJobSubprocesses(t, false)
+	liveProbes, liveFFmpegs := countJobSubprocesses(t, true)
+	t.Logf("one done job, progress collection off -> on: ffprobe %d -> %d, ffmpeg %d -> %d (long-run ceiling %d / %d)",
+		baseProbes, liveProbes, baseFFmpegs, liveFFmpegs, probeBudgetFFprobe, probeBudgetFFmpeg)
+
+	// The criterion, measured on both sides.
+	if liveProbes > baseProbes {
+		t.Errorf("one job spawned %d ffprobe subprocesses with progress collection on and %d with it off — progress collection must not add a probe",
+			liveProbes, baseProbes)
+	}
+	if liveFFmpegs > baseFFmpegs {
+		t.Errorf("one job spawned %d ffmpeg subprocesses with progress collection on and %d with it off — progress collection must not add a subprocess",
+			liveFFmpegs, baseFFmpegs)
+	}
+
+	// The long-run ceiling, so a sequence of individually-innocent changes cannot walk
+	// the per-job cost upwards a probe at a time.
+	if liveProbes > probeBudgetFFprobe || liveFFmpegs > probeBudgetFFmpeg {
+		t.Errorf("one job spawned %d ffprobe / %d ffmpeg subprocesses, over the recorded ceiling of %d / %d",
+			liveProbes, liveFFmpegs, probeBudgetFFprobe, probeBudgetFFmpeg)
+	}
+	// ...and the ceiling is held to the measurement, so it stays a number somebody can
+	// still reproduce rather than one somebody once wrote down.
+	if baseProbes != probeBudgetFFprobe || baseFFmpegs != probeBudgetFFmpeg {
+		t.Errorf("the recorded per-job baseline is stale: measured %d ffprobe / %d ffmpeg with progress collection off, the constants say %d / %d. Re-measure and move the constants in the same commit that moved the cost.",
+			baseProbes, baseFFmpegs, probeBudgetFFprobe, probeBudgetFFmpeg)
+	}
+}
+
+// TestEngine_ReportsLiveProgressWithTheSourceDuration is the wiring proof: a real encode
+// driven through ProcessFile reaches the Observer as PROGRESS events (no state
+// transition), each carrying a real position and the source duration it is measured
+// against. It is what makes the dashboard's figure a measurement rather than a guess.
+func TestEngine_ReportsLiveProgressWithTheSourceDuration(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	root := t.TempDir()
+	src := filepath.Join(root, "movie.mkv")
+	mkH264Long(t, ffmpeg, src, "8M") // 10s, so the encode is long enough to report
+
+	srcDur, ok := probe.New(ffmpeg, ffprobe).DurationSec(context.Background(), src)
+	if !ok {
+		t.Fatal("fixture has no readable duration")
+	}
+
+	eng := buildEngine(t, ffmpeg, ffprobe, root, nil, nil)
+	var c collector
+	eng.Observer = c.observe
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+
+	var progress []Event
+	for _, ev := range c.snapshot() {
+		if ev.Progress != nil {
+			progress = append(progress, ev)
+		}
+	}
+	if len(progress) == 0 {
+		t.Fatal("a real encode produced no progress events — an in-flight job stays as illegible as it was")
+	}
+	for _, ev := range progress {
+		if ev.Status != store.Encoding {
+			t.Errorf("a progress event must carry the state the job is still IN, got %q", ev.Status)
+		}
+		if ev.Outcome != nil {
+			t.Error("a progress event must carry no Outcome — it is not a terminal transition")
+		}
+		if ev.Path != src {
+			t.Errorf("progress event path = %q, want the source %q", ev.Path, src)
+		}
+		if ev.Progress.DurationSec == nil {
+			t.Fatal("progress carries no source duration — there is nothing to measure it against")
+		}
+		if math.Abs(*ev.Progress.DurationSec-srcDur) > 0.01 {
+			t.Errorf("progress duration = %v, want the source duration %v", *ev.Progress.DurationSec, srcDur)
+		}
+		if ev.Progress.PositionSec < 0 {
+			t.Errorf("negative reported position %v", ev.Progress.PositionSec)
+		}
+	}
+}
+
+// TestEngine_FailedEncodeWithProgressStillRecordsTheError is the engine half of AC6: the
+// job a failing encoder produces is the same job it produced before progress collection
+// existed — failed, source untouched, with the encoder's error text as the reason.
+func TestEngine_FailedEncodeWithProgressStillRecordsTheError(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	root := t.TempDir()
+	src := filepath.Join(root, "movie.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+	before := md5f(t, src)
+
+	d := t.TempDir()
+	// A fake ffmpeg that emits a valid progress report and THEN fails.
+	fake := progressFake(t, d, "engine-failing", oneReport(500_000, "continue"),
+		"", "Conversion failed! the encoder gave up", 4)
+	cfg := baseCfg(root)
+	prober := probe.New(ffmpeg, ffprobe)
+	ts := newTestStore(t, root)
+	eng := New(cfg, prober, FFmpegEncoder{FFmpeg: fake, Cfg: cfg, Probe: prober}, ts, discardLogger())
+	var c collector
+	eng.Observer = c.observe
+
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+
+	if md5f(t, src) != before {
+		t.Fatal("source modified by a failed encode")
+	}
+	if nTemp(t, root) != 0 {
+		t.Error("a failed encode left a temp behind")
+	}
+	if !ledgerHas(t, ts, store.Failed, "movie.mkv") {
+		t.Fatal("expected a failed row")
+	}
+	rows, err := ts.List(context.Background(), []store.Status{store.Failed}, 0)
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	reason := ""
+	for _, r := range rows {
+		if r.Path == src {
+			reason = r.Outcome.Reason
+		}
+	}
+	if !strings.Contains(reason, "Conversion failed!") {
+		t.Errorf("the failed row lost the encoder's error text: %q", reason)
+	}
+	if !strings.Contains(reason, "exit status 4") {
+		t.Errorf("the failed row lost the encoder's exit status: %q", reason)
+	}
+	// Progress really was collected on that run, so the assertions above are not
+	// vacuously true of a run where collection never happened.
+	sawProgress := false
+	for _, ev := range c.snapshot() {
+		if ev.Progress != nil {
+			sawProgress = true
+		}
+	}
+	if !sawProgress {
+		t.Error("no progress was collected on the failing run — the proof would be vacuous")
 	}
 }
