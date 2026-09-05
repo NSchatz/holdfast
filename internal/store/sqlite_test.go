@@ -2,11 +2,14 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"math"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func openTest(t *testing.T) *SQLite {
@@ -788,5 +791,427 @@ func TestClearSkip_RemovesMatchingSkipOnly(t *testing.T) {
 	// Clearing a non-existent row is a no-op, not an error.
 	if err := s.ClearSkip(ctx, "/a/nope.mkv", "fp", "hardlinked"); err != nil {
 		t.Errorf("ClearSkip on absent row: %v", err)
+	}
+}
+
+// --- DASH-7: whole-ledger aggregates -----------------------------------------
+//
+// The reporting caps the API ships with (500 queue rows, 200 history rows) are the
+// thing these tests exist to defeat. Every ledger they seed is DELIBERATELY larger
+// than both, because an aggregate that agrees with the whole table on 3 rows and on
+// 300,000 rows looks identical until the table is bigger than the view.
+
+const (
+	// The API's reporting caps, restated here as the thing to exceed. They live in
+	// internal/server (a store test must not import it), so the seeds below are sized
+	// against these and the server-side test asserts the real ones.
+	testQueueCap   = 500
+	testHistoryCap = 200
+)
+
+// seedTerminal claims path and finishes it with the given status and outcome, so a test
+// can seed a row carrying exactly the facts (or the absences) it wants to aggregate.
+func seedTerminal(t *testing.T, s *SQLite, path string, st Status, o *Outcome) {
+	t.Helper()
+	ctx := context.Background()
+	ok, err := s.Claim(ctx, path, "fp", "w0", 3)
+	if err != nil || !ok {
+		t.Fatalf("seedTerminal Claim(%s): ok=%v err=%v", path, ok, err)
+	}
+	if err := s.Finish(ctx, path, "fp", st, o); err != nil {
+		t.Fatalf("seedTerminal Finish(%s): %v", path, err)
+	}
+}
+
+func closeToF(t *testing.T, what string, got *float64, want float64) {
+	t.Helper()
+	if got == nil {
+		t.Errorf("%s = nil, want %v", what, want)
+		return
+	}
+	if math.Abs(*got-want) > 1e-9*math.Max(1, math.Abs(want)) {
+		t.Errorf("%s = %v, want %v", what, *got, want)
+	}
+}
+
+func bucketsOf(b Breakdown) map[string]int64 {
+	m := make(map[string]int64, len(b.Buckets))
+	for _, x := range b.Buckets {
+		m[x.Key] = x.Count
+	}
+	return m
+}
+
+// THE criterion of this phase: an aggregate is over every matching row in the table,
+// not over the capped rows the queue and history views ship. The ledger seeded here
+// holds MORE terminal rows than the history cap and MORE non-terminal rows than the
+// queue cap, so a figure derived from either view is arithmetically unable to match -
+// the test states the capped values it must NOT equal, alongside the whole-table values
+// it must.
+func TestAggregates_ComputedOverEveryRowNotTheCappedViews(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	const (
+		nDone    = testHistoryCap + 30 // 230 terminal-done rows
+		nSkipped = testHistoryCap + 5  // 205 skipped rows
+		nQueued  = testQueueCap + 5    // 505 non-terminal rows
+	)
+
+	// Done rows carry a deterministic, non-degenerate spread of every recorded fact,
+	// and the expected values are accumulated here rather than restated as constants -
+	// a hand-copied expectation is a second implementation to get wrong.
+	var (
+		ratioSum, meanSum, minSum float64
+		ratioLo, ratioHi          = math.Inf(1), math.Inf(-1)
+		msSum, msLo, msHi         = int64(0), int64(math.MaxInt64), int64(math.MinInt64)
+		vmeanLo, vmeanHi          = math.Inf(1), math.Inf(-1)
+		vminLo, vminHi            = math.Inf(1), math.Inf(-1)
+	)
+	for i := 0; i < nDone; i++ {
+		src := int64(1_000_000 + i*1_000)
+		out := int64(300_000 + i*100)
+		ms := int64(60_000 + i*37)
+		vmean := 90.0 + float64(i%100)/10.0
+		vmin := 60.0 + float64(i%80)/10.0
+		model := "version=vmaf_v0.6.1"
+
+		ratio := float64(out) / float64(src)
+		ratioSum += ratio
+		ratioLo, ratioHi = math.Min(ratioLo, ratio), math.Max(ratioHi, ratio)
+		msSum += ms
+		if ms < msLo {
+			msLo = ms
+		}
+		if ms > msHi {
+			msHi = ms
+		}
+		meanSum += vmean
+		vmeanLo, vmeanHi = math.Min(vmeanLo, vmean), math.Max(vmeanHi, vmean)
+		minSum += vmin
+		vminLo, vminHi = math.Min(vminLo, vmin), math.Max(vminHi, vmin)
+
+		seedTerminal(t, s, "/lib/done"+strconv.Itoa(i)+".mkv", Done, &Outcome{
+			Encoder: "cpu", VmafMean: &vmean, VmafMin: &vmin, VmafModel: model,
+			SourceBytes: &src, OutputBytes: &out, EncodeMs: &ms,
+		})
+	}
+
+	guards := []string{"low-bitrate", "already-at-target-codec", "hardlinked"}
+	wantGuards := map[string]int64{}
+	for i := 0; i < nSkipped; i++ {
+		g := guards[i%len(guards)]
+		wantGuards[g]++
+		seedTerminal(t, s, "/lib/skip"+strconv.Itoa(i)+".mkv", Skipped, &Outcome{Reason: g})
+	}
+	for i := 0; i < nQueued; i++ {
+		p := "/lib/queued" + strconv.Itoa(i) + ".mkv"
+		if ok, err := s.Claim(ctx, p, "fp", "w0", 3); err != nil || !ok {
+			t.Fatalf("Claim(%s): ok=%v err=%v", p, ok, err)
+		}
+	}
+
+	// The views really are capped - this is the premise, not an aside. If these ever
+	// stopped truncating, the test below would pass for the wrong reason.
+	hist, err := s.List(ctx, []Status{Done, Skipped, Failed}, testHistoryCap)
+	if err != nil {
+		t.Fatalf("List history: %v", err)
+	}
+	queue, err := s.List(ctx, []Status{Pending, Probing, Encoding, Verifying}, testQueueCap)
+	if err != nil {
+		t.Fatalf("List queue: %v", err)
+	}
+	if len(hist) != testHistoryCap || len(queue) != testQueueCap {
+		t.Fatalf("seed did not exceed the caps: history=%d queue=%d", len(hist), len(queue))
+	}
+
+	// Timed and LOGGED, not asserted: the figures are recomputed on the snapshot path,
+	// which shares one serialized connection with the engine's writes, so what this
+	// costs is a fact worth having in the test output. A threshold here would be a
+	// clock-dependent flake, and a flaky test is one that gets deleted later by someone
+	// who no longer knows what it was for.
+	started := time.Now()
+	a := s.Aggregates(ctx)
+	t.Logf("six aggregates over %d rows took %v", nDone+nSkipped+nQueued, time.Since(started))
+
+	if a.Outcomes.Err != nil {
+		t.Fatalf("outcome counts: %v", a.Outcomes.Err)
+	}
+	got := bucketsOf(a.Outcomes)
+	if got[string(Done)] != nDone || got[string(Skipped)] != nSkipped {
+		t.Errorf("outcome counts = %v, want done=%d skipped=%d (the WHOLE table, not the %d-row history view)",
+			got, nDone, nSkipped, testHistoryCap)
+	}
+	if a.Outcomes.Counted != nDone+nSkipped {
+		t.Errorf("outcome counted = %d, want %d", a.Outcomes.Counted, nDone+nSkipped)
+	}
+
+	if a.SkipsByGuard.Err != nil {
+		t.Fatalf("skips by guard: %v", a.SkipsByGuard.Err)
+	}
+	for g, want := range wantGuards {
+		if got := bucketsOf(a.SkipsByGuard)[g]; got != want {
+			t.Errorf("skips by guard %q = %d, want %d (counted over every skipped row)", g, got, want)
+		}
+	}
+
+	if a.SizeRatio.Err != nil {
+		t.Fatalf("size ratio: %v", a.SizeRatio.Err)
+	}
+	if a.SizeRatio.Counted != nDone {
+		t.Errorf("size ratio counted = %d, want %d", a.SizeRatio.Counted, nDone)
+	}
+	closeToF(t, "size ratio mean", a.SizeRatio.Mean, ratioSum/float64(nDone))
+	closeToF(t, "size ratio min", a.SizeRatio.Min, ratioLo)
+	closeToF(t, "size ratio max", a.SizeRatio.Max, ratioHi)
+
+	if a.EncodeMs.Err != nil {
+		t.Fatalf("encode ms: %v", a.EncodeMs.Err)
+	}
+	closeToF(t, "encode ms mean", a.EncodeMs.Mean, float64(msSum)/float64(nDone))
+	closeToF(t, "encode ms min", a.EncodeMs.Min, float64(msLo))
+	closeToF(t, "encode ms max", a.EncodeMs.Max, float64(msHi))
+
+	if a.VmafMean.Err != nil || a.VmafMin.Err != nil {
+		t.Fatalf("vmaf spreads: mean=%v min=%v", a.VmafMean.Err, a.VmafMin.Err)
+	}
+	closeToF(t, "vmaf mean spread mean", a.VmafMean.Mean, meanSum/float64(nDone))
+	closeToF(t, "vmaf mean spread min", a.VmafMean.Min, vmeanLo)
+	closeToF(t, "vmaf mean spread max", a.VmafMean.Max, vmeanHi)
+	closeToF(t, "vmaf worst spread mean", a.VmafMin.Mean, minSum/float64(nDone))
+	closeToF(t, "vmaf worst spread min", a.VmafMin.Min, vminLo)
+	closeToF(t, "vmaf worst spread max", a.VmafMin.Max, vminHi)
+
+	// And every figure states the set it covers, so the number is never published bare.
+	for name, cov := range map[string]Coverage{
+		"outcomes": a.Outcomes.Coverage, "skips": a.SkipsByGuard.Coverage,
+		"size ratio": a.SizeRatio.Coverage, "encode ms": a.EncodeMs.Coverage,
+		"vmaf mean": a.VmafMean.Coverage, "vmaf min": a.VmafMin.Coverage,
+	} {
+		if cov.Set == "" {
+			t.Errorf("%s publishes no coverage set - a figure whose set is unstated reads as covering everything", name)
+		}
+		if cov.Window != "" {
+			t.Errorf("%s claims window %q, but it is computed over its whole matching set", name, cov.Window)
+		}
+	}
+}
+
+// A row that recorded no value for an aggregate is EXCLUDED and COUNTED, never read as
+// a zero. Reading an absent VMAF as 0 would drag a published fidelity figure down with
+// a measurement nobody took; reading an absent size as 0 would invent a 100%-reclaim.
+func TestAggregates_ExcludeRowsWithNoRecordedValueAndCountThem(t *testing.T) {
+	s := openTest(t)
+
+	src, out, ms := int64(1000), int64(400), int64(2000)
+	mean, worst := 96.0, 80.0
+	seedTerminal(t, s, "/lib/measured-a.mkv", Done, &Outcome{
+		SourceBytes: &src, OutputBytes: &out, EncodeMs: &ms, VmafMean: &mean, VmafMin: &worst,
+	})
+	src2, out2, ms2 := int64(2000), int64(1000), int64(4000)
+	mean2, worst2 := 98.0, 90.0
+	seedTerminal(t, s, "/lib/measured-b.mkv", Done, &Outcome{
+		SourceBytes: &src2, OutputBytes: &out2, EncodeMs: &ms2, VmafMean: &mean2, VmafMin: &worst2,
+	})
+	// The shape of every row written before the outcome columns existed: done, and
+	// carrying nothing.
+	seedTerminal(t, s, "/lib/unmeasured.mkv", Done, nil)
+
+	a := s.Aggregates(context.Background())
+
+	for _, tc := range []struct {
+		name string
+		sp   Spread
+		mean float64
+	}{
+		{"size ratio", a.SizeRatio, (0.4 + 0.5) / 2},
+		{"encode ms", a.EncodeMs, 3000},
+		{"vmaf mean", a.VmafMean, 97},
+		{"vmaf min", a.VmafMin, 85},
+	} {
+		if tc.sp.Err != nil {
+			t.Fatalf("%s: %v", tc.name, tc.sp.Err)
+		}
+		if tc.sp.Counted != 2 {
+			t.Errorf("%s counted = %d, want 2 (the rows that recorded a value)", tc.name, tc.sp.Counted)
+		}
+		if tc.sp.Excluded != 1 {
+			t.Errorf("%s excluded = %d, want 1 - an excluded row must be REPORTED, not silently dropped", tc.name, tc.sp.Excluded)
+		}
+		closeToF(t, tc.name+" mean", tc.sp.Mean, tc.mean)
+	}
+
+	// A skipped row that recorded no guard is excluded from the breakdown rather than
+	// filed under a bucket that would look like a guard which exists.
+	seedTerminal(t, s, "/lib/skip-known.mkv", Skipped, &Outcome{Reason: "low-bitrate"})
+	seedTerminal(t, s, "/lib/skip-unknown.mkv", Skipped, nil)
+	b := s.Aggregates(context.Background()).SkipsByGuard
+	if b.Err != nil {
+		t.Fatalf("skips by guard: %v", b.Err)
+	}
+	if b.Counted != 1 || b.Excluded != 1 {
+		t.Errorf("skip breakdown counted/excluded = %d/%d, want 1/1", b.Counted, b.Excluded)
+	}
+	if len(b.Buckets) != 1 || b.Buckets[0].Key != "low-bitrate" {
+		t.Errorf("skip buckets = %+v, want exactly the recorded guard", b.Buckets)
+	}
+}
+
+// When NO row contributed a value, the figure is "no data" - nil, and never a zero or an
+// average of zero. A ledger of unmeasured swaps must not read as a ledger of perfectly
+// measured zeros.
+func TestAggregates_NothingRecordedIsNoDataNotZero(t *testing.T) {
+	s := openTest(t)
+	for i := 0; i < 3; i++ {
+		seedTerminal(t, s, "/lib/old"+strconv.Itoa(i)+".mkv", Done, nil)
+	}
+
+	a := s.Aggregates(context.Background())
+	for name, sp := range map[string]Spread{
+		"size ratio": a.SizeRatio, "encode ms": a.EncodeMs,
+		"vmaf mean": a.VmafMean, "vmaf min": a.VmafMin,
+	} {
+		if sp.Err != nil {
+			t.Fatalf("%s: %v", name, sp.Err)
+		}
+		if sp.Counted != 0 || sp.Excluded != 3 {
+			t.Errorf("%s counted/excluded = %d/%d, want 0/3", name, sp.Counted, sp.Excluded)
+		}
+		if sp.Min != nil || sp.Mean != nil || sp.Max != nil {
+			t.Errorf("%s reported %v/%v/%v with nothing recorded - an unmeasured aggregate must be nil, never 0",
+				name, sp.Min, sp.Mean, sp.Max)
+		}
+	}
+
+	// An empty ledger: no buckets at all, and a zero count that says so.
+	empty := openTest(t).Aggregates(context.Background())
+	if empty.Outcomes.Err != nil || len(empty.Outcomes.Buckets) != 0 || empty.Outcomes.Counted != 0 {
+		t.Errorf("empty ledger outcomes = %+v, want no buckets and a zero count", empty.Outcomes)
+	}
+	if empty.SizeRatio.Mean != nil {
+		t.Errorf("empty ledger size ratio mean = %v, want nil", *empty.SizeRatio.Mean)
+	}
+}
+
+// A skip breakdown is keyed by the GUARD that fired and counted over EVERY skipped row -
+// including the ones past the history view's cap, which is where an operator's intuition
+// about "which guard is holding my library back" actually lives.
+func TestAggregates_SkipBreakdownCoversEverySkippedRow(t *testing.T) {
+	s := openTest(t)
+	guards := map[string]int{
+		"low-bitrate":             120,
+		"already-at-target-codec": 60,
+		"hardlinked":              25,
+		"dolby-vision":            5,
+	}
+	total := 0
+	for g, n := range guards {
+		for i := 0; i < n; i++ {
+			seedTerminal(t, s, "/lib/"+g+strconv.Itoa(i)+".mkv", Skipped, &Outcome{Reason: g})
+			total++
+		}
+	}
+	if total <= testHistoryCap {
+		t.Fatalf("seed of %d skipped rows does not exceed the %d-row history cap", total, testHistoryCap)
+	}
+
+	b := s.Aggregates(context.Background()).SkipsByGuard
+	if b.Err != nil {
+		t.Fatalf("skips by guard: %v", b.Err)
+	}
+	if b.Counted != int64(total) {
+		t.Errorf("skip breakdown counted %d of %d skipped rows", b.Counted, total)
+	}
+	got := bucketsOf(b)
+	for g, want := range guards {
+		if got[g] != int64(want) {
+			t.Errorf("guard %q = %d, want %d", g, got[g], want)
+		}
+	}
+	// Ordered biggest first, so the page's ordering is the store's and does not wobble
+	// between snapshots.
+	for i := 1; i < len(b.Buckets); i++ {
+		if b.Buckets[i-1].Count < b.Buckets[i].Count {
+			t.Errorf("buckets are not ordered by count: %+v", b.Buckets)
+			break
+		}
+	}
+}
+
+// The constraint this phase was given, pinned as a test: the aggregates must not depend
+// on a SQL function whose presence is a property of the BUILD. median() and percentile()
+// need SQLite 3.51.0 compiled with -DSQLITE_ENABLE_PERCENTILE (or a loadable extension
+// before that), so a query naming one resolves on some builds and fails at runtime on
+// others - on a user's image, in the surface whose whole job is to be trustworthy.
+//
+// This test asks the PINNED build directly whether median() resolves and then asserts
+// the aggregates are fully computed either way. Whichever answer the build gives, the
+// figures must not depend on it.
+func TestAggregates_DoNotDependOnAVersionGatedSQLFunction(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	var v sql.NullFloat64
+	err := s.db.QueryRowContext(ctx, `SELECT median(x) FROM (SELECT 1 AS x UNION ALL SELECT 2)`).Scan(&v)
+	if err != nil {
+		t.Logf("this build has no median(): %v - which is exactly why the aggregates use MIN/AVG/MAX", err)
+	} else {
+		t.Logf("this build resolves median() (= %v), but the aggregates still must not require it", v.Float64)
+	}
+
+	src, out, ms := int64(1000), int64(500), int64(9000)
+	mean, worst := 95.5, 77.25
+	seedTerminal(t, s, "/lib/one.mkv", Done, &Outcome{
+		SourceBytes: &src, OutputBytes: &out, EncodeMs: &ms, VmafMean: &mean, VmafMin: &worst,
+	})
+
+	a := s.Aggregates(ctx)
+	for name, e := range map[string]error{
+		"outcomes": a.Outcomes.Err, "skips": a.SkipsByGuard.Err, "size ratio": a.SizeRatio.Err,
+		"encode ms": a.EncodeMs.Err, "vmaf mean": a.VmafMean.Err, "vmaf min": a.VmafMin.Err,
+	} {
+		if e != nil {
+			t.Errorf("%s failed against the pinned SQLite build: %v", name, e)
+		}
+	}
+	closeToF(t, "size ratio mean", a.SizeRatio.Mean, 0.5)
+	closeToF(t, "encode ms mean", a.EncodeMs.Mean, 9000)
+	closeToF(t, "vmaf mean", a.VmafMean.Mean, 95.5)
+	closeToF(t, "vmaf worst", a.VmafMin.Mean, 77.25)
+}
+
+// A read failure is reported PER FIGURE, not as one error for the report. Aggregates
+// returns no error at all, by design: a single error return is what would let one
+// unreadable figure travel up the snapshot path and blank the live page. A failed
+// figure must also carry NO value - an unreadable aggregate that reported 0 rows and a
+// 0 mean would be indistinguishable from a real, empty ledger.
+func TestAggregates_ReportFailurePerFigureAndNeverAsAZero(t *testing.T) {
+	s := openTest(t)
+	if err := s.Close(); err != nil { // every query below now fails
+		t.Fatalf("Close: %v", err)
+	}
+
+	a := s.Aggregates(context.Background())
+	for name, b := range map[string]Breakdown{"outcomes": a.Outcomes, "skips": a.SkipsByGuard} {
+		if b.Err == nil {
+			t.Errorf("%s reported no error against a closed database", name)
+		}
+		if b.Counted != 0 || len(b.Buckets) != 0 {
+			t.Errorf("%s reported data (%d/%+v) it could not read", name, b.Counted, b.Buckets)
+		}
+		if b.Coverage.Set == "" {
+			t.Errorf("%s lost its coverage statement on failure", name)
+		}
+	}
+	for name, sp := range map[string]Spread{
+		"size ratio": a.SizeRatio, "encode ms": a.EncodeMs,
+		"vmaf mean": a.VmafMean, "vmaf min": a.VmafMin,
+	} {
+		if sp.Err == nil {
+			t.Errorf("%s reported no error against a closed database", name)
+		}
+		if sp.Min != nil || sp.Mean != nil || sp.Max != nil || sp.Counted != 0 {
+			t.Errorf("%s published a figure it could not read: %+v", name, sp)
+		}
 	}
 }

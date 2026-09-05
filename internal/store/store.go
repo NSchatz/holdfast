@@ -119,6 +119,102 @@ type Job struct {
 	Outcome Outcome
 }
 
+// Coverage states the SET a published figure was computed over. It travels WITH the
+// figure, never beside it in a comment, because a number whose set is unstated is a
+// number an operator will read as covering everything they own - and the queue and
+// history views deliberately ship only the most recent rows, so "everything" is exactly
+// what the page has never been able to promise before.
+//
+// Set names the matching rows (e.g. "every done row in the ledger"). Window is "" for a
+// figure over that whole set, and otherwise names the BOUND that narrows it (e.g. "the
+// most recent 200 rows"). Every aggregate here is currently whole-set, and the field
+// exists so that a future bounded figure cannot ship without saying what it is bounded
+// by - the descriptor is produced by the same function that runs the query, so the two
+// cannot drift.
+type Coverage struct {
+	Set    string
+	Window string
+}
+
+// Bucket is one keyed count in a Breakdown (a status, or a skip guard's token).
+type Bucket struct {
+	Key   string
+	Count int64
+}
+
+// Breakdown is a keyed count over every matching row in the table.
+//
+// Counted is the number of rows that contributed a key; Excluded is the number of
+// matching rows that recorded NO key and were therefore left out rather than folded
+// into some "other" bucket that would read as a real category. Counted == 0 means NO
+// ROW CONTRIBUTED - which a reader must render as "no data", never as an empty
+// breakdown that looks like a set of zero counts.
+//
+// Err is this aggregate's OWN failure. It is per-aggregate on purpose: the snapshot's
+// summary, queue and history must still ship when one figure cannot be read, so a
+// failure is carried here and rendered as "unavailable" rather than returned up a
+// path that would suppress the whole frame.
+type Breakdown struct {
+	Coverage Coverage
+	Buckets  []Bucket
+	Counted  int64
+	Excluded int64
+	Err      error
+}
+
+// Spread is the shape of one numeric aggregate over every matching row: how many rows
+// contributed a recorded value, how many were excluded for want of one, and the low /
+// mean / high of what was actually recorded.
+//
+// Min, Mean and Max are POINTERS for the same reason store.Outcome's fields are: 0 is a
+// legal value for every one of them, so a plain zero cannot mean "nothing was
+// measured". They are nil exactly when Counted == 0, and a reader must render that as
+// "no data" - never as 0, and never as an average of 0.
+//
+// Deliberately min/mean/max and NOT a median or a percentile: those are version- and
+// compile-flag-gated in SQLite (median() and percentile() need 3.51.0 built with
+// SQLITE_ENABLE_PERCENTILE, or a loadable extension before that), and a query that
+// resolves on the developer's build and not on the shipped image is a runtime failure
+// on somebody else's machine. Everything here uses COUNT/MIN/AVG/MAX, which every
+// SQLite build has.
+//
+// Err carries this aggregate's own failure; see Breakdown.
+type Spread struct {
+	Coverage Coverage
+	Counted  int64
+	Excluded int64
+	Min      *float64
+	Mean     *float64
+	Max      *float64
+	Err      error
+}
+
+// Aggregates is the whole-ledger report the dashboard publishes: the figures the
+// queue and history views cannot give, because those ship at most a few hundred rows
+// while a library holds hundreds of thousands.
+//
+// Every field is computed INDEPENDENTLY and carries its own Err, which is why this
+// method returns no error of its own: there is no failure that belongs to the set, and
+// a single error return would be an invitation to let one unreadable figure blank the
+// live page.
+type Aggregates struct {
+	// Outcomes is the count of terminal rows per status, over the whole table.
+	Outcomes Breakdown
+	// SkipsByGuard breaks every skipped row down by the guard token that skipped it,
+	// so an operator never has to read the logs to learn WHICH guard fired.
+	SkipsByGuard Breakdown
+	// SizeRatio is the spread of output size / source size over done rows (0.35 = the
+	// replacement is 35% of the original).
+	SizeRatio Spread
+	// EncodeMs is the spread of wall-clock encode duration, in milliseconds.
+	EncodeMs Spread
+	// VmafMean and VmafMin are the spreads of the two pooled VMAF statistics each done
+	// row recorded. A row that recorded neither (VMAF disabled) is excluded and
+	// counted, never read as a zero - a VMAF of 0 is a destroyed frame.
+	VmafMean Spread
+	VmafMin  Spread
+}
+
 // Store is the persistent job ledger. Every method is safe for concurrent use by
 // multiple workers (goroutines) within one process.
 type Store interface {
@@ -179,6 +275,15 @@ type Store interface {
 	// every restart. Rows written before the outcome columns existed carry no sizes
 	// and are simply not counted (never counted as 0-reclaimed). A pure read.
 	ReclaimedTotal(ctx context.Context) (int64, error)
+
+	// Aggregates computes the published whole-ledger figures - each over EVERY
+	// matching row in the table, never over the capped rows List ships. It is a pure
+	// read.
+	//
+	// It returns no error: every figure is computed independently and reports its own
+	// failure in its Err, so one unreadable aggregate can be rendered as unavailable
+	// while the rest of the report - and the snapshot carrying it - still ships.
+	Aggregates(ctx context.Context) Aggregates
 
 	// RecordSkip persists a Skipped row carrying reason for a guard that fires BEFORE
 	// Claim — today only the hardlink guard, whose decision must stay unclaimed (it

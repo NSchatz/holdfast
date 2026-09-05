@@ -99,12 +99,19 @@ func (s *Server) routes() http.Handler {
 // the durable lifetime reclaimed total (TRANSCODE-14 — the figure that survives a
 // restart) and the per-process session figure, mirroring the SSE snapshot so a client
 // polling /api/summary sees the same two numbers the live stream pushes.
+//
+// It also carries the whole-ledger aggregates (DASH-7) under the same key and the same
+// shape the SSE snapshot uses, so the figures are not reachable only over a live stream:
+// a client that polls sees exactly what a client that subscribes sees. Like every other
+// field here they are aggregates, so this adds no per-file datum to a read surface that
+// needs no authorization.
 type controlState struct {
 	Summary                map[string]int `json:"summary"`
 	BytesReclaimedSession  int64          `json:"bytes_reclaimed_session"`
 	BytesReclaimedLifetime int64          `json:"bytes_reclaimed_lifetime"`
 	Paused                 bool           `json:"paused"`
 	Scanning               bool           `json:"scanning"`
+	Aggregates             aggregatesDTO  `json:"aggregates"`
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
@@ -123,6 +130,7 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		BytesReclaimedLifetime: s.hub.ReclaimedLifetime(),
 		Paused:                 s.ctrl.Paused(),
 		Scanning:               s.ctrl.Scanning(),
+		Aggregates:             s.hub.aggregates(r.Context()),
 	})
 }
 

@@ -85,6 +85,28 @@ ALTER TABLE jobs ADD COLUMN output_bytes INTEGER;
 ALTER TABLE jobs ADD COLUMN encode_ms    INTEGER;
 `,
 	},
+	{
+		// v3 - DASH-7: the indexes the whole-ledger aggregates read through.
+		//
+		// The published figures are computed over EVERY matching row rather than over
+		// the few hundred the queue/history views ship, and they are recomputed on the
+		// snapshot path - which shares one serialized connection with the engine's
+		// writes. An aggregate that costs a full table scan of a 300,000-row ledger on
+		// every snapshot would therefore be paid for in encode throughput, and "the
+		// dashboard slowed the transcoder down" is not a trade this tool gets to make.
+		//
+		// idx_jobs_status_reason serves the skip breakdown (GROUP BY reason within the
+		// skipped rows) and the terminal counts. idx_jobs_outcome carries the four
+		// numeric columns the done-row spreads read, so each of those is an index-only
+		// scan of the done partition instead of a walk over the whole table. Both cost
+		// a little write amplification per job transition - a few microseconds against
+		// an encode measured in minutes.
+		name: "aggregate indexes",
+		sql: `
+CREATE INDEX IF NOT EXISTS idx_jobs_status_reason ON jobs(status, reason);
+CREATE INDEX IF NOT EXISTS idx_jobs_outcome ON jobs(status, source_bytes, output_bytes, encode_ms, vmaf_mean, vmaf_min);
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

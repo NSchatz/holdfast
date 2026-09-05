@@ -64,6 +64,21 @@
      tint and rule are decorative. */
   .note.cap { color:var(--fg); background:rgba(210,153,34,.12); border-left:3px solid var(--warn);
     padding:6px 10px; border-radius:4px; }
+  /* Whole-ledger figures. Each card carries its number, the set that number is over,
+     and the rows it had to leave out; ".out" is the unavailable state, which colours the
+     card without removing it (an aggregate that vanished on failure would leave the page
+     looking complete). */
+  .aggs { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:10px; }
+  .agg { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 14px; }
+  .agg h3 { margin:0 0 6px; font-size:12px; color:var(--muted); text-transform:uppercase;
+    letter-spacing:.5px; font-weight:600; }
+  .agg .agg-v { font-size:14px; }
+  .agg .agg-v b { font-size:20px; font-weight:700; }
+  .agg .range { display:block; color:var(--muted); font-size:12px; margin-top:2px; }
+  .agg .bucket { display:flex; justify-content:space-between; gap:12px; font-size:13px; }
+  .agg .bucket .c { font-weight:600; }
+  .agg .agg-cov, .agg .agg-ex { margin:6px 0 0; font-size:11px; color:var(--muted); }
+  .agg.out .agg-v { color:var(--warn); }
   .tablewrap { overflow-x:auto; }
   table { width:100%; border-collapse:collapse; }
   th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);
@@ -134,6 +149,16 @@
   </div>
 
   <section>
+    <h2>Across the whole ledger</h2>
+    <p class="note">Every figure here is computed by the server over <em>every</em> matching row in the
+      ledger, not over the capped rows the tables below ship, and each states the set it covers. A row
+      that recorded no value is excluded and counted, never read as a zero: a fact nobody measured is
+      reported as missing, not as 0. VMAF figures pool per-file scores, each measured against that
+      file's own source under one viewing condition, luma-only; they are not compared between files.</p>
+    <div class="aggs" id="aggregates"></div>
+  </section>
+
+  <section>
     <h2>Queue &amp; active</h2>
     <p class="note cap" id="queue-cap" hidden></p>
     <div class="tablewrap">
@@ -176,6 +201,14 @@
     <td class="st"><span class="dot"></span><span class="stlabel"></span></td>
     <td class="worker"></td>
   </tr>
+</template>
+<template id="tpl-agg">
+  <div class="agg">
+    <h3 class="agg-k"></h3>
+    <div class="agg-v"></div>
+    <p class="agg-cov"></p>
+    <p class="agg-ex"></p>
+  </div>
 </template>
 <template id="tpl-hist-row">
   <tr>
@@ -339,6 +372,102 @@ function emptyRow(cols, text) {
 
 function sumStatuses(sum, keys) { return keys.reduce((a, s) => a + (sum[s] || 0), 0); }
 
+// --- whole-ledger aggregates -------------------------------------------------
+//
+// The queue and history tables are capped by the API, so anything derived from them in
+// the browser would be a statistic about the last few hundred files wearing the clothes
+// of a statistic about the library. These figures are computed server-side over every
+// matching row, and each arrives with the set it covers, the rows excluded for want of a
+// recorded value, and whether it could be read at all.
+
+// One card's value renderer per published figure. Each returns DOM nodes; none of them
+// invents a number, and each is only ever called when the figure reports data.
+function pct(x) { return Math.round(x * 100) + "%"; }
+function fmtScore(x) { return Number(x).toFixed(1); }
+
+function spreadNodes(a, fmt, lead) {
+  const out = [mk("b", null, fmt(a.mean))];
+  if (lead) out.push(document.createTextNode(" " + lead));
+  out.push(mk("span", "range", "range " + fmt(a.min) + " to " + fmt(a.max) + " across " +
+    Number(a.counted).toLocaleString() + " files"));
+  return out;
+}
+function bucketNodes(a, label) {
+  return a.buckets.map((b) => {
+    const row = mk("div", "bucket");
+    row.appendChild(mk("span", null, label(b.key)));
+    row.appendChild(mk("span", "c", Number(b.count).toLocaleString()));
+    return row;
+  });
+}
+
+const AGGREGATES = [
+  ["outcomes", "Outcomes", (a) => bucketNodes(a, (k) => k)],
+  ["skips_by_guard", "Skips by guard", (a) => bucketNodes(a, (k) => GUARD_LABELS[k] || k)],
+  ["size_ratio", "Replacement size", (a) => spreadNodes(a, pct, "of the original, mean")],
+  ["encode_ms", "Encode time", (a) => spreadNodes(a, fmtDur, "mean")],
+  ["vmaf_mean", "VMAF pooled mean", (a) => spreadNodes(a, fmtScore, "mean of per-file means")],
+  ["vmaf_min", "VMAF worst frame", (a) => spreadNodes(a, fmtScore, "mean of per-file worst frames")],
+];
+
+// aggCard renders ONE figure. An unavailable figure is drawn as unavailable - the card
+// stays on the page, saying it could not be read, because a card that disappeared would
+// leave the page looking complete while a number was missing from it.
+function aggCard(a, title, nodes) {
+  const el = $("tpl-agg").content.cloneNode(true).firstElementChild;
+  el.querySelector(".agg-k").textContent = title;
+  const v = el.querySelector(".agg-v");
+  const cov = el.querySelector(".agg-cov");
+  const ex = el.querySelector(".agg-ex");
+
+  if (!a || a.available !== true) {
+    el.classList.add("out");
+    v.appendChild(mk("span", "nr", "unavailable"));
+    ex.textContent = (a && a.unavailable) ? a.unavailable : "this figure could not be read from the ledger";
+    if (a && a.covers) cov.textContent = "over " + a.covers;
+    return el;
+  }
+
+  const counted = Number(a.counted) || 0;
+  if (counted === 0) {
+    // No row contributed a value. Say so - never 0, never an average of 0, and never an
+    // empty list that reads as a set of zero counts.
+    v.appendChild(nrNode());
+  } else {
+    for (const n of nodes(a)) v.appendChild(n);
+  }
+  // The set the figure is over, always stated; plus the bound, when it is not over all
+  // of that set.
+  cov.textContent = "over " + (a.covers || "an unstated set") +
+    (a.window ? " · window: " + a.window : "");
+  const excluded = Number(a.excluded) || 0;
+  if (excluded > 0) {
+    ex.textContent = excluded.toLocaleString() + " row" + (excluded === 1 ? "" : "s") +
+      " excluded: no recorded value";
+  }
+  return el;
+}
+
+// renderAggregates draws every card, each one INDEPENDENTLY: a figure that throws while
+// rendering becomes an unavailable card and takes nothing else with it. It is also the
+// last thing render() does, so the badges, chips, queue and history are already on the
+// page before any of this runs.
+function renderAggregates(aggs) {
+  const host = $("aggregates");
+  if (!host) return;
+  host.replaceChildren();
+  const src = aggs || {};
+  for (const [key, title, nodes] of AGGREGATES) {
+    let card;
+    try {
+      card = aggCard(src[key], title, nodes);
+    } catch (_) {
+      card = aggCard(null, title, nodes);
+    }
+    host.appendChild(card);
+  }
+}
+
 // Surface the API's silent row caps: it ships at most a fixed number of queue / history
 // rows, so a truncated view could read as the whole ledger. When the store holds more
 // than we were handed, say so.
@@ -424,6 +553,10 @@ function render(snap) {
 
   announce(sum);
   applyFilter();
+
+  // Last, and guarded: the tables above are already drawn, so nothing that happens
+  // inside the aggregate cards can cost the operator the rest of the page.
+  try { renderAggregates(snap.aggregates); } catch (_) {}
 }
 
 $("filter").addEventListener("input", applyFilter);
