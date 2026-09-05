@@ -1,0 +1,43 @@
+name: pin health
+
+# Watch the ffmpeg pin, on a schedule, on no pull request.
+#
+# S0022: the pin was a mid-month daily build, upstream keeps only the last 14 dailies,
+# and it 404ed about a fortnight after it was chosen. Nothing was watching it, so the
+# expiry was discovered as collateral damage - a red `install ffmpeg` step on unrelated
+# pull requests, in three different specs, for days, with no message that said the pin
+# had expired. This job exists so the NEXT expiry reports itself: named, dated, in a run
+# whose entire subject is the pin.
+#
+# It is deliberately NOT part of the PR gate. `make check` must not go red because a
+# third party had a bad afternoon; what can be asserted locally (the tag is a dated
+# month-end release, the digests are real digests, NOTICE agrees) is asserted there, by
+# scripts/check-pins.sh. Reachability is a question only the network can answer, so it
+# is asked here, alone, where the answer is about the pin and nothing else.
+
+on:
+  schedule:
+    # 06:17 UTC every Monday. Off the hour on purpose: the top of the hour is when
+    # GitHub's scheduled-run queue is deepest and a cron there is the one that silently
+    # does not run.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pin-health
+  cancel-in-progress: false
+
+jobs:
+  ffmpeg-pin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Through the Makefile, like every other gate in this repository, so the scheduled
+      # run and a human typing `make check-pin-live` are the identical check rather than
+      # two things that agree until one of them is edited.
+      - name: is the pinned ffmpeg still served?
+        run: make check-pin-live

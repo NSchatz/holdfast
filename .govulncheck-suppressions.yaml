@@ -1,0 +1,33 @@
+# Advisories govulncheck reports that CANNOT be remediated, one entry each.
+#
+# This file is the only thing in the repo that can stop a reported advisory failing
+# `make check`. It is not an ignore list: an entry is a record of a decision, and the gate
+# (scripts/govulncheck.sh -> scripts/govulncheck-gate) refuses to honour one that does not
+# read like one.
+#
+# An entry is legitimate only when there is NOWHERE FOR THE FIX TO COME FROM - no fixed
+# module release, and no Go patch that clears it. If govulncheck names a fixed version,
+# take it: bump the module, or raise the Go toolchain (which is pinned in the Dockerfile's
+# GO_IMAGE, ci.yml and release.yml, held equal by scripts/check-pins.sh). Recording a
+# fixable advisory is refused, because that is how a suppression file rots into a
+# permanent exemption list: remediation deferred, then forgotten, and indistinguishable
+# afterwards from a considered decision.
+#
+# The shape is a sequence of mappings with EXACTLY these four keys:
+#
+#   - id:           the OSV identifier as govulncheck prints it (GO-YYYY-NNNN)
+#     reason:       why no remediation exists TODAY - name the module or stdlib package
+#                   and what is absent (no fixed release; the fix is in a major version
+#                   this repo cannot take; and so on)
+#     reachability: the symbol and call path govulncheck reports, and the argument for why
+#                   it cannot be exercised here
+#     recorded:     the ISO date (YYYY-MM-DD) the entry was written
+#
+# A missing key, an unknown key, an id that is not an OSV identifier, a repeated id, or a
+# `recorded` that is not a real date fails the gate naming the entry - never skipped,
+# never honoured. And an entry is honoured only while govulncheck still reports its id: a
+# record that outlives its advisory is STALE and fails the gate, so this file cannot
+# quietly accumulate exemptions for things that stopped being true.
+#
+# Empty is the correct state. Everything reported today has a fix and the fix is taken.
+[]

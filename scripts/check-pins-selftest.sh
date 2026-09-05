@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# Prove the rename guard in check-pins.sh still BITES. Part of `make check`.
+# Prove the guards in check-pins.sh still BITE: the rename guard and the pin assertions.
+# Part of `make check`.
+#
+# Three families of case live here. Cases 0-6 defeat the RENAME guard; cases 7-17 (S0022)
+# defeat the FFMPEG PIN guard - the floating alias, the short-retention daily build, a
+# blanked digest, and a NOTICE that has drifted from the Dockerfile it is supposed to be
+# the source offer for; case 18 (S0024) defeats the GO TOOLCHAIN pin's digest half.
 #
 # It exists because that guard degraded to a silent GREEN — printing "ok" over a real leak —
 # several times while it was being written, and every one of those was invisible in a green
@@ -34,7 +40,7 @@ OLD_ENV="TRANSCODE""_SERVER_AUTH_TOKEN"
 OLD_CRF="TRANSCODE""_CRF"
 OLD_METRIC="transcode""_files_total"
 
-declared=7
+declared=19
 pass=0; failed=0
 repo="$work/repo"
 
@@ -56,18 +62,37 @@ git -C "$repo" commit -qm "selftest: grade the working tree, not HEAD" --allow-e
 cmp -s "$here/scripts/check-pins.sh" "$repo/scripts/check-pins.sh" \
   || { echo "::error::selftest: the clone's guard is not the working-tree guard — it graded the wrong thing" >&2; exit 1; }
 
-guard() { ( cd "$repo" && bash scripts/check-pins.sh >/dev/null 2>&1 ); }
+# The output is CAPTURED, not discarded. check-pins.sh now makes several independent
+# assertions, and once a script has more than one reason to fail, "it exited 1" stops
+# being evidence that the assertion under test is the one that bit. A case that names a
+# message is graded on the message too, so a case cannot go green off somebody else's
+# failure - which is the selftest version of the silent-green bug this file exists for.
+guard_out=""
+guard() { guard_out="$( cd "$repo" && bash scripts/check-pins.sh 2>&1 )"; }
 
-# expect <want-exit> <name>.  0 = must pass, 1 = must bite.
+# expect <want-exit> <name> [must-mention-regex].  0 = must pass, 1 = must bite.
 expect() {
-  local want="$1" name="$2" got=0
+  local want="$1" name="$2" want_msg="${3:-}" got=0
   guard || got=$?
-  if [ "$got" -eq "$want" ]; then
-    printf '  ok: %s\n' "$name"; pass=$((pass + 1))
-  else
+  if [ "$got" -ne "$want" ]; then
     printf '::error::selftest: %s — guard exited %s, wanted %s\n' "$name" "$got" "$want" >&2
+    printf '%s\n' "$guard_out" | sed 's/^/       | /' >&2
     failed=$((failed + 1))
+  elif [ -n "$want_msg" ] && ! grep -qE -- "$want_msg" <<<"$guard_out"; then
+    printf '::error::selftest: %s: exited %s (correct) but for the WRONG REASON, nothing in its output matched /%s/\n' "$name" "$got" "$want_msg" >&2
+    printf '%s\n' "$guard_out" | sed 's/^/       | /' >&2
+    failed=$((failed + 1))
+  else
+    printf '  ok: %s\n' "$name"; pass=$((pass + 1))
   fi
+}
+
+# Move the ffmpeg pin in the CLONE. NOTICE is moved with it deliberately: the two must
+# agree, and a case about the tag's SHAPE that also broke that agreement would be graded
+# on whichever assertion happened to fire first.
+set_build() {
+  sed -i -e "s|^ARG FFMPEG_BUILD=.*|ARG FFMPEG_BUILD=$1|" "$repo/Dockerfile"
+  sed -i -E "s|^( *Build tag *: *).*|\1$1|" "$repo/NOTICE"
 }
 
 reset() { git -C "$repo" reset -q --hard HEAD; git -C "$repo" clean -qfdx; }
@@ -127,6 +152,95 @@ else
   failed=$((failed + 1))
 fi
 
+# =====================================================================================
+# The ffmpeg-pin assertions (S0022). Everything above proves the RENAME guard bites;
+# these prove the PIN guard does. The pin that broke was autobuild-2026-07-13-14-11, a
+# mid-month daily, and upstream keeps only the last 14 dailies - so it 404ed on schedule
+# and took every job that installs ffmpeg down with it, on unrelated pull requests, in
+# three different specs. check-pins.sh now refuses that pin at the only moment somebody
+# is looking. A refusal nobody has tried to provoke is a refusal nobody knows still works.
+# =====================================================================================
+
+# --- 7. The floating alias. It never 404s, which is precisely the problem: it would
+#        change the encoder AND the libvmaf instrument the no-loss verdict is measured
+#        with, under a permanently green build.
+set_build "latest"
+expect 1 "a floating 'latest' pin is refused" "not a dated upstream release tag"
+reset
+
+# --- 8. The other shape of the same mistake.
+set_build "autobuild-latest"
+expect 1 "an 'autobuild-latest' pin is refused as undated" "not a dated upstream release tag"
+reset
+
+# --- 9. The actual dead pin from the incident. The message must name the POLICY, not
+#        just say no: the next person needs to know what to pin instead, and why.
+set_build "autobuild-2026-07-13-14-11"
+expect 1 "the mid-month daily build that caused S0022 is refused" "MID-MONTH DAILY build"
+reset
+
+# --- 10. A date that does not exist is not a release tag either.
+set_build "autobuild-2026-02-30-13-00"
+expect 1 "an impossible calendar date is refused" "impossible date"
+reset
+
+# --- 11 and 12. The month-end test is real calendar arithmetic, not a string match on
+#        -30/-31. February in a leap year is the case that separates the two, and it has
+#        to work in BOTH directions or the guard is either useless or unusable.
+set_build "autobuild-2024-02-29-13-00"
+expect 0 "a leap-year 29 February pin PASSES (it is that month's last day)"
+reset
+
+set_build "autobuild-2024-02-28-13-00"
+expect 1 "28 February in a LEAP year is refused (it is not that month's last day)" "MID-MONTH DAILY build"
+reset
+
+# --- 13 and 14. The digest is the half of the pin that says which BYTES, and blanking it
+#        is the cheapest way to make a rotted pin appear to work.
+sed -i -e "s|^ARG FFMPEG_SHA256_AMD64=.*|ARG FFMPEG_SHA256_AMD64=|" "$repo/Dockerfile"
+expect 1 "a blanked FFMPEG_SHA256_AMD64 is refused" "not a 64-character lowercase sha256 digest"
+reset
+
+sed -i -e "s|^ARG FFMPEG_SHA256_ARM64=.*|ARG FFMPEG_SHA256_ARM64=deadbeef|" "$repo/Dockerfile"
+expect 1 "a truncated FFMPEG_SHA256_ARM64 is refused" "not a 64-character lowercase sha256 digest"
+reset
+
+# --- 15 and 16. NOTICE is the GPL source offer and travels INSIDE the image, where no
+#        Dockerfile is available to point at. If it drifts, the image redistributes GPL
+#        binaries whose corresponding-source record names a different build. The guard for
+#        that has existed since TRANSCODE-9 and had never been provoked.
+sed -i -E "s|^( *Build tag *: *).*|\1autobuild-2026-06-30-13-34|" "$repo/NOTICE"
+expect 1 "a NOTICE naming a different build tag is refused" "NOTICE does not match the Dockerfile"
+reset
+
+sed -i -E "s|^( *Version *: *).*|\1N-999999-gdeadbeef99|" "$repo/NOTICE"
+expect 1 "a NOTICE naming a different version is refused" "NOTICE does not match the Dockerfile"
+reset
+
+# --- 17. The restatement nobody was checking. NOTICE used to name the git revision a
+#        THIRD time in its corresponding-source paragraph, on a line no assertion matched,
+#        so the two checked lines could be bumped correctly while the source offer went on
+#        naming a build the image no longer contains.
+printf '\n  (previously built from revision g90436de5e1.)\n' >>"$repo/NOTICE"
+expect 1 "a stray ffmpeg build identifier elsewhere in NOTICE is refused" "identifier that is NOT the pinned one"
+reset
+
+# =====================================================================================
+# The Go-toolchain pin assertion (S0024). Same failure shape as the ffmpeg block above,
+# on the other pin: the half of a pin that names the BYTES rather than the URL.
+# =====================================================================================
+
+# --- 18. GO_IMAGE with its digest dropped. Section 3 compares only the TAG, so the three
+#         files still agree and it prints "ok" while the toolchain floats to whatever the
+#         registry serves that day. The Dockerfile's in-image `go env GOVERSION` assertion
+#         cannot catch this one either (a floating tag agrees with itself), so the "is a
+#         digest pinned at all" half has to hold here.
+sed -i 's/^\(ARG GO_IMAGE=[^@]*\)@sha256:[0-9a-f]*$/\1/' "$repo/Dockerfile"
+grep -qE '^ARG GO_IMAGE=golang:[^@]+$' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not strip the GO_IMAGE digest, so this case did NOT run" >&2; exit 1; }
+expect 1 "a GO_IMAGE whose digest was dropped is caught (the tag alone still agrees)" "GO_IMAGE is not pinned to a well-formed"
+reset
+
 echo
 # Report against the number of cases DECLARED, not the number that ran: "$pass/$pass" is N/N
 # by construction and could never show a shortfall.
@@ -136,7 +250,7 @@ if [ "$total" -ne "$declared" ]; then
   exit 1
 fi
 if [ "$failed" -ne 0 ]; then
-  echo "::error::check-pins selftest: $failed of $declared case(s) did not bite — the rename guard is not trustworthy" >&2
+  echo "::error::check-pins selftest: $failed of $declared case(s) did not bite - check-pins.sh is not trustworthy" >&2
   exit 1
 fi
 echo "check-pins selftest: $pass/$declared cases bite"

@@ -3,7 +3,7 @@ module github.com/NSchatz/holdfast
 go 1.25.0
 
 require (
-	github.com/go-chi/chi/v5 v5.2.5
+	github.com/go-chi/chi/v5 v5.3.0
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/knadh/koanf/parsers/yaml v1.1.0
 	github.com/knadh/koanf/providers/confmap v1.0.0
@@ -12,6 +12,7 @@ require (
 	github.com/knadh/koanf/v2 v2.3.5
 	github.com/nicholas-fedor/shoutrrr v0.16.1
 	github.com/prometheus/client_golang v1.23.2
+	go.yaml.in/yaml/v3 v3.0.4
 	modernc.org/sqlite v1.53.0
 )
 
@@ -36,8 +37,7 @@ require (
 	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/term v0.44.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect

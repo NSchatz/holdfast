@@ -15,7 +15,7 @@
 # cross-compiled (CGO_ENABLED=0 — pure-Go SQLite, no cgo), so the arm64 image needs no
 # QEMU: its runtime stage only COPYs.
 
-ARG GO_IMAGE=golang:1.25.12-bookworm@sha256:a9c020ee3d1508c7be5435c262434e3d3fc1d0e76a11afeb9ddae7d60bc86aa4
+ARG GO_IMAGE=golang:1.25.14-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437
 ARG FETCH_IMAGE=debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
 # distroless CC, not BASE. ffmpeg/ffprobe carry a DT_NEEDED on libgcc_s.so.1, and the
 # `base` variant ships glibc WITHOUT libgcc — so `base` builds perfectly and then dies
@@ -44,10 +44,18 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
  && rm -rf /var/lib/apt/lists/*
 ARG TARGETARCH
-ARG FFMPEG_BUILD=autobuild-2026-07-13-14-11
-ARG FFMPEG_VERSION=N-125573-g90436de5e1
-ARG FFMPEG_SHA256_AMD64=d7c3084807d14c868eface59617107ec29a8ae729413d7c133d1bcf6ffe39f01
-ARG FFMPEG_SHA256_ARM64=cca15acd6d7f2ecbd3f0508e7f25777ec2fdc4895cffebf8d919540c76e648b2
+# The tag MUST be a month-end build (the last calendar day of its month). Upstream's
+# published retention policy is: the last build of each month is kept for TWO YEARS, the
+# last 14 DAILY builds are kept, and "latest" floats. A mid-month daily is therefore a
+# pin with a two-week fuse, which is exactly how the previous pin
+# (autobuild-2026-07-13-14-11) turned into a 404 and took every job that installs ffmpeg
+# down with it. scripts/check-pins.sh REFUSES a floating alias and refuses any tag that
+# is not month-end, so this cannot regress by accident, and `make check-pin-live` asks
+# upstream whether the pin is still served so the NEXT expiry reports itself.
+ARG FFMPEG_BUILD=autobuild-2026-07-31-14-10
+ARG FFMPEG_VERSION=N-125875-g5d4d3bdc61
+ARG FFMPEG_SHA256_AMD64=16161335f2323ec74c5cec70427d3365ee9e0f581486eda35f6eba47375c45b4
+ARG FFMPEG_SHA256_ARM64=a38f9976ff6377ed0a1117ed726c580da968cc8a0e9dc1328297cc60673e6f92
 RUN set -eu; \
     case "${TARGETARCH}" in \
       amd64) slug=linux64;    sha="${FFMPEG_SHA256_AMD64}" ;; \
@@ -67,6 +75,25 @@ RUN set -eu; \
 
 # --- build the binary --------------------------------------------------------
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS build
+
+# The DIGEST is what Docker pulls; the tag beside it is a label the registry does not
+# enforce. scripts/check-pins.sh holds the Go version together across this file, ci.yml
+# and release.yml, but it can only compare the TAG it parses out of GO_IMAGE, because
+# nothing outside the image can see which toolchain a digest actually contains. So bump
+# the tag, leave the stale digest, and every file agrees, check-pins prints "ok", and the
+# shipped binary is built by the superseded Go. That is the same silent detachment the
+# ffmpeg pin is guarded against, in the one place the script cannot reach, so ask the
+# image what it is, from inside it, where the answer is authoritative.
+ARG GO_IMAGE
+RUN set -eu; \
+    want="${GO_IMAGE#*:}"; want="${want%%@*}"; want="${want%%-*}"; \
+    got="$(go env GOVERSION)"; \
+    if [ "$got" != "go${want}" ]; then \
+      echo "GO_IMAGE tag names go${want} but its pinned digest ships ${got}: the digest was left at a superseded toolchain" >&2; \
+      exit 1; \
+    fi; \
+    echo "go toolchain in the image matches the GO_IMAGE tag (${got})"
+
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

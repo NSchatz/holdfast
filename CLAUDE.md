@@ -255,6 +255,37 @@ what makes a durable lifetime total *derivable* — but summing it on every SSE 
 unbounded scan over the single serialized connection the engine writes through, on a table whose
 retention/pruning this phase explicitly defers. That sum belongs with the dashboard that shows it.
 
+`S0022` **made the ffmpeg pin fail out loud instead of failing somewhere else.** The pin was
+`autobuild-2026-07-13-14-11`, a **mid-month daily** build, and BtbN/FFmpeg-Builds keeps only the **last 14
+dailies** (the last build of each **month** is kept **two years**; `latest` floats). So it 404ed on schedule,
+about a fortnight after it was chosen, and the only symptom anyone saw was a red `install ffmpeg` step on
+**unrelated** pull requests, in three different specs, for days, with nothing in the output to separate a
+deleted release from a bad afternoon on the network. The repin is to a month-end build; the rest of the
+change is so that this class of failure reports itself.
+
+`scripts/install-ffmpeg.sh` now has **five named failure modes with distinct exit codes** (3 destination, 4
+expired pin, 5 unreachable upstream, 6 digest mismatch, 7 unusable archive, 8 missing capability), each
+naming the pinned tag and the URL, and each leaving **no ffmpeg behind**. The destination is settled
+**before** anything is fetched; a 404/410 is **not retried** (it will not become a 200) while a 5xx or a
+connection failure is, three times; and the archive is unpacked into a **staging directory inside the
+destination** and proved usable (`bin/ffmpeg` + `bin/ffprobe` executable, libvmaf + libx265 present) **before**
+it is published. **There is deliberately no fallback**: no distro package, no `latest`, no "it downloaded, ship
+it". This ffmpeg is not only the encoder, it is the **libvmaf instrument the no-loss verdict is measured
+with**, so a substituted build would be a substituted verdict on whether a source may be deleted.
+`make install-ffmpeg-selftest` defeats every one of those paths on purpose, hermetically (a fake `curl` on
+PATH plus a throwaway copy of the Dockerfile whose digests are rewritten to fixture archives), and asserts
+the destination is EMPTY afterwards and the message says which failure it was. Decoy package managers and a
+decoy system `ffmpeg` sit on PATH during a failure case and must stay uninvoked.
+
+`scripts/check-pins.sh` gained the check that would have prevented the incident: `FFMPEG_BUILD` must be a
+**dated month-end** tag (real calendar arithmetic, so leap-year February works in both directions), a floating
+alias is refused outright, both digests must be real 64-char sha256s, and **NOTICE may carry no ffmpeg build
+identifier beyond its two checked lines** (it used to spell the git revision out a third time, in the
+corresponding-source paragraph, on a line no assertion matched). All local: `make check` must not red because
+a third party is down. Reachability is asked separately by **`make check-pin-live`**, which is **NOT** in
+`check` and runs on a **schedule** (`.github/workflows/pin-health.yml`), so the next expiry arrives as itself,
+naming the pin and the date it falls out of retention, rather than as somebody else's red build.
+
 **The rule when you touch this: hyphen is history, underscore is an identifier.** The phase IDs
 `TRANSCODE-1`…`TRANSCODE-15` are **historical labels and must survive** — they are how git log and the
 roadmap name the work, and renumbering them would rewrite those references for no gain. The underscore
@@ -356,7 +387,10 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   a dry run.
 - `Dockerfile` (TRANSCODE-9) — the production image (multi-arch, distroless `cc`, non-root, pinned ffmpeg);
   its `FFMPEG_*` ARGs are the single source of truth for the pin. `scripts/install-ffmpeg.sh` — installs
-  exactly that pin by parsing them (CI + release + local dev all use it). `docker-compose.yml` — the example
+  exactly that pin by parsing them (CI + release + local dev all use it), with five distinct, self-naming
+  failure modes and no fallback ffmpeg, proved by `scripts/install-ffmpeg-selftest.sh` (S0022).
+  `scripts/check-pin-live.sh` asks upstream whether the pin is still served; scheduled, never in
+  `make check`. `docker-compose.yml` — the example
   deployment. `scripts/smoke-image.sh` — the packaging gate: a real encode inside the image, asserting the
   no-loss contract. `NOTICE` — the image redistributes GPL ffmpeg binaries, so it carries their licence and
   source offer.

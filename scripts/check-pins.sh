@@ -41,10 +41,90 @@ else
        NOTICE:     build=$no_build version=$no_version"
 fi
 
-# --- 2. One Go version across the proof and the artifact ---------------------------
+# ... and those two lines are the ONLY ffmpeg build identifiers NOTICE is allowed to
+# carry. It used to also spell the git revision out a third time, in the corresponding-
+# source paragraph ("revision g90436de5e1 above"), where nothing checked it: the two
+# checked lines could be bumped correctly while the source offer went on naming the
+# revision of a build the image no longer contains. A restatement no gate looks at is
+# exactly the failure this whole script exists to prevent, so a stray one is now RED
+# rather than merely regrettable. (Both known values are erased first, so the legitimate
+# Build tag and Version lines are not their own violation.)
+scan_txt="$(sed -e "s|$df_version||g" -e "s|$df_build||g" "$here/NOTICE")"
+strays="$(printf '%s\n' "$scan_txt" \
+  | grep -oE 'autobuild-[0-9]{4}(-[0-9]{2}){4}|N-[0-9]+-g[0-9a-f]{7,}|\bg[0-9a-f]{10,}\b' \
+  | sort -u || true)"
+if [ -z "$strays" ]; then
+  note "ok: NOTICE carries no ffmpeg build identifier beyond the two checked lines"
+else
+  bad "NOTICE names an ffmpeg build identifier that is NOT the pinned one, on a line no check matches. It would drift silently and leave the GPL source offer pointing at a build the image does not contain.
+       stray: $(printf '%s' "$strays" | tr '\n' ' ')
+       pinned: build=$df_build version=$df_version
+       Refer to the 'Build tag'/'Version' lines instead of restating the value."
+fi
+
+# --- 2. The ffmpeg pin must be one upstream will STILL SERVE next year -------------
+# This is the check that would have prevented S0022. The pin was
+# autobuild-2026-07-13-14-11, a mid-month DAILY build, and BtbN/FFmpeg-Builds publishes
+# its retention policy in the repository README:
+#
+#     "The last build of each month is kept for two years.
+#      The last 14 daily builds are kept.
+#      The special 'latest' build floats and provides consistent URLs always
+#      pointing to the latest build."
+#
+# So a daily pin has a roughly two-week fuse and was always going to 404, and it did:
+# every job that installs ffmpeg went red, on unrelated pull requests, across three
+# specs, and the cause was not visible from any of them. A month-end pin has a TWO-YEAR
+# fuse. `latest` never 404s and is worse than either: it silently changes the encoder
+# AND the libvmaf instrument the no-loss verdict is measured with, which is a pin that
+# does not pin. Both are refused here, at the only moment a human is looking.
+#
+# Local arithmetic only: no network. `make check` runs on every PR, and a gate that
+# depends on a third party being up is a gate that reds for reasons the author cannot
+# fix. The live reachability probe is `make check-pin-live`, on a schedule, deliberately
+# NOT here.
+if [[ "$df_build" =~ ^autobuild-([0-9]{4})-([0-9]{2})-([0-9]{2})-[0-9]{2}-[0-9]{2}$ ]]; then
+  pin_day="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+  if ! next_day="$(date -u -d "$pin_day +1 day" +%d 2>/dev/null)"; then
+    bad "FFMPEG_BUILD names an impossible date ($pin_day): '$df_build' is not a real upstream release tag."
+  elif [ "$next_day" != "01" ]; then
+    bad "FFMPEG_BUILD is a MID-MONTH DAILY build ($df_build) and upstream does not keep it for a year.
+       Upstream's published retention policy (BtbN/FFmpeg-Builds README):
+         'The last build of each month is kept for two years.
+          The last 14 daily builds are kept.'
+       A daily build therefore survives about a FORTNIGHT. Pin the last build of a month
+       (a tag whose date is the final calendar day of that month), which is retained for
+       two years, and put its published SHA-256 digests in FFMPEG_SHA256_AMD64/ARM64."
+  else
+    note "ok: ffmpeg pin $df_build is a month-end build (upstream keeps it two years, until $(date -u -d "$pin_day +2 years" +%F))"
+  fi
+else
+  bad "FFMPEG_BUILD is not a dated upstream release tag: '$df_build'.
+       It must match autobuild-YYYY-MM-DD-HH-MM. A floating alias such as 'latest' is
+       REFUSED outright: upstream documents it as 'the special latest build floats and
+       provides consistent URLs always pointing to the latest build', so it would never
+       404 and would instead change the encoder, and the libvmaf instrument the no-loss
+       verdict is measured with, under a green build. That is a pin that does not pin."
+fi
+
+# The digest is the other half of the pin, and it is the half that makes the tag mean
+# anything: a tag says which URL, the digest says which BYTES. Dropping or blanking it is
+# the cheapest way to make a rotted pin "work", so its shape is asserted rather than
+# assumed. (The installer and the Dockerfile both verify against these before they trust
+# an archive; an empty value would make that verification vacuous.)
+for a in AMD64 ARM64; do
+  d="$(arg "FFMPEG_SHA256_$a")"
+  if [[ "$d" =~ ^[0-9a-f]{64}$ ]]; then
+    note "ok: FFMPEG_SHA256_$a is a full sha256 digest"
+  else
+    bad "FFMPEG_SHA256_$a is not a 64-character lowercase sha256 digest (got '$d'). The archive verification it feeds would be vacuous, and an ffmpeg that is merely 'whatever answered 200' is also the instrument that decides a source may be deleted."
+  fi
+done
+
+# --- 3. One Go version across the proof and the artifact ---------------------------
 # The gate must run on the Go that builds the binary we ship. Nothing forces these three
 # together but this check.
-go_image="$(arg GO_IMAGE)"                       # golang:1.25.12-bookworm@sha256:...
+go_image="$(arg GO_IMAGE)"                       # golang:1.25.14-bookworm@sha256:...
 docker_go="${go_image#golang:}"; docker_go="${docker_go%%-*}"
 ci_go="$(sed -n 's/^ *GO_VERSION: *"\(.*\)"$/\1/p' "$here/.github/workflows/ci.yml" | head -1)"
 rel_go="$(sed -n 's/^ *GO_VERSION: *"\(.*\)"$/\1/p' "$here/.github/workflows/release.yml" | head -1)"
@@ -58,7 +138,26 @@ else
        release.yml:         $rel_go"
 fi
 
-# --- 3. No pre-rename identifier survives (TRANSCODE-12) ---------------------------
+# The tag above is only a LABEL. What Docker pulls is the digest beside it, and this
+# script cannot look inside an image to learn which toolchain a digest carries, so the
+# tag comparison is satisfied by a GO_IMAGE whose digest was never moved. Two halves
+# close that: the Dockerfile's build stage asks the pulled image its own `go env
+# GOVERSION` and refuses when it disagrees with the tag, and this checks the half that
+# the build cannot: that a digest is pinned AT ALL. Drop the `@sha256:` and the tag
+# floats to whatever the registry serves today, and the in-image assertion still passes
+# because a floating tag is self-consistent.
+go_digest=""
+case "$go_image" in *@*) go_digest="${go_image##*@}" ;; esac
+if printf '%s' "$go_digest" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+  note "ok: GO_IMAGE is digest-pinned ($go_digest)"
+else
+  bad "GO_IMAGE is not pinned to a well-formed @sha256: digest. The toolchain would float to
+       whatever the registry serves today, and the in-image assertion cannot catch that
+       because a floating tag agrees with itself.
+       Dockerfile GO_IMAGE: $go_image"
+fi
+
+# --- 4. No pre-rename identifier survives (TRANSCODE-12) ---------------------------
 # The project was `transcode` and is now `holdfast`. The rename had to land BEFORE the
 # first tag because none of these surfaces can be redirected afterwards: Go has no
 # module-path rename primitive, nothing rewrites a container-image reference in a user's

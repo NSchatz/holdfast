@@ -13,8 +13,8 @@ offer with it.
 
   Component : ffmpeg + ffprobe (static builds carrying libx265, libsvtav1, libvmaf)
   Source of : https://github.com/BtbN/FFmpeg-Builds
-  Build tag : autobuild-2026-07-13-14-11
-  Version   : N-125573-g90436de5e1
+  Build tag : autobuild-2026-07-31-14-10
+  Version   : N-125875-g5d4d3bdc61
   Licence   : GPL-3.0 (these are the "-gpl" builds — ffmpeg configured with
               --enable-gpl, which is what makes libx265 usable)
 
@@ -27,9 +27,13 @@ offer with it.
   different build.)
 
   Corresponding source: FFmpeg's own source is at https://github.com/FFmpeg/FFmpeg
-  (revision g90436de5e1 above), and the exact build recipe — the configure flags and
-  the pinned versions of every bundled library — is the BtbN/FFmpeg-Builds repository
-  at the build tag above.
+  at the git revision named by the trailing `g<rev>` of the Version above, and the exact
+  build recipe (the configure flags and the pinned versions of every bundled library) is
+  the BtbN/FFmpeg-Builds repository at the Build tag above. The revision is deliberately
+  NOT written out a second time here: it used to be, and a restatement no gate checks is
+  the drift this file exists to prevent. Build tag and Version are the only two, and
+  scripts/check-pins.sh both matches them against the Dockerfile and REFUSES any other
+  ffmpeg build identifier anywhere in this file.
 
 The Dockerfile pins that build by tag AND verifies the tarball's SHA-256 before
 trusting it, so the ffmpeg in any given image is the exact one named here.
