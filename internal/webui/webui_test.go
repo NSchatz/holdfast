@@ -619,6 +619,416 @@ const (
 	reduceAt = "@media(prefers-reduced-motion:reduce)"
 )
 
+// --- reading a NAME for the property it IS -------------------------------------
+
+// vendorPrefix is a `-webkit-` / `-moz-` / `-ms-` / `-o-` prefix on a property
+// name. A CUSTOM property is deliberately not one: `--paints-on` has a hyphen
+// where this pattern needs a letter, so it is never stripped.
+var vendorPrefix = regexp.MustCompile(`^-[a-zA-Z]+-`)
+
+// unprefixed reads a property name for the property it IS rather than for the
+// spelling it happens to carry. `strings.HasPrefix(prop, "animation")` is a
+// membership narrower than AC5's own set - "any transition, animation or
+// @keyframes" - by exactly the vendor prefixes WebKit and Blink both still
+// honour, so a page whose motion was written `-webkit-animation` declared no
+// motion at all to that sweep and it took the criterion's no-motion exit
+// (impl-gate finding F18). Every property-NAME lookup in this file goes through
+// this reader, for the same reason canonicalAt exists for a prelude.
+func unprefixed(prop string) string {
+	return vendorPrefix.ReplaceAllString(strings.ToLower(strings.TrimSpace(prop)), "")
+}
+
+// cssPx reads a length written as a plain px literal. It is the one place a
+// number is taken out of a CSS value, so measuredPx (which resolves a token
+// first) and the media-query reader (which has no tokens to resolve) agree about
+// what counts as a measurable length.
+func cssPx(v string) (float64, bool) {
+	v = strings.TrimSpace(v)
+	if !strings.HasSuffix(v, "px") {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(v, "px")), 64)
+	if err != nil {
+		return 0, false
+	}
+	return f, true
+}
+
+// --- reading an AT-RULE PRELUDE for the condition it IS ------------------------
+//
+// canonicalAt above compares a prelude for EQUALITY, which is how AC4's light
+// block and AC5's reduce block refuse a second condition that never holds. Two
+// sweeps were never given that reader and asked something looser instead: AC6's
+// narrow block was matched with `strings.Contains(r.at, "@media")` plus a
+// max-width regex, so `@media (max-width: 640px) and (min-width: 99999px)` read
+// as the narrow block and applied at no viewport (impl-gate finding F14); AC8's
+// coverage loop asked nothing at all about the at-rule, so the page's one
+// :focus-visible rule could be wrapped in any media query and every control still
+// counted as covered (impl-gate finding F15). Both now read the prelude here.
+//
+// An equality test is not enough for either of them, because AC6's block is
+// legitimately conditional (it is a breakpoint) and AC8's must legitimately be
+// unconditional - so the prelude is PARSED and then evaluated, at a viewport for
+// AC6 and against every user for AC8.
+
+// mediaCond is one condition of a media query: a media type (`screen`), or a
+// parenthesised feature test (`(max-width: 640px)`).
+type mediaCond struct {
+	typ   string // the media type, lowercased; "" for a feature test
+	name  string // the feature name, lowercased; "" for a media type
+	value string // the feature's value, lowercased and space-free
+}
+
+// mediaTokens splits one media query into its top-level tokens: each
+// parenthesised group is one token and each bare word is one.
+func mediaTokens(q string) ([]string, bool) {
+	var out []string
+	for i := 0; i < len(q); {
+		switch {
+		case q[i] == ' ':
+			i++
+		case q[i] == '(':
+			depth, j := 0, i
+			for ; j < len(q); j++ {
+				if q[j] == '(' {
+					depth++
+				}
+				if q[j] == ')' {
+					depth--
+					if depth == 0 {
+						j++
+						break
+					}
+				}
+			}
+			if depth != 0 {
+				return nil, false
+			}
+			out = append(out, strings.TrimSpace(q[i:j]))
+			i = j
+		default:
+			j := i
+			for j < len(q) && q[j] != ' ' && q[j] != '(' {
+				j++
+			}
+			out = append(out, q[i:j])
+			i = j
+		}
+	}
+	return out, true
+}
+
+// mediaQueries splits an @media prelude into its comma-separated queries, each a
+// conjunction of conditions. ok is false when the prelude is not an @media rule,
+// or carries a shape this reader does not model - a `not`, an `or`, a boolean
+// feature, the range syntax, an unbalanced parenthesis - in which case NO caller
+// may claim to know when the rule applies.
+func mediaQueries(at string) ([][]mediaCond, bool) {
+	s := strings.TrimSpace(normSpace(at))
+	if !strings.HasPrefix(strings.ToLower(s), "@media") {
+		return nil, false
+	}
+	s = strings.TrimSpace(s[len("@media"):])
+	if s == "" {
+		return nil, false
+	}
+	var out [][]mediaCond
+	for _, q := range strings.Split(s, ",") {
+		toks, ok := mediaTokens(strings.TrimSpace(q))
+		if !ok {
+			return nil, false
+		}
+		var conds []mediaCond
+		for _, tok := range toks {
+			lt := strings.ToLower(tok)
+			switch lt {
+			case "":
+				continue
+			case "and", "only":
+				continue
+			case "not", "or":
+				return nil, false
+			}
+			if strings.HasPrefix(tok, "(") {
+				if !strings.HasSuffix(tok, ")") {
+					return nil, false
+				}
+				inner := strings.TrimSpace(tok[1 : len(tok)-1])
+				c := strings.IndexByte(inner, ':')
+				if c < 0 {
+					return nil, false // a boolean feature, or the range syntax
+				}
+				conds = append(conds, mediaCond{
+					name:  strings.ToLower(strings.TrimSpace(inner[:c])),
+					value: strings.ToLower(strings.ReplaceAll(strings.TrimSpace(inner[c+1:]), " ", "")),
+				})
+				continue
+			}
+			if strings.ContainsAny(tok, "()<>=") {
+				return nil, false
+			}
+			conds = append(conds, mediaCond{typ: lt})
+		}
+		if len(conds) == 0 {
+			return nil, false
+		}
+		out = append(out, conds)
+	}
+	return out, true
+}
+
+// holdsAtWidth reports whether one condition holds on a screen px CSS pixels
+// wide whose user has expressed no preference of any kind. A condition this
+// reader cannot evaluate does NOT hold: for AC6 that means a block it cannot
+// read never counts as the narrow block, which is the strict direction and the
+// one that reds.
+func (c mediaCond) holdsAtWidth(px float64) bool {
+	if c.typ != "" {
+		return c.typ == "all" || c.typ == "screen"
+	}
+	n, ok := cssPx(c.value)
+	if !ok {
+		return false
+	}
+	switch c.name {
+	case "width":
+		return n == px
+	case "min-width":
+		return px >= n
+	case "max-width":
+		return px <= n
+	}
+	return false
+}
+
+// atAppliesAtViewportWidth reports whether a rule under this prelude is live at a
+// viewport px CSS pixels wide, for a user expressing no preference. The top level
+// applies at every viewport; an @media prelude applies when one of its queries
+// does; a prelude this reader cannot read does not, because a sweep that assumed
+// otherwise is exactly how a block matching no viewport read as the narrow one.
+func atAppliesAtViewportWidth(at string, px float64) bool {
+	if strings.TrimSpace(at) == "" {
+		return true
+	}
+	queries, ok := mediaQueries(at)
+	if !ok {
+		return false
+	}
+	for _, conds := range queries {
+		live := true
+		for _, c := range conds {
+			if !c.holdsAtWidth(px) {
+				live = false
+				break
+			}
+		}
+		if live {
+			return true
+		}
+	}
+	return false
+}
+
+// atAppliesToEveryUser reports whether a rule under this prelude is live for
+// EVERY user agent: no viewport condition, no user preference, no media type
+// narrower than `all`. AC8 says the ring is drawn "in both themes"; a ring
+// declared under any condition at all leaves some keyboard operator with none,
+// which is the plainest violation that criterion has - not a poor ring, no ring.
+func atAppliesToEveryUser(at string) bool {
+	if strings.TrimSpace(at) == "" {
+		return true
+	}
+	queries, ok := mediaQueries(at)
+	if !ok {
+		return false
+	}
+	for _, conds := range queries {
+		if len(conds) == 1 && conds[0].typ == "all" {
+			return true
+		}
+	}
+	return false
+}
+
+// --- reading a declared VALUE, rather than searching it -------------------------
+
+// topLevelFields splits a value into its space-separated parts, treating a
+// parenthesised group as ONE part. `repeat(3, 1fr)` is one part, not two.
+func topLevelFields(v string) []string {
+	var out []string
+	depth, start := 0, 0
+	for i := 0; i < len(v); i++ {
+		switch v[i] {
+		case '(', '[':
+			depth++
+		case ')', ']':
+			depth--
+		case ' ':
+			if depth == 0 {
+				if f := strings.TrimSpace(v[start:i]); f != "" {
+					out = append(out, f)
+				}
+				start = i + 1
+			}
+		}
+	}
+	if f := strings.TrimSpace(v[start:]); f != "" {
+		out = append(out, f)
+	}
+	return out
+}
+
+// gridTrackCount counts the columns a grid-template-columns value declares, and
+// reports ok=false when the count is not decidable from the source (auto-fit,
+// auto-fill, a shape this reader does not model). Searching the value for the
+// wanted one instead is how `repeat(3, 1fr)` satisfied a single-column check, by
+// CONTAINING "1fr" at the very viewport the criterion says must show one column
+// (impl-gate finding F14).
+func gridTrackCount(v string) (int, bool) {
+	v = strings.TrimSpace(strings.ReplaceAll(normSpace(v), "!important", ""))
+	if v == "" {
+		return 0, false
+	}
+	if strings.EqualFold(v, "none") {
+		// No explicit track list: with the default row auto-flow every item is
+		// placed in one implicit column.
+		return 1, true
+	}
+	n := 0
+	for _, f := range topLevelFields(v) {
+		lf := strings.ToLower(f)
+		switch {
+		case strings.HasPrefix(lf, "["): // a line name, not a track
+			continue
+		case strings.HasPrefix(lf, "repeat("):
+			inner := strings.TrimSpace(f[len("repeat("):])
+			if !strings.HasSuffix(inner, ")") {
+				return 0, false
+			}
+			inner = strings.TrimSpace(inner[:len(inner)-1])
+			c := strings.IndexByte(inner, ',')
+			if c < 0 {
+				return 0, false
+			}
+			count, err := strconv.Atoi(strings.TrimSpace(inner[:c]))
+			if err != nil || count < 1 {
+				return 0, false // auto-fit / auto-fill: the count is the viewport's
+			}
+			tracks, ok := gridTrackCount(strings.TrimSpace(inner[c+1:]))
+			if !ok {
+				return 0, false
+			}
+			n += count * tracks
+		default:
+			n++
+		}
+	}
+	if n == 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// isSingleColumnTrackList reports whether a grid-template-columns value lays its
+// items out in exactly one column.
+func isSingleColumnTrackList(v string) bool {
+	n, ok := gridTrackCount(v)
+	return ok && n == 1
+}
+
+// isColumnFlexDirection reports whether a flex-direction value stacks its items
+// in one column. `column-reverse` is refused: it is a single column, but it also
+// reverses the reading order of a header this criterion is about, so a page that
+// wants it will red here and be looked at.
+func isColumnFlexDirection(v string) bool {
+	return strings.ToLower(strings.TrimSpace(strings.ReplaceAll(v, "!important", ""))) == "column"
+}
+
+// The two readers' own proof, asserted against FIXTURES rather than against the
+// shipped page - the same discipline TestPageComments_ uses - so it stays a proof
+// whatever preludes and track lists the page happens to carry. Both readers exist
+// because a substring test answered a question it was not asked, so both are
+// proved to answer the question they ARE asked, in the exact shapes that broke
+// their predecessors.
+func TestPrelude_IsReadForWhatItIsAndAValueIsComparedNotSearched(t *testing.T) {
+	for _, c := range []struct {
+		at         string
+		atWidth360 bool
+		everyUser  bool
+	}{
+		{"", true, true},
+		{"@media all", true, true},
+		{"@media screen", true, false},
+		{"@media print", false, false},
+		{"@media (max-width: 640px)", true, false},
+		{"@media only screen and (max-width: 640px)", true, false},
+		{"@media (max-width: 320px)", false, false},
+		{"@media (min-width: 99999px)", false, false},
+		// The shape finding F14 broke the narrow-viewport proof with: it carries
+		// the max-width the old regex found and applies at no viewport at all.
+		{"@media (max-width: 640px) and (min-width: 99999px)", false, false},
+		// The shapes finding F15 broke the focus proof with.
+		{"@media (prefers-reduced-motion: reduce)", false, false},
+		{"@media (prefers-color-scheme: light)", false, false},
+		// A comma is a disjunction: one query matching is enough.
+		{"@media (min-width: 99999px), (max-width: 640px)", true, false},
+		// Shapes this reader does not model. It says so by declining to vouch for
+		// them, never by assuming they hold.
+		{"@media not all and (max-width: 640px)", false, false},
+		{"@media (max-width: 40em)", false, false},
+		{"@media (400px >= width)", false, false},
+		{"@media (hover)", false, false},
+		{"@supports (display: grid)", false, false},
+		{"@-webkit-keyframes pulse", false, false},
+	} {
+		if got := atAppliesAtViewportWidth(c.at, 360); got != c.atWidth360 {
+			t.Errorf("atAppliesAtViewportWidth(%q, 360) = %v, want %v", c.at, got, c.atWidth360)
+		}
+		if got := atAppliesToEveryUser(c.at); got != c.everyUser {
+			t.Errorf("atAppliesToEveryUser(%q) = %v, want %v", c.at, got, c.everyUser)
+		}
+	}
+	for _, c := range []string{
+		"1fr", "100%", "none", "minmax(230px,1fr)", "repeat(1, 1fr)",
+		"[full-start] 1fr [full-end]",
+	} {
+		if !isSingleColumnTrackList(c) {
+			t.Errorf("isSingleColumnTrackList(%q) = false, want true", c)
+		}
+	}
+	for _, c := range []string{
+		"", "1fr 1fr", "repeat(3, 1fr)", "repeat(2, 1fr 2fr)",
+		"repeat(auto-fit,minmax(230px,1fr))", "repeat(auto-fill, 1fr)",
+	} {
+		if isSingleColumnTrackList(c) {
+			t.Errorf("isSingleColumnTrackList(%q) = true, want false - a check whose whole subject is that there is ONE column must not be satisfied by more", c)
+		}
+	}
+	for _, c := range []struct {
+		v    string
+		want bool
+	}{
+		{"column", true}, {" column ", true}, {"row", false},
+		{"column-reverse", false}, {"row-reverse", false}, {"", false},
+	} {
+		if got := isColumnFlexDirection(c.v); got != c.want {
+			t.Errorf("isColumnFlexDirection(%q) = %v, want %v", c.v, got, c.want)
+		}
+	}
+	for _, c := range []struct{ prop, want string }{
+		{"animation", "animation"},
+		{"-webkit-animation", "animation"},
+		{"-MOZ-Animation-Duration", "animation-duration"},
+		{"transition", "transition"},
+		{"--paints-on", "--paints-on"},
+		{"font-size", "font-size"},
+	} {
+		if got := unprefixed(c.prop); got != c.want {
+			t.Errorf("unprefixed(%q) = %q, want %q", c.prop, got, c.want)
+		}
+	}
+}
+
 // themeTokens returns the two token sets the page declares: the dark set (the
 // default, in the top-level :root) and the light set (the same names, overridden
 // under prefers-color-scheme: light, merged over the dark defaults).
@@ -729,14 +1139,7 @@ func measuredPx(tokens map[string]string, v string) (float64, bool) {
 	if m := soleVarRef.FindStringSubmatch(v); m != nil {
 		v = strings.TrimSpace(resolveToken(tokens, m[1]))
 	}
-	if !strings.HasSuffix(v, "px") {
-		return 0, false
-	}
-	f, err := strconv.ParseFloat(strings.TrimSuffix(v, "px"), 64)
-	if err != nil {
-		return 0, false
-	}
-	return f, true
+	return cssPx(v)
 }
 
 // pxOf reads an unmeasurable length as 0. That is safe for a FLOOR sweep and only
@@ -1250,7 +1653,10 @@ func isColourProp(p string) bool {
 	if strings.HasPrefix(p, "--") {
 		return true
 	}
-	switch p {
+	// Read for the property it IS: `-webkit-text-fill-color` is a colour by any
+	// reading, and a list gated on the unprefixed spelling alone is the membership
+	// finding F18 named in AC5's position.
+	switch unprefixed(p) {
 	case "color", "background", "background-color",
 		"border", "border-color", "border-top", "border-right", "border-bottom", "border-left",
 		"border-top-color", "border-right-color", "border-bottom-color", "border-left-color",
@@ -1342,7 +1748,7 @@ var quotedString = regexp.MustCompile(`"[^"]*"|'[^']*'`)
 // namedColoursIn reports the CSS named colours a declaration writes at its point
 // of use, ignoring anything inside a var() reference or a quoted string.
 func namedColoursIn(prop, value string) []string {
-	if identifierProps[prop] {
+	if identifierProps[unprefixed(prop)] {
 		return nil
 	}
 	rest := quotedString.ReplaceAllString(varCall.ReplaceAllString(value, " "), " ")
@@ -1451,15 +1857,20 @@ func TestTokens_TypeAndSpaceComeFromTheDeclaredScales(t *testing.T) {
 			if r.sel == ":root" && strings.HasPrefix(d.prop, "--") {
 				continue
 			}
-			if d.prop == "font" {
+			// Read for the property it IS, not for the spelling it carries
+			// (finding F18's class): `-webkit-padding-before` is a padding length
+			// and `-moz-font-size` is a font size, and a sweep gated on the
+			// unprefixed name alone would pass over both.
+			prop := unprefixed(d.prop)
+			if prop == "font" {
 				t.Errorf("%s { font: %s } - the font shorthand hides a font-size; declare font-size from the type scale", r.sel, d.value)
 				continue
 			}
 			want := ""
 			switch {
-			case d.prop == "font-size":
+			case prop == "font-size":
 				want = "--fs-"
-			case spaceProps[d.prop]:
+			case spaceProps[prop]:
 				want = "--sp-"
 			default:
 				continue
@@ -1889,8 +2300,21 @@ func TestFocus_RingClearsBothTheControlFillAndTheSurfaceBehindIt(t *testing.T) {
 			continue
 		}
 		if o.focus {
-			if _, ok := measuredPx(dark, o.offset); !ok {
+			off, ok := measuredPx(dark, o.offset)
+			switch {
+			case !ok:
 				t.Errorf("%s declares no measurable outline-offset (%q), so the gap that puts the ring against the surface behind the control is gone", where, o.offset)
+			case off < 0:
+				// Checking the offset for MEASURABILITY alone let `-8px` through,
+				// and a negative offset draws the ring INSIDE the control's border
+				// box, where it never meets the surface behind (impl-gate finding
+				// F19). AC8 requires the indicator to clear 3:1 against "the surface
+				// immediately behind it", which a ring painted entirely on the
+				// control's own fill is never adjacent to - so the half of the
+				// criterion this file measures would be measuring a boundary the
+				// page does not draw. Zero is allowed: the ring then sits flush
+				// against the border edge, which IS against the surface behind.
+				t.Errorf("%s draws its ring at outline-offset %gpx; a negative offset puts the indicator inside the control's own border box, where it never meets the surface immediately behind the control that AC8 measures it against", where, off)
 			}
 		}
 		rings = append(rings, o)
@@ -1898,18 +2322,29 @@ func TestFocus_RingClearsBothTheControlFillAndTheSurfaceBehindIt(t *testing.T) {
 	if len(rings) == 0 {
 		t.Fatal("no rule draws a focus indicator from a colour token")
 	}
-	// Every pointer target is REACHED by one of those rules. A ring scoped to
-	// `button:focus-visible` draws nothing on the two inputs, and folding the rules
-	// together hid which controls were covered at all.
+	// Every pointer target is REACHED by one of those rules - and by one that
+	// APPLIES. A ring scoped to `button:focus-visible` draws nothing on the two
+	// inputs, and folding the rules together hid which controls were covered at all.
+	//
+	// The at-rule the rule sits under used to be kept only as an error label, so
+	// the page's single :focus-visible rule could be wrapped in ANY media query and
+	// every control still counted as covered (impl-gate finding F15):
+	// `@media (min-width: 99999px)` leaves nobody with an indicator, and
+	// `@media (prefers-reduced-motion: reduce)` leaves it to one user preference.
+	// AC8 says the ring is drawn "in both themes", so only a rule this reader can
+	// show is live for EVERY user agent counts as drawing it - the way themeTokens
+	// decides which :root block is the live one. A page that wants to declare the
+	// ring once per theme will red here and be looked at; this one declares it once,
+	// at the top level, in a token each theme redefines.
 	for _, el := range targets {
 		covered := false
 		for _, o := range rings {
-			if o.focus && selectorReaches(o.sel, []pageElement{el}) {
+			if o.focus && atAppliesToEveryUser(o.at) && selectorReaches(o.sel, []pageElement{el}) {
 				covered = true
 			}
 		}
 		if !covered {
-			t.Errorf("no :focus-visible rule that draws an indicator reaches %s, so that control shows nothing on keyboard focus", el)
+			t.Errorf("no :focus-visible rule that draws an indicator for every user agent reaches %s, so that control shows nothing on keyboard focus", el)
 		}
 	}
 	ctrls := controlRules(t, rules, dark)
@@ -2107,51 +2542,100 @@ func msOf(v string) float64 {
 	return math.Inf(1)
 }
 
+// keyframesAt matches a keyframes at-rule whatever vendor prefix it carries.
+// `strings.Contains(css, "@keyframes")` is a membership narrower than AC5's own
+// set - which says "any ... @keyframes" - by exactly the prefix WebKit and Blink
+// still honour, so a page animating through `@-webkit-keyframes` declared no
+// motion at all and the sweep took the criterion's no-motion exit (impl-gate
+// finding F18).
+var keyframesAt = regexp.MustCompile(`(?i)@\s*(?:-[a-zA-Z]+-)?keyframes\b`)
+
+// motionFamily returns the motion property family a declaration belongs to -
+// "transition" or "animation" - whatever vendor prefix it is spelled with, and ""
+// for a property that declares no motion.
+func motionFamily(prop string) string {
+	p := unprefixed(prop)
+	switch {
+	case p == "transition" || strings.HasPrefix(p, "transition-"):
+		return "transition"
+	case p == "animation" || strings.HasPrefix(p, "animation-"):
+		return "animation"
+	}
+	return ""
+}
+
 func TestMotion_NoStateDependsOnItAndAReducePreferenceStopsIt(t *testing.T) {
 	// Comments stripped: a comment saying the page declares no keyframes is not a
-	// keyframes block.
-	if strings.Contains(cssComment.ReplaceAllString(styleBlock(t), " "), "@keyframes") {
-		t.Error("the page declares @keyframes; a state that arrives by animation is not readable from a static frame")
+	// keyframes block. Read for the at-rule it IS, prefix and all.
+	if m := keyframesAt.FindString(cssComment.ReplaceAllString(styleBlock(t), " ")); m != "" {
+		t.Errorf("the page declares %s; a state that arrives by animation is not readable from a static frame", strings.TrimSpace(m))
 	}
 	// Inline style= attributes are motion too, and the reduce block's !important
 	// is what overrides them - so they are swept with the stylesheet, not apart
 	// from it.
 	rules := allRules(t)
-	moved := 0
+	// The families the page actually declares motion in, so the reduce block below
+	// is required to cut each of them and not only the one this page happens to
+	// use. `animation` reds outright by the loop's first branch, but the
+	// requirement is stated rather than left implied: AC5's set is "any transition,
+	// animation or @keyframes", and a sweep that only ever cut transitions left a
+	// user who asked for reduced motion watching an animation run (finding F18).
+	moved := map[string]int{}
 	for _, r := range rules {
 		for _, d := range r.decls {
-			if strings.HasPrefix(d.prop, "animation") {
+			fam := motionFamily(d.prop)
+			if fam == "animation" {
 				t.Errorf("%s { %s: %s } animates; every state on this page must be readable from a static frame", r.sel, d.prop, d.value)
 			}
-			if strings.HasPrefix(d.prop, "transition") && canonicalAt(r.at) != reduceAt {
-				moved++
+			if fam != "" && canonicalAt(r.at) != reduceAt {
+				moved[fam]++
 			}
 		}
 	}
-	if moved == 0 {
+	if len(moved) == 0 {
 		return // the page declares no motion at all: the criterion is met with no media block
 	}
+	// The block that stops the motion has to be the block a reduce preference
+	// actually turns on, and it has to reach every element. Matching the prelude on
+	// the words "prefers-reduced-motion" and "reduce" accepted
+	// `@media (prefers-reduced-motion: reduce) and (min-width: 99999px)`, which
+	// never applies; matching the selector on the character `*` accepted `.foo *`,
+	// which reaches a subtree.
+	cut := map[string]bool{}
 	for _, r := range rules {
-		// The block that stops the motion has to be the block a reduce preference
-		// actually turns on, and it has to reach every element. Matching the
-		// prelude on the words "prefers-reduced-motion" and "reduce" accepted
-		// `@media (prefers-reduced-motion: reduce) and (min-width: 99999px)`, which
-		// never applies; matching the selector on the character `*` accepted
-		// `.foo *`, which reaches a subtree.
 		if canonicalAt(r.at) != reduceAt || !hasUniversalPart(r.sel) {
 			continue
 		}
-		v := r.get("transition-duration")
-		if strings.Contains(v, "!important") && msOf(v) <= 1 {
-			return
+		for _, d := range r.decls {
+			if unprefixed(d.prop) != motionFamily(d.prop)+"-duration" {
+				continue
+			}
+			if strings.Contains(d.value, "!important") && msOf(d.value) <= 1 {
+				cut[motionFamily(d.prop)] = true
+			}
 		}
 	}
-	t.Errorf("the page declares %d transitions but no @media (prefers-reduced-motion: reduce) rule cuts every transition-duration to no perceptible motion", moved)
+	for _, fam := range []string{"transition", "animation"} {
+		if moved[fam] > 0 && !cut[fam] {
+			t.Errorf("the page declares motion in the %s family (%d declarations) but no @media (prefers-reduced-motion: reduce) rule cuts every %s-duration to no perceptible motion", fam, moved[fam], fam)
+		}
+	}
 }
 
 // --- AC6: the narrow viewport --------------------------------------------------
 
-var maxWidthRe = regexp.MustCompile(`max-width\s*:\s*([0-9.]+)px`)
+// narrowColumnRegions is what "a single column" means for each of the three
+// regions AC6 names, read as a VALUE rather than searched for as a substring:
+// `grid-template-columns:repeat(3, 1fr)` CONTAINS "1fr" and is three columns at
+// the very viewport the criterion says must show one (impl-gate finding F14).
+var narrowColumnRegions = []struct {
+	sel, prop, want string
+	single          func(string) bool
+}{
+	{"header", "flex-direction", "column", isColumnFlexDirection},
+	{".controls", "flex-direction", "column", isColumnFlexDirection},
+	{".aggs", "grid-template-columns", "a single track", isSingleColumnTrackList},
+}
 
 // containerRelativeWidths are the width / min-width values that are not lengths
 // and that cannot make a box wider than the one containing it, whatever the
@@ -2169,30 +2653,46 @@ func TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody(t *testing.T
 	if narrow < 360 {
 		t.Fatalf("--bp-narrow is %gpx; the criterion is written at a 360px viewport", narrow)
 	}
-	want := map[string][2]string{
-		"header":    {"flex-direction", "column"},
-		".controls": {"flex-direction", "column"},
-		".aggs":     {"grid-template-columns", "1fr"},
-	}
-	for _, r := range rules {
-		if !strings.Contains(r.at, "@media") {
-			continue
+	// Which rule decides the layout at the narrow viewport is asked, and answered,
+	// twice over - because the old check could fail neither question (impl-gate
+	// finding F14).
+	//
+	// (a) The block has to APPLY there. `strings.Contains(r.at, "@media")` plus a
+	// max-width regex read the rest of the prelude not at all, so `@media
+	// (max-width: 640px) and (min-width: 99999px)` still yielded max-width 640,
+	// still read as the narrow block, and applied at no viewport a person has. The
+	// prelude is now read for the condition it IS, by the same reader AC8's ring
+	// uses, and evaluated at 360px.
+	//
+	// (b) The VALUE has to be a single column, which means comparing it and not
+	// searching it: `repeat(3, 1fr)` contains "1fr" and satisfied a check whose
+	// whole subject is that there is ONE column.
+	//
+	// And the rule that decides is the LAST applying one that declares the
+	// property, which is what the cascade gives these three equal-specificity
+	// pairs. Accepting ANY applying rule would let a single-column declaration the
+	// page overrides two lines later stand in for the layout an operator sees.
+	for _, region := range narrowColumnRegions {
+		decided, from := "", ""
+		for _, r := range rules {
+			if r.sel != region.sel || !atAppliesAtViewportWidth(r.at, narrow) {
+				continue
+			}
+			if v := r.get(region.prop); v != "" {
+				decided, from = v, r.at
+			}
 		}
-		m := maxWidthRe.FindStringSubmatch(r.at)
-		if m == nil {
-			continue
-		}
-		bp, err := strconv.ParseFloat(m[1], 64)
-		if err != nil || bp < narrow {
-			continue // this block does not apply at the narrow viewport
-		}
-		if w, ok := want[r.sel]; ok && strings.Contains(r.get(w[0]), w[1]) {
-			delete(want, r.sel)
-		}
-	}
-	for _, sel := range []string{"header", ".controls", ".aggs"} {
-		if w, ok := want[sel]; ok {
-			t.Errorf("at a %gpx viewport, %s is not laid out in a single column (expected %s: %s under a max-width media block)", narrow, sel, w[0], w[1])
+		switch {
+		case decided == "":
+			t.Errorf("at a %gpx viewport no rule that applies there declares %s on %s, so it is not laid out in a single column (expected %s: %s)",
+				narrow, region.prop, region.sel, region.prop, region.want)
+		case !region.single(decided):
+			where := "the top level"
+			if from != "" {
+				where = from
+			}
+			t.Errorf("at a %gpx viewport, %s { %s: %s } (from %s) is not a single column (expected %s)",
+				narrow, region.sel, region.prop, decided, where, region.want)
 		}
 	}
 	// Nothing outside a .tablewrap may assert a width or a minimum width wider than
@@ -2277,12 +2777,85 @@ func funcBody(t *testing.T, s, header string) string {
 	return ""
 }
 
+// jsConstString returns the VALUE of a `const NAME = "..." + "...";` declaration
+// in the page's script: the string literals it concatenates, joined. It exists
+// because AC9's wording was graded by a substring over the whole page while the
+// render site was pinned by the constant's NAME, so the two halves were never
+// tied together - set NO_MATCH_TEXT to "n/a", leave the sentences in a second
+// constant nothing reads, and the row an operator sees on a non-matching term
+// states neither of the two things the criterion exists to make it state, with
+// every grader green (impl-gate finding F16). It does not even need a comment to
+// hide in, so stripping comments does not close it; reading the declaration the
+// render site actually reads does.
+//
+// A missing or duplicated declaration is FATAL: a proof cannot pass because the
+// thing it grades was renamed out from under it, and it must not read one
+// declaration while the page renders from another.
+func jsConstString(t *testing.T, page, name string) string {
+	t.Helper()
+	header := "const " + name + " ="
+	i := strings.Index(page, header)
+	if i < 0 {
+		t.Fatalf("the page no longer declares %q", header)
+	}
+	if k := strings.Index(page[i+len(header):], header); k >= 0 {
+		t.Fatalf("the page declares %q more than once; this reader cannot say which one the render site reads", header)
+	}
+	var lits []string
+	rest := page[i+len(header):]
+	for k := 0; k < len(rest); {
+		c := rest[k]
+		if c == ';' {
+			return strings.Join(lits, "")
+		}
+		if c != '"' && c != '\'' && c != '`' {
+			k++
+			continue
+		}
+		var b strings.Builder
+		k++
+		closed := false
+		for k < len(rest) {
+			if rest[k] == '\\' && k+1 < len(rest) {
+				b.WriteByte(rest[k+1])
+				k += 2
+				continue
+			}
+			if rest[k] == c {
+				k++
+				closed = true
+				break
+			}
+			b.WriteByte(rest[k])
+			k++
+		}
+		if !closed {
+			t.Fatalf("a string literal in the declaration of %s is never closed", name)
+		}
+		lits = append(lits, b.String())
+	}
+	t.Fatalf("the declaration of %s is never terminated", name)
+	return ""
+}
+
 func TestFilter_ANonMatchingTermSaysSoAndSaysTheLoadedRowsAreCapped(t *testing.T) {
-	s := string(indexHTML)
-	for _, want := range []string{
-		"const NO_MATCH_TEXT",
+	// The comment-stripped page, for the reason AC10's sweep reads one: prose
+	// ABOUT the page is not the page (impl-gate finding F7).
+	s := pageWithoutComments(t)
+	// The two sentences AC9 demands are asserted on the VALUE the render site
+	// reads, not on the page at large - see jsConstString.
+	noMatch := jsConstString(t, s, "NO_MATCH_TEXT")
+	for _, sentence := range []string{
 		"No loaded row matches this filter.",
 		"themselves capped",
+	} {
+		if !strings.Contains(noMatch, sentence) {
+			t.Errorf("NO_MATCH_TEXT - the value the no-match row is built from - is %q, which does not state %q; AC9 requires the row to state BOTH that no loaded row matches the filter AND that the loaded rows are themselves capped, so that \"no match\" is never read as \"not in the library\"",
+				noMatch, sentence)
+		}
+	}
+	for _, want := range []string{
+		"const NO_MATCH_TEXT",
 		"function setNoMatchRow(body, want)",
 		`body.querySelector("tr[data-nomatch]")`,
 		`tr.dataset.nomatch = "1"`,
@@ -2512,8 +3085,12 @@ func TestPageComments_AreStrippedSoNoProseCanStandInForTheRender(t *testing.T) {
 // copy, and an unavailable card's fallback sentence carries "unavailable" past a
 // reworded node - so all nine are pinned, not the one the finding named.
 var degradedCopy = []struct{ text, renderedBy string }{
-	{"Nothing queued.", `emptyRow(5, "Nothing queued.")`},
-	{"No history yet.", `emptyRow(7, "No history yet.")`},
+	// The two empty-table states are pinned at the APPEND, not at the call: a row
+	// built and never put into the table shows an operator nothing, which is
+	// finding F1's shape in AC10's position. What emptyRow does with the text is
+	// pinned separately, below - see finding F17.
+	{"Nothing queued.", `qbody.appendChild(emptyRow(5, "Nothing queued."));`},
+	{"No history yet.", `hbody.appendChild(emptyRow(7, "No history yet."));`},
 	{"unavailable", `mk("span", "nr", "unavailable")`},
 	{"not recorded", `mk("span", "nr", "not recorded")`},
 	{"unknown", `mk("span", "nr", "unknown")`},
@@ -2533,6 +3110,33 @@ func TestDegradedStates_CopySurvivesVerbatimAndStaysLegibleInBothThemes(t *testi
 			t.Errorf("the degraded-state wording %q is no longer rendered by %q: the page may still carry those words somewhere, but the node that shows them to an operator has stopped saying them",
 				c.text, c.renderedBy)
 		}
+	}
+	// AC10 says the page shall RENDER those words, and for the two empty-table
+	// states the expression pinned above is the CALL. Nothing pinned what emptyRow
+	// does with the argument, so `const td = mk("td", "empty", "")` rendered an
+	// empty queue and an empty history each as a BLANK row - the operator shown a
+	// table that says nothing when there is nothing to say - with both call sites
+	// reading exactly as pinned (impl-gate finding F17). That is finding F1's
+	// build-then-do-not-show shape one level further down the call, and it is
+	// closed the same way it was closed for AC9: emptyRow's own body is asserted as
+	// an ORDERED construction path, so dropping any step reds, and so does building
+	// the row after inserting it.
+	er := funcBody(t, s, "function emptyRow(cols, text) {")
+	at := 0
+	for _, step := range []string{
+		`const tr = document.createElement("tr");`,
+		`tr.dataset.empty = "1";`,
+		`const td = mk("td", "empty", text);`,
+		`td.colSpan = cols;`,
+		`tr.appendChild(td);`,
+		`return tr;`,
+	} {
+		k := strings.Index(er[at:], step)
+		if k < 0 {
+			t.Errorf("emptyRow no longer carries %q, in that order: the wording its callers hand it never reaches a cell in the table, so an empty queue and an empty history each render a row that says nothing", step)
+			continue
+		}
+		at += k + len(step)
 	}
 	rules := allRules(t)
 	dark, light := themeTokens(t, rules)

@@ -277,6 +277,98 @@ var s0035Mutations = map[string]mutation{
 		old: `for (const body of [$("queue"), $("history")]) {`, new: `for (const body of [$("queue")]) {`,
 		why: "the no-match message reaches the queue alone, so a non-matching term still empties the history table in silence",
 	},
+
+	// -----------------------------------------------------------------------
+	// The second grader sweep (impl-gate ordinal 4: findings F14-F19). Same
+	// class as the block above - a condition or a name matched by SUBSTRING
+	// instead of read for what it is, and a value SEARCHED instead of compared -
+	// and every case below is the exact shape the verdict broke the grader with,
+	// now red.
+	// -----------------------------------------------------------------------
+
+	"F14-ac6-narrow-block-never-applies": {
+		criterion: "AC6", target: "TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody",
+		old: "  @media (max-width: 640px) {", new: "  @media (max-width: 640px) and (min-width: 99999px) {",
+		why: "the narrow-viewport block carries a second condition that never holds, so at 360px the header, both control rows and the aggregate grid stay multi-column while the prelude still carries the max-width a regex found in it",
+	},
+	"F14-ac6-three-column-grid": {
+		criterion: "AC6", target: "TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody",
+		old: "    .aggs { grid-template-columns:1fr; }", new: "    .aggs { grid-template-columns:repeat(3, 1fr); }",
+		why: "the aggregate cards are laid out in THREE columns at the 360px viewport, in a value that satisfies a substring search for \"1fr\" by containing it",
+	},
+	"hard-ac6-two-track-grid": {
+		criterion: "AC6", target: "TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody",
+		old: "    .aggs { grid-template-columns:1fr; }", new: "    .aggs { grid-template-columns:1fr 1fr; }",
+		why: "the aggregate cards are two columns at the narrow viewport, written as a track list that also contains \"1fr\"",
+	},
+	"hard-ac6-narrow-block-under-a-user-preference": {
+		criterion: "AC6", target: "TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody",
+		old: "  @media (max-width: 640px) {", new: "  @media (max-width: 640px) and (prefers-color-scheme: dark) {",
+		why: "the single-column collapse reaches only a user whose system theme is dark, so a light-theme operator on a 360px screen scrolls the page body sideways",
+	},
+	"hard-ac6-collapse-overridden-after-the-block": {
+		criterion: "AC6", target: "TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody",
+		old: "</style>", new: "  .aggs { grid-template-columns:repeat(2, 1fr); }\n</style>",
+		why: "a later top-level rule of equal specificity overrides the narrow block's single column, so the collapse is declared and then undone - accepting ANY applying rule would let the overridden declaration stand in for the layout an operator sees",
+	},
+	"F15-ac8-ring-no-user-agent-turns-on": {
+		criterion: "AC8", target: "TestFocus_RingClearsBothTheControlFillAndTheSurfaceBehindIt",
+		old: "  :focus-visible { outline:var(--focus-w) solid var(--focus);\n    outline-offset:var(--focus-offset); border-radius:var(--radius-sm); }",
+		new: "  @media (min-width: 99999px) {\n  :focus-visible { outline:var(--focus-w) solid var(--focus);\n    outline-offset:var(--focus-offset); border-radius:var(--radius-sm); }\n  }",
+		why: "the page's only :focus-visible rule sits inside `@media (min-width: 99999px)`, so NO control draws a focus indicator at any viewport a person has, in either theme",
+	},
+	"F15-ac8-ring-only-under-a-reduced-motion-preference": {
+		criterion: "AC8", target: "TestFocus_RingClearsBothTheControlFillAndTheSurfaceBehindIt",
+		old: "  :focus-visible { outline:var(--focus-w) solid var(--focus);\n    outline-offset:var(--focus-offset); border-radius:var(--radius-sm); }",
+		new: "  @media (prefers-reduced-motion: reduce) {\n  :focus-visible { outline:var(--focus-w) solid var(--focus);\n    outline-offset:var(--focus-offset); border-radius:var(--radius-sm); }\n  }",
+		why: "the ring exists only for a user who asked for reduced motion, so every other keyboard operator tabs through all five controls with no indicator at all",
+	},
+	"hard-ac8-ring-only-in-the-light-theme": {
+		criterion: "AC8", target: "TestFocus_RingClearsBothTheControlFillAndTheSurfaceBehindIt",
+		old: "  :focus-visible { outline:var(--focus-w) solid var(--focus);\n    outline-offset:var(--focus-offset); border-radius:var(--radius-sm); }",
+		new: "  @media (prefers-color-scheme: light) {\n  :focus-visible { outline:var(--focus-w) solid var(--focus);\n    outline-offset:var(--focus-offset); border-radius:var(--radius-sm); }\n  }",
+		why: "the ring is declared in one theme only, and AC8 requires it drawn in BOTH - a keyboard operator on the dark page gets none",
+	},
+	"F19-ac8-ring-drawn-inside-the-control": {
+		criterion: "AC8", target: "TestFocus_RingClearsBothTheControlFillAndTheSurfaceBehindIt",
+		old: "outline-offset:var(--focus-offset);", new: "outline-offset:-8px;",
+		why: "a negative offset draws the ring INSIDE the control's border box, where it never meets the surface immediately behind the control that AC8 measures it against",
+	},
+	"F16-ac9-no-match-text-is-a-dead-constant": {
+		criterion: "AC9", target: "TestFilter_ANonMatchingTermSaysSoAndSaysTheLoadedRowsAreCapped",
+		old: `const NO_MATCH_TEXT = "No loaded row matches this filter. The rows loaded here are "`,
+		new: `const NO_MATCH_TEXT = "n/a";` + "\n" +
+			`const NO_MATCH_TEXT_OLD = "No loaded row matches this filter. The rows loaded here are "`,
+		why: "the value the no-match row is built from is \"n/a\" while AC9's two sentences survive in a constant nothing reads, so the row an operator sees on a non-matching term states neither that no loaded row matches nor that the loaded rows are capped",
+	},
+	"hard-ac9-row-built-from-a-literal-instead-of-the-constant": {
+		criterion: "AC9", target: "TestFilter_ANonMatchingTermSaysSoAndSaysTheLoadedRowsAreCapped",
+		old: `const td = mk("td", "empty", NO_MATCH_TEXT);`, new: `const td = mk("td", "empty", "n/a");`,
+		why: "the render site stops reading the constant whose value the wording is asserted on, so the two halves of the proof come apart from the other end",
+	},
+	"F17-ac10-empty-row-renders-a-blank-cell": {
+		criterion: "AC10", target: "TestDegradedStates_CopySurvivesVerbatimAndStaysLegibleInBothThemes",
+		old: `  const td = mk("td", "empty", text);`, new: `  const td = mk("td", "empty", "");`,
+		why: "emptyRow builds its cell with an EMPTY string, so an empty queue and an empty history each render a blank row and the operator is shown a table that says nothing - with both call sites reading exactly as pinned",
+	},
+	"hard-ac10-empty-row-built-and-never-appended": {
+		criterion: "AC10", target: "TestDegradedStates_CopySurvivesVerbatimAndStaysLegibleInBothThemes",
+		old: `  if (!q.length) qbody.appendChild(emptyRow(5, "Nothing queued."));`, new: `  if (!q.length) emptyRow(5, "Nothing queued.");`,
+		why: "the empty-queue row is built and never put into the table, which is finding F1's build-then-do-not-show shape in AC10's position",
+	},
+	"F18-ac5-motion-behind-the-vendor-prefix": {
+		criterion: "AC5", target: "TestMotion_NoStateDependsOnItAndAReducePreferenceStopsIt",
+		old: "  .tablewrap { overflow-x:auto; }",
+		new: "  @-webkit-keyframes pulse { from { opacity:0; } to { opacity:1; } }\n" +
+			"  .st-encoding .dot { -webkit-animation:pulse 2s infinite; }\n" +
+			"  .tablewrap { overflow-x:auto; }",
+		why: "the page's motion is written entirely through the WebKit prefix, which both WebKit and Blink still honour, so a user who asked for reduced motion watches the encoding dot pulse forever while the reduce block cuts transition-duration only",
+	},
+	"hard-ac5-animation-behind-the-vendor-prefix": {
+		criterion: "AC5", target: "TestMotion_NoStateDependsOnItAndAReducePreferenceStopsIt",
+		old: "  .dot { display:inline-block;", new: "  .dot { -webkit-animation:pulse 2s infinite; display:inline-block;",
+		why: "a state arrives by animation, spelled with the vendor prefix, so it is not readable from a static frame",
+	},
 }
 
 // s0035Holes are the edits that violate their criterion and that the committed
