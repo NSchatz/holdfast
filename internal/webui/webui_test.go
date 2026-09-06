@@ -675,22 +675,37 @@ func ratio(t *testing.T, tokens map[string]string, a, b string) float64 {
 	return contrastRatio(t, ha, hb)
 }
 
-// pxOf reads a px length out of a token reference or a literal. Anything that is
-// not a px length (a percentage, auto, a keyword) reads 0, which is never the
-// unsafe direction for the two sweeps that use it.
-func pxOf(tokens map[string]string, v string) float64 {
+// measuredPx resolves a length through any single token reference and reports
+// whether it could be measured at all. It is deliberately the only reader of a
+// length in this file: a sweep that cannot measure a value has to SAY so, because
+// the alternative - scoring it and moving on - is how a 60em width scores 0 and
+// clears a "wider than the breakpoint" test.
+func measuredPx(tokens map[string]string, v string) (float64, bool) {
 	v = strings.TrimSpace(v)
 	if refs := varRefs(v); len(refs) == 1 {
 		v = strings.TrimSpace(resolveToken(tokens, refs[0]))
 	}
 	if !strings.HasSuffix(v, "px") {
-		return 0
+		return 0, false
 	}
 	f, err := strconv.ParseFloat(strings.TrimSuffix(v, "px"), 64)
 	if err != nil {
+		return 0, false
+	}
+	return f, true
+}
+
+// pxOf reads an unmeasurable length as 0. That is safe for a FLOOR sweep and only
+// for a floor sweep: 0 is under every floor, so an unreadable value reds there. A
+// sweep asking whether a length is too LARGE must not use it - 0 clears every
+// ceiling - and the AC6 width sweep therefore reads its lengths itself and refuses
+// the ones it cannot measure.
+func pxOf(tokens map[string]string, v string) float64 {
+	px, ok := measuredPx(tokens, v)
+	if !ok {
 		return 0
 	}
-	return f
+	return px
 }
 
 // disabledOnly reports whether a selector applies ONLY to a disabled control, which
@@ -741,6 +756,81 @@ var nonColourKeywords = map[string]bool{
 	"overline": true, "line-through": true, "auto": true,
 }
 
+// cssNamedColours is the CSS Color 4 <named-color> set. A hex literal and a colour
+// function are refused in EVERY declaration by the two patterns above; the whitelist
+// sweep catches a bare word, but only where isColourProp says a colour may appear,
+// and that list cannot name every property that accepts one (background-image, mask,
+// filter, the border-block/border-inline family, a shorthand yet to be invented).
+// So a named colour is refused everywhere too, by NAME rather than by exclusion -
+// which is precise enough to run over a font stack or a url() without inventing a
+// violation.
+var cssNamedColours = map[string]bool{
+	"aliceblue": true, "antiquewhite": true, "aqua": true, "aquamarine": true, "azure": true,
+	"beige": true, "bisque": true, "black": true, "blanchedalmond": true, "blue": true,
+	"blueviolet": true, "brown": true, "burlywood": true, "cadetblue": true, "chartreuse": true,
+	"chocolate": true, "coral": true, "cornflowerblue": true, "cornsilk": true, "crimson": true,
+	"cyan": true, "darkblue": true, "darkcyan": true, "darkgoldenrod": true, "darkgray": true,
+	"darkgreen": true, "darkgrey": true, "darkkhaki": true, "darkmagenta": true,
+	"darkolivegreen": true, "darkorange": true, "darkorchid": true, "darkred": true,
+	"darksalmon": true, "darkseagreen": true, "darkslateblue": true, "darkslategray": true,
+	"darkslategrey": true, "darkturquoise": true, "darkviolet": true, "deeppink": true,
+	"deepskyblue": true, "dimgray": true, "dimgrey": true, "dodgerblue": true, "firebrick": true,
+	"floralwhite": true, "forestgreen": true, "fuchsia": true, "gainsboro": true,
+	"ghostwhite": true, "gold": true, "goldenrod": true, "gray": true, "green": true,
+	"greenyellow": true, "grey": true, "honeydew": true, "hotpink": true, "indianred": true,
+	"indigo": true, "ivory": true, "khaki": true, "lavender": true, "lavenderblush": true,
+	"lawngreen": true, "lemonchiffon": true, "lightblue": true, "lightcoral": true,
+	"lightcyan": true, "lightgoldenrodyellow": true, "lightgray": true, "lightgreen": true,
+	"lightgrey": true, "lightpink": true, "lightsalmon": true, "lightseagreen": true,
+	"lightskyblue": true, "lightslategray": true, "lightslategrey": true, "lightsteelblue": true,
+	"lightyellow": true, "lime": true, "limegreen": true, "linen": true, "magenta": true,
+	"maroon": true, "mediumaquamarine": true, "mediumblue": true, "mediumorchid": true,
+	"mediumpurple": true, "mediumseagreen": true, "mediumslateblue": true,
+	"mediumspringgreen": true, "mediumturquoise": true, "mediumvioletred": true,
+	"midnightblue": true, "mintcream": true, "mistyrose": true, "moccasin": true,
+	"navajowhite": true, "navy": true, "oldlace": true, "olive": true, "olivedrab": true,
+	"orange": true, "orangered": true, "orchid": true, "palegoldenrod": true, "palegreen": true,
+	"paleturquoise": true, "palevioletred": true, "papayawhip": true, "peachpuff": true,
+	"peru": true, "pink": true, "plum": true, "powderblue": true, "purple": true,
+	"rebeccapurple": true, "red": true, "rosybrown": true, "royalblue": true,
+	"saddlebrown": true, "salmon": true, "sandybrown": true, "seagreen": true, "seashell": true,
+	"sienna": true, "silver": true, "skyblue": true, "slateblue": true, "slategray": true,
+	"slategrey": true, "snow": true, "springgreen": true, "steelblue": true, "tan": true,
+	"teal": true, "thistle": true, "tomato": true, "turquoise": true, "violet": true,
+	"wheat": true, "white": true, "whitesmoke": true, "yellow": true, "yellowgreen": true,
+}
+
+// identifierProps take an author-chosen NAME as a value (a font family, a grid
+// area, an animation), where a word that happens to spell a colour is not one.
+var identifierProps = map[string]bool{
+	"font": true, "font-family": true, "grid-area": true, "grid-row": true,
+	"grid-row-start": true, "grid-row-end": true, "grid-column": true,
+	"grid-column-start": true, "grid-column-end": true, "grid-template-areas": true,
+	"animation": true, "animation-name": true, "counter-reset": true,
+	"counter-increment": true, "content": true, "will-change": true,
+	"transition-property": true,
+}
+
+var quotedString = regexp.MustCompile(`"[^"]*"|'[^']*'`)
+
+// namedColoursIn reports the CSS named colours a declaration writes at its point
+// of use, ignoring anything inside a var() reference or a quoted string.
+func namedColoursIn(prop, value string) []string {
+	if identifierProps[prop] {
+		return nil
+	}
+	rest := quotedString.ReplaceAllString(varCall.ReplaceAllString(value, " "), " ")
+	var out []string
+	for _, w := range strings.FieldsFunc(rest, func(c rune) bool {
+		return c == ' ' || c == ',' || c == '(' || c == ')' || c == '/'
+	}) {
+		if cssNamedColours[strings.ToLower(w)] {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
 func TestTokens_EveryColourIsDeclaredInATokenBlock(t *testing.T) {
 	rules := parseCSS(t)
 	checked := 0
@@ -756,6 +846,13 @@ func TestTokens_EveryColourIsDeclaredInATokenBlock(t *testing.T) {
 				t.Errorf("%s { %s: %s } writes a colour function at its point of use; declare it in :root and reference it as var(--...)", r.sel, d.prop, d.value)
 			}
 			if !isColourProp(d.prop) {
+				// A property this file does not list as colour-bearing may still take
+				// one - background-image, mask, filter, a border-block shorthand. The
+				// named-colour set is checked by name there, so `background-image:
+				// linear-gradient(red, blue)` reds like `color:red` does.
+				for _, w := range namedColoursIn(d.prop, d.value) {
+					t.Errorf("%s { %s: %s } names the colour %q at its point of use; every colour must come from a token", r.sel, d.prop, d.value, w)
+				}
 				continue
 			}
 			checked++
@@ -1234,6 +1331,15 @@ func TestMotion_NoStateDependsOnItAndAReducePreferenceStopsIt(t *testing.T) {
 
 var maxWidthRe = regexp.MustCompile(`max-width\s*:\s*([0-9.]+)px`)
 
+// containerRelativeWidths are the width / min-width values that are not lengths
+// and that cannot make a box wider than the one containing it, whatever the
+// viewport - so the sweep below may pass over them without measuring one.
+// max-content is deliberately absent: it is exactly how a wide box overflows.
+var containerRelativeWidths = map[string]bool{
+	"auto": true, "0": true, "min-content": true, "fit-content": true,
+	"inherit": true, "initial": true, "unset": true, "revert": true,
+}
+
 func TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody(t *testing.T) {
 	rules := parseCSS(t)
 	dark, _ := themeTokens(t, rules)
@@ -1270,23 +1376,79 @@ func TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody(t *testing.T
 	// Nothing outside a .tablewrap may assert a width or a minimum width wider than
 	// the narrow viewport, or the page BODY scrolls sideways. The two data tables
 	// keep scrolling inside their own .tablewrap, which is how they behave today.
+	//
+	// RESOLVABLE OR RED, the same discipline the contrast derivation is built on: a
+	// declared width is either measured against the breakpoint, or it is one of the
+	// container-relative values that provably cannot exceed the box it sits in, or
+	// the sweep FAILS on it. Reading an unmeasurable length as zero is what let a
+	// `min-width:60em` - 840px at this page's base size - clear a 360px ceiling in
+	// silence, and em-family lengths are already in this stylesheet's idiom
+	// (`max-width:70ch`, `max-width:80ch`).
+	swept := 0
 	for _, r := range rules {
 		if strings.Contains(r.sel, "tablewrap") {
 			continue
 		}
 		for _, prop := range []string{"width", "min-width"} {
-			v := r.get(prop)
+			v := strings.TrimSpace(strings.ReplaceAll(r.get(prop), "!important", ""))
 			if v == "" {
 				continue
 			}
-			if px := pxOf(dark, v); px > narrow {
+			swept++
+			if containerRelativeWidths[strings.ToLower(v)] {
+				continue
+			}
+			if percentage.MatchString(v) {
+				if pct, err := strconv.ParseFloat(strings.TrimSuffix(v, "%"), 64); err == nil && pct <= 100 {
+					continue
+				}
+				t.Errorf("%s { %s: %s } is wider than the box that contains it, so the page body scrolls sideways at any viewport", r.sel, prop, v)
+				continue
+			}
+			px, ok := measuredPx(dark, v)
+			if !ok {
+				t.Errorf("%s { %s: %s } is a length this sweep cannot measure, so it cannot be shown to fit the %gpx narrow viewport: express it in px, or as auto / a percentage / min-content / fit-content, which cannot exceed the box they sit in",
+					r.sel, prop, v, narrow)
+				continue
+			}
+			if px > narrow {
 				t.Errorf("%s { %s: %s } is wider than the %gpx narrow viewport, so the page body itself scrolls sideways", r.sel, prop, v, narrow)
 			}
 		}
 	}
+	if swept == 0 {
+		t.Fatal("the width sweep examined no declaration - it is not reading the stylesheet")
+	}
 }
 
 // --- AC9: a filter term that matches nothing -----------------------------------
+
+// funcBody returns the brace-matched body of the function the page declares with
+// the given header, so an assertion can be made about that function's own text
+// rather than about the whole page - which is what makes an ORDERED sweep mean
+// anything. A header that is gone is fatal: a proof cannot pass because the thing
+// it grades has been renamed out from under it.
+func funcBody(t *testing.T, s, header string) string {
+	t.Helper()
+	i := strings.Index(s, header)
+	if i < 0 {
+		t.Fatalf("the page no longer declares %q", header)
+	}
+	depth, k := 0, i+len(header)-1 // the header ends with its opening brace
+	for ; k < len(s); k++ {
+		switch s[k] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[i+len(header) : k]
+			}
+		}
+	}
+	t.Fatalf("%q is never closed", header)
+	return ""
+}
 
 func TestFilter_ANonMatchingTermSaysSoAndSaysTheLoadedRowsAreCapped(t *testing.T) {
 	s := string(indexHTML)
@@ -1313,6 +1475,34 @@ func TestFilter_ANonMatchingTermSaysSoAndSaysTheLoadedRowsAreCapped(t *testing.T
 	// other row (TestRenderIdiom forbids the HTML string sinks page-wide).
 	if !strings.Contains(s, "const tr = document.createElement(\"tr\");\n  tr.dataset.nomatch = \"1\";") {
 		t.Error("the no-match row is not built with createElement")
+	}
+	// A list of substrings grades the PARTS and not the PATH: every fragment above
+	// survives a page that builds the row, gives it its span, and then never puts it
+	// into the table - which leaves both bodies silently blank on a non-matching
+	// term, the exact state this criterion exists to end. So the whole construction
+	// path is asserted as an ORDERED sequence inside setNoMatchRow's own body:
+	// dropping any one step reds, and so does building the row after inserting it.
+	fn := funcBody(t, s, "function setNoMatchRow(body, want) {")
+	at := 0
+	for _, step := range []string{
+		`const existing = body.querySelector("tr[data-nomatch]");`,
+		`if (!want) { if (existing) existing.remove(); return; }`,
+		`if (existing) return;`,
+		`const table = body.closest("table");`,
+		`const cols = table ? table.querySelectorAll("thead th").length : 1;`,
+		`const tr = document.createElement("tr");`,
+		`tr.dataset.nomatch = "1";`,
+		`const td = mk("td", "empty", NO_MATCH_TEXT);`,
+		`td.colSpan = cols;`,
+		`tr.appendChild(td);`,
+		`body.appendChild(tr);`,
+	} {
+		k := strings.Index(fn[at:], step)
+		if k < 0 {
+			t.Errorf("setNoMatchRow no longer carries %q, in that order: the message the criterion demands never reaches the table body, so a non-matching term empties it in silence", step)
+			continue
+		}
+		at += k + len(step)
 	}
 	// It has to be reachable: applyFilter is what the input event and every render
 	// call, and the term is read from the filter box.
