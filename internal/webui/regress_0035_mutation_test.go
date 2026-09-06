@@ -510,6 +510,147 @@ var s0035Mutations = map[string]mutation{
 		old: "  #msg { font-size:var(--fs-md);", new: "  #rescan { transform:matrix(0.4, 0, 0, 0.4, 0, 0); }\n  #msg { font-size:var(--fs-md);",
 		why: "the same shrink written as a matrix, which this reader cannot evaluate - and a scale it cannot evaluate must red rather than be scored as harmless, the way an unmeasurable length already does",
 	},
+
+	// -----------------------------------------------------------------------
+	// The RENDERED graders (impl-gate findings F27, F28 and F29; conductor
+	// ruling "the kill is withdrawn", 2026-09-06). Everything above this block
+	// grades a criterion by reading the page's source, and five ordinals showed
+	// what that cannot decide: what a token resolves to at the element that
+	// USES it, which of two layout properties is live, and whether a node an
+	// operator must read is on the screen. The graders named below load the page
+	// in a real browser and assert on what the engine drew, and every case here
+	// is the positive control for one of them - the edit violates the criterion
+	// and the rendered grader FAILS on it.
+	//
+	// The first six are the exact mutations the ordinal-6 verdict cut into the
+	// page to show the old graders could not fail.
+	// -----------------------------------------------------------------------
+
+	"rendered-ac3-token-redefined-below-root": {
+		criterion: "AC3", target: "TestRendered_EveryTextThePagePaintsClearsItsContrastFloor",
+		old: "</style>", new: "  body { --fg:var(--line); }\n</style>",
+		why: "--fg is re-declared on body, so every element that inherits it paints its text in --line and 60-odd rendered elements fall under the 4.5:1 floor - while the source reader resolves the token from the :root blocks alone and reports the value nothing is painted with (impl-gate F27)",
+	},
+	"rendered-ac3-a-painted-pair-pushed-under-its-floor": {
+		criterion: "AC3", target: "TestRendered_EveryTextThePagePaintsClearsItsContrastFloor",
+		old: "--muted:#9aa3b4;", new: "--muted:#4a5160;",
+		why: "the muted text token is darkened until the pairs it paints fall under the 4.5:1 floor in the dark theme",
+	},
+	"rendered-ac10-honest-absence-illegible": {
+		criterion: "AC3, AC10", target: "TestRendered_EveryTextThePagePaintsClearsItsContrastFloor",
+		old: ".nr { color:var(--muted);", new: ".nr { color:var(--line);",
+		why: "`not recorded`, `unknown` and `unavailable` are painted in the hairline colour, so the honest-absence copy is on the screen and cannot be read",
+	},
+	"rendered-ac10-refusal-message-illegible": {
+		criterion: "AC3, AC10", target: "TestRendered_EveryTextThePagePaintsClearsItsContrastFloor",
+		old: "  #msg.err { color:var(--bad); --paints-on:var(--bg); }", new: "  #msg.err { color:var(--line); --paints-on:var(--bg); }",
+		why: "the 401 / 403 refusal is painted in the hairline colour - a state no snapshot can reach, and one this sweep only measures because it drives the page's own control() against a refusing transport",
+	},
+	"rendered-ac10-reconnecting-state-illegible": {
+		criterion: "AC3, AC10", target: "TestRendered_EveryTextThePagePaintsClearsItsContrastFloor",
+		old: "  #conn.down { color:var(--bad); --paints-on:var(--panel); }", new: "  #conn.down { color:var(--line); --paints-on:var(--panel); }",
+		why: "the reconnecting connection state is painted in the hairline colour - again a state reached only by dropping the page's own live stream",
+	},
+	"rendered-ac4-color-scheme-names-one-ident": {
+		criterion: "AC4", target: "TestRendered_BothThemesArePaintedAndColorSchemeFollowsThem",
+		old: "color-scheme: light dark;", new: "color-scheme: lightdark;",
+		why: "color-scheme names a single unrecognised custom-ident, so the document opts into NEITHER scheme and native controls, scrollbars and form fields stay light inside a dark page; the computed value is read as a list of idents rather than searched as a string",
+	},
+	"rendered-ac4-the-light-set-is-the-dark-set": {
+		criterion: "AC4", target: "TestRendered_BothThemesArePaintedAndColorSchemeFollowsThem",
+		old: "      --bg:#f6f7f9;", new: "      --bg:#0f1115;",
+		why: "the light theme paints the page surface the dark one does, so the browser draws the same body background under both colour preferences and there is one theme, not two",
+	},
+	"rendered-ac5-motion-survives-a-reduce-preference": {
+		criterion: "AC5", target: "TestRendered_AReducePreferenceLeavesNoPerceptibleMotion",
+		old: "transition-duration:0.01ms !important;", new: "transition-duration:400ms !important;",
+		why: "a user who asked for reduced motion gets 400ms transitions back, measured as the duration the engine COMPUTED for each element rather than as the declaration that set it",
+	},
+	"rendered-ac5-a-state-arrives-by-animation": {
+		criterion: "AC5", target: "TestRendered_AReducePreferenceLeavesNoPerceptibleMotion",
+		old: "  .dot { display:inline-block;", new: "  .dot { animation:pulse 2s infinite; display:inline-block;",
+		why: "an element animates, so a state is no longer readable from a static frame",
+	},
+	"rendered-ac6-single-column-undone-by-the-display-property": {
+		criterion: "AC6", target: "TestRendered_TheNarrowViewportIsOneColumnAndTheBodyDoesNotScrollSideways",
+		old: "</style>",
+		new: "  @media (max-width: 640px) {\n" +
+			"    .controls { display:grid; grid-template-columns:1fr 1fr; }\n" +
+			"    #aggregates { display:flex; }\n" +
+			"  }\n</style>",
+		why: "at 360px the control rows lay out in TWO columns and the aggregate cards in a ROW, because `display` decides which of flex-direction and grid-template-columns is live at all - and both rules leave the declaration a source reader looks for exactly where it was (impl-gate F28)",
+	},
+	"rendered-ac6-body-scrolls-sideways-with-no-width-declared": {
+		criterion: "AC6", target: "TestRendered_TheNarrowViewportIsOneColumnAndTheBodyDoesNotScrollSideways",
+		old: "</style>", new: "  section .note { white-space:nowrap; }\n</style>",
+		why: "the page's own explanatory prose is laid out on one unwrapped line, so the BODY scrolls sideways at 360px - the harm AC6 names in its own words - through a property that is neither a width nor a minimum width (impl-gate F28)",
+	},
+	"rendered-ac6-a-region-forced-wider-than-the-viewport": {
+		criterion: "AC6", target: "TestRendered_TheNarrowViewportIsOneColumnAndTheBodyDoesNotScrollSideways",
+		old: "min-width:96px;", new: "min-width:960px;",
+		why: "an element outside a .tablewrap renders 960 CSS px wide at the 360px viewport, so the page body scrolls sideways",
+	},
+	"rendered-ac7-token-redefined-on-the-control-row": {
+		criterion: "AC7", target: "TestRendered_EveryPointerTargetClearsTheTwentyFourPixelFloorAsLaidOut",
+		old: "</style>", new: "  .controls { --target-min:8px; --sp-3:0px; --fs-md:8px; }\n</style>",
+		why: "--target-min, --sp-3 and --fs-md are re-declared on the control rows, so every button and input inside them RENDERS at 11 CSS px, under WCAG 2.2 2.5.8's 24px floor, while a source reader resolves var(--target-min) from :root and reads 32px (impl-gate F27)",
+	},
+	"rendered-ac7-target-shrunk-by-an-ancestor-transform": {
+		criterion: "AC7", target: "TestRendered_EveryPointerTargetClearsTheTwentyFourPixelFloorAsLaidOut",
+		old: "  #msg { font-size:var(--fs-md);", new: "  .controls { transform:scale(0.4); }\n  #msg { font-size:var(--fs-md);",
+		why: "the scale is declared on the row that CONTAINS the controls, so every target inside it is laid out at 12.8 CSS px while no rule reaching a target says so",
+	},
+	"rendered-ac8-ring-invisible-on-the-primary-button": {
+		criterion: "AC8", target: "TestRendered_TheFocusRingIsDrawnAndClearsBothSidesInBothThemes",
+		old: "--focus:#ffffff;", new: "--focus:#1d4f7c;",
+		why: "the focus ring is the primary button's own fill, so a keyboard operator tabbing to Rescan sees nothing on the control the ring is marking",
+	},
+	"rendered-ac8-focus-token-redefined-on-the-control-row": {
+		criterion: "AC8", target: "TestRendered_TheFocusRingIsDrawnAndClearsBothSidesInBothThemes",
+		old: "</style>", new: "  .controls { --focus:var(--btn-primary-bg); }\n</style>",
+		why: "--focus is re-declared on the rows that hold every control, so the ring RENDERS in the primary button's own fill in both themes while the :root value a source reader resolves is untouched - impl-gate F27's shape at AC8",
+	},
+	"rendered-ac8-ring-switched-off-on-the-primary-button": {
+		criterion: "AC8", target: "TestRendered_TheFocusRingIsDrawnAndClearsBothSidesInBothThemes",
+		old: "  /* An off-screen but screen-reader-available region",
+		new: "  button.primary:focus-visible { outline:none; }\n  /* An off-screen but screen-reader-available region",
+		why: "a more specific :focus-visible rule switches the ring off on the one control AC8 names by hand, and the engine draws no outline at all",
+	},
+	"rendered-ac9-no-match-row-never-inserted": {
+		criterion: "AC9", target: "TestRendered_EveryDegradedStateReachesTheScreen",
+		old: "\n  body.appendChild(tr);", new: "",
+		why: "the no-match row is built, given its colSpan and never put into the table body, so a term matching no loaded row empties both tables in silence - the state AC9 exists to end",
+	},
+	"rendered-ac9-no-match-row-inserted-then-hidden": {
+		criterion: "AC9", target: "TestRendered_EveryDegradedStateReachesTheScreen",
+		old: "  body.appendChild(tr);", new: "  tr.hidden = true;\n  body.appendChild(tr);",
+		why: "the no-match row is constructed in the pinned order and inserted, and is then not VISIBLE",
+	},
+	"rendered-ac10-mk-renders-no-text": {
+		criterion: "AC9, AC10", target: "TestRendered_EveryDegradedStateReachesTheScreen",
+		old: "  if (text != null) e.textContent = text;", new: "  if (text != null) e.textContent = \"\";",
+		why: "the one node factory every degraded state renders through stops writing the text it is handed, so `Nothing queued.`, `No history yet.`, `unavailable`, `not recorded`, `unknown` and AC9's whole sentence render as empty cells",
+	},
+	"rendered-ac10-empty-row-inserted-then-hidden": {
+		criterion: "AC10", target: "TestRendered_EveryDegradedStateReachesTheScreen",
+		old: "  tr.dataset.empty = \"1\";", new: "  tr.dataset.empty = \"1\";\n  tr.hidden = true;",
+		why: "the empty-queue and empty-history rows are built, filled and appended, and are then not on the screen",
+	},
+	"rendered-ac10-cap-notice-written-then-hidden": {
+		criterion: "AC10", target: "TestRendered_EveryDegradedStateReachesTheScreen",
+		old: "    el.hidden = false;", new: "    el.hidden = true;",
+		why: "the row-cap notice is written into its element on the branch that exists to SHOW it and then hidden, so a truncated view reads as the whole ledger",
+	},
+	"rendered-ac10-cap-notice-hidden-by-a-rule-naming-its-own-id": {
+		criterion: "AC10", target: "TestRendered_EveryDegradedStateReachesTheScreen",
+		old: "</style>", new: "  #queue-cap { display:none; }\n</style>",
+		why: "`this view is capped` is written into the queue's cap notice and painted off the page by a rule addressing that very node by the id the page gives it (impl-gate F29)",
+	},
+	"rendered-ac9-degraded-states-hidden-by-an-ancestor": {
+		criterion: "AC9, AC10", target: "TestRendered_EveryDegradedStateReachesTheScreen",
+		old: "</style>", new: "  .tablewrap { display:none; }\n</style>",
+		why: "`Nothing queued.`, `No history yet.` and AC9's whole no-match sentence are built, filled, appended and never seen, because display:none on an ANCESTOR takes the subtree off the page (impl-gate F29)",
+	},
 }
 
 // s0035Holes are the edits that violate their criterion and that the committed

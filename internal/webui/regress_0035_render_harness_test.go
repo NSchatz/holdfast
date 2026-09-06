@@ -41,7 +41,14 @@ import (
 	"time"
 )
 
-const chromiumBin = "/usr/bin/chromium"
+// chromiumBin is the browser every rendered grader in this package drives. It is
+// /usr/bin/chromium here; renderBrowserPath (webui_test.go) tries that first and
+// then the names the same binary carries on other hosts, so the committed
+// rendered graders are not pinned to one container's layout. It is deliberately
+// NOT a fall-back to "grade it from the CSS text instead": render() fails naming
+// this path when no browser is found, because a criterion about what the page
+// draws is UNGRADED without one.
+var chromiumBin = renderBrowserPath()
 
 // --- the mutations, and the child process that carries one --------------------
 

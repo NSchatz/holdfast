@@ -5,9 +5,12 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -3976,6 +3979,1296 @@ func TestDegradedStates_CopySurvivesVerbatimAndStaysLegibleInBothThemes(t *testi
 					t.Errorf("%s { %s: %s } reaches the node that renders %s and takes it off the page; AC10's verb is RENDER, so a state painted to a floor nobody can see is a state that is not reported",
 						r.sel, d.prop, d.value, st.state)
 				}
+			}
+		}
+	}
+}
+
+// =============================================================================
+// THE RENDERED GRADERS
+//
+// Everything above this line reads the page's SOURCE. That is the right
+// instrument for AC1 and AC2 - properties of what the stylesheet SAYS - and the
+// wrong one for every criterion that is a property of what an engine DRAWS:
+//
+//   - a custom property is INHERITED, so `body { --fg:var(--line) }` repaints a
+//     whole subtree while a reader that resolves tokens from the :root blocks
+//     alone still reports the :root value, and `.controls { --target-min:8px }`
+//     re-measures every pointer target the same way (impl-gate F27);
+//   - `display` decides which of flex-direction and grid-template-columns is
+//     live at all, and a box overflows its container for reasons that are
+//     neither a width nor a minimum width - `white-space:nowrap` on the page's
+//     own prose scrolls the BODY sideways at 360px (F28);
+//   - whether a node is SHOWN is a property of the box tree, not of the rules
+//     that name it: `display:none` on an ancestor, or on the state's own id,
+//     takes it off the screen while it is still built, filled and appended
+//     exactly as every source pin above requires (F29).
+//
+// So the criteria that are about a render are graded here BY RENDERING. The page
+// is served through webui.Handler() with its real Content-Security-Policy, drawn
+// by the container's own headless browser, and driven through its own script: a
+// real SSE snapshot, its own render(), the real filter box, its own control()
+// against a refusing transport, and its own EventSource error handler. Every
+// number below is one the engine computed.
+//
+// These graders do not replace the source graders, they close what a source
+// grader cannot decide. AC3's derivation over the WHOLE stylesheet still catches
+// a painted pair no fixture here reaches; this file catches the pair the
+// stylesheet does not spell.
+// =============================================================================
+
+// renderBrowserPath finds the browser these graders drive. /usr/bin/chromium is
+// this container's and is tried first; the rest are names the same binary
+// carries on other hosts. There is deliberately NO fall-back to "decide it from
+// the CSS text instead": render() fails naming this path when nothing is found,
+// because a criterion about what the page draws is UNGRADED without an engine,
+// and a skipped render grader is an ungraded criterion wearing a green tick.
+func renderBrowserPath() string {
+	if p := os.Getenv("HOLDFAST_TEST_BROWSER"); p != "" {
+		return p
+	}
+	for _, p := range []string{
+		"/usr/bin/chromium",
+		"/usr/bin/chromium-browser",
+		"/usr/bin/google-chrome",
+		"/usr/bin/google-chrome-stable",
+		"/snap/bin/chromium",
+	} {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p
+		}
+	}
+	return "/usr/bin/chromium"
+}
+
+// --- the fixtures -------------------------------------------------------------
+//
+// Three snapshots and two viewports. Between them every rule the stylesheet
+// paints with is put on the screen at least once, and every degraded state AC10
+// names is REACHED rather than described.
+//
+// One browser draws all of them. The FIRST state each browser shows arrives on
+// the page's own SSE stream (the driver waits for it before anything here runs,
+// so the transport is proved live); the rest are drawn by calling the page's own
+// render(), which is the function that stream's listener calls with the parsed
+// payload, and which is where every criterion below actually lives. Three
+// browsers instead of eighteen is the difference between a gate that runs and a
+// gate that times out.
+
+// renderedLiveSnapshot is the working page: a capped queue and a capped history
+// (so both cap notices fire), a running encode whose encoder has reported no
+// position (so the progress cell reads `unknown`), a done row that recorded
+// neither encoder, duration nor VMAF (three `not recorded` nodes), an aggregate
+// that could not be read (`unavailable`) and one that counted no contributing
+// row (`not recorded` again).
+const renderedLiveSnapshot = `{
+  "now": 1757200000,
+  "paused": false,
+  "scanning": false,
+  "bytes_reclaimed_lifetime": 123456789,
+  "bytes_reclaimed_session": 4096,
+  "summary": {"pending": 40, "probing": 1, "encoding": 1, "verifying": 1,
+              "done": 90, "skipped": 5, "failed": 5},
+  "queue": [
+    {"path": "/media/alpha.mkv", "status": "encoding", "updated_at": 1757199900, "worker": "w1"},
+    {"path": "/media/bravo.mkv", "status": "pending", "updated_at": 1757199940}
+  ],
+  "history": [
+    {"path": "/media/charlie.mkv", "status": "done", "updated_at": 1757199000,
+     "source_bytes": 4000000000, "output_bytes": 1500000000}
+  ],
+  "aggregates": {
+    "outcomes": {"available": true, "counted": 100, "covers": "every terminal row",
+                 "buckets": [{"key": "done", "count": 90}, {"key": "failed", "count": 5}]},
+    "size_ratio": {"available": false, "unavailable": "the ledger could not be read",
+                   "covers": "every done row"},
+    "encode_ms": {"available": true, "counted": 0, "covers": "every done row"}
+  }
+}`
+
+// renderedRichSnapshot draws what the live one does not: both badges ON (which
+// swaps which of pause/resume is disabled, so between the two fixtures every
+// pointer target is measured while it can take focus), a running encode with a
+// real progress figure, a done row carrying both VMAF statistics and its viewing
+// condition, a failed row with its reason, a skipped row with its guard, and
+// aggregates that report a spread, a window and excluded rows.
+const renderedRichSnapshot = `{
+  "now": 1757200000,
+  "paused": true,
+  "scanning": true,
+  "bytes_reclaimed_lifetime": 987654321,
+  "bytes_reclaimed_session": 262144,
+  "summary": {"pending": 3, "probing": 1, "encoding": 1, "verifying": 1,
+              "done": 12, "skipped": 4, "failed": 2},
+  "queue": [
+    {"path": "/media/delta.mkv", "status": "encoding", "updated_at": 1757199800,
+     "worker": "w2", "progress_fraction": 0.42, "progress_seconds": 300,
+     "progress_duration_seconds": 720},
+    {"path": "/media/echo.mkv", "status": "verifying", "updated_at": 1757199950, "worker": "w1"}
+  ],
+  "history": [
+    {"path": "/media/foxtrot.mkv", "status": "done", "updated_at": 1757199000,
+     "source_bytes": 4000000000, "output_bytes": 1500000000, "encoder": "cpu",
+     "encode_ms": 5400000, "vmaf_mean": 97.4, "vmaf_min": 91.2,
+     "vmaf_model": "version=vmaf_v0.6.1"},
+    {"path": "/media/golf.mkv", "status": "failed", "updated_at": 1757198000,
+     "reason": "verify: packet count differs (source 172800, output 172799)"},
+    {"path": "/media/hotel.mkv", "status": "skipped", "updated_at": 1757197000,
+     "reason": "hardlinked"}
+  ],
+  "aggregates": {
+    "outcomes": {"available": true, "counted": 18, "covers": "every terminal row",
+                 "buckets": [{"key": "done", "count": 12}, {"key": "skipped", "count": 4},
+                             {"key": "failed", "count": 2}]},
+    "skips_by_guard": {"available": true, "counted": 4, "covers": "every skipped row",
+                       "buckets": [{"key": "hardlinked", "count": 3},
+                                   {"key": "low-bitrate", "count": 1}]},
+    "size_ratio": {"available": true, "counted": 12, "excluded": 2, "covers": "every done row",
+                   "window": "the last 90 days", "mean": 0.42, "min": 0.21, "max": 0.77},
+    "encode_ms": {"available": true, "counted": 12, "covers": "every done row",
+                  "mean": 5400000, "min": 900000, "max": 14400000},
+    "vmaf_mean": {"available": true, "counted": 12, "covers": "every scored row",
+                  "mean": 97.1, "min": 95.4, "max": 99.2},
+    "vmaf_min": {"available": false, "unavailable": "the ledger could not be read",
+                 "covers": "every scored row"}
+  }
+}`
+
+// renderedEmptySnapshot draws the two empty-table states.
+const renderedEmptySnapshot = `{
+  "now": 1757200000, "paused": false, "scanning": false,
+  "bytes_reclaimed_lifetime": 0, "bytes_reclaimed_session": 0,
+  "summary": {}, "queue": [], "history": [], "aggregates": {}
+}`
+
+// renderedNarrowWidth is the viewport AC6 is written at.
+const renderedNarrowWidth = 360
+
+// renderedWideWidth is a desktop viewport, where nothing collapses.
+const renderedWideWidth = 1200
+
+// renderedRefusalPrelude runs once per browser, before anything is measured. It
+// records the connection state the LIVE stream left on the screen (the live and
+// the reconnecting states are two different painted pairs and only one of them
+// can be shown at a time), and then drives the two degraded states no snapshot
+// can carry, each through the page's own code:
+//
+//	window.stop() aborts the live SSE request, so the page's real EventSource
+//	error handler runs and #conn goes to its reconnecting state;
+//
+//	fetch is then replaced with a transport that refuses, and the page's own
+//	control() is called - so #msg carries the authorisation message the page
+//	itself writes, painted by the page's own .err rule.
+//
+// Neither is simulated by setting a class this file chose: the page decides the
+// wording and the class, and this only creates the condition.
+func renderedRefusalPrelude(status int) string {
+	return jsHelpers + `
+  var conn = d.getElementById("conn");
+  var ccs = w.getComputedStyle(conn);
+  var cbg = surfaceOf(conn);
+  var cfg = rgbOf(ccs.color);
+  if (cfg && cfg[3] < 1) { cfg = over(cfg, cbg); }
+  w.__liveConn = {
+    sel: sel(conn), text: conn.textContent.slice(0, 72), fg: ccs.color,
+    bg: "rgb(" + Math.round(cbg[0]) + "," + Math.round(cbg[1]) + "," + Math.round(cbg[2]) + ")",
+    size: parseFloat(ccs.fontSize), weight: parseInt(ccs.fontWeight, 10) || 400,
+    large: false, floor: 4.5, ratio: cfg ? contrast(cfg, cbg) : 0, shown: isShown(conn)
+  };
+
+  try { w.stop(); } catch (e) {}
+  w.fetch = function () {
+    return Promise.resolve({
+      status: ` + strconv.Itoa(status) + `,
+      json: function () { return Promise.resolve({}); }
+    });
+  };
+  try { w.control("/api/pause"); } catch (e) {}
+  return;
+`
+}
+
+// --- what one render reports ---------------------------------------------------
+
+type renderedTextEl struct {
+	Sel    string  `json:"sel"`
+	Text   string  `json:"text"`
+	FG     string  `json:"fg"`
+	BG     string  `json:"bg"`
+	Size   float64 `json:"size"`
+	Weight int     `json:"weight"`
+	Large  bool    `json:"large"`
+	Floor  float64 `json:"floor"`
+	Ratio  float64 `json:"ratio"`
+}
+
+// renderedLiveConn is the connection state as the real stream left it, captured
+// before that stream is dropped.
+type renderedLiveConn struct {
+	renderedTextEl
+	Shown bool `json:"shown"`
+}
+
+type renderedNode struct {
+	Shown bool   `json:"shown"`
+	Text  string `json:"text"`
+	Class string `json:"cls"`
+}
+
+type renderedRows struct {
+	All     int `json:"all"`
+	Visible int `json:"visible"`
+}
+
+// renderedState is one moment of the page: every text element the engine
+// painted, the text an operator can actually SEE (page-wide and per region), the
+// state of the nodes the degraded copy is written into, and how many rows of
+// each table body are on the screen rather than merely in it.
+type renderedState struct {
+	Text        []renderedTextEl        `json:"text"`
+	Visible     string                  `json:"visible"`
+	QueueText   string                  `json:"queueText"`
+	HistoryText string                  `json:"historyText"`
+	AggsText    string                  `json:"aggsText"`
+	Nodes       map[string]renderedNode `json:"nodes"`
+	Queue       renderedRows            `json:"queue"`
+	History     renderedRows            `json:"history"`
+}
+
+type renderedTarget struct {
+	ID       string  `json:"id"`
+	W        float64 `json:"w"`
+	H        float64 `json:"h"`
+	Disabled bool    `json:"disabled"`
+}
+
+type renderedFocus struct {
+	ID            string  `json:"id"`
+	Disabled      bool    `json:"disabled"`
+	FocusVisible  bool    `json:"focusVisible"`
+	Style         string  `json:"style"`
+	Width         float64 `json:"width"`
+	Offset        float64 `json:"offset"`
+	Colour        string  `json:"colour"`
+	Fill          string  `json:"fill"`
+	Behind        string  `json:"behind"`
+	AgainstFill   float64 `json:"againstFill"`
+	AgainstBehind float64 `json:"againstBehind"`
+}
+
+type renderedMotionEl struct {
+	Sel          string `json:"sel"`
+	Duration     string `json:"duration"`
+	Delay        string `json:"delay"`
+	AnimName     string `json:"animName"`
+	AnimDuration string `json:"animDuration"`
+}
+
+type renderedLayoutProbe struct {
+	ScrollW  float64        `json:"scrollW"`
+	ClientW  float64        `json:"clientW"`
+	BodyW    float64        `json:"bodyW"`
+	Hosts    map[string]int `json:"hosts"`
+	PerRow   map[string]int `json:"perRow"`
+	Overlaps []string       `json:"overlaps"`
+	Wide     []string       `json:"wide"`
+}
+
+// renderedFixture is one snapshot drawn at one viewport, with the filter driven
+// where there were rows to filter.
+type renderedFixture struct {
+	Name     string              `json:"name"`
+	Width    float64             `json:"width"`
+	Base     renderedState       `json:"base"`
+	Filtered renderedState       `json:"filtered"`
+	Cleared  renderedState       `json:"cleared"`
+	Filters  bool                `json:"filters"`
+	Targets  []renderedTarget    `json:"targets"`
+	Focus    []renderedFocus     `json:"focus"`
+	Layout   renderedLayoutProbe `json:"layout"`
+}
+
+type renderedReport struct {
+	Fixtures    []renderedFixture  `json:"fixtures"`
+	LiveConn    *renderedLiveConn  `json:"liveConn"`
+	Motion      []renderedMotionEl `json:"motion"`
+	ColorScheme string             `json:"colorScheme"`
+	BodyBG      string             `json:"bodyBg"`
+	Dark        bool               `json:"dark"`
+	Light       bool               `json:"light"`
+	Reduce      bool               `json:"reduce"`
+	Width       float64            `json:"width"`
+}
+
+// fixture returns one drawn fixture by name, and fails rather than returning a
+// zero value that would sail through every assertion made about it.
+func (r renderedReport) fixture(t *testing.T, key, name string) renderedFixture {
+	t.Helper()
+	for _, f := range r.Fixtures {
+		if f.Name == name {
+			return f
+		}
+	}
+	t.Fatalf("case %q drew no fixture named %q", key, name)
+	return renderedFixture{}
+}
+
+// --- the measurement, run inside the page under test ---------------------------
+
+// renderedFixtureJS hands the browser the snapshots it will draw. JSON is a
+// subset of the object-literal syntax, so these are the same bytes the SSE
+// stream carries.
+const renderedFixtureJS = `
+  var FIXTURES = [
+    {name: "rich",  filter: true,  focus: true,  snap: ` + renderedRichSnapshot + `},
+    {name: "live",  filter: true,  focus: true,  snap: ` + renderedLiveSnapshot + `},
+    {name: "empty", filter: false, focus: false, snap: ` + renderedEmptySnapshot + `}
+  ];
+`
+
+// renderedMeasureBody reads only values the ENGINE computed: getComputedStyle
+// for every colour and length, the composited surface actually behind a box
+// (walked up the box tree, which is what a browser does and what a --paints-on
+// annotation only claims), getBoundingClientRect for every layout question, and
+// offsetParent plus a non-zero rect for "is this on the screen".
+const renderedMeasureBody = `
+  var rgbStr = function (c) {
+    return "rgb(" + Math.round(c[0]) + "," + Math.round(c[1]) + "," + Math.round(c[2]) + ")";
+  };
+  var CONTROL_IDS = ["token", "rescan", "pause", "resume", "filter"];
+
+  // Every element that renders text of its own, with the colour the engine gave
+  // it measured against the surface a person actually sees behind it. Disabled
+  // controls are exempt, as WCAG 2.2 1.4.3 and 1.4.11 exempt them.
+  var textElements = function () {
+    var out = [];
+    var all = d.body.querySelectorAll("*");
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (!isShown(el)) { continue; }
+      if (el.closest("[disabled]") || el.closest(":disabled")) { continue; }
+      var text = "";
+      for (var k = 0; k < el.childNodes.length; k++) {
+        if (el.childNodes[k].nodeType === 3) { text += el.childNodes[k].nodeValue; }
+      }
+      text = text.replace(/\s+/g, " ").trim();
+      if (!text) { continue; }
+      var cs = w.getComputedStyle(el);
+      var bg = surfaceOf(el);
+      var fg = rgbOf(cs.color);
+      if (!fg) { continue; }
+      if (fg[3] < 1) { fg = over(fg, bg); }
+      var size = parseFloat(cs.fontSize);
+      var weight = parseInt(cs.fontWeight, 10) || 400;
+      var large = size >= 24 || (size >= 18.66 && weight >= 700);
+      out.push({
+        sel: sel(el), text: text.slice(0, 72), fg: cs.color, bg: rgbStr(bg),
+        size: size, weight: weight, large: large,
+        floor: large ? 3 : 4.5, ratio: contrast(fg, bg)
+      });
+    }
+    return out;
+  };
+
+  // The text an operator can see inside one subtree. Rooted, because "unknown"
+  // is also a word in the page's own explanatory prose: a degraded state is
+  // proved by finding it where the page renders it, never anywhere on the page.
+  var shownTextIn = function (root) {
+    if (!root) { return ""; }
+    var out = [];
+    var walk = d.createTreeWalker(root, w.NodeFilter.SHOW_TEXT, null);
+    var n;
+    while ((n = walk.nextNode())) {
+      if (!n.nodeValue.trim()) { continue; }
+      if (!isShown(n.parentElement)) { continue; }
+      out.push(n.nodeValue);
+    }
+    return out.join(" ").replace(/\s+/g, " ");
+  };
+
+  var nodeState = function (id) {
+    var el = d.getElementById(id);
+    if (!el) { return {shown: false, text: "", cls: ""}; }
+    return {
+      shown: isShown(el),
+      text: el.textContent.replace(/\s+/g, " ").trim(),
+      cls: String(el.className || "")
+    };
+  };
+  var rowCount = function (id) {
+    var b = d.getElementById(id), all = 0, vis = 0;
+    if (!b) { return {all: 0, visible: 0}; }
+    for (var i = 0; i < b.children.length; i++) {
+      all++;
+      if (isShown(b.children[i])) { vis++; }
+    }
+    return {all: all, visible: vis};
+  };
+  var stateReport = function () {
+    return {
+      text: textElements(),
+      visible: shownText(),
+      queueText: shownTextIn(d.getElementById("queue")),
+      historyText: shownTextIn(d.getElementById("history")),
+      aggsText: shownTextIn(d.getElementById("aggregates")),
+      nodes: {
+        "queue-cap": nodeState("queue-cap"), "hist-cap": nodeState("hist-cap"),
+        "conn": nodeState("conn"), "msg": nodeState("msg")
+      },
+      queue: rowCount("queue"),
+      history: rowCount("history")
+    };
+  };
+
+  // AC7: the border box each pointer target actually occupies.
+  var targetBoxes = function () {
+    var out = [];
+    for (var i = 0; i < CONTROL_IDS.length; i++) {
+      var el = d.getElementById(CONTROL_IDS[i]);
+      if (!el) { continue; }
+      var r = el.getBoundingClientRect();
+      out.push({id: CONTROL_IDS[i], w: r.width, h: r.height, disabled: !!el.disabled});
+    }
+    return out;
+  };
+
+  // AC8: the indicator the engine draws on keyboard focus, measured against the
+  // control's own RENDERED fill and the surface RENDERED behind it.
+  var focusProbes = function () {
+    var out = [];
+    for (var i = 0; i < CONTROL_IDS.length; i++) {
+      var el = d.getElementById(CONTROL_IDS[i]);
+      if (!el) { continue; }
+      if (el.disabled) { out.push({id: CONTROL_IDS[i], disabled: true}); continue; }
+      el.focus();
+      var cs = w.getComputedStyle(el);
+      var ring = rgbOf(cs.outlineColor);
+      var behind = surfaceOf(el.parentElement);
+      var fill = rgbOf(cs.backgroundColor);
+      if (fill && fill[3] < 1) { fill = over(fill, behind); }
+      if (!fill) { fill = behind; }
+      out.push({
+        id: CONTROL_IDS[i], disabled: false,
+        focusVisible: el.matches(":focus-visible"),
+        style: cs.outlineStyle,
+        width: parseFloat(cs.outlineWidth) || 0,
+        offset: parseFloat(cs.outlineOffset) || 0,
+        colour: cs.outlineColor,
+        fill: rgbStr(fill), behind: rgbStr(behind),
+        againstFill: ring ? contrast(ring, fill) : 0,
+        againstBehind: ring ? contrast(ring, behind) : 0
+      });
+      el.blur();
+    }
+    return out;
+  };
+
+  // AC5: the motion the engine computed, not the motion the stylesheet declared.
+  var motionProbes = function () {
+    var out = [];
+    var all = d.querySelectorAll(
+      "body, header, main, section, .chip, .controls, .controls input, button, .badge," +
+      " .agg, .note, table, tr, th, td, .dot, #conn, #msg");
+    for (var i = 0; i < all.length; i++) {
+      var cs = w.getComputedStyle(all[i]);
+      out.push({
+        sel: sel(all[i]), duration: cs.transitionDuration, delay: cs.transitionDelay,
+        animName: cs.animationName, animDuration: cs.animationDuration
+      });
+    }
+    return out;
+  };
+
+  // AC6: "a single column" and "the body does not scroll sideways", asked of the
+  // boxes rather than of a declaration. Two children share a row when their
+  // vertical bands overlap - which is true whatever property put them there.
+  var layoutProbe = function () {
+    var regions = {
+      "header": [d.querySelector("header")],
+      ".controls": [].slice.call(d.querySelectorAll(".controls")),
+      ".aggs": [d.getElementById("aggregates")]
+    };
+    var perRow = {}, hosts = {}, overlaps = [];
+    for (var key in regions) {
+      var most = 1, found = 0;
+      var list = regions[key];
+      for (var h = 0; h < list.length; h++) {
+        var host = list[h];
+        if (!host) { continue; }
+        found++;
+        var kids = [];
+        for (var c = 0; c < host.children.length; c++) {
+          if (isShown(host.children[c])) { kids.push(host.children[c]); }
+        }
+        for (var a = 0; a < kids.length; a++) {
+          var band = 1;
+          var ra = kids[a].getBoundingClientRect();
+          for (var b = 0; b < kids.length; b++) {
+            if (a === b) { continue; }
+            var rb = kids[b].getBoundingClientRect();
+            if (ra.top < rb.bottom - 0.5 && rb.top < ra.bottom - 0.5) {
+              band++;
+              if (band === 2) {
+                overlaps.push(key + ": " + sel(kids[a]) + " shares a row with " + sel(kids[b]));
+              }
+            }
+          }
+          if (band > most) { most = band; }
+        }
+      }
+      perRow[key] = most;
+      hosts[key] = found;
+    }
+    var clientW = d.documentElement.clientWidth;
+    var wide = [];
+    var all = d.body.querySelectorAll("*");
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (!isShown(el)) { continue; }
+      if (el.closest(".tablewrap")) { continue; }
+      var r = el.getBoundingClientRect();
+      if (r.width > clientW + 0.5 || r.right > clientW + 0.5) {
+        wide.push(sel(el) + " renders " + r.width.toFixed(1) + " CSS px wide, right edge at " +
+          r.right.toFixed(1));
+      }
+    }
+    return {
+      scrollW: d.documentElement.scrollWidth, clientW: clientW, bodyW: d.body.scrollWidth,
+      hosts: hosts, perRow: perRow, overlaps: overlaps, wide: wide
+    };
+  };
+
+  var filterBox = d.getElementById("filter");
+  var setTerm = function (v) {
+    filterBox.value = v;
+    filterBox.dispatchEvent(new w.Event("input", {bubbles: true}));
+  };
+
+  // draw() puts one snapshot on the page at one viewport width and measures the
+  // result. The snapshot goes through the page's OWN render() - the function its
+  // SSE listener calls with the parsed payload - and the width is set on the
+  // frame the page is laid out in, so a media query is re-evaluated by the
+  // engine rather than assumed by this file. Everything from here to the return
+  // is synchronous, so no reconnect or timer can land in the middle of a
+  // measurement.
+  var draw = function (fx, width) {
+    setTerm("");
+    w.frameElement.style.width = width + "px";
+    void d.documentElement.getBoundingClientRect().width;
+    w.render(fx.snap);
+    var out = {
+      name: fx.name, width: d.documentElement.clientWidth,
+      base: stateReport(), targets: targetBoxes(), layout: layoutProbe(), filters: false
+    };
+    if (fx.focus) { out.focus = focusProbes(); }
+    if (fx.filter) {
+      setTerm("zzz-no-such-path-anywhere");
+      out.filtered = stateReport();
+      setTerm("");
+      out.cleared = stateReport();
+      out.filters = true;
+    }
+    return out;
+  };
+
+  if (typeof w.render !== "function") {
+    throw new Error("the page no longer exposes render(); the fixtures below cannot be drawn through the page's own render path");
+  }
+
+  var report = {fixtures: []};
+  report.colorScheme = w.getComputedStyle(d.documentElement).colorScheme;
+  report.bodyBg = w.getComputedStyle(d.body).backgroundColor;
+  report.dark = w.matchMedia("(prefers-color-scheme: dark)").matches;
+  report.light = w.matchMedia("(prefers-color-scheme: light)").matches;
+  report.reduce = w.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  report.width = d.documentElement.clientWidth;
+  report.liveConn = w.__liveConn || null;
+
+  for (var i = 0; i < FIXTURES.length; i++) {
+    report.fixtures.push(draw(FIXTURES[i], __WIDE__));
+  }
+  // The motion the engine computed, with the working page drawn.
+  w.render(FIXTURES[1].snap);
+  report.motion = motionProbes();
+  // ...and the same page at the viewport AC6 is written at.
+  //
+  // Not under a reduce preference, and the reason is the page's own reduce
+  // block: transition-property defaults to "all", so a universal
+  // transition-duration of 0.01ms makes EVERY property transitionable.
+  // Changing the viewport then starts a 0.01ms transition on every length the
+  // breakpoint moves, and a synchronous read lands on its starting value -
+  // main keeps its wide padding for that instant. That is a real transient,
+  // but it is not the layout AC6 is about, so the narrow viewport is measured
+  // in the two cases whose page is not transitioning.
+  if (!report.reduce) {
+    report.fixtures.push(draw(
+      {name: "narrow", snap: FIXTURES[1].snap, filter: false, focus: false}, __NARROW__));
+  }
+  return report;
+`
+
+// renderedMeasure is the whole pass: the helpers, the fixtures, and the stages.
+var renderedMeasure = jsHelpers + renderedFixtureJS + strings.NewReplacer(
+	"__WIDE__", strconv.Itoa(renderedWideWidth),
+	"__NARROW__", strconv.Itoa(renderedNarrowWidth),
+).Replace(renderedMeasureBody)
+
+// --- the cases, and one browser per case per process ---------------------------
+
+// renderedHeight is tall enough that nothing is clipped out of the box tree. It
+// is not a viewport assertion: visibility here is decided by offsetParent and a
+// non-zero rect, neither of which depends on how much of the page is scrolled
+// into view.
+const renderedHeight = 1600
+
+type renderedCase struct {
+	theme   string // "light" or "dark", the colour preference the browser reports
+	reduce  bool
+	prelude string
+	what    string
+}
+
+// renderedCases is the whole measured surface. A colour preference and a motion
+// preference are properties of the USER AGENT, not of the document, so each is a
+// browser of its own; everything else - the snapshot, the viewport - is driven
+// inside the page the browser already has open.
+var renderedCases = map[string]renderedCase{
+	"light": {theme: "light", prelude: renderedRefusalPrelude(403),
+		what: "the light theme, with the stream dropped and a control call refused 403"},
+	"dark": {theme: "dark", prelude: renderedRefusalPrelude(401),
+		what: "the dark theme, with the stream dropped and a control call refused 401"},
+	"reduce": {theme: "light", reduce: true,
+		what: "a user who asked for reduced motion, with the stream still live"},
+}
+
+// renderedExpectedFixtures is every fixture a case draws, in the order it draws
+// them. The narrow viewport is measured only where the page is not transitioning
+// - see the comment at the end of renderedMeasureBody.
+func renderedExpectedFixtures(c renderedCase) []string {
+	if c.reduce {
+		return []string{"rich", "live", "empty"}
+	}
+	return []string{"rich", "live", "empty", "narrow"}
+}
+
+// renderedLayoutKeys are the cases whose narrow-viewport layout AC6 is graded
+// from.
+var renderedLayoutKeys = []string{"light", "dark"}
+
+type renderedEntry struct {
+	once   sync.Once
+	report renderedReport
+	ok     bool
+}
+
+var (
+	renderedCacheMu sync.Mutex
+	renderedCache   = map[string]*renderedEntry{}
+)
+
+// renderedPage drives one browser and caches what it measured for the rest of
+// the process. The embedded page is fixed for the life of a test binary (a
+// mutation harness rewrites it in init, before any test runs), so one browser
+// per case is one reading of the page under test.
+//
+// The emulation is re-proved on every case rather than assumed: a launch flag
+// that silently did nothing would make "in both themes" a measurement of one
+// theme twice, and a viewport that was not 360 would make AC6 a measurement of
+// the desktop layout.
+func renderedPage(t *testing.T, key string) renderedReport {
+	t.Helper()
+	c, ok := renderedCases[key]
+	if !ok {
+		t.Fatalf("no rendered case named %q", key)
+	}
+	renderedCacheMu.Lock()
+	e := renderedCache[key]
+	if e == nil {
+		e = &renderedEntry{}
+		renderedCache[key] = e
+	}
+	renderedCacheMu.Unlock()
+
+	e.once.Do(func() {
+		var args []string
+		if c.theme == "dark" {
+			args = append(args, darkUA...)
+		}
+		if c.reduce {
+			args = append(args, reduceUA...)
+		}
+		var rep renderedReport
+		renderInto(t, renderCase{
+			width: renderedWideWidth, height: renderedHeight, chromiumArgs: args,
+			snapshot: renderedLiveSnapshot, prelude: c.prelude, measure: renderedMeasure,
+		}, &rep)
+		switch {
+		case c.theme == "dark" && (!rep.Dark || rep.Light):
+			t.Fatalf("case %q (%s) asked for a dark colour preference and the page under test reports light=%v dark=%v; the dark theme cannot be graded",
+				key, c.what, rep.Light, rep.Dark)
+		case c.theme == "light" && (!rep.Light || rep.Dark):
+			t.Fatalf("case %q (%s) asked for a light colour preference and the page under test reports light=%v dark=%v; the light theme cannot be graded",
+				key, c.what, rep.Light, rep.Dark)
+		}
+		if rep.Reduce != c.reduce {
+			t.Fatalf("case %q asked for prefers-reduced-motion: reduce = %v and the page under test reports %v; AC5 cannot be graded",
+				key, c.reduce, rep.Reduce)
+		}
+		wantFixtures := renderedExpectedFixtures(c)
+		if len(rep.Fixtures) != len(wantFixtures) {
+			t.Fatalf("case %q drew %d fixtures, expected %v", key, len(rep.Fixtures), wantFixtures)
+		}
+		for i, f := range rep.Fixtures {
+			if f.Name != wantFixtures[i] {
+				t.Fatalf("case %q drew %q where %q was expected", key, f.Name, wantFixtures[i])
+			}
+			want := float64(renderedWideWidth)
+			if f.Name == "narrow" {
+				want = renderedNarrowWidth
+			}
+			if f.Width != want {
+				t.Fatalf("case %q drew the %s fixture at a %gpx viewport, not the %g it asked the browser for",
+					key, f.Name, f.Width, want)
+			}
+			if n := len(f.Base.Text); n < 25 {
+				t.Fatalf("case %q measured only %d text-bearing elements in the %s fixture; the probe is not seeing the rendered page",
+					key, n, f.Name)
+			}
+		}
+		e.report, e.ok = rep, true
+	})
+	if !e.ok {
+		t.Fatalf("the rendered measurement %q could not be taken; the failure that stopped it is reported above", key)
+	}
+	return e.report
+}
+
+// renderedKeys is every case, in a stable order, so a failure names the same
+// case on every run.
+func renderedKeys() []string {
+	out := make([]string, 0, len(renderedCases))
+	for k := range renderedCases {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// renderedMoment is one measured state, carrying the label a failure is reported
+// under.
+type renderedMoment struct {
+	when  string
+	state renderedState
+}
+
+// renderedMoments returns every state one case measured: each fixture as drawn,
+// plus the filtered and cleared states of the fixtures that had rows to filter.
+func renderedMoments(key string, r renderedReport) []renderedMoment {
+	var out []renderedMoment
+	for _, f := range r.Fixtures {
+		out = append(out, renderedMoment{key + "/" + f.Name, f.Base})
+		if f.Filters {
+			out = append(out,
+				renderedMoment{key + "/" + f.Name + " (a term matching no loaded row)", f.Filtered},
+				renderedMoment{key + "/" + f.Name + " (the term cleared)", f.Cleared})
+		}
+	}
+	return out
+}
+
+// --- the instrument, proved inside the committed set ---------------------------
+
+// TestRendered_TheEngineAnswersTheQuestionsTheseGradersAsk proves the instrument
+// before any criterion leans on it. Every case re-checks its own emulation in
+// renderedPage; what is checked here is the property no single case can see -
+// that the two colour preferences really select DIFFERENT token sets. Without
+// it, "in both themes" could be one theme measured twice and pass.
+func TestRendered_TheEngineAnswersTheQuestionsTheseGradersAsk(t *testing.T) {
+	t.Parallel()
+	// Every browser at once. render() may only fail the test whose goroutine
+	// calls it, so they are spent in parallel SUBTESTS - the testing package's
+	// own way of running several at a time - and this group returns when they
+	// have all landed in the cache the graders below read.
+	t.Run("every case renders", func(t *testing.T) {
+		for _, key := range renderedKeys() {
+			t.Run(key, func(t *testing.T) {
+				t.Parallel()
+				renderedPage(t, key)
+			})
+		}
+	})
+	light := renderedPage(t, "light")
+	dark := renderedPage(t, "dark")
+	reduced := renderedPage(t, "reduce")
+
+	if light.BodyBG == dark.BodyBG {
+		t.Errorf("the page paints the same body background (%s) under both colour preferences, so the two themes are not being told apart and every measurement below is one theme measured twice",
+			light.BodyBG)
+	}
+	if !reduced.Reduce {
+		t.Error("the reduce case does not make (prefers-reduced-motion: reduce) match inside the page under test")
+	}
+	narrow := light.fixture(t, "light", "narrow")
+	if narrow.Width != renderedNarrowWidth || narrow.Layout.ClientW != renderedNarrowWidth {
+		t.Errorf("the narrow fixture reports a %gpx viewport (layout %gpx) where AC6 is written at %d",
+			narrow.Width, narrow.Layout.ClientW, renderedNarrowWidth)
+	}
+	if got := len(light.fixture(t, "light", "live").Base.Text); got < 40 {
+		t.Errorf("the light working page reports %d text-bearing elements; that is too few for this to be the whole rendered page", got)
+	}
+	t.Logf("light body %s | dark body %s | narrow viewport %gpx | %d text elements on the light working page",
+		light.BodyBG, dark.BodyBG, narrow.Layout.ClientW, len(light.fixture(t, "light", "live").Base.Text))
+}
+
+// --- AC3, AC4, AC10: the contrast of everything the engine painted -------------
+
+// Each entry names a selector that BEARS TEXT of its own, because that is what
+// this sweep measures: a chip and an aggregate card are containers, and their
+// number and their label are the elements a person reads. A rendered sweep is
+// exhaustive over what its fixtures DRAW, so a fixture that stopped reaching a
+// state would quietly narrow it; naming the states makes that narrowing red
+// instead of invisible.
+var renderedContrastCoverage = []struct{ what, match string }{
+	{"the empty-table and no-match rows", "td.empty"},
+	{"the honest-absence node", "span.nr"},
+	{"the row-cap notice", ".note.cap"},
+	{"the live connection state", "#conn.live"},
+	{"the reconnecting connection state", "#conn.down"},
+	{"a 401 / 403 refusal", "#msg.err"},
+	{"a failed row's reason", "div.reason.fail"},
+	{"a skipped row's guard", "div.reason"},
+	{"a badge in its on state", ".badge.on"},
+	{"the primary button", "button#rescan.primary"},
+	{"a summary chip's count", "div.n"},
+	{"a summary chip's label", "div.k"},
+	{"an aggregate card's value", "div.agg-v"},
+	{"an aggregate card's coverage line", "p.agg-cov"},
+	{"an aggregate card's excluded-row line", "p.agg-ex"},
+	{"a done row's reclaimed percentage", "span.pct"},
+	{"a done row's VMAF viewing condition", "span.cond"},
+	{"a running encode's progress figure", "span.pctv"},
+	{"a media path", "td.path"},
+}
+
+func TestRendered_EveryTextThePagePaintsClearsItsContrastFloor(t *testing.T) {
+	t.Parallel()
+	seen := map[string]bool{}
+	measured, under := 0, 0
+	worst := renderedTextEl{Ratio: 1e9}
+	check := func(when string, el renderedTextEl) {
+		measured++
+		seen[el.Sel] = true
+		if el.Ratio-el.Floor < worst.Ratio-worst.Floor {
+			worst = el
+		}
+		if el.Ratio < el.Floor {
+			under++
+			t.Errorf("%s: %s (%q) paints %s on %s at %.2f:1, under its %.1f:1 floor at %gpx / weight %d",
+				when, el.Sel, el.Text, el.FG, el.BG, el.Ratio, el.Floor, el.Size, el.Weight)
+		}
+	}
+	for _, key := range renderedKeys() {
+		r := renderedPage(t, key)
+		for _, m := range renderedMoments(key, r) {
+			for _, el := range m.state.Text {
+				check(m.when, el)
+			}
+		}
+		if r.LiveConn != nil {
+			check(key+" (the connection state the live stream left)", r.LiveConn.renderedTextEl)
+		}
+	}
+	if measured < 200 {
+		t.Fatalf("only %d rendered text elements were measured across %d cases; that is not the whole painted surface",
+			measured, len(renderedCases))
+	}
+	missing := 0
+	for _, want := range renderedContrastCoverage {
+		found := false
+		for s := range seen {
+			if strings.Contains(s, want.match) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing++
+			t.Errorf("no fixture here put %s (%s) on the screen, so this sweep never measured it; AC3 measures every pair the page PAINTS, and a state no fixture reaches is a state nothing here grades",
+				want.what, want.match)
+		}
+	}
+	if missing > 0 {
+		got := make([]string, 0, len(seen))
+		for s := range seen {
+			got = append(got, s)
+		}
+		sort.Strings(got)
+		t.Logf("the selectors this sweep did measure: %v", got)
+	}
+	t.Logf("%d rendered text elements measured across %d cases and %d distinct selectors, %d under floor; tightest is %s (%q) at %.2f:1 against a %.1f:1 floor",
+		measured, len(renderedCases), len(seen), under, worst.Sel, worst.Text, worst.Ratio, worst.Floor)
+}
+
+// --- AC4: two token sets, and a document that opts into both schemes -----------
+
+func TestRendered_BothThemesArePaintedAndColorSchemeFollowsThem(t *testing.T) {
+	t.Parallel()
+	light := renderedPage(t, "light")
+	dark := renderedPage(t, "dark")
+	if light.BodyBG == dark.BodyBG {
+		t.Errorf("both colour preferences paint the body %s: there is one token set here, not two", light.BodyBG)
+	}
+	// color-scheme's grammar accepts a <custom-ident>, so `color-scheme:
+	// lightdark` PARSES and opts the document into neither scheme - native
+	// controls, scrollbars and form fields then stay light inside a dark page,
+	// which is the harm AC4 names. The computed value is therefore read as a
+	// list of idents, never searched as a string.
+	for _, c := range []struct {
+		name string
+		rep  renderedReport
+	}{{"light", light}, {"dark", dark}} {
+		idents := map[string]bool{}
+		for _, f := range strings.Fields(strings.ToLower(c.rep.ColorScheme)) {
+			idents[f] = true
+		}
+		for _, want := range []string{"light", "dark"} {
+			if !idents[want] {
+				t.Errorf("%s theme: the document's computed color-scheme is %q, which does not name %q as a scheme of its own; native controls, scrollbars and form fields do not follow the page's theme",
+					c.name, c.rep.ColorScheme, want)
+			}
+		}
+	}
+	t.Logf("light body %s, dark body %s, computed color-scheme %q", light.BodyBG, dark.BodyBG, light.ColorScheme)
+}
+
+// --- AC5: no perceptible motion under a reduce preference ----------------------
+
+// renderedLongestMs reads the longest duration out of a computed
+// transition-duration or transition-delay list. A component it cannot parse is
+// reported as unreadable and every caller reds on that, rather than scoring it
+// as 0 - the discipline the rest of this file already holds a length to.
+func renderedLongestMs(list string) (float64, bool) {
+	worst := 0.0
+	for _, part := range strings.Split(list, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		mult := 1.0
+		switch {
+		case strings.HasSuffix(part, "ms"):
+			part = strings.TrimSuffix(part, "ms")
+		case strings.HasSuffix(part, "s"):
+			part = strings.TrimSuffix(part, "s")
+			mult = 1000
+		default:
+			return 0, false
+		}
+		f, err := strconv.ParseFloat(strings.TrimSpace(part), 64)
+		if err != nil {
+			return 0, false
+		}
+		if f*mult > worst {
+			worst = f * mult
+		}
+	}
+	return worst, true
+}
+
+func TestRendered_AReducePreferenceLeavesNoPerceptibleMotion(t *testing.T) {
+	t.Parallel()
+	normal := renderedPage(t, "light")
+	reduced := renderedPage(t, "reduce")
+
+	moved := 0
+	for _, p := range normal.Motion {
+		ms, ok := renderedLongestMs(p.Duration)
+		if !ok {
+			t.Errorf("%s computes a transition-duration of %q, which this reader cannot measure; an unreadable duration must red rather than be scored as none", p.Sel, p.Duration)
+		} else if ms > 1 {
+			moved++
+		}
+		if p.AnimName != "none" && p.AnimName != "" {
+			t.Errorf("%s runs the animation %q; AC5 requires every state to be readable from a static frame", p.Sel, p.AnimName)
+		}
+	}
+	if len(reduced.Motion) == 0 {
+		t.Fatal("the reduce case probed no element at all, so nothing about motion was graded")
+	}
+	worst := 0.0
+	for _, p := range reduced.Motion {
+		for _, list := range []string{p.Duration, p.Delay} {
+			ms, ok := renderedLongestMs(list)
+			if !ok {
+				t.Errorf("under (prefers-reduced-motion: reduce), %s computes %q, which this reader cannot measure", p.Sel, list)
+				continue
+			}
+			if ms > worst {
+				worst = ms
+			}
+			if ms > 1 {
+				t.Errorf("under (prefers-reduced-motion: reduce), %s still moves for %gms (%q); that is perceptible motion", p.Sel, ms, list)
+			}
+		}
+		if p.AnimName != "none" && p.AnimName != "" {
+			t.Errorf("under (prefers-reduced-motion: reduce), %s still runs the animation %q", p.Sel, p.AnimName)
+		}
+	}
+	t.Logf("%d of %d probed elements carry a perceptible transition with no preference expressed; under reduce the longest computed duration or delay on the page is %gms",
+		moved, len(normal.Motion), worst)
+}
+
+// --- AC6: one column at 360px, and a body that does not scroll sideways --------
+
+func TestRendered_TheNarrowViewportIsOneColumnAndTheBodyDoesNotScrollSideways(t *testing.T) {
+	t.Parallel()
+	wantHosts := map[string]int{"header": 1, ".controls": 2, ".aggs": 1}
+	for _, key := range renderedLayoutKeys {
+		l := renderedPage(t, key).fixture(t, key, "narrow").Layout
+		if l.ClientW != renderedNarrowWidth {
+			t.Fatalf("%s: the page under test reports a %gpx viewport, not the %d AC6 is written at", key, l.ClientW, renderedNarrowWidth)
+		}
+		for _, region := range []string{"header", ".controls", ".aggs"} {
+			if got, want := l.Hosts[region], wantHosts[region]; got != want {
+				t.Errorf("%s: %d elements answer to %s where AC6 names %d; the region this criterion is about is not the region being measured",
+					key, got, region, want)
+			}
+			if n := l.PerRow[region]; n > 1 {
+				t.Errorf("%s: %s renders %d elements per row at 360px, not a single column %v", key, region, n, l.Overlaps)
+			}
+		}
+		if l.ScrollW > l.ClientW+0.5 {
+			t.Errorf("%s: the page body scrolls sideways at 360px - documentElement.scrollWidth is %g against a clientWidth of %g",
+				key, l.ScrollW, l.ClientW)
+		}
+		if l.BodyW > l.ClientW+0.5 {
+			t.Errorf("%s: body.scrollWidth is %g against a clientWidth of %g", key, l.BodyW, l.ClientW)
+		}
+		for _, wide := range l.Wide {
+			t.Errorf("%s: %s - AC6 lets only a .tablewrap be wider than the narrow viewport", key, wide)
+		}
+		t.Logf("%s: per-row %v, documentElement.scrollWidth %g against clientWidth %g, nothing outside a .tablewrap wider than the viewport",
+			key, l.PerRow, l.ScrollW, l.ClientW)
+	}
+}
+
+// --- AC7: the box each pointer target actually occupies ------------------------
+
+func TestRendered_EveryPointerTargetClearsTheTwentyFourPixelFloorAsLaidOut(t *testing.T) {
+	t.Parallel()
+	want := []string{"token", "rescan", "pause", "resume", "filter"}
+	for _, key := range renderedKeys() {
+		r := renderedPage(t, key)
+		for _, f := range r.Fixtures {
+			if len(f.Targets) != len(want) {
+				t.Fatalf("%s/%s: measured %d pointer targets, expected the page's %d: %+v",
+					key, f.Name, len(f.Targets), len(want), f.Targets)
+			}
+			got := map[string]renderedTarget{}
+			for _, b := range f.Targets {
+				got[b.ID] = b
+			}
+			for _, id := range want {
+				b, ok := got[id]
+				if !ok {
+					t.Errorf("%s/%s: #%s was never measured", key, f.Name, id)
+					continue
+				}
+				// WCAG 2.2 2.5.8 has no disabled exemption: a target under the
+				// floor is under it whether or not it is currently actionable.
+				if b.W < 24 || b.H < 24 {
+					t.Errorf("%s/%s: #%s renders %.1f x %.1f CSS px, under WCAG 2.2 2.5.8's 24 CSS px floor in both dimensions",
+						key, f.Name, id, b.W, b.H)
+				}
+			}
+			t.Logf("%s/%s at %gpx: %+v", key, f.Name, f.Width, f.Targets)
+		}
+	}
+}
+
+// --- AC8: the focus indicator, as the engine draws it --------------------------
+
+func TestRendered_TheFocusRingIsDrawnAndClearsBothSidesInBothThemes(t *testing.T) {
+	t.Parallel()
+	for _, key := range []string{"light", "dark"} {
+		r := renderedPage(t, key)
+		// Between the two fixtures every control is measured while it is
+		// ENABLED: the working page disables Resume, the paused page disables
+		// Pause, and a disabled control cannot take keyboard focus at all.
+		measured := map[string]renderedFocus{}
+		for _, name := range []string{"rich", "live"} {
+			f := r.fixture(t, key, name)
+			if len(f.Focus) != 5 {
+				t.Fatalf("%s/%s: probed %d controls, expected the page's five", key, name, len(f.Focus))
+			}
+			for _, p := range f.Focus {
+				if !p.Disabled {
+					measured[p.ID] = p
+				}
+			}
+		}
+		for _, id := range []string{"token", "rescan", "pause", "resume", "filter"} {
+			p, ok := measured[id]
+			if !ok {
+				t.Errorf("%s theme: #%s was disabled under both fixtures, so its focus indicator was never measured", key, id)
+				continue
+			}
+			if !p.FocusVisible {
+				t.Errorf("%s theme: #%s does not match :focus-visible on keyboard focus, so no indicator is drawn for it", key, id)
+				continue
+			}
+			if p.Style == "none" || p.Width < 2 {
+				t.Errorf("%s theme: #%s draws a %s outline %gpx wide; WCAG 2.2 2.4.13 puts the floor at a 2 CSS px perimeter", key, id, p.Style, p.Width)
+			}
+			if p.Offset < 0 {
+				t.Errorf("%s theme: #%s draws its ring at offset %gpx, inside its own border box, where it never meets the surface behind it", key, id, p.Offset)
+			}
+			if p.AgainstFill < 3 {
+				t.Errorf("%s theme: #%s's ring %s is %.2f:1 against the control's own rendered fill %s, under the 3:1 floor", key, id, p.Colour, p.AgainstFill, p.Fill)
+			}
+			if p.AgainstBehind < 3 {
+				t.Errorf("%s theme: #%s's ring %s is %.2f:1 against the surface rendered behind it (%s), under the 3:1 floor", key, id, p.Colour, p.AgainstBehind, p.Behind)
+			}
+			t.Logf("%s theme: #%s ring %s, %gpx at offset %gpx - %.2f:1 on its own fill %s, %.2f:1 on the surface behind (%s)",
+				key, id, p.Colour, p.Width, p.Offset, p.AgainstFill, p.Fill, p.AgainstBehind, p.Behind)
+		}
+	}
+}
+
+// --- AC9 and AC10: every degraded state reaches the screen ---------------------
+
+// renderedDegradedText finds one of AC10's strings in the list that already pins
+// them at their render site, so this file states none of that wording a second
+// time and cannot drift from it.
+func renderedDegradedText(t *testing.T, prefix string) string {
+	t.Helper()
+	var hit string
+	for _, c := range degradedCopy {
+		if strings.HasPrefix(c.text, prefix) {
+			if hit != "" {
+				t.Fatalf("more than one pinned degraded-state string starts with %q", prefix)
+			}
+			hit = c.text
+		}
+	}
+	if hit == "" {
+		t.Fatalf("no pinned degraded-state string starts with %q; AC10's copy set has moved out from under this grader", prefix)
+	}
+	return hit
+}
+
+func TestRendered_EveryDegradedStateReachesTheScreen(t *testing.T) {
+	t.Parallel()
+	nothingQueued := renderedDegradedText(t, "Nothing queued.")
+	noHistory := renderedDegradedText(t, "No history yet.")
+	unavailable := renderedDegradedText(t, "unavailable")
+	notRecorded := renderedDegradedText(t, "not recorded")
+	unknown := renderedDegradedText(t, "unknown")
+	capped := renderedDegradedText(t, "this view is capped")
+	reconnecting := renderedDegradedText(t, "reconnecting")
+	noMatch := jsConstString(t, pageWithoutComments(t), "NO_MATCH_TEXT")
+	refusal := map[string]string{
+		"light": renderedDegradedText(t, "control disabled"),
+		"dark":  renderedDegradedText(t, "unauthorized"),
+	}
+
+	for _, key := range []string{"light", "dark"} {
+		r := renderedPage(t, key)
+
+		// (1) The two empty-table states, in the body of the table each is about.
+		empty := r.fixture(t, key, "empty").Base
+		if !strings.Contains(empty.QueueText, nothingQueued) {
+			t.Errorf("%s: with nothing queued the queue body shows %q; %q is not on the screen", key, empty.QueueText, nothingQueued)
+		}
+		if !strings.Contains(empty.HistoryText, noHistory) {
+			t.Errorf("%s: with no history the history body shows %q; %q is not on the screen", key, empty.HistoryText, noHistory)
+		}
+		if empty.Queue.Visible != 1 || empty.History.Visible != 1 {
+			t.Errorf("%s: %d of %d queue rows and %d of %d history rows are on the screen; each empty table should show exactly its own empty-state row",
+				key, empty.Queue.Visible, empty.Queue.All, empty.History.Visible, empty.History.All)
+		}
+
+		// (2) The working page: an absent measurement rendered as absent, and
+		// both row-cap notices on the screen. Each is looked for where the page
+		// renders it - `unknown` is also a word in the page's own explanatory
+		// prose, so a page-wide search would pass on a queue cell that says
+		// nothing at all.
+		live := r.fixture(t, key, "live").Base
+		if !strings.Contains(live.QueueText, unknown) {
+			t.Errorf("%s: a running encode whose encoder reported no position leaves %q off the queue body, which shows %q", key, unknown, live.QueueText)
+		}
+		if !strings.Contains(live.HistoryText, notRecorded) {
+			t.Errorf("%s: a done row that recorded no encoder, duration or VMAF leaves %q off the history body, which shows %q", key, notRecorded, live.HistoryText)
+		}
+		if !strings.Contains(live.AggsText, unavailable) {
+			t.Errorf("%s: an aggregate that could not be read leaves %q off the cards, which show %q", key, unavailable, live.AggsText)
+		}
+		if !strings.Contains(live.AggsText, notRecorded) {
+			t.Errorf("%s: an aggregate that counted no contributing row leaves %q off the cards, which show %q", key, notRecorded, live.AggsText)
+		}
+		for _, id := range []string{"queue-cap", "hist-cap"} {
+			n := live.Nodes[id]
+			if !n.Shown {
+				t.Errorf("%s: #%s carries %q and is NOT on the screen; a truncated view then reads as the whole ledger", key, id, n.Text)
+				continue
+			}
+			if !strings.Contains(n.Text, capped) {
+				t.Errorf("%s: #%s is on the screen saying %q, which does not state %q", key, id, n.Text, capped)
+			}
+		}
+
+		// (3) The two states no snapshot can carry, each driven through the
+		// page's own code: its EventSource error handler, and its own control()
+		// against a transport that refuses. The connection state the LIVE stream
+		// left is read back from the prelude, because only one of the two can be
+		// on the screen at a time.
+		if r.LiveConn == nil || !r.LiveConn.Shown {
+			t.Errorf("%s: the live connection state was never on the screen before the stream was dropped", key)
+		}
+		conn := live.Nodes["conn"]
+		if !conn.Shown || !strings.Contains(conn.Text, reconnecting) {
+			t.Errorf("%s: with the stream dropped #conn is shown=%v saying %q; AC10 requires the reconnecting state to be rendered", key, conn.Shown, conn.Text)
+		}
+		msg := live.Nodes["msg"]
+		if !msg.Shown || !strings.Contains(msg.Text, refusal[key]) {
+			t.Errorf("%s: a refused control call leaves #msg shown=%v saying %q, not %q", key, msg.Shown, msg.Text, refusal[key])
+		}
+
+		// (4) AC9, driven through the real filter box: a term matching no loaded
+		// row puts the message in BOTH table bodies, visibly, and clearing it
+		// brings the rows back and takes the message down.
+		for _, name := range []string{"rich", "live"} {
+			f := r.fixture(t, key, name)
+			if !f.Filters {
+				t.Fatalf("%s/%s: the filter was never driven, so AC9 went ungraded here", key, name)
+			}
+			for _, body := range []struct {
+				what string
+				text string
+				rows renderedRows
+			}{
+				{"queue", f.Filtered.QueueText, f.Filtered.Queue},
+				{"history", f.Filtered.HistoryText, f.Filtered.History},
+			} {
+				if !strings.Contains(body.text, noMatch) {
+					t.Errorf("%s/%s: on a term matching no loaded row the %s body shows %q, which does not state %q",
+						key, name, body.what, body.text, noMatch)
+				}
+				if body.rows.Visible != 1 {
+					t.Errorf("%s/%s: on a term matching no loaded row %d of the %s body's %d rows are on the screen; exactly the no-match message should be",
+						key, name, body.rows.Visible, body.what, body.rows.All)
+				}
+			}
+			if f.Cleared.Queue.Visible < 1 || f.Cleared.History.Visible < 1 {
+				t.Errorf("%s/%s: clearing the term left %d queue rows and %d history rows on the screen; the previously matching rows did not return",
+					key, name, f.Cleared.Queue.Visible, f.Cleared.History.Visible)
+			}
+			if strings.Contains(f.Cleared.QueueText, noMatch) || strings.Contains(f.Cleared.HistoryText, noMatch) {
+				t.Errorf("%s/%s: the no-match message survived the term being cleared", key, name)
+			}
+			if !strings.Contains(f.Cleared.QueueText, "/media/") || !strings.Contains(f.Cleared.HistoryText, "/media/") {
+				t.Errorf("%s/%s: clearing the term left the queue body %q and the history body %q; the loaded rows did not come back",
+					key, name, f.Cleared.QueueText, f.Cleared.HistoryText)
 			}
 		}
 	}
