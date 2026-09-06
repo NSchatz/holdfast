@@ -875,11 +875,21 @@ func TestTokens_EveryColourIsDeclaredInATokenBlock(t *testing.T) {
 
 // --- AC2: type and space come from the declared scales ------------------------
 
+// spaceProps names every property whose value AC2 governs as "a padding, margin
+// or gap length". The clause is unqualified, so the list is the whole property
+// family and not the subset the page happens to write today: the eight logical
+// LONGHANDS are here as well as their two-value shorthands, because
+// `margin-inline-start:37px` is a margin length by any reading and a sweep that
+// did not name the property would pass over it.
 var spaceProps = map[string]bool{
 	"padding": true, "padding-top": true, "padding-right": true, "padding-bottom": true,
 	"padding-left": true, "padding-inline": true, "padding-block": true,
+	"padding-inline-start": true, "padding-inline-end": true,
+	"padding-block-start": true, "padding-block-end": true,
 	"margin": true, "margin-top": true, "margin-right": true, "margin-bottom": true,
 	"margin-left": true, "margin-inline": true, "margin-block": true,
+	"margin-inline-start": true, "margin-inline-end": true,
+	"margin-block-start": true, "margin-block-end": true,
 	"gap": true, "row-gap": true, "column-gap": true,
 }
 
@@ -1149,7 +1159,7 @@ func TestControls_AreIdentifiableAgainstTheSurfaceTheySitOn(t *testing.T) {
 func TestFocus_RingClearsBothTheControlFillAndTheSurfaceBehindIt(t *testing.T) {
 	rules := parseCSS(t)
 	dark, light := themeTokens(t, rules)
-	focus := ""
+	focus, width := "", ""
 	for _, r := range rules {
 		if !strings.Contains(r.sel, ":focus-visible") {
 			continue
@@ -1161,9 +1171,36 @@ func TestFocus_RingClearsBothTheControlFillAndTheSurfaceBehindIt(t *testing.T) {
 		if c := colourTokens(dark, v); len(c) > 0 {
 			focus = c[0]
 		}
+		if w := r.get("outline-width"); w != "" {
+			width = w
+		} else if o := r.get("outline"); o != "" {
+			// The `outline` shorthand: width is its length component. Take the first
+			// field that measures as a length rather than assuming a position.
+			for _, f := range strings.Fields(o) {
+				if _, ok := measuredPx(dark, f); ok {
+					width = f
+					break
+				}
+			}
+		}
 	}
 	if focus == "" {
 		t.Fatal("no :focus-visible rule draws an outline from a colour token")
+	}
+	// The ring's WIDTH, not only its colour. Contrast is the floor AC8 restates, but
+	// the clause before it is "SHALL draw a focus indicator", and an outline of zero
+	// width draws none however well its colour would have contrasted - a hole a
+	// colour-only reading of this test leaves open (impl-gate finding F9). The 2px
+	// figure is WCAG 2.2 2.4.13 Focus Appearance, one of the success criteria the
+	// spec's Constraints section carries at
+	// work/specs/S0035-holdfast-dashboard-ui/sources/www.w3.org-TR-WCAG22: the
+	// indicator has to be at least as large as a 2 CSS px thick perimeter.
+	w, ok := measuredPx(dark, width)
+	if !ok {
+		t.Fatalf("the :focus-visible ring declares no measurable outline width (%q), so nothing says an indicator is drawn at all", width)
+	}
+	if w < 2 {
+		t.Errorf("the :focus-visible ring is %gpx thick; a zero-width outline draws no indicator, and WCAG 2.2 2.4.13 puts the floor at a 2 CSS px perimeter", w)
 	}
 	ctrls := controlRules(t, rules, dark)
 	if len(ctrls) < 4 {
@@ -1245,6 +1282,41 @@ func TestTargets_EveryPointerTargetClearsTheTwentyFourPixelFloor(t *testing.T) {
 				t.Errorf("%s { %s: %s } holds the target at %gpx in that dimension, under the 24px floor", sel, prop, r.get(prop), px)
 			}
 		}
+	}
+	// The floor is not a property of the TOP-LEVEL rules alone. A rule in any
+	// at-rule block can lower min-height or min-width back under it, and the page
+	// already carries a `@media (max-width: 640px)` block that restyles
+	// `.controls input` - so the two base rules above would never see it (impl-gate
+	// finding F8). Every rule anywhere in the stylesheet that touches a pointer
+	// target and declares one of those two properties is held to the same floor,
+	// which also covers a more specific top-level rule such as `button.primary`.
+	swept := 0
+	for _, c := range rules {
+		if !strings.Contains(c.sel, "button") && !strings.Contains(c.sel, "input") {
+			continue
+		}
+		for _, prop := range []string{"min-height", "min-width"} {
+			v := c.get(prop)
+			if v == "" {
+				continue
+			}
+			swept++
+			where := c.sel
+			if c.at != "" {
+				where = c.at + " { " + c.sel
+			}
+			px, ok := measuredPx(dark, v)
+			if !ok {
+				t.Errorf("%s { %s: %s } is a length this sweep cannot measure, so it cannot be shown to clear the 24px target floor", where, prop, v)
+				continue
+			}
+			if px < 24 {
+				t.Errorf("%s { %s: %s } holds the target at %gpx, under WCAG 2.2 2.5.8's 24px floor", where, prop, v, px)
+			}
+		}
+	}
+	if swept < 4 {
+		t.Fatalf("the target sweep examined %d min-height/min-width declarations on the page's controls; it expects at least the two base rules' four and is not reading the stylesheet", swept)
 	}
 	// The pointer targets ARE every button and input in the two control rows. One
 	// added anywhere else would not be covered by the two rules above, so it reds.
@@ -1519,21 +1591,172 @@ func TestFilter_ANonMatchingTermSaysSoAndSaysTheLoadedRowsAreCapped(t *testing.T
 
 // --- AC10: the degraded-state copy, verbatim and legible -----------------------
 
-func TestDegradedStates_CopySurvivesVerbatimAndStaysLegibleInBothThemes(t *testing.T) {
-	s := string(indexHTML)
-	for _, want := range []string{
-		"Nothing queued.",
-		"No history yet.",
-		"unavailable",
-		"not recorded",
-		"unknown",
-		"this view is capped",
-		"reconnecting…",
-		"control disabled — set server_auth_token on the server.",
-		"unauthorized — check the control token.",
+var htmlComment = regexp.MustCompile(`(?s)<!--.*?-->`)
+
+// replaceBlock rewrites the contents of the page's single <style> or <script>
+// element through fn. A missing element is FATAL rather than a pass-through: a
+// stripper that silently skipped the block holding the comments would be no
+// stripper at all, and the sweep built on it would go back to reading prose.
+func replaceBlock(t *testing.T, page, openTag, closeTag string, fn func(string) string) string {
+	t.Helper()
+	i := strings.Index(page, openTag)
+	j := strings.Index(page, closeTag)
+	if i < 0 || j < 0 || j < i {
+		t.Fatalf("the page has no %s ... %s block", openTag, closeTag)
+	}
+	i += len(openTag)
+	return page[:i] + fn(page[i:j]) + page[j:]
+}
+
+// stripJSComments removes line and block comments from JavaScript source. String
+// and template literals are copied through verbatim, so a `//` or a `/*` inside
+// one of the page's own strings is never mistaken for a comment. A `/` opening
+// neither `//` nor `/*` is copied through as itself, which carries the page's one
+// regex literal (/^version=/) and any division unharmed.
+//
+// Each comment becomes a single space, so two tokens either side of one cannot be
+// read as a single token by an assertion downstream.
+func stripJSComments(t *testing.T, js string) string {
+	t.Helper()
+	var b strings.Builder
+	for i := 0; i < len(js); {
+		c := js[i]
+		switch {
+		case c == '/' && i+1 < len(js) && js[i+1] == '/':
+			for i < len(js) && js[i] != '\n' {
+				i++
+			}
+			b.WriteByte(' ')
+		case c == '/' && i+1 < len(js) && js[i+1] == '*':
+			k := strings.Index(js[i+2:], "*/")
+			if k < 0 {
+				t.Fatal("a /* block comment in the page's script is never closed")
+			}
+			i += 2 + k + 2
+			b.WriteByte(' ')
+		case c == '"' || c == '\'' || c == '`':
+			b.WriteByte(c)
+			i++
+			closed := false
+			for i < len(js) {
+				if js[i] == '\\' && i+1 < len(js) {
+					b.WriteString(js[i : i+2])
+					i += 2
+					continue
+				}
+				b.WriteByte(js[i])
+				i++
+				if js[i-1] == c {
+					closed = true
+					break
+				}
+			}
+			if !closed {
+				t.Fatalf("a string literal opened with %q in the page's script is never closed", string(c))
+			}
+		default:
+			b.WriteByte(c)
+			i++
+		}
+	}
+	return b.String()
+}
+
+// stripPageComments returns the page with every comment removed: the HTML
+// comments, the CSS comments inside <style>, and the JS line and block comments
+// inside <script>.
+//
+// It exists because a whole-page strings.Contains reads PROSE ABOUT the page as if
+// it were the page. The comment above nrNode() says `not recorded` and satisfied
+// AC10's wording sweep on its own, so the node underneath it could stop saying it
+// with every test in this package green (impl-gate finding F7). This file already
+// drew that distinction once, for @keyframes - "a comment saying the page declares
+// no keyframes is not a keyframes block"; this makes it once, for the whole page.
+func stripPageComments(t *testing.T, page string) string {
+	t.Helper()
+	out := htmlComment.ReplaceAllString(page, " ")
+	out = replaceBlock(t, out, "<style>", "</style>", func(css string) string {
+		return cssComment.ReplaceAllString(css, " ")
+	})
+	return replaceBlock(t, out, "<script>", "</script>", func(js string) string {
+		return stripJSComments(t, js)
+	})
+}
+
+func pageWithoutComments(t *testing.T) string {
+	t.Helper()
+	return stripPageComments(t, string(indexHTML))
+}
+
+// The stripper's own proof. It is asserted against a FIXTURE rather than against
+// the shipped page, so it stays a proof whatever comments the page happens to
+// carry: each of the three comment syntaxes must go, and the code around them -
+// including a string literal that itself contains `//` and `/*`, and the regex
+// literal - must stay.
+func TestPageComments_AreStrippedSoNoProseCanStandInForTheRender(t *testing.T) {
+	fixture := `<!DOCTYPE html><!-- html: gone -->` +
+		"<style>/* css: gone */\n  .nr { color:var(--muted); } /* tail: gone */</style>" +
+		"<script>\n// line: gone\nconst a = 1; /* block: gone */\n" +
+		`const keep = "a // b /* c */ kept";` + "\n" +
+		`const re = j.replace(/^version=/, "");` + "\n</script>"
+	got := stripPageComments(t, fixture)
+	for _, gone := range []string{"html: gone", "css: gone", "tail: gone", "line: gone", "block: gone"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("stripPageComments left the comment %q on the page:\n%s", gone, got)
+		}
+	}
+	for _, kept := range []string{
+		".nr { color:var(--muted); }",
+		"const a = 1;",
+		`const keep = "a // b /* c */ kept";`,
+		`j.replace(/^version=/, "")`,
 	} {
-		if !strings.Contains(s, want) {
-			t.Errorf("the degraded-state wording %q no longer appears on the page", want)
+		if !strings.Contains(got, kept) {
+			t.Errorf("stripPageComments removed page CODE it must keep: %q\n%s", kept, got)
+		}
+	}
+	// And it bites on the real page, where the comments actually are.
+	if strings.Contains(string(indexHTML), "<!--") && strings.Contains(pageWithoutComments(t), "<!--") {
+		t.Error("an HTML comment survived the stripper on the shipped page")
+	}
+}
+
+// degradedCopy is AC10's nine strings, each paired with the expression on the page
+// that RENDERS it. Both halves are asserted, and both against the comment-stripped
+// page.
+//
+// The wording half alone is not a proof, and `not recorded` is why: it occurs
+// three times - in the comment above nrNode(), in nrNode() itself, and inside the
+// unrelated "reason not recorded" string - so a whole-page substring stays green
+// while nrNode(), the honest-absence node behind every nil outcome field, renders
+// "n/a" instead. Stripping comments does not close that on its own either:
+// "reason not recorded" is a real render of a superstring and satisfies the sweep
+// by itself. Only pinning the render site does, which is the shape the other
+// assertions in this file already have. `unknown` and `unavailable` are the same
+// case one step weaker - `<i>unknown</i>` is prose in the page's own explanatory
+// copy, and an unavailable card's fallback sentence carries "unavailable" past a
+// reworded node - so all nine are pinned, not the one the finding named.
+var degradedCopy = []struct{ text, renderedBy string }{
+	{"Nothing queued.", `emptyRow(5, "Nothing queued.")`},
+	{"No history yet.", `emptyRow(7, "No history yet.")`},
+	{"unavailable", `mk("span", "nr", "unavailable")`},
+	{"not recorded", `mk("span", "nr", "not recorded")`},
+	{"unknown", `mk("span", "nr", "unknown")`},
+	{"this view is capped", `+ total.toLocaleString() + " — this view is capped.";`},
+	{"reconnecting…", `conn.textContent = "reconnecting…";`},
+	{"control disabled — set server_auth_token on the server.", `msg.textContent = "control disabled — set server_auth_token on the server.";`},
+	{"unauthorized — check the control token.", `msg.textContent = "unauthorized — check the control token.";`},
+}
+
+func TestDegradedStates_CopySurvivesVerbatimAndStaysLegibleInBothThemes(t *testing.T) {
+	s := pageWithoutComments(t)
+	for _, c := range degradedCopy {
+		if !strings.Contains(s, c.text) {
+			t.Errorf("the degraded-state wording %q no longer appears on the page", c.text)
+		}
+		if !strings.Contains(s, c.renderedBy) {
+			t.Errorf("the degraded-state wording %q is no longer rendered by %q: the page may still carry those words somewhere, but the node that shows them to an operator has stopped saying them",
+				c.text, c.renderedBy)
 		}
 	}
 	rules := parseCSS(t)
