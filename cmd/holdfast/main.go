@@ -35,6 +35,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/schedule"
 	"github.com/NSchatz/holdfast/internal/server"
+	"github.com/NSchatz/holdfast/internal/startup"
 	"github.com/NSchatz/holdfast/internal/store"
 	"github.com/NSchatz/holdfast/internal/version"
 	"github.com/NSchatz/holdfast/internal/webui"
@@ -135,6 +136,18 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 // engine. It returns the engine, the store (the caller MUST Close it), and a
 // nonzero exit code on failure (with a message already written to stderr).
 func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engine.Engine, store.Store, int) {
+	// FILESYSTEM-1, and it goes FIRST. holdfast's no-loss contract is stated for
+	// a local filesystem and this is where the tool checks it has one: it
+	// classifies every path this run would act on, reports each, and takes ONE
+	// start-or-refuse decision over the whole set - before any encode, before
+	// the job store is opened, and before anything is created in or under the
+	// state directory, so a refused run leaves no jobs.db, journal or sidecar
+	// behind on storage it just refused.
+	res, code := startupCheck(cfg, log, stderr)
+	if code != 0 {
+		return nil, nil, code
+	}
+
 	ffmpeg := envOr("HOLDFAST_FFMPEG", "ffmpeg")
 	ffprobe := envOr("HOLDFAST_FFPROBE", "ffprobe")
 	// Fail loud if the tools are missing — never a false green / silent no-op.
@@ -172,7 +185,55 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 		fmt.Fprintf(stderr, "holdfast: opening job store: %v\n", err)
 		return nil, nil, 1
 	}
-	return engine.New(*cfg, prober, enc, st, log), st, 0
+	eng := engine.New(*cfg, prober, enc, st, log)
+	// The startup walk's coverage BOUNDS the run: this scan enumerates sources
+	// from exactly the directories that walk traversed successfully, so a
+	// subtree it declined, could not read or failed to traverse yields no file
+	// and no swap can happen under it.
+	eng.Coverage = res.Coverage
+	return eng, st, 0
+}
+
+// stateDirPath is the absolute path the configuration interpretation produces
+// for the state directory - never the configured string, which may be the
+// shipped RELATIVE default. It is what store.Open will use, and it is therefore
+// what the startup check classifies and what a printed declaration spells.
+func stateDirPath(cfg *config.Config) string {
+	dir := cfg.StateDir
+	if dir == "" {
+		dir = "state"
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return filepath.Clean(dir)
+	}
+	return abs
+}
+
+// startupPlatform builds the view of the host the startup check reads.
+// Production reads the real host; a test substitutes the two seams it needs (the
+// filesystem-type lookup and the mount layout), because the gate this repo is
+// tested on has neither a network mount nor a second real filesystem.
+var startupPlatform = func() startup.Platform { return startup.System(nil, nil) }
+
+// startupCheck runs the whole-run start-or-refuse decision and reports it. On a
+// refusal it writes the operator-facing account to stderr - every cause it
+// established, each with the exact declaration that would permit it or, where no
+// declaration could, the remedy - and returns a nonzero exit code.
+func startupCheck(cfg *config.Config, log *slog.Logger, stderr io.Writer) (startup.Result, int) {
+	res := startup.Run(startup.Check{
+		Roots:        cfg.LibraryRoots,
+		StateDir:     stateDirPath(cfg),
+		Declarations: cfg.AllowNonLocal,
+		IsMediaFile:  func(base string) bool { return engine.IsSourceName(base, cfg.VideoExts) },
+		Platform:     startupPlatform(),
+	})
+	res.Log(log)
+	if !res.Start {
+		res.WriteRefusal(stderr)
+		return res, 1
+	}
+	return res, 0
 }
 
 func cmdRun(args []string, stdout, stderr io.Writer) int {
