@@ -114,6 +114,25 @@ holdfast serve --config config.yaml # HTTP API + web dashboard (scan on demand /
 exit non-zero if they are missing rather than silently doing nothing. Use a build with **libx265** and
 **libvmaf** — a distro ffmpeg typically lacks the latter, which is why the image exists.
 
+### The filesystem check at startup
+
+The no-loss contract holdfast is built on is stated for a **local** filesystem: an atomic
+same-filesystem rename whose failure means it did not happen, a stat that can see a concurrent
+rewrite, and a SQLite WAL that works at all. None of those hold on a NAS. So before the first encode,
+`run` and `serve` both classify every path this run would act on - every library root, the state
+directory, and every filesystem mounted beneath a root - and start or refuse the whole run in one
+decision, printing the exact line that would permit each path it refused:
+
+```yaml
+allow_non_local:
+  - /media/tv        # per PATH, never a global switch; the guarantee is REDUCED here and it says so
+```
+
+Only a positive identification counts as local: an unrecognised type, an overlay, a `tmpfs` and
+anything in user space (FUSE) are all treated as not-local, because a false warning costs one line of
+configuration and a false clear costs a film. **[docs/filesystem.md](docs/filesystem.md)** has the
+recognised-local set, the opt-in rules and what the startup traversal costs.
+
 ### Web API + UI (`serve`)
 
 `holdfast serve` runs a REST API + [SSE](https://developer.mozilla.org/docs/Web/API/Server-sent_events)

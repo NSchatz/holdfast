@@ -120,6 +120,20 @@ type Engine struct {
 	// no emission, the pre-TRANSCODE-7 behaviour.
 	Observer Observer
 
+	// Coverage, when non-nil, is the set of directories the STARTUP WALK
+	// traversed successfully (FILESYSTEM-1), and it BOUNDS this run: a source is
+	// enumerated from exactly these directories and from nowhere else, so a
+	// subtree the walk declined to re-enter, could not read, or failed to
+	// traverse contributes no file to this run and no swap can happen under it.
+	// It is also what makes the scan terminate over a bind-mount loop, which the
+	// startup walk cut by region and a plain recursive walk would follow for
+	// ever.
+	//
+	// nil restores the pre-check behaviour of walking the roots directly, which
+	// is what an Engine built without the startup check (the engine's own tests)
+	// gets.
+	Coverage []string
+
 	// Paused, when non-nil and returning true, tells scanOnce to stop feeding NEW
 	// files to workers this pass (TRANSCODE-7's pause control). It is checked
 	// between files only — an in-flight encode is NEVER interrupted (that would
@@ -260,6 +274,30 @@ func (e *Engine) RunOneshot(ctx context.Context) error {
 // is always safe to discard).
 func (e *Engine) cleanStaleTemps(ctx context.Context) {
 	n := 0
+	if e.Coverage != nil {
+		// Bounded by the startup walk exactly as the scan is: a directory the
+		// walk did not traverse is one this run touches in no way at all.
+		for _, dir := range e.Coverage {
+			if ctx.Err() != nil {
+				break
+			}
+			ents, err := os.ReadDir(dir)
+			if err != nil {
+				continue
+			}
+			for _, ent := range ents {
+				if !ent.IsDir() && isTempName(ent.Name()) {
+					if os.Remove(filepath.Join(dir, ent.Name())) == nil {
+						n++
+					}
+				}
+			}
+		}
+		if n > 0 {
+			e.Log.Info("discarded orphaned temp file(s) from a prior run", "count", n)
+		}
+		return
+	}
 	for _, root := range e.Cfg.LibraryRoots {
 		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
@@ -287,26 +325,7 @@ func (e *Engine) cleanStaleTemps(ctx context.Context) {
 // pulling new files from the channel, and the in-flight ffmpeg subprocess (if any)
 // is killed via ctx cancellation propagating through exec.CommandContext.
 func (e *Engine) scanOnce(ctx context.Context) error {
-	var files []string
-	for _, root := range e.Cfg.LibraryRoots {
-		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.IsDir() {
-				return nil
-			}
-			base := filepath.Base(path)
-			if isTempName(base) { // a temp is itself a *.mkv — never a source
-				return nil
-			}
-			if e.hasVideoExt(base) {
-				files = append(files, path)
-			}
-			return nil
-		})
-	}
-	sort.Strings(files)
+	files := e.enumerate()
 
 	n := e.Cfg.EffectiveWorkers()
 	ch := make(chan string)
@@ -372,6 +391,53 @@ feed:
 		return firstCancelErr
 	}
 	return ctx.Err()
+}
+
+// enumerate returns every source this run may act on, sorted for a deterministic
+// order.
+//
+// With a Coverage set (FILESYSTEM-1) it lists exactly the directories the startup
+// walk traversed successfully and nothing else: no recursion of its own, so a
+// directory the walk declined, could not read, or never reached yields no file
+// here, and a bind-mount loop the walk cut cannot be followed. Without one it
+// falls back to walking the roots directly, which is the behaviour of an Engine
+// built without the startup check.
+func (e *Engine) enumerate() []string {
+	var files []string
+	if e.Coverage != nil {
+		for _, dir := range e.Coverage {
+			ents, err := os.ReadDir(dir)
+			if err != nil {
+				continue
+			}
+			for _, ent := range ents {
+				if ent.IsDir() {
+					continue
+				}
+				if IsSourceName(ent.Name(), e.Cfg.VideoExts) {
+					files = append(files, filepath.Join(dir, ent.Name()))
+				}
+			}
+		}
+		sort.Strings(files)
+		return files
+	}
+	for _, root := range e.Cfg.LibraryRoots {
+		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				return nil
+			}
+			if IsSourceName(filepath.Base(path), e.Cfg.VideoExts) {
+				files = append(files, path)
+			}
+			return nil
+		})
+	}
+	sort.Strings(files)
+	return files
 }
 
 // ProcessFile applies the full safety pipeline to one source file on behalf of
@@ -870,14 +936,25 @@ func isTempName(base string) bool {
 	return strings.Contains(base, "."+TempMarker+".")
 }
 
-// hasVideoExt reports whether base has one of the configured video extensions
+// IsSourceName reports whether a file BASENAME is one a scan would enumerate as
+// a source: it carries one of the configured video extensions and is not one of
+// this tool's own work-in-progress temps (a temp is itself a *.mkv and is never a
+// source). It is the ONE definition of "a media file this run would enumerate",
+// shared by the scan and by the startup walk, which must decide it from the name
+// alone - it opens no file, so the walk's cost is bounded by the directory tree
+// and not by the library.
+func IsSourceName(base string, exts []string) bool {
+	return !isTempName(base) && matchesVideoExt(base, exts)
+}
+
+// matchesVideoExt reports whether base has one of the configured video extensions
 // (case-insensitive), matching the bash `-iname` scan.
-func (e *Engine) hasVideoExt(base string) bool {
+func matchesVideoExt(base string, exts []string) bool {
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(base), "."))
 	if ext == "" {
 		return false
 	}
-	for _, want := range e.Cfg.VideoExts {
+	for _, want := range exts {
 		if ext == strings.ToLower(want) {
 			return true
 		}

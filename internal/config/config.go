@@ -44,7 +44,8 @@ var knownKeys = map[string]bool{
 	"pixel_format": true, "container_ext": true, "min_bitrate_kbps": true,
 	"min_savings_percent": true, "duration_tolerance_sec": true,
 	"max_failures": true, "skip_hardlinked": true, "state_dir": true,
-	"vmaf_enable": true, "min_vmaf": true, "vmaf_min_pool": true,
+	"allow_non_local": true,
+	"vmaf_enable":     true, "min_vmaf": true, "vmaf_min_pool": true,
 	"vmaf_subsample": true, "vmaf_model": true, "workers": true,
 	"server_addr": true, "server_auth_token": true, "scan_interval_sec": true,
 	"metrics_enable": true, "notify_url": true, "run_window": true,
@@ -155,6 +156,24 @@ type Config struct {
 	// StateDir holds the job store (jobs.db) + heartbeat (relative paths are
 	// resolved by callers).
 	StateDir string `yaml:"state_dir"`
+
+	// AllowNonLocal opts specific paths in to running on storage holdfast could
+	// not positively identify as local (FILESYSTEM-1). holdfast's no-loss
+	// contract is stated for a local filesystem - an atomic same-filesystem
+	// rename whose failure means it did not happen, a stat that can see a
+	// concurrent rewrite, a SQLite WAL that works at all - and at startup it
+	// checks it has one, refusing a run whose library roots, state directory or
+	// any filesystem mounted beneath a root is NOT local unless the operator has
+	// said so here.
+	//
+	// It is per PATH and never a global switch: each entry names one path and
+	// covers that path alone, so opting the state directory in does not quietly
+	// opt a NAS mount inside the library in too. Each entry must name a
+	// configured library root, the state directory, or a path spelled beneath a
+	// configured library root AS CONFIGURED; anything else is a refusal, never a
+	// silently ignored line. It never permits a path holdfast cannot INSPECT:
+	// that is a refusal whatever is declared here.
+	AllowNonLocal []string `yaml:"allow_non_local"`
 
 	// --- VMAF perceptual-quality gate (TRANSCODE-4) ---
 

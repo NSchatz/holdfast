@@ -165,6 +165,25 @@ dry_run: false
 #                             # CPU libx265 already saturates cores per encode, so
 #                             # raising this is an opt-in for many small/low-res files)
 
+# --- storage that is not local ---
+# holdfast's no-loss contract is stated for a LOCAL filesystem: an atomic
+# same-filesystem rename whose failure means it did not happen, a stat that can see
+# a concurrent rewrite, a SQLite WAL that works at all. None of those hold on a NAS.
+# So at startup it classifies every path this run would act on - every library root,
+# the state directory, and every filesystem mounted beneath a root - and REFUSES the
+# whole run unless you have said, per path, that you accept the reduced guarantee.
+# It prints the exact line to add, so you never have to guess the spelling.
+#
+# Each entry names ONE path and covers that path alone (never a global switch), and
+# must be a configured library root, the state directory, or a path spelled beneath
+# a library root AS CONFIGURED. An entry that covers nothing is reported as
+# unnecessary; an entry naming something else refuses the run as malformed rather
+# than being silently ignored. It never permits a path holdfast cannot INSPECT.
+# See docs/filesystem.md.
+# allow_non_local:
+#   - /media/tv
+#   - /state
+
 # --- HTTP API + web UI (`holdfast serve`) ---
 # `holdfast serve` runs a REST API + SSE live stream + an embedded web dashboard
 # (single binary). It is a READ-AND-CONTROL surface: this YAML stays the source of
