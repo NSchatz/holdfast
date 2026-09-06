@@ -491,10 +491,18 @@ func (r cssRule) get(prop string) string {
 	return v
 }
 
-// styleBlock is the contents of the page's single <style> element.
+// styleBlock is the contents of the page's single <style> element. "Single" is
+// ASSERTED here rather than assumed: every CSS sweep in this file is built on this
+// function and reads the first <style> element only, so a second stylesheet would
+// carry declarations no criterion ever looks at. That is the same hole the inline
+// style= attributes opened one element lower down (impl-gate finding F13), and it
+// is closed in the same place - at the reader, once, for every sweep.
 func styleBlock(t *testing.T) string {
 	t.Helper()
 	s := string(indexHTML)
+	if n := strings.Count(s, "<style"); n != 1 {
+		t.Fatalf("the page carries %d <style elements; every sweep in this file reads one of them, so the rest would go unswept", n)
+	}
 	i := strings.Index(s, "<style>")
 	j := strings.Index(s, "</style>")
 	if i < 0 || j < 0 || j < i {
@@ -586,8 +594,9 @@ func parseDecls(body string) []cssDecl {
 }
 
 var (
-	varRefRe = regexp.MustCompile(`var\(\s*(--[a-zA-Z0-9_-]+)`)
-	hex6     = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
+	varRefRe   = regexp.MustCompile(`var\(\s*(--[a-zA-Z0-9_-]+)`)
+	hex6       = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
+	soleVarRef = regexp.MustCompile(`^var\(\s*(--[a-zA-Z0-9_-]+)\s*\)$`)
 )
 
 func varRefs(value string) []string {
@@ -598,9 +607,26 @@ func varRefs(value string) []string {
 	return out
 }
 
+// canonicalAt is an at-rule prelude with every space removed, so a media query
+// can be compared for what it IS rather than for the words it happens to contain.
+// Matching a prelude with strings.Contains is the F12 defect in another position:
+// `@media (prefers-color-scheme: light) and (min-width: 99999px)` contains both
+// words, reads as the live light theme, and applies to nothing.
+func canonicalAt(at string) string { return strings.ReplaceAll(normSpace(at), " ", "") }
+
+const (
+	lightAt  = "@media(prefers-color-scheme:light)"
+	reduceAt = "@media(prefers-reduced-motion:reduce)"
+)
+
 // themeTokens returns the two token sets the page declares: the dark set (the
 // default, in the top-level :root) and the light set (the same names, overridden
 // under prefers-color-scheme: light, merged over the dark defaults).
+//
+// A :root block under any OTHER at-rule is fatal rather than skipped. Such a
+// block declares tokens that paint the page under some condition and that no
+// theme here measures, which is the "unreadable value scored as harmless" shape
+// this file refuses everywhere else.
 func themeTokens(t *testing.T, rules []cssRule) (dark, light map[string]string) {
 	t.Helper()
 	dark, over := map[string]string{}, map[string]string{}
@@ -612,10 +638,10 @@ func themeTokens(t *testing.T, rules []cssRule) (dark, light map[string]string) 
 		switch {
 		case r.at == "":
 			target = dark
-		case strings.Contains(r.at, "prefers-color-scheme") && strings.Contains(r.at, "light"):
+		case canonicalAt(r.at) == lightAt:
 			target = over
 		default:
-			continue
+			t.Fatalf("a :root token block sits under %q, which is neither the top level nor the light theme's exact `@media (prefers-color-scheme: light)`: the tokens it declares paint the page under a condition no theme in this file measures", r.at)
 		}
 		for _, d := range r.decls {
 			if strings.HasPrefix(d.prop, "--") {
@@ -635,6 +661,18 @@ func themeTokens(t *testing.T, rules []cssRule) (dark, light map[string]string) 
 	}
 	for k, v := range over {
 		light[k] = v
+	}
+	// Every colour token is #rrggbb, because that is the only form contrastRatio
+	// can measure. A token written any other way - `rgb()`, `#abc`, `#rrggbbaa` -
+	// is not seen as a colour by colourTokens, so every pair it paints drops
+	// silently out of the contrast derivation instead of being measured.
+	for _, set := range []map[string]string{dark, light} {
+		for name, v := range set {
+			v = strings.TrimSpace(v)
+			if colourFuncRe.MatchString(v) || (hexLiteral.MatchString(v) && !hex6.MatchString(v)) {
+				t.Errorf("the token %s is %q; this file measures #rrggbb, so a colour written any other way would leave every pair it paints unmeasured", name, v)
+			}
+		}
 	}
 	return dark, light
 }
@@ -682,8 +720,14 @@ func ratio(t *testing.T, tokens map[string]string, a, b string) float64 {
 // clears a "wider than the breakpoint" test.
 func measuredPx(tokens map[string]string, v string) (float64, bool) {
 	v = strings.TrimSpace(v)
-	if refs := varRefs(v); len(refs) == 1 {
-		v = strings.TrimSpace(resolveToken(tokens, refs[0]))
+	// Only a value that is EXACTLY var(--x) resolves through its token. A var()
+	// sitting inside a larger expression must not be read as the whole value:
+	// substituting it there measured `calc(1000px + var(--sp-4))` as 8px, which
+	// clears every ceiling in this file, and that is the F2/F11 shape once more -
+	// a value the reader cannot evaluate scored as a harmless one. An expression is
+	// UNMEASURABLE, and every caller here is built to red on that.
+	if m := soleVarRef.FindStringSubmatch(v); m != nil {
+		v = strings.TrimSpace(resolveToken(tokens, m[1]))
 	}
 	if !strings.HasSuffix(v, "px") {
 		return 0, false
@@ -708,11 +752,493 @@ func pxOf(tokens map[string]string, v string) float64 {
 	return px
 }
 
-// disabledOnly reports whether a selector applies ONLY to a disabled control, which
-// WCAG 2.2 exempts from 1.4.3 and 1.4.11 alike. `:not(:disabled)` is the opposite
-// statement and must not be caught by it.
+// --- reading a SELECTOR, rather than the words it is spelled with --------------
+
+// selectorParts splits a selector GROUP into its parts. Asking a question of the
+// whole group as one string answers it for every part at once, which is exactly
+// how an exemption written for one selector leaks onto another:
+// `button:disabled, .empty { color:var(--line) }` is disabled-only by a
+// strings.Contains and is not disabled-only at all.
+func selectorParts(sel string) []string {
+	var out []string
+	depth, start := 0, 0
+	for i := 0; i < len(sel); i++ {
+		switch sel[i] {
+		case '(', '[':
+			depth++
+		case ')', ']':
+			depth--
+		case ',':
+			if depth == 0 {
+				out = append(out, strings.TrimSpace(sel[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	out = append(out, strings.TrimSpace(sel[start:]))
+	var keep []string
+	for _, p := range out {
+		if p != "" {
+			keep = append(keep, p)
+		}
+	}
+	return keep
+}
+
+// lastCompound returns the rightmost compound of one selector part - the piece
+// that picks the element the rule actually applies TO. Everything to the left of
+// the last top-level combinator is context.
+func lastCompound(part string) string {
+	depth, start := 0, 0
+	for i := 0; i < len(part); i++ {
+		switch part[i] {
+		case '(', '[':
+			depth++
+		case ')', ']':
+			depth--
+		case ' ', '\t', '\n', '>', '+', '~':
+			if depth == 0 {
+				start = i + 1
+			}
+		}
+	}
+	return strings.TrimSpace(part[start:])
+}
+
+// compound is a parsed compound selector: the simple selectors that decide which
+// elements it can apply to.
+type compound struct {
+	tag      string
+	id       string
+	classes  []string
+	pseudoEl bool // a ::pseudo-element is not the element itself
+	root     bool // :root is the document element, never a control
+}
+
+func isNameByte(c byte) bool {
+	return c == '-' || c == '_' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func parseCompound(c string) compound {
+	var out compound
+	for i := 0; i < len(c); {
+		switch c[i] {
+		case '#', '.':
+			j := i + 1
+			for j < len(c) && isNameByte(c[j]) {
+				j++
+			}
+			if c[i] == '#' {
+				out.id = c[i+1 : j]
+			} else {
+				out.classes = append(out.classes, c[i+1:j])
+			}
+			i = j
+		case ':':
+			j := i + 1
+			if j < len(c) && c[j] == ':' {
+				out.pseudoEl = true
+				j++
+			}
+			name := j
+			for j < len(c) && isNameByte(c[j]) {
+				j++
+			}
+			if strings.EqualFold(c[name:j], "root") {
+				out.root = true
+			}
+			if j < len(c) && c[j] == '(' { // a functional pseudo-class: skip its argument
+				depth := 0
+				for ; j < len(c); j++ {
+					if c[j] == '(' {
+						depth++
+					}
+					if c[j] == ')' {
+						depth--
+						if depth == 0 {
+							j++
+							break
+						}
+					}
+				}
+			}
+			i = j
+		case '[': // an attribute selector: not decided here, see reaches()
+			j := i
+			for ; j < len(c) && c[j] != ']'; j++ {
+			}
+			if j < len(c) {
+				j++
+			}
+			i = j
+		case '*':
+			i++
+		default:
+			j := i
+			for j < len(c) && isNameByte(c[j]) {
+				j++
+			}
+			if j == i {
+				i++ // a byte this reader does not model; it narrows nothing
+				continue
+			}
+			out.tag = strings.ToLower(c[i:j])
+			i = j
+		}
+	}
+	return out
+}
+
+// universal reports whether the compound names no element in particular, so it
+// applies to everything on the page (`*`, `:focus-visible`).
+func (c compound) universal() bool {
+	return c.tag == "" && c.id == "" && len(c.classes) == 0 && !c.root && !c.pseudoEl
+}
+
+// reaches reports whether a rule with this compound as its subject CAN apply to
+// el. It is deliberately generous where it cannot decide - an attribute selector,
+// an unmodelled pseudo-class, an ancestor it does not walk - because for a FLOOR
+// sweep an over-inclusive membership only ever holds MORE rules to the criterion,
+// while an under-inclusive one is the hole finding F12 named.
+func (c compound) reaches(el pageElement) bool {
+	if c.pseudoEl || c.root {
+		return false
+	}
+	if c.tag != "" && c.tag != el.tag {
+		return false
+	}
+	if c.id != "" && c.id != el.id {
+		return false
+	}
+	for _, cl := range c.classes {
+		if !el.hasClass(cl) {
+			return false
+		}
+	}
+	return true
+}
+
+// selectorReaches reports whether any part of a selector group can apply to any
+// of the given elements.
+func selectorReaches(sel string, els []pageElement) bool {
+	for _, p := range selectorParts(sel) {
+		c := parseCompound(lastCompound(p))
+		for _, el := range els {
+			if c.reaches(el) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// selectorAddresses is selectorReaches for a rule that names one of the elements
+// SPECIFICALLY. A universal rule applies to every element on the page and says
+// nothing about a control in particular, so it is not one of the page's controls.
+func selectorAddresses(sel string, els []pageElement) bool {
+	for _, p := range selectorParts(sel) {
+		c := parseCompound(lastCompound(p))
+		if c.universal() {
+			continue
+		}
+		for _, el := range els {
+			if c.reaches(el) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasUniversalPart reports whether a selector group carries a bare `*` part, which
+// is what makes a rule apply to every element rather than to a subtree.
+func hasUniversalPart(sel string) bool {
+	for _, p := range selectorParts(sel) {
+		if p != lastCompound(p) {
+			continue // `.foo *` is a descendant rule, not a universal one
+		}
+		if parseCompound(p).universal() {
+			return true
+		}
+	}
+	return false
+}
+
+// disabledOnly reports whether EVERY part of a selector group applies only to a
+// disabled control, which WCAG 2.2 exempts from 1.4.3 and 1.4.11 alike.
+// `:not(:disabled)` is the opposite statement and must not be caught by it, and
+// one disabled-only part must not carry the exemption to the rest of its group.
 func disabledOnly(sel string) bool {
-	return strings.Contains(sel, ":disabled") && !strings.Contains(sel, ":not(:disabled)")
+	parts := selectorParts(sel)
+	if len(parts) == 0 {
+		return false
+	}
+	for _, p := range parts {
+		if !strings.Contains(p, ":disabled") || strings.Contains(p, ":not(:disabled)") {
+			return false
+		}
+	}
+	return true
+}
+
+// exemptTablewrap reports whether EVERY part of a selector group is scoped to a
+// .tablewrap, which is the one place AC6 lets a box be wider than the viewport.
+func exemptTablewrap(sel string) bool {
+	parts := selectorParts(sel)
+	if len(parts) == 0 {
+		return false
+	}
+	for _, p := range parts {
+		if !strings.Contains(p, "tablewrap") {
+			return false
+		}
+	}
+	return true
+}
+
+// --- the MARKUP the stylesheet paints ------------------------------------------
+
+// pageElement is one element of the page's markup: enough of it to say which
+// selectors can reach it, what it declares inline, and where it sits.
+type pageElement struct {
+	tag         string
+	id          string
+	classes     []string
+	style       string
+	at          int
+	inTablewrap bool
+}
+
+func (e pageElement) hasClass(c string) bool {
+	for _, x := range e.classes {
+		if x == c {
+			return true
+		}
+	}
+	return false
+}
+
+func (e pageElement) String() string {
+	s := "<" + e.tag
+	if e.id != "" {
+		s += " id=\"" + e.id + "\""
+	}
+	for _, c := range e.classes {
+		s += " ." + c
+	}
+	return s + ">"
+}
+
+// selector spells the element as the selector that would pick it, with [style]
+// marking the attribute the declarations came from. Written this way so an
+// inline rule is read by the same selector machinery as every other rule rather
+// than by a shape only its own sweep understands.
+func (e pageElement) selector() string {
+	s := e.tag
+	if e.id != "" {
+		s += "#" + e.id
+	}
+	for _, c := range e.classes {
+		s += "." + c
+	}
+	return s + "[style]"
+}
+
+var (
+	tagOpen    = regexp.MustCompile(`<([a-zA-Z][a-zA-Z0-9-]*)((?:[^<>"']|"[^"]*"|'[^']*')*)>`)
+	attrPair   = regexp.MustCompile(`([a-zA-Z-]+)\s*=\s*"([^"]*)"`)
+	styleElem  = regexp.MustCompile(`(?s)<style>.*?</style>`)
+	scriptElem = regexp.MustCompile(`(?s)<script>.*?</script>`)
+	styleAttr  = regexp.MustCompile(`\bstyle\s*=`)
+)
+
+// blankOut replaces each span with spaces of the SAME LENGTH (newlines kept), so
+// an index into the result is still an index into the page it came from.
+func blankOut(s string, spans [][]int) string {
+	b := []byte(s)
+	for _, sp := range spans {
+		for i := sp[0]; i < sp[1] && i < len(b); i++ {
+			if b[i] != '\n' {
+				b[i] = ' '
+			}
+		}
+	}
+	return string(b)
+}
+
+// pageMarkup is the page with every region a tag scanner must not read blanked:
+// the HTML comments (prose is not markup - impl-gate finding F7 made that
+// distinction once already), the stylesheet, and the script, whose JavaScript
+// carries `<` in comparisons and in strings.
+func pageMarkup(t *testing.T) string {
+	t.Helper()
+	s := string(indexHTML)
+	style := styleElem.FindAllStringIndex(s, -1)
+	script := scriptElem.FindAllStringIndex(s, -1)
+	if len(style) != 1 || len(script) != 1 {
+		t.Fatalf("the page has %d <style> and %d <script> elements; this reader models one of each", len(style), len(script))
+	}
+	spans := htmlComment.FindAllStringIndex(s, -1)
+	spans = append(spans, style...)
+	spans = append(spans, script...)
+	return blankOut(s, spans)
+}
+
+// divSpans returns the [start,end) span of each <div> opened with the given tag
+// text, ending at its closing </div>.
+func divSpans(t *testing.T, s, open string) [][2]int {
+	t.Helper()
+	var spans [][2]int
+	for i := 0; ; {
+		k := strings.Index(s[i:], open)
+		if k < 0 {
+			break
+		}
+		start := i + k
+		e := strings.Index(s[start:], "</div>")
+		if e < 0 {
+			t.Fatalf("a %s is never closed", open)
+		}
+		spans = append(spans, [2]int{start, start + e})
+		i = start + e
+	}
+	return spans
+}
+
+// elementsIn returns every element the page's markup opens, in document order.
+func elementsIn(t *testing.T, markup string) []pageElement {
+	t.Helper()
+	wraps := divSpans(t, markup, `<div class="tablewrap">`)
+	var out []pageElement
+	for _, m := range tagOpen.FindAllStringSubmatchIndex(markup, -1) {
+		el := pageElement{
+			tag:         strings.ToLower(markup[m[2]:m[3]]),
+			at:          m[0],
+			inTablewrap: inAnySpan(wraps, m[0]),
+		}
+		for _, a := range attrPair.FindAllStringSubmatch(markup[m[4]:m[5]], -1) {
+			switch strings.ToLower(a[1]) {
+			case "id":
+				el.id = a[2]
+			case "class":
+				el.classes = strings.Fields(a[2])
+			case "style":
+				el.style = a[2]
+			}
+		}
+		out = append(out, el)
+	}
+	if len(out) < 20 {
+		t.Fatalf("the markup reader found %d elements; it is not reading the page", len(out))
+	}
+	return out
+}
+
+// inlineStyle is a style="..." attribute read as the rule it is: a declaration
+// block that applies to exactly one element, at the highest precedence the
+// cascade has short of !important.
+type inlineStyle struct {
+	el   pageElement
+	rule cssRule
+}
+
+// inlineStyles returns the declarations the MARKUP carries in style= attributes.
+// Every sweep in this file used to read the <style> element alone, so those
+// declarations were ungraded by AC1, AC2, AC5 and AC6 alike (impl-gate finding
+// F13): `<main style="min-width:900px">` scrolls the page body sideways at 360px
+// with every test green. They are folded into the same sweeps here rather than
+// checked separately, because the criteria do not distinguish where a declaration
+// is written - AC1 says "no declaration", and an attribute is one.
+//
+// The synthetic selector names the element for the error message, and carries
+// `.tablewrap` when the element sits inside one so AC6's own exemption still
+// applies to a column of a scrolling table.
+func inlineStyles(t *testing.T) []inlineStyle {
+	t.Helper()
+	markup := pageMarkup(t)
+	var out []inlineStyle
+	for _, el := range elementsIn(t, markup) {
+		if strings.TrimSpace(el.style) == "" {
+			continue
+		}
+		sel := el.selector()
+		if el.inTablewrap {
+			sel = ".tablewrap " + sel
+		}
+		out = append(out, inlineStyle{el: el, rule: cssRule{sel: sel, decls: parseDecls(el.style)}})
+	}
+	// This reader reads a double-quoted attribute. If the markup carries a style=
+	// this loop did not pick up - unquoted, single-quoted, on a tag shape the
+	// scanner does not model - that is a declaration no sweep here grades, so it
+	// is fatal rather than absent.
+	if n := len(styleAttr.FindAllString(markup, -1)); n != len(out) {
+		t.Fatalf("the markup carries %d style= attributes and this reader read %d of them; the ones it missed are declarations no sweep in this file grades", n, len(out))
+	}
+	return out
+}
+
+// allRules is every declaration the PAGE carries: the stylesheet's rules and the
+// markup's inline ones, as one set.
+func allRules(t *testing.T) []cssRule {
+	t.Helper()
+	out := parseCSS(t)
+	for _, in := range inlineStyles(t) {
+		out = append(out, in.rule)
+	}
+	return out
+}
+
+// pointerTargets are the elements AC7 defines as the page's pointer targets:
+// every button and every input in the two .controls rows. They are read out of
+// the MARKUP because that is where the criterion's own set is defined, and
+// because what a rule has to do to lower one of their floors is REACH one -
+// whatever words its selector happens to be spelled with (impl-gate finding F12).
+//
+// Every button and input on the page is returned, not only the ones inside a
+// .controls row: TestTargets_EveryPointerTargetClearsTheTwentyFourPixelFloor reds
+// on one placed anywhere else, so the two sets agree, and holding a stray control
+// to the floor as well is never the unsafe direction.
+func pointerTargets(t *testing.T) []pageElement {
+	t.Helper()
+	var out []pageElement
+	for _, el := range elementsIn(t, pageMarkup(t)) {
+		if el.tag == "button" || el.tag == "input" {
+			out = append(out, el)
+		}
+	}
+	if len(out) < 5 {
+		t.Fatalf("the markup declares %d buttons/inputs; the page's five pointer targets are not being read", len(out))
+	}
+	return out
+}
+
+// --- every var() reference names a declared token ------------------------------
+
+// A var() that names nothing is the F11 shape at its ROOT: colourTokens finds no
+// colour in it, measuredPx finds no length in it, and every sweep built on those
+// two readers then passes over the declaration in silence.
+// `.nr { color:var(--mutedd) }` paints unstyled text no contrast pair covers, and
+// `#rescan { min-height:var(--tgt) }` holds a pointer target at its content height
+// under a floor sweep that never sees a number. Neither is a colour literal, so
+// AC1 does not catch either. This closes both at the reader they share.
+func TestTokens_EveryVarReferenceNamesADeclaredToken(t *testing.T) {
+	rules := allRules(t)
+	dark, _ := themeTokens(t, rules)
+	seen := 0
+	for _, r := range rules {
+		for _, d := range r.decls {
+			for _, name := range varRefs(d.value) {
+				seen++
+				if strings.TrimSpace(dark[name]) == "" {
+					t.Errorf("%s { %s: %s } references %s, which no token block declares; a var() that resolves to nothing is read as neither a colour nor a length, so every sweep in this file passes over the declaration in silence",
+						r.sel, d.prop, d.value, name)
+				}
+			}
+		}
+	}
+	if seen == 0 {
+		t.Fatal("the var() sweep examined no reference - it is not reading the stylesheet")
+	}
 }
 
 // --- AC1: every colour comes from a token ------------------------------------
@@ -832,13 +1358,17 @@ func namedColoursIn(prop, value string) []string {
 }
 
 func TestTokens_EveryColourIsDeclaredInATokenBlock(t *testing.T) {
-	rules := parseCSS(t)
+	rules := allRules(t)
 	checked := 0
 	for _, r := range rules {
-		if r.sel == ":root" {
-			continue // the token block IS where the literals are allowed to live
-		}
 		for _, d := range r.decls {
+			// The token block is where the literals are allowed to live - and only
+			// its CUSTOM PROPERTIES are. Skipping the whole :root rule exempted
+			// `:root { background:#ff0000 }` too, which is a colour painted at a
+			// point of use like any other.
+			if r.sel == ":root" && strings.HasPrefix(d.prop, "--") {
+				continue
+			}
 			if hexLiteral.MatchString(d.value) {
 				t.Errorf("%s { %s: %s } writes a colour literal at its point of use; declare it in :root and reference it as var(--...)", r.sel, d.prop, d.value)
 			}
@@ -894,7 +1424,7 @@ var spaceProps = map[string]bool{
 }
 
 func TestTokens_TypeAndSpaceComeFromTheDeclaredScales(t *testing.T) {
-	rules := parseCSS(t)
+	rules := allRules(t)
 	dark, _ := themeTokens(t, rules)
 	fs, sp := 0, 0
 	for name, v := range dark {
@@ -914,10 +1444,13 @@ func TestTokens_TypeAndSpaceComeFromTheDeclaredScales(t *testing.T) {
 
 	seen := 0
 	for _, r := range rules {
-		if r.sel == ":root" {
-			continue
-		}
 		for _, d := range r.decls {
+			// As in AC1's sweep: inside :root only the custom properties are the
+			// scale. A literal `font-size` written there is written at a point of
+			// use, and skipping the whole rule passed over it.
+			if r.sel == ":root" && strings.HasPrefix(d.prop, "--") {
+				continue
+			}
 			if d.prop == "font" {
 				t.Errorf("%s { font: %s } - the font shorthand hides a font-size; declare font-size from the type scale", r.sel, d.value)
 				continue
@@ -982,9 +1515,6 @@ func paintedTextPairs(t *testing.T, rules []cssRule, tokens map[string]string) [
 	t.Helper()
 	var out []paintedPair
 	for _, r := range rules {
-		if r.sel == ":root" {
-			continue
-		}
 		fg := colourTokens(tokens, r.get("color"))
 		bgVal := r.get("background-color")
 		if bgVal == "" {
@@ -996,6 +1526,13 @@ func paintedTextPairs(t *testing.T, rules []cssRule, tokens map[string]string) [
 		if len(bg) > 0 && len(fg) == 0 && r.get("--decorative") == "" {
 			t.Errorf("%s paints the surface %s but declares no text colour on it: give it one so the pair is measured, or mark the rule --decorative:1 if it never holds text",
 				r.sel, bg[0])
+		}
+		// A `color` this reader cannot resolve to a token is a RED, not a skip: the
+		// text it paints would otherwise leave the derivation in silence. The one
+		// exception is the inherit family, which takes an ancestor's colour and is
+		// therefore measured where that ancestor declared it.
+		if cv := r.get("color"); len(fg) == 0 && cv != "" && !inheritedColour(cv) {
+			t.Errorf("%s declares color:%s, which resolves to no colour token, so the pair it paints cannot be measured against its floor", r.sel, cv)
 		}
 		if len(fg) == 0 || disabledOnly(r.sel) {
 			continue
@@ -1012,11 +1549,26 @@ func paintedTextPairs(t *testing.T, rules []cssRule, tokens map[string]string) [
 		if isLargeText(tokens, r) {
 			floor, kind = 3.0, "large-text"
 		}
-		for _, s := range surfaces {
-			out = append(out, paintedPair{sel: r.sel, fg: fg[0], bg: s, floor: floor, kind: kind})
+		// EVERY foreground token the declaration names, against every surface it
+		// names. Measuring fg[0] alone left a second colour in the same value -
+		// `color:light-dark(var(--a), var(--b))` - painted and unmeasured.
+		for _, f := range fg {
+			for _, s := range surfaces {
+				out = append(out, paintedPair{sel: r.sel, fg: f, bg: s, floor: floor, kind: kind})
+			}
 		}
 	}
 	return out
+}
+
+// inheritedColour reports whether a colour value takes an ancestor's colour
+// rather than naming one of its own.
+func inheritedColour(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "inherit", "initial", "unset", "revert":
+		return true
+	}
+	return false
 }
 
 type theme struct {
@@ -1029,7 +1581,7 @@ func themes(dark, light map[string]string) []theme {
 }
 
 func TestContrast_EveryPaintedPairMeetsItsFloorInBothThemes(t *testing.T) {
-	rules := parseCSS(t)
+	rules := allRules(t)
 	dark, light := themeTokens(t, rules)
 	pairs := paintedTextPairs(t, rules, dark)
 	if len(pairs) < 20 {
@@ -1063,16 +1615,30 @@ func TestThemes_ALightSetIsDeclaredAndColorSchemeFollowsIt(t *testing.T) {
 	if got := resolveToken(dark, "--bg"); got != "#0f1115" {
 		t.Errorf("the default (no-preference) --bg is %q; the dark set the page ships must remain the default", got)
 	}
-	// The light set is a real second set, not a copy of the first.
-	for _, name := range []string{"--bg", "--panel", "--fg", "--muted", "--accent", "--ok", "--warn", "--bad", "--border", "--focus"} {
-		d, l := resolveToken(dark, name), resolveToken(light, name)
-		if !hex6.MatchString(l) {
+	// The light set is a real second set, not a copy of the first - over EVERY
+	// colour token the dark set declares, derived from the dark :root block in
+	// source order rather than from a list of ten names written by hand. A
+	// hand-written list is a membership narrower than the criterion's own set: a
+	// colour token added to the dark block and forgotten in the light one keeps its
+	// DARK value inside the light theme, and no assertion here would ask about it.
+	covered := 0
+	for _, d := range root.decls {
+		name := d.prop
+		if !strings.HasPrefix(name, "--") || !hex6.MatchString(resolveToken(dark, name)) {
+			continue
+		}
+		covered++
+		dv, lv := resolveToken(dark, name), resolveToken(light, name)
+		if !hex6.MatchString(lv) {
 			t.Errorf("the light theme does not declare %s", name)
 			continue
 		}
-		if d == l {
-			t.Errorf("the light theme reuses the dark %s (%s) - that is not a light set", name, d)
+		if dv == lv {
+			t.Errorf("the light theme reuses the dark %s (%s) - that is not a light set", name, dv)
 		}
+	}
+	if covered < 10 {
+		t.Fatalf("only %d colour tokens derived from the dark :root block; this proof is not reading the token set", covered)
 	}
 	// ...and it is light: its page surface is lighter than its text, the opposite of
 	// the dark set. (Contrast against black is monotonic in luminance.)
@@ -1117,28 +1683,65 @@ func controlRules(t *testing.T, rules []cssRule, tokens map[string]string) []con
 		}
 		return nil
 	}
+	// Which rules paint a control is decided from the MARKUP as well as from the
+	// selector text: the words "button" and "input" are not how a stylesheet
+	// reaches a control, they are only how this page happens to spell two of its
+	// rules. `#rescan { background:var(--panel); border-color:var(--panel) }`
+	// repaints a control into invisibility against the surface behind it and names
+	// neither word (the AC7 half of the same gate is impl-gate finding F12).
+	//
+	// A UNIVERSAL rule is deliberately not a control rule: `*` and `:focus-visible`
+	// apply to every element on the page and say nothing about a control in
+	// particular, and the surface each element sits on is covered by AC3's own
+	// painted-pair derivation.
+	targets := pointerTargets(t)
+	inputBase := func(r cssRule) bool {
+		if strings.Contains(r.sel, "input") {
+			return true
+		}
+		for _, el := range targets {
+			if el.tag == "input" && selectorAddresses(r.sel, []pageElement{el}) {
+				return true
+			}
+		}
+		return false
+	}
 	var out []controlRule
 	for _, r := range rules {
-		if !controlSel.MatchString(r.sel) || disabledOnly(r.sel) || strings.Contains(r.sel, "::") {
+		reaches := controlSel.MatchString(r.sel) || selectorAddresses(r.sel, targets)
+		if !reaches || disabledOnly(r.sel) || strings.Contains(r.sel, "::") {
 			continue
 		}
 		b := base["button"]
-		if strings.Contains(r.sel, "input") {
+		if inputBase(r) {
 			b = base[".controls input"]
 		}
 		fill := first(r.get("background-color"), r.get("background"), b.get("background-color"), b.get("background"))
 		edge := first(r.get("border-color"), r.get("border"), b.get("border-color"), b.get("border"))
 		behind := first(r.get("--paints-on"), b.get("--paints-on"))
+		// Unresolvable is RED, not skipped. Dropping a control rule this reader
+		// could not resolve is the F11 shape on the non-text floor: the control
+		// stops being measured and nothing says so.
 		if len(fill) == 0 || len(edge) == 0 || len(behind) == 0 {
+			t.Errorf("%s paints a control but this reader cannot resolve all three of its fill (%v), its edge (%v) and the surface behind it (%v) to colour tokens, so the control goes unmeasured against WCAG 2.2 1.4.11's 3:1 non-text floor",
+				r.sel, fill, edge, behind)
 			continue
 		}
-		out = append(out, controlRule{sel: r.sel, fill: fill[0], edge: edge[0], behind: behind[0]})
+		// Every combination the declarations name, not the first of each: a value
+		// carrying two colour tokens paints with both.
+		for _, f := range fill {
+			for _, e := range edge {
+				for _, bh := range behind {
+					out = append(out, controlRule{sel: r.sel, fill: f, edge: e, behind: bh})
+				}
+			}
+		}
 	}
 	return out
 }
 
 func TestControls_AreIdentifiableAgainstTheSurfaceTheySitOn(t *testing.T) {
-	rules := parseCSS(t)
+	rules := allRules(t)
 	dark, light := themeTokens(t, rules)
 	ctrls := controlRules(t, rules, dark)
 	if len(ctrls) < 4 {
@@ -1156,75 +1759,184 @@ func TestControls_AreIdentifiableAgainstTheSurfaceTheySitOn(t *testing.T) {
 	}
 }
 
-func TestFocus_RingClearsBothTheControlFillAndTheSurfaceBehindIt(t *testing.T) {
-	rules := parseCSS(t)
-	dark, light := themeTokens(t, rules)
-	focus, width := "", ""
-	for _, r := range rules {
-		if !strings.Contains(r.sel, ":focus-visible") {
-			continue
+// outlineSpec is the focus indicator ONE rule declares: what it says about the
+// outline's style, width, colour and offset, and whether it says anything at all.
+type outlineSpec struct {
+	sel     string
+	at      string
+	style   string
+	width   string
+	offset  string
+	colours []string
+	focus   bool // the rule is a :focus-visible rule
+	stated  bool // the rule declares an outline property at all
+}
+
+func outlineOf(tokens map[string]string, r cssRule) outlineSpec {
+	o := outlineSpec{sel: r.sel, at: r.at, offset: r.get("outline-offset")}
+	for _, p := range selectorParts(r.sel) {
+		if strings.Contains(p, ":focus-visible") {
+			o.focus = true
 		}
-		v := r.get("outline-color")
-		if v == "" {
-			v = r.get("outline")
-		}
-		if c := colourTokens(dark, v); len(c) > 0 {
-			focus = c[0]
-		}
-		if w := r.get("outline-width"); w != "" {
-			width = w
-		} else if o := r.get("outline"); o != "" {
-			// The `outline` shorthand: width is its length component. Take the first
-			// field that measures as a length rather than assuming a position.
-			for _, f := range strings.Fields(o) {
-				if _, ok := measuredPx(dark, f); ok {
-					width = f
-					break
+	}
+	if sh := r.get("outline"); sh != "" {
+		o.stated = true
+		o.colours = colourTokens(tokens, sh)
+		for _, f := range strings.Fields(sh) {
+			lf := strings.ToLower(f)
+			if lf == "none" || lf == "hidden" {
+				o.style = lf
+			}
+			if o.width == "" {
+				if _, ok := measuredPx(tokens, f); ok {
+					o.width = f
+				} else if f == "0" {
+					// `outline:0` is a zero width written without a unit, and it
+					// removes the indicator exactly as `none` does.
+					o.width = "0px"
 				}
 			}
 		}
 	}
-	if focus == "" {
-		t.Fatal("no :focus-visible rule draws an outline from a colour token")
+	if v := r.get("outline-style"); v != "" {
+		o.stated = true
+		o.style = strings.ToLower(strings.TrimSpace(v))
 	}
-	// The ring's WIDTH, not only its colour. Contrast is the floor AC8 restates, but
-	// the clause before it is "SHALL draw a focus indicator", and an outline of zero
-	// width draws none however well its colour would have contrasted - a hole a
-	// colour-only reading of this test leaves open (impl-gate finding F9). The 2px
-	// figure is WCAG 2.2 2.4.13 Focus Appearance, one of the success criteria the
-	// spec's Constraints section carries at
+	if v := r.get("outline-width"); v != "" {
+		o.stated = true
+		o.width = v
+	}
+	if v := r.get("outline-color"); v != "" {
+		o.stated = true
+		o.colours = colourTokens(tokens, v)
+	}
+	return o
+}
+
+// hasBareFocus reports whether a selector group carries a :focus that is not
+// :focus-visible or :focus-within - the shape that would show the ring on a mouse
+// click. Asked of the PARSED selectors, so a comment mentioning `:focus {` is not
+// mistaken for a rule and a rule spelled `:focus:hover` is not missed.
+func hasBareFocus(sel string) bool {
+	for _, p := range selectorParts(sel) {
+		for i := 0; ; {
+			k := strings.Index(p[i:], ":focus")
+			if k < 0 {
+				break
+			}
+			at := i + k + len(":focus")
+			if rest := p[at:]; !strings.HasPrefix(rest, "-visible") && !strings.HasPrefix(rest, "-within") {
+				return true
+			}
+			i = at
+		}
+	}
+	return false
+}
+
+func TestFocus_RingClearsBothTheControlFillAndTheSurfaceBehindIt(t *testing.T) {
+	rules := allRules(t)
+	dark, light := themeTokens(t, rules)
+	targets := pointerTargets(t)
+
+	// EVERY rule that says anything about an outline is resolved, and one this
+	// reader cannot resolve FAILS rather than being discarded.
+	//
+	// This loop used to fold every :focus-visible rule into one colour and one
+	// width, and both assignments were conditional on the rule yielding a value.
+	// `outline:none` yields neither - no colour token, and `none` is not a
+	// measurable length - so a second, more specific rule switching the ring OFF
+	// was read and thrown away while the test went on reporting the colour and
+	// width of the base rule the cascade had already overridden (impl-gate finding
+	// F11). `button.primary:focus-visible { outline:none }` is one line, it is the
+	// standard prelude to a bespoke ring, and AC8 names that button by hand.
+	//
+	// The sweep is not restricted to :focus-visible rules either, because
+	// specificity does not respect the distinction: `button.primary { outline:none }`
+	// (0,1,1) outranks `:focus-visible` (0,1,0) and removes the same indicator
+	// without ever mentioning focus. No rule on this page may switch an outline
+	// off; a rule that needs to will red here and be looked at, which is the point.
+	//
+	// The 2px figure is WCAG 2.2 2.4.13 Focus Appearance, one of the success
+	// criteria the spec's Constraints section carries at
 	// work/specs/S0035-holdfast-dashboard-ui/sources/www.w3.org-TR-WCAG22: the
 	// indicator has to be at least as large as a 2 CSS px thick perimeter.
-	w, ok := measuredPx(dark, width)
-	if !ok {
-		t.Fatalf("the :focus-visible ring declares no measurable outline width (%q), so nothing says an indicator is drawn at all", width)
+	var rings []outlineSpec
+	for _, r := range rules {
+		o := outlineOf(dark, r)
+		if !o.stated {
+			continue
+		}
+		where := o.sel
+		if o.at != "" {
+			where = o.at + " { " + o.sel
+		}
+		if o.style == "none" || o.style == "hidden" {
+			t.Errorf("%s switches the outline off (%s); on a control this draws no focus indicator at all, whatever a less specific rule declared", where, o.style)
+			continue
+		}
+		w, ok := measuredPx(dark, o.width)
+		if !ok {
+			t.Errorf("%s declares an outline whose width (%q) this reader cannot measure, so nothing says an indicator is drawn at all", where, o.width)
+			continue
+		}
+		if w < 2 {
+			t.Errorf("%s draws a %gpx outline; a zero-width outline draws no indicator, and WCAG 2.2 2.4.13 puts the floor at a 2 CSS px perimeter", where, w)
+			continue
+		}
+		if len(o.colours) == 0 {
+			t.Errorf("%s draws an outline in no colour token, so the ring it draws cannot be measured against the control it marks", where)
+			continue
+		}
+		if o.focus {
+			if _, ok := measuredPx(dark, o.offset); !ok {
+				t.Errorf("%s declares no measurable outline-offset (%q), so the gap that puts the ring against the surface behind the control is gone", where, o.offset)
+			}
+		}
+		rings = append(rings, o)
 	}
-	if w < 2 {
-		t.Errorf("the :focus-visible ring is %gpx thick; a zero-width outline draws no indicator, and WCAG 2.2 2.4.13 puts the floor at a 2 CSS px perimeter", w)
+	if len(rings) == 0 {
+		t.Fatal("no rule draws a focus indicator from a colour token")
+	}
+	// Every pointer target is REACHED by one of those rules. A ring scoped to
+	// `button:focus-visible` draws nothing on the two inputs, and folding the rules
+	// together hid which controls were covered at all.
+	for _, el := range targets {
+		covered := false
+		for _, o := range rings {
+			if o.focus && selectorReaches(o.sel, []pageElement{el}) {
+				covered = true
+			}
+		}
+		if !covered {
+			t.Errorf("no :focus-visible rule that draws an indicator reaches %s, so that control shows nothing on keyboard focus", el)
+		}
 	}
 	ctrls := controlRules(t, rules, dark)
 	if len(ctrls) < 4 {
 		t.Fatalf("only %d control rules derived; the focus proof would cover almost nothing", len(ctrls))
 	}
 	for _, th := range themes(dark, light) {
-		for _, c := range ctrls {
-			if got := ratio(t, th.tokens, focus, c.fill); got < 3.0 {
-				t.Errorf("%s theme: the focus ring %s is %.2f:1 on %s's own fill %s - a ring you cannot see on the control it is marking is not an indicator",
-					th.name, focus, got, c.sel, c.fill)
-			}
-			if got := ratio(t, th.tokens, focus, c.behind); got < 3.0 {
-				t.Errorf("%s theme: the focus ring %s is %.2f:1 on the surface behind %s (%s)",
-					th.name, focus, got, c.sel, c.behind)
+		for _, o := range rings {
+			for _, focus := range o.colours {
+				for _, c := range ctrls {
+					if got := ratio(t, th.tokens, focus, c.fill); got < 3.0 {
+						t.Errorf("%s theme: the focus ring %s (%s) is %.2f:1 on %s's own fill %s - a ring you cannot see on the control it is marking is not an indicator",
+							th.name, focus, o.sel, got, c.sel, c.fill)
+					}
+					if got := ratio(t, th.tokens, focus, c.behind); got < 3.0 {
+						t.Errorf("%s theme: the focus ring %s (%s) is %.2f:1 on the surface behind %s (%s)",
+							th.name, focus, o.sel, got, c.sel, c.behind)
+					}
+				}
 			}
 		}
 	}
 	// Keyboard focus shows it; a mouse click does not.
-	s := string(indexHTML)
-	if strings.Contains(s, ":focus {") || strings.Contains(s, ":focus{") {
-		t.Error("a bare :focus rule would show the ring on a mouse click; the ring is :focus-visible only")
-	}
-	if !strings.Contains(s, "outline-offset:var(--focus-offset)") {
-		t.Error("the ring has no offset, so the gap that puts it against the surface behind the control is gone")
+	for _, r := range rules {
+		if hasBareFocus(r.sel) {
+			t.Errorf("%s is a bare :focus rule and would show the ring on a mouse click; the ring is :focus-visible only", r.sel)
+		}
 	}
 }
 
@@ -1284,39 +1996,71 @@ func TestTargets_EveryPointerTargetClearsTheTwentyFourPixelFloor(t *testing.T) {
 		}
 	}
 	// The floor is not a property of the TOP-LEVEL rules alone. A rule in any
-	// at-rule block can lower min-height or min-width back under it, and the page
-	// already carries a `@media (max-width: 640px)` block that restyles
-	// `.controls input` - so the two base rules above would never see it (impl-gate
-	// finding F8). Every rule anywhere in the stylesheet that touches a pointer
-	// target and declares one of those two properties is held to the same floor,
-	// which also covers a more specific top-level rule such as `button.primary`.
+	// at-rule block can lower a minimum back under it, and the page already carries
+	// a `@media (max-width: 640px)` block that restyles `.controls input` - so the
+	// two base rules above would never see it (impl-gate finding F8). Every rule
+	// anywhere in the stylesheet that can reach a pointer target and declares one of
+	// those properties is held to the same floor, which also covers a more specific
+	// top-level rule such as `button.primary`.
+	//
+	// WHICH rules the floor applies to is the criterion's own question, and it is
+	// answered from the MARKUP: the pointer targets are the page's buttons and
+	// inputs, and a rule lowers one of their floors if its selector can REACH one.
+	// Gating the sweep on the words "button" and "input" appearing in the selector
+	// text answered a different question, and missed every rule that addresses a
+	// control by its id - which all five of them have, and which outranks the base
+	// `button` rule (1,0,0 against 0,0,1). `#rescan { min-height:20px;
+	// min-width:20px }` held the one control that starts a scan four pixels under
+	// the floor with every test in this package green (impl-gate finding F12).
+	//
+	// The textual gate is kept as a UNION with the derived one, so nothing that was
+	// swept before stops being swept, and the logical longhands are named for the
+	// reason finding F10 gave: `min-block-size:20px` is a minimum height.
+	targets := pointerTargets(t)
 	swept := 0
+	floorProps := []string{"min-height", "min-width", "min-block-size", "min-inline-size"}
+	check := func(where, prop, v string) {
+		swept++
+		px, ok := measuredPx(dark, v)
+		if !ok {
+			t.Errorf("%s { %s: %s } is a length this sweep cannot measure, so it cannot be shown to clear the 24px target floor", where, prop, v)
+			return
+		}
+		if px < 24 {
+			t.Errorf("%s { %s: %s } holds the target at %gpx, under WCAG 2.2 2.5.8's 24px floor", where, prop, v, px)
+		}
+	}
 	for _, c := range rules {
-		if !strings.Contains(c.sel, "button") && !strings.Contains(c.sel, "input") {
+		textual := strings.Contains(c.sel, "button") || strings.Contains(c.sel, "input")
+		if !textual && !selectorReaches(c.sel, targets) {
 			continue
 		}
-		for _, prop := range []string{"min-height", "min-width"} {
+		for _, prop := range floorProps {
 			v := c.get(prop)
 			if v == "" {
 				continue
 			}
-			swept++
 			where := c.sel
 			if c.at != "" {
 				where = c.at + " { " + c.sel
 			}
-			px, ok := measuredPx(dark, v)
-			if !ok {
-				t.Errorf("%s { %s: %s } is a length this sweep cannot measure, so it cannot be shown to clear the 24px target floor", where, prop, v)
-				continue
-			}
-			if px < 24 {
-				t.Errorf("%s { %s: %s } holds the target at %gpx, under WCAG 2.2 2.5.8's 24px floor", where, prop, v, px)
+			check(where, prop, v)
+		}
+	}
+	// A style= attribute on a control outranks every rule above it, so it is held
+	// to the same floor (impl-gate finding F13).
+	for _, in := range inlineStyles(t) {
+		if in.el.tag != "button" && in.el.tag != "input" {
+			continue
+		}
+		for _, prop := range floorProps {
+			if v := in.rule.get(prop); v != "" {
+				check(in.rule.sel, prop, v)
 			}
 		}
 	}
 	if swept < 4 {
-		t.Fatalf("the target sweep examined %d min-height/min-width declarations on the page's controls; it expects at least the two base rules' four and is not reading the stylesheet", swept)
+		t.Fatalf("the target sweep examined %d minimum-size declarations on the page's controls; it expects at least the two base rules' four and is not reading the stylesheet", swept)
 	}
 	// The pointer targets ARE every button and input in the two control rows. One
 	// added anywhere else would not be covered by the two rules above, so it reds.
@@ -1369,14 +2113,17 @@ func TestMotion_NoStateDependsOnItAndAReducePreferenceStopsIt(t *testing.T) {
 	if strings.Contains(cssComment.ReplaceAllString(styleBlock(t), " "), "@keyframes") {
 		t.Error("the page declares @keyframes; a state that arrives by animation is not readable from a static frame")
 	}
-	rules := parseCSS(t)
+	// Inline style= attributes are motion too, and the reduce block's !important
+	// is what overrides them - so they are swept with the stylesheet, not apart
+	// from it.
+	rules := allRules(t)
 	moved := 0
 	for _, r := range rules {
 		for _, d := range r.decls {
 			if strings.HasPrefix(d.prop, "animation") {
 				t.Errorf("%s { %s: %s } animates; every state on this page must be readable from a static frame", r.sel, d.prop, d.value)
 			}
-			if strings.HasPrefix(d.prop, "transition") && !strings.Contains(r.at, "prefers-reduced-motion") {
+			if strings.HasPrefix(d.prop, "transition") && canonicalAt(r.at) != reduceAt {
 				moved++
 			}
 		}
@@ -1385,10 +2132,13 @@ func TestMotion_NoStateDependsOnItAndAReducePreferenceStopsIt(t *testing.T) {
 		return // the page declares no motion at all: the criterion is met with no media block
 	}
 	for _, r := range rules {
-		if !strings.Contains(r.at, "prefers-reduced-motion") || !strings.Contains(r.at, "reduce") {
-			continue
-		}
-		if !strings.Contains(r.sel, "*") {
+		// The block that stops the motion has to be the block a reduce preference
+		// actually turns on, and it has to reach every element. Matching the
+		// prelude on the words "prefers-reduced-motion" and "reduce" accepted
+		// `@media (prefers-reduced-motion: reduce) and (min-width: 99999px)`, which
+		// never applies; matching the selector on the character `*` accepted
+		// `.foo *`, which reaches a subtree.
+		if canonicalAt(r.at) != reduceAt || !hasUniversalPart(r.sel) {
 			continue
 		}
 		v := r.get("transition-duration")
@@ -1413,7 +2163,7 @@ var containerRelativeWidths = map[string]bool{
 }
 
 func TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody(t *testing.T) {
-	rules := parseCSS(t)
+	rules := allRules(t)
 	dark, _ := themeTokens(t, rules)
 	narrow := pxOf(dark, "var(--bp-narrow)")
 	if narrow < 360 {
@@ -1456,12 +2206,17 @@ func TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody(t *testing.T
 	// `min-width:60em` - 840px at this page's base size - clear a 360px ceiling in
 	// silence, and em-family lengths are already in this stylesheet's idiom
 	// (`max-width:70ch`, `max-width:80ch`).
+	// The exemption is per SELECTOR GROUP: `.tablewrap, main { min-width:960px }`
+	// contains the word and scopes nothing. And the sweep covers the logical
+	// longhands as well as the physical ones, for the reason finding F10 gave for
+	// the space scale: `min-inline-size:960px` is a minimum width by any reading,
+	// and a sweep that did not name the property would pass over it.
 	swept := 0
 	for _, r := range rules {
-		if strings.Contains(r.sel, "tablewrap") {
+		if exemptTablewrap(r.sel) {
 			continue
 		}
-		for _, prop := range []string{"width", "min-width"} {
+		for _, prop := range []string{"width", "min-width", "inline-size", "min-inline-size"} {
 			v := strings.TrimSpace(strings.ReplaceAll(r.get(prop), "!important", ""))
 			if v == "" {
 				continue
@@ -1586,6 +2341,26 @@ func TestFilter_ANonMatchingTermSaysSoAndSaysTheLoadedRowsAreCapped(t *testing.T
 		if !strings.Contains(s, want) {
 			t.Errorf("applyFilter is no longer wired up: missing %q", want)
 		}
+	}
+	// ...and it has to reach BOTH tables. The criterion is written per table ("a
+	// visible message in that table's body"), and every assertion above is
+	// satisfied by an applyFilter that walks one of them: the history table would
+	// go back to emptying itself in silence with this whole test green. So the set
+	// it iterates is pinned inside applyFilter's own body, in order, the way
+	// setNoMatchRow's construction path is.
+	af := funcBody(t, s, "function applyFilter() {")
+	at = 0
+	for _, step := range []string{
+		`const term = $("filter").value.trim().toLowerCase();`,
+		`for (const body of [$("queue"), $("history")]) {`,
+		`setNoMatchRow(body, term !== "" && loaded > 0 && shown === 0);`,
+	} {
+		k := strings.Index(af[at:], step)
+		if k < 0 {
+			t.Errorf("applyFilter no longer carries %q, in that order: the no-match message does not reach both of the tables the filter hides rows in", step)
+			continue
+		}
+		at += k + len(step)
 	}
 }
 
@@ -1759,7 +2534,7 @@ func TestDegradedStates_CopySurvivesVerbatimAndStaysLegibleInBothThemes(t *testi
 				c.text, c.renderedBy)
 		}
 	}
-	rules := parseCSS(t)
+	rules := allRules(t)
 	dark, light := themeTokens(t, rules)
 	pairs := paintedTextPairs(t, rules, dark)
 	// Each degraded state names the rule that paints it. Every one of those rules
