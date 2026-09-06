@@ -651,6 +651,76 @@ var s0035Mutations = map[string]mutation{
 		old: "</style>", new: "  .tablewrap { display:none; }\n</style>",
 		why: "`Nothing queued.`, `No history yet.` and AC9's whole no-match sentence are built, filled, appended and never seen, because display:none on an ANCESTOR takes the subtree off the page (impl-gate F29)",
 	},
+
+	// -----------------------------------------------------------------------
+	// Impl-gate ordinal 7: finding F30, and the three membership lists of F31.
+	//
+	// F30 is the same property one language further out again. "Shown" was
+	// decided by display, visibility, offsetParent and a non-zero rect - four
+	// questions a box painted 9999 CSS px off the viewport answers exactly as
+	// the shipped page does. The stylesheet sweep beside it compares against
+	// `invisibleValues`, five values, and a blacklist cannot enumerate CSS. So
+	// the question is now asked of the engine: does the border box intersect
+	// the viewport, does a hit test at its centre land on the node, is the
+	// effective opacity enough to paint, and do the GLYPHS have boxes of their
+	// own on the screen. Each case below is one way of taking a degraded state
+	// off an operator's screen while every source pin still reads as pinned.
+	// -----------------------------------------------------------------------
+
+	"F30a-rendered-ac9-ac10-degraded-states-translated-off-the-viewport": {
+		criterion: "AC9, AC10", target: "TestRendered_EveryDegradedStateReachesTheScreen",
+		old: "</style>",
+		new: "  td.empty, .note.cap, #conn.down, #msg.err, .nr { transform:translateX(-9999px); }\n</style>",
+		why: "the row-cap notices, both empty-table states, AC9's whole no-match sentence, the honest-absence copy, the reconnecting state and the 401/403 refusal are all painted 9999 CSS px to the left of the viewport, by a painting-time property that moves no layout any other grader measures",
+	},
+	"F30b-rendered-ac9-ac10-degraded-states-clipped-away": {
+		criterion: "AC9, AC10", target: "TestRendered_EveryDegradedStateReachesTheScreen",
+		old: "</style>",
+		new: "  td.empty, .note.cap, #conn.down, #msg.err, .nr { clip-path:inset(100%); }\n</style>",
+		why: "every one of those states is clipped to nothing, so no pixel of it is painted while its box stays exactly where it was - which only a hit test can tell apart from the shipped page",
+	},
+	"F30c-rendered-ac10-cap-notice-positioned-off-the-viewport": {
+		criterion: "AC10", target: "TestRendered_EveryDegradedStateReachesTheScreen",
+		old: "</style>", new: "  #queue-cap { position:absolute; left:-9999px; }\n</style>",
+		why: "`this view is capped` is taken off the screen by a rule addressing that node by its own id, so the queue's truncated view reads as the whole ledger - F29's shape, spelled with a position instead of a display",
+	},
+	"F30d-rendered-ac9-no-match-row-positioned-off-the-viewport": {
+		criterion: "AC9", target: "TestRendered_EveryDegradedStateReachesTheScreen",
+		old: "</style>", new: "  td.empty { position:absolute; left:-9999px; }\n</style>",
+		why: "the empty-table rows and AC9's no-match message are positioned off the viewport, so a filter term that matches nothing empties both tables in silence again",
+	},
+	"F30e-rendered-ac10-degraded-state-text-indented-off-the-screen": {
+		criterion: "AC9, AC10", target: "TestRendered_EveryDegradedStateReachesTheScreen",
+		old: "</style>",
+		new: "  td.empty, .note.cap, #conn.down, #msg.err, .nr { text-indent:-9999px; }\n</style>",
+		why: "every box stays exactly where it was and the WORDS are painted off the screen - a value no blacklist here ever named; only the glyphs' own Range boxes see it",
+	},
+	"F31a-rendered-ac7-a-sixth-control-under-the-floor": {
+		criterion: "AC7", target: "TestRendered_EveryPointerTargetClearsTheTwentyFourPixelFloorAsLaidOut",
+		old: `    <button id="resume">Resume</button>`,
+		new: `    <button id="resume">Resume</button>` + "\n" +
+			`    <button id="clear" style="min-height:var(--sp-7);min-width:var(--sp-7);padding:0">Clear</button>`,
+		why: "a sixth button in a control row renders 21.5 x 37 CSS px, under WCAG 2.2 2.5.8's floor - and AC7's set is every button and input in those rows, not the five this file used to name",
+	},
+	"F31b-rendered-ac5-animation-on-a-node-no-probe-list-named": {
+		criterion: "AC5", target: "TestRendered_AReducePreferenceLeavesNoPerceptibleMotion",
+		old: "  footer { color:var(--muted);",
+		new: "  @keyframes r7pulse { from { opacity:1; } to { opacity:0.3; } }\n" +
+			"  footer { animation:r7pulse 2s infinite alternate; color:var(--muted);",
+		why: "the page animates forever, on an element a hand-written probe list left out; AC5's set is the page, so every element is asked what the engine computed for it",
+	},
+	"F31c-rendered-ac8-ring-switched-off-under-a-reduce-preference": {
+		criterion: "AC8", target: "TestRendered_TheFocusRingIsDrawnAndClearsBothSidesInBothThemes",
+		old: "</style>",
+		new: "  @media (prefers-reduced-motion: reduce) { button.primary:focus-visible { outline:none; } }\n</style>",
+		why: "a keyboard operator who asked for reduced motion gets NO indicator on the primary button, in a user agent the focus grader used not to look at because it iterated the two themes",
+	},
+	"F31d-rendered-ac9-ac10-states-hidden-for-one-user-agent-only": {
+		criterion: "AC9, AC10", target: "TestRendered_EveryDegradedStateReachesTheScreen",
+		old: "</style>",
+		new: "  @media (prefers-reduced-motion: reduce) { td.empty, .note.cap { display:none; } }\n</style>",
+		why: "F31's narrowing at AC9 and AC10, which the verdict did not name: both empty-table states, AC9's no-match sentence and both row-cap notices are taken off the screen for a user who asked for reduced motion, and the degraded-state grader used to look at two of the three user agents it renders",
+	},
 }
 
 // s0035Holes are the edits that violate their criterion and that the committed

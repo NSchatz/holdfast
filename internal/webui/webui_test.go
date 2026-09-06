@@ -4163,7 +4163,8 @@ const renderedWideWidth = 1200
 // Neither is simulated by setting a class this file chose: the page decides the
 // wording and the class, and this only creates the condition.
 func renderedRefusalPrelude(status int) string {
-	return jsHelpers + `
+	return jsHelpers + renderedOnScreen + `
+  fitViewport();
   var conn = d.getElementById("conn");
   var ccs = w.getComputedStyle(conn);
   var cbg = surfaceOf(conn);
@@ -4173,7 +4174,8 @@ func renderedRefusalPrelude(status int) string {
     sel: sel(conn), text: conn.textContent.slice(0, 72), fg: ccs.color,
     bg: "rgb(" + Math.round(cbg[0]) + "," + Math.round(cbg[1]) + "," + Math.round(cbg[2]) + ")",
     size: parseFloat(ccs.fontSize), weight: parseInt(ccs.fontWeight, 10) || 400,
-    large: false, floor: 4.5, ratio: cfg ? contrast(cfg, cbg) : 0, shown: isShown(conn)
+    large: false, floor: 4.5, ratio: cfg ? contrast(cfg, cbg) : 0,
+    shown: ownTextOnScreen(conn)
   };
 
   try { w.stop(); } catch (e) {}
@@ -4210,9 +4212,34 @@ type renderedLiveConn struct {
 }
 
 type renderedNode struct {
-	Shown bool   `json:"shown"`
-	Text  string `json:"text"`
-	Class string `json:"cls"`
+	Shown     bool   `json:"shown"`
+	TextShown bool   `json:"textShown"`
+	Text      string `json:"text"`
+	Class     string `json:"cls"`
+}
+
+// renderedFit is the measuring viewport after it was grown to the page's own
+// height: the page must FIT it, or part of the page is being graded as if it
+// were off the screen.
+type renderedFit struct {
+	ClientH float64 `json:"clientH"`
+	ScrollH float64 `json:"scrollH"`
+	Capped  bool    `json:"capped"`
+}
+
+// renderedHiding is one way of taking a node off the screen, applied in the
+// browser and undone again. want* is what the predicate must answer while it is
+// applied; restored* is what it must answer once it is not.
+type renderedHiding struct {
+	Name         string `json:"name"`
+	CSS          string `json:"css"`
+	Present      bool   `json:"present"`
+	Box          bool   `json:"box"`
+	Text         bool   `json:"text"`
+	WantBox      bool   `json:"wantBox"`
+	WantText     bool   `json:"wantText"`
+	RestoredBox  bool   `json:"restoredBox"`
+	RestoredText bool   `json:"restoredText"`
 }
 
 type renderedRows struct {
@@ -4237,6 +4264,7 @@ type renderedState struct {
 
 type renderedTarget struct {
 	ID       string  `json:"id"`
+	Sel      string  `json:"sel"`
 	W        float64 `json:"w"`
 	H        float64 `json:"h"`
 	Disabled bool    `json:"disabled"`
@@ -4244,6 +4272,7 @@ type renderedTarget struct {
 
 type renderedFocus struct {
 	ID            string  `json:"id"`
+	Sel           string  `json:"sel"`
 	Disabled      bool    `json:"disabled"`
 	FocusVisible  bool    `json:"focusVisible"`
 	Style         string  `json:"style"`
@@ -4268,6 +4297,8 @@ type renderedLayoutProbe struct {
 	ScrollW  float64        `json:"scrollW"`
 	ClientW  float64        `json:"clientW"`
 	BodyW    float64        `json:"bodyW"`
+	ScrollH  float64        `json:"scrollH"`
+	ClientH  float64        `json:"clientH"`
 	Hosts    map[string]int `json:"hosts"`
 	PerRow   map[string]int `json:"perRow"`
 	Overlaps []string       `json:"overlaps"`
@@ -4279,6 +4310,7 @@ type renderedLayoutProbe struct {
 type renderedFixture struct {
 	Name     string              `json:"name"`
 	Width    float64             `json:"width"`
+	Fit      renderedFit         `json:"fit"`
 	Base     renderedState       `json:"base"`
 	Filtered renderedState       `json:"filtered"`
 	Cleared  renderedState       `json:"cleared"`
@@ -4292,6 +4324,8 @@ type renderedReport struct {
 	Fixtures    []renderedFixture  `json:"fixtures"`
 	LiveConn    *renderedLiveConn  `json:"liveConn"`
 	Motion      []renderedMotionEl `json:"motion"`
+	Fit         renderedFit        `json:"fit"`
+	Hidings     []renderedHiding   `json:"hidings"`
 	ColorScheme string             `json:"colorScheme"`
 	BodyBG      string             `json:"bodyBg"`
 	Dark        bool               `json:"dark"`
@@ -4313,6 +4347,181 @@ func (r renderedReport) fixture(t *testing.T, key, name string) renderedFixture 
 	return renderedFixture{}
 }
 
+// --- "on the screen", which is the question AC9 and AC10 actually ask ----------
+
+// renderedOnScreen is the predicate every committed grader in this file measures
+// through, and it exists because impl-gate finding F30 showed that nothing in
+// this package was asking whether a node is ON THE OPERATOR'S SCREEN.
+//
+// The harness's own isShown (jsHelpers, in regress_0035_render_harness_test.go)
+// asks for `display`, `visibility`, an offsetParent and a non-zero rect. A box
+// painted 9999 CSS px to the left of the viewport satisfies every one of those,
+// and so does one clipped away to nothing - so AC9's whole no-match sentence and
+// every string AC10 names could be taken off the screen by one ordinary
+// stylesheet rule with the entire committed grader set green. The source sweep
+// did not catch it either: `invisibleValues` is a five-value blacklist, and CSS
+// cannot be enumerated by a blacklist, which is the shape five impl ordinals
+// have already blocked on. So the question is asked where it can be answered
+// exhaustively - of the engine, about the box it painted:
+//
+//  1. does the border box intersect the viewport at all?
+//  2. does a hit test at the centre of the part that does land ON the node, or
+//     inside it? That is what refuses clip-path, an overlay, and a node whose
+//     own area is not hit-testable - the engine decides, not a value table.
+//  3. is the effective opacity - the product up the box tree - enough to paint?
+//
+// and, for TEXT, a fourth: glyphs have their own geometry, so an element's own
+// text is asked for ITS boxes, through a Range. `text-indent:-9999px` and
+// `font-size:0` leave the element's border box exactly where it was and paint
+// nothing an operator can read.
+//
+// The refuter's artifact files keep the harness's isShown, deliberately (reading
+// 12: their instruments are theirs). This is the one the CRITERIA are decided by,
+// and TestRendered_TheEngineAnswersTheQuestionsTheseGradersAsk proves it FLIPS,
+// in the browser and on the shipped page, for nine separate ways of taking a
+// node off the screen - a predicate that cannot refuse is not evidence.
+const renderedOnScreen = `
+  // The measuring frame is grown to the page's own height before anything is
+  // measured. "Off the screen" must mean what an operator would see, not what
+  // happens to be below the fold of a frame this file chose: at 360 CSS px wide
+  // this page is about 3000 CSS px tall, and treating its lower half as unseen
+  // would grade AC6's own viewport at a fraction of the page. The growth is
+  // BOUNDED, and the bound is asserted rather than silently truncating - a page
+  // that still does not fit is reported and the graders red on it, which is what
+  // makes ` + "`top:99999px`" + ` a red rather than a taller frame.
+  var RENDERED_FIT_MAX = 8000;
+  var fitViewport = function () {
+    var want = Math.max(d.documentElement.scrollHeight, d.body ? d.body.scrollHeight : 0);
+    if (w.frameElement) {
+      w.frameElement.style.height = Math.min(want, RENDERED_FIT_MAX) + "px";
+      void d.documentElement.getBoundingClientRect().height;
+    }
+    return {
+      clientH: d.documentElement.clientHeight,
+      scrollH: d.documentElement.scrollHeight,
+      capped: want > RENDERED_FIT_MAX
+    };
+  };
+
+  // laidOut is the box-tree half, with no viewport question in it. AC6 asks what
+  // the engine LAID OUT - an element painted outside the viewport is exactly the
+  // violation that criterion is about - so the width sweep reads this one and
+  // must not skip a box for being off the screen.
+  var laidOut = function (el) {
+    if (!el || el.nodeType !== 1) { return false; }
+    if (el.closest(".visually-hidden")) { return false; }
+    var cs = w.getComputedStyle(el);
+    if (cs.visibility !== "visible" || cs.display === "none") { return false; }
+    if (el.offsetParent === null && cs.position !== "fixed" &&
+        el.tagName !== "BODY" && el.tagName !== "HTML") { return false; }
+    var r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  };
+
+  // The page declares exactly one opacity, button:disabled at .45. A box painted
+  // at under a tenth of its colour is not a state anybody is being shown, and
+  // opacity:0 is one of the five values the source sweep already refuses.
+  var MIN_OPACITY = 0.1;
+  var effectiveOpacity = function (el) {
+    var n = el, o = 1;
+    while (n && n.nodeType === 1) {
+      var v = parseFloat(w.getComputedStyle(n).opacity);
+      if (!isNaN(v)) { o *= v; }
+      n = n.parentElement;
+    }
+    return o;
+  };
+
+  // hitCentre is the centre of the part of a box that is INSIDE the viewport, or
+  // null when none of it is. Taking the centre of the visible part rather than of
+  // the whole box is what lets a table row wider than a 360px viewport still be
+  // hit-tested where it is on the screen.
+  var hitCentre = function (r) {
+    var vw = d.documentElement.clientWidth, vh = d.documentElement.clientHeight;
+    var l = Math.max(r.left, 0), t = Math.max(r.top, 0);
+    var rr = Math.min(r.right, vw), b = Math.min(r.bottom, vh);
+    if (!(rr > l && b > t)) { return null; }
+    return {
+      x: Math.min(Math.max((l + rr) / 2, 0.5), vw - 0.5),
+      y: Math.min(Math.max((t + b) / 2, 0.5), vh - 0.5)
+    };
+  };
+
+  // anyBoxOnScreen: one of these boxes is on the screen and the engine's own hit
+  // test at its centre lands on el or inside it. An ancestor is NOT accepted -
+  // that is precisely what a clipped-away or covered node hit-tests to.
+  var anyBoxOnScreen = function (el, rects) {
+    for (var i = 0; i < rects.length; i++) {
+      var r = rects[i];
+      if (!(r.width > 0 && r.height > 0)) { continue; }
+      var pt = hitCentre(r);
+      if (!pt) { continue; }
+      var hit = d.elementFromPoint(pt.x, pt.y);
+      if (hit && (hit === el || el.contains(hit))) { return true; }
+    }
+    return false;
+  };
+
+  // An inline element that wraps occupies one box per line, and the centre of the
+  // union of those boxes can fall in a gap belonging to its parent - so the boxes
+  // are asked for one at a time.
+  var rectsOf = function (o) {
+    var list = o.getClientRects(), out = [];
+    for (var i = 0; i < list.length; i++) { out.push(list[i]); }
+    return out;
+  };
+
+  var onScreen = function (el) {
+    if (!laidOut(el)) { return false; }
+    if (effectiveOpacity(el) < MIN_OPACITY) { return false; }
+    var rects = rectsOf(el);
+    if (!rects.length) { rects = [el.getBoundingClientRect()]; }
+    return anyBoxOnScreen(el, rects);
+  };
+
+  // textNodeOnScreen asks the same question of the GLYPHS: a Range over the text
+  // node's own characters gives one box per line box, and those are what the
+  // operator reads.
+  var textNodeOnScreen = function (n) {
+    var el = n.parentElement;
+    if (!onScreen(el)) { return false; }
+    var range = d.createRange();
+    range.selectNodeContents(n);
+    return anyBoxOnScreen(el, rectsOf(range));
+  };
+
+  // ownTextOnScreen: this element's OWN text (not a descendant's) is on the
+  // screen. It is what the contrast sweep measures and what a degraded state's
+  // node is asked for, because AC9's word is "visible" and AC10's verb is
+  // "render" - both of them about the words, not about the box around them.
+  var ownTextOnScreen = function (el) {
+    if (!el || !onScreen(el)) { return false; }
+    for (var i = 0; i < el.childNodes.length; i++) {
+      var n = el.childNodes[i];
+      if (n.nodeType !== 3 || !n.nodeValue.trim()) { continue; }
+      if (textNodeOnScreen(n)) { return true; }
+    }
+    return false;
+  };
+
+  // isShown and shownText are REPLACED for everything downstream, jsHelpers' own
+  // callers included: these are var declarations in one function scope, so the
+  // assignments here are what every later call resolves. Nothing in this file
+  // measures through the weaker pair.
+  var isShown = onScreen;
+  var shownText = function () {
+    var out = [];
+    var walk = d.createTreeWalker(d.body, w.NodeFilter.SHOW_TEXT, null);
+    var n;
+    while ((n = walk.nextNode())) {
+      if (!n.nodeValue.trim()) { continue; }
+      if (!textNodeOnScreen(n)) { continue; }
+      out.push(n.nodeValue);
+    }
+    return out.join(" ").replace(/\s+/g, " ");
+  };
+`
+
 // --- the measurement, run inside the page under test ---------------------------
 
 // renderedFixtureJS hands the browser the snapshots it will draw. JSON is a
@@ -4330,12 +4539,27 @@ const renderedFixtureJS = `
 // for every colour and length, the composited surface actually behind a box
 // (walked up the box tree, which is what a browser does and what a --paints-on
 // annotation only claims), getBoundingClientRect for every layout question, and
-// offsetParent plus a non-zero rect for "is this on the screen".
+// renderedOnScreen's predicate - viewport, hit test, opacity and the glyphs' own
+// Range boxes - for "is this on the operator's screen".
 const renderedMeasureBody = `
   var rgbStr = function (c) {
     return "rgb(" + Math.round(c[0]) + "," + Math.round(c[1]) + "," + Math.round(c[2]) + ")";
   };
-  var CONTROL_IDS = ["token", "rescan", "pause", "resume", "filter"];
+
+  // AC7's set is "every button and every input in the two control rows", so it is
+  // DERIVED from the markup rather than listed here: a list is a membership test
+  // narrower than the criterion, which is the shape impl-gate findings F12, F18,
+  // F21 and F31 each named. A control the page grows is measured the day it is
+  // added; a control it loses reds against the five ids named on the Go side.
+  var controlEls = function () {
+    var out = [], rows = d.querySelectorAll(".controls");
+    for (var i = 0; i < rows.length; i++) {
+      var els = rows[i].querySelectorAll("button, input");
+      for (var j = 0; j < els.length; j++) { out.push(els[j]); }
+    }
+    return out;
+  };
+  var controlKey = function (el, i) { return el.id ? el.id : sel(el) + "@" + i; };
 
   // Every element that renders text of its own, with the colour the engine gave
   // it measured against the surface a person actually sees behind it. Disabled
@@ -4345,7 +4569,6 @@ const renderedMeasureBody = `
     var all = d.body.querySelectorAll("*");
     for (var i = 0; i < all.length; i++) {
       var el = all[i];
-      if (!isShown(el)) { continue; }
       if (el.closest("[disabled]") || el.closest(":disabled")) { continue; }
       var text = "";
       for (var k = 0; k < el.childNodes.length; k++) {
@@ -4353,6 +4576,8 @@ const renderedMeasureBody = `
       }
       text = text.replace(/\s+/g, " ").trim();
       if (!text) { continue; }
+      // Its own text, on the screen - not merely a box that is.
+      if (!ownTextOnScreen(el)) { continue; }
       var cs = w.getComputedStyle(el);
       var bg = surfaceOf(el);
       var fg = rgbOf(cs.color);
@@ -4380,17 +4605,21 @@ const renderedMeasureBody = `
     var n;
     while ((n = walk.nextNode())) {
       if (!n.nodeValue.trim()) { continue; }
-      if (!isShown(n.parentElement)) { continue; }
+      if (!textNodeOnScreen(n)) { continue; }
       out.push(n.nodeValue);
     }
     return out.join(" ").replace(/\s+/g, " ");
   };
 
+  // textShown is asked separately from shown: a node whose BOX is on the screen
+  // can still paint no readable glyph (font-size:0, text-indent:-9999px), and
+  // AC10's verb is about the wording.
   var nodeState = function (id) {
     var el = d.getElementById(id);
-    if (!el) { return {shown: false, text: "", cls: ""}; }
+    if (!el) { return {shown: false, textShown: false, text: "", cls: ""}; }
     return {
       shown: isShown(el),
+      textShown: ownTextOnScreen(el),
       text: el.textContent.replace(/\s+/g, " ").trim(),
       cls: String(el.className || "")
     };
@@ -4422,12 +4651,13 @@ const renderedMeasureBody = `
 
   // AC7: the border box each pointer target actually occupies.
   var targetBoxes = function () {
-    var out = [];
-    for (var i = 0; i < CONTROL_IDS.length; i++) {
-      var el = d.getElementById(CONTROL_IDS[i]);
-      if (!el) { continue; }
-      var r = el.getBoundingClientRect();
-      out.push({id: CONTROL_IDS[i], w: r.width, h: r.height, disabled: !!el.disabled});
+    var out = [], els = controlEls();
+    for (var i = 0; i < els.length; i++) {
+      var r = els[i].getBoundingClientRect();
+      out.push({
+        id: controlKey(els[i], i), sel: sel(els[i]),
+        w: r.width, h: r.height, disabled: !!els[i].disabled
+      });
     }
     return out;
   };
@@ -4435,11 +4665,10 @@ const renderedMeasureBody = `
   // AC8: the indicator the engine draws on keyboard focus, measured against the
   // control's own RENDERED fill and the surface RENDERED behind it.
   var focusProbes = function () {
-    var out = [];
-    for (var i = 0; i < CONTROL_IDS.length; i++) {
-      var el = d.getElementById(CONTROL_IDS[i]);
-      if (!el) { continue; }
-      if (el.disabled) { out.push({id: CONTROL_IDS[i], disabled: true}); continue; }
+    var out = [], els = controlEls();
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i], key = controlKey(el, i);
+      if (el.disabled) { out.push({id: key, sel: sel(el), disabled: true}); continue; }
       el.focus();
       var cs = w.getComputedStyle(el);
       var ring = rgbOf(cs.outlineColor);
@@ -4448,7 +4677,7 @@ const renderedMeasureBody = `
       if (fill && fill[3] < 1) { fill = over(fill, behind); }
       if (!fill) { fill = behind; }
       out.push({
-        id: CONTROL_IDS[i], disabled: false,
+        id: key, sel: sel(el), disabled: false,
         focusVisible: el.matches(":focus-visible"),
         style: cs.outlineStyle,
         width: parseFloat(cs.outlineWidth) || 0,
@@ -4463,12 +4692,13 @@ const renderedMeasureBody = `
     return out;
   };
 
-  // AC5: the motion the engine computed, not the motion the stylesheet declared.
+  // AC5: the motion the engine computed, not the motion the stylesheet declared -
+  // and over EVERY element, because AC5's set is the page ("IF the page declares
+  // any transition, animation or @keyframes"), not a selector list this file
+  // chose. A named list left footer, .reclaimed, #aggregates and the chip spans
+  // unasked (impl-gate F31).
   var motionProbes = function () {
-    var out = [];
-    var all = d.querySelectorAll(
-      "body, header, main, section, .chip, .controls, .controls input, button, .badge," +
-      " .agg, .note, table, tr, th, td, .dot, #conn, #msg");
+    var out = [], all = d.querySelectorAll("*");
     for (var i = 0; i < all.length; i++) {
       var cs = w.getComputedStyle(all[i]);
       out.push({
@@ -4498,7 +4728,7 @@ const renderedMeasureBody = `
         found++;
         var kids = [];
         for (var c = 0; c < host.children.length; c++) {
-          if (isShown(host.children[c])) { kids.push(host.children[c]); }
+          if (laidOut(host.children[c])) { kids.push(host.children[c]); }
         }
         for (var a = 0; a < kids.length; a++) {
           var band = 1;
@@ -4524,7 +4754,9 @@ const renderedMeasureBody = `
     var all = d.body.querySelectorAll("*");
     for (var i = 0; i < all.length; i++) {
       var el = all[i];
-      if (!isShown(el)) { continue; }
+      // laidOut, not onScreen: a box painted outside the viewport is the
+      // violation AC6 is about, so this sweep must still see it.
+      if (!laidOut(el)) { continue; }
       if (el.closest(".tablewrap")) { continue; }
       var r = el.getBoundingClientRect();
       if (r.width > clientW + 0.5 || r.right > clientW + 0.5) {
@@ -4534,6 +4766,7 @@ const renderedMeasureBody = `
     }
     return {
       scrollW: d.documentElement.scrollWidth, clientW: clientW, bodyW: d.body.scrollWidth,
+      scrollH: d.documentElement.scrollHeight, clientH: d.documentElement.clientHeight,
       hosts: hosts, perRow: perRow, overlaps: overlaps, wide: wide
     };
   };
@@ -4551,11 +4784,25 @@ const renderedMeasureBody = `
   // engine rather than assumed by this file. Everything from here to the return
   // is synchronous, so no reconnect or timer can land in the middle of a
   // measurement.
+  // worseFit keeps the least-fitting measurement a fixture took, so the assertion
+  // that the page FITS the measuring viewport is made about every state drawn and
+  // not only the first.
+  var worseFit = function (a, b) {
+    if (!a) { return b; }
+    if (b.capped && !a.capped) { return b; }
+    return (b.scrollH - b.clientH) > (a.scrollH - a.clientH) ? b : a;
+  };
+
   var draw = function (fx, width) {
     setTerm("");
     w.frameElement.style.width = width + "px";
     void d.documentElement.getBoundingClientRect().width;
     w.render(fx.snap);
+    // The frame is grown to the page before ANY measurement, so no part of the
+    // page counts as off the screen for being below the fold of a frame height
+    // this file picked. Every state below is fitted again, because the filter
+    // changes how tall the page is.
+    var fit = fitViewport();
     var out = {
       name: fx.name, width: d.documentElement.clientWidth,
       base: stateReport(), targets: targetBoxes(), layout: layoutProbe(), filters: false
@@ -4563,11 +4810,87 @@ const renderedMeasureBody = `
     if (fx.focus) { out.focus = focusProbes(); }
     if (fx.filter) {
       setTerm("zzz-no-such-path-anywhere");
+      fit = worseFit(fit, fitViewport());
       out.filtered = stateReport();
       setTerm("");
+      fit = worseFit(fit, fitViewport());
       out.cleared = stateReport();
       out.filters = true;
     }
+    out.fit = fit;
+    return out;
+  };
+
+  // --- the predicate's own positive control ------------------------------------
+  //
+  // Eleven ways of taking a node off an operator's screen, applied IN THE BROWSER to
+  // the node that renders the row-cap notice, one at a time, and undone again.
+  // Each names which half of the predicate must refuse it: the box, or the
+  // glyphs. A predicate that cannot refuse is not evidence, and this impl gate
+  // has now spent five ordinals on exactly that - so the proof rides inside the
+  // committed set rather than in a harness the graders themselves never run.
+  var HIDINGS = [
+    {name: "translated off the viewport",  css: "transform:translateX(-9999px)",  box: false, text: false},
+    {name: "clipped away",                 css: "clip-path:inset(100%)",          box: false, text: false},
+    {name: "positioned off the viewport",  css: "position:absolute;left:-9999px", box: false, text: false},
+    {name: "scaled to nothing",            css: "transform:scale(0)",             box: false, text: false},
+    {name: "painted at zero opacity",      css: "opacity:0",                      box: false, text: false},
+    {name: "visibility hidden",            css: "visibility:hidden",              box: false, text: false},
+    {name: "display none",                 css: "display:none",                   box: false, text: false},
+    {name: "contents not rendered",        css: "content-visibility:hidden",      box: true,  text: false},
+    {name: "text indented off the screen", css: "text-indent:-9999px",            box: true,  text: false},
+    {name: "text at no size at all",       css: "font-size:0",                    box: true,  text: false}
+  ];
+  // Each hiding is applied with the element's transitions switched OFF, and so is
+  // the undo. transition-property defaults to "all", so under a reduce preference
+  // the page's own universal cut makes EVERY property transitionable, and a
+  // synchronous read after a change lands on the value it started from - the
+  // transient reading 35 already records at the narrow viewport. An inline
+  // !important declaration outranks the stylesheet's, so the probe reads the
+  // state it just set rather than the one it replaced.
+  var NOTRANS = ";transition:none !important";
+  var probeHidings = function (id) {
+    var el = d.getElementById(id);
+    if (!el) { return [{name: "the probe node", present: false}]; }
+    var reflow = function () { void d.documentElement.getBoundingClientRect().width; };
+    var out = [{
+      name: "the page as shipped", css: "", present: true,
+      box: onScreen(el), text: ownTextOnScreen(el), wantBox: true, wantText: true,
+      restoredBox: true, restoredText: true
+    }];
+    for (var i = 0; i < HIDINGS.length; i++) {
+      var h = HIDINGS[i];
+      var prev = el.getAttribute("style") || "";
+      el.setAttribute("style", prev + NOTRANS + ";" + h.css);
+      reflow();
+      var got = {
+        name: h.name, css: h.css, present: true,
+        box: onScreen(el), text: ownTextOnScreen(el), wantBox: h.box, wantText: h.text
+      };
+      el.setAttribute("style", prev + NOTRANS);
+      reflow();
+      got.restoredBox = onScreen(el);
+      got.restoredText = ownTextOnScreen(el);
+      el.setAttribute("style", prev);
+      out.push(got);
+    }
+    // ...and one hiding that is not a property of the node at all: an opaque box
+    // painted over it. Nothing about the node changes, and an operator sees none
+    // of it - which only a hit test can answer.
+    var cover = d.createElement("div");
+    cover.setAttribute("style",
+      "position:fixed;left:0;top:0;right:0;bottom:0;z-index:9;background:var(--panel)" + NOTRANS);
+    d.body.appendChild(cover);
+    reflow();
+    var covered = {
+      name: "covered by an opaque box", css: "an overlay over the whole viewport", present: true,
+      box: onScreen(el), text: ownTextOnScreen(el), wantBox: false, wantText: false
+    };
+    cover.remove();
+    reflow();
+    covered.restoredBox = onScreen(el);
+    covered.restoredText = ownTextOnScreen(el);
+    out.push(covered);
     return out;
   };
 
@@ -4604,11 +4927,20 @@ const renderedMeasureBody = `
     report.fixtures.push(draw(
       {name: "narrow", snap: FIXTURES[1].snap, filter: false, focus: false}, __NARROW__));
   }
+
+  // Last: the predicate's own positive control, on the working page at the wide
+  // viewport, so the node it hides and restores is one every grader above has
+  // already been measured against.
+  w.frameElement.style.width = __WIDE__ + "px";
+  void d.documentElement.getBoundingClientRect().width;
+  w.render(FIXTURES[1].snap);
+  report.fit = fitViewport();
+  report.hidings = probeHidings("queue-cap");
   return report;
 `
 
 // renderedMeasure is the whole pass: the helpers, the fixtures, and the stages.
-var renderedMeasure = jsHelpers + renderedFixtureJS + strings.NewReplacer(
+var renderedMeasure = jsHelpers + renderedOnScreen + renderedFixtureJS + strings.NewReplacer(
 	"__WIDE__", strconv.Itoa(renderedWideWidth),
 	"__NARROW__", strconv.Itoa(renderedNarrowWidth),
 ).Replace(renderedMeasureBody)
@@ -4734,6 +5066,15 @@ func renderedPage(t *testing.T, key string) renderedReport {
 				t.Fatalf("case %q measured only %d text-bearing elements in the %s fixture; the probe is not seeing the rendered page",
 					key, n, f.Name)
 			}
+			// The whole page must FIT the measuring viewport, or "off the screen"
+			// would include everything below the fold and every degraded state
+			// low on the page would be graded as unseen - or, worse, a node
+			// pushed thousands of pixels down would be graded as seen because
+			// the frame grew to meet it.
+			if f.Fit.Capped || f.Fit.ScrollH > f.Fit.ClientH+1 {
+				t.Fatalf("case %q: the %s fixture is %g CSS px tall in a %g px measuring viewport (capped=%v); on-screen cannot be decided for a page that does not fit it",
+					key, f.Name, f.Fit.ScrollH, f.Fit.ClientH, f.Fit.Capped)
+			}
 		}
 		e.report, e.ok = rep, true
 	})
@@ -4783,6 +5124,13 @@ func renderedMoments(key string, r renderedReport) []renderedMoment {
 // renderedPage; what is checked here is the property no single case can see -
 // that the two colour preferences really select DIFFERENT token sets. Without
 // it, "in both themes" could be one theme measured twice and pass.
+//
+// It also proves the predicate the degraded-state criteria are decided by. Impl
+// -gate finding F30 was not that the page hid anything; it was that NOTHING here
+// could tell whether it had, so a predicate that answers "shown" is worth exactly
+// as much as its ability to answer "not shown" on a page where the words are off
+// the screen. Ten hidings are applied to a real degraded state in the browser and
+// undone again, and each must flip the half of the predicate it defeats.
 func TestRendered_TheEngineAnswersTheQuestionsTheseGradersAsk(t *testing.T) {
 	t.Parallel()
 	// Every browser at once. render() may only fail the test whose goroutine
@@ -4818,6 +5166,37 @@ func TestRendered_TheEngineAnswersTheQuestionsTheseGradersAsk(t *testing.T) {
 	}
 	t.Logf("light body %s | dark body %s | narrow viewport %gpx | %d text elements on the light working page",
 		light.BodyBG, dark.BodyBG, narrow.Layout.ClientW, len(light.fixture(t, "light", "live").Base.Text))
+
+	// The predicate, proved to refuse. Each case takes `this view is capped` off
+	// the operator's screen a different way, and the ones that leave the box
+	// where it was (text-indent, font-size:0) must still be refused by the half
+	// of the predicate that reads the GLYPHS.
+	for _, key := range renderedKeys() {
+		r := renderedPage(t, key)
+		if len(r.Hidings) < 12 {
+			t.Fatalf("%s: the predicate's positive control ran %d cases where the page as shipped plus eleven hidings are expected; a case that stopped running is a way of hiding a state that nothing here refuses",
+				key, len(r.Hidings))
+		}
+		for _, h := range r.Hidings {
+			if !h.Present {
+				t.Fatalf("%s: the positive control found no node to hide, so the predicate is unproved", key)
+			}
+			if h.Box != h.WantBox {
+				t.Errorf("%s: with the row-cap notice %s (%s) the box predicate says shown=%v, expected %v; a predicate that cannot refuse is not evidence",
+					key, h.Name, h.CSS, h.Box, h.WantBox)
+			}
+			if h.Text != h.WantText {
+				t.Errorf("%s: with the row-cap notice %s (%s) the text predicate says shown=%v, expected %v",
+					key, h.Name, h.CSS, h.Text, h.WantText)
+			}
+			if !h.RestoredBox || !h.RestoredText {
+				t.Errorf("%s: after %s was undone the notice reads box=%v text=%v; the control did not put the page back and every measurement after it is suspect",
+					key, h.Name, h.RestoredBox, h.RestoredText)
+			}
+		}
+		t.Logf("%s: the measuring viewport fits the page (%g of %g CSS px) and the on-screen predicate refused all %d hidings",
+			key, r.Fit.ScrollH, r.Fit.ClientH, len(r.Hidings)-1)
+	}
 }
 
 // --- AC3, AC4, AC10: the contrast of everything the engine painted -------------
@@ -5054,31 +5433,38 @@ func TestRendered_TheNarrowViewportIsOneColumnAndTheBodyDoesNotScrollSideways(t 
 
 // --- AC7: the box each pointer target actually occupies ------------------------
 
+// renderedControls are the pointer targets the page ships today. They are NOT the
+// set AC7 grades - that set is derived from the markup by the measurement, which
+// is what makes a control added tomorrow measured tomorrow (impl-gate F31). They
+// are the floor under that derivation: a page that renames or drops one of these
+// reds here rather than quietly grading a smaller set.
+var renderedControls = []string{"token", "rescan", "pause", "resume", "filter"}
+
 func TestRendered_EveryPointerTargetClearsTheTwentyFourPixelFloorAsLaidOut(t *testing.T) {
 	t.Parallel()
-	want := []string{"token", "rescan", "pause", "resume", "filter"}
 	for _, key := range renderedKeys() {
 		r := renderedPage(t, key)
 		for _, f := range r.Fixtures {
-			if len(f.Targets) != len(want) {
-				t.Fatalf("%s/%s: measured %d pointer targets, expected the page's %d: %+v",
-					key, f.Name, len(f.Targets), len(want), f.Targets)
+			if len(f.Targets) < len(renderedControls) {
+				t.Fatalf("%s/%s: measured %d pointer targets, fewer than the %d the page ships: %+v",
+					key, f.Name, len(f.Targets), len(renderedControls), f.Targets)
 			}
 			got := map[string]renderedTarget{}
 			for _, b := range f.Targets {
 				got[b.ID] = b
-			}
-			for _, id := range want {
-				b, ok := got[id]
-				if !ok {
-					t.Errorf("%s/%s: #%s was never measured", key, f.Name, id)
-					continue
-				}
-				// WCAG 2.2 2.5.8 has no disabled exemption: a target under the
-				// floor is under it whether or not it is currently actionable.
+				// AC7's set is every button and every input in the two control
+				// rows, so the floor is applied to what was FOUND there, not to
+				// a list. WCAG 2.2 2.5.8 has no disabled exemption: a target
+				// under the floor is under it whether or not it is actionable.
 				if b.W < 24 || b.H < 24 {
-					t.Errorf("%s/%s: #%s renders %.1f x %.1f CSS px, under WCAG 2.2 2.5.8's 24 CSS px floor in both dimensions",
-						key, f.Name, id, b.W, b.H)
+					t.Errorf("%s/%s: %s renders %.1f x %.1f CSS px, under WCAG 2.2 2.5.8's 24 CSS px floor in both dimensions",
+						key, f.Name, b.Sel, b.W, b.H)
+				}
+			}
+			for _, id := range renderedControls {
+				if _, ok := got[id]; !ok {
+					t.Errorf("%s/%s: #%s is not among the buttons and inputs found in the two control rows (%+v); AC7's set has moved out from under this grader",
+						key, f.Name, id, f.Targets)
 				}
 			}
 			t.Logf("%s/%s at %gpx: %+v", key, f.Name, f.Width, f.Targets)
@@ -5088,49 +5474,68 @@ func TestRendered_EveryPointerTargetClearsTheTwentyFourPixelFloorAsLaidOut(t *te
 
 // --- AC8: the focus indicator, as the engine draws it --------------------------
 
+// TestRendered_TheFocusRingIsDrawnAndClearsBothSidesInBothThemes grades EVERY
+// case, not the two themes alone: the reduce case is a third user agent, its
+// focus probes are collected the same way, and a ring switched off inside
+// `@media (prefers-reduced-motion: reduce)` is a ring that user never sees
+// (impl-gate F31). The control set is the derived one, so a control the page
+// grows is held to AC8 the day it is added.
 func TestRendered_TheFocusRingIsDrawnAndClearsBothSidesInBothThemes(t *testing.T) {
 	t.Parallel()
-	for _, key := range []string{"light", "dark"} {
+	for _, key := range renderedKeys() {
 		r := renderedPage(t, key)
+		what := renderedCases[key].what
 		// Between the two fixtures every control is measured while it is
 		// ENABLED: the working page disables Resume, the paused page disables
 		// Pause, and a disabled control cannot take keyboard focus at all.
 		measured := map[string]renderedFocus{}
+		seen := map[string]bool{}
+		var ids []string
 		for _, name := range []string{"rich", "live"} {
 			f := r.fixture(t, key, name)
-			if len(f.Focus) != 5 {
-				t.Fatalf("%s/%s: probed %d controls, expected the page's five", key, name, len(f.Focus))
+			if len(f.Focus) < len(renderedControls) {
+				t.Fatalf("%s/%s: probed %d controls, fewer than the %d the page ships", key, name, len(f.Focus), len(renderedControls))
 			}
 			for _, p := range f.Focus {
+				if !seen[p.ID] {
+					seen[p.ID] = true
+					ids = append(ids, p.ID)
+				}
 				if !p.Disabled {
 					measured[p.ID] = p
 				}
 			}
 		}
-		for _, id := range []string{"token", "rescan", "pause", "resume", "filter"} {
+		sort.Strings(ids)
+		for _, id := range renderedControls {
+			if !seen[id] {
+				t.Errorf("%s (%s): #%s is not among the controls found in the two control rows; AC8's set has moved out from under this grader", key, what, id)
+			}
+		}
+		for _, id := range ids {
 			p, ok := measured[id]
 			if !ok {
-				t.Errorf("%s theme: #%s was disabled under both fixtures, so its focus indicator was never measured", key, id)
+				t.Errorf("%s (%s): %s was disabled under both fixtures, so its focus indicator was never measured", key, what, id)
 				continue
 			}
 			if !p.FocusVisible {
-				t.Errorf("%s theme: #%s does not match :focus-visible on keyboard focus, so no indicator is drawn for it", key, id)
+				t.Errorf("%s (%s): %s does not match :focus-visible on keyboard focus, so no indicator is drawn for it", key, what, p.Sel)
 				continue
 			}
 			if p.Style == "none" || p.Width < 2 {
-				t.Errorf("%s theme: #%s draws a %s outline %gpx wide; WCAG 2.2 2.4.13 puts the floor at a 2 CSS px perimeter", key, id, p.Style, p.Width)
+				t.Errorf("%s (%s): %s draws a %s outline %gpx wide; WCAG 2.2 2.4.13 puts the floor at a 2 CSS px perimeter", key, what, p.Sel, p.Style, p.Width)
 			}
 			if p.Offset < 0 {
-				t.Errorf("%s theme: #%s draws its ring at offset %gpx, inside its own border box, where it never meets the surface behind it", key, id, p.Offset)
+				t.Errorf("%s (%s): %s draws its ring at offset %gpx, inside its own border box, where it never meets the surface behind it", key, what, p.Sel, p.Offset)
 			}
 			if p.AgainstFill < 3 {
-				t.Errorf("%s theme: #%s's ring %s is %.2f:1 against the control's own rendered fill %s, under the 3:1 floor", key, id, p.Colour, p.AgainstFill, p.Fill)
+				t.Errorf("%s (%s): %s's ring %s is %.2f:1 against the control's own rendered fill %s, under the 3:1 floor", key, what, p.Sel, p.Colour, p.AgainstFill, p.Fill)
 			}
 			if p.AgainstBehind < 3 {
-				t.Errorf("%s theme: #%s's ring %s is %.2f:1 against the surface rendered behind it (%s), under the 3:1 floor", key, id, p.Colour, p.AgainstBehind, p.Behind)
+				t.Errorf("%s (%s): %s's ring %s is %.2f:1 against the surface rendered behind it (%s), under the 3:1 floor", key, what, p.Sel, p.Colour, p.AgainstBehind, p.Behind)
 			}
-			t.Logf("%s theme: #%s ring %s, %gpx at offset %gpx - %.2f:1 on its own fill %s, %.2f:1 on the surface behind (%s)",
-				key, id, p.Colour, p.Width, p.Offset, p.AgainstFill, p.Fill, p.AgainstBehind, p.Behind)
+			t.Logf("%s: %s ring %s, %gpx at offset %gpx - %.2f:1 on its own fill %s, %.2f:1 on the surface behind (%s)",
+				key, p.Sel, p.Colour, p.Width, p.Offset, p.AgainstFill, p.Fill, p.AgainstBehind, p.Behind)
 		}
 	}
 }
@@ -5172,7 +5577,13 @@ func TestRendered_EveryDegradedStateReachesTheScreen(t *testing.T) {
 		"dark":  renderedDegradedText(t, "unauthorized"),
 	}
 
-	for _, key := range []string{"light", "dark"} {
+	// EVERY rendered case, not the two themes: a state hidden inside
+	// `@media (prefers-reduced-motion: reduce)` is a state that user never reads,
+	// and a grader that looks at two of the three user agents would pass on it -
+	// the narrowing impl-gate F31 named at AC8. The two states no snapshot can
+	// carry (part 3) are the exception and say so: only the cases carrying a
+	// refusal prelude ever reach them.
+	for _, key := range renderedKeys() {
 		r := renderedPage(t, key)
 
 		// (1) The two empty-table states, in the body of the table each is about.
@@ -5208,8 +5619,9 @@ func TestRendered_EveryDegradedStateReachesTheScreen(t *testing.T) {
 		}
 		for _, id := range []string{"queue-cap", "hist-cap"} {
 			n := live.Nodes[id]
-			if !n.Shown {
-				t.Errorf("%s: #%s carries %q and is NOT on the screen; a truncated view then reads as the whole ledger", key, id, n.Text)
+			if !n.Shown || !n.TextShown {
+				t.Errorf("%s: #%s carries %q and is NOT on the screen (box=%v, its own text=%v); a truncated view then reads as the whole ledger",
+					key, id, n.Text, n.Shown, n.TextShown)
 				continue
 			}
 			if !strings.Contains(n.Text, capped) {
@@ -5221,17 +5633,26 @@ func TestRendered_EveryDegradedStateReachesTheScreen(t *testing.T) {
 		// page's own code: its EventSource error handler, and its own control()
 		// against a transport that refuses. The connection state the LIVE stream
 		// left is read back from the prelude, because only one of the two can be
-		// on the screen at a time.
-		if r.LiveConn == nil || !r.LiveConn.Shown {
-			t.Errorf("%s: the live connection state was never on the screen before the stream was dropped", key)
-		}
-		conn := live.Nodes["conn"]
-		if !conn.Shown || !strings.Contains(conn.Text, reconnecting) {
-			t.Errorf("%s: with the stream dropped #conn is shown=%v saying %q; AC10 requires the reconnecting state to be rendered", key, conn.Shown, conn.Text)
-		}
-		msg := live.Nodes["msg"]
-		if !msg.Shown || !strings.Contains(msg.Text, refusal[key]) {
-			t.Errorf("%s: a refused control call leaves #msg shown=%v saying %q, not %q", key, msg.Shown, msg.Text, refusal[key])
+		// on the screen at a time. Only the cases whose prelude creates those two
+		// conditions can be asked about them; the map is the record of which, so
+		// a case that stopped running its prelude reds here rather than being
+		// skipped in silence.
+		if want, ok := refusal[key]; ok {
+			if r.LiveConn == nil || !r.LiveConn.Shown {
+				t.Errorf("%s: the live connection state was never on the screen before the stream was dropped", key)
+			}
+			conn := live.Nodes["conn"]
+			if !conn.Shown || !conn.TextShown || !strings.Contains(conn.Text, reconnecting) {
+				t.Errorf("%s: with the stream dropped #conn is shown=%v (its own text %v) saying %q; AC10 requires the reconnecting state to be rendered",
+					key, conn.Shown, conn.TextShown, conn.Text)
+			}
+			msg := live.Nodes["msg"]
+			if !msg.Shown || !msg.TextShown || !strings.Contains(msg.Text, want) {
+				t.Errorf("%s: a refused control call leaves #msg shown=%v (its own text %v) saying %q, not %q",
+					key, msg.Shown, msg.TextShown, msg.Text, want)
+			}
+		} else if r.LiveConn != nil {
+			t.Errorf("%s: this case carries no refusal prelude, yet it reported a captured connection state; the fixture set has moved and AC10's dropped-stream and refusal states may now be graded nowhere", key)
 		}
 
 		// (4) AC9, driven through the real filter box: a term matching no loaded
