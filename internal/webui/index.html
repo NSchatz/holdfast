@@ -733,12 +733,12 @@ function capNote(id, shown, total) {
 }
 
 // The no-match state for the filter. A term that matches none of the loaded rows used to
-// empty both table bodies in silence, and a blank table reads as "not in the library" —
+// empty both table bodies in silence, and a blank table reads as "not in the library",
 // which is the wrong reading twice over, because the rows loaded here are themselves
 // capped by the API. So say both things, in the body of the table it applies to, built as
 // DOM nodes like every other row.
 const NO_MATCH_TEXT = "No loaded row matches this filter. The rows loaded here are "
-  + "themselves capped, so a file in the library may simply not be among them — clear "
+  + "themselves capped, so a file in the library may simply not be among them; clear "
   + "the filter to see every loaded row again.";
 
 function setNoMatchRow(body, want) {

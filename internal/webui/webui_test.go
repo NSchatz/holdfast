@@ -462,7 +462,7 @@ func TestHandler404sOtherPaths(t *testing.T) {
 //
 // Everything below grades a PROPERTY of the embedded page, read out of the page's
 // own stylesheet. The render is client-side and CI has no browser, so the proof is
-// structural — the idiom this file already uses — but it is DERIVED, not
+// structural, the idiom this file already uses, but it is DERIVED, not
 // enumerated. The contrast proof measures the pairs the RULES paint, and a rule
 // that paints text without saying which surface it sits on FAILS here rather than
 // going unmeasured. That is the property that stops this decaying into a
@@ -829,6 +829,44 @@ func atAppliesAtViewportWidth(at string, px float64) bool {
 	return false
 }
 
+// atDecidableAtViewportWidth reports whether this reader can DECIDE, at all,
+// whether a rule under this prelude is live at a given viewport.
+// atAppliesAtViewportWidth answers false both for a prelude that provably does not
+// apply and for one it cannot read, and those are not the same answer where the
+// question is which rule DECIDES a layout: dropping a rule the reader cannot
+// evaluate is how an override survives a sweep, which is finding F21's shape
+// spelled in the prelude instead of the selector. `@media (max-width: 40em)` is
+// live at 360px in a real browser and this reader will not say so;
+// `@supports (display: grid)` may hold for everyone it reaches;
+// `@media (prefers-color-scheme: light)` holds for half the users the criterion is
+// written about. A rule declaring one of AC6's regions under any of them is RED,
+// not absent - resolvable or red, as the width sweep beside it already is.
+func atDecidableAtViewportWidth(at string) bool {
+	if strings.TrimSpace(at) == "" {
+		return true
+	}
+	queries, ok := mediaQueries(at)
+	if !ok {
+		return false
+	}
+	for _, conds := range queries {
+		for _, c := range conds {
+			if c.typ != "" {
+				continue // a media type: holdsAtWidth models every one of them
+			}
+			switch c.name {
+			case "width", "min-width", "max-width":
+			default:
+				return false
+			}
+			if _, okPx := cssPx(c.value); !okPx {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // atAppliesToEveryUser reports whether a rule under this prelude is live for
 // EVERY user agent: no viewport condition, no user preference, no media type
 // narrower than `all`. AC8 says the ring is drawn "in both themes"; a ring
@@ -944,6 +982,235 @@ func isColumnFlexDirection(v string) bool {
 	return strings.ToLower(strings.TrimSpace(strings.ReplaceAll(v, "!important", ""))) == "column"
 }
 
+// declaredIdents reads a value as the IDENT LIST it is, lowercased, with a
+// parenthesised group left whole. A value SEARCHED instead of compared answers a
+// question nobody asked: `color-scheme: lightdark` is one <custom-ident> naming a
+// scheme no user agent implements - the document opts into NEITHER, and every
+// native control falls back to the UA's light default inside the dark page, which
+// is verbatim the harm AC4 names - and it satisfies
+// `strings.Contains(cs, "light") && strings.Contains(cs, "dark")` with the single
+// word that contains both (impl-gate finding F24).
+func declaredIdents(v string) map[string]bool {
+	out := map[string]bool{}
+	for _, f := range topLevelFields(strings.ToLower(strings.ReplaceAll(normSpace(v), "!important", ""))) {
+		out[strings.TrimSpace(f)] = true
+	}
+	return out
+}
+
+// --- reading a number, and a rendered SIZE rather than an authored minimum ------
+
+// numberOrPercent reads a scale component: a bare number, or a percentage of the
+// authored size. ok=false means this reader cannot evaluate it.
+func numberOrPercent(s string) (float64, bool) {
+	s = strings.TrimSpace(s)
+	if strings.HasSuffix(s, "%") {
+		f, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(s, "%")), 64)
+		return f / 100, err == nil
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	return f, err == nil
+}
+
+// scaleProps are the properties that change the size a box RENDERS at without
+// changing any length declared on it. AC7 measures what is rendered ("WHEN a
+// pointer target is rendered ... at least 24 CSS px in both dimensions"), and a
+// sweep reading only min-height / min-width / min-block-size / min-inline-size is a
+// membership narrower than the criterion's own set by exactly these three:
+// `#rescan { transform:scale(0.4) }` renders a 32px control at 12.8px, half of
+// WCAG 2.2 2.5.8's floor in both dimensions and hit area included, and not one
+// minimum on the page moves (impl-gate finding F25).
+var scaleProps = map[string]bool{"transform": true, "scale": true, "zoom": true}
+
+// scaleFactorOf returns the smallest factor a declaration applies to the rendered
+// box, and ok=false when this reader cannot SHOW the declaration leaves that box at
+// the size the floor sweep measured. Undecidable is red, never 1: scoring a value
+// the reader cannot evaluate as a harmless one is the shape findings F2 and F11
+// both named, and "resolvable or red" is the discipline the contrast derivation is
+// already built on.
+func scaleFactorOf(prop, value string) (float64, bool) {
+	p := unprefixed(prop)
+	if !scaleProps[p] {
+		return 1, true
+	}
+	v := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(normSpace(value), "!important", "")))
+	if v == "" {
+		return 0, false
+	}
+	switch p {
+	case "zoom":
+		if v == "normal" || v == "reset" {
+			return 1, true
+		}
+		return numberOrPercent(v)
+	case "scale":
+		if v == "none" {
+			return 1, true
+		}
+		min := math.Inf(1)
+		for _, f := range topLevelFields(v) {
+			n, ok := numberOrPercent(f)
+			if !ok {
+				return 0, false
+			}
+			min = math.Min(min, n)
+		}
+		if math.IsInf(min, 1) {
+			return 0, false
+		}
+		return min, true
+	}
+	// transform: a space-separated list of functions. Only the ones this reader can
+	// show are non-shrinking are accepted; anything else (a matrix, a skew, a
+	// function it does not model) is undecidable and therefore red.
+	if v == "none" {
+		return 1, true
+	}
+	min := 1.0
+	for _, f := range topLevelFields(v) {
+		open := strings.IndexByte(f, '(')
+		if open < 0 || !strings.HasSuffix(f, ")") {
+			return 0, false
+		}
+		args := strings.Split(f[open+1:len(f)-1], ",")
+		switch strings.TrimSpace(f[:open]) {
+		case "translate", "translatex", "translatey", "translatez", "translate3d":
+			// A translation moves the box; its rendered size is unchanged.
+		case "scale", "scalex", "scaley", "scale3d":
+			for _, a := range args {
+				n, ok := numberOrPercent(a)
+				if !ok {
+					return 0, false
+				}
+				min = math.Min(min, n)
+			}
+		default:
+			return 0, false
+		}
+	}
+	return min, true
+}
+
+// --- reading how long a motion RUNS --------------------------------------------
+
+// motionDurationsMs returns the durations a motion declaration establishes, in
+// milliseconds. A `<family>-duration` longhand states them directly; the
+// `transition` / `animation` shorthand states each as the FIRST time in its
+// comma-separated part (the second time is the delay). A motion longhand carrying
+// no time at all - transition-property, animation-name - establishes none.
+//
+// It exists because AC5's reduce check read one property name, so a reduce block
+// restoring motion through the shorthand, or through a rule scoped to a subtree,
+// was never asked about (impl-gate finding F22 and its class).
+func motionDurationsMs(prop, value string) []float64 {
+	fam := motionFamily(prop)
+	if fam == "" {
+		return nil
+	}
+	v := strings.TrimSpace(strings.ReplaceAll(normSpace(value), "!important", ""))
+	var out []float64
+	switch unprefixed(prop) {
+	case fam + "-duration":
+		for _, part := range strings.Split(v, ",") {
+			out = append(out, msOf(part))
+		}
+	case fam:
+		for _, part := range strings.Split(v, ",") {
+			for _, f := range topLevelFields(part) {
+				if ms := msOf(f); !math.IsInf(ms, 1) {
+					out = append(out, ms)
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+// --- reading whether a node an operator should SEE is taken off the page --------
+
+var (
+	hiddenAssign  = regexp.MustCompile(`[\w$.]*\.hidden\s*=\s*([^;\n]+)`)
+	hiddenAttr    = regexp.MustCompile(`[\w$.]*\.(?:setAttribute|toggleAttribute)\(\s*["']hidden["'][^)]*\)`)
+	displayAssign = regexp.MustCompile(`[\w$.]*\.style\.(?:display|visibility)\s*=\s*([^;\n]+)`)
+	nodeRemoved   = regexp.MustCompile(`[\w$.]*\.(?:remove|replaceChildren)\(\s*\)`)
+)
+
+// hidingStatements returns every expression in a fragment of the page's script that
+// takes a node off the page an operator reads. AC9's word is "visible" and AC10's
+// verb is "render", and every proof of either stopped at the function that BUILDS
+// the row: `tr.hidden = true` beside setNoMatchRow's appendChild, or in emptyRow,
+// or in capNote's `total > shown` branch, leaves the wording constructed exactly as
+// pinned, inserted exactly as pinned, and shows an operator nothing (impl-gate
+// finding F20).
+//
+// The membership is the CLASS rather than the one property the finding used, for
+// the reason finding F18 gave about AC5's: a sweep narrower than the thing it
+// grades is the same hole one spelling to the left. `hidden` set to the literal
+// `false` is how this page puts a node back, so it is not one.
+func hidingStatements(js string) []string {
+	var out []string
+	for _, m := range hiddenAssign.FindAllStringSubmatch(js, -1) {
+		if strings.TrimSpace(m[1]) == "false" {
+			continue
+		}
+		out = append(out, strings.TrimSpace(m[0]))
+	}
+	out = append(out, hiddenAttr.FindAllString(js, -1)...)
+	for _, m := range displayAssign.FindAllStringSubmatch(js, -1) {
+		if v := strings.TrimSpace(m[1]); v == `""` || v == "''" {
+			continue
+		}
+		out = append(out, strings.TrimSpace(m[0]))
+	}
+	out = append(out, nodeRemoved.FindAllString(js, -1)...)
+	return out
+}
+
+// invisibleValues are the declarations that paint a node out of existence. A
+// degraded state hidden by the STYLESHEET is finding F20's shape one language to
+// the left: the row is built, filled and appended exactly as every pin requires,
+// and nobody sees it.
+var invisibleValues = map[string]map[string]bool{
+	"display":            {"none": true},
+	"visibility":         {"hidden": true, "collapse": true},
+	"content-visibility": {"hidden": true},
+	"opacity":            {"0": true, "0%": true, "0.0": true},
+	"font-size":          {"0": true, "0px": true},
+}
+
+// stateIsReachedBy reports whether a rule's selector group can apply to the node a
+// degraded state is rendered on. The state's own selector (`.empty`, `#conn.down`)
+// names the classes and the id that node carries, and a rule reaches it when its
+// subject compound narrows past neither. The TAG is deliberately not compared:
+// three of these nodes are built in the script rather than written in the markup,
+// and over-inclusion here only ever holds MORE rules to the criterion.
+func stateIsReachedBy(sel, state string) bool {
+	want := parseCompound(lastCompound(state))
+	for _, p := range selectorParts(sel) {
+		c := parseCompound(lastCompound(p))
+		if c.pseudoEl || c.root || (c.id != "" && c.id != want.id) {
+			continue
+		}
+		reaches := true
+		for _, cl := range c.classes {
+			found := false
+			for _, w := range want.classes {
+				if w == cl {
+					found = true
+				}
+			}
+			if !found {
+				reaches = false
+			}
+		}
+		if reaches {
+			return true
+		}
+	}
+	return false
+}
+
 // The two readers' own proof, asserted against FIXTURES rather than against the
 // shipped page - the same discipline TestPageComments_ uses - so it stays a proof
 // whatever preludes and track lists the page happens to carry. Both readers exist
@@ -955,37 +1222,44 @@ func TestPrelude_IsReadForWhatItIsAndAValueIsComparedNotSearched(t *testing.T) {
 		at         string
 		atWidth360 bool
 		everyUser  bool
+		decidable  bool
 	}{
-		{"", true, true},
-		{"@media all", true, true},
-		{"@media screen", true, false},
-		{"@media print", false, false},
-		{"@media (max-width: 640px)", true, false},
-		{"@media only screen and (max-width: 640px)", true, false},
-		{"@media (max-width: 320px)", false, false},
-		{"@media (min-width: 99999px)", false, false},
+		{"", true, true, true},
+		{"@media all", true, true, true},
+		{"@media screen", true, false, true},
+		{"@media print", false, false, true},
+		{"@media (max-width: 640px)", true, false, true},
+		{"@media only screen and (max-width: 640px)", true, false, true},
+		{"@media (max-width: 320px)", false, false, true},
+		{"@media (min-width: 99999px)", false, false, true},
 		// The shape finding F14 broke the narrow-viewport proof with: it carries
 		// the max-width the old regex found and applies at no viewport at all.
-		{"@media (max-width: 640px) and (min-width: 99999px)", false, false},
-		// The shapes finding F15 broke the focus proof with.
-		{"@media (prefers-reduced-motion: reduce)", false, false},
-		{"@media (prefers-color-scheme: light)", false, false},
+		{"@media (max-width: 640px) and (min-width: 99999px)", false, false, true},
+		// The shapes finding F15 broke the focus proof with. Neither is DECIDABLE at
+		// a viewport: a light-preference user is half the users AC6 is written about,
+		// so a rule laying out a region under one of these reds rather than vanishing.
+		{"@media (prefers-reduced-motion: reduce)", false, false, false},
+		{"@media (prefers-color-scheme: light)", false, false, false},
 		// A comma is a disjunction: one query matching is enough.
-		{"@media (min-width: 99999px), (max-width: 640px)", true, false},
+		{"@media (min-width: 99999px), (max-width: 640px)", true, false, true},
 		// Shapes this reader does not model. It says so by declining to vouch for
-		// them, never by assuming they hold.
-		{"@media not all and (max-width: 640px)", false, false},
-		{"@media (max-width: 40em)", false, false},
-		{"@media (400px >= width)", false, false},
-		{"@media (hover)", false, false},
-		{"@supports (display: grid)", false, false},
-		{"@-webkit-keyframes pulse", false, false},
+		// them, never by assuming they hold - and, for AC6's regions, by declining to
+		// vouch that they do NOT hold either.
+		{"@media not all and (max-width: 640px)", false, false, false},
+		{"@media (max-width: 40em)", false, false, false},
+		{"@media (400px >= width)", false, false, false},
+		{"@media (hover)", false, false, false},
+		{"@supports (display: grid)", false, false, false},
+		{"@-webkit-keyframes pulse", false, false, false},
 	} {
 		if got := atAppliesAtViewportWidth(c.at, 360); got != c.atWidth360 {
 			t.Errorf("atAppliesAtViewportWidth(%q, 360) = %v, want %v", c.at, got, c.atWidth360)
 		}
 		if got := atAppliesToEveryUser(c.at); got != c.everyUser {
 			t.Errorf("atAppliesToEveryUser(%q) = %v, want %v", c.at, got, c.everyUser)
+		}
+		if got := atDecidableAtViewportWidth(c.at); got != c.decidable {
+			t.Errorf("atDecidableAtViewportWidth(%q) = %v, want %v - a prelude the reader cannot evaluate and one it evaluates to false are not the same answer", c.at, got, c.decidable)
 		}
 	}
 	for _, c := range []string{
@@ -1025,6 +1299,166 @@ func TestPrelude_IsReadForWhatItIsAndAValueIsComparedNotSearched(t *testing.T) {
 	} {
 		if got := unprefixed(c.prop); got != c.want {
 			t.Errorf("unprefixed(%q) = %q, want %q", c.prop, got, c.want)
+		}
+	}
+	// A value read as the IDENT LIST it is. The last case is the one finding F24
+	// broke AC4 with: one word containing both of the two the check searched for.
+	for _, c := range []struct {
+		v                 string
+		light, dark, both bool
+	}{
+		{"light dark", true, true, true},
+		{"only light dark", true, true, true},
+		{" LIGHT   DARK ", true, true, true},
+		{"dark", false, true, false},
+		{"light", true, false, false},
+		{"lightdark", false, false, false},
+		{"normal", false, false, false},
+		{"", false, false, false},
+	} {
+		got := declaredIdents(c.v)
+		if got["light"] != c.light || got["dark"] != c.dark {
+			t.Errorf("declaredIdents(%q) reads light=%v dark=%v, want light=%v dark=%v - a scheme name is an IDENT, not a substring",
+				c.v, got["light"], got["dark"], c.light, c.dark)
+		}
+		if (got["light"] && got["dark"]) != c.both {
+			t.Errorf("declaredIdents(%q) declares both schemes = %v, want %v", c.v, got["light"] && got["dark"], c.both)
+		}
+	}
+	// A RENDERED size, not an authored one. `ok=false` is the reader declining to
+	// vouch for a declaration, which a floor sweep must treat as red.
+	for _, c := range []struct {
+		prop, value string
+		want        float64
+		ok          bool
+	}{
+		{"min-height", "32px", 1, true}, // not a scaling property at all
+		{"text-transform", "uppercase", 1, true},
+		{"transform", "none", 1, true},
+		{"transform", "translateY(-2px)", 1, true},
+		{"transform", "scale(0.4)", 0.4, true},
+		{"transform", "scale(1.5)", 1, true},
+		{"transform", "scaleX(0.5) translateY(2px)", 0.5, true},
+		{"transform", "scale(2) scale(0.4)", 0.4, true},
+		{"-webkit-transform", "scale(0.4)", 0.4, true},
+		{"transform", "scale3d(1, 0.25, 1)", 0.25, true},
+		{"transform", "matrix(0.4, 0, 0, 0.4, 0, 0)", 0, false},
+		{"transform", "rotate(45deg)", 0, false},
+		{"transform", "var(--shrink)", 0, false},
+		{"zoom", "0.4", 0.4, true},
+		{"zoom", "40%", 0.4, true},
+		{"zoom", "normal", 1, true},
+		{"zoom", "1.5", 1.5, true},
+		{"zoom", "var(--z)", 0, false},
+		{"scale", "0.4", 0.4, true},
+		{"scale", "1 0.4", 0.4, true},
+		{"scale", "none", 1, true},
+		{"scale", "calc(1/2)", 0, false},
+	} {
+		got, ok := scaleFactorOf(c.prop, c.value)
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("scaleFactorOf(%q, %q) = %g, %v; want %g, %v", c.prop, c.value, got, ok, c.want, c.ok)
+		}
+	}
+	// How long a motion RUNS, read from the longhand and from the shorthand alike.
+	for _, c := range []struct {
+		prop, value string
+		want        []float64
+	}{
+		{"transition-duration", "0.01ms", []float64{0.01}},
+		{"transition-duration", "400ms", []float64{400}},
+		{"transition-duration", "0.4s", []float64{400}},
+		{"transition-duration", "0.01ms, 400ms", []float64{0.01, 400}},
+		{"-webkit-transition-duration", "400ms", []float64{400}},
+		{"transition-delay", "400ms", nil},
+		{"transition-property", "color", nil},
+		{"transition", "border-color 400ms ease", []float64{400}},
+		{"transition", "border-color 400ms 200ms ease", []float64{400}},
+		{"transition", "color 0s, background 400ms", []float64{0, 400}},
+		{"animation-duration", "2s", []float64{2000}},
+		{"animation", "pulse 2s infinite", []float64{2000}},
+		{"font-size", "14px", nil},
+		{"scroll-behavior", "auto", nil},
+	} {
+		got := motionDurationsMs(c.prop, c.value)
+		if len(got) != len(c.want) {
+			t.Errorf("motionDurationsMs(%q, %q) = %v, want %v", c.prop, c.value, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("motionDurationsMs(%q, %q) = %v, want %v", c.prop, c.value, got, c.want)
+				break
+			}
+		}
+	}
+	// A node taken off the page an operator reads. The first four are the exact
+	// edits finding F20 hid a degraded state with.
+	for _, c := range []struct {
+		js   string
+		want int
+	}{
+		{"  tr.hidden = true;\n  body.appendChild(tr);", 1},
+		{"  el.hidden = true;", 1},
+		{`  tr.setAttribute("hidden", "");`, 1},
+		{`  td.style.display = "none";`, 1},
+		{"  el.hidden = false;", 0},
+		{"  tr.hidden = hide;", 1},
+		{"  if (existing) existing.remove();", 1},
+		{`  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;`, 0},
+		{`  el.textContent = "";
+  el.hidden = true;`, 1},
+	} {
+		if got := hidingStatements(c.js); len(got) != c.want {
+			t.Errorf("hidingStatements(%q) found %d hiding statements %v, want %d", c.js, len(got), got, c.want)
+		}
+	}
+	// An EXEMPTION claimed by a class name, compared rather than searched for. The
+	// `.tablewrapper` case is the substring leak: it is scoped to nothing and would
+	// scroll the page body sideways at 360px.
+	for _, c := range []struct {
+		sel  string
+		want bool
+	}{
+		{".tablewrap", true},
+		{".tablewrap table", true},
+		{".tablewrap > table th", true},
+		{".tablewrap td[style]", true},
+		{".tablewrap, .tablewrap table", true},
+		{".tablewrapper", false},
+		{".not-tablewrap", false},
+		{".tablewrap, main", false},
+		{"main", false},
+		{"", false},
+	} {
+		if got := exemptTablewrap(c.sel); got != c.want {
+			t.Errorf("exemptTablewrap(%q) = %v, want %v - AC6's one exemption belongs to the .tablewrap class, not to every selector spelled with those letters", c.sel, got, c.want)
+		}
+	}
+	// Which rules can reach the node a degraded state is rendered on.
+	for _, c := range []struct {
+		sel, state string
+		want       bool
+	}{
+		{".empty", ".empty", true},
+		{"td.empty", ".empty", true},
+		{".empty, .nr", ".empty", true},
+		{"*", ".empty", true},
+		{"section .note", ".note.cap", true},
+		{".note.cap", ".note.cap", true},
+		{"#conn.down", "#conn.down", true},
+		{"#conn", "#conn.down", true},
+		{"#msg.err", "#conn.down", false},
+		{"header .grow", ".empty", false},
+		{".nr", ".empty", false},
+		{"#msg", ".empty", false},
+		{".empty::before", ".empty", false},
+	} {
+		if got := stateIsReachedBy(c.sel, c.state); got != c.want {
+			t.Errorf("stateIsReachedBy(%q, %q) = %v, want %v", c.sel, c.state, got, c.want)
 		}
 	}
 }
@@ -1384,15 +1818,56 @@ func disabledOnly(sel string) bool {
 	return true
 }
 
+// compoundsIn splits one selector part into its compounds, dropping the
+// combinators between them. lastCompound answers which element a rule applies TO;
+// this answers which elements it is SCOPED BY, which is the question an exemption
+// has to ask.
+func compoundsIn(part string) []string {
+	var out []string
+	depth, start := 0, 0
+	for i := 0; i < len(part); i++ {
+		switch part[i] {
+		case '(', '[':
+			depth++
+		case ')', ']':
+			depth--
+		case ' ', '\t', '\n', '>', '+', '~':
+			if depth == 0 {
+				if c := strings.TrimSpace(part[start:i]); c != "" {
+					out = append(out, c)
+				}
+				start = i + 1
+			}
+		}
+	}
+	if c := strings.TrimSpace(part[start:]); c != "" {
+		out = append(out, c)
+	}
+	return out
+}
+
 // exemptTablewrap reports whether EVERY part of a selector group is scoped to a
 // .tablewrap, which is the one place AC6 lets a box be wider than the viewport.
+//
+// The class name is COMPARED, not searched for. `strings.Contains(p, "tablewrap")`
+// hands the exemption to `.tablewrapper { min-width:960px }`, which scrolls the page
+// body sideways at 360px and is scoped to nothing - an exemption claimed by a
+// substring, which is the leak selectorParts was written for one level up.
 func exemptTablewrap(sel string) bool {
 	parts := selectorParts(sel)
 	if len(parts) == 0 {
 		return false
 	}
 	for _, p := range parts {
-		if !strings.Contains(p, "tablewrap") {
+		scoped := false
+		for _, c := range compoundsIn(p) {
+			for _, cl := range parseCompound(c).classes {
+				if cl == "tablewrap" {
+					scoped = true
+				}
+			}
+		}
+		if !scoped {
 			return false
 		}
 	}
@@ -1678,7 +2153,7 @@ var (
 
 // nonColourKeywords are the words a colour-accepting declaration may legitimately
 // carry that are not colours. Anything else left standing once the var()
-// references are removed is a colour written at the point of use — which is a
+// references are removed is a colour written at the point of use, which is a
 // whitelist, so `color:rebeccapurple` reds exactly as `color:red` does.
 var nonColourKeywords = map[string]bool{
 	"solid": true, "dashed": true, "dotted": true, "double": true, "groove": true,
@@ -2018,8 +2493,28 @@ func TestThemes_ALightSetIsDeclaredAndColorSchemeFollowsIt(t *testing.T) {
 			root = r
 		}
 	}
-	if cs := root.get("color-scheme"); !strings.Contains(cs, "light") || !strings.Contains(cs, "dark") {
-		t.Errorf("color-scheme is %q; it must declare `light dark` so native controls, scrollbars and form fields follow the page's theme instead of staying light inside a dark page", cs)
+	// color-scheme is read as the ident LIST it is, and each scheme is COMPARED. Two
+	// strings.Contains calls answered a different question: `color-scheme: lightdark`
+	// is a single <custom-ident> naming a scheme no user agent implements, so the
+	// document opts into NEITHER and every native control, scrollbar and form field
+	// falls back to the UA's light default inside the dark page - which is verbatim
+	// the harm this criterion names - while one word satisfies both searches
+	// (impl-gate finding F24). It is "a value SEARCHED instead of compared", the
+	// diagnosis gridTrackCount was written for, in AC4's position.
+	// ...read off the LAST top-level :root that declares it, which is the one the
+	// cascade keeps. Reading it off the last :root rule FULL STOP would let a second
+	// block declaring only a token blank the check it is supposed to answer.
+	cs := ""
+	for _, r := range rules {
+		if r.sel == ":root" && r.at == "" && r.get("color-scheme") != "" {
+			cs = r.get("color-scheme")
+		}
+	}
+	schemes := declaredIdents(cs)
+	for _, want := range []string{"light", "dark"} {
+		if !schemes[want] {
+			t.Errorf("color-scheme is %q, which does not name %q among its schemes; it must declare `light dark` so native controls, scrollbars and form fields follow the page's theme instead of staying light inside a dark page", cs, want)
+		}
 	}
 	// The dark set is the DEFAULT, so a user agent expressing no preference still
 	// gets the page holdfast ships today.
@@ -2322,6 +2817,38 @@ func TestFocus_RingClearsBothTheControlFillAndTheSurfaceBehindIt(t *testing.T) {
 	if len(rings) == 0 {
 		t.Fatal("no rule draws a focus indicator from a colour token")
 	}
+	// outline-offset is read on EVERY rule that declares it, whether or not that rule
+	// also restates an outline. `outlineOf` sets `stated` from outline /
+	// outline-style / outline-width / outline-color alone, and the loop above
+	// discards an unstated rule before its offset is ever looked at - so
+	// `:focus-visible { outline-offset:-8px }` won the cascade over the base rule,
+	// pulled the ring INSIDE every control's border box where it never meets the
+	// surface AC8 measures it against, and was thrown away first (impl-gate finding
+	// F23). It is finding F19's violation spelled in one declaration instead of two,
+	// and it is this loop's own class stated exactly: an assertion conditional on the
+	// thing it checks being present.
+	offsets := 0
+	for _, r := range rules {
+		v := r.get("outline-offset")
+		if v == "" {
+			continue
+		}
+		offsets++
+		where := r.sel
+		if r.at != "" {
+			where = r.at + " { " + r.sel
+		}
+		off, ok := measuredPx(dark, v)
+		switch {
+		case !ok:
+			t.Errorf("%s declares an outline-offset (%q) this reader cannot measure, so nothing says the focus ring is drawn where the surface behind the control is visible", where, v)
+		case off < 0:
+			t.Errorf("%s draws its ring at outline-offset %gpx; a negative offset puts the indicator inside the control's own border box, where it never meets the surface immediately behind the control that AC8 measures it against", where, off)
+		}
+	}
+	if offsets == 0 {
+		t.Error("no rule on the page declares an outline-offset, so nothing holds the focus ring clear of the control it marks")
+	}
 	// Every pointer target is REACHED by one of those rules - and by one that
 	// APPLIES. A ring scoped to `button:focus-visible` draws nothing on the two
 	// inputs, and folding the rules together hid which controls were covered at all.
@@ -2465,7 +2992,45 @@ func TestTargets_EveryPointerTargetClearsTheTwentyFourPixelFloor(t *testing.T) {
 			t.Errorf("%s { %s: %s } holds the target at %gpx, under WCAG 2.2 2.5.8's 24px floor", where, prop, v, px)
 		}
 	}
+	// AC7 measures what is RENDERED, and a minimum is not a rendered size. The four
+	// property names above are a membership narrower than the criterion's own set by
+	// exactly the properties that scale a box without changing a length declared on
+	// it: `#rescan { transform:scale(0.4) }`, in this page's own id idiom, renders a
+	// 32px control at 12.8px - half the floor in both dimensions, hit area included -
+	// and every minimum the sweep reads is untouched (impl-gate finding F25).
+	// Recorded reading 19 chose to be generous about which RULES reach a target; a
+	// sweep that is then narrow about which DECLARATIONS is narrow in the unsafe
+	// direction. So a rule reaching a target may not scale it below the size the
+	// minimums are measured at, and a scale this reader cannot evaluate REDS rather
+	// than passing - the same "resolvable or red" the contrast derivation is built
+	// on.
+	checkScale := func(where, prop, v string) {
+		f, ok := scaleFactorOf(prop, v)
+		switch {
+		case !ok:
+			t.Errorf("%s { %s: %s } scales the rendered box by a factor this sweep cannot evaluate, so the target cannot be SHOWN to still clear WCAG 2.2 2.5.8's 24px floor", where, prop, v)
+		case f < 1:
+			t.Errorf("%s { %s: %s } renders the target at %g of the size every minimum on this page is measured at, so a control held at the authored floor is drawn under WCAG 2.2 2.5.8's 24px floor", where, prop, v, f)
+		}
+	}
 	for _, c := range rules {
+		where := c.sel
+		if c.at != "" {
+			where = c.at + " { " + c.sel
+		}
+		// A scale is asked of EVERY rule, not only of the ones that reach a target,
+		// because these three properties scale an element's whole SUBTREE:
+		// `.controls { transform:scale(0.4) }` renders every button and input in that
+		// row at 12.8px while reaching none of them, and this reader has no parent
+		// chain to decide ancestry with. The page declares no transform, scale or zoom
+		// at all, so refusing a shrink outright costs it nothing and closes the
+		// ancestor case with the direct one - undecidable REDS, the strict direction
+		// this file takes everywhere.
+		for _, d := range c.decls {
+			if scaleProps[unprefixed(d.prop)] {
+				checkScale(where, d.prop, d.value)
+			}
+		}
 		textual := strings.Contains(c.sel, "button") || strings.Contains(c.sel, "input")
 		if !textual && !selectorReaches(c.sel, targets) {
 			continue
@@ -2475,16 +3040,17 @@ func TestTargets_EveryPointerTargetClearsTheTwentyFourPixelFloor(t *testing.T) {
 			if v == "" {
 				continue
 			}
-			where := c.sel
-			if c.at != "" {
-				where = c.at + " { " + c.sel
-			}
 			check(where, prop, v)
 		}
 	}
 	// A style= attribute on a control outranks every rule above it, so it is held
 	// to the same floor (impl-gate finding F13).
 	for _, in := range inlineStyles(t) {
+		for _, d := range in.rule.decls {
+			if scaleProps[unprefixed(d.prop)] {
+				checkScale(in.rule.sel, d.prop, d.value)
+			}
+		}
 		if in.el.tag != "button" && in.el.tag != "input" {
 			continue
 		}
@@ -2601,23 +3167,72 @@ func TestMotion_NoStateDependsOnItAndAReducePreferenceStopsIt(t *testing.T) {
 	// `@media (prefers-reduced-motion: reduce) and (min-width: 99999px)`, which
 	// never applies; matching the selector on the character `*` accepted `.foo *`,
 	// which reaches a subtree.
+	//
+	// And the rule that decides is the LAST applying one, which is the reading AC6's
+	// region loop takes 150 lines further down this file. `cut[fam] = true` was set
+	// by the FIRST qualifying rule and never unset, so a second reduce block of
+	// identical origin, importance and specificity, later in source order, restored
+	// 400ms transitions while `cut["transition"]` stayed true - set by the block it
+	// had just overridden (impl-gate finding F22). The duration is read from the
+	// shorthand as well as the longhand, for the reason finding F18 gave: AC5's set
+	// is the motion the page declares, not the one property name a sweep happened to
+	// look up.
 	cut := map[string]bool{}
 	for _, r := range rules {
 		if canonicalAt(r.at) != reduceAt || !hasUniversalPart(r.sel) {
 			continue
 		}
 		for _, d := range r.decls {
-			if unprefixed(d.prop) != motionFamily(d.prop)+"-duration" {
+			fam := motionFamily(d.prop)
+			durs := motionDurationsMs(d.prop, d.value)
+			if fam == "" || len(durs) == 0 {
 				continue
 			}
-			if strings.Contains(d.value, "!important") && msOf(d.value) <= 1 {
-				cut[motionFamily(d.prop)] = true
+			longest := 0.0
+			for _, ms := range durs {
+				longest = math.Max(longest, ms)
 			}
+			cut[fam] = strings.Contains(d.value, "!important") && longest <= 1
 		}
 	}
 	for _, fam := range []string{"transition", "animation"} {
 		if moved[fam] > 0 && !cut[fam] {
 			t.Errorf("the page declares motion in the %s family (%d declarations) but no @media (prefers-reduced-motion: reduce) rule cuts every %s-duration to no perceptible motion", fam, moved[fam], fam)
+		}
+	}
+	// ...and NO rule anywhere on the page may declare a perceptible motion duration
+	// as !important. The cut above is what makes every ordinary motion declaration on
+	// this page harmless: an important universal declaration beats a normal one at
+	// any specificity, in any block, which is why a normal 400ms transition is not a
+	// violation and why the refuter discarded that mutation itself. An IMPORTANT one
+	// is the exception, and it is the whole of AC5's remaining exposure - it beats
+	// the cut whenever it is more specific or later, and this reader will not model
+	// the cascade to decide which. Asking it of every rule, rather than of the rules
+	// whose prelude compares equal to the reduce block's, is deliberate: the equality
+	// is a prelude COMPARISON, and
+	// `@media (prefers-reduced-motion: reduce) and (min-width: 0px)` is live for the
+	// same user and equal to nothing (impl-gate finding F22's class, one prelude to
+	// the left). A page that needs an important motion declaration will red here and
+	// be looked at, which is what the criterion wants.
+	for _, r := range rules {
+		for _, d := range r.decls {
+			if !strings.Contains(d.value, "!important") {
+				continue
+			}
+			for _, ms := range motionDurationsMs(d.prop, d.value) {
+				where := r.sel
+				if r.at != "" {
+					where = r.at + " { " + r.sel
+				}
+				if math.IsInf(ms, 1) {
+					t.Errorf("%s { %s: %s } declares an important duration this reader cannot measure, so it cannot be shown to leave a user who asked for reduced motion with no perceptible motion", where, d.prop, d.value)
+					break
+				}
+				if ms > 1 {
+					t.Errorf("%s { %s: %s } runs for %gms and is IMPORTANT, so it beats the reduce block's own important cut wherever it is more specific or later; a user who asked for reduced motion must be left with no perceptible motion at all", where, d.prop, d.value, ms)
+					break
+				}
+			}
 		}
 	}
 }
@@ -2646,6 +3261,24 @@ var containerRelativeWidths = map[string]bool{
 	"inherit": true, "initial": true, "unset": true, "revert": true,
 }
 
+// regionElements are the elements of the page's MARKUP that one of AC6's three
+// regions names. A region that the markup does not carry is FATAL rather than
+// empty: a proof cannot pass because the thing it grades is no longer on the page.
+func regionElements(t *testing.T, sel string, els []pageElement) []pageElement {
+	t.Helper()
+	c := parseCompound(lastCompound(sel))
+	var out []pageElement
+	for _, el := range els {
+		if c.reaches(el) {
+			out = append(out, el)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("the markup carries no element that %s picks, so this proof grades a region the page does not have", sel)
+	}
+	return out
+}
+
 func TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody(t *testing.T) {
 	rules := allRules(t)
 	dark, _ := themeTokens(t, rules)
@@ -2672,15 +3305,41 @@ func TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody(t *testing.T
 	// property, which is what the cascade gives these three equal-specificity
 	// pairs. Accepting ANY applying rule would let a single-column declaration the
 	// page overrides two lines later stand in for the layout an operator sees.
+	//
+	// WHICH rules those are is asked of the MARKUP, the way AC7's floor sweep and
+	// AC8's coverage loop ask it: a rule decides this region's layout when its
+	// selector can REACH the region's own element. `r.sel != region.sel` is string
+	// equality on the whole selector GROUP, which answers a different question - add
+	// one selector to the group and the identical override becomes invisible, so
+	// `.aggs, .chips { grid-template-columns:repeat(2, 1fr) }` lays the aggregate
+	// cards out in TWO columns at 360px, `header, footer { flex-direction:row }`
+	// keeps the header a row, and the rule that decides is never even considered
+	// (impl-gate finding F21). It is the leak selectorParts was written for, running
+	// the other way: a group EVADING a check rather than claiming an exemption. It
+	// also closes the same evasion spelled with a descendant combinator
+	// (`body header { flex-direction:row }`), which outranks the region's own rule
+	// and which part-by-part equality would still have missed.
+	markup := elementsIn(t, pageMarkup(t))
 	for _, region := range narrowColumnRegions {
-		decided, from := "", ""
+		els := regionElements(t, region.sel, markup)
+		decided, from, by := "", "", ""
 		for _, r := range rules {
-			if r.sel != region.sel || !atAppliesAtViewportWidth(r.at, narrow) {
+			v := r.get(region.prop)
+			if v == "" || !selectorReaches(r.sel, els) {
 				continue
 			}
-			if v := r.get(region.prop); v != "" {
-				decided, from = v, r.at
+			// A prelude this reader cannot evaluate is RED here, not absent: dropping
+			// the rule would be the same override surviving the sweep one field to the
+			// left of the selector it was just fixed in.
+			if !atDecidableAtViewportWidth(r.at) {
+				t.Errorf("%s { %s: %s } lays out %s under a prelude this reader cannot evaluate at a %gpx viewport (%s), so it cannot be shown NOT to be the rule an operator sees there",
+					r.sel, region.prop, v, region.sel, narrow, r.at)
+				continue
 			}
+			if !atAppliesAtViewportWidth(r.at, narrow) {
+				continue
+			}
+			decided, from, by = v, r.at, r.sel
 		}
 		switch {
 		case decided == "":
@@ -2691,8 +3350,8 @@ func TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody(t *testing.T
 			if from != "" {
 				where = from
 			}
-			t.Errorf("at a %gpx viewport, %s { %s: %s } (from %s) is not a single column (expected %s)",
-				narrow, region.sel, region.prop, decided, where, region.want)
+			t.Errorf("at a %gpx viewport, %s is laid out by %s { %s: %s } (from %s), which is not a single column (expected %s)",
+				narrow, region.sel, by, region.prop, decided, where, region.want)
 		}
 	}
 	// Nothing outside a .tablewrap may assert a width or a minimum width wider than
@@ -2775,6 +3434,27 @@ func funcBody(t *testing.T, s, header string) string {
 	}
 	t.Fatalf("%q is never closed", header)
 	return ""
+}
+
+// funcBodyIs asserts that a function's WHOLE body is the statements named, with
+// whitespace normalised.
+//
+// An ordered sweep of a body proves every pinned step is present and in order. It
+// proves nothing about a statement INSERTED between two of them, and one inserted
+// statement is all it took to render every degraded state on this page to nobody:
+// `tr.hidden = true` beside setNoMatchRow's appendChild, or in emptyRow, satisfies
+// every step of both sweeps (impl-gate finding F20). These four functions are four
+// to eleven lines each and exist to put a criterion's own wording in front of an
+// operator, so the whole body is pinned rather than a subsequence of it - which is
+// also the one form of this check that a hiding shape no reader here models
+// (`style.cssText`, `parentNode.removeChild`, a class swap) cannot sit beside.
+func funcBodyIs(t *testing.T, s, header string, want []string) {
+	t.Helper()
+	got, w := normSpace(funcBody(t, s, header)), normSpace(strings.Join(want, " "))
+	if got != w {
+		t.Errorf("the body of %q is\n  %s\nand the proof of the criterion it renders requires exactly\n  %s\n(an ordered sweep of its steps cannot see a statement inserted BETWEEN two of them, and one is enough to build the wording perfectly and show it to no one)",
+			header, got, w)
+	}
 }
 
 // jsConstString returns the VALUE of a `const NAME = "..." + "...";` declaration
@@ -2882,9 +3562,8 @@ func TestFilter_ANonMatchingTermSaysSoAndSaysTheLoadedRowsAreCapped(t *testing.T
 	// term, the exact state this criterion exists to end. So the whole construction
 	// path is asserted as an ORDERED sequence inside setNoMatchRow's own body:
 	// dropping any one step reds, and so does building the row after inserting it.
-	fn := funcBody(t, s, "function setNoMatchRow(body, want) {")
-	at := 0
-	for _, step := range []string{
+	const setNoMatchRowHeader = "function setNoMatchRow(body, want) {"
+	setNoMatchRowSteps := []string{
 		`const existing = body.querySelector("tr[data-nomatch]");`,
 		`if (!want) { if (existing) existing.remove(); return; }`,
 		`if (existing) return;`,
@@ -2896,7 +3575,10 @@ func TestFilter_ANonMatchingTermSaysSoAndSaysTheLoadedRowsAreCapped(t *testing.T
 		`td.colSpan = cols;`,
 		`tr.appendChild(td);`,
 		`body.appendChild(tr);`,
-	} {
+	}
+	fn := funcBody(t, s, setNoMatchRowHeader)
+	at := 0
+	for _, step := range setNoMatchRowSteps {
 		k := strings.Index(fn[at:], step)
 		if k < 0 {
 			t.Errorf("setNoMatchRow no longer carries %q, in that order: the message the criterion demands never reaches the table body, so a non-matching term empties it in silence", step)
@@ -2904,6 +3586,18 @@ func TestFilter_ANonMatchingTermSaysSoAndSaysTheLoadedRowsAreCapped(t *testing.T
 		}
 		at += k + len(step)
 	}
+	// An ordered path proves the row is BUILT and INSERTED. AC9's word is "visible",
+	// and one inserted statement satisfies every step above and shows an operator
+	// nothing: `tr.hidden = true` beside the appendChild leaves a table that empties
+	// itself in silence on a non-matching term, which is the exact state this
+	// criterion exists to end (impl-gate finding F20). So the function may take
+	// exactly one node off the page - the message itself, when the term is cleared,
+	// which is the other half of the criterion ("WHEN the term is cleared, the
+	// previously matching rows SHALL return").
+	if got := hidingStatements(fn); len(got) != 1 || got[0] != "existing.remove()" {
+		t.Errorf("setNoMatchRow takes nodes off the page an operator reads: %v. AC9 requires a VISIBLE message, and the only node this function may remove is the message itself when the filter no longer matches nothing", got)
+	}
+	funcBodyIs(t, s, setNoMatchRowHeader, setNoMatchRowSteps)
 	// It has to be reachable: applyFilter is what the input event and every render
 	// call, and the term is read from the filter box.
 	for _, want := range []string{
@@ -3121,22 +3815,117 @@ func TestDegradedStates_CopySurvivesVerbatimAndStaysLegibleInBothThemes(t *testi
 	// closed the same way it was closed for AC9: emptyRow's own body is asserted as
 	// an ORDERED construction path, so dropping any step reds, and so does building
 	// the row after inserting it.
-	er := funcBody(t, s, "function emptyRow(cols, text) {")
-	at := 0
-	for _, step := range []string{
+	const emptyRowHeader = "function emptyRow(cols, text) {"
+	emptyRowSteps := []string{
 		`const tr = document.createElement("tr");`,
 		`tr.dataset.empty = "1";`,
 		`const td = mk("td", "empty", text);`,
 		`td.colSpan = cols;`,
 		`tr.appendChild(td);`,
 		`return tr;`,
-	} {
+	}
+	er := funcBody(t, s, emptyRowHeader)
+	at := 0
+	for _, step := range emptyRowSteps {
 		k := strings.Index(er[at:], step)
 		if k < 0 {
 			t.Errorf("emptyRow no longer carries %q, in that order: the wording its callers hand it never reaches a cell in the table, so an empty queue and an empty history each render a row that says nothing", step)
 			continue
 		}
 		at += k + len(step)
+	}
+	// Every pin so far - here, in AC9's test, and in degradedCopy above - stops at
+	// the function that BUILDS the node. Four one-line edits satisfy all of them and
+	// show an operator nothing (impl-gate finding F20), and this is where each is
+	// closed.
+	//
+	// (a) mk() is the leaf that writes the text for emptyRow, for setNoMatchRow and
+	// for nrNode alike. `if (text != null) e.textContent = "";` renders `Nothing
+	// queued.`, `No history yet.`, `unavailable`, `not recorded`, `unknown` and AC9's
+	// whole no-match sentence as EMPTY cells while every call site above reads
+	// exactly as pinned - finding F17's own diagnosis, "the pins prove the CALL SITE,
+	// not the render", one call deeper, at the single function all of them delegate
+	// the render to. So mk's own body is pinned as an ordered path, the way
+	// emptyRow's and setNoMatchRow's are.
+	const mkHeader = "function mk(tag, cls, text) {"
+	mkSteps := []string{
+		`const e = document.createElement(tag);`,
+		`if (cls) e.className = cls;`,
+		`if (text != null) e.textContent = text;`,
+		`return e;`,
+	}
+	mkBody := funcBody(t, s, mkHeader)
+	at = 0
+	for _, step := range mkSteps {
+		k := strings.Index(mkBody[at:], step)
+		if k < 0 {
+			t.Errorf("mk no longer carries %q, in that order: mk is the one node factory every degraded state on this page renders through, so the wording each of them is handed reaches no operator", step)
+			continue
+		}
+		at += k + len(step)
+	}
+	// (b, c, d) Construction is pinned; VISIBILITY was not. `tr.hidden = true` in
+	// emptyRow or in mk hides both empty-table states, and capNote's `total > shown`
+	// branch writing the notice and then hiding it takes `this view is capped` away
+	// from an operator entirely - so a truncated view reads as a complete one, which
+	// is the half of AC9's message this criterion also pins.
+	for _, fn := range []struct{ name, body string }{
+		{"mk", mkBody},
+		{"emptyRow", er},
+	} {
+		if got := hidingStatements(fn.body); len(got) > 0 {
+			t.Errorf("%s takes the node carrying a degraded state off the page an operator reads (%v); AC10's verb is RENDER, and a row built, filled and appended exactly as pinned shows nobody anything once it is hidden", fn.name, got)
+		}
+	}
+	const capNoteHeader = "function capNote(id, shown, total) {"
+	capNoteSteps := []string{
+		`const el = $(id);`,
+		`if (total > shown) {`,
+		`el.textContent = "Showing the most recent " + shown.toLocaleString() + " of "`,
+		`+ total.toLocaleString() + " — this view is capped.";`,
+		`el.hidden = false;`,
+		`} else {`,
+		`el.textContent = "";`,
+		`el.hidden = true;`,
+		`}`,
+	}
+	cn := funcBody(t, s, capNoteHeader)
+	at = 0
+	for _, step := range capNoteSteps {
+		k := strings.Index(cn[at:], step)
+		if k < 0 {
+			t.Errorf("capNote no longer carries %q, in that order: `this view is capped` is written into its element and never shown, so a truncated view reads as the whole ledger", step)
+			continue
+		}
+		at += k + len(step)
+	}
+	if i, j := strings.Index(cn, "if (total > shown) {"), strings.Index(cn, "} else {"); i >= 0 && j > i {
+		if got := hidingStatements(cn[i:j]); len(got) > 0 {
+			t.Errorf("capNote hides the row-cap notice on the branch that exists to SHOW it (%v), so `this view is capped` never reaches an operator", got)
+		}
+	}
+	// The three bodies whole, not a subsequence of each - see funcBodyIs. This is the
+	// backstop under every ordered sweep above: an inserted statement satisfies all
+	// of them, and one inserted statement is the whole of finding F20.
+	funcBodyIs(t, s, mkHeader, mkSteps)
+	funcBodyIs(t, s, emptyRowHeader, emptyRowSteps)
+	funcBodyIs(t, s, capNoteHeader, capNoteSteps)
+	// ...and each of those functions is REACHED. A function that renders the wording
+	// perfectly renders nothing at all when nobody calls it, which is finding F1's
+	// build-then-do-not-show shape one call further out; the two empty-table states
+	// are pinned at their appendChild for exactly that reason, and the row-cap notice
+	// and the honest-absence node are pinned here for it. degradedCopy pins the
+	// expression INSIDE capNote, which survives both call sites being deleted.
+	for _, call := range []struct{ what, expr string }{
+		{"the queue's row-cap notice", `capNote("queue-cap", q.length, sumStatuses(sum, QUEUE_STATUSES));`},
+		{"the history's row-cap notice", `capNote("hist-cap", h.length, sumStatuses(sum, TERMINAL_STATUSES));`},
+	} {
+		if !strings.Contains(s, call.expr) {
+			t.Errorf("%s is never rendered: the page no longer carries %q, so capNote may write `this view is capped` exactly as pinned and no operator ever sees it", call.what, call.expr)
+		}
+	}
+	if n := strings.Count(s, "appendChild(nrNode())"); n < 5 {
+		t.Errorf("the honest-absence node is appended at %d sites; the page reports a nil size, VMAF, encoder, duration and aggregate that way, so `not recorded` stops reaching an operator wherever one of those calls is dropped", n)
 	}
 	rules := allRules(t)
 	dark, light := themeTokens(t, rules)
@@ -3167,6 +3956,27 @@ func TestDegradedStates_CopySurvivesVerbatimAndStaysLegibleInBothThemes(t *testi
 		}
 		if !found {
 			t.Errorf("%s is painted by %s, which the contrast derivation never saw - that state is unmeasured", st.state, st.sel)
+		}
+	}
+	// ...and no rule paints one of those states out of existence. Hiding a degraded
+	// state from the STYLESHEET is finding F20's shape one language to the left: the
+	// row is built, filled and appended exactly as every pin above requires, its
+	// colours clear their floor, and `.empty { display:none }` means nobody ever
+	// reads it. The rules that can reach each state's node are decided by the
+	// selector, not by its text, for the reason finding F21 gave about AC6's regions.
+	for _, r := range rules {
+		for _, st := range states {
+			if !stateIsReachedBy(r.sel, st.sel) {
+				continue
+			}
+			for _, d := range r.decls {
+				bad := invisibleValues[unprefixed(d.prop)]
+				v := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(normSpace(d.value), "!important", "")))
+				if bad[strings.TrimSpace(v)] {
+					t.Errorf("%s { %s: %s } reaches the node that renders %s and takes it off the page; AC10's verb is RENDER, so a state painted to a floor nobody can see is a state that is not reported",
+						r.sel, d.prop, d.value, st.state)
+				}
+			}
 		}
 	}
 }

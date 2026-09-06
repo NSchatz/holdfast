@@ -369,6 +369,147 @@ var s0035Mutations = map[string]mutation{
 		old: "  .dot { display:inline-block;", new: "  .dot { -webkit-animation:pulse 2s infinite; display:inline-block;",
 		why: "a state arrives by animation, spelled with the vendor prefix, so it is not readable from a static frame",
 	},
+
+	// --- impl-gate ordinal 5 (F20-F25), and the class each of them names ---------
+	//
+	// The four F20 cases are the same defect in four places: a degraded state that is
+	// BUILT exactly as every pin requires and never SHOWN.
+	"F20a-ac10-mk-renders-no-text": {
+		criterion: "AC9, AC10", target: "TestDegradedStates_CopySurvivesVerbatimAndStaysLegibleInBothThemes",
+		old: `  if (text != null) e.textContent = text;`, new: `  if (text != null) e.textContent = "";`,
+		why: "mk stops writing the text it is handed, so every degraded state built through it - `Nothing queued.`, `No history yet.`, `unavailable`, `not recorded`, `unknown` and AC9's whole no-match sentence - renders as an EMPTY cell while every pinned call site reads exactly as pinned",
+	},
+	"F20b-ac9-no-match-row-inserted-then-hidden": {
+		criterion: "AC9", target: "TestFilter_ANonMatchingTermSaysSoAndSaysTheLoadedRowsAreCapped",
+		old: "  body.appendChild(tr);", new: "  tr.hidden = true;\n  body.appendChild(tr);",
+		why: "the no-match row is built in the pinned order and inserted, and is then not VISIBLE, so a term matching no loaded row still empties the table in silence",
+	},
+	"F20c-ac10-empty-row-inserted-then-hidden": {
+		criterion: "AC10", target: "TestDegradedStates_CopySurvivesVerbatimAndStaysLegibleInBothThemes",
+		old: `  tr.dataset.empty = "1";`, new: "  tr.dataset.empty = \"1\";\n  tr.hidden = true;",
+		why: "the empty-queue and empty-history rows are built, filled and appended, and are then not visible, so an operator with an empty queue is shown a table that says nothing",
+	},
+	"F20d-ac10-cap-notice-written-then-hidden": {
+		criterion: "AC10", target: "TestDegradedStates_CopySurvivesVerbatimAndStaysLegibleInBothThemes",
+		old: "    el.hidden = false;", new: "    el.hidden = true;",
+		why: "the row-cap notice is written into its element and then hidden, so `this view is capped` never reaches an operator and a truncated view reads as a complete one",
+	},
+	"hard-ac10-empty-row-hidden-by-a-shape-no-reader-models": {
+		criterion: "AC10", target: "TestDegradedStates_CopySurvivesVerbatimAndStaysLegibleInBothThemes",
+		old: `  tr.dataset.empty = "1";`, new: "  tr.dataset.empty = \"1\";\n  tr.style.cssText = \"display:none\";",
+		why: "the empty-table rows are hidden through a property no hiding reader here models, which is why the whole body is pinned and not a subsequence of it",
+	},
+	"hard-ac9-no-match-row-hidden-by-a-shape-no-reader-models": {
+		criterion: "AC9", target: "TestFilter_ANonMatchingTermSaysSoAndSaysTheLoadedRowsAreCapped",
+		old: "  body.appendChild(tr);", new: "  tr.style.cssText = \"display:none\";\n  body.appendChild(tr);",
+		why: "the no-match row is hidden the same way, one statement inserted into a body whose every pinned step still reads exactly as pinned",
+	},
+	"hard-ac10-cap-notice-never-called-for-the-history": {
+		criterion: "AC10", target: "TestDegradedStates_CopySurvivesVerbatimAndStaysLegibleInBothThemes",
+		old: `  capNote("hist-cap", h.length, sumStatuses(sum, TERMINAL_STATUSES));`, new: "",
+		why: "capNote writes `this view is capped` exactly as pinned and the history never calls it, so a truncated history reads as the whole ledger - finding F1's shape one call further out than any pin reached",
+	},
+	"hard-ac10-honest-absence-node-never-appended": {
+		criterion: "AC10", target: "TestDegradedStates_CopySurvivesVerbatimAndStaysLegibleInBothThemes",
+		old: `  if (!isNum(j.source_bytes) || !isNum(j.output_bytes)) { td.appendChild(nrNode()); return; }`,
+		new: `  if (!isNum(j.source_bytes) || !isNum(j.output_bytes)) { return; }`,
+		why: "a size that was never recorded renders as an EMPTY cell instead of `not recorded`, which is the distinction between a measured verdict and a missing one that this criterion exists to keep",
+	},
+	"hard-ac6-exemption-claimed-by-a-substring": {
+		criterion: "AC6", target: "TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody",
+		old: "  .tablewrap { overflow-x:auto; }", new: "  .tablewrapper { min-width:960px; }\n  .tablewrap { overflow-x:auto; }",
+		why: "a rule scoped to nothing claims AC6's one exemption by CONTAINING the word tablewrap, and forces the page body 960px wide at the 360px viewport",
+	},
+	"hard-ac10-degraded-state-hidden-by-the-stylesheet": {
+		criterion: "AC10", target: "TestDegradedStates_CopySurvivesVerbatimAndStaysLegibleInBothThemes",
+		old: "  .tablewrap { overflow-x:auto; }", new: "  .empty { display:none; }\n  .tablewrap { overflow-x:auto; }",
+		why: "the empty-table states are built, appended and painted to their contrast floor, and the STYLESHEET takes them off the page - finding F20's shape one language to the left",
+	},
+
+	// F21: AC6's region membership, evaded by a selector GROUP and by a descendant.
+	"F21a-ac6-aggregate-grid-collapse-undone-by-a-selector-group": {
+		criterion: "AC6", target: "TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody",
+		old: "</style>", new: "  .aggs, .chips { grid-template-columns:repeat(2, 1fr); }\n</style>",
+		why: "a later top-level rule of equal specificity, written as a selector GROUP, lays the aggregate cards out in TWO columns at the 360px viewport",
+	},
+	"F21b-ac6-header-collapse-undone-by-a-selector-group": {
+		criterion: "AC6", target: "TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody",
+		old: "</style>", new: "  header, footer { flex-direction:row; }\n</style>",
+		why: "a later top-level rule, written as a selector GROUP, keeps the header a ROW at the 360px viewport",
+	},
+	"F21c-ac6-control-rows-collapse-undone-by-a-selector-group": {
+		criterion: "AC6", target: "TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody",
+		old: "</style>", new: "  .controls, .chips { flex-direction:row; }\n</style>",
+		why: "a later top-level rule, written as a selector GROUP, keeps both control rows a ROW at the 360px viewport",
+	},
+	"hard-ac6-collapse-undone-under-a-prelude-the-reader-cannot-evaluate": {
+		criterion: "AC6", target: "TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody",
+		old: "</style>", new: "  @media (max-width: 40em) {\n    header { flex-direction:row; }\n  }\n</style>",
+		why: "the same override under a prelude that IS live at 360px in a real browser and that this reader cannot evaluate, so dropping the rule rather than reding on it would let it decide the layout unseen",
+	},
+	"hard-ac6-header-collapse-undone-by-a-descendant-rule": {
+		criterion: "AC6", target: "TestLayout_NarrowViewportIsOneColumnAndNothingForcesAWiderBody",
+		old: "</style>", new: "  body header { flex-direction:row; }\n</style>",
+		why: "the same override spelled with a descendant combinator, which OUTRANKS the region's own rule - the evasion that survives a membership fixed by comparing each part of the group for equality",
+	},
+
+	// F22: AC5's cut, undone by a later block and by one scoped to a subtree.
+	"F22-ac5-reduce-cut-undone-by-a-later-reduce-block": {
+		criterion: "AC5", target: "TestMotion_NoStateDependsOnItAndAReducePreferenceStopsIt",
+		old: "</style>", new: "  @media (prefers-reduced-motion: reduce) {\n    * { transition-duration:400ms !important; }\n  }\n</style>",
+		why: "a second reduce block of identical origin, importance and specificity, later in source order, restores 400ms transitions - so a user who asked for reduced motion gets the page's motion back in full",
+	},
+	"hard-ac5-reduce-cut-undone-by-a-prelude-that-compares-equal-to-nothing": {
+		criterion: "AC5", target: "TestMotion_NoStateDependsOnItAndAReducePreferenceStopsIt",
+		old: "</style>", new: "  @media (prefers-reduced-motion: reduce) and (min-width: 0px) {\n    * { transition-duration:400ms !important; }\n  }\n</style>",
+		why: "the same restoration under a prelude that is live for the same user and compares equal to the reduce block's prelude not at all, so a sweep keyed on that equality never sees it",
+	},
+	"hard-ac5-important-motion-beats-the-cut-from-the-top-level": {
+		criterion: "AC5", target: "TestMotion_NoStateDependsOnItAndAReducePreferenceStopsIt",
+		old: "</style>", new: "  .card { transition-duration:400ms !important; }\n</style>",
+		why: "an important motion declaration more specific than the reduce block's universal cut beats it for every user who asked for reduced motion, from outside any reduce block at all",
+	},
+
+	// F23: AC8's offset, declared without an outline property beside it.
+	"F23-ac8-ring-pulled-inside-by-an-offset-only-rule": {
+		criterion: "AC8", target: "TestFocus_RingClearsBothTheControlFillAndTheSurfaceBehindIt",
+		old: "</style>", new: "  :focus-visible { outline-offset:-8px; }\n</style>",
+		why: "a later :focus-visible rule declaring ONLY outline-offset wins the cascade and draws the ring INSIDE the control's border box, where it never meets the surface immediately behind it",
+	},
+
+	// F24: AC4's color-scheme, searched instead of compared.
+	"F24-ac4-color-scheme-supports-neither-scheme": {
+		criterion: "AC4", target: "TestThemes_ALightSetIsDeclaredAndColorSchemeFollowsIt",
+		old: "color-scheme: light dark;", new: "color-scheme: lightdark;",
+		why: "color-scheme names a single unrecognised ident, so the document opts into NEITHER scheme and native controls, scrollbars and form fields stay light inside the dark page - while one word contains both of the substrings the old check searched for",
+	},
+
+	// F25: AC7 measures what is RENDERED, and a minimum is not a rendered size.
+	"F25a-ac7-target-shrunk-by-a-transform": {
+		criterion: "AC7", target: "TestTargets_EveryPointerTargetClearsTheTwentyFourPixelFloor",
+		old: "  #msg { font-size:var(--fs-md);", new: "  #rescan { transform:scale(0.4); }\n  #msg { font-size:var(--fs-md);",
+		why: "the Rescan button is RENDERED at 12.8 x 12.8 CSS px, half of WCAG 2.2 2.5.8's floor in both dimensions and hit area included, by a property outside the sweep's four minimum names",
+	},
+	"F25b-ac7-target-shrunk-by-zoom": {
+		criterion: "AC7", target: "TestTargets_EveryPointerTargetClearsTheTwentyFourPixelFloor",
+		old: "  #msg { font-size:var(--fs-md);", new: "  #rescan { zoom:0.4; }\n  #msg { font-size:var(--fs-md);",
+		why: "the same target, shrunk under the floor through `zoom` instead",
+	},
+	"hard-ac7-target-shrunk-by-the-scale-property": {
+		criterion: "AC7", target: "TestTargets_EveryPointerTargetClearsTheTwentyFourPixelFloor",
+		old: "  #msg { font-size:var(--fs-md);", new: "  #rescan { scale:0.4; }\n  #msg { font-size:var(--fs-md);",
+		why: "the same target, shrunk under the floor through the standalone `scale` property, which is neither a minimum nor a transform",
+	},
+	"hard-ac7-target-shrunk-by-an-ancestor-transform": {
+		criterion: "AC7", target: "TestTargets_EveryPointerTargetClearsTheTwentyFourPixelFloor",
+		old: "  #msg { font-size:var(--fs-md);", new: "  .controls { transform:scale(0.4); }\n  #msg { font-size:var(--fs-md);",
+		why: "the scale is declared on the row that CONTAINS the controls, so every button and input inside it renders at 12.8px while the rule reaches none of them",
+	},
+	"hard-ac7-target-scaled-by-an-unreadable-transform": {
+		criterion: "AC7", target: "TestTargets_EveryPointerTargetClearsTheTwentyFourPixelFloor",
+		old: "  #msg { font-size:var(--fs-md);", new: "  #rescan { transform:matrix(0.4, 0, 0, 0.4, 0, 0); }\n  #msg { font-size:var(--fs-md);",
+		why: "the same shrink written as a matrix, which this reader cannot evaluate - and a scale it cannot evaluate must red rather than be scored as harmless, the way an unmeasurable length already does",
+	},
 }
 
 // s0035Holes are the edits that violate their criterion and that the committed
