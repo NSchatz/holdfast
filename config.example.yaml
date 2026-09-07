@@ -246,6 +246,14 @@ dry_run: false
 #                            #   there is one row per file you own and every one of them is
 #                            #   load-bearing. This bounds what your library has FINISHED
 #                            #   with. The pass logs what it kept and why.
+#                            #   IT ALSO NEVER TOUCHES THE UNDO WINDOW: a retained
+#                            #   original is a file that is still there, so the row for
+#                            #   the swap that produced it stays, the retention record
+#                            #   lives in its own table a prune never writes, and a row
+#                            #   left by `holdfast restore` is kept for as long as the
+#                            #   restored file is. Setting this key cannot cost you a
+#                            #   restore, and a prune returns no space, so it does not
+#                            #   move what the window reports holding either.
 #                            #   A negative or fractional value is a startup REFUSAL.
 #                            #   The bound is a row count only: there is no age-based or
 #                            #   per-status policy, and pruning does not shrink jobs.db on

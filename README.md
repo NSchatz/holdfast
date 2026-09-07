@@ -371,6 +371,14 @@ What a prune will never do, whatever you set:
   `min_bitrate_kbps`, a file parked at `max_failures`). **So a row is only ever removed when the scan
   listed the directory that file should be in and the file was not there**: gone, or replaced by different
   content. Retention bounds what your library has *finished with*.
+- **It cannot take anything the undo window is holding**, and it does not release it either. A retained
+  original is a file that is still present, so the `done` row for the swap that produced it is a row the
+  prune may not remove — and the retention itself lives in its own table the prune never reads or writes,
+  so `holdfast restore` works exactly the same either side of a pass. That also holds for the row a
+  restore leaves behind: putting an original back writes a `skipped / restored-original` row, and that row
+  is the only thing standing between the rescued bytes and the same gates that passed the encode you just
+  rejected, so retention keeps it for as long as the file is there. The two figures stay separate too — a
+  prune returns no space, so `bytes_held_by_undo_window` does not move across one.
 - **It never touches a media file.** The store records job state and nothing else.
 
 **What that costs you, plainly.** A library that is not churning has one terminal row per file and every
@@ -423,8 +431,10 @@ An empty ledger is an empty export and **exit 0** — distinguishable from every
 
 **Known limitations.** The store must be at this build's schema version: export from an older ledger by
 starting holdfast once (which migrates it) and exporting after, or by using the holdfast that wrote it.
-And SQLite needs to create its WAL index beside the database to read it, so the *directory* has to be
-writable — exporting straight from a read-only copy of `state_dir` will not work.
+SQLite needs to create its WAL index beside the database to read it, so the *directory* has to be
+writable — exporting straight from a read-only copy of `state_dir` will not work. And it is the **job**
+ledger only: what the undo window is currently holding is separate state with a lifetime of hours, not a
+record of what holdfast did, and `holdfast restore` with no argument is what prints it.
 
 #### Schema versioning
 
