@@ -1,0 +1,437 @@
+#!/usr/bin/env bash
+# Prove the release-shape gate still BITES. `make release-shape-selftest`.
+#
+# The gate (scripts/release-shape-gate, inside `make check`) is the only thing standing
+# between a comment in release.yml and a one-way door: it decides, by RUNNING the
+# workflow's planning shell, that a dry run publishes nothing, that `:latest` moves last,
+# that a non-zero major is refused, that the operator runbook names every publishing step,
+# and that the reference docker-compose.yml gives users is the one a release promotes.
+#
+# A gate nobody has tried to defeat is a gate nobody knows works, and every way this one
+# can fail is a way it fails SILENTLY - by printing "ok" over a release that would publish
+# from a dry run. So each property is defeated here on purpose, against a MUTATED COPY of
+# the real inputs, and each defeat has to be red AND to say what it saw. A case that goes
+# red for somebody else's reason is counted as a failure, not a pass.
+#
+# Case 3 is the one that decides whether this whole design was worth it: it flips the
+# PLANNING SCRIPT so a manual dispatch sets publish=true, and touches not one `if:` in the
+# file. A gate that matched the text of those guards stays green through it while a dry run
+# pushes an image.
+#
+# Runs entirely inside a throwaway directory; it never mutates the working tree, and it
+# publishes nothing (the gate stubs every command that could).
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+work="$(mktemp -d)" || { echo "::error::selftest: mktemp failed" >&2; exit 1; }
+trap 'rm -rf "$work"' EXIT
+
+declared=32
+pass=0; failed=0
+
+repo="$work/repo"
+pristine="$work/pristine"
+gate="$work/release-shape-gate"
+
+# The inputs the gate reads. Copied from the WORKING TREE, so an uncommitted change - a fix
+# or a break - is graded as it stands, which is where the mistake gets made.
+inputs=(
+  .github/workflows/release.yml
+  docker-compose.yml
+  docs/release.md
+  go.mod
+  scripts/resolve-compose-image.sh
+)
+
+( cd "$here" && go build -o "$gate" ./scripts/release-shape-gate ) \
+  || { echo "::error::selftest: could not build the gate - it did NOT run" >&2; exit 1; }
+
+for f in "${inputs[@]}"; do
+  [ -r "$here/$f" ] || { echo "::error::selftest: $f is missing from the working tree - it graded nothing" >&2; exit 1; }
+  mkdir -p "$repo/$(dirname "$f")" "$pristine/$(dirname "$f")"
+  cp -p "$here/$f" "$repo/$f"
+  cp -p "$here/$f" "$pristine/$f"
+done
+for f in "${inputs[@]}"; do
+  cmp -s "$here/$f" "$repo/$f" \
+    || { echo "::error::selftest: the fixture's $f is not the working tree's - it graded the wrong thing" >&2; exit 1; }
+done
+
+reset() {
+  rm -rf "${repo:?}/.github" "${repo:?}/docs" "${repo:?}/scripts" "${repo:?}/docker-compose.yml" "${repo:?}/go.mod"
+  for f in "${inputs[@]}"; do
+    mkdir -p "$repo/$(dirname "$f")"
+    cp -p "$pristine/$f" "$repo/$f"
+  done
+}
+
+wf="$repo/.github/workflows/release.yml"
+compose="$repo/docker-compose.yml"
+runbook="$repo/docs/release.md"
+
+# --- mutation helpers -----------------------------------------------------------------
+# Every mutation is asserted to have CHANGED something. A sed that matched nothing would
+# otherwise leave a clean tree behind and the case would "bite" against the baseline,
+# which is the selftest's own version of the silent-green bug it exists to catch.
+changed() {  # changed <file-under-$repo> <case-name>
+  local rel="${1#"$repo"/}"
+  if cmp -s "$pristine/$rel" "$1"; then
+    echo "::error::selftest: the mutation for '$2' changed nothing in $rel - that case did NOT run" >&2
+    exit 1
+  fi
+}
+
+# block_range <file> <name-substring> -> "start end" (1-based, inclusive) of one step.
+# `done` is load-bearing: awk's `exit` still runs END, so without it the range is printed
+# twice and every caller silently gets a second, wrong pair of line numbers.
+block_range() {
+  awk -v pat="$2" '
+    /^      - / { if (s) { print s, NR - 1; done = 1; exit } if (index($0, pat)) s = NR }
+    END { if (s && !done) print s, NR }
+  ' "$1"
+}
+
+# move_step <name-substring-to-move> <name-substring-to-put-it-before>
+move_step() {
+  awk -v mv="$1" -v before="$2" '
+    function isstep(l) { return l ~ /^      - / }
+    { line[NR] = $0 }
+    END {
+      for (i = 1; i <= NR; i++) if (isstep(line[i]) && index(line[i], mv))     { a = i; break }
+      for (i = 1; i <= NR; i++) if (isstep(line[i]) && index(line[i], before)) { t = i; break }
+      if (!a || !t) { exit 3 }
+      b = NR
+      for (i = a + 1; i <= NR; i++) if (isstep(line[i])) { b = i - 1; break }
+      for (i = 1; i <= NR; i++) {
+        if (i == t) for (j = a; j <= b; j++) print line[j]
+        if (i >= a && i <= b) continue
+        print line[i]
+      }
+    }
+  ' "$wf" > "$wf.new" || { echo "::error::selftest: could not move '$1' before '$2'" >&2; exit 1; }
+  mv "$wf.new" "$wf"
+}
+
+# in_step <name-substring> <sed-program> - apply sed only inside one step's block.
+in_step() {
+  local r; r="$(block_range "$wf" "$1")"
+  [ -n "$r" ] || { echo "::error::selftest: no step matching '$1'" >&2; exit 1; }
+  # shellcheck disable=SC2086
+  set -- $r "$2"
+  sed -i "$1,$2{$3;}" "$wf"
+}
+
+# --- the harness ----------------------------------------------------------------------
+out=""
+run_gate() { out="$( "$gate" -root "$repo" 2>&1 )"; }
+
+# expect <want-exit> <name> [must-mention-regex]. 0 = must pass, 1 = must bite.
+expect() {
+  local want="$1" name="$2" want_msg="${3:-}" got=0
+  run_gate || got=$?
+  if [ "$got" -ne "$want" ]; then
+    printf '::error::selftest: %s - the gate exited %s, wanted %s\n' "$name" "$got" "$want" >&2
+    printf '%s\n' "$out" | sed 's/^/       | /' >&2
+    failed=$((failed + 1)); return
+  fi
+  if [ -n "$want_msg" ] && ! grep -qE -- "$want_msg" <<<"$out"; then
+    printf '::error::selftest: %s - exited %s (correct) but for the WRONG REASON: nothing matched /%s/\n' "$name" "$got" "$want_msg" >&2
+    printf '%s\n' "$out" | sed 's/^/       | /' >&2
+    failed=$((failed + 1)); return
+  fi
+  printf '  ok: %s\n' "$name"; pass=$((pass + 1))
+}
+
+# --- 0. The real, unmutated inputs PASS. Without this every "bites" case below could be a
+#        gate that simply fails on everything, which would prove nothing at all.
+expect 0 "the release definition as committed passes"
+
+# =====================================================================================
+# A12 - a publishing step that would run on a manual dispatch.
+# =====================================================================================
+
+# --- 1. The guard deleted outright. The crudest version of the mistake.
+in_step "push the multi-arch image" "/^        if:/d"
+changed "$wf" "the image push with no guard at all"
+expect 1 "an unguarded image push is caught on a dispatch" "on a manual dispatch.*WOULD RUN"
+reset
+
+# --- 2. `always()` reads as caution and means the opposite: it runs on a dispatch AND
+#        after a failure.
+in_step "push the multi-arch image" "s/^        if: .*/        if: always()/"
+changed "$wf" "the image push guarded with always()"
+expect 1 "an image push guarded with always() is caught on a dispatch" "on a manual dispatch.*WOULD RUN"
+reset
+
+# --- 3. THE case this gate exists for. The PLANNING SCRIPT is flipped so a dispatch sets
+#        publish=true; every `if:` in the file is untouched, so the guards read exactly as
+#        they did a moment ago. A gate that matched their text is green here while a dry
+#        run pushes an image to a public registry. This one is only catchable by running
+#        the planning logic and reading what it produced.
+sed -i 's/^            publish=false$/            publish=true/' "$wf"
+sed -i 's|^            version="0.0.0-dev-${GITHUB_SHA::7}"$|            version="v0.0.0-dev-${GITHUB_SHA::7}"|' "$wf"
+changed "$wf" "the planning script flipped to publish on a dispatch"
+grep -q "if: steps.plan.outputs.publish == 'true'" "$wf" \
+  || { echo "::error::selftest: case 3 also changed a guard, so it no longer proves the planning logic is executed" >&2; exit 1; }
+expect 1 "a PLANNING SCRIPT that publishes on a dispatch is caught, with every guard untouched" "on a manual dispatch.*WOULD RUN.*published act"
+reset
+
+# =====================================================================================
+# A13 / A3 - the floating reference moving before the artefact was proved.
+# =====================================================================================
+
+# --- 4. Promotion hoisted above the push. `:latest` would then point at a tag that does
+#        not exist yet, and would be moved without the pushed artefact being gated at all.
+move_step "promote :latest" "push the multi-arch image"
+changed "$wf" "the promotion hoisted above the version-tag push"
+expect 1 "a promotion that runs before the version-tag push is caught" "runs AFTER .*moves the floating reference"
+reset
+
+# --- 5. Promotion hoisted above the re-smoke of the PULLED artefact. This is the exact
+#        ordering the workflow's own comment claims and nothing enforced: the push is a
+#        cache rebuild, so `:latest` would be promoted onto bytes nobody smoked.
+move_step "promote :latest" "smoke test the PUSHED image"
+changed "$wf" "the promotion hoisted above the re-smoke"
+expect 1 "a promotion that runs before the re-smoke of the pulled artefact is caught" "re-smoke of the linux/(amd|arm)64 artefact.*runs AFTER"
+reset
+
+# --- 6. The floating reference pushed directly by the build, so it is live before the
+#        artefact is pulled back at all - which is what promoting it separately avoids.
+in_step "push the multi-arch image" 's|^\( *tags: .*\)$|\1,${{ steps.plan.outputs.image }}:latest|'
+changed "$wf" "the build pushing :latest itself"
+expect 1 "a build that pushes the floating reference itself is caught" "pushes ghcr.io/.*:latest directly"
+reset
+
+# --- 7. The promotion marked `always()`. It then runs after the gate or a smoke run has
+#        FAILED - the precise state in which `:latest` must stay where it was.
+in_step "promote :latest" "s/^        if: .*/        if: always() \&\& steps.plan.outputs.publish == 'true'/"
+changed "$wf" "the promotion guarded with always()"
+expect 1 "a promotion that survives a failed gate is caught" "still runs after an earlier step has FAILED"
+reset
+
+# =====================================================================================
+# A14 - a step before the promotion whose failure does not fail the run.
+# =====================================================================================
+
+# --- 8. The full gate, tolerated. `make check` reds, the run stays green, `:latest` moves
+#        onto an image whose verify/swap logic was never proved.
+in_step "the full gate" 's|^      - name: .*|&\n        continue-on-error: true|'
+changed "$wf" "the full gate marked continue-on-error"
+expect 1 "a tolerated failure on the full gate is caught" 'marked .continue-on-error: true'
+reset
+
+# --- 9. The same, on the re-smoke of the pushed artefact.
+in_step "smoke test the PUSHED image" 's|^      - name: .*|&\n        continue-on-error: true|'
+changed "$wf" "the re-smoke marked continue-on-error"
+expect 1 "a tolerated failure on the re-smoke is caught" 'marked .continue-on-error: true'
+reset
+
+# =====================================================================================
+# A15 - a definition that cannot be read, cannot be parsed, or names no step. Each must
+# say WHICH; a vacuous pass over nothing is the failure mode all three share.
+# =====================================================================================
+
+# --- 10.
+rm -f "$wf"
+expect 1 "a release definition that cannot be read is red, and says so" "CANNOT BE READ"
+reset
+
+# --- 11.
+printf '\nthis is not: [valid: yaml\n' >> "$wf"
+changed "$wf" "an unparseable release definition"
+expect 1 "a release definition that cannot be parsed is red, and says so" "CANNOT BE PARSED"
+reset
+
+# --- 12.
+: > "$wf"
+expect 1 "an empty release definition is red, and says so" "IS EMPTY"
+reset
+
+# --- 13. A job whose step list is empty. Every ordering assertion below would otherwise
+#         hold over nothing and report green.
+awk '/^    steps:$/ { print "    steps: []"; exit } { print }' "$pristine/.github/workflows/release.yml" > "$wf"
+changed "$wf" "a job with no steps"
+expect 1 "a release definition that names no step is red, and says so" "NAMES NO STEP AT ALL|names NO step that performs a published act"
+reset
+
+# --- 14. No planning step at all: nothing writes to $GITHUB_OUTPUT, so there is no runtime
+#         value to decide any guard from. The gate must refuse rather than fall back to
+#         reading the text, which is the whole thing it is not allowed to do.
+sed -i 's/GITHUB_OUTPUT/GITHUB_NOWHERE/g' "$wf"
+changed "$wf" "a release definition with no planning step"
+expect 1 "a definition whose planning step produces nothing is red" "NO planning step"
+reset
+
+# =====================================================================================
+# A16 / A8 - the operator runbook.
+# =====================================================================================
+
+# --- 15. No runbook at all. Three irreversible acts would then be checked against nothing.
+rm -f "$runbook"
+expect 1 "a missing operator runbook is red, and lists the acts it should have named" "CANNOT BE READ"
+reset
+
+# --- 16. A runbook that exists and names no act. This is the vacuous pass A16 names: a
+#         document can be present, long, and about nothing.
+printf '# Releasing\n\nAsk Noah.\n' > "$runbook"
+changed "$runbook" "a runbook that names no irreversible act"
+expect 1 "a runbook that names NO irreversible act is red" "names NO irreversible act"
+reset
+
+# --- 17. One act quietly dropped from the runbook - what happens when a publishing step is
+#         added and the documentation is not.
+sed -i 's/`github-release@cut-the-github-release`/(dropped)/' "$runbook"
+changed "$runbook" "a runbook missing one act"
+expect 1 "a runbook that stops naming one publishing step is red, naming the id it needs" 'Add .github-release@cut-the-github-release.'
+reset
+
+# =====================================================================================
+# A17 / A9 - the example deployment's image reference.
+# =====================================================================================
+
+# --- 18. The reference removed. An absent reference is not agreement.
+sed -i '/^ *image: ghcr/d' "$compose"
+changed "$compose" "a compose file with no image reference"
+expect 1 "an example deployment with no image reference is red, naming the file" "docker-compose.yml NAMES NO IMAGE REFERENCE"
+reset
+
+# --- 19. The reference made unreadable by breaking the file around it.
+printf '\nthis: [is: broken\n' >> "$compose"
+changed "$compose" "an unparseable compose file"
+expect 1 "an unparseable example deployment is red, naming the file" "docker-compose.yml CANNOT BE PARSED"
+reset
+
+# --- 20.
+rm -f "$compose"
+expect 1 "a missing example deployment is red, naming the file" "docker-compose.yml CANNOT BE READ"
+reset
+
+# --- 21. The disagreement itself: the compose file names an image this repository's
+#         release would never produce. This is what a repository rename does, silently.
+sed -i 's|^\( *image: \).*|\1ghcr.io/someone-else/holdfast:latest|' "$compose"
+changed "$compose" "a compose reference naming a different repository"
+expect 1 "a compose reference nothing publishes is red, and prints both" "ghcr.io/someone-else/holdfast:latest"
+reset
+
+# =====================================================================================
+# A4 / A10 - the major-version-zero refusal, and the record it has to name.
+# =====================================================================================
+
+# --- 22. The refusal removed. A v1.0.0 tag would then publish, and 1.0.0 "defines the
+#         public API" over three surfaces this project has not frozen.
+sed -i 's/^          if \[ "$publish" = "true" \]; then$/          if false; then/' "$wf"
+changed "$wf" "the major-version-zero refusal removed"
+expect 1 "a release path that accepts a non-zero major is red" "ACCEPTS v1.0.0"
+reset
+
+# --- 23. The refusal kept, but stripped of the record it points at. "No" without "go and
+#         read this first" is how the refusal gets deleted by the next person in a hurry.
+sed -i 's|docs/release.md|the stability record|g' "$wf"
+changed "$wf" "a refusal that names no record"
+expect 1 "a refusal that names no record is red" "names no record"
+reset
+
+# --- 24. The refusal pointing at a document that does not exist - prose again.
+sed -i 's|docs/release.md|docs/stability.md|g' "$wf"
+changed "$wf" "a refusal naming a record that does not exist"
+expect 1 "a refusal naming a record that does not exist is red" "docs/stability.md, which does not exist"
+reset
+
+# =====================================================================================
+# A11 - the post-promotion resolution of the example deployment's reference.
+# =====================================================================================
+
+# --- 25. The step deleted. Every release after the first would then stop checking that the
+#         reference users actually pull resolves at all.
+r="$(block_range "$wf" "must resolve to the gated digest")"
+[ -n "$r" ] || { echo "::error::selftest: could not find the resolution step" >&2; exit 1; }
+# shellcheck disable=SC2086
+set -- $r
+sed -i "$1,$2d" "$wf"
+changed "$wf" "the resolution step deleted"
+expect 1 "a release that never resolves the example deployment's reference is red" "no step resolves the example deployment"
+reset
+
+# --- 26. The step kept, but moved before the promotion, where it would resolve the
+#         PREVIOUS release's digest and pass while this one is broken.
+move_step "must resolve to the gated digest" "promote :latest"
+changed "$wf" "the resolution step moved before the promotion"
+expect 1 "a resolution that runs before the promotion is red" "BEFORE the promotion"
+reset
+
+# --- 27 to 30. scripts/resolve-compose-image.sh itself, driven against a fake registry.
+#         It is the enforcement behind A5, so its verdict has to be real: a matching digest
+#         passes, a different one fails, an unresolvable reference fails, and a compose file
+#         with no reference fails - each with its own exit code and its own sentence.
+fake="$work/fakebin"; mkdir -p "$fake"
+cat > "$fake/docker" <<'FAKE'
+#!/bin/sh
+# A registry that answers only from $FAKE_DIGESTS ("<ref> <digest>" per line).
+ref=""
+for a in "$@"; do
+  case "$a" in
+    -*) ;;
+    *:*) ref="$a" ;;
+  esac
+done
+d="$(awk -v r="$ref" '$1 == r { print $2; exit }' "$FAKE_DIGESTS")"
+[ -n "$d" ] || { echo "ERROR: $ref: not found" >&2; exit 1; }
+echo "$d"
+FAKE
+chmod +x "$fake/docker"
+
+digests="$work/digests"
+resolve() {  # resolve <name> <want-exit> <must-mention>
+  local name="$1" want="$2" mention="$3" got=0 o
+  o="$( cd "$repo" && PATH="$fake:$PATH" FAKE_DIGESTS="$digests" IMAGE=ghcr.io/nschatz/holdfast VERSION=v0.1.0 \
+        ./scripts/resolve-compose-image.sh 2>&1 )" || got=$?
+  if [ "$got" -ne "$want" ]; then
+    printf '::error::selftest: %s - exited %s, wanted %s\n%s\n' "$name" "$got" "$want" "$o" >&2
+    failed=$((failed + 1)); return
+  fi
+  if [ -n "$mention" ] && ! grep -qE -- "$mention" <<<"$o"; then
+    printf '::error::selftest: %s - exited %s (correct) but nothing matched /%s/:\n%s\n' "$name" "$got" "$mention" "$o" >&2
+    failed=$((failed + 1)); return
+  fi
+  printf '  ok: %s\n' "$name"; pass=$((pass + 1))
+}
+
+printf 'ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa\nghcr.io/nschatz/holdfast:latest sha256:aaa\n' > "$digests"
+resolve "the compose reference resolving to the gated digest passes" 0 "the digest this release gated"
+
+printf 'ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa\nghcr.io/nschatz/holdfast:latest sha256:bbb\n' > "$digests"
+resolve "a compose reference resolving to a DIFFERENT digest fails the release" 5 "DIFFERENT image"
+
+printf 'ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa\n' > "$digests"
+resolve "a compose reference that does not resolve at all fails the release" 4 "does NOT RESOLVE"
+
+sed -i '/^ *image: ghcr/d' "$compose"
+changed "$compose" "resolving a compose file with no image reference"
+printf 'ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa\nghcr.io/nschatz/holdfast:latest sha256:aaa\n' > "$digests"
+resolve "a compose file naming no image is refused before any registry call" 3 "names NO image reference"
+reset
+
+# --- 31. And the gate has to still be IN `make check`. A target nothing depends on is a
+#         gate that runs nowhere, and nothing else in this file would notice.
+prereqs=" $(sed -n 's/^check:[[:space:]]*//p' "$here/Makefile" | head -1) "
+case "$prereqs" in
+  *" release-shape "*)
+    printf '  ok: the check target still depends on release-shape\n'; pass=$((pass + 1)) ;;
+  *)
+    printf '::error::selftest: the `check` target no longer depends on release-shape - the gate is detached\n' >&2
+    failed=$((failed + 1)) ;;
+esac
+
+echo
+# Report against the number of cases DECLARED, not the number that ran: "$pass/$pass" is
+# N/N by construction and could never show a shortfall (A18).
+total=$((pass + failed))
+if [ "$total" -ne "$declared" ]; then
+  echo "::error::release-shape selftest: ran $total case(s), expected $declared - a case did not execute" >&2
+  exit 1
+fi
+if [ "$failed" -ne 0 ]; then
+  echo "::error::release-shape selftest: $failed of $declared case(s) did not bite - the release-shape gate is not trustworthy" >&2
+  exit 1
+fi
+echo "release-shape selftest: $pass/$declared cases bite"

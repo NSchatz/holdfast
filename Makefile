@@ -44,6 +44,7 @@ PLATFORM ?= linux/amd64
 
 .PHONY: build test check fmt vet staticcheck govulncheck govulncheck-selftest \
         check-pins check-pins-selftest install-ffmpeg-selftest check-pin-live \
+        release-shape release-shape-selftest \
         webui-gen webui-stale webui-check \
         tidy clean image image-smoke compose-check
 
@@ -99,6 +100,29 @@ check-pins-selftest:
 install-ffmpeg-selftest:
 	./scripts/install-ffmpeg-selftest.sh
 
+# --- the release path (S0046) -------------------------------------------------
+# Everything that decides whether the one-way door opens correctly - that a manual
+# dispatch publishes nothing, that the version tag is pushed before `:latest` moves, that
+# `:latest` is promoted only onto a digest that was pulled back and re-smoked - used to be
+# asserted only by COMMENTS inside release.yml. That is the same "prose cannot enforce an
+# invariant" failure as the ffmpeg pin, on the one path this repository has never run.
+#
+# The gate does not match text. It RUNS release.yml's own planning shell, once per event
+# shape, and decides each step's guard from the values that run produces: flip the planning
+# script so a dispatch sets publish=true and every `if:` in the file is unchanged, so a
+# text matcher stays green while a dry run would push an image. Read-only; it publishes
+# nothing and needs no network.
+release-shape:
+	go run ./scripts/release-shape-gate
+
+# Proves the release-shape gate still BITES. Every property it asserts is defeated on
+# purpose against a mutated copy of the repository, each defeat is required to be red and
+# to name what it saw, and the run fails if any defeat did not execute. Deliberately NOT
+# part of `check`: the mutations belong in their own target. A guard nobody tries to defeat
+# is a guard nobody knows works.
+release-shape-selftest:
+	./scripts/release-shape-selftest.sh
+
 # --- the dashboard (WEBUI-10) -------------------------------------------------
 # internal/webui/index.html is GENERATED and COMMITTED: the binary embeds one
 # self-contained file, and it is built from the modules under internal/webui/src by
@@ -124,7 +148,7 @@ webui-check:
 	./scripts/webui-check.sh
 
 # THE gate. CI and the release workflow both run exactly this.
-check: check-pins check-pins-selftest install-ffmpeg-selftest webui-stale fmt vet build test staticcheck govulncheck govulncheck-selftest
+check: check-pins check-pins-selftest install-ffmpeg-selftest release-shape webui-stale fmt vet build test staticcheck govulncheck govulncheck-selftest
 
 # Asks UPSTREAM whether the pinned ffmpeg release is still served. Deliberately NOT part
 # of `check`: the PR gate must not red because a third party had a bad afternoon. CI runs

@@ -18,7 +18,8 @@ reproducible from git, not hidden in a UI database.
 > worker pool (`TRANSCODE-5`), hardware/AV1 encoders (`TRANSCODE-6`), the REST/SSE API + embedded web UI
 > (`TRANSCODE-7`, shown above), observability + host-fair scheduling (`TRANSCODE-8`), and **packaging: a
 > multi-arch, non-root container image bundling a pinned ffmpeg (`TRANSCODE-9`)**. The first tagged release
-> is a deliberate human act and has not been cut. See the roadmap for the full plan.
+> is a deliberate human act and has not been cut: [`docs/release.md`](docs/release.md) is the ordered
+> runbook for it, and says which of its steps can be undone. See the roadmap for the full plan.
 
 ## Why another transcoder?
 

@@ -65,6 +65,42 @@ jobs:
           # One timestamp for every artifact this run produces.
           date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+          # THE MAJOR VERSION MUST BE ZERO, and this refuses before anything is published.
+          #
+          # Semantic Versioning: "Major version zero (0.y.z) is for initial development.
+          # Anything MAY change at any time. The public API SHOULD NOT be considered
+          # stable." and "Version 1.0.0 defines the public API." So the first non-zero
+          # major is not a bigger number, it is a PROMISE about three surfaces this
+          # project has not yet frozen (the configuration keys, the HTTP surface and the
+          # metric names), and "Once a versioned package has been released, the contents
+          # of that version MUST NOT be modified", so the promise cannot be taken back.
+          #
+          # docs/release.md, section "Before a major version above zero", is the record
+          # that has to declare those three surfaces stable first. Lifting this refusal is
+          # an edit to this step, made only after that record says so.
+          if [ "$publish" = "true" ]; then
+            case "$version" in
+              v0.*)
+                : ;;
+              *)
+                echo "::error::refusing to publish $version: its major version is not zero." >&2
+                echo "       Major version zero is for initial development and promises nothing; the first" >&2
+                echo "       non-zero major DEFINES the public API and a released version can never be" >&2
+                echo "       modified afterwards. docs/release.md, section 'Before a major version above" >&2
+                echo "       zero', is the record that must first declare the configuration keys, the HTTP" >&2
+                echo "       surface and the metric names stable. Cut a v0.y.z tag, or update that record" >&2
+                echo "       and this step together." >&2
+                exit 1 ;;
+            esac
+            # A tag that is not a version at all would sail past the case above on its way
+            # to becoming an image tag and a GitHub release name.
+            if ! printf '%s' "$version" | grep -qE '^v0\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+              echo "::error::refusing to publish $version: it is not a v0.MINOR.PATCH semantic version." >&2
+              echo "       See docs/release.md for the tag this release path accepts." >&2
+              exit 1
+            fi
+          fi
+
           # A pre-release tag (v1.0.0-rc1, v2.0.0-beta.1 — anything with a suffix) must
           # NOT become `:latest`, or `docker pull` hands a release candidate to everyone
           # who did not ask for one.
@@ -246,6 +282,20 @@ jobs:
           set -euo pipefail
           docker buildx imagetools create -t "${IMAGE}:latest" "${IMAGE}:${VERSION}"
           docker buildx imagetools inspect "${IMAGE}:latest" | head -20
+
+      # The reference in docker-compose.yml is what a stranger actually pulls, and it is
+      # the ONE reference nothing above resolves: everything so far worked with
+      # `${IMAGE}:${VERSION}`, which is derived from `github.repository` and is therefore
+      # right by construction even if the compose file names something else entirely.
+      # `make check` proves the two agree offline; this proves the agreement survived
+      # contact with the registry, on the digest this run just gated. It runs after the
+      # promotion because before it there is nothing at `:latest` to resolve.
+      - name: the example deployment's image reference must resolve to the gated digest
+        if: steps.plan.outputs.publish == 'true' && steps.plan.outputs.prerelease == 'false'
+        env:
+          IMAGE: ${{ steps.plan.outputs.image }}
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: ./scripts/resolve-compose-image.sh
 
       - name: cut the GitHub release
         if: steps.plan.outputs.publish == 'true'
