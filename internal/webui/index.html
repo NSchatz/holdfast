@@ -116,6 +116,15 @@
   .nr { color:var(--muted); font-style:italic; }
   .empty { color:var(--muted); font-style:italic; padding:10px; }
   footer { color:var(--muted); font-size:12px; text-align:center; padding:22px; max-width:80ch; margin:0 auto; }
+  /* The AGPL section 13 source offer (LICENSE-3). It is rendered into the document
+     server-side, so it is in the bytes of the root response whether or not a single
+     API call succeeds, and it carries its OWN class: nothing else on this page styles
+     it, and no hiding rule anywhere in this stylesheet names it. Do not add one - a
+     `display:none` or `visibility:hidden` naming .source-offer (or an ancestor of it)
+     would make the offer unreachable without interaction, which is the whole thing the
+     offer owes. */
+  .source-offer { margin:12px 0 0; }
+  .source-offer a { color:var(--accent); overflow-wrap:anywhere; }
   #conn { font-size:12px; color:var(--muted); }
   #conn.live { color:var(--ok); } #conn.down { color:var(--bad); }
 </style>
@@ -200,7 +209,8 @@
   </section>
 </main>
 <footer>holdfast — config-as-code, data-safe media transcoder. The YAML config is the source of truth;
-  this page reads and controls. It reports what was measured, and only that.</footer>
+  this page reads and controls. It reports what was measured, and only that.
+  <!--holdfast:source-offer--></footer>
 
 <!-- Row shells cloned per render. Rows are built as DOM nodes (createElement +
      textContent) and filled from cloned templates — the page never assembles an HTML

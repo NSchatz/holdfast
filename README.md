@@ -320,3 +320,22 @@ matrix, web UI, observability). The phased plan and its research live in the umb
 ## License
 
 [AGPL-3.0](./LICENSE).
+
+### Running a modified holdfast on a network
+
+The dashboard offers its Corresponding Source: every response the root path serves carries a link to the
+source, the licence name and the build identity the `version` subcommand reports. AGPL-3.0 section 13 binds
+whoever runs a **modified** holdfast over a network to offer that source, so if you fork this, point the
+offer at **your** tree. It is a build-time value on both paths that build the binary, and you never patch
+the embedded HTML to change it:
+
+```bash
+make build SOURCE_URL=https://git.example.org/me/holdfast
+make image SOURCE_URL=https://git.example.org/me/holdfast
+docker buildx build --build-arg SOURCE_URL=https://git.example.org/me/holdfast .
+```
+
+Leave it unset and the binary offers this tree. The value must be an absolute `http://` or `https://` URL:
+`serve` **refuses to start** on anything else and names the value it rejected, rather than serving an offer
+nobody can follow or quietly falling back to upstream, which would tell your users that upstream is the
+source of a binary it is not.
