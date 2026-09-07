@@ -107,6 +107,32 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status_reason ON jobs(status, reason);
 CREATE INDEX IF NOT EXISTS idx_jobs_outcome ON jobs(status, source_bytes, output_bytes, encode_ms, vmaf_mean, vmaf_min);
 `,
 	},
+	{
+		// v4 - GATE-4: what the quality gate actually compared, and what it found in
+		// the colour planes.
+		//
+		// vmaf_pix_fmt is the single format both streams were converted to before
+		// scoring. Until this phase nothing recorded it and nothing chose it: the two
+		// inputs disagree on the default path (pixel_format: auto floors output depth
+		// at 10, so an 8-bit source meets a 10-bit output) and libavfilter negotiated
+		// the conversion unobserved. vmaf_chroma + vmaf_chroma_metric are the chroma
+		// measurement and the name of the metric that produced it, which have to
+		// travel together: a bare dB figure with no metric attached is not something
+		// an operator can act on, exactly as vmaf_model established for the score.
+		//
+		// NULLABLE with NO DEFAULT, as v2 established. Every row written before this
+		// migration was scored by a gate that measured none of these things, and it
+		// must READ as not recorded rather than be backfilled with a value that would
+		// claim a chroma measurement nobody took. A DEFAULT here would invent evidence
+		// about swaps that already happened, in the one table whose whole job is to be
+		// evidence. 0.0 is legal for vmaf_chroma too - it is an obliterated plane.
+		name: "comparison format and chroma columns",
+		sql: `
+ALTER TABLE jobs ADD COLUMN vmaf_pix_fmt       TEXT;
+ALTER TABLE jobs ADD COLUMN vmaf_chroma        REAL;
+ALTER TABLE jobs ADD COLUMN vmaf_chroma_metric TEXT;
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

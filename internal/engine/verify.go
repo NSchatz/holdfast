@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"strings"
 
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/vmaf"
@@ -31,10 +30,26 @@ import (
 // Model is the libvmaf model spec actually passed to the filter, not the config's
 // possibly-"auto" request — a score without the model that produced it is not
 // interpretable, so the resolved value is the only one worth persisting.
+//
+// PixFmt, ChromaMin and ChromaMetric are the GATE-4 additions and follow the same
+// discipline for the same reason: the format the comparison was made in and the
+// chroma statistic it produced are FACTS ABOUT THE MEASUREMENT, and a score that
+// travels without them cannot be interpreted afterwards - nobody reading a stored
+// 98.4 can say which pixels were compared or whether the colour survived.
 type vmafProof struct {
 	Mean  *float64
 	Min   *float64
 	Model string
+
+	// PixFmt is the pixel format BOTH streams were converted to before scoring, named
+	// by holdfast rather than negotiated by libavfilter. "" means no measurement.
+	PixFmt string
+	// ChromaMin is the worst (sub)sampled frame's chroma PSNR in dB, and ChromaMetric
+	// names what that number is. nil/"" means no measurement, never a zero: 0.0 dB is
+	// an obliterated plane, which is the single most important thing this field could
+	// ever have to report.
+	ChromaMin    *float64
+	ChromaMetric string
 }
 
 // verifyOutput returns the VMAF proof it measured alongside its pass/fail error. The
@@ -115,14 +130,18 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (vmafProof, e
 	return none, nil
 }
 
-// vmafGate measures the output (distorted) against the source (reference) and
-// rejects an encode on EITHER of two independent conditions:
+// vmafGate measures the output (distorted) against the source (reference) - in ONE
+// pixel format holdfast names rather than one libavfilter negotiates - and rejects
+// an encode on ANY of three independent conditions:
 //
-//  1. pooled harmonic mean < MinVmaf — the average is too low; and
+//  1. pooled harmonic mean < MinVmaf - the average is too low;
 //  2. worst (sub)sampled frame < VmafMinPool — some part of the output collapsed,
-//     however good the average is.
+//     however good the average is; and
+//  3. worst (sub)sampled frame's chroma PSNR < VmafMinChroma - the COLOUR planes
+//     were damaged, which (1) and (2) cannot see at all because the VMAF model
+//     extracts luma features only.
 //
-// Both are needed, and (2) is the one that closes the real hole. The mean is an
+// All three are needed, and (2) is the one that closed the first real hole. The mean is an
 // average, so it hides local damage — Netflix documents exactly this ("mean pooling
 // has the risk of hiding poor quality frames"). Measured on real libvmaf: an encode
 // with 4 of 240 frames destroyed to VMAF ~43 pools to a harmonic mean of ~97.5 and
@@ -141,24 +160,50 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (vmafProof, e
 func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (vmafProof, error) {
 	model := resolveVmafModel(e.Cfg.VmafModel, e.Probe.Height(ctx, distorted))
 
+	// Name the comparison format BEFORE anything is measured, from the two streams'
+	// own pixel formats. `pixel_format: auto` floors output depth at 10, so an 8-bit
+	// source routinely meets a 10-bit output and the two DO disagree on the default
+	// path; leaving that conversion to libavfilter's negotiation made the score depend
+	// on an undocumented choice nobody recorded. A pair whose formats holdfast cannot
+	// name a comparison format for is REJECTED rather than measured in whatever
+	// negotiation would have produced - the fail-closed direction costs a wasted
+	// encode and keeps the source.
+	pixFmt, ok := vmaf.ComparisonFormat(e.Probe.PixFmt(ctx, reference), e.Probe.PixFmt(ctx, distorted))
+	if !ok {
+		return vmafProof{}, fmt.Errorf(
+			"cannot name a comparison pixel format for source pix_fmt %q and output pix_fmt %q "+
+				"(refusing to score a pair whose comparison format would be chosen by filter negotiation)",
+			e.Probe.PixFmt(ctx, reference), e.Probe.PixFmt(ctx, distorted))
+	}
+
 	score := e.vmafScore
 	if score == nil {
 		if !vmaf.Available(ctx, e.Probe.FFmpeg) {
 			return vmafProof{}, fmt.Errorf("VMAF gate enabled but libvmaf is not available in the ffmpeg build (refusing to accept an unmeasured encode)")
 		}
-		score = func(ctx context.Context, d, r string, sub int, m string) (vmaf.Result, error) {
-			return vmaf.Score(ctx, e.Probe.FFmpeg, d, r, sub, m)
+		score = func(ctx context.Context, req vmaf.Request) (vmaf.Result, error) {
+			return vmaf.Score(ctx, e.Probe.FFmpeg, req)
 		}
 	}
 
-	res, err := score(ctx, distorted, reference, e.Cfg.VmafSubsample, model)
+	res, err := score(ctx, vmaf.Request{
+		Distorted:   distorted,
+		Reference:   reference,
+		Subsample:   e.Cfg.VmafSubsample,
+		Model:       model,
+		PixelFormat: pixFmt,
+	})
 	if err != nil {
 		// Nothing was measured, so there is nothing to record: an empty proof, NOT a
-		// zeroed one. (vmaf.Score already refuses a log missing either pooled statistic
-		// — TRANSCODE-11 — so this really is "no measurement", not a partial one.)
+		// zeroed one. (vmaf.Score already refuses a log missing ANY pooled statistic -
+		// TRANSCODE-11 for the luma pair, GATE-4 for the chroma planes - so this really
+		// is "no measurement", never a partial one scored on what did report.)
 		return vmafProof{}, fmt.Errorf("VMAF measurement failed (refusing to accept an unmeasured encode): %w", err)
 	}
-	proof := vmafProof{Mean: &res.HarmonicMean, Min: &res.Min, Model: model}
+	proof := vmafProof{
+		Mean: &res.HarmonicMean, Min: &res.Min, Model: model,
+		PixFmt: res.PixelFormat, ChromaMin: &res.ChromaMin, ChromaMetric: res.ChromaMetric,
+	}
 
 	if res.HarmonicMean < e.Cfg.MinVmaf {
 		return proof, fmt.Errorf("VMAF below threshold (harmonic_mean=%.2f < min_vmaf=%.2f)", res.HarmonicMean, e.Cfg.MinVmaf)
@@ -172,21 +217,33 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (vma
 				"its average is fine (harmonic_mean=%.2f) but at least one frame collapsed, so the source is kept",
 			res.Min, e.Cfg.VmafMinPool, res.HarmonicMean)
 	}
+	// The chroma floor (GATE-4). Everything above this line is LUMA: the VMAF model
+	// extracts luma features only, so an output whose colour planes were flattened,
+	// shifted or desaturated clears both floors above - and clears every structural
+	// check too, because it decodes cleanly and carries the right duration, packets
+	// and streams. Measured on real libvmaf, a 15% chroma desaturation pools to a
+	// harmonic mean of ~99 with a worst frame of ~97 while its chroma PSNR falls from
+	// ~40 dB to ~26 dB. Only this sees it. The reason NAMES the metric and the floor,
+	// because "rejected" without them sends an operator to the logs to find out which
+	// of three gates fired.
+	if e.Cfg.VmafMinChroma > 0 && res.ChromaMin < e.Cfg.VmafMinChroma {
+		return proof, fmt.Errorf(
+			"chroma below floor (%s=%.2f < vmaf_min_chroma=%.2f) - the encode is damaged in its COLOUR "+
+				"planes: its luma is fine (harmonic_mean=%.2f, worst frame=%.2f) and the VMAF model is "+
+				"luma-only, so nothing else would have seen this; the source is kept",
+			res.ChromaMetric, res.ChromaMin, e.Cfg.VmafMinChroma, res.HarmonicMean, res.Min)
+	}
 	return proof, nil
 }
 
 // resolveVmafModel maps the config VmafModel to a libvmaf model spec. "auto"/""
 // picks the UHD model for output height > 1440, else the HD model; any other value
 // is passed through (prefixed with "version=" when it looks like a bare version id).
+//
+// The rule itself lives in internal/vmaf, beside the startup preflight that proves
+// each candidate actually loads (GATE-4). It has to be ONE rule: a preflight that
+// checked a different set of models from the ones the gate later resolves to would
+// be a preflight that passes and a run that dies hours in.
 func resolveVmafModel(cfg string, height int) string {
-	if cfg == "" || cfg == "auto" {
-		if height > 1440 {
-			return "version=vmaf_4k_v0.6.1"
-		}
-		return "version=vmaf_v0.6.1"
-	}
-	if !strings.Contains(cfg, "=") {
-		return "version=" + cfg
-	}
-	return cfg
+	return vmaf.ResolveModel(cfg, height)
 }

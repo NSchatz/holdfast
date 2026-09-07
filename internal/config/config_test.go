@@ -129,6 +129,77 @@ func TestLoad(t *testing.T) {
 	})
 }
 
+// TestChromaFloorConfigSurface is the GATE-4 configuration proof: the new key ships
+// with a real default, a misspelling of it is refused BY NAME, and an out-of-range
+// value is refused BY NAME. All three are one property - a chroma floor an operator
+// thinks they set must never silently be a floor they did not.
+//
+// The misspelling case is the one that matters most and is the reason knownKeys
+// exists: `vmaf_min_chroma` mistyped is not a config that runs with a slightly wrong
+// floor, it is a config that runs with the DEFAULT floor while its author believes
+// otherwise. On a tool that deletes originals, that is the whole failure.
+func TestChromaFloorConfigSurface(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("ships a real default, not zero", func(t *testing.T) {
+		p := filepath.Join(dir, "minimal.yaml")
+		writeFile(t, p, "library_roots:\n  - /mnt/media\n")
+		c, err := Load(p)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.VmafMinChroma != 30 {
+			t.Errorf("VmafMinChroma = %g, want the shipped default 30 - a 0 default would ship "+
+				"the gate with chroma unguarded", c.VmafMinChroma)
+		}
+		// A shipped default that immediately warns would be a default nobody meant.
+		for _, w := range c.Warnings() {
+			if strings.Contains(w, "CHROMA DAMAGE IS UNGUARDED") {
+				t.Errorf("the shipped defaults warn about an unguarded chroma floor: %s", w)
+			}
+		}
+	})
+
+	t.Run("a misspelled key is refused and named", func(t *testing.T) {
+		p := filepath.Join(dir, "typo-chroma.yaml")
+		writeFile(t, p, "library_roots:\n  - /mnt/media\nvmaf_min_chroma_: 30\n")
+		_, err := Load(p)
+		if err == nil {
+			t.Fatal("Load with a misspelled chroma key = nil, want a refusal")
+		}
+		if !strings.Contains(err.Error(), "vmaf_min_chroma_") {
+			t.Errorf("the refusal must name the offending key; got: %v", err)
+		}
+		// Anti-vacuity: the correctly spelled key in the same shape LOADS, so the
+		// refusal above is the typo and not the file.
+		ok := filepath.Join(dir, "ok-chroma.yaml")
+		writeFile(t, ok, "library_roots:\n  - /mnt/media\nvmaf_min_chroma: 25\n")
+		c, err := Load(ok)
+		if err != nil {
+			t.Fatalf("the correctly spelled key must load: %v", err)
+		}
+		if c.VmafMinChroma != 25 {
+			t.Errorf("VmafMinChroma = %g, want 25 from the file", c.VmafMinChroma)
+		}
+	})
+
+	t.Run("an out-of-range floor refuses the run and names the key", func(t *testing.T) {
+		p := filepath.Join(dir, "range-chroma.yaml")
+		writeFile(t, p, "library_roots:\n  - /mnt/media\nvmaf_min_chroma: 140\n")
+		c, err := Load(p)
+		if err != nil {
+			t.Fatalf("Load: %v", err) // range is Validate's job, not Load's
+		}
+		err = c.Validate()
+		if err == nil {
+			t.Fatal("Validate with vmaf_min_chroma: 140 = nil, want a refusal")
+		}
+		if !strings.Contains(err.Error(), "vmaf_min_chroma") {
+			t.Errorf("the refusal must name the offending key; got: %v", err)
+		}
+	})
+}
+
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
@@ -208,25 +279,40 @@ func TestWarnings(t *testing.T) {
 	}{
 		{
 			name:  "defaults are quiet",
-			cfg:   Config{VmafEnable: &on, MinVmaf: 95, VmafMinPool: 60, VmafSubsample: 1},
+			cfg:   Config{VmafEnable: &on, MinVmaf: 95, VmafMinPool: 60, VmafMinChroma: 30, VmafSubsample: 1},
 			nWant: 0,
 		},
 		{
 			name:  "floor explicitly disabled warns",
-			cfg:   Config{VmafEnable: &on, MinVmaf: 95, VmafMinPool: 0, VmafSubsample: 1},
+			cfg:   Config{VmafEnable: &on, MinVmaf: 95, VmafMinPool: 0, VmafMinChroma: 30, VmafSubsample: 1},
 			want:  "worst-frame floor is DISABLED",
 			nWant: 1,
 		},
 		{
+			// GATE-4. The chroma floor at 0 can never reject, and chroma damage is the
+			// one class NOTHING else in the pipeline can see - the VMAF model is
+			// luma-only and every structural check passes a desaturated encode. It is
+			// warned about in exactly the way the worst-frame floor above is.
+			name:  "chroma floor explicitly disabled warns",
+			cfg:   Config{VmafEnable: &on, MinVmaf: 95, VmafMinPool: 60, VmafMinChroma: 0, VmafSubsample: 1},
+			want:  "CHROMA DAMAGE IS UNGUARDED",
+			nWant: 1,
+		},
+		{
 			name:  "subsampling weakens the floor and warns",
-			cfg:   Config{VmafEnable: &on, MinVmaf: 95, VmafMinPool: 60, VmafSubsample: 10},
+			cfg:   Config{VmafEnable: &on, MinVmaf: 95, VmafMinPool: 60, VmafMinChroma: 30, VmafSubsample: 10},
 			want:  "SAMPLE, not a guarantee",
 			nWant: 1,
 		},
 		{
 			name:  "both at once warn twice",
-			cfg:   Config{VmafEnable: &on, MinVmaf: 95, VmafMinPool: 0, VmafSubsample: 10},
+			cfg:   Config{VmafEnable: &on, MinVmaf: 95, VmafMinPool: 0, VmafMinChroma: 30, VmafSubsample: 10},
 			nWant: 2,
+		},
+		{
+			name:  "every floor down and subsampled warns three times",
+			cfg:   Config{VmafEnable: &on, MinVmaf: 95, VmafMinPool: 0, VmafMinChroma: 0, VmafSubsample: 10},
+			nWant: 3,
 		},
 		{
 			// The gate off entirely is the WEAKEST setting there is — strictly weaker
@@ -488,6 +574,25 @@ func TestVmafConfig(t *testing.T) {
 		{"enabled gate with no threshold refused", func(c *Config) { on := true; c.VmafEnable = &on; c.MinVmaf = 0; c.VmafMinPool = 0 }, "never reject"},
 		{"enabled gate with a min-pool floor ok", func(c *Config) { on := true; c.VmafEnable = &on; c.MinVmaf = 0; c.VmafMinPool = 80 }, ""},
 		{"valid vmaf knobs", func(c *Config) { c.MinVmaf = 95; c.VmafMinPool = 80; c.VmafSubsample = 5 }, ""},
+
+		// GATE-4: the chroma floor bounds a PSNR in dB. Both ends of the range are
+		// refused BY NAME rather than clamped - a negative floor could never reject
+		// (a silent no-op on a delete-capable tool) and one above 100 dB could never
+		// be cleared (every encode rejected). Neither is what the operator meant.
+		{"vmaf_min_chroma negative", func(c *Config) { c.VmafMinChroma = -1 }, "vmaf_min_chroma"},
+		{"vmaf_min_chroma above the metric's range", func(c *Config) { c.VmafMinChroma = 120 }, "vmaf_min_chroma"},
+		{"vmaf_min_chroma at the top of the range is ok", func(c *Config) { c.VmafMinChroma = 100 }, ""},
+		{"vmaf_min_chroma zero is ok (disabled; Warnings says so)", func(c *Config) { c.VmafMinChroma = 0 }, ""},
+		{"enabled gate rejecting on chroma alone is not a no-op", func(c *Config) {
+			on := true
+			c.VmafEnable = &on
+			c.MinVmaf, c.VmafMinPool, c.VmafMinChroma = 0, 0, 30
+		}, ""},
+		{"enabled gate with every floor at zero refused", func(c *Config) {
+			on := true
+			c.VmafEnable = &on
+			c.MinVmaf, c.VmafMinPool, c.VmafMinChroma = 0, 0, 0
+		}, "never reject"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

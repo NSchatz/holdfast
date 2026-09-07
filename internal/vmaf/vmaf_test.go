@@ -73,7 +73,7 @@ func TestScore(t *testing.T) {
 		"-vf", "scale=48:36,scale=320:240:flags=neighbor",
 		"-c:v", "libx265", "-crf", "45", "-x265-params", "log-level=error", bad)
 
-	g, err := Score(context.Background(), bin, good, ref, 1, "version=vmaf_v0.6.1")
+	g, err := Score(context.Background(), bin, req(good, ref))
 	if err != nil {
 		t.Fatalf("Score(good): %v", err)
 	}
@@ -85,12 +85,34 @@ func TestScore(t *testing.T) {
 	if g.HarmonicMean < 90 {
 		t.Errorf("a faithful crf22 encode should score high; got harmonic_mean=%.2f", g.HarmonicMean)
 	}
-	b, err := Score(context.Background(), bin, bad, ref, 1, "version=vmaf_v0.6.1")
+	b, err := Score(context.Background(), bin, req(bad, ref))
 	if err != nil {
 		t.Fatalf("Score(bad): %v", err)
 	}
 	if b.HarmonicMean >= g.HarmonicMean {
 		t.Errorf("degraded (%.2f) should score below faithful (%.2f)", b.HarmonicMean, g.HarmonicMean)
+	}
+	// The chroma planes are measured on every pass now (GATE-4), so a faithful encode
+	// must report a real chroma figure and a degraded one must report a worse figure.
+	// Chroma is a MEASUREMENT, not a flag: if it ever came back constant, the floor
+	// built on it would be decoration.
+	if g.ChromaMin <= 0 || g.ChromaMin > 100 {
+		t.Errorf("chroma PSNR %v dB out of a plausible range - psnr_cb/psnr_cr mapping likely wrong", g.ChromaMin)
+	}
+	if b.ChromaMin >= g.ChromaMin {
+		t.Errorf("degraded chroma (%.2f dB) should measure below faithful (%.2f dB)", b.ChromaMin, g.ChromaMin)
+	}
+	if g.ChromaMetric != ChromaMetricName {
+		t.Errorf("ChromaMetric = %q, want %q - the metric must travel with its value", g.ChromaMetric, ChromaMetricName)
+	}
+}
+
+// req is the scoring request the older tests used implicitly: every frame, the HD
+// model, and an explicitly named comparison format (which Score now requires).
+func req(distorted, reference string) Request {
+	return Request{
+		Distorted: distorted, Reference: reference,
+		Subsample: 1, Model: "version=vmaf_v0.6.1", PixelFormat: "yuv420p10le",
 	}
 }
 
@@ -252,30 +274,46 @@ func stubFfmpegWritingLog(t *testing.T, body string) string {
 	return stub
 }
 
-// TestScore_IncompleteLogIsRejected is the fail-closed proof for TRANSCODE-11.
+// TestScore_IncompleteLogIsRejected is the fail-closed proof for TRANSCODE-11, and
+// since GATE-4 for the chroma planes too.
 //
-// The worst-frame floor is enforced as `Min < vmaf_min_pool`. If libvmaf ever hands
-// back a log WITHOUT a `min` pool, a plain unmarshal yields 0.0 — a number the gate
-// cannot distinguish from a real measurement. Score must refuse instead. An
-// unmeasured worst frame is an UNKNOWN, and this tool treats an unknown as a
-// rejection, never as a silent fall-back to the mean-only gate it just replaced.
+// The worst-frame floor is enforced as `Min < vmaf_min_pool` and the chroma floor as
+// `ChromaMin < vmaf_min_chroma`. If libvmaf ever hands back a log WITHOUT one of
+// those pools, a plain unmarshal yields 0.0 - a number the gate cannot distinguish
+// from a real measurement. Score must refuse instead, and it must refuse on ANY
+// missing statistic rather than score the output on the ones that did report: an
+// output graded on two of three metrics is an output whose third property nobody
+// measured, and this tool does not delete an original on that.
 func TestScore_IncompleteLogIsRejected(t *testing.T) {
+	const full = `{"pooled_metrics":{"vmaf":{"min":98.0,"harmonic_mean":99.1},` +
+		`"psnr_cb":{"min":41.0},"psnr_cr":{"min":40.0}}}`
 	cases := []struct {
 		name string
 		log  string
 	}{
-		{"min absent", `{"pooled_metrics":{"vmaf":{"harmonic_mean":99.1}}}`},
-		{"harmonic_mean absent", `{"pooled_metrics":{"vmaf":{"min":98.0}}}`},
-		{"vmaf section absent", `{"pooled_metrics":{}}`},
+		{"min absent", `{"pooled_metrics":{"vmaf":{"harmonic_mean":99.1},"psnr_cb":{"min":41.0},"psnr_cr":{"min":40.0}}}`},
+		{"harmonic_mean absent", `{"pooled_metrics":{"vmaf":{"min":98.0},"psnr_cb":{"min":41.0},"psnr_cr":{"min":40.0}}}`},
+		{"vmaf section absent", `{"pooled_metrics":{"psnr_cb":{"min":41.0},"psnr_cr":{"min":40.0}}}`},
+		// The GATE-4 half: the LUMA statistics are complete and only the chroma
+		// planes are missing. This is the case that would silently restore the
+		// pre-GATE-4 gate - a full-looking pass on a metric nobody measured.
+		{"psnr_cb absent", `{"pooled_metrics":{"vmaf":{"min":98.0,"harmonic_mean":99.1},"psnr_cr":{"min":40.0}}}`},
+		{"psnr_cr absent", `{"pooled_metrics":{"vmaf":{"min":98.0,"harmonic_mean":99.1},"psnr_cb":{"min":41.0}}}`},
+		{"both chroma planes absent", `{"pooled_metrics":{"vmaf":{"min":98.0,"harmonic_mean":99.1}}}`},
 		{"empty object", `{}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Anti-vacuity: the SAME stub with a complete log must be accepted, so a
+			// rejection below is the missing statistic and not the stub itself.
+			if _, err := Score(context.Background(), stubFfmpegWritingLog(t, full), req("d.mkv", "r.mkv")); err != nil {
+				t.Fatalf("the complete-log control failed (%v) - this case proves nothing", err)
+			}
 			bin := stubFfmpegWritingLog(t, tc.log)
-			res, err := Score(context.Background(), bin, "d.mkv", "r.mkv", 1, "version=vmaf_v0.6.1")
+			res, err := Score(context.Background(), bin, req("d.mkv", "r.mkv"))
 			if err == nil {
 				t.Fatalf("Score accepted an incomplete libvmaf log (got %+v) — an unmeasured "+
-					"worst frame must be a REJECTION, not a zero value the gate reads as real", res)
+					"metric must be a REJECTION, not a zero value the gate reads as real", res)
 			}
 			if !strings.Contains(err.Error(), "missing a pooled statistic") {
 				t.Errorf("error should name the incomplete log; got: %v", err)
@@ -285,15 +323,36 @@ func TestScore_IncompleteLogIsRejected(t *testing.T) {
 }
 
 // A complete log still parses — the fail-closed check must not reject a real
-// measurement, including a legitimate 0.0 (which is a score, not an absence).
+// measurement, including a legitimate 0.0 (which is a score, not an absence). 0.0 dB
+// of chroma PSNR is a plane that has been obliterated, which is the single most
+// important thing this field could ever report; reading it as "absent" would drop it.
 func TestScore_CompleteLogParses(t *testing.T) {
-	bin := stubFfmpegWritingLog(t, `{"pooled_metrics":{"vmaf":{"min":0.0,"harmonic_mean":0.0}}}`)
-	res, err := Score(context.Background(), bin, "d.mkv", "r.mkv", 1, "version=vmaf_v0.6.1")
+	bin := stubFfmpegWritingLog(t, `{"pooled_metrics":{"vmaf":{"min":0.0,"harmonic_mean":0.0},`+
+		`"psnr_cb":{"min":0.0},"psnr_cr":{"min":0.0}}}`)
+	res, err := Score(context.Background(), bin, req("d.mkv", "r.mkv"))
 	if err != nil {
 		t.Fatalf("a complete log with genuine 0.0 scores must parse, not error: %v", err)
 	}
-	if res.Min != 0 || res.HarmonicMean != 0 {
-		t.Errorf("got %+v, want zeroed Result", res)
+	if res.Min != 0 || res.HarmonicMean != 0 || res.ChromaMin != 0 {
+		t.Errorf("got %+v, want zeroed scores", res)
+	}
+	if res.PixelFormat != "yuv420p10le" || res.ChromaMetric != ChromaMetricName {
+		t.Errorf("got %+v, want the named format and metric carried back with the score", res)
+	}
+}
+
+// Score refuses a request with no named comparison format. There is deliberately no
+// fallback: "let libavfilter negotiate it" is the behaviour GATE-4 removed, and a
+// default here would quietly reinstate it for any caller that forgot the field.
+func TestScore_RefusesAnUnnamedComparisonFormat(t *testing.T) {
+	bin := stubFfmpegWritingLog(t, `{"pooled_metrics":{"vmaf":{"min":98.0,"harmonic_mean":99.1},`+
+		`"psnr_cb":{"min":41.0},"psnr_cr":{"min":40.0}}}`)
+	r := req("d.mkv", "r.mkv")
+	r.PixelFormat = ""
+	if res, err := Score(context.Background(), bin, r); err == nil {
+		t.Fatalf("Score accepted a request with no comparison format (got %+v)", res)
+	} else if !strings.Contains(err.Error(), "comparison pixel format") {
+		t.Errorf("error should name the missing comparison format; got: %v", err)
 	}
 }
 
