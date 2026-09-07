@@ -3,12 +3,17 @@ package webui
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -104,16 +109,33 @@ function verdict(doc, win) {
 // EventSource was reconnecting, and then load-completion semantics that differ from the
 // local browser's). The Go test now owns the deadline: it waits for the POST, and a
 // browser that never sends one fails the test with its stderr attached.
+// The one wrinkle the dashboard graders added to it: the shipped page fills its tables
+// from an SSE snapshot, which lands AFTER load, so a verdict computed once in `load` can
+// be computed before its subject exists. A probe may therefore report `ready: false` and
+// be retried on a plain setTimeout - still no virtual time, and the TEST still owns the
+// outer deadline. A probe that never sets `ready` (the source-offer graders below) posts
+// on the first attempt, exactly as it always did.
 const probePage = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>probe</title></head>
 <body><iframe id="f" src="%SRC%" width="1200" height="900" style="border:0"></iframe>
 <script>
 %JS%
 window.addEventListener("load", function () {
   const f = document.getElementById("f");
-  let v;
-  try { v = verdict(f.contentDocument, f.contentWindow); }
-  catch (e) { v = { error: String(e) }; }
-  fetch("/verdict", { method: "POST", body: JSON.stringify(v) });
+  const deadline = Date.now() + %WAIT%;
+  let sent = false;
+  function post(v) {
+    if (sent) return;
+    sent = true;
+    fetch("/verdict", { method: "POST", body: JSON.stringify(v) });
+  }
+  function attempt() {
+    let v;
+    try { v = verdict(f.contentDocument, f.contentWindow); }
+    catch (e) { v = { error: String(e) }; }
+    if (v && v.ready === false && Date.now() < deadline) { setTimeout(attempt, 50); return; }
+    post(v);
+  }
+  attempt();
 });
 </script></body></html>`
 
@@ -144,8 +166,26 @@ type renderVerdict struct {
 	} `json:"chain"`
 }
 
-// chromium locates the browser or skips. `make check` must stay green on a machine
-// with no browser, exactly as it must stay green on one with no docker.
+// requiredMode reports whether a runtime this package needs and cannot find is a FAILURE
+// rather than a skip. `make check` is the repository gate and must stay green on a
+// machine with no browser (exactly as it must on one with no docker), so it leaves this
+// unset; `make webui-check` sets it, which is what makes that target unable to come back
+// green without having measured anything.
+func requiredMode() bool { return os.Getenv("HOLDFAST_WEBUI_REQUIRED") == "1" }
+
+// missingRuntime is the ONE place the skip-or-fail decision is made, so the two modes
+// cannot drift apart. Either way the message NAMES the runtime that was not there.
+func missingRuntime(t *testing.T, runtime, need string) {
+	t.Helper()
+	if requiredMode() {
+		t.Fatalf("required runtime %q is not on PATH: %s. "+
+			"HOLDFAST_WEBUI_REQUIRED=1 (make webui-check) makes a missing runtime a failure, never a skip",
+			runtime, need)
+	}
+	t.Skipf("no %q on PATH: %s. Run `make webui-check` to require it", runtime, need)
+}
+
+// chromium locates the browser or skips (fails, under required mode).
 func chromium(t *testing.T) string {
 	t.Helper()
 	for _, name := range []string{"chromium", "chromium-browser", "google-chrome", "chrome"} {
@@ -153,7 +193,18 @@ func chromium(t *testing.T) string {
 			return p
 		}
 	}
-	t.Skip("no chromium on PATH: the rendered-page grader needs a browser; the byte-level assertions in sourceoffer_test.go still ran")
+	missingRuntime(t, "chromium", "the rendered-page graders load the served document in a real browser engine, which no scan of source text can replace")
+	return ""
+}
+
+// nodeRuntime locates node or skips (fails, under required mode). The dashboard's
+// derivation units run in node's BUILT-IN test runner: no registry package, no lockfile.
+func nodeRuntime(t *testing.T) string {
+	t.Helper()
+	if p, err := exec.LookPath("node"); err == nil {
+		return p
+	}
+	missingRuntime(t, "node", "the dashboard's derivation units run in node's built-in test runner (node --test)")
 	return ""
 }
 
@@ -164,16 +215,58 @@ type probeServer struct {
 	verdict chan []byte
 }
 
+// serveOpts is everything a grader can vary about the page under measurement. The
+// DOCUMENT is always the one the real handler produces, under the real response headers;
+// only the world around it moves.
+type serveOpts struct {
+	// url is the source-offer value the handler is built for.
+	url string
+	// mutate rewrites the served document bytes to build a counterexample. nil serves the
+	// document exactly as it ships.
+	mutate func([]byte) []byte
+	// probe is the measuring script. probeJS when empty.
+	probe string
+	// wait is how long the probe retries a verdict that reports itself not ready.
+	wait time.Duration
+	// snapshot, when non-nil, is pushed to the page as a real SSE `snapshot` event on
+	// /api/events, which is how the dashboard gets every value it renders.
+	snapshot []byte
+	// streamFails drops the event stream after the first snapshot and answers every
+	// reconnection with 500, so the page's connection state must leave "live".
+	streamFails bool
+}
+
 // serveDocument stands the REAL handler up on a real listener, plus the probe page
 // beside it. mutate is applied to the served document bytes to build a counterexample
 // (nil serves the document exactly as it ships).
 func serveDocument(t *testing.T, url string, mutate func([]byte) []byte) *probeServer {
 	t.Helper()
+	return serveDocumentWith(t, serveOpts{url: url, mutate: mutate})
+}
+
+func serveDocumentWith(t *testing.T, o serveOpts) *probeServer {
+	t.Helper()
+	if o.probe == "" {
+		o.probe = probeJS
+	}
+	if o.wait <= 0 {
+		o.wait = 15 * time.Second
+	}
+	// An SSE `data:` field is ONE line. The fixtures are written readably, so they are
+	// compacted here - and a fixture that is not valid JSON fails now, loudly, rather than
+	// as a page that quietly never rendered.
+	if o.snapshot != nil {
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, o.snapshot); err != nil {
+			t.Fatalf("the snapshot fixture is not valid JSON: %v\n%s", err, o.snapshot)
+		}
+		o.snapshot = compact.Bytes()
+	}
 	ps := &probeServer{verdict: make(chan []byte, 4)}
-	real := HandlerFor(offerFor(url))
+	real := HandlerFor(offerFor(o.url))
 	mux := http.NewServeMux()
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if mutate == nil {
+		if o.mutate == nil {
 			real.ServeHTTP(w, r)
 			return
 		}
@@ -183,11 +276,12 @@ func serveDocument(t *testing.T, url string, mutate func([]byte) []byte) *probeS
 			w.Header()[k] = v
 		}
 		w.WriteHeader(rec.Code)
-		_, _ = w.Write(mutate(rec.Body.Bytes()))
+		_, _ = w.Write(o.mutate(rec.Body.Bytes()))
 	}))
 	mux.HandleFunc("/probe", func(w http.ResponseWriter, _ *http.Request) {
-		page := strings.Replace(probePage, "%JS%", probeJS, 1)
+		page := strings.Replace(probePage, "%JS%", o.probe, 1)
 		page = strings.Replace(page, "%SRC%", "/", 1)
+		page = strings.Replace(page, "%WAIT%", strconv.Itoa(int(o.wait/time.Millisecond)), 1)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(page))
 	})
@@ -199,18 +293,55 @@ func serveDocument(t *testing.T, url string, mutate func([]byte) []byte) *probeS
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-	// The dashboard's own API calls, answered so the page is not reconnecting while it
-	// is being measured. Deliberately NOT held open: a hanging response would keep
-	// httptest.Server.Close waiting. The offer depends on none of this - that is AC8,
-	// and internal/server proves it with every endpoint returning 500.
-	for _, ep := range []string{"/api/summary", "/api/queue", "/api/history", "/api/events"} {
+	// The dashboard's own API calls. The read endpoints are answered so the page is not
+	// reconnecting while it is being measured, and are deliberately NOT held open: a
+	// hanging response would keep httptest.Server.Close waiting.
+	for _, ep := range []string{"/api/summary", "/api/queue", "/api/history"} {
 		mux.HandleFunc(ep, func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			_, _ = w.Write([]byte(`{}`))
 		})
 	}
+
+	// The event stream. With no snapshot this is the old behaviour (a JSON body, which the
+	// page treats as a failed stream and does not render from). With one it is a REAL SSE
+	// stream: the snapshot the dashboard renders every value from.
+	//
+	// The stream is held open until the test finishes, because a stream that ends is a
+	// stream the page reports as down - which is a different criterion (B13) and would
+	// otherwise contaminate every happy-path grader. `done` is closed BEFORE the server is
+	// closed (t.Cleanup runs last-registered-first), so nothing is left hanging.
+	var conns atomic.Int32
+	done := make(chan struct{})
+	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
+		if o.snapshot == nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		if o.streamFails && conns.Add(1) > 1 {
+			http.Error(w, "the event stream is unavailable", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", o.snapshot)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		if o.streamFails {
+			return // drop it: the page must leave its connected state and keep its rows
+		}
+		select {
+		case <-done:
+		case <-r.Context().Done():
+		}
+	})
+
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(done) })
 	ps.url = srv.URL
 	return ps
 }
@@ -220,8 +351,15 @@ func serveDocument(t *testing.T, url string, mutate func([]byte) []byte) *probeS
 // session bus": a CI runner's Chrome will otherwise register with GCM, poll the
 // component updater and fail to find dbus, which is what hung the first version of
 // this test on the runner. There is no --virtual-time-budget: see probePage.
+//
+// --enable-logging=stderr is not hermeticity, it is INSTRUMENTATION: it is what makes the
+// engine write its console log - every Content-Security-Policy and Trusted Types refusal
+// included - where the test can read it. B17 is graded on that log, because a violation
+// fires inside the SERVED document and a listener attached from the probe at load time
+// arrives after the initial render has already happened.
 var hermeticFlags = []string{
 	"--headless", "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage",
+	"--enable-logging=stderr", "--log-level=0",
 	"--hide-scrollbars", "--window-size=1280,1024",
 	"--no-first-run", "--no-default-browser-check", "--disable-default-apps",
 	"--disable-background-networking", "--disable-component-update",
@@ -232,12 +370,19 @@ var hermeticFlags = []string{
 	"--disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,InterestFeedContentSuggestions,AutofillServerCommunication,CalculateNativeWinOcclusion",
 }
 
-// renderAndRead points the browser at the probe page and returns what it saw. The
-// deadline is the TEST's, not the browser's: the browser is killed as soon as the
-// verdict arrives, and a browser that never sends one fails the test with its stderr.
-func renderAndRead(t *testing.T, bin string, ps *probeServer) renderVerdict {
-	t.Helper()
-	profile := t.TempDir()
+// verdictDeadline is the TEST's own deadline for a measurement. It exists so a browser
+// that wedges fails HERE, naming the page and carrying the browser's output, rather than
+// hanging until the CI runner kills the whole job with nothing to read (B21).
+const verdictDeadline = 90 * time.Second
+
+// runProbe points the browser at the probe page and returns the raw verdict together with
+// everything the browser wrote to stdout/stderr. The browser is killed as soon as the
+// verdict arrives (after a short grace, so a console message raised during the render is
+// not truncated out of the log), and the process is REAPED before the log is read, so the
+// caller never races the copying goroutines for it.
+//
+// It returns an error rather than failing the test, so the deadline itself is gradeable.
+func runProbe(bin string, ps *probeServer, deadline time.Duration, profile string) (raw []byte, browserLog string, err error) {
 	args := append(append([]string{}, hermeticFlags...), "--user-data-dir="+profile, ps.url+"/probe")
 	cmd := exec.Command(bin, args...)
 	var log bytes.Buffer
@@ -245,27 +390,56 @@ func renderAndRead(t *testing.T, bin string, ps *probeServer) renderVerdict {
 	// A profile-local HOME and no session bus to look for: the runner has neither.
 	cmd.Env = append(os.Environ(), "HOME="+profile, "DBUS_SESSION_BUS_ADDRESS=disabled:")
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("starting %s: %v", bin, err)
+		return nil, "", fmt.Errorf("starting %s: %w", bin, err)
 	}
-	defer func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	}()
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		})
+	}
+	defer stop()
 
-	var raw []byte
 	select {
 	case raw = <-ps.verdict:
-	case <-time.After(90 * time.Second):
-		t.Fatalf("the browser never posted a verdict for %s within 90s\nbrowser output:\n%s", ps.url, log.String())
+		time.Sleep(250 * time.Millisecond)
+		stop()
+		return raw, log.String(), nil
+	case <-time.After(deadline):
+		stop()
+		return nil, log.String(), fmt.Errorf("the browser never posted a verdict for %s within %s\nbrowser output:\n%s",
+			ps.url, deadline, log.String())
+	}
+}
+
+// renderAndRead is runProbe plus the source-offer verdict decoding, and it fails the test
+// on anything that went wrong.
+func renderAndRead(t *testing.T, bin string, ps *probeServer) renderVerdict {
+	t.Helper()
+	v, _ := renderAndReadLog(t, bin, ps)
+	return v
+}
+
+// renderAndReadLog also hands back what the browser itself printed. That log is the
+// engine's own report of every Content-Security-Policy and Trusted Types refusal it made
+// while rendering, which is a fact about the render that no assertion inside the page can
+// observe: a violation fires in the SERVED document, and a listener attached from the
+// parent at load time arrives after the initial render has already happened.
+func renderAndReadLog(t *testing.T, bin string, ps *probeServer) (renderVerdict, string) {
+	t.Helper()
+	raw, log, err := runProbe(bin, ps, verdictDeadline, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
 	}
 	var v renderVerdict
 	if err := json.Unmarshal(raw, &v); err != nil {
-		t.Fatalf("verdict is not JSON (%v): %s", err, raw)
+		t.Fatalf("verdict is not JSON (%v): %s\nbrowser output:\n%s", err, raw, log)
 	}
 	if v.Error != "" {
-		t.Fatalf("the probe failed inside the browser: %s", v.Error)
+		t.Fatalf("the probe failed inside the browser: %s\nbrowser output:\n%s", v.Error, log)
 	}
-	return v
+	return v, log
 }
 
 // hiddenProblems reports every way the browser says the offer did NOT reach the
@@ -461,5 +635,112 @@ func TestRendered_ForkBuildShowsItsOwnTreeAndNeverUpstream(t *testing.T) {
 	}
 	if strings.Contains(v.LinkHref, sourceoffer.Upstream) {
 		t.Errorf("the fork build's link targets upstream: %q", v.LinkHref)
+	}
+}
+
+// --- WEBUI-10: the graders' own failure modes -----------------------------------
+
+// B21. A rendered grader whose browser never returns a measurement must fail on ITS OWN
+// deadline, with the browser's output attached - never hang until the CI runner kills the
+// job, which leaves nobody anything to read. Two CI runs were lost to exactly that before
+// the verdict was moved off --dump-dom and onto a POST the test waits for; this proves the
+// deadline that replaced it still bites.
+func TestRendered_ABrowserThatNeverAnswersFailsOnTheGradersOwnDeadline(t *testing.T) {
+	bin := chromium(t)
+	// A probe that is never ready: the browser loads the page and keeps retrying for far
+	// longer than the deadline this grader gives it.
+	const neverReady = `function verdict(doc, win) { return { ready: false }; }`
+	ps := serveDocumentWith(t, serveOpts{url: sourceoffer.Upstream, probe: neverReady, wait: 10 * time.Minute})
+
+	start := time.Now()
+	raw, _, err := runProbe(bin, ps, 5*time.Second, t.TempDir())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("the grader accepted a verdict (%s) from a browser that was never going to answer", raw)
+	}
+	if elapsed > 60*time.Second {
+		t.Errorf("the grader waited %s on a browser that never answered; its deadline was 5s", elapsed)
+	}
+	for _, want := range []string{"never posted a verdict", "5s", "browser output"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the failure does not carry %q, so a reader cannot tell what happened: %v", want, err)
+		}
+	}
+	// And the deadline the real graders use is the TEST's, well inside any CI job budget.
+	if verdictDeadline <= 0 || verdictDeadline > 5*time.Minute {
+		t.Errorf("verdictDeadline is %s; a rendered grader must fail on its own deadline, not the runner's", verdictDeadline)
+	}
+}
+
+// B8. A runtime this package needs and cannot find is a SKIP under `make check` (which
+// must stay green on a machine with no browser) and a FAILURE under `make webui-check`.
+// Both halves are proven for real: the package's own test binary is built once and run
+// with an EMPTY PATH, so neither chromium nor node can be found, first without the
+// required-mode switch and then with it.
+func TestRuntimeGate_SkipsWhenARuntimeIsAbsentAndFailsUnderRequiredMode(t *testing.T) {
+	if os.Getenv("HOLDFAST_WEBUI_GATE_CHILD") == "1" {
+		t.Skip("this is the child of the runtime-gate self-test; it does not recurse")
+	}
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Skipf("no go toolchain on PATH to build the child test binary: %v", err)
+	}
+	bin := filepath.Join(t.TempDir(), "webui.test")
+	if out, err := exec.Command(goBin, "test", "-c", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("building this package's test binary: %v\n%s", err, out)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	run := func(required bool, name string) (string, error) {
+		cmd := exec.Command(bin, "-test.run", "^"+name+"$", "-test.v")
+		cmd.Dir = wd
+		env := []string{
+			"PATH=", // the point of the exercise: no runtime can be found
+			"HOME=" + t.TempDir(),
+			"HOLDFAST_WEBUI_GATE_CHILD=1",
+		}
+		if required {
+			env = append(env, "HOLDFAST_WEBUI_REQUIRED=1")
+		}
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	for _, c := range []struct{ runtime, test string }{
+		{"chromium", "TestRendered_OfferIsShownToAReaderWithoutInteraction"},
+		{"node", "TestUnit_DerivationsRunInNodesOwnTestRunner"},
+	} {
+		out, err := run(false, c.test)
+		if err != nil {
+			t.Errorf("with no %s on PATH and no required mode, `make check` must stay green; it exited %v:\n%s", c.runtime, err, out)
+		}
+		if !strings.Contains(out, "--- SKIP: "+c.test) {
+			t.Errorf("with no %s on PATH the suite did not report itself SKIPPED:\n%s", c.runtime, out)
+		}
+		if strings.Contains(out, "--- PASS: "+c.test) {
+			t.Errorf("with no %s on PATH the suite reported a PASS, which is a false green:\n%s", c.runtime, out)
+		}
+		if !strings.Contains(out, c.runtime) {
+			t.Errorf("the skip message does not name the missing runtime %q:\n%s", c.runtime, out)
+		}
+
+		out, err = run(true, c.test)
+		if err == nil {
+			t.Errorf("under required mode the suite passed with no %s on PATH:\n%s", c.runtime, out)
+		}
+		if !strings.Contains(out, "--- FAIL: "+c.test) {
+			t.Errorf("under required mode the suite did not FAIL with no %s on PATH:\n%s", c.runtime, out)
+		}
+		if !strings.Contains(out, "required runtime") || !strings.Contains(out, c.runtime) {
+			t.Errorf("the required-mode failure does not name the missing runtime %q:\n%s", c.runtime, out)
+		}
+		if strings.Contains(out, "--- SKIP: "+c.test) {
+			t.Errorf("under required mode the suite still SKIPPED with no %s on PATH:\n%s", c.runtime, out)
+		}
 	}
 }

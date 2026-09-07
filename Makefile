@@ -44,6 +44,7 @@ PLATFORM ?= linux/amd64
 
 .PHONY: build test check fmt vet staticcheck govulncheck govulncheck-selftest \
         check-pins check-pins-selftest install-ffmpeg-selftest check-pin-live \
+        webui-gen webui-stale webui-check \
         tidy clean image image-smoke compose-check
 
 build:
@@ -98,8 +99,32 @@ check-pins-selftest:
 install-ffmpeg-selftest:
 	./scripts/install-ffmpeg-selftest.sh
 
+# --- the dashboard (WEBUI-10) -------------------------------------------------
+# internal/webui/index.html is GENERATED and COMMITTED: the binary embeds one
+# self-contained file, and it is built from the modules under internal/webui/src by
+# internal/webui/gen with the Go toolchain alone - no JavaScript runtime, no bundler, no
+# registry package, no lockfile, no network, and so no new stage or tool in the image
+# build. `webui-gen` is the only writer of that file.
+webui-gen:
+	go run ./internal/webui/gen/genindex
+
+# The stale-artifact gate. A committed document that is not what the sources generate is
+# a page whose behaviour nobody can predict from its source, so `check` refuses it by
+# name rather than silently regenerating behind the build.
+webui-stale:
+	go run ./internal/webui/gen/genindex -check
+
+# The dashboard's suites in REQUIRED mode: the derivation units (node's built-in test
+# runner) and the rendered graders (a real browser engine). A runtime it needs and cannot
+# find is a FAILURE here, and a suite that reported itself skipped is a failure too - the
+# whole point of this target is that it cannot come back green without having measured
+# anything. `check` keeps the repo's skip-when-absent idiom instead, exactly as the docker
+# gate does, so a contributor with no browser is not blocked.
+webui-check:
+	./scripts/webui-check.sh
+
 # THE gate. CI and the release workflow both run exactly this.
-check: check-pins check-pins-selftest install-ffmpeg-selftest fmt vet build test staticcheck govulncheck govulncheck-selftest
+check: check-pins check-pins-selftest install-ffmpeg-selftest webui-stale fmt vet build test staticcheck govulncheck govulncheck-selftest
 
 # Asks UPSTREAM whether the pinned ffmpeg release is still served. Deliberately NOT part
 # of `check`: the PR gate must not red because a third party had a bad afternoon. CI runs
