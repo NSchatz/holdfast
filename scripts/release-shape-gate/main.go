@@ -347,13 +347,18 @@ func (g *gate) checkDispatchPublishesNothing(job Job, p *planned) {
 		g.bad("cannot decide which steps run on %s: %v", p.shape.label, err)
 		return
 	}
+	acts, undecided := g.actsOf(running, &p.ctx)
 	found := 0
-	for _, a := range g.actsOf(running, &p.ctx) {
+	for _, a := range acts {
 		found++
 		g.bad("on %s, %s WOULD RUN and it performs a published act: %s (%s).\nA dry run must publish nothing. The planning logic produced %s, and this step's guard (`%s`) is true against those values.",
 			p.shape.label, a.Step.Label(), a.Why, a.Kind, outputsOf(p), strings.TrimSpace(a.Step.If))
 	}
-	if found == 0 {
+	switch {
+	case undecided > 0:
+		g.undecidedNote("on %s, %d of the %d step(s) that run could not be decided (see the errors above), so whether a dry run publishes anything is UNKNOWN - which is not the same as no",
+			p.shape.label, undecided, len(running))
+	case found == 0:
 		g.note("on %s, %d step(s) run and NONE of them publishes anything", p.shape.label, len(running))
 	}
 }
@@ -374,7 +379,8 @@ func (g *gate) checkPublishOrdering(job Job, p *planned) int {
 		firstReSmoke            = -1
 		lastReSmoke             = -1
 	)
-	for _, a := range g.actsOf(running, &p.ctx) {
+	acts, undecided := g.actsOf(running, &p.ctx)
+	for _, a := range acts {
 		switch a.Kind {
 		case ActImagePush:
 			pushes = append(pushes, a)
@@ -472,7 +478,11 @@ func (g *gate) checkPublishOrdering(job Job, p *planned) int {
 			p.shape.label, lastReSmoke+1, move.Step.Index+1)
 	}
 
-	if problems == 0 {
+	switch {
+	case undecided > 0:
+		g.undecidedNote("on %s, %d step(s) that run could not be decided (see the errors above), so the published acts this order was checked over are INCOMPLETE",
+			p.shape.label, undecided)
+	case problems == 0:
 		g.note("on %s the order holds: gate -> both smoke runs -> version-tag push -> re-smoke of both pulled artefacts -> %s", p.shape.label, move.Step.Label())
 	}
 
@@ -505,13 +515,17 @@ func (g *gate) checkNothingPublishesAfterAFailure(job Job, p *planned) {
 		g.bad("cannot decide which steps run after a failure: %v", err)
 		return
 	}
+	acts, undecided := g.actsOf(running, &failing)
 	bad := 0
-	for _, a := range g.actsOf(running, &failing) {
+	for _, a := range acts {
 		bad++
 		g.bad("%s still runs after an earlier step has FAILED, and it performs a published act: %s (%s). Its guard is `%s`, which does not defer to the run's success. A failed gate or smoke run must leave the floating reference exactly where it was.",
 			a.Step.Label(), a.Why, a.Kind, strings.TrimSpace(a.Step.If))
 	}
-	if bad == 0 {
+	switch {
+	case undecided > 0:
+		g.undecidedNote("after a failed step, %d of the %d step(s) that still run could not be decided (see the errors above), so whether anything publishes is UNKNOWN", undecided, len(running))
+	case bad == 0:
 		g.note("after a failed step, NO published act runs at all - the floating reference stays where it was")
 	}
 }
@@ -533,14 +547,18 @@ func (g *gate) checkPreReleaseDoesNotPromote(r *Runner, wf *Workflow, job Job, r
 		g.bad("cannot decide which steps run for a pre-release tag: %v", err)
 		return
 	}
+	acts, undecided := g.actsOf(running, &pre.ctx)
 	moved := false
-	for _, a := range g.actsOf(running, &pre.ctx) {
+	for _, a := range acts {
 		if a.Kind == ActTagMove {
 			moved = true
 			g.bad("on a pre-release tag (%s), %s would move the floating reference. `docker pull` would hand a release candidate to everyone who did not ask for one.", samplePreTag, a.Step.Label())
 		}
 	}
-	if !moved {
+	switch {
+	case undecided > 0:
+		g.undecidedNote("on a pre-release tag (%s), %d step(s) that run could not be decided (see the errors above), so whether the floating reference moves is UNKNOWN", samplePreTag, undecided)
+	case !moved:
 		g.note("a pre-release tag (%s) publishes but does NOT move the floating reference", samplePreTag)
 	}
 }
@@ -684,27 +702,33 @@ func (g *gate) checkComposeReferenceAgreement(r *Runner, wf *Workflow, job Job, 
 		} else {
 			g.note("the promotion retags %s onto %s - the same digest, not a rebuild", floating, want)
 		}
-		// And no earlier publishing step may produce the floating reference itself.
+		// And no earlier publishing step may produce the floating reference itself. The
+		// references a push publishes are read from BOTH spellings (`tags:`, and an
+		// `outputs:` entry's `name=`), and a push whose references cannot be read at all
+		// reds: "this step names no tags" is a statement about the gate's reader, not about
+		// what the step pushes, and treating the two as the same is the absent-key
+		// inference again.
 		var earlier []Step
 		for _, s := range job.Steps {
 			if s.Index < promoteIdx {
 				earlier = append(earlier, s)
 			}
 		}
-		for _, a := range g.actsOf(earlier, &p.ctx) {
+		acts, _ := g.actsOf(earlier, &p.ctx)
+		for _, a := range acts {
 			if a.Kind != ActImagePush {
 				continue
 			}
-			raw, ok := a.Step.With["tags"]
-			if !ok {
-				continue
-			}
-			tags, err := Interpolate(yamlString(raw), p.ctx)
+			refs, err := a.Step.PushedRefs(p.ctx)
 			if err != nil {
-				g.bad("cannot read the tags %s pushes: %v", a.Step.Label(), err)
+				g.bad("cannot read the references %s pushes: %v", a.Step.Label(), err)
 				continue
 			}
-			for _, t := range strings.Fields(strings.ReplaceAll(tags, ",", " ")) {
+			if len(refs) == 0 {
+				g.bad("%s publishes an image (%s) but names no reference this gate can read - neither a `tags:` input nor a `name=` in `outputs:`. Whether the floating reference %s is among the references it publishes is therefore UNDECIDABLE, and an undecidable publish is not a harmless one.", a.Step.Label(), a.Why, floating)
+				continue
+			}
+			for _, t := range refs {
 				if t == floating {
 					g.bad("%s pushes %s directly. The floating reference would then be pullable before the pushed artefact has been pulled back and re-smoked, which is exactly what promoting it separately, last, avoids.", a.Step.Label(), floating)
 				}
@@ -750,20 +774,33 @@ func runningSteps(job Job, ctx evalCtx) ([]Step, error) {
 	return out, nil
 }
 
-// actsOf reports the published acts these steps perform under ctx. A step whose publish
-// decision cannot be decided reds the gate and contributes no act, which is why every
-// caller must go through here rather than dropping the error.
-func (g *gate) actsOf(steps []Step, ctx *evalCtx) []Act {
+// actsOf reports the published acts these steps perform under ctx, AND how many steps it
+// could not decide. A step whose publish decision cannot be decided reds the gate and
+// contributes no act, which is why every caller must go through here rather than dropping
+// the error - and why the undecided count comes back with the acts. Counting only acts made
+// "0 acts" indistinguishable from "0 answers", so the gate printed the affirmative
+// "NONE of them publishes anything" on the very run where it had just said it could not
+// answer. The exit code was right and the sentence was not; a reader skims the sentence.
+func (g *gate) actsOf(steps []Step, ctx *evalCtx) ([]Act, int) {
 	var out []Act
+	undecided := 0
 	for _, s := range steps {
 		acts, err := s.Acts(ctx)
 		if err != nil {
 			g.bad("%v", err)
+			undecided++
 			continue
 		}
 		out = append(out, acts...)
 	}
-	return out
+	return out, undecided
+}
+
+// undecidedNote is the counterpart of note: what the gate prints when a property could not
+// be answered. It never begins with "ok", because the whole defect it exists to fix was an
+// affirmative sentence over an unanswered question.
+func (g *gate) undecidedNote(format string, a ...any) {
+	fmt.Fprintf(g.out, "  UNDECIDED: %s\n", fmt.Sprintf(format, a...))
 }
 
 func actsIn(wf *Workflow) ([]Act, error) {

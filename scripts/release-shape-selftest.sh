@@ -26,7 +26,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=38
+declared=46
 pass=0; failed=0
 
 repo="$work/repo"
@@ -142,6 +142,26 @@ expect() {
   printf '  ok: %s\n' "$name"; pass=$((pass + 1))
 }
 
+# expect_absent <want-exit> <name> <must-NOT-mention-regex>. The counterpart of expect's
+# third argument, and it grades a different failure: a gate whose EXIT CODE is right while
+# the sentence it prints answers a question it just said it could not answer. A6 is about
+# that sentence, and a reader skimming stdout sees the reassurance, not the refusal.
+expect_absent() {
+  local want="$1" name="$2" forbidden="$3" got=0
+  run_gate || got=$?
+  if [ "$got" -ne "$want" ]; then
+    printf '::error::selftest: %s - the gate exited %s, wanted %s\n' "$name" "$got" "$want" >&2
+    printf '%s\n' "$out" | sed 's/^/       | /' >&2
+    failed=$((failed + 1)); return
+  fi
+  if grep -qE -- "$forbidden" <<<"$out"; then
+    printf '::error::selftest: %s - exited %s (correct) but still printed /%s/ over a question it could not answer\n' "$name" "$got" "$forbidden" >&2
+    printf '%s\n' "$out" | sed 's/^/       | /' >&2
+    failed=$((failed + 1)); return
+  fi
+  printf '  ok: %s\n' "$name"; pass=$((pass + 1))
+}
+
 # --- 0. The real, unmutated inputs PASS. Without this every "bites" case below could be a
 #        gate that simply fails on everything, which would prove nothing at all.
 expect 0 "the release definition as committed passes"
@@ -234,6 +254,104 @@ reset
 in_step "push the multi-arch image" 's|^          push: true$|          push: ${{ steps.plan.outputs.publish }}|'
 changed "$wf" "the version-tag push respelled as an expression"
 expect 0 "an expression-valued push: that is correct is DECIDED, not refused"
+reset
+
+# --- 3e to 3k. THE SECOND SPELLING OF THE SAME ACT. `push:` is not the action's only route
+#     to a registry, it is a SHORTHAND for the other one: the action's own input table
+#     defines `push` as "shorthand for `--output=type=registry`", and `outputs` as the list
+#     of output destinations. So a step carrying `outputs: type=image,name=…,push=true` (the
+#     spelling in the action's own multi-platform example) or `outputs: type=registry`, and
+#     no `push:` key at all, publishes exactly as hard - while a gate that models only
+#     `push:` reads the ABSENCE of that key as "a local build" and prints "NONE of them
+#     publishes anything" over a dry run that pushes to a public registry. Both inputs are
+#     decided, the step publishes if either says so, and an `outputs:` this gate cannot
+#     decide is never a quiet no.
+dev_output_step() {  # dev_output_step <what to write after `outputs:`>
+  printf '%s\n' \
+    '      - name: publish a dev image so testers can pull dispatch builds' \
+    '        uses: docker/build-push-action@v6' \
+    '        with:' \
+    '          context: .' \
+    '          platforms: linux/amd64' \
+    "          outputs: $1" \
+    '' > "$work/devpush.yml"
+}
+
+# --- 3e. The action's own README spelling. This dry run pushes ghcr.io/nschatz/holdfast:dev
+#         and carries no `push:` key whatsoever.
+dev_output_step "type=image,name=ghcr.io/nschatz/holdfast:dev,push=true"
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch that publishes through outputs: type=image,...,push=true"
+expect 1 "an outputs: that pushes an image is caught on a dispatch, naming the step" "on a manual dispatch.*publish a dev image.*WOULD RUN"
+reset
+
+# --- 3f. buildx's own shorthand for the identical destination.
+dev_output_step "type=registry"
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch that publishes through outputs: type=registry"
+expect 1 "an outputs: type=registry is caught on a dispatch" "on a manual dispatch.*publish a dev image.*WOULD RUN"
+reset
+
+# --- 3g. Undecidable, exactly as 3b is for `push:`: the value reads a context no run here
+#         produces, and resolving that to "local build" is the fail-open.
+dev_output_step "\${{ vars.PUBLISH_DEV }}"
+insert_before "- name: build the release binaries"
+changed "$wf" "an outputs: input the gate cannot decide"
+expect 1 "an outputs: input that cannot be decided reds the gate rather than reading as harmless" "cannot be decided"
+reset
+
+# --- 3h. An exporter this gate has never heard of. buildx gains exporters; an unmodelled
+#         destination must red naming itself, not fall into the local-build bucket by
+#         default.
+dev_output_step "type=quay-direct,name=ghcr.io/nschatz/holdfast:dev"
+insert_before "- name: build the release binaries"
+changed "$wf" "an outputs: naming an exporter the gate does not model"
+expect 1 "an outputs: exporter the gate does not model reds it, naming the exporter" "does not model"
+reset
+
+# --- 3i. THE HONEST OTHER DIRECTION, and it matters as much here as 3d does for `push:`:
+#         `outputs:` is not a synonym for publishing. `load: true` IS `--output=type=docker`,
+#         a local load, and respelling it that way must still PASS. A fix that turned any
+#         `outputs:` into a publish would be caught here and nowhere else.
+in_step "build the image (linux/amd64)" 's|^          load: true$|          outputs: type=docker|'
+changed "$wf" "the amd64 local load respelled as outputs: type=docker"
+expect 0 "a LOCAL outputs: spelling is decided as local, not refused as a publish"
+reset
+
+# --- 3j. The other honest direction, on the step that actually publishes: the real
+#         version-tag push respelled with `outputs:` is a correct definition, and the act
+#         must stay IN the inventory rather than vanishing from it - which is what makes the
+#         runbook cross-check (A8) still demand an entry for it and gives the ordering
+#         property a push to order.
+in_step "push the multi-arch image" '/^          push: true$/d'
+in_step "push the multi-arch image" 's@^          tags: \(.*\)$@          outputs: type=image,name=\1,push=true@'
+changed "$wf" "the version-tag push respelled with outputs:"
+expect 0 "the version-tag push respelled with outputs: passes AND stays in the act inventory" \
+  "names every one of the 3 published act.*image-push@push-the-multi-arch-image-version-tag-only"
+reset
+
+# --- 3k. And the reference a push publishes has the same two spellings. `tags:` was the
+#         only one the gate read, so a push that names the FLOATING reference inside
+#         `outputs:` slipped past the check that `:latest` is never pushed directly - live
+#         before the artefact has been pulled back and re-smoked.
+in_step "push the multi-arch image" '/^          push: true$/d'
+in_step "push the multi-arch image" 's@^          tags: \(.*\)$@          outputs: |\n            type=image,name=\1,push=true\n            type=image,name=${{ steps.plan.outputs.image }}:latest,push=true@'
+changed "$wf" "the build pushing :latest through an outputs: name="
+expect 1 "a build that pushes the floating reference through outputs: name= is caught" \
+  "pushes ghcr.io/.*:latest directly. The floating reference would then be pullable"
+reset
+
+# --- 3l. A6 grades a SENTENCE as well as an exit code, and the two came apart: the gate
+#         counted ACTS, so a step it could not decide contributed no act, `found` stayed 0,
+#         and "NONE of them publishes anything" was printed in the affirmative on the very
+#         run where the gate had just refused to answer. The exit code was right and nothing
+#         unreviewed could ship, but a reader skimming stdout saw the reassurance rather than
+#         the refusal. An undecided step must suppress that sentence, not survive it.
+dev_output_step "\${{ vars.PUBLISH_DEV }}"
+insert_before "- name: build the release binaries"
+changed "$wf" "an undecidable step, to grade what the gate SAYS about the dispatch"
+expect_absent 1 "a run the gate could not decide never claims NONE of them publishes anything" \
+  "NONE of them publishes anything"
 reset
 
 # =====================================================================================

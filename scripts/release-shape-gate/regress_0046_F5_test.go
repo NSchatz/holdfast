@@ -101,15 +101,45 @@ func TestRegress0046L2_F5c_DispatchLogsInAndPublishesThroughOutputs(t *testing.T
 
 // F5d. The same input on the step that already exists, which is how this arrives
 // in practice: `push: true` is swapped for the `outputs:` form during a
-// push-by-digest refactor. The version-tag push then disappears from the gate's
-// inventory entirely - so the runbook cross-check (A8) stops requiring an entry
-// for it, and the ordering property has no push to order.
-func TestRegress0046L2_F5d_TheRealPushRespelledAsOutputsVanishes(t *testing.T) {
+// push-by-digest refactor.
+//
+// THE MUTATION IS BYTE-IDENTICAL TO THE ONE WRITTEN AT IMPL ORDINAL 2. Its
+// EXPECTATION is not, and the reason is the finding itself. At ordinal 2 this
+// asserted `mustRed` with the note "nothing then orders it, and the runbook need
+// not name it": the version-tag push disappeared from the gate's inventory
+// entirely, three acts became two, and the gate red only because this workflow
+// happens to carry a separate promotion to complain about ("nothing pushes an
+// image, yet step 17 ... moves a floating reference"). The refuter recorded that
+// as surviving by accident.
+//
+// Once BOTH of the action's destination inputs are decided, this mutation is not
+// a defect at all: it is a correct release definition, spelled the way the
+// action's own multi-platform example spells it. Asserting red on it would be
+// the false positive P6 and self-test case 3d exist to forbid. So the honest
+// assertion is the one the refuter named as the fix's own success condition -
+// the respelled push must APPEAR IN THE ACT INVENTORY properly, which is what
+// makes A8 demand a runbook entry for it and gives the ordering property a push
+// to order. That is asserted here, and pinned inside `make check` too, by
+// release-shape-selftest case 3j.
+func TestRegress0046L2_F5d_TheRealPushRespelledAsOutputsStaysInTheInventory(t *testing.T) {
 	root := fixture(t)
 	mutate(t, root, ".github/workflows/release.yml",
 		"          push: true\n          tags: ${{ steps.plan.outputs.image }}:${{ steps.plan.outputs.version }}\n",
 		"          outputs: type=image,name=${{ steps.plan.outputs.image }}:${{ steps.plan.outputs.version }},push=true\n")
-	mustRed(t, root, "a release definition whose only image push is spelled with `outputs:` (nothing then orders it, and the runbook need not name it)")
+	red, out := runGate(t, root)
+	t.Logf("gate stdout:\n%s", out)
+	if red {
+		t.Fatalf("the gate RED the version-tag push respelled with `outputs:`, which is a correct release definition")
+	}
+	for _, want := range []string{
+		"names every one of the 3 published act(s)",
+		"image-push@push-the-multi-arch-image-version-tag-only",
+		"version-tag push",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the respelled push is not visible to the gate: nothing in its output mentions %q.\nIt passed, but over an inventory the push had vanished from - which is what ordinal 2 blocked on.", want)
+		}
+	}
 }
 
 // --- probes the gate CATCHES, kept so this file is a measurement -------------

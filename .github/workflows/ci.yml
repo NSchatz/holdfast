@@ -67,7 +67,7 @@ jobs:
         run: make check
 
       # The release-shape gate's own self-test, on top of the gate. `make check` runs the
-      # GATE (scripts/release-shape-gate); this defeats it on purpose, 38 ways, against
+      # GATE (scripts/release-shape-gate); this defeats it on purpose, 46 ways, against
       # mutated copies of release.yml, docker-compose.yml and docs/release.md - so the
       # mutations stay out of `check`, which must never rewrite the tree it is grading.
       # Same reason the config self-test below sits here: proving a gate REDS is a

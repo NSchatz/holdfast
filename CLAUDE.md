@@ -175,11 +175,24 @@ decides each step's guard from the values that run produced, through a real GitH
 models the implicit `success() &&` every `if:` carries. The difference is the whole design: flip the planning
 script so a dispatch sets `publish=true` and not one `if:` in the file changes, so a text matcher stays green
 while a dry run pushes an image (`release-shape-selftest` case 3). The same refusal to read text applies one
-layer in, to the ACTION INPUT that can make a step publish on its own: `docker/build-push-action` publishes
-when `push:` is true, and GitHub lets that be an expression (`push: ${{ github.event_name != 'pull_request' }}`
-is the action's documented idiom), which is never the literal string `true` — so the input is EVALUATED for
-the event under test, and anything undecidable (an unknown context, an unimplemented function, a value that
-is not a boolean) reds the gate by name rather than reading as harmless (cases 3a-3d). It also runs the
+layer in, to the ACTION INPUTS that can make a step publish on its own - **plural, and that is the point**.
+`docker/build-push-action` publishes when `push:` is true, and GitHub lets that be an expression
+(`push: ${{ github.event_name != 'pull_request' }}` is the action's documented idiom), which is never the
+literal string `true`, so the input is EVALUATED for the event under test, and anything undecidable (an
+unknown context, an unimplemented function, a value that is not a boolean) reds the gate by name rather than
+reading as harmless (cases 3a-3d). But `push:` is not that action's only route to a registry, it is a
+SHORTHAND for the other one: the action's own input table defines it as "shorthand for
+`--output=type=registry`" and defines `outputs:` as the list of output destinations, so
+`outputs: type=registry` - and `type=image,name=...,push=true`, the spelling in the action's own
+multi-platform example - publish exactly as hard, with no `push:` key present at all. Modelling one key
+turned its ABSENCE into an inferred "this is a local build", and a dry run that pushed to GHCR was reported
+as "NONE of them publishes anything". Both inputs are decided, the step publishes if EITHER says so, a local
+`outputs:` spelling (`type=docker`, which is what `load: true` means) must still PASS, and an exporter this
+gate does not model reds naming itself rather than falling into the local bucket (cases 3e-3k). The same
+absent-key inference is closed one property along: the references a push publishes are read from BOTH
+`tags:` and an `outputs:` entry's `name=`. **The rule when you extend this**: an act is a property of a
+step's DEFINITION, so model every input through which an action can perform it - a set of one is how this
+shipped a hole twice - and never let a value the gate cannot decide read as a no. It also runs the
 promotion step under a
 stubbed `docker` and reads the reference it ACTUALLY moved out of the argv, which is the only honest way to
 compare `docker-compose.yml` against a reference the workflow derives at run time from `github.repository`.
@@ -193,7 +206,7 @@ HTTP surface and the metric names stable: 1.0.0 "defines the public API" and a r
 modified, so the first non-zero major is a promise, not a bigger number. `scripts/resolve-compose-image.sh`
 runs after the promotion and fails the release if the reference the example deployment names does not resolve
 to the digest that run just gated. `make release-shape-selftest` (CI, not `check`, because its mutations must
-not touch the tree `check` is grading) defeats every one of those 38 ways and fails if any defeat did not run.
+not touch the tree `check` is grading) defeats every one of those 46 ways and fails if any defeat did not run.
 `TRANSCODE-12` **renamed the project `transcode` → `holdfast`**, and it had to land before the first tag
 because not one of these surfaces can be redirected afterwards: Go has **no module-path rename primitive**
 (golang/go#59766, closed *not planned*), **nothing** rewrites a container-image reference in a user's

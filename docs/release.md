@@ -300,14 +300,28 @@ major is refused; this table names every publishing step; and the reference
 `docker-compose.yml` gives users is the one a release of THIS repository promotes.
 
 "A dispatch publishes nothing" is decided rather than read, on both sides of a step: the
-guard, and the action input that can make a step publish on its own. `docker/build-push-
-action` publishes when its `push:` input is true, and GitHub lets that input be an
-expression - `push: ${{ github.event_name != 'pull_request' }}` is the action's own
-documented idiom - so the input is evaluated for the event under test, through the same
-evaluator as the guards. Anything it cannot decide (an unknown context, a function it does
-not implement, a value that is not a boolean) reds the gate by name. It is never read as
-"this step is harmless": a step wrongly called publishing costs a runbook entry, one wrongly
-called harmless is an unreviewed publish.
+guard, and every action input that can make a step publish on its own. `docker/build-push-
+action` has TWO of those, and its own input table says they are one act spelled two ways:
+`push` is "shorthand for `--output=type=registry`", and `outputs` is the list of output
+destinations. So `outputs: type=registry` - and `type=image,name=...,push=true`, the
+spelling in the action's own multi-platform example - publish exactly as hard as
+`push: true` does, with no `push:` key present at all. Both are decided, and the step
+publishes if either says so.
+
+GitHub also lets either input be an expression - `push: ${{ github.event_name !=
+'pull_request' }}` is the action's own documented idiom - so it is evaluated for the event
+under test, through the same evaluator as the guards. Anything the gate cannot decide (an
+unknown context, a function it does not implement, a value that is not a boolean, a buildx
+exporter it does not model) reds it by name. Nothing is read as "this step is harmless": a
+step wrongly called publishing costs a runbook entry, one wrongly called harmless is an
+unreviewed publish. The same rule holds for the references a push publishes, which are read
+from `tags:` and from an `outputs:` entry's `name=`; a push whose references the gate cannot
+read reds rather than being assumed to name nothing.
+
+**Extending this:** an act is a property of a step's DEFINITION, so model every input
+through which an action can perform it. Modelling one and inferring the act's absence from
+that key's absence is how a dry run that pushed to GHCR came to be reported as "NONE of them
+publishes anything", and it is why the input catalogue is a set rather than a key.
 
 The example deployment's image reference has exactly ONE reader, in that gate.
 `scripts/resolve-compose-image.sh` asks for it (`release-shape-gate -print-compose-ref`)

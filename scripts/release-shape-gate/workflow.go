@@ -14,7 +14,7 @@ package main
 //     as publishing reds the gate and gets an entry in the runbook, while one wrongly
 //     classified as harmless is how an unreviewed publish ships.
 //
-// The second question has a sharp edge, and decideRequiredInput is where it is handled: an
+// The second question has a sharp edge, and destinationInput is where it is handled: an
 // action input can decide the act by itself (`docker/build-push-action` publishes when
 // `push:` is true), and GitHub lets that input be an EXPRESSION - `push: ${{
 // github.event_name != 'pull_request' }}` is the action's own documented idiom. Asking
@@ -23,6 +23,18 @@ package main
 // harmless. Such an input is therefore DECIDED, through the same evaluator that decides
 // `if:` guards, against the same event shape - and everything undecidable is an error, not
 // a false.
+//
+// The same edge has a SECOND face, and it is the reason an input is modelled as a SET
+// rather than as one key. `docker/build-push-action` has TWO inputs that set where its
+// build goes, and its own input table says they are one act spelled two ways: `push` is
+// "shorthand for `--output=type=registry`", and `outputs` is the longhand list of output
+// destinations. So `outputs: type=registry`, and `outputs: type=image,name=…,push=true`
+// (the spelling in the action's own multi-platform example), publish exactly as hard as
+// `push: true` does. Modelling only `push:` turned the ABSENCE of that one key into an
+// inferred "this is a local build", which is false whenever the other key carries the act -
+// and false in the direction that ships an unreviewed publish. Both are decided here, the
+// step publishes if EITHER says so, and an `outputs:` value this gate cannot decide is
+// never a quiet no.
 
 import (
 	"fmt"
@@ -195,17 +207,33 @@ var runDetectors = []struct {
 	{ActArtefact, regexp.MustCompile(`\b(skopeo|oras)\s+(copy|push)\b`), "a registry copy/push"},
 }
 
+// destinationInput is one `with:` input through which an action decides where its build
+// goes. An action's inputs are modelled as a SET because a destination can be spelled more
+// than one way on the same action, and a set of one is how the "only `push:` exists"
+// reading shipped a hole: absence of the modelled key was read as absence of the act.
+type destinationInput struct {
+	key    string
+	decide func(key string, raw any, ctx *evalCtx) (publishes bool, detail string, err error)
+}
+
 // usesDetectors are matched against a step's `uses:` and its `with:` inputs.
+//
+// `inputs` are ALTERNATIVE spellings of the same destination, not a conjunction: the action
+// publishes if ANY of them says so, because buildx unions its output destinations (`push:
+// true` appends `--output=type=registry` to whatever `outputs:` already asked for).
 var usesDetectors = []struct {
-	kind    ActKind
-	action  *regexp.Regexp
-	require string // a `with:` key that must be TRUE, empty = the action always publishes
-	what    string
+	kind   ActKind
+	action *regexp.Regexp
+	inputs []destinationInput // nil = the action always publishes
+	what   string
 }{
-	{ActImagePush, regexp.MustCompile(`^docker/build-push-action`), "push", "docker/build-push-action"},
-	{ActRelease, regexp.MustCompile(`^softprops/action-gh-release`), "", "softprops/action-gh-release"},
-	{ActRelease, regexp.MustCompile(`^ncipollo/release-action`), "", "ncipollo/release-action"},
-	{ActRefPush, regexp.MustCompile(`^ad-m/github-push-action`), "", "ad-m/github-push-action"},
+	{ActImagePush, regexp.MustCompile(`^docker/build-push-action`), []destinationInput{
+		{"push", decideRequiredInput},
+		{"outputs", decideOutputsInput},
+	}, "docker/build-push-action"},
+	{ActRelease, regexp.MustCompile(`^softprops/action-gh-release`), nil, "softprops/action-gh-release"},
+	{ActRelease, regexp.MustCompile(`^ncipollo/release-action`), nil, "ncipollo/release-action"},
+	{ActRefPush, regexp.MustCompile(`^ad-m/github-push-action`), nil, "ad-m/github-push-action"},
 }
 
 // Acts reports every published act this step performs, for the event shape ctx describes.
@@ -230,27 +258,37 @@ func (s Step) Acts(ctx *evalCtx) ([]Act, error) {
 			continue
 		}
 		why := d.what
-		if d.require != "" {
-			publishes, detail, err := decideRequiredInput(d.require, s.With[d.require], ctx)
-			if err != nil {
-				return nil, fmt.Errorf("%s uses %s, and %w.\nThis gate will not read an input it cannot decide as harmless: a step wrongly called publishing reds this gate, one wrongly called harmless is how an unreviewed publish ships", s.Label(), s.Uses, err)
+		if len(d.inputs) > 0 {
+			var reasons []string
+			for _, in := range d.inputs {
+				publishes, detail, err := in.decide(in.key, s.With[in.key], ctx)
+				if err != nil {
+					return nil, fmt.Errorf("%s uses %s, and %w.\nThis gate will not read an input it cannot decide as harmless: a step wrongly called publishing reds this gate, one wrongly called harmless is how an unreviewed publish ships", s.Label(), s.Uses, err)
+				}
+				if publishes {
+					reasons = append(reasons, detail)
+				}
 			}
-			if !publishes {
+			if len(reasons) == 0 {
 				continue
 			}
-			why = d.what + " (" + detail + ")"
+			why = d.what + " (" + strings.Join(reasons, "; ") + ")"
 		}
 		out = append(out, Act{Kind: d.kind, Step: s, Why: why})
 	}
 	return out, nil
 }
 
-// decideRequiredInput decides a `with:` input that by itself makes an action publish.
+// decideRequiredInput decides a BOOLEAN `with:` input that by itself makes an action
+// publish - `docker/build-push-action`'s `push:`.
 //
 // Fail-closed at every branch, because the wrong way to be wrong here is a silent false:
 //
-//   - absent: the action's own default, and a build step with no `push:` is a local build.
-//     Not an act. This is the only "no" that is inferred rather than read.
+//   - absent: this key does not set a destination. It is NOT on its own a verdict that the
+//     step is a local build - the same action's `outputs:` can carry the very same act, and
+//     that is why a detector decides every one of an action's destination inputs and
+//     publishes if any of them says so. Reading absence here as "harmless" while the other
+//     spelling went unmodelled is precisely how a dry run that pushes read as green.
 //   - a YAML boolean, or a string that is exactly true/false once every ${{ … }} span in it
 //     has been EVALUATED against the event under test: that value.
 //   - anything else - an expression this evaluator cannot decide, a context the planning run
@@ -295,6 +333,201 @@ func decideRequiredInput(key string, raw any, ctx *evalCtx) (publishes bool, det
 	default:
 		return false, "", fmt.Errorf("`%s:` is a %T (%v), not a boolean and not an expression, so this step's publish decision is unknown", key, raw, raw)
 	}
+}
+
+// decideOutputsInput decides `outputs:` - buildx's LONGHAND for the destination `push:`
+// sets in shorthand. The action's own input table calls `push` "shorthand for
+// `--output=type=registry`", so these two keys are one act with two spellings and both have
+// to be decided or the absence of one is read as the absence of the act.
+//
+// The value is a LIST, one buildx output specification per LINE (the action parses it with
+// commas ignored as separators, because a single specification is itself a comma-separated
+// attribute list: `type=image,name=…,push=true`). The step publishes if ANY line does.
+//
+// Fail-closed at every branch, in the same two ways `push:` is:
+//
+//   - absent: this key sets no destination. Not on its own a verdict about the step.
+//   - an expression with no event to decide against (the static question the runbook
+//     cross-check asks): counted as PUBLISHING, so a step that might publish is a step the
+//     runbook has to name.
+//   - an expression this evaluator cannot decide for the event under test: an ERROR.
+//   - a line whose exporter this gate does not model, whose `type=` is missing, whose
+//     `push=` is not a boolean, or which cannot be read as attributes at all: an ERROR that
+//     names the line. An unmodelled destination must red rather than read as harmless, and
+//     an error is deliberately stronger than counting it as publishing here - a publish
+//     miscounted as an act can be silenced by adding a runbook entry, whereas this can only
+//     be silenced by teaching the gate what that exporter does.
+func decideOutputsInput(key string, raw any, ctx *evalCtx) (publishes bool, detail string, err error) {
+	switch t := raw.(type) {
+	case nil:
+		return false, "", nil
+	case string:
+		text := strings.TrimSpace(t)
+		if text == "" {
+			return false, "", fmt.Errorf("`%s:` is empty. An input that decides where this step's build is written must say where", key)
+		}
+		if strings.Contains(text, "${{") {
+			if ctx == nil {
+				return true, fmt.Sprintf("%s: %s - an expression, counted as publishing because no single event decides it", key, oneLine(text)), nil
+			}
+			v, ierr := Interpolate(text, *ctx)
+			if ierr != nil {
+				return false, "", fmt.Errorf("`%s: %s` cannot be decided for this event: %w", key, oneLine(text), ierr)
+			}
+			text = strings.TrimSpace(v)
+			if text == "" {
+				return false, "", fmt.Errorf("`%s:` evaluates to nothing for this event, so where this step's build is written is unknown", key)
+			}
+		}
+		return decideBuildxOutputs(key, text)
+	default:
+		return false, "", fmt.Errorf("`%s:` is a %T (%v), not a list of buildx output specifications and not an expression, so where this step's build is written is unknown", key, raw, raw)
+	}
+}
+
+// buildxLocalExporters write to the local filesystem or the local daemon. None of them can
+// reach a registry, so none of them is a published act. Listed rather than defaulted: an
+// exporter this gate has never heard of is an error, not a member of this set.
+var buildxLocalExporters = map[string]bool{
+	"local": true, "tar": true, "oci": true, "docker": true, "cacheonly": true,
+}
+
+func decideBuildxOutputs(key, text string) (bool, string, error) {
+	for _, line := range strings.Split(text, "\n") {
+		entry := strings.TrimSpace(line)
+		if entry == "" {
+			continue
+		}
+		attrs, aerr := parseCSVAttrs(entry)
+		if aerr != nil {
+			return false, "", fmt.Errorf("`%s:` entry %q cannot be read as buildx output attributes (%v), so where it writes the build is unknown", key, entry, aerr)
+		}
+		typ, ok := attrs["type"]
+		if !ok {
+			return false, "", fmt.Errorf("`%s:` entry %q names no `type=`, so which buildx exporter it selects - and whether that exporter writes to a registry - is unknown", key, entry)
+		}
+		typ = strings.ToLower(strings.TrimSpace(typ))
+		switch {
+		case typ == "registry":
+			return true, fmt.Sprintf("%s: %s - the `registry` exporter, which buildx documents as `type=image,push=true`", key, entry), nil
+		case typ == "image":
+			push, has := attrs["push"]
+			if !has {
+				continue // the image exporter keeps its result locally unless told to push
+			}
+			switch strings.ToLower(strings.TrimSpace(push)) {
+			case "true":
+				return true, fmt.Sprintf("%s: %s - the `image` exporter with push=true, which IS a registry push", key, entry), nil
+			case "false":
+				continue
+			default:
+				return false, "", fmt.Errorf("`%s:` entry %q sets `push=%s`, which is not a boolean, so whether this step publishes is unknown", key, entry, push)
+			}
+		case buildxLocalExporters[typ]:
+			continue
+		default:
+			return false, "", fmt.Errorf("`%s:` entry %q selects the buildx exporter %q, which this gate does not model. Teach it that exporter - and whether it writes to a registry - rather than letting an unmodelled destination read as harmless", key, entry, typ)
+		}
+	}
+	return false, "", nil
+}
+
+// parseCSVAttrs reads one buildx output specification: comma-separated `key=value` pairs,
+// where a value may be double-quoted and may itself contain commas and `=`.
+func parseCSVAttrs(entry string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, field := range splitOutsideQuotes(entry, ',') {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(field, "=")
+		if !ok {
+			return nil, fmt.Errorf("%q is not a key=value attribute", field)
+		}
+		k = strings.ToLower(strings.TrimSpace(k))
+		if k == "" {
+			return nil, fmt.Errorf("%q names no attribute", field)
+		}
+		out[k] = strings.Trim(strings.TrimSpace(v), `"`)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("it names no attributes at all")
+	}
+	return out, nil
+}
+
+func splitOutsideQuotes(s string, sep byte) []string {
+	var (
+		out    []string
+		cur    strings.Builder
+		quoted bool
+	)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '"':
+			quoted = !quoted
+			cur.WriteByte(c)
+		case c == sep && !quoted:
+			out = append(out, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	return append(out, cur.String())
+}
+
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// PushedRefs reports the image references a publishing step actually publishes, read from
+// BOTH spellings the action accepts: the `tags:` input, and the `name=` attribute of an
+// `outputs:` entry that pushes. Reading only `tags:` made an absent `tags:` key mean "this
+// push names nothing I need to check", which is the same absent-key inference that let a
+// step publishing through `outputs:` disappear.
+//
+// An empty result from a step that DOES publish is the caller's problem to report: it means
+// the gate cannot see what the step pushes, which is not the same as "it pushes nothing".
+func (s Step) PushedRefs(ctx evalCtx) ([]string, error) {
+	var out []string
+	if raw, ok := s.With["tags"]; ok {
+		tags, err := Interpolate(yamlString(raw), ctx)
+		if err != nil {
+			return nil, fmt.Errorf("`tags:` cannot be decided for this event: %w", err)
+		}
+		out = append(out, strings.Fields(strings.ReplaceAll(tags, ",", " "))...)
+	}
+	if raw, ok := s.With["outputs"]; ok {
+		text, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("`outputs:` is a %T, not a list of buildx output specifications", raw)
+		}
+		resolved, err := Interpolate(text, ctx)
+		if err != nil {
+			return nil, fmt.Errorf("`outputs:` cannot be decided for this event: %w", err)
+		}
+		for _, line := range strings.Split(resolved, "\n") {
+			entry := strings.TrimSpace(line)
+			if entry == "" {
+				continue
+			}
+			attrs, err := parseCSVAttrs(entry)
+			if err != nil {
+				return nil, fmt.Errorf("`outputs:` entry %q cannot be read as buildx output attributes: %v", entry, err)
+			}
+			if name := strings.TrimSpace(attrs["name"]); name != "" {
+				for _, n := range strings.Split(name, ";") {
+					if n = strings.TrimSpace(n); n != "" {
+						out = append(out, n)
+					}
+				}
+			}
+		}
+	}
+	return out, nil
 }
 
 // TolerateFailure reports whether the step is marked so that its own failure does not
