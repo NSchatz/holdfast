@@ -210,9 +210,17 @@ dry_run: false
 #                            #   lowers the lifetime reclaimed total (a removed row's
 #                            #   contribution is carried forward durably before the row
 #                            #   goes), it never touches a media file, and it never causes
-#                            #   a file to be encoded again - a file parked at
-#                            #   max_failures keeps its row, so the ledger can sit above
-#                            #   this bound rather than hand that file back to the encoder.
+#                            #   a file to be encoded again. That last one is why a row is
+#                            #   only removed when the scan LISTED the directory its file
+#                            #   should be in and the file was not there: a terminal row is
+#                            #   what holds that file out of the encoder, so deleting one
+#                            #   for a file you still have re-encodes it as soon as the
+#                            #   configuration it was decided under has moved.
+#                            #   SO THE LEDGER CAN SIT ABOVE THIS BOUND, and on a library
+#                            #   that is not churning a pass may remove nothing at all:
+#                            #   there is one row per file you own and every one of them is
+#                            #   load-bearing. This bounds what your library has FINISHED
+#                            #   with. The pass logs what it kept and why.
 #                            #   A negative or fractional value is a startup REFUSAL.
 #                            #   The bound is a row count only: there is no age-based or
 #                            #   per-status policy, and pruning does not shrink jobs.db on

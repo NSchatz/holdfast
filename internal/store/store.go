@@ -240,14 +240,34 @@ type Aggregates struct {
 // Removed is how many terminal rows were deleted. ReclaimedCarried is the number of bytes
 // those rows contributed to the lifetime reclaimed total, moved into the durable
 // carry-forward BEFORE they were deleted, so the published total does not move. Kept is
-// how many rows the pass deliberately left above the retention because removing them
-// would change what the engine does - today, files parked at max_failures (see
-// PruneTerminal).
+// how many rows the pass EXAMINED and refused to remove because removing them would change
+// what the engine does with a file: a job parked at max_failures, or a row Prunable
+// declined. It counts examined rows, not the whole table - a pass stops offering rows the
+// moment enough are approved to meet the retention - so it is "what this pass refused",
+// which is the figure that tells an operator why a table stayed large.
 type Prune struct {
 	Removed          int64
 	ReclaimedCarried int64
 	Kept             int64
 }
+
+// Prunable answers the one question the retention pass cannot answer for itself: may the
+// terminal row for path+fingerprint be removed WITHOUT changing what the engine would do
+// with that file?
+//
+// It exists because a terminal row is a DECISION and not only a record. Claim refuses a
+// done or skipped row outright, and the skip guards that would re-derive the same verdict
+// run after Claim, under whatever configuration is current - so a pruned row re-derives
+// its own verdict only while the configuration it was taken under has not moved. Answering
+// it means knowing whether that file is still in the library, which is a question about
+// the filesystem, and this package never touches the filesystem (see the package comment:
+// the store records job STATE and nothing else). So the caller answers, and internal/engine
+// is the caller that can.
+//
+// TRUE means "removing this row can cause no encode": the file that row decided is no
+// longer in the library. FALSE is the safe answer and must be the answer whenever the
+// caller cannot tell.
+type Prunable func(path, fingerprint string, s Status) bool
 
 // RowTotal is a count of matching rows in the LEDGER, beside the capped rows a response
 // actually ships (LEDGER-5). It exists because /api/queue and /api/history return at most
@@ -332,25 +352,34 @@ type Store interface {
 	// is a no-op that reads nothing and deletes nothing - the shipped default, and the
 	// behaviour of a configuration that never mentions retention.
 	//
-	// Two rows are never removed, and both exclusions are the criteria this method exists
-	// to satisfy rather than defensive taste:
+	// Three rules govern what it may take, and every one of them is a criterion this
+	// method exists to satisfy rather than defensive taste:
 	//
 	//  1. A row's contribution to the durable lifetime reclaimed total is CARRIED FORWARD
 	//     into ledger_totals in the same transaction that deletes it, so the published
 	//     total is identical either side of a prune - on the running server, whose
 	//     baseline is frozen at startup, and after the restart that re-reads it. A row
 	//     that still contributed is therefore never lost, only relocated.
-	//  2. A FAILED row whose fail_count has reached maxFailures is PARKED: the engine
+	//  2. A row prunable says no to is KEPT. A terminal row is a decision the engine
+	//     enforces through Claim, so removing the row of a file that is still in the
+	//     library hands that file to the encoder whenever the configuration the verdict
+	//     was taken under has since moved. Only the caller can see the library; see
+	//     Prunable. A nil prunable keeps every row.
+	//  3. A FAILED row whose fail_count has reached maxFailures is PARKED: the engine
 	//     refuses to claim it, and deleting it would reset that accounting and hand the
-	//     file straight back to the encoder on the next scan. Retention must not cause an
-	//     encode, so a parked row is kept and counted in Prune.Kept. It is the one case
-	//     where the ledger may sit above maxRows, and it is reported rather than hidden.
+	//     file straight back to the encoder on the next scan. This one the store can see
+	//     in its own columns, so it is refused here as well as by rule 2 - the one
+	//     irreversible act in this package does not rest on a single check.
+	//
+	// Rules 2 and 3 are counted in Prune.Kept and are why the ledger may sit ABOVE
+	// maxRows: a retention that cannot be met without causing an encode is not met, and
+	// the count is reported rather than hidden.
 	//
 	// The pass runs in BATCHES, each its own transaction: a 300,000-row ledger must not
 	// hold the single serialized write connection for the length of one enormous DELETE,
 	// and a failure part way through leaves every row it did not remove in place with the
 	// total already correct for the rows it did.
-	PruneTerminal(ctx context.Context, maxRows, maxFailures int) (Prune, error)
+	PruneTerminal(ctx context.Context, maxRows, maxFailures int, prunable Prunable) (Prune, error)
 
 	// CountRows counts the rows matching statuses, over the WHOLE table - the total a
 	// capped response was capped against (LEDGER-5). An empty statuses counts every row.

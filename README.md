@@ -340,17 +340,32 @@ What a prune will never do, whatever you set:
   the figure is identical either side of a prune — on the running server *and* after the restart that
   re-reads it from the database. (That second half is where a naive prune fails silently: the server reads
   the total once, at startup, so deleting contributing rows shows a correct figure until the next restart.)
-- **It cannot cause a file to be encoded again.** A file parked at `max_failures` keeps its row, because
-  deleting it would reset the retry accounting and hand the file straight back to the encoder. **The ledger
-  can therefore sit above the bound**, and the retention pass logs how many rows it kept and why.
+- **It cannot cause a file to be encoded again.** A terminal row is a *decision*, not only a record: it is
+  what holds that file out of the encoder on every later scan, and the guards that would re-derive the same
+  verdict run under whatever configuration is current, so a deleted row means a re-encode the moment the
+  configuration it was taken under has moved (a different `encoder` target codec, a lowered
+  `min_bitrate_kbps`, a file parked at `max_failures`). **So a row is only ever removed when the scan
+  listed the directory that file should be in and the file was not there**: gone, or replaced by different
+  content. Retention bounds what your library has *finished with*.
 - **It never touches a media file.** The store records job state and nothing else.
+
+**What that costs you, plainly.** A library that is not churning has one terminal row per file and every
+one of them is load-bearing, so **its ledger is bounded by the library and not by `history_retention_rows`,
+and a prune pass may remove nothing at all**. The ledger can therefore sit above the bound; the retention
+pass logs how many rows it kept, and splits them into the files that are still in the library and the
+directories this run could not list. If your `jobs.db` is large because your library is large, this key is
+not the tool for it: that is one row per file you own, and deleting it would cost you a second lossy
+generation of the file it describes.
 
 **Known limitations.** The bound is a **row count** only — there is no age-based or per-status policy. It
 does not shrink `jobs.db` on disk: pruning bounds the rows, and SQLite reuses the freed pages (there is no
-`VACUUM`). Non-terminal rows are never pruned — they are work, not history. And with retention disabled
-(the default) the table's growth is visible through the metrics that already exist:
-`holdfast_queue_depth{state}` is read from the store on every scrape, over every status including the
-terminal ones.
+`VACUUM`). Non-terminal rows are never pruned — they are work, not history. Rows under a directory the run
+could not list are kept, deliberately and indefinitely: an unmounted subtree looks exactly like a library
+you emptied, and pruning on that absence would re-encode the lot when it came back. With retention enabled,
+each pass stats the files behind the terminal rows it examines, which is one extra stat per row on top of
+the scan that just ran. And with retention disabled (the default) the table's growth is visible through the
+metrics that already exist: `holdfast_queue_depth{state}` is read from the store on every scrape, over every
+status including the terminal ones.
 
 ### Taking the record elsewhere — `holdfast export`
 

@@ -115,7 +115,7 @@ func TestOpenReadOnly_ReadsEveryRowAndRefusesEveryWrite(t *testing.T) {
 	if err := st.Finish(ctx, "/lib/a.mkv", "fp", Done, &Outcome{Encoder: "cpu"}); err == nil {
 		t.Error("a read-only handle accepted a write; `never writes to the store it reads` must be enforced, not promised")
 	}
-	if _, err := st.PruneTerminal(ctx, 1, 3); err == nil {
+	if _, err := st.PruneTerminal(ctx, 1, 3, everyRowSpent); err == nil {
 		t.Error("a read-only handle accepted a prune - the one irreversible act in this package")
 	}
 }

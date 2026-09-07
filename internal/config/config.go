@@ -176,7 +176,10 @@ type Config struct {
 	//
 	// The prune it enables cannot lower the published lifetime reclaimed total (a pruned
 	// row's contribution is carried forward durably before the row is removed) and cannot
-	// cause a file to be encoded again (a file parked at max_failures keeps its row).
+	// cause a file to be encoded again: a terminal row is what holds that file out of the
+	// encoder, so a row is only ever removed when the scan LISTED the directory its file
+	// should be in and the file was not there. The ledger can therefore sit above this
+	// bound - on a library that is not churning, above it permanently.
 	// A negative value, or a value that is not a whole number of rows, is a startup
 	// REFUSAL naming the key and the offending value - never a silent default.
 	HistoryRetentionRows int `yaml:"history_retention_rows"`

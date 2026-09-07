@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -76,11 +77,14 @@ func queueDepth(t *testing.T, body, state string) int {
 	return 0 // absent means no row in that state, which the gauge reports by omission
 }
 
-func seedSkipped(t *testing.T, st *store.SQLite, from, to int) {
+// seedSkipped writes terminal rows for files UNDER root that are not there. root is the
+// library the scan below lists, so these are the rows a churning library leaves behind -
+// history for files it has finished with, and the rows a retention exists to bound.
+func seedSkipped(t *testing.T, st *store.SQLite, root string, from, to int) {
 	t.Helper()
 	ctx := context.Background()
 	for i := from; i < to; i++ {
-		p := "/lib/history" + strconv.Itoa(i) + ".mkv"
+		p := filepath.Join(root, "history"+strconv.Itoa(i)+".mkv")
 		ok, err := st.Claim(ctx, p, "fp", "w0", 3)
 		if err != nil || !ok {
 			t.Fatalf("seed claim %s: ok=%v err=%v", p, ok, err)
@@ -91,12 +95,13 @@ func seedSkipped(t *testing.T, st *store.SQLite, from, to int) {
 	}
 }
 
-// scanWithRetention runs one real engine scan over an EMPTY library with the given
-// retention. Empty because the criterion is about the LEDGER, not about encoding: the scan
-// is here only because it is what triggers the retention pass.
-func scanWithRetention(t *testing.T, st store.Store, rows int) {
+// scanWithRetention runs one real engine scan over root with the given retention. root is
+// EMPTY because the criterion is about the LEDGER, not about encoding: the scan is here
+// only because it is what triggers the retention pass. It is the SAME directory the rows
+// were seeded under, which is what makes them prunable - the pass lists it and the files
+// are not there.
+func scanWithRetention(t *testing.T, st store.Store, root string, rows int) {
 	t.Helper()
-	root := t.TempDir()
 	cfg := config.Config{
 		LibraryRoots:         []string{root},
 		VideoExts:            []string{"mkv"},
@@ -116,6 +121,7 @@ func scanWithRetention(t *testing.T, st store.Store, rows int) {
 func TestGrowth_WithRetentionDisabledEveryRowIsKeptAndTheGaugeShowsTheTableGrowing(t *testing.T) {
 	st := openStore(t)
 	m := New(st)
+	root := t.TempDir()
 
 	// The shipped default: history_retention_rows unset, which resolves to 0.
 	var cfg config.Config
@@ -123,23 +129,23 @@ func TestGrowth_WithRetentionDisabledEveryRowIsKeptAndTheGaugeShowsTheTableGrowi
 		t.Fatal("the zero-value configuration enables retention; the shipped default must be disabled")
 	}
 
-	seedSkipped(t, st, 0, 40)
-	scanWithRetention(t, st, cfg.HistoryRetentionRows)
+	seedSkipped(t, st, root, 0, 40)
+	scanWithRetention(t, st, root, cfg.HistoryRetentionRows)
 	if got := queueDepth(t, scrape(t, m), "skipped"); got != 40 {
 		t.Fatalf("holdfast_queue_depth{state=\"skipped\"} reads %d after 40 rows and a scan with retention disabled", got)
 	}
 
 	// The table GROWS, and the gauge grows with it. No new metric, no new wiring: the
 	// figure is read from the store on every scrape.
-	seedSkipped(t, st, 40, 140)
-	scanWithRetention(t, st, cfg.HistoryRetentionRows)
+	seedSkipped(t, st, root, 40, 140)
+	scanWithRetention(t, st, root, cfg.HistoryRetentionRows)
 	body := scrape(t, m)
 	if got := queueDepth(t, body, "skipped"); got != 140 {
 		t.Fatalf("holdfast_queue_depth{state=\"skipped\"} reads %d after the table grew to 140", got)
 	}
 
-	seedSkipped(t, st, 140, 400)
-	scanWithRetention(t, st, cfg.HistoryRetentionRows)
+	seedSkipped(t, st, root, 140, 400)
+	scanWithRetention(t, st, root, cfg.HistoryRetentionRows)
 	if got := queueDepth(t, scrape(t, m), "skipped"); got != 400 {
 		t.Fatalf("holdfast_queue_depth{state=\"skipped\"} reads %d after the table grew to 400", got)
 	}
@@ -151,12 +157,13 @@ func TestGrowth_WithRetentionDisabledEveryRowIsKeptAndTheGaugeShowsTheTableGrowi
 func TestGrowth_TheGaugeFollowsTheTableDownWhenRetentionIsEnabled(t *testing.T) {
 	st := openStore(t)
 	m := New(st)
+	root := t.TempDir()
 
-	seedSkipped(t, st, 0, 400)
+	seedSkipped(t, st, root, 0, 400)
 	if got := queueDepth(t, scrape(t, m), "skipped"); got != 400 {
 		t.Fatalf("holdfast_queue_depth{state=\"skipped\"} reads %d before the prune, want 400", got)
 	}
-	scanWithRetention(t, st, 25)
+	scanWithRetention(t, st, root, 25)
 	if got := queueDepth(t, scrape(t, m), "skipped"); got != 25 {
 		t.Fatalf("holdfast_queue_depth{state=\"skipped\"} reads %d after a scan with history_retention_rows: 25; "+
 			"if this is still 400 the reading above cannot fail and proves nothing", got)
@@ -170,7 +177,7 @@ func TestGrowth_TheMetricNamesPublishedTodayAreStillPublishedAndNoneWasRenamed(t
 	m := New(st)
 
 	// Something in every series, so nothing is absent merely for want of a data point.
-	seedSkipped(t, st, 0, 3)
+	seedSkipped(t, st, t.TempDir(), 0, 3)
 	m.Observe(doneEvent(1024, 1000, 97.5))
 	m.Observe(engine.Event{Status: store.Skipped})
 	m.Observe(engine.Event{Status: store.Failed})
@@ -268,10 +275,11 @@ func TestGrowth_ARetentionPassPublishesNoNewMetricOfItsOwn(t *testing.T) {
 	// puts adding one out of scope.
 	st := openStore(t)
 	m := New(st)
-	seedSkipped(t, st, 0, 50)
+	root := t.TempDir()
+	seedSkipped(t, st, root, 0, 50)
 	before := publishedMetricNames(t, m)
 
-	scanWithRetention(t, st, 5)
+	scanWithRetention(t, st, root, 5)
 	after := publishedMetricNames(t, m)
 	if strings.Join(before, ",") != strings.Join(after, ",") {
 		t.Errorf("a retention pass changed the published metric set from\n  %v\nto\n  %v", before, after)
