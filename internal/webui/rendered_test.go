@@ -1,8 +1,9 @@
 package webui
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -89,18 +90,22 @@ function verdict(doc, win) {
 // probePage is the harness document. It is served by the TEST, never shipped: the
 // shipped document is what it loads into the iframe, unmodified, over HTTP.
 //
-// The verdict is computed SYNCHRONOUSLY in this page's own `load` handler, with no
-// timer and no --virtual-time-budget. That is load-bearing, not tidiness: the parent's
-// load event cannot fire until the iframe has loaded, so the iframe's document is
-// there by then, and --dump-dom serialises after load handlers have run.
-// getBoundingClientRect forces layout synchronously, so geometry is settled when it is
-// read. The earlier shape (a timer plus --virtual-time-budget) hung on a CI runner,
-// because virtual time does not advance while a page has network in flight and the
-// dashboard's own EventSource retries forever against a probe server that is not the
-// real API.
+// The verdict is computed SYNCHRONOUSLY in this page's own `load` handler and POSTed
+// straight back to the test's own server. Both halves of that are load-bearing.
+//
+// Synchronous, in `load`: the parent's load event cannot fire until the iframe has
+// loaded, so the iframe's document is there by then, and getBoundingClientRect forces
+// layout, so geometry is settled when it is read. No timer, no --virtual-time-budget.
+//
+// POSTed rather than read out of --dump-dom: the browser then has no say in WHEN the
+// measurement is available. Two CI runs were lost to exactly that - the runner's Chrome
+// never returned from --dump-dom and was killed at the deadline, twice, for two
+// different reasons (virtual time that could not advance while the dashboard's own
+// EventSource was reconnecting, and then load-completion semantics that differ from the
+// local browser's). The Go test now owns the deadline: it waits for the POST, and a
+// browser that never sends one fails the test with its stderr attached.
 const probePage = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>probe</title></head>
 <body><iframe id="f" src="%SRC%" width="1200" height="900" style="border:0"></iframe>
-<pre id="verdict">pending</pre>
 <script>
 %JS%
 window.addEventListener("load", function () {
@@ -108,7 +113,7 @@ window.addEventListener("load", function () {
   let v;
   try { v = verdict(f.contentDocument, f.contentWindow); }
   catch (e) { v = { error: String(e) }; }
-  document.getElementById("verdict").textContent = JSON.stringify(v);
+  fetch("/verdict", { method: "POST", body: JSON.stringify(v) });
 });
 </script></body></html>`
 
@@ -152,11 +157,19 @@ func chromium(t *testing.T) string {
 	return ""
 }
 
+// probeServer is the test's own server: the REAL handler at "/", the probe page beside
+// it, and the endpoint the probe POSTs its verdict back to.
+type probeServer struct {
+	url     string
+	verdict chan []byte
+}
+
 // serveDocument stands the REAL handler up on a real listener, plus the probe page
 // beside it. mutate is applied to the served document bytes to build a counterexample
 // (nil serves the document exactly as it ships).
-func serveDocument(t *testing.T, url string, mutate func([]byte) []byte) *httptest.Server {
+func serveDocument(t *testing.T, url string, mutate func([]byte) []byte) *probeServer {
 	t.Helper()
+	ps := &probeServer{verdict: make(chan []byte, 4)}
 	real := HandlerFor(offerFor(url))
 	mux := http.NewServeMux()
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -178,24 +191,19 @@ func serveDocument(t *testing.T, url string, mutate func([]byte) []byte) *httpte
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(page))
 	})
-	// The dashboard's own API calls, answered just well enough that the page does not
-	// sit in a reconnect loop against a probe server that is not the real API. The
-	// offer is in the static bytes and depends on none of this (that is AC8); this is
-	// here so the browser has nothing to keep retrying while it is being measured.
-	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		// Bounded, so this handler can never hold httptest.Server.Close open if the
-		// browser goes away without closing the connection.
+	mux.HandleFunc("/verdict", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		select {
-		case <-r.Context().Done():
-		case <-time.After(30 * time.Second):
+		case ps.verdict <- b:
+		default:
 		}
+		w.WriteHeader(http.StatusNoContent)
 	})
-	for _, ep := range []string{"/api/summary", "/api/queue", "/api/history"} {
+	// The dashboard's own API calls, answered so the page is not reconnecting while it
+	// is being measured. Deliberately NOT held open: a hanging response would keep
+	// httptest.Server.Close waiting. The offer depends on none of this - that is AC8,
+	// and internal/server proves it with every endpoint returning 500.
+	for _, ep := range []string{"/api/summary", "/api/queue", "/api/history", "/api/events"} {
 		mux.HandleFunc(ep, func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			_, _ = w.Write([]byte(`{}`))
@@ -203,7 +211,8 @@ func serveDocument(t *testing.T, url string, mutate func([]byte) []byte) *httpte
 	}
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return srv
+	ps.url = srv.URL
+	return ps
 }
 
 // hermeticFlags make the browser a MEASURING INSTRUMENT rather than a desktop
@@ -223,48 +232,40 @@ var hermeticFlags = []string{
 	"--disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,InterestFeedContentSuggestions,AutofillServerCommunication,CalculateNativeWinOcclusion",
 }
 
-// renderAndRead drives the browser over the probe page and returns what it saw.
-func renderAndRead(t *testing.T, bin, url string) renderVerdict {
+// renderAndRead points the browser at the probe page and returns what it saw. The
+// deadline is the TEST's, not the browser's: the browser is killed as soon as the
+// verdict arrives, and a browser that never sends one fails the test with its stderr.
+func renderAndRead(t *testing.T, bin string, ps *probeServer) renderVerdict {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
 	profile := t.TempDir()
-	args := append(append([]string{}, hermeticFlags...), "--user-data-dir="+profile, "--dump-dom", url)
-	cmd := exec.CommandContext(ctx, bin, args...)
+	args := append(append([]string{}, hermeticFlags...), "--user-data-dir="+profile, ps.url+"/probe")
+	cmd := exec.Command(bin, args...)
+	var log bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &log, &log
 	// A profile-local HOME and no session bus to look for: the runner has neither.
 	cmd.Env = append(os.Environ(), "HOME="+profile, "DBUS_SESSION_BUS_ADDRESS=disabled:")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("chromium --dump-dom %s: %v\n%s", url, err, out)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting %s: %v", bin, err)
 	}
-	dom := string(out)
-	i := strings.Index(dom, `<pre id="verdict">`)
-	if i < 0 {
-		t.Fatalf("the probe page rendered no verdict element:\n%s", dom)
-	}
-	rest := dom[i+len(`<pre id="verdict">`):]
-	j := strings.Index(rest, "</pre>")
-	if j < 0 {
-		t.Fatalf("the verdict element is not closed:\n%s", dom)
-	}
-	raw := unescapeDOM(rest[:j])
-	if raw == "pending" {
-		t.Fatalf("the probe never ran: the iframe did not load in time\n%s", dom)
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	var raw []byte
+	select {
+	case raw = <-ps.verdict:
+	case <-time.After(90 * time.Second):
+		t.Fatalf("the browser never posted a verdict for %s within 90s\nbrowser output:\n%s", ps.url, log.String())
 	}
 	var v renderVerdict
-	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+	if err := json.Unmarshal(raw, &v); err != nil {
 		t.Fatalf("verdict is not JSON (%v): %s", err, raw)
 	}
 	if v.Error != "" {
 		t.Fatalf("the probe failed inside the browser: %s", v.Error)
 	}
 	return v
-}
-
-// unescapeDOM undoes the entity escaping --dump-dom applies to text content.
-func unescapeDOM(s string) string {
-	r := strings.NewReplacer("&lt;", "<", "&gt;", ">", "&quot;", `"`, "&#39;", "'", "&amp;", "&")
-	return r.Replace(s)
 }
 
 // hiddenProblems reports every way the browser says the offer did NOT reach the
@@ -311,8 +312,7 @@ func hiddenProblems(v renderVerdict) []string {
 // build identity.
 func TestRendered_OfferIsShownToAReaderWithoutInteraction(t *testing.T) {
 	bin := chromium(t)
-	srv := serveDocument(t, sourceoffer.Upstream, nil)
-	v := renderAndRead(t, bin, srv.URL+"/probe")
+	v := renderAndRead(t, bin, serveDocument(t, sourceoffer.Upstream, nil))
 
 	if probs := hiddenProblems(v); probs != nil {
 		t.Errorf("the browser did not show the offer: %v", probs)
@@ -352,7 +352,7 @@ func TestRendered_GraderFailsAgainstEveryHidingMutation(t *testing.T) {
 	bin := chromium(t)
 
 	// The unmutated document first, so a report below is a signal.
-	if probs := hiddenProblems(renderAndRead(t, bin, serveDocument(t, sourceoffer.Upstream, nil).URL+"/probe")); probs != nil {
+	if probs := hiddenProblems(renderAndRead(t, bin, serveDocument(t, sourceoffer.Upstream, nil))); probs != nil {
 		t.Fatalf("the shipped document was reported as hiding the offer: %v", probs)
 	}
 
@@ -386,8 +386,7 @@ func TestRendered_GraderFailsAgainstEveryHidingMutation(t *testing.T) {
 		if string(mutate([]byte(plain))) == plain {
 			t.Fatalf("the mutation %q did not change the served document - the assertion below would be vacuous", name)
 		}
-		srv := serveDocument(t, sourceoffer.Upstream, mutate)
-		v := renderAndRead(t, bin, srv.URL+"/probe")
+		v := renderAndRead(t, bin, serveDocument(t, sourceoffer.Upstream, mutate))
 		if probs := hiddenProblems(v); probs == nil {
 			t.Errorf("the rendered grader passed a mutation that hides the offer from a reader (%s): %+v", name, v)
 		}
@@ -404,8 +403,8 @@ func TestRendered_GraderFailsAgainstEveryHidingMutation(t *testing.T) {
 func TestRendered_HostileValueIntroducesNoElementOrAttribute(t *testing.T) {
 	bin := chromium(t)
 
-	benign := renderAndRead(t, bin, serveDocument(t, sourceoffer.Upstream, nil).URL+"/probe")
-	hostile := renderAndRead(t, bin, serveDocument(t, hostileValue, nil).URL+"/probe")
+	benign := renderAndRead(t, bin, serveDocument(t, sourceoffer.Upstream, nil))
+	hostile := renderAndRead(t, bin, serveDocument(t, hostileValue, nil))
 
 	if !hostile.Found {
 		t.Fatal("the hostile-value document rendered no offer at all")
@@ -446,7 +445,7 @@ func TestRendered_HostileValueIntroducesNoElementOrAttribute(t *testing.T) {
 // upstream URL appears nowhere in the text a reader sees.
 func TestRendered_ForkBuildShowsItsOwnTreeAndNeverUpstream(t *testing.T) {
 	bin := chromium(t)
-	v := renderAndRead(t, bin, serveDocument(t, forkValue, nil).URL+"/probe")
+	v := renderAndRead(t, bin, serveDocument(t, forkValue, nil))
 
 	if probs := hiddenProblems(v); probs != nil {
 		t.Fatalf("the fork build's offer did not reach the screen: %v", probs)
