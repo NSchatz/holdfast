@@ -13,6 +13,16 @@ package main
 //     broad and errs towards calling something a published act: a step wrongly classified
 //     as publishing reds the gate and gets an entry in the runbook, while one wrongly
 //     classified as harmless is how an unreviewed publish ships.
+//
+// The second question has a sharp edge, and decideRequiredInput is where it is handled: an
+// action input can decide the act by itself (`docker/build-push-action` publishes when
+// `push:` is true), and GitHub lets that input be an EXPRESSION - `push: ${{
+// github.event_name != 'pull_request' }}` is the action's own documented idiom. Asking
+// whether the literal text says "true" answers the wrong question, because an expression is
+// never the string "true", so a step that publishes on the event under test would read as
+// harmless. Such an input is therefore DECIDED, through the same evaluator that decides
+// `if:` guards, against the same event shape - and everything undecidable is an error, not
+// a false.
 
 import (
 	"fmt"
@@ -189,17 +199,25 @@ var runDetectors = []struct {
 var usesDetectors = []struct {
 	kind    ActKind
 	action  *regexp.Regexp
-	require string // a `with:` key that must be truthy, empty = the action always publishes
+	require string // a `with:` key that must be TRUE, empty = the action always publishes
 	what    string
 }{
-	{ActImagePush, regexp.MustCompile(`^docker/build-push-action`), "push", "docker/build-push-action with push: true"},
+	{ActImagePush, regexp.MustCompile(`^docker/build-push-action`), "push", "docker/build-push-action"},
 	{ActRelease, regexp.MustCompile(`^softprops/action-gh-release`), "", "softprops/action-gh-release"},
 	{ActRelease, regexp.MustCompile(`^ncipollo/release-action`), "", "ncipollo/release-action"},
 	{ActRefPush, regexp.MustCompile(`^ad-m/github-push-action`), "", "ad-m/github-push-action"},
 }
 
-// Acts reports every published act this step performs.
-func (s Step) Acts() []Act {
+// Acts reports every published act this step performs, for the event shape ctx describes.
+//
+// ctx is nil for the STATIC question - "what published acts does this definition name at
+// all?", which the runbook cross-check (A8) asks and which no single event answers. With no
+// event to decide against, an input written as an expression counts as publishing: a step
+// that might publish is a step the runbook has to name.
+//
+// An input this gate cannot decide is an error, never an omission. Returning no act for it
+// would print "NONE of them publishes anything" over a dry run that pushes.
+func (s Step) Acts(ctx *evalCtx) ([]Act, error) {
 	var out []Act
 	script := StripShellComments(s.Run)
 	for _, d := range runDetectors {
@@ -211,26 +229,71 @@ func (s Step) Acts() []Act {
 		if !d.action.MatchString(s.Uses) {
 			continue
 		}
-		if d.require != "" && !truthyYAML(s.With[d.require]) {
-			continue
+		why := d.what
+		if d.require != "" {
+			publishes, detail, err := decideRequiredInput(d.require, s.With[d.require], ctx)
+			if err != nil {
+				return nil, fmt.Errorf("%s uses %s, and %w.\nThis gate will not read an input it cannot decide as harmless: a step wrongly called publishing reds this gate, one wrongly called harmless is how an unreviewed publish ships", s.Label(), s.Uses, err)
+			}
+			if !publishes {
+				continue
+			}
+			why = d.what + " (" + detail + ")"
 		}
-		out = append(out, Act{Kind: d.kind, Step: s, Why: d.what})
+		out = append(out, Act{Kind: d.kind, Step: s, Why: why})
 	}
-	return out
+	return out, nil
 }
 
-func truthyYAML(v any) bool {
-	switch t := v.(type) {
+// decideRequiredInput decides a `with:` input that by itself makes an action publish.
+//
+// Fail-closed at every branch, because the wrong way to be wrong here is a silent false:
+//
+//   - absent: the action's own default, and a build step with no `push:` is a local build.
+//     Not an act. This is the only "no" that is inferred rather than read.
+//   - a YAML boolean, or a string that is exactly true/false once every ${{ … }} span in it
+//     has been EVALUATED against the event under test: that value.
+//   - anything else - an expression this evaluator cannot decide, a context the planning run
+//     did not produce, a string that is not a boolean (`push: yes` is a string in YAML 1.2,
+//     and GitHub's own boolean-input parser rejects it), a type that is not one either - is
+//     an ERROR that reds the gate by name.
+func decideRequiredInput(key string, raw any, ctx *evalCtx) (publishes bool, detail string, err error) {
+	switch t := raw.(type) {
 	case nil:
-		return false
+		return false, "", nil
 	case bool:
-		return t
+		return t, fmt.Sprintf("%s: %v", key, t), nil
 	case string:
-		return strings.EqualFold(strings.TrimSpace(t), "true")
-	case int:
-		return t != 0
+		text := strings.TrimSpace(t)
+		if text == "" {
+			return false, "", fmt.Errorf("`%s:` is empty. An input that decides whether this step publishes must say which", key)
+		}
+		if strings.Contains(text, "${{") {
+			if ctx == nil {
+				return true, fmt.Sprintf("%s: %s - an expression, counted as publishing because no single event decides it", key, text), nil
+			}
+			v, ierr := Interpolate(text, *ctx)
+			if ierr != nil {
+				return false, "", fmt.Errorf("`%s: %s` cannot be decided for this event: %w", key, text, ierr)
+			}
+			decided := strings.TrimSpace(v)
+			switch strings.ToLower(decided) {
+			case "true":
+				return true, fmt.Sprintf("%s: %s, which is TRUE here", key, text), nil
+			case "false":
+				return false, "", nil
+			}
+			return false, "", fmt.Errorf("`%s: %s` evaluates to %q, which is not a boolean, so whether this step publishes is unknown", key, text, decided)
+		}
+		switch strings.ToLower(text) {
+		case "true":
+			return true, fmt.Sprintf("%s: %s", key, text), nil
+		case "false":
+			return false, "", nil
+		}
+		return false, "", fmt.Errorf("`%s: %s` is not a boolean. GitHub's own boolean-input parser accepts only true/false, so this step's publish decision is unknown", key, text)
 	default:
-		return false
+		return false, "", fmt.Errorf("`%s:` is a %T (%v), not a boolean and not an expression, so this step's publish decision is unknown", key, raw, raw)
 	}
 }
 

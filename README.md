@@ -9,7 +9,7 @@ to reclaim disk space, and — the whole point — **never destroys a source unt
 faithful**. It is configured entirely by **YAML** (config-as-code), so what it does is reviewable and
 reproducible from git, not hidden in a UI database.
 
-> **Status: feature-complete for a first release, not yet released.** This repository was built phase by
+> **Status: `v0.1.0` released (2026-07-18); major version zero, so anything MAY change.** This repository was built phase by
 > phase from a mature, battle-tested Bash predecessor (see _Provenance_). **The data-safety core
 > (`TRANSCODE-1`)** is the heart of it: `holdfast run` performs one oneshot scan of the library roots —
 > skip guards → same-directory temp encode → the full verify gate → atomic swap → delete — proven by a
@@ -17,9 +17,10 @@ reproducible from git, not hidden in a UI database.
 > preservation (`TRANSCODE-3`), the VMAF perceptual gate (`TRANSCODE-4`), a persistent crash-safe queue +
 > worker pool (`TRANSCODE-5`), hardware/AV1 encoders (`TRANSCODE-6`), the REST/SSE API + embedded web UI
 > (`TRANSCODE-7`, shown above), observability + host-fair scheduling (`TRANSCODE-8`), and **packaging: a
-> multi-arch, non-root container image bundling a pinned ffmpeg (`TRANSCODE-9`)**. The first tagged release
-> is a deliberate human act and has not been cut: [`docs/release.md`](docs/release.md) is the ordered
-> runbook for it, and says which of its steps can be undone. See the roadmap for the full plan.
+> multi-arch, non-root container image bundling a pinned ffmpeg (`TRANSCODE-9`)**. Cutting a tag is a
+> deliberate human act: [`docs/release.md`](docs/release.md) is the ordered runbook, says which of its
+> steps can be undone, and carries the record of what `v0.1.0` already published. See the roadmap for the
+> full plan.
 
 ## Why another transcoder?
 

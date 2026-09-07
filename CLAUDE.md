@@ -156,31 +156,44 @@ failure mode is loud. `release.yml` publishes on a **tag push only** — a delib
 human act, never on a merge — and `workflow_dispatch` is ALWAYS a full dry run (both arches, both smoke
 tests, the real binaries; pushes nothing). There is deliberately no `publish` input to tick: the only thing
 that can publish is a tag, so a release always carries a real tag name — a dispatch-publish could only ever
-push `0.0.0-dev-<sha>` and move `:latest` onto it. **Outstanding: `release.yml` has never executed, and
-`docs/release.md` is the ordered runbook for the first one**: the dispatch dry run, the repository rename,
-the visibility flip, the tag, and which of those can be undone. Do not restate that procedure anywhere
-else; it moved out of here for the same reason every other duplicated value did. Note it is NOT a reusable workflow called from
+push `0.0.0-dev-<sha>` and move `:latest` onto it. **`docs/release.md` is the ordered runbook, and it also
+carries the record of what has already been published**: the dispatch dry run, the repository rename, the
+visibility flip, the tag, and which of those can be undone. Do not restate that procedure or that record
+anywhere else; they moved out of here for the same reason every other duplicated value did. Note it is NOT a reusable workflow called from
 CI: a called workflow cannot hold permissions its caller lacks, so a PR-triggered call declaring
-`packages: write` would fail to load — hence the shared *script* rather than a shared workflow. **Not yet released** (cutting a tag is a human call — the umbrella's `PUB-FLIP` gate).
+`packages: write` would fail to load — hence the shared *script* rather than a shared workflow. **`v0.1.0`
+is released** (2026-07-18, by a tag push; the repository is public and `:latest` resolves to that digest).
+The next release is a HIGHER version: a released version's contents must not be modified, so `v0.1.0` is
+spent. `docs/release.md` has the evidence and the `gh` commands that re-derive it.
 
 `S0046` **stopped asserting the release path's invariants in comments and started deciding them.** The dry
 run publishing nothing, the version tag being pushed before `:latest` moves, `:latest` being promoted only
-onto a digest that was pulled back and re-smoked: all three were prose inside `release.yml`, on the one path
-this repository has never run. `scripts/release-shape-gate` (in `make check`) does not match that text. It
+onto a digest that was pulled back and re-smoked: all three were prose inside `release.yml`, on the path that
+publishes. `scripts/release-shape-gate` (in `make check`) does not match that text. It
 EXECUTES the workflow's own planning shell, once per event shape, with the publishing binaries stubbed, and
 decides each step's guard from the values that run produced, through a real GitHub-expression evaluator that
 models the implicit `success() &&` every `if:` carries. The difference is the whole design: flip the planning
 script so a dispatch sets `publish=true` and not one `if:` in the file changes, so a text matcher stays green
-while a dry run pushes an image (`release-shape-selftest` case 3). It also runs the promotion step under a
+while a dry run pushes an image (`release-shape-selftest` case 3). The same refusal to read text applies one
+layer in, to the ACTION INPUT that can make a step publish on its own: `docker/build-push-action` publishes
+when `push:` is true, and GitHub lets that be an expression (`push: ${{ github.event_name != 'pull_request' }}`
+is the action's documented idiom), which is never the literal string `true` — so the input is EVALUATED for
+the event under test, and anything undecidable (an unknown context, an unimplemented function, a value that
+is not a boolean) reds the gate by name rather than reading as harmless (cases 3a-3d). It also runs the
+promotion step under a
 stubbed `docker` and reads the reference it ACTUALLY moved out of the argv, which is the only honest way to
 compare `docker-compose.yml` against a reference the workflow derives at run time from `github.repository`.
+That compose reference has exactly ONE reader: `scripts/resolve-compose-image.sh` asks the gate for it
+(`-print-compose-ref`) instead of parsing the file a second time in sed, because two readers agree on today's
+file and diverge on a quoted scalar, a second service with an `image:`, or an `image:` nested outside
+`services:` — the ffmpeg-pin lesson applied to one more duplicated value.
 The plan step now REFUSES a tag whose major version is not zero, naming the record
 (`docs/release.md`, "Before a major version above zero") that must first declare the configuration keys, the
 HTTP surface and the metric names stable: 1.0.0 "defines the public API" and a released version can never be
 modified, so the first non-zero major is a promise, not a bigger number. `scripts/resolve-compose-image.sh`
 runs after the promotion and fails the release if the reference the example deployment names does not resolve
 to the digest that run just gated. `make release-shape-selftest` (CI, not `check`, because its mutations must
-not touch the tree `check` is grading) defeats every one of those 32 ways and fails if any defeat did not run.
+not touch the tree `check` is grading) defeats every one of those 38 ways and fails if any defeat did not run.
 `TRANSCODE-12` **renamed the project `transcode` → `holdfast`**, and it had to land before the first tag
 because not one of these surfaces can be redirected afterwards: Go has **no module-path rename primitive**
 (golang/go#59766, closed *not planned*), **nothing** rewrites a container-image reference in a user's

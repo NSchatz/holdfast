@@ -1,13 +1,15 @@
 name: Release
 
 # Publishing happens on a TAG PUSH ONLY — a deliberate human act. Nothing here fires on
-# a merge to main, and the image stays private while the repository is (GHCR package
-# visibility follows the repo — see the umbrella's PUB-FLIP gate).
+# a merge to main.
 #
 # `workflow_dispatch` is ALWAYS a dry run: it does everything a tag does — builds both
 # architectures, drives a real encode inside the built image, and produces the exact
-# binaries a release would ship — and pushes nothing. Run it once before you cut the
-# first tag.
+# binaries a release would ship — and pushes nothing. Run it before every tag; it is free.
+#
+# This path is LIVE: v0.1.0 was published from it, so a release now moves a `:latest` that
+# real users pull. docs/release.md carries the record and the order, and
+# scripts/release-shape-gate decides (rather than restates) every claim these comments make.
 #
 # There is deliberately no "publish" input to tick. The only thing that can publish is a
 # tag, so the version a release carries is always a real tag name — a dispatch-publish

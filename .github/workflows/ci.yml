@@ -66,13 +66,8 @@ jobs:
       - name: make check (the gate)
         run: make check
 
-      # Config schema self-test (anti-advisory-only), on top of the gate: the committed
-      # example must validate, and each known-invalid config must be REJECTED — one via
-      # the schema (unknown key), one via value validation (out-of-range crf), so both
-      # rejection paths are covered. Proves the `validate` subcommand + schema wire
-      # together end to end, and that the gate actually REDS — not just that tests passed.
       # The release-shape gate's own self-test, on top of the gate. `make check` runs the
-      # GATE (scripts/release-shape-gate); this defeats it on purpose, 32 ways, against
+      # GATE (scripts/release-shape-gate); this defeats it on purpose, 38 ways, against
       # mutated copies of release.yml, docker-compose.yml and docs/release.md - so the
       # mutations stay out of `check`, which must never rewrite the tree it is grading.
       # Same reason the config self-test below sits here: proving a gate REDS is a
@@ -80,6 +75,11 @@ jobs:
       - name: release-shape self-test (the gate must still bite)
         run: make release-shape-selftest
 
+      # Config schema self-test (anti-advisory-only), on top of the gate: the committed
+      # example must validate, and each known-invalid config must be REJECTED — one via
+      # the schema (unknown key), one via value validation (out-of-range crf), so both
+      # rejection paths are covered. Proves the `validate` subcommand + schema wire
+      # together end to end, and that the gate actually REDS — not just that tests passed.
       - name: config schema self-test
         run: |
           set -euo pipefail

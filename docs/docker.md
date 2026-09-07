@@ -185,4 +185,6 @@ rejected, rather than serving an offer nobody can follow.
   original, never a torn or missing file), but the reclaim may not persist. This cannot be proven
   in CI (it needs a power-cut harness), so it is stated as a limitation, not a guarantee; prefer a
   local filesystem for the `/media` mount.
-- The image is **private until the repository is** — GHCR package visibility follows the repo.
+- A GHCR package carries **its own visibility**, separate from the repository's. The repository is
+  public and `ghcr.io/nschatz/holdfast:latest` has been published; if a pull without credentials is
+  refused, the package itself is still private. `docs/release.md` step 8 is the check that settles it.

@@ -13,8 +13,8 @@
 services:
   holdfast:
     image: ghcr.io/nschatz/holdfast:latest
-    # Build it yourself instead of pulling (the image is private until the repo is
-    # public — see the roadmap's PUB-FLIP gate):
+    # Build it yourself instead of pulling (or if the GHCR package is not readable
+    # without credentials — see docs/release.md, step 8):
     # build:
     #   context: .
     container_name: holdfast

@@ -26,7 +26,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=32
+declared=38
 pass=0; failed=0
 
 repo="$work/repo"
@@ -174,6 +174,66 @@ changed "$wf" "the planning script flipped to publish on a dispatch"
 grep -q "if: steps.plan.outputs.publish == 'true'" "$wf" \
   || { echo "::error::selftest: case 3 also changed a guard, so it no longer proves the planning logic is executed" >&2; exit 1; }
 expect 1 "a PLANNING SCRIPT that publishes on a dispatch is caught, with every guard untouched" "on a manual dispatch.*WOULD RUN.*published act"
+reset
+
+# --- 3a to 3d. THE SAME HOLE, ONE LAYER IN. Case 3 flips the value the planning script
+#     produces; these flip the value the ACTION ITSELF is handed. `docker/build-push-action`
+#     publishes when its `push:` input is true, and GitHub lets that input be an EXPRESSION -
+#     `push: ${{ github.event_name != 'pull_request' }}` is the action's own documented idiom
+#     for a conditional push. An expression is never the literal string "true", so asking
+#     whether the text says "true" reads a dry run that PUSHES as publishing nothing, and the
+#     step needs no `if:` at all to get there. The input is decided through the same
+#     evaluator that decides `if:` guards, and anything undecidable is red, not false.
+dev_push_step() {  # dev_push_step <what to write after `push:`>
+  printf '%s\n' \
+    '      - name: publish a dev image so testers can pull dispatch builds' \
+    '        uses: docker/build-push-action@v6' \
+    '        with:' \
+    '          context: .' \
+    '          platforms: linux/amd64' \
+    "          push: $1" \
+    '          tags: ghcr.io/nschatz/holdfast:dev' \
+    '' > "$work/devpush.yml"
+}
+
+# insert_before <anchor-substring> - splice $work/devpush.yml in ahead of the first line
+# containing the anchor.
+insert_before() {
+  awk -v anchor="$1" -v block="$work/devpush.yml" '
+    index($0, anchor) && !done { while ((getline l < block) > 0) print l; close(block); done = 1 }
+    { print }
+  ' "$wf" > "$wf.new" && mv "$wf.new" "$wf"
+}
+
+# --- 3a. True on a dispatch. This dry run pushes ghcr.io/nschatz/holdfast:dev.
+dev_push_step "\${{ github.event_name == 'workflow_dispatch' }}"
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch that publishes through an expression-valued push: input"
+expect 1 "an expression-valued push: that is TRUE on a dispatch is caught, naming the step" "on a manual dispatch.*publish a dev image.*WOULD RUN"
+reset
+
+# --- 3b. Undecidable: the value reads a context no run here produces. Resolving that to
+#         false is exactly the fail-open; the gate must refuse.
+dev_push_step "\${{ vars.PUBLISH_DEV }}"
+insert_before "- name: build the release binaries"
+changed "$wf" "a push: input the gate cannot decide"
+expect 1 "a push: input that cannot be decided reds the gate rather than reading as harmless" "cannot be decided"
+reset
+
+# --- 3c. Not a boolean at all. `push: yes` is a STRING in YAML 1.2, and GitHub's own
+#         boolean-input parser rejects it - so what this step does is unknown, not "no".
+dev_push_step "yes"
+insert_before "- name: build the release binaries"
+changed "$wf" "a push: input that is not a boolean"
+expect 1 "a push: input that is not a boolean reds the gate" "is not a boolean"
+reset
+
+# --- 3d. The other direction, and it matters as much: the gate must DECIDE these inputs,
+#         not refuse every one of them. The real push step respelled with the idiomatic
+#         expression is still a correct release definition and must still pass.
+in_step "push the multi-arch image" 's|^          push: true$|          push: ${{ steps.plan.outputs.publish }}|'
+changed "$wf" "the version-tag push respelled as an expression"
+expect 0 "an expression-valued push: that is correct is DECIDED, not refused"
 reset
 
 # =====================================================================================
@@ -383,8 +443,8 @@ chmod +x "$fake/docker"
 digests="$work/digests"
 resolve() {  # resolve <name> <want-exit> <must-mention>
   local name="$1" want="$2" mention="$3" got=0 o
-  o="$( cd "$repo" && PATH="$fake:$PATH" FAKE_DIGESTS="$digests" IMAGE=ghcr.io/nschatz/holdfast VERSION=v0.1.0 \
-        ./scripts/resolve-compose-image.sh 2>&1 )" || got=$?
+  o="$( cd "$repo" && PATH="$fake:$PATH" FAKE_DIGESTS="$digests" RELEASE_SHAPE_GATE="$gate" \
+        IMAGE=ghcr.io/nschatz/holdfast VERSION=v0.1.0 ./scripts/resolve-compose-image.sh 2>&1 )" || got=$?
   if [ "$got" -ne "$want" ]; then
     printf '::error::selftest: %s - exited %s, wanted %s\n%s\n' "$name" "$got" "$want" "$o" >&2
     failed=$((failed + 1)); return
@@ -410,6 +470,33 @@ changed "$compose" "resolving a compose file with no image reference"
 printf 'ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa\nghcr.io/nschatz/holdfast:latest sha256:aaa\n' > "$digests"
 resolve "a compose file naming no image is refused before any registry call" 3 "names NO image reference"
 reset
+
+# --- 30a. The shape that made two readers dangerous: a SECOND service with its own
+#          `image:`. There is one reader now - the gate's YAML decoder, asked for by
+#          `-print-compose-ref` - and it REFUSES rather than silently grading whichever
+#          service came first, which is what a `sed … | head -1` did.
+printf '\n  sidecar:\n    image: ghcr.io/nschatz/something-else:latest\n' >> "$compose"
+changed "$compose" "a compose file whose second service carries an image"
+printf 'ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa\nghcr.io/nschatz/holdfast:latest sha256:aaa\nghcr.io/nschatz/something-else:latest sha256:aaa\n' > "$digests"
+resolve "a second service's image reference is refused, not silently ignored" 3 "names 2 image references"
+reset
+
+# --- 30b. The DEFAULT reader path, which is the one a real release takes: no binary handed
+#          over, so the script builds the single reader itself. Driven against the real
+#          working tree, so the whole chain - script, reader, docker-compose.yml - is the
+#          committed one and not a fixture.
+printf 'ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa\nghcr.io/nschatz/holdfast:latest sha256:aaa\n' > "$digests"
+got=0
+o="$( cd "$here" && PATH="$fake:$PATH" FAKE_DIGESTS="$digests" \
+      IMAGE=ghcr.io/nschatz/holdfast VERSION=v0.1.0 ./scripts/resolve-compose-image.sh 2>&1 )" || got=$?
+if [ "$got" -eq 0 ] && grep -qE 'the digest this release gated' <<<"$o"; then
+  printf '  ok: the script builds the single reader itself when no binary is handed to it\n'
+  pass=$((pass + 1))
+else
+  printf '::error::selftest: the default reader path (built from source) failed - exit %s\n' "$got" >&2
+  printf '%s\n' "$o" | sed 's/^/       | /' >&2
+  failed=$((failed + 1))
+fi
 
 # --- 31. And the gate has to still be IN `make check`. A target nothing depends on is a
 #         gate that runs nowhere, and nothing else in this file would notice.

@@ -1,11 +1,13 @@
 // Command release-shape-gate decides whether .github/workflows/release.yml still has the
 // shape the first release depends on. Part of `make check`.
 //
-// The release path has never executed, and every property that decides whether it opens
-// the one-way door correctly used to be asserted only by COMMENTS inside the workflow:
-// that a manual dispatch publishes nothing, that the version tag is pushed before
-// `:latest` moves, that `:latest` is promoted only onto a digest that was pulled back and
-// re-smoked. This repository has twice learned that prose cannot enforce an invariant
+// Every property that decides whether the release path opens the one-way door correctly
+// used to be asserted only by COMMENTS inside the workflow: that a manual dispatch
+// publishes nothing, that the version tag is pushed before `:latest` moves, that `:latest`
+// is promoted only onto a digest that was pulled back and re-smoked. That door is now open
+// (docs/release.md carries the record), which raises the stakes rather than lowering them:
+// every later release moves a `:latest` real users pull. This repository has twice learned
+// that prose cannot enforce an invariant
 // (scripts/check-pins.sh, scripts/install-ffmpeg.sh), and both times the answer was a
 // committed gate plus a self-test that proves the gate still bites. This is that answer
 // for the release path.
@@ -64,7 +66,25 @@ const (
 
 func main() {
 	root := flag.String("root", ".", "repository root whose release definition is checked")
+	printComposeRef := flag.Bool("print-compose-ref", false,
+		"print the one image reference the example deployment names, and exit; a non-zero exit means it could not be read")
 	flag.Parse()
+
+	// The example deployment's image reference has exactly ONE reader, and this is how the
+	// release-time check (scripts/resolve-compose-image.sh, which needs the same value with
+	// a registry in front of it) gets at it. A second reader written in sed would agree with
+	// this one on today's file and disagree on a quoted scalar, a folded one, a second
+	// service, or an `image:` key nested outside `services:` - the "one value, two readers
+	// held in step by hope" shape this repository refuses for the ffmpeg pin.
+	if *printComposeRef {
+		ref, err := composeImageRef(filepath.Join(*root, composeFile))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(ref)
+		return
+	}
 
 	g := &gate{root: *root, out: os.Stdout}
 	if err := g.run(); err != nil {
@@ -78,9 +98,10 @@ func main() {
 }
 
 type gate struct {
-	root   string
-	out    io.Writer
-	failed bool
+	root     string
+	out      io.Writer
+	failed   bool
+	reported map[string]bool
 }
 
 func (g *gate) path(rel string) string { return filepath.Join(g.root, rel) }
@@ -90,10 +111,19 @@ func (g *gate) note(format string, a ...any) {
 }
 
 // bad records a failure and keeps going: every independent property should report itself
-// on one run, so a fix is one edit rather than one edit per re-run.
+// on one run, so a fix is one edit rather than one edit per re-run. A message identical to
+// one already printed is counted and suppressed - several properties ask the same step the
+// same question, and one undecidable step should read as one problem.
 func (g *gate) bad(format string, a ...any) {
 	g.failed = true
 	msg := strings.TrimRight(fmt.Sprintf(format, a...), "\n")
+	if g.reported == nil {
+		g.reported = map[string]bool{}
+	}
+	if g.reported[msg] {
+		return
+	}
+	g.reported[msg] = true
 	lines := strings.Split(msg, "\n")
 	fmt.Fprintf(os.Stderr, "::error::%s\n", lines[0])
 	for _, l := range lines[1:] {
@@ -126,7 +156,10 @@ func (g *gate) run() error {
 	}
 	g.note("%s parses, and names %d job(s)", releaseWorkflow, len(wf.Jobs))
 
-	allActs := actsIn(wf)
+	allActs, err := actsIn(wf)
+	if err != nil {
+		return err // an input that decides a publish and cannot be decided
+	}
 	if len(allActs) == 0 {
 		return fmt.Errorf("%s names NO step that performs a published act. Every assertion below would then pass over nothing, which is not a gate. If the release genuinely no longer publishes, delete this gate deliberately rather than letting it report green", releaseWorkflow)
 	}
@@ -167,7 +200,7 @@ func (g *gate) run() error {
 	g.note("the planning logic RAN for both event shapes; dispatch produced %s, %s produced %s",
 		outputsOf(dispatch), sampleTag, outputsOf(tag))
 
-	g.checkPlanningPrecedesActs(job)
+	g.checkPlanningPrecedesActs(jobID, job, allActs)
 	g.checkDispatchPublishesNothing(job, dispatch)
 	promoteIdx := g.checkPublishOrdering(job, tag)
 	g.checkNothingPublishesAfterAFailure(job, tag)
@@ -290,7 +323,7 @@ func sortedKeys(m map[string]any) []string {
 // --- properties -----------------------------------------------------------------------
 
 // A15's companion: a refusal that runs after the first publishing step is not a refusal.
-func (g *gate) checkPlanningPrecedesActs(job Job) {
+func (g *gate) checkPlanningPrecedesActs(jobID string, job Job, acts []Act) {
 	first := -1
 	for _, s := range job.Steps {
 		if isPlanningStep(s) {
@@ -298,12 +331,10 @@ func (g *gate) checkPlanningPrecedesActs(job Job) {
 			break
 		}
 	}
-	for _, s := range job.Steps {
-		for _, a := range s.Acts() {
-			if s.Index < first {
-				g.bad("%s performs a published act (%s) BEFORE the planning step that decides whether this run may publish at all. Nothing the planning logic refuses could stop it.", s.Label(), a.Why)
-				return
-			}
+	for _, a := range acts {
+		if a.Step.JobID == jobID && a.Step.Index < first {
+			g.bad("%s performs a published act (%s) BEFORE the planning step that decides whether this run may publish at all. Nothing the planning logic refuses could stop it.", a.Step.Label(), a.Why)
+			return
 		}
 	}
 	g.note("every published act is declared after the planning step that gates it")
@@ -317,12 +348,10 @@ func (g *gate) checkDispatchPublishesNothing(job Job, p *planned) {
 		return
 	}
 	found := 0
-	for _, s := range running {
-		for _, a := range s.Acts() {
-			found++
-			g.bad("on %s, %s WOULD RUN and it performs a published act: %s (%s).\nA dry run must publish nothing. The planning logic produced %s, and this step's guard (`%s`) is true against those values.",
-				p.shape.label, s.Label(), a.Why, a.Kind, outputsOf(p), strings.TrimSpace(s.If))
-		}
+	for _, a := range g.actsOf(running, &p.ctx) {
+		found++
+		g.bad("on %s, %s WOULD RUN and it performs a published act: %s (%s).\nA dry run must publish nothing. The planning logic produced %s, and this step's guard (`%s`) is true against those values.",
+			p.shape.label, a.Step.Label(), a.Why, a.Kind, outputsOf(p), strings.TrimSpace(a.Step.If))
 	}
 	if found == 0 {
 		g.note("on %s, %d step(s) run and NONE of them publishes anything", p.shape.label, len(running))
@@ -345,17 +374,17 @@ func (g *gate) checkPublishOrdering(job Job, p *planned) int {
 		firstReSmoke            = -1
 		lastReSmoke             = -1
 	)
-	for _, s := range running {
-		for _, a := range s.Acts() {
-			switch a.Kind {
-			case ActImagePush:
-				pushes = append(pushes, a)
-			case ActTagMove:
-				moves = append(moves, a)
-			case ActRelease:
-				releases = append(releases, a)
-			}
+	for _, a := range g.actsOf(running, &p.ctx) {
+		switch a.Kind {
+		case ActImagePush:
+			pushes = append(pushes, a)
+		case ActTagMove:
+			moves = append(moves, a)
+		case ActRelease:
+			releases = append(releases, a)
 		}
+	}
+	for _, s := range running {
 		if gateIdx < 0 && s.RunsFullGate() {
 			gateIdx = s.Index
 		}
@@ -477,12 +506,10 @@ func (g *gate) checkNothingPublishesAfterAFailure(job Job, p *planned) {
 		return
 	}
 	bad := 0
-	for _, s := range running {
-		for _, a := range s.Acts() {
-			bad++
-			g.bad("%s still runs after an earlier step has FAILED, and it performs a published act: %s (%s). Its guard is `%s`, which does not defer to the run's success. A failed gate or smoke run must leave the floating reference exactly where it was.",
-				s.Label(), a.Why, a.Kind, strings.TrimSpace(s.If))
-		}
+	for _, a := range g.actsOf(running, &failing) {
+		bad++
+		g.bad("%s still runs after an earlier step has FAILED, and it performs a published act: %s (%s). Its guard is `%s`, which does not defer to the run's success. A failed gate or smoke run must leave the floating reference exactly where it was.",
+			a.Step.Label(), a.Why, a.Kind, strings.TrimSpace(a.Step.If))
 	}
 	if bad == 0 {
 		g.note("after a failed step, NO published act runs at all - the floating reference stays where it was")
@@ -507,12 +534,10 @@ func (g *gate) checkPreReleaseDoesNotPromote(r *Runner, wf *Workflow, job Job, r
 		return
 	}
 	moved := false
-	for _, s := range running {
-		for _, a := range s.Acts() {
-			if a.Kind == ActTagMove {
-				moved = true
-				g.bad("on a pre-release tag (%s), %s would move the floating reference. `docker pull` would hand a release candidate to everyone who did not ask for one.", samplePreTag, s.Label())
-			}
+	for _, a := range g.actsOf(running, &pre.ctx) {
+		if a.Kind == ActTagMove {
+			moved = true
+			g.bad("on a pre-release tag (%s), %s would move the floating reference. `docker pull` would hand a release candidate to everyone who did not ask for one.", samplePreTag, a.Step.Label())
 		}
 	}
 	if !moved {
@@ -660,27 +685,28 @@ func (g *gate) checkComposeReferenceAgreement(r *Runner, wf *Workflow, job Job, 
 			g.note("the promotion retags %s onto %s - the same digest, not a rebuild", floating, want)
 		}
 		// And no earlier publishing step may produce the floating reference itself.
+		var earlier []Step
 		for _, s := range job.Steps {
-			if s.Index >= promoteIdx {
+			if s.Index < promoteIdx {
+				earlier = append(earlier, s)
+			}
+		}
+		for _, a := range g.actsOf(earlier, &p.ctx) {
+			if a.Kind != ActImagePush {
 				continue
 			}
-			for _, a := range s.Acts() {
-				if a.Kind != ActImagePush {
-					continue
-				}
-				raw, ok := s.With["tags"]
-				if !ok {
-					continue
-				}
-				tags, err := Interpolate(yamlString(raw), p.ctx)
-				if err != nil {
-					g.bad("cannot read the tags %s pushes: %v", s.Label(), err)
-					continue
-				}
-				for _, t := range strings.Fields(strings.ReplaceAll(tags, ",", " ")) {
-					if t == floating {
-						g.bad("%s pushes %s directly. The floating reference would then be pullable before the pushed artefact has been pulled back and re-smoked, which is exactly what promoting it separately, last, avoids.", s.Label(), floating)
-					}
+			raw, ok := a.Step.With["tags"]
+			if !ok {
+				continue
+			}
+			tags, err := Interpolate(yamlString(raw), p.ctx)
+			if err != nil {
+				g.bad("cannot read the tags %s pushes: %v", a.Step.Label(), err)
+				continue
+			}
+			for _, t := range strings.Fields(strings.ReplaceAll(tags, ",", " ")) {
+				if t == floating {
+					g.bad("%s pushes %s directly. The floating reference would then be pullable before the pushed artefact has been pulled back and re-smoked, which is exactly what promoting it separately, last, avoids.", a.Step.Label(), floating)
 				}
 			}
 		}
@@ -724,14 +750,34 @@ func runningSteps(job Job, ctx evalCtx) ([]Step, error) {
 	return out, nil
 }
 
-func actsIn(wf *Workflow) []Act {
+// actsOf reports the published acts these steps perform under ctx. A step whose publish
+// decision cannot be decided reds the gate and contributes no act, which is why every
+// caller must go through here rather than dropping the error.
+func (g *gate) actsOf(steps []Step, ctx *evalCtx) []Act {
+	var out []Act
+	for _, s := range steps {
+		acts, err := s.Acts(ctx)
+		if err != nil {
+			g.bad("%v", err)
+			continue
+		}
+		out = append(out, acts...)
+	}
+	return out
+}
+
+func actsIn(wf *Workflow) ([]Act, error) {
 	var out []Act
 	for _, id := range wf.JobIDs() {
 		for _, s := range wf.Jobs[id].Steps {
-			out = append(out, s.Acts()...)
+			acts, err := s.Acts(nil)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, acts...)
 		}
 	}
-	return out
+	return out, nil
 }
 
 func releaseJobOf(wf *Workflow, acts []Act) (string, Job, error) {
