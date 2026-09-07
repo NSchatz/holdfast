@@ -108,8 +108,40 @@ CREATE INDEX IF NOT EXISTS idx_jobs_outcome ON jobs(status, source_bytes, output
 `,
 	},
 	{
-		// v4 - LEDGER-5: the durable carry-forward a prune needs, and the index it reads
+		// v4 - GATE-4: what the quality gate actually compared, and what it found in
+		// the colour planes.
+		//
+		// vmaf_pix_fmt is the single format both streams were converted to before
+		// scoring. Until this phase nothing recorded it and nothing chose it: the two
+		// inputs disagree on the default path (pixel_format: auto floors output depth
+		// at 10, so an 8-bit source meets a 10-bit output) and libavfilter negotiated
+		// the conversion unobserved. vmaf_chroma + vmaf_chroma_metric are the chroma
+		// measurement and the name of the metric that produced it, which have to
+		// travel together: a bare dB figure with no metric attached is not something
+		// an operator can act on, exactly as vmaf_model established for the score.
+		//
+		// NULLABLE with NO DEFAULT, as v2 established. Every row written before this
+		// migration was scored by a gate that measured none of these things, and it
+		// must READ as not recorded rather than be backfilled with a value that would
+		// claim a chroma measurement nobody took. A DEFAULT here would invent evidence
+		// about swaps that already happened, in the one table whose whole job is to be
+		// evidence. 0.0 is legal for vmaf_chroma too - it is an obliterated plane.
+		name: "comparison format and chroma columns",
+		sql: `
+ALTER TABLE jobs ADD COLUMN vmaf_pix_fmt       TEXT;
+ALTER TABLE jobs ADD COLUMN vmaf_chroma        REAL;
+ALTER TABLE jobs ADD COLUMN vmaf_chroma_metric TEXT;
+`,
+	},
+	{
+		// v5 - LEDGER-5: the durable carry-forward a prune needs, and the index it reads
 		// the oldest rows through.
+		//
+		// It is v5 and NOT v4, which is the whole of what this slice's append-only rule
+		// is for. GATE-4's columns shipped as v4 while this branch was open; a database
+		// in the field has already run that text under that version. Two different steps
+		// claiming version 4 would silently fork the schema in two - so this one moves to
+		// the end of the history rather than contesting an ordinal that is already spent.
 		//
 		// ledger_totals carries the ONE fact a pruned row would otherwise take with it.
 		// The published lifetime reclaimed total is a SUM over the done rows that recorded

@@ -90,6 +90,24 @@ type Outcome struct {
 	VmafMin   *float64
 	VmafModel string
 
+	// VmafPixFmt is the single pixel format BOTH streams were converted to before
+	// they were compared (GATE-4) - named by holdfast, never left to libavfilter's
+	// automatic negotiation. It belongs on the row for the same reason VmafModel
+	// does: `pixel_format: auto` floors output bit depth at 10, so an 8-bit source
+	// and its 10-bit replacement are routinely compared after a conversion, and
+	// upconverting the reference is not the same measurement as downconverting the
+	// output. A score whose comparison format is unrecorded is a score whose meaning
+	// cannot be stated afterwards.
+	//
+	// VmafChroma is the worst (sub)sampled frame's PSNR over the chroma planes, and
+	// VmafChromaMetric names what that number is and in what unit. The VMAF model is
+	// luma-only, so this is the ONLY figure on the row that says anything at all
+	// about whether the colour survived. Pointer/"" for the same reason as everything
+	// else here: 0.0 dB is an obliterated chroma plane, not a missing measurement.
+	VmafPixFmt       string
+	VmafChroma       *float64
+	VmafChromaMetric string
+
 	// SourceBytes and OutputBytes are the file sizes either side of the swap (Done).
 	// BOTH are persisted rather than only their difference: that is what makes a
 	// durable lifetime reclaimed total DERIVABLE (TRANSCODE-14 computes and shows it;

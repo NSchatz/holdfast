@@ -32,8 +32,10 @@ and fixes the trust gaps:
 - **Never replace before verify.** Encode to a same-directory temp; the source is replaced only by an
   **atomic same-filesystem rename**, and only after the output passes *every* gate: correct codec,
   duration/packet parity, strictly smaller, per-type stream-count parity, full decode-integrity, and a
-  **VMAF** perceptual-quality check — both its **average** (`min_vmaf`) *and* its **worst frame**
-  (`vmaf_min_pool`). Any failure leaves the source byte-for-byte untouched.
+  **VMAF** perceptual-quality check - its **average** (`min_vmaf`), its **worst frame**
+  (`vmaf_min_pool`) *and* its **colour** (`vmaf_min_chroma`, which the luma-only VMAF model cannot
+  see at all). The comparison is made in one pixel format holdfast **names and records**, not one
+  ffmpeg negotiated. Any failure leaves the source byte-for-byte untouched.
 - **The source can't be swapped out from under a running encode.** The source's `size:mtime` is
   re-checked immediately before the swap: if something else (Plex, an *arr, you) rewrote or replaced it
   while the encode ran — hours, on a real film — the swap is **refused** rather than atomically
@@ -204,6 +206,8 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | `encoder` | any job that reached the encoder | the encoder that ran (`cpu`, `svtav1`, `nvenc`, …) — a skip, or a file with no readable video stream, never gets that far and records none |
 | `vmaf_mean`, `vmaf_min` | done, and a VMAF-rejected failure | the pooled harmonic mean **and the worst frame** |
 | `vmaf_model` | as above | the libvmaf model that produced them |
+| `vmaf_pix_fmt` | as above | the single pixel format **both streams were converted to** before scoring - chosen and named by holdfast, so a score says which pixels were compared |
+| `vmaf_chroma`, `vmaf_chroma_metric` | as above | the worst frame's chroma measurement and what it is (`psnr_cb/psnr_cr min (dB)`) - the only figure on the row that says whether the **colour** survived |
 | `source_bytes`, `output_bytes` | done | the sizes either side of the swap |
 | `encode_ms` | done, and a failure after the encode ran | wall-clock encode time |
 
@@ -212,11 +216,19 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 columns existed), because a VMAF of `0.0` is a *destroyed frame*, not a missing measurement, and rendering
 one as the other would be inventing evidence about a swap nobody checked.
 
-**A VMAF score is not interpretable without its model**, which is why the two always travel together.
-Read `vmaf_mean`/`vmaf_min` with the limits in mind: VMAF is a regression onto a *subjective* opinion
-scale under one viewing condition, `vmaf_v0.6.1` is **luma-only** (structurally blind to chroma damage),
-and the scores are **not comparable across different sources**. The number bounds measured perceptual
-quality against *your* source; it is not a proof of fidelity.
+**A VMAF score is not interpretable without its model or the format it was measured in**, which is why
+all three travel together. Read `vmaf_mean`/`vmaf_min` with the limits in mind: VMAF is a regression onto
+a *subjective* opinion scale under one viewing condition, `vmaf_v0.6.1` is **luma-only** (structurally
+blind to chroma damage - that is what `vmaf_chroma` is for), and the scores are **not comparable across
+different sources**. The number bounds measured perceptual quality against *your* source; it is not a
+proof of fidelity.
+
+**The comparison format is a fact, not a guess.** `pixel_format: auto` floors output bit depth at 10, so
+an 8-bit source and its replacement routinely disagree - and upconverting the source is not the same
+measurement as downconverting the output. holdfast converts both streams to one named format before
+scoring (the richer chroma subsampling of the two, at the deeper of the two bit depths, so nothing is
+averaged or quantised away on the way in) and records it in `vmaf_pix_fmt`. The same source and output
+scored twice are compared in the same format both times.
 
 An outcome is recorded per *attempt*, not per file: **claiming a job for a retry clears it**, so a file
 that is being re-encoded never advertises the rejected attempt's score while it is in flight.

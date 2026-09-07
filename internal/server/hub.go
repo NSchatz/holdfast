@@ -56,6 +56,20 @@ type jobDTO struct {
 	VmafMean  *float64 `json:"vmaf_mean"`
 	VmafMin   *float64 `json:"vmaf_min"`
 	VmafModel string   `json:"vmaf_model,omitempty"`
+	// What the comparison was made IN, and what it found in the colour planes
+	// (GATE-4). VmafPixFmt is the single pixel format both streams were converted to
+	// before scoring; VmafChromaMetric names the chroma metric and its unit.
+	//
+	// The two strings are `omitempty` - a row that recorded no comparison carries
+	// neither key, exactly as vmaf_model already behaves, so a client never has to
+	// decide what an empty string means. VmafChroma is a POINTER without omitempty,
+	// following vmaf_mean/vmaf_min: it serializes as an explicit JSON null, which
+	// states "not recorded" rather than leaving a client to infer it from a missing
+	// key - and it is the field where the distinction bites hardest, because 0.0 dB
+	// is an obliterated chroma plane and not an absence.
+	VmafPixFmt       string   `json:"vmaf_pix_fmt,omitempty"`
+	VmafChroma       *float64 `json:"vmaf_chroma"`
+	VmafChromaMetric string   `json:"vmaf_chroma_metric,omitempty"`
 	// The sizes either side of the swap, and how long the encode took.
 	SourceBytes *int64 `json:"source_bytes"`
 	OutputBytes *int64 `json:"output_bytes"`
@@ -94,11 +108,15 @@ func toDTOs(jobs []store.Job) []jobDTO {
 			FailCount: j.FailCount,
 			UpdatedAt: j.UpdatedAt,
 
-			Reason:      j.Outcome.Reason,
-			Encoder:     j.Outcome.Encoder,
-			VmafMean:    j.Outcome.VmafMean,
-			VmafMin:     j.Outcome.VmafMin,
-			VmafModel:   j.Outcome.VmafModel,
+			Reason:           j.Outcome.Reason,
+			Encoder:          j.Outcome.Encoder,
+			VmafMean:         j.Outcome.VmafMean,
+			VmafMin:          j.Outcome.VmafMin,
+			VmafModel:        j.Outcome.VmafModel,
+			VmafPixFmt:       j.Outcome.VmafPixFmt,
+			VmafChroma:       j.Outcome.VmafChroma,
+			VmafChromaMetric: j.Outcome.VmafChromaMetric,
+
 			SourceBytes: j.Outcome.SourceBytes,
 			OutputBytes: j.Outcome.OutputBytes,
 			EncodeMs:    j.Outcome.EncodeMs,
