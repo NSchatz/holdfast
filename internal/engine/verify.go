@@ -58,25 +58,8 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (vmafProof, e
 	}
 
 	// 3. length: the encode must not be truncated.
-	din, okIn := e.Probe.DurationSec(ctx, in)
-	dout, okOut := e.Probe.DurationSec(ctx, tmp)
-	if okIn && okOut {
-		// Both durations known: strict parity — a truncated encode is shorter.
-		if math.Abs(din-dout) > e.Cfg.DurationToleranceSec {
-			return none, fmt.Errorf("duration parity failed (in=%.3fs out=%.3fs tol=%gs)", din, dout, e.Cfg.DurationToleranceSec)
-		}
-	} else {
-		// Duration unknown (e.g. MPEG-TS reports N/A) — use video-packet-count
-		// parity (transcoding preserves frame count, so a truncated encode has far
-		// fewer packets). Only enforce when the source is countable.
-		pin, okp := e.Probe.PacketCount(ctx, in)
-		pout, okpo := e.Probe.PacketCount(ctx, tmp)
-		if okp && pin > 0 && okpo {
-			// Same tolerance as the bash: |pin-pout| <= pin*0.02 + 2.
-			if math.Abs(float64(pin-pout)) > float64(pin)*0.02+2 {
-				return none, fmt.Errorf("packet-count parity failed (in=%d out=%d — truncated encode?)", pin, pout)
-			}
-		}
+	if err := e.lengthParity(ctx, in, tmp); err != nil {
+		return none, err
 	}
 
 	// 4. size: reclaiming space is the whole point.
@@ -113,6 +96,43 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (vmafProof, e
 		return e.vmafGate(ctx, tmp, in)
 	}
 	return none, nil
+}
+
+// lengthParity is gate 3 on its own: an encode of `in` must not be TRUNCATED, so its
+// length has to match the source's. It is a named function rather than an inline block
+// because the stale-temp sweep asks the identical question of a temp it finds lying
+// around (see strayReplacementHold), and the two must not be allowed to drift: the
+// sweep's licence to delete rests on the fact that anything that ever passed THIS check
+// still passes it, so a second, slightly different copy of the arithmetic would be a
+// second, slightly different answer about whether a file may be removed.
+//
+// It measures length twice over, deliberately. Duration is the direct measure and is
+// used whenever both files report one. When a container reports none (MPEG-TS is the
+// standing example) it falls back to video-packet count, since transcoding preserves
+// frame count and a truncated encode has far fewer packets. Neither measurable is a
+// PASS - this gate cannot convict on evidence it does not have, and the layers around
+// it (decode integrity, stream counts, VMAF) are what cover that case.
+func (e *Engine) lengthParity(ctx context.Context, in, out string) error {
+	din, okIn := e.Probe.DurationSec(ctx, in)
+	dout, okOut := e.Probe.DurationSec(ctx, out)
+	if okIn && okOut {
+		// Both durations known: strict parity — a truncated encode is shorter.
+		if math.Abs(din-dout) > e.Cfg.DurationToleranceSec {
+			return fmt.Errorf("duration parity failed (in=%.3fs out=%.3fs tol=%gs)", din, dout, e.Cfg.DurationToleranceSec)
+		}
+		return nil
+	}
+	// Duration unknown (e.g. MPEG-TS reports N/A) — use video-packet-count parity.
+	// Only enforce when the source is countable.
+	pin, okp := e.Probe.PacketCount(ctx, in)
+	pout, okpo := e.Probe.PacketCount(ctx, out)
+	if okp && pin > 0 && okpo {
+		// Same tolerance as the bash: |pin-pout| <= pin*0.02 + 2.
+		if math.Abs(float64(pin-pout)) > float64(pin)*0.02+2 {
+			return fmt.Errorf("packet-count parity failed (in=%d out=%d — truncated encode?)", pin, pout)
+		}
+	}
+	return nil
 }
 
 // vmafGate measures the output (distorted) against the source (reference) and

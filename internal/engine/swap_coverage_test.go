@@ -7,11 +7,11 @@ package engine
 // exists for an engine built without the startup check. A hold-back proven only on the
 // fallback would be a hold-back nobody's install has.
 //
-// These tests substitute nothing but the store: no ffmpeg, no seams, no encode. They
-// assert what the two record-based hold-backs (a parked job's two recorded paths, and a
-// recorded replacement path whose disposition still excludes it) do to the list of files
-// a run would hand its workers, and that the record-free name basis holds where no
-// record survived.
+// These tests substitute no seam and run no encode; they use the real store and the real
+// prober. They assert what the two record-based hold-backs (a parked job's two recorded
+// paths, and a recorded replacement path whose disposition still excludes it) do to the
+// list of files a run would hand its workers, and that the record-free basis holds where
+// no record survived.
 
 import (
 	"context"
@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
 )
 
@@ -30,7 +31,11 @@ import (
 func heldEngine(t *testing.T, root string, st store.Store, coverage []string) *Engine {
 	t.Helper()
 	cfg := config.Config{LibraryRoots: []string{root}, VideoExts: []string{"mkv", "mp4"}}
-	e := New(cfg, nil, nil, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// A REAL prober, not nil: the sweep's record-free hold-back asks the verify gate's
+	// own questions of a file before it may be removed, so an engine whose prober cannot
+	// answer them would be answering a different question than production does.
+	ffmpeg, ffprobe := tools(t)
+	e := New(cfg, probe.New(ffmpeg, ffprobe), nil, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	e.Coverage = coverage
 	e.held.Store(e.loadHoldBacks(context.Background()))
 	return e

@@ -333,19 +333,20 @@ func (e *Engine) RunOneshot(ctx context.Context) error {
 	return e.scanOnce(ctx)
 }
 
-// cleanStaleTemps deletes any `*.__transcoding__.*` files left under the roots by a
-// prior killed run (crash-safety: the swap is the only mutation, so a leftover temp
-// is always safe to discard).
+// cleanStaleTemps deletes `*.__transcoding__.*` files left under the roots by a prior
+// killed run (crash-safety: the swap is the only mutation, so a half-written encode is
+// worth nothing and reclaiming it is right).
 //
-// It sweeps WORK IN PROGRESS and nothing else. Two kinds of file it must never take:
+// It sweeps WORK IN PROGRESS and nothing else. Three kinds of file it must never take:
 //
 //   - a RETAINED replacement (`*.__holdfast-replacement__.*`). It passed every gate and
 //     may be the only faithful copy of a source whose fate is unknown. It carries a
-//     different marker precisely so this sweep cannot reach it by construction, which
-//     is also why this function did not have to grow a heuristic.
+//     different marker precisely so this sweep cannot reach it by construction.
 //   - a temp path a live record names as a job's replacement. That happens when the
-//     move to a retained name could not be made, so the record is the only thing left
-//     saying what the file is.
+//     move to a retained name could not be made, so the record says what the file is.
+//   - a temp path holding a FINISHED replacement with no record at all, which is what a
+//     library that went read-only leaves behind: the same failure denies the swap, the
+//     move to the retained name and the incident write alike (strayReplacementHold).
 func (e *Engine) cleanStaleTemps(ctx context.Context) {
 	n := 0
 	if e.Coverage != nil {
@@ -360,7 +361,7 @@ func (e *Engine) cleanStaleTemps(ctx context.Context) {
 				continue
 			}
 			for _, ent := range ents {
-				if !ent.IsDir() && isTempName(ent.Name()) && e.sweepTemp(filepath.Join(dir, ent.Name())) {
+				if !ent.IsDir() && isTempName(ent.Name()) && e.sweepTemp(ctx, filepath.Join(dir, ent.Name())) {
 					n++
 				}
 			}
@@ -381,7 +382,7 @@ func (e *Engine) cleanStaleTemps(ctx context.Context) {
 			if d.IsDir() || !isTempName(filepath.Base(path)) {
 				return nil
 			}
-			if e.sweepTemp(path) {
+			if e.sweepTemp(ctx, path) {
 				n++
 			}
 			return nil
@@ -393,14 +394,25 @@ func (e *Engine) cleanStaleTemps(ctx context.Context) {
 }
 
 // sweepTemp discards ONE work-in-progress temp, and reports whether it did. It is the
-// single place the sweep's one exception lives, so the coverage-bounded branch and the
-// walking branch cannot disagree about it: a temp path a live record names as a job's
-// REPLACEMENT is left alone. That happens when the move to a retained name could not be
-// made, so the record is the only thing left saying what the file is - and deleting it
-// would be deleting a replacement that passed every gate.
-func (e *Engine) sweepTemp(path string) bool {
+// single place the sweep's exceptions live, so the coverage-bounded branch and the
+// walking branch cannot disagree about them. There are two, and they are independent:
+//
+//   - a temp path a live RECORD names as a job's replacement (AC15d), and
+//   - a temp path holding a finished replacement that no record survived to name
+//     (AC15i's record-free half - strayReplacementHold).
+//
+// The second is asked even when the first says nothing, because the case it exists for
+// is precisely the one where the store write that would have made the record is what
+// failed.
+func (e *Engine) sweepTemp(ctx context.Context, path string) bool {
 	if why, ok := e.heldBack(path); ok {
 		e.Log.Warn("leaving a file holdfast wrote in place (not an orphaned temp)", "file", path, "why", why)
+		return false
+	}
+	if why := e.strayReplacementHold(ctx, path); why != "" {
+		e.Log.Warn("leaving a file holdfast wrote in place - NO RECORD of it survives, so it is held back on its name and its content alone: "+
+			"it is never enumerated, encoded, swapped or swept, in this run or any later one, and removing it is an operator's call",
+			"file", path, "why", why)
 		return false
 	}
 	return os.Remove(path) == nil
@@ -792,11 +804,11 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// source is intact" is handed back to enumeration and encoded again, while the
 	// replacement of the FAILED attempt may still be sitting beside it. The retained
 	// marker already keeps those two apart by construction; the candidate search covers
-	// the remaining case, a recorded replacement that could not be MOVED to its retained
-	// name and so is still at a temp path. A candidate a record holds back is skipped,
-	// never cleared. Clearing a stale temp at a path nothing holds back is the
-	// pre-existing behaviour and is kept.
-	tmp, err := e.pickTempPath(dir, stem, outExt)
+	// the remaining case, a replacement that could not be MOVED to its retained name and
+	// so is still at a temp path - whether a record names it or the file itself is the
+	// only evidence left. Such a candidate is skipped, never cleared. Clearing a stale
+	// temp at a path nothing holds back is the pre-existing behaviour and is kept.
+	tmp, err := e.pickTempPath(ctx, dir, stem, outExt)
 	if err != nil {
 		e.Log.Warn("FAIL (no free temp path beside the source, source untouched)", "file", f, "err", err)
 		e.finish(ctx, f, key, store.Failed, &store.Outcome{Reason: err.Error()})
@@ -1126,14 +1138,22 @@ func IsSourceName(base string, exts []string) bool {
 // any stale temp sitting at it.
 //
 // The candidate at n == 0 is the name this repo has always used, so the ordinary case
-// is unchanged. A candidate is SKIPPED rather than cleared when a record holds it back
-// - that is a file holdfast wrote, and the whole point of the record is that it must
-// not be removed. Running out of candidates is a loud failure, never a silent walk.
-func (e *Engine) pickTempPath(dir, stem, ext string) (string, error) {
+// is unchanged. A candidate is SKIPPED rather than cleared when a file holdfast wrote is
+// sitting at it - whether a record says so or the file itself does (strayReplacementHold).
+// This is the SECOND route to the same deletion the sweep guards: a source resolved "the
+// source is intact", or one simply re-queued after a failed swap, comes back round to
+// this function, and the replacement of the failed attempt may be sitting at exactly the
+// path it is about to pick. Running out of candidates is a loud failure, never a silent
+// walk.
+func (e *Engine) pickTempPath(ctx context.Context, dir, stem, ext string) (string, error) {
 	for n := 0; n < maxPathCandidates; n++ {
 		p := tempPath(dir, stem, ext, n)
 		if why, ok := e.heldBack(p); ok {
 			e.Log.Info("not using a temp path a record holds back", "path", p, "why", why)
+			continue
+		}
+		if why := e.strayReplacementHold(ctx, p); why != "" {
+			e.Log.Info("not using a temp path a file holdfast wrote is sitting at (no record of it survives)", "path", p, "why", why)
 			continue
 		}
 		_ = os.Remove(p) // clear any stale temp for this file

@@ -1487,6 +1487,7 @@ func TestObserver_TheTwoNewOutcomesAreEmittedAsThemselves(t *testing.T) {
 // that source must step around it rather than clear it, which is what every other temp
 // path gets.
 func TestPickTempPath_SkipsAPathARecordHoldsBackAndNeverClearsIt(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
 	d := t.TempDir()
 	first := tempPath(d, "movie", "mkv", 0)
 	if err := os.WriteFile(first, []byte("a recorded replacement stuck at a temp path"), 0o644); err != nil {
@@ -1494,10 +1495,11 @@ func TestPickTempPath_SkipsAPathARecordHoldsBackAndNeverClearsIt(t *testing.T) {
 	}
 	before := md5f(t, first)
 
-	eng := New(config.Config{}, nil, nil, nil, discardLogger())
+	ctx := context.Background()
+	eng := New(config.Config{}, probe.New(ffmpeg, ffprobe), nil, nil, discardLogger())
 	eng.held.Store(&holdBacks{paths: map[string]string{resolvedForm(first): "a recorded replacement path"}})
 
-	got, err := eng.pickTempPath(d, "movie", "mkv")
+	got, err := eng.pickTempPath(ctx, d, "movie", "mkv")
 	if err != nil {
 		t.Fatalf("pickTempPath: %v", err)
 	}
@@ -1511,9 +1513,10 @@ func TestPickTempPath_SkipsAPathARecordHoldsBackAndNeverClearsIt(t *testing.T) {
 		t.Errorf("temp path = %q, want the next candidate of the same construction", got)
 	}
 	// With nothing held back, the ordinary path is the one this repo has always used,
-	// and a stale temp at it is still cleared.
+	// and a stale temp at it is still cleared. The file there is not a finished encode -
+	// it is 43 bytes of prose - so the record-free hold-back does not fire either.
 	eng.held.Store(&holdBacks{paths: map[string]string{}})
-	got, err = eng.pickTempPath(d, "movie", "mkv")
+	got, err = eng.pickTempPath(ctx, d, "movie", "mkv")
 	if err != nil {
 		t.Fatalf("pickTempPath: %v", err)
 	}

@@ -310,6 +310,17 @@ never an unrecorded deletion - and a replacement holdfast kept is never handed b
 it were a source. Files holdfast retained this way are named `*.__holdfast-replacement__.*` and are left
 alone by every later run, whether or not a record of them survived.
 
+Moving a replacement to that name is itself a write into the media directory, and the failure that
+strands a replacement is often the same failure that denies the write - a library that has gone
+read-only refuses the swap, the move to the held-back name and the record in the job store alike. So a
+replacement can end up left at its `*.__transcoding__.*` working path with nothing recorded about it.
+holdfast still will not touch it. The stale-temp sweep that reclaims a killed run's half-written encodes
+**examines** each one rather than assuming it is disposable: a file at that path whose content is a
+finished encode at the target codec, the length of the source beside it, is kept, reported at every
+subsequent run, and stepped around when a fresh encode of the same source picks its own working path.
+Removing it is your call, not the tool's. A genuinely half-written encode is shorter than its source and
+is still swept, exactly as before.
+
 When `container_ext` makes the output's extension differ from the source's, the swap's target is a
 **different path** from the source, so a rename that took effect while reporting an error leaves the
 replacement *there* rather than at the source path. holdfast follows the file: a parked job records where

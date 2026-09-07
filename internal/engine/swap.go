@@ -37,8 +37,8 @@ import (
 // because the job that produced it did not complete cleanly. It is deliberately a
 // DIFFERENT marker from TempMarker, and the difference is load-bearing.
 //
-// A `__transcoding__` file is work in progress: a killed run leaves them behind and
-// the next startup sweeps them, which is right, because a partial encode is worth
+// A `__transcoding__` file is USUALLY work in progress: a killed run leaves them behind
+// and the next startup sweeps them, which is right, because a partial encode is worth
 // nothing. A `__holdfast-replacement__` file is the opposite: it PASSED every gate, it
 // may be the only faithful copy of a source whose fate is unknown, and nothing in this
 // program may ever delete it on its own initiative. Giving the two states two names is
@@ -46,6 +46,12 @@ import (
 // it is what stops a fresh encode of a reclaimed source from colliding with a retained
 // replacement of the same source, since the two constructions cannot produce the same
 // string.
+//
+// "Usually" is the load-bearing word, and it is why strayReplacementHold exists. Moving
+// a replacement to this name is a WRITE into the media directory, and the failure that
+// strands a replacement in the first place is very often the same failure that denies
+// that write. A `__transcoding__` file therefore has to be examined rather than assumed
+// disposable; the name is the cheap half of the question and the content is the rest.
 const RetainedMarker = "__holdfast-replacement__"
 
 // maxPathCandidates bounds the search for a free constructed path. It is small on
@@ -77,31 +83,146 @@ func suffix(n int) string {
 	return "." + strconv.Itoa(n)
 }
 
-// IsRetainedReplacementName reports whether base is EXACTLY a name
-// retainedReplacementPath could have produced: a non-empty stem, the marker, an
-// optional all-digit ordinal, and a simple extension.
+// splitConstruction decomposes base into the stem and extension the named construction
+// would have been called with, and reports whether base is EXACTLY something that
+// construction could have produced: a non-empty stem, the marker, an optional all-digit
+// ordinal, and a simple extension.
 //
-// This is the RECORD-FREE hold-back, and it is the only one. It exists because the one
-// case that most needs holding back is the one where no record could be written - the
-// job store was unwritable, which is precisely what denied the record - so a hold-back
-// that depended on a record would be absent exactly when it matters. It is matched
-// exactly rather than by pattern: nothing else in the library is held back on its name,
-// so an ordinary source in the same roots still enumerates, encodes and swaps.
+// It is the whole of the RECORD-FREE basis, for BOTH markers. That basis exists because
+// the one case that most needs holding back is the one where no record could be written -
+// the job store was unwritable, which is precisely what denied the record - so a
+// hold-back that depended on a record would be absent exactly when it matters. It is
+// matched exactly rather than by pattern: nothing else in the library is held back on
+// its name, so an ordinary source in the same roots still enumerates, encodes and swaps.
 //
 // The extension is not checked against the configured video extensions, deliberately.
 // Tying the matcher to configuration would mean editing a config key silently released
 // a file holdfast wrote back into enumeration, and the fail-safe runs the other way.
-func IsRetainedReplacementName(base string) bool {
-	infix := "." + RetainedMarker + "."
+func splitConstruction(base, marker string) (stem, ext string, ok bool) {
+	infix := "." + marker + "."
 	i := strings.Index(base, infix)
 	if i <= 0 { // i == 0 would mean no stem at all
-		return false
+		return "", "", false
 	}
+	stem = base[:i]
 	rest := base[i+len(infix):]
 	if j := strings.IndexByte(rest, '.'); j >= 0 {
-		return allDigits(rest[:j]) && isSimpleExt(rest[j+1:])
+		if !allDigits(rest[:j]) {
+			return "", "", false
+		}
+		rest = rest[j+1:]
 	}
-	return isSimpleExt(rest)
+	if !isSimpleExt(rest) {
+		return "", "", false
+	}
+	return stem, rest, true
+}
+
+// IsRetainedReplacementName reports whether base is EXACTLY a name
+// retainedReplacementPath could have produced.
+func IsRetainedReplacementName(base string) bool {
+	_, _, ok := splitConstruction(base, RetainedMarker)
+	return ok
+}
+
+// IsTempConstructionName reports whether base is EXACTLY a name tempPath could have
+// produced. It is the SECOND half of the record-free basis, and it is deliberately
+// narrower than isTempName.
+//
+// isTempName ("contains .__transcoding__.") decides what the stale-temp SWEEP looks at,
+// and it has to stay wide: a temp that ends up with an odd name is still work in
+// progress and still has to be reclaimed. This one decides what may be HELD BACK on its
+// name, and AC15i bounds that to what the build's own construction could have produced -
+// "matched exactly and never by a widened temp-or-dotfile pattern". Holding a path back
+// withholds it from the library for as long as the file is there, so the two questions
+// get two matchers rather than one loose one shared between them.
+func IsTempConstructionName(base string) bool {
+	_, _, ok := splitConstruction(base, TempMarker)
+	return ok
+}
+
+// strayReplacementHold reports WHY a file sitting at a temp path must be left alone, or
+// "" when it is an ordinary orphan the sweep may take. It is the record-free hold-back
+// at the one place a file holdfast wrote can still be destroyed: the stale-temp sweep
+// and the temp-path picker, both of which remove a file at a path tempPath produced.
+//
+// It exists because the retained NAME is not, on its own, a record-free protection:
+// getting a file to that name is itself a WRITE INTO THE MEDIA DIRECTORY. A library
+// filesystem that has gone read-only (ext4's errors=remount-ro default, an NFS export
+// turned ro, a full-ish volume) makes the swap rename fail - which is how a run reaches
+// handleFailedSwap at all - and makes retainReplacement's rename, a rename in the same
+// directory, fail for exactly the same reason; a state directory on that same mount then
+// refuses the incident write and AC15h fires. One cause, every record denied, and a
+// gate-passed replacement left sitting at a `__transcoding__` path. AC15i is
+// unconditional across runs and names that origin explicitly, so the hold-back has to
+// reach it without any write at all.
+//
+// THE TENSION, stated rather than glossed: an ordinary orphaned temp MUST still be
+// swept, or a killed run's half-written encodes accumulate for ever and crash-safety
+// regresses. So a path is NOT held on the temp name alone. It is held when both halves
+// hold:
+//
+//  1. its NAME is exactly what tempPath could have produced - never a widened
+//     temp-or-dotfile pattern (AC15i bounds the record-free basis to the construction);
+//     and
+//  2. its CONTENT is a FINISHED encode rather than a partial one.
+//
+// Half 2 is decided by the verify gate's OWN checks, and that is what makes this a rule
+// rather than a guess: the output codec (gate 2) and length parity against the source
+// beside it (gate 3, lengthParity, the same function). Every replacement that ever
+// reached a swap passed both BY CONSTRUCTION, so this can never sweep one. It is
+// deliberately loose in the other direction - a partial encode that satisfies both is
+// KEPT and reported, which costs an operator some disk and never a file.
+//
+// Both checks are needed and neither is decorative. Measured on real ffmpeg: a libx265
+// encode of a 20-second source, killed part-way, ends up 3.6 seconds long while
+// reporting codec `hevc` and DECODING CLEANLY - so the codec check alone (and a decode
+// integrity check alone) would hold every partial encode for ever, and the length check
+// is the one that tells them apart. A hard-killed encode leaves a zero-length or
+// header-only file, which fails the codec check and is swept by that half.
+func (e *Engine) strayReplacementHold(ctx context.Context, path string) string {
+	// Nothing there, or not a regular file: nothing to hold, and no subprocess spent
+	// asking. This is also what keeps the picker's common case free of an extra probe.
+	if fi, err := os.Lstat(path); err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
+	stem, ext, ok := splitConstruction(filepath.Base(path), TempMarker)
+	if !ok {
+		return ""
+	}
+	if codec := e.Probe.VideoCodec(ctx, path); codec != e.targetCodec {
+		return ""
+	}
+	src, found := e.sourceBeside(filepath.Dir(path), stem, ext)
+	if !found {
+		// No source to measure against. Holding is the fail-safe answer and it is the
+		// rarer branch by construction: a swap that failed left the source where it was,
+		// so a replacement stranded at a temp path normally has its source beside it.
+		return "a finished " + e.targetCodec + " encode holdfast wrote, with no source beside it left to measure it against"
+	}
+	if err := e.lengthParity(ctx, src, path); err != nil {
+		return "" // a truncated encode: work in progress, and the sweep's to take
+	}
+	return "a finished " + e.targetCodec + " encode holdfast wrote, the length of the source beside it (" + filepath.Base(src) + ")"
+}
+
+// sourceBeside finds the source a stray temp was being encoded FROM: the sibling sharing
+// its stem that carries a video extension. tempPath puts the temp in the source's own
+// directory under the source's own stem, so this is that construction read backwards and
+// not a search. The temp's own extension is tried first because it IS the source's
+// whenever the output container matches the source (the default); the configured
+// extensions cover a forced container_ext, where the two differ.
+func (e *Engine) sourceBeside(dir, stem, tempExt string) (string, bool) {
+	exts := make([]string, 0, len(e.Cfg.VideoExts)+1)
+	exts = append(exts, tempExt)
+	exts = append(exts, e.Cfg.VideoExts...)
+	for _, ext := range exts {
+		p := filepath.Join(dir, stem+"."+ext)
+		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() {
+			return p, true
+		}
+	}
+	return "", false
 }
 
 func allDigits(s string) bool {
@@ -469,14 +590,32 @@ func (e *Engine) retainReplacement(at, final string) string {
 		p := retainedReplacementPath(dir, stem, ext, n)
 		if _, err := os.Lstat(p); errors.Is(err, os.ErrNotExist) {
 			if err := os.Rename(at, p); err != nil {
-				// Say only what is true. The old wording here asserted the file "stays
-				// at the temp path and is held back by its record" - two claims this
-				// branch cannot make, since the move most often fails because there is
-				// nothing at that path at all, and the record that would hold it has not
-				// been written yet (it may be exactly what fails next). What IS true is
-				// the path the outcome record will name and whether a file is there.
+				// Say only what is true, and say what is now standing on what. The move
+				// failing is the case where an operator most needs to know which
+				// protection is left, because the write that just failed is very often
+				// the same write that is about to deny the outcome record below.
+				//
+				// What holds the file then is strayReplacementHold: a file at a path THIS
+				// BUILD'S TEMP CONSTRUCTION produced, whose content is a finished encode
+				// at the target codec matching the length of the source beside it, is
+				// never enumerated, encoded, swapped or swept - with or without a record.
+				// What that does NOT cover is a file at an ordinary media name, which is
+				// reachable only when the rename took effect at a target whose extension
+				// differs from the source's; the rename having taken effect is itself
+				// evidence the directory accepts writes, so the move above is expected to
+				// succeed in exactly that case.
 				_, statErr := os.Lstat(at)
-				e.Log.Warn("could not move the replacement to a held-back name - the outcome record below names this path and the operator action reports what is (or is not) there",
+				held := "no file is there"
+				if statErr == nil {
+					held = "the file there is held back on its name and its content (a finished " +
+						e.targetCodec + " encode at a temp path this build constructed), with or without a record"
+					if !IsTempConstructionName(filepath.Base(at)) {
+						held = "the file there is at an ordinary media name, so ONLY the outcome record below can hold it back - " +
+							"if that record cannot be written either, move or remove this file by hand"
+					}
+				}
+				e.Log.Warn("could not move the replacement to a held-back name - "+held+
+					"; the outcome record below names this path and the operator action reports what is (or is not) there",
 					"replacement", at, "retained", p, "file_present_there", statErr == nil, "err", err)
 				return at
 			}

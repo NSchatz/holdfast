@@ -405,7 +405,16 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   (`RecoverStale` → stale-temp cleanup → scan → fan out to a `Cfg.EffectiveWorkers()`-sized worker pool over
   a channel; a worker's in-flight temp is local to its own `ProcessFile` call, never a shared field, since N
   workers each hold at most one temp at a time). **This is the risk-critical heart — do not weaken the
-  invariant.**
+  invariant.** The stale-temp cleanup is no longer unconditional (FILESYSTEM-1): moving a gate-passed
+  replacement to its held-back `__holdfast-replacement__` name is a WRITE into the media directory, and the
+  failure that strands a replacement is usually the same failure that denies that write and the job-store
+  record with it — so a `__transcoding__` file is EXAMINED before it is reclaimed (`strayReplacementHold`).
+  It is kept when its name is exactly what `tempPath` constructs AND its content passes the verify gate's
+  own codec and `lengthParity` checks against the source beside it, which every replacement that ever
+  reached a swap passes by construction; a half-written encode is shorter and is still swept. Do not
+  "simplify" that to the name alone (a killed encode reports codec `hevc` and decodes cleanly — measured —
+  so temps would accumulate for ever) nor back to an unconditional `os.Remove` (that is the deletion AC15i
+  forbids). `pickTempPath` applies the identical rule: it is the second route to the same deletion.
 - `internal/logging`, `internal/version` — logger construction, build-stamped version.
 - `.github/workflows/ci.yml` — the gate (installs the pinned ffmpeg via `scripts/install-ffmpeg.sh` for the
   engine proof) + a `package` job (TRANSCODE-9) that builds BOTH arches and runs the image smoke gate.

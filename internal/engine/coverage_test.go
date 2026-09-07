@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/probe"
 )
 
 func coverageEngine(t *testing.T, root string, coverage []string) *Engine {
@@ -18,7 +19,10 @@ func coverageEngine(t *testing.T, root string, coverage []string) *Engine {
 		LibraryRoots: []string{root},
 		VideoExts:    []string{"mkv", "mp4"},
 	}
-	e := New(cfg, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// A REAL prober (see heldEngine): the sweep asks the verify gate's own questions of
+	// a file before it may be removed.
+	ffmpeg, ffprobe := tools(t)
+	e := New(cfg, probe.New(ffmpeg, ffprobe), nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	e.Coverage = coverage
 	return e
 }
