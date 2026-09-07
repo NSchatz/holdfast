@@ -103,3 +103,48 @@ pull request, after proving both runtimes are present.
   navigation target the reader chooses, not a resource the page loads.
 - Absence. A fact nobody recorded renders as "not recorded" or "unavailable", never as 0,
   NaN or "undefined" - the store's own invariant, carried to the screen.
+
+## The page's shape, and its figures (DASH-9)
+
+The page is ordered by the two questions an operator has, in the order they ask them.
+**Right now** comes first in the document and first on the screen - the live badges, the
+counts, the controls, the filter and the queue - and **What it has done to your library**
+comes after it: the whole-ledger figures and the recent history. Each region is under its
+own heading, and the graders decide that order from document position AND from the
+rendered top edge of each region, not from the markup.
+
+Each whole-ledger figure is **drawn as well as stated**. A distribution (Outcomes, Skips
+by guard) draws one bar per bucket, sized against the largest count in that same figure; a
+spread (Replacement size, Encode time, VMAF pooled mean, VMAF worst frame) puts its
+minimum, mean and maximum on one scale. Four rules govern every one of them, and each is
+graded in the browser against a document deliberately mutated to defeat it:
+
+- **Built, never fetched.** A drawing is a shell cloned from a `<template>` in the page's
+  own markup, with one geometry attribute set per mark. The SVG namespace comes from the
+  HTML parser reading that template, so no module names a namespace URI either. No
+  library, no font, no image, no `data:` URI, no `package.json`, no lockfile: the response
+  policy is `default-src 'none'` and `img-src`, `font-src` and `media-src` all fall back
+  to it, so a dependency here would not be a heavier page, it would be a broken one.
+- **The drawing is never the sole carrier of a number.** Every value a figure encodes is
+  rendered as text in the same card, in the order the marks are drawn: label and count per
+  bar, and the three named values of a spread. Remove every drawing from the rendered
+  document and the cards still read - which is exactly what one grader does.
+- **Nothing means anything by colour alone.** Every mark of every figure is one token
+  (`--mark`), and the distinctions are position, length, tick height and the label beside
+  the mark. Elsewhere on the page a status dot, a count chip, a badge, the connection state
+  and an unavailable figure each pair their colour with rendered text, and the three
+  terminal outcomes are given three different dot shapes as well. The grader forces every
+  colour on the page to one value and requires the same distinctions to still be readable.
+- **3:1 against what is behind it.** Every mark, scale, tick, status dot and figure
+  boundary is measured from the browser's computed styles by WCAG 2.2's own relative
+  luminance ratio, and the Go side recomputes each ratio rather than trusting the page's.
+  `--border` (4.15:1 on the page, 3.82:1 on a card face) draws every boundary a reader has
+  to find; `--line` remains for decorative separators, where the floor does not apply.
+
+The value-to-geometry arithmetic behind the drawings (`readBuckets`, `bucketProportions`,
+`spreadPositions`) lives in `js/20-derive.js` with the rest of the derivations, so it is
+exercised input by input in node. Nothing in the browser computes a STATISTIC: the server
+already did that over the whole ledger, and these turn a published number into a length or
+a position and nothing else. A figure with nothing to draw draws nothing - an unavailable
+one, one no row contributed to, and a spread whose ends coincide or never arrived all keep
+their card and their words while drawing no mark that could be read as a measured zero.

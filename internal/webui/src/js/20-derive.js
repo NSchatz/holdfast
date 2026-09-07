@@ -129,8 +129,13 @@ function progressFigure(j) {
 }
 
 // Human label for one skip guard. An unknown token falls back to itself, so a new guard
-// is never hidden behind a blank.
-function guardLabel(k) { return GUARD_LABELS[k] || k; }
+// is never hidden behind a blank. The lookup is an OWN-property lookup deliberately: a
+// bucket key arriving off the wire is attacker-influencable text, and a plain `obj[k]`
+// answers "constructor" or "toString" with something off Object.prototype, which would
+// put a function body on the screen where a guard name belongs.
+function guardLabel(k) {
+  return Object.prototype.hasOwnProperty.call(GUARD_LABELS, k) ? GUARD_LABELS[k] : k;
+}
 
 // Surface the API's silent row caps: it ships at most a fixed number of queue / history
 // rows, so a truncated view could read as the whole ledger. When the store holds more
@@ -163,4 +168,66 @@ function aggExclusionText(a) {
   if (excluded <= 0) return "";
   return excluded.toLocaleString() + " row" + (excluded === 1 ? "" : "s") +
     " excluded: no recorded value";
+}
+
+// --- what a figure's DRAWING is derived from -----------------------------------
+//
+// The three functions below are the whole of the arithmetic the graphics do, and they
+// are here rather than beside the nodes they end up on for the same reason every other
+// derivation is: they map published numbers to a value, touch no DOM, and are therefore
+// exercisable one input at a time. None of them computes a STATISTIC - the server
+// already did that over the whole ledger; these turn a number that was published into a
+// length or a position, and nothing else.
+
+// readBuckets is the one gate between a published bucket figure and the page. It either
+// hands back a usable list of {key, count} or it THROWS, and a throw is what makes the
+// card render as unavailable: a figure whose buckets are absent, empty or malformed is a
+// figure that could not be read, and this page says exactly that rather than drawing a
+// shape over numbers nobody published.
+function readBuckets(buckets) {
+  if (!Array.isArray(buckets) || buckets.length === 0) {
+    throw new Error("this figure carries no readable buckets");
+  }
+  return buckets.map(function (b) {
+    if (!b || typeof b !== "object" || Array.isArray(b)) {
+      throw new Error("a bucket in this figure is not a bucket");
+    }
+    if (typeof b.key !== "string" && typeof b.key !== "number") {
+      throw new Error("a bucket in this figure carries no usable key");
+    }
+    if (!isNum(b.count) || b.count < 0) {
+      throw new Error("a bucket in this figure carries no usable count");
+    }
+    return { key: String(b.key), count: b.count };
+  });
+}
+
+// bucketProportions is the length of every bar of a distribution, as a share of the
+// LARGEST count in the same figure - so the bars of one figure are comparable with each
+// other and with nothing else. It answers null where there is nothing a proportion could
+// be taken against (an empty list, or a largest count of zero), and the renderer then
+// draws no bar at all: a zero-length mark on a shared axis reads as a measured zero, and
+// no row measured anything.
+function bucketProportions(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  let max = 0;
+  for (const b of rows) {
+    if (!b || !isNum(b.count) || b.count < 0) return null;
+    if (b.count > max) max = b.count;
+  }
+  if (max <= 0) return null;
+  return rows.map(function (b) { return b.count / max; });
+}
+
+// spreadPositions places a spread's mean on the scale its own minimum and maximum define:
+// 0 is the minimum end, 1 the maximum end. It answers null where there is no scale to
+// draw on - any of the three absent, a maximum below its minimum (a figure that cannot be
+// true), or ends that coincide, where a full-width axis would assert a spread that was
+// never measured. The three values are always rendered as text either way, so a figure
+// with no drawing still carries every number it has.
+function spreadPositions(min, mean, max) {
+  if (!isNum(min) || !isNum(mean) || !isNum(max)) return null;
+  if (max <= min) return null;
+  const t = (mean - min) / (max - min);
+  return { mean: Math.min(1, Math.max(0, t)) };
 }

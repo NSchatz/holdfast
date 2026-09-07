@@ -173,6 +173,13 @@ test("guardLabel names each skip guard and never hides an unknown one", () => {
   assert.equal(d.guardLabel("low-bitrate"), "already efficient (low bitrate)");
   assert.equal(d.guardLabel("already-at-target-codec"), "already at target codec");
   assert.equal(d.guardLabel("a-guard-added-next-week"), "a-guard-added-next-week");
+  // A bucket key is attacker-influencable text off the wire, and every one of these
+  // names something on Object.prototype. An inherited lookup would put a function body
+  // (or "[object Object]") on screen where a guard name belongs; the label is an OWN
+  // property or it is the key itself.
+  for (const k of ["constructor", "toString", "hasOwnProperty", "__proto__", "valueOf"]) {
+    assert.equal(d.guardLabel(k), k, "guardLabel(" + k + ") must fall back to the key itself");
+  }
 });
 
 test("capNoteText claims a cap only when the ledger holds more than we were handed", () => {
@@ -320,5 +327,76 @@ test("announceText and aggregate copy survive an unusable summary", () => {
   assert.equal(d.aggCoverageText({}), "over an unstated set");
   for (const v of ABSENT) {
     assert.equal(d.aggExclusionText({ excluded: v }), "", "excluded " + String(v));
+  }
+});
+
+// --- DASH-9: the value-to-geometry derivations behind the drawings -------------------
+//
+// These are the only arithmetic the figures do, so they are exercised here one input at
+// a time - including every degenerate input a real ledger produces. What the marks then
+// MEASURE on screen is a different question and is decided in a real browser engine
+// (dashboard_rendered_test.go), because no assertion here can say what was drawn.
+
+test("readBuckets accepts a published figure and refuses one that cannot be read", () => {
+  assert.deepEqual(
+    shape(d.readBuckets([{ key: "done", count: 9 }, { key: "failed", count: 2 }])),
+    [{ key: "done", count: 9 }, { key: "failed", count: 2 }]);
+  // A numeric key is a key; it arrives as text on the page either way.
+  assert.deepEqual(shape(d.readBuckets([{ key: 7, count: 1 }])), [{ key: "7", count: 1 }]);
+  // A count of zero is a MEASUREMENT and is kept; only an unusable one is refused.
+  assert.deepEqual(shape(d.readBuckets([{ key: "done", count: 0 }])), [{ key: "done", count: 0 }]);
+
+  // Absent, empty or malformed: each throws, which is what draws the card as unavailable
+  // rather than as a figure with a shape over a number nobody published.
+  for (const bad of [undefined, null, {}, "done=9", 3, true, []]) {
+    assert.throws(() => d.readBuckets(bad), "readBuckets(" + JSON.stringify(bad) + ")");
+  }
+  for (const bad of [
+    [null], [undefined], ["done"], [[]], [{ count: 9 }], [{ key: "done" }],
+    [{ key: "done", count: null }], [{ key: "done", count: "9" }], [{ key: "done", count: NaN }],
+    [{ key: "done", count: Infinity }], [{ key: "done", count: -1 }], [{ key: {}, count: 1 }],
+    [{ key: "done", count: 9 }, { key: "failed", count: null }],
+  ]) {
+    assert.throws(() => d.readBuckets(bad), "readBuckets(" + JSON.stringify(bad) + ")");
+  }
+});
+
+test("bucketProportions sizes every bar against the largest count in its own figure", () => {
+  assert.deepEqual(shape(d.bucketProportions([{ count: 9 }, { count: 3 }, { count: 2 }])),
+    [1, 1 / 3, 2 / 9]);
+  // One bucket is its own maximum.
+  assert.deepEqual(shape(d.bucketProportions([{ count: 4 }])), [1]);
+  // All-equal counts are all full length - the figure says "these are the same", which
+  // is what it measured.
+  assert.deepEqual(shape(d.bucketProportions([{ count: 5 }, { count: 5 }])), [1, 1]);
+  // A zero beside a real count is a real zero, and draws as no length at all.
+  assert.deepEqual(shape(d.bucketProportions([{ count: 10 }, { count: 0 }])), [1, 0]);
+  // Nothing to take a proportion against: no bar is drawn at all, rather than a row of
+  // full-length marks or a division by zero.
+  assert.equal(d.bucketProportions([{ count: 0 }, { count: 0 }]), null);
+  for (const bad of [undefined, null, [], {}, "x", 4, [{ count: null }], [{ count: "3" }],
+    [{ count: NaN }], [{ count: -2 }], [null], [{ count: 3 }, { count: undefined }]]) {
+    assert.equal(d.bucketProportions(bad), null, "bucketProportions(" + JSON.stringify(bad) + ")");
+  }
+});
+
+test("spreadPositions places the mean on the scale its own ends define", () => {
+  assert.deepEqual(shape(d.spreadPositions(0, 5, 10)), { mean: 0.5 });
+  assert.deepEqual(shape(d.spreadPositions(0.21, 0.38, 0.74)), { mean: (0.38 - 0.21) / (0.74 - 0.21) });
+  assert.deepEqual(shape(d.spreadPositions(10, 10, 20)), { mean: 0 });
+  assert.deepEqual(shape(d.spreadPositions(10, 20, 20)), { mean: 1 });
+  // A mean outside its own ends cannot be plotted honestly beyond them; it is clamped to
+  // the scale rather than drawn off the end of the card.
+  assert.deepEqual(shape(d.spreadPositions(10, 4, 20)), { mean: 0 });
+  assert.deepEqual(shape(d.spreadPositions(10, 40, 20)), { mean: 1 });
+  // Ends that coincide are a point, not a spread: nothing is drawn, and the three values
+  // are still stated as text by the card.
+  assert.equal(d.spreadPositions(7, 7, 7), null);
+  // A maximum below its minimum is a figure that cannot be true.
+  assert.equal(d.spreadPositions(9, 5, 1), null);
+  for (const v of ABSENT) {
+    assert.equal(d.spreadPositions(v, 5, 10), null, "min " + String(v));
+    assert.equal(d.spreadPositions(0, v, 10), null, "mean " + String(v));
+    assert.equal(d.spreadPositions(0, 5, v), null, "max " + String(v));
   }
 });
