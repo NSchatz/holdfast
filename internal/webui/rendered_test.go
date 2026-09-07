@@ -88,19 +88,28 @@ function verdict(doc, win) {
 
 // probePage is the harness document. It is served by the TEST, never shipped: the
 // shipped document is what it loads into the iframe, unmodified, over HTTP.
+//
+// The verdict is computed SYNCHRONOUSLY in this page's own `load` handler, with no
+// timer and no --virtual-time-budget. That is load-bearing, not tidiness: the parent's
+// load event cannot fire until the iframe has loaded, so the iframe's document is
+// there by then, and --dump-dom serialises after load handlers have run.
+// getBoundingClientRect forces layout synchronously, so geometry is settled when it is
+// read. The earlier shape (a timer plus --virtual-time-budget) hung on a CI runner,
+// because virtual time does not advance while a page has network in flight and the
+// dashboard's own EventSource retries forever against a probe server that is not the
+// real API.
 const probePage = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>probe</title></head>
 <body><iframe id="f" src="%SRC%" width="1200" height="900" style="border:0"></iframe>
 <pre id="verdict">pending</pre>
 <script>
 %JS%
-function run() {
+window.addEventListener("load", function () {
   const f = document.getElementById("f");
   let v;
   try { v = verdict(f.contentDocument, f.contentWindow); }
   catch (e) { v = { error: String(e) }; }
   document.getElementById("verdict").textContent = JSON.stringify(v);
-}
-document.getElementById("f").addEventListener("load", function () { setTimeout(run, 250); });
+});
 </script></body></html>`
 
 type renderVerdict struct {
@@ -169,23 +178,61 @@ func serveDocument(t *testing.T, url string, mutate func([]byte) []byte) *httpte
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(page))
 	})
+	// The dashboard's own API calls, answered just well enough that the page does not
+	// sit in a reconnect loop against a probe server that is not the real API. The
+	// offer is in the static bytes and depends on none of this (that is AC8); this is
+	// here so the browser has nothing to keep retrying while it is being measured.
+	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// Bounded, so this handler can never hold httptest.Server.Close open if the
+		// browser goes away without closing the connection.
+		select {
+		case <-r.Context().Done():
+		case <-time.After(30 * time.Second):
+		}
+	})
+	for _, ep := range []string{"/api/summary", "/api/queue", "/api/history"} {
+		mux.HandleFunc(ep, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_, _ = w.Write([]byte(`{}`))
+		})
+	}
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
 }
 
+// hermeticFlags make the browser a MEASURING INSTRUMENT rather than a desktop
+// application. Everything here is either "do not reach the network" or "do not need a
+// session bus": a CI runner's Chrome will otherwise register with GCM, poll the
+// component updater and fail to find dbus, which is what hung the first version of
+// this test on the runner. There is no --virtual-time-budget: see probePage.
+var hermeticFlags = []string{
+	"--headless", "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage",
+	"--hide-scrollbars", "--window-size=1280,1024",
+	"--no-first-run", "--no-default-browser-check", "--disable-default-apps",
+	"--disable-background-networking", "--disable-component-update",
+	"--disable-client-side-phishing-detection", "--safebrowsing-disable-auto-update",
+	"--disable-sync", "--disable-domain-reliability", "--disable-extensions",
+	"--disable-breakpad", "--metrics-recording-only", "--mute-audio",
+	"--password-store=basic", "--use-mock-keychain",
+	"--disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,InterestFeedContentSuggestions,AutofillServerCommunication,CalculateNativeWinOcclusion",
+}
+
 // renderAndRead drives the browser over the probe page and returns what it saw.
 func renderAndRead(t *testing.T, bin, url string) renderVerdict {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	profile := t.TempDir()
-	cmd := exec.CommandContext(ctx, bin,
-		"--headless", "--disable-gpu", "--no-sandbox", "--no-first-run",
-		"--disable-dev-shm-usage", "--hide-scrollbars", "--window-size=1280,1024",
-		"--user-data-dir="+profile, "--virtual-time-budget=8000",
-		"--dump-dom", url)
-	cmd.Env = append(os.Environ(), "HOME="+profile)
+	args := append(append([]string{}, hermeticFlags...), "--user-data-dir="+profile, "--dump-dom", url)
+	cmd := exec.CommandContext(ctx, bin, args...)
+	// A profile-local HOME and no session bus to look for: the runner has neither.
+	cmd.Env = append(os.Environ(), "HOME="+profile, "DBUS_SESSION_BUS_ADDRESS=disabled:")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("chromium --dump-dom %s: %v\n%s", url, err, out)
