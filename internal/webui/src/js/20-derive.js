@@ -148,14 +148,24 @@ function guardLabel(k) {
 // A total that could not be read says exactly that AND SHOWS NO NUMBER IN ITS PLACE. Not a
 // zero, not the row count standing in for it: a reader who sees a figure beside "capped"
 // will read it as the total, so the honest answer here carries no digits at all.
+//
+// And it does not claim the view IS capped, because without the total nothing here knows
+// that. Cappedness is a COMPARISON - the ledger's total against the rows this response
+// carried - so the figure being unreadable takes the answer with it. A page told "this view
+// is capped" while showing 3 rows drawn from a 3-row ledger would be inventing the one fact
+// it has just said it cannot read.
 const CAP_TOTAL_UNAVAILABLE =
-  "This view is capped. The total it is capped against is unavailable.";
+  "The total behind this view is unavailable, so whether it is capped cannot be shown.";
 
 function capNoteText(shown, total) {
   if (!isNum(shown)) return "";
-  // No total on the wire at all: an older server, or a frame that never carried one.
-  // Nothing is claimed, and nothing is shown.
-  if (total === null || total === undefined) return "";
+  // No total on the wire at all is no readable total either, and is treated as one. The
+  // server's snapshot always carries both fields (they are plain struct fields, and the
+  // page is embedded in the binary that serves them), so this is unreachable in the shipped
+  // system - but "absent" and "present and unreadable" are the same fact to a reader, and
+  // answering them differently would leave a silent branch that renders an unknown cap as
+  // an uncapped view.
+  if (total === null || total === undefined) return CAP_TOTAL_UNAVAILABLE;
   if (typeof total !== "object" || Array.isArray(total)) return CAP_TOTAL_UNAVAILABLE;
   if (total.available !== true || !isNum(total.count) || total.count < 0) {
     return CAP_TOTAL_UNAVAILABLE;

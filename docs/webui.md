@@ -109,9 +109,12 @@ pull request, after proving both runtimes are present.
   per-table status lists that fed it, so there is nothing left to derive one from. A
   response whose total could not be read is shown as unavailable **with no figure in its
   place** - the notice carries no digit at all, because a number beside the word "capped"
-  is read as the total whatever the sentence around it says. Both are graded in the
-  browser against a document mutated to derive its own total, to hide the notice, to print
-  a number where the unavailability belongs, and to say nothing at all.
+  is read as the total whatever the sentence around it says. Nor does it claim the view IS
+  capped: cappedness is the comparison `total > shown`, so an unreadable total takes that
+  answer with it, and an absent total field answers the same way as an unreadable one.
+  Both are graded in the browser against a document mutated to derive its own total, to
+  hide the notice, to print a number where the unavailability belongs, and to say nothing
+  at all.
 
 ## The page's shape, and its figures (DASH-9)
 

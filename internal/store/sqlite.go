@@ -63,6 +63,53 @@ func Open(path string) (*SQLite, error) {
 	return s, nil
 }
 
+// OpenReadOnly opens an EXISTING ledger for reading and never changes it (LEDGER-5).
+//
+// Open above MIGRATES: it is the daemon's door, and a daemon that is about to write
+// through the current schema must have the current schema. A READER is the opposite
+// case, and `holdfast export` is the reader this exists for. An export that opened the
+// store the daemon's way would silently upgrade the operator's ledger as a side effect
+// of reading it — and migrate() then REFUSES that file to the older holdfast that wrote
+// it, because its user_version is ahead of that build. So the one command whose whole
+// job is to preserve the record would be the command that made the record unreadable to
+// the daemon still running against it.
+//
+// Two things stop that, and both are needed:
+//
+//   - mode=ro makes it a physical property of the handle rather than a promise about
+//     the code above it: SQLite itself refuses every write, so no future caller can
+//     quietly reintroduce one. Nothing is created either — a path that does not exist
+//     is an error, never a fresh empty database.
+//   - requireCurrentSchema refuses a version mismatch in BOTH directions instead of
+//     repairing one. Ahead of this build was already a refusal (migrate's rule, for the
+//     same reason: a narrower SELECT would not see every column). Behind it is now a
+//     refusal too, because the alternative is either reading through a schema the file
+//     does not have or migrating it, and migrating is exactly what a read must not do.
+//     Upgrading the ledger stays a deliberate act: run `holdfast run` or `holdfast
+//     serve` once, which is the path that has always owned the schema.
+//
+// SQLite may still create its own -wal/-shm sidecars beside the database while reading
+// one in WAL mode, as any reader does; the database file itself — its rows, its schema
+// and its version — is left exactly as it was found.
+func OpenReadOnly(path string) (*SQLite, error) {
+	// No MkdirAll and no create: a read that finds nothing to read says so. The
+	// pragmas are deliberately not Open's — journal_mode and synchronous are writes to
+	// the header, and a reader has no business setting either. query_only is belt and
+	// braces beside mode=ro, and it costs nothing.
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)", path)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("store: open %q read-only: %w", path, err)
+	}
+	db.SetMaxOpenConns(1)
+
+	if err := requireCurrentSchema(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &SQLite{db: db}, nil
+}
+
 // New wraps an already-open *sql.DB (test seam — e.g. an in-memory database) and
 // migrates the schema up to date. The caller is responsible for any connection-limit
 // pragmas it wants (Open sets MaxOpenConns(1); New leaves db as given).

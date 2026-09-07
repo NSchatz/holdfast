@@ -186,14 +186,79 @@ func TestGrowth_TheMetricNamesPublishedTodayAreStillPublishedAndNoneWasRenamed(t
 
 	// And the queue-depth gauge still carries its `state` label over every status,
 	// terminal ones included - which is the whole of how growth is visible.
+	//
+	// The fixture puts a real row in each of the other six states first, and it has to: the
+	// gauge reports an empty state by OMISSION, so over a table holding only skipped rows
+	// this loop would be asking whether six series that SHOULD be absent are absent, and
+	// answering yes whatever the collector did.
+	seedOneRowInEveryOtherState(t, st)
+
 	body := scrape(t, m)
-	for _, state := range []string{"pending", "probing", "encoding", "verifying", "done", "skipped", "failed"} {
-		if !strings.Contains(body, `holdfast_queue_depth{state="`+state+`"`) && queueDepth(t, body, state) != 0 {
-			t.Errorf("holdfast_queue_depth carries no series for state %q", state)
+	for _, c := range []struct {
+		state string
+		rows  int
+	}{
+		{"pending", 1}, {"probing", 1}, {"encoding", 1}, {"verifying", 1},
+		{"done", 1}, {"skipped", 3}, {"failed", 1},
+	} {
+		if !strings.Contains(body, `holdfast_queue_depth{state="`+c.state+`"`) {
+			t.Errorf("holdfast_queue_depth carries no series for state %q, which holds %d row(s)", c.state, c.rows)
+			continue
+		}
+		if got := queueDepth(t, body, c.state); got != c.rows {
+			t.Errorf("holdfast_queue_depth{state=%q} reads %d, want the %d seeded row(s)", c.state, got, c.rows)
 		}
 	}
-	if queueDepth(t, body, "skipped") != 3 {
-		t.Errorf("holdfast_queue_depth{state=\"skipped\"} reads %d, want the 3 seeded rows", queueDepth(t, body, "skipped"))
+}
+
+// seedOneRowInEveryOtherState leaves exactly one row in each of pending, probing, encoding,
+// verifying, done and failed, beside whatever skipped rows the caller seeded.
+//
+// Order is load-bearing. Claim is the only way to create a row and it creates it PROBING,
+// and RecoverStale is the only way back to pending - and it resets EVERY active row - so the
+// pending one has to be made and reset before the three that must stay active exist.
+func seedOneRowInEveryOtherState(t *testing.T, st *store.SQLite) {
+	t.Helper()
+	ctx := context.Background()
+	claim := func(path string) {
+		t.Helper()
+		ok, err := st.Claim(ctx, path, "fp", "w0", 3)
+		if err != nil || !ok {
+			t.Fatalf("seed claim %s: ok=%v err=%v", path, ok, err)
+		}
+	}
+
+	claim("/lib/state-pending.mkv")
+	if _, err := st.RecoverStale(ctx); err != nil {
+		t.Fatalf("seed RecoverStale: %v", err)
+	}
+
+	claim("/lib/state-probing.mkv") // left where Claim puts it
+
+	for _, c := range []struct {
+		path string
+		to   store.Status
+	}{
+		{"/lib/state-encoding.mkv", store.Encoding},
+		{"/lib/state-verifying.mkv", store.Verifying},
+	} {
+		claim(c.path)
+		if err := st.Advance(ctx, c.path, "fp", c.to); err != nil {
+			t.Fatalf("seed advance %s to %s: %v", c.path, c.to, err)
+		}
+	}
+
+	for _, c := range []struct {
+		path string
+		to   store.Status
+	}{
+		{"/lib/state-done.mkv", store.Done},
+		{"/lib/state-failed.mkv", store.Failed},
+	} {
+		claim(c.path)
+		if err := st.Finish(ctx, c.path, "fp", c.to, &store.Outcome{Encoder: "cpu"}); err != nil {
+			t.Fatalf("seed finish %s as %s: %v", c.path, c.to, err)
+		}
 	}
 }
 

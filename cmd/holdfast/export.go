@@ -25,7 +25,17 @@ import (
 // rather than by restating it here.
 //
 // It is a local, operator-run READ of the operator's own store: no listener, no port, no
-// network surface of any kind, and it never writes to the store it reads.
+// network surface of any kind, and it never writes to the store it reads. That last clause
+// is enforced rather than promised - store.OpenReadOnly opens the file `mode=ro`, so SQLite
+// itself refuses every write, and it does NOT migrate. The daemon's door (store.Open)
+// migrates unconditionally, which for a READER would mean that exporting from a ledger an
+// older holdfast wrote silently upgraded that ledger in place - whereupon store.migrate
+// refuses the file to the very binary still running against it. The one command whose job
+// is to preserve the record must not be the command that costs an operator their daemon.
+//
+// A ledger this build's schema does not match is therefore a REFUSAL naming the store path,
+// in both directions (criterion 13), not a repair: newer was already refused, and older is
+// refused now. Migrating stays a deliberate act - `holdfast run` or `holdfast serve`.
 //
 // Absence survives the trip. Every unmeasured field is an explicit JSON `null`, never a 0,
 // because 0 is legal for all of them and a VMAF of 0.0 is a destroyed frame rather than a
@@ -51,11 +61,12 @@ func cmdExport(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "holdfast: cannot read the job store %q: %v\n", dbPath, err)
 		return 1
 	}
-	st, err := store.Open(dbPath)
+	st, err := store.OpenReadOnly(dbPath)
 	if err != nil {
-		// Covers every way the store refuses to be read, including a schema version this
-		// build does not know (store.migrate refuses a database from the future rather
-		// than writing through a schema that cannot see all of its columns). The path is
+		// Covers every way the store refuses to be read, including a schema version that
+		// is not this build's - ahead of it (a database from the future, whose columns a
+		// narrower SELECT cannot all see) or behind it (a ledger an earlier holdfast
+		// wrote, which this command refuses to migrate on its way past). The path is
 		// named because "opening the job store failed" without it is unactionable.
 		fmt.Fprintf(stderr, "holdfast: cannot open the job store %q: %v\n", dbPath, err)
 		return 1

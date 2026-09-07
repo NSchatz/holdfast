@@ -364,6 +364,13 @@ publishes for a row** — the export calls that same projection, so the two cann
 operator-run read of your own store: no listener, no port, no network surface, and it never writes to the
 store it reads.
 
+**"Never writes" is enforced, not promised.** The ledger is opened `mode=ro`, so SQLite itself refuses
+every write, and — unlike starting the daemon — the export **does not migrate**. That matters most in the
+one situation you would reach for it: around an upgrade. A read that quietly bumped the schema would leave
+your ledger unopenable by the holdfast still running against it, because a database from the *future* is a
+refusal (see *Schema versioning*). So the rows, the schema and its version are exactly as the export found
+them. Upgrading the store stays a deliberate act — `holdfast run` or `holdfast serve`.
+
 **A `null` means "not recorded" here exactly as it does in the API.** An unmeasured VMAF, size or duration
 is an explicit `null` and never a `0`, because a VMAF of `0.0` is a *destroyed frame* and a size of `0`
 would invent a 100% reclaim. A *measured* zero exports as `0`, and the two stay distinguishable.
@@ -371,8 +378,14 @@ would invent a 100% reclaim. A *measured* zero exports as `0`, and the two stay 
 Failure is loud and leaves nothing behind. `--out` **refuses to overwrite an existing file** (the export it
 would replace may be the only copy of rows a prune has since removed); a destination that cannot be created
 or written exits non-zero naming that path with no partial file left; and a job store that is missing,
-unreadable, or written by a *newer* holdfast exits non-zero naming the store path and writes no export.
+unreadable, or **at any schema version but this build's** — written by a newer holdfast, or by an older one
+this command will not migrate on its way past — exits non-zero naming the store path and writes no export.
 An empty ledger is an empty export and **exit 0** — distinguishable from every one of those.
+
+**Known limitations.** The store must be at this build's schema version: export from an older ledger by
+starting holdfast once (which migrates it) and exporting after, or by using the holdfast that wrote it.
+And SQLite needs to create its WAL index beside the database to read it, so the *directory* has to be
+writable — exporting straight from a read-only copy of `state_dir` will not work.
 
 #### Schema versioning
 
@@ -381,6 +394,10 @@ migrated forward on startup, in a transaction per step, so the version and the s
 at all. **A migration failure is a refusal to start**, never a silent downgrade to a partial schema — and
 a database written by a *newer* holdfast is likewise refused rather than opened and quietly written
 through a schema that cannot see all of its columns.
+
+Migrating is the **daemon's** job, not a reader's: `holdfast export` opens the store read-only and refuses
+a version mismatch in **either** direction rather than repairing one, so reading the ledger can never be
+what upgrades it.
 
 ### Observability & host-fair scheduling (`serve`)
 

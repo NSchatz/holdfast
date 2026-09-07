@@ -186,9 +186,9 @@ func schemaVersion() int { return len(migrations) }
 // the engine would then be recording the proof of its swaps into columns that may or
 // may not exist.
 func migrate(ctx context.Context, db *sql.DB) error {
-	var have int
-	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&have); err != nil {
-		return fmt.Errorf("store: read schema version: %w", err)
+	have, err := readSchemaVersion(ctx, db)
+	if err != nil {
+		return err
 	}
 	want := schemaVersion()
 
@@ -199,15 +199,62 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	// operator rolls the binary forward (or the database back) and loses nothing
 	// meanwhile.
 	if have > want {
-		return fmt.Errorf("store: database schema version %d is newer than this build supports (%d) — "+
-			"refusing to open (running an older binary against a newer schema would silently discard data it cannot see; "+
-			"upgrade holdfast, or restore an older database)", have, want)
+		return errSchemaFromTheFuture(have, want)
 	}
 
 	for i := have; i < want; i++ {
 		if err := applyMigration(ctx, db, i+1, migrations[i]); err != nil {
 			return fmt.Errorf("store: migration %d (%s): %w", i+1, migrations[i].name, err)
 		}
+	}
+	return nil
+}
+
+// readSchemaVersion reads the stamp SQLite keeps in the database header. It is the one
+// place either door reads it, so a reader and a writer can never disagree about what
+// they are looking at.
+func readSchemaVersion(ctx context.Context, db *sql.DB) (int, error) {
+	var have int
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&have); err != nil {
+		return 0, fmt.Errorf("store: read schema version: %w", err)
+	}
+	return have, nil
+}
+
+// errSchemaFromTheFuture is the refusal both doors give a database this build cannot see
+// all of. Shared so the two cannot drift apart into two different explanations of the
+// same fact.
+func errSchemaFromTheFuture(have, want int) error {
+	return fmt.Errorf("store: database schema version %d is newer than this build supports (%d) — "+
+		"refusing to open (running an older binary against a newer schema would silently discard data it cannot see; "+
+		"upgrade holdfast, or restore an older database)", have, want)
+}
+
+// requireCurrentSchema is migrate's read-only counterpart (LEDGER-5): it CHECKS the
+// version and never moves it. OpenReadOnly is its only caller.
+//
+// Behind this build is a refusal here, where migrate would upgrade. That is the whole
+// point of the read-only door. Reading an older ledger would mean querying columns the
+// file may not have, and the only way to give it those columns is to migrate it — which
+// stamps a user_version the holdfast that wrote the file will then refuse. A reader that
+// did that would break the running daemon it was trying not to disturb. So it refuses and
+// names the deliberate act instead: no rows are lost, and migrating a ledger stays
+// something the operator does by starting holdfast, not something a read does behind
+// their back.
+func requireCurrentSchema(ctx context.Context, db *sql.DB) error {
+	have, err := readSchemaVersion(ctx, db)
+	if err != nil {
+		return err
+	}
+	want := schemaVersion()
+	switch {
+	case have > want:
+		return errSchemaFromTheFuture(have, want)
+	case have < want:
+		return fmt.Errorf("store: database schema version %d is older than this build's (%d) — "+
+			"refusing to open it read-only, because a read must not migrate the ledger it is reading "+
+			"(that would stamp a version the holdfast which wrote this file would then refuse to open). "+
+			"Run `holdfast run` or `holdfast serve` once with this build to migrate the store, then read it again", have, want)
 	}
 	return nil
 }

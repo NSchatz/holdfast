@@ -2840,7 +2840,7 @@ func TestRendered_EveryCapTotalGraderFailsAgainstItsOwnMutation(t *testing.T) {
 	bin := chromium(t)
 	plain := servedDocument(t)
 
-	const unavailableDecl = "const CAP_TOTAL_UNAVAILABLE =\n  \"This view is capped. The total it is capped against is unavailable.\";"
+	const unavailableDecl = "const CAP_TOTAL_UNAVAILABLE =\n  \"The total behind this view is unavailable, so whether it is capped cannot be shown.\";"
 
 	for _, c := range []struct {
 		name     string

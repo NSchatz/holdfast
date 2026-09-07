@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -416,6 +417,17 @@ func TestExport_AStoreThatCannotBeReadIsNonZeroNamesThePathAndWritesNoExport(t *
 				bumpSchemaVersion(t, filepath.Join(stateDir, "jobs.db"), 9999)
 			},
 		},
+		{
+			// The other direction, and the reason the read-only door exists: a ledger an
+			// EARLIER holdfast wrote. Reading it would mean querying columns the file may
+			// not have, and the only way to get them is to migrate - which would stamp a
+			// version the holdfast still running against that file would then refuse. So
+			// this too is a refusal naming the store path, never a repair.
+			name: "the store was written by an earlier holdfast",
+			breakStore: func(t *testing.T, stateDir string) {
+				seedOlderLedger(t, stateDir)
+			},
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			stateDir, cfgPath := exportFixture(t)
@@ -437,6 +449,99 @@ func TestExport_AStoreThatCannotBeReadIsNonZeroNamesThePathAndWritesNoExport(t *
 				t.Errorf("a failed export wrote a file at %s", out)
 			}
 		})
+	}
+}
+
+// --- criterion 13 + the Interfaces section: a READ, and only a read -----------------------
+//
+// The spec fixes `holdfast export` as "a local, operator-run read of the operator's own
+// store", and README.md and export.go both say it never writes to the store it reads. The
+// store's daemon door (store.Open) MIGRATES unconditionally, so an export that went through
+// it would upgrade the operator's ledger as a side effect of reading it - and store.migrate
+// then refuses that file to the older holdfast that wrote it, which may be the daemon still
+// running against it. These two tests are what hold the documented behaviour to the code.
+
+// theStoreIsExactlyAsItWasFound is the whole claim, measured on the file itself rather than
+// on an assertion about which function was called: the bytes and the schema stamp.
+func theStoreIsExactlyAsItWasFound(t *testing.T, dbPath, wantDigest string, wantVersion int) {
+	t.Helper()
+	if got := dbDigest(t, dbPath); got != wantDigest {
+		t.Errorf("`holdfast export` changed the database file it read:\n  before %s\n  after  %s", wantDigest, got)
+	}
+	if got := readSchemaStamp(t, dbPath); got != wantVersion {
+		t.Errorf("`holdfast export` left the store at user_version %d, was %d before the export.\n"+
+			"README.md and cmd/holdfast/export.go both state it never writes to the store it reads - "+
+			"and a store whose version has moved ahead is a store the holdfast that wrote it will refuse to open.",
+			got, wantVersion)
+	}
+}
+
+func TestExport_NeverWritesToTheStoreItReads(t *testing.T) {
+	stateDir, cfgPath := exportFixture(t)
+	st := openFixtureStore(t, stateDir)
+	finishRow(t, st, "/lib/one.mkv", store.Done, &store.Outcome{
+		Encoder: "cpu", SourceBytes: ptrI(10), OutputBytes: ptrI(5),
+	})
+	finishRow(t, st, "/lib/two.mkv", store.Skipped, &store.Outcome{Reason: "low-bitrate"})
+	_ = st.Close()
+
+	dbPath := filepath.Join(stateDir, "jobs.db")
+	digest, version := dbDigest(t, dbPath), readSchemaStamp(t, dbPath)
+
+	code, stdout, stderr := runExport(t, "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("export exited %d: %s", code, stderr)
+	}
+	if len(exportLines(t, stdout)) != 2 {
+		t.Fatalf("the export wrote %d lines; the fixture is wrong, not the claim", len(exportLines(t, stdout)))
+	}
+	theStoreIsExactlyAsItWasFound(t, dbPath, digest, version)
+}
+
+func TestExport_RefusesALedgerAnEarlierHoldfastWroteRatherThanUpgradingIt(t *testing.T) {
+	stateDir, cfgPath := exportFixture(t)
+	seedOlderLedger(t, stateDir)
+
+	dbPath := filepath.Join(stateDir, "jobs.db")
+	digest, version := dbDigest(t, dbPath), readSchemaStamp(t, dbPath)
+	if version != olderSchemaVersion {
+		t.Fatalf("the fixture is at user_version %d, want %d", version, olderSchemaVersion)
+	}
+
+	out := filepath.Join(t.TempDir(), "ledger.ndjson")
+	code, stdout, stderr := runExport(t, "--config", cfgPath, "--out", out)
+	if code == 0 {
+		t.Fatalf("export exited 0 against a ledger written by an earlier holdfast")
+	}
+	if !strings.Contains(stderr, dbPath) {
+		t.Errorf("the refusal does not name the store path %q: %q", dbPath, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("a refused export wrote %q to stdout", stdout)
+	}
+	if _, err := os.Stat(out); err == nil {
+		t.Errorf("a refused export wrote a file at %s", out)
+	}
+	theStoreIsExactlyAsItWasFound(t, dbPath, digest, version)
+}
+
+// The anti-vacuity half. `store.Open` - the door the export used to go through - really does
+// migrate this fixture in place, so the two tests above are measuring a difference that
+// exists rather than a wind-back that quietly did nothing. This is the defect, run on
+// purpose, one call away from the code that no longer makes it.
+func TestExport_TheDaemonsDoorIsWhatMigratesAndThatIsWhyTheExportDoesNotUseIt(t *testing.T) {
+	stateDir, _ := exportFixture(t)
+	seedOlderLedger(t, stateDir)
+	dbPath := filepath.Join(stateDir, "jobs.db")
+
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	_ = st.Close()
+	if got := readSchemaStamp(t, dbPath); got <= olderSchemaVersion {
+		t.Fatalf("store.Open left the fixture at user_version %d; it is not an older ledger, so the "+
+			"refusal tests above prove nothing", got)
 	}
 }
 
@@ -468,6 +573,68 @@ func bumpSchemaVersion(t *testing.T, dbPath string, version int) {
 	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {
 		t.Fatalf("stamp user_version: %v", err)
 	}
+}
+
+// olderSchemaVersion is the schema this repository shipped immediately before LEDGER-5
+// appended its own step: the shape a database written by the previous holdfast has. It is a
+// literal because cmd/holdfast cannot see the store's unexported version counter - and
+// TestExport_TheDaemonsDoorIsWhatMigratesAndThatIsWhyTheExportDoesNotUseIt keeps the literal
+// honest by asserting store.Open really does move a fixture built from it.
+const olderSchemaVersion = 4
+
+// seedOlderLedger builds a real ledger with rows and then removes exactly what the LEDGER-5
+// migration added, restoring the previous version stamp. Not a current database wearing an
+// older number: the objects are gone too, which is what an earlier holdfast's file looks
+// like and what makes "read it without migrating it" a question with teeth.
+func seedOlderLedger(t *testing.T, stateDir string) {
+	t.Helper()
+	st := openFixtureStore(t, stateDir)
+	finishRow(t, st, "/lib/a.mkv", store.Skipped, &store.Outcome{Reason: "already-at-target-codec"})
+	finishRow(t, st, "/lib/b.mkv", store.Done, &store.Outcome{
+		Encoder: "cpu", SourceBytes: ptrI(4096), OutputBytes: ptrI(1024),
+	})
+	_ = st.Close()
+
+	dbPath := filepath.Join(stateDir, "jobs.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("raw open %s: %v", dbPath, err)
+	}
+	defer func() { _ = db.Close() }()
+	for _, stmt := range []string{
+		`DROP TABLE IF EXISTS ledger_totals`,
+		`DROP INDEX IF EXISTS idx_jobs_status_updated`,
+		fmt.Sprintf(`PRAGMA user_version = %d`, olderSchemaVersion),
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+}
+
+// readSchemaStamp reads PRAGMA user_version straight off the file, with no store code in
+// between - the assertion has to be able to see a migration the store would have hidden.
+func readSchemaStamp(t *testing.T, dbPath string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("raw open %s: %v", dbPath, err)
+	}
+	defer func() { _ = db.Close() }()
+	var v int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	return v
+}
+
+func dbDigest(t *testing.T, dbPath string) string {
+	t.Helper()
+	b, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", dbPath, err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(b))
 }
 
 // exportLines splits an NDJSON export into its records, dropping the trailing empty

@@ -118,9 +118,32 @@ test("fmtScore renders a VMAF score to one decimal", () => {
 test("the page carries no way to derive the total a view was capped against", () => {
   // LEDGER-5 removed the summary roll-up outright, which is a stronger statement than a
   // test that the renderer stopped calling it: there is nothing left to call.
-  assert.equal(d.sumStatuses, undefined, "sumStatuses must not exist: the server reports the total");
-  assert.equal(d.QUEUE_STATUSES, undefined, "a per-table status list is an invitation to derive a total");
-  assert.equal(d.TERMINAL_STATUSES, undefined, "a per-table status list is an invitation to derive a total");
+  //
+  // This reads the MODULE SOURCES, and it has to. Asking load()'s api object instead
+  // (`assert.equal(d.sumStatuses, undefined)`) would measure load.js: that object is built
+  // from a fixed NAMES list, so ANY identifier the list does not mention is undefined on it
+  // whatever the modules declare - the assertion would pass unchanged against a page that
+  // had the roll-up back. And the scan covers every SHIPPED module, not just the two that
+  // load here, because a roll-up reintroduced in the renderer is the same defect.
+  const shipped = moduleSource("modules.txt").split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "" && !l.startsWith("#"));
+  assert.ok(shipped.length >= DERIVATION_MODULES.length,
+    "modules.txt names " + shipped.length + " modules; this scan would be vacuous");
+
+  const sources = shipped.map((name) => [name, moduleSource(name)]);
+  // Anti-vacuity: the scan is reading real module text, so a name that IS there is found.
+  // Without this, a mis-resolved path would read as "the identifier is gone" every time.
+  assert.ok(sources.some(([, src]) => src.includes("capNoteText")),
+    "the scan found no module declaring capNoteText, so it is not reading the shipped sources");
+
+  for (const [name, src] of sources) {
+    for (const gone of ["sumStatuses", "QUEUE_STATUSES", "TERMINAL_STATUSES"]) {
+      assert.ok(!src.includes(gone), name + " still carries " + gone
+        + ": the server reports the total, and a client-side roll-up beside it is a second answer"
+        + " to the same question for a later reader to reach for");
+    }
+  }
 });
 
 test("sizeFigures derives before, after and the percent reclaimed", () => {
@@ -212,12 +235,29 @@ test("capNoteText states an unreadable total as unavailable and shows no figure 
     assert.ok(!/\d/.test(text),
       "an unreadable total must put NO figure on screen - a number beside 'capped' reads AS the total: " + text);
   }
-  // No total on the wire at all claims nothing rather than claiming unavailability of a
-  // field that was never published.
-  assert.equal(d.capNoteText(200, undefined), "");
-  assert.equal(d.capNoteText(200, null), "");
+  // A total absent from the frame entirely is no readable total either, and answers the
+  // same way. The alternative - "" - is indistinguishable from an uncapped view, which is
+  // the one thing an unknown cap must not look like.
+  assert.equal(d.capNoteText(200, undefined), d.CAP_TOTAL_UNAVAILABLE);
+  assert.equal(d.capNoteText(200, null), d.CAP_TOTAL_UNAVAILABLE);
   // And a page that does not know how many rows it drew claims nothing either.
   assert.equal(d.capNoteText(undefined, total(1500)), "");
+});
+
+test("an unreadable total does not claim the view is capped, which it cannot know", () => {
+  // Cappedness is the comparison total > shown. With the total unreadable that comparison
+  // cannot be made, so the notice states the unavailability and stops there - it must not
+  // assert a cap the page has just said it cannot see. 3 rows out of a 3-row ledger is not
+  // a capped view, and the old wording called it one.
+  const unread = { available: false, unavailable: "this figure could not be read from the ledger",
+                   covers: "every terminal row in the ledger", cap: 200, count: null };
+  const text = d.capNoteText(3, unread);
+  assert.ok(/unavailable/i.test(text), "the reader must still be told the total is unavailable");
+  assert.ok(!/this view is capped/i.test(text),
+    "an unreadable total must not assert that the view IS capped - cappedness is the comparison "
+    + "total > shown, and the total is the half that could not be read: " + text);
+  assert.ok(/whether/i.test(text), "the notice must qualify the fact it cannot establish: " + text);
+  assert.ok(!/\d/.test(text), "and still no figure: " + text);
 });
 
 test("announceText is a short count summary a screen reader can hear on every snapshot", () => {
