@@ -127,7 +127,7 @@ func (e *Engine) undo() *UndoWindow {
 // because the question is WHOSE link this is, and a link this tool took does not
 // become a foreign seed when a setting changes. Gating it on the setting is how an
 // operator who turns the window off parks the very file it was protecting, under a
-// guard token that is factually wrong about the extra link — and permanently, since
+// guard token that is factually wrong about the extra link, and permanently, since
 // what would clear that token is the link going away and the link is this tool's own.
 //
 // The cost is bounded by the caller, not by the setting: the hardlink guard asks only

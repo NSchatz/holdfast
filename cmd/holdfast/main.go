@@ -455,9 +455,9 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 // becomes invisible.
 //
 // Notices come first, and they are logged at WARN even though they are not warnings.
-// The two lists stay separate — `validate` prints them as `note:` against `warning:`,
+// The two lists stay separate (`validate` prints them as `note:` against `warning:`,
 // and Notices exists precisely so a shipped default is never dressed as a weakened
-// gate — but a LOG LEVEL is not a severity classification, it is how loud something
+// gate), but a LOG LEVEL is not a severity classification, it is how loud something
 // has to be to survive the operator turning the volume down. `log_level: warn` is a
 // legal setting, and at INFO this announcement vanished there entirely: the daemon
 // started, swapped a file and said nothing about the swap being final. A statement

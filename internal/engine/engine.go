@@ -304,7 +304,7 @@ func (e *Engine) RunOneshot(ctx context.Context) error {
 	//
 	// It is deliberately NOT gated on undo_window_hours still being non-zero. Each
 	// retention carries the expiry it was GIVEN, so releasing is a promise this tool
-	// already made about bytes it is already holding — and setting the key back to 0
+	// already made about bytes it is already holding, and setting the key back to 0
 	// is the documented way to stop paying for the window, so gating the sweep on it
 	// would make that setting strand every original it had retained: the second link
 	// on disk for ever, the row live for ever, the space never returned. The setting

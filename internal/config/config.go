@@ -648,7 +648,7 @@ func (c *Config) Validate() error {
 // goes.
 //
 // `validate` prints these as `note:`; `run` and `serve` log them at startup. They are
-// logged at WARN rather than INFO - not because a notice is a warning, but because
+// logged at WARN rather than INFO, not because a notice is a warning, but because
 // `log_level: warn` is a legal setting and a startup statement nobody can hear at a
 // level they may legitimately choose has not been made. The list stays separate from
 // Warnings regardless, which is where the distinction actually lives.
