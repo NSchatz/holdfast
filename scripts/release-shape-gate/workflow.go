@@ -236,6 +236,33 @@ var usesDetectors = []struct {
 	{ActRefPush, regexp.MustCompile(`^ad-m/github-push-action`), nil, "ad-m/github-push-action"},
 }
 
+// classifiedLocalActions is the OTHER half of the catalogue, and its whole job is to give
+// the catalogue an EDGE the gate can state.
+//
+// usesDetectors alone answered "does this action publish?" with either yes or silence, and
+// silence read as no. An action in neither list - `docker/bake-action` with `push: true`, a
+// local composite action, a reusable workflow, a container action - then contributed no act
+// and no message, so "NONE of them publishes anything" was printed over a definition
+// carrying a step the gate had never asked about. That is the same sentence and the same
+// fail-open direction as reading an absent input, or an unjoined continuation, as harmless.
+//
+// So the rule is: every `uses:` must be in ONE of the two lists. This one is short on
+// purpose and grows one line at a time, each entry naming a reason a human checked, because
+// a list that grows by guessing is the unbounded catalogue this gate refuses to become. An
+// action in neither list is UNDECIDED and reds by name; classifying it costs one line and
+// forces the question to be asked once, out loud, in a file under review.
+var classifiedLocalActions = []struct {
+	action *regexp.Regexp
+	why    string
+}{
+	{regexp.MustCompile(`^actions/checkout(@|$)`), "checks a ref out into the workspace; it writes nothing outward"},
+	{regexp.MustCompile(`^actions/setup-go(@|$)`), "installs a toolchain onto the runner"},
+	{regexp.MustCompile(`^actions/upload-artifact(@|$)`), "uploads a RUN-SCOPED artifact, which expires with the run and is not a published artefact"},
+	{regexp.MustCompile(`^docker/setup-qemu-action(@|$)`), "registers binfmt emulators on the runner"},
+	{regexp.MustCompile(`^docker/setup-buildx-action(@|$)`), "creates a local builder instance"},
+	{regexp.MustCompile(`^docker/login-action(@|$)`), "authenticates to a registry; a credential is not a publish, and every push it enables is decided on its own step"},
+}
+
 // Acts reports every published act this step performs, for the event shape ctx describes.
 //
 // ctx is nil for the STATIC question - "what published acts does this definition name at
@@ -247,16 +274,18 @@ var usesDetectors = []struct {
 // would print "NONE of them publishes anything" over a dry run that pushes.
 func (s Step) Acts(ctx *evalCtx) ([]Act, error) {
 	var out []Act
-	script := StripShellComments(s.Run)
+	script := s.script()
 	for _, d := range runDetectors {
 		if d.re.MatchString(script) {
 			out = append(out, Act{Kind: d.kind, Step: s, Why: d.what})
 		}
 	}
+	matched := false
 	for _, d := range usesDetectors {
 		if !d.action.MatchString(s.Uses) {
 			continue
 		}
+		matched = true
 		why := d.what
 		if len(d.inputs) > 0 {
 			var reasons []string
@@ -276,7 +305,19 @@ func (s Step) Acts(ctx *evalCtx) ([]Act, error) {
 		}
 		out = append(out, Act{Kind: d.kind, Step: s, Why: why})
 	}
+	if u := strings.TrimSpace(s.Uses); u != "" && !matched && !isClassifiedLocal(u) {
+		return nil, fmt.Errorf("%s uses `%s`, and this gate does not classify that action.\nEvery `uses:` has to sit in ONE of the two halves of the act catalogue in scripts/release-shape-gate/workflow.go: usesDetectors, for an action that can publish and whose destination inputs are then decided, or classifiedLocalActions, for one a human has checked and found performs no published act. An action in NEITHER is undecided, which is not the same as harmless - `docker/bake-action` with `push: true`, a local composite action and a reusable workflow all publish, and answering silence with \"no\" is how an unreviewed publish ships. Add it to whichever list is right, with the reason", s.Label(), u)
+	}
 	return out, nil
+}
+
+func isClassifiedLocal(uses string) bool {
+	for _, c := range classifiedLocalActions {
+		if c.action.MatchString(uses) {
+			return true
+		}
+	}
+	return false
 }
 
 // decideRequiredInput decides a BOOLEAN `with:` input that by itself makes an action
@@ -562,7 +603,13 @@ var (
 	reResolve    = regexp.MustCompile(`resolve-compose-image\.sh`)
 )
 
-func (s Step) script() string { return StripShellComments(s.Run) }
+// script is the ONE normalisation every detector in this file reads through, and the order
+// of its two passes is load-bearing. Comments go first because a `\` inside a comment is
+// comment text and continues nothing, so joining first would splice the line BELOW a
+// comment into it and then delete both - turning a real `docker push` on the next line into
+// prose. Continuations go second because a command the shell executes as one logical line
+// must be one string here too.
+func (s Step) script() string { return JoinShellContinuations(StripShellComments(s.Run)) }
 
 func (s Step) RunsFullGate() bool      { return reMakeCheck.MatchString(s.script()) }
 func (s Step) RunsSmoke() bool         { return reSmoke.MatchString(s.script()) }
@@ -637,4 +684,75 @@ func StripShellComments(script string) string {
 		out.WriteByte('\n')
 	}
 	return out.String()
+}
+
+// JoinShellContinuations collapses shell line continuations, so every detector above reads
+// the LOGICAL line the shell executes rather than the physical line the file stores.
+//
+// A detector matched against physical lines is a detector that can be defeated by pressing
+// return. `[^\n]*` cannot cross a newline and `\s+` does not match a backslash, so
+//
+//	docker buildx build \
+//	  --push -t ghcr.io/owner/repo:dev .
+//
+// read as a build with no destination and `gh release \` then `create` read as no release
+// at all - while the shell runs both. That is not obfuscation: it is this repository's own
+// house style for a multi-flag command, and release.yml writes `go build -trimpath \` and
+// `gh release create "$VERSION" "${args[@]}" \` in exactly that shape. Normalising once
+// here is the fix rather than teaching each pattern a second spelling, because the next
+// spelling is always the one nobody wrote a pattern for.
+//
+// The rules, and what each is worth:
+//
+//   - A line continues when the run of backslashes ending it has ODD length, which is what
+//     the shell decides too: `\\` is an escaped literal backslash and ends the command,
+//     while `\` is unescaped and swallows the newline. Reading `\\` as a continuation would
+//     join two commands the shell keeps apart.
+//   - The backslash and the newline are removed and NOTHING is put in their place, which is
+//     again exactly the shell: `docker\` + ` push x` is `docker push x`, and `push\` + `foo`
+//     is the single token `pushfoo`, which is not a push and must not read as one. Inserting
+//     a space would invent word boundaries the shell never had - in the direction that
+//     reports an act the definition does not perform.
+//   - Quoting is deliberately NOT tracked. Inside double quotes the shell joins exactly as
+//     it does outside them; inside single quotes it does not, so joining there is joining
+//     more than the shell would. That direction only ever lengthens a line, and joining
+//     deletes nothing but the backslash, so no command this normalisation invents can hide
+//     one - while tracking quotes badly would skip a join the shell makes, which is the
+//     fail-open direction this gate exists to refuse.
+//   - A `\r` before the newline is stripped before the run is counted, so a CRLF file joins
+//     too. A real shell would treat that backslash as escaping the CR instead, but YAML has
+//     already normalised line breaks by the time the gate reads a `run:` block, and
+//     over-joining a spelling the shell would reject costs a runbook entry where
+//     under-joining costs an unreviewed publish.
+//   - A continuation on the LAST line continues into nothing: the backslash is dropped and
+//     the string ends. No detector's match depends on a trailing newline.
+func JoinShellContinuations(script string) string {
+	lines := strings.Split(script, "\n")
+	var out strings.Builder
+	for i, line := range lines {
+		body := strings.TrimSuffix(line, "\r")
+		hadCR := len(body) != len(line)
+		if trailingBackslashes(body)%2 == 1 {
+			out.WriteString(body[:len(body)-1])
+			continue
+		}
+		out.WriteString(body)
+		if i < len(lines)-1 {
+			if hadCR {
+				out.WriteByte('\r')
+			}
+			out.WriteByte('\n')
+		}
+	}
+	return out.String()
+}
+
+// trailingBackslashes counts the unbroken run of `\` at the end of a line. Parity, not
+// presence, is what decides a continuation.
+func trailingBackslashes(line string) int {
+	n := 0
+	for i := len(line) - 1; i >= 0 && line[i] == '\\'; i-- {
+		n++
+	}
+	return n
 }

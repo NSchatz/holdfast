@@ -354,6 +354,138 @@ expect_absent 1 "a run the gate could not decide never claims NONE of them publi
   "NONE of them publishes anything"
 reset
 
+# --- 3m to 3r. THE SAME ACT, DEFEATED BY PRESSING RETURN. 3a-3l are all about an action's
+#     inputs; these are about the other half of the catalogue, the `run:` commands, and the
+#     hole there was not a missing detector but a matcher confined to one PHYSICAL line. A
+#     shell line continuation makes one logical command out of several lines, and this
+#     repository writes its multi-flag commands that way - release.yml itself continues
+#     `go build -trimpath \` and `gh release create ... \`. So the very command the gate
+#     already names, in the spelling the repository already uses, read as performing no act
+#     at all, and a dispatch that pushed to a public registry was reported as publishing
+#     nothing. The fix is ONE normalisation - the shell's own line joining, applied before
+#     any pattern runs - and not a second spelling per pattern, because the spelling after
+#     that is always the one nobody wrote a pattern for.
+dev_run_step() {  # dev_run_step <line>... - a step with no `if:`, so it runs on a dispatch
+  { printf '%s\n' \
+      '      - name: publish a dev image so testers can pull dispatch builds' \
+      '        env:' \
+      '          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}' \
+      '        run: |' \
+      '          set -euo pipefail'
+    printf '          %s\n' "$@"
+    printf '\n'
+  } > "$work/devpush.yml"
+}
+
+# --- 3m. The whole finding in six lines: `--push` on the line below the build.
+dev_run_step 'docker buildx build \' \
+             '  --push \' \
+             '  --platform linux/amd64 \' \
+             '  -t ghcr.io/nschatz/holdfast:dev \' \
+             '  .'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch that pushes via a line-continued docker buildx build"
+expect 1 "a buildx --push written across a line continuation is caught on a dispatch, naming the step" \
+  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
+reset
+
+# --- 3n. And it cannot be waved away as a push that would 401 anyway: the same mutation
+#         plus the GHCR login unguarded, so this dry run authenticates and THEN publishes.
+dev_run_step 'docker buildx build \' \
+             '  --push \' \
+             '  --platform linux/amd64 \' \
+             '  -t ghcr.io/nschatz/holdfast:dev \' \
+             '  .'
+insert_before "- name: build the release binaries"
+in_step "log in to GHCR" "/^        if:/d"
+changed "$wf" "a dispatch that logs in to GHCR and then pushes via a continued build"
+expect 1 "a continued push on a dispatch that has ALSO authenticated is caught" \
+  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
+reset
+
+# --- 3o. The same confinement on the other command, and this one creates a published
+#         RELEASE object - irreversible in exactly the sense docs/release.md records.
+dev_run_step 'gh release \' \
+             '  create v0.0.0-dev \' \
+             '  --title "dev build" \' \
+             '  --notes "for testers"'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch that cuts a release via a line-continued gh release create"
+expect 1 "a gh release create written across a line continuation is caught on a dispatch, naming the step" \
+  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
+reset
+
+# --- 3p. THE HONEST OTHER DIRECTION, and the reason this is a normalisation rather than a
+#         refusal: joining lines must not turn every continued build into a publish. A
+#         continued build with no `--push` is a LOCAL build and must still pass.
+dev_run_step 'docker buildx build \' \
+             '  --load \' \
+             '  --platform linux/amd64 \' \
+             '  -t holdfast:dev \' \
+             '  .'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch running a continued build that stays local"
+expect 0 "a line-continued build with no --push is still decided as local, not refused as a publish"
+reset
+
+# --- 3q. Parity, not presence. `\\` is an ESCAPED backslash: the shell ends the command
+#         there and runs the next line separately, so `--push .` is its own (failing)
+#         command and nothing is published. Joining on any trailing backslash would splice
+#         two commands the shell keeps apart and report an act the definition cannot perform.
+dev_run_step 'docker buildx build -t ghcr.io/nschatz/holdfast:dev . \\' \
+             '  --push'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch whose build ends in an escaped backslash, not a continuation"
+expect 0 "an ESCAPED trailing backslash is not read as a continuation"
+reset
+
+# --- 3r. A continuation on the LAST line of a run block continues into nothing. The join
+#         has to end the string rather than reach past it, and the act on the line above
+#         still has to be seen.
+dev_run_step 'docker buildx build --push -t ghcr.io/nschatz/holdfast:dev \' \
+             '  . \'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch whose publishing run block ends in a dangling continuation"
+expect 1 "a dangling continuation at the end of a run block is handled and the push still caught" \
+  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
+reset
+
+# --- 3s and 3t. THE CATALOGUE'S EDGE, which the gate never used to state. `usesDetectors`
+#     answers "does this action publish?" with yes or with silence, and silence read as no:
+#     an action in neither half of the catalogue contributed no act AND no message, so
+#     "NONE of them publishes anything" covered a step the gate had never asked about. Every
+#     `uses:` must now be classified, one way or the other, by a human who wrote down why.
+
+# --- 3s. An action outside both lists - and not a contrived one: docker/bake-action takes
+#         `push: true` and publishes exactly as hard as the action beside it in the file.
+printf '%s\n' \
+  '      - name: publish a dev image so testers can pull dispatch builds' \
+  '        uses: docker/bake-action@v5' \
+  '        with:' \
+  '          push: true' \
+  '' > "$work/devpush.yml"
+insert_before "- name: build the release binaries"
+changed "$wf" "a step using an action the gate has never classified"
+expect 1 "an action in neither half of the catalogue reds the gate, naming it" \
+  "uses .docker/bake-action@v5., and this gate does not classify that action"
+reset
+
+# --- 3t. The other direction: stating the boundary must not become a refusal of every
+#         `uses:`. An action already checked and classified as local stays passable, even
+#         added unguarded on the dispatch path.
+printf '%s\n' \
+  '      - name: log in to GHCR again, unguarded' \
+  '        uses: docker/login-action@v3' \
+  '        with:' \
+  '          registry: ghcr.io' \
+  '          username: ${{ github.actor }}' \
+  '          password: ${{ secrets.GITHUB_TOKEN }}' \
+  '' > "$work/devpush.yml"
+insert_before "- name: build the release binaries"
+changed "$wf" "an unguarded step using an action classified as publishing nothing"
+expect 0 "a classified non-publishing action still passes, unguarded, on a dispatch"
+reset
+
 # =====================================================================================
 # A13 / A3 - the floating reference moving before the artefact was proved.
 # =====================================================================================

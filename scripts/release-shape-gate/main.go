@@ -168,6 +168,7 @@ func (g *gate) run() error {
 		return err
 	}
 	g.note("the published acts all live in job %q (%d step(s))", jobID, len(job.Steps))
+	g.noteCatalogueBoundary(wf)
 
 	repo, err := repoFromModule(g.path(goModFile))
 	if err != nil {
@@ -338,6 +339,31 @@ func (g *gate) checkPlanningPrecedesActs(jobID string, job Job, acts []Act) {
 		}
 	}
 	g.note("every published act is declared after the planning step that gates it")
+}
+
+// noteCatalogueBoundary states the edge of the act catalogue in the gate's own output.
+//
+// Every "NONE of them publishes anything" below is only worth what the catalogue behind it
+// is worth, and a reader cannot see that catalogue from the output. Reaching here at all
+// means actsIn already refused every `uses:` in neither half of it, so this says which half
+// each one landed in - the difference between "asked and answered no" and "never asked",
+// which is the distinction the sentence used to blur.
+func (g *gate) noteCatalogueBoundary(wf *Workflow) {
+	var decided, local int
+	for _, id := range wf.JobIDs() {
+		for _, s := range wf.Jobs[id].Steps {
+			u := strings.TrimSpace(s.Uses)
+			if u == "" {
+				continue
+			}
+			if isClassifiedLocal(u) {
+				local++
+				continue
+			}
+			decided++
+		}
+	}
+	g.note("every `uses:` is classified: %d against the publishing catalogue (their destination inputs decided) and %d against the list of actions checked and found to publish nothing. An action in neither list reds this gate rather than passing unasked", decided, local)
 }
 
 // A6.
