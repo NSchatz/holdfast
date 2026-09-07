@@ -266,7 +266,53 @@ func (e *Engine) RunOneshot(ctx context.Context) error {
 		e.Log.Warn("recover stale jobs failed (continuing)", "err", err)
 	}
 	e.cleanStaleTemps(ctx)
-	return e.scanOnce(ctx)
+	if err := e.scanOnce(ctx); err != nil {
+		return err
+	}
+	e.enforceRetention(ctx)
+	return nil
+}
+
+// enforceRetention brings the ledger back within Cfg.HistoryRetentionRows, and it is the
+// ONLY caller of the prune - which is what makes the bound hold with no operator action
+// and no request to the API, on `run` and on every scan `serve` starts alike.
+//
+// It runs AFTER the scan, never during it. A prune competes for the single serialized
+// store connection the engine writes every Claim/Advance/Finish through, and the scan is
+// the thing that must not be slowed; it also means the rows this pass just wrote are the
+// newest ones, so "the oldest beyond the retention" is evaluated against a complete
+// picture rather than a half-finished one.
+//
+// A failure here is LOGGED and survivable, deliberately: the prune is bookkeeping about
+// history, and history is not the reason this process exists. A store that cannot be
+// pruned must not stop the daemon serving, and must not stop the next scan encoding - so
+// the error goes to the log with what the pass had already done, and the run continues.
+// The rows it did not remove are still there; nothing about the engine's decisions changed.
+func (e *Engine) enforceRetention(ctx context.Context) {
+	if !e.Cfg.RetentionEnabled() {
+		// Retention disabled (the shipped default): every row is kept and the store is
+		// not so much as read. Growth stays visible through the metrics that already
+		// exist - holdfast_queue_depth{state} is read from the store on every scrape.
+		return
+	}
+	p, err := e.Store.PruneTerminal(ctx, e.Cfg.HistoryRetentionRows, e.Cfg.MaxFailures)
+	if err != nil {
+		e.Log.Warn("ledger retention pass failed (rows it did not remove are untouched; serving and encoding continue)",
+			"err", err, "history_retention_rows", e.Cfg.HistoryRetentionRows,
+			"removed", p.Removed, "reclaimed_carried_bytes", p.ReclaimedCarried)
+		return
+	}
+	if p.Removed == 0 && p.Kept == 0 {
+		return
+	}
+	e.Log.Info("ledger retention enforced (an irreversible delete of audit history)",
+		"history_retention_rows", e.Cfg.HistoryRetentionRows,
+		"removed", p.Removed, "reclaimed_carried_bytes", p.ReclaimedCarried, "kept_parked", p.Kept)
+	if p.Kept > 0 {
+		e.Log.Info("ledger is above the retention by design: a file parked at max_failures keeps its row, "+
+			"because removing it would reset the retry accounting and hand the file back to the encoder",
+			"parked_rows", p.Kept, "max_failures", e.Cfg.MaxFailures)
+	}
 }
 
 // cleanStaleTemps deletes any `*.__transcoding__.*` files left under the roots by a

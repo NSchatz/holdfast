@@ -107,6 +107,37 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status_reason ON jobs(status, reason);
 CREATE INDEX IF NOT EXISTS idx_jobs_outcome ON jobs(status, source_bytes, output_bytes, encode_ms, vmaf_mean, vmaf_min);
 `,
 	},
+	{
+		// v4 - LEDGER-5: the durable carry-forward a prune needs, and the index it reads
+		// the oldest rows through.
+		//
+		// ledger_totals carries the ONE fact a pruned row would otherwise take with it.
+		// The published lifetime reclaimed total is a SUM over the done rows that recorded
+		// both sizes, so deleting such a row lowers it - not immediately (the server reads
+		// the baseline once, at startup) but at the next restart, which is precisely how a
+		// wrong total ships unnoticed. Prune therefore ADDS the rows' contribution here, in
+		// the same transaction that deletes them, and ReclaimedTotal reads live rows plus
+		// this. The row can only ever grow, so the total can never run backwards.
+		//
+		// One row, enforced by the CHECK: this is a singleton counter, not a table of
+		// them, and a second row would silently split the total in two. INSERT OR IGNORE
+		// seeds it so every later UPDATE has something to update - and re-running the
+		// migration (which cannot happen, but the whole mechanism is built on it being
+		// safe if it did) changes nothing.
+		//
+		// idx_jobs_status_updated is what makes "the oldest terminal rows" an index scan
+		// rather than a sort of the operator's entire library: the prune orders terminal
+		// rows by updated_at, on the same serialized connection the engine writes through.
+		name: "ledger retention totals",
+		sql: `
+CREATE TABLE IF NOT EXISTS ledger_totals (
+	id               INTEGER PRIMARY KEY CHECK (id = 1),
+	reclaimed_pruned INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO ledger_totals (id, reclaimed_pruned) VALUES (1, 0);
+CREATE INDEX IF NOT EXISTS idx_jobs_status_updated ON jobs(status, updated_at);
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

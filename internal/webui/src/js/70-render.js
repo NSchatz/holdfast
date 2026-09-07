@@ -75,9 +75,11 @@ function render(snap) {
   if (!h.length) hbody.appendChild(emptyRow(7, "No history yet."));
   else for (const j of h) hbody.appendChild(histRow(j));
 
-  // Honest row-cap notices (the summary counts are the authoritative totals).
-  capNote("queue-cap", q.length, sumStatuses(sum, QUEUE_STATUSES));
-  capNote("hist-cap", h.length, sumStatuses(sum, TERMINAL_STATUSES));
+  // Honest row-cap notices. The total is the one the SERVER reported for each table -
+  // counted over every matching row in the ledger - and never one this page derived from
+  // the summary counts, which answer a different question and cannot see the cap.
+  capNote("queue-cap", q.length, snap.queue_total);
+  capNote("hist-cap", h.length, snap.history_total);
 
   announce(sum);
   applyFilter();

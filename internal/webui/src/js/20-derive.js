@@ -52,13 +52,11 @@ function fmtScore(x) { return isNum(x) ? Number(x).toFixed(1) : NOT_RECORDED; }
 // The count an aggregate states its spread across. Absent is stated, never printed as NaN.
 function fmtCount(x) { return isNum(x) ? Number(x).toLocaleString() : NOT_RECORDED; }
 
-// The status roll-up behind each table's cap notice: how many rows the ledger holds in
-// the states this table shows. A summary that is not an object cannot be rolled up, and
-// says so with null rather than reporting a total of 0 nobody counted.
-function sumStatuses(sum, keys) {
-  if (!sum || typeof sum !== "object" || !Array.isArray(keys)) return null;
-  return keys.reduce((a, s) => a + (isNum(sum[s]) ? sum[s] : 0), 0);
-}
+// There is deliberately NO roll-up here any more. The cap notice used to add up the
+// summary counts for a table's states and present that as the total the view was capped
+// against; the server now REPORTS that total (see capNoteText), and keeping a derivation
+// beside it would only leave a second answer to the same question for a later reader to
+// reach for.
 
 // The offset between this page's clock and the server's, taken from the snapshot's own
 // `now` field. Every elapsed figure is DERIVED from it on each tick - never accumulated
@@ -138,12 +136,33 @@ function guardLabel(k) {
 }
 
 // Surface the API's silent row caps: it ships at most a fixed number of queue / history
-// rows, so a truncated view could read as the whole ledger. When the store holds more
-// than we were handed, say so; when the total could not be rolled up, claim nothing.
+// rows, so a truncated view could read as the whole ledger.
+//
+// The total is the one the SERVER REPORTED for this table (`queue_total` / `history_total`),
+// counted over every matching row in the ledger. It is never derived here. The page used to
+// roll it up from the summary counts, which was a different number wearing this one's name:
+// the summary counts rows in a status, the cap applies to the rows the response selected,
+// and only the server can see both. A figure a client derived and presented as the ledger's
+// own is the failure this field exists to end.
+//
+// A total that could not be read says exactly that AND SHOWS NO NUMBER IN ITS PLACE. Not a
+// zero, not the row count standing in for it: a reader who sees a figure beside "capped"
+// will read it as the total, so the honest answer here carries no digits at all.
+const CAP_TOTAL_UNAVAILABLE =
+  "This view is capped. The total it is capped against is unavailable.";
+
 function capNoteText(shown, total) {
-  if (!isNum(shown) || !isNum(total) || total <= shown) return "";
+  if (!isNum(shown)) return "";
+  // No total on the wire at all: an older server, or a frame that never carried one.
+  // Nothing is claimed, and nothing is shown.
+  if (total === null || total === undefined) return "";
+  if (typeof total !== "object" || Array.isArray(total)) return CAP_TOTAL_UNAVAILABLE;
+  if (total.available !== true || !isNum(total.count) || total.count < 0) {
+    return CAP_TOTAL_UNAVAILABLE;
+  }
+  if (total.count <= shown) return "";
   return "Showing the most recent " + shown.toLocaleString() + " of "
-    + total.toLocaleString() + " — this view is capped.";
+    + Number(total.count).toLocaleString() + " — this view is capped.";
 }
 
 // The polite screen-reader summary: short counts, so a snapshot that shifts nothing can

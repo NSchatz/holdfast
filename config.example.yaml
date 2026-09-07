@@ -161,6 +161,34 @@ dry_run: false
 
 # --- runtime ---
 # state_dir: state           # holds the resumable SQLite job store (jobs.db)
+#
+# history_retention_rows: 0  # THE LEDGER'S SIZE BOUND, AND IT SHIPS DISABLED.
+#                            #   0 (the default, and what an absent key means) keeps EVERY
+#                            #   terminal row: done, skipped and failed, for ever. A value
+#                            #   n > 0 is the maximum number of terminal rows kept; after
+#                            #   each scan the oldest beyond it are DELETED.
+#                            #
+#                            #   A PRUNE CANNOT BE UNDONE. Those rows are the record of
+#                            #   what holdfast did to your library after it deleted your
+#                            #   originals, and no re-run recreates them: a later scan
+#                            #   re-derives the file's CURRENT state instead, so a pruned
+#                            #   "done" row for a file still on disk comes back as a
+#                            #   "skipped / already-at-target-codec" row - proof that the
+#                            #   file is at the target codec, not proof that holdfast put
+#                            #   it there. Export first if the record matters to you:
+#                            #     holdfast export --config config.yaml --out ledger.ndjson
+#                            #
+#                            #   What a prune will NOT do, whatever you set here: it never
+#                            #   lowers the lifetime reclaimed total (a removed row's
+#                            #   contribution is carried forward durably before the row
+#                            #   goes), it never touches a media file, and it never causes
+#                            #   a file to be encoded again - a file parked at
+#                            #   max_failures keeps its row, so the ledger can sit above
+#                            #   this bound rather than hand that file back to the encoder.
+#                            #   A negative or fractional value is a startup REFUSAL.
+#                            #   The bound is a row count only: there is no age-based or
+#                            #   per-status policy, and pruning does not shrink jobs.db on
+#                            #   disk (no VACUUM) - it bounds the rows, not the file.
 # workers: 1                 # concurrent encode workers (default 1 = sequential;
 #                             # CPU libx265 already saturates cores per encode, so
 #                             # raising this is an opt-in for many small/low-res files)

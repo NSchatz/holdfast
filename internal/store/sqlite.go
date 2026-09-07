@@ -373,18 +373,33 @@ func (s *SQLite) Summary(ctx context.Context) (map[Status]int, error) {
 // case into 0. The result is clamped at 0 for the same reason Event.BytesReclaimed
 // is: the strictly-smaller gate precludes output > source, but a defensive clamp
 // means a future bug there can never make a lifetime total run backwards.
+//
+// The second term is the retention carry-forward (LEDGER-5): what rows a prune has
+// already removed contributed, moved into ledger_totals in the same transaction that
+// deleted them. Without it, bounding the ledger would quietly shrink the one figure an
+// operator uses to judge whether the tool was worth running - and it would do so at the
+// NEXT RESTART rather than at the prune, because the server reads this once as a baseline.
+// The two terms cannot double-count: a row is in exactly one of them, and it moves from
+// the first to the second atomically.
 func (s *SQLite) ReclaimedTotal(ctx context.Context) (int64, error) {
-	var total int64
+	var live, pruned int64
 	if err := s.db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(source_bytes - output_bytes), 0) FROM jobs
 		 WHERE status = ? AND source_bytes IS NOT NULL AND output_bytes IS NOT NULL`,
-		string(Done)).Scan(&total); err != nil {
+		string(Done)).Scan(&live); err != nil {
 		return 0, fmt.Errorf("store: reclaimed total: %w", err)
 	}
-	if total < 0 {
-		total = 0
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(reclaimed_pruned), 0) FROM ledger_totals`).Scan(&pruned); err != nil {
+		return 0, fmt.Errorf("store: reclaimed total (pruned carry-forward): %w", err)
 	}
-	return total, nil
+	if live < 0 {
+		live = 0
+	}
+	if pruned < 0 {
+		pruned = 0
+	}
+	return live + pruned, nil
 }
 
 // RecordSkip is documented on the Store interface. The ON CONFLICT DO UPDATE is

@@ -169,9 +169,15 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	// Same projection the SSE snapshot uses, live progress included, and the same "now"
 	// basis for an in-state age — a client that polls this endpoint must not see a
 	// different picture of a running job than one watching the stream.
+	//
+	// queue_total is the same field, under the same name and in the same shape, that the
+	// SSE snapshot carries: the count of matching rows in the ledger, so a response that
+	// shipped at most queueLimit of them says what it capped against instead of leaving a
+	// client to derive it.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"queue": s.hub.queueDTOs(jobs),
-		"now":   time.Now().Unix(),
+		"queue":       s.hub.queueDTOs(jobs),
+		"now":         time.Now().Unix(),
+		"queue_total": s.hub.rowTotal(r.Context(), "queue_total", activeAndPending, queueLimit),
 	})
 }
 
@@ -190,7 +196,13 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, "history", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"history": toDTOs(jobs)})
+	// history_total counts the matching rows in the LEDGER, so it is the same figure
+	// whether the caller took the cap or asked for fewer: `cap` moves with the request,
+	// `count` does not. A total that tracked the request would just be len(history).
+	writeJSON(w, http.StatusOK, map[string]any{
+		"history":       toDTOs(jobs),
+		"history_total": s.hub.rowTotal(r.Context(), "history_total", terminal, limit),
+	})
 }
 
 // handleEvents is the SSE stream: an initial snapshot, then a fresh snapshot on

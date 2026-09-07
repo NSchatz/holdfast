@@ -215,6 +215,36 @@ type Aggregates struct {
 	VmafMin  Spread
 }
 
+// Prune is what one retention pass actually did (LEDGER-5). It is returned rather than
+// logged inside the store so the caller can report it: a prune is the one IRREVERSIBLE
+// act in this package, and an operator is owed the count.
+//
+// Removed is how many terminal rows were deleted. ReclaimedCarried is the number of bytes
+// those rows contributed to the lifetime reclaimed total, moved into the durable
+// carry-forward BEFORE they were deleted, so the published total does not move. Kept is
+// how many rows the pass deliberately left above the retention because removing them
+// would change what the engine does - today, files parked at max_failures (see
+// PruneTerminal).
+type Prune struct {
+	Removed          int64
+	ReclaimedCarried int64
+	Kept             int64
+}
+
+// RowTotal is a count of matching rows in the LEDGER, beside the capped rows a response
+// actually ships (LEDGER-5). It exists because /api/queue and /api/history return at most
+// a few hundred rows and, until now, said nothing about what they were a few hundred OF -
+// leaving a client to derive it, which is exactly what a client cannot do correctly.
+//
+// Count is the number of matching rows. Err is this figure's OWN failure, carried the way
+// an Aggregate carries one: a total that could not be read must be STATED as unreadable
+// beside rows that still ship, never reported as a total of zero.
+type RowTotal struct {
+	Coverage Coverage
+	Count    int64
+	Err      error
+}
+
 // Store is the persistent job ledger. Every method is safe for concurrent use by
 // multiple workers (goroutines) within one process.
 type Store interface {
@@ -274,7 +304,49 @@ type Store interface {
 	// figure must be built on instead of a per-process counter that resets to 0 on
 	// every restart. Rows written before the outcome columns existed carry no sizes
 	// and are simply not counted (never counted as 0-reclaimed). A pure read.
+	//
+	// It is the sum over the live rows PLUS the durable carry-forward a prune leaves
+	// behind (LEDGER-5), so bounding the ledger cannot make this figure run backwards.
 	ReclaimedTotal(ctx context.Context) (int64, error)
+
+	// PruneTerminal enforces a ledger retention of at most maxRows TERMINAL rows,
+	// deleting the oldest beyond it (LEDGER-5). maxRows <= 0 is retention DISABLED and
+	// is a no-op that reads nothing and deletes nothing - the shipped default, and the
+	// behaviour of a configuration that never mentions retention.
+	//
+	// Two rows are never removed, and both exclusions are the criteria this method exists
+	// to satisfy rather than defensive taste:
+	//
+	//  1. A row's contribution to the durable lifetime reclaimed total is CARRIED FORWARD
+	//     into ledger_totals in the same transaction that deletes it, so the published
+	//     total is identical either side of a prune - on the running server, whose
+	//     baseline is frozen at startup, and after the restart that re-reads it. A row
+	//     that still contributed is therefore never lost, only relocated.
+	//  2. A FAILED row whose fail_count has reached maxFailures is PARKED: the engine
+	//     refuses to claim it, and deleting it would reset that accounting and hand the
+	//     file straight back to the encoder on the next scan. Retention must not cause an
+	//     encode, so a parked row is kept and counted in Prune.Kept. It is the one case
+	//     where the ledger may sit above maxRows, and it is reported rather than hidden.
+	//
+	// The pass runs in BATCHES, each its own transaction: a 300,000-row ledger must not
+	// hold the single serialized write connection for the length of one enormous DELETE,
+	// and a failure part way through leaves every row it did not remove in place with the
+	// total already correct for the rows it did.
+	PruneTerminal(ctx context.Context, maxRows, maxFailures int) (Prune, error)
+
+	// CountRows counts the rows matching statuses, over the WHOLE table - the total a
+	// capped response was capped against (LEDGER-5). An empty statuses counts every row.
+	//
+	// It is its own read, not a projection of Summary, for the reason the aggregates are
+	// their own reads: /api/queue and /api/history must still return their rows when this
+	// figure cannot be read, and a shared failure path would take the rows down with it.
+	CountRows(ctx context.Context, statuses []Status) RowTotal
+
+	// EachTerminal streams every terminal row, oldest transition first, calling fn once
+	// per row. It is the export's read (LEDGER-5): a ledger that has outgrown a capped
+	// API response has also outgrown a []Job, so the rows are handed over one at a time
+	// and never accumulated. fn's error stops the walk and is returned. A pure read.
+	EachTerminal(ctx context.Context, fn func(Job) error) error
 
 	// Aggregates computes the published whole-ledger figures - each over EVERY
 	// matching row in the table, never over the capped rows List ships. It is a pure

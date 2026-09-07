@@ -108,6 +108,7 @@ cp config.example.yaml config.yaml   # then edit library_roots
 holdfast validate --config config.yaml
 holdfast run --config config.yaml   # one scan: re-encode bloated non-HEVC video, safely
 holdfast serve --config config.yaml # HTTP API + web dashboard (scan on demand / on an interval)
+holdfast export --config config.yaml --out ledger.ndjson  # the whole ledger, as NDJSON
 ```
 
 `run`/`serve` need `ffmpeg` and `ffprobe` on `PATH` (or set `HOLDFAST_FFMPEG` / `HOLDFAST_FFPROBE`); they
@@ -146,8 +147,8 @@ invariant is entirely unaffected.
 |---|---|---|
 | `GET /` | — | the embedded dashboard |
 | `GET /api/summary` | — | counts per status + bytes reclaimed (**lifetime** and this-run) + paused/scanning + the **whole-ledger aggregates** (see below) |
-| `GET /api/queue` | — | pending + active jobs |
-| `GET /api/history?limit=N` | — | recent terminal jobs (done/skipped/failed) with their recorded outcome — see below |
+| `GET /api/queue` | — | pending + active jobs, capped, with `queue_total` — see *The total behind a cap* |
+| `GET /api/history?limit=N` | — | recent terminal jobs (done/skipped/failed) with their recorded outcome, capped, with `history_total` — see below |
 | `GET /api/events` | — | SSE: a fresh snapshot on every state change |
 | `GET /metrics` | — | Prometheus metrics (when `metrics_enable`, default on) |
 | `POST /api/rescan` | token | start a library scan (409 if paused / scanning / outside the run window) |
@@ -158,7 +159,38 @@ Fail-safes: the server **binds `127.0.0.1` by default** (front it with a reverse
 multi-user); the mutating endpoints require a bearer token (`server_auth_token`, best set via
 `HOLDFAST_SERVER_AUTH_TOKEN`) and are **disabled entirely when no token is set**; pause only ever
 *delays* work — it never interrupts an encode or the atomic swap. **Known limitation:** single-token auth
-(no per-user accounts); the queue/history views are capped at the most recent rows, not the whole ledger.
+(no per-user accounts); the queue/history views are capped at the most recent rows, not the whole ledger —
+but they now say what they were capped *against*, and `holdfast export` gives you the whole thing.
+
+### The total behind a cap
+
+`GET /api/queue` returns at most **500** rows and `GET /api/history` at most **200**. A truncated view that
+says nothing about what it truncated reads as the whole ledger, and a client cannot work it out for itself
+(the summary counts answer a different question — rows *per status*, not the rows a response selected). So
+every capped response carries the total it capped against, counted in the server over **every matching row
+in the `jobs` table**:
+
+| Response | Field |
+|---|---|
+| `GET /api/queue` | `queue_total` |
+| `GET /api/history?limit=N` | `history_total` |
+| the SSE snapshot | both |
+
+```json
+"history_total": {
+  "available": true, "unavailable": "",
+  "covers": "every row in the ledger with status done, skipped, failed",
+  "cap": 200, "count": 41237
+}
+```
+
+- **`count`** is the number of matching rows in the ledger, **never the number of rows returned**. Asking
+  for fewer rows than the cap (`?limit=5`) reports the *same* `count`; only `cap` moves with the request.
+- **`available`** is `false` when the total could not be read, and `count` is then an explicit **`null`**,
+  never `0` — a zero would claim the ledger is empty beside rows the caller can see. The rows still ship:
+  one unreadable figure never costs an operator the records.
+- The dashboard renders that total in each table's cap notice, and when the total is unavailable it says so
+  **and shows no figure in its place**.
 
 ### The recorded outcome — the proof a swap was safe
 
@@ -232,7 +264,8 @@ honest this-run number.
 **Known limitations.** Rows written before these columns existed carry no outcome and read as "not
 recorded" — a measurement never taken cannot be reconstructed, and such a row also contributes nothing to
 the lifetime total (never counted as a zero-reclaim). Queue/history views are still capped at the most
-recent rows, not the whole ledger; the aggregate figures below are not.
+recent rows, not the whole ledger — each now reports the total it was capped against (see *The total behind
+a cap*), the aggregate figures below are over the whole table, and `holdfast export` writes all of it.
 
 ### Whole-ledger figures
 
@@ -267,6 +300,67 @@ Each one carries the same envelope, and every part of it is load-bearing:
 
 The dashboard shows all of it under **Across the whole ledger**, each figure beside the set it covers and
 the count of rows it had to leave out.
+
+### Bounding the ledger — `history_retention_rows` (off by default)
+
+The `jobs` table only grows: one terminal row per file holdfast has finished with, for the life of the
+install. At library scale that record becomes unbounded, so there is a bound — and it **ships disabled**.
+
+```yaml
+history_retention_rows: 0     # the DEFAULT, and what an absent key means: keep every row
+# history_retention_rows: 50000   # keep at most 50,000 terminal rows; prune the oldest beyond it
+```
+
+With a value `n > 0`, holdfast brings the terminal rows back within `n` **after each scan completes** — no
+operator action, no API call, no separate command. A negative or fractional value is a **startup refusal**
+naming the key and the value, before the job store is opened.
+
+**A prune cannot be undone, and that is why the default is 0.** Those rows are the record of what holdfast
+did to your library *after it deleted your originals*. Nothing recreates them: a later scan re-derives the
+file's **current** state instead, so a pruned `done` row for a file still on disk comes back as
+`skipped / already-at-target-codec` — proof that the file is at the target codec, not proof that holdfast
+put it there. **Export before you bound it** if the record matters to you.
+
+What a prune will never do, whatever you set:
+
+- **It cannot lower the lifetime reclaimed total.** A removed row's contribution to
+  `bytes_reclaimed_lifetime` is carried forward durably, in the same transaction that deletes the row, so
+  the figure is identical either side of a prune — on the running server *and* after the restart that
+  re-reads it from the database. (That second half is where a naive prune fails silently: the server reads
+  the total once, at startup, so deleting contributing rows shows a correct figure until the next restart.)
+- **It cannot cause a file to be encoded again.** A file parked at `max_failures` keeps its row, because
+  deleting it would reset the retry accounting and hand the file straight back to the encoder. **The ledger
+  can therefore sit above the bound**, and the retention pass logs how many rows it kept and why.
+- **It never touches a media file.** The store records job state and nothing else.
+
+**Known limitations.** The bound is a **row count** only — there is no age-based or per-status policy. It
+does not shrink `jobs.db` on disk: pruning bounds the rows, and SQLite reuses the freed pages (there is no
+`VACUUM`). Non-terminal rows are never pruned — they are work, not history. And with retention disabled
+(the default) the table's growth is visible through the metrics that already exist:
+`holdfast_queue_depth{state}` is read from the store on every scrape, over every status including the
+terminal ones.
+
+### Taking the record elsewhere — `holdfast export`
+
+```bash
+holdfast export --config config.yaml                        # newline-delimited JSON on stdout
+holdfast export --config config.yaml --out ledger.ndjson    # or to a file
+```
+
+Every terminal row, oldest first, one JSON object per line, using **the same field names `/api/history`
+publishes for a row** — the export calls that same projection, so the two cannot drift. It is a local,
+operator-run read of your own store: no listener, no port, no network surface, and it never writes to the
+store it reads.
+
+**A `null` means "not recorded" here exactly as it does in the API.** An unmeasured VMAF, size or duration
+is an explicit `null` and never a `0`, because a VMAF of `0.0` is a *destroyed frame* and a size of `0`
+would invent a 100% reclaim. A *measured* zero exports as `0`, and the two stay distinguishable.
+
+Failure is loud and leaves nothing behind. `--out` **refuses to overwrite an existing file** (the export it
+would replace may be the only copy of rows a prune has since removed); a destination that cannot be created
+or written exits non-zero naming that path with no partial file left; and a job store that is missing,
+unreadable, or written by a *newer* holdfast exits non-zero naming the store path and writes no export.
+An empty ledger is an empty export and **exit 0** — distinguishable from every one of those.
 
 #### Schema versioning
 
