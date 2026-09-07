@@ -234,6 +234,26 @@ type serveOpts struct {
 	// streamFails drops the event stream after the first snapshot and answers every
 	// reconnection with 500, so the page's connection state must leave "live".
 	streamFails bool
+
+	// --- S0053: the worlds the frontend-convention graders need ------------------
+	//
+	// Each of these is a state the page must have an answer for, and none of them was
+	// reachable from the harness before: a stream that opens and delivers nothing (the
+	// LOADING state), a payload that is not JSON (the UNREADABLE state), a snapshot
+	// endpoint that errors outright, and a control action the server refuses.
+
+	// rawSnapshot, when non-empty, is written verbatim as the SSE `data:` field instead
+	// of `snapshot`. It is how a payload that cannot be parsed is delivered; it is NOT
+	// compacted or validated, which is the whole point.
+	rawSnapshot string
+	// holdStream opens the event stream and sends nothing down it, so the page is
+	// connected with no snapshot: the loading state, which is otherwise a race to catch.
+	holdStream bool
+	// eventsStatus, when non-zero, answers /api/events with that status and no body.
+	eventsStatus int
+	// controlStatus, when non-zero, answers every mutating control endpoint with that
+	// status, so a refusal can be driven for real from a real click.
+	controlStatus int
 }
 
 // serveDocument stands the REAL handler up on a real listener, plus the probe page
@@ -302,6 +322,21 @@ func serveDocumentWith(t *testing.T, o serveOpts) *probeServer {
 			_, _ = w.Write([]byte(`{}`))
 		})
 	}
+	// The mutating controls. They answer 204 by default and controlStatus when a grader
+	// is driving a refusal, so a refused control action can be produced by a REAL click
+	// on the shipped page rather than by a stub inside it.
+	for _, ep := range []string{"/api/rescan", "/api/pause", "/api/resume"} {
+		mux.HandleFunc(ep, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			if o.controlStatus != 0 {
+				w.WriteHeader(o.controlStatus)
+				_, _ = w.Write([]byte(`{"reason":"the control token was refused"}`))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"started":true}`))
+		})
+	}
 
 	// The event stream. With no snapshot this is the old behaviour (a JSON body, which the
 	// page treats as a failed stream and does not render from). With one it is a REAL SSE
@@ -314,6 +349,42 @@ func serveDocumentWith(t *testing.T, o serveOpts) *probeServer {
 	var conns atomic.Int32
 	done := make(chan struct{})
 	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
+		// The snapshot endpoint answering with a server error: the page has scripting,
+		// it asked, and it was refused (F7 + F11).
+		if o.eventsStatus != 0 {
+			http.Error(w, "the snapshot endpoint is unavailable", o.eventsStatus)
+			return
+		}
+		// A stream that opens and delivers nothing: the page is connected and has no
+		// snapshot, which is the LOADING state every view owes (F7).
+		if o.holdStream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusOK)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			select {
+			case <-done:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		// A payload that is not JSON at all: the UNREADABLE state (F7).
+		if o.rawSnapshot != "" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", o.rawSnapshot)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			select {
+			case <-done:
+			case <-r.Context().Done():
+			}
+			return
+		}
 		if o.snapshot == nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			_, _ = w.Write([]byte(`{}`))

@@ -353,7 +353,7 @@ func TestAccessibility_ContrastMeasured(t *testing.T) {
 	// The border token must actually be the one drawing the interactive edges, not a
 	// defined-but-unused value: buttons and control inputs reference it.
 	s := string(indexHTML)
-	if !strings.Contains(s, "button {") || !strings.Contains(s, "border:1px solid var(--border)") {
+	if !strings.Contains(s, "button {") || !strings.Contains(s, "border: var(--bw-hair) solid var(--border)") {
 		t.Error("buttons/inputs do not draw their border from the accessible --border token")
 	}
 }
@@ -428,28 +428,43 @@ func TestQueue_RendersInStateElapsedDerivedFromTheWireTimestamp(t *testing.T) {
 	}
 }
 
-// TestQueue_RendersProgressAndShowsUnknownAsUnknown is AC3's page half: a running encode
-// shows a figure taken from the encoder's own stream, and an absent one reads "unknown"
-// — never a stale figure, never an interpolated one, never a zero.
-func TestQueue_RendersProgressAndShowsUnknownAsUnknown(t *testing.T) {
+// TestQueue_RendersProgressAndShowsAbsenceAsAbsence is AC3's page half: a running encode
+// shows a figure taken from the encoder's own stream, and a row with no measurement reads
+// the page's ONE absence phrase - never a stale figure, never an interpolated one, never
+// a zero.
+//
+// S0053 changed two things here and both are asserted, not dropped. The absent-figure
+// word was "unknown" and is now that one phrase, because F3 requires the SAME phrase in
+// every field that can carry an absence. And the paragraphs explaining what the figure is
+// measured against moved off the surface into the linked document (F8) - so the claims
+// are asserted where they now live rather than deleted from the assertion.
+func TestQueue_RendersProgressAndShowsAbsenceAsAbsence(t *testing.T) {
 	s := string(indexHTML)
 	for _, want := range []string{
 		"progress_fraction", "progress_seconds", "progress_duration_seconds",
 		"<th>Progress</th>",
-		`mk("span", "nr", "unknown")`, // the honest absent-figure node
-		"never a stale figure",        // the copy says what the figure is and is not
-		"encoder's own progress stream",
+		"td.appendChild(nrNode());", // the honest absent-figure node
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("index.html missing progress element %q", want)
 		}
 	}
-	// The empty-queue rendering is unchanged in wording; only its column span moved with
-	// the two new columns.
-	if !strings.Contains(s, `"Nothing queued."`) {
+	doc := readRepoDoc(t, DocPath)
+	for _, want := range []string{
+		"never a stale figure",
+		"encoder's own progress stream",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("%s missing the progress claim %q, which moved off the surface under F8", DocPath, want)
+		}
+	}
+	// The empty-queue rendering is unchanged in wording; it is now one entry in the
+	// per-view state vocabulary rather than a literal at the call site, and the column
+	// span comes from the same table.
+	if !strings.Contains(s, `empty: "Nothing queued."`) {
 		t.Error("the empty-queue rendering was changed")
 	}
-	if !strings.Contains(s, `emptyRow(5, "Nothing queued.")`) {
+	if !strings.Contains(s, `const VIEW_COLUMNS = { queue: 5, history: 7 };`) {
 		t.Error("the empty-queue row does not span the queue table's columns")
 	}
 }
@@ -508,7 +523,10 @@ func TestQueue_ProgressAddsNoHTMLSinkAndNoExternalAsset(t *testing.T) {
 	if !strings.Contains(s, "function progressCell(td, j)") {
 		t.Fatal("no progressCell renderer")
 	}
-	if !strings.Contains(s, `td.textContent = age === null ? "" : age;`) {
+	// The elapsed cell is filled from the derivation and from nothing else: a text node
+	// when there is an age, and the page's absence node when there is not (F3).
+	if !strings.Contains(s, `if (age === null) td.replaceChildren(nrNode());`) ||
+		!strings.Contains(s, `else td.textContent = age;`) {
 		t.Error("the elapsed cell is not filled with textContent")
 	}
 }
@@ -559,7 +577,7 @@ func TestDashboard_AnUnavailableAggregateStillLeavesThePageRendering(t *testing.
 	if hist < 0 || agg < 0 || agg < hist {
 		t.Errorf("the aggregates render before the tables (history at %d, aggregates at %d) - an aggregate failure could then cost the rows", hist, agg)
 	}
-	if !strings.Contains(s, "try { renderAggregates(snap.aggregates); } catch (_) {}") {
+	if !strings.Contains(s, `try { renderAggregates(snap.aggregates); } catch (_) { setViewState("aggs", "unreadable"); }`) {
 		t.Error("the aggregate render is not guarded, so a throw inside it would abort the rest of render()")
 	}
 	// A figure with nothing recorded reads as "not recorded", never as 0.

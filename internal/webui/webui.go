@@ -8,7 +8,9 @@ package webui
 import (
 	"bytes"
 	_ "embed"
+	"html"
 	"net/http"
+	"strings"
 
 	"github.com/NSchatz/holdfast/internal/sourceoffer"
 )
@@ -26,6 +28,42 @@ var indexHTML []byte
 // Content-Security-Policy must not be relaxed to let it in.
 const offerMarker = "<!--holdfast:source-offer-->"
 
+// DocPath is the repository-relative path of the document the dashboard's methodology
+// prose lives in (frontend clause F8: "Explanation lives in docs. Scope labels on the
+// surface stay short ... The paragraphs explaining methodology live in the repo's own
+// docs, linked once per region"). It is a constant so the page, the link check inside
+// `make check` and the document itself cannot drift apart.
+const DocPath = "docs/dashboard-methodology.md"
+
+// docLinks is one entry per REGION of the page: the marker in the shell, the fragment of
+// DocPath that region's methodology lives under, and the link text a reader sees.
+//
+// The href is built from the SOURCE URL THIS BINARY WAS BUILT WITH, the same value the
+// AGPL section 13 offer names, so the link always points at the tree that produced the
+// running binary: a fork that sets SOURCE_URL to its own repository gets doc links into
+// its own repository, with no patching of embedded HTML, exactly as the offer does. That
+// is also what makes the link checkable: the path component after the tree is a path in
+// THIS repository, and a test inside `make check` fails if it names a document that is
+// not committed here or an anchor that document does not carry.
+var docLinks = []struct {
+	Marker   string
+	Fragment string
+	Text     string
+}{
+	{"<!--holdfast:doc-now-->", "right-now", "How the live figures are computed"},
+	{"<!--holdfast:doc-history-->", "what-it-has-done-to-your-library", "How the ledger figures are computed"},
+}
+
+// docLinkHTML renders one region's documentation link. Every value that reaches the
+// document is escaped, exactly as the offer's is, so a source URL can appear ONLY as the
+// link's target: it can introduce no element, no attribute and no script, which is what
+// lets the page keep its tight Content-Security-Policy and its no-HTML-string-sink render
+// idiom unchanged.
+func docLinkHTML(base, fragment, text string) string {
+	href := html.EscapeString(strings.TrimSuffix(base, "/") + "/blob/main/" + DocPath + "#" + fragment)
+	return `<p class="docs"><a class="doclink" href="` + href + `">` + html.EscapeString(text) + `</a></p>`
+}
+
 // csp is the response Content-Security-Policy, byte for byte. A tight CSP: the page
 // is fully self-contained, so nothing but its own inline script/style is ever allowed
 // to load — defence in depth for a tool that may sit on a home LAN.
@@ -40,7 +78,11 @@ const csp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-i
 // render returns the served document for one resolved offer: the embedded page with
 // the offer substituted for its marker.
 func render(o sourceoffer.Offer) []byte {
-	return bytes.Replace(indexHTML, []byte(offerMarker), []byte(o.HTML()), 1)
+	doc := bytes.Replace(indexHTML, []byte(offerMarker), []byte(o.HTML()), 1)
+	for _, l := range docLinks {
+		doc = bytes.Replace(doc, []byte(l.Marker), []byte(docLinkHTML(o.SourceURL, l.Fragment, l.Text)), 1)
+	}
+	return doc
 }
 
 // Handler returns an http.Handler that serves the embedded dashboard at "/" (and

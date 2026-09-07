@@ -186,16 +186,16 @@ func TestVisibilityPredicate_FailsAgainstEveryHidingMutation(t *testing.T) {
 
 	for name, mutate := range map[string]func(string) string{
 		"the offer's own class is display:none": func(d string) string {
-			return strings.Replace(d, ".source-offer { margin:12px 0 0; }",
+			return strings.Replace(d, ".source-offer { margin: var(--sp-3) 0 0; }",
 				".source-offer { display:none; }", 1)
 		},
 		"an ancestor element type is display:none": func(d string) string {
-			return strings.Replace(d, "footer { color:var(--muted);",
-				"footer { display: none; color:var(--muted);", 1)
+			return strings.Replace(d, "footer { color: var(--muted);",
+				"footer { display: none; color: var(--muted);", 1)
 		},
 		"an ancestor element type is visibility:hidden": func(d string) string {
-			return strings.Replace(d, "footer { color:var(--muted);",
-				"footer { visibility:hidden; color:var(--muted);", 1)
+			return strings.Replace(d, "footer { color: var(--muted);",
+				"footer { visibility:hidden; color: var(--muted);", 1)
 		},
 		"the offer carries a hidden attribute": func(d string) string {
 			return strings.Replace(d, `<p class="source-offer">`, `<p class="source-offer" hidden>`, 1)
