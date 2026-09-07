@@ -318,10 +318,27 @@ unreviewed publish. The same rule holds for the references a push publishes, whi
 from `tags:` and from an `outputs:` entry's `name=`; a push whose references the gate cannot
 read reds rather than being assumed to name nothing.
 
+A step's `run:` script is decided the same way, and the same care goes into what a
+"command" is. The commands are matched against the LOGICAL line the shell executes, not the
+physical line the file stores: continuations are joined first, on backslash parity, so
+`docker buildx build \` with `--push` on the next line is one string. A multi-flag command
+written across continuations is this repository's own house style - `release.yml` writes
+`go build -trimpath \` and `gh release create ... \` that way - so a detector confined to
+one physical line is a detector that can be defeated by pressing return.
+
+The catalogue also has an EDGE, and states it: every `uses:` must sit either in the
+publishing half, whose destination inputs are then decided, or in the list of actions a
+human has checked and found to publish nothing, each with the reason. An action in neither
+reds the gate by name. "Never asked" and "asked and answered no" have to look different,
+because `docker/bake-action` with `push: true`, a local composite action and a reusable
+workflow all publish.
+
 **Extending this:** an act is a property of a step's DEFINITION, so model every input
 through which an action can perform it. Modelling one and inferring the act's absence from
 that key's absence is how a dry run that pushed to GHCR came to be reported as "NONE of them
-publishes anything", and it is why the input catalogue is a set rather than a key.
+publishes anything", and it is why the input catalogue is a set rather than a key. When the
+same shape turns up again, normalise the input once rather than adding a pattern per
+spelling: the next spelling is always the one nobody wrote a pattern for.
 
 The example deployment's image reference has exactly ONE reader, in that gate.
 `scripts/resolve-compose-image.sh` asks for it (`release-shape-gate -print-compose-ref`)

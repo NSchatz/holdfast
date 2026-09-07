@@ -383,6 +383,116 @@ func TestActs_UndecidablePushInputIsAnErrorNotAnEmptyList(t *testing.T) {
 	}
 }
 
+// The `run:` half of the catalogue had the same hole in a different dimension: its patterns
+// were matched against PHYSICAL lines. `[^\n]*` cannot cross a newline and `\s+` does not
+// match a backslash, so a command written across shell line continuations - which is this
+// repository's own house style for a multi-flag command - performed no act at all.
+//
+// The fix is this one normalisation rather than a second pattern per spelling, so it is
+// pinned as a normalisation: exactly what the shell does to the text, asserted on the text.
+func TestJoinShellContinuations(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"nothing to join", "docker push a\n", "docker push a\n"},
+		{
+			"the F7 shape: a flag on the line below its command",
+			"docker buildx build \\\n  --push \\\n  -t ghcr.io/o/r:dev \\\n  .\n",
+			"docker buildx build   --push   -t ghcr.io/o/r:dev   .\n",
+		},
+		{
+			// The shell puts NOTHING in the backslash's place, so a token split across a
+			// continuation joins into one word. `push\` + `foo` is `pushfoo`, which is not a
+			// push - inserting a space here would invent a word boundary and report an act
+			// the definition cannot perform.
+			"no separator is invented",
+			"docker\\\n push a\n",
+			"docker push a\n",
+		},
+		{
+			"a token split across the join stays one token",
+			"docker pu\\\nsh a\n",
+			"docker push a\n",
+		},
+		{
+			// PARITY, not presence. `\\` is an escaped literal backslash: the shell ends the
+			// command there. Joining on it would splice two commands the shell keeps apart.
+			"an escaped backslash ends the command",
+			"docker buildx build -t x . \\\\\n  --push\n",
+			"docker buildx build -t x . \\\\\n  --push\n",
+		},
+		{
+			"three backslashes is still odd, so still a continuation",
+			"a \\\\\\\nb\n",
+			"a \\\\b\n",
+		},
+		{"a continuation on the last line continues into nothing", "docker push a \\", "docker push a "},
+		{"a lone backslash line", "\\\nb\n", "b\n"},
+		{"CRLF joins too", "docker buildx build \\\r\n  --push\r\n", "docker buildx build   --push\r\n"},
+		{"empty input", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := JoinShellContinuations(tc.in); got != tc.want {
+				t.Fatalf("JoinShellContinuations(%q)\n = %q\nwant %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// The normalisation's whole point is what the DETECTORS then see, so that is asserted too -
+// in both directions, because "join the lines" must not turn every continued build into a
+// publish.
+func TestActs_ReadsTheLogicalLineNotThePhysicalOne(t *testing.T) {
+	cases := []struct {
+		name      string
+		run       string
+		publishes bool
+	}{
+		{"a continued buildx --push publishes", "docker buildx build \\\n  --push \\\n  -t ghcr.io/o/r:dev .\n", true},
+		{"a continued gh release create publishes", "gh release \\\n  create v0.0.0 \\\n  --notes x\n", true},
+		{"a continued docker push publishes", "docker \\\n push ghcr.io/o/r:dev\n", true},
+		{"a continued build with no --push is local", "docker buildx build \\\n  --load \\\n  -t r:dev .\n", false},
+		{"an escaped backslash does not splice --push onto the build", "docker buildx build -t r:dev . \\\\\n  --push\n", false},
+		{"`--push` only in a comment is still prose", "docker buildx build --load . \\\n  -t r:dev\n# and never --push\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := Step{Name: "dev", Run: tc.run}
+			acts, err := s.Acts(nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := len(acts) > 0; got != tc.publishes {
+				t.Fatalf("Acts found %d act(s) (%+v), want publishes=%v", len(acts), acts, tc.publishes)
+			}
+		})
+	}
+}
+
+// The catalogue's EDGE. `usesDetectors` answers "does this action publish?" with yes or with
+// silence, and silence read as no - so an action in neither half contributed no act AND no
+// message, and "NONE of them publishes anything" covered a step nobody had asked about.
+func TestActs_AnUnclassifiedActionIsAnErrorNotSilence(t *testing.T) {
+	s := Step{Name: "publish a dev image", Uses: "docker/bake-action@v5", With: map[string]any{"push": true}, Index: 3}
+	acts, err := s.Acts(nil)
+	if err == nil {
+		t.Fatalf("Acts returned %d act(s) and no error for an action in neither half of the catalogue", len(acts))
+	}
+	for _, want := range []string{`step 4 "publish a dev image"`, "docker/bake-action@v5", "does not classify"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not name %q:\n%v", want, err)
+		}
+	}
+	// The other direction: stating the boundary must not become a refusal of every `uses:`.
+	local := Step{Name: "log in to GHCR", Uses: "docker/login-action@v3"}
+	if got, err := local.Acts(nil); err != nil || len(got) != 0 {
+		t.Fatalf("a classified non-publishing action gave (%v, %v), want no acts and no error", got, err)
+	}
+}
+
 func ctxFor(event string) evalCtx {
 	ref, refName := "refs/heads/main", "main"
 	publish := "false"
