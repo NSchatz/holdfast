@@ -112,6 +112,8 @@ cp config.example.yaml config.yaml   # then edit library_roots
 holdfast validate --config config.yaml
 holdfast run --config config.yaml   # one scan: re-encode bloated non-HEVC video, safely
 holdfast serve --config config.yaml # HTTP API + web dashboard (scan on demand / on an interval)
+holdfast restore --config config.yaml  # what the undo window is holding (see below)
+holdfast export --config config.yaml --out ledger.ndjson  # the whole ledger, as NDJSON
 ```
 
 `run`/`serve` need `ffmpeg` and `ffprobe` on `PATH` (or set `HOLDFAST_FFMPEG` / `HOLDFAST_FFPROBE`); they
@@ -137,6 +139,29 @@ anything in user space (FUSE) are all treated as not-local, because a false warn
 configuration and a false clear costs a film. **[docs/filesystem.md](docs/filesystem.md)** has the
 recognised-local set, the opt-in rules and what the startup traversal costs.
 
+### The undo window (`restore`) — off by default
+
+The swap is the one irreversible thing holdfast does, and every gate in front of it is an **estimate**.
+The delete is not. `undo_window_hours` buys a bounded period in which a swap can be walked back:
+
+```yaml
+undo_window_hours: 24     # 0 (the default) = a swap is FINAL, and startup says so
+```
+
+```bash
+holdfast restore --config config.yaml                     # what is held, and for how long
+holdfast restore --config config.yaml /media/tv/ep.mkv    # put that original back
+```
+
+The original is kept by a second **hard link**, so retention costs **no space at the moment it is
+taken** — but the space a swap reclaimed **does not come back until the window closes**, which for a
+first library pass means holding every original it replaced. So the API reports
+`bytes_held_by_undo_window` **separately** from the reclaimed totals, and a release reports the bytes it
+**actually** returned (removing a name frees the data only when it was the last one). A source whose
+original cannot be retained is **skipped, not swapped**, and a restore refuses rather than overwrite a
+file that has changed since the swap. Full reference, including what it costs and what it deliberately
+does not offer: **[docs/undo.md](docs/undo.md)**.
+
 ### Web API + UI (`serve`)
 
 `holdfast serve` runs a REST API + [SSE](https://developer.mozilla.org/docs/Web/API/Server-sent_events)
@@ -149,9 +174,9 @@ invariant is entirely unaffected.
 | Method & path | Auth | Purpose |
 |---|---|---|
 | `GET /` | — | the embedded dashboard |
-| `GET /api/summary` | — | counts per status + bytes reclaimed (**lifetime** and this-run) + paused/scanning + the **whole-ledger aggregates** (see below) |
-| `GET /api/queue` | — | pending + active jobs |
-| `GET /api/history?limit=N` | — | recent terminal jobs (done/skipped/failed) with their recorded outcome — see below |
+| `GET /api/summary` | — | counts per status + bytes reclaimed (**lifetime** and this-run) + `bytes_held_by_undo_window` (space a retained original still holds, never folded into either reclaimed figure; `null` = unreadable) + paused/scanning + the **whole-ledger aggregates** (see below) |
+| `GET /api/queue` | — | pending + active jobs, capped, with `queue_total` — see *The total behind a cap* |
+| `GET /api/history?limit=N` | — | recent terminal jobs (done/skipped/failed) with their recorded outcome, capped, with `history_total` — see below |
 | `GET /api/events` | — | SSE: a fresh snapshot on every state change |
 | `GET /metrics` | — | Prometheus metrics (when `metrics_enable`, default on) |
 | `POST /api/rescan` | token | start a library scan (409 if paused / scanning / outside the run window) |
@@ -162,7 +187,38 @@ Fail-safes: the server **binds `127.0.0.1` by default** (front it with a reverse
 multi-user); the mutating endpoints require a bearer token (`server_auth_token`, best set via
 `HOLDFAST_SERVER_AUTH_TOKEN`) and are **disabled entirely when no token is set**; pause only ever
 *delays* work — it never interrupts an encode or the atomic swap. **Known limitation:** single-token auth
-(no per-user accounts); the queue/history views are capped at the most recent rows, not the whole ledger.
+(no per-user accounts); the queue/history views are capped at the most recent rows, not the whole ledger —
+but they now say what they were capped *against*, and `holdfast export` gives you the whole thing.
+
+### The total behind a cap
+
+`GET /api/queue` returns at most **500** rows and `GET /api/history` at most **200**. A truncated view that
+says nothing about what it truncated reads as the whole ledger, and a client cannot work it out for itself
+(the summary counts answer a different question — rows *per status*, not the rows a response selected). So
+every capped response carries the total it capped against, counted in the server over **every matching row
+in the `jobs` table**:
+
+| Response | Field |
+|---|---|
+| `GET /api/queue` | `queue_total` |
+| `GET /api/history?limit=N` | `history_total` |
+| the SSE snapshot | both |
+
+```json
+"history_total": {
+  "available": true, "unavailable": "",
+  "covers": "every row in the ledger with status done, skipped, failed",
+  "cap": 200, "count": 41237
+}
+```
+
+- **`count`** is the number of matching rows in the ledger, **never the number of rows returned**. Asking
+  for fewer rows than the cap (`?limit=5`) reports the *same* `count`; only `cap` moves with the request.
+- **`available`** is `false` when the total could not be read, and `count` is then an explicit **`null`**,
+  never `0` — a zero would claim the ledger is empty beside rows the caller can see. The rows still ship:
+  one unreadable figure never costs an operator the records.
+- The dashboard renders that total in each table's cap notice, and when the total is unavailable it says so
+  **and shows no figure in its place**.
 
 ### The recorded outcome — the proof a swap was safe
 
@@ -172,7 +228,7 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | Field | On | What it is |
 |---|---|---|
 | `reason` | failed | the error that rejected it (the encode error, or **which gate** refused the output) |
-| `reason` | skipped | **which guard** fired — `already-at-target-codec`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `target-already-exists` |
+| `reason` | skipped | **which guard** fired — `already-at-target-codec`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `target-already-exists`, `undo-retention-failed`, `restored-original` |
 | `encoder` | any job that reached the encoder | the encoder that ran (`cpu`, `svtav1`, `nvenc`, …) — a skip, or a file with no readable video stream, never gets that far and records none |
 | `vmaf_mean`, `vmaf_min` | done, and a VMAF-rejected failure | the pooled harmonic mean **and the worst frame** |
 | `vmaf_model` | as above | the libvmaf model that produced them |
@@ -246,7 +302,8 @@ honest this-run number.
 **Known limitations.** Rows written before these columns existed carry no outcome and read as "not
 recorded" — a measurement never taken cannot be reconstructed, and such a row also contributes nothing to
 the lifetime total (never counted as a zero-reclaim). Queue/history views are still capped at the most
-recent rows, not the whole ledger; the aggregate figures below are not.
+recent rows, not the whole ledger — each now reports the total it was capped against (see *The total behind
+a cap*), the aggregate figures below are over the whole table, and `holdfast export` writes all of it.
 
 ### Whole-ledger figures
 
@@ -282,6 +339,105 @@ Each one carries the same envelope, and every part of it is load-bearing:
 The dashboard shows all of it under **Across the whole ledger**, each figure beside the set it covers and
 the count of rows it had to leave out.
 
+### Bounding the ledger — `history_retention_rows` (off by default)
+
+The `jobs` table only grows: one terminal row per file holdfast has finished with, for the life of the
+install. At library scale that record becomes unbounded, so there is a bound — and it **ships disabled**.
+
+```yaml
+history_retention_rows: 0     # the DEFAULT, and what an absent key means: keep every row
+# history_retention_rows: 50000   # keep at most 50,000 terminal rows; prune the oldest beyond it
+```
+
+With a value `n > 0`, holdfast brings the terminal rows back within `n` **after each scan completes** — no
+operator action, no API call, no separate command. A negative or fractional value is a **startup refusal**
+naming the key and the value, before the job store is opened.
+
+**A prune cannot be undone, and that is why the default is 0.** Those rows are the record of what holdfast
+did to your library *after it deleted your originals*. Nothing recreates them: a later scan re-derives the
+file's **current** state instead, so a pruned `done` row for a file still on disk comes back as
+`skipped / already-at-target-codec` — proof that the file is at the target codec, not proof that holdfast
+put it there. **Export before you bound it** if the record matters to you.
+
+What a prune will never do, whatever you set:
+
+- **It cannot lower the lifetime reclaimed total.** A removed row's contribution to
+  `bytes_reclaimed_lifetime` is carried forward durably, in the same transaction that deletes the row, so
+  the figure is identical either side of a prune — on the running server *and* after the restart that
+  re-reads it from the database. (That second half is where a naive prune fails silently: the server reads
+  the total once, at startup, so deleting contributing rows shows a correct figure until the next restart.)
+- **It cannot cause a file to be encoded again.** A terminal row is a *decision*, not only a record: it is
+  what holds that file out of the encoder on every later scan, and the guards that would re-derive the same
+  verdict run under whatever configuration is current, so a deleted row means a re-encode the moment the
+  configuration it was taken under has moved (a different `encoder` target codec, a lowered
+  `min_bitrate_kbps`, a file parked at `max_failures`). **So a row is only ever removed when the scan
+  listed the directory that file should be in and the file was not there**: gone, or replaced by different
+  content. Retention bounds what your library has *finished with*.
+- **It cannot take anything the undo window is holding**, and it does not release it either. A retained
+  original is a file that is still present, so the `done` row for the swap that produced it is a row the
+  prune may not remove — and the retention itself lives in its own table the prune never reads or writes,
+  so `holdfast restore` works exactly the same either side of a pass. That also holds for the row a
+  restore leaves behind: putting an original back writes a `skipped / restored-original` row, and that row
+  is the only thing standing between the rescued bytes and the same gates that passed the encode you just
+  rejected, so retention keeps it for as long as the file is there. The two figures stay separate too — a
+  prune returns no space, so `bytes_held_by_undo_window` does not move across one.
+- **It never touches a media file.** The store records job state and nothing else.
+
+**What that costs you, plainly.** A library that is not churning has one terminal row per file and every
+one of them is load-bearing, so **its ledger is bounded by the library and not by `history_retention_rows`,
+and a prune pass may remove nothing at all**. The ledger can therefore sit above the bound; the retention
+pass logs how many rows it kept, and splits them into the files that are still in the library and the
+directories this run could not list. If your `jobs.db` is large because your library is large, this key is
+not the tool for it: that is one row per file you own, and deleting it would cost you a second lossy
+generation of the file it describes.
+
+**Known limitations.** The bound is a **row count** only — there is no age-based or per-status policy. It
+does not shrink `jobs.db` on disk: pruning bounds the rows, and SQLite reuses the freed pages (there is no
+`VACUUM`). Non-terminal rows are never pruned — they are work, not history. Rows under a directory the run
+could not list are kept, deliberately and indefinitely: an unmounted subtree looks exactly like a library
+you emptied, and pruning on that absence would re-encode the lot when it came back. With retention enabled,
+each pass stats the files behind the terminal rows it examines, which is one extra stat per row on top of
+the scan that just ran. And with retention disabled (the default) the table's growth is visible through the
+metrics that already exist: `holdfast_queue_depth{state}` is read from the store on every scrape, over every
+status including the terminal ones.
+
+### Taking the record elsewhere — `holdfast export`
+
+```bash
+holdfast export --config config.yaml                        # newline-delimited JSON on stdout
+holdfast export --config config.yaml --out ledger.ndjson    # or to a file
+```
+
+Every terminal row, oldest first, one JSON object per line, using **the same field names `/api/history`
+publishes for a row** — the export calls that same projection, so the two cannot drift. It is a local,
+operator-run read of your own store: no listener, no port, no network surface, and it never writes to the
+store it reads.
+
+**"Never writes" is enforced, not promised.** The ledger is opened `mode=ro`, so SQLite itself refuses
+every write, and — unlike starting the daemon — the export **does not migrate**. That matters most in the
+one situation you would reach for it: around an upgrade. A read that quietly bumped the schema would leave
+your ledger unopenable by the holdfast still running against it, because a database from the *future* is a
+refusal (see *Schema versioning*). So the rows, the schema and its version are exactly as the export found
+them. Upgrading the store stays a deliberate act — `holdfast run` or `holdfast serve`.
+
+**A `null` means "not recorded" here exactly as it does in the API.** An unmeasured VMAF, size or duration
+is an explicit `null` and never a `0`, because a VMAF of `0.0` is a *destroyed frame* and a size of `0`
+would invent a 100% reclaim. A *measured* zero exports as `0`, and the two stay distinguishable.
+
+Failure is loud and leaves nothing behind. `--out` **refuses to overwrite an existing file** (the export it
+would replace may be the only copy of rows a prune has since removed); a destination that cannot be created
+or written exits non-zero naming that path with no partial file left; and a job store that is missing,
+unreadable, or **at any schema version but this build's** — written by a newer holdfast, or by an older one
+this command will not migrate on its way past — exits non-zero naming the store path and writes no export.
+An empty ledger is an empty export and **exit 0** — distinguishable from every one of those.
+
+**Known limitations.** The store must be at this build's schema version: export from an older ledger by
+starting holdfast once (which migrates it) and exporting after, or by using the holdfast that wrote it.
+SQLite needs to create its WAL index beside the database to read it, so the *directory* has to be
+writable — exporting straight from a read-only copy of `state_dir` will not work. And it is the **job**
+ledger only: what the undo window is currently holding is separate state with a lifetime of hours, not a
+record of what holdfast did, and `holdfast restore` with no argument is what prints it.
+
 #### Schema versioning
 
 The job store (`<state_dir>/jobs.db`) carries a schema version in SQLite's `PRAGMA user_version` and is
@@ -289,6 +445,10 @@ migrated forward on startup, in a transaction per step, so the version and the s
 at all. **A migration failure is a refusal to start**, never a silent downgrade to a partial schema — and
 a database written by a *newer* holdfast is likewise refused rather than opened and quietly written
 through a schema that cannot see all of its columns.
+
+Migrating is the **daemon's** job, not a reader's: `holdfast export` opens the store read-only and refuses
+a version mismatch in **either** direction rather than repairing one, so reading the ledger can never be
+what upgrades it.
 
 ### Observability & host-fair scheduling (`serve`)
 

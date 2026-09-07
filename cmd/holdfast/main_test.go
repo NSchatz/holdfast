@@ -363,3 +363,118 @@ func httpPostCode(t *testing.T, url, token string) int {
 	defer func() { _ = resp.Body.Close() }()
 	return resp.StatusCode
 }
+
+// ---- UNDO-6: the startup announcement ---------------------------------------
+
+// undoDisabledPhrases are the two things the announcement has to carry: WHICH setting
+// it is about, and what it means for a swap. A message that named the key without
+// saying the swap is final would be a line an operator skips.
+var undoDisabledPhrases = []string{"undo_window_hours", "THE UNDO WINDOW IS DISABLED", "a swap is FINAL"}
+
+// captureStderr redirects the PROCESS's stderr for the duration of fn and returns
+// what was written to it. It is needed because the startup announcement goes through
+// the real logger, which writes to os.Stderr: asserting on a buffer handed to
+// dispatch would prove the announcement exists somewhere other than where an operator
+// would ever see it.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "stderr-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = f
+	defer func() { os.Stderr = old }()
+	fn()
+	os.Stderr = old
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestRun_SaysAtStartupWhenTheUndoWindowIsDisabled is UNDO-6's fifth criterion. With
+// the window off - which is the DEFAULT, and therefore the case that matters most -
+// the swap is final the microsecond it happens, and a tool that deletes originals has
+// to say that out loud before it deletes one.
+//
+// Both spellings of "off" are graded: the key absent (a stranger's first config) and
+// the key explicitly 0 (an operator who turned it off).
+func TestRun_SaysAtStartupWhenTheUndoWindowIsDisabled(t *testing.T) {
+	for _, tc := range []struct{ name, extra string }{
+		{"the key is absent (the shipped default)", ""},
+		{"the key is explicitly zero", "undo_window_hours: 0\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfgPath, _, _, _ := preflightLibrary(t, "vmaf_enable: false\n"+tc.extra)
+			code := -1
+			got := captureStderr(t, func() {
+				var out, errOut bytes.Buffer
+				code = dispatch([]string{"run", "--config", cfgPath}, &out, &errOut)
+			})
+			if code != 0 {
+				t.Fatalf("run exited %d:\n%s", code, got)
+			}
+			for _, want := range undoDisabledPhrases {
+				if !strings.Contains(got, want) {
+					t.Errorf("the startup output does not contain %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+
+	// The control: with the window OPEN the announcement must be absent. Without this,
+	// a message printed unconditionally would pass every assertion above while telling
+	// an operator with a 24-hour window that their swaps are final.
+	t.Run("control: an open window says nothing of the kind", func(t *testing.T) {
+		cfgPath, _, _, _ := preflightLibrary(t, "vmaf_enable: false\nundo_window_hours: 24\n")
+		got := captureStderr(t, func() {
+			var out, errOut bytes.Buffer
+			if code := dispatch([]string{"run", "--config", cfgPath}, &out, &errOut); code != 0 {
+				t.Errorf("run exited %d: %s", code, errOut.String())
+			}
+		})
+		if strings.Contains(got, "THE UNDO WINDOW IS DISABLED") {
+			t.Errorf("a run with a 24h undo window announced that the window is disabled:\n%s", got)
+		}
+	})
+}
+
+// TestValidate_PrintsTheDisabledUndoWindow is the other half of the same criterion.
+// `validate` is where an operator checks a configuration BEFORE pointing it at a
+// library, so it has to say the same thing the daemon says at startup.
+func TestValidate_PrintsTheDisabledUndoWindow(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("library_roots:\n  - /mnt/media\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if code := dispatch([]string{"validate", "--config", cfgPath}, &out, &errOut); code != 0 {
+		t.Fatalf("validate exited %d: %s", code, errOut.String())
+	}
+	got := out.String()
+	for _, want := range undoDisabledPhrases {
+		if !strings.Contains(got, want) {
+			t.Errorf("validate does not print %q:\n%s", want, got)
+		}
+	}
+
+	// The control, again: an open window is not announced as a closed one.
+	openCfg := filepath.Join(dir, "open.yaml")
+	if err := os.WriteFile(openCfg, []byte("library_roots:\n  - /mnt/media\nundo_window_hours: 24\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := dispatch([]string{"validate", "--config", openCfg}, &out, &errOut); code != 0 {
+		t.Fatalf("validate exited %d: %s", code, errOut.String())
+	}
+	if strings.Contains(out.String(), "THE UNDO WINDOW IS DISABLED") {
+		t.Errorf("validate announced a disabled window for a 24h one:\n%s", out.String())
+	}
+}

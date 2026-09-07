@@ -187,8 +187,77 @@ dry_run: false
 # score says which pixels were compared rather than leaving it to ffmpeg's filter
 # negotiation and nobody's notes.
 
+# --- the undo window (a swap you can walk back) ---
+# The swap is the ONE irreversible thing holdfast does, and every gate in front of it
+# is an estimate - a very good one, but still a machine's verdict that two files look
+# the same. The delete is not an estimate.
+#
+# With undo_window_hours > 0, holdfast takes a second hard link to the original just
+# before the rename, so the original's bytes stay retrievable after the swap has taken
+# its only other name away:
+#
+#   holdfast restore --config config.yaml            # what is held, and for how long
+#   holdfast restore --config config.yaml /media/tv/ep.mkv
+#
+# What it costs. NOTHING at the moment it is taken - a second name for the same data
+# is not a second copy. But the space a swap reclaimed does NOT come back until the
+# window closes: a first pass over a library holds every original it replaced for this
+# many hours. The API reports what is held separately from what was reclaimed, so the
+# two are never confused. A release returns the file's space only when the retained
+# name was the last one, and reports zero when it was not.
+#
+# 0 (THE DEFAULT) disables it: the rename destroys the source and nothing retains it.
+# `validate` and startup both say so out loud. A source whose original cannot be
+# retained is SKIPPED rather than swapped, so the window never becomes a promise that
+# quietly is not kept.
+# undo_window_hours: 0       # 0 = off (default); e.g. 24 keeps an original for a day
+
 # --- runtime ---
 # state_dir: state           # holds the resumable SQLite job store (jobs.db)
+#
+# history_retention_rows: 0  # THE LEDGER'S SIZE BOUND, AND IT SHIPS DISABLED.
+#                            #   0 (the default, and what an absent key means) keeps EVERY
+#                            #   terminal row: done, skipped and failed, for ever. A value
+#                            #   n > 0 is the maximum number of terminal rows kept; after
+#                            #   each scan the oldest beyond it are DELETED.
+#                            #
+#                            #   A PRUNE CANNOT BE UNDONE. Those rows are the record of
+#                            #   what holdfast did to your library after it deleted your
+#                            #   originals, and no re-run recreates them: a later scan
+#                            #   re-derives the file's CURRENT state instead, so a pruned
+#                            #   "done" row for a file still on disk comes back as a
+#                            #   "skipped / already-at-target-codec" row - proof that the
+#                            #   file is at the target codec, not proof that holdfast put
+#                            #   it there. Export first if the record matters to you:
+#                            #     holdfast export --config config.yaml --out ledger.ndjson
+#                            #
+#                            #   What a prune will NOT do, whatever you set here: it never
+#                            #   lowers the lifetime reclaimed total (a removed row's
+#                            #   contribution is carried forward durably before the row
+#                            #   goes), it never touches a media file, and it never causes
+#                            #   a file to be encoded again. That last one is why a row is
+#                            #   only removed when the scan LISTED the directory its file
+#                            #   should be in and the file was not there: a terminal row is
+#                            #   what holds that file out of the encoder, so deleting one
+#                            #   for a file you still have re-encodes it as soon as the
+#                            #   configuration it was decided under has moved.
+#                            #   SO THE LEDGER CAN SIT ABOVE THIS BOUND, and on a library
+#                            #   that is not churning a pass may remove nothing at all:
+#                            #   there is one row per file you own and every one of them is
+#                            #   load-bearing. This bounds what your library has FINISHED
+#                            #   with. The pass logs what it kept and why.
+#                            #   IT ALSO NEVER TOUCHES THE UNDO WINDOW: a retained
+#                            #   original is a file that is still there, so the row for
+#                            #   the swap that produced it stays, the retention record
+#                            #   lives in its own table a prune never writes, and a row
+#                            #   left by `holdfast restore` is kept for as long as the
+#                            #   restored file is. Setting this key cannot cost you a
+#                            #   restore, and a prune returns no space, so it does not
+#                            #   move what the window reports holding either.
+#                            #   A negative or fractional value is a startup REFUSAL.
+#                            #   The bound is a row count only: there is no age-based or
+#                            #   per-status policy, and pruning does not shrink jobs.db on
+#                            #   disk (no VACUUM) - it bounds the rows, not the file.
 # workers: 1                 # concurrent encode workers (default 1 = sequential;
 #                             # CPU libx265 already saturates cores per encode, so
 #                             # raising this is an opt-in for many small/low-res files)

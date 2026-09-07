@@ -784,6 +784,8 @@ func fixtureSnapshot() []byte {
      "encoder":"svtav1","vmaf_mean":96.10,"vmaf_min":88.40,"vmaf_model":"version=vmaf_v0.6.1",
      "source_bytes":2147483648,"output_bytes":1610612736,"encode_ms":900000}
   ],
+  "queue_total": {"available":true,"unavailable":"","covers":"every pending or active row in the ledger","cap":500,"count":7},
+  "history_total": {"available":true,"unavailable":"","covers":"every terminal row in the ledger","cap":200,"count":14},
   "bytes_reclaimed_session": 1073741824,
   "bytes_reclaimed_lifetime": 5368709120,
   "paused": false, "scanning": true, "now": %d,
@@ -834,6 +836,8 @@ func emptySnapshot() []byte {
 	return []byte(fmt.Sprintf(`{
   "summary": {"pending":0,"probing":0,"encoding":0,"verifying":0,"done":0,"skipped":0,"failed":0},
   "queue": [], "history": [],
+  "queue_total": {"available":true,"unavailable":"","covers":"every pending or active row in the ledger","cap":500,"count":0},
+  "history_total": {"available":true,"unavailable":"","covers":"every terminal row in the ledger","cap":200,"count":0},
   "bytes_reclaimed_session": 0, "bytes_reclaimed_lifetime": 0,
   "paused": false, "scanning": false, "now": %d,
   "aggregates": %s
@@ -861,6 +865,8 @@ func mixedSnapshot() []byte {
      "reason":"vmaf worst frame 43.2 below the floor 60","vmaf_mean":null,"vmaf_min":null,
      "source_bytes":null,"output_bytes":null,"encode_ms":null}
   ],
+  "queue_total": {"available":true,"unavailable":"","covers":"every pending or active row in the ledger","cap":500,"count":2},
+  "history_total": {"available":true,"unavailable":"","covers":"every terminal row in the ledger","cap":200,"count":3},
   "bytes_reclaimed_session": 0, "bytes_reclaimed_lifetime": 3221225472,
   "paused": true, "scanning": false, "now": %d,
   "aggregates": %s
@@ -2688,6 +2694,203 @@ func TestRendered_TheColourCollapseReadingFailsWhenTheTextIsStripped(t *testing.
 	} {
 		if probs := g.probe(v); probs == nil {
 			t.Errorf("with every colour collapsed AND the text stripped, %q still passed, so it cannot fail", g.name)
+		}
+	}
+}
+
+// --- LEDGER-5: the total a capped table was capped AGAINST --------------------------
+//
+// Two criteria, both about what the page SHOWS, so both are decided by loading the served
+// document in the browser and reading the rendered notice - never by matching the module
+// source, which cannot tell a figure that was rendered from one that was merely computed.
+//
+//	16. a capped table whose response carries a total shows the REPORTED total, not one
+//	    the page derived;
+//	17. a response with no readable total tells the reader the total is unavailable and
+//	    shows NO figure in its place.
+//
+// The first is only gradeable because the fixture below makes the two answers DIFFER: a
+// reported total that no arithmetic over this payload produces. Held equal, every grader
+// here would pass a page that still derived its own.
+
+// divergentBothTotalsSnapshot reports 613 queue rows and 41,237 terminal ones while the
+// summary in the same frame rolls up to 7 and 14 - the two numbers the page used to print.
+// A page deriving its own total shows the latter, which is exactly the defect to catch.
+func divergentBothTotalsSnapshot() []byte {
+	s := strings.Replace(string(fixtureSnapshot()), `"cap":500,"count":7}`, `"cap":500,"count":613}`, 1)
+	return []byte(strings.Replace(s, `"cap":200,"count":14}`, `"cap":200,"count":41237}`, 1))
+}
+
+// unreadableTotalsSnapshot is the server saying it could not read either total: available
+// false, count an explicit null, and the same fixed statement the aggregates use. The rows
+// are all still there, which is the point - one unreadable figure never costs an operator
+// the rows they can otherwise see.
+func unreadableTotalsSnapshot() []byte {
+	s := string(fixtureSnapshot())
+	s = strings.Replace(s,
+		`"queue_total": {"available":true,"unavailable":"","covers":"every pending or active row in the ledger","cap":500,"count":7}`,
+		`"queue_total": {"available":false,"unavailable":"this figure could not be read from the ledger","covers":"every pending or active row in the ledger","cap":500,"count":null}`, 1)
+	s = strings.Replace(s,
+		`"history_total": {"available":true,"unavailable":"","covers":"every terminal row in the ledger","cap":200,"count":14}`,
+		`"history_total": {"available":false,"unavailable":"this figure could not be read from the ledger","covers":"every terminal row in the ledger","cap":200,"count":null}`, 1)
+	return []byte(s)
+}
+
+var capDigit = regexp.MustCompile(`[0-9]`)
+
+// gradeReportedCapTotal is criterion 16. Each notice must be SHOWN, must carry the
+// reported total, and must not carry the figure this payload's own summary rolls up to -
+// which is the whole of what "rather than one the page derived" asserts.
+func gradeReportedCapTotal(v dashVerdict) []string {
+	if !v.Ready {
+		return []string{"the page never rendered a snapshot"}
+	}
+	var out []string
+	for _, c := range []struct {
+		what     string
+		cap      dashCap
+		reported string // what the server reported, as a reader sees it
+		derived  string // what this payload's summary rolls up to
+	}{
+		{"the queue cap notice", v.QueueCap, "613", "7"},
+		{"the history cap notice", v.HistCap, "41,237", "14"},
+	} {
+		out = append(out, shownProblems(c.what, c.cap.Shown)...)
+		if !strings.Contains(c.cap.Text, "of "+c.reported) {
+			out = append(out, fmt.Sprintf("%s reads %q; it must carry the reported total %s", c.what, c.cap.Text, c.reported))
+		}
+		if strings.Contains(c.cap.Text, "of "+c.derived) {
+			out = append(out, fmt.Sprintf("%s reads %q, which is the total the PAGE derives from this snapshot (%s), not the one the server reported",
+				c.what, c.cap.Text, c.derived))
+		}
+		if c.cap.Text == "" || !strings.Contains(v.BodyText, c.cap.Text) {
+			out = append(out, fmt.Sprintf("%s is not in the text a reader can see: %q", c.what, c.cap.Text))
+		}
+	}
+	return out
+}
+
+// gradeUnavailableCapTotal is criterion 17: told in words, with NO figure standing in for
+// the total. The digit test is the sharp end - a number beside the word "capped" reads AS
+// the total whatever the sentence around it says, so an unreadable one puts no digit on
+// the screen at all.
+func gradeUnavailableCapTotal(v dashVerdict) []string {
+	if !v.Ready {
+		return []string{"the page never rendered a snapshot"}
+	}
+	var out []string
+	for _, c := range []struct {
+		what string
+		cap  dashCap
+	}{
+		{"the queue cap notice", v.QueueCap},
+		{"the history cap notice", v.HistCap},
+	} {
+		out = append(out, shownProblems(c.what, c.cap.Shown)...)
+		if !strings.Contains(strings.ToLower(c.cap.Text), "unavailable") {
+			out = append(out, fmt.Sprintf("%s does not tell the reader the total is unavailable: %q", c.what, c.cap.Text))
+		}
+		if capDigit.MatchString(c.cap.Text) {
+			out = append(out, fmt.Sprintf("%s shows a figure where the unreadable total belongs: %q", c.what, c.cap.Text))
+		}
+		if c.cap.Text == "" || !strings.Contains(v.BodyText, c.cap.Text) {
+			out = append(out, fmt.Sprintf("%s is not in the text a reader can see: %q", c.what, c.cap.Text))
+		}
+	}
+	return out
+}
+
+func TestRendered_ACappedTableShowsTheTotalTheServerReportedNotOneThePageDerived(t *testing.T) {
+	bin := chromium(t)
+	v, log := mustRender(t, bin, dashOpts{snapshot: divergentBothTotalsSnapshot()})
+
+	if probs := gradeReportedCapTotal(v); probs != nil {
+		t.Errorf("%v\nqueue notice: %q\nhistory notice: %q\nbrowser output:\n%s",
+			probs, v.QueueCap.Text, v.HistCap.Text, log)
+	}
+	// The notice is a statement about the ledger, never a filter on what was drawn.
+	if len(v.Queue) != 3 || len(v.History) != 2 {
+		t.Errorf("the reported totals changed what was drawn: %d queue rows and %d history rows",
+			len(v.Queue), len(v.History))
+	}
+}
+
+func TestRendered_AnUnreadableCapTotalIsShownAsUnavailableWithNoFigureInItsPlace(t *testing.T) {
+	bin := chromium(t)
+	v, log := mustRender(t, bin, dashOpts{snapshot: unreadableTotalsSnapshot()})
+
+	if probs := gradeUnavailableCapTotal(v); probs != nil {
+		t.Errorf("%v\nqueue notice: %q\nhistory notice: %q\nbrowser output:\n%s",
+			probs, v.QueueCap.Text, v.HistCap.Text, log)
+	}
+	// One unreadable figure costs the operator nothing else: every row still drew, and so
+	// did every aggregate card.
+	if len(v.Queue) != 3 || len(v.History) != 2 {
+		t.Errorf("an unreadable total cost the reader rows: %d queue rows and %d history rows",
+			len(v.Queue), len(v.History))
+	}
+	if len(v.Aggregates) != 6 {
+		t.Errorf("an unreadable total cost the reader %d of the 6 aggregate cards", 6-len(v.Aggregates))
+	}
+}
+
+// A grader that cannot fail is not evidence. Each mutation below breaks exactly the
+// property its grader asserts, inside the SERVED document, and the grader must report it.
+func TestRendered_EveryCapTotalGraderFailsAgainstItsOwnMutation(t *testing.T) {
+	bin := chromium(t)
+	plain := servedDocument(t)
+
+	const unavailableDecl = "const CAP_TOTAL_UNAVAILABLE =\n  \"The total behind this view is unavailable, so whether it is capped cannot be shown.\";"
+
+	for _, c := range []struct {
+		name     string
+		snapshot []byte
+		mutate   func([]byte) []byte
+		grade    func(dashVerdict) []string
+	}{
+		{
+			// The page derives the total from the summary counts again - the exact
+			// behaviour LEDGER-5 replaced, and the one no source scan can see.
+			name:     "the page derives the total from the summary instead of reading the reported one",
+			snapshot: divergentBothTotalsSnapshot(),
+			mutate: domReplace(
+				`capNote("queue-cap", q.length, snap.queue_total);`,
+				`capNote("queue-cap", q.length, {available:true,count:(snap.summary.pending||0)+(snap.summary.probing||0)+(snap.summary.encoding||0)+(snap.summary.verifying||0)});`,
+				`capNote("hist-cap", h.length, snap.history_total);`,
+				`capNote("hist-cap", h.length, {available:true,count:(snap.summary.done||0)+(snap.summary.skipped||0)+(snap.summary.failed||0)});`),
+			grade: gradeReportedCapTotal,
+		},
+		{
+			// Built with the reported total and then hidden, so no reader ever sees it.
+			name:     "the notices carry the reported total and are hidden from the reader",
+			snapshot: divergentBothTotalsSnapshot(),
+			mutate:   cssMutation(`.note.cap { display:none; }`),
+			grade:    gradeReportedCapTotal,
+		},
+		{
+			// An unreadable total rendered as a figure: what criterion 17 forbids.
+			name:     "an unreadable total is shown as a number anyway",
+			snapshot: unreadableTotalsSnapshot(),
+			mutate: domReplace(unavailableDecl,
+				`const CAP_TOTAL_UNAVAILABLE = "Showing the most recent 0 of 0 - this view is capped.";`),
+			grade: gradeUnavailableCapTotal,
+		},
+		{
+			// An unreadable total rendered as nothing at all: indistinguishable from a
+			// view that is not capped, which is the other half of criterion 17.
+			name:     "an unreadable total says nothing at all",
+			snapshot: unreadableTotalsSnapshot(),
+			mutate:   domReplace(unavailableDecl, `const CAP_TOTAL_UNAVAILABLE = "";`),
+			grade:    gradeUnavailableCapTotal,
+		},
+	} {
+		if string(c.mutate([]byte(plain))) == plain {
+			t.Fatalf("the mutation %q did not change the served document - the assertion below would be vacuous", c.name)
+		}
+		v, log := renderDashboard(t, bin, dashOpts{snapshot: c.snapshot, mutate: c.mutate, wait: 10 * time.Second})
+		if probs := c.grade(v); probs == nil {
+			t.Errorf("the grader passed a page that breaks the property it asserts (%s)\nqueue notice: %q\nhistory notice: %q\nbrowser output:\n%s",
+				c.name, v.QueueCap.Text, v.HistCap.Text, log)
 		}
 	}
 }

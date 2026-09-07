@@ -552,6 +552,176 @@ func TestMigrate_PreGate4DatabaseGainsTheNewColumnsUnbackfilled(t *testing.T) {
 	}
 }
 
+// ---- UNDO-6: the retained-originals table -------------------------------------
+
+// v4Schema is the schema EXACTLY as it shipped BEFORE UNDO-6 - v1's table, v2's
+// outcome columns, v3's indexes, GATE-4's three columns, and the v4 version stamp.
+// Frozen for the same reason v0Schema and v3Schema are: it is the shape of every
+// jobs.db in the world at the moment this phase lands. Do NOT update it when the
+// schema changes.
+const v4Schema = v3Schema + `
+ALTER TABLE jobs ADD COLUMN vmaf_pix_fmt       TEXT;
+ALTER TABLE jobs ADD COLUMN vmaf_chroma        REAL;
+ALTER TABLE jobs ADD COLUMN vmaf_chroma_metric TEXT;
+PRAGMA user_version = 4;
+`
+
+// seedV4 writes a real pre-UNDO-6 database at path, with rows that CARRY OUTCOMES. A
+// fixture of empty rows could not tell "the migration kept what was recorded" apart
+// from "the migration kept a row".
+func seedV4(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open v4 db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if _, err := db.Exec(v4Schema); err != nil {
+		t.Fatalf("create v4 schema: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at,
+			encoder, vmaf_mean, vmaf_min, vmaf_model, vmaf_pix_fmt, vmaf_chroma, vmaf_chroma_metric,
+			source_bytes, output_bytes, encode_ms)
+		 VALUES ('/lib/old-done.mkv', '10:100', 'done', 0, NULL, 1000,
+			'cpu', 97.25, 88.5, 'version=vmaf_v0.6.1', 'yuv420p10le', 41.5, 'psnr_cb/psnr_cr min (dB)',
+			5000000, 2000000, 12345)`); err != nil {
+		t.Fatalf("seed done row: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, reason)
+		 VALUES ('/lib/old-skipped.mkv', '20:200', 'skipped', 0, NULL, 1001, 'hardlinked')`); err != nil {
+		t.Fatalf("seed skipped row: %v", err)
+	}
+
+	// Sanity: the fixture really is a v4 database that really lacks the new table.
+	var ver int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil {
+		t.Fatalf("read seeded user_version: %v", err)
+	}
+	if ver != 4 {
+		t.Fatalf("seeded database is at version %d, want 4 - it is not a pre-UNDO-6 database", ver)
+	}
+	if hasTable(t, db, "retained_originals") {
+		t.Fatal("seeded v4 database already has retained_originals - the fixture is wrong")
+	}
+}
+
+// hasTable reports whether a table of that name exists, read from SQLite itself
+// rather than from our own belief about the schema.
+func hasTable(t *testing.T, db *sql.DB, name string) bool {
+	t.Helper()
+	var found string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&found)
+	if err == sql.ErrNoRows {
+		return false
+	}
+	if err != nil {
+		t.Fatalf("read sqlite_master: %v", err)
+	}
+	return found == name
+}
+
+// TestMigrate_PreUndoDatabaseGainsTheRetentionTableWithNoFabricatedRetentions is
+// UNDO-6's sixteenth criterion. A jobs.db written by the SHIPPED build (v4) must
+// migrate forward in place, keep every row and every outcome those rows recorded, and
+// read as having NO retained original - never a fabricated one.
+//
+// The second half is the one that matters. Every swap recorded in a pre-UNDO-6 ledger
+// happened with no undo window at all: its original was destroyed by the rename, and
+// nothing anywhere retains it. A row that read back as "something is retained for this
+// path" would be the ledger promising a restore that is physically impossible, which
+// is why the retention lives in its own table with no backfill rather than as columns
+// with defaults on the jobs row.
+func TestMigrate_PreUndoDatabaseGainsTheRetentionTableWithNoFabricatedRetentions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.db")
+	seedV4(t, path)
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on a v4 database must migrate it, not fail: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if got, want := userVersion(t, path), schemaVersion(); got != want {
+		t.Errorf("user_version after migration = %d, want %d", got, want)
+	}
+	if !hasTable(t, s.db, "retained_originals") {
+		t.Fatal("migrated database has no retained_originals table - the migration was a silent no-op")
+	}
+
+	ctx := context.Background()
+	rows, err := s.List(ctx, nil, 0)
+	if err != nil {
+		t.Fatalf("List after migration: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("migration lost rows: got %d, want 2 (%+v)", len(rows), rows)
+	}
+	byPath := make(map[string]Job, len(rows))
+	for _, j := range rows {
+		byPath[j.Path] = j
+	}
+
+	// 1. Nothing was rewritten: every value the v4 rows carried is still there.
+	done := byPath["/lib/old-done.mkv"]
+	if done.Status != Done || done.Outcome.Encoder != "cpu" || done.Outcome.VmafModel != "version=vmaf_v0.6.1" ||
+		done.Outcome.VmafPixFmt != "yuv420p10le" {
+		t.Errorf("the pre-existing done row was mangled: %+v", done)
+	}
+	if done.Outcome.VmafMean == nil || *done.Outcome.VmafMean != 97.25 ||
+		done.Outcome.VmafMin == nil || *done.Outcome.VmafMin != 88.5 ||
+		done.Outcome.VmafChroma == nil || *done.Outcome.VmafChroma != 41.5 {
+		t.Errorf("the pre-existing measurements were lost: %+v", done.Outcome)
+	}
+	if done.Outcome.SourceBytes == nil || *done.Outcome.SourceBytes != 5000000 {
+		t.Errorf("the pre-existing sizes were lost: %+v", done.Outcome)
+	}
+	if skipped := byPath["/lib/old-skipped.mkv"]; skipped.Outcome.Reason != "hardlinked" {
+		t.Errorf("the pre-existing skip reason was lost: %+v", skipped.Outcome)
+	}
+
+	// 2. And NO row has a retained original invented for it.
+	for _, j := range rows {
+		if _, ok, err := s.GetRetained(ctx, j.Path); err != nil {
+			t.Fatalf("GetRetained(%s): %v", j.Path, err)
+		} else if ok {
+			t.Errorf("%s reads as having a retained original - that swap happened before the undo "+
+				"window existed and its original is gone", j.Path)
+		}
+	}
+	if held, err := s.HeldByUndoWindow(ctx); err != nil {
+		t.Fatalf("HeldByUndoWindow: %v", err)
+	} else if held != 0 {
+		t.Errorf("a migrated pre-UNDO-6 ledger reports %d bytes held by a window it never had", held)
+	}
+	if live, err := s.ListRetained(ctx); err != nil {
+		t.Fatal(err)
+	} else if len(live) != 0 {
+		t.Errorf("a migrated pre-UNDO-6 ledger lists retentions: %+v", live)
+	}
+
+	// 3. The migrated database is WRITABLE through the new table. Without the CREATE
+	// this fails with "no such table" - which is how a silent no-op surfaces on a live
+	// install: not at startup, but later, on the first swap that tries to retain.
+	r := Retained{
+		SourcePath: "/lib/fresh.mkv", SwappedPath: "/lib/fresh.mkv",
+		RetainedPath: "/lib/.holdfast-undo/fresh", SourceBytes: 4242,
+		SwappedFingerprint: "9:9", RetainedAt: 5000, ExpiresAt: 6000,
+	}
+	if err := s.Retain(ctx, r); err != nil {
+		t.Fatalf("Retain on a migrated database: %v", err)
+	}
+	got, ok, err := s.GetRetained(ctx, "/lib/fresh.mkv")
+	if err != nil || !ok {
+		t.Fatalf("GetRetained after Retain: ok=%v err=%v", ok, err)
+	}
+	if got != r {
+		t.Errorf("a retention written AFTER the migration did not round-trip:\n  got  %+v\n  want %+v", got, r)
+	}
+}
+
 // TestMigrations_ShippedTextIsNeverEdited pins the SQL of every migration that has
 // already shipped, by content hash.
 //
@@ -569,6 +739,7 @@ func TestMigrations_ShippedTextIsNeverEdited(t *testing.T) {
 		{"outcome columns", "f32c589da2867b079b6601be9073cc18c89311af1dd2734dd3f58d38423c2fc5"},
 		{"aggregate indexes", "f37a79b51a174ce3fa9eee7dd10780f75c8d6cb0eaa70277cdbc54be65d29188"},
 		{"comparison format and chroma columns", "78f72aa49e83685be32c26550f09f4190203719480a5e262c24ef3dd483b1522"},
+		{"retained originals", "27b4e3a4954ff0b060797b229f1d0ec6f60c7c4a08b0fb571c479a7ab88c25b7"},
 	}
 	if len(migrations) < len(shipped) {
 		t.Fatalf("migrations has %d entries, fewer than the %d that have shipped - an entry was "+

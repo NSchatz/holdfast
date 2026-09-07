@@ -63,6 +63,53 @@ func Open(path string) (*SQLite, error) {
 	return s, nil
 }
 
+// OpenReadOnly opens an EXISTING ledger for reading and never changes it (LEDGER-5).
+//
+// Open above MIGRATES: it is the daemon's door, and a daemon that is about to write
+// through the current schema must have the current schema. A READER is the opposite
+// case, and `holdfast export` is the reader this exists for. An export that opened the
+// store the daemon's way would silently upgrade the operator's ledger as a side effect
+// of reading it — and migrate() then REFUSES that file to the older holdfast that wrote
+// it, because its user_version is ahead of that build. So the one command whose whole
+// job is to preserve the record would be the command that made the record unreadable to
+// the daemon still running against it.
+//
+// Two things stop that, and both are needed:
+//
+//   - mode=ro makes it a physical property of the handle rather than a promise about
+//     the code above it: SQLite itself refuses every write, so no future caller can
+//     quietly reintroduce one. Nothing is created either — a path that does not exist
+//     is an error, never a fresh empty database.
+//   - requireCurrentSchema refuses a version mismatch in BOTH directions instead of
+//     repairing one. Ahead of this build was already a refusal (migrate's rule, for the
+//     same reason: a narrower SELECT would not see every column). Behind it is now a
+//     refusal too, because the alternative is either reading through a schema the file
+//     does not have or migrating it, and migrating is exactly what a read must not do.
+//     Upgrading the ledger stays a deliberate act: run `holdfast run` or `holdfast
+//     serve` once, which is the path that has always owned the schema.
+//
+// SQLite may still create its own -wal/-shm sidecars beside the database while reading
+// one in WAL mode, as any reader does; the database file itself — its rows, its schema
+// and its version — is left exactly as it was found.
+func OpenReadOnly(path string) (*SQLite, error) {
+	// No MkdirAll and no create: a read that finds nothing to read says so. The
+	// pragmas are deliberately not Open's — journal_mode and synchronous are writes to
+	// the header, and a reader has no business setting either. query_only is belt and
+	// braces beside mode=ro, and it costs nothing.
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)", path)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("store: open %q read-only: %w", path, err)
+	}
+	db.SetMaxOpenConns(1)
+
+	if err := requireCurrentSchema(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &SQLite{db: db}, nil
+}
+
 // New wraps an already-open *sql.DB (test seam — e.g. an in-memory database) and
 // migrates the schema up to date. The caller is responsible for any connection-limit
 // pragmas it wants (Open sets MaxOpenConns(1); New leaves db as given).
@@ -408,18 +455,149 @@ func (s *SQLite) Summary(ctx context.Context) (map[Status]int, error) {
 // case into 0. The result is clamped at 0 for the same reason Event.BytesReclaimed
 // is: the strictly-smaller gate precludes output > source, but a defensive clamp
 // means a future bug there can never make a lifetime total run backwards.
+//
+// The second term is the retention carry-forward (LEDGER-5): what rows a prune has
+// already removed contributed, moved into ledger_totals in the same transaction that
+// deleted them. Without it, bounding the ledger would quietly shrink the one figure an
+// operator uses to judge whether the tool was worth running - and it would do so at the
+// NEXT RESTART rather than at the prune, because the server reads this once as a baseline.
+// The two terms cannot double-count: a row is in exactly one of them, and it moves from
+// the first to the second atomically.
 func (s *SQLite) ReclaimedTotal(ctx context.Context) (int64, error) {
-	var total int64
+	var live, pruned int64
 	if err := s.db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(source_bytes - output_bytes), 0) FROM jobs
 		 WHERE status = ? AND source_bytes IS NOT NULL AND output_bytes IS NOT NULL`,
-		string(Done)).Scan(&total); err != nil {
+		string(Done)).Scan(&live); err != nil {
 		return 0, fmt.Errorf("store: reclaimed total: %w", err)
 	}
-	if total < 0 {
-		total = 0
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(reclaimed_pruned), 0) FROM ledger_totals`).Scan(&pruned); err != nil {
+		return 0, fmt.Errorf("store: reclaimed total (pruned carry-forward): %w", err)
+	}
+	if live < 0 {
+		live = 0
+	}
+	if pruned < 0 {
+		pruned = 0
+	}
+	return live + pruned, nil
+}
+
+// HeldByUndoWindow is documented on the Store interface. It sums only LIVE retentions
+// (restored_at IS NULL); a released one is not in the table at all, and a restored one
+// gave its bytes back to the library rather than to the filesystem. COALESCE turns the
+// no-rows case into 0, which here is the truth and not a fabrication: nothing retained
+// is nothing held.
+func (s *SQLite) HeldByUndoWindow(ctx context.Context) (int64, error) {
+	var total int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(source_bytes), 0) FROM retained_originals WHERE restored_at IS NULL`).
+		Scan(&total); err != nil {
+		return 0, fmt.Errorf("store: held by undo window: %w", err)
 	}
 	return total, nil
+}
+
+// retainedColumns is the column list every reader of a retention projects, in ONE
+// place so the SELECT text and the scan destinations cannot drift apart.
+const retainedColumns = `source_path, swapped_path, retained_path, source_bytes,
+	swapped_fingerprint, retained_at, expires_at, restored_at`
+
+// scanRetained reads one row in retainedColumns order. restored_at is the only
+// nullable column: NULL means "not restored", which is a state and not a missing
+// measurement, so it maps to a nil pointer exactly as the outcome columns do.
+func scanRetained(sc interface{ Scan(...any) error }) (Retained, error) {
+	var r Retained
+	var restoredAt sql.NullInt64
+	if err := sc.Scan(&r.SourcePath, &r.SwappedPath, &r.RetainedPath, &r.SourceBytes,
+		&r.SwappedFingerprint, &r.RetainedAt, &r.ExpiresAt, &restoredAt); err != nil {
+		return Retained{}, err
+	}
+	r.RestoredAt = nullableInt(restoredAt)
+	return r, nil
+}
+
+// Retain is documented on the Store interface. The upsert replaces an earlier record
+// for the same source path and CLEARS restored_at with it: the row now describes the
+// swap that has just happened, not the one an operator undid before it.
+func (s *SQLite) Retain(ctx context.Context, r Retained) error {
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO retained_originals
+			(source_path, swapped_path, retained_path, source_bytes, swapped_fingerprint, retained_at, expires_at, restored_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+		 ON CONFLICT(source_path) DO UPDATE SET
+			swapped_path = excluded.swapped_path,
+			retained_path = excluded.retained_path,
+			source_bytes = excluded.source_bytes,
+			swapped_fingerprint = excluded.swapped_fingerprint,
+			retained_at = excluded.retained_at,
+			expires_at = excluded.expires_at,
+			restored_at = NULL`,
+		r.SourcePath, r.SwappedPath, r.RetainedPath, r.SourceBytes,
+		r.SwappedFingerprint, r.RetainedAt, r.ExpiresAt); err != nil {
+		return fmt.Errorf("store: retain: %w", err)
+	}
+	return nil
+}
+
+// GetRetained is documented on the Store interface. The source_path match is tried
+// FIRST so an exact answer always wins over the swapped-path convenience lookup.
+func (s *SQLite) GetRetained(ctx context.Context, path string) (Retained, bool, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+retainedColumns+` FROM retained_originals
+		 WHERE source_path = ? OR swapped_path = ?
+		 ORDER BY (source_path = ?) DESC LIMIT 1`, path, path, path)
+	r, err := scanRetained(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Retained{}, false, nil
+	}
+	if err != nil {
+		return Retained{}, false, fmt.Errorf("store: get retained: %w", err)
+	}
+	return r, true, nil
+}
+
+// ListRetained is documented on the Store interface.
+func (s *SQLite) ListRetained(ctx context.Context) ([]Retained, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+retainedColumns+` FROM retained_originals
+		 WHERE restored_at IS NULL ORDER BY expires_at ASC, source_path ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list retained: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Retained
+	for rows.Next() {
+		r, err := scanRetained(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: list retained scan: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list retained rows: %w", err)
+	}
+	return out, nil
+}
+
+// MarkRestored is documented on the Store interface.
+func (s *SQLite) MarkRestored(ctx context.Context, sourcePath string, at int64) error {
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE retained_originals SET restored_at = ? WHERE source_path = ?`, at, sourcePath); err != nil {
+		return fmt.Errorf("store: mark restored: %w", err)
+	}
+	return nil
+}
+
+// DropRetained is documented on the Store interface.
+func (s *SQLite) DropRetained(ctx context.Context, sourcePath string) error {
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM retained_originals WHERE source_path = ?`, sourcePath); err != nil {
+		return fmt.Errorf("store: drop retained: %w", err)
+	}
+	return nil
 }
 
 // RecordSkip is documented on the Store interface. The ON CONFLICT DO UPDATE is
