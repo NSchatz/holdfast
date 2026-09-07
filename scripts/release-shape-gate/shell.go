@@ -9,12 +9,29 @@ package main
 // script's logic, so the gate cannot drift from it: change the branch that sets `publish`
 // and this gate sees the new value on the next run.
 //
-// The step runs in a scratch directory with the publishing binaries REPLACED by stubs that
-// record their argv and exit 0. That is what makes it safe to execute a step whose whole
-// purpose is to publish: `docker buildx imagetools create -t …` performs nothing and yet
-// tells the gate the exact reference it would have moved - a reference the workflow
-// computes at runtime out of the repository name, which no amount of reading the YAML
-// would produce.
+// EXACTLY ONE STEP IS EVER EXECUTED: the one declaring `id: plan` (main.go refuses a
+// definition in which anything else writes to $GITHUB_OUTPUT). That bound is the lesson of
+// this spec's sixth impl-gate ordinal, which defeated a design that ran EVERY step's script
+// in a stubbed environment: the environment's controls all lived inside the shell they were
+// watching, so one `export PATH=/usr/bin:/bin` put a real `git push` beyond them. The gate
+// no longer needs to know what a step's shell does - see capability.go - so it no longer
+// runs one.
+//
+// What the planning step gets is still hardened, because it is repository code and `make
+// check` runs it:
+//
+//   - PATH is the stub directory ALONE. It carries recording stubs for every tool that
+//     could reach a registry, a remote or a package index (they perform nothing), plus
+//     shims for a declared set of pure utilities an ordinary planning script needs. A
+//     program outside both lists is "command not found", which fails the step LOUDLY.
+//   - HOME, the working directory and every GitHub path point into a throwaway directory.
+//   - A 90-second timeout.
+//
+// The residue, stated rather than left to be found: a planning script that sets PATH back
+// itself can still run a program. That is a property of executing repository code at all,
+// which `make check` does when it runs the test suite; what it is NOT is a way to make this
+// gate report the wrong answer, because nothing about the grade depends on what the script
+// invokes - only on what it appends to $GITHUB_OUTPUT.
 
 import (
 	"context"
@@ -27,15 +44,29 @@ import (
 	"time"
 )
 
-// stubbed are the commands replaced on PATH while a step's shell runs. A step is only ever
-// executed here for its DECISIONS, so anything that could reach a registry, a remote or a
-// package index is neutralised. An unlisted command runs for real, which is why only the
-// planning steps and the tag-move step are ever executed (see main.go).
-//
-// It is the SAME list the act catalogue decides against (command.go), and deliberately so: a
-// tool worth neutralising before a step runs is a tool whose every invocation has to be
-// decided when the definition is read. One list, two uses, no drift.
-var stubbed = stubbedCommands()
+// stubbedTools are neutralised on PATH while the planning step runs: each records its argv
+// and performs nothing. The planning step invoking one of these is itself an error (main.go)
+// - a step that reaches a registry is not planning - and the recording is how that is
+// noticed rather than performed.
+var stubbedTools = []string{
+	"docker", "podman", "nerdctl", "buildah", "skopeo",
+	"crane", "regctl", "oras", "helm",
+	"gh", "git", "hub", "glab",
+	"npm", "pnpm", "yarn", "cargo", "twine", "poetry", "gem", "mvn", "gradle",
+	"aws", "gcloud", "az", "doctl", "flyctl",
+	"curl", "wget", "rclone", "rsync", "scp", "sftp", "ssh", "nc",
+}
+
+// utilitiesCheckedAndPure are the ordinary programs a planning script computes with. Each
+// one was read and found unable to publish anything: they transform text, report the date,
+// or test a condition. The list is deliberately short - a program outside it does not run,
+// which fails the step by name rather than letting it reach the host.
+var utilitiesCheckedAndPure = []string{
+	"date", "tr", "grep", "egrep", "fgrep", "sed", "awk", "gawk", "mawk",
+	"cut", "cat", "head", "tail", "sort", "uniq", "wc", "tr",
+	"basename", "dirname", "expr", "printf", "echo", "test", "[",
+	"true", "false", "env", "uname", "seq", "id", "sleep",
+}
 
 const argvSep = "\x1f"
 
@@ -43,6 +74,7 @@ const argvSep = "\x1f"
 type Runner struct {
 	stubDir string
 	root    string
+	home    string
 }
 
 func NewRunner() (*Runner, error) {
@@ -51,10 +83,13 @@ func NewRunner() (*Runner, error) {
 		return nil, fmt.Errorf("cannot create a scratch directory: %w", err)
 	}
 	stub := filepath.Join(root, "stub-bin")
-	if err := os.MkdirAll(stub, 0o755); err != nil {
-		return nil, fmt.Errorf("cannot create the stub bin directory: %w", err)
+	home := filepath.Join(root, "home")
+	for _, d := range []string{stub, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return nil, fmt.Errorf("cannot create %s: %w", d, err)
+		}
 	}
-	for _, name := range stubbed {
+	for _, name := range stubbedTools {
 		body := fmt.Sprintf(`#!/bin/sh
 # Stubbed by the release-shape gate: records its argv and performs nothing.
 { printf '%%s' %q; for a in "$@"; do printf '%s%%s' "$a"; done; printf '\n'; } >> "$RELEASE_SHAPE_ARGV_LOG"
@@ -64,7 +99,23 @@ exit 0
 			return nil, fmt.Errorf("cannot write the %s stub: %w", name, err)
 		}
 	}
-	return &Runner{stubDir: stub, root: root}, nil
+	// The pure utilities are symlinked from the host so the planning script computes with
+	// the real ones. A missing utility is simply absent: a script that needs it fails by
+	// name, which is the loud direction.
+	for _, name := range utilitiesCheckedAndPure {
+		real, err := exec.LookPath(name)
+		if err != nil {
+			continue
+		}
+		link := filepath.Join(stub, name)
+		if _, err := os.Lstat(link); err == nil {
+			continue
+		}
+		if err := os.Symlink(real, link); err != nil {
+			return nil, fmt.Errorf("cannot link the %s utility: %w", name, err)
+		}
+	}
+	return &Runner{stubDir: stub, root: root, home: home}, nil
 }
 
 func (r *Runner) Close() {
@@ -102,8 +153,11 @@ func (r *Runner) Run(script string, env map[string]string) (*StepRun, error) {
 	}
 
 	full := map[string]string{
-		"PATH":                   r.stubDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"HOME":                   os.Getenv("HOME"),
+		// The stub directory ALONE. Nothing of the host's PATH is appended: a program
+		// that is neither stubbed nor a declared pure utility is not found, and the step
+		// fails saying so.
+		"PATH":                   r.stubDir,
+		"HOME":                   r.home,
 		"LANG":                   "C",
 		"LC_ALL":                 "C",
 		"TZ":                     "UTC",

@@ -166,76 +166,72 @@ is released** (2026-07-18, by a tag push; the repository is public and `:latest`
 The next release is a HIGHER version: a released version's contents must not be modified, so `v0.1.0` is
 spent. `docs/release.md` has the evidence and the `gh` commands that re-derive it.
 
-`S0046` **stopped asserting the release path's invariants in comments and started deciding them.** The dry
-run publishing nothing, the version tag being pushed before `:latest` moves, `:latest` being promoted only
-onto a digest that was pulled back and re-smoked: all three were prose inside `release.yml`, on the path that
-publishes. `scripts/release-shape-gate` (in `make check`) does not match that text. It
-EXECUTES the workflow's own planning shell, once per event shape, with the publishing binaries stubbed, and
-decides each step's guard from the values that run produced, through a real GitHub-expression evaluator that
-models the implicit `success() &&` every `if:` carries. The difference is the whole design: flip the planning
-script so a dispatch sets `publish=true` and not one `if:` in the file changes, so a text matcher stays green
-while a dry run pushes an image (`release-shape-selftest` case 3). The same refusal to read text applies one
-layer in, to the ACTION INPUTS that can make a step publish on its own - **plural, and that is the point**.
-`docker/build-push-action` publishes when `push:` is true, and GitHub lets that be an expression
-(`push: ${{ github.event_name != 'pull_request' }}` is the action's documented idiom), which is never the
-literal string `true`, so the input is EVALUATED for the event under test, and anything undecidable (an
-unknown context, an unimplemented function, a value that is not a boolean) reds the gate by name rather than
-reading as harmless (cases 3a-3d). But `push:` is not that action's only route to a registry, it is a
-SHORTHAND for the other one: the action's own input table defines it as "shorthand for
-`--output=type=registry`" and defines `outputs:` as the list of output destinations, so
-`outputs: type=registry` - and `type=image,name=...,push=true`, the spelling in the action's own
-multi-platform example - publish exactly as hard, with no `push:` key present at all. Modelling one key
-turned its ABSENCE into an inferred "this is a local build", and a dry run that pushed to GHCR was reported
-as "NONE of them publishes anything". Both inputs are decided, the step publishes if EITHER says so, a local
-`outputs:` spelling (`type=docker`, which is what `load: true` means) must still PASS, and an exporter this
-gate does not model reds naming itself rather than falling into the local bucket (cases 3e-3k). The same
-absent-key inference is closed one property along: the references a push publishes are read from BOTH
-`tags:` and an `outputs:` entry's `name=`. **The other half - a step's `run:` script - is not READ at all
-any more; it is OBSERVED**, and that change is the whole point of the design. Reading it lost six times in
-one direction: a publishing input the act decision could not see, detectors that could not cross a line
-continuation, a catalogue that knew command SPELLINGS and no destination, a push inside a quoted word
-(`sh -c "docker push …"`, `eval "docker push …"`), buildx's attached shorthand `-otype=registry` decided
-"local" (`-o` is a pflag shorthand and pflag takes an ATTACHED value, so that IS `--output=type=registry`,
-measured against a real buildx), and quote removal that made `echo "make check"` satisfy the full-gate role.
-Six holes, four mechanisms, one sentence: a spelling the reader had not been taught contributed SILENCE, and
-silence read as "this publishes nothing". Each fix made the reader cleverer and ordinary shell beat the next
-one. So `observe.go` RUNS each step the plan says runs, in an environment where **nothing external
-executes**: `PATH` is one empty directory, so every command the shell resolves through it lands in
-`command_not_found_handle`, which records the full argv **bash built** - after quote removal, after
-expansion, after `eval`, from inside a pipeline, a subshell, a loop or a command substitution - and performs
-nothing. The repository is MIRRORED as directories plus a recording shim per executable file, and that
-mirror is the working directory, so `./scripts/smoke-image.sh` is recorded with its arguments and a shell
-script it ships is descended into: a command cannot hide one file away. Every tool the gate classifies is
-shimmed at its absolute path too, and a command word beginning with `/` that has no shim is REFUSED by a
-DEBUG trap before it runs. Two departures from the runner, both in the direction that cannot hide an act:
-`set -e`/`set -u` are stripped (the commands that would have created a file were recorded rather than run,
-so stopping at the first failure would leave the rest unobserved), and each of the step's own commands is
-made to FAIL in turn across re-runs, because `if ! docker manifest inspect X; then docker push X; fi`
-publishes on exactly one path and the all-succeed run never takes it. Then each recorded invocation is
-classified, and a build's act is decided from WHERE IT SENDS WHAT IT BUILT - `--push`, `--load` and
-`--output=<spec>` go through the SAME function that decides an action's `outputs:` input, with the flags
-TOKENISED rather than matched, so a local exporter stays local and an unmodelled one reds. **A ROLE is what
-a step was observed to INVOKE**, never what its text mentions: a step runs the full gate because `make` was
-called with the `check` target, not because a string says so. And the catalogue has an EDGE on every half,
-stated out loud: every `uses:` must sit in `usesDetectors` or in `classifiedLocalActions`; every command
-invoking a tool that can reach a registry, a remote or a package index (`registryTools`, the same list
-`shell.go` stubs) must land on a rule in `commandRules`; and **every program an observed step invokes at
-all** must sit in `registryTools`, `clientsCheckedAndNotInventoried` or `programsCheckedAndLocal` - each
-entry carrying the reason a human checked. Anything in none of them reds by name instead of contributing
-silence, which is why `crane copy` reds without appearing anywhere in the gate.
-**The rule when you extend this**: do NOT teach the reader a new spelling - there is no reader. Ask what the
-step INVOKED and read it out of the recorded argv; classify an unclassified program with the reason;
-respell a step the environment says it could not watch. The one thing this must never gain is a rule that
-reads a step's text and concludes it is harmless. The residue, stated so nobody has to find it: a command
-word that expands from a VARIABLE to an absolute path outside the shimmed set is the one invocation this
-environment does not reach. The gate also observes the
-promotion step and reads the reference it ACTUALLY moved out of the argv, which is the only honest way to
-compare `docker-compose.yml` against a reference the workflow derives at run time from `github.repository`.
-That compose reference has exactly ONE reader: `scripts/resolve-compose-image.sh` asks the gate for it
+`S0046` **stopped asserting the release path's invariants in comments and started deciding them - and, in the
+end, stopped asking a question that cannot be answered.** The dry run publishing nothing, the version tag
+being pushed before `:latest` moves, `:latest` being promoted only onto a digest that was pulled back and
+re-smoked: all three were prose inside `release.yml`, on the path that publishes. `scripts/release-shape-gate`
+(in `make check`) does not match that text. It EXECUTES the workflow's own planning shell, once per event
+shape, with the publishing binaries stubbed, and decides each guard from the values that run produced, through
+a real GitHub-expression evaluator that models the implicit `success() &&` every `if:` carries. The difference
+is the whole design: flip the planning script so a dispatch sets `publish=true` and not one `if:` in the file
+changes, so a text matcher stays green while the publishing job runs (`release-shape-selftest` case 3).
+
+**THE UNDECIDABLE HALF, AND WHAT REPLACED IT.** "Does this step publish?" was asked of a step's `run:` script
+eight times and answered wrongly eight times. First by READING it: a publishing input the decision could not
+see, detectors that could not cross a shell line continuation, a catalogue that knew command SPELLINGS and no
+destination, a push inside a quoted word (`sh -c "docker push …"`, `eval "docker push …"`), buildx's attached
+shorthand `-otype=registry` decided "local", and quote removal that made `echo "make check"` satisfy the
+full-gate role. Then by OBSERVING it - running each step where `PATH` was one empty directory and every
+resolved name reached a recording `command_not_found_handle`. That lasted one review. Every control such an
+environment has lives INSIDE the shell it is watching: the recorder is a shell function, the guard a `DEBUG`
+trap, the emptied `PATH` an ordinary exported variable the step owns. `export PATH=/usr/bin:/bin` is one line,
+and after it a real `git push` ran and was recorded nowhere; `exec docker push …` reached no recorder at all,
+because `exec` is a builtin and the shell resolves the program itself. Eight holes, one sentence: whatever
+decides what arbitrary shell does can be defeated by arbitrary shell.
+
+**So the release definition is CONSTRAINED and the gate decides the constraint.** A step publishes nothing it
+holds no credential for. `release.yml` is two jobs: `build` is the whole of a dry run and holds
+`contents: read`; `publish` holds `packages: write` and `contents: write`, carries every irreversible act, and
+runs only when the planning logic said `publish=true` - so on a dispatch it never starts and no write-scoped
+token is ever minted. The gate asserts that from `permissions:`, `secrets:`, `needs:` and `if:` - structured
+YAML, no shell in the question - and DENIES BY DEFAULT at every point: an unstated `permissions:` reads CLOSED
+and reds (the repository default is not in the file and may be write-all), a scope outside GitHub's vocabulary
+reds by name, a value outside read/write/none reds, any secret but `GITHUB_TOKEN` (which those very
+permissions bound) reds, and a job or step key nobody classified reds saying so. The payoff is the point and
+the self-test asserts it: a `build` step may say `docker push`, `sh -c "docker push …"`, `exec docker push …`
+or `export PATH=/usr/bin:/bin; docker push …` and the gate PASSES, because none of them can publish - while
+the IDENTICAL step in a job granted `packages: write` reds. What decides the verdict is the grant.
+
+**A ROLE is DECLARED, not searched for.** A7 is an order, so the gate must know which step is the full gate
+and which the promotion; deciding that by searching a step for a mention of the thing is what let
+`echo "make check"` be the full gate. Each position now has a step `id:` the gate names, and the step must
+INVOKE what the role names, compared WHOLE: a role step's `run:` is ONE line, its fields are whole words, and
+the FIRST field must BE the program. `echo make check` and `"make" check` fail; `make check` and
+`make -C . check` pass. Nothing is searched for inside anything, so no quoting or nesting reaches the
+comparison - and that is why `scripts/release-resmoke.sh` and `scripts/release-promote.sh` are files rather
+than inline scripts. The order comes from `needs:` and declaration order; two jobs with no path between them
+are CONCURRENT and the gate refuses to order them. An ACT, for the runbook cross-check, is likewise every step
+in the job that holds the grant, identified by its id: nothing about what a step SAYS is consulted, so a new
+publishing step cannot avoid `docs/release.md` by being spelled unrecognisably.
+
+**The gate executes exactly ONE step**, the one holding the `plan` role; a second step writing to
+`$GITHUB_OUTPUT` reds, because executing a workflow's step scripts to find out what they do is the mechanism
+that was defeated. That script runs with `PATH` set to a stub directory alone (recording stubs for every tool
+that could reach a registry, plus a declared set of pure utilities), `HOME` and the working directory in a
+throwaway directory, and a 90-second timeout; invoking a registry tool from the planning step is itself an
+error. **The rule when you extend this**: do NOT teach the gate to read a step's text - there is no reader,
+and there will not be one. A step that must publish goes in the job that holds the grant and gains a runbook
+row; a step that must not goes in the job that holds none; an unclassified key gets classified with what it
+can hand a job. The residues, stated so nobody has to find them: a planning script that resets `PATH` itself
+can still run a program (a property of running repository code at all, which `make check` already does), and a
+credential written LITERALLY into the workflow rather than through `secrets.` is outside the model.
+The compose reference has exactly ONE reader: `scripts/resolve-compose-image.sh` asks the gate for it
 (`-print-compose-ref`) instead of parsing the file a second time in sed, because two readers agree on today's
 file and diverge on a quoted scalar, a second service with an `image:`, or an `image:` nested outside
-`services:` — the ffmpeg-pin lesson applied to one more duplicated value.
-The plan step now REFUSES a tag whose major version is not zero, naming the record
+`services:` — the ffmpeg-pin lesson applied to one more duplicated value. The floating tag gets the same
+treatment: it is declared once, as `FLOATING_TAG` in the promotion step's `env:`, read by the gate and by
+`scripts/release-promote.sh`.
+The plan step REFUSES a tag whose major version is not zero, naming the record
 (`docs/release.md`, "Before a major version above zero") that must first declare the configuration keys, the
 HTTP surface and the metric names stable: 1.0.0 "defines the public API" and a released version can never be
 modified, so the first non-zero major is a promise, not a bigger number. `scripts/resolve-compose-image.sh`
@@ -496,7 +492,9 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   `.github/workflows/release.yml` (TRANSCODE-9) — tag-triggered: runs the full `make check`, builds both
   arches, smokes them, pushes the version tag, re-smokes what it pulled back, and only then promotes
   `:latest` and cuts the release. Publishing happens on a **tag push only**; `workflow_dispatch` is always
-  a dry run.
+  a dry run — enforced by the capability split (S0046), not by the guards alone: the `build` job holds
+  `contents: read`, the `publish` job holds every write scope and every irreversible act, and it runs only
+  when the planning logic says a tag is being released.
 - `Dockerfile` (TRANSCODE-9) — the production image (multi-arch, distroless `cc`, non-root, pinned ffmpeg);
   its `FFMPEG_*` ARGs are the single source of truth for the pin. `scripts/install-ffmpeg.sh` — installs
   exactly that pin by parsing them (CI + release + local dev all use it), with five distinct, self-naming

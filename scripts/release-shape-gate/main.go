@@ -7,28 +7,43 @@
 // is promoted only onto a digest that was pulled back and re-smoked. That door is now open
 // (docs/release.md carries the record), which raises the stakes rather than lowering them:
 // every later release moves a `:latest` real users pull. This repository has twice learned
-// that prose cannot enforce an invariant
-// (scripts/check-pins.sh, scripts/install-ffmpeg.sh), and both times the answer was a
-// committed gate plus a self-test that proves the gate still bites. This is that answer
-// for the release path.
+// that prose cannot enforce an invariant (scripts/check-pins.sh, scripts/install-ffmpeg.sh),
+// and both times the answer was a committed gate plus a self-test that proves the gate still
+// bites. This is that answer for the release path.
 //
-// It does NOT match text in release.yml. It RUNS the workflow's own planning shell - once
-// per event shape - and decides each step's guard from the values that run produced, with
-// a real GitHub-expression evaluator. The difference is not academic: flip the planning
-// script so a manual dispatch sets publish=true and every `if:` in the file is unchanged,
-// so a text matcher stays green while a dispatch would push an image. That mutation is
-// case 3 of scripts/release-shape-selftest.sh.
+// IT DOES NOT DECIDE WHAT A `run:` STEP DOES, and that is the design rather than a gap.
+// Six ordinals of adversarial review found six fail-opens in one direction in a reader that
+// tried (F1, F5, F7, F9, F11, F12), and an observer that RAN each step in a stubbed
+// environment was beaten in one line by `export PATH=/usr/bin:/bin` and by `exec docker
+// push` (F14, F15) - because every control such an environment has is an ordinary shell
+// object the step it is observing owns. The question is undecidable over arbitrary shell.
+//
+// So the gate asks a decidable one. A step publishes nothing it holds no credential for, so
+// the release definition is CONSTRAINED - every irreversible act lives in a job that runs
+// only on a tag push, and that job is the only one granted a write permission - and the gate
+// decides that constraint from `permissions:`, `secrets:`, `needs:` and `if:`, which are
+// structured YAML with no shell in the question. A dry run's steps may then say `docker
+// push` in any spelling at all and publish nothing.
+//
+// The one thing it still EXECUTES is the workflow's own planning logic, which every review
+// has found sound and which is what makes the guards real rather than restated: flip the
+// planning script so a dispatch sets publish=true and not one `if:` in the file changes, so
+// a text matcher stays green while the publishing job runs. That is case 3 of
+// scripts/release-shape-selftest.sh. Exactly one step is executed - the step declaring
+// `id: plan` - and it runs with the publishing binaries stubbed, with HOME and PATH pointed
+// at a scratch directory, and with no other step's script ever run at all.
 //
 // What it asserts, and the acceptance criteria each answers:
 //
-//	A6      a manual dispatch runs no step that publishes anything
+//	A6/A12  on a manual dispatch, every job that runs holds NO capability that could
+//	        authorise a published act, and every job that does hold one does not run
 //	A7/A3   on a tag push the floating reference moves last, after the full gate, both
 //	        smoke runs, the version-tag push and the re-smoke of the pulled artefact -
-//	        and no published act runs at all once something has failed
+//	        and no capability-bearing job runs at all once something has failed
 //	A14     no step before the promotion tolerates its own failure
 //	A4/A10  the planning logic itself refuses a tag whose major version is not zero,
 //	        naming the record that must first declare the surface stable
-//	A8/A16  every published act the definition names is named by the operator runbook
+//	A8/A16  every step in a capability-bearing job is named by the operator runbook
 //	A9/A17  the example deployment's image reference IS the reference this repository's
 //	        own release would promote
 //	A15     an unreadable, unparseable or step-less definition is red, and says which
@@ -62,6 +77,11 @@ const (
 	samplePreTag = "v0.1.0-rc1"
 
 	fakeSHA = "0123456789abcdef0123456789abcdef01234567"
+
+	// The step env key through which the promotion declares which floating reference it
+	// moves. It is declared in release.yml, read here, and read by
+	// scripts/release-promote.sh - one value, one writer, no copy to drift.
+	floatingTagEnv = "FLOATING_TAG"
 )
 
 func main() {
@@ -112,8 +132,8 @@ func (g *gate) note(format string, a ...any) {
 
 // bad records a failure and keeps going: every independent property should report itself
 // on one run, so a fix is one edit rather than one edit per re-run. A message identical to
-// one already printed is counted and suppressed - several properties ask the same step the
-// same question, and one undecidable step should read as one problem.
+// one already printed is counted and suppressed - several properties ask the same job the
+// same question, and one undecidable job should read as one problem.
 func (g *gate) bad(format string, a ...any) {
 	g.failed = true
 	msg := strings.TrimRight(fmt.Sprintf(format, a...), "\n")
@@ -139,14 +159,35 @@ type shape struct {
 	refName string
 }
 
+// jobPlan is one job under one event shape.
+type jobPlan struct {
+	id   string
+	job  Job
+	runs bool
+	why  string  // why it does not run, when it does not
+	ctx  evalCtx // the context its steps are decided against
+	outs map[string]string
+}
+
 // planned is one event shape, planned for real.
 type planned struct {
 	shape    shape
-	ctx      evalCtx
+	jobs     map[string]*jobPlan
+	order    []string
 	failed   bool
 	failStep Step
 	exitCode int
 	output   string
+}
+
+func (p *planned) running() []string {
+	var out []string
+	for _, id := range p.order {
+		if p.jobs[id].runs {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 func (g *gate) run() error {
@@ -154,30 +195,17 @@ func (g *gate) run() error {
 	if err != nil {
 		return err // A15: read / parse / empty / no step, each naming itself
 	}
-	g.note("%s parses, and names %d job(s)", releaseWorkflow, len(wf.Jobs))
+	g.note("%s parses, and names %d job(s): %s", releaseWorkflow, len(wf.Jobs), strings.Join(wf.JobIDs(), ", "))
 
-	// The observation environment every `run:` step is watched in. It has to exist before
-	// the first question is asked, because "what does this step publish?" is now answered by
-	// running the step in it, not by reading the step.
-	obs, err := NewObserver(g.root)
+	roles, err := locateRoles(wf, g.root)
 	if err != nil {
 		return err
 	}
-	defer obs.install()()
+	g.note("every position a release has is declared by a step `id:` and invokes what that role names (%d roles)", len(releaseRoles))
 
-	allActs, err := actsIn(wf)
-	if err != nil {
-		return err // an input that decides a publish and cannot be decided
-	}
-	if len(allActs) == 0 {
-		return fmt.Errorf("%s names NO step that performs a published act. Every assertion below would then pass over nothing, which is not a gate. If the release genuinely no longer publishes, delete this gate deliberately rather than letting it report green", releaseWorkflow)
-	}
-	jobID, job, err := releaseJobOf(wf, allActs)
-	if err != nil {
+	if err := g.checkOnlyThePlanStepIsExecuted(wf, roles); err != nil {
 		return err
 	}
-	g.note("the published acts all live in job %q (%d step(s))", jobID, len(job.Steps))
-	g.noteCatalogueBoundary(wf)
 
 	repo, err := repoFromModule(g.path(goModFile))
 	if err != nil {
@@ -191,16 +219,16 @@ func (g *gate) run() error {
 	}
 	defer runner.Close()
 
-	// Every shape below is PLANNED by executing the workflow's planning steps. Nothing
-	// downstream re-reads the script.
-	dispatch, err := g.plan(runner, wf, job, repo, shape{"a manual dispatch", "workflow_dispatch", "main"})
+	// Every shape below is PLANNED by executing the workflow's planning step. Nothing
+	// downstream re-reads a script.
+	dispatch, err := g.plan(runner, wf, roles, repo, shape{"a manual dispatch", "workflow_dispatch", "main"})
 	if err != nil {
 		return err
 	}
 	if dispatch.failed {
 		return fmt.Errorf("the planning logic FAILED on %s (exit %d) - a dry run must be able to plan itself:\n%s", dispatch.shape.label, dispatch.exitCode, indent(dispatch.output))
 	}
-	tag, err := g.plan(runner, wf, job, repo, shape{"a version tag push (" + sampleTag + ")", "push", sampleTag})
+	tag, err := g.plan(runner, wf, roles, repo, shape{"a version tag push (" + sampleTag + ")", "push", sampleTag})
 	if err != nil {
 		return err
 	}
@@ -210,96 +238,194 @@ func (g *gate) run() error {
 	g.note("the planning logic RAN for both event shapes; dispatch produced %s, %s produced %s",
 		outputsOf(dispatch), sampleTag, outputsOf(tag))
 
-	g.checkPlanningPrecedesActs(jobID, job, allActs)
-	g.checkDispatchPublishesNothing(job, dispatch)
-	promoteIdx := g.checkPublishOrdering(job, tag)
-	g.checkNothingPublishesAfterAFailure(job, tag)
-	g.checkPreReleaseDoesNotPromote(runner, wf, job, repo)
-	g.checkMajorVersionZero(runner, wf, job, repo, allActs)
-	g.checkRunbookNamesEveryAct(allActs)
-	g.checkComposeReferenceAgreement(runner, wf, job, tag, promoteIdx)
+	g.checkDispatchHoldsNoCapability(wf, dispatch)
+	g.checkIrreversibleActsLiveBehindAGrant(wf, roles)
+	g.checkOrder(wf, roles, tag)
+	g.checkNothingToleratesAFailure(wf, roles, tag)
+	g.checkNothingPublishesAfterAFailure(wf, tag)
+	g.checkPreReleaseDoesNotPromote(runner, wf, roles, repo)
+	g.checkMajorVersionZero(runner, wf, roles, repo)
+	g.checkRunbookNamesEveryAct(wf)
+	g.checkComposeReferenceAgreement(wf, roles, tag, repo)
+	return nil
+}
+
+// The gate executes shell, so what it executes is bounded and declared. Exactly one step -
+// the one holding the `plan` role - is ever run, and it is run with the publishing binaries
+// stubbed and with HOME and PATH pointed at a scratch directory. A second step writing to
+// $GITHUB_OUTPUT would be a second script this gate would have to execute to know what the
+// guards see, and running a step whose purpose is to publish is the mistake ordinal 6
+// caught (F14's second consequence). It reds instead.
+func (g *gate) checkOnlyThePlanStepIsExecuted(wf *Workflow, roles *Roles) error {
+	plan := roles.step("plan")
+	for _, jid := range wf.JobIDs() {
+		for _, s := range wf.Jobs[jid].Steps {
+			if s.Run == "" || !strings.Contains(s.Run, "GITHUB_OUTPUT") {
+				continue
+			}
+			if s.JobID == plan.JobID && s.Index == plan.Index {
+				continue
+			}
+			return fmt.Errorf("%s writes to $GITHUB_OUTPUT, but the only step this gate executes is the one holding the `plan` role (%s). A second planning script would have to be executed too, and executing a workflow's step scripts to find out what they do is the mechanism ordinal 6 of this spec's impl gate defeated. Fold the decision into the `plan` step, or give this one an `id:` and stop it writing outputs", s.Label(), plan.Label())
+		}
+	}
+	g.note("exactly ONE step is ever executed by this gate: %s. No other step's script runs, here or in the self-test", plan.Label())
 	return nil
 }
 
 // --- planning -------------------------------------------------------------------------
 
-// plan executes, in order, every planning step of the job: a `run:` step that appends to
-// $GITHUB_OUTPUT. Their outputs become the `steps` context every guard is decided against.
-func (g *gate) plan(r *Runner, wf *Workflow, job Job, repo string, sh shape) (*planned, error) {
-	ctx := evalCtx{success: true, vars: map[string]any{
-		"github": map[string]any{
-			"event_name": sh.event,
-			"ref_name":   sh.refName,
-			"ref":        refFor(sh),
-			"repository": repo,
-			"repository_owner": func() string {
-				owner, _, _ := strings.Cut(repo, "/")
-				return owner
-			}(),
-			"sha":   fakeSHA,
-			"actor": "release-shape-gate",
-		},
-		"env":   mergeEnv(wf.Env, job.Env),
-		"steps": map[string]any{},
-	}}
-	if ok, err := ConditionRuns(job.If, ctx); err != nil {
-		return nil, fmt.Errorf("the release job's own `if:` cannot be decided: %w", err)
-	} else if !ok {
-		return nil, fmt.Errorf("the release job would NOT RUN for %s; this gate cannot judge a release that never starts", sh.label)
+// plan walks the jobs in `needs:` order, decides which run for this event shape, and
+// executes the planning step of each that does. The values that run produces are what every
+// guard downstream is decided against - the workflow's own logic, not a restatement of it.
+func (g *gate) plan(r *Runner, wf *Workflow, roles *Roles, repo string, sh shape) (*planned, error) {
+	order, err := topoJobs(wf)
+	if err != nil {
+		return nil, err
 	}
+	res := &planned{shape: sh, jobs: map[string]*jobPlan{}, order: order}
+	needs := map[string]any{}
+	plan := roles.step("plan")
 
-	res := &planned{shape: sh, ctx: ctx}
-	ran := 0
-	for _, s := range job.Steps {
-		if !isPlanningStep(s) {
+	for _, id := range order {
+		job := wf.Jobs[id]
+		ctx := evalCtx{success: true, vars: map[string]any{
+			"github": githubCtx(repo, sh),
+			"env":    mergeEnv(wf.Env, job.Env),
+			"steps":  map[string]any{},
+			"needs":  needs,
+		}}
+		jp := &jobPlan{id: id, job: job, ctx: ctx, outs: map[string]string{}}
+		res.jobs[id] = jp
+
+		jobNeeds, err := job.NeedsOf()
+		if err != nil {
+			return nil, err
+		}
+		blocked := ""
+		for _, n := range jobNeeds {
+			if np, ok := res.jobs[n]; !ok || !np.runs {
+				blocked = n
+				break
+			}
+		}
+		if blocked != "" {
+			jp.why = fmt.Sprintf("it needs job %q, which does not run", blocked)
 			continue
 		}
-		if s.ID == "" {
-			return nil, fmt.Errorf("%s writes to $GITHUB_OUTPUT but carries no `id:`, so nothing can read what it decided", s.Label())
-		}
-		runs, err := ConditionRuns(s.If, res.ctx)
+		runs, err := ConditionRuns(job.If, ctx)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", s.Label(), err)
+			return nil, fmt.Errorf("job %q's own `if:` cannot be decided for %s: %w", id, sh.label, err)
 		}
 		if !runs {
+			jp.why = fmt.Sprintf("its `if:` (`%s`) is false against the values the planning logic produced", strings.TrimSpace(job.If))
 			continue
 		}
-		env, err := stepEnv(wf, job, s, res.ctx)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", s.Label(), err)
+		jp.runs = true
+
+		// Execute the planning step, if this is the job that carries it.
+		if plan.JobID == id {
+			runsStep, err := ConditionRuns(plan.If, jp.ctx)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", plan.Label(), err)
+			}
+			if !runsStep {
+				return nil, fmt.Errorf("%s does not run for %s, so nothing decides whether this run may publish", plan.Label(), sh.label)
+			}
+			env, err := stepEnv(wf, job, plan, jp.ctx)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", plan.Label(), err)
+			}
+			script, err := Interpolate(plan.Run, jp.ctx)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", plan.Label(), err)
+			}
+			out, err := r.Run(script, env)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", plan.Label(), err)
+			}
+			res.output += out.Output
+			if out.ExitCode != 0 {
+				res.failed, res.failStep, res.exitCode = true, plan, out.ExitCode
+				return res, nil
+			}
+			if len(out.Argv) > 0 {
+				return nil, fmt.Errorf("%s invoked %s. The planning step DECIDES; a step that reaches a registry, a remote or a package index is not planning, and this gate executes only the planning step precisely so that it never runs one that does", plan.Label(), formatArgv(out.Argv))
+			}
+			outs := map[string]any{}
+			for k, v := range out.Outputs {
+				outs[k] = v
+				jp.outs[k] = v
+			}
+			jp.ctx.vars["steps"].(map[string]any)[plan.ID] = map[string]any{
+				"outputs":    outs,
+				"conclusion": "success",
+				"outcome":    "success",
+			}
 		}
-		script, err := Interpolate(s.Run, res.ctx)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", s.Label(), err)
+
+		// Publish this job's declared outputs into the `needs` context downstream jobs read.
+		jobOut := map[string]any{}
+		for k, expr := range job.Outputs {
+			v, err := Interpolate(expr, jp.ctx)
+			if err != nil {
+				return nil, fmt.Errorf("job %q's output %q cannot be decided: %w", id, k, err)
+			}
+			jobOut[k] = v
 		}
-		out, err := r.Run(script, env)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", s.Label(), err)
-		}
-		ran++
-		if out.ExitCode != 0 {
-			res.failed, res.failStep, res.exitCode, res.output = true, s, out.ExitCode, out.Output
-			return res, nil
-		}
-		outs := map[string]any{}
-		for k, v := range out.Outputs {
-			outs[k] = v
-		}
-		res.ctx.vars["steps"].(map[string]any)[s.ID] = map[string]any{
-			"outputs":    outs,
-			"conclusion": "success",
-			"outcome":    "success",
-		}
-		res.output += out.Output
-	}
-	if ran == 0 {
-		return nil, fmt.Errorf("%s has NO planning step: no `run:` step writes to $GITHUB_OUTPUT, so there is no runtime value to decide any guard from and this gate would be reduced to reading text", releaseWorkflow)
+		needs[id] = map[string]any{"outputs": jobOut, "result": "success"}
 	}
 	return res, nil
 }
 
-func isPlanningStep(s Step) bool {
-	return s.Run != "" && strings.Contains(s.Run, "GITHUB_OUTPUT")
+func githubCtx(repo string, sh shape) map[string]any {
+	owner, _, _ := strings.Cut(repo, "/")
+	return map[string]any{
+		"event_name":       sh.event,
+		"ref_name":         sh.refName,
+		"ref":              refFor(sh),
+		"repository":       repo,
+		"repository_owner": owner,
+		"sha":              fakeSHA,
+		"actor":            "release-shape-gate",
+	}
+}
+
+// topoJobs orders the jobs so every job comes after everything it needs.
+func topoJobs(wf *Workflow) ([]string, error) {
+	var out []string
+	done := map[string]bool{}
+	for len(out) < len(wf.Jobs) {
+		progress := false
+		for _, id := range wf.JobIDs() {
+			if done[id] {
+				continue
+			}
+			needs, err := wf.Jobs[id].NeedsOf()
+			if err != nil {
+				return nil, err
+			}
+			ready := true
+			for _, n := range needs {
+				if _, ok := wf.Jobs[n]; !ok {
+					return nil, fmt.Errorf("job %q needs %q, which %s does not define", id, n, releaseWorkflow)
+				}
+				if !done[n] {
+					ready = false
+				}
+			}
+			if !ready {
+				continue
+			}
+			done[id] = true
+			out = append(out, id)
+			progress = true
+		}
+		if !progress {
+			return nil, fmt.Errorf("the jobs in %s form a `needs:` CYCLE, so there is no order to grade", releaseWorkflow)
+		}
+	}
+	return out, nil
 }
 
 func refFor(sh shape) string {
@@ -310,12 +436,11 @@ func refFor(sh shape) string {
 }
 
 func outputsOf(p *planned) string {
-	steps, _ := p.ctx.vars["steps"].(map[string]any)
 	var parts []string
-	for _, id := range sortedKeys(steps) {
-		outs, _ := steps[id].(map[string]any)["outputs"].(map[string]any)
-		for _, k := range sortedKeys(outs) {
-			parts = append(parts, fmt.Sprintf("%s=%v", k, outs[k]))
+	for _, id := range p.order {
+		jp := p.jobs[id]
+		for _, k := range sortedStrings(jp.outs) {
+			parts = append(parts, fmt.Sprintf("%s=%v", k, jp.outs[k]))
 		}
 	}
 	return "{" + strings.Join(parts, " ") + "}"
@@ -330,245 +455,250 @@ func sortedKeys(m map[string]any) []string {
 	return out
 }
 
-// --- properties -----------------------------------------------------------------------
-
-// A15's companion: a refusal that runs after the first publishing step is not a refusal.
-func (g *gate) checkPlanningPrecedesActs(jobID string, job Job, acts []Act) {
-	first := -1
-	for _, s := range job.Steps {
-		if isPlanningStep(s) {
-			first = s.Index
-			break
-		}
+func sortedStrings(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
 	}
-	for _, a := range acts {
-		if a.Step.JobID == jobID && a.Step.Index < first {
-			g.bad("%s performs a published act (%s) BEFORE the planning step that decides whether this run may publish at all. Nothing the planning logic refuses could stop it.", a.Step.Label(), a.Why)
-			return
-		}
-	}
-	g.note("every published act is declared after the planning step that gates it")
+	sort.Strings(out)
+	return out
 }
 
-// noteCatalogueBoundary states the edge of the act catalogue in the gate's own output.
+// --- A6, A12: capability -----------------------------------------------------------------
+
+// checkDispatchHoldsNoCapability is the criterion, in its decidable form. Every job that
+// runs on a manual dispatch must hold nothing that could authorise something leaving this
+// machine, and every job that DOES hold such a thing must not run.
 //
-// Every "NONE of them publishes anything" below is only worth what the catalogue behind it
-// is worth, and a reader cannot see that catalogue from the output. Reaching here at all
-// means actsIn already refused every `uses:` in neither half of it, so this says which half
-// each one landed in - the difference between "asked and answered no" and "never asked",
-// which is the distinction the sentence used to blur.
-func (g *gate) noteCatalogueBoundary(wf *Workflow) {
-	var decided, local int
-	for _, id := range wf.JobIDs() {
-		for _, s := range wf.Jobs[id].Steps {
-			u := strings.TrimSpace(s.Uses)
-			if u == "" {
-				continue
+// Note what is NOT asked: what any step's script says. That question is undecidable over
+// arbitrary shell and cost this gate six fail-opens; a step in a job with no write scope and
+// no secret publishes nothing however it is spelled.
+func (g *gate) checkDispatchHoldsNoCapability(wf *Workflow, p *planned) {
+	safe, unsafe := 0, 0
+	for _, id := range p.order {
+		jp := p.jobs[id]
+		problems, err := CanPublish(wf, jp.job)
+		if err != nil {
+			g.bad("on %s, what job %q may do CANNOT BE DECIDED: %v", p.shape.label, id, err)
+			unsafe++
+			continue
+		}
+		if !jp.runs {
+			if len(problems) > 0 {
+				g.note("job %q holds a publishing grant and does NOT run on %s (%s)", id, p.shape.label, jp.why)
 			}
-			if isClassifiedLocal(u) {
-				local++
-				continue
-			}
-			decided++
+			continue
+		}
+		if len(problems) == 0 {
+			safe++
+			continue
+		}
+		unsafe++
+		for _, pr := range problems {
+			g.bad("on %s, job %q RUNS and it holds a capability that could authorise a published act:\n%s\nA dry run must publish nothing, and the way that is guaranteed is that nothing which runs on a dispatch is handed anything a registry, a ref or a release would accept. The planning logic produced %s.",
+				p.shape.label, id, pr.Detail, outputsOf(p))
 		}
 	}
-	g.note("every `uses:` is classified: %d against the publishing catalogue (their destination inputs decided) and %d against the list of actions checked and found to publish nothing. An action in neither list reds this gate rather than passing unasked", decided, local)
-}
-
-// A6.
-func (g *gate) checkDispatchPublishesNothing(job Job, p *planned) {
-	running, err := runningSteps(job, p.ctx)
-	if err != nil {
-		g.bad("cannot decide which steps run on %s: %v", p.shape.label, err)
-		return
-	}
-	acts, undecided := g.actsOf(running, &p.ctx)
-	found := 0
-	for _, a := range acts {
-		found++
-		g.bad("on %s, %s WOULD RUN and it performs a published act: %s (%s).\nA dry run must publish nothing. The planning logic produced %s, and this step's guard (`%s`) is true against those values.",
-			p.shape.label, a.Step.Label(), a.Why, a.Kind, outputsOf(p), strings.TrimSpace(a.Step.If))
-	}
-	switch {
-	case undecided > 0:
-		g.undecidedNote("on %s, %d of the %d step(s) that run could not be decided (see the errors above), so whether a dry run publishes anything is UNKNOWN - which is not the same as no",
-			p.shape.label, undecided, len(running))
-	case found == 0:
-		g.note("on %s, %d step(s) run and NONE of them publishes anything", p.shape.label, len(running))
+	if unsafe == 0 {
+		var descriptions []string
+		for _, id := range p.running() {
+			gr, err := EffectiveGrants(wf, p.jobs[id].job)
+			if err != nil {
+				continue
+			}
+			descriptions = append(descriptions, fmt.Sprintf("%s %s", id, gr.String()))
+		}
+		g.note("on %s, %d job(s) run and NONE of them holds a capability that could publish anything: %s. A step in them may say `docker push` in any spelling and still publish nothing",
+			p.shape.label, safe, strings.Join(descriptions, ", "))
 	}
 }
 
-// A7, A3, A14. Returns the promotion step's index, or -1.
-func (g *gate) checkPublishOrdering(job Job, p *planned) int {
-	running, err := runningSteps(job, p.ctx)
-	if err != nil {
-		g.bad("cannot decide which steps run on %s: %v", p.shape.label, err)
-		return -1
-	}
-
-	var (
-		pushes, moves, releases []Act
-		gateIdx                 = -1
-		smokeArch               = map[string]int{}
-		reSmokeArch             = map[string]int{}
-		firstReSmoke            = -1
-		lastReSmoke             = -1
-	)
-	acts, undecided := g.actsOf(running, &p.ctx)
-	for _, a := range acts {
-		switch a.Kind {
-		case ActImagePush:
-			pushes = append(pushes, a)
-		case ActTagMove:
-			moves = append(moves, a)
-		case ActRelease:
-			releases = append(releases, a)
-		}
-	}
-	for _, s := range running {
-		if gateIdx < 0 && s.RunsFullGate() {
-			gateIdx = s.Index
-		}
-		if !s.RunsSmoke() {
+// checkIrreversibleActsLiveBehindAGrant is the other half of the same property: a step that
+// really does perform an irreversible act must live in a job that CAN, or the capability
+// split is decorative - the act would have been moved somewhere that holds no grant, where
+// this gate stops asking about it and the release fails at run time instead.
+func (g *gate) checkIrreversibleActsLiveBehindAGrant(wf *Workflow, roles *Roles) {
+	named := 0
+	for _, r := range releaseRoles {
+		if !r.needsGrant {
 			continue
 		}
-		if s.PullsFromRegistry() {
-			for _, a := range s.PullArches() {
-				reSmokeArch[a] = s.Index
-			}
-			if firstReSmoke < 0 {
-				firstReSmoke = s.Index
-			}
-			lastReSmoke = s.Index
+		s := roles.step(r.id)
+		problems, err := CanPublish(wf, wf.Jobs[s.JobID])
+		if err != nil {
+			g.bad("cannot decide what job %q may do, and it carries %s: %v", s.JobID, r.what, err)
 			continue
 		}
-		for _, a := range s.SmokeArches() {
-			if _, seen := smokeArch[a]; !seen {
-				smokeArch[a] = s.Index
-			}
+		if len(problems) == 0 {
+			g.bad("%s performs %s, which is irreversible, but job %q holds NO capability that could carry it out. Either the act is in the wrong job - it would fail at run time, having passed this gate - or a grant it needs has been removed. An irreversible act must sit in a job that visibly holds the authority for it, so that this gate can grade the authority instead of the shell.",
+				s.Label(), r.what, s.JobID)
+			continue
+		}
+		named++
+	}
+	if named == len(grantRoles()) {
+		g.note("every irreversible act (%s) lives in a job that visibly holds the grant it needs", strings.Join(grantRoles(), ", "))
+	}
+}
+
+func grantRoles() []string {
+	var out []string
+	for _, r := range releaseRoles {
+		if r.needsGrant {
+			out = append(out, r.id)
 		}
 	}
+	return out
+}
 
-	if len(moves) != 1 {
-		g.bad("on %s, %d step(s) move a floating reference; this gate models exactly one promotion and refuses to guess which of several moves last.\n%s",
-			p.shape.label, len(moves), actList(moves))
-		return -1
-	}
-	move := moves[0]
-	if len(pushes) == 0 {
-		g.bad("on %s nothing pushes an image, yet %s moves a floating reference. A promotion with no gated artefact behind it points `:latest` at something this run never proved.",
-			p.shape.label, move.Step.Label())
-		return move.Step.Index
-	}
+// --- A7, A13: the order ------------------------------------------------------------------
 
+func (g *gate) checkOrder(wf *Workflow, roles *Roles, p *planned) {
 	problems := 0
-	must := func(what string, idx int, label string) {
-		switch {
-		case idx < 0:
+	for _, pair := range mustPrecede {
+		before, after := roles.step(pair[0]), roles.step(pair[1])
+		if !g.stepRuns(p, before) || !g.stepRuns(p, after) {
 			problems++
-			g.bad("on %s, %s does not run before %s moves the floating reference. The promotion would point `:latest` at an image this run never %s.",
-				p.shape.label, what, move.Step.Label(), label)
-		case idx > move.Step.Index:
-			problems++
-			g.bad("on %s, %s runs AFTER %s moves the floating reference (%s is step %d, the promotion is step %d). `:latest` would be handed to every `docker compose pull` user before it was proved.",
-				p.shape.label, what, move.Step.Label(), what, idx+1, move.Step.Index+1)
-		}
-	}
-	must("the full gate (make check)", gateIdx, "gated")
-	for _, arch := range []string{"linux/amd64", "linux/arm64"} {
-		idx, ok := smokeArch[arch]
-		if !ok {
-			idx = -1
-		}
-		must("the "+arch+" smoke run", idx, "smoked")
-		ridx, rok := reSmokeArch[arch]
-		if !rok {
-			ridx = -1
-		}
-		must("the re-smoke of the "+arch+" artefact pulled back from the registry", ridx, "pulled back and re-smoked")
-	}
-	for _, a := range pushes {
-		must("the version-tag push ("+a.Step.Label()+")", a.Step.Index, "pushed")
-		if firstReSmoke >= 0 && firstReSmoke < a.Step.Index {
-			problems++
-			g.bad("on %s, the artefact is re-smoked (step %d) BEFORE it is pushed (step %d). A re-smoke that runs first grades a local build, which is the gate-by-equivalence this ordering exists to reject.",
-				p.shape.label, firstReSmoke+1, a.Step.Index+1)
-		}
-		if gateIdx >= 0 && gateIdx > a.Step.Index {
-			problems++
-			g.bad("on %s, the full gate (step %d) runs AFTER the image is pushed (step %d). The pushed image is immediately pullable, so the gate would be judging something already published.",
-				p.shape.label, gateIdx+1, a.Step.Index+1)
-		}
-	}
-	for _, a := range releases {
-		if a.Step.Index < move.Step.Index {
-			problems++
-			g.bad("on %s, %s creates a published release (step %d) before the floating reference is promoted (step %d). A release announcing an image that has not been promoted advertises a reference that does not resolve.",
-				p.shape.label, a.Step.Label(), a.Step.Index+1, move.Step.Index+1)
-		}
-	}
-	if lastReSmoke > move.Step.Index {
-		problems++
-		g.bad("on %s, the last re-smoke of a pulled artefact (step %d) runs AFTER the promotion (step %d).",
-			p.shape.label, lastReSmoke+1, move.Step.Index+1)
-	}
-
-	switch {
-	case undecided > 0:
-		g.undecidedNote("on %s, %d step(s) that run could not be decided (see the errors above), so the published acts this order was checked over are INCOMPLETE",
-			p.shape.label, undecided)
-	case problems == 0:
-		g.note("on %s the order holds: gate -> both smoke runs -> version-tag push -> re-smoke of both pulled artefacts -> %s", p.shape.label, move.Step.Label())
-	}
-
-	// A14: nothing before the promotion may be allowed to fail quietly.
-	tolerated := 0
-	if tolerant, why := tolerates(job.ContinueOnError); tolerant {
-		tolerated++
-		g.bad("the release job itself is marked `%s`, so every failure before the promotion is tolerated and `:latest` moves anyway.", why)
-	}
-	for _, s := range running {
-		if s.Index > move.Step.Index {
+			missing, other := pair[0], pair[1]
+			if g.stepRuns(p, before) {
+				missing, other = pair[1], pair[0]
+			}
+			g.bad("on %s, %s (`%s`) does not run, so the order this release depends on cannot hold: %s must come before %s.",
+				p.shape.label, roleWhat(missing), missing, roleWhat(pair[0]), roleWhat(pair[1]))
+			_ = other
 			continue
 		}
-		if tolerant, why := s.TolerateFailure(); tolerant {
+		ok, err := g.precedes(wf, before, after)
+		if err != nil {
+			problems++
+			g.bad("on %s, this gate cannot order %s (`%s`) against %s (`%s`): %v",
+				p.shape.label, roleWhat(pair[0]), pair[0], roleWhat(pair[1]), pair[1], err)
+			continue
+		}
+		if !ok {
+			problems++
+			g.bad("on %s, %s does NOT run before %s.\n%s is %s; %s is %s.\nThe floating reference would end up pointing at an image this run never proved, for every user running `docker compose pull`.",
+				p.shape.label, roleWhat(pair[0]), roleWhat(pair[1]),
+				pair[0], before.Label(), pair[1], after.Label())
+		}
+	}
+	if problems == 0 {
+		g.note("on %s the order holds: %s -> both smoke runs -> the version-tag push -> the re-smoke of the pulled artefact -> %s -> %s",
+			p.shape.label, roleWhat("full-gate"), roles.step("promote-latest").Label(), roleWhat("resolve-compose"))
+	}
+}
+
+// precedes decides whether `a` is guaranteed to have finished before `b` starts. Within one
+// job that is declaration order. Across jobs it is the `needs:` graph, and two jobs with no
+// path between them are CONCURRENT: the gate refuses to order them rather than reporting an
+// order it did not check.
+func (g *gate) precedes(wf *Workflow, a, b Step) (bool, error) {
+	if a.JobID == b.JobID {
+		return a.Index < b.Index, nil
+	}
+	fwd, err := wf.reaches(b.JobID, a.JobID)
+	if err != nil {
+		return false, err
+	}
+	if fwd {
+		return true, nil
+	}
+	rev, err := wf.reaches(a.JobID, b.JobID)
+	if err != nil {
+		return false, err
+	}
+	if rev {
+		return false, nil
+	}
+	return false, fmt.Errorf("jobs %q and %q are CONCURRENT: neither `needs:` the other, so they may run in either order or at the same time. An order that is not in the `needs:` graph is not an order", a.JobID, b.JobID)
+}
+
+func (g *gate) stepRuns(p *planned, s Step) bool {
+	jp, ok := p.jobs[s.JobID]
+	if !ok || !jp.runs {
+		return false
+	}
+	runs, err := ConditionRuns(s.If, jp.ctx)
+	if err != nil {
+		g.bad("cannot decide whether %s runs: %v", s.Label(), err)
+		return false
+	}
+	return runs
+}
+
+// --- A14: nothing before the promotion may fail quietly ----------------------------------
+
+func (g *gate) checkNothingToleratesAFailure(wf *Workflow, roles *Roles, p *planned) {
+	promote := roles.step("promote-latest")
+	tolerated := 0
+	for _, id := range p.order {
+		job := wf.Jobs[id]
+		if tolerant, why := tolerates(job.ContinueOnError); tolerant {
 			tolerated++
-			g.bad("%s runs before the floating reference moves and is marked `%s`, so its failure would NOT fail the run. `:latest` would be promoted over the top of it.", s.Label(), why)
+			g.bad("job %q is marked `%s`, so a failure inside it is tolerated and everything downstream of it - including the promotion - proceeds anyway.", id, why)
+		}
+		if !p.jobs[id].runs {
+			continue
+		}
+		for _, s := range job.Steps {
+			before, err := g.precedes(wf, s, promote)
+			if err != nil || !before {
+				continue
+			}
+			if !g.stepRuns(p, s) {
+				continue
+			}
+			if tolerant, why := s.TolerateFailure(); tolerant {
+				tolerated++
+				g.bad("%s runs before the floating reference moves and is marked `%s`, so its failure would NOT fail the run. `:latest` would be promoted over the top of it.", s.Label(), why)
+			}
 		}
 	}
 	if tolerated == 0 {
-		g.note("no step before the promotion tolerates its own failure")
+		g.note("no step and no job before the promotion tolerates its own failure")
 	}
-	return move.Step.Index
 }
 
-// A3, stated as its own property: once anything has failed, nothing publishes.
-func (g *gate) checkNothingPublishesAfterAFailure(job Job, p *planned) {
-	failing := evalCtx{vars: p.ctx.vars, success: false}
-	running, err := runningSteps(job, failing)
-	if err != nil {
-		g.bad("cannot decide which steps run after a failure: %v", err)
-		return
-	}
-	acts, undecided := g.actsOf(running, &failing)
+// --- A3: once anything has failed, nothing publishes -------------------------------------
+
+func (g *gate) checkNothingPublishesAfterAFailure(wf *Workflow, p *planned) {
 	bad := 0
-	for _, a := range acts {
-		bad++
-		g.bad("%s still runs after an earlier step has FAILED, and it performs a published act: %s (%s). Its guard is `%s`, which does not defer to the run's success. A failed gate or smoke run must leave the floating reference exactly where it was.",
-			a.Step.Label(), a.Why, a.Kind, strings.TrimSpace(a.Step.If))
+	for _, id := range p.order {
+		jp := p.jobs[id]
+		problems, err := CanPublish(wf, jp.job)
+		if err != nil || len(problems) == 0 {
+			continue // a job that can publish nothing is not the question here
+		}
+		needs, err := jp.job.NeedsOf()
+		if err != nil {
+			g.bad("%v", err)
+			continue
+		}
+		failing := evalCtx{vars: jp.ctx.vars, success: false}
+		runs, err := ConditionRuns(jp.job.If, failing)
+		if err != nil {
+			g.bad("cannot decide whether job %q runs after a failure: %v", id, err)
+			continue
+		}
+		if len(needs) == 0 {
+			bad++
+			g.bad("job %q holds a publishing grant and `needs:` nothing, so nothing sequences it behind the gate at all: it starts immediately, in parallel with the job that would have proved the artefact.", id)
+			continue
+		}
+		if runs {
+			bad++
+			g.bad("job %q holds a publishing grant and would STILL RUN after an earlier job has FAILED (its `if:` is `%s`, which does not defer to the run's success). A failed gate or smoke run must leave the floating reference exactly where it was.", id, strings.TrimSpace(jp.job.If))
+		}
 	}
-	switch {
-	case undecided > 0:
-		g.undecidedNote("after a failed step, %d of the %d step(s) that still run could not be decided (see the errors above), so whether anything publishes is UNKNOWN", undecided, len(running))
-	case bad == 0:
-		g.note("after a failed step, NO published act runs at all - the floating reference stays where it was")
+	if bad == 0 {
+		g.note("after a failure, NO job holding a publishing grant runs at all - the floating reference stays where it was")
 	}
 }
 
-// The pre-release invariant the workflow already claims: a suffixed tag publishes but must
-// not become the floating reference.
-func (g *gate) checkPreReleaseDoesNotPromote(r *Runner, wf *Workflow, job Job, repo string) {
-	pre, err := g.plan(r, wf, job, repo, shape{"a pre-release tag push (" + samplePreTag + ")", "push", samplePreTag})
+// --- the pre-release invariant -----------------------------------------------------------
+
+func (g *gate) checkPreReleaseDoesNotPromote(r *Runner, wf *Workflow, roles *Roles, repo string) {
+	pre, err := g.plan(r, wf, roles, repo, shape{"a pre-release tag push (" + samplePreTag + ")", "push", samplePreTag})
 	if err != nil {
 		g.bad("cannot plan a pre-release tag: %v", err)
 		return
@@ -577,30 +707,22 @@ func (g *gate) checkPreReleaseDoesNotPromote(r *Runner, wf *Workflow, job Job, r
 		g.bad("the planning logic refuses the pre-release tag %s (exit %d). A pre-release is a supported release shape:\n%s", samplePreTag, pre.exitCode, indent(pre.output))
 		return
 	}
-	running, err := runningSteps(job, pre.ctx)
-	if err != nil {
-		g.bad("cannot decide which steps run for a pre-release tag: %v", err)
+	promote := roles.step("promote-latest")
+	if g.stepRuns(pre, promote) {
+		g.bad("on a pre-release tag (%s), %s would move the floating reference. `docker pull` would hand a release candidate to everyone who did not ask for one.", samplePreTag, promote.Label())
 		return
 	}
-	acts, undecided := g.actsOf(running, &pre.ctx)
-	moved := false
-	for _, a := range acts {
-		if a.Kind == ActTagMove {
-			moved = true
-			g.bad("on a pre-release tag (%s), %s would move the floating reference. `docker pull` would hand a release candidate to everyone who did not ask for one.", samplePreTag, a.Step.Label())
-		}
+	if !g.stepRuns(pre, roles.step("push-version")) {
+		g.bad("on a pre-release tag (%s), the version-tag push does not run either. A pre-release is meant to PUBLISH under its own tag and merely not become the floating reference.", samplePreTag)
+		return
 	}
-	switch {
-	case undecided > 0:
-		g.undecidedNote("on a pre-release tag (%s), %d step(s) that run could not be decided (see the errors above), so whether the floating reference moves is UNKNOWN", samplePreTag, undecided)
-	case !moved:
-		g.note("a pre-release tag (%s) publishes but does NOT move the floating reference", samplePreTag)
-	}
+	g.note("a pre-release tag (%s) publishes but does NOT move the floating reference", samplePreTag)
 }
 
-// A4, A10.
-func (g *gate) checkMajorVersionZero(r *Runner, wf *Workflow, job Job, repo string, acts []Act) {
-	major, err := g.plan(r, wf, job, repo, shape{"a tag whose major version is not zero (" + sampleMajorTag + ")", "push", sampleMajorTag})
+// --- A4, A10 ------------------------------------------------------------------------------
+
+func (g *gate) checkMajorVersionZero(r *Runner, wf *Workflow, roles *Roles, repo string) {
+	major, err := g.plan(r, wf, roles, repo, shape{"a tag whose major version is not zero (" + sampleMajorTag + ")", "push", sampleMajorTag})
 	if err != nil {
 		g.bad("cannot plan %s: %v", sampleMajorTag, err)
 		return
@@ -609,9 +731,17 @@ func (g *gate) checkMajorVersionZero(r *Runner, wf *Workflow, job Job, repo stri
 		g.bad("the release path ACCEPTS %s. Major version zero is for initial development and promises nothing (semver.org clause 4); the first non-zero major DEFINES the public API (clause 5), and this project has not yet decided that its configuration keys, HTTP surface and metric names will not change without one. The planning logic must refuse it before anything is published.", sampleMajorTag)
 		return
 	}
-	for _, a := range acts {
-		if a.Step.Index < major.failStep.Index {
-			g.bad("%s refuses %s, but %s performs a published act before it. The refusal must come first.", major.failStep.Label(), sampleMajorTag, a.Step.Label())
+	// The refusal has to come before anything could publish. It lives in the `plan` role,
+	// and every irreversible act is in a job that `needs:` the job holding it.
+	planStep := roles.step("plan")
+	for _, r := range releaseRoles {
+		if !r.needsGrant {
+			continue
+		}
+		act := roles.step(r.id)
+		ok, err := g.precedes(wf, planStep, act)
+		if err != nil || !ok {
+			g.bad("%s refuses %s, but %s (%s) is not sequenced behind it. The refusal must come first.", planStep.Label(), sampleMajorTag, act.Label(), r.what)
 		}
 	}
 	named := reDocPath.FindAllString(major.output, -1)
@@ -633,238 +763,161 @@ func (g *gate) checkMajorVersionZero(r *Runner, wf *Workflow, job Job, repo stri
 
 var reDocPath = regexp.MustCompile(`\bdocs/[A-Za-z0-9._/-]+\.md\b`)
 
-// A8, A16.
-func (g *gate) checkRunbookNamesEveryAct(acts []Act) {
+// --- A8, A16: the runbook ------------------------------------------------------------------
+
+// An ACT is now every step in a job that holds a publishing grant, identified by the step's
+// own `id:`. That is stronger than the catalogue it replaces and needs no reading: a step
+// added to that job cannot avoid the runbook by being spelled unrecognisably, because
+// nothing about what it says is consulted. It is in the job that can publish, so it counts.
+func (g *gate) checkRunbookNamesEveryAct(wf *Workflow) {
+	var acts []Step
+	for _, jid := range wf.JobIDs() {
+		job := wf.Jobs[jid]
+		problems, err := CanPublish(wf, job)
+		if err != nil || len(problems) == 0 {
+			continue
+		}
+		for _, s := range job.Steps {
+			if s.ID == "" {
+				g.bad("%s is in job %q, which holds a publishing grant, and carries no `id:`. Every step in a job that can publish is an act the operator runbook has to name, and an act with no id cannot be named. Give it one.", s.Label(), jid)
+				continue
+			}
+			acts = append(acts, s)
+		}
+	}
+	if len(acts) == 0 {
+		g.bad("no job in %s holds a publishing grant, so there is no irreversible act to check the runbook against. Every assertion here would then pass over nothing, which is not a gate. If the release genuinely no longer publishes, delete this gate deliberately rather than letting it report green.", releaseWorkflow)
+		return
+	}
+
 	raw, err := os.ReadFile(g.path(runbookFile))
 	if err != nil {
-		g.bad("the operator runbook %s CANNOT BE READ (%v). %d published act(s) in %s would then be checked against nothing:\n%s",
+		g.bad("the operator runbook %s CANNOT BE READ (%v). %d irreversible act(s) in %s would then be checked against nothing:\n%s",
 			runbookFile, err, len(acts), releaseWorkflow, actList(acts))
 		return
 	}
 	text := string(raw)
-	declared := reActID.FindAllString(text, -1)
-	if len(declared) == 0 {
-		g.bad("the operator runbook %s names NO irreversible act (no `<kind>@<step>` id anywhere in it). An empty document must not satisfy this check - that is the vacuous pass the whole gate exists to refuse. It must name:\n%s",
+	if len(reActID.FindAllString(text, -1)) == 0 {
+		g.bad("the operator runbook %s names NO irreversible act (no `<job>/<step id>` anywhere in it). An empty document must not satisfy this check - that is the vacuous pass the whole gate exists to refuse. It must name:\n%s",
 			runbookFile, actList(acts))
 		return
 	}
 	missing := 0
-	for _, a := range acts {
-		if !strings.Contains(text, "`"+a.ID()+"`") {
+	for _, s := range acts {
+		if !strings.Contains(text, "`"+s.ActID()+"`") {
 			missing++
-			g.bad("%s performs a published act (%s) that the operator runbook does not name.\nAdd `%s` to %s, with what it does, whether it can be undone, and by what. A publishing step nobody wrote down is a publishing step nobody reviewed.",
-				a.Step.Label(), a.Why, a.ID(), runbookFile)
+			g.bad("%s runs in a job that holds a publishing grant, and the operator runbook does not name it.\nAdd `%s` to %s, with what it does, whether it can be undone, and by what. A step that can publish and that nobody wrote down is a step nobody reviewed.",
+				s.Label(), s.ActID(), runbookFile)
 		}
 	}
 	if missing == 0 {
-		g.note("%s names every one of the %d published act(s) in %s: %s", runbookFile, len(acts), releaseWorkflow, strings.Join(actIDs(acts), ", "))
+		g.note("%s names every one of the %d irreversible act(s) in %s: %s", runbookFile, len(acts), releaseWorkflow, strings.Join(actIDs(acts), ", "))
 	}
 }
 
-var reActID = regexp.MustCompile("`[a-z-]+@[a-z0-9-]+`")
+var reActID = regexp.MustCompile("`[a-z0-9_-]+/[a-z0-9-]+`")
 
-// A9, A17, plus the A11 wiring check.
-func (g *gate) checkComposeReferenceAgreement(r *Runner, wf *Workflow, job Job, p *planned, promoteIdx int) {
+// --- A9, A17, A11 ---------------------------------------------------------------------------
+
+func (g *gate) checkComposeReferenceAgreement(wf *Workflow, roles *Roles, p *planned, repo string) {
 	composeRef, err := composeImageRef(g.path(composeFile))
 	if err != nil {
 		g.bad("%v", err) // A17: the file is named in every one of these
 		return
 	}
-	if promoteIdx < 0 {
-		return // the ordering check already said why it could not find the promotion
-	}
-	var promote Step
-	for _, s := range job.Steps {
-		if s.Index == promoteIdx {
-			promote = s
-		}
-	}
 
-	// OBSERVE the promotion with the values the planning logic produced, and read the
-	// reference it moved out of the argv it actually built. The workflow derives that
-	// reference at runtime from the repository name; reading the YAML would only ever
-	// produce `${IMAGE}:latest`.
-	observed, err := promote.Observed(&p.ctx)
+	promote := roles.step("promote-latest")
+	jp := p.jobs[promote.JobID]
+	env, err := stepEnv(wf, wf.Jobs[promote.JobID], promote, jp.ctx)
 	if err != nil {
-		g.bad("cannot observe the promotion step: %v", err)
+		g.bad("cannot decide the environment %s runs with: %v", promote.Label(), err)
 		return
 	}
-	if err := observed.refusal(promote); err != nil {
-		g.bad("%v", err)
+	image, floating := env["IMAGE"], env[floatingTagEnv]
+	if image == "" || floating == "" {
+		g.bad("%s does not declare both IMAGE and %s in its `env:`, so the reference it moves is unknown to this gate. The floating tag is declared THERE, once, and read here and by scripts/release-promote.sh: it is the value docker-compose.yml is held against, and a value spelled in two places is the shape this repository refuses for the ffmpeg pin. Its env is %v",
+			promote.Label(), floatingTagEnv, sortedStrings(env))
 		return
 	}
-	argv := make([][]string, 0, len(observed.Invocations))
-	for _, inv := range observed.Invocations {
-		argv = append(argv, inv.Argv)
-	}
-	targets, sources := tagMoveRefs(argv)
-	if len(targets) != 1 {
-		g.bad("could not read a single floating reference out of what %s actually ran (%d found). The gate refuses to guess which reference a release moves:\n%s",
-			promote.Label(), len(targets), indent(formatArgv(argv)))
-		return
-	}
-	floating := targets[0]
+	promoted := image + ":" + floating
 
-	if floating != composeRef {
+	// The image the workflow derives has to be the image THIS module's repository produces.
+	// It is derived at run time from `github.repository`, so a repository rename moves it -
+	// which is why the rename is part of the irreversible set.
+	wantImage := "ghcr.io/" + strings.ToLower(repo)
+	if image != wantImage {
+		g.bad("the reference %s promotes is not the one this repository's own release produces.\n%s derives: %s\nthis module (%s) implies: %s",
+			promote.Label(), promote.Label(), image, goModFile, wantImage)
+		return
+	}
+
+	if promoted != composeRef {
 		g.bad("the example deployment names an image reference this repository's own release would NEVER produce.\n%s names:  %s\n%s promotes: %s\nA user who runs the published compose file would pull a reference nothing publishes. The release image is derived from the repository name at run time, so a repository rename moves this reference too.",
-			composeFile, composeRef, promote.Label(), floating)
+			composeFile, composeRef, promote.Label(), promoted)
 		return
 	}
-	g.note("the example deployment's image reference agrees with the one a release promotes\n      %s: %s\n      %s: %s", composeFile, composeRef, promote.Label(), floating)
+	g.note("the example deployment's image reference agrees with the one a release promotes\n      %s: %s\n      %s: %s", composeFile, composeRef, promote.Label(), promoted)
 
-	// The floating reference must be retagged onto the version this run gated, never
-	// rebuilt or pointed at something else.
-	steps, _ := p.ctx.vars["steps"].(map[string]any)
-	image, version := "", ""
-	for _, id := range sortedKeys(steps) {
-		outs, _ := steps[id].(map[string]any)["outputs"].(map[string]any)
-		if v, ok := outs["image"].(string); ok {
-			image = v
-		}
-		if v, ok := outs["version"].(string); ok {
-			version = v
-		}
+	// The floating reference must be retagged onto the version this run gated, and no
+	// earlier step may push the floating reference itself.
+	version := env["VERSION"]
+	if version == "" {
+		g.bad("%s does not declare VERSION in its `env:`, so which version the floating reference is moved onto is unknown to this gate.", promote.Label())
+		return
 	}
-	if image != "" && version != "" {
-		want := image + ":" + version
-		if len(sources) != 1 || sources[0] != want {
-			g.bad("%s does not promote the floating reference onto the version this run gated.\nexpected source: %s\nactually ran:    %s", promote.Label(), want, strings.Join(sources, " "))
-		} else {
-			g.note("the promotion retags %s onto %s - the same digest, not a rebuild", floating, want)
-		}
-		// And no earlier publishing step may produce the floating reference itself. The
-		// references a push publishes are read from BOTH spellings (`tags:`, and an
-		// `outputs:` entry's `name=`), and a push whose references cannot be read at all
-		// reds: "this step names no tags" is a statement about the gate's reader, not about
-		// what the step pushes, and treating the two as the same is the absent-key
-		// inference again.
-		var earlier []Step
-		for _, s := range job.Steps {
-			if s.Index < promoteIdx {
-				earlier = append(earlier, s)
-			}
-		}
-		acts, _ := g.actsOf(earlier, &p.ctx)
-		for _, a := range acts {
-			if a.Kind != ActImagePush {
-				continue
-			}
-			refs, err := a.Step.PushedRefs(p.ctx)
-			if err != nil {
-				g.bad("cannot read the references %s pushes: %v", a.Step.Label(), err)
-				continue
-			}
-			if len(refs) == 0 {
-				g.bad("%s publishes an image (%s) but names no reference this gate can read - neither a `tags:` input nor a `name=` in `outputs:`. Whether the floating reference %s is among the references it publishes is therefore UNDECIDABLE, and an undecidable publish is not a harmless one.", a.Step.Label(), a.Why, floating)
-				continue
-			}
-			for _, t := range refs {
-				if t == floating {
-					g.bad("%s pushes %s directly. The floating reference would then be pullable before the pushed artefact has been pulled back and re-smoked, which is exactly what promoting it separately, last, avoids.", a.Step.Label(), floating)
-				}
-			}
-		}
-	}
-
-	// A11's wiring: something must resolve that reference against the registry after the
-	// promotion, or A5 has no enforcement behind it on any release after the first.
-	running, err := runningSteps(job, p.ctx)
+	gated := image + ":" + version
+	push := roles.step("push-version")
+	pushed, err := interpolatedInput(wf, wf.Jobs[push.JobID], push, p.jobs[push.JobID].ctx, "tags")
 	if err != nil {
+		g.bad("cannot read the references %s pushes: %v", push.Label(), err)
 		return
 	}
-	resolved := -1
-	for _, s := range running {
-		if s.ResolvesComposeRef() {
-			resolved = s.Index
+	refs := splitRefs(pushed)
+	if len(refs) == 0 {
+		g.bad("%s names no `tags:` this gate can read, so whether it pushes the floating reference %s is UNDECIDABLE - and an undecidable publish is not a harmless one.", push.Label(), promoted)
+		return
+	}
+	for _, ref := range refs {
+		if ref == promoted {
+			g.bad("%s pushes %s directly. The floating reference would then be pullable before the pushed artefact has been pulled back and re-smoked, which is exactly what promoting it separately, last, avoids.", push.Label(), promoted)
+			return
 		}
 	}
-	switch {
-	case resolved < 0:
-		g.bad("no step resolves the example deployment's image reference (%s) against the registry after the promotion. Without it, a release that leaves %s pointing at a reference nobody publishes is only ever discovered by a user.", composeRef, composeFile)
-	case resolved < promoteIdx:
-		g.bad("the step that resolves %s runs (step %d) BEFORE the promotion (step %d), so it would resolve the previous release's digest.", composeRef, resolved+1, promoteIdx+1)
-	default:
-		g.note("the example deployment's reference is resolved against the registry after the promotion (step %d)", resolved+1)
+	if len(refs) != 1 || refs[0] != gated {
+		g.bad("%s does not push exactly the version this run gated.\nexpected: %s\nactually: %s", push.Label(), gated, strings.Join(refs, " "))
+		return
 	}
+	g.note("the promotion retags %s onto %s - the same digest, not a rebuild", promoted, gated)
+
+	// A11's wiring: something resolves that reference against the registry after the
+	// promotion, or A5 has no enforcement behind it on any release after the first. The
+	// order is checked in checkOrder; this states what it buys.
+	g.note("the example deployment's reference is resolved against the registry after the promotion, by %s", roles.step("resolve-compose").Label())
+}
+
+// interpolatedInput reads one `with:` input, with every expression in it decided against the
+// values the planning logic produced.
+func interpolatedInput(wf *Workflow, job Job, s Step, ctx evalCtx, key string) (string, error) {
+	raw, ok := s.With[key]
+	if !ok {
+		return "", fmt.Errorf("it declares no `%s:` input", key)
+	}
+	return Interpolate(yamlString(raw), ctx)
+}
+
+func splitRefs(s string) []string {
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		for _, f := range strings.Split(line, ",") {
+			if f = strings.TrimSpace(f); f != "" {
+				out = append(out, f)
+			}
+		}
+	}
+	return out
 }
 
 // --- helpers --------------------------------------------------------------------------
-
-func runningSteps(job Job, ctx evalCtx) ([]Step, error) {
-	var out []Step
-	for _, s := range job.Steps {
-		ok, err := ConditionRuns(s.If, ctx)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", s.Label(), err)
-		}
-		if ok {
-			out = append(out, s)
-		}
-	}
-	return out, nil
-}
-
-// actsOf reports the published acts these steps perform under ctx, AND how many steps it
-// could not decide. A step whose publish decision cannot be decided reds the gate and
-// contributes no act, which is why every caller must go through here rather than dropping
-// the error - and why the undecided count comes back with the acts. Counting only acts made
-// "0 acts" indistinguishable from "0 answers", so the gate printed the affirmative
-// "NONE of them publishes anything" on the very run where it had just said it could not
-// answer. The exit code was right and the sentence was not; a reader skims the sentence.
-func (g *gate) actsOf(steps []Step, ctx *evalCtx) ([]Act, int) {
-	var out []Act
-	undecided := 0
-	for _, s := range steps {
-		acts, err := s.Acts(ctx)
-		if err != nil {
-			g.bad("%v", err)
-			undecided++
-			continue
-		}
-		out = append(out, acts...)
-	}
-	return out, undecided
-}
-
-// undecidedNote is the counterpart of note: what the gate prints when a property could not
-// be answered. It never begins with "ok", because the whole defect it exists to fix was an
-// affirmative sentence over an unanswered question.
-func (g *gate) undecidedNote(format string, a ...any) {
-	fmt.Fprintf(g.out, "  UNDECIDED: %s\n", fmt.Sprintf(format, a...))
-}
-
-func actsIn(wf *Workflow) ([]Act, error) {
-	var out []Act
-	for _, id := range wf.JobIDs() {
-		for _, s := range wf.Jobs[id].Steps {
-			acts, err := s.Acts(nil)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, acts...)
-		}
-	}
-	return out, nil
-}
-
-func releaseJobOf(wf *Workflow, acts []Act) (string, Job, error) {
-	jobs := map[string]bool{}
-	for _, a := range acts {
-		jobs[a.Step.JobID] = true
-	}
-	if len(jobs) != 1 {
-		var names []string
-		for j := range jobs {
-			names = append(names, j)
-		}
-		sort.Strings(names)
-		return "", Job{}, fmt.Errorf("published acts are spread across %d jobs (%s). This gate models the ordering of ONE job, because ordering across jobs is a `needs:` graph it does not read - it refuses rather than reporting an order it did not check", len(jobs), strings.Join(names, ", "))
-	}
-	for id := range jobs {
-		return id, wf.Jobs[id], nil
-	}
-	return "", Job{}, fmt.Errorf("unreachable")
-}
 
 func mergeEnv(maps ...map[string]any) map[string]any {
 	out := map[string]any{}
@@ -915,52 +968,12 @@ func stepEnv(wf *Workflow, job Job, s Step, ctx evalCtx) (map[string]string, err
 	return out, nil
 }
 
-// tagMoveRefs reads the references a promotion actually moved out of the argv the stubbed
-// docker recorded: `docker buildx imagetools create -t <target> <source…>`.
-func tagMoveRefs(argv [][]string) (targets, sources []string) {
-	for _, cmd := range argv {
-		if len(cmd) < 2 {
-			continue
-		}
-		joined := strings.Join(cmd, " ")
-		if !strings.Contains(joined, "imagetools") || !strings.Contains(joined, " create") {
-			continue
-		}
-		rest := cmd
-		for i := 0; i < len(rest); i++ {
-			if rest[i] == "create" {
-				rest = rest[i+1:]
-				break
-			}
-		}
-		for i := 0; i < len(rest); i++ {
-			switch {
-			case rest[i] == "-t" || rest[i] == "--tag":
-				if i+1 < len(rest) {
-					targets = append(targets, rest[i+1])
-					i++
-				}
-			case strings.HasPrefix(rest[i], "--tag="):
-				targets = append(targets, strings.TrimPrefix(rest[i], "--tag="))
-			case strings.HasPrefix(rest[i], "-"):
-				// another flag; not a reference
-			default:
-				sources = append(sources, rest[i])
-			}
-		}
-	}
-	return targets, sources
-}
-
 func formatArgv(argv [][]string) string {
 	var lines []string
 	for _, cmd := range argv {
 		lines = append(lines, strings.Join(cmd, " "))
 	}
-	if len(lines) == 0 {
-		return "(it ran no publishing command at all)"
-	}
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "; ")
 }
 
 // composeImageRef reads the one image reference the example deployment names. Every
@@ -1035,18 +1048,18 @@ func repoFromModule(path string) (string, error) {
 	return parts[0] + "/" + parts[1], nil
 }
 
-func actList(acts []Act) string {
+func actList(acts []Step) string {
 	var lines []string
-	for _, a := range acts {
-		lines = append(lines, fmt.Sprintf("  `%s`  (%s, %s)", a.ID(), a.Why, a.Step.Label()))
+	for _, s := range acts {
+		lines = append(lines, fmt.Sprintf("  `%s`  (%s)", s.ActID(), s.Label()))
 	}
 	return strings.Join(lines, "\n")
 }
 
-func actIDs(acts []Act) []string {
+func actIDs(acts []Step) []string {
 	var out []string
-	for _, a := range acts {
-		out = append(out, a.ID())
+	for _, s := range acts {
+		out = append(out, s.ActID())
 	}
 	return out
 }

@@ -2,31 +2,37 @@
 # Prove the release-shape gate still BITES. `make release-shape-selftest`.
 #
 # The gate (scripts/release-shape-gate, inside `make check`) is the only thing standing
-# between a comment in release.yml and a one-way door: it decides, by RUNNING the
-# workflow's planning shell, that a dry run publishes nothing, that `:latest` moves last,
-# that a non-zero major is refused, that the operator runbook names every publishing step,
-# and that the reference docker-compose.yml gives users is the one a release promotes.
+# between a comment in release.yml and a one-way door. It decides, by RUNNING the workflow's
+# planning logic and reading its `permissions:`, `secrets:` and `needs:` graph, that a dry
+# run can publish nothing, that `:latest` moves last, that a non-zero major is refused, that
+# the operator runbook names every step in the job that can publish, and that the reference
+# docker-compose.yml gives users is the one a release promotes.
 #
-# A gate nobody has tried to defeat is a gate nobody knows works, and every way this one
-# can fail is a way it fails SILENTLY - by printing "ok" over a release that would publish
-# from a dry run. So each property is defeated here on purpose, against a MUTATED COPY of
-# the real inputs, and each defeat has to be red AND to say what it saw. A case that goes
-# red for somebody else's reason is counted as a failure, not a pass.
+# A gate nobody has tried to defeat is a gate nobody knows works, and every way this one can
+# fail is a way it fails SILENTLY - by printing "ok" over a release that would publish from a
+# dry run. So each property is defeated here on purpose, against a MUTATED COPY of the real
+# inputs, and each defeat has to be red AND to say what it saw. A case that goes red for
+# somebody else's reason is counted as a failure, not a pass.
 #
-# Case 3 is the one that decides whether this whole design was worth it: it flips the
-# PLANNING SCRIPT so a manual dispatch sets publish=true, and touches not one `if:` in the
-# file. A gate that matched the text of those guards stays green through it while a dry run
-# pushes an image.
+# TWO cases decide whether the design was worth it, and they point in opposite directions:
+#
+#   * case 3 flips the PLANNING SCRIPT so a dispatch sets publish=true and touches not one
+#     `if:` in the file. A gate that matched the text of those guards stays green while the
+#     publishing job runs.
+#   * cases 15a-15d put REAL publishing commands, in the spellings that beat six earlier
+#     readers, into a step that runs on a dispatch - and the gate must still PASS, because
+#     that step holds no credential. If those cases red, the reader has come back.
 #
 # Runs entirely inside a throwaway directory; it never mutates the working tree, and it
-# publishes nothing (the gate stubs every command that could).
+# publishes nothing (nothing here executes a workflow step except the planning script, and
+# that runs with the publishing binaries stubbed).
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=71
+declared=68
 pass=0; failed=0
 
 repo="$work/repo"
@@ -36,19 +42,18 @@ gate="$work/release-shape-gate"
 # The inputs the gate reads. Copied from the WORKING TREE, so an uncommitted change - a fix
 # or a break - is graded as it stands, which is where the mistake gets made.
 #
-# The three scripts the release path INVOKES are here because the gate now observes each step
-# rather than reading it: it mirrors the repository, answers every invocation of a file in it
-# with a recorder, and descends into a shell script so a step cannot reach a registry by
-# putting the command one file away. A fixture missing one of them would be a fixture whose
-# steps invoke a program that is not there, which the gate refuses rather than passes.
+# The two release scripts are here because the gate requires a role step's script to BE a
+# file in the repository, executable: a step invoking a script that is not there fails in the
+# middle of a release, having passed a gate that only compared strings. They are NOT executed.
 inputs=(
   .github/workflows/release.yml
   docker-compose.yml
   docs/release.md
   go.mod
   scripts/resolve-compose-image.sh
+  scripts/release-resmoke.sh
+  scripts/release-promote.sh
   scripts/smoke-image.sh
-  scripts/install-ffmpeg.sh
 )
 
 ( cd "$here" && go build -o "$gate" ./scripts/release-shape-gate ) \
@@ -99,7 +104,8 @@ block_range() {
   ' "$1"
 }
 
-# move_step <name-substring-to-move> <name-substring-to-put-it-before>
+# move_step <name-substring-to-move> <name-substring-to-put-it-before>. Both must be in the
+# same job; the ordering cases that cross jobs mutate `needs:` instead.
 move_step() {
   awk -v mv="$1" -v before="$2" '
     function isstep(l) { return l ~ /^      - / }
@@ -127,6 +133,31 @@ in_step() {
   # shellcheck disable=SC2086
   set -- $r "$2"
   sed -i "$1,$2{$3;}" "$wf"
+}
+
+# replace_line <awk-regex> <replacement, may contain \n> - the FIRST matching line only.
+replace_line() {
+  awk -v pat="$1" -v repl="$2" '
+    $0 ~ pat && !done { print repl; done = 1; next }
+    { print }
+  ' "$wf" > "$wf.new" || { echo "::error::selftest: could not replace /$1/" >&2; exit 1; }
+  mv "$wf.new" "$wf"
+}
+
+# add_build_step <run-body> - insert a step into the DISPATCH-PATH job. This is how a
+# publishing command is put where a dry run would execute it.
+add_build_step() {
+  awk -v body="$1" '
+    /^      - name: build the release binaries$/ && !done {
+      print "      - name: a step whose text says it publishes"
+      print "        id: says-publish"
+      print "        run: " body
+      print ""
+      done = 1
+    }
+    { print }
+  ' "$wf" > "$wf.new" || { echo "::error::selftest: could not add a build step" >&2; exit 1; }
+  mv "$wf.new" "$wf"
 }
 
 # --- the harness ----------------------------------------------------------------------
@@ -175,566 +206,286 @@ expect_absent() {
 expect 0 "the release definition as committed passes"
 
 # =====================================================================================
-# A12 - a publishing step that would run on a manual dispatch.
+# A6 / A12 - THE CAPABILITY PROPERTY. A dry run publishes nothing because nothing that
+# runs on a dispatch is handed anything a registry, a ref or a release would accept.
 # =====================================================================================
 
-# --- 1. The guard deleted outright. The crudest version of the mistake.
-in_step "push the multi-arch image" "/^        if:/d"
-changed "$wf" "the image push with no guard at all"
-expect 1 "an unguarded image push is caught on a dispatch" "on a manual dispatch.*WOULD RUN"
+# --- 1. The publishing job's guard deleted outright. The crudest version of the mistake:
+#        the job that holds `packages: write` now runs on a dispatch.
+sed -i "/^    if: needs.build.outputs.publish == 'true'$/d" "$wf"
+changed "$wf" "the publish job with no guard at all"
+expect 1 "an unguarded publishing job is caught on a dispatch" "job \"publish\" RUNS and it holds a capability"
 reset
 
-# --- 2. `always()` reads as caution and means the opposite: it runs on a dispatch AND
-#        after a failure.
-in_step "push the multi-arch image" "s/^        if: .*/        if: always()/"
-changed "$wf" "the image push guarded with always()"
-expect 1 "an image push guarded with always() is caught on a dispatch" "on a manual dispatch.*WOULD RUN"
+# --- 2. `always()` reads as caution and means the opposite: the job runs on a dispatch.
+sed -i "s|^    if: needs.build.outputs.publish == 'true'$|    if: always()|" "$wf"
+changed "$wf" "the publish job guarded with always()"
+expect 1 "a publishing job guarded with always() is caught on a dispatch" "job \"publish\" RUNS and it holds a capability"
 reset
 
-# --- 3. THE case this gate exists for. The PLANNING SCRIPT is flipped so a dispatch sets
-#        publish=true; every `if:` in the file is untouched, so the guards read exactly as
-#        they did a moment ago. A gate that matched their text is green here while a dry
-#        run pushes an image to a public registry. This one is only catchable by running
-#        the planning logic and reading what it produced.
+# --- 3. THE case the executed planning logic exists for. The PLANNING SCRIPT is flipped so
+#        a dispatch sets publish=true; every `if:` in the file is untouched, so the guards
+#        read exactly as they did a moment ago. A gate that matched their text is green here
+#        while a dry run runs the whole publishing job.
 sed -i 's/^            publish=false$/            publish=true/' "$wf"
 sed -i 's|^            version="0.0.0-dev-${GITHUB_SHA::7}"$|            version="v0.0.0-dev-${GITHUB_SHA::7}"|' "$wf"
 changed "$wf" "the planning script flipped to publish on a dispatch"
-grep -q "if: steps.plan.outputs.publish == 'true'" "$wf" \
-  || { echo "::error::selftest: case 3 also changed a guard, so it no longer proves the planning logic is executed" >&2; exit 1; }
-expect 1 "a PLANNING SCRIPT that publishes on a dispatch is caught, with every guard untouched" "on a manual dispatch.*WOULD RUN.*published act"
+expect 1 "a planning script that publishes on a dispatch is caught, with every guard untouched" "job \"publish\" RUNS and it holds a capability"
 reset
 
-# --- 3a to 3d. THE SAME HOLE, ONE LAYER IN. Case 3 flips the value the planning script
-#     produces; these flip the value the ACTION ITSELF is handed. `docker/build-push-action`
-#     publishes when its `push:` input is true, and GitHub lets that input be an EXPRESSION -
-#     `push: ${{ github.event_name != 'pull_request' }}` is the action's own documented idiom
-#     for a conditional push. An expression is never the literal string "true", so asking
-#     whether the text says "true" reads a dry run that PUSHES as publishing nothing, and the
-#     step needs no `if:` at all to get there. The input is decided through the same
-#     evaluator that decides `if:` guards, and anything undecidable is red, not false.
-dev_push_step() {  # dev_push_step <what to write after `push:`>
-  printf '%s\n' \
-    '      - name: publish a dev image so testers can pull dispatch builds' \
-    '        uses: docker/build-push-action@v6' \
-    '        with:' \
-    '          context: .' \
-    '          platforms: linux/amd64' \
-    "          push: $1" \
-    '          tags: ghcr.io/nschatz/holdfast:dev' \
-    '' > "$work/devpush.yml"
-}
-
-# insert_before <anchor-substring> - splice $work/devpush.yml in ahead of the first line
-# containing the anchor.
-insert_before() {
-  awk -v anchor="$1" -v block="$work/devpush.yml" '
-    index($0, anchor) && !done { while ((getline l < block) > 0) print l; close(block); done = 1 }
-    { print }
-  ' "$wf" > "$wf.new" && mv "$wf.new" "$wf"
-}
-
-# --- 3a. True on a dispatch. This dry run pushes ghcr.io/nschatz/holdfast:dev.
-dev_push_step "\${{ github.event_name == 'workflow_dispatch' }}"
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch that publishes through an expression-valued push: input"
-expect 1 "an expression-valued push: that is TRUE on a dispatch is caught, naming the step" "on a manual dispatch.*publish a dev image.*WOULD RUN"
+# --- 4 to 7. THE GRANT ITSELF. A dry run's job may hold no write scope of any kind: a token
+#        with one can authorise something that leaves this machine whatever its steps say.
+replace_line '^      contents: read # read the tree' '      contents: write'
+changed "$wf" "the dispatch path granted contents: write"
+expect 1 "a dispatch-path job granted contents: write is caught" "grants WRITE on contents"
 reset
 
-# --- 3b. Undecidable: the value reads a context no run here produces. Resolving that to
-#         false is exactly the fail-open; the gate must refuse.
-dev_push_step "\${{ vars.PUBLISH_DEV }}"
-insert_before "- name: build the release binaries"
-changed "$wf" "a push: input the gate cannot decide"
-expect 1 "a push: input that cannot be decided reds the gate rather than reading as harmless" "cannot be decided"
+replace_line '^      contents: read # read the tree' '      contents: read\n      packages: write'
+changed "$wf" "the dispatch path granted packages: write"
+expect 1 "a dispatch-path job granted packages: write is caught" "grants WRITE on packages"
 reset
 
-# --- 3c. Not a boolean at all. `push: yes` is a STRING in YAML 1.2, and GitHub's own
-#         boolean-input parser rejects it - so what this step does is unknown, not "no".
-dev_push_step "yes"
-insert_before "- name: build the release binaries"
-changed "$wf" "a push: input that is not a boolean"
-expect 1 "a push: input that is not a boolean reds the gate" "is not a boolean"
+replace_line '^      contents: read # read the tree' '      contents: read\n      id-token: write'
+changed "$wf" "the dispatch path granted id-token: write"
+expect 1 "a dispatch-path job granted id-token: write is caught (it mints a credential an external registry accepts)" "grants WRITE on id-token"
 reset
 
-# --- 3d. The other direction, and it matters as much: the gate must DECIDE these inputs,
-#         not refuse every one of them. The real push step respelled with the idiomatic
-#         expression is still a correct release definition and must still pass.
-in_step "push the multi-arch image" 's|^          push: true$|          push: ${{ steps.plan.outputs.publish }}|'
-changed "$wf" "the version-tag push respelled as an expression"
-expect 0 "an expression-valued push: that is correct is DECIDED, not refused"
+awk '
+  /^    permissions:$/ && !d { print "    permissions: write-all"; skip = 1; d = 1; next }
+  skip && /^      contents: read # read the tree/ { skip = 0; next }
+  { print }
+' "$wf" > "$wf.new" && mv "$wf.new" "$wf"
+changed "$wf" "the dispatch path granted write-all"
+expect 1 "a dispatch-path job granted write-all is caught" "grants WRITE on"
 reset
 
-# --- 3e to 3k. THE SECOND SPELLING OF THE SAME ACT. `push:` is not the action's only route
-#     to a registry, it is a SHORTHAND for the other one: the action's own input table
-#     defines `push` as "shorthand for `--output=type=registry`", and `outputs` as the list
-#     of output destinations. So a step carrying `outputs: type=image,name=…,push=true` (the
-#     spelling in the action's own multi-platform example) or `outputs: type=registry`, and
-#     no `push:` key at all, publishes exactly as hard - while a gate that models only
-#     `push:` reads the ABSENCE of that key as "a local build" and prints "NONE of them
-#     publishes anything" over a dry run that pushes to a public registry. Both inputs are
-#     decided, the step publishes if either says so, and an `outputs:` this gate cannot
-#     decide is never a quiet no.
-dev_output_step() {  # dev_output_step <what to write after `outputs:`>
-  printf '%s\n' \
-    '      - name: publish a dev image so testers can pull dispatch builds' \
-    '        uses: docker/build-push-action@v6' \
-    '        with:' \
-    '          context: .' \
-    '          platforms: linux/amd64' \
-    "          outputs: $1" \
-    '' > "$work/devpush.yml"
-}
-
-# --- 3e. The action's own README spelling. This dry run pushes ghcr.io/nschatz/holdfast:dev
-#         and carries no `push:` key whatsoever.
-dev_output_step "type=image,name=ghcr.io/nschatz/holdfast:dev,push=true"
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch that publishes through outputs: type=image,...,push=true"
-expect 1 "an outputs: that pushes an image is caught on a dispatch, naming the step" "on a manual dispatch.*publish a dev image.*WOULD RUN"
+# --- 8. NO grant stated at all, at either level. The repository default then applies, and
+#        this file cannot see it: it may be write-all. An unstated grant reads CLOSED.
+awk '
+  /^permissions:$/ { wl = 1; next }
+  wl && /^  contents: read$/ { wl = 0; next }
+  /^    permissions:$/ && !jd { jb = 1; jd = 1; next }
+  jb && /^      contents: read # read the tree/ { jb = 0; next }
+  { print }
+' "$wf" > "$wf.new" && mv "$wf.new" "$wf"
+changed "$wf" "no permissions block anywhere"
+expect 1 "a job with no stated permissions is red, not assumed to grant nothing" "declares no .permissions:. and neither does the workflow"
 reset
 
-# --- 3f. buildx's own shorthand for the identical destination.
-dev_output_step "type=registry"
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch that publishes through outputs: type=registry"
-expect 1 "an outputs: type=registry is caught on a dispatch" "on a manual dispatch.*publish a dev image.*WOULD RUN"
+# --- 9. A scope outside GitHub's vocabulary. A typo grants nothing the author meant to
+#        grant, and a scope GitHub added since is one nobody has classified. Both red.
+replace_line '^      contents: read # read the tree' '      contentz: read'
+changed "$wf" "an unknown permission scope"
+expect 1 "an unrecognised permission scope reads CLOSED and reds by name" "grants \"contentz\", which is not one of the permission scopes"
 reset
 
-# --- 3g. Undecidable, exactly as 3b is for `push:`: the value reads a context no run here
-#         produces, and resolving that to "local build" is the fail-open.
-dev_output_step "\${{ vars.PUBLISH_DEV }}"
-insert_before "- name: build the release binaries"
-changed "$wf" "an outputs: input the gate cannot decide"
-expect 1 "an outputs: input that cannot be decided reds the gate rather than reading as harmless" "cannot be decided"
+# --- 10. A value outside read / write / none.
+replace_line '^      contents: read # read the tree' '      contents: maybe'
+changed "$wf" "an unknown permission value"
+expect 1 "an unrecognised permission value reds by name" "which is not one of read / write / none"
 reset
 
-# --- 3h. An exporter this gate has never heard of. buildx gains exporters; an unmodelled
-#         destination must red naming itself, not fall into the local-build bucket by
-#         default.
-dev_output_step "type=quay-direct,name=ghcr.io/nschatz/holdfast:dev"
-insert_before "- name: build the release binaries"
-changed "$wf" "an outputs: naming an exporter the gate does not model"
-expect 1 "an outputs: exporter the gate does not model reds it, naming the exporter" "does not model"
+# --- 11. A repository secret on the dispatch path. `permissions:` does not bound one - its
+#         scope is whatever was put in it - so a step holding one can publish regardless.
+in_step "the full gate (make check)" 's|^      - name: .*|&\n        env:\n          TOKEN: ${{ secrets.RELEASE_PAT }}|'
+changed "$wf" "a repository secret on the dispatch path"
+expect 1 "a secret other than the scoped GITHUB_TOKEN is caught on the dispatch path" "reads .secrets.RELEASE_PAT."
 reset
 
-# --- 3i. THE HONEST OTHER DIRECTION, and it matters as much here as 3d does for `push:`:
-#         `outputs:` is not a synonym for publishing. `load: true` IS `--output=type=docker`,
-#         a local load, and respelling it that way must still PASS. A fix that turned any
-#         `outputs:` into a publish would be caught here and nowhere else.
-in_step "build the image (linux/amd64)" 's|^          load: true$|          outputs: type=docker|'
-changed "$wf" "the amd64 local load respelled as outputs: type=docker"
-expect 0 "a LOCAL outputs: spelling is decided as local, not refused as a publish"
+# --- 12. `environment:` hands the job that environment's secrets, which this file cannot
+#         see the value of.
+sed -i '0,/^    runs-on: ubuntu-latest$/s//&\n    environment: production/' "$wf"
+changed "$wf" "an environment on the dispatch path"
+expect 1 "a deployment environment on the dispatch path is caught, naming what it hands over" "uses .environment:., which hands it"
+
 reset
 
-# --- 3j. The other honest direction, on the step that actually publishes: the real
-#         version-tag push respelled with `outputs:` is a correct definition, and the act
-#         must stay IN the inventory rather than vanishing from it - which is what makes the
-#         runbook cross-check (A8) still demand an entry for it and gives the ordering
-#         property a push to order.
-in_step "push the multi-arch image" '/^          push: true$/d'
-in_step "push the multi-arch image" 's@^          tags: \(.*\)$@          outputs: type=image,name=\1,push=true@'
-changed "$wf" "the version-tag push respelled with outputs:"
-expect 0 "the version-tag push respelled with outputs: passes AND stays in the act inventory" \
-  "names every one of the 3 published act.*image-push@push-the-multi-arch-image-version-tag-only"
+# --- 13. A job key nobody has classified. DENY BY DEFAULT is the whole difference between
+#         this and the catalogues that lost six times: silence must be unreachable.
+sed -i '0,/^    runs-on: ubuntu-latest$/s//&\n    some-future-key: whatever/' "$wf"
+changed "$wf" "an unclassified job key"
+expect 1 "an unclassified job key reads CLOSED and reds by name" "the job key .some-future-key:., which this gate has not classified"
 reset
 
-# --- 3k. And the reference a push publishes has the same two spellings. `tags:` was the
-#         only one the gate read, so a push that names the FLOATING reference inside
-#         `outputs:` slipped past the check that `:latest` is never pushed directly - live
-#         before the artefact has been pulled back and re-smoked.
-in_step "push the multi-arch image" '/^          push: true$/d'
-in_step "push the multi-arch image" 's@^          tags: \(.*\)$@          outputs: |\n            type=image,name=\1,push=true\n            type=image,name=${{ steps.plan.outputs.image }}:latest,push=true@'
-changed "$wf" "the build pushing :latest through an outputs: name="
-expect 1 "a build that pushes the floating reference through outputs: name= is caught" \
-  "pushes ghcr.io/.*:latest directly. The floating reference would then be pullable"
+# --- 14. The same one level down, on a step.
+in_step "the full gate (make check)" 's|^      - name: .*|&\n        some-step-key: x|'
+changed "$wf" "an unclassified step key"
+expect 1 "an unclassified step key reads CLOSED and reds by name" "the step key .some-step-key:., which this gate has not classified"
 reset
 
-# --- 3l. A6 grades a SENTENCE as well as an exit code, and the two came apart: the gate
-#         counted ACTS, so a step it could not decide contributed no act, `found` stayed 0,
-#         and "NONE of them publishes anything" was printed in the affirmative on the very
-#         run where the gate had just refused to answer. The exit code was right and nothing
-#         unreviewed could ship, but a reader skimming stdout saw the reassurance rather than
-#         the refusal. An undecided step must suppress that sentence, not survive it.
-dev_output_step "\${{ vars.PUBLISH_DEV }}"
-insert_before "- name: build the release binaries"
-changed "$wf" "an undecidable step, to grade what the gate SAYS about the dispatch"
-expect_absent 1 "a run the gate could not decide never claims NONE of them publishes anything" \
-  "NONE of them publishes anything"
+# --- 15a to 15d. THE CONTROL THAT DECIDES WHETHER THIS DESIGN WAS WORTH IT.
+#
+#         Each of these puts a REAL publishing command into a step that runs on a manual
+#         dispatch, in a spelling that defeated an earlier version of this gate: a plain
+#         push (F1), one inside a quoted word handed to a nested shell (F11), one after the
+#         step restores PATH (F14), and one through `exec`, which is a shell builtin and so
+#         reaches no wrapper at all (F15).
+#
+#         THE GATE MUST PASS ALL FOUR. Not because they are harmless to write, but because
+#         they cannot publish: the job that runs them holds `contents: read` and no secret,
+#         so the registry, the ref and the release API each refuse it. If one of these ever
+#         reds, a reader has come back into this gate, and the six ordinals that proved
+#         reading cannot be made to work are being repeated.
+for spelling in \
+  'docker push ghcr.io/nschatz/holdfast:dev' \
+  'sh -c "docker push ghcr.io/nschatz/holdfast:dev"' \
+  'export PATH=/usr/bin:/bin; docker push ghcr.io/nschatz/holdfast:dev' \
+  'exec docker push ghcr.io/nschatz/holdfast:dev'
+do
+  add_build_step "$spelling"
+  changed "$wf" "a dispatch-path step spelled: $spelling"
+  expect 0 "a dispatch-path step running \`$spelling\` publishes nothing, and the gate says so" \
+    "NONE of them holds a capability that could publish anything"
+  reset
+done
+
+# --- 15e. AND THE OTHER DIRECTION, or the four cases above would be satisfied by a gate that
+#          passes everything. The IDENTICAL step, in a job that has been granted the write
+#          scope, is caught - so what changed the verdict is the grant, which is the claim.
+add_build_step 'docker push ghcr.io/nschatz/holdfast:dev'
+replace_line '^      contents: read # read the tree' '      contents: read\n      packages: write'
+changed "$wf" "the same publishing step, in a job granted packages: write"
+expect 1 "the identical step in a job granted packages: write IS caught - the grant is what decides" "grants WRITE on packages"
 reset
 
-# --- 3m to 3r. THE SAME ACT, DEFEATED BY PRESSING RETURN. 3a-3l are all about an action's
-#     inputs; these are about the other half of the catalogue, the `run:` commands, and the
-#     hole there was not a missing detector but a matcher confined to one PHYSICAL line. A
-#     shell line continuation makes one logical command out of several lines, and this
-#     repository writes its multi-flag commands that way - release.yml itself continues
-#     `go build -trimpath \` and `gh release create ... \`. So the very command the gate
-#     already names, in the spelling the repository already uses, read as performing no act
-#     at all, and a dispatch that pushed to a public registry was reported as publishing
-#     nothing. The fix is ONE normalisation - the shell's own line joining, applied before
-#     any pattern runs - and not a second spelling per pattern, because the spelling after
-#     that is always the one nobody wrote a pattern for.
-dev_run_step() {  # dev_run_step <line>... - a step with no `if:`, so it runs on a dispatch
-  { printf '%s\n' \
-      '      - name: publish a dev image so testers can pull dispatch builds' \
-      '        env:' \
-      '          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}' \
-      '        run: |' \
-      '          set -euo pipefail'
-    printf '          %s\n' "$@"
-    printf '\n'
-  } > "$work/devpush.yml"
-}
-
-# --- 3m. The whole finding in six lines: `--push` on the line below the build.
-dev_run_step 'docker buildx build \' \
-             '  --push \' \
-             '  --platform linux/amd64 \' \
-             '  -t ghcr.io/nschatz/holdfast:dev \' \
-             '  .'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch that pushes via a line-continued docker buildx build"
-expect 1 "a buildx --push written across a line continuation is caught on a dispatch, naming the step" \
-  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
-reset
-
-# --- 3n. And it cannot be waved away as a push that would 401 anyway: the same mutation
-#         plus the GHCR login unguarded, so this dry run authenticates and THEN publishes.
-dev_run_step 'docker buildx build \' \
-             '  --push \' \
-             '  --platform linux/amd64 \' \
-             '  -t ghcr.io/nschatz/holdfast:dev \' \
-             '  .'
-insert_before "- name: build the release binaries"
-in_step "log in to GHCR" "/^        if:/d"
-changed "$wf" "a dispatch that logs in to GHCR and then pushes via a continued build"
-expect 1 "a continued push on a dispatch that has ALSO authenticated is caught" \
-  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
-reset
-
-# --- 3o. The same confinement on the other command, and this one creates a published
-#         RELEASE object - irreversible in exactly the sense docs/release.md records.
-dev_run_step 'gh release \' \
-             '  create v0.0.0-dev \' \
-             '  --title "dev build" \' \
-             '  --notes "for testers"'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch that cuts a release via a line-continued gh release create"
-expect 1 "a gh release create written across a line continuation is caught on a dispatch, naming the step" \
-  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
-reset
-
-# --- 3p. THE HONEST OTHER DIRECTION, and the reason this is a normalisation rather than a
-#         refusal: joining lines must not turn every continued build into a publish. A
-#         continued build with no `--push` is a LOCAL build and must still pass.
-dev_run_step 'docker buildx build \' \
-             '  --load \' \
-             '  --platform linux/amd64 \' \
-             '  -t holdfast:dev \' \
-             '  .'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch running a continued build that stays local"
-expect 0 "a line-continued build with no --push is still decided as local, not refused as a publish"
-reset
-
-# --- 3q. Parity, not presence. `\\` is an ESCAPED backslash: the shell ends the command
-#         there and runs the next line separately, so `--push .` is its own (failing)
-#         command and nothing is published. Joining on any trailing backslash would splice
-#         two commands the shell keeps apart and report an act the definition cannot perform.
-dev_run_step 'docker buildx build -t ghcr.io/nschatz/holdfast:dev . \\' \
-             '  --push'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch whose build ends in an escaped backslash, not a continuation"
-expect 0 "an ESCAPED trailing backslash is not read as a continuation"
-reset
-
-# --- 3r. A continuation on the LAST line of a run block continues into nothing. The join
-#         has to end the string rather than reach past it, and the act on the line above
-#         still has to be seen.
-dev_run_step 'docker buildx build --push -t ghcr.io/nschatz/holdfast:dev \' \
-             '  . \'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch whose publishing run block ends in a dangling continuation"
-expect 1 "a dangling continuation at the end of a run block is handled and the push still caught" \
-  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
-reset
-
-# --- 3s and 3t. THE CATALOGUE'S EDGE, which the gate never used to state. `usesDetectors`
-#     answers "does this action publish?" with yes or with silence, and silence read as no:
-#     an action in neither half of the catalogue contributed no act AND no message, so
-#     "NONE of them publishes anything" covered a step the gate had never asked about. Every
-#     `uses:` must now be classified, one way or the other, by a human who wrote down why.
-
-# --- 3s. An action outside both lists - and not a contrived one: docker/bake-action takes
-#         `push: true` and publishes exactly as hard as the action beside it in the file.
-printf '%s\n' \
-  '      - name: publish a dev image so testers can pull dispatch builds' \
-  '        uses: docker/bake-action@v5' \
-  '        with:' \
-  '          push: true' \
-  '' > "$work/devpush.yml"
-insert_before "- name: build the release binaries"
-changed "$wf" "a step using an action the gate has never classified"
-expect 1 "an action in neither half of the catalogue reds the gate, naming it" \
-  "uses .docker/bake-action@v5., and this gate does not classify that action"
-reset
-
-# --- 3t. The other direction: stating the boundary must not become a refusal of every
-#         `uses:`. An action already checked and classified as local stays passable, even
-#         added unguarded on the dispatch path.
-printf '%s\n' \
-  '      - name: log in to GHCR again, unguarded' \
-  '        uses: docker/login-action@v3' \
-  '        with:' \
-  '          registry: ghcr.io' \
-  '          username: ${{ github.actor }}' \
-  '          password: ${{ secrets.GITHUB_TOKEN }}' \
-  '' > "$work/devpush.yml"
-insert_before "- name: build the release binaries"
-changed "$wf" "an unguarded step using an action classified as publishing nothing"
-expect 0 "a classified non-publishing action still passes, unguarded, on a dispatch"
-reset
-
-# --- 3u to 3ab. THE `run:` HALF'S DESTINATION MODEL, AND ITS EDGE. 3m-3r fixed how the text
-#     is READ; these are about what is read OUT of it. The catalogue used to know exactly one
-#     destination - the literal flag `--push` - so `docker buildx build --output=type=registry`
-#     (the thing `push:` is documented shorthand FOR, and the spelling 3e-3k closed on the
-#     `uses:` half) performed no act, and neither did `docker image push`, the
-#     management-command form of `docker push`. Neither involves a continuation. A command's
-#     destination is now decided from the flags that SET it, through the SAME function that
-#     decides an action's `outputs:` input, and every invocation of a tool that can reach a
-#     registry has to land on a rule: an invocation on none of them is UNDECIDED and reds by
-#     name, which is why `crane copy` reds without appearing anywhere in the gate.
-
-# --- 3u. buildx's own longhand for a registry push. This dry run publishes.
-dev_run_step 'docker buildx build --platform linux/amd64 --output=type=registry,name=ghcr.io/nschatz/holdfast:dev .'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch that pushes through --output=type=registry"
-expect 1 "a run-step build that pushes through --output=type=registry is caught on a dispatch" \
-  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
-reset
-
-# --- 3v. The short flag with the image exporter's own attributes.
-dev_run_step 'docker buildx build --platform linux/amd64 -o type=image,name=ghcr.io/nschatz/holdfast:dev,push=true .'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch that pushes through -o type=image,...,push=true"
-expect 1 "a run-step build that pushes through -o type=image,...,push=true is caught" \
-  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
-reset
-
-# --- 3w. The plainest one: a word between `docker` and `push` used to hide the act.
-dev_run_step 'docker image push ghcr.io/nschatz/holdfast:dev'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch that runs docker image push"
-expect 1 "docker image push, the management-command spelling, is caught on a dispatch" \
-  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
-reset
-
-# --- 3x. THE HONEST OTHER DIRECTION, and it is the one that makes this a destination model
-#         rather than a refusal: `--output=` is not a synonym for publishing. The `docker`
-#         exporter writes a local tar and must still pass. A fix that red every `--output=`
-#         would be caught here and nowhere else.
-dev_run_step 'docker buildx build --platform linux/amd64 --output=type=docker,dest=/tmp/img.tar .'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch running a build whose exporter is local"
-expect 0 "a LOCAL --output= exporter in a run step is decided as local, not refused as a publish"
-reset
-
-# --- 3y. THE EDGE. `crane copy` appears nowhere in the gate, and that is the point: an
-#         invocation of a registry tool that lands on no rule is UNDECIDED, and undecided
-#         reds by name. A catalogue that answers an unknown spelling with silence has to grow
-#         a row per spelling, and the spelling after that is always the one nobody added.
-dev_run_step 'crane copy ghcr.io/nschatz/holdfast:dev ghcr.io/nschatz/holdfast:latest'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch running a registry command the gate has never been taught"
-expect 1 "a registry command in no rule reds the gate, naming the invocation" \
-  "does not model that invocation of .crane."
-reset
-
-# --- 3z. THE TWO READERS' DISAGREEMENT, which was fail-open. Reading a `run:` block used to
-#         take two passes - strip comments per PHYSICAL line, then join continuations - and
-#         they disagreed about what a line is: quote state reset at exactly the boundary the
-#         join erased. A `#` inside a quoted argument on a continuation line was therefore
-#         read as a comment, and the rest of the logical line was deleted, the `--push` and
-#         the backslash that would have joined it included. An OCI annotation carrying an
-#         issue number is the everyday way that `#` arrives, and bash really does perform the
-#         push.
-dev_run_step 'docker buildx build \' \
-             '  --annotation "org.opencontainers.image.description=dev build, \' \
-             '  see #123" \' \
-             '  --push \' \
-             '  --platform linux/amd64 \' \
-             '  -t ghcr.io/nschatz/holdfast:dev \' \
-             '  .'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch whose push sits after a quoted # across a continuation"
-expect 1 "a quoted # on a continuation line does not hide the --push below it" \
-  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
-reset
-
-# --- 3aa. And the other direction for the same shape: the identical argument on a build that
-#          stays LOCAL must still pass, so "quotes survive a continuation" cannot be
-#          satisfied by calling every annotated build a publish.
-dev_run_step 'docker buildx build \' \
-             '  --annotation "org.opencontainers.image.description=dev build, \' \
-             '  see #123" \' \
-             '  --load \' \
-             '  --platform linux/amd64 \' \
-             '  -t holdfast:dev \' \
-             '  .'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch whose annotated build stays local"
-expect 0 "the same quoted # on a build that only loads locally is still local"
-reset
-
-# --- 3ab. The act belongs to the program that performs it, not to the word at the start of
-#          the line. `sudo docker push` is a push.
-dev_run_step 'sudo docker push ghcr.io/nschatz/holdfast:dev'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch pushing through a wrapper command"
-expect 1 "a push behind a wrapper command is still caught on a dispatch" \
-  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
-reset
-
-# --- 3ac..3ai. THE OBSERVED GRADE ROUTE. Reading a `run:` step lost six times in one
-#         direction, so A6, A7 and A12 are no longer decided by reading it: each step is RUN
-#         in an environment where nothing external executes and every invocation is recorded
-#         with the argv bash built. These cases are the spellings that beat the reader, and
-#         the ones the environment itself has to refuse rather than pass.
-
-# --- 3ac. F11. A push inside a QUOTED WORD handed to a nested shell. To any lexer this is
-#          the single argv element `docker push …` belonging to `sh`; to the shell it is a
-#          push, and the observation follows the nested shell into it.
-dev_run_step 'sh -c "docker push ghcr.io/nschatz/holdfast:dev"'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch pushing from inside a quoted sh -c"
-expect 1 "a push inside a quoted sh -c is caught on a dispatch" \
-  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
-reset
-
-# --- 3ad. F11b. The same through `eval`, where stepping over the wrapper left the quoted
-#          string as the program name.
-dev_run_step 'eval "docker push ghcr.io/nschatz/holdfast:dev"'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch pushing from inside an evaled string"
-expect 1 "a push inside an evaled string is caught on a dispatch" \
-  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
-reset
-
-# --- 3ae. F12. buildx's `-o` is a pflag shorthand and pflag takes an ATTACHED value, so
-#          `-otype=registry` IS `--output=type=registry` and really publishes - measured
-#          against a real buildx. A switch over flag spellings decided it "local".
-dev_run_step 'docker buildx build --platform linux/amd64 -otype=registry,name=ghcr.io/nschatz/holdfast:dev .'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch pushing through buildx's attached short flag"
-expect 1 "a push through the attached shorthand -otype=registry is caught" \
-  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
-reset
-
-# --- 3af. THE OTHER DIRECTION for 3ae, and the one that keeps this a reading of the flag
-#          rather than a refusal of it: the same attached shorthand naming a LOCAL exporter
-#          must still pass.
-dev_run_step 'docker buildx build --platform linux/amd64 -otype=docker,dest=/tmp/img.tar .'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch whose attached short flag names a local exporter"
-expect 0 "an attached -otype=docker,dest= is decided as local, not refused as a publish"
-reset
-
-# --- 3ag. DENY BY DEFAULT. Every program an observed step invokes has to be classified. One
-#          that is not FAILS naming it, which is what turns the next unseen spelling into a
-#          loud stop instead of the seventh fail-open.
-dev_run_step 'rclone copy dist ghcr:holdfast'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch invoking a program the gate has never been taught"
-expect 1 "a program in none of the gate's lists reds by name rather than reading as harmless" \
-  "does not classify that program"
-reset
-
-# --- 3ah. A COMMAND THE ENVIRONMENT CANNOT WATCH. An absolute path is resolved by bash
-#          itself, so a program at one this gate has not shimmed would run for real and be
-#          recorded nowhere. It is refused before it runs.
-dev_run_step '/opt/vendor/bin/docker push ghcr.io/nschatz/holdfast:dev'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch invoking a program by an unshimmed absolute path"
-expect 1 "an invocation this environment could not watch is refused, not passed" \
-  "could NOT OBSERVE"
-reset
-
-# --- 3ai. THE PATH BEHIND A FAILURE. A publish reached only when an earlier command fails is
-#          never on the all-succeed path, so the environment re-runs the step making each of
-#          its commands fail in turn. One run down the happy path reports this as clean.
-dev_run_step 'if ! docker manifest inspect ghcr.io/nschatz/holdfast:dev; then' \
-             '  docker push ghcr.io/nschatz/holdfast:dev' \
-             'fi'
-insert_before "- name: build the release binaries"
-changed "$wf" "a dispatch that pushes only when an inspect fails"
-expect 1 "a push reachable only when an earlier command fails is still caught" \
-  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
-reset
-
-# --- 3aj. F13, in the ordering half. A step that PRINTS the gate's name and runs nothing
-#          satisfied the full-gate role once quoting was resolved, so A7 read the promotion
-#          as gated. A role is now what the step was observed to invoke.
-in_step "the full gate (make check)" 's|run: make check|run: echo "make check"|'
-changed "$wf" "a full gate reduced to an echo of its own name"
-expect 1 "a step that only prints the gate's name does not satisfy the full-gate role" \
-  "the full gate .make check. does not run before"
-reset
-
-# --- 3ak. THE OTHER DIRECTION for 3aj: the real gate, and a spelling of it that is still the
-#          gate, must both still read as one.
-in_step "the full gate (make check)" 's|run: make check|run: make -C . check|'
-changed "$wf" "the full gate spelled with a directory flag"
-expect 0 "a make invocation that really runs the check target still reads as the full gate"
+# --- 16. The other half of the split: an irreversible act must live in a job that can
+#         actually perform it, or the boundary is decorative and the release fails at run
+#         time having passed this gate.
+awk '
+  /^      contents: write # cut the GitHub release$/ { print "      contents: read"; next }
+  /^      packages: write # push the image to GHCR$/ { print "      packages: read"; next }
+  { print }
+' "$wf" > "$wf.new" && mv "$wf.new" "$wf"
+changed "$wf" "the publishing job stripped of its grants"
+expect 1 "a publishing job that holds no grant is caught, not quietly accepted" "holds NO capability that could carry it out"
 reset
 
 # =====================================================================================
-# A13 / A3 - the floating reference moving before the artefact was proved.
+# A7 - ROLE IDENTITY. A step holds a position because it DECLARES it and INVOKES what
+# that position names, never because its text mentions the thing.
 # =====================================================================================
 
-# --- 4. Promotion hoisted above the push. `:latest` would then point at a tag that does
-#        not exist yet, and would be moved without the pushed artefact being gated at all.
+# --- 17. F13, closed by construction. A step that PRINTS the gate's name and runs nothing
+#         used to satisfy the full-gate role.
+in_step "the full gate (make check)" 's|^        run: make check$|        run: echo "make check"|'
+changed "$wf" "the full gate reduced to an echo"
+expect 1 "a step that merely mentions the gate cannot hold the full-gate role" "the first word of its script has to BE that program"
+reset
+
+# --- 17a. The same, UNQUOTED, which is the spelling that separates the two designs: every
+#          word the role names is present, in order, as a whole field - and the step still
+#          runs nothing. Only "the FIRST field must BE the program" refuses it.
+in_step "the full gate (make check)" 's|^        run: make check$|        run: echo make check|'
+changed "$wf" "the full gate reduced to an unquoted echo"
+expect 1 "a step whose fields merely include the gate's cannot hold the role either" "the first word of its script has to BE that program"
+reset
+
+# --- 18. THE HONEST OTHER DIRECTION, and it is what keeps 17 a reading of the invocation
+#         rather than a refusal of every respelling: `make -C . check` IS the full gate.
+in_step "the full gate (make check)" 's|^        run: make check$|        run: make -C . check|'
+changed "$wf" "the full gate respelled with -C"
+expect 0 "a respelt but real invocation of the full gate still holds the role"
+reset
+
+# --- 19. The role's declaration removed. The gate refuses rather than grading an order over
+#         a set of steps it could not identify.
+in_step "the full gate (make check)" '/^        id: full-gate$/d'
+changed "$wf" "the full-gate role undeclared"
+expect 1 "a missing role declaration is refused, not worked around" "no step declares .id: full-gate."
+reset
+
+# --- 20. A role step turned into an inline multi-line script. One line is what makes the
+#         comparison total; a script would have to be searched, and searching is what lost.
+replace_line '^        run: ./scripts/release-resmoke.sh$' '        run: |\n          ./scripts/release-resmoke.sh\n          echo "and something else"'
+changed "$wf" "the re-smoke role turned into a multi-line script"
+expect 1 "a role step with a multi-line script is refused" "is more than one line"
+reset
+
+# --- 21. The action role pointed at a different action.
+in_step "push the multi-arch image" 's|^        uses: docker/build-push-action@v6$|        uses: someone/else@v1|'
+changed "$wf" "the push role pointed at another action"
+expect 1 "a role that names an action is that action, not a lookalike" "but uses \"someone/else\""
+reset
+
+# --- 22. The amd64 smoke run reduced to an exec check. It is the run that must drive a REAL
+#         encode; `--no-encode` makes it prove the binary starts and nothing else.
+in_step "smoke test the image (real encode" 's|holdfast:release$|holdfast:release --no-encode|'
+changed "$wf" "the amd64 smoke run reduced to an exec check"
+expect 1 "an amd64 smoke run that does not encode cannot hold that role" 'passes "--no-encode", which that role must not'
+reset
+
+# --- 23. A role script deleted from the repository. The step would fail in the middle of a
+#         release, having passed a gate that only compared strings.
+rm -f "$repo/scripts/release-promote.sh"
+expect 1 "a role invoking a script that is not in the repository is caught" "is not in this repository"
+reset
+
+# =====================================================================================
+# A7 / A13 - the order itself.
+# =====================================================================================
+
+# --- 24. Promotion hoisted above the push. `:latest` would then point at a tag that does
+#         not exist yet, moved without the pushed artefact being gated at all.
 move_step "promote :latest" "push the multi-arch image"
 changed "$wf" "the promotion hoisted above the version-tag push"
-expect 1 "a promotion that runs before the version-tag push is caught" "runs AFTER .*moves the floating reference"
+expect 1 "a promotion that runs before the version-tag push is caught" "does NOT run before"
 reset
 
-# --- 5. Promotion hoisted above the re-smoke of the PULLED artefact. This is the exact
-#        ordering the workflow's own comment claims and nothing enforced: the push is a
-#        cache rebuild, so `:latest` would be promoted onto bytes nobody smoked.
+# --- 25. Promotion hoisted above the re-smoke of the PULLED artefact. This is the exact
+#         ordering the workflow's own comment claims and nothing enforced: the push is a
+#         cache rebuild, so `:latest` would be promoted onto bytes nobody smoked.
 move_step "promote :latest" "smoke test the PUSHED image"
 changed "$wf" "the promotion hoisted above the re-smoke"
-expect 1 "a promotion that runs before the re-smoke of the pulled artefact is caught" "re-smoke of the linux/(amd|arm)64 artefact.*runs AFTER"
+expect 1 "a promotion that runs before the re-smoke of the pulled artefact is caught" "does NOT run before"
 reset
 
-# --- 6. The floating reference pushed directly by the build, so it is live before the
-#        artefact is pulled back at all - which is what promoting it separately avoids.
-in_step "push the multi-arch image" 's|^\( *tags: .*\)$|\1,${{ steps.plan.outputs.image }}:latest|'
+# --- 26. The floating reference pushed directly by the build, so it is live before the
+#         artefact is pulled back at all - which is what promoting it separately avoids.
+in_step "push the multi-arch image" 's|^          tags: .*|&,${{ needs.build.outputs.image }}:latest|'
 changed "$wf" "the build pushing :latest itself"
 expect 1 "a build that pushes the floating reference itself is caught" "pushes ghcr.io/.*:latest directly"
 reset
 
-# --- 7. The promotion marked `always()`. It then runs after the gate or a smoke run has
-#        FAILED - the precise state in which `:latest` must stay where it was.
-in_step "promote :latest" "s/^        if: .*/        if: always() \&\& steps.plan.outputs.publish == 'true'/"
-changed "$wf" "the promotion guarded with always()"
-expect 1 "a promotion that survives a failed gate is caught" "still runs after an earlier step has FAILED"
+# --- 27. `needs:` removed. The jobs are then CONCURRENT: the gate refuses to report an order
+#         it did not check, rather than reading declaration order as one.
+sed -i '/^    needs: build$/d' "$wf"
+changed "$wf" "the needs: edge removed"
+expect 1 "two concurrent jobs are refused rather than ordered by where they appear" "CONCURRENT"
+reset
+
+# =====================================================================================
+# A3 - once anything has failed, nothing publishes.
+# =====================================================================================
+
+# --- 28. `always()` moved to the END of the guard. On a dispatch it still does not run - so
+#         case 1's assertion would not catch this - but after a FAILED gate it does, which is
+#         the precise state in which `:latest` must stay where it was.
+sed -i "s|^    if: needs.build.outputs.publish == 'true'$|    if: needs.build.outputs.publish == 'true' \&\& always()|" "$wf"
+changed "$wf" "the publish job surviving a failed gate"
+expect 1 "a publishing job that survives a failed gate is caught" "would STILL RUN after an earlier job has FAILED"
 reset
 
 # =====================================================================================
 # A14 - a step before the promotion whose failure does not fail the run.
 # =====================================================================================
 
-# --- 8. The full gate, tolerated. `make check` reds, the run stays green, `:latest` moves
-#        onto an image whose verify/swap logic was never proved.
-in_step "the full gate" 's|^      - name: .*|&\n        continue-on-error: true|'
+# --- 29. The full gate, tolerated. `make check` reds, the run stays green, `:latest` moves
+#         onto an image whose verify/swap logic was never proved.
+in_step "the full gate (make check)" 's|^      - name: .*|&\n        continue-on-error: true|'
 changed "$wf" "the full gate marked continue-on-error"
 expect 1 "a tolerated failure on the full gate is caught" 'marked .continue-on-error: true'
 reset
 
-# --- 9. The same, on the re-smoke of the pushed artefact.
+# --- 30. The same, on the re-smoke of the pushed artefact.
 in_step "smoke test the PUSHED image" 's|^      - name: .*|&\n        continue-on-error: true|'
 changed "$wf" "the re-smoke marked continue-on-error"
 expect 1 "a tolerated failure on the re-smoke is caught" 'marked .continue-on-error: true'
+reset
+
+# --- 31. And on the JOB, where it tolerates every step at once.
+sed -i '0,/^    runs-on: ubuntu-latest$/s//&\n    continue-on-error: true/' "$wf"
+changed "$wf" "the dispatch-path job marked continue-on-error"
+expect 1 "a tolerated failure on the whole job is caught" 'is marked .continue-on-error: true'
 reset
 
 # =====================================================================================
@@ -742,107 +493,162 @@ reset
 # say WHICH; a vacuous pass over nothing is the failure mode all three share.
 # =====================================================================================
 
-# --- 10.
+# --- 32.
 rm -f "$wf"
 expect 1 "a release definition that cannot be read is red, and says so" "CANNOT BE READ"
 reset
 
-# --- 11.
+# --- 33.
 printf '\nthis is not: [valid: yaml\n' >> "$wf"
 changed "$wf" "an unparseable release definition"
 expect 1 "a release definition that cannot be parsed is red, and says so" "CANNOT BE PARSED"
 reset
 
-# --- 12.
+# --- 34.
 : > "$wf"
 expect 1 "an empty release definition is red, and says so" "IS EMPTY"
 reset
 
-# --- 13. A job whose step list is empty. Every ordering assertion below would otherwise
-#         hold over nothing and report green.
+# --- 35. A definition with no steps at all. Every assertion below would otherwise hold over
+#         nothing and report green.
 awk '/^    steps:$/ { print "    steps: []"; exit } { print }' "$pristine/.github/workflows/release.yml" > "$wf"
-changed "$wf" "a job with no steps"
-expect 1 "a release definition that names no step is red, and says so" "NAMES NO STEP AT ALL|names NO step that performs a published act"
+changed "$wf" "a definition with no steps"
+expect 1 "a release definition that names no step is red, and says so" "NAMES NO STEP AT ALL"
 reset
 
-# --- 14. No planning step at all: nothing writes to $GITHUB_OUTPUT, so there is no runtime
-#         value to decide any guard from. The gate must refuse rather than fall back to
-#         reading the text, which is the whole thing it is not allowed to do.
+# --- 36. No planning step: nothing writes to $GITHUB_OUTPUT, so there is no runtime value to
+#         decide any guard from. The gate must refuse rather than fall back to reading text,
+#         which is the whole thing it is not allowed to do.
 sed -i 's/GITHUB_OUTPUT/GITHUB_NOWHERE/g' "$wf"
 changed "$wf" "a release definition with no planning step"
-expect 1 "a definition whose planning step produces nothing is red" "NO planning step"
+expect 1 "a definition whose planning step produces nothing is red" "writes nothing to .GITHUB_OUTPUT"
+reset
+
+# --- 37. THE BOUND ON WHAT THIS GATE EXECUTES. Exactly one step's script is ever run. A
+#         SECOND step writing outputs would be a second script the gate had to execute to
+#         know what the guards see, and running workflow step scripts to find out what they
+#         do is the mechanism that was defeated in one line.
+add_build_step 'echo "x=y" >> "$GITHUB_OUTPUT"'
+changed "$wf" "a second step writing to GITHUB_OUTPUT"
+expect 1 "a second planning script is refused rather than executed" "the only step this gate executes"
+reset
+
+# --- 38. And the one script it does execute may not reach a registry. The planning step
+#         DECIDES; a step that publishes is not planning.
+replace_line '^          set -euo pipefail$' '          set -euo pipefail\n          docker push ghcr.io/nschatz/holdfast:dev'
+changed "$wf" "a planning step that reaches a registry"
+expect 1 "a planning step that invokes a registry tool is refused" "is not planning"
 reset
 
 # =====================================================================================
-# A16 / A8 - the operator runbook.
+# A16 / A8 - the operator runbook. An ACT is every step in the job that holds the grant,
+# identified by its declared id: nothing about what a step SAYS is consulted.
 # =====================================================================================
 
-# --- 15. No runbook at all. Three irreversible acts would then be checked against nothing.
+# --- 39. No runbook at all.
 rm -f "$runbook"
 expect 1 "a missing operator runbook is red, and lists the acts it should have named" "CANNOT BE READ"
 reset
 
-# --- 16. A runbook that exists and names no act. This is the vacuous pass A16 names: a
+# --- 40. A runbook that exists and names no act. This is the vacuous pass A16 names: a
 #         document can be present, long, and about nothing.
 printf '# Releasing\n\nAsk Noah.\n' > "$runbook"
 changed "$runbook" "a runbook that names no irreversible act"
 expect 1 "a runbook that names NO irreversible act is red" "names NO irreversible act"
 reset
 
-# --- 17. One act quietly dropped from the runbook - what happens when a publishing step is
-#         added and the documentation is not.
-sed -i 's/`github-release@cut-the-github-release`/(dropped)/' "$runbook"
+# --- 41. One act quietly dropped from the runbook - what happens when a publishing step is
+#         documented and then the documentation is edited.
+sed -i 's|`publish/github-release`|(dropped)|' "$runbook"
 changed "$runbook" "a runbook missing one act"
-expect 1 "a runbook that stops naming one publishing step is red, naming the id it needs" 'Add .github-release@cut-the-github-release.'
+expect 1 "a runbook that stops naming one act is red, naming the id it needs" 'Add .publish/github-release.'
+reset
+
+# --- 42. THE PROPERTY ITSELF: a NEW step added to the job that can publish, which the
+#         runbook has never heard of. It says nothing about publishing; it does not need to.
+awk '
+  /^      - name: cut the GitHub release$/ && !d {
+    print "      - name: a step nobody wrote down"
+    print "        id: brand-new"
+    print "        run: echo hello"
+    print ""
+    d = 1
+  }
+  { print }
+' "$wf" > "$wf.new" && mv "$wf.new" "$wf"
+changed "$wf" "a new step in the publishing job"
+expect 1 "a step added to the publishing job that the runbook does not name is red" 'Add .publish/brand-new.'
+reset
+
+# --- 43. A step in that job with no id at all. An act that cannot be named cannot be
+#         reviewed.
+in_step "cut the GitHub release" '/^        id: github-release$/d'
+changed "$wf" "a publishing-job step with no id"
+expect 1 "a step in the publishing job with no id is red" "carries no .id:."
 reset
 
 # =====================================================================================
 # A17 / A9 - the example deployment's image reference.
 # =====================================================================================
 
-# --- 18. The reference removed. An absent reference is not agreement.
+# --- 44. The reference removed. An absent reference is not agreement.
 sed -i '/^ *image: ghcr/d' "$compose"
 changed "$compose" "a compose file with no image reference"
 expect 1 "an example deployment with no image reference is red, naming the file" "docker-compose.yml NAMES NO IMAGE REFERENCE"
 reset
 
-# --- 19. The reference made unreadable by breaking the file around it.
+# --- 45. The reference made unreadable by breaking the file around it.
 printf '\nthis: [is: broken\n' >> "$compose"
 changed "$compose" "an unparseable compose file"
 expect 1 "an unparseable example deployment is red, naming the file" "docker-compose.yml CANNOT BE PARSED"
 reset
 
-# --- 20.
+# --- 46.
 rm -f "$compose"
 expect 1 "a missing example deployment is red, naming the file" "docker-compose.yml CANNOT BE READ"
 reset
 
-# --- 21. The disagreement itself: the compose file names an image this repository's
+# --- 47. The disagreement itself: the compose file names an image this repository's
 #         release would never produce. This is what a repository rename does, silently.
 sed -i 's|^\( *image: \).*|\1ghcr.io/someone-else/holdfast:latest|' "$compose"
 changed "$compose" "a compose reference naming a different repository"
 expect 1 "a compose reference nothing publishes is red, and prints both" "ghcr.io/someone-else/holdfast:latest"
 reset
 
+# --- 48. The floating tag moved. It is declared ONCE, in the promotion step's env, read by
+#         this gate and by scripts/release-promote.sh - so changing it there changes what a
+#         release promotes, and the compose file no longer names it.
+in_step "promote :latest" 's|^          FLOATING_TAG: latest$|          FLOATING_TAG: stable|'
+changed "$wf" "the floating tag moved to :stable"
+expect 1 "a promotion that moves a different floating reference than the compose file names is red" "ghcr.io/nschatz/holdfast:stable"
+reset
+
+# --- 49. The floating tag removed altogether. Which reference a release moves is then
+#         unknown to this gate, and unknown is not harmless.
+in_step "promote :latest" '/^          FLOATING_TAG: latest$/d'
+changed "$wf" "the floating tag undeclared"
+expect 1 "a promotion that declares no floating tag is red" "does not declare both IMAGE and FLOATING_TAG"
+reset
+
 # =====================================================================================
 # A4 / A10 - the major-version-zero refusal, and the record it has to name.
 # =====================================================================================
 
-# --- 22. The refusal removed. A v1.0.0 tag would then publish, and 1.0.0 "defines the
+# --- 50. The refusal removed. A v1.0.0 tag would then publish, and 1.0.0 "defines the
 #         public API" over three surfaces this project has not frozen.
 sed -i 's/^          if \[ "$publish" = "true" \]; then$/          if false; then/' "$wf"
 changed "$wf" "the major-version-zero refusal removed"
 expect 1 "a release path that accepts a non-zero major is red" "ACCEPTS v1.0.0"
 reset
 
-# --- 23. The refusal kept, but stripped of the record it points at. "No" without "go and
+# --- 51. The refusal kept, but stripped of the record it points at. "No" without "go and
 #         read this first" is how the refusal gets deleted by the next person in a hurry.
 sed -i 's|docs/release.md|the stability record|g' "$wf"
 changed "$wf" "a refusal that names no record"
 expect 1 "a refusal that names no record is red" "names no record"
 reset
 
-# --- 24. The refusal pointing at a document that does not exist - prose again.
+# --- 52. The refusal pointing at a document that does not exist - prose again.
 sed -i 's|docs/release.md|docs/stability.md|g' "$wf"
 changed "$wf" "a refusal naming a record that does not exist"
 expect 1 "a refusal naming a record that does not exist is red" "docs/stability.md, which does not exist"
@@ -852,7 +658,7 @@ reset
 # A11 - the post-promotion resolution of the example deployment's reference.
 # =====================================================================================
 
-# --- 25. The step deleted. Every release after the first would then stop checking that the
+# --- 53. The step deleted. Every release after the first would then stop checking that the
 #         reference users actually pull resolves at all.
 r="$(block_range "$wf" "must resolve to the gated digest")"
 [ -n "$r" ] || { echo "::error::selftest: could not find the resolution step" >&2; exit 1; }
@@ -860,17 +666,17 @@ r="$(block_range "$wf" "must resolve to the gated digest")"
 set -- $r
 sed -i "$1,$2d" "$wf"
 changed "$wf" "the resolution step deleted"
-expect 1 "a release that never resolves the example deployment's reference is red" "no step resolves the example deployment"
+expect 1 "a release that never resolves the example deployment's reference is red" "no step declares .id: resolve-compose."
 reset
 
-# --- 26. The step kept, but moved before the promotion, where it would resolve the
+# --- 54. The step kept, but moved before the promotion, where it would resolve the
 #         PREVIOUS release's digest and pass while this one is broken.
 move_step "must resolve to the gated digest" "promote :latest"
 changed "$wf" "the resolution step moved before the promotion"
-expect 1 "a resolution that runs before the promotion is red" "BEFORE the promotion"
+expect 1 "a resolution that runs before the promotion is red" "does NOT run before"
 reset
 
-# --- 27 to 30. scripts/resolve-compose-image.sh itself, driven against a fake registry.
+# --- 55 to 58. scripts/resolve-compose-image.sh itself, driven against a fake registry.
 #         It is the enforcement behind A5, so its verdict has to be real: a matching digest
 #         passes, a different one fails, an unresolvable reference fails, and a compose file
 #         with no reference fails - each with its own exit code and its own sentence.
@@ -922,20 +728,20 @@ printf 'ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa\nghcr.io/nschatz/holdfast:lat
 resolve "a compose file naming no image is refused before any registry call" 3 "names NO image reference"
 reset
 
-# --- 30a. The shape that made two readers dangerous: a SECOND service with its own
-#          `image:`. There is one reader now - the gate's YAML decoder, asked for by
-#          `-print-compose-ref` - and it REFUSES rather than silently grading whichever
-#          service came first, which is what a `sed … | head -1` did.
+# --- 59. The shape that made two readers dangerous: a SECOND service with its own
+#         `image:`. There is one reader now - the gate's YAML decoder, asked for by
+#         `-print-compose-ref` - and it REFUSES rather than silently grading whichever
+#         service came first, which is what a `sed … | head -1` did.
 printf '\n  sidecar:\n    image: ghcr.io/nschatz/something-else:latest\n' >> "$compose"
 changed "$compose" "a compose file whose second service carries an image"
 printf 'ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa\nghcr.io/nschatz/holdfast:latest sha256:aaa\nghcr.io/nschatz/something-else:latest sha256:aaa\n' > "$digests"
 resolve "a second service's image reference is refused, not silently ignored" 3 "names 2 image references"
 reset
 
-# --- 30b. The DEFAULT reader path, which is the one a real release takes: no binary handed
-#          over, so the script builds the single reader itself. Driven against the real
-#          working tree, so the whole chain - script, reader, docker-compose.yml - is the
-#          committed one and not a fixture.
+# --- 60. The DEFAULT reader path, which is the one a real release takes: no binary handed
+#         over, so the script builds the single reader itself. Driven against the real
+#         working tree, so the whole chain - script, reader, docker-compose.yml - is the
+#         committed one and not a fixture.
 printf 'ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa\nghcr.io/nschatz/holdfast:latest sha256:aaa\n' > "$digests"
 got=0
 o="$( cd "$here" && PATH="$fake:$PATH" FAKE_DIGESTS="$digests" \
@@ -949,7 +755,15 @@ else
   failed=$((failed + 1))
 fi
 
-# --- 31. And the gate has to still be IN `make check`. A target nothing depends on is a
+# --- 61. A6 grades a SENTENCE as well as an exit code, and the two can come apart: a gate
+#         that says "NONE of them holds a capability" over a question it just refused would
+#         reassure every reader who skims stdout.
+replace_line '^      contents: read # read the tree' '      contentz: read'
+changed "$wf" "an undecidable grant on the dispatch path"
+expect_absent 1 "a dispatch it could not decide never prints the reassurance" "NONE of them holds a capability"
+reset
+
+# --- 62. And the gate has to still be IN `make check`. A target nothing depends on is a
 #         gate that runs nowhere, and nothing else in this file would notice.
 prereqs=" $(sed -n 's/^check:[[:space:]]*//p' "$here/Makefile" | head -1) "
 case "$prereqs" in

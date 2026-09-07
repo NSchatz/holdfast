@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"strings"
 	"testing"
 )
 
@@ -128,47 +127,19 @@ func TestEvaluate_Operators(t *testing.T) {
 	}
 }
 
-// Prose in a comment must not be read as a published act, and a real command must not be
-// hidden by a quote character earlier on the line.
-func TestShellCommands_CommentsAreProseAndQuotesAreNot(t *testing.T) {
-	in := strings.Join([]string{
-		`# docker push ghcr.io/x/y:latest`,
-		`echo "a # b" && docker push ghcr.io/x/y:v1   # trailing prose`,
-		`echo '#not a comment'`,
-	}, "\n")
-	var got []string
-	for _, c := range ShellCommands(in) {
-		got = append(got, c.String())
+// The references a push publishes are read out of a structured `tags:` input, in either of
+// the two shapes GitHub accepts for a multi-line scalar.
+func TestSplitRefs(t *testing.T) {
+	got := splitRefs("ghcr.io/x/y:v0.1.0\nghcr.io/x/y:latest\n")
+	if len(got) != 2 || got[0] != "ghcr.io/x/y:v0.1.0" || got[1] != "ghcr.io/x/y:latest" {
+		t.Fatalf("newline-separated tags = %v", got)
 	}
-	all := strings.Join(got, "\n")
-	if len(got) != 3 {
-		t.Fatalf("read %d command(s), want 3 (the whole-line comment is not one of them):\n%s", len(got), all)
+	got = splitRefs("ghcr.io/x/y:v0.1.0, ghcr.io/x/y:latest")
+	if len(got) != 2 || got[1] != "ghcr.io/x/y:latest" {
+		t.Fatalf("comma-separated tags = %v", got)
 	}
-	if got[0] != `echo a # b` {
-		t.Fatalf("a # inside double quotes was treated as a comment: %q", got[0])
-	}
-	if got[1] != "docker push ghcr.io/x/y:v1" {
-		t.Fatalf("a real command was cut along with the trailing comment: %q", got[1])
-	}
-	if strings.Contains(all, "trailing prose") {
-		t.Fatalf("a trailing comment survived: %q", all)
-	}
-	if got[2] != `echo #not a comment` {
-		t.Fatalf("a # inside single quotes was treated as a comment: %q", got[2])
-	}
-}
-
-func TestTagMoveRefs(t *testing.T) {
-	argv := [][]string{
-		{"docker", "buildx", "imagetools", "create", "-t", "ghcr.io/x/y:latest", "ghcr.io/x/y:v0.1.0"},
-		{"docker", "buildx", "imagetools", "inspect", "ghcr.io/x/y:latest"},
-	}
-	targets, sources := tagMoveRefs(argv)
-	if len(targets) != 1 || targets[0] != "ghcr.io/x/y:latest" {
-		t.Fatalf("targets = %v, want [ghcr.io/x/y:latest]", targets)
-	}
-	if len(sources) != 1 || sources[0] != "ghcr.io/x/y:v0.1.0" {
-		t.Fatalf("sources = %v, want [ghcr.io/x/y:v0.1.0]", sources)
+	if got := splitRefs("  \n , \n"); len(got) != 0 {
+		t.Fatalf("a blank input names no reference, and must not be read as one: %v", got)
 	}
 }
 
