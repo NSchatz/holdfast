@@ -22,10 +22,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/encoder"
+	"github.com/NSchatz/holdfast/internal/fsclass"
 	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
@@ -140,7 +142,63 @@ type Engine struct {
 	// risk the invariant); paused work is simply left pending for the next scan
 	// after resume. nil = never paused.
 	Paused func() bool
+
+	// --- the three FILESYSTEM-1 seams --------------------------------------------
+	//
+	// The gate has no network mount and no second real filesystem, and it never will:
+	// a CI runner cannot conjure an NFS server, and a test that needed one would be
+	// skipped, which for a data-safety proof is a false green. These three
+	// substitutions are what make the whole failed-swap contract testable on ordinary
+	// local storage. Production leaves all three nil and uses the real thing.
+
+	// fsLookup, when non-nil, replaces the real filesystem-type lookup. A test uses it
+	// to report "ext4", "nfs", a type string this build does not recognise, or an
+	// error. It supplies a type NAME only: the enumeration still decides the class, so
+	// a suite built entirely on substituted lookups still reds against a build whose
+	// recognised-local set was emptied.
+	fsLookup fsclass.Lookup
+
+	// renameFn, when non-nil, replaces os.Rename in the swap. A test uses it to inject
+	// a failure - optionally one that nonetheless APPLIES the rename, which is the
+	// shape rename(2) describes for NFS and the single most important case here.
+	renameFn func(oldpath, newpath string) error
+
+	// restatFn, when non-nil, replaces the re-stat that follows a failed rename. It is
+	// a seam in its own right because one scenario cannot be produced by the other two:
+	// a rename that genuinely took effect, whose re-stat nonetheless returns the
+	// SOURCE's pre-swap attributes, as a client attribute cache populated before the
+	// swap would. No substitute for the lookup or for the rename can make a real stat
+	// lie about a real file.
+	restatFn func(path string) (probe.Attributes, error)
+
+	// held is the current run's hold-back snapshot, published once by RunOneshot
+	// before any worker starts and only read afterwards. An atomic pointer rather than
+	// a plain field so a second RunOneshot (the serve loop's scan racing an operator's
+	// rescan) can never be observed mid-write.
+	held atomic.Pointer[holdBacks]
 }
+
+// rename performs the swap's rename, routing through the test seam when one is set.
+func (e *Engine) rename(oldpath, newpath string) error {
+	if e.renameFn != nil {
+		return e.renameFn(oldpath, newpath)
+	}
+	return os.Rename(oldpath, newpath)
+}
+
+// restat reads a path's rename-invariant attributes after a failed swap, routing
+// through the test seam when one is set.
+func (e *Engine) restat(path string) (probe.Attributes, error) {
+	if e.restatFn != nil {
+		return e.restatFn(path)
+	}
+	return probe.StatAttributes(path)
+}
+
+// heldBack reports whether a path is one of this run's two record-based hold-backs,
+// and why. It is deliberately separate from the record-free name check: a caller that
+// needs both asks for both, so it is always obvious which rule fired.
+func (e *Engine) heldBack(p string) (string, bool) { return e.held.Load().held(p) }
 
 // emit delivers ev to the Observer if one is set. It is deliberately trivial and
 // must stay cheap + non-blocking: it runs inline on a worker goroutine, so the
@@ -258,6 +316,12 @@ func New(cfg config.Config, p *probe.Prober, enc Encoder, st store.Store, log *s
 // but never swapped in, and cleanStaleTemps sweeps it on the next startup — the
 // source is untouched either way.
 func (e *Engine) RunOneshot(ctx context.Context) error {
+	// FILESYSTEM-1: read this run's hold-backs FIRST and publish them before anything
+	// walks a root. Every parked job is reported here, naming both of its files, and
+	// its two recorded paths - plus every recorded replacement path still carrying a
+	// live exclusion - are withheld from the sweep, from the scan and from the workers.
+	e.held.Store(e.loadHoldBacks(ctx))
+
 	if _, err := e.Store.RecoverStale(ctx); err != nil {
 		// Fail safe: if we can't tell what was left active by a prior crash, log and
 		// continue — a stuck "active" row just means that one file is skipped this
@@ -269,9 +333,20 @@ func (e *Engine) RunOneshot(ctx context.Context) error {
 	return e.scanOnce(ctx)
 }
 
-// cleanStaleTemps deletes any `*.__transcoding__.*` files left under the roots by a
-// prior killed run (crash-safety: the swap is the only mutation, so a leftover temp
-// is always safe to discard).
+// cleanStaleTemps deletes `*.__transcoding__.*` files left under the roots by a prior
+// killed run (crash-safety: the swap is the only mutation, so a half-written encode is
+// worth nothing and reclaiming it is right).
+//
+// It sweeps WORK IN PROGRESS and nothing else. Three kinds of file it must never take:
+//
+//   - a RETAINED replacement (`*.__holdfast-replacement__.*`). It passed every gate and
+//     may be the only faithful copy of a source whose fate is unknown. It carries a
+//     different marker precisely so this sweep cannot reach it by construction.
+//   - a temp path a live record names as a job's replacement. That happens when the
+//     move to a retained name could not be made, so the record says what the file is.
+//   - a temp path holding a FINISHED replacement with no record at all, which is what a
+//     library that went read-only leaves behind: the same failure denies the swap, the
+//     move to the retained name and the incident write alike (strayReplacementHold).
 func (e *Engine) cleanStaleTemps(ctx context.Context) {
 	n := 0
 	if e.Coverage != nil {
@@ -286,10 +361,8 @@ func (e *Engine) cleanStaleTemps(ctx context.Context) {
 				continue
 			}
 			for _, ent := range ents {
-				if !ent.IsDir() && isTempName(ent.Name()) {
-					if os.Remove(filepath.Join(dir, ent.Name())) == nil {
-						n++
-					}
+				if !ent.IsDir() && isTempName(ent.Name()) && e.sweepTemp(ctx, filepath.Join(dir, ent.Name())) {
+					n++
 				}
 			}
 		}
@@ -306,10 +379,11 @@ func (e *Engine) cleanStaleTemps(ctx context.Context) {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			if !d.IsDir() && isTempName(filepath.Base(path)) {
-				if os.Remove(path) == nil {
-					n++
-				}
+			if d.IsDir() || !isTempName(filepath.Base(path)) {
+				return nil
+			}
+			if e.sweepTemp(ctx, path) {
+				n++
 			}
 			return nil
 		})
@@ -317,6 +391,31 @@ func (e *Engine) cleanStaleTemps(ctx context.Context) {
 	if n > 0 {
 		e.Log.Info("discarded orphaned temp file(s) from a prior run", "count", n)
 	}
+}
+
+// sweepTemp discards ONE work-in-progress temp, and reports whether it did. It is the
+// single place the sweep's exceptions live, so the coverage-bounded branch and the
+// walking branch cannot disagree about them. There are two, and they are independent:
+//
+//   - a temp path a live RECORD names as a job's replacement (AC15d), and
+//   - a temp path holding a finished replacement that no record survived to name
+//     (AC15i's record-free half - strayReplacementHold).
+//
+// The second is asked even when the first says nothing, because the case it exists for
+// is precisely the one where the store write that would have made the record is what
+// failed.
+func (e *Engine) sweepTemp(ctx context.Context, path string) bool {
+	if why, ok := e.heldBack(path); ok {
+		e.Log.Warn("leaving a file holdfast wrote in place (not an orphaned temp)", "file", path, "why", why)
+		return false
+	}
+	if why := e.strayReplacementHold(ctx, path); why != "" {
+		e.Log.Warn("leaving a file holdfast wrote in place - NO RECORD of it survives, so it is held back on its name and its content alone: "+
+			"it is never enumerated, encoded, swapped or swept, in this run or any later one, and removing it is an operator's call",
+			"file", path, "why", why)
+		return false
+	}
+	return os.Remove(path) == nil
 }
 
 // scanOnce walks the roots, sorts matches for deterministic order, and fans them
@@ -402,6 +501,15 @@ feed:
 // here, and a bind-mount loop the walk cut cannot be followed. Without one it
 // falls back to walking the roots directly, which is the behaviour of an Engine
 // built without the startup check.
+//
+// Two hold-backs are applied here and they are the only two this phase creates
+// (FILESYSTEM-1's swap half). IsSourceName carries the RECORD-FREE one: a retained
+// replacement is a file holdfast wrote and is never anybody's source, whether or not a
+// record of it survived - and where the store could not be written, none did. offered()
+// carries the RECORD-based one: a parked job's two recorded paths, and any recorded
+// replacement path whose disposition still excludes it. Everything else in the same
+// roots enumerates exactly as before, so a parked job withholds two files from the work
+// and never narrows the run.
 func (e *Engine) enumerate() []string {
 	var files []string
 	if e.Coverage != nil {
@@ -415,7 +523,9 @@ func (e *Engine) enumerate() []string {
 					continue
 				}
 				if IsSourceName(ent.Name(), e.Cfg.VideoExts) {
-					files = append(files, filepath.Join(dir, ent.Name()))
+					if p := filepath.Join(dir, ent.Name()); e.offered(p) {
+						files = append(files, p)
+					}
 				}
 			}
 		}
@@ -430,7 +540,7 @@ func (e *Engine) enumerate() []string {
 			if d.IsDir() {
 				return nil
 			}
-			if IsSourceName(filepath.Base(path), e.Cfg.VideoExts) {
+			if IsSourceName(filepath.Base(path), e.Cfg.VideoExts) && e.offered(path) {
 				files = append(files, path)
 			}
 			return nil
@@ -438,6 +548,17 @@ func (e *Engine) enumerate() []string {
 	}
 	sort.Strings(files)
 	return files
+}
+
+// offered reports whether a path this run found may be OFFERED to the pipeline, and
+// logs the reason when it may not. It is the record-based hold-back at the one place
+// enumeration decides what to hand a worker.
+func (e *Engine) offered(path string) bool {
+	if why, ok := e.heldBack(path); ok {
+		e.Log.Info("not enumerating (held back)", "file", path, "why", why)
+		return false
+	}
+	return true
 }
 
 // ProcessFile applies the full safety pipeline to one source file on behalf of
@@ -454,6 +575,18 @@ func (e *Engine) enumerate() []string {
 func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	fi, err := os.Stat(f)
 	if err != nil || fi.IsDir() {
+		return nil
+	}
+
+	// Hold-backs, re-checked here rather than trusted to the scan. ProcessFile is the
+	// only door into the encode/swap pipeline and it is exported, so the rule that a
+	// parked job's two paths and a recorded replacement path are never encoded,
+	// swapped, deleted or re-queued belongs on the door itself.
+	if IsRetainedReplacementName(filepath.Base(f)) {
+		return nil
+	}
+	if why, ok := e.heldBack(f); ok {
+		e.Log.Info("not processing (held back)", "file", f, "why", why)
 		return nil
 	}
 
@@ -644,7 +777,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// remove tmp directly, and on a ctx-cancel (SIGTERM) the ffmpeg subprocess is
 	// killed by exec.CommandContext leaving tmp orphaned on disk — cleanStaleTemps
 	// sweeps it on the next startup, exactly like the pre-worker-pool code path.
-	tmp := filepath.Join(dir, stem+"."+TempMarker+"."+outExt)
+	//
+	// The path is the build's own construction (see swap.go).
 	final := filepath.Join(dir, stem+"."+outExt)
 
 	// Collision guard. When the container ext changes (movie.mp4 -> movie.mkv),
@@ -665,7 +799,21 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		return nil
 	}
 
-	_ = os.Remove(tmp) // clear any stale temp for this file
+	// Pick the temp path and clear any stale temp at it. The n-suffixed candidates
+	// exist for exactly one situation, and it is a real one: a source resolved "the
+	// source is intact" is handed back to enumeration and encoded again, while the
+	// replacement of the FAILED attempt may still be sitting beside it. The retained
+	// marker already keeps those two apart by construction; the candidate search covers
+	// the remaining case, a replacement that could not be MOVED to its retained name and
+	// so is still at a temp path - whether a record names it or the file itself is the
+	// only evidence left. Such a candidate is skipped, never cleared. Clearing a stale
+	// temp at a path nothing holds back is the pre-existing behaviour and is kept.
+	tmp, err := e.pickTempPath(ctx, dir, stem, outExt)
+	if err != nil {
+		e.Log.Warn("FAIL (no free temp path beside the source, source untouched)", "file", f, "err", err)
+		e.finish(ctx, f, key, store.Failed, &store.Outcome{Reason: err.Error()})
+		return nil
+	}
 	e.Log.Info("transcode", "file", f, "codec", codec, "-> ", e.targetCodec, "worker", worker)
 	e.advance(ctx, f, key, store.Encoding)
 
@@ -764,6 +912,21 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// on a file another process owns could), but it turns "guaranteed loss on any
 	// mid-encode rewrite" into "loss only on a sub-millisecond race". Symmetric with
 	// the target re-check.
+	//
+	// The guard's achieved GRANULARITY is recorded here, as it runs (FILESYSTEM-1).
+	// Two of the three fields are measured facts about the check just performed - which
+	// attributes it compared, and the resolution of the timestamp it compared, which is
+	// a real duration and stays a duration. The third is a CLASS LABEL naming which of
+	// the two residual windows the shipped documentation states applies, keyed to a
+	// classification taken WHEN THIS GUARD RUNS: a root that was local when the run
+	// began can have a NAS mounted beneath it hours later, and the record has to
+	// describe the storage the check actually ran against. `undetermined` takes the
+	// network window, the same fail-safe that makes an unrecognised type not-local.
+	guardClass := fsclass.Of(e.fsLookup, f)
+	out.GuardAttributes = probe.AttributeNames
+	out.GuardTimeResolution = probe.MTimeResolution
+	out.GuardResidualWindow = residualWindowFor(guardClass)
+
 	if cur := probe.Fingerprint(f); cur != key {
 		e.Log.Warn("FAIL (source changed during encode — refusing to overwrite the newer content)", "file", f, "entry", key, "now", cur)
 		_ = os.Remove(tmp)
@@ -772,14 +935,36 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		return nil
 	}
 
+	// Record BOTH files' rename-invariant attributes before attempting the rename, so
+	// a re-stat afterwards has two records to compare against. Rename-invariance is
+	// what makes the comparison mean anything: these attributes describe the content at
+	// a path, so the replacement's record still matches when the replacement is
+	// observed at the SOURCE path - which is the only way the applied case is reachable
+	// at all. If either record cannot be taken, do not attempt the swap: a rename whose
+	// outcome could never be established afterwards is not one to start.
+	srcRec, srcErr := probe.StatAttributes(f)
+	replRec, replErr := probe.StatAttributes(tmp)
+	if srcErr != nil || replErr != nil {
+		e.Log.Warn("FAIL (could not record the pre-swap attributes, source untouched - refusing a swap whose outcome could not be established)",
+			"file", f, "source_err", srcErr, "replacement_err", replErr)
+		_ = os.Remove(tmp)
+		out.Reason = "could not record the pre-swap attributes of both files - refused the swap: " +
+			errText(srcErr) + " / " + errText(replErr)
+		e.finish(ctx, f, key, store.Failed, out)
+		return nil
+	}
+
 	// Atomic swap. Same directory => same filesystem => rename() is atomic. If the
 	// ext is unchanged the rename replaces the source in one step; if it changed we
 	// rename to the new name then remove the now-orphaned source.
-	if err := os.Rename(tmp, final); err != nil {
-		e.Log.Warn("FAIL (swap error, source untouched)", "file", f, "err", err)
-		_ = os.Remove(tmp)
-		out.Reason = err.Error()
-		e.finish(ctx, f, key, store.Failed, out)
+	//
+	// A FAILED rename is no longer self-reporting. It used to log "swap error, source
+	// untouched" unconditionally, which on a network filesystem can be simply false -
+	// rename(2) says you cannot assume a failed rename was not performed. What happens
+	// now is in handleFailedSwap: re-stat, classify at swap time, and decide between
+	// four exhaustive cases, only one of which is allowed to say "untouched".
+	if err := e.rename(tmp, final); err != nil {
+		e.handleFailedSwap(ctx, f, key, tmp, final, srcRec, replRec, err, out)
 		return nil
 	}
 
@@ -937,14 +1122,53 @@ func isTempName(base string) bool {
 }
 
 // IsSourceName reports whether a file BASENAME is one a scan would enumerate as
-// a source: it carries one of the configured video extensions and is not one of
+// a source: it carries one of the configured video extensions and is neither one of
 // this tool's own work-in-progress temps (a temp is itself a *.mkv and is never a
-// source). It is the ONE definition of "a media file this run would enumerate",
+// source) nor a replacement this tool RETAINED (FILESYSTEM-1's record-free hold-back:
+// a file holdfast wrote is never anybody's source, whether or not a record of it
+// survived). It is the ONE definition of "a media file this run would enumerate",
 // shared by the scan and by the startup walk, which must decide it from the name
 // alone - it opens no file, so the walk's cost is bounded by the directory tree
 // and not by the library.
 func IsSourceName(base string, exts []string) bool {
-	return !isTempName(base) && matchesVideoExt(base, exts)
+	return !isTempName(base) && !IsRetainedReplacementName(base) && matchesVideoExt(base, exts)
+}
+
+// pickTempPath returns a free temp path from this build's own construction and clears
+// any stale temp sitting at it.
+//
+// The candidate at n == 0 is the name this repo has always used, so the ordinary case
+// is unchanged. A candidate is SKIPPED rather than cleared when a file holdfast wrote is
+// sitting at it - whether a record says so or the file itself does (strayReplacementHold).
+// This is the SECOND route to the same deletion the sweep guards: a source resolved "the
+// source is intact", or one simply re-queued after a failed swap, comes back round to
+// this function, and the replacement of the failed attempt may be sitting at exactly the
+// path it is about to pick. Running out of candidates is a loud failure, never a silent
+// walk.
+func (e *Engine) pickTempPath(ctx context.Context, dir, stem, ext string) (string, error) {
+	for n := 0; n < maxPathCandidates; n++ {
+		p := tempPath(dir, stem, ext, n)
+		if why, ok := e.heldBack(p); ok {
+			e.Log.Info("not using a temp path a record holds back", "path", p, "why", why)
+			continue
+		}
+		if why := e.strayReplacementHold(ctx, p); why != "" {
+			e.Log.Info("not using a temp path a file holdfast wrote is sitting at (no record of it survives)", "path", p, "why", why)
+			continue
+		}
+		_ = os.Remove(p) // clear any stale temp for this file
+		return p, nil
+	}
+	return "", fmt.Errorf("no free temp path beside %s after %d candidates", filepath.Join(dir, stem+"."+ext), maxPathCandidates)
+}
+
+// errText renders an error for a reason string, or "ok" when there is none, so a
+// two-part message reads honestly when only one half failed.
+func errText(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	return err.Error()
 }
 
 // matchesVideoExt reports whether base has one of the configured video extensions

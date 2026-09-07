@@ -186,3 +186,8 @@ rejected, rather than serving an offer nobody can follow.
   in CI (it needs a power-cut harness), so it is stated as a limitation, not a guarantee; prefer a
   local filesystem for the `/media` mount.
 - The image is **private until the repository is** — GHCR package visibility follows the repo.
+- **The source-mutation guard has a residual window, and it is different on local storage than on
+  a network mount.** The guard re-checks the source immediately before the swap, but it can only
+  be as sharp as the attributes it compares. Both windows are stated in
+  [The filesystem holdfast runs on](filesystem.md#residual-window-local): one place, so the two
+  statements cannot drift apart from each other or from the label holdfast records per job.

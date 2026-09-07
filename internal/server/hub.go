@@ -25,7 +25,16 @@ const (
 var activeAndPending = []store.Status{store.Pending, store.Probing, store.Encoding, store.Verifying}
 
 // terminal are the statuses shown in the "history" view.
-var terminal = []store.Status{store.Done, store.Skipped, store.Failed}
+//
+// The two FILESYSTEM-1 outcomes are here for a reason that is not cosmetic: a job
+// parked indeterminate, or one applied despite an error, must be reported AS THE STATE
+// IT IS IN. Leaving them out would have made a parked job - the one job on the whole
+// dashboard that is actually waiting for a human - the only job that never appears
+// anywhere, which is the same failure as reporting it as a success.
+var terminal = []store.Status{
+	store.Done, store.Skipped, store.Failed,
+	store.Indeterminate, store.AppliedDespiteError,
+}
 
 // jobDTO is the wire shape of one job row (a reporting projection of store.Job —
 // fingerprint is intentionally omitted; it is an internal dedup key, not UI data).
@@ -82,6 +91,19 @@ type jobDTO struct {
 	ProgressSeconds  *float64 `json:"progress_seconds"`
 	ProgressDuration *float64 `json:"progress_duration_seconds"`
 	ProgressFraction *float64 `json:"progress_fraction"`
+
+	// The source-mutation guard's achieved granularity for this job (FILESYSTEM-1):
+	// which attributes it compared, the resolution of the timestamp it compared, and
+	// which of the two documented residual windows applies to the storage it ran
+	// against. The window is a CLASS LABEL naming a statement in the shipped
+	// documentation, never a duration - the network one belongs to the client's
+	// attribute cache and has no value anyone can honestly state.
+	GuardAttributes     string `json:"guard_attributes,omitempty"`
+	GuardTimeResolution string `json:"guard_time_resolution,omitempty"`
+	GuardResidualWindow string `json:"guard_residual_window,omitempty"`
+	// SwapCause names a swap failure's cause when it is one holdfast reports
+	// distinctly - today only "cross-filesystem". Absent for every other failure.
+	SwapCause string `json:"swap_cause,omitempty"`
 }
 
 func toDTOs(jobs []store.Job) []jobDTO {
@@ -102,6 +124,11 @@ func toDTOs(jobs []store.Job) []jobDTO {
 			SourceBytes: j.Outcome.SourceBytes,
 			OutputBytes: j.Outcome.OutputBytes,
 			EncodeMs:    j.Outcome.EncodeMs,
+
+			GuardAttributes:     j.Outcome.GuardAttributes,
+			GuardTimeResolution: j.Outcome.GuardTimeResolution,
+			GuardResidualWindow: j.Outcome.GuardResidualWindow,
+			SwapCause:           j.Outcome.SwapCause,
 		})
 	}
 	return out

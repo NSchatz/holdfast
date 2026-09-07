@@ -29,14 +29,37 @@ const (
 	Done      Status = "done"
 	Skipped   Status = "skipped"
 	Failed    Status = "failed"
+
+	// Indeterminate is a swap that FAILED and whose outcome could not be established:
+	// the re-stat could not be completed, or it completed without either confirming
+	// the source untouched or establishing that the swap was applied. It is its own
+	// state precisely because it is neither of the two states that already exist -
+	// not a success, and NOT "a failure that left the source intact", which is what
+	// Failed has always meant on the swap path and what the pin's code asserted
+	// unconditionally. A job in this state is PARKED: both files are kept, nothing is
+	// re-attempted or re-queued, in this run or any later one, until an operator
+	// records a determination.
+	Indeterminate Status = "indeterminate"
+
+	// AppliedDespiteError is a swap whose rename returned an error and whose
+	// post-failure re-stat established that the rename NONETHELESS took effect - the
+	// hazard rename(2) documents for NFS, where a retransmitted request reports a
+	// failure for an operation the server already performed. It is established, not
+	// unknown, so it is neither Indeterminate nor Failed; and it is not Done, because
+	// the swap did not complete the way a success does (no durability fsync was
+	// ordered after it, and the caller was told it failed). It needs no operator
+	// action: the file at the source path IS the replacement.
+	AppliedDespiteError Status = "applied-despite-error"
 )
 
-// Terminal reports whether s is a terminal status (done/skipped/failed) — no
-// further processing will happen for that path+fingerprint (failed may still be
-// retried by Claim, but the row itself is a terminal record of an attempt).
+// Terminal reports whether s is a terminal status - no further processing will happen
+// for that path+fingerprint (failed may still be retried by Claim, but the row itself
+// is a terminal record of an attempt). Indeterminate and AppliedDespiteError are
+// terminal for the same reason done/skipped are: the attempt is over and its record
+// stands. Neither is ever re-claimed (see Claim).
 func (s Status) Terminal() bool {
 	switch s {
-	case Done, Skipped, Failed:
+	case Done, Skipped, Failed, Indeterminate, AppliedDespiteError:
 		return true
 	default:
 		return false
@@ -100,7 +123,61 @@ type Outcome struct {
 
 	// EncodeMs is the wall-clock encode duration in milliseconds (Done).
 	EncodeMs *int64
+
+	// --- the source-mutation guard's achieved granularity, per job -------------
+	//
+	// Recorded when the guard RUNS (immediately before the rename), and carried
+	// through to this job's terminal row so it is retrievable after the run has
+	// finished. All three are "" on a job that never reached the guard - a skip, an
+	// encode failure, a rejected output - which is "not recorded", never a fabricated
+	// window.
+
+	// GuardAttributes names the source attributes the guard compared, e.g.
+	// "size,mtime". It is the MEASURED half of the record: what was actually looked at.
+	GuardAttributes string
+
+	// GuardTimeResolution is the resolution of the timestamp the guard compared, as a
+	// duration - "1s" for the whole-second mtime this build stats. This field is
+	// REQUIRED to carry a duration: it is measured, not invented, and a build that
+	// dropped it (or spelled it as a word to slip past a check) would have thrown away
+	// the one number that says how sharp the guard actually is.
+	GuardTimeResolution string
+
+	// GuardResidualWindow is a CLASS LABEL - which of the two residual windows the
+	// shipped documentation states applies to this job's storage - and NEVER a
+	// duration. There are exactly two windows and no third: storage classified local
+	// takes the local one, and storage that is not local (network-backed OR
+	// undetermined) takes the network one, the same fail-safe that makes an
+	// unrecognised type not-local.
+	//
+	// A duration is refused HERE and only here. The network window belongs to the
+	// client's attribute cache, and nfs(5) says only "Every few seconds" - it names no
+	// interval and no tunable - so any number recorded in this field would be
+	// invented. What is measured is already in the two fields above.
+	GuardResidualWindow string
+
+	// SwapCause names the CAUSE of a swap failure when the cause is one this build
+	// reports distinctly - today exactly one: SwapCauseCrossFilesystem. It is "" for
+	// every other failure, so "the temp and the target are not on the same mounted
+	// filesystem" is never attributed to a swap that failed for some other reason.
+	SwapCause string
 }
+
+// SwapCauseCrossFilesystem is the distinct, machine-readable cause for a swap that
+// failed because the temp and the target are not on the same mounted filesystem
+// (rename(2)'s EXDEV: "oldpath and newpath are not on the same mounted filesystem").
+// It is a stable token, not prose - treat it as a wire format. holdfast does NOT copy,
+// move or otherwise fall back across filesystems when it sees this; it reports it.
+const SwapCauseCrossFilesystem = "cross-filesystem"
+
+// The two residual-window CLASS LABELS. They are deliberately the same identifiers as
+// the anchors the shipped documentation carries, so the label in a job's record and
+// the statement an operator reads are provably the same two things and a reader can
+// grep from one to the other.
+const (
+	ResidualWindowLocal   = "residual-window-local"
+	ResidualWindowNetwork = "residual-window-network"
+)
 
 // Job is a read-only snapshot of one row in the job ledger, returned by List. It
 // is a reporting view (the API/UI in TRANSCODE-7 renders it) — never a handle the
@@ -215,6 +292,142 @@ type Aggregates struct {
 	VmafMin  Spread
 }
 
+// Determination is what an operator decided about a parked job. There are exactly
+// two, because there are exactly two things that could have happened to the rename.
+type Determination string
+
+// The two determinations an operator may record.
+const (
+	SwapWasApplied  Determination = "swap-was-applied"
+	SourceIsIntact  Determination = "source-is-intact"
+	determinationNo Determination = "" // still parked
+)
+
+// Valid reports whether d is one of the two determinations.
+func (d Determination) Valid() bool { return d == SwapWasApplied || d == SourceIsIntact }
+
+// Disposition is what happened to ONE of the two recorded paths when a parked job was
+// resolved. Every resolution carries one for EACH path; a resolution that leaves
+// either path without one is refused, because an unstated disposition is exactly the
+// state in which nobody can say whether a file holdfast wrote is still out there.
+type Disposition string
+
+// The four dispositions.
+const (
+	// KeptInPlace: the file stays and later runs treat that path NORMALLY - it
+	// re-enters enumeration and no hold-back is placed on it. It is never legal for a
+	// recorded REPLACEMENT path: a file holdfast wrote is never handed back to
+	// enumeration as if it were a source.
+	KeptInPlace Disposition = "kept-in-place"
+	// RetainedExcluded: the file stays and that path remains OUT of enumeration for as
+	// long as the record survives.
+	RetainedExcluded Disposition = "retained-excluded"
+	// Deleted: removed, and only on the operator's explicit instruction.
+	Deleted Disposition = "deleted"
+	// Absent: there was no file there to dispose of.
+	Absent Disposition = "absent"
+)
+
+// Valid reports whether d is one of the four dispositions.
+func (d Disposition) Valid() bool {
+	switch d {
+	case KeptInPlace, RetainedExcluded, Deleted, Absent:
+		return true
+	default:
+		return false
+	}
+}
+
+// SwapIncident is the durable record of a swap that did not complete cleanly - the
+// facts AC-level reporting needs to identify BOTH files without logs, plus the
+// operator's determination once one is made.
+//
+// It lives in its own table rather than as more columns on the jobs row, for a reason
+// that is load-bearing: the jobs row is keyed on path+fingerprint and is CLEARED by
+// Claim (claiming begins a new attempt) and PRUNED after a successful transcode. The
+// exclusion a recorded replacement path carries has to outlive all of that - the file
+// holdfast wrote is still on disk regardless of what happens to the job that wrote it -
+// so the record cannot be a passenger on a row with that lifecycle.
+type SwapIncident struct {
+	ID int64
+
+	// SourcePath and SourceFingerprint are the job this incident belongs to.
+	SourcePath        string
+	SourceFingerprint string
+
+	// ReplacementPath is where the replacement IS - the path holdfast last knows it to
+	// be at, which after a retained failure is the retained-replacement path rather
+	// than the in-flight temp.
+	ReplacementPath string
+
+	// SourceAttrs and ReplacementAttrs are the rename-invariant attribute records
+	// taken BEFORE the rename was attempted, in probe.Attributes' "size:mtime"
+	// spelling. They are what makes the two files identifiable from the record alone.
+	SourceAttrs      string
+	ReplacementAttrs string
+
+	// ObservedAttrs is what the post-failure re-stat saw, or "" when the re-stat could
+	// not be completed. On an Outcome of AppliedDespiteError this is the evidence the
+	// applied case matched on.
+	ObservedAttrs string
+
+	// Outcome is Indeterminate or AppliedDespiteError.
+	Outcome Status
+
+	// SwapError is the error text the rename returned; SwapCause is
+	// SwapCauseCrossFilesystem or "".
+	SwapError string
+	SwapCause string
+
+	// StorageClass and StorageType are the classification of the source's storage
+	// taken AT THE TIME OF THAT SWAP.
+	StorageClass string
+	StorageType  string
+
+	CreatedAt int64
+
+	// JobOutcome is the proof the pipeline had accumulated for this job when the swap
+	// failed - the encoder, the VMAF pair and its model, the encode duration, and the
+	// source-mutation guard's granularity record. RecordSwapIncident writes it onto
+	// the JOB row in the same transaction as the incident, so a parked job's row still
+	// carries everything an ordinary terminal row would. nil records none.
+	JobOutcome *Outcome
+
+	// --- the resolution half; every field is zero while the job is parked -------
+
+	Resolution                      Determination
+	ResolvedBy                      string // who made it: "operator"
+	ResolvedAt                      int64
+	ObservedAtResolutionSource      string
+	ObservedAtResolutionReplacement string
+	DispositionSource               Disposition
+	DispositionReplacement          Disposition
+
+	// RemovalError records that a removal the resolution licensed did NOT succeed.
+	// When it is non-empty the replacement's disposition has been corrected away from
+	// Deleted, so the surviving file is still held out of enumeration - a licensed
+	// removal that fails must never leave a record claiming a deletion that did not
+	// happen.
+	RemovalError string
+}
+
+// Parked reports whether this incident is a parked job: recorded indeterminate, with
+// no operator determination yet.
+func (s SwapIncident) Parked() bool {
+	return s.Outcome == Indeterminate && s.Resolution == determinationNo
+}
+
+// Resolution is the operator's instruction, as the store records it.
+type Resolution struct {
+	Determination          Determination
+	By                     string
+	ObservedSource         string
+	ObservedReplacement    string
+	DispositionSource      Disposition
+	DispositionReplacement Disposition
+	RemovalError           string
+}
+
 // Store is the persistent job ledger. Every method is safe for concurrent use by
 // multiple workers (goroutines) within one process.
 type Store interface {
@@ -305,6 +518,47 @@ type Store interface {
 	// done/failed/other-skip row (the reason+status match guards that), so a real
 	// outcome is never deleted. No-op when no such row exists.
 	ClearSkip(ctx context.Context, path, fingerprint, reason string) error
+
+	// RecordSwapIncident persists a swap that did not complete cleanly: an
+	// indeterminate outcome, or one applied despite an error. It writes the incident
+	// row AND moves the job row to the matching status in ONE transaction, so a job
+	// can never sit in a state whose supporting facts were not written (or the
+	// reverse). An error from here means NEITHER landed, which is the only condition
+	// under which the caller may treat the outcome as unpersisted.
+	RecordSwapIncident(ctx context.Context, in SwapIncident) error
+
+	// ParkedIncidents returns every parked job - recorded indeterminate, no operator
+	// determination yet - oldest first. A run reads this at startup to report them and
+	// to hold both of each job's recorded paths back from the scan.
+	ParkedIncidents(ctx context.Context) ([]SwapIncident, error)
+
+	// ExcludedReplacementPaths returns every path a record carries as a job's
+	// replacement path whose disposition is neither deleted nor absent - i.e. every
+	// path where a file holdfast wrote may still be. Enumeration must not treat any of
+	// them as a source. The exclusion is keyed to the EXISTENCE OF THE RECORD and not
+	// to the parked state: a replacement retained after a job is resolved is still a
+	// file holdfast wrote, and enumerating it would queue a gate-passed encode as a
+	// source and leave the library a permanent duplicate.
+	ExcludedReplacementPaths(ctx context.Context) ([]string, error)
+
+	// ResolveIncident records an operator's determination against a parked incident
+	// and RELEASES the job: the incident keeps the durable record, and the jobs row for
+	// (source path, source fingerprint) is removed so a later run treats that path as
+	// new work rather than as a job to re-park. Both dispositions are required and a
+	// replacement path may never be kept-in-place; ResolveIncident refuses otherwise.
+	// It returns an error if id is not a parked incident.
+	ResolveIncident(ctx context.Context, id int64, r Resolution) error
+
+	// AmendReplacementDisposition corrects an already-recorded replacement disposition
+	// and attaches the reason. It exists for exactly one situation: the removal a
+	// resolution licensed was ordered AFTER the record was made durable, and then did
+	// not succeed. The record must not go on claiming a deletion that did not happen,
+	// so the disposition moves back to retained-excluded and the surviving file stays
+	// out of enumeration.
+	AmendReplacementDisposition(ctx context.Context, id int64, d Disposition, removalErr string) error
+
+	// IncidentByID returns one incident.
+	IncidentByID(ctx context.Context, id int64) (SwapIncident, bool, error)
 
 	// Close releases the underlying database handle.
 	Close() error

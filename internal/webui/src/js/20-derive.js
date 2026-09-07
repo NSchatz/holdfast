@@ -147,8 +147,13 @@ function announceText(sum) {
   const s = (sum && typeof sum === "object") ? sum : {};
   const n = (k) => (isNum(s[k]) ? s[k] : 0);
   const active = n("probing") + n("encoding") + n("verifying");
+  // A parked job is counted SEPARATELY and named for what it is. Folding it into
+  // "failed" would tell a screen-reader user the one thing this phase exists to stop
+  // holdfast saying: on this dashboard "failed" has always carried "and your source is
+  // fine", and a parked job is precisely the case where that is not established.
   return n("done") + " done, " + n("skipped") + " skipped, "
-    + n("failed") + " failed; " + active + " active, " + n("pending") + " pending.";
+    + n("failed") + " failed, " + n("indeterminate") + " parked awaiting a determination; "
+    + active + " active, " + n("pending") + " pending.";
 }
 
 // The set an aggregate is over, always stated; plus the bound, when it is not over all

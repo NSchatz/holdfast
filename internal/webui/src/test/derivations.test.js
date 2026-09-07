@@ -185,8 +185,23 @@ test("capNoteText claims a cap only when the ledger holds more than we were hand
 test("announceText is a short count summary a screen reader can hear on every snapshot", () => {
   assert.equal(
     d.announceText({ pending: 4, probing: 1, encoding: 2, verifying: 1, done: 9, skipped: 3, failed: 2 }),
-    "9 done, 3 skipped, 2 failed; 4 active, 4 pending.");
-  assert.equal(d.announceText({}), "0 done, 0 skipped, 0 failed; 0 active, 0 pending.");
+    "9 done, 3 skipped, 2 failed, 0 parked awaiting a determination; 4 active, 4 pending.");
+  assert.equal(d.announceText({}),
+    "0 done, 0 skipped, 0 failed, 0 parked awaiting a determination; 0 active, 0 pending.");
+});
+
+// A parked job is counted SEPARATELY and named for what it is (FILESYSTEM-1, AC15j). It is
+// NOT folded into "failed", because on this dashboard "failed" has always carried "and your
+// source is fine" - and a parked job is exactly the case where that is not established. A
+// screen-reader user hearing the count as a failure would be told the one thing this phase
+// exists to stop holdfast saying.
+test("announceText counts a parked job as parked, never as a failure", () => {
+  assert.equal(
+    d.announceText({ done: 1, skipped: 0, failed: 2, indeterminate: 3, pending: 0 }),
+    "1 done, 0 skipped, 2 failed, 3 parked awaiting a determination; 0 active, 0 pending.");
+  // The two counts move independently: parked jobs do not inflate the failure count.
+  assert.ok(d.announceText({ failed: 0, indeterminate: 5 }).includes("0 failed, 5 parked"));
+  assert.ok(d.announceText({ failed: 5, indeterminate: 0 }).includes("5 failed, 0 parked"));
 });
 
 test("an aggregate states the set it covers and the rows it excluded", () => {

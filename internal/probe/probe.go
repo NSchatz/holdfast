@@ -156,7 +156,59 @@ func Fingerprint(f string) string {
 	if err != nil {
 		return "0:0"
 	}
-	return strconv.FormatInt(fi.Size(), 10) + ":" + strconv.FormatInt(fi.ModTime().Unix(), 10)
+	return Attributes{SizeBytes: fi.Size(), MTimeUnix: fi.ModTime().Unix()}.String()
+}
+
+// Attributes is a file's RENAME-INVARIANT attribute record: the byte count and the
+// modification time in whole Unix seconds, and deliberately nothing else.
+//
+// Rename-invariance is the whole point and it constrains the field list rather than
+// decorating it. These attributes describe the CONTENT AT A PATH, so that a record
+// taken of a file at one path still matches when the file is observed at another - which
+// is exactly what a re-stat after a failed rename has to do to tell "the replacement is
+// now at the source path" from "the source is still there". Anything a rename changes is
+// therefore excluded by construction: the name and the path, the inode and link
+// identity, and ctime (which rename updates). mtime is not touched by rename, and neither
+// is the size.
+//
+// The two fields are also, precisely, what the source-mutation guard compares - so the
+// guard's granularity record (its attributes and its time resolution) describes this
+// type and cannot drift from it.
+type Attributes struct {
+	SizeBytes int64
+	// MTimeUnix is WHOLE Unix seconds. The truncation is not laziness, it is the
+	// platform's own resolution here, and it is the local residual window: a rewrite
+	// that keeps the byte count and lands inside the same mtime second is invisible.
+	MTimeUnix int64
+}
+
+// MTimeResolution is the resolution of the timestamp Attributes actually compares, as
+// a MEASURED duration. It is recorded per job beside the guard's compared attributes
+// (it is a fact about this build, not a label), and it is the local residual window:
+// a same-size rewrite inside one of these is undetectable.
+const MTimeResolution = "1s"
+
+// AttributeNames names the attributes Attributes compares, in a stable order, for the
+// guard's per-job granularity record. It is a closed vocabulary: a reader keys off it.
+const AttributeNames = "size,mtime"
+
+// String is the "size:mtime" spelling Fingerprint has always used, so an attribute
+// record and a job key are the same text and a reader never has to know two formats.
+func (a Attributes) String() string {
+	return strconv.FormatInt(a.SizeBytes, 10) + ":" + strconv.FormatInt(a.MTimeUnix, 10)
+}
+
+// StatAttributes reads f's rename-invariant attribute record. Unlike Fingerprint it
+// returns the ERROR rather than a "0:0" sentinel, because after a failed swap the
+// difference between "the file is not there" and "the file is there and is zero bytes
+// at the epoch" decides whether an outcome is reportable at all - a sentinel there
+// would be a fabricated observation.
+func StatAttributes(f string) (Attributes, error) {
+	fi, err := os.Stat(f)
+	if err != nil {
+		return Attributes{}, err
+	}
+	return Attributes{SizeBytes: fi.Size(), MTimeUnix: fi.ModTime().Unix()}, nil
 }
 
 // IsSymlink reports whether f is itself a symbolic link (Lstat, so it does NOT

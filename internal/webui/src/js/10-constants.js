@@ -2,14 +2,19 @@
 // The closed vocabularies the page reads off the wire. Values only, no DOM: this module
 // is loadable in a plain JavaScript runtime, which is what lets the unit suite exercise
 // the derivations that consume it without standing up a browser.
-const STATUSES = ["pending","probing","encoding","verifying","done","skipped","failed"];
+// "indeterminate" and "applied-despite-error" are FILESYSTEM-1 outcomes and they get
+// their own chip and their own history rows. A job whose swap outcome could not be
+// established must show as the state it is in: rendering it as done would be a lie and
+// rendering it as failed would be the more dangerous lie, because "failed" on this
+// dashboard has always meant "and your source is fine".
+const STATUSES = ["pending","probing","encoding","verifying","done","skipped","failed","indeterminate","applied-despite-error"];
 const QUEUE_STATUSES = ["pending","probing","encoding","verifying"];
 // The one state a progress figure can exist in. Progress is measured BY the encoder
 // against the source duration, so it is defined while the encoder runs and at no other
 // time: a probing row has not started one and a verifying row's encoder has exited. Those
 // states are covered by Elapsed alone, which is exactly what the phase scoped them to.
 const PROGRESS_STATUS = "encoding";
-const TERMINAL_STATUSES = ["done","skipped","failed"];
+const TERMINAL_STATUSES = ["done","skipped","failed","indeterminate","applied-despite-error"];
 
 // Human labels for the closed vocabulary of skip guards (internal/engine's Skip*
 // constants). An unknown token falls back to itself, so a new guard is never hidden.

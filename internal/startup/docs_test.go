@@ -56,14 +56,27 @@ func TestDocs_TheCheckBites(t *testing.T) {
 
 	// Each of the three parts, removed one at a time, must be caught: a cost
 	// statement that says two of the three is not the statement this owes.
+	//
+	// The redaction is scoped to the COST SECTION, and that is load-bearing rather
+	// than tidy. Redacting the first occurrence anywhere in the file passes the
+	// moment an unrelated section above happens to use the same ordinary English
+	// word ("refused", "in full") - the mutation then lands outside the section,
+	// the cost statement is left intact, and the check goes green while claiming to
+	// have been defeated. Scoping it also makes the assertion stronger: the phrase
+	// must be IN the cost statement, not merely somewhere in the document.
+	costStart := strings.Index(doc, CostHeading)
+	if costStart < 0 {
+		t.Fatalf("the shipped documentation has no %q section to mutate", CostHeading)
+	}
+	head, costOnward := doc[:costStart], doc[costStart:]
 	for _, part := range costParts {
 		for _, need := range part.Needs {
 			t.Run("a cost statement missing: "+need, func(t *testing.T) {
-				mutated := strings.Replace(doc, need, "REDACTED", 1)
-				if mutated == doc {
-					t.Fatalf("the phrase %q is not in the shipped text, so removing it proves nothing", need)
+				mutatedTail := strings.Replace(costOnward, need, "REDACTED", 1)
+				if mutatedTail == costOnward {
+					t.Fatalf("the phrase %q is not in the shipped COST SECTION, so removing it proves nothing", need)
 				}
-				if err := CheckCostStatement(mutated); err == nil {
+				if err := CheckCostStatement(head + mutatedTail); err == nil {
 					t.Fatalf("a cost statement missing %q passed", need)
 				}
 			})

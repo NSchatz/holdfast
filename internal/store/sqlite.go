@@ -143,6 +143,20 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 	switch {
 	case st == Done || st == Skipped:
 		return false, nil // permanent terminal state
+	case st == Indeterminate:
+		// PARKED. Whether the swap was applied is exactly what is unknown, so
+		// re-claiming would mean re-encoding and re-swapping a path that may already
+		// hold the replacement. Nothing here moves until an operator records a
+		// determination, which RELEASES the job by removing this row (see
+		// ResolveIncident) rather than by making it claimable again.
+		return false, nil
+	case st == AppliedDespiteError:
+		// The rename took effect: the file at this path is the replacement, and this
+		// row describes an attempt that is over. It is never re-attempted ON THE
+		// STRENGTH OF THIS JOB. The path itself is not held back - the file there now
+		// has a different size/mtime, so a later scan keys it as NEW work and the
+		// ordinary already-at-target-codec guard is what skips it.
+		return false, nil
 	case st == Failed:
 		if failCount >= maxFailures {
 			return false, nil // parked
@@ -170,7 +184,9 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE jobs SET status = ?, worker = ?, updated_at = ?,
 			reason = NULL, encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
-			source_bytes = NULL, output_bytes = NULL, encode_ms = NULL
+			source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
+			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
+			swap_cause = NULL
 		 WHERE path = ? AND fingerprint = ?`,
 		string(Probing), worker, now(), path, fingerprint); err != nil {
 		return false, fmt.Errorf("store: claim update: %w", err)
@@ -206,24 +222,37 @@ func (s *SQLite) Finish(ctx context.Context, path, fingerprint string, st Status
 	// A "" string is stored as NULL, not as an empty string, so "not recorded" has ONE
 	// representation in the column rather than two the readers would both have to know
 	// about.
+	if _, err := s.db.ExecContext(ctx, finishQuery(st), finishArgs(st, o, path, fingerprint)...); err != nil {
+		return fmt.Errorf("store: finish: %w", err)
+	}
+	return nil
+}
+
+// finishQuery and finishArgs are shared by Finish and by RecordSwapIncident's
+// transaction, so the "every Finish fully defines the row's proof" rule cannot hold on
+// one path and quietly lapse on the other.
+func finishQuery(st Status) string {
 	q := `UPDATE jobs SET status = ?, updated_at = ?,
 		reason = ?, encoder = ?, vmaf_mean = ?, vmaf_min = ?, vmaf_model = ?,
-		source_bytes = ?, output_bytes = ?, encode_ms = ?`
+		source_bytes = ?, output_bytes = ?, encode_ms = ?,
+		guard_attributes = ?, guard_time_resolution = ?, guard_residual_window = ?,
+		swap_cause = ?`
 	if st == Failed {
 		q += `, fail_count = fail_count + 1`
 	}
-	q += ` WHERE path = ? AND fingerprint = ?`
+	return q + ` WHERE path = ? AND fingerprint = ?`
+}
 
-	if _, err := s.db.ExecContext(ctx, q,
+func finishArgs(st Status, o *Outcome, path, fingerprint string) []any {
+	return []any{
 		string(st), now(),
 		nullString(o.Reason), nullString(o.Encoder),
 		nullFloat(o.VmafMean), nullFloat(o.VmafMin), nullString(o.VmafModel),
 		nullInt(o.SourceBytes), nullInt(o.OutputBytes), nullInt(o.EncodeMs),
+		nullString(o.GuardAttributes), nullString(o.GuardTimeResolution),
+		nullString(o.GuardResidualWindow), nullString(o.SwapCause),
 		path, fingerprint,
-	); err != nil {
-		return fmt.Errorf("store: finish: %w", err)
 	}
-	return nil
 }
 
 // --- NULL helpers -------------------------------------------------------------
@@ -255,8 +284,13 @@ func nullInt(i *int64) any {
 // scanOutcome reads the eight nullable outcome columns into an Outcome, mapping SQL
 // NULL back to the nil pointer / empty string that means "not recorded". The inverse
 // of the null* helpers above; the round-trip is asserted by the store tests.
-func scanOutcome(reason, encoder, model sql.NullString, mean, worst sql.NullFloat64, src, out, ms sql.NullInt64) Outcome {
-	o := Outcome{Reason: reason.String, Encoder: encoder.String, VmafModel: model.String}
+func scanOutcome(reason, encoder, model sql.NullString, mean, worst sql.NullFloat64, src, out, ms sql.NullInt64,
+	guardAttrs, guardRes, guardWindow, swapCause sql.NullString) Outcome {
+	o := Outcome{
+		Reason: reason.String, Encoder: encoder.String, VmafModel: model.String,
+		GuardAttributes: guardAttrs.String, GuardTimeResolution: guardRes.String,
+		GuardResidualWindow: guardWindow.String, SwapCause: swapCause.String,
+	}
 	if mean.Valid {
 		v := mean.Float64
 		o.VmafMean = &v
@@ -295,7 +329,8 @@ func (s *SQLite) Delete(ctx context.Context, path, fingerprint string) error {
 // but parameterizing keeps the read injection-proof by construction).
 func (s *SQLite) List(ctx context.Context, statuses []Status, limit int) ([]Job, error) {
 	q := `SELECT path, fingerprint, status, fail_count, worker, updated_at,
-		reason, encoder, vmaf_mean, vmaf_min, vmaf_model, source_bytes, output_bytes, encode_ms
+		reason, encoder, vmaf_mean, vmaf_min, vmaf_model, source_bytes, output_bytes, encode_ms,
+		guard_attributes, guard_time_resolution, guard_residual_window, swap_cause
 		FROM jobs`
 	args := make([]any, 0, len(statuses)+1)
 	if len(statuses) > 0 {
@@ -329,13 +364,16 @@ func (s *SQLite) List(ctx context.Context, statuses []Status, limit int) ([]Job,
 		var reason, encoder, model sql.NullString
 		var mean, vmin sql.NullFloat64
 		var src, outB, ms sql.NullInt64
+		var guardAttrs, guardRes, guardWindow, swapCause sql.NullString
 		if err := rows.Scan(&j.Path, &j.Fingerprint, &status, &j.FailCount, &worker, &j.UpdatedAt,
-			&reason, &encoder, &mean, &vmin, &model, &src, &outB, &ms); err != nil {
+			&reason, &encoder, &mean, &vmin, &model, &src, &outB, &ms,
+			&guardAttrs, &guardRes, &guardWindow, &swapCause); err != nil {
 			return nil, fmt.Errorf("store: list scan: %w", err)
 		}
 		j.Status = Status(status)
 		j.Worker = worker.String
-		j.Outcome = scanOutcome(reason, encoder, model, mean, vmin, src, outB, ms)
+		j.Outcome = scanOutcome(reason, encoder, model, mean, vmin, src, outB, ms,
+			guardAttrs, guardRes, guardWindow, swapCause)
 		out = append(out, j)
 	}
 	if err := rows.Err(); err != nil {
@@ -402,7 +440,9 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 		 ON CONFLICT(path, fingerprint) DO UPDATE SET
 			status = excluded.status, reason = excluded.reason, worker = NULL, updated_at = excluded.updated_at,
 			encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
-			source_bytes = NULL, output_bytes = NULL, encode_ms = NULL
+			source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
+			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
+			swap_cause = NULL
 		 WHERE jobs.status = ?`,
 		path, fingerprint, string(Skipped), now(), nullString(reason), string(Pending))
 	if err != nil {

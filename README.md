@@ -106,8 +106,9 @@ Bash transcoder.
 ```bash
 cp config.example.yaml config.yaml   # then edit library_roots
 holdfast validate --config config.yaml
-holdfast run --config config.yaml   # one scan: re-encode bloated non-HEVC video, safely
-holdfast serve --config config.yaml # HTTP API + web dashboard (scan on demand / on an interval)
+holdfast run --config config.yaml     # one scan: re-encode bloated non-HEVC video, safely
+holdfast serve --config config.yaml   # HTTP API + web dashboard (scan on demand / on an interval)
+holdfast resolve --config config.yaml # list (and resolve) any job whose swap outcome is unknown
 ```
 
 `run`/`serve` need `ffmpeg` and `ffprobe` on `PATH` (or set `HOLDFAST_FFMPEG` / `HOLDFAST_FFPROBE`); they
@@ -147,7 +148,7 @@ invariant is entirely unaffected.
 | `GET /` | — | the embedded dashboard |
 | `GET /api/summary` | — | counts per status + bytes reclaimed (**lifetime** and this-run) + paused/scanning + the **whole-ledger aggregates** (see below) |
 | `GET /api/queue` | — | pending + active jobs |
-| `GET /api/history?limit=N` | — | recent terminal jobs (done/skipped/failed) with their recorded outcome — see below |
+| `GET /api/history?limit=N` | — | recent terminal jobs (done/skipped/failed, plus `indeterminate` and `applied-despite-error`) with their recorded outcome — see below |
 | `GET /api/events` | — | SSE: a fresh snapshot on every state change |
 | `GET /metrics` | — | Prometheus metrics (when `metrics_enable`, default on) |
 | `POST /api/rescan` | token | start a library scan (409 if paused / scanning / outside the run window) |
@@ -174,6 +175,9 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | `vmaf_model` | as above | the libvmaf model that produced them |
 | `source_bytes`, `output_bytes` | done | the sizes either side of the swap |
 | `encode_ms` | done, and a failure after the encode ran | wall-clock encode time |
+| `guard_attributes`, `guard_time_resolution` | any job that reached the swap | which source attributes the source-mutation guard compared (`size,mtime`) and the resolution of the timestamp it compared (`1s`) - the granularity that check actually achieved |
+| `guard_residual_window` | as above | which of the two documented residual windows applies to the storage the guard ran against: `residual-window-local` or `residual-window-network`. A **class label**, never a duration - see [docs/filesystem.md](docs/filesystem.md#residual-window-local) |
+| `swap_cause` | a swap failure with a distinct cause | today only `cross-filesystem` - the temp and the target were not on the same mounted filesystem. Absent for every other failure |
 
 **A `null` means "not recorded", and you must read it that way.** It is never a zero. A numeric field is
 `null` — not `0` — whenever the fact was not measured (VMAF disabled, or a row written before these
@@ -267,6 +271,62 @@ Each one carries the same envelope, and every part of it is load-bearing:
 
 The dashboard shows all of it under **Across the whole ledger**, each figure beside the set it covers and
 the count of rows it had to leave out.
+
+#### When holdfast cannot tell what the swap did (`indeterminate`) - and how you get out of it
+
+The swap is an atomic `rename(2)`, and on a **local** filesystem a failed rename means the source is
+still there. On a network one it does not: `rename(2)` says outright that "on NFS filesystems, you can
+not assume that if the operation failed, the file was not renamed" - a retransmitted request can report
+a failure for an operation the server already performed. So after *every* failed swap holdfast re-stats
+the source path and decides between four outcomes, and only one of them may say the source is untouched:
+
+| Outcome | What it means |
+|---|---|
+| `failed` | the swap failed AND the re-stat confirmed the source untouched - which requires the storage to be **positively identified as local**, because a client attribute cache populated before the swap returns the pre-swap answer either way |
+| `applied-despite-error` | the rename returned an error but the re-stat established that it **took effect**: the file at the source path is the replacement. Nothing is re-attempted, nothing is deleted, and a later run treats that path normally (the ordinary already-at-target-codec guard skips it) |
+| `indeterminate` | holdfast **cannot establish** what happened. The job is **parked**: both files are kept, and nothing encodes, swaps, deletes or re-queues either path - in this run or any later one - until you say what happened |
+
+An unrecognised filesystem counts as **not local**: a false warning costs you a look, a false clear costs
+you a film. The set this build recognises as local is the **same one** the startup check prints and
+[docs/filesystem.md](docs/filesystem.md#filesystem-types-this-build-classifies-local) states - there is
+exactly one such set in the binary, read by the startup check and by the swap-time and guard-time
+lookups alike. NFS and SMB/CIFS are known to be network-backed; anything in neither set is
+undetermined, and therefore not local.
+
+A parked job is reported at the start of every run, naming both files, and:
+
+```bash
+holdfast resolve --config config.yaml            # list every parked job
+holdfast resolve --config config.yaml --id 3     # report one: both paths, and what is at each RIGHT NOW
+holdfast resolve --config config.yaml --id 3 \
+    --determination swap-was-applied \
+    --replacement delete                         # record what happened, and dispose of the replacement
+```
+
+The report is never conditional on observing either file: a recorded path with nothing at it, or one
+that cannot be inspected, is reported as exactly that and the job is still resolvable. The record is
+made **durable before** anything is removed, so a store failure costs you a repeated instruction and
+never an unrecorded deletion - and a replacement holdfast kept is never handed back to enumeration as if
+it were a source. Files holdfast retained this way are named `*.__holdfast-replacement__.*` and are left
+alone by every later run, whether or not a record of them survived.
+
+Moving a replacement to that name is itself a write into the media directory, and the failure that
+strands a replacement is often the same failure that denies the write - a library that has gone
+read-only refuses the swap, the move to the held-back name and the record in the job store alike. So a
+replacement can end up left at its `*.__transcoding__.*` working path with nothing recorded about it.
+holdfast still will not touch it. The stale-temp sweep that reclaims a killed run's half-written encodes
+**examines** each one rather than assuming it is disposable: a file at that path whose content is a
+finished encode at the target codec, the length of the source beside it, is kept, reported at every
+subsequent run, and stepped around when a fresh encode of the same source picks its own working path.
+Removing it is your call, not the tool's. A genuinely half-written encode is shorter than its source and
+is still swept, exactly as before.
+
+When `container_ext` makes the output's extension differ from the source's, the swap's target is a
+**different path** from the source, so a rename that took effect while reporting an error leaves the
+replacement *there* rather than at the source path. holdfast follows the file: a parked job records where
+it actually is and retains it under the held-back name, and where the source is instead established
+untouched the recorded reason names the second file, so a duplicate is never something you have to
+notice for yourself (the next scan's collision guard reconciles it).
 
 #### Schema versioning
 

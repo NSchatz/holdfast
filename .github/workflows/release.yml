@@ -105,6 +105,31 @@ jobs:
           ./scripts/install-ffmpeg.sh /opt/ffmpeg
           echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
 
+      # The gate now includes dashboard graders that load the page in a real browser
+      # engine, so the release resolves one too. Same reason as ci.yml, and the same
+      # probe: a candidate is accepted only once it has actually RENDERED a page under a
+      # timeout, because /usr/bin/chromium can be a snap shim that hangs instead of
+      # failing. A grader that skipped for want of a browser would be a false green, and
+      # a release is the last place to accept one.
+      - name: browser for the rendered dashboard graders
+        run: |
+          set -uo pipefail
+          probe="$(mktemp -d)"
+          for b in google-chrome google-chrome-stable chrome chromium chromium-browser; do
+            p="$(command -v "$b" 2>/dev/null || true)"
+            [ -n "$p" ] || continue
+            if HOME="$probe" timeout 60 "$p" --headless=new --disable-gpu --no-sandbox \
+                 --disable-dev-shm-usage --no-first-run --no-default-browser-check \
+                 --user-data-dir="$probe/profile" --dump-dom about:blank >/dev/null 2>&1; then
+              echo "HOLDFAST_BROWSER=$p" >> "$GITHUB_ENV"
+              echo "using $b: $p ($("$p" --version 2>/dev/null || echo 'version unknown'))"
+              exit 0
+            fi
+            echo "  $p found but did not render within 60s - trying the next candidate"
+          done
+          echo "::error::no browser on this runner could render a page - the dashboard graders need one" >&2
+          exit 1
+
       - name: the full gate (make check)
         run: make check
 
