@@ -16,3 +16,9 @@ function mk(tag, cls, text) {
 }
 // The honest "not recorded" node for a nil/absent outcome field.
 function nrNode() { return mk("span", "nr", NOT_RECORDED); }
+
+// tplNode clones one shell out of a <template> in the document. It is how every row is
+// built, and it is also the ONLY way a vector element gets onto this page: the SVG
+// namespace comes from the HTML parser reading the template, so no module here names a
+// namespace URI, imports a drawing library, or builds an element from a string.
+function tplNode(id) { return $(id).content.cloneNode(true).firstElementChild; }
