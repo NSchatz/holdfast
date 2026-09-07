@@ -187,6 +187,31 @@ dry_run: false
 # score says which pixels were compared rather than leaving it to ffmpeg's filter
 # negotiation and nobody's notes.
 
+# --- the undo window (a swap you can walk back) ---
+# The swap is the ONE irreversible thing holdfast does, and every gate in front of it
+# is an estimate - a very good one, but still a machine's verdict that two files look
+# the same. The delete is not an estimate.
+#
+# With undo_window_hours > 0, holdfast takes a second hard link to the original just
+# before the rename, so the original's bytes stay retrievable after the swap has taken
+# its only other name away:
+#
+#   holdfast restore --config config.yaml            # what is held, and for how long
+#   holdfast restore --config config.yaml /media/tv/ep.mkv
+#
+# What it costs. NOTHING at the moment it is taken - a second name for the same data
+# is not a second copy. But the space a swap reclaimed does NOT come back until the
+# window closes: a first pass over a library holds every original it replaced for this
+# many hours. The API reports what is held separately from what was reclaimed, so the
+# two are never confused. A release returns the file's space only when the retained
+# name was the last one, and reports zero when it was not.
+#
+# 0 (THE DEFAULT) disables it: the rename destroys the source and nothing retains it.
+# `validate` and startup both say so out loud. A source whose original cannot be
+# retained is SKIPPED rather than swapped, so the window never becomes a promise that
+# quietly is not kept.
+# undo_window_hours: 0       # 0 = off (default); e.g. 24 keeps an original for a day
+
 # --- runtime ---
 # state_dir: state           # holds the resumable SQLite job store (jobs.db)
 # workers: 1                 # concurrent encode workers (default 1 = sequential;

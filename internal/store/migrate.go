@@ -133,6 +133,45 @@ ALTER TABLE jobs ADD COLUMN vmaf_chroma        REAL;
 ALTER TABLE jobs ADD COLUMN vmaf_chroma_metric TEXT;
 `,
 	},
+	{
+		// v5 - UNDO-6: the retained originals the undo window can put back.
+		//
+		// A SEPARATE TABLE rather than columns on jobs, and that is forced by the
+		// lifetimes. A jobs row is keyed (path, fingerprint) and the swap DELETES the
+		// pre-swap row (ProcessFile prunes it once the done row lands under the final
+		// file's new key), so a retention recorded on that row would be pruned by the
+		// very swap it exists to undo. The retention outlives the row: it is keyed by
+		// the library PATH, which is the thing an operator asks to restore.
+		//
+		// source_path is where the original goes BACK; swapped_path is what the swap
+		// produced (the same path for an in-place rename, a different one when the
+		// container extension changed). Both are recorded because a restore has to put
+		// one back and remove the other, and deriving either from the other after the
+		// fact would be guessing at configuration that may since have changed.
+		//
+		// swapped_fingerprint is the size:mtime of the file the swap left at
+		// swapped_path, taken immediately after the swap. It is what makes a restore
+		// refuse to overwrite content that is not what this tool put there.
+		//
+		// restored_at is NULL until an operator restores, and a released retention is
+		// DELETED outright - so "is there anything to restore for this path" is exactly
+		// "a row exists with restored_at IS NULL", with no third state to get wrong.
+		name: "retained originals",
+		sql: `
+CREATE TABLE IF NOT EXISTS retained_originals (
+	source_path         TEXT NOT NULL PRIMARY KEY,
+	swapped_path        TEXT NOT NULL,
+	retained_path       TEXT NOT NULL,
+	source_bytes        INTEGER NOT NULL,
+	swapped_fingerprint TEXT NOT NULL,
+	retained_at         INTEGER NOT NULL,
+	expires_at          INTEGER NOT NULL,
+	restored_at         INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_retained_swapped ON retained_originals(swapped_path);
+CREATE INDEX IF NOT EXISTS idx_retained_expires ON retained_originals(restored_at, expires_at);
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

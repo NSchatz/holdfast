@@ -304,7 +304,11 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
 
 ## Layout
 
-- `cmd/holdfast` — the CLI (`run` / `serve` / `validate` / `version`), structured `slog` logging. `run`
+- `cmd/holdfast` — the CLI (`run` / `serve` / `restore` / `validate` / `version`), structured `slog`
+  logging. `restore` (UNDO-6) is the operator's half of the undo window and is deliberately LOCAL, not an
+  HTTP endpoint: it overwrites a library file with older bytes, which is a mutation the read-and-control
+  API has no authorization story for. It loads the same config and opens the same state directory as
+  `run`/`serve` and stops there — no ffmpeg lookup, no capability check, no library walk. `run`
   builds and drives the engine oneshot with a signal-cancellable context; `serve` (TRANSCODE-7) wires the
   same engine to the API/UI and runs until SIGTERM (graceful HTTP drain). Engine setup shared by both is
   factored into `buildEngine`.
@@ -408,6 +412,20 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   a channel; a worker's in-flight temp is local to its own `ProcessFile` call, never a shared field, since N
   workers each hold at most one temp at a time). **This is the risk-critical heart — do not weaken the
   invariant.**
+  `undo.go` (UNDO-6) is the bounded window in which the swap can be walked back, and it is OFF by
+  default (`undo_window_hours: 0`, announced at startup and by `validate`, because that is the setting
+  in which a swap is final). It is a second **hard link** taken before the rename, never a copy: one
+  inode, two names, no additional bytes — and therefore, by `link(2)`'s EXDEV rule, a retention area
+  that must live in the source's own directory (`.holdfast-undo/`), which is why there is no
+  configurable retention path. Three consequences bind anything that touches this: a retained original
+  is **never enumerated** as a source (it would be re-encoded and swapped over the bytes an operator was
+  given a window to recover); a link this tool **can prove is its own** is discounted by the hardlink
+  guard, while a foreign one still skips exactly as before; and a source whose original **cannot** be
+  retained is skipped (`undo-retention-failed`, a mutable guard) rather than swapped, because the
+  window's promise is that a swap can be undone. The release runs at the start of every scan pass and
+  reports the bytes it ACTUALLY returned — `unlink(2)` frees the data only when the removed name was the
+  last one, so a retention whose data survives elsewhere reports zero rather than its size. Space still
+  held is published as its own figure, never folded into a reclaimed total. Full reference: `docs/undo.md`.
 - `internal/logging`, `internal/version` — logger construction, build-stamped version.
 - `.github/workflows/ci.yml` — the gate (installs the pinned ffmpeg via `scripts/install-ffmpeg.sh` for the
   engine proof) + a `package` job (TRANSCODE-9) that builds BOTH arches and runs the image smoke gate.

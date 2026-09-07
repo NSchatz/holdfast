@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/knadh/koanf/parsers/yaml"
@@ -44,7 +45,7 @@ var knownKeys = map[string]bool{
 	"pixel_format": true, "container_ext": true, "min_bitrate_kbps": true,
 	"min_savings_percent": true, "duration_tolerance_sec": true,
 	"max_failures": true, "skip_hardlinked": true, "state_dir": true,
-	"allow_non_local": true,
+	"allow_non_local": true, "undo_window_hours": true,
 	"vmaf_enable":     true, "min_vmaf": true, "vmaf_min_pool": true,
 	"vmaf_min_chroma": true,
 	"vmaf_subsample":  true, "vmaf_model": true, "workers": true,
@@ -71,6 +72,7 @@ func defaultLayer() map[string]any {
 		"max_failures":           3,
 		"skip_hardlinked":        true,
 		"state_dir":              "state",
+		"undo_window_hours":      0,
 		"vmaf_enable":            true,
 		"min_vmaf":               95.0,
 		"vmaf_min_pool":          60.0,
@@ -158,6 +160,24 @@ type Config struct {
 	// StateDir holds the job store (jobs.db) + heartbeat (relative paths are
 	// resolved by callers).
 	StateDir string `yaml:"state_dir"`
+
+	// UndoWindowHours is how many hours a swapped-out original is kept retrievable
+	// (UNDO-6). 0 - the DEFAULT - disables the window, which is the configuration in
+	// which a swap is final the microsecond it happens; `validate` and startup both
+	// say so out loud.
+	//
+	// While the window is open the original is held by a SECOND HARD LINK to the same
+	// data, so retention costs no additional space at the moment it is taken - but the
+	// space the swap reclaimed is NOT returned to the filesystem until the window
+	// closes and the link is released. A library-wide first pass therefore holds every
+	// original it replaced for this many hours, which is the real cost of the setting:
+	// the reclaimed figure and the held figure are reported separately for exactly
+	// that reason.
+	//
+	// A source whose original cannot be retained is SKIPPED rather than swapped: the
+	// window's promise is that a swap can be walked back, and a swap that cannot be is
+	// not one this tool takes while the operator has asked for the window.
+	UndoWindowHours int `yaml:"undo_window_hours"`
 
 	// AllowNonLocal opts specific paths in to running on storage holdfast could
 	// not positively identify as local (FILESYSTEM-1). holdfast's no-loss
@@ -330,6 +350,20 @@ func (c *Config) EffectiveWorkers() int {
 		return 1
 	}
 	return c.Workers
+}
+
+// UndoEnabled reports whether the undo window is open at all. It is the single
+// reading of "is 0 the disabled sentinel", so the engine, the CLI and the warning
+// cannot disagree about what the default means.
+func (c *Config) UndoEnabled() bool { return c.UndoWindowHours > 0 }
+
+// UndoWindow is how long a retained original is kept. Zero when the window is
+// disabled, which no caller should reach - UndoEnabled gates them all.
+func (c *Config) UndoWindow() time.Duration {
+	if !c.UndoEnabled() {
+		return 0
+	}
+	return time.Duration(c.UndoWindowHours) * time.Hour
 }
 
 // VmafGate reports whether the VMAF gate is enabled, defaulting to true when unset.
@@ -567,6 +601,14 @@ func (c *Config) Validate() error {
 	if c.VmafEnable != nil && *c.VmafEnable && c.MinVmaf == 0 && c.VmafMinPool == 0 && c.VmafMinChroma == 0 {
 		return errors.New("vmaf_enable is true but min_vmaf, vmaf_min_pool and vmaf_min_chroma are all 0 - the VMAF gate would never reject; set min_vmaf (e.g. 95) or disable the gate")
 	}
+	// The undo window (UNDO-6). A negative retention is not a shorter window, it is a
+	// window that has already closed for every original it would hold - so it would
+	// retain a link and release it on the same pass, paying the cost of the feature
+	// and delivering none of it. Refused BY NAME rather than clamped to 0, which would
+	// silently turn a typo into "swaps are final".
+	if c.UndoWindowHours < 0 {
+		return fmt.Errorf("undo_window_hours %d must be >= 0 (0 disables the undo window; a swap is then final)", c.UndoWindowHours)
+	}
 	if c.Workers < 0 || c.Workers > 1024 {
 		return fmt.Errorf("workers %d out of range (0-1024; 0 means the default of 1)", c.Workers)
 	}
@@ -592,6 +634,34 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// Notices reports things this configuration MEANS that an operator must be told at
+// startup, whether or not they chose them. They are not Warnings: a warning says a
+// safety gate has been weakened from what this tool ships, and a shipped default can
+// never be that. Both are announced, and they are separate lists so that neither has
+// to lie about what it is - a default that produced a warning would train an operator
+// to skip warnings, and a real weakened gate is what they would skip next.
+//
+// The undo window is the case this exists for (UNDO-6). It is OFF by default, and off
+// means the swap - the only irreversible act this tool performs - cannot be walked
+// back. That is not a weakened gate, it is the tool's behaviour, and it is precisely
+// the behaviour somebody deleting originals should hear stated before the first one
+// goes.
+//
+// `validate` prints these; `run` and `serve` log them at startup.
+func (c *Config) Notices() []string {
+	var n []string
+	if !c.UndoEnabled() {
+		n = append(n, "undo_window_hours is 0 - THE UNDO WINDOW IS DISABLED, so a swap is FINAL: "+
+			"the rename that replaces a source destroys it, nothing retains the original, and a bad "+
+			"encode that cleared every gate cannot be walked back. This is the default. Set "+
+			"undo_window_hours (e.g. 24) to keep each replaced original retrievable with "+
+			"`holdfast restore <path>` for that long: it costs no extra space at the moment it is "+
+			"taken (a second hard link to the same data), but the space a swap reclaimed is not "+
+			"returned to the filesystem until the window closes.")
+	}
+	return n
+}
+
 // Warnings reports configurations that are VALID but weaken a safety gate — the
 // things a delete-capable tool must say out loud rather than absorb silently. They
 // are not errors: each is a legitimate choice, and refusing to start would be
@@ -599,6 +669,11 @@ func (c *Config) Validate() error {
 // LOOKS like it has a worst-frame floor when it no longer meaningfully does.
 //
 // `validate` prints these, and `run`/`serve` log them at startup.
+//
+// A WARNING IS ALWAYS A WEAKENED GATE. Something that is merely worth stating about a
+// configuration - including a shipped default worth stating - belongs in Notices,
+// because a default configuration that warns is how an operator learns to skip
+// warnings, and the next one will be a real gate they have turned off.
 func (c *Config) Warnings() []string {
 	var w []string
 	// The gate off entirely is the operator's call — but it is also the WEAKEST
