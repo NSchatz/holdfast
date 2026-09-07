@@ -130,24 +130,31 @@ func TestEvaluate_Operators(t *testing.T) {
 
 // Prose in a comment must not be read as a published act, and a real command must not be
 // hidden by a quote character earlier on the line.
-func TestStripShellComments(t *testing.T) {
+func TestShellCommands_CommentsAreProseAndQuotesAreNot(t *testing.T) {
 	in := strings.Join([]string{
 		`# docker push ghcr.io/x/y:latest`,
 		`echo "a # b" && docker push ghcr.io/x/y:v1   # trailing prose`,
 		`echo '#not a comment'`,
 	}, "\n")
-	got := StripShellComments(in)
-	if strings.Contains(strings.SplitN(got, "\n", 2)[0], "docker push") {
-		t.Fatalf("a whole-line comment survived stripping: %q", got)
+	var got []string
+	for _, c := range ShellCommands(in) {
+		got = append(got, c.String())
 	}
-	if !strings.Contains(got, "docker push ghcr.io/x/y:v1") {
-		t.Fatalf("a real command was stripped along with the trailing comment: %q", got)
+	all := strings.Join(got, "\n")
+	if len(got) != 3 {
+		t.Fatalf("read %d command(s), want 3 (the whole-line comment is not one of them):\n%s", len(got), all)
 	}
-	if strings.Contains(got, "trailing prose") {
-		t.Fatalf("a trailing comment survived stripping: %q", got)
+	if got[0] != `echo a # b` {
+		t.Fatalf("a # inside double quotes was treated as a comment: %q", got[0])
 	}
-	if !strings.Contains(got, "#not a comment") {
-		t.Fatalf("a # inside quotes was treated as a comment: %q", got)
+	if got[1] != "docker push ghcr.io/x/y:v1" {
+		t.Fatalf("a real command was cut along with the trailing comment: %q", got[1])
+	}
+	if strings.Contains(all, "trailing prose") {
+		t.Fatalf("a trailing comment survived: %q", all)
+	}
+	if got[2] != `echo #not a comment` {
+		t.Fatalf("a # inside single quotes was treated as a comment: %q", got[2])
 	}
 }
 

@@ -383,62 +383,237 @@ func TestActs_UndecidablePushInputIsAnErrorNotAnEmptyList(t *testing.T) {
 	}
 }
 
-// The `run:` half of the catalogue had the same hole in a different dimension: its patterns
-// were matched against PHYSICAL lines. `[^\n]*` cannot cross a newline and `\s+` does not
-// match a backslash, so a command written across shell line continuations - which is this
-// repository's own house style for a multi-flag command - performed no act at all.
+// The `run:` half of the catalogue is read by ONE function, and having one is the property
+// being pinned here. Two readers - a comment stripper per physical line, then a continuation
+// joiner - disagreed about what a line is: the stripper reset its quote state at exactly the
+// boundary the joiner erased, so a `#` inside a quoted argument on a continuation line was
+// read as a comment and the rest of the LOGICAL line was deleted, backslash and `--push`
+// included. The shell runs that text and pushes.
 //
-// The fix is this one normalisation rather than a second pattern per spelling, so it is
-// pinned as a normalisation: exactly what the shell does to the text, asserted on the text.
-func TestJoinShellContinuations(t *testing.T) {
+// So the reader is asserted against what the shell does, one shape at a time, in both
+// directions: a command spread over continuations is one command, and a comment is still
+// prose.
+func TestShellCommands(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
-		want string
+		want []string
 	}{
-		{"nothing to join", "docker push a\n", "docker push a\n"},
+		{"nothing to join", "docker push a\n", []string{"docker push a"}},
 		{
-			"the F7 shape: a flag on the line below its command",
+			"a flag on the line below its command is the same command",
 			"docker buildx build \\\n  --push \\\n  -t ghcr.io/o/r:dev \\\n  .\n",
-			"docker buildx build   --push   -t ghcr.io/o/r:dev   .\n",
+			[]string{"docker buildx build --push -t ghcr.io/o/r:dev ."},
 		},
 		{
 			// The shell puts NOTHING in the backslash's place, so a token split across a
 			// continuation joins into one word. `push\` + `foo` is `pushfoo`, which is not a
-			// push - inserting a space here would invent a word boundary and report an act
-			// the definition cannot perform.
+			// push - inventing a word boundary here would report an act the definition
+			// cannot perform.
 			"no separator is invented",
 			"docker\\\n push a\n",
-			"docker push a\n",
+			[]string{"docker push a"},
 		},
 		{
 			"a token split across the join stays one token",
 			"docker pu\\\nsh a\n",
-			"docker push a\n",
+			[]string{"docker push a"},
 		},
 		{
-			// PARITY, not presence. `\\` is an escaped literal backslash: the shell ends the
-			// command there. Joining on it would splice two commands the shell keeps apart.
+			// PARITY, not presence, and it falls out of reading `\` as an escape rather than
+			// being a rule of its own: `\\` is an escaped literal backslash, so the newline
+			// after it ends the command and the next line is its own.
 			"an escaped backslash ends the command",
 			"docker buildx build -t x . \\\\\n  --push\n",
-			"docker buildx build -t x . \\\\\n  --push\n",
+			[]string{`docker buildx build -t x . \`, "--push"},
 		},
 		{
-			"three backslashes is still odd, so still a continuation",
+			"three backslashes is an escaped one plus a continuation",
 			"a \\\\\\\nb\n",
-			"a \\\\b\n",
+			[]string{`a \b`},
 		},
-		{"a continuation on the last line continues into nothing", "docker push a \\", "docker push a "},
-		{"a lone backslash line", "\\\nb\n", "b\n"},
-		{"CRLF joins too", "docker buildx build \\\r\n  --push\r\n", "docker buildx build   --push\r\n"},
-		{"empty input", "", ""},
+		{"a continuation on the last line continues into nothing", "docker push a \\", []string{"docker push a"}},
+		{"a lone backslash line", "\\\nb\n", []string{"b"}},
+		{"CRLF joins too", "docker buildx build \\\r\n  --push\r\n", []string{"docker buildx build --push"}},
+		{"empty input", "", nil},
+
+		// THE DEFECT THE ONE-READER SHAPE CLOSES. A quote opened on one physical line is
+		// still open on the next, so the `#` is text and the whole command survives.
+		{
+			"a quote opened before a continuation is still open after it",
+			"docker buildx build \\\n  --annotation \"org.opencontainers.image.description=dev, \\\n  see #123\" \\\n  --push \\\n  -t ghcr.io/o/r:dev .\n",
+			[]string{"docker buildx build --annotation org.opencontainers.image.description=dev, see #123 --push -t ghcr.io/o/r:dev ."},
+		},
+		{
+			"and the other direction: a # that really does start a word is a comment",
+			"docker buildx build --load . \\\n  -t r:dev\n  # --push is not used here\n",
+			[]string{"docker buildx build --load . -t r:dev"},
+		},
+		{
+			"a # inside a word is not a comment",
+			"os=${target#*/}\ndocker push a\n",
+			[]string{"os=${target#*/}", "docker push a"},
+		},
+
+		// A quote that is never closed is not a quote: the shell would refuse the whole
+		// script, so reading its contents as inert is the fail-open direction.
+		{
+			"an unterminated quote does not swallow the commands after it",
+			"printf '%s' 'a\ndocker push ghcr.io/o/r:dev\n",
+			[]string{"printf %s 'a", "docker push ghcr.io/o/r:dev"},
+		},
+
+		// A command hidden in a substitution is still a command.
+		{
+			"a command substitution is a script in its own right",
+			"ref=\"$(docker push ghcr.io/o/r:dev)\"\n",
+			[]string{"docker push ghcr.io/o/r:dev", "ref=$(...)"},
+		},
+
+		{
+			"redirections are plumbing, not argv",
+			"docker image rm -f \"$REF\" >/dev/null 2>&1 || true\n",
+			[]string{"docker image rm -f $REF", "true"},
+		},
+		{
+			"separators end a command",
+			"a; b && c || d | e\n",
+			[]string{"a", "b", "c", "d", "e"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := JoinShellContinuations(tc.in); got != tc.want {
-				t.Fatalf("JoinShellContinuations(%q)\n = %q\nwant %q", tc.in, got, tc.want)
+			var got []string
+			for _, c := range ShellCommands(tc.in) {
+				got = append(got, c.String())
+			}
+			if strings.Join(got, " | ") != strings.Join(tc.want, " | ") {
+				t.Fatalf("ShellCommands(%q)\n = %q\nwant %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// THE DESTINATION MODEL, which the `run:` half had none of. Every row here is a command
+// whose act is decided from WHERE IT SENDS WHAT IT BUILT rather than from whether its text
+// happens to match a spelling somebody wrote a pattern for, and the local rows matter as
+// much as the publishing ones: a fix that red every `--output=` would be the false positive
+// this table forbids.
+func TestCommandAct_TheRunHalfDecidesADestination(t *testing.T) {
+	cases := []struct {
+		name string
+		run  string
+		kind ActKind
+	}{
+		// Publishing, in every spelling of the one destination.
+		{"the flag the old catalogue knew", "docker buildx build --push -t ghcr.io/o/r:dev .", ActImagePush},
+		{"the longhand it is shorthand FOR", "docker buildx build --output=type=registry,name=ghcr.io/o/r:dev .", ActImagePush},
+		{"the short flag, with the image exporter", "docker buildx build -o type=image,name=ghcr.io/o/r:dev,push=true .", ActImagePush},
+		{"the space-separated form", "docker buildx build --output type=registry .", ActImagePush},
+		{"the plainest push", "docker push ghcr.io/o/r:dev", ActImagePush},
+		{"the management-command spelling of it", "docker image push ghcr.io/o/r:dev", ActImagePush},
+		{"podman takes docker's command surface", "podman manifest push ghcr.io/o/r:dev", ActTagMove},
+		{"a floating reference being moved", "docker buildx imagetools create -t ghcr.io/o/r:latest ghcr.io/o/r:v1", ActTagMove},
+		{"a published release", `gh release create v0.0.0 --notes x`, ActRelease},
+		{"a ref reaching the remote", "git push origin v0.0.0", ActRefPush},
+		{"a wrapper does not hide the act", "sudo docker push ghcr.io/o/r:dev", ActImagePush},
+		{"nor does another one", "xargs -n1 docker push", ActImagePush},
+
+		// Local, and it has to stay local.
+		{"the docker exporter writes a tar", "docker buildx build --output=type=docker,dest=/tmp/img.tar .", ""},
+		{"--load IS the docker exporter", "docker buildx build --load -t r:dev .", ""},
+		{"an image exporter with no push= keeps its result", "docker buildx build -o type=image,name=r:dev .", ""},
+		{"an explicit push=false does not publish", "docker buildx build --push=false -t r:dev .", ""},
+		{"no destination flag at all", "docker buildx build -t r:dev .", ""},
+		{"a pull reads FROM a registry", `docker pull --platform linux/arm64 "$REF"`, ""},
+		{"a local image removal", `docker image rm -f "$REF"`, ""},
+		{"inspecting a manifest reads it", `docker buildx imagetools inspect "$REF"`, ""},
+		{"authenticating is not publishing", "docker login ghcr.io -u x --password-stdin", ""},
+		{"a local tag is not a push", "docker tag a b", ""},
+		{"a program outside the tool set is not an act", "./scripts/smoke-image.sh holdfast:release", ""},
+		{"nor is the gate itself", "make check", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmds := ShellCommands(tc.run)
+			if len(cmds) != 1 {
+				t.Fatalf("fixture is not one command: %v", cmds)
+			}
+			kind, why, err := cmds[0].Act()
+			if err != nil {
+				t.Fatalf("unexpected refusal: %v", err)
+			}
+			if kind != tc.kind {
+				t.Fatalf("Act() = %q (%s), want %q", kind, why, tc.kind)
+			}
+		})
+	}
+}
+
+// THE EDGE, which is the whole difference between this catalogue and the one it replaced.
+// An invocation of a tool that can reach a registry has to land on a rule; one that does not
+// is UNDECIDED, and undecided reds by name. None of the first four commands below appears
+// anywhere in command.go, which is the point - a catalogue that has to grow a row per
+// spelling has already lost to the next spelling.
+func TestCommandAct_AnUnmodelledRegistryCommandIsAnErrorNotSilence(t *testing.T) {
+	for _, run := range []string{
+		"crane push image.tar ghcr.io/o/r:dev",
+		"crane copy ghcr.io/o/r:dev ghcr.io/o/r:latest",
+		"regctl image copy ghcr.io/o/r:dev ghcr.io/o/r:latest",
+		"skopeo delete docker://ghcr.io/o/r:dev",
+		"docker frobnicate ghcr.io/o/r:dev",
+		"gh api -X POST /repos/o/r/git/refs",
+		"docker buildx bake release",
+		"docker buildx build --output=type=quay-direct,name=ghcr.io/o/r:dev .",
+	} {
+		t.Run(run, func(t *testing.T) {
+			cmds := ShellCommands(run)
+			if len(cmds) != 1 {
+				t.Fatalf("fixture is not one command: %v", cmds)
+			}
+			kind, why, err := cmds[0].Act()
+			if err == nil {
+				t.Fatalf("Act() = %q (%s) and no error, so an invocation this gate has never been taught reads as harmless", kind, why)
+			}
+			if !strings.Contains(err.Error(), strings.Fields(run)[0]) {
+				t.Errorf("the refusal does not name what it saw:\n%v", err)
+			}
+		})
+	}
+	// The OTHER direction, so "everything reds" cannot pass for an edge.
+	for _, run := range []string{"docker pull x", "gh release view v0.1.0", "git status", "npm ci"} {
+		cmds := ShellCommands(run)
+		if kind, _, err := cmds[0].Act(); err != nil || kind != "" {
+			t.Errorf("%q gave (%q, %v), want no act and no error - stating the boundary must not become a refusal of every command", run, kind, err)
+		}
+	}
+}
+
+// The two lists are one list. shell.go stubs a binary because it could reach a registry;
+// command.go requires every invocation of one to be decided. A tool in one and not the other
+// is either a command the gate decides and then EXECUTES for real, or a command it
+// neutralises and then reads as harmless - both of which are how this gate fails silently.
+func TestStubbedCommandsAreExactlyTheToolsTheGateClassifies(t *testing.T) {
+	want := map[string]bool{}
+	for name := range registryTools {
+		want[name] = true
+	}
+	for name := range clientsCheckedAndNotInventoried {
+		want[name] = true
+	}
+	got := map[string]bool{}
+	for _, name := range stubbed {
+		got[name] = true
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("%q is classified by the act catalogue but not stubbed, so a step invoking it would run for real", name)
+		}
+	}
+	for name := range got {
+		if !want[name] {
+			t.Errorf("%q is stubbed but classified nowhere, so an invocation of it would read as harmless", name)
+		}
 	}
 }
 
@@ -457,6 +632,21 @@ func TestActs_ReadsTheLogicalLineNotThePhysicalOne(t *testing.T) {
 		{"a continued build with no --push is local", "docker buildx build \\\n  --load \\\n  -t r:dev .\n", false},
 		{"an escaped backslash does not splice --push onto the build", "docker buildx build -t r:dev . \\\\\n  --push\n", false},
 		{"`--push` only in a comment is still prose", "docker buildx build --load . \\\n  -t r:dev\n# and never --push\n", false},
+
+		// A `#` inside a quoted argument, on a continuation line, is TEXT. An OCI annotation
+		// or a release note carrying an issue number is the everyday way it arrives, and
+		// reading it as a comment deleted the rest of the logical line - the `--push`
+		// included, and the backslash that would have joined it.
+		{
+			"a quoted # on a continuation line does not eat the push below it",
+			"docker buildx build \\\n  --annotation \"org.opencontainers.image.description=dev, \\\n  see #123\" \\\n  --push \\\n  -t ghcr.io/o/r:dev .\n",
+			true,
+		},
+		{
+			"and the same argument on a build that stays local is still local",
+			"docker buildx build \\\n  --annotation \"org.opencontainers.image.description=dev, \\\n  see #123\" \\\n  --load \\\n  -t r:dev .\n",
+			false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -26,7 +26,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=54
+declared=62
 pass=0; failed=0
 
 repo="$work/repo"
@@ -484,6 +484,107 @@ printf '%s\n' \
 insert_before "- name: build the release binaries"
 changed "$wf" "an unguarded step using an action classified as publishing nothing"
 expect 0 "a classified non-publishing action still passes, unguarded, on a dispatch"
+reset
+
+# --- 3u to 3ab. THE `run:` HALF'S DESTINATION MODEL, AND ITS EDGE. 3m-3r fixed how the text
+#     is READ; these are about what is read OUT of it. The catalogue used to know exactly one
+#     destination - the literal flag `--push` - so `docker buildx build --output=type=registry`
+#     (the thing `push:` is documented shorthand FOR, and the spelling 3e-3k closed on the
+#     `uses:` half) performed no act, and neither did `docker image push`, the
+#     management-command form of `docker push`. Neither involves a continuation. A command's
+#     destination is now decided from the flags that SET it, through the SAME function that
+#     decides an action's `outputs:` input, and every invocation of a tool that can reach a
+#     registry has to land on a rule: an invocation on none of them is UNDECIDED and reds by
+#     name, which is why `crane copy` reds without appearing anywhere in the gate.
+
+# --- 3u. buildx's own longhand for a registry push. This dry run publishes.
+dev_run_step 'docker buildx build --platform linux/amd64 --output=type=registry,name=ghcr.io/nschatz/holdfast:dev .'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch that pushes through --output=type=registry"
+expect 1 "a run-step build that pushes through --output=type=registry is caught on a dispatch" \
+  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
+reset
+
+# --- 3v. The short flag with the image exporter's own attributes.
+dev_run_step 'docker buildx build --platform linux/amd64 -o type=image,name=ghcr.io/nschatz/holdfast:dev,push=true .'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch that pushes through -o type=image,...,push=true"
+expect 1 "a run-step build that pushes through -o type=image,...,push=true is caught" \
+  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
+reset
+
+# --- 3w. The plainest one: a word between `docker` and `push` used to hide the act.
+dev_run_step 'docker image push ghcr.io/nschatz/holdfast:dev'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch that runs docker image push"
+expect 1 "docker image push, the management-command spelling, is caught on a dispatch" \
+  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
+reset
+
+# --- 3x. THE HONEST OTHER DIRECTION, and it is the one that makes this a destination model
+#         rather than a refusal: `--output=` is not a synonym for publishing. The `docker`
+#         exporter writes a local tar and must still pass. A fix that red every `--output=`
+#         would be caught here and nowhere else.
+dev_run_step 'docker buildx build --platform linux/amd64 --output=type=docker,dest=/tmp/img.tar .'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch running a build whose exporter is local"
+expect 0 "a LOCAL --output= exporter in a run step is decided as local, not refused as a publish"
+reset
+
+# --- 3y. THE EDGE. `crane copy` appears nowhere in the gate, and that is the point: an
+#         invocation of a registry tool that lands on no rule is UNDECIDED, and undecided
+#         reds by name. A catalogue that answers an unknown spelling with silence has to grow
+#         a row per spelling, and the spelling after that is always the one nobody added.
+dev_run_step 'crane copy ghcr.io/nschatz/holdfast:dev ghcr.io/nschatz/holdfast:latest'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch running a registry command the gate has never been taught"
+expect 1 "a registry command in no rule reds the gate, naming the invocation" \
+  "does not model that invocation of .crane."
+reset
+
+# --- 3z. THE TWO READERS' DISAGREEMENT, which was fail-open. Reading a `run:` block used to
+#         take two passes - strip comments per PHYSICAL line, then join continuations - and
+#         they disagreed about what a line is: quote state reset at exactly the boundary the
+#         join erased. A `#` inside a quoted argument on a continuation line was therefore
+#         read as a comment, and the rest of the logical line was deleted, the `--push` and
+#         the backslash that would have joined it included. An OCI annotation carrying an
+#         issue number is the everyday way that `#` arrives, and bash really does perform the
+#         push.
+dev_run_step 'docker buildx build \' \
+             '  --annotation "org.opencontainers.image.description=dev build, \' \
+             '  see #123" \' \
+             '  --push \' \
+             '  --platform linux/amd64 \' \
+             '  -t ghcr.io/nschatz/holdfast:dev \' \
+             '  .'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch whose push sits after a quoted # across a continuation"
+expect 1 "a quoted # on a continuation line does not hide the --push below it" \
+  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
+reset
+
+# --- 3aa. And the other direction for the same shape: the identical argument on a build that
+#          stays LOCAL must still pass, so "quotes survive a continuation" cannot be
+#          satisfied by calling every annotated build a publish.
+dev_run_step 'docker buildx build \' \
+             '  --annotation "org.opencontainers.image.description=dev build, \' \
+             '  see #123" \' \
+             '  --load \' \
+             '  --platform linux/amd64 \' \
+             '  -t holdfast:dev \' \
+             '  .'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch whose annotated build stays local"
+expect 0 "the same quoted # on a build that only loads locally is still local"
+reset
+
+# --- 3ab. The act belongs to the program that performs it, not to the word at the start of
+#          the line. `sudo docker push` is a push.
+dev_run_step 'sudo docker push ghcr.io/nschatz/holdfast:dev'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch pushing through a wrapper command"
+expect 1 "a push behind a wrapper command is still caught on a dispatch" \
+  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
 reset
 
 # =====================================================================================

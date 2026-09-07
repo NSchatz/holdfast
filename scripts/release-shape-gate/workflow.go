@@ -186,27 +186,6 @@ type Act struct {
 // SECOND publishing step of an already-documented kind still forces a runbook entry.
 func (a Act) ID() string { return string(a.Kind) + "@" + a.Step.Slug() }
 
-// runDetectors are matched against the step's run script with comments removed.
-var runDetectors = []struct {
-	kind ActKind
-	re   *regexp.Regexp
-	what string
-}{
-	{ActImagePush, regexp.MustCompile(`\bdocker\s+push\b`), "docker push"},
-	{ActImagePush, regexp.MustCompile(`\bpodman\s+push\b`), "podman push"},
-	{ActImagePush, regexp.MustCompile(`\bdocker\s+(buildx\s+)?(build|bake)\b[^\n]*--push\b`), "a buildx build with --push"},
-	{ActTagMove, regexp.MustCompile(`\bimagetools\s+create\b`), "docker buildx imagetools create"},
-	{ActTagMove, regexp.MustCompile(`\bdocker\s+manifest\s+push\b`), "docker manifest push"},
-	{ActTagMove, regexp.MustCompile(`\b(crane|regctl)\s+(tag|index)\b`), "a registry tag/index write"},
-	{ActRelease, regexp.MustCompile(`\bgh\s+release\s+(create|edit|upload|delete)\b`), "gh release"},
-	{ActRelease, regexp.MustCompile(`\bgh\s+api\b[^\n]*/releases\b`), "a gh api call against /releases"},
-	{ActRefPush, regexp.MustCompile(`\bgit\s+push\b`), "git push"},
-	{ActArtefact, regexp.MustCompile(`\b(npm|pnpm)\s+publish\b`), "npm publish"},
-	{ActArtefact, regexp.MustCompile(`\bcargo\s+publish\b`), "cargo publish"},
-	{ActArtefact, regexp.MustCompile(`\bhelm\s+push\b`), "helm push"},
-	{ActArtefact, regexp.MustCompile(`\b(skopeo|oras)\s+(copy|push)\b`), "a registry copy/push"},
-}
-
 // destinationInput is one `with:` input through which an action decides where its build
 // goes. An action's inputs are modelled as a SET because a destination can be spelled more
 // than one way on the same action, and a set of one is how the "only `push:` exists"
@@ -274,11 +253,17 @@ var classifiedLocalActions = []struct {
 // would print "NONE of them publishes anything" over a dry run that pushes.
 func (s Step) Acts(ctx *evalCtx) ([]Act, error) {
 	var out []Act
-	script := s.script()
-	for _, d := range runDetectors {
-		if d.re.MatchString(script) {
-			out = append(out, Act{Kind: d.kind, Step: s, Why: d.what})
+	seen := map[string]bool{}
+	for _, c := range s.commands() {
+		kind, why, err := c.Act()
+		if err != nil {
+			return nil, fmt.Errorf("%s %w.\nThis gate will not read a command it cannot decide as harmless: a command wrongly called publishing reds this gate, one wrongly called harmless is how an unreviewed publish ships", s.Label(), err)
 		}
+		if kind == "" || seen[string(kind)+"\x00"+why] {
+			continue
+		}
+		seen[string(kind)+"\x00"+why] = true
+		out = append(out, Act{Kind: kind, Step: s, Why: why})
 	}
 	matched := false
 	for _, d := range usesDetectors {
@@ -420,7 +405,7 @@ func decideOutputsInput(key string, raw any, ctx *evalCtx) (publishes bool, deta
 				return false, "", fmt.Errorf("`%s:` evaluates to nothing for this event, so where this step's build is written is unknown", key)
 			}
 		}
-		return decideBuildxOutputs(key, text)
+		return decideBuildxOutputs(key+":", text)
 	default:
 		return false, "", fmt.Errorf("`%s:` is a %T (%v), not a list of buildx output specifications and not an expression, so where this step's build is written is unknown", key, raw, raw)
 	}
@@ -433,7 +418,12 @@ var buildxLocalExporters = map[string]bool{
 	"local": true, "tar": true, "oci": true, "docker": true, "cacheonly": true,
 }
 
-func decideBuildxOutputs(key, text string) (bool, string, error) {
+// decideBuildxOutputs decides a list of buildx output specifications. It is the ONE model of
+// where a build goes, and it is called from both spellings of that question: an action's
+// `outputs:` input (decideOutputsInput, above) and a build command's `--output` flag
+// (decideBuildDestination, in command.go). `display` is how the caller's spelling is named
+// in a message, so the same refusal reads correctly either way.
+func decideBuildxOutputs(display, text string) (bool, string, error) {
 	for _, line := range strings.Split(text, "\n") {
 		entry := strings.TrimSpace(line)
 		if entry == "" {
@@ -441,16 +431,16 @@ func decideBuildxOutputs(key, text string) (bool, string, error) {
 		}
 		attrs, aerr := parseCSVAttrs(entry)
 		if aerr != nil {
-			return false, "", fmt.Errorf("`%s:` entry %q cannot be read as buildx output attributes (%v), so where it writes the build is unknown", key, entry, aerr)
+			return false, "", fmt.Errorf("`%s` entry %q cannot be read as buildx output attributes (%v), so where it writes the build is unknown", display, entry, aerr)
 		}
 		typ, ok := attrs["type"]
 		if !ok {
-			return false, "", fmt.Errorf("`%s:` entry %q names no `type=`, so which buildx exporter it selects - and whether that exporter writes to a registry - is unknown", key, entry)
+			return false, "", fmt.Errorf("`%s` entry %q names no `type=`, so which buildx exporter it selects - and whether that exporter writes to a registry - is unknown", display, entry)
 		}
 		typ = strings.ToLower(strings.TrimSpace(typ))
 		switch {
 		case typ == "registry":
-			return true, fmt.Sprintf("%s: %s - the `registry` exporter, which buildx documents as `type=image,push=true`", key, entry), nil
+			return true, fmt.Sprintf("%s %s - the `registry` exporter, which buildx documents as `type=image,push=true`", display, entry), nil
 		case typ == "image":
 			push, has := attrs["push"]
 			if !has {
@@ -458,16 +448,16 @@ func decideBuildxOutputs(key, text string) (bool, string, error) {
 			}
 			switch strings.ToLower(strings.TrimSpace(push)) {
 			case "true":
-				return true, fmt.Sprintf("%s: %s - the `image` exporter with push=true, which IS a registry push", key, entry), nil
+				return true, fmt.Sprintf("%s %s - the `image` exporter with push=true, which IS a registry push", display, entry), nil
 			case "false":
 				continue
 			default:
-				return false, "", fmt.Errorf("`%s:` entry %q sets `push=%s`, which is not a boolean, so whether this step publishes is unknown", key, entry, push)
+				return false, "", fmt.Errorf("`%s` entry %q sets `push=%s`, which is not a boolean, so whether this step publishes is unknown", display, entry, push)
 			}
 		case buildxLocalExporters[typ]:
 			continue
 		default:
-			return false, "", fmt.Errorf("`%s:` entry %q selects the buildx exporter %q, which this gate does not model. Teach it that exporter - and whether it writes to a registry - rather than letting an unmodelled destination read as harmless", key, entry, typ)
+			return false, "", fmt.Errorf("`%s` entry %q selects the buildx exporter %q, which this gate does not model. Teach it that exporter - and whether it writes to a registry - rather than letting an unmodelled destination read as harmless", display, entry, typ)
 		}
 	}
 	return false, "", nil
@@ -603,13 +593,23 @@ var (
 	reResolve    = regexp.MustCompile(`resolve-compose-image\.sh`)
 )
 
-// script is the ONE normalisation every detector in this file reads through, and the order
-// of its two passes is load-bearing. Comments go first because a `\` inside a comment is
-// comment text and continues nothing, so joining first would splice the line BELOW a
-// comment into it and then delete both - turning a real `docker push` on the next line into
-// prose. Continuations go second because a command the shell executes as one logical line
-// must be one string here too.
-func (s Step) script() string { return JoinShellContinuations(StripShellComments(s.Run)) }
+// commands is the ONE reader of a step's shell, shared by the act catalogue and by every
+// role detector below. There used to be two - a comment stripper and a continuation joiner -
+// and having two was itself the defect: they disagreed about what a line is, in the
+// fail-open direction. command.go says what one reader costs and buys.
+func (s Step) commands() []Command { return ShellCommands(s.Run) }
+
+// script is what the role detectors match against: the step's shell as the reader read it,
+// one command per line, quoting removed. A pattern here can no longer be defeated by
+// pressing return, because the line it sees is the LOGICAL one the shell would run.
+func (s Step) script() string {
+	var b strings.Builder
+	for _, c := range s.commands() {
+		b.WriteString(c.String())
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
 
 func (s Step) RunsFullGate() bool      { return reMakeCheck.MatchString(s.script()) }
 func (s Step) RunsSmoke() bool         { return reSmoke.MatchString(s.script()) }
@@ -646,113 +646,4 @@ func (s Step) PullArches() []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// StripShellComments removes `#` comments from a shell script without stripping a `#`
-// that is inside a quoted string. Comment text is prose, and prose that mentions `docker
-// push` must not be read as a publishing act - nor must a real `docker push` hide behind
-// a quote.
-func StripShellComments(script string) string {
-	var out strings.Builder
-	for _, line := range strings.Split(script, "\n") {
-		var (
-			single, double bool
-			cut            = -1
-		)
-		for i := 0; i < len(line); i++ {
-			c := line[i]
-			switch {
-			case c == '\\' && double:
-				i++
-			case c == '\'' && !double:
-				single = !single
-			case c == '"' && !single:
-				double = !double
-			case c == '#' && !single && !double:
-				if i == 0 || line[i-1] == ' ' || line[i-1] == '\t' {
-					cut = i
-				}
-			}
-			if cut >= 0 {
-				break
-			}
-		}
-		if cut >= 0 {
-			line = line[:cut]
-		}
-		out.WriteString(line)
-		out.WriteByte('\n')
-	}
-	return out.String()
-}
-
-// JoinShellContinuations collapses shell line continuations, so every detector above reads
-// the LOGICAL line the shell executes rather than the physical line the file stores.
-//
-// A detector matched against physical lines is a detector that can be defeated by pressing
-// return. `[^\n]*` cannot cross a newline and `\s+` does not match a backslash, so
-//
-//	docker buildx build \
-//	  --push -t ghcr.io/owner/repo:dev .
-//
-// read as a build with no destination and `gh release \` then `create` read as no release
-// at all - while the shell runs both. That is not obfuscation: it is this repository's own
-// house style for a multi-flag command, and release.yml writes `go build -trimpath \` and
-// `gh release create "$VERSION" "${args[@]}" \` in exactly that shape. Normalising once
-// here is the fix rather than teaching each pattern a second spelling, because the next
-// spelling is always the one nobody wrote a pattern for.
-//
-// The rules, and what each is worth:
-//
-//   - A line continues when the run of backslashes ending it has ODD length, which is what
-//     the shell decides too: `\\` is an escaped literal backslash and ends the command,
-//     while `\` is unescaped and swallows the newline. Reading `\\` as a continuation would
-//     join two commands the shell keeps apart.
-//   - The backslash and the newline are removed and NOTHING is put in their place, which is
-//     again exactly the shell: `docker\` + ` push x` is `docker push x`, and `push\` + `foo`
-//     is the single token `pushfoo`, which is not a push and must not read as one. Inserting
-//     a space would invent word boundaries the shell never had - in the direction that
-//     reports an act the definition does not perform.
-//   - Quoting is deliberately NOT tracked. Inside double quotes the shell joins exactly as
-//     it does outside them; inside single quotes it does not, so joining there is joining
-//     more than the shell would. That direction only ever lengthens a line, and joining
-//     deletes nothing but the backslash, so no command this normalisation invents can hide
-//     one - while tracking quotes badly would skip a join the shell makes, which is the
-//     fail-open direction this gate exists to refuse.
-//   - A `\r` before the newline is stripped before the run is counted, so a CRLF file joins
-//     too. A real shell would treat that backslash as escaping the CR instead, but YAML has
-//     already normalised line breaks by the time the gate reads a `run:` block, and
-//     over-joining a spelling the shell would reject costs a runbook entry where
-//     under-joining costs an unreviewed publish.
-//   - A continuation on the LAST line continues into nothing: the backslash is dropped and
-//     the string ends. No detector's match depends on a trailing newline.
-func JoinShellContinuations(script string) string {
-	lines := strings.Split(script, "\n")
-	var out strings.Builder
-	for i, line := range lines {
-		body := strings.TrimSuffix(line, "\r")
-		hadCR := len(body) != len(line)
-		if trailingBackslashes(body)%2 == 1 {
-			out.WriteString(body[:len(body)-1])
-			continue
-		}
-		out.WriteString(body)
-		if i < len(lines)-1 {
-			if hadCR {
-				out.WriteByte('\r')
-			}
-			out.WriteByte('\n')
-		}
-	}
-	return out.String()
-}
-
-// trailingBackslashes counts the unbroken run of `\` at the end of a line. Parity, not
-// presence, is what decides a continuation.
-func trailingBackslashes(line string) int {
-	n := 0
-	for i := len(line) - 1; i >= 0 && line[i] == '\\'; i-- {
-		n++
-	}
-	return n
 }

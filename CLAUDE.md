@@ -190,20 +190,30 @@ as "NONE of them publishes anything". Both inputs are decided, the step publishe
 `outputs:` spelling (`type=docker`, which is what `load: true` means) must still PASS, and an exporter this
 gate does not model reds naming itself rather than falling into the local bucket (cases 3e-3k). The same
 absent-key inference is closed one property along: the references a push publishes are read from BOTH
-`tags:` and an `outputs:` entry's `name=`. The other half of the catalogue, the `run:` commands, had the
-same hole in a different dimension: those patterns were matched against PHYSICAL lines, so
-`docker buildx build \` with `--push` on the next line, and `gh release \` with `create` on the next line,
-performed no act at all - and a line continuation is not obfuscation, it is this file's own house style for
-a multi-flag command. The fix is one NORMALISATION and not two more patterns: `Step.script()` joins shell
-continuations (on backslash PARITY, `\\` being an escaped literal that ends the command) after stripping
-comments, so every detector reads the logical line the shell runs. And the catalogue now has an EDGE it
-states out loud: every `uses:` must sit in `usesDetectors` or in `classifiedLocalActions`, each entry
-carrying the reason a human checked, and an action in neither reds by name instead of contributing silence.
+`tags:` and an `outputs:` entry's `name=`. The other half of the catalogue, the `run:` commands, is built
+the same way and was not: it knew a list of command SPELLINGS and no destination at all, so
+`docker image push` (the management-command form of `docker push`) and
+`docker buildx build --output=type=registry` (the thing `push:` is documented shorthand FOR) each performed
+no act, on one physical line, with nothing exotic about them. It now takes the same two pieces the
+`uses:` half takes. ONE reader (`command.go`) parses a `run:` block as the shell parses it - continuations
+joined, quoting resolved, comments dropped, `$(…)` read as a script of its own - and yields the commands the
+runner would execute; it is graded against `bash` itself, by running the same text with a recording stub on
+PATH and comparing the words. There used to be TWO readers, a comment stripper and a continuation joiner,
+and having two was the defect: quote state reset at exactly the boundary the join erased, so a `#` inside a
+quoted argument on a continuation line ate the rest of the logical line and the `--push` below it. Then each
+command's act is decided from WHERE IT SENDS WHAT IT BUILT - `--push`, `--load` and `--output=<spec>` go
+through the SAME function that decides an action's `outputs:` input, so a local exporter stays local and an
+unmodelled one reds. And the catalogue has an EDGE on both halves, stated out loud: every `uses:` must sit
+in `usesDetectors` or in `classifiedLocalActions`, and every command invoking a tool that can reach a
+registry, a remote or a package index (`registryTools`, which is the same list `shell.go` stubs) must land
+on a rule in `commandRules` - each entry carrying the reason a human checked. Anything in neither reds by
+name instead of contributing silence, which is why `crane copy` reds without appearing anywhere in the gate.
 **The rule when you extend this**: an act is a property of a
-step's DEFINITION, so model every input through which an action can perform it - a set of one is how this
-shipped a hole twice - never let a value the gate cannot decide read as a no, and normalise the input once
-rather than teaching each pattern a second spelling, because the next spelling is always the one nobody
-wrote a pattern for. It also runs the
+step's DEFINITION, so model the DESTINATION rather than the spelling and give the model an edge - a set of
+one is how this shipped a hole twice, and a catalogue of spellings is how it shipped one twice more. Read
+the input once, never let a value the gate cannot decide read as a no, and make the case nobody thought of
+red rather than silent, because the spelling after this one is always the one nobody wrote a pattern for.
+It also runs the
 promotion step under a
 stubbed `docker` and reads the reference it ACTUALLY moved out of the argv, which is the only honest way to
 compare `docker-compose.yml` against a reference the workflow derives at run time from `github.repository`.

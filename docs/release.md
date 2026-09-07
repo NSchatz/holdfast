@@ -318,27 +318,32 @@ unreviewed publish. The same rule holds for the references a push publishes, whi
 from `tags:` and from an `outputs:` entry's `name=`; a push whose references the gate cannot
 read reds rather than being assumed to name nothing.
 
-A step's `run:` script is decided the same way, and the same care goes into what a
-"command" is. The commands are matched against the LOGICAL line the shell executes, not the
-physical line the file stores: continuations are joined first, on backslash parity, so
-`docker buildx build \` with `--push` on the next line is one string. A multi-flag command
-written across continuations is this repository's own house style - `release.yml` writes
-`go build -trimpath \` and `gh release create ... \` that way - so a detector confined to
-one physical line is a detector that can be defeated by pressing return.
+A step's `run:` script is decided the same way, and it takes the same two pieces: a reader
+and a destination model. ONE reader parses the block as the shell parses it - continuations
+joined (a quote opened before one is still open after it), comments dropped, quoting
+resolved, `$(…)` read as a script of its own - and yields the commands the runner would
+execute. It is graded against `bash` itself: the same text is run with a recording stub on
+PATH and the words the reader produced are compared with the words bash passed. Then each
+command's act is decided from WHERE IT SENDS WHAT IT BUILT: `--push`, `--load` and
+`--output=<spec>` go through the same function that decides an action's `outputs:` input,
+because `--push` and `outputs: type=registry` are one destination with two spellings.
 
-The catalogue also has an EDGE, and states it: every `uses:` must sit either in the
-publishing half, whose destination inputs are then decided, or in the list of actions a
-human has checked and found to publish nothing, each with the reason. An action in neither
-reds the gate by name. "Never asked" and "asked and answered no" have to look different,
-because `docker/bake-action` with `push: true`, a local composite action and a reusable
-workflow all publish.
+The catalogue has an EDGE on both halves, and states it. Every `uses:` must sit either in
+the publishing half, whose destination inputs are then decided, or in the list of actions a
+human has checked and found to publish nothing. Every command that invokes a tool which can
+reach a registry, a remote or a package index - the same list the gate stubs before it
+executes anything - must likewise land on a rule naming the act it performs or the reason it
+performs none. Anything in neither reds by name. "Never asked" and "asked and answered no"
+have to look different, because `docker/bake-action` with `push: true`, `crane copy` and
+`regctl image copy` all publish.
 
-**Extending this:** an act is a property of a step's DEFINITION, so model every input
-through which an action can perform it. Modelling one and inferring the act's absence from
-that key's absence is how a dry run that pushed to GHCR came to be reported as "NONE of them
-publishes anything", and it is why the input catalogue is a set rather than a key. When the
-same shape turns up again, normalise the input once rather than adding a pattern per
-spelling: the next spelling is always the one nobody wrote a pattern for.
+**Extending this:** an act is a property of a step's DEFINITION, so model the DESTINATION
+rather than the spelling, and give the model an edge. Matching spellings is how
+`docker image push` and `docker buildx build --output=type=registry` came to perform no act
+at all while a dry run pushed to GHCR, and adding the missing spelling closes the spelling,
+never the class - the spelling after that is always the one nobody wrote a pattern for. Read
+the input once, decide where it sends what it built, and make the case you have not thought
+of red rather than silent.
 
 The example deployment's image reference has exactly ONE reader, in that gate.
 `scripts/resolve-compose-image.sh` asks for it (`release-shape-gate -print-compose-ref`)

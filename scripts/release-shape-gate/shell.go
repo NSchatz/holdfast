@@ -31,10 +31,11 @@ import (
 // executed here for its DECISIONS, so anything that could reach a registry, a remote or a
 // package index is neutralised. An unlisted command runs for real, which is why only the
 // planning steps and the tag-move step are ever executed (see main.go).
-var stubbed = []string{
-	"docker", "podman", "buildx", "gh", "git", "curl", "wget",
-	"npm", "pnpm", "cargo", "helm", "skopeo", "oras", "crane", "regctl", "aws",
-}
+//
+// It is the SAME list the act catalogue decides against (command.go), and deliberately so: a
+// tool worth neutralising before a step runs is a tool whose every invocation has to be
+// decided when the definition is read. One list, two uses, no drift.
+var stubbed = stubbedCommands()
 
 const argvSep = "\x1f"
 
