@@ -110,6 +110,7 @@ cp config.example.yaml config.yaml   # then edit library_roots
 holdfast validate --config config.yaml
 holdfast run --config config.yaml   # one scan: re-encode bloated non-HEVC video, safely
 holdfast serve --config config.yaml # HTTP API + web dashboard (scan on demand / on an interval)
+holdfast restore --config config.yaml  # what the undo window is holding (see below)
 holdfast export --config config.yaml --out ledger.ndjson  # the whole ledger, as NDJSON
 ```
 
@@ -136,6 +137,29 @@ anything in user space (FUSE) are all treated as not-local, because a false warn
 configuration and a false clear costs a film. **[docs/filesystem.md](docs/filesystem.md)** has the
 recognised-local set, the opt-in rules and what the startup traversal costs.
 
+### The undo window (`restore`) — off by default
+
+The swap is the one irreversible thing holdfast does, and every gate in front of it is an **estimate**.
+The delete is not. `undo_window_hours` buys a bounded period in which a swap can be walked back:
+
+```yaml
+undo_window_hours: 24     # 0 (the default) = a swap is FINAL, and startup says so
+```
+
+```bash
+holdfast restore --config config.yaml                     # what is held, and for how long
+holdfast restore --config config.yaml /media/tv/ep.mkv    # put that original back
+```
+
+The original is kept by a second **hard link**, so retention costs **no space at the moment it is
+taken** — but the space a swap reclaimed **does not come back until the window closes**, which for a
+first library pass means holding every original it replaced. So the API reports
+`bytes_held_by_undo_window` **separately** from the reclaimed totals, and a release reports the bytes it
+**actually** returned (removing a name frees the data only when it was the last one). A source whose
+original cannot be retained is **skipped, not swapped**, and a restore refuses rather than overwrite a
+file that has changed since the swap. Full reference, including what it costs and what it deliberately
+does not offer: **[docs/undo.md](docs/undo.md)**.
+
 ### Web API + UI (`serve`)
 
 `holdfast serve` runs a REST API + [SSE](https://developer.mozilla.org/docs/Web/API/Server-sent_events)
@@ -148,7 +172,7 @@ invariant is entirely unaffected.
 | Method & path | Auth | Purpose |
 |---|---|---|
 | `GET /` | — | the embedded dashboard |
-| `GET /api/summary` | — | counts per status + bytes reclaimed (**lifetime** and this-run) + paused/scanning + the **whole-ledger aggregates** (see below) |
+| `GET /api/summary` | — | counts per status + bytes reclaimed (**lifetime** and this-run) + `bytes_held_by_undo_window` (space a retained original still holds, never folded into either reclaimed figure; `null` = unreadable) + paused/scanning + the **whole-ledger aggregates** (see below) |
 | `GET /api/queue` | — | pending + active jobs, capped, with `queue_total` — see *The total behind a cap* |
 | `GET /api/history?limit=N` | — | recent terminal jobs (done/skipped/failed) with their recorded outcome, capped, with `history_total` — see below |
 | `GET /api/events` | — | SSE: a fresh snapshot on every state change |
@@ -202,7 +226,7 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | Field | On | What it is |
 |---|---|---|
 | `reason` | failed | the error that rejected it (the encode error, or **which gate** refused the output) |
-| `reason` | skipped | **which guard** fired — `already-at-target-codec`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `target-already-exists` |
+| `reason` | skipped | **which guard** fired — `already-at-target-codec`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `target-already-exists`, `undo-retention-failed`, `restored-original` |
 | `encoder` | any job that reached the encoder | the encoder that ran (`cpu`, `svtav1`, `nvenc`, …) — a skip, or a file with no readable video stream, never gets that far and records none |
 | `vmaf_mean`, `vmaf_min` | done, and a VMAF-rejected failure | the pooled harmonic mean **and the worst frame** |
 | `vmaf_model` | as above | the libvmaf model that produced them |

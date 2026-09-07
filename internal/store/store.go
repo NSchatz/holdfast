@@ -283,6 +283,40 @@ type RowTotal struct {
 	Err      error
 }
 
+// Retained is one original the undo window is holding: a SECOND LINK to the bytes a
+// swap replaced, plus everything a restore needs to put them back safely (UNDO-6).
+//
+// It is not an Outcome and deliberately does not live on a jobs row: a jobs row is
+// keyed (path, fingerprint) and the pre-swap row is pruned by the swap itself, so a
+// retention recorded there would be deleted by the event it exists to undo.
+//
+// SourcePath is the path the original is restored TO - the file the swap consumed.
+// SwappedPath is what the swap produced: the same path for an in-place rename, a
+// different one when the container extension changed. RetainedPath is the second link
+// holding the original's bytes alive.
+//
+// SwappedFingerprint is the size:mtime of SwappedPath taken immediately after the
+// swap. A restore compares it against what is there NOW and refuses when the two
+// disagree, so an operator can never overwrite content this tool did not write.
+//
+// SourceBytes is the size of the retained original, which is what the undo window is
+// HOLDING - space a reclaimed figure must not count as returned, because it has not
+// been.
+//
+// RestoredAt is nil until the original is put back; a RELEASED retention is deleted
+// outright rather than flagged, so "something is retained for this path" is exactly
+// "a row exists whose RestoredAt is nil".
+type Retained struct {
+	SourcePath         string
+	SwappedPath        string
+	RetainedPath       string
+	SourceBytes        int64
+	SwappedFingerprint string
+	RetainedAt         int64
+	ExpiresAt          int64
+	RestoredAt         *int64
+}
+
 // Store is the persistent job ledger. Every method is safe for concurrent use by
 // multiple workers (goroutines) within one process.
 type Store interface {
@@ -424,6 +458,45 @@ type Store interface {
 	// done/failed/other-skip row (the reason+status match guards that), so a real
 	// outcome is never deleted. No-op when no such row exists.
 	ClearSkip(ctx context.Context, path, fingerprint, reason string) error
+
+	// HeldByUndoWindow is the number of bytes the undo window is still HOLDING: the
+	// sum of SourceBytes over every retention that has neither been restored nor
+	// released (UNDO-6). It is reported BESIDE ReclaimedTotal and never folded into
+	// it, because a retained original's bytes have not been returned to the
+	// filesystem - the second link is still there - and a reclaimed figure that
+	// counted them would tell an operator space is free while it is not. It falls to
+	// zero of its own accord as the window closes and the releases run. A pure read.
+	HeldByUndoWindow(ctx context.Context) (int64, error)
+
+	// Retain records one retained original (UNDO-6), replacing any earlier record for
+	// the same source path - an earlier one can only be a retention that was already
+	// restored (a live one blocks the swap, a released one is deleted), and that
+	// history is superseded by the swap now being recorded.
+	Retain(ctx context.Context, r Retained) error
+
+	// GetRetained returns the retention record for path, which may be named EITHER by
+	// its source path or by the path the swap produced: after a container-changing
+	// swap the only name an operator can see in their library is the latter, and being
+	// asked to restore the file that is actually there must not be a miss. Rows that
+	// have already been restored ARE returned (exists=true) so a caller can report the
+	// restore rather than an absence; a released retention is gone from the table
+	// entirely and reads as exists=false.
+	GetRetained(ctx context.Context, path string) (r Retained, exists bool, err error)
+
+	// ListRetained returns every LIVE retention (not yet restored), oldest expiry
+	// first. It is what the release sweep walks and what `holdfast restore` lists.
+	ListRetained(ctx context.Context) ([]Retained, error)
+
+	// MarkRestored stamps a retention as restored at unix second at. The row is KEPT:
+	// the restore is a ledger fact ("it happened, and when") and deleting it would
+	// leave the ledger reporting only the swap that has just been undone.
+	MarkRestored(ctx context.Context, sourcePath string, at int64) error
+
+	// DropRetained deletes a retention record outright. Used by the release sweep once
+	// the retained name is gone, and by a restore that finds the retained original no
+	// longer on disk: in both cases there is nothing left to restore, and a record that
+	// promises one would be a promise the tool cannot keep.
+	DropRetained(ctx context.Context, sourcePath string) error
 
 	// Close releases the underlying database handle.
 	Close() error

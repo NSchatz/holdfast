@@ -174,6 +174,15 @@ func HistoryRowJSON(j store.Job) ([]byte, error) {
 // status; the cap applies to the rows this response selected) and not one a client can
 // answer correctly. Each total is counted over the MATCHING rows in the ledger and never
 // over the rows returned, so asking for fewer rows than the cap reports the same total.
+//
+// BytesHeldByUndoWindow is space the swaps counted in the reclaimed figures have NOT
+// yet returned to the filesystem (UNDO-6): while an original is retained, its bytes
+// are still allocated under a second link, and they come back only when the window
+// closes. It ships as its OWN figure, never folded into either reclaimed total,
+// because a reclaimed number that quietly included space still being held would tell
+// an operator a disk is free when it is not. It is a POINTER: null means the figure
+// could not be read, which a reader must render as unavailable rather than as a
+// zero that would read as "nothing is being held".
 type snapshot struct {
 	Summary                map[string]int `json:"summary"`
 	Queue                  []jobDTO       `json:"queue"`
@@ -182,6 +191,7 @@ type snapshot struct {
 	HistoryTotal           rowTotalDTO    `json:"history_total"`
 	BytesReclaimedSession  int64          `json:"bytes_reclaimed_session"`
 	BytesReclaimedLifetime int64          `json:"bytes_reclaimed_lifetime"`
+	BytesHeldByUndoWindow  *int64         `json:"bytes_held_by_undo_window"`
 	Paused                 bool           `json:"paused"`
 	Scanning               bool           `json:"scanning"`
 	Now                    int64          `json:"now"`
@@ -603,11 +613,31 @@ func (h *Hub) buildSnapshot(ctx context.Context) (snapshot, error) {
 		HistoryTotal:           h.rowTotal(ctx, "history_total", terminal, historyLimit),
 		BytesReclaimedSession:  h.bytesReclaimed.Load(),
 		BytesReclaimedLifetime: h.ReclaimedLifetime(),
+		BytesHeldByUndoWindow:  h.heldByUndoWindow(ctx),
 		Paused:                 h.ctrl.Paused(),
 		Scanning:               h.ctrl.Scanning(),
 		Now:                    time.Now().Unix(),
 		Aggregates:             h.aggregates(ctx),
 	}, nil
+}
+
+// heldByUndoWindow reads the bytes the undo window is still holding. Unlike the
+// reclaimed lifetime total this is NOT baselined at startup: a held figure that could
+// not fall would keep reporting space as held after the release returned it, which is
+// the opposite of the honesty it exists for. The read is a SUM over the retained
+// table, which holds one row per original inside the window and nothing else - it is
+// bounded by what is currently retained, not by the ledger's history.
+//
+// A read failure yields nil (rendered as unavailable) and never fails the snapshot:
+// the same rule the whole-ledger aggregates follow, for the same reason - one
+// unreadable figure must not blank a live page.
+func (h *Hub) heldByUndoWindow(ctx context.Context) *int64 {
+	held, err := h.store.HeldByUndoWindow(ctx)
+	if err != nil {
+		h.log.Warn("undo-window held-bytes read failed (reported as unavailable)", "err", err)
+		return nil
+	}
+	return &held
 }
 
 // aggregates reads the whole-ledger figures for a snapshot. It CANNOT fail the
