@@ -228,7 +228,7 @@ credential written LITERALLY into the workflow rather than through `secrets.` is
 The compose reference has exactly ONE reader: `scripts/resolve-compose-image.sh` asks the gate for it
 (`-print-compose-ref`) instead of parsing the file a second time in sed, because two readers agree on today's
 file and diverge on a quoted scalar, a second service with an `image:`, or an `image:` nested outside
-`services:` — the ffmpeg-pin lesson applied to one more duplicated value. The floating tag gets the same
+`services:` - the ffmpeg-pin lesson applied to one more duplicated value. The floating tag gets the same
 treatment: it is declared once, as `FLOATING_TAG` in the promotion step's `env:`, read by the gate and by
 `scripts/release-promote.sh`.
 The plan step REFUSES a tag whose major version is not zero, naming the record
@@ -492,7 +492,7 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   `.github/workflows/release.yml` (TRANSCODE-9) — tag-triggered: runs the full `make check`, builds both
   arches, smokes them, pushes the version tag, re-smokes what it pulled back, and only then promotes
   `:latest` and cuts the release. Publishing happens on a **tag push only**; `workflow_dispatch` is always
-  a dry run — enforced by the capability split (S0046), not by the guards alone: the `build` job holds
+  a dry run - enforced by the capability split (S0046), not by the guards alone: the `build` job holds
   `contents: read`, the `publish` job holds every write scope and every irreversible act, and it runs only
   when the planning logic says a tag is being released.
 - `Dockerfile` (TRANSCODE-9) — the production image (multi-arch, distroless `cc`, non-root, pinned ffmpeg);
