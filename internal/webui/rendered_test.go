@@ -17,6 +17,7 @@ package webui
 // asserting the same reading of the same DOM fails.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -26,20 +27,31 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
 
 // browserCandidates are the binaries this grader will drive, in order. HOLDFAST_BROWSER
-// overrides the search.
+// overrides the search, and CI sets it to a candidate it has already PROVED renders.
+//
+// The order is not alphabetical: a real vendor binary comes before `chromium`, because on
+// several distributions (Ubuntu among them) `/usr/bin/chromium` is a snap shim that can
+// sit for ever instead of failing when its confinement is unhappy - which is exactly what
+// it did the first time this ran on CI. renderBudget below turns any such hang into a
+// named failure rather than a ten-minute timeout of the whole package.
 //
 // There is deliberately NO skip when none is found. A criterion about what the page
 // shows, silently unproven because a machine had no browser, is the "false green" this
 // repo refuses everywhere else - the fixture suite fails loud without ffmpeg for exactly
-// the same reason, and CI installs what the proof needs rather than skipping past it.
+// the same reason, and CI resolves what the proof needs rather than skipping past it.
 var browserCandidates = []string{
-	"chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome",
+	"google-chrome", "google-chrome-stable", "chrome", "chromium", "chromium-browser",
 }
+
+// renderBudget bounds one render. A page this small renders in a second or two; anything
+// approaching this is a browser that is not going to answer at all.
+const renderBudget = 90 * time.Second
 
 func browserBin(t *testing.T) string {
 	t.Helper()
@@ -119,21 +131,42 @@ func renderPage(t *testing.T, pageHTML, snapshot string) string {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	profile := t.TempDir()
-	cmd := exec.Command(browserBin(t),
+	bin := browserBin(t)
+	home := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), renderBudget)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin,
 		"--headless=new",
 		"--disable-gpu",
 		"--no-sandbox",
 		"--disable-dev-shm-usage",
-		"--user-data-dir="+filepath.Join(profile, "profile"),
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--disable-extensions",
+		"--user-data-dir="+filepath.Join(home, "profile"),
 		"--virtual-time-budget=6000",
 		"--run-all-compositor-stages-before-draw",
 		"--dump-dom",
 		srv.URL+"/",
 	)
+	// A writable HOME of its own: a browser denied one can sit rather than fail, and a
+	// grader that hangs is a grader that reports nothing.
+	cmd.Env = append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+home, "XDG_CACHE_HOME="+home)
+	// Killing the process group as well: a browser that spawns helpers and then wedges
+	// leaves them holding the pipe, and CombinedOutput would wait on THEM after the
+	// context killed the parent.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 5 * time.Second
+
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("::error:: %s did not render within %s - the dashboard grader needs a browser that "+
+			"actually answers (set HOLDFAST_BROWSER to one). Output so far:\n%s",
+			bin, renderBudget, truncate(string(out)))
+	}
 	if err != nil {
-		t.Fatalf("::error:: rendering the dashboard failed: %v\n%s", err, out)
+		t.Fatalf("::error:: rendering the dashboard with %s failed: %v\n%s", bin, err, truncate(string(out)))
 	}
 	dom := string(out)
 	if !strings.Contains(dom, "<table") {
