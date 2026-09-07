@@ -113,6 +113,44 @@ jobs:
           done
           echo "config schema self-test OK (valid accepted; unknown-key + bad-value rejected)"
 
+  # The dashboard's own suites, in REQUIRED mode (WEBUI-10).
+  #
+  # `make check` above runs them with this repository's skip-when-absent idiom, so a
+  # contributor with no browser is not blocked - the same courtesy the docker gate gets.
+  # That idiom has exactly one failure mode: a suite that skips on every machine reports
+  # "ok" forever while measuring nothing. This job closes it. HOLDFAST_WEBUI_REQUIRED=1
+  # turns a missing runtime into a failure, and scripts/webui-check.sh fails the run if
+  # anything skipped or if either half did not execute at all.
+  #
+  # It is a separate job because it needs two runtimes the gate does not: node (for the
+  # derivation units, in node's BUILT-IN test runner - no registry package, no lockfile)
+  # and a browser engine (for the rendered graders, which decide what the page SHOWS by
+  # loading the served document rather than by matching its source text).
+  dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
+      # Named and proven present BEFORE the gate runs, so "the browser was missing" is a
+      # sentence in the log rather than a mystery inside a test binary.
+      - name: the runtimes the dashboard suites require
+        run: |
+          set -euo pipefail
+          node --version
+          for b in chromium chromium-browser google-chrome chrome; do
+            if command -v "$b" >/dev/null 2>&1; then "$b" --version; exit 0; fi
+          done
+          echo "::error::no browser engine on PATH; the rendered graders cannot run and must not be skipped"
+          exit 1
+
+      - name: the dashboard's unit suite and rendered graders, in required mode
+        run: make webui-check
+
   # The packaging gate. It runs on every PR the same script the release workflow runs
   # before it pushes anything (scripts/smoke-image.sh), so the image a tag ships is the
   # image that has been gated all along.

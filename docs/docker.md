@@ -147,6 +147,22 @@ make image-smoke               # build, then drive a REAL encode inside the imag
 the source was replaced by a smaller HEVC file that passed every gate, with no temp left
 behind. Run it against any image you are about to trust.
 
+### Building a modified holdfast: the source offer
+
+The dashboard offers its Corresponding Source (AGPL-3.0 section 13). An image built from this
+repository unchanged offers this tree; an image you build from a **modified** tree must offer
+yours, and one build argument does it, with no patching of the embedded HTML:
+
+```bash
+docker buildx build --build-arg SOURCE_URL=https://git.example.org/me/holdfast -t my/holdfast .
+make image SOURCE_URL=https://git.example.org/me/holdfast    # the same thing through the Makefile
+```
+
+`SOURCE_URL` rides the same `-ldflags` invocation as `VERSION`/`COMMIT`/`DATE`, so the link and
+the build identity the page shows always name the same tree. It must be an absolute `http://` or
+`https://` URL: the container **exits non-zero at startup** on anything else, naming the value it
+rejected, rather than serving an offer nobody can follow.
+
 ## Known limitations
 
 - **Only NVIDIA hardware encoding works in this image.** `qsv` / `vaapi` / `amf` each need a vendor

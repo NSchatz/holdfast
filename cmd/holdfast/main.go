@@ -35,6 +35,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/schedule"
 	"github.com/NSchatz/holdfast/internal/server"
+	"github.com/NSchatz/holdfast/internal/sourceoffer"
 	"github.com/NSchatz/holdfast/internal/startup"
 	"github.com/NSchatz/holdfast/internal/store"
 	"github.com/NSchatz/holdfast/internal/version"
@@ -315,6 +316,30 @@ func logConfigWarnings(cfg *config.Config, log *slog.Logger) {
 // signals: it serves until ctx is cancelled, then drains gracefully. cmdServe wraps
 // it with a signal-bound context.
 func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr io.Writer) int {
+	// THE source-URL refusal site (LICENSE-3), and it is deliberately the first
+	// statement in the function. Every listener this program can create is created
+	// below, and both branches that can serve the root path - the embedded dashboard
+	// and the API-only page - are behind it, so a build whose Corresponding Source
+	// URL is unusable serves neither.
+	//
+	// It sits AHEAD of buildEngine, which is where the whole-run start-or-refuse
+	// decision over the filesystem lives (FILESYSTEM-1). Same shape, same exit
+	// contract - refuse the whole run, say which value was rejected, exit non-zero -
+	// and deliberately not folded into that decision, which is about the paths this
+	// run would act on and is taken by `run` too. `run` starts no listener that
+	// serves the root path, so an unusable source URL is none of its business.
+	// Ordering it first means the refusal costs no ffmpeg probe, no store open and
+	// no filesystem walk: nothing happens at all.
+	//
+	// A refusal, never a fall back to upstream. A fork whose override is malformed
+	// and silently fell back would tell its users that upstream is the source of a
+	// binary it is not.
+	offer, err := sourceoffer.Resolve()
+	if err != nil {
+		fmt.Fprintf(stderr, "holdfast: refusing to serve: %v\n", err)
+		return 1
+	}
+
 	eng, st, code := buildEngine(cfg, log, stderr)
 	if code != 0 {
 		return code
@@ -358,7 +383,7 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		return !ok
 	}
 
-	srv := server.New(ctx, *cfg, st, ctrl, hub, webui.Handler(), metricsHandler, log)
+	srv := server.New(ctx, *cfg, st, ctrl, hub, webui.HandlerFor(offer), metricsHandler, log)
 	var bg sync.WaitGroup
 	bg.Add(3)
 	go func() { defer bg.Done(); hub.Run(ctx) }()

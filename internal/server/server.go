@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/sourceoffer"
 	"github.com/NSchatz/holdfast/internal/store"
 )
 
@@ -85,12 +86,37 @@ func (s *Server) routes() http.Handler {
 	if s.ui != nil {
 		r.Handle("/*", s.ui)
 	} else {
-		r.Get("/", func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			_, _ = w.Write([]byte("holdfast API is running. See /api/summary, /api/queue, /api/history, /api/events.\n"))
-		})
+		r.Get("/", apiOnlyRoot())
 	}
 	return r
+}
+
+// apiOnlyRoot serves the minimal plain-text page that stands in for the dashboard
+// when the server is constructed without one. It is a root response a remote user can
+// get, so it owes the same AGPL section 13 source offer the dashboard does
+// (LICENSE-3) - the source URL in effect, the licence name and the build identity,
+// with the same literal label immediately before the URL. No markup, so the URL is
+// written verbatim.
+//
+// It resolves the offer through the SAME accept test the daemon runs at startup, and
+// refuses if the value was rejected: a rejected value must not reach a root response
+// on either branch. In the daemon that refusal has already happened before any
+// listener exists - this branch is reachable only in process, where there is no
+// listener to refuse and no exit code to return.
+func apiOnlyRoot() http.HandlerFunc {
+	const banner = "holdfast API is running. See /api/summary, /api/queue, /api/history, /api/events.\n"
+	offer, err := sourceoffer.Resolve()
+	if err != nil {
+		msg := "holdfast refuses to serve the root path: " + err.Error() + "\n"
+		return func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, msg, http.StatusServiceUnavailable)
+		}
+	}
+	body := []byte(banner + "\n" + offer.Text())
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write(body)
+	}
 }
 
 // --- read endpoints ----------------------------------------------------------

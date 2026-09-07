@@ -1,4 +1,9 @@
 <!DOCTYPE html>
+<!-- GENERATED FILE - do not edit by hand.
+     Built from internal/webui/src by internal/webui/gen, with the Go toolchain alone:
+     no JavaScript runtime, no bundler, no registry package, no lockfile, no network.
+     Edit the modules under internal/webui/src and run `make webui-gen`;
+     `make check` fails when this file is stale. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -118,6 +123,15 @@
   .nr { color:var(--muted); font-style:italic; }
   .empty { color:var(--muted); font-style:italic; padding:10px; }
   footer { color:var(--muted); font-size:12px; text-align:center; padding:22px; max-width:80ch; margin:0 auto; }
+  /* The AGPL section 13 source offer (LICENSE-3). It is rendered into the document
+     server-side, so it is in the bytes of the root response whether or not a single
+     API call succeeds, and it carries its OWN class: nothing else on this page styles
+     it, and no hiding rule anywhere in this stylesheet names it. Do not add one - a
+     `display:none` or `visibility:hidden` naming .source-offer (or an ancestor of it)
+     would make the offer unreachable without interaction, which is the whole thing the
+     offer owes. */
+  .source-offer { margin:12px 0 0; }
+  .source-offer a { color:var(--accent); overflow-wrap:anywhere; }
   #conn { font-size:12px; color:var(--muted); }
   #conn.live { color:var(--ok); } #conn.down { color:var(--bad); }
 </style>
@@ -202,7 +216,8 @@
   </section>
 </main>
 <footer>holdfast — config-as-code, data-safe media transcoder. The YAML config is the source of truth;
-  this page reads and controls. It reports what was measured, and only that.</footer>
+  this page reads and controls. It reports what was measured, and only that.
+  <!--holdfast:source-offer--></footer>
 
 <!-- Row shells cloned per render. Rows are built as DOM nodes (createElement +
      textContent) and filled from cloned templates — the page never assembles an HTML
@@ -238,7 +253,11 @@
 </template>
 
 <script>
+// --- internal/webui/src/js/10-constants.js ---
 "use strict";
+// The closed vocabularies the page reads off the wire. Values only, no DOM: this module
+// is loadable in a plain JavaScript runtime, which is what lets the unit suite exercise
+// the derivations that consume it without standing up a browser.
 // "indeterminate" and "applied-despite-error" are FILESYSTEM-1 outcomes and they get
 // their own chip and their own history rows. A job whose swap outcome could not be
 // established must show as the state it is in: rendering it as done would be a lie and
@@ -252,12 +271,6 @@ const QUEUE_STATUSES = ["pending","probing","encoding","verifying"];
 // states are covered by Elapsed alone, which is exactly what the phase scoped them to.
 const PROGRESS_STATUS = "encoding";
 const TERMINAL_STATUSES = ["done","skipped","failed","indeterminate","applied-despite-error"];
-const $ = (id) => document.getElementById(id);
-
-// Persist the control token locally so an operator doesn't retype it each visit.
-const tokenInput = $("token");
-tokenInput.value = localStorage.getItem("holdfast_token") || "";
-tokenInput.addEventListener("change", () => localStorage.setItem("holdfast_token", tokenInput.value));
 
 // Human labels for the closed vocabulary of skip guards (internal/engine's Skip*
 // constants). An unknown token falls back to itself, so a new guard is never hidden.
@@ -273,21 +286,38 @@ const GUARD_LABELS = {
   "target-already-exists": "target file already exists",
   "symlinked-source": "symlinked source (would replace the link)",
 };
+// --- internal/webui/src/js/20-derive.js ---
+// The dashboard's VALUE DERIVATIONS. Every function here maps wire data to the value a
+// cell shows, and NONE of them touches the DOM - that is what makes them exercisable in
+// a plain JavaScript runtime, one input at a time, without standing up the page.
+//
+// The absence rule, which is the store's own invariant carried to the screen: a pointer
+// field arrives as JSON null when the fact was never recorded, and a reader must render
+// that AS not recorded - never as 0, never as NaN, never as the string "undefined". So a
+// derivation handed an absent, null, non-numeric, non-finite or negative value answers
+// with the page's honest absent result for its own type: NOT_RECORDED for the string
+// formatters, null for the roll-up and the composite cell derivations, false for the
+// predicate, and the "unknown" progress figure for a running encode with no measurement.
+// The cell renderers then map that absence to exactly what the page has always shown.
+const NOT_RECORDED = "not recorded";
+
+// A pointer field arrives as JSON null when the fact was never recorded. Render that
+// honestly - never as 0, never as an invented value.
+function isNum(v) { return typeof v === "number" && isFinite(v); }
 
 function fmtBytes(n) {
-  n = Number(n) || 0;
-  const neg = n < 0; n = Math.abs(n);
+  if (!isNum(n) || n < 0) return NOT_RECORDED;
   const u = ["B","KB","MB","GB","TB","PB"]; let i = 0;
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-  return (neg ? "-" : "") + n.toFixed(i ? 1 : 0) + " " + u[i];
+  return n.toFixed(i ? 1 : 0) + " " + u[i];
 }
 function fmtTime(sec) {
-  if (!sec) return "";
+  if (!isNum(sec) || sec <= 0) return NOT_RECORDED;
   const d = new Date(sec * 1000);
   return d.toLocaleString();
 }
 function fmtDur(ms) {
-  ms = Number(ms) || 0;
+  if (!isNum(ms) || ms < 0) return NOT_RECORDED;
   if (ms < 1000) return ms + " ms";
   let s = Math.round(ms / 1000);
   if (s < 60) return s + "s";
@@ -299,30 +329,146 @@ function fmtDur(ms) {
 // fmtSpan renders a duration in seconds as a compact H/M/S span. Used for how long a job
 // has been in its state and for a position within the source.
 function fmtSpan(sec) {
-  sec = Math.floor(Number(sec));
-  if (!isFinite(sec) || sec < 0) return "";
+  if (!isNum(sec) || sec < 0) return NOT_RECORDED;
+  sec = Math.floor(sec);
   const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, s = sec % 60;
   if (h) return h + "h " + m + "m";
   if (m) return m + "m " + s + "s";
   return s + "s";
 }
+function pct(x) { return isNum(x) ? Math.round(x * 100) + "%" : NOT_RECORDED; }
+function fmtScore(x) { return isNum(x) ? Number(x).toFixed(1) : NOT_RECORDED; }
+// The count an aggregate states its spread across. Absent is stated, never printed as NaN.
+function fmtCount(x) { return isNum(x) ? Number(x).toLocaleString() : NOT_RECORDED; }
 
-// A pointer field arrives as JSON null when the fact was never recorded. Render that
-// honestly — never as 0, never as an invented value.
-function isNum(v) { return typeof v === "number" && isFinite(v); }
+// The status roll-up behind each table's cap notice: how many rows the ledger holds in
+// the states this table shows. A summary that is not an object cannot be rolled up, and
+// says so with null rather than reporting a total of 0 nobody counted.
+function sumStatuses(sum, keys) {
+  if (!sum || typeof sum !== "object" || !Array.isArray(keys)) return null;
+  return keys.reduce((a, s) => a + (isNum(sum[s]) ? sum[s] : 0), 0);
+}
 
 // The offset between this page's clock and the server's, taken from the snapshot's own
-// `now` field. Every elapsed figure is DERIVED from it on each tick — never accumulated
+// `now` field. Every elapsed figure is DERIVED from it on each tick - never accumulated
 // in a counter here. Two reasons, both load-bearing: a background tab's timers are
 // throttled by policies with no normative guarantee, so a counter ticking in the page
 // would silently drift while a value recomputed from the transition timestamp cannot;
 // and a client whose clock is skewed against the server's would otherwise read a
 // nonsensical (or negative) age straight off updated_at.
 let clockOffset = 0;
+function clockOffsetFrom(serverSeconds, clientMillis) { return serverSeconds - clientMillis / 1000; }
 function serverNow() { return Date.now() / 1000 + clockOffset; }
 
+// elapsedText is the in-state age one queue row shows: the server's clock now, less the
+// transition timestamp that row carries on the wire. A row with no usable basis has no
+// age to show and says so with null, which the cell renders as an empty cell.
+function elapsedText(now, since) {
+  since = Number(since);
+  if (!isNum(since) || since <= 0 || !isNum(now)) return null;
+  return fmtSpan(Math.max(0, now - since));
+}
+
+// The size figures a done row shows: before, after, and the percent reclaimed. Null when
+// either size was never recorded, so the cell reads "not recorded" and never 0%.
+function sizeFigures(j) {
+  if (!isNum(j.source_bytes) || !isNum(j.output_bytes)) return null;
+  // Clamp at 0 for the same reason the server does (Event.BytesReclaimed / ReclaimedTotal):
+  // the strictly-smaller gate precludes output > source, but a defensive clamp means a
+  // future bug there can never render a nonsensical negative "% smaller".
+  const saved = Math.max(0, j.source_bytes - j.output_bytes);
+  const share = j.source_bytes > 0 ? Math.round((saved / j.source_bytes) * 100) : 0;
+  return {
+    before: fmtBytes(j.source_bytes),
+    after: fmtBytes(j.output_bytes),
+    reduction: share + "% smaller",
+  };
+}
+
+// The VMAF figures a done row shows, and exactly what they license: the two pooled
+// statistics (harmonic mean AND worst frame), the model that produced them, its pooling,
+// its luma-only blind spot, and that it was measured against the operator's own source.
+// It never grades the result, never claims perfect fidelity, and never compares files.
+function vmafFigures(j) {
+  if (!isNum(j.vmaf_mean) && !isNum(j.vmaf_min)) return null;
+  const model = j.vmaf_model ? String(j.vmaf_model).replace(/^version=/, "") : "unspecified model";
+  return {
+    mean: isNum(j.vmaf_mean) ? fmtScore(j.vmaf_mean) : "?",
+    worst: isNum(j.vmaf_min) ? fmtScore(j.vmaf_min) : "?",
+    condition: "model " + model + " · harmonic-mean + worst-frame pooling · luma-only · measured vs your source",
+  };
+}
+
+// The progress figure for a queue row. A figure exists ONLY when the row is a RUNNING
+// encode AND that encoder reported a position AND the source duration is known; a running
+// encode with no usable figure is "unknown", and every other state has no progress to
+// have at all (null). There is no interpolation, no estimate from elapsed time, and no
+// carry-over of the last figure - an absent measurement is absent, including the instant
+// the encode ends and the verify begins.
+function progressFigure(j) {
+  if (j.status !== PROGRESS_STATUS) return null;
+  if (!isNum(j.progress_fraction)) return { unknown: true };
+  const frac = Math.min(1, Math.max(0, j.progress_fraction));
+  const out = { unknown: false, percent: Math.round(frac * 100) + "%" };
+  if (isNum(j.progress_seconds) && isNum(j.progress_duration_seconds)) {
+    out.of = fmtSpan(Math.min(j.progress_seconds, j.progress_duration_seconds))
+      + " of " + fmtSpan(j.progress_duration_seconds);
+  }
+  return out;
+}
+
+// Human label for one skip guard. An unknown token falls back to itself, so a new guard
+// is never hidden behind a blank.
+function guardLabel(k) { return GUARD_LABELS[k] || k; }
+
+// Surface the API's silent row caps: it ships at most a fixed number of queue / history
+// rows, so a truncated view could read as the whole ledger. When the store holds more
+// than we were handed, say so; when the total could not be rolled up, claim nothing.
+function capNoteText(shown, total) {
+  if (!isNum(shown) || !isNum(total) || total <= shown) return "";
+  return "Showing the most recent " + shown.toLocaleString() + " of "
+    + total.toLocaleString() + " — this view is capped.";
+}
+
+// The polite screen-reader summary: short counts, so a snapshot that shifts nothing can
+// be compared against the last one and stay silent.
+function announceText(sum) {
+  const s = (sum && typeof sum === "object") ? sum : {};
+  const n = (k) => (isNum(s[k]) ? s[k] : 0);
+  const active = n("probing") + n("encoding") + n("verifying");
+  // A parked job is counted SEPARATELY and named for what it is. Folding it into
+  // "failed" would tell a screen-reader user the one thing this phase exists to stop
+  // holdfast saying: on this dashboard "failed" has always carried "and your source is
+  // fine", and a parked job is precisely the case where that is not established.
+  return n("done") + " done, " + n("skipped") + " skipped, "
+    + n("failed") + " failed, " + n("indeterminate") + " parked awaiting a determination; "
+    + active + " active, " + n("pending") + " pending.";
+}
+
+// The set an aggregate is over, always stated; plus the bound, when it is not over all
+// of that set.
+function aggCoverageText(a) {
+  return "over " + ((a && a.covers) || "an unstated set") +
+    (a && a.window ? " · window: " + a.window : "");
+}
+// The rows an aggregate had to leave out for want of a recorded value.
+function aggExclusionText(a) {
+  const excluded = (a && isNum(a.excluded)) ? a.excluded : 0;
+  if (excluded <= 0) return "";
+  return excluded.toLocaleString() + " row" + (excluded === 1 ? "" : "s") +
+    " excluded: no recorded value";
+}
+// --- internal/webui/src/js/30-dom.js ---
+// The DOM primitives. Everything the page puts on screen is built here or through here,
+// and there is exactly one way to do it: createElement plus textContent. No module in
+// this directory assigns a string to an HTML sink, which is what makes the response
+// Content-Security-Policy's `require-trusted-types-for 'script'` a guarantee rather than
+// a hope - a regression that string-built from an attacker-influencable media path would
+// throw in the browser instead of silently reintroducing a sink.
+const $ = (id) => document.getElementById(id);
+
 // mk(tag, class, text): the one DOM-node factory. textContent means any string it is
-// handed — a media path, a failure reason — is inert text, never parsed as markup.
+// handed - a media path, a failure reason - is inert text, never parsed as markup.
 function mk(tag, cls, text) {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
@@ -330,21 +476,20 @@ function mk(tag, cls, text) {
   return e;
 }
 // The honest "not recorded" node for a nil/absent outcome field.
-function nrNode() { return mk("span", "nr", "not recorded"); }
+function nrNode() { return mk("span", "nr", NOT_RECORDED); }
+// --- internal/webui/src/js/40-cells.js ---
+// The cells. Each takes the value its derivation produced and puts it on screen; an
+// absent derivation is rendered as the page's honest absence, never as a zero.
 
 // The size cell: before → after with the percent reclaimed. Only meaningful on a done
 // row that recorded both sizes.
 function sizeCell(td, j) {
-  if (!isNum(j.source_bytes) || !isNum(j.output_bytes)) { td.appendChild(nrNode()); return; }
-  // Clamp at 0 for the same reason the server does (Event.BytesReclaimed / ReclaimedTotal):
-  // the strictly-smaller gate precludes output > source, but a defensive clamp means a
-  // future bug there can never render a nonsensical negative "% smaller".
-  const saved = Math.max(0, j.source_bytes - j.output_bytes);
-  const pct = j.source_bytes > 0 ? Math.round((saved / j.source_bytes) * 100) : 0;
-  td.appendChild(mk("span", "before", fmtBytes(j.source_bytes)));
+  const f = sizeFigures(j);
+  if (!f) { td.appendChild(nrNode()); return; }
+  td.appendChild(mk("span", "before", f.before));
   td.appendChild(mk("span", "arrow", "→"));
-  td.appendChild(document.createTextNode(fmtBytes(j.output_bytes)));
-  td.appendChild(mk("span", "pct", pct + "% smaller"));
+  td.appendChild(document.createTextNode(f.after));
+  td.appendChild(mk("span", "pct", f.reduction));
 }
 
 // The VMAF cell states exactly what the number licenses and no more: the two pooled
@@ -352,29 +497,26 @@ function sizeCell(td, j) {
 // its luma-only blind spot, and that it was measured against the operator's own source.
 // It never grades the result, never claims perfect fidelity, and never compares files.
 function vmafCell(td, j) {
-  if (!isNum(j.vmaf_mean) && !isNum(j.vmaf_min)) { td.appendChild(nrNode()); return; }
-  const mean = isNum(j.vmaf_mean) ? j.vmaf_mean.toFixed(1) : "?";
-  const worst = isNum(j.vmaf_min) ? j.vmaf_min.toFixed(1) : "?";
-  const model = j.vmaf_model ? j.vmaf_model.replace(/^version=/, "") : "unspecified model";
+  const f = vmafFigures(j);
+  if (!f) { td.appendChild(nrNode()); return; }
   const pair = mk("span", "pair");
-  pair.appendChild(mk("span", "mean", mean));
+  pair.appendChild(mk("span", "mean", f.mean));
   pair.appendChild(document.createTextNode(" mean · "));
-  pair.appendChild(mk("span", "worst", worst));
+  pair.appendChild(mk("span", "worst", f.worst));
   pair.appendChild(document.createTextNode(" worst frame"));
   td.appendChild(pair);
-  td.appendChild(mk("span", "cond",
-    "model " + model + " · harmonic-mean + worst-frame pooling · luma-only · measured vs your source"));
+  td.appendChild(mk("span", "cond", f.condition));
 }
 
 // The result cell: the status, plus WHY for the two states that have a reason. A skipped
-// row names the guard; a failed row shows the error text verbatim.
+// row names the guard; a failed one shows the error text verbatim.
 function resultCell(td, j) {
   const st = mk("span", "st st-" + j.status);
   st.appendChild(mk("span", "dot"));
   st.appendChild(document.createTextNode(j.status));
   td.appendChild(st);
   if (j.status === "skipped" && j.reason) {
-    td.appendChild(mk("div", "reason", GUARD_LABELS[j.reason] || j.reason));
+    td.appendChild(mk("div", "reason", guardLabel(j.reason)));
   } else if (j.status === "failed") {
     td.appendChild(mk("div", "reason fail", j.reason ? j.reason : "reason not recorded"));
   } else if (j.status === "indeterminate") {
@@ -388,26 +530,22 @@ function resultCell(td, j) {
   }
 }
 
-// The progress cell for a queue row. It shows a figure ONLY when the row is a RUNNING
-// encode AND that encoder reported a position AND the source duration is known; a running
-// encode with no usable figure reads "unknown", and every other state leaves the cell
-// empty because it has no progress to have. There is no interpolation, no estimate from
-// elapsed time, and no carry-over of the last figure — an absent measurement is displayed
-// as absent, including the instant the encode ends and the verify begins.
+// The progress cell for a queue row: the derivation's figure, "unknown" when the encoder
+// has reported nothing usable, and an empty cell for every state that has no progress.
 function progressCell(td, j) {
-  if (j.status !== PROGRESS_STATUS) return; // not encoding: nothing measures a fraction here
-  if (!isNum(j.progress_fraction)) {
+  const f = progressFigure(j);
+  if (!f) return; // not encoding: nothing measures a fraction here
+  if (f.unknown) {
     td.appendChild(mk("span", "nr", "unknown"));
     return;
   }
-  const frac = Math.min(1, Math.max(0, j.progress_fraction));
-  td.appendChild(mk("span", "pctv", Math.round(frac * 100) + "%"));
-  if (isNum(j.progress_seconds) && isNum(j.progress_duration_seconds)) {
-    td.appendChild(mk("span", "of",
-      fmtSpan(Math.min(j.progress_seconds, j.progress_duration_seconds))
-      + " of " + fmtSpan(j.progress_duration_seconds)));
-  }
+  td.appendChild(mk("span", "pctv", f.percent));
+  if (f.of) td.appendChild(mk("span", "of", f.of));
 }
+// --- internal/webui/src/js/50-rows.js ---
+// The rows. Each is cloned from a <template> in the document and filled cell by cell, so
+// the row's shape is markup the author wrote and its content is text the browser can only
+// ever treat as text.
 
 // refreshElapsed recomputes every active row's in-state age from the transition
 // timestamp the row carries. It runs on render AND on a timer, which is what makes the
@@ -415,9 +553,8 @@ function progressCell(td, j) {
 function refreshElapsed() {
   const now = serverNow();
   for (const td of $("queue").querySelectorAll("td.elapsed")) {
-    const since = Number(td.dataset.since);
-    if (!isFinite(since) || since <= 0) { td.textContent = ""; continue; }
-    td.textContent = fmtSpan(Math.max(0, now - since));
+    const age = elapsedText(now, td.dataset.since);
+    td.textContent = age === null ? "" : age;
   }
 }
 
@@ -448,7 +585,7 @@ function histRow(j) {
   const dur = tr.querySelector(".dur");
   if (isNum(j.encode_ms)) dur.textContent = fmtDur(j.encode_ms);
   else if (j.status === "done") dur.appendChild(nrNode());
-  tr.querySelector(".upd").textContent = fmtTime(j.updated_at);
+  tr.querySelector(".upd").textContent = j.updated_at ? fmtTime(j.updated_at) : "";
   return tr;
 }
 
@@ -460,9 +597,7 @@ function emptyRow(cols, text) {
   tr.appendChild(td);
   return tr;
 }
-
-function sumStatuses(sum, keys) { return keys.reduce((a, s) => a + (sum[s] || 0), 0); }
-
+// --- internal/webui/src/js/60-aggregates.js ---
 // --- whole-ledger aggregates -------------------------------------------------
 //
 // The queue and history tables are capped by the API, so anything derived from them in
@@ -473,28 +608,25 @@ function sumStatuses(sum, keys) { return keys.reduce((a, s) => a + (sum[s] || 0)
 
 // One card's value renderer per published figure. Each returns DOM nodes; none of them
 // invents a number, and each is only ever called when the figure reports data.
-function pct(x) { return Math.round(x * 100) + "%"; }
-function fmtScore(x) { return Number(x).toFixed(1); }
-
 function spreadNodes(a, fmt, lead) {
   const out = [mk("b", null, fmt(a.mean))];
   if (lead) out.push(document.createTextNode(" " + lead));
   out.push(mk("span", "range", "range " + fmt(a.min) + " to " + fmt(a.max) + " across " +
-    Number(a.counted).toLocaleString() + " files"));
+    fmtCount(a.counted) + " files"));
   return out;
 }
 function bucketNodes(a, label) {
   return a.buckets.map((b) => {
     const row = mk("div", "bucket");
     row.appendChild(mk("span", null, label(b.key)));
-    row.appendChild(mk("span", "c", Number(b.count).toLocaleString()));
+    row.appendChild(mk("span", "c", fmtCount(b.count)));
     return row;
   });
 }
 
 const AGGREGATES = [
   ["outcomes", "Outcomes", (a) => bucketNodes(a, (k) => k)],
-  ["skips_by_guard", "Skips by guard", (a) => bucketNodes(a, (k) => GUARD_LABELS[k] || k)],
+  ["skips_by_guard", "Skips by guard", (a) => bucketNodes(a, guardLabel)],
   ["size_ratio", "Replacement size", (a) => spreadNodes(a, pct, "of the original, mean")],
   ["encode_ms", "Encode time", (a) => spreadNodes(a, fmtDur, "mean")],
   ["vmaf_mean", "VMAF pooled mean", (a) => spreadNodes(a, fmtScore, "mean of per-file means")],
@@ -519,7 +651,7 @@ function aggCard(a, title, nodes) {
     return el;
   }
 
-  const counted = Number(a.counted) || 0;
+  const counted = isNum(a.counted) ? a.counted : 0;
   if (counted === 0) {
     // No row contributed a value. Say so - never 0, never an average of 0, and never an
     // empty list that reads as a set of zero counts.
@@ -527,15 +659,8 @@ function aggCard(a, title, nodes) {
   } else {
     for (const n of nodes(a)) v.appendChild(n);
   }
-  // The set the figure is over, always stated; plus the bound, when it is not over all
-  // of that set.
-  cov.textContent = "over " + (a.covers || "an unstated set") +
-    (a.window ? " · window: " + a.window : "");
-  const excluded = Number(a.excluded) || 0;
-  if (excluded > 0) {
-    ex.textContent = excluded.toLocaleString() + " row" + (excluded === 1 ? "" : "s") +
-      " excluded: no recorded value";
-  }
+  cov.textContent = aggCoverageText(a);
+  ex.textContent = aggExclusionText(a);
   return el;
 }
 
@@ -558,23 +683,19 @@ function renderAggregates(aggs) {
     host.appendChild(card);
   }
 }
+// --- internal/webui/src/js/70-render.js ---
+// The whole-page render. One snapshot in, the page it describes out.
 
 // Surface the API's silent row caps: it ships at most a fixed number of queue / history
-// rows, so a truncated view could read as the whole ledger. When the store holds more
-// than we were handed, say so.
+// rows, so a truncated view could read as the whole ledger.
 function capNote(id, shown, total) {
   const el = $(id);
-  if (total > shown) {
-    el.textContent = "Showing the most recent " + shown.toLocaleString() + " of "
-      + total.toLocaleString() + " — this view is capped.";
-    el.hidden = false;
-  } else {
-    el.textContent = "";
-    el.hidden = true;
-  }
+  const text = capNoteText(shown, total);
+  el.textContent = text;
+  el.hidden = text === "";
 }
 
-// Client-side path filter over the rows already loaded (which are themselves capped —
+// Client-side path filter over the rows already loaded (which are themselves capped -
 // see capNote). Hides non-matching rows in both tables; empty term shows all.
 function applyFilter() {
   const term = $("filter").value.trim().toLowerCase();
@@ -586,21 +707,17 @@ function applyFilter() {
   }
 }
 
-// The polite screen-reader summary: short counts, updated only when they change so a
-// snapshot that shifts nothing stays silent.
+// The polite screen-reader summary, updated only when it changes so a snapshot that
+// shifts nothing stays silent.
 function announce(sum) {
-  const active = (sum.probing || 0) + (sum.encoding || 0) + (sum.verifying || 0);
-  const parked = sum.indeterminate || 0;
-  const msg = (sum.done || 0) + " done, " + (sum.skipped || 0) + " skipped, "
-    + (sum.failed || 0) + " failed, " + parked + " parked awaiting a determination; "
-    + active + " active, " + (sum.pending || 0) + " pending.";
+  const msg = announceText(sum);
   const el = $("sr-status");
   if (el.textContent !== msg) el.textContent = msg;
 }
 
 function render(snap) {
   // Re-anchor the elapsed basis to the server's clock as of this frame.
-  if (isNum(snap.now)) clockOffset = snap.now - Date.now() / 1000;
+  if (isNum(snap.now)) clockOffset = clockOffsetFrom(snap.now, Date.now());
 
   // Badges.
   const bp = $("b-paused");
@@ -624,7 +741,7 @@ function render(snap) {
   chips.replaceChildren();
   for (const s of STATUSES) {
     const chip = mk("div", "chip " + s);
-    chip.appendChild(mk("div", "n", String(sum[s] || 0)));
+    chip.appendChild(mk("div", "n", String(isNum(sum[s]) ? sum[s] : 0)));
     chip.appendChild(mk("div", "k", s));
     chips.appendChild(chip);
   }
@@ -637,7 +754,7 @@ function render(snap) {
   else for (const j of q) qbody.appendChild(queueRow(j));
   refreshElapsed();
 
-  // History — the trust surface: per file, the evidence its swap was safe.
+  // History - the trust surface: per file, the evidence its swap was safe.
   const h = snap.history || [];
   const hbody = $("history");
   hbody.replaceChildren();
@@ -655,11 +772,19 @@ function render(snap) {
   // inside the aggregate cards can cost the operator the rest of the page.
   try { renderAggregates(snap.aggregates); } catch (_) {}
 }
+// --- internal/webui/src/js/80-wire.js ---
+// The wiring: the controls, the ticker and the live stream. This is the only module that
+// runs anything at load time; everything above it declares.
+
+// Persist the control token locally so an operator doesn't retype it each visit.
+const tokenInput = $("token");
+tokenInput.value = localStorage.getItem("holdfast_token") || "";
+tokenInput.addEventListener("change", () => localStorage.setItem("holdfast_token", tokenInput.value));
 
 $("filter").addEventListener("input", applyFilter);
 
 // The elapsed ticker. It recomputes from each row's own transition timestamp, so a
-// throttled or long-delayed tick produces a correct figure rather than a lagging one —
+// throttled or long-delayed tick produces a correct figure rather than a lagging one -
 // the tick decides only HOW OFTEN the page refreshes, never WHAT it says.
 setInterval(refreshElapsed, 1000);
 

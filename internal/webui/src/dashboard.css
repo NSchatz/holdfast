@@ -1,0 +1,124 @@
+  :root {
+    --bg:#0f1115; --panel:#171a21; --line:#252a34; --fg:#e6e9ef; --muted:#8b93a3;
+    --accent:#5b9dd9; --ok:#3fb950; --warn:#d29922; --bad:#f85149;
+    /* --border draws every interactive control's edge (buttons, inputs, badges) and
+       the focus ring's base. It is #606776 (3.33:1 on --bg), clearing WCAG 2.2's 3:1
+       floor for non-text UI. --line stays for purely decorative separators (table
+       rows, section rules) where the 3:1 component floor does not apply. */
+    --border:#606776;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+    font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+  /* One focus-visible ring for every keyboard-reachable control (accent = 6.5:1 on
+     --bg). Mouse clicks keep no ring (:focus-visible), keyboard focus always shows one. */
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:3px; }
+  /* An off-screen but screen-reader-available region (the aria-live summary lives here). */
+  .visually-hidden { position:absolute; width:1px; height:1px; padding:0; margin:-1px;
+    overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0; }
+  header { display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+    padding:14px 20px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { font-size:18px; margin:0; letter-spacing:.5px; }
+  header h1 .mono { color:var(--accent); }
+  .badges { display:flex; gap:8px; flex-wrap:wrap; }
+  .badge { font-size:12px; padding:2px 9px; border-radius:20px; border:1px solid var(--border);
+    color:var(--muted); }
+  .badge.on { color:var(--bg); background:var(--warn); border-color:var(--warn); font-weight:600; }
+  .badge.scan.on { background:var(--accent); border-color:var(--accent); }
+  .grow { flex:1 1 auto; }
+  .reclaimed { font-size:13px; color:var(--muted); text-align:right; }
+  .reclaimed b { color:var(--ok); font-size:16px; }
+  .reclaimed .sub { display:block; font-size:11px; color:var(--muted); }
+  main { padding:20px; max-width:1180px; margin:0 auto; }
+  .chips { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px; }
+  .chip { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+    padding:10px 14px; min-width:96px; }
+  .chip .n { font-size:22px; font-weight:700; }
+  .chip .k { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+  .chip.done .n { color:var(--ok); } .chip.failed .n { color:var(--bad); }
+  .chip.indeterminate .n, .chip.applied-despite-error .n { color:var(--bad); }
+  .chip.encoding .n, .chip.probing .n, .chip.verifying .n { color:var(--accent); }
+  .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:14px; }
+  .lbl { font-size:12px; color:var(--muted); }
+  .controls input { background:var(--bg); border:1px solid var(--border); color:var(--fg);
+    padding:7px 10px; border-radius:6px; width:220px; }
+  .controls input::placeholder { color:var(--muted); }
+  button { background:var(--panel); border:1px solid var(--border); color:var(--fg);
+    padding:7px 14px; border-radius:6px; cursor:pointer; font-size:13px; }
+  button:hover:not(:disabled) { border-color:var(--accent); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:var(--bg); font-weight:600; }
+  button:disabled { opacity:.45; cursor:not-allowed; border-color:var(--line); }
+  #msg { font-size:13px; color:var(--muted); min-height:18px; margin-left:6px; }
+  #msg.err { color:var(--bad); }
+  section h2 { font-size:14px; text-transform:uppercase; letter-spacing:.5px;
+    color:var(--muted); border-bottom:1px solid var(--line); padding-bottom:6px; margin:26px 0 6px; }
+  section .note { font-size:12px; color:var(--muted); margin:0 0 10px; max-width:70ch; }
+  /* The cap notice: the API caps the queue/history rows it ships, so a truncated view
+     could read as a complete one. This calls it out. Text is --fg (accessible); the
+     tint and rule are decorative. */
+  .note.cap { color:var(--fg); background:rgba(210,153,34,.12); border-left:3px solid var(--warn);
+    padding:6px 10px; border-radius:4px; }
+  /* Whole-ledger figures. Each card carries its number, the set that number is over,
+     and the rows it had to leave out; ".out" is the unavailable state, which colours the
+     card without removing it (an aggregate that vanished on failure would leave the page
+     looking complete). */
+  .aggs { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:10px; }
+  .agg { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 14px; }
+  .agg h3 { margin:0 0 6px; font-size:12px; color:var(--muted); text-transform:uppercase;
+    letter-spacing:.5px; font-weight:600; }
+  .agg .agg-v { font-size:14px; }
+  .agg .agg-v b { font-size:20px; font-weight:700; }
+  .agg .range { display:block; color:var(--muted); font-size:12px; margin-top:2px; }
+  .agg .bucket { display:flex; justify-content:space-between; gap:12px; font-size:13px; }
+  .agg .bucket .c { font-weight:600; }
+  .agg .agg-cov, .agg .agg-ex { margin:6px 0 0; font-size:11px; color:var(--muted); }
+  .agg.out .agg-v { color:var(--warn); }
+  .tablewrap { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);
+    font-size:13px; vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:12px; white-space:nowrap; }
+  td.path { font-family:ui-monospace,Menlo,Consolas,monospace; word-break:break-all; }
+  /* The history table is FIXED-width so its wide free-text cells (the VMAF viewing
+     condition, a failed row's reason) WRAP inside their column instead of blowing the
+     table past the viewport and pushing the fidelity proof off-screen. */
+  table.hist { table-layout:fixed; }
+  table.hist td { overflow-wrap:anywhere; }
+  /* The Result cell reuses the status styling but, unlike the queue, must WRAP — a
+     failed row's reason is long free text and td.st's nowrap would run it off-screen. */
+  table.hist td.st { white-space:normal; }
+  td.st { white-space:nowrap; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px;
+    background:var(--muted); vertical-align:middle; }
+  .st-done .dot { background:var(--ok); } .st-failed .dot { background:var(--bad); }
+  .st-skipped .dot { background:var(--muted); }
+  .st-indeterminate .dot, .st-applied-despite-error .dot { background:var(--bad); }
+  .st-encoding .dot,.st-probing .dot,.st-verifying .dot,.st-pending .dot { background:var(--accent); }
+  .reason { color:var(--muted); font-size:12px; }
+  .reason.fail { color:var(--bad); word-break:break-word; }
+  .size .before { color:var(--muted); }
+  .size .arrow { color:var(--muted); margin:0 4px; }
+  .size .pct { display:block; color:var(--ok); font-weight:600; margin-top:2px; }
+  .vmaf .pair { white-space:nowrap; }
+  .vmaf .mean { font-weight:600; }
+  .vmaf .worst { color:var(--fg); }
+  .vmaf .cond { display:block; color:var(--muted); font-size:11px; margin-top:2px; }
+  /* In-state age and the encoder's own progress figure, for the active queue only. */
+  td.elapsed { white-space:nowrap; font-variant-numeric:tabular-nums; }
+  td.prog { white-space:nowrap; }
+  td.prog .pctv { font-weight:600; font-variant-numeric:tabular-nums; }
+  td.prog .of { display:block; color:var(--muted); font-size:11px; margin-top:2px; }
+  .nr { color:var(--muted); font-style:italic; }
+  .empty { color:var(--muted); font-style:italic; padding:10px; }
+  footer { color:var(--muted); font-size:12px; text-align:center; padding:22px; max-width:80ch; margin:0 auto; }
+  /* The AGPL section 13 source offer (LICENSE-3). It is rendered into the document
+     server-side, so it is in the bytes of the root response whether or not a single
+     API call succeeds, and it carries its OWN class: nothing else on this page styles
+     it, and no hiding rule anywhere in this stylesheet names it. Do not add one - a
+     `display:none` or `visibility:hidden` naming .source-offer (or an ancestor of it)
+     would make the offer unreachable without interaction, which is the whole thing the
+     offer owes. */
+  .source-offer { margin:12px 0 0; }
+  .source-offer a { color:var(--accent); overflow-wrap:anywhere; }
+  #conn { font-size:12px; color:var(--muted); }
+  #conn.live { color:var(--ok); } #conn.down { color:var(--bad); }

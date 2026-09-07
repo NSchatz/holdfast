@@ -297,7 +297,9 @@ banned identifier only to prohibit it, and only with the `rename-guard-allow` ma
 exemption greppable instead of letting a file-level exclusion hide a real leak.
 
 `docs/docker.md` is the deployment reference (volumes, permissions, TZ, GPU passthrough, security posture);
-`docs/migration.md` covers the cutover from the Bash transcoder and from Tdarr. The full phased plan lives
+`docs/migration.md` covers the cutover from the Bash transcoder and from Tdarr; `docs/webui.md` is the
+dashboard reference (the source layout, the generator, `make webui-gen` / `webui-stale` / `webui-check`,
+and the runtime each suite needs). The full phased plan lives
 in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
 
 ## Layout
@@ -337,6 +339,24 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   recorded" rather than `0` when nothing contributed, and renders an unreadable figure as **unavailable**
   while the rest of the page still draws. Each card is built independently and after the tables, so no
   figure can cost an operator the rows.
+  **`index.html` is GENERATED and COMMITTED (WEBUI-10) — do not edit it.** Its source is
+  `internal/webui/src` (the page shell `index.html.tmpl`, `dashboard.css`, and the script modules named
+  in order by `js/modules.txt`), and `internal/webui/gen` inlines them back into the one embedded file.
+  The generator is **Go and stdlib only**: no JavaScript runtime, no bundler, no registry package, no
+  lockfile, no network — so `make build` is a plain `go build` and the image gains no stage and no tool.
+  `make webui-gen` is the only writer of that file; `make webui-stale` (inside `make check`) fails naming
+  it when the committed bytes are not what the sources generate. A source that is missing, unreadable or
+  unparseable stops the generator with the file NAMED and the committed document untouched — never half
+  a page. The split is what makes the page testable: `js/20-derive.js` holds every VALUE DERIVATION and
+  touches no DOM, so it is exercised one input at a time in **node's built-in test runner** (no registry
+  package), while everything that BUILDS nodes is graded by loading the SERVED document in a **real
+  browser engine** — computed style, layout geometry, `innerText`, a hit test, and the browser's own
+  report of every CSP/Trusted Types refusal. Never grade a rendered property off source text; a text
+  grader cannot decide what a rule applies to, what wins the cascade, or what is SHOWN rather than built.
+  `make check` lets both suites SKIP when their runtime is absent (as the docker gate does); `make
+  webui-check` sets `HOLDFAST_WEBUI_REQUIRED=1`, which makes a missing runtime a FAILURE, and refuses a
+  run in which anything skipped or either half did not execute. CI runs it on every PR. Full reference:
+  `docs/webui.md`.
 - `internal/metrics` (TRANSCODE-8) — Prometheus `client_golang` collectors on a private registry: an
   `engine.Observer` adapter (counts terminal outcomes; records reclaimed bytes + encode-duration + VMAF on
   the Done event) + a queue-depth collector that reads `store.Summary` at scrape time + a `/metrics`
@@ -440,9 +460,12 @@ mistake this repo keeps making; read the target.) It covers the real-ffmpeg fixt
 `scripts/check-pins.sh`. The **Makefile owns the tool pins** and CI
 invokes that same target, so the PR gate, the release gate and a human all run the identical thing — the
 versions were once restated in `ci.yml` too, which meant bumping one silently drifted the gates apart. CI
-adds two things on top: the **config-schema self-test** (proves `validate` REDS on a bad config, not merely
-that tests passed) and the **image smoke gate** (`scripts/smoke-image.sh`, needs Docker). **Never claim green
-without running it.** Every phase that touches the engine must also extend the fixture suite so it *reds on
+adds three things on top: the **config-schema self-test** (proves `validate` REDS on a bad config, not merely
+that tests passed), the **image smoke gate** (`scripts/smoke-image.sh`, needs Docker), and the **dashboard
+gate** (`make webui-check`, needs node + a browser engine). That last one is deliberately NOT inside `check`:
+`check` must stay green on a machine with no browser, so the dashboard suites SKIP there, and `webui-check`
+is where a missing runtime is a FAILURE and a run in which either half did not execute is refused.
+**Never claim green without running it.** Every phase that touches the engine must also extend the fixture suite so it *reds on
 the specific regression* — a data-safety tool proves its unhappy paths, not just that tests pass.
 The gate needs the **pinned ffmpeg** (`scripts/install-ffmpeg.sh`) and, since FILESYSTEM-1, a **browser**
 on `PATH` (or `HOLDFAST_BROWSER`): a criterion about what the DASHBOARD SHOWS is graded against the page

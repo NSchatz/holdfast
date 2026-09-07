@@ -11,16 +11,40 @@ GOVULNCHECK_VERSION ?= v1.1.4
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# The Corresponding Source URL the served page offers (AGPL-3.0 section 13, LICENSE-3).
+# It rides the SAME -ldflags invocation as the version stamp below, because the offer is
+# the link PLUS the build identity and the two have to name the same tree.
+#
+# A fork running a MODIFIED holdfast over a network points it at its own tree, and does
+# not patch the embedded HTML to do it:
+#
+#   make build SOURCE_URL=https://git.example.org/me/holdfast
+#   make image SOURCE_URL=https://git.example.org/me/holdfast
+#
+# The value must be an absolute http:// or https:// URL; `serve` REFUSES to start on
+# anything else rather than serving an offer nobody can follow. This default is checked
+# against internal/sourceoffer.Upstream by a test inside `make check`, so this copy
+# cannot drift from the built-in one.
+#
+# Its -X assignment below is SINGLE-QUOTED, which the others do not need to be: go splits
+# the -ldflags value with shell-like quoting, so an unquoted URL carrying a space would be
+# split into two flags and fail the build. A value is only ever escaped at render time,
+# never rejected for being unclean, so the build path carries the same values the page does.
+SOURCE_URL ?= https://github.com/NSchatz/holdfast
+
 LDFLAGS := -s -w \
   -X github.com/NSchatz/holdfast/internal/version.Version=$(VERSION) \
   -X github.com/NSchatz/holdfast/internal/version.Commit=$(COMMIT) \
-  -X github.com/NSchatz/holdfast/internal/version.Date=$(DATE)
+  -X github.com/NSchatz/holdfast/internal/version.Date=$(DATE) \
+  -X 'github.com/NSchatz/holdfast/internal/sourceoffer.URL=$(SOURCE_URL)'
 
 IMAGE    ?= holdfast:dev
 PLATFORM ?= linux/amd64
 
 .PHONY: build test check fmt vet staticcheck govulncheck govulncheck-selftest \
         check-pins check-pins-selftest install-ffmpeg-selftest check-pin-live \
+        webui-gen webui-stale webui-check \
         tidy clean image image-smoke compose-check
 
 build:
@@ -75,8 +99,32 @@ check-pins-selftest:
 install-ffmpeg-selftest:
 	./scripts/install-ffmpeg-selftest.sh
 
+# --- the dashboard (WEBUI-10) -------------------------------------------------
+# internal/webui/index.html is GENERATED and COMMITTED: the binary embeds one
+# self-contained file, and it is built from the modules under internal/webui/src by
+# internal/webui/gen with the Go toolchain alone - no JavaScript runtime, no bundler, no
+# registry package, no lockfile, no network, and so no new stage or tool in the image
+# build. `webui-gen` is the only writer of that file.
+webui-gen:
+	go run ./internal/webui/gen/genindex
+
+# The stale-artifact gate. A committed document that is not what the sources generate is
+# a page whose behaviour nobody can predict from its source, so `check` refuses it by
+# name rather than silently regenerating behind the build.
+webui-stale:
+	go run ./internal/webui/gen/genindex -check
+
+# The dashboard's suites in REQUIRED mode: the derivation units (node's built-in test
+# runner) and the rendered graders (a real browser engine). A runtime it needs and cannot
+# find is a FAILURE here, and a suite that reported itself skipped is a failure too - the
+# whole point of this target is that it cannot come back green without having measured
+# anything. `check` keeps the repo's skip-when-absent idiom instead, exactly as the docker
+# gate does, so a contributor with no browser is not blocked.
+webui-check:
+	./scripts/webui-check.sh
+
 # THE gate. CI and the release workflow both run exactly this.
-check: check-pins check-pins-selftest install-ffmpeg-selftest fmt vet build test staticcheck govulncheck govulncheck-selftest
+check: check-pins check-pins-selftest install-ffmpeg-selftest webui-stale fmt vet build test staticcheck govulncheck govulncheck-selftest
 
 # Asks UPSTREAM whether the pinned ffmpeg release is still served. Deliberately NOT part
 # of `check`: the PR gate must not red because a third party had a bad afternoon. CI runs
@@ -91,7 +139,8 @@ check-pin-live:
 # something only the runner can do.
 image:
 	docker buildx build --platform $(PLATFORM) --load -t $(IMAGE) \
-	  --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) .
+	  --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) \
+	  --build-arg SOURCE_URL=$(SOURCE_URL) .
 
 # Builds the image, then drives a REAL oneshot encode inside it and asserts the
 # no-loss contract held. This — not "the build succeeded" — is the packaging gate.
