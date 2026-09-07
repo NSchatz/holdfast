@@ -26,8 +26,18 @@ import (
 // code. Substituting the lookup, and only it, answers a recognised-local type for
 // the fixture tree, which is what those fixtures actually are. The mount layout
 // and the directory tree are still the real ones.
+// It also routes a CHILD PROCESS straight into the CLI (UNDO-6). A retention has to
+// survive the process that took it, and the only way to prove that without asserting
+// on our own in-memory state is to take it in one process and act on it from another
+// - so the test binary re-execs itself with subprocessEnv set and becomes `holdfast`,
+// opening its own store and running its own migration exactly as an operator's shell
+// would. The child substitutes the same filesystem-type lookup, for the same reason
+// the parent does.
 func TestMain(m *testing.M) {
 	startupPlatform = func() startup.Platform { return startup.System(fixedType("ext4"), nil) }
+	if os.Getenv(subprocessEnv) != "" {
+		os.Exit(dispatch(os.Args[1:], os.Stdout, os.Stderr))
+	}
 	os.Exit(m.Run())
 }
 

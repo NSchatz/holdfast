@@ -55,10 +55,14 @@ Usage:
 Commands:
   run        Load config and run one transcode scan over the library roots
   serve      Run the HTTP API + web UI (scan on demand / on an interval)
+  restore    List what the undo window is holding, or put one original back
   validate   Load and validate a config file, then exit
   version    Print version and exit
 
 Run "holdfast <command> -h" for command flags.
+
+  holdfast restore --config config.yaml            # what is retained, and for how long
+  holdfast restore --config config.yaml <path>     # put that original back
 `
 
 func dispatch(args []string, stdout, stderr io.Writer) int {
@@ -71,6 +75,8 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 		return cmdRun(args[1:], stdout, stderr)
 	case "serve":
 		return cmdServe(args[1:], stdout, stderr)
+	case "restore":
+		return cmdRestore(args[1:], stdout, stderr)
 	case "validate":
 		return cmdValidate(args[1:], stdout, stderr)
 	case "version", "-v", "--version":
@@ -123,12 +129,130 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 	fmt.Fprintf(stdout, "config OK: %d library root(s)\n", len(cfg.LibraryRoots))
+	// What this configuration MEANS, before what it has weakened. A disabled undo
+	// window is the shipped default and not a weakened gate, but it is the setting in
+	// which a swap is final - so it is stated here rather than silently absorbed.
+	for _, n := range cfg.Notices() {
+		fmt.Fprintf(stdout, "note: %s\n", n)
+	}
 	// Valid, but a safety gate is weakened — say so. These are not errors (each is a
 	// legitimate choice), but a config that has quietly lost its worst-frame floor
 	// must not look identical to one that still has it.
 	for _, w := range cfg.Warnings() {
 		fmt.Fprintf(stdout, "warning: %s\n", w)
 	}
+	return 0
+}
+
+// cmdRestore is the operator's half of the undo window (UNDO-6): with no argument it
+// lists what is retained and how long each has left; with a path it puts that original
+// back.
+//
+// It is deliberately a LOCAL command and not an HTTP endpoint. Restoring overwrites a
+// library file with older bytes, which is a mutation, and a mutating endpoint opens an
+// authorization question the read-and-control API does not currently answer. It is
+// also deliberately cheap: it loads the same config and opens the same state directory
+// as `run`/`serve` and stops there - no ffmpeg lookup, no encoder capability check, no
+// library walk - because none of those bear on moving one file back into place.
+func cmdRestore(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
+	cfg, code := loadConfig(fs, args, stderr)
+	if cfg == nil {
+		return code
+	}
+	rest := fs.Args()
+	if len(rest) > 1 {
+		fmt.Fprintf(stderr, "holdfast: restore takes at most one path (got %d)\n", len(rest))
+		return 2
+	}
+
+	log := logging.New(cfg.LogLevel)
+	st, err := store.Open(filepath.Join(stateDirPath(cfg), "jobs.db"))
+	if err != nil {
+		fmt.Fprintf(stderr, "holdfast: opening job store: %v\n", err)
+		return 1
+	}
+	defer func() { _ = st.Close() }()
+
+	undo := engine.NewUndoWindow(*cfg, st, log)
+	if len(rest) == 0 {
+		return listRetained(context.Background(), undo, cfg, stdout, stderr)
+	}
+	return restoreOne(context.Background(), undo, rest[0], stdout, stderr)
+}
+
+// resolveRestorePath turns what the operator typed into the path the ledger is keyed
+// by. Library roots are absolute (Validate refuses anything else), so every recorded
+// path is too - and an operator standing in their library and typing `ep.mkv` would
+// otherwise get "nothing is retained for that path" about a file that certainly is.
+// An unresolvable path falls back to the input, so the refusal still names something
+// they recognise rather than an error about the current directory.
+func resolveRestorePath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	return abs
+}
+
+// listRetained prints what the undo window is holding. Each line states the space that
+// original is HOLDING and how long is left on it, because those are the two facts an
+// operator is deciding between: whether to put a file back, and whether to wait for
+// the space instead.
+func listRetained(ctx context.Context, undo *engine.UndoWindow, cfg *config.Config, stdout, stderr io.Writer) int {
+	rows, err := undo.List(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "holdfast: reading the retained originals: %v\n", err)
+		return 1
+	}
+	if len(rows) == 0 {
+		if !cfg.UndoEnabled() {
+			fmt.Fprintln(stdout, "nothing is retained: undo_window_hours is 0, so the undo window is disabled and every swap is final.")
+			return 0
+		}
+		fmt.Fprintf(stdout, "nothing is retained: no swap has happened inside the current %dh undo window.\n", cfg.UndoWindowHours)
+		return 0
+	}
+	var held int64
+	for _, r := range rows {
+		held += r.SourceBytes
+	}
+	fmt.Fprintf(stdout, "%d retained original(s), holding %d byte(s) that the undo window has not yet returned:\n", len(rows), held)
+	now := time.Now().Unix()
+	for _, r := range rows {
+		fmt.Fprintf(stdout, "  %s  %d bytes  %s  (retained %s)\n",
+			r.SourcePath, r.SourceBytes, remainingWindow(r.ExpiresAt, now), r.RetainedPath)
+	}
+	fmt.Fprintln(stdout, "restore one with: holdfast restore --config <file> <path>")
+	return 0
+}
+
+// remainingWindow renders how long a retention has left. An expired one says so rather
+// than printing a negative duration: it is not gone yet (the release runs at the start
+// of the next scan), and the honest report of that state is its own sentence.
+func remainingWindow(expiresAt, now int64) string {
+	left := time.Duration(expiresAt-now) * time.Second
+	if left <= 0 {
+		return "window closed - released on the next scan"
+	}
+	return left.Round(time.Minute).String() + " left"
+}
+
+// restoreOne puts one original back, or refuses and says why. Every refusal exits
+// NONZERO and has mutated nothing: the whole value of a restore is that an operator
+// can trust what it did, and a command that half-restored while reporting a failure
+// would be worse than one that never existed.
+func restoreOne(ctx context.Context, undo *engine.UndoWindow, path string, stdout, stderr io.Writer) int {
+	res, err := undo.Restore(ctx, resolveRestorePath(path))
+	if err != nil {
+		fmt.Fprintf(stderr, "holdfast: cannot restore %s: %v\n", path, err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "restored %s (%d bytes) from %s\n", res.Record.SourcePath, res.Record.SourceBytes, res.Record.RetainedPath)
+	if res.Removed != "" {
+		fmt.Fprintf(stdout, "removed the encode it replaced: %s\n", res.Removed)
+	}
+	fmt.Fprintf(stdout, "the ledger records the restore at %d; the file will not be re-encoded until it changes.\n", res.RestoredAt)
 	return 0
 }
 
@@ -325,11 +449,26 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 	return runServer(ctx, cfg, log, stderr)
 }
 
-// logConfigWarnings emits the "valid, but a safety gate is weakened" warnings at
-// daemon startup. A tool that deletes originals should say out loud when the gate
-// protecting them has been narrowed — silence here is how a weakened config becomes
-// invisible.
+// logConfigWarnings announces, at daemon startup, what this configuration means and
+// what it has weakened. A tool that deletes originals should say out loud when the
+// gate protecting them has been narrowed — silence here is how a weakened config
+// becomes invisible.
+//
+// Notices come first, and they are logged at WARN even though they are not warnings.
+// The two lists stay separate (`validate` prints them as `note:` against `warning:`,
+// and Notices exists precisely so a shipped default is never dressed as a weakened
+// gate), but a LOG LEVEL is not a severity classification, it is how loud something
+// has to be to survive the operator turning the volume down. `log_level: warn` is a
+// legal setting, and at INFO this announcement vanished there entirely: the daemon
+// started, swapped a file and said nothing about the swap being final. A statement
+// that is inaudible at a level an operator may legitimately choose has not been made.
+//
+// WARN puts it on exactly the footing of the safety warnings below, which is the
+// right one: at `log_level: error` both go quiet, and `docs/undo.md` says so.
 func logConfigWarnings(cfg *config.Config, log *slog.Logger) {
+	for _, n := range cfg.Notices() {
+		log.Warn(n)
+	}
 	for _, w := range cfg.Warnings() {
 		log.Warn(w)
 	}

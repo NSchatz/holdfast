@@ -422,6 +422,122 @@ func (s *SQLite) ReclaimedTotal(ctx context.Context) (int64, error) {
 	return total, nil
 }
 
+// HeldByUndoWindow is documented on the Store interface. It sums only LIVE retentions
+// (restored_at IS NULL); a released one is not in the table at all, and a restored one
+// gave its bytes back to the library rather than to the filesystem. COALESCE turns the
+// no-rows case into 0, which here is the truth and not a fabrication: nothing retained
+// is nothing held.
+func (s *SQLite) HeldByUndoWindow(ctx context.Context) (int64, error) {
+	var total int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(source_bytes), 0) FROM retained_originals WHERE restored_at IS NULL`).
+		Scan(&total); err != nil {
+		return 0, fmt.Errorf("store: held by undo window: %w", err)
+	}
+	return total, nil
+}
+
+// retainedColumns is the column list every reader of a retention projects, in ONE
+// place so the SELECT text and the scan destinations cannot drift apart.
+const retainedColumns = `source_path, swapped_path, retained_path, source_bytes,
+	swapped_fingerprint, retained_at, expires_at, restored_at`
+
+// scanRetained reads one row in retainedColumns order. restored_at is the only
+// nullable column: NULL means "not restored", which is a state and not a missing
+// measurement, so it maps to a nil pointer exactly as the outcome columns do.
+func scanRetained(sc interface{ Scan(...any) error }) (Retained, error) {
+	var r Retained
+	var restoredAt sql.NullInt64
+	if err := sc.Scan(&r.SourcePath, &r.SwappedPath, &r.RetainedPath, &r.SourceBytes,
+		&r.SwappedFingerprint, &r.RetainedAt, &r.ExpiresAt, &restoredAt); err != nil {
+		return Retained{}, err
+	}
+	r.RestoredAt = nullableInt(restoredAt)
+	return r, nil
+}
+
+// Retain is documented on the Store interface. The upsert replaces an earlier record
+// for the same source path and CLEARS restored_at with it: the row now describes the
+// swap that has just happened, not the one an operator undid before it.
+func (s *SQLite) Retain(ctx context.Context, r Retained) error {
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO retained_originals
+			(source_path, swapped_path, retained_path, source_bytes, swapped_fingerprint, retained_at, expires_at, restored_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+		 ON CONFLICT(source_path) DO UPDATE SET
+			swapped_path = excluded.swapped_path,
+			retained_path = excluded.retained_path,
+			source_bytes = excluded.source_bytes,
+			swapped_fingerprint = excluded.swapped_fingerprint,
+			retained_at = excluded.retained_at,
+			expires_at = excluded.expires_at,
+			restored_at = NULL`,
+		r.SourcePath, r.SwappedPath, r.RetainedPath, r.SourceBytes,
+		r.SwappedFingerprint, r.RetainedAt, r.ExpiresAt); err != nil {
+		return fmt.Errorf("store: retain: %w", err)
+	}
+	return nil
+}
+
+// GetRetained is documented on the Store interface. The source_path match is tried
+// FIRST so an exact answer always wins over the swapped-path convenience lookup.
+func (s *SQLite) GetRetained(ctx context.Context, path string) (Retained, bool, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+retainedColumns+` FROM retained_originals
+		 WHERE source_path = ? OR swapped_path = ?
+		 ORDER BY (source_path = ?) DESC LIMIT 1`, path, path, path)
+	r, err := scanRetained(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Retained{}, false, nil
+	}
+	if err != nil {
+		return Retained{}, false, fmt.Errorf("store: get retained: %w", err)
+	}
+	return r, true, nil
+}
+
+// ListRetained is documented on the Store interface.
+func (s *SQLite) ListRetained(ctx context.Context) ([]Retained, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+retainedColumns+` FROM retained_originals
+		 WHERE restored_at IS NULL ORDER BY expires_at ASC, source_path ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list retained: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Retained
+	for rows.Next() {
+		r, err := scanRetained(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: list retained scan: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list retained rows: %w", err)
+	}
+	return out, nil
+}
+
+// MarkRestored is documented on the Store interface.
+func (s *SQLite) MarkRestored(ctx context.Context, sourcePath string, at int64) error {
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE retained_originals SET restored_at = ? WHERE source_path = ?`, at, sourcePath); err != nil {
+		return fmt.Errorf("store: mark restored: %w", err)
+	}
+	return nil
+}
+
+// DropRetained is documented on the Store interface.
+func (s *SQLite) DropRetained(ctx context.Context, sourcePath string) error {
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM retained_originals WHERE source_path = ?`, sourcePath); err != nil {
+		return fmt.Errorf("store: drop retained: %w", err)
+	}
+	return nil
+}
+
 // RecordSkip is documented on the Store interface. The ON CONFLICT DO UPDATE is
 // gated by `WHERE jobs.status = 'pending'`, which is what keeps a mutable guard from
 // clobbering a real outcome: on a fresh key the INSERT runs (1 row); on a pending

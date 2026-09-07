@@ -60,6 +60,20 @@ const (
 	SkipTargetExists          = "target-already-exists"
 	SkipSymlink               = "symlinked-source"
 
+	// SkipUndoRetentionFailed is the undo window's own guard (UNDO-6): the original
+	// could not be retained, so the swap that would have destroyed it does not run.
+	// It is a MUTABLE guard, like the hardlink one - a full disk or an unwritable
+	// retention area is fixed and the next scan reclaims the file - so ProcessFile
+	// clears a stale one before the claim rather than parking the file for ever.
+	SkipUndoRetentionFailed = "undo-retention-failed"
+
+	// SkipRestoredOriginal marks a file an operator has deliberately put back through
+	// the undo window. It is NOT mutable: the next scan must not re-encode a file
+	// somebody just rescued, through the very gates that passed the encode they
+	// rejected. Changing the file clears it, because that is a new fingerprint and a
+	// new row.
+	SkipRestoredOriginal = "restored-original"
+
 	// FailUnreadable is the one failure whose reason is a token: there is no error to
 	// quote, because the probe simply reported no video stream.
 	FailUnreadable = "unreadable-or-no-video-stream"
@@ -114,6 +128,20 @@ type Engine struct {
 	// ProcessFile aborts before the delete, exactly as a crashed process would, leaving
 	// BOTH files on disk (a duplicate, never a loss) for the next scan to reconcile.
 	hookAfterRename func() error
+
+	// hookAfterRetain, when non-nil, is called immediately after the undo window has
+	// taken its second link to the source and BEFORE the re-fingerprint and the
+	// rename. Production leaves it nil. It exists so a test can observe the state
+	// that only exists in that window - the retained original and the source being
+	// the same inode, and the filesystem having grown by nothing - which is the whole
+	// of the claim that retention costs no space. Returning a non-nil error aborts
+	// the swap exactly as a failure there would, so it also drives the abandon path.
+	hookAfterRetain func(retained string) error
+
+	// undoNow, when non-nil, replaces the clock the undo window reads. Production
+	// leaves it nil. A test uses it to place a retention's expiry in the past, so the
+	// release sweep is exercised for real rather than by rewriting a ledger row.
+	undoNow func() time.Time
 
 	// Observer, when non-nil, receives an Event on every job-state transition
 	// (TRANSCODE-7's API/SSE hub subscribes here). It is a fire-and-forget
@@ -268,8 +296,36 @@ func (e *Engine) RunOneshot(ctx context.Context) error {
 		// picked up once the store is healthy again.
 		e.Log.Warn("recover stale jobs failed (continuing)", "err", err)
 	}
+	// The undo window closes here (UNDO-6), at the START of the pass and before
+	// anything is encoded: a retention whose window has passed is released, and the
+	// space that release actually returned is reported. Doing it first means the
+	// figure an operator sees for this pass covers the whole pass, and that the disk
+	// this run is about to write to has already had back whatever the last one held.
+	//
+	// It is deliberately NOT gated on undo_window_hours still being non-zero. Each
+	// retention carries the expiry it was GIVEN, so releasing is a promise this tool
+	// already made about bytes it is already holding, and setting the key back to 0
+	// is the documented way to stop paying for the window, so gating the sweep on it
+	// would make that setting strand every original it had retained: the second link
+	// on disk for ever, the row live for ever, the space never returned. The setting
+	// governs whether a NEW retention is taken, nothing else.
+	e.undo().ReleaseExpired(ctx)
 	e.cleanStaleTemps(ctx)
 	return e.scanOnce(ctx)
+}
+
+// ReleaseExpired releases every retained original whose undo window has closed and
+// reports what that returned. RunOneshot calls it at the start of every pass; it is
+// exported so the release is drivable on its own, which is what makes "the space the
+// release actually returned" an assertable figure rather than a log line.
+func (e *Engine) ReleaseExpired(ctx context.Context) ReleaseReport {
+	return e.undo().ReleaseExpired(ctx)
+}
+
+// Restore puts a retained original back at its own path. It is the engine-side entry
+// point `holdfast restore` drives; see UndoWindow.Restore.
+func (e *Engine) Restore(ctx context.Context, path string) (RestoreResult, error) {
+	return e.undo().Restore(ctx, path)
 }
 
 // cleanStaleTemps deletes any `*.__transcoding__.*` files left under the roots by a
@@ -409,6 +465,14 @@ func (e *Engine) enumerate() []string {
 	var files []string
 	if e.Coverage != nil {
 		for _, dir := range e.Coverage {
+			// The retention area holds this tool's own retained originals and nothing
+			// else. Its files are already excluded by name (IsSourceName), and the
+			// directory is skipped here as well so a retained original cannot become
+			// a source through any route at all - re-encoding one would feed an
+			// operator's rescued bytes straight back to the encoder.
+			if filepath.Base(dir) == UndoDirName {
+				continue
+			}
 			ents, err := os.ReadDir(dir)
 			if err != nil {
 				continue
@@ -431,6 +495,9 @@ func (e *Engine) enumerate() []string {
 				return nil
 			}
 			if d.IsDir() {
+				if d.Name() == UndoDirName {
+					return filepath.SkipDir // the retention area is never a source
+				}
 				return nil
 			}
 			if IsSourceName(filepath.Base(path), e.Cfg.VideoExts) {
@@ -472,6 +539,20 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 
 	key := probe.Fingerprint(f)
 
+	// The undo window's own guard is MUTABLE (UNDO-6): a retention that could not be
+	// taken - a full disk, an unwritable retention area - is a condition that gets
+	// fixed, so a stale skip from a previous scan is dropped here and the file
+	// re-enters the normal path. Same discipline as the hardlink guard below.
+	//
+	// Not gated on the window still being enabled, for the same reason the release
+	// sweep and the hardlink discount are not: turning the window off must not strand
+	// what it left behind. With the window off no retention is attempted at all, so a
+	// retention failure is no longer a reason to skip anything, and a row left over
+	// from when it was on would park that file for as long as the setting stayed off.
+	if err := e.Store.ClearSkip(ctx, f, key, SkipUndoRetentionFailed); err != nil {
+		e.Log.Warn("clear stale undo-retention skip failed (continuing)", "file", f, "err", err)
+	}
+
 	// Hardlink guard. A file with >1 hard link is almost always an *arr import that
 	// is also an active seed. Replacing it via rename breaks the link — reclaiming
 	// no space and silently breaking the seed. Skip — and RECORD the skip as
@@ -481,8 +562,15 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// MUTABLE: RecordSkip only writes a skipped/hardlinked row where none with a real
 	// outcome exists, and once the file is no longer hardlinked the else-branch's
 	// ClearSkip removes that stale row so the file is reclaimed on the normal path.
+	//
+	// A link THIS TOOL holds is discounted (UNDO-6). The undo window takes a second
+	// link to the source before the rename, so a run interrupted in that window leaves
+	// the source at two links with nothing foreign about the extra one - and the guard,
+	// reading only the count, would park the very file the window was protecting.
+	// Discounting is proved per link (same inode, live retention record), never
+	// assumed from the count, so a foreign extra link still skips exactly as it did.
 	if e.Cfg.HardlinkSkip() {
-		if links := probe.NLink(f); links > 1 {
+		if links := probe.NLink(f); links > 1 && links > 1+e.retainedLinks(ctx, f, key) {
 			e.Log.Info("skip (hardlinked — swap would break a seed and reclaim nothing)", "file", f, "links", links)
 			changed, err := e.Store.RecordSkip(ctx, f, key, SkipHardlinked)
 			if err != nil {
@@ -755,6 +843,54 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		return nil
 	}
 
+	// Retain the original BEFORE the rename (UNDO-6). The rename is the only
+	// irreversible act this tool performs, and every gate in front of it is an
+	// estimate; a second link taken here keeps the original's bytes alive after the
+	// rename has taken its only other name away, so a bad encode that cleared every
+	// gate can still be walked back.
+	//
+	// Placement mirrors the temp fsync above and for the same reason: it is hoisted
+	// OUT of the re-fingerprint's window, so the TOCTOU the -16 guard narrows stays
+	// the microseconds between that stat and the rename syscall and does not grow by
+	// a link() and a possible mkdir(). Retaining first is safe in the other direction
+	// too - if the re-fingerprint below then refuses the swap, the retention is
+	// discarded on the way out and the source is left exactly as it was.
+	//
+	// A retention that cannot be taken SKIPS the file. The window's promise is that a
+	// swap can be undone, and a swap this tool could not undo is not one it performs
+	// while that promise is in force.
+	var retained string
+	if e.Cfg.UndoEnabled() {
+		u := e.undo()
+		r, rerr := u.retain(f, key)
+		if rerr != nil {
+			e.Log.Info("skip (the original could not be retained, so the swap could not be undone — source untouched)",
+				"file", f, "err", rerr)
+			_ = os.Remove(tmp)
+			e.finish(ctx, f, key, store.Skipped, because(SkipUndoRetentionFailed))
+			return nil
+		}
+		retained = r
+		if e.hookAfterRetain != nil {
+			if herr := e.hookAfterRetain(retained); herr != nil {
+				u.discard(retained)
+				_ = os.Remove(tmp)
+				out.Reason = "aborted after retaining the original: " + herr.Error()
+				e.finish(ctx, f, key, store.Failed, out)
+				return nil
+			}
+		}
+	}
+	// abandon undoes the retention on every path below that decides NOT to swap. A
+	// retained link with no swap behind it is not a loss (it names the same bytes the
+	// source still has), but it would raise the source's link count for nothing and
+	// leave an orphan in the retention area, so each refusal cleans up after itself.
+	abandon := func() {
+		if retained != "" {
+			e.undo().discard(retained)
+		}
+	}
+
 	// Re-fingerprint the SOURCE right before the swap (TRANSCODE-16 — the headline
 	// no-loss hazard). ProcessFile fingerprinted the source ONCE at entry (key) and
 	// has re-checked only the TARGET since; the source's own identity was never
@@ -774,6 +910,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// the target re-check.
 	if cur := probe.Fingerprint(f); cur != key {
 		e.Log.Warn("FAIL (source changed during encode — refusing to overwrite the newer content)", "file", f, "entry", key, "now", cur)
+		abandon()
 		_ = os.Remove(tmp)
 		out.Reason = "source changed during encode (fingerprint " + key + " -> " + cur + ") — refused to overwrite newer content"
 		e.finish(ctx, f, key, store.Failed, out)
@@ -785,6 +922,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// rename to the new name then remove the now-orphaned source.
 	if err := os.Rename(tmp, final); err != nil {
 		e.Log.Warn("FAIL (swap error, source untouched)", "file", f, "err", err)
+		abandon()
 		_ = os.Remove(tmp)
 		out.Reason = err.Error()
 		e.finish(ctx, f, key, store.Failed, out)
@@ -807,6 +945,10 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			// on the next scan. Return a non-context error — it is logged and the scan
 			// continues; the source is never removed under an unproven rename.
 			e.Log.Warn("swap durability unproven (parent dir fsync failed) — leaving both files for the next scan to reconcile", "file", f, "final", final, "err", dirErr)
+			// The source is still on disk, so there is nothing for the undo window to
+			// hold: drop the retention rather than leave an unreferenced link raising
+			// the source's link count while the next scan reconciles the duplicate.
+			abandon()
 			return fmt.Errorf("fsync parent dir after rename of %s: %w", final, dirErr)
 		}
 		// Test seam (TRANSCODE-16 fixture c): simulate a crash in the window between the
@@ -843,6 +985,21 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// (TRANSCODE-14) and what lets a UI show "before → after" instead of a bare delta.
 	newSize := probe.FileSize(final)
 	out.SourceBytes, out.OutputBytes = ptr(fi.Size()), ptr(newSize)
+
+	// The swap has happened, so the retention becomes a promise this tool has to keep:
+	// record it, with the fingerprint of what the swap left behind so a restore can
+	// refuse to overwrite anything else. Recorded AFTER the swap deliberately - before
+	// it the record would describe a swap that may never happen, and a ledger that
+	// claims a file was replaced when it was not is worse than one that is a moment
+	// behind. The window that opens here is covered without a record: the retained
+	// original carries this tool's own marker and the source's own fingerprint in its
+	// NAME, which is how the hardlink guard recognises it even if this write is lost.
+	if retained != "" {
+		if err := e.undo().record(ctx, f, final, retained, fi.Size()); err != nil {
+			e.Log.Warn("swapped, but could not record the retained original (it will not be released automatically until the record exists)",
+				"file", f, "retained", retained, "err", err)
+		}
+	}
 
 	// The log line carries the comparison format and the chroma figure beside the
 	// score, because "recorded alongside the score" has to mean everywhere the score
@@ -963,13 +1120,19 @@ func isTempName(base string) bool {
 
 // IsSourceName reports whether a file BASENAME is one a scan would enumerate as
 // a source: it carries one of the configured video extensions and is not one of
-// this tool's own work-in-progress temps (a temp is itself a *.mkv and is never a
-// source). It is the ONE definition of "a media file this run would enumerate",
-// shared by the scan and by the startup walk, which must decide it from the name
-// alone - it opens no file, so the walk's cost is bounded by the directory tree
-// and not by the library.
+// this tool's own working files - a work-in-progress temp, or an original the undo
+// window is holding. Both are themselves *.mkv (or whatever the source was) and
+// neither is ever a source. It is the ONE definition of "a media file this run would
+// enumerate", shared by the scan and by the startup walk, which must decide it from
+// the name alone - it opens no file, so the walk's cost is bounded by the directory
+// tree and not by the library.
+//
+// The retained original is the load-bearing addition (UNDO-6). A retention area whose
+// files were enumerated would hand the encoder the very bytes the undo window is
+// holding, re-encode them, and swap the result over them - destroying the thing an
+// operator was given a window to recover.
 func IsSourceName(base string, exts []string) bool {
-	return !isTempName(base) && matchesVideoExt(base, exts)
+	return !isTempName(base) && !isUndoName(base) && matchesVideoExt(base, exts)
 }
 
 // matchesVideoExt reports whether base has one of the configured video extensions
