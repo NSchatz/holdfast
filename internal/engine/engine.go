@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -311,7 +312,108 @@ func (e *Engine) RunOneshot(ctx context.Context) error {
 	// governs whether a NEW retention is taken, nothing else.
 	e.undo().ReleaseExpired(ctx)
 	e.cleanStaleTemps(ctx)
-	return e.scanOnce(ctx)
+	observed, err := e.scanOnce(ctx)
+	if err != nil {
+		return err
+	}
+	e.enforceRetention(ctx, observed)
+	return nil
+}
+
+// enforceRetention brings the ledger back within Cfg.HistoryRetentionRows, and it is the
+// ONLY caller of the prune - which is what makes the bound hold with no operator action
+// and no request to the API, on `run` and on every scan `serve` starts alike.
+//
+// It runs AFTER the scan, never during it. A prune competes for the single serialized
+// store connection the engine writes every Claim/Advance/Finish through, and the scan is
+// the thing that must not be slowed; it also means the rows this pass just wrote are the
+// newest ones, so "the oldest beyond the retention" is evaluated against a complete
+// picture rather than a half-finished one.
+//
+// A failure here is LOGGED and survivable, deliberately: the prune is bookkeeping about
+// history, and history is not the reason this process exists. A store that cannot be
+// pruned must not stop the daemon serving, and must not stop the next scan encoding - so
+// the error goes to the log with what the pass had already done, and the run continues.
+// The rows it did not remove are still there; nothing about the engine's decisions changed.
+//
+// observed is what THIS scan actually listed (see scanOnce), and it is what decides which
+// rows may go: see rowIsSpent.
+func (e *Engine) enforceRetention(ctx context.Context, observed map[string]bool) {
+	if !e.Cfg.RetentionEnabled() {
+		// Retention disabled (the shipped default): every row is kept and the store is
+		// not so much as read. Growth stays visible through the metrics that already
+		// exist - holdfast_queue_depth{state} is read from the store on every scrape.
+		return
+	}
+	var stillInLibrary, notObserved int64
+	prunable := e.rowIsSpent(observed, &stillInLibrary, &notObserved)
+	p, err := e.Store.PruneTerminal(ctx, e.Cfg.HistoryRetentionRows, e.Cfg.MaxFailures, prunable)
+	if err != nil {
+		e.Log.Warn("ledger retention pass failed (rows it did not remove are untouched; serving and encoding continue)",
+			"err", err, "history_retention_rows", e.Cfg.HistoryRetentionRows,
+			"removed", p.Removed, "reclaimed_carried_bytes", p.ReclaimedCarried)
+		return
+	}
+	if p.Removed == 0 && p.Kept == 0 {
+		return
+	}
+	e.Log.Info("ledger retention enforced (an irreversible delete of audit history)",
+		"history_retention_rows", e.Cfg.HistoryRetentionRows,
+		"removed", p.Removed, "reclaimed_carried_bytes", p.ReclaimedCarried, "kept", p.Kept)
+	if p.Kept > 0 {
+		e.Log.Info("ledger is above the retention by design: these rows are what holds their files out of "+
+			"the encoder, and deleting one would hand that file back to it on the next scan",
+			"kept_rows", p.Kept, "kept_file_still_in_the_library", stillInLibrary,
+			"kept_directory_this_run_did_not_list", notObserved, "max_failures", e.Cfg.MaxFailures)
+	}
+}
+
+// rowIsSpent answers store.Prunable: may this terminal row be removed without changing
+// what the engine does with that file?
+//
+// A row is SPENT only when this run LOOKED where the file should be and it was not there.
+// Both halves are load-bearing, and the second is the one that is easy to get wrong:
+//
+//   - Looked. A row is only ever spent if THIS run listed its directory (observed). A
+//     directory that could not be listed, or that does not exist, yields no evidence at
+//     all - and the shape that matters is the nested mount that is down, where the roots
+//     list fine and a whole subtree is simply absent. Pruning on that absence and then
+//     meeting the files again when the mount returns is the re-encode this rule exists to
+//     prevent, over an entire library at once. A missing or unlistable ROOT refuses the
+//     run outright (FILESYSTEM-1), so the two rules together mean no absence is ever read
+//     as "gone" unless holdfast successfully listed the directory it was absent from.
+//   - Not there. Absent, or present under a fingerprint that is not this row's - which is
+//     the superseded row the swap already deletes by hand after every transcode. Claim is
+//     keyed on path+fingerprint, so such a row can hold nothing out of the encoder. Any
+//     other stat failure (a permission error, an I/O error) is not an absence and is
+//     answered like an unlisted directory: keep.
+//
+// What it costs is stated where an operator will meet it (README, "Bounding the ledger"):
+// a library that is not churning has one row per file and every one of them is holding
+// that file out of the encoder, so its ledger is bounded by the library and not by
+// history_retention_rows. Retention bounds what the library has FINISHED with.
+//
+// The counters are plain ints because PruneTerminal calls this synchronously, on this
+// goroutine, one row at a time.
+func (e *Engine) rowIsSpent(observed map[string]bool, stillInLibrary, notObserved *int64) store.Prunable {
+	return func(path, fingerprint string, _ store.Status) bool {
+		if !observed[filepath.Dir(path)] {
+			*notObserved++
+			return false
+		}
+		if _, err := os.Stat(path); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return true
+			}
+			*notObserved++
+			return false
+		}
+		if probe.Fingerprint(path) == fingerprint {
+			*stillInLibrary++
+			return false
+		}
+		return true
+	}
 }
 
 // ReleaseExpired releases every retained original whose undo window has closed and
@@ -383,8 +485,14 @@ func (e *Engine) cleanStaleTemps(ctx context.Context) {
 // pre-TRANSCODE-5 behaviour). It stops promptly if ctx is cancelled: workers stop
 // pulling new files from the channel, and the in-flight ffmpeg subprocess (if any)
 // is killed via ctx cancellation propagating through exec.CommandContext.
-func (e *Engine) scanOnce(ctx context.Context) error {
-	files := e.enumerate()
+//
+// It returns the set of directories this scan LISTED SUCCESSFULLY - the only places
+// this run has evidence about, and therefore the only places the retention pass may
+// read a missing file as a file that is gone (see rowIsSpent). It is the enumeration's
+// own record rather than a re-derivation, so the two cannot disagree about where
+// holdfast looked.
+func (e *Engine) scanOnce(ctx context.Context) (map[string]bool, error) {
+	files, observed := e.enumerate()
 
 	n := e.Cfg.EffectiveWorkers()
 	ch := make(chan string)
@@ -447,13 +555,13 @@ feed:
 	wg.Wait()
 
 	if firstCancelErr != nil {
-		return firstCancelErr
+		return observed, firstCancelErr
 	}
-	return ctx.Err()
+	return observed, ctx.Err()
 }
 
 // enumerate returns every source this run may act on, sorted for a deterministic
-// order.
+// order, and the set of directories it LISTED SUCCESSFULLY to find them.
 //
 // With a Coverage set (FILESYSTEM-1) it lists exactly the directories the startup
 // walk traversed successfully and nothing else: no recursion of its own, so a
@@ -461,8 +569,14 @@ feed:
 // here, and a bind-mount loop the walk cut cannot be followed. Without one it
 // falls back to walking the roots directly, which is the behaviour of an Engine
 // built without the startup check.
-func (e *Engine) enumerate() []string {
+//
+// The observed set is the SAME evidence in its other form: a directory is in it only
+// when a listing of that directory returned, here, in this run. A directory that is
+// missing, unreadable, or that the walk declined is absent from it, and the retention
+// pass reads that as "no evidence" rather than as "the files are gone".
+func (e *Engine) enumerate() ([]string, map[string]bool) {
 	var files []string
+	observed := map[string]bool{}
 	if e.Coverage != nil {
 		for _, dir := range e.Coverage {
 			// The retention area holds this tool's own retained originals and nothing
@@ -477,6 +591,7 @@ func (e *Engine) enumerate() []string {
 			if err != nil {
 				continue
 			}
+			observed[dir] = true
 			for _, ent := range ents {
 				if ent.IsDir() {
 					continue
@@ -487,17 +602,30 @@ func (e *Engine) enumerate() []string {
 			}
 		}
 		sort.Strings(files)
-		return files
+		return files, observed
 	}
 	for _, root := range e.Cfg.LibraryRoots {
 		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
+				// WalkDir reports a directory it could not read by calling back a
+				// SECOND time for that directory, carrying the error. Withdraw it:
+				// it was marked on the way in, and a listing that failed is not one
+				// this run may draw a conclusion from.
+				if d != nil && d.IsDir() {
+					delete(observed, path)
+				}
 				return nil
 			}
 			if d.IsDir() {
+				// The retention area is never a source, and it is skipped BEFORE it is
+				// marked observed - exactly as the Coverage branch above skips it. A
+				// directory this run declined to list is not evidence about what is in
+				// it, and the retention pass must read it as "no evidence" rather than
+				// as "the files are gone".
 				if d.Name() == UndoDirName {
-					return filepath.SkipDir // the retention area is never a source
+					return filepath.SkipDir
 				}
+				observed[path] = true
 				return nil
 			}
 			if IsSourceName(filepath.Base(path), e.Cfg.VideoExts) {
@@ -507,7 +635,7 @@ func (e *Engine) enumerate() []string {
 		})
 	}
 	sort.Strings(files)
-	return files
+	return files, observed
 }
 
 // ProcessFile applies the full safety pipeline to one source file on behalf of

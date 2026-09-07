@@ -172,6 +172,44 @@ CREATE INDEX IF NOT EXISTS idx_retained_swapped ON retained_originals(swapped_pa
 CREATE INDEX IF NOT EXISTS idx_retained_expires ON retained_originals(restored_at, expires_at);
 `,
 	},
+	{
+		// v6 - LEDGER-5: the durable carry-forward a prune needs, and the index it reads
+		// the oldest rows through.
+		//
+		// It is v6 and NOT v4 or v5, which is the whole of what this slice's append-only
+		// rule is for. GATE-4's columns shipped as v4 and UNDO-6's retained_originals as
+		// v5 while this branch was open; a database in the field has already run both
+		// texts under those versions. Two different steps claiming one version would
+		// silently fork the schema in two - so this one moves to the end of the history
+		// rather than contesting an ordinal that is already spent.
+		//
+		// ledger_totals carries the ONE fact a pruned row would otherwise take with it.
+		// The published lifetime reclaimed total is a SUM over the done rows that recorded
+		// both sizes, so deleting such a row lowers it - not immediately (the server reads
+		// the baseline once, at startup) but at the next restart, which is precisely how a
+		// wrong total ships unnoticed. Prune therefore ADDS the rows' contribution here, in
+		// the same transaction that deletes them, and ReclaimedTotal reads live rows plus
+		// this. The row can only ever grow, so the total can never run backwards.
+		//
+		// One row, enforced by the CHECK: this is a singleton counter, not a table of
+		// them, and a second row would silently split the total in two. INSERT OR IGNORE
+		// seeds it so every later UPDATE has something to update - and re-running the
+		// migration (which cannot happen, but the whole mechanism is built on it being
+		// safe if it did) changes nothing.
+		//
+		// idx_jobs_status_updated is what makes "the oldest terminal rows" an index scan
+		// rather than a sort of the operator's entire library: the prune orders terminal
+		// rows by updated_at, on the same serialized connection the engine writes through.
+		name: "ledger retention totals",
+		sql: `
+CREATE TABLE IF NOT EXISTS ledger_totals (
+	id               INTEGER PRIMARY KEY CHECK (id = 1),
+	reclaimed_pruned INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO ledger_totals (id, reclaimed_pruned) VALUES (1, 0);
+CREATE INDEX IF NOT EXISTS idx_jobs_status_updated ON jobs(status, updated_at);
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the
@@ -188,9 +226,9 @@ func schemaVersion() int { return len(migrations) }
 // the engine would then be recording the proof of its swaps into columns that may or
 // may not exist.
 func migrate(ctx context.Context, db *sql.DB) error {
-	var have int
-	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&have); err != nil {
-		return fmt.Errorf("store: read schema version: %w", err)
+	have, err := readSchemaVersion(ctx, db)
+	if err != nil {
+		return err
 	}
 	want := schemaVersion()
 
@@ -201,15 +239,62 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	// operator rolls the binary forward (or the database back) and loses nothing
 	// meanwhile.
 	if have > want {
-		return fmt.Errorf("store: database schema version %d is newer than this build supports (%d) — "+
-			"refusing to open (running an older binary against a newer schema would silently discard data it cannot see; "+
-			"upgrade holdfast, or restore an older database)", have, want)
+		return errSchemaFromTheFuture(have, want)
 	}
 
 	for i := have; i < want; i++ {
 		if err := applyMigration(ctx, db, i+1, migrations[i]); err != nil {
 			return fmt.Errorf("store: migration %d (%s): %w", i+1, migrations[i].name, err)
 		}
+	}
+	return nil
+}
+
+// readSchemaVersion reads the stamp SQLite keeps in the database header. It is the one
+// place either door reads it, so a reader and a writer can never disagree about what
+// they are looking at.
+func readSchemaVersion(ctx context.Context, db *sql.DB) (int, error) {
+	var have int
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&have); err != nil {
+		return 0, fmt.Errorf("store: read schema version: %w", err)
+	}
+	return have, nil
+}
+
+// errSchemaFromTheFuture is the refusal both doors give a database this build cannot see
+// all of. Shared so the two cannot drift apart into two different explanations of the
+// same fact.
+func errSchemaFromTheFuture(have, want int) error {
+	return fmt.Errorf("store: database schema version %d is newer than this build supports (%d) — "+
+		"refusing to open (running an older binary against a newer schema would silently discard data it cannot see; "+
+		"upgrade holdfast, or restore an older database)", have, want)
+}
+
+// requireCurrentSchema is migrate's read-only counterpart (LEDGER-5): it CHECKS the
+// version and never moves it. OpenReadOnly is its only caller.
+//
+// Behind this build is a refusal here, where migrate would upgrade. That is the whole
+// point of the read-only door. Reading an older ledger would mean querying columns the
+// file may not have, and the only way to give it those columns is to migrate it — which
+// stamps a user_version the holdfast that wrote the file will then refuse. A reader that
+// did that would break the running daemon it was trying not to disturb. So it refuses and
+// names the deliberate act instead: no rows are lost, and migrating a ledger stays
+// something the operator does by starting holdfast, not something a read does behind
+// their back.
+func requireCurrentSchema(ctx context.Context, db *sql.DB) error {
+	have, err := readSchemaVersion(ctx, db)
+	if err != nil {
+		return err
+	}
+	want := schemaVersion()
+	switch {
+	case have > want:
+		return errSchemaFromTheFuture(have, want)
+	case have < want:
+		return fmt.Errorf("store: database schema version %d is older than this build's (%d) — "+
+			"refusing to open it read-only, because a read must not migrate the ledger it is reading "+
+			"(that would stamp a version the holdfast which wrote this file would then refuse to open). "+
+			"Run `holdfast run` or `holdfast serve` once with this build to migrate the store, then read it again", have, want)
 	}
 	return nil
 }

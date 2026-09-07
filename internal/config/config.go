@@ -12,9 +12,11 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,7 +47,7 @@ var knownKeys = map[string]bool{
 	"pixel_format": true, "container_ext": true, "min_bitrate_kbps": true,
 	"min_savings_percent": true, "duration_tolerance_sec": true,
 	"max_failures": true, "skip_hardlinked": true, "state_dir": true,
-	"allow_non_local": true, "undo_window_hours": true,
+	"allow_non_local": true, "history_retention_rows": true, "undo_window_hours": true,
 	"vmaf_enable": true, "min_vmaf": true, "vmaf_min_pool": true,
 	"vmaf_min_chroma": true,
 	"vmaf_subsample":  true, "vmaf_model": true, "workers": true,
@@ -72,6 +74,7 @@ func defaultLayer() map[string]any {
 		"max_failures":           3,
 		"skip_hardlinked":        true,
 		"state_dir":              "state",
+		"history_retention_rows": 0,
 		"undo_window_hours":      0,
 		"vmaf_enable":            true,
 		"min_vmaf":               95.0,
@@ -160,6 +163,28 @@ type Config struct {
 	// StateDir holds the job store (jobs.db) + heartbeat (relative paths are
 	// resolved by callers).
 	StateDir string `yaml:"state_dir"`
+
+	// HistoryRetentionRows bounds the ledger: the maximum number of terminal rows
+	// (done/skipped/failed) the job store retains. 0 - the DEFAULT, and what an absent
+	// key resolves to - disables retention entirely and keeps every row.
+	//
+	// It ships DISABLED and must stay that way. A prune is the one IRREVERSIBLE act in
+	// this package's blast radius: it deletes audit history, and no re-run recreates it.
+	// A later scan re-derives the file's CURRENT state instead, so a pruned `done` row
+	// for a file still on disk comes back as a `skipped` row carrying the
+	// already-at-target-codec guard - a weaker record of the same swap. A default that
+	// silently deleted those rows would be this tool's cardinal sin with the ledger
+	// instead of with the library.
+	//
+	// The prune it enables cannot lower the published lifetime reclaimed total (a pruned
+	// row's contribution is carried forward durably before the row is removed) and cannot
+	// cause a file to be encoded again: a terminal row is what holds that file out of the
+	// encoder, so a row is only ever removed when the scan LISTED the directory its file
+	// should be in and the file was not there. The ledger can therefore sit above this
+	// bound - on a library that is not churning, above it permanently.
+	// A negative value, or a value that is not a whole number of rows, is a startup
+	// REFUSAL naming the key and the offending value - never a silent default.
+	HistoryRetentionRows int `yaml:"history_retention_rows"`
 
 	// UndoWindowHours is how many hours a swapped-out original is kept retrievable
 	// (UNDO-6). 0 - the DEFAULT - disables the window, which is the configuration in
@@ -352,6 +377,11 @@ func (c *Config) EffectiveWorkers() int {
 	return c.Workers
 }
 
+// RetentionEnabled reports whether a bounded ledger is configured. It is false for the
+// shipped default (0) and for an absent key, which is what makes "keep every row" the
+// behaviour an operator gets without asking for anything.
+func (c *Config) RetentionEnabled() bool { return c.HistoryRetentionRows > 0 }
+
 // UndoEnabled reports whether the undo window is open at all. It is the single
 // reading of "is 0 the disabled sentinel", so the engine, the CLI and the warning
 // cannot disagree about what the default means.
@@ -443,6 +473,17 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("load env overrides: %w", err)
 	}
 
+	// history_retention_rows is a COUNT OF ROWS, and the decoder below is deliberately
+	// weakly typed - it would turn `3.7` into 3 and `"12"` into 12 without a word. A
+	// retention that silently rounds is a retention the operator did not write, on the
+	// one knob whose effect is an irreversible delete of audit history, so the raw value
+	// is checked BEFORE the decoder can coerce it. Same discipline as the unknown-key
+	// rejection above: loud, never a silent default. (A NEGATIVE whole number decodes
+	// faithfully and is refused by Validate, with the rest of the range checks.)
+	if err := requireWholeRows(k.Get(retentionKey), retentionKey, path); err != nil {
+		return nil, err
+	}
+
 	var c Config
 	if err := k.UnmarshalWithConf("", &c, koanf.UnmarshalConf{
 		Tag: "yaml",
@@ -464,6 +505,51 @@ func Load(path string) (*Config, error) {
 	c.VideoExts = normalizeExts(c.VideoExts)
 
 	return &c, nil
+}
+
+// retentionKey is the one place the ledger-retention key is spelled. knownKeys,
+// defaultLayer and the whole-number refusal all read it from here, so a rename cannot
+// leave one of the three behind.
+const retentionKey = "history_retention_rows"
+
+// requireWholeRows refuses a value for a row-count key that is not a whole number of
+// rows, naming the key and the offending value. It runs against the RAW layered value
+// (defaults <- file <- env) rather than the decoded struct field, because the decoder is
+// WeaklyTypedInput: it would truncate 3.7 to 3, read "12" as 12 and read `true` as 1,
+// each of which is a configuration the operator did not write.
+//
+// An env override arrives as a string and a YAML integer as an int, so both spellings of
+// a genuine whole number are accepted; anything else - a fraction, a word, a boolean, a
+// list, or a key present with no value at all - is a refusal.
+func requireWholeRows(raw any, key, path string) error {
+	switch v := raw.(type) {
+	case int:
+		return nil
+	case int32:
+		return nil
+	case int64:
+		return nil
+	case uint:
+		return nil
+	case uint32:
+		return nil
+	case uint64:
+		return nil
+	case float32:
+		if float64(v) == math.Trunc(float64(v)) && !math.IsInf(float64(v), 0) {
+			return nil
+		}
+	case float64:
+		if v == math.Trunc(v) && !math.IsInf(v, 0) && !math.IsNaN(v) {
+			return nil
+		}
+	case string:
+		if _, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s must be a whole number of rows (0 disables retention and keeps every terminal row): "+
+		"%#v in %s is not one", key, raw, path)
 }
 
 // normalizeExts lowercases each video extension and strips a leading dot and any
@@ -564,6 +650,14 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxFailures < 0 {
 		return fmt.Errorf("max_failures %d must be >= 0", c.MaxFailures)
+	}
+	// A negative retention has no reading: it is neither "keep everything" (0) nor a
+	// bound. Refuse it here, before the store is opened, rather than guessing which the
+	// operator meant on the one knob that deletes audit history.
+	if c.HistoryRetentionRows < 0 {
+		return fmt.Errorf("%s %d must be >= 0 (0 disables retention and keeps every terminal row; "+
+			"a positive value is the maximum number of terminal rows the ledger retains)",
+			retentionKey, c.HistoryRetentionRows)
 	}
 	if c.DurationToleranceSec < 0 {
 		return fmt.Errorf("duration_tolerance_sec %g must be >= 0", c.DurationToleranceSec)

@@ -3,13 +3,15 @@
 // is loadable in a plain JavaScript runtime, which is what lets the unit suite exercise
 // the derivations that consume it without standing up a browser.
 const STATUSES = ["pending","probing","encoding","verifying","done","skipped","failed"];
-const QUEUE_STATUSES = ["pending","probing","encoding","verifying"];
 // The one state a progress figure can exist in. Progress is measured BY the encoder
 // against the source duration, so it is defined while the encoder runs and at no other
 // time: a probing row has not started one and a verifying row's encoder has exited. Those
 // states are covered by Elapsed alone, which is exactly what the phase scoped them to.
 const PROGRESS_STATUS = "encoding";
-const TERMINAL_STATUSES = ["done","skipped","failed"];
+// The per-table status lists this module used to carry are GONE (LEDGER-5). They existed
+// so the page could roll the summary up into the total each capped table was capped
+// against; the server reports that total now, and a list of statuses left here would be an
+// invitation to derive one again.
 
 // Human labels for the closed vocabulary of skip guards (internal/engine's Skip*
 // constants). An unknown token falls back to itself, so a new guard is never hidden.

@@ -56,6 +56,7 @@ Commands:
   run        Load config and run one transcode scan over the library roots
   serve      Run the HTTP API + web UI (scan on demand / on an interval)
   restore    List what the undo window is holding, or put one original back
+  export     Write every terminal ledger row to newline-delimited JSON (stdout, or --out)
   validate   Load and validate a config file, then exit
   version    Print version and exit
 
@@ -77,6 +78,8 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 		return cmdServe(args[1:], stdout, stderr)
 	case "restore":
 		return cmdRestore(args[1:], stdout, stderr)
+	case "export":
+		return cmdExport(args[1:], stdout, stderr)
 	case "validate":
 		return cmdValidate(args[1:], stdout, stderr)
 	case "version", "-v", "--version":
@@ -326,12 +329,9 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 	prober := probe.New(ffmpeg, ffprobe)
 	enc := engine.FFmpegEncoder{FFmpeg: ffmpeg, Cfg: *cfg, Probe: prober}
 	// Belt: an explicit empty state_dir must not silently write the job DB into the
-	// process CWD (Load defaults it to "state"; this covers `state_dir: ""`).
-	stateDir := cfg.StateDir
-	if stateDir == "" {
-		stateDir = "state"
-	}
-	st, err := store.Open(filepath.Join(stateDir, "jobs.db"))
+	// process CWD (Load defaults it to "state"; this covers `state_dir: ""`). The
+	// defaulting lives in ONE function so `export` reads the database `run` wrote.
+	st, err := store.Open(filepath.Join(effectiveStateDir(cfg), "jobs.db"))
 	if err != nil {
 		fmt.Fprintf(stderr, "holdfast: opening job store: %v\n", err)
 		return nil, nil, 1
@@ -350,10 +350,7 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 // shipped RELATIVE default. It is what store.Open will use, and it is therefore
 // what the startup check classifies and what a printed declaration spells.
 func stateDirPath(cfg *config.Config) string {
-	dir := cfg.StateDir
-	if dir == "" {
-		dir = "state"
-	}
+	dir := effectiveStateDir(cfg)
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return filepath.Clean(dir)

@@ -115,13 +115,35 @@ test("fmtScore renders a VMAF score to one decimal", () => {
   assert.equal(d.fmtScore(100), "100.0");
 });
 
-test("sumStatuses rolls the summary up over one table's states", () => {
-  const sum = { pending: 4, probing: 1, encoding: 2, verifying: 1, done: 9, skipped: 3, failed: 2 };
-  assert.equal(d.sumStatuses(sum, d.QUEUE_STATUSES), 8);
-  assert.equal(d.sumStatuses(sum, d.TERMINAL_STATUSES), 14);
-  assert.equal(d.sumStatuses({}, d.QUEUE_STATUSES), 0, "an empty ledger rolls up to a counted zero");
-  assert.equal(d.sumStatuses({ done: 2, encoding: "many" }, d.TERMINAL_STATUSES), 2,
-    "a non-numeric member contributes nothing rather than NaN");
+test("the page carries no way to derive the total a view was capped against", () => {
+  // LEDGER-5 removed the summary roll-up outright, which is a stronger statement than a
+  // test that the renderer stopped calling it: there is nothing left to call.
+  //
+  // This reads the MODULE SOURCES, and it has to. Asking load()'s api object instead
+  // (`assert.equal(d.sumStatuses, undefined)`) would measure load.js: that object is built
+  // from a fixed NAMES list, so ANY identifier the list does not mention is undefined on it
+  // whatever the modules declare - the assertion would pass unchanged against a page that
+  // had the roll-up back. And the scan covers every SHIPPED module, not just the two that
+  // load here, because a roll-up reintroduced in the renderer is the same defect.
+  const shipped = moduleSource("modules.txt").split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "" && !l.startsWith("#"));
+  assert.ok(shipped.length >= DERIVATION_MODULES.length,
+    "modules.txt names " + shipped.length + " modules; this scan would be vacuous");
+
+  const sources = shipped.map((name) => [name, moduleSource(name)]);
+  // Anti-vacuity: the scan is reading real module text, so a name that IS there is found.
+  // Without this, a mis-resolved path would read as "the identifier is gone" every time.
+  assert.ok(sources.some(([, src]) => src.includes("capNoteText")),
+    "the scan found no module declaring capNoteText, so it is not reading the shipped sources");
+
+  for (const [name, src] of sources) {
+    for (const gone of ["sumStatuses", "QUEUE_STATUSES", "TERMINAL_STATUSES"]) {
+      assert.ok(!src.includes(gone), name + " still carries " + gone
+        + ": the server reports the total, and a client-side roll-up beside it is a second answer"
+        + " to the same question for a later reader to reach for");
+    }
+  }
 });
 
 test("sizeFigures derives before, after and the percent reclaimed", () => {
@@ -182,11 +204,60 @@ test("guardLabel names each skip guard and never hides an unknown one", () => {
   }
 });
 
-test("capNoteText claims a cap only when the ledger holds more than we were handed", () => {
-  assert.equal(d.capNoteText(200, 200), "");
-  assert.equal(d.capNoteText(200, 12), "");
-  assert.ok(d.capNoteText(200, 1500).startsWith("Showing the most recent 200 of 1,500"));
-  assert.ok(d.capNoteText(200, 1500).includes("this view is capped"));
+// The wire shape of a reported row total, available and carrying a count.
+function total(count) {
+  return { available: true, unavailable: "", covers: "every terminal row in the ledger", cap: 200, count: count };
+}
+
+test("capNoteText claims a cap only when the REPORTED total exceeds the rows we were handed", () => {
+  assert.equal(d.capNoteText(200, total(200)), "");
+  assert.equal(d.capNoteText(200, total(12)), "");
+  assert.ok(d.capNoteText(200, total(1500)).startsWith("Showing the most recent 200 of 1,500"));
+  assert.ok(d.capNoteText(200, total(1500)).includes("this view is capped"));
+});
+
+test("capNoteText reports the total the server sent, never one derived from the rows", () => {
+  // The rows on screen and the summary a page could add up say one thing; the ledger says
+  // another, and only the server can see it. The reported figure is the one that shows.
+  assert.ok(d.capNoteText(3, total(41_237)).includes("of 41,237"),
+    "the reported total must be the figure the notice carries");
+  assert.ok(!d.capNoteText(3, total(41_237)).includes("of 3"), "the rows returned are not the total");
+});
+
+test("capNoteText states an unreadable total as unavailable and shows no figure in its place", () => {
+  const unread = { available: false, unavailable: "this figure could not be read from the ledger",
+                   covers: "every terminal row in the ledger", cap: 200, count: null };
+  for (const t of [unread, {}, { available: true, count: null }, { available: true, count: "many" },
+                   { available: true, count: NaN }, { available: true, count: -1 }, [], "200", 200, true]) {
+    const text = d.capNoteText(200, t);
+    assert.equal(text, d.CAP_TOTAL_UNAVAILABLE, "capNoteText(200, " + JSON.stringify(t) + ")");
+    assert.ok(/unavailable/i.test(text), "the reader must be told the total is unavailable");
+    assert.ok(!/\d/.test(text),
+      "an unreadable total must put NO figure on screen - a number beside 'capped' reads AS the total: " + text);
+  }
+  // A total absent from the frame entirely is no readable total either, and answers the
+  // same way. The alternative - "" - is indistinguishable from an uncapped view, which is
+  // the one thing an unknown cap must not look like.
+  assert.equal(d.capNoteText(200, undefined), d.CAP_TOTAL_UNAVAILABLE);
+  assert.equal(d.capNoteText(200, null), d.CAP_TOTAL_UNAVAILABLE);
+  // And a page that does not know how many rows it drew claims nothing either.
+  assert.equal(d.capNoteText(undefined, total(1500)), "");
+});
+
+test("an unreadable total does not claim the view is capped, which it cannot know", () => {
+  // Cappedness is the comparison total > shown. With the total unreadable that comparison
+  // cannot be made, so the notice states the unavailability and stops there - it must not
+  // assert a cap the page has just said it cannot see. 3 rows out of a 3-row ledger is not
+  // a capped view, and the old wording called it one.
+  const unread = { available: false, unavailable: "this figure could not be read from the ledger",
+                   covers: "every terminal row in the ledger", cap: 200, count: null };
+  const text = d.capNoteText(3, unread);
+  assert.ok(/unavailable/i.test(text), "the reader must still be told the total is unavailable");
+  assert.ok(!/this view is capped/i.test(text),
+    "an unreadable total must not assert that the view IS capped - cappedness is the comparison "
+    + "total > shown, and the total is the half that could not be read: " + text);
+  assert.ok(/whether/i.test(text), "the notice must qualify the fact it cannot establish: " + text);
+  assert.ok(!/\d/.test(text), "and still no figure: " + text);
 });
 
 test("announceText is a short count summary a screen reader can hear on every snapshot", () => {
@@ -273,13 +344,11 @@ test("fmtCount answers an absent or non-finite count as not recorded", () => {
   }
 });
 
-test("sumStatuses answers an unusable summary as not rolled up, never as a total of 0", () => {
-  for (const v of [undefined, null, NaN, "9", 7, true]) {
-    assert.equal(d.sumStatuses(v, d.QUEUE_STATUSES), null, "sumStatuses(" + String(v) + ")");
-  }
-  assert.equal(d.sumStatuses({ done: 1 }, null), null, "no state list is nothing to roll up");
-  // And the cap notice claims nothing when the total could not be rolled up.
-  assert.equal(d.capNoteText(200, d.sumStatuses(null, d.TERMINAL_STATUSES)), "");
+test("a cap notice never renders a zero total as a real one", () => {
+  // The failure this whole field replaces: a figure nobody could read, shown as 0.
+  assert.equal(d.capNoteText(200, { available: false, count: 0 }), d.CAP_TOTAL_UNAVAILABLE);
+  // A genuine zero is a genuine answer, and it caps nothing.
+  assert.equal(d.capNoteText(0, total(0)), "");
 });
 
 test("elapsedText answers a row with no usable basis with no age at all", () => {
