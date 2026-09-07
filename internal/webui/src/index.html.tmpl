@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>holdfast</title>
+<style>
+/*holdfast:inline-css*/
+</style>
+</head>
+<body>
+<header>
+  <h1>hold<span class="mono">fast</span></h1>
+  <div class="badges">
+    <span id="b-paused" class="badge">running</span>
+    <span id="b-scan" class="badge scan">idle</span>
+  </div>
+  <span class="grow"></span>
+  <span class="reclaimed">reclaimed: <b id="reclaimed-lifetime">0 B</b>
+    <span class="sub">lifetime · this run <span id="reclaimed-session">0 B</span></span></span>
+  <span id="conn">connecting…</span>
+</header>
+<!-- Polite, atomic screen-reader summary. The SSE stream pushes a fresh snapshot on
+     every job transition; announcing the whole table would spam a screen-reader reader
+     on each one, so we announce only a short count summary, and only when it changes. -->
+<div id="sr-status" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+<main>
+  <div class="chips" id="chips"></div>
+
+  <div class="controls">
+    <label for="token" class="lbl">Control token</label>
+    <input id="token" type="password" placeholder="for pause / rescan" autocomplete="off">
+    <button id="rescan" class="primary">Rescan</button>
+    <button id="pause">Pause</button>
+    <button id="resume">Resume</button>
+    <span id="msg" role="status" aria-live="polite"></span>
+  </div>
+
+  <div class="controls">
+    <label for="filter" class="lbl">Filter</label>
+    <input id="filter" type="search" placeholder="filter queue &amp; history by path…" autocomplete="off">
+  </div>
+
+  <section>
+    <h2>Across the whole ledger</h2>
+    <p class="note">Every figure here is computed by the server over <em>every</em> matching row in the
+      ledger, not over the capped rows the tables below ship, and each states the set it covers. A row
+      that recorded no value is excluded and counted, never read as a zero: a fact nobody measured is
+      reported as missing, not as 0. VMAF figures pool per-file scores, each measured against that
+      file's own source under one viewing condition, luma-only; they are not compared between files.</p>
+    <div class="aggs" id="aggregates"></div>
+  </section>
+
+  <section>
+    <h2>Queue &amp; active</h2>
+    <p class="note">Elapsed is how long the file has been in the state it is in now, recomputed from the
+      transition timestamp on each update rather than counted in this page. Progress is read from the
+      encoder's own progress stream and measured against the source duration, so it is shown while a file
+      is <i>encoding</i> and not in any other state — a file being probed or verified is covered by
+      Elapsed alone. Where the encoder has reported nothing yet, or the container reports no duration, it
+      reads <i>unknown</i> — never an estimate, and never a stale figure.</p>
+    <p class="note cap" id="queue-cap" hidden></p>
+    <div class="tablewrap">
+      <table><thead><tr><th>File</th><th>Status</th><th>Elapsed</th><th>Progress</th><th>Worker</th></tr></thead>
+        <tbody id="queue"></tbody></table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Recent history</h2>
+    <p class="note">Each finished file, with the proof its swap was safe. A skipped file shows which
+      guard held it back; a failed one shows why. VMAF is a perceptual estimate under one viewing
+      condition — the model, its pooling, and its luma-only blind spot are shown with every score, and
+      scores are never compared across files (VMAF is not comparable between different sources).</p>
+    <p class="note cap" id="hist-cap" hidden></p>
+    <div class="tablewrap">
+      <table class="hist">
+        <colgroup>
+          <col style="width:19%"><col style="width:17%"><col style="width:12%"><col style="width:23%">
+          <col style="width:8%"><col style="width:9%"><col style="width:12%">
+        </colgroup>
+        <thead><tr>
+          <th>File</th><th>Result</th><th>Size</th><th>VMAF</th><th>Encoder</th><th>Encode</th><th>Updated</th>
+        </tr></thead>
+        <tbody id="history"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<footer>holdfast — config-as-code, data-safe media transcoder. The YAML config is the source of truth;
+  this page reads and controls. It reports what was measured, and only that.
+  <!--holdfast:source-offer--></footer>
+
+<!-- Row shells cloned per render. Rows are built as DOM nodes (createElement +
+     textContent) and filled from cloned templates — the page never assembles an HTML
+     string from job data, so an attacker-influencable media path is inert text, never
+     markup. Trusted Types (enforced by the response CSP) makes that a hard guarantee. -->
+<template id="tpl-queue-row">
+  <tr>
+    <td class="path"></td>
+    <td class="st"><span class="dot"></span><span class="stlabel"></span></td>
+    <td class="elapsed"></td>
+    <td class="prog"></td>
+    <td class="worker"></td>
+  </tr>
+</template>
+<template id="tpl-agg">
+  <div class="agg">
+    <h3 class="agg-k"></h3>
+    <div class="agg-v"></div>
+    <p class="agg-cov"></p>
+    <p class="agg-ex"></p>
+  </div>
+</template>
+<template id="tpl-hist-row">
+  <tr>
+    <td class="path"></td>
+    <td class="st"></td>
+    <td class="size"></td>
+    <td class="vmaf"></td>
+    <td class="enc"></td>
+    <td class="dur"></td>
+    <td class="upd"></td>
+  </tr>
+</template>
+
+<script>
+//holdfast:inline-js
+</script>
+</body>
+</html>

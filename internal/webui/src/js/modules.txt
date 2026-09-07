@@ -1,0 +1,15 @@
+# The dashboard's script, in the order it is concatenated into the ONE inline <script>
+# of the generated index.html. Order is data, not a directory listing: a module may use a
+# constant an earlier module declared, and the last module is the only one that RUNS
+# anything. A name here that does not resolve to a readable file is a generator failure
+# naming that file, never a page silently missing a module.
+#
+# Lines starting with # and blank lines are ignored.
+10-constants.js
+20-derive.js
+30-dom.js
+40-cells.js
+50-rows.js
+60-aggregates.js
+70-render.js
+80-wire.js
