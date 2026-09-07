@@ -107,6 +107,68 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status_reason ON jobs(status, reason);
 CREATE INDEX IF NOT EXISTS idx_jobs_outcome ON jobs(status, source_bytes, output_bytes, encode_ms, vmaf_mean, vmaf_min);
 `,
 	},
+	{
+		// v4 - FILESYSTEM-1 (the swap half): the source-mutation guard's achieved
+		// granularity, and the durable record of a swap that did not complete cleanly.
+		//
+		// Two independent additions, in one step because they ship together.
+		//
+		// (1) Four more nullable outcome columns on jobs. Three record what the
+		// source-mutation guard actually did for that job (which attributes it
+		// compared, the resolution of the timestamp it compared, and WHICH residual
+		// window applies to the storage it ran against). The fourth names the CAUSE of
+		// a swap failure when the cause is one holdfast reports distinctly. NULL is
+		// "not recorded" here exactly as it is for every other outcome column: a job
+		// that never reached the guard has no window, and a fabricated one would be a
+		// claim about a check that never ran.
+		//
+		// (2) A SEPARATE swap_incidents table. It is not more columns on jobs, and the
+		// reason is lifecycle, not tidiness: Claim CLEARS the outcome columns (it
+		// begins a new attempt) and a successful transcode PRUNES the pre-swap row, so
+		// a fact carried there is a fact with an expiry date. The record that a
+		// replacement holdfast wrote is still sitting in a library root has to outlive
+		// both of those, because the FILE does. Its own table, keyed by its own id and
+		// referring to the job by (source_path, source_fingerprint), is what gives it
+		// that lifetime.
+		//
+		// The partial index is the read the scan makes on every run: which recorded
+		// replacement paths must not be enumerated. Partial, so it indexes only the
+		// rows that can still exclude something.
+		name: "swap guard record + swap incidents",
+		sql: `
+ALTER TABLE jobs ADD COLUMN guard_attributes       TEXT;
+ALTER TABLE jobs ADD COLUMN guard_time_resolution  TEXT;
+ALTER TABLE jobs ADD COLUMN guard_residual_window  TEXT;
+ALTER TABLE jobs ADD COLUMN swap_cause             TEXT;
+
+CREATE TABLE IF NOT EXISTS swap_incidents (
+	id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+	source_path        TEXT NOT NULL,
+	source_fingerprint TEXT NOT NULL,
+	replacement_path   TEXT NOT NULL,
+	source_attrs       TEXT NOT NULL,
+	replacement_attrs  TEXT NOT NULL,
+	observed_attrs     TEXT,
+	outcome            TEXT NOT NULL,
+	swap_error         TEXT,
+	swap_cause         TEXT,
+	storage_class      TEXT,
+	storage_type       TEXT,
+	created_at         INTEGER NOT NULL,
+	resolution         TEXT,
+	resolved_by        TEXT,
+	resolved_at        INTEGER,
+	observed_source      TEXT,
+	observed_replacement TEXT,
+	disposition_source      TEXT,
+	disposition_replacement TEXT,
+	removal_error      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_incidents_parked ON swap_incidents(outcome, resolution);
+CREATE INDEX IF NOT EXISTS idx_incidents_excluded ON swap_incidents(replacement_path)
+	WHERE disposition_replacement IS NULL OR disposition_replacement = 'retained-excluded';
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

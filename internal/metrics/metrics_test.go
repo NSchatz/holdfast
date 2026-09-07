@@ -122,3 +122,31 @@ func TestMetrics_PrecreatedSeriesReadZero(t *testing.T) {
 		t.Errorf("expected pre-created done series at 0; body:\n%s", body)
 	}
 }
+
+// TestMetrics_TheTwoSwapOutcomesGetTheirOwnSeries is this surface's half of the rule
+// that a job parked indeterminate, or one applied despite an error, is reported AS THE
+// STATE IT IS IN. Folding either into done or failed is not a rounding error: an alert
+// on "a job whose outcome holdfast could not establish" is exactly the alert an operator
+// wants, and it is unbuildable if the count is hidden inside another label.
+func TestMetrics_TheTwoSwapOutcomesGetTheirOwnSeries(t *testing.T) {
+	m := New(openStore(t))
+
+	m.Observe(engine.Event{Status: store.Indeterminate, Outcome: &store.Outcome{Reason: "could not establish"}})
+	m.Observe(engine.Event{Status: store.AppliedDespiteError, Outcome: &store.Outcome{Reason: "applied anyway"}})
+
+	body := scrape(t, m)
+	for _, want := range []string{
+		`holdfast_files_total{outcome="indeterminate"} 1`,
+		`holdfast_files_total{outcome="applied-despite-error"} 1`,
+		`holdfast_files_total{outcome="done"} 0`,
+		`holdfast_files_total{outcome="failed"} 0`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics does not carry %q:\n%s", want, body)
+		}
+	}
+	// Neither reclaimed anything: nothing was established, so nothing is claimed.
+	if !strings.Contains(body, "holdfast_bytes_reclaimed_total 0") {
+		t.Errorf("an unestablished outcome contributed reclaimed bytes:\n%s", body)
+	}
+}

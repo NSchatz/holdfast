@@ -68,7 +68,12 @@ func redactURL(raw string) string {
 
 type tally struct {
 	done, skipped, failed int
-	reclaimed             int64
+	// The two FILESYSTEM-1 outcomes are counted SEPARATELY and never folded into done
+	// or failed. Folding either one in is the whole bug: a parked job reported as
+	// "failed" tells an operator the source is fine, which is precisely what nobody
+	// knows.
+	indeterminate, appliedDespiteError int
+	reclaimed                          int64
 }
 
 // New builds a Notifier for the given shoutrrr service URL ("" disables it).
@@ -150,7 +155,40 @@ func (n *Notifier) Observe(ev engine.Event) {
 			msg = fmt.Sprintf("holdfast: FAILED to transcode %s: %s (source left untouched)", ev.Path, ev.Outcome.Reason)
 		}
 		n.enqueue(msg)
+
+	// The two FILESYSTEM-1 outcomes are reported as themselves and NEVER folded into
+	// the failed tally: a notification saying "failed, source left untouched" is
+	// exactly the false comfort this phase exists to remove, and one saying "done"
+	// would be worse. They are the two messages on this surface that actually want an
+	// operator's attention, so they are sent immediately rather than waiting for the
+	// scan summary.
+	case store.Indeterminate:
+		n.mu.Lock()
+		n.tally.indeterminate++
+		n.mu.Unlock()
+		n.enqueue(fmt.Sprintf(
+			"holdfast: PARKED %s - the swap failed and holdfast could not establish whether it was applied%s. "+
+				"Both files are intact and nothing will be re-attempted until you resolve it (holdfast resolve).",
+			ev.Path, reasonSuffix(ev)))
+
+	case store.AppliedDespiteError:
+		n.mu.Lock()
+		n.tally.appliedDespiteError++
+		n.mu.Unlock()
+		n.enqueue(fmt.Sprintf(
+			"holdfast: %s - the swap reported an error but the rename took effect%s. "+
+				"The file at that path is the replacement; nothing will be re-attempted.",
+			ev.Path, reasonSuffix(ev)))
 	}
+}
+
+// reasonSuffix renders an event's recorded reason as a parenthetical, or nothing when
+// none was recorded - never an empty pair of brackets.
+func reasonSuffix(ev engine.Event) string {
+	if ev.Outcome == nil || ev.Outcome.Reason == "" {
+		return ""
+	}
+	return ": " + ev.Outcome.Reason
 }
 
 // ScanStarted resets the per-scan tally. Call at the start of each scan.
@@ -168,10 +206,19 @@ func (n *Notifier) ScanFinished() {
 	n.tally = tally{}
 	n.mu.Unlock()
 
-	if t.done == 0 && t.skipped == 0 && t.failed == 0 {
+	if t.done == 0 && t.skipped == 0 && t.failed == 0 && t.indeterminate == 0 && t.appliedDespiteError == 0 {
 		return // nothing to report
 	}
-	n.enqueue(fmt.Sprintf(
+	msg := fmt.Sprintf(
 		"transcode scan complete: %d transcoded (%s reclaimed), %d skipped, %d failed",
-		t.done, humanBytes(t.reclaimed), t.skipped, t.failed))
+		t.done, humanBytes(t.reclaimed), t.skipped, t.failed)
+	// Appended rather than folded in, and only when non-zero, so the sentence an
+	// operator has read for four phases keeps meaning exactly what it meant.
+	if t.indeterminate > 0 {
+		msg += fmt.Sprintf(", %d PARKED (outcome unknown, awaiting your determination)", t.indeterminate)
+	}
+	if t.appliedDespiteError > 0 {
+		msg += fmt.Sprintf(", %d applied despite a reported error", t.appliedDespiteError)
+	}
+	n.enqueue(msg)
 }

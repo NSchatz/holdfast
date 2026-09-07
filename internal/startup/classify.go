@@ -4,8 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"sort"
 	"strings"
+
+	"github.com/NSchatz/holdfast/internal/fsclass"
 )
 
 // Class is the storage classification of one checked path. There are exactly
@@ -43,10 +44,14 @@ const (
 // opt-in. "Not local" is non-local OR undetermined.
 func (c Class) IsLocal() bool { return c == Local }
 
-// localTypes is the complete set of filesystem types THIS BUILD classifies
-// `local`, reported at startup and restated in the shipped documentation (the
-// two are held in agreement by a test, so a build whose set moves and a
-// documentation file left unedited fail the aggregate check target).
+// The set of filesystem types THIS BUILD classifies `local` lives in ONE place,
+// `internal/fsclass`, and this package READS it rather than declaring a second
+// one. It has to: the startup check and the swap-time / guard-time lookups the
+// engine makes for itself are two consumers of the same question, and two sets
+// that could drift would mean a run that started because startup called a path
+// local and then parked every swap on it, or the reverse. The set is reported at
+// startup and restated in the shipped documentation, held in agreement by a test
+// the aggregate check target runs.
 //
 // A type qualifies only if, for EVERY file on storage of that type, the storage
 // is attached to the host holdfast runs on and no other host can modify that
@@ -56,61 +61,13 @@ func (c Class) IsLocal() bool { return c == Local }
 //
 // Deliberately absent: any union or overlay filesystem, any in-memory filesystem
 // and anything in user space (FUSE), because the name of such a type does not by
-// itself say what storage is underneath it (see notLocalByConstruction).
-var localTypes = map[string]bool{
-	"btrfs": true,
-	"ext2":  true,
-	"ext3":  true,
-	"ext4":  true,
-	"f2fs":  true,
-	"jfs":   true,
-	"xfs":   true,
-	"zfs":   true,
-}
-
-// networkTypes are types this build KNOWS are network-backed. The set exists so
-// a refusal can name the filesystem it detected; it is not a completeness claim
-// and nothing rests on it being complete, because a type absent from BOTH sets
-// is `undetermined`, which refuses just the same.
-var networkTypes = map[string]bool{
-	"9p": true, "afp": true, "afs": true, "beegfs": true, "ceph": true,
-	"cifs": true, "coda": true, "davfs": true, "gfs2": true, "glusterfs": true,
-	"lustre": true, "ncpfs": true, "nfs": true, "nfs4": true, "ocfs2": true,
-	"orangefs": true, "pvfs2": true, "smb3": true, "smbfs": true, "sshfs": true,
-}
+// itself say what storage is underneath it (fsclass.NotLocalByConstruction).
 
 // LocalTypes returns the complete set of filesystem types this build classifies
 // `local`, sorted. Startup prints it and the shipped documentation states it, so
 // two builds recognising different sets are distinguishable from what each
 // prints without anyone reading source or rebuilding.
-func LocalTypes() []string {
-	out := make([]string, 0, len(localTypes))
-	for t := range localTypes {
-		out = append(out, t)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// notLocalByConstruction reports whether a type name is one whose name does not
-// by itself determine the backing storage: a union or overlay filesystem, an
-// in-memory one, or a user-space (FUSE) one. Such a path is `undetermined` -
-// never `local` - however ordinary the files under it look, because what is
-// underneath an overlay or a FUSE mount may be anything at all, including a NAS.
-func notLocalByConstruction(t string) string {
-	switch t {
-	case "overlay", "overlayfs", "aufs", "unionfs":
-		return "a union or overlay filesystem does not say what storage is underneath it"
-	case "tmpfs", "ramfs":
-		return "an in-memory filesystem is not durable storage"
-	case "fuse", "fuseblk":
-		return "a user-space (FUSE) filesystem does not say what storage is underneath it"
-	}
-	if strings.HasPrefix(t, "fuse.") {
-		return "a user-space (FUSE) filesystem does not say what storage is underneath it"
-	}
-	return ""
-}
+func LocalTypes() []string { return fsclass.RecognisedLocalTypes() }
 
 // classification is the outcome of classifying one path.
 type classification struct {
@@ -148,14 +105,14 @@ func classify(typeName string, err error) classification {
 	if t == "" {
 		return classification{Class: Undetermined, Reason: "the platform reported no filesystem type"}
 	}
-	if why := notLocalByConstruction(t); why != "" {
+	if why := fsclass.NotLocalByConstruction(t); why != "" {
 		return classification{Class: Undetermined,
 			Reason: fmt.Sprintf("filesystem type %q is not evidence of local storage: %s", t, why)}
 	}
-	if localTypes[t] {
+	if fsclass.IsRecognisedLocal(t) {
 		return classification{Class: Local, Type: t}
 	}
-	if networkTypes[t] {
+	if fsclass.IsNetworkBacked(t) {
 		return classification{Class: NonLocal, Type: t}
 	}
 	return classification{Class: Undetermined,

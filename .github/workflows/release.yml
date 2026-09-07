@@ -105,6 +105,23 @@ jobs:
           ./scripts/install-ffmpeg.sh /opt/ffmpeg
           echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
 
+      # The gate now includes dashboard graders that load the page in a real browser
+      # engine, so the release resolves one too. Same reason as ci.yml: a grader that
+      # skipped for want of a browser would be a false green, and a release is the last
+      # place to accept one.
+      - name: browser for the rendered dashboard graders
+        run: |
+          set -euo pipefail
+          for b in chromium chromium-browser google-chrome google-chrome-stable chrome; do
+            if command -v "$b" >/dev/null 2>&1; then
+              echo "HOLDFAST_BROWSER=$(command -v "$b")" >> "$GITHUB_ENV"
+              echo "using $b: $(command -v "$b")"
+              exit 0
+            fi
+          done
+          echo "::error::no chromium/chrome on this runner - the rendered dashboard graders need one" >&2
+          exit 1
+
       - name: the full gate (make check)
         run: make check
 

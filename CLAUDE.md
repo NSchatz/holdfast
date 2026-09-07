@@ -302,10 +302,28 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
 
 ## Layout
 
-- `cmd/holdfast` — the CLI (`run` / `serve` / `validate` / `version`), structured `slog` logging. `run`
+- `cmd/holdfast` - the CLI (`run` / `serve` / `resolve` / `validate` / `version`), structured `slog`
+  logging. `run`
   builds and drives the engine oneshot with a signal-cancellable context; `serve` (TRANSCODE-7) wires the
   same engine to the API/UI and runs until SIGTERM (graceful HTTP drain). Engine setup shared by both is
-  factored into `buildEngine`.
+  factored into `buildEngine`. `resolve` (FILESYSTEM-1) is the operator's way out of a job parked
+  `indeterminate`: it reports both recorded paths and what is at each RIGHT NOW (or that the file is
+  absent / uninspectable, named as which), takes an explicit determination, and makes the resolution
+  DURABLE BEFORE any licensed removal, so a store failure costs a repeated instruction, never an
+  unrecorded deletion. It lives on the CLI and not on the HTTP API deliberately: the API is a
+  read-and-control surface that never touches a media file, and this one deletes one on instruction.
+- `internal/fsclass` (FILESYSTEM-1) - the ONE enumeration of what this build calls `local`
+  (btrfs/ext2/ext3/ext4/f2fs/jfs/xfs/zfs) and what it knows to be network-backed, plus the
+  point-in-time `Classification` every lookup in the program lands on. `internal/startup` READS it
+  rather than declaring a second set, and so do the swap-time and guard-time lookups the engine makes
+  for itself: two sets that could drift would mean a run that started because startup called a path
+  local and then parked every swap on it, or the reverse (`startup.TestOneSet_*` pins it). Only a
+  POSITIVE local identification counts as local: network-backed AND undetermined are both "not local".
+- `internal/docscheck` (FILESYSTEM-1) - a MECHANICAL check, riding the ordinary test step, that the
+  shipped documentation still carries both residual-window statements under their two fixed anchors
+  (`residual-window-local`, `residual-window-network`) and that the network one attributes the window
+  to the client's attribute cache. The corpus is a WALK of every Markdown file in the repo, not a list,
+  so a statement moved to a new document is still checked and a document added joins the set.
 - `internal/server` (TRANSCODE-7) — the HTTP surface: a `Controller` (pause flag + scan orchestration, the
   single source of truth for both, wired into `engine.Paused`), an SSE `Hub` (the `engine.Observer`;
   coalesces events off the engine's critical path and broadcasts store-derived snapshots — an engine
@@ -417,6 +435,11 @@ adds two things on top: the **config-schema self-test** (proves `validate` REDS 
 that tests passed) and the **image smoke gate** (`scripts/smoke-image.sh`, needs Docker). **Never claim green
 without running it.** Every phase that touches the engine must also extend the fixture suite so it *reds on
 the specific regression* — a data-safety tool proves its unhappy paths, not just that tests pass.
+The gate needs the **pinned ffmpeg** (`scripts/install-ffmpeg.sh`) and, since FILESYSTEM-1, a **browser**
+on `PATH` (or `HOLDFAST_BROWSER`): a criterion about what the DASHBOARD SHOWS is graded against the page
+loaded in a real engine, because the rows are built by script from a snapshot and the source text cannot
+say what an operator sees. Neither is skipped when absent (a grader that skips is a false green), so both
+fail loud and both workflows locate what the proof needs before running the gate.
 
 ## Conventions
 
