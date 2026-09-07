@@ -181,6 +181,20 @@ func cmdRestore(args []string, stdout, stderr io.Writer) int {
 	return restoreOne(context.Background(), undo, rest[0], stdout, stderr)
 }
 
+// resolveRestorePath turns what the operator typed into the path the ledger is keyed
+// by. Library roots are absolute (Validate refuses anything else), so every recorded
+// path is too - and an operator standing in their library and typing `ep.mkv` would
+// otherwise get "nothing is retained for that path" about a file that certainly is.
+// An unresolvable path falls back to the input, so the refusal still names something
+// they recognise rather than an error about the current directory.
+func resolveRestorePath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	return abs
+}
+
 // listRetained prints what the undo window is holding. Each line states the space that
 // original is HOLDING and how long is left on it, because those are the two facts an
 // operator is deciding between: whether to put a file back, and whether to wait for
@@ -229,7 +243,7 @@ func remainingWindow(expiresAt, now int64) string {
 // can trust what it did, and a command that half-restored while reporting a failure
 // would be worse than one that never existed.
 func restoreOne(ctx context.Context, undo *engine.UndoWindow, path string, stdout, stderr io.Writer) int {
-	res, err := undo.Restore(ctx, path)
+	res, err := undo.Restore(ctx, resolveRestorePath(path))
 	if err != nil {
 		fmt.Fprintf(stderr, "holdfast: cannot restore %s: %v\n", path, err)
 		return 1

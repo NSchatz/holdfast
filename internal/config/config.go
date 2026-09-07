@@ -46,7 +46,7 @@ var knownKeys = map[string]bool{
 	"min_savings_percent": true, "duration_tolerance_sec": true,
 	"max_failures": true, "skip_hardlinked": true, "state_dir": true,
 	"allow_non_local": true, "undo_window_hours": true,
-	"vmaf_enable":     true, "min_vmaf": true, "vmaf_min_pool": true,
+	"vmaf_enable": true, "min_vmaf": true, "vmaf_min_pool": true,
 	"vmaf_min_chroma": true,
 	"vmaf_subsample":  true, "vmaf_model": true, "workers": true,
 	"server_addr": true, "server_auth_token": true, "scan_interval_sec": true,

@@ -519,64 +519,103 @@ func skippedRows(t *testing.T, ts *testStore) []store.Job {
 //
 // The fixture is deliberately a `.mkv` - a scanned extension - so the exclusion cannot
 // be passing by accident on a name the scan would have ignored anyway.
+//
+// BOTH enumeration paths are graded. `run` and `serve` always set Coverage (the
+// directories the startup walk traversed, which INCLUDES the retention area, because
+// the walk descends into it), so that is the production path; the direct root walk is
+// what an engine built without the startup check uses, including every other test in
+// this package. An exclusion present in only one of them would be an exclusion that is
+// absent exactly where it ships.
 func TestUndo_ARetainedOriginalIsNeverEnumerated(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
-	d := t.TempDir()
-	src := filepath.Join(d, "movie.mkv")
-	mkH264(t, ffmpeg, src, "8M")
 
-	// Everything the encoder is handed, so "never enumerated" is asserted against what
-	// actually reached the encode and not only against the ledger.
-	var handed []string
-	spy := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
-		handed = append(handed, in)
-		return errFake // never actually swap: this test is about what is SCANNED
+	for _, withCoverage := range []bool{false, true} {
+		name := "walking the roots directly"
+		if withCoverage {
+			name = "bounded by the startup walk's coverage (the production path)"
+		}
+		t.Run(name, func(t *testing.T) {
+			d := t.TempDir()
+			src := filepath.Join(d, "movie.mkv")
+			mkH264(t, ffmpeg, src, "8M")
+
+			// Everything the encoder is handed, so "never enumerated" is asserted
+			// against what actually reached the encode and not only against the ledger.
+			var handed []string
+			spy := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
+				handed = append(handed, in)
+				return errFake // never actually swap: this test is about what is SCANNED
+			})
+
+			eng, ts := undoEngine(t, ffmpeg, ffprobe, d, 24, spy)
+			u := eng.undo()
+			retained, err := u.retain(src, probe.Fingerprint(src))
+			if err != nil {
+				t.Fatalf("retain: %v", err)
+			}
+			if err := u.record(context.Background(), src, src, retained, probe.FileSize(src)); err != nil {
+				t.Fatalf("record: %v", err)
+			}
+			// The retained original really is a name the scan would otherwise
+			// enumerate: it ENDS in a configured video extension. Without this the
+			// exclusion below could be passing because the name carried no video
+			// extension at all, which would prove nothing about a retention area.
+			if !strings.HasSuffix(retained, ".mkv") {
+				t.Fatalf("the retained name %q does not end in a scanned extension - the fixture is not the hazard", retained)
+			}
+			if !matchesVideoExt(filepath.Base(retained), eng.Cfg.VideoExts) {
+				t.Fatalf("the retained name %q is not one the extension rule would match - the fixture is not the hazard", retained)
+			}
+			if withCoverage {
+				// Exactly what the startup walk produces: every directory it traversed,
+				// the retention area among them.
+				eng.Coverage = []string{d, filepath.Dir(retained)}
+			}
+
+			if err := eng.RunOneshot(context.Background()); err != nil {
+				t.Fatalf("RunOneshot: %v", err)
+			}
+
+			if len(handed) == 0 {
+				t.Fatal("the encoder was handed nothing at all - this scan enumerated no file, so it cannot show what it excluded")
+			}
+			for _, in := range handed {
+				if in == retained || strings.Contains(in, UndoDirName) || isUndoName(filepath.Base(in)) {
+					t.Errorf("the encoder was handed a retained original: %s", in)
+				}
+			}
+			if _, _, found, err := ts.Get(context.Background(), retained, probe.Fingerprint(retained)); err != nil {
+				t.Fatal(err)
+			} else if found {
+				t.Errorf("the scan claimed a job for the retained original %s", retained)
+			}
+			// And it is still there, which is the whole point of it.
+			if !exists(retained) {
+				t.Fatal("the retained original was removed by the scan")
+			}
+		})
+	}
+
+	// The name rule the scan and the startup walk SHARE, asserted directly: the walk
+	// decides what is media from the basename alone, so this is the only place the two
+	// can be held in agreement.
+	t.Run("the shared name rule", func(t *testing.T) {
+		for _, base := range []string{
+			"movie.100-200." + UndoMarker + ".mkv",
+			"movie.100-200." + UndoMarker + ".mp4",
+		} {
+			if IsSourceName(base, []string{"mkv", "mp4"}) {
+				t.Errorf("IsSourceName(%q) = true - a retained original would be enumerated as a source", base)
+			}
+		}
+		// The control: the same names WITHOUT the marker are sources, so the rule above
+		// is the marker and not the shape of the name.
+		for _, base := range []string{"movie.mkv", "movie.100-200.mp4"} {
+			if !IsSourceName(base, []string{"mkv", "mp4"}) {
+				t.Errorf("IsSourceName(%q) = false - the exclusion is too broad and would hide real media", base)
+			}
+		}
 	})
-
-	eng, ts := undoEngine(t, ffmpeg, ffprobe, d, 24, spy)
-	u := eng.undo()
-	retained, err := u.retain(src, probe.Fingerprint(src))
-	if err != nil {
-		t.Fatalf("retain: %v", err)
-	}
-	if err := u.record(context.Background(), src, src, retained, probe.FileSize(src)); err != nil {
-		t.Fatalf("record: %v", err)
-	}
-	// The retained original really does carry a scanned extension inside its name, so
-	// the exclusion is doing work.
-	if !strings.Contains(filepath.Base(retained), ".mkv.") {
-		t.Fatalf("the retained name %q does not carry the source's scanned extension - the fixture is not the hazard", retained)
-	}
-
-	if err := eng.RunOneshot(context.Background()); err != nil {
-		t.Fatalf("RunOneshot: %v", err)
-	}
-
-	for _, in := range handed {
-		if in == retained || strings.Contains(in, UndoDirName) || isUndoName(filepath.Base(in)) {
-			t.Errorf("the encoder was handed a retained original: %s", in)
-		}
-	}
-	if _, _, found, err := ts.Get(context.Background(), retained, probe.Fingerprint(retained)); err != nil {
-		t.Fatal(err)
-	} else if found {
-		t.Errorf("the scan claimed a job for the retained original %s", retained)
-	}
-	// And it is still there, byte-identical, which is the whole point of it.
-	if !exists(retained) {
-		t.Fatal("the retained original was removed by the scan")
-	}
-
-	// The name rule the scan and the startup walk share, asserted directly: a retained
-	// original is not a source whatever extension it carries.
-	for _, base := range []string{
-		"movie.mkv.100-200." + UndoMarker,
-		"movie.mp4.100-200." + UndoMarker,
-	} {
-		if IsSourceName(base, []string{"mkv", "mp4"}) {
-			t.Errorf("IsSourceName(%q) = true - a retained original would be enumerated as a source", base)
-		}
-	}
 }
 
 // ---- AC3 / AC14: releasing, and what a release actually returns --------------

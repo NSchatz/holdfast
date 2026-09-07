@@ -60,14 +60,28 @@ func isUndoName(base string) bool { return strings.Contains(base, "."+UndoMarker
 // undoDirFor returns the retention area for files in dir.
 func undoDirFor(dir string) string { return filepath.Join(dir, UndoDirName) }
 
-// retainedPathFor is the retained original's full path: the source's basename, the
-// source's fingerprint, and the marker. The fingerprint is in the name so two
-// retentions of the same path (a swap, a restore, a later swap) can never collide on
-// one name, and so a caller can compute the name a given source WOULD get.
+// retainedPathFor is the retained original's full path: `<stem>.<fingerprint>.__undo__.<ext>`,
+// in the retention area beside the source. It mirrors the temp file's shape exactly,
+// including KEEPING THE SOURCE'S EXTENSION - a retained original is a playable copy of
+// the operator's file and they may well want to look at it before deciding, which an
+// extension of `.__undo__` would take away from them.
+//
+// That is also what makes the scan's exclusion real rather than incidental: the
+// retained name ends in `.mkv`, so it IS a name the scan would otherwise enumerate,
+// and only the marker keeps it out. An exclusion that worked because the name happened
+// to carry no video extension would be one nobody could rely on, and nobody would
+// notice it had stopped working.
+//
+// The fingerprint is in the name so two retentions of the same path (a swap, a
+// restore, a later swap) can never collide, and so a caller can compute the name a
+// given source WOULD get without consulting the ledger - which is how a retained link
+// left by a run that died before its ledger write is still recognised as ours.
 func retainedPathFor(src, fingerprint string) string {
 	base := filepath.Base(src)
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
 	safe := strings.NewReplacer(":", "-", "/", "-").Replace(fingerprint)
-	return filepath.Join(undoDirFor(filepath.Dir(src)), base+"."+safe+"."+UndoMarker)
+	return filepath.Join(undoDirFor(filepath.Dir(src)), stem+"."+safe+"."+UndoMarker+ext)
 }
 
 // errRetentionExists is returned when the retention area already holds a DIFFERENT
