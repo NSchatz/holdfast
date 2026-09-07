@@ -504,7 +504,7 @@ func TestHistoryEndpoint_UnrecordedOutcomeIsNullNotZero(t *testing.T) {
 			t.Errorf("history body missing %s\nbody: %s", want, body)
 		}
 	}
-	// /lib/done.mkv was seeded by newStore with a nil outcome — the shape of every row
+	// /lib/done.mkv was seeded by newStore with a nil outcome - the shape of every row
 	// written before this phase. It must serialize as null, not 0.
 	for _, want := range []string{`"vmaf_mean":null`, `"vmaf_min":null`, `"source_bytes":null`, `"encode_ms":null`} {
 		if !strings.Contains(body, want) {
@@ -513,6 +513,62 @@ func TestHistoryEndpoint_UnrecordedOutcomeIsNullNotZero(t *testing.T) {
 	}
 	if strings.Contains(body, `"vmaf_mean":0`) || strings.Contains(body, `"vmaf_min":0`) {
 		t.Errorf("an unrecorded VMAF must NEVER go out as 0\nbody: %s", body)
+	}
+}
+
+// TestHistoryEndpoint_CarriesTheComparisonFormatAndChromaBesideTheScore is GATE-4's
+// fourteenth acceptance criterion. A score on the wire has to carry the format the
+// comparison was made IN and the chroma metric measured beside it, and a row that
+// recorded neither must not send a zero or a placeholder in their place.
+//
+// Asserted on the RAW BYTES, for the reason this file already establishes twice: the
+// distinction between "not recorded" and 0 exists only on the wire, and decoding into
+// a struct erases it. A client that read 0 for the chroma figure would render a
+// perfectly rejectable colour as an obliterated one - or, worse, take an absent
+// comparison format for a real one and tell an operator which pixels were compared
+// when nobody knows.
+func TestHistoryEndpoint_CarriesTheComparisonFormatAndChromaBesideTheScore(t *testing.T) {
+	h := newHarness(t, "")
+	st := h.st
+	ctx := context.Background()
+
+	mean, worst, chroma := 98.4, 96.1, 41.2
+	mustClaim(t, st, "/lib/scored.mkv", "6:6")
+	if err := st.Finish(ctx, "/lib/scored.mkv", "6:6", store.Done, &store.Outcome{
+		Encoder: "cpu", VmafMean: &mean, VmafMin: &worst, VmafModel: "version=vmaf_v0.6.1",
+		VmafPixFmt: "yuv420p10le", VmafChroma: &chroma, VmafChromaMetric: "psnr_cb/psnr_cr min (dB)",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(h.srv)
+	defer ts.Close()
+	body := getRaw(t, ts.URL+"/api/history")
+
+	for _, want := range []string{
+		`"vmaf_pix_fmt":"yuv420p10le"`,
+		`"vmaf_chroma":41.2`,
+		`"vmaf_chroma_metric":"psnr_cb/psnr_cr min (dB)"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("history body missing %s - a score must carry which pixels were compared "+
+				"and what the colour measured\nbody: %s", want, body)
+		}
+	}
+
+	// /lib/done.mkv was seeded by newStore with a nil outcome - the shape of every row
+	// written before this phase. Its two strings are OMITTED (as vmaf_model already is)
+	// and its chroma figure is an explicit null. Neither is ever a zero.
+	if strings.Contains(body, `"vmaf_pix_fmt":""`) || strings.Contains(body, `"vmaf_chroma_metric":""`) {
+		t.Errorf("an unrecorded comparison format or metric must be OMITTED, not sent as an "+
+			"empty string a client has to interpret\nbody: %s", body)
+	}
+	if !strings.Contains(body, `"vmaf_chroma":null`) {
+		t.Errorf("an unrecorded chroma figure must serialize as null\nbody: %s", body)
+	}
+	if strings.Contains(body, `"vmaf_chroma":0`) {
+		t.Errorf("an unrecorded chroma figure must NEVER go out as 0 - 0.0 dB is an obliterated "+
+			"plane, which is the single most alarming thing this field could say\nbody: %s", body)
 	}
 }
 

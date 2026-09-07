@@ -115,31 +115,72 @@ var pixFmtRe = regexp.MustCompile(`^yuv(j?)(420|422|444)p(\d*)(le|be)?$`)
 // etc.) returns ok=false — the caller must SKIP rather than silently subsample or
 // guess.
 func DerivePixFmt(srcPixFmt string) (out string, ok bool) {
-	m := pixFmtRe.FindStringSubmatch(srcPixFmt)
-	if m == nil {
-		return "", false
-	}
-	chroma := m[2]
-	depthStr := m[3]
-	if depthStr == "" {
-		depthStr = "8"
-	}
-	depth, err := strconv.Atoi(depthStr)
-	if err != nil {
+	p, ok := ParsePixFmt(srcPixFmt)
+	if !ok {
 		return "", false
 	}
 	// libx265 encodes only 8/10/12-bit. A deeper source (e.g. 16-bit) must be
 	// SKIPPED, not silently reduced to 12-bit — this tool never silently loses
 	// precision. (16-bit consumer video is essentially nonexistent; skipping is safe.)
-	if depth > 12 {
+	if p.Depth > 12 {
 		return "", false
 	}
-	if depth < 10 {
-		depth = 10 // floor at 10-bit (8 -> 10: better compression, no banding)
+	if p.Depth < 10 {
+		p.Depth = 10 // floor at 10-bit (8 -> 10: better compression, no banding)
 	}
-	endian := m[4]
-	if endian == "" {
-		endian = "le"
+	return p.String(), true
+}
+
+// PixFmt is a recognized planar-YUV pixel format taken apart: its chroma
+// subsampling, its bit depth, and its byte order. It exists so there is ONE parser
+// for this format family - DerivePixFmt (which format to ENCODE to) and
+// vmaf.ComparisonFormat (which format to COMPARE in) both have to read a pix_fmt,
+// and a second regex somewhere else would be a second thing to drift.
+type PixFmt struct {
+	// Chroma is the subsampling token: "420", "422" or "444".
+	Chroma string
+	// Depth is the bit depth (8 for a name with no numeric suffix).
+	Depth int
+	// Endian is "le" or "be". It is "" when the parsed name carried no suffix,
+	// which is every 8-bit name; String() spells that as "le" for a deeper format.
+	Endian string
+}
+
+// String spells the ffmpeg pix_fmt name back. 8-bit carries no numeric or
+// endianness suffix ("yuv420p"); anything deeper carries both ("yuv420p10le"). The
+// full-range "j" variant is deliberately NOT reproduced: range travels separately
+// (-color_range), and yuvj* is deprecated as a pixel format.
+func (p PixFmt) String() string {
+	if p.Depth <= 8 {
+		return "yuv" + p.Chroma + "p"
 	}
-	return "yuv" + chroma + "p" + strconv.Itoa(depth) + endian, true
+	e := p.Endian
+	if e == "" {
+		e = "le"
+	}
+	return "yuv" + p.Chroma + "p" + strconv.Itoa(p.Depth) + e
+}
+
+// ParsePixFmt takes a pix_fmt name apart, e.g. "yuv420p10le" -> {420, 10, le},
+// "yuvj420p" -> {420, 8, ""} (the "j" is the full-range JPEG variant; the range
+// itself is carried separately).
+//
+// ok=false for anything outside the recognized family (4:1:1, RGB, paletted, or the
+// empty string a failed ffprobe returns). Every caller treats that as "do not
+// guess": the encoder path SKIPS the file, and the comparison path REJECTS the
+// encode rather than measuring it in a format nobody chose.
+func ParsePixFmt(pixFmt string) (PixFmt, bool) {
+	m := pixFmtRe.FindStringSubmatch(pixFmt)
+	if m == nil {
+		return PixFmt{}, false
+	}
+	depthStr := m[3]
+	if depthStr == "" {
+		depthStr = "8" // no numeric suffix is the 8-bit spelling ("yuv420p")
+	}
+	d, err := strconv.Atoi(depthStr)
+	if err != nil {
+		return PixFmt{}, false
+	}
+	return PixFmt{Chroma: m[2], Depth: d, Endian: m[4]}, true
 }

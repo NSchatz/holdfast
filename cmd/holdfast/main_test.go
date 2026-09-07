@@ -157,6 +157,170 @@ func TestServeSmoke(t *testing.T) {
 	}
 }
 
+// ---- VMAF model preflight (GATE-4) -------------------------------------------
+
+// preflightLibrary lays out a real library with one real, encodable source in it,
+// plus a config that sets the VMAF knobs from extraCfg. The source is REAL on
+// purpose: every case below asserts the run stopped before touching it, which only
+// means something if a run that did NOT stop would have transcoded it.
+func preflightLibrary(t *testing.T, extraCfg string) (cfgPath, lib, state, src string) {
+	t.Helper()
+	ffmpeg := envOr("HOLDFAST_FFMPEG", "ffmpeg")
+	if _, err := exec.LookPath(ffmpeg); err != nil {
+		t.Fatalf("::error:: ffmpeg required for the model-preflight proof: %v", err)
+	}
+	dir := t.TempDir()
+	lib = filepath.Join(dir, "media")
+	state = filepath.Join(dir, "state")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src = filepath.Join(lib, "movie.mkv")
+	out, err := exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=2:size=320x240:rate=10",
+		"-c:v", "libx264", "-preset", "ultrafast", "-b:v", "8M", "-pix_fmt", "yuv420p", "--", src).CombinedOutput()
+	if err != nil {
+		t.Fatalf("build fixture: %v\n%s", err, out)
+	}
+	cfgPath = filepath.Join(dir, "config.yaml")
+	body := "library_roots:\n  - " + lib + "\nstate_dir: " + state + "\nmin_bitrate_kbps: 0\n" + extraCfg
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return cfgPath, lib, state, src
+}
+
+func readAll(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return b
+}
+
+// TestRun_RefusesAnUnresolvableVmafModelBeforeEncodingAnything is GATE-4's third and
+// ninth acceptance criteria together: with the quality gate ENABLED and a model that
+// does not resolve in this ffmpeg build, the process exits NONZERO, says which model
+// was configured, leaves no encoded output and no swapped file behind, and takes that
+// decision BEFORE the job store is opened.
+//
+// Why it exists at all: `vmaf.Available` only greps the filter list, which says the
+// build HAS libvmaf and says nothing about whether it ships the MODEL libvmaf was
+// asked for. Until this check, a typo in vmaf_model - or a build without the UHD
+// model holdfast's own `auto` selects above 1440 lines - was discovered after a full
+// library's worth of encoding, one rejected file at a time, because an unmeasurable
+// encode is (correctly) never accepted.
+//
+// The store clause is the one that is easy to get wrong and easy to check: opened
+// first, a refused run would leave a jobs.db, a WAL and a shared-memory file in a
+// state directory the operator never got a run out of. The encoder capability check
+// has the same shape and the same placement, which is why the preflight sits beside it.
+func TestRun_RefusesAnUnresolvableVmafModelBeforeEncodingAnything(t *testing.T) {
+	cfgPath, lib, state, src := preflightLibrary(t,
+		"vmaf_enable: true\nvmaf_model: definitely_not_a_real_model\n")
+	before := readAll(t, src)
+
+	var out, errOut bytes.Buffer
+	code := dispatch([]string{"run", "--config", cfgPath}, &out, &errOut)
+	if code == 0 {
+		t.Fatalf("run with an unresolvable vmaf_model exited 0 - the refusal must be LOUD "+
+			"(stdout: %s)", out.String())
+	}
+	// The message names the CONFIGURED value, which is what the operator has to fix.
+	// Naming only the resolved spec would send them looking for a string they never typed.
+	msg := errOut.String()
+	if !strings.Contains(msg, "definitely_not_a_real_model") {
+		t.Errorf("the refusal must name the configured model; got: %s", msg)
+	}
+	if !strings.Contains(msg, "vmaf_model") {
+		t.Errorf("the refusal must name the configuration key; got: %s", msg)
+	}
+
+	// Nothing was encoded and nothing was swapped.
+	if !bytes.Equal(readAll(t, src), before) {
+		t.Error("the source changed on a preflight refusal")
+	}
+	entries, err := os.ReadDir(lib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "movie.mkv" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("the library holds %v after a preflight refusal, want only the untouched source", names)
+	}
+
+	// And the decision came before the job store was opened: there is no state
+	// directory at all.
+	if _, err := os.Stat(state); !os.IsNotExist(err) {
+		var names []string
+		if entries, rerr := os.ReadDir(state); rerr == nil {
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+		}
+		t.Errorf("the state directory exists after a preflight refusal (%v) - the model check "+
+			"must be taken BEFORE store.Open, so a refused run leaves no jobs.db behind", names)
+	}
+}
+
+// The anti-vacuity control: the IDENTICAL layout with a model this build DOES ship
+// starts, runs and exits 0 - so the refusal above is the model and not the fixture.
+//
+// It also settles the roadmap's open question about vmaf_4k_v0.6.1 by ASKING the
+// build rather than assuming: `auto` can resolve to either built-in depending on
+// output height, so the preflight checks both, and a build missing the UHD model
+// reds here rather than four hours into somebody's 4K library.
+func TestRun_ResolvableVmafModelStartsAndRuns(t *testing.T) {
+	for _, model := range []string{"auto", "vmaf_v0.6.1", "version=vmaf_v0.6.1"} {
+		t.Run(model, func(t *testing.T) {
+			cfgPath, _, state, _ := preflightLibrary(t, "vmaf_enable: true\nvmaf_model: "+model+"\n")
+			var out, errOut bytes.Buffer
+			if code := dispatch([]string{"run", "--config", cfgPath}, &out, &errOut); code != 0 {
+				t.Fatalf("run with vmaf_model %q exited %d, want 0 (stderr: %s)", model, code, errOut.String())
+			}
+			// It really got past the preflight and opened the store.
+			if _, err := os.Stat(filepath.Join(state, "jobs.db")); err != nil {
+				t.Errorf("no jobs.db after a run that cleared the preflight: %v", err)
+			}
+		})
+	}
+}
+
+// TestRun_DisabledGateDoesNotRefuseAnUnresolvableModel is GATE-4's tenth criterion.
+// With vmaf_enable: false nothing will ever ask libvmaf for a model, so refusing the
+// run over one would be refusing a configuration that cannot fail. The run must still
+// SAY, loudly, that there is no perceptual gate - that is the strictly weakest
+// setting this tool has, and the one an operator most needs told about.
+func TestRun_DisabledGateDoesNotRefuseAnUnresolvableModel(t *testing.T) {
+	cfgPath, _, state, _ := preflightLibrary(t,
+		"vmaf_enable: false\nvmaf_model: definitely_not_a_real_model\n")
+
+	var out, errOut bytes.Buffer
+	if code := dispatch([]string{"run", "--config", cfgPath}, &out, &errOut); code != 0 {
+		t.Fatalf("run with the gate DISABLED and an unresolvable model exited %d, want 0 "+
+			"(stderr: %s)", code, errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(state, "jobs.db")); err != nil {
+		t.Errorf("the run did not reach the store: %v", err)
+	}
+
+	// The run reports that there is no perceptual gate. `run` and `serve` log the same
+	// warning set through logConfigWarnings; `validate` prints it to stdout, which is
+	// where it is checkable without capturing slog.
+	var vOut, vErr bytes.Buffer
+	if code := dispatch([]string{"validate", "--config", cfgPath}, &vOut, &vErr); code != 0 {
+		t.Fatalf("validate exited %d (stderr: %s)", code, vErr.String())
+	}
+	if !strings.Contains(vOut.String(), "there is NO perceptual gate") {
+		t.Errorf("a run with the gate disabled must report that there is no perceptual gate; "+
+			"got: %s", vOut.String())
+	}
+}
+
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 func waitHTTP(t *testing.T, url string, timeout time.Duration) {

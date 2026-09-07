@@ -39,6 +39,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/startup"
 	"github.com/NSchatz/holdfast/internal/store"
 	"github.com/NSchatz/holdfast/internal/version"
+	"github.com/NSchatz/holdfast/internal/vmaf"
 	"github.com/NSchatz/holdfast/internal/webui"
 )
 
@@ -171,6 +172,31 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 	if _, err := encoder.RequireAvailable(context.Background(), ffmpeg, ffprobe, cfg.Encoder); err != nil {
 		fmt.Fprintf(stderr, "holdfast: %v\n", err)
 		return nil, nil, 1
+	}
+
+	// VMAF model preflight (GATE-4), in the same band and for the same reason as the
+	// encoder check above: a capability that will not work must stop the run HERE, not
+	// after a library's worth of encoding. Until this existed the gate only checked
+	// that the libvmaf FILTER exists, which says nothing about whether the build ships
+	// the MODEL the filter was asked for - and holdfast's own `auto` selects
+	// vmaf_4k_v0.6.1 above 1440 lines, a spec the FFmpeg filter documentation does not
+	// even enumerate. A typo in vmaf_model had the same shape: hours of encoding, then
+	// a rejection per file, because an unmeasurable encode is (correctly) never
+	// accepted.
+	//
+	// It runs ONLY when the gate is enabled. With vmaf_enable: false nothing will ever
+	// ask libvmaf for a model, so refusing the run over one would be refusing a
+	// configuration that cannot fail - and logConfigWarnings has already said, loudly,
+	// that there is no perceptual gate at all.
+	//
+	// Placement is load-bearing and asserted by a test: BEFORE store.Open, so a
+	// refused run leaves no jobs.db behind, and long before anything is encoded or
+	// swapped.
+	if cfg.VmafGate() {
+		if err := vmaf.RequireModel(context.Background(), ffmpeg, cfg.VmafModel); err != nil {
+			fmt.Fprintf(stderr, "holdfast: %v\n", err)
+			return nil, nil, 1
+		}
 	}
 
 	prober := probe.New(ffmpeg, ffprobe)
