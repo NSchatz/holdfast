@@ -11,10 +11,33 @@ GOVULNCHECK_VERSION ?= v1.1.4
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# The Corresponding Source URL the served page offers (AGPL-3.0 section 13, LICENSE-3).
+# It rides the SAME -ldflags invocation as the version stamp below, because the offer is
+# the link PLUS the build identity and the two have to name the same tree.
+#
+# A fork running a MODIFIED holdfast over a network points it at its own tree, and does
+# not patch the embedded HTML to do it:
+#
+#   make build SOURCE_URL=https://git.example.org/me/holdfast
+#   make image SOURCE_URL=https://git.example.org/me/holdfast
+#
+# The value must be an absolute http:// or https:// URL; `serve` REFUSES to start on
+# anything else rather than serving an offer nobody can follow. This default is checked
+# against internal/sourceoffer.Upstream by a test inside `make check`, so this copy
+# cannot drift from the built-in one.
+#
+# Its -X assignment below is SINGLE-QUOTED, which the others do not need to be: go splits
+# the -ldflags value with shell-like quoting, so an unquoted URL carrying a space would be
+# split into two flags and fail the build. A value is only ever escaped at render time,
+# never rejected for being unclean, so the build path carries the same values the page does.
+SOURCE_URL ?= https://github.com/NSchatz/holdfast
+
 LDFLAGS := -s -w \
   -X github.com/NSchatz/holdfast/internal/version.Version=$(VERSION) \
   -X github.com/NSchatz/holdfast/internal/version.Commit=$(COMMIT) \
-  -X github.com/NSchatz/holdfast/internal/version.Date=$(DATE)
+  -X github.com/NSchatz/holdfast/internal/version.Date=$(DATE) \
+  -X 'github.com/NSchatz/holdfast/internal/sourceoffer.URL=$(SOURCE_URL)'
 
 IMAGE    ?= holdfast:dev
 PLATFORM ?= linux/amd64
@@ -91,7 +114,8 @@ check-pin-live:
 # something only the runner can do.
 image:
 	docker buildx build --platform $(PLATFORM) --load -t $(IMAGE) \
-	  --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) .
+	  --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) \
+	  --build-arg SOURCE_URL=$(SOURCE_URL) .
 
 # Builds the image, then drives a REAL oneshot encode inside it and asserts the
 # no-loss contract held. This — not "the build succeeded" — is the packaging gate.

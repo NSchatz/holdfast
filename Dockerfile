@@ -103,11 +103,29 @@ ARG TARGETARCH
 ARG VERSION=0.0.0-dev
 ARG COMMIT=unknown
 ARG DATE=unknown
+# The Corresponding Source URL the served page offers (AGPL-3.0 section 13, LICENSE-3).
+# The image is the only way this project is distributed, so the offer has to be settable
+# HERE and not only through the Makefile. It rides the same -ldflags invocation as the
+# version stamp, because the offer is the link PLUS the build identity.
+#
+#   docker buildx build --build-arg SOURCE_URL=https://git.example.org/me/holdfast .
+#
+# Leave it unset and the image offers the upstream tree. This default is checked against
+# internal/sourceoffer.Upstream by a test inside `make check` (no docker required), so
+# this copy cannot drift from the built-in one.
+#
+# The -X assignment below is SINGLE-QUOTED, which the others do not need to be. go's
+# -ldflags value is split with shell-like quoting, so an unquoted URL carrying a space
+# would be split into two flags and fail the build. The value is only ever escaped at
+# render time, never rejected for being unclean, so the build path has to carry the same
+# values the served page does.
+ARG SOURCE_URL=https://github.com/NSchatz/holdfast
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -ldflags="-s -w \
       -X github.com/NSchatz/holdfast/internal/version.Version=${VERSION} \
       -X github.com/NSchatz/holdfast/internal/version.Commit=${COMMIT} \
-      -X github.com/NSchatz/holdfast/internal/version.Date=${DATE}" \
+      -X github.com/NSchatz/holdfast/internal/version.Date=${DATE} \
+      -X 'github.com/NSchatz/holdfast/internal/sourceoffer.URL=${SOURCE_URL}'" \
     -o /out/holdfast ./cmd/holdfast
 
 # --- runtime -----------------------------------------------------------------
