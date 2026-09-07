@@ -26,7 +26,8 @@ const NAMES = [
   "GUARD_LABELS", "isNum", "fmtBytes", "fmtTime", "fmtDur", "fmtSpan", "pct", "fmtScore",
   "fmtCount", "sumStatuses", "clockOffsetFrom", "serverNow", "elapsedText", "sizeFigures",
   "vmafFigures", "progressFigure", "guardLabel", "capNoteText", "announceText",
-  "aggCoverageText", "aggExclusionText",
+  "aggCoverageText", "aggExclusionText", "readBuckets", "bucketProportions",
+  "spreadPositions",
 ];
 
 // The modules that hold no DOM reference at all, and so load anywhere.

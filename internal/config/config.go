@@ -46,7 +46,8 @@ var knownKeys = map[string]bool{
 	"max_failures": true, "skip_hardlinked": true, "state_dir": true,
 	"allow_non_local": true,
 	"vmaf_enable":     true, "min_vmaf": true, "vmaf_min_pool": true,
-	"vmaf_subsample": true, "vmaf_model": true, "workers": true,
+	"vmaf_min_chroma": true,
+	"vmaf_subsample":  true, "vmaf_model": true, "workers": true,
 	"server_addr": true, "server_auth_token": true, "scan_interval_sec": true,
 	"metrics_enable": true, "notify_url": true, "run_window": true,
 	"max_load": true, "tautulli_url": true, "tautulli_api_key": true,
@@ -73,6 +74,7 @@ func defaultLayer() map[string]any {
 		"vmaf_enable":            true,
 		"min_vmaf":               95.0,
 		"vmaf_min_pool":          60.0,
+		"vmaf_min_chroma":        30.0,
 		"vmaf_subsample":         1,
 		"vmaf_model":             "auto",
 		"workers":                1,
@@ -215,6 +217,35 @@ type Config struct {
 	// `validate` warns when you do. The floor only ever REJECTS (the source is
 	// kept), so the failure it can cause is a wasted encode, never a lost original.
 	VmafMinPool float64 `yaml:"vmaf_min_pool"`
+	// VmafMinChroma is the CHROMA floor, in dB: an encode is rejected when the worst
+	// (sub)sampled frame's PSNR over the chroma planes - the worse of Cb and Cr -
+	// falls below it. Default 30.
+	//
+	// It exists because the VMAF model above is LUMA-ONLY and therefore structurally
+	// blind to chroma damage, and so is every structural gate: an output whose colour
+	// planes have been flattened, shifted or desaturated decodes perfectly, carries
+	// the right duration, packets and streams, and scores as well on VMAF as a
+	// faithful encode does. Before this floor existed the source was then deleted.
+	// Measured on real libvmaf: a 15% desaturation of the chroma planes leaves the
+	// pooled harmonic mean at ~99 and the worst frame at ~97 - clear of BOTH luma
+	// floors at their shipped defaults - while chroma PSNR falls to ~26 dB from the
+	// ~40 dB a faithful encode of the same source records.
+	//
+	// It is PSNR over Cb and Cr rather than a colour-difference metric because PSNR
+	// over those planes is computed over the chroma planes and nothing else, so a
+	// value that falls can only mean chroma changed. And it is the raw min over
+	// frames for the same reason VmafMinPool is: a mean hides a locally-broken
+	// segment.
+	//
+	// The default of 30 dB sits in a measured gap. Honest encodes at the shipped
+	// crf that still clear the luma gate bottom out around 40 dB (10 dB of
+	// headroom), while the weakest chroma-only damage that evades the luma gate
+	// reads ~26 dB. Rejecting a good encode costs a wasted encode and keeps the
+	// source; accepting a bad one deletes an original.
+	//
+	// 0 disables the floor, leaving chroma damage UNGUARDED. `validate` warns when
+	// you do. Range 0-100 (dB); libvmaf caps PSNR well below 100 in practice.
+	VmafMinChroma float64 `yaml:"vmaf_min_chroma"`
 	// VmafSubsample is the frame-sampling interval for VMAF (>=1; 1 = every frame;
 	// higher is cheaper but less precise). VMAF is a second full decode, so large
 	// libraries may raise this.
@@ -512,19 +543,29 @@ func (c *Config) Validate() error {
 	if c.VmafMinPool < 0 || c.VmafMinPool > 100 {
 		return fmt.Errorf("vmaf_min_pool %g out of range (0-100)", c.VmafMinPool)
 	}
+	// The chroma floor bounds a PSNR in dB. 0 is the "disabled" sentinel (warned
+	// about, not refused); a negative floor could never reject and would be a silent
+	// no-op, and a value above 100 dB could never be cleared and would reject every
+	// encode there is. Both are configuration the operator did not mean, so both are
+	// refused BY NAME rather than clamped into something plausible.
+	if c.VmafMinChroma < 0 || c.VmafMinChroma > 100 {
+		return fmt.Errorf("vmaf_min_chroma %g out of range (0-100 dB; 0 disables the chroma floor)", c.VmafMinChroma)
+	}
 	if c.VmafSubsample < 0 {
 		// 0 means "use the default" (Load's koanf layer sets 1; the VMAF scorer also
 		// floors <1 to 1) — consistent with the other zero-defaulted knobs. Only a
 		// negative interval is invalid.
 		return fmt.Errorf("vmaf_subsample %d must be >= 0", c.VmafSubsample)
 	}
-	// Fail-safe: an explicitly-enabled VMAF gate with no effective threshold (both
-	// min_vmaf and vmaf_min_pool 0) is enabled-but-never-rejecting — a silent no-op on
-	// a delete-capable tool. Refuse it. (Checked only when vmaf_enable is EXPLICIT: a
-	// nil pointer is the default-on state, and Load always resolves it to true with
-	// min_vmaf=95, so a real config never trips this by omission.)
-	if c.VmafEnable != nil && *c.VmafEnable && c.MinVmaf == 0 && c.VmafMinPool == 0 {
-		return errors.New("vmaf_enable is true but both min_vmaf and vmaf_min_pool are 0 — the VMAF gate would never reject; set min_vmaf (e.g. 95) or disable the gate")
+	// Fail-safe: an explicitly-enabled VMAF gate with no effective threshold (every
+	// floor 0) is enabled-but-never-rejecting - a silent no-op on a delete-capable
+	// tool. Refuse it. (Checked only when vmaf_enable is EXPLICIT: a nil pointer is
+	// the default-on state, and Load always resolves it to true with min_vmaf=95, so
+	// a real config never trips this by omission.) The chroma floor counts here: a
+	// gate that rejects on chroma alone is a strange configuration but it is not a
+	// no-op, and refusing it would be refusing a gate that does gate.
+	if c.VmafEnable != nil && *c.VmafEnable && c.MinVmaf == 0 && c.VmafMinPool == 0 && c.VmafMinChroma == 0 {
+		return errors.New("vmaf_enable is true but min_vmaf, vmaf_min_pool and vmaf_min_chroma are all 0 - the VMAF gate would never reject; set min_vmaf (e.g. 95) or disable the gate")
 	}
 	if c.Workers < 0 || c.Workers > 1024 {
 		return fmt.Errorf("workers %d out of range (0-1024; 0 means the default of 1)", c.Workers)
@@ -577,10 +618,19 @@ func (c *Config) Warnings() []string {
 			"If honest encodes are being rejected, LOWER the floor (e.g. 45) rather than setting it to 0 — "+
 			"a lower floor still bounds local damage; 0 bounds nothing.")
 	}
+	if c.VmafMinChroma <= 0 {
+		w = append(w, "vmaf_min_chroma is 0 - the chroma floor is DISABLED, so CHROMA DAMAGE IS "+
+			"UNGUARDED. The VMAF model is luma-only and every structural check passes an output whose "+
+			"colour planes have been flattened, shifted or desaturated: it decodes perfectly, carries "+
+			"the right duration, packets and streams, and scores ~99 on VMAF. The source is then deleted. "+
+			"If honest encodes are being rejected, LOWER the floor (e.g. 25) rather than setting it to 0 - "+
+			"a lower floor still bounds chroma damage; 0 bounds nothing.")
+	}
 	if c.VmafSubsample > 1 {
 		w = append(w, fmt.Sprintf("vmaf_subsample is %d — VMAF measures only every %dth frame, so the "+
-			"vmaf_min_pool worst-frame floor is a SAMPLE, not a guarantee: a damaged frame that is never "+
-			"sampled is never seen. Use vmaf_subsample: 1 on content you cannot re-acquire.",
+			"vmaf_min_pool and vmaf_min_chroma worst-frame floors are a SAMPLE, not a guarantee: a "+
+			"damaged frame that is never sampled is never seen. Use vmaf_subsample: 1 on content you "+
+			"cannot re-acquire.",
 			c.VmafSubsample, c.VmafSubsample))
 	}
 	return w

@@ -1,11 +1,23 @@
   :root {
     --bg:#0f1115; --panel:#171a21; --line:#252a34; --fg:#e6e9ef; --muted:#8b93a3;
     --accent:#5b9dd9; --ok:#3fb950; --warn:#d29922; --bad:#f85149;
-    /* --border draws every interactive control's edge (buttons, inputs, badges) and
-       the focus ring's base. It is #606776 (3.33:1 on --bg), clearing WCAG 2.2's 3:1
-       floor for non-text UI. --line stays for purely decorative separators (table
-       rows, section rules) where the 3:1 component floor does not apply. */
-    --border:#606776;
+    /* --border draws every interactive control's edge (buttons, inputs, badges), every
+       boundary a reader has to find to read the thing inside it (a count chip, a figure
+       card, a region heading rule) and the focus ring's base. It is #6f7686: 4.15:1 on
+       --bg and 3.82:1 on --panel, so it clears WCAG 2.2's 3:1 floor for non-text UI
+       against BOTH surfaces this page draws it on. --line stays for purely decorative
+       separators (table rows) where the 3:1 component floor does not apply. */
+    --border:#6f7686;
+    /* --mark draws every mark of every figure: a distribution's bars, a spread's scale
+       and its three ticks. ONE token for all of them, deliberately - nothing inside a
+       drawing on this page is told apart from anything else in it by colour (a bar by
+       its row, its length and the label beside it; a minimum, a mean and a maximum by
+       their position and height), so the only contrast a drawing owes is the mark
+       against the card face behind it. #5b9dd9 is 6.03:1 on --panel (the .agg face) and
+       6.54:1 on --bg, both clear of the 3:1 non-text floor. It is a literal measured
+       value in the same idiom as --border rather than a reference to --accent: a figure
+       must not lose its legibility because a brand colour moved. */
+    --mark:#5b9dd9;
   }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--fg);
@@ -20,20 +32,21 @@
     padding:14px 20px; border-bottom:1px solid var(--line); background:var(--panel); }
   header h1 { font-size:18px; margin:0; letter-spacing:.5px; }
   header h1 .mono { color:var(--accent); }
-  .badges { display:flex; gap:8px; flex-wrap:wrap; }
+  .badges { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:14px; }
   .badge { font-size:12px; padding:2px 9px; border-radius:20px; border:1px solid var(--border);
     color:var(--muted); }
   .badge.on { color:var(--bg); background:var(--warn); border-color:var(--warn); font-weight:600; }
   .badge.scan.on { background:var(--accent); border-color:var(--accent); }
   .grow { flex:1 1 auto; }
-  .reclaimed { font-size:13px; color:var(--muted); text-align:right; }
+  .reclaimed { font-size:13px; color:var(--muted); }
   .reclaimed b { color:var(--ok); font-size:16px; }
-  .reclaimed .sub { display:block; font-size:11px; color:var(--muted); }
   main { padding:20px; max-width:1180px; margin:0 auto; }
   .chips { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px; }
-  .chip { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+  .chip { background:var(--panel); border:1px solid var(--border); border-radius:8px;
     padding:10px 14px; min-width:96px; }
   .chip .n { font-size:22px; font-weight:700; }
+  /* The chip's key is the STATE IN WORDS, always rendered, always beside the number: the
+     colour of the number below is a second reading of the same fact, never the only one. */
   .chip .k { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
   .chip.done .n { color:var(--ok); } .chip.failed .n { color:var(--bad); }
   .chip.encoding .n, .chip.probing .n, .chip.verifying .n { color:var(--accent); }
@@ -49,29 +62,60 @@
   button:disabled { opacity:.45; cursor:not-allowed; border-color:var(--line); }
   #msg { font-size:13px; color:var(--muted); min-height:18px; margin-left:6px; }
   #msg.err { color:var(--bad); }
-  section h2 { font-size:14px; text-transform:uppercase; letter-spacing:.5px;
-    color:var(--muted); border-bottom:1px solid var(--line); padding-bottom:6px; margin:26px 0 6px; }
+  /* The page's two regions, in the order an operator asks their two questions. The h2 is
+     the region; the h3s inside it are the blocks of that region. */
+  section > h2 { font-size:15px; letter-spacing:.4px; color:var(--fg);
+    border-bottom:1px solid var(--border); padding-bottom:6px; margin:26px 0 8px; }
+  section > h3 { font-size:14px; text-transform:uppercase; letter-spacing:.5px;
+    color:var(--muted); border-bottom:1px solid var(--line); padding-bottom:6px; margin:22px 0 6px; }
   section .note { font-size:12px; color:var(--muted); margin:0 0 10px; max-width:70ch; }
   /* The cap notice: the API caps the queue/history rows it ships, so a truncated view
      could read as a complete one. This calls it out. Text is --fg (accessible); the
      tint and rule are decorative. */
   .note.cap { color:var(--fg); background:rgba(210,153,34,.12); border-left:3px solid var(--warn);
     padding:6px 10px; border-radius:4px; }
-  /* Whole-ledger figures. Each card carries its number, the set that number is over,
-     and the rows it had to leave out; ".out" is the unavailable state, which colours the
-     card without removing it (an aggregate that vanished on failure would leave the page
-     looking complete). */
-  .aggs { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:10px; }
-  .agg { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 14px; }
+  /* Whole-ledger figures. Each card carries its number, its drawing, the set that number
+     is over, and the rows it had to leave out; ".out" is the unavailable state, which
+     colours the card without removing it (an aggregate that vanished on failure would
+     leave the page looking complete) and draws NO figure at all - there is nothing
+     measured to draw. */
+  .aggs { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:10px; }
+  .agg { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:10px 14px; }
   .agg h3 { margin:0 0 6px; font-size:12px; color:var(--muted); text-transform:uppercase;
     letter-spacing:.5px; font-weight:600; }
   .agg .agg-v { font-size:14px; }
   .agg .agg-v b { font-size:20px; font-weight:700; }
-  .agg .range { display:block; color:var(--muted); font-size:12px; margin-top:2px; }
-  .agg .bucket { display:flex; justify-content:space-between; gap:12px; font-size:13px; }
-  .agg .bucket .c { font-weight:600; }
+  .agg .range { display:block; color:var(--muted); font-size:12px; margin-top:4px; }
   .agg .agg-cov, .agg .agg-ex { margin:6px 0 0; font-size:11px; color:var(--muted); }
   .agg.out .agg-v { color:var(--warn); }
+  /* --- the drawings --------------------------------------------------------------
+     A figure is an inline vector drawing built from DOM nodes cloned out of a template,
+     with one geometry attribute set per mark from a number the server already published.
+     It loads nothing: no library, no font, no image, no data: URI. Every value it
+     encodes is also rendered as text in the same card, in the order the marks are drawn,
+     so the drawing is never the sole carrier of a number and nothing here needs to be
+     hovered or pointed at to be read. */
+  .agg .fig { display:block; width:100%; }
+  .agg .fig .mark { fill:var(--mark); }
+  .agg .fig .axis, .agg .fig .tick { stroke:var(--mark); fill:none; stroke-width:2; }
+  /* The mean tick is TALLER and THICKER than the two ends it sits between - the one
+     thing that tells the three marks of a spread apart, since all three share a colour. */
+  .agg .fig .tick.mean { stroke-width:3; }
+  .agg .fig.spread { margin:6px 0 2px; }
+  /* One grid for the whole distribution, so every bar is measured against the same track
+     width and a reader can compare two bars by eye as safely as by their numbers. Label,
+     bar and count sit in one row per bucket, in the order the marks are drawn. */
+  .buckets { display:grid; grid-template-columns:max-content minmax(48px,1fr) max-content;
+    align-items:center; gap:4px 10px; font-size:13px; }
+  .buckets .bk { overflow-wrap:anywhere; }
+  .buckets .bc { font-weight:600; font-variant-numeric:tabular-nums; }
+  /* The spread's text equivalent: minimum, mean and maximum, in the left-to-right order
+     the ticks above them are drawn. */
+  .spreadkeys { display:flex; flex-wrap:wrap; gap:12px; margin-top:2px; font-size:12px; }
+  /* Lower case deliberately: these three words are the drawing's text equivalent, and
+     what a reader sees is what the grader reads back, so they are not transformed. */
+  .spreadkeys .sn { color:var(--muted); letter-spacing:.4px; margin-right:5px; }
+  .spreadkeys .sv { font-weight:600; font-variant-numeric:tabular-nums; }
   .tablewrap { overflow-x:auto; }
   table { width:100%; border-collapse:collapse; }
   th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);
@@ -87,10 +131,15 @@
      failed row's reason is long free text and td.st's nowrap would run it off-screen. */
   table.hist td.st { white-space:normal; }
   td.st { white-space:nowrap; }
-  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px;
+  /* A status dot's COLOUR is never the only carrier of its meaning. The state is always
+     spelled out beside it, and the three TERMINAL outcomes are given three different
+     SHAPES as well - a filled disc for done, a square for failed, a diamond for skipped -
+     so they stay apart from each other with no colour vision at all. */
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px;
     background:var(--muted); vertical-align:middle; }
-  .st-done .dot { background:var(--ok); } .st-failed .dot { background:var(--bad); }
-  .st-skipped .dot { background:var(--muted); }
+  .st-done .dot { background:var(--ok); }
+  .st-failed .dot { background:var(--bad); border-radius:0; }
+  .st-skipped .dot { background:var(--muted); border-radius:0; transform:rotate(45deg); }
   .st-encoding .dot,.st-probing .dot,.st-verifying .dot,.st-pending .dot { background:var(--accent); }
   .reason { color:var(--muted); font-size:12px; }
   .reason.fail { color:var(--bad); word-break:break-word; }

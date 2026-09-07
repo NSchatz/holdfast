@@ -170,6 +170,7 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE jobs SET status = ?, worker = ?, updated_at = ?,
 			reason = NULL, encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
+			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL,
 			source_bytes = NULL, output_bytes = NULL, encode_ms = NULL
 		 WHERE path = ? AND fingerprint = ?`,
 		string(Probing), worker, now(), path, fingerprint); err != nil {
@@ -208,6 +209,7 @@ func (s *SQLite) Finish(ctx context.Context, path, fingerprint string, st Status
 	// about.
 	q := `UPDATE jobs SET status = ?, updated_at = ?,
 		reason = ?, encoder = ?, vmaf_mean = ?, vmaf_min = ?, vmaf_model = ?,
+		vmaf_pix_fmt = ?, vmaf_chroma = ?, vmaf_chroma_metric = ?,
 		source_bytes = ?, output_bytes = ?, encode_ms = ?`
 	if st == Failed {
 		q += `, fail_count = fail_count + 1`
@@ -218,6 +220,7 @@ func (s *SQLite) Finish(ctx context.Context, path, fingerprint string, st Status
 		string(st), now(),
 		nullString(o.Reason), nullString(o.Encoder),
 		nullFloat(o.VmafMean), nullFloat(o.VmafMin), nullString(o.VmafModel),
+		nullString(o.VmafPixFmt), nullFloat(o.VmafChroma), nullString(o.VmafChromaMetric),
 		nullInt(o.SourceBytes), nullInt(o.OutputBytes), nullInt(o.EncodeMs),
 		path, fingerprint,
 	); err != nil {
@@ -252,32 +255,66 @@ func nullInt(i *int64) any {
 	return *i
 }
 
-// scanOutcome reads the eight nullable outcome columns into an Outcome, mapping SQL
-// NULL back to the nil pointer / empty string that means "not recorded". The inverse
-// of the null* helpers above; the round-trip is asserted by the store tests.
-func scanOutcome(reason, encoder, model sql.NullString, mean, worst sql.NullFloat64, src, out, ms sql.NullInt64) Outcome {
-	o := Outcome{Reason: reason.String, Encoder: encoder.String, VmafModel: model.String}
-	if mean.Valid {
-		v := mean.Float64
-		o.VmafMean = &v
+// outcomeColumns is the column list every reader of the outcome projects, in ONE
+// place, so the SELECT text and the scan destinations cannot drift apart when a
+// column is appended. Its order is the order outcomeScan expects.
+const outcomeColumns = `reason, encoder, vmaf_mean, vmaf_min, vmaf_model,
+	vmaf_pix_fmt, vmaf_chroma, vmaf_chroma_metric, source_bytes, output_bytes, encode_ms`
+
+// outcomeScan holds one row's outcome columns on the way out of the driver. Every
+// field is a sql.Null* because every column is nullable: NULL is "not recorded" and
+// must not be scanned into a bare 0/"" a reader would mistake for a measurement.
+//
+// It exists as a struct rather than a list of locals because the column set grows
+// (v2 added eight, v4 added three) and a positional scan is the shape that silently
+// mis-binds when it does - swap two same-typed columns in the argument list and the
+// compiler is happy while a VMAF score arrives in the chroma field.
+type outcomeScan struct {
+	reason, encoder, model    sql.NullString
+	pixFmt, chromaMetric      sql.NullString
+	mean, worst, chroma       sql.NullFloat64
+	srcBytes, outBytes, encMs sql.NullInt64
+}
+
+// dest returns the scan destinations in outcomeColumns order.
+func (s *outcomeScan) dest() []any {
+	return []any{
+		&s.reason, &s.encoder, &s.mean, &s.worst, &s.model,
+		&s.pixFmt, &s.chroma, &s.chromaMetric, &s.srcBytes, &s.outBytes, &s.encMs,
 	}
-	if worst.Valid {
-		v := worst.Float64
-		o.VmafMin = &v
+}
+
+// outcome maps the scanned columns back to an Outcome, turning SQL NULL into the nil
+// pointer / empty string that means "not recorded". The inverse of the null* helpers
+// above; the round-trip is asserted by the store tests.
+func (s *outcomeScan) outcome() Outcome {
+	o := Outcome{
+		Reason: s.reason.String, Encoder: s.encoder.String, VmafModel: s.model.String,
+		VmafPixFmt: s.pixFmt.String, VmafChromaMetric: s.chromaMetric.String,
 	}
-	if src.Valid {
-		v := src.Int64
-		o.SourceBytes = &v
-	}
-	if out.Valid {
-		v := out.Int64
-		o.OutputBytes = &v
-	}
-	if ms.Valid {
-		v := ms.Int64
-		o.EncodeMs = &v
-	}
+	o.VmafMean = nullableFloat(s.mean)
+	o.VmafMin = nullableFloat(s.worst)
+	o.VmafChroma = nullableFloat(s.chroma)
+	o.SourceBytes = nullableInt(s.srcBytes)
+	o.OutputBytes = nullableInt(s.outBytes)
+	o.EncodeMs = nullableInt(s.encMs)
 	return o
+}
+
+func nullableFloat(n sql.NullFloat64) *float64 {
+	if !n.Valid {
+		return nil
+	}
+	v := n.Float64
+	return &v
+}
+
+func nullableInt(n sql.NullInt64) *int64 {
+	if !n.Valid {
+		return nil
+	}
+	v := n.Int64
+	return &v
 }
 
 // Delete removes the row for path+fingerprint (a no-op if absent).
@@ -295,7 +332,7 @@ func (s *SQLite) Delete(ctx context.Context, path, fingerprint string) error {
 // but parameterizing keeps the read injection-proof by construction).
 func (s *SQLite) List(ctx context.Context, statuses []Status, limit int) ([]Job, error) {
 	q := `SELECT path, fingerprint, status, fail_count, worker, updated_at,
-		reason, encoder, vmaf_mean, vmaf_min, vmaf_model, source_bytes, output_bytes, encode_ms
+		` + outcomeColumns + `
 		FROM jobs`
 	args := make([]any, 0, len(statuses)+1)
 	if len(statuses) > 0 {
@@ -326,16 +363,14 @@ func (s *SQLite) List(ctx context.Context, statuses []Status, limit int) ([]Job,
 		var worker sql.NullString // worker is NULL for a pending/recovered row
 		// Every outcome column is nullable: NULL is "not recorded" and must not be
 		// scanned into a bare 0/"" that a reader would mistake for a measurement.
-		var reason, encoder, model sql.NullString
-		var mean, vmin sql.NullFloat64
-		var src, outB, ms sql.NullInt64
-		if err := rows.Scan(&j.Path, &j.Fingerprint, &status, &j.FailCount, &worker, &j.UpdatedAt,
-			&reason, &encoder, &mean, &vmin, &model, &src, &outB, &ms); err != nil {
+		var oc outcomeScan
+		dest := append([]any{&j.Path, &j.Fingerprint, &status, &j.FailCount, &worker, &j.UpdatedAt}, oc.dest()...)
+		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("store: list scan: %w", err)
 		}
 		j.Status = Status(status)
 		j.Worker = worker.String
-		j.Outcome = scanOutcome(reason, encoder, model, mean, vmin, src, outB, ms)
+		j.Outcome = oc.outcome()
 		out = append(out, j)
 	}
 	if err := rows.Err(); err != nil {
@@ -402,6 +437,7 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 		 ON CONFLICT(path, fingerprint) DO UPDATE SET
 			status = excluded.status, reason = excluded.reason, worker = NULL, updated_at = excluded.updated_at,
 			encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
+			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL,
 			source_bytes = NULL, output_bytes = NULL, encode_ms = NULL
 		 WHERE jobs.status = ?`,
 		path, fingerprint, string(Skipped), now(), nullString(reason), string(Pending))

@@ -91,8 +91,11 @@ type Engine struct {
 
 	// vmafScore, when non-nil, replaces the real libvmaf measurement in the VMAF
 	// gate. Unexported test seam — lets a test force a low score or an unavailable-
-	// libvmaf error without a second real encode. Production leaves it nil.
-	vmafScore func(ctx context.Context, distorted, reference string, subsample int, model string) (vmaf.Result, error)
+	// libvmaf error without a second real encode. Production leaves it nil. It
+	// receives the whole vmaf.Request, comparison pixel format included, so a test
+	// can assert on the format the gate NAMED as well as on what it did with the
+	// numbers that came back.
+	vmafScore func(ctx context.Context, req vmaf.Request) (vmaf.Result, error)
 
 	// fsyncPath, when non-nil, replaces the real fsync in the durable swap
 	// (TRANSCODE-17). A test uses it to observe or force-fail the fsync of the temp
@@ -697,6 +700,11 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// an encode are exactly the ones an operator wants to see, and a rejection whose
 	// score is thrown away is the defect this phase exists to fix.
 	out.VmafMean, out.VmafMin, out.VmafModel = proof.Mean, proof.Min, proof.Model
+	// The comparison format and the chroma measurement travel with the score, on the
+	// reject path too and for the same reason (GATE-4). A stored score whose pixel
+	// format is unrecorded does not say which pixels were compared, and a stored
+	// verdict with no chroma figure does not say whether the colour survived.
+	out.VmafPixFmt, out.VmafChroma, out.VmafChromaMetric = proof.PixFmt, proof.ChromaMin, proof.ChromaMetric
 	if reason != nil {
 		if ctx.Err() != nil {
 			_ = os.Remove(tmp)
@@ -836,9 +844,15 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	newSize := probe.FileSize(final)
 	out.SourceBytes, out.OutputBytes = ptr(fi.Size()), ptr(newSize)
 
+	// The log line carries the comparison format and the chroma figure beside the
+	// score, because "recorded alongside the score" has to mean everywhere the score
+	// is recorded - a log line that reports a bare 98.4 is one more surface where a
+	// reader cannot say which pixels were compared.
 	e.Log.Info("DONE", "file", final, "bytes", newSize, "reclaimed", fi.Size()-newSize,
 		"encode_ms", encodeDur.Milliseconds(),
-		"vmaf", logScore(proof.Mean), "vmaf_min", logScore(proof.Min))
+		"vmaf", logScore(proof.Mean), "vmaf_min", logScore(proof.Min),
+		"vmaf_pix_fmt", logText(proof.PixFmt),
+		"vmaf_chroma", logScore(proof.ChromaMin), "vmaf_chroma_metric", logText(proof.ChromaMetric))
 	// The done row is keyed under the FINAL file's own path+fingerprint (mirroring
 	// the pre-TRANSCODE-5 ledger behaviour) so a resume short-circuits on the new
 	// file's identity, not the pre-swap source's. The post-swap fingerprint (new
@@ -915,6 +929,17 @@ func logScore(p *float64) any {
 		return "not recorded"
 	}
 	return *p
+}
+
+// logText is logScore for the string half of the measurement (the comparison pixel
+// format, the chroma metric's name). An empty string is NOT RECORDED and says so:
+// slog would render "" as an empty value, which reads as a field that exists and is
+// blank rather than a measurement that was never taken.
+func logText(s string) string {
+	if s == "" {
+		return "not recorded"
+	}
+	return s
 }
 
 // isAlreadyTargetCodec reports whether a source's probed video codec already IS
