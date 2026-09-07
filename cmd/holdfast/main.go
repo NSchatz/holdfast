@@ -454,13 +454,20 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 // gate protecting them has been narrowed — silence here is how a weakened config
 // becomes invisible.
 //
-// Notices come first and at INFO, because they are statements about a configuration
-// and not complaints about it: the disabled undo window is the shipped default, and
-// dressing a default as a warning is how warnings stop being read. Warnings keep the
-// WARN level they have always had.
+// Notices come first, and they are logged at WARN even though they are not warnings.
+// The two lists stay separate — `validate` prints them as `note:` against `warning:`,
+// and Notices exists precisely so a shipped default is never dressed as a weakened
+// gate — but a LOG LEVEL is not a severity classification, it is how loud something
+// has to be to survive the operator turning the volume down. `log_level: warn` is a
+// legal setting, and at INFO this announcement vanished there entirely: the daemon
+// started, swapped a file and said nothing about the swap being final. A statement
+// that is inaudible at a level an operator may legitimately choose has not been made.
+//
+// WARN puts it on exactly the footing of the safety warnings below, which is the
+// right one: at `log_level: error` both go quiet, and `docs/undo.md` says so.
 func logConfigWarnings(cfg *config.Config, log *slog.Logger) {
 	for _, n := range cfg.Notices() {
-		log.Info(n)
+		log.Warn(n)
 	}
 	for _, w := range cfg.Warnings() {
 		log.Warn(w)

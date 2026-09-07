@@ -405,6 +405,52 @@ func TestUndo_ARetentionFailureIsReEvaluatedOnTheNextScan(t *testing.T) {
 	}
 }
 
+// TestUndo_TurningTheWindowOffClearsAStaleRetentionFailureSkip is the third strand of
+// the same rule the release sweep and the hardlink discount follow: undo_window_hours
+// governs whether a NEW retention is taken and nothing else, so turning it off must not
+// strand what the window left behind.
+//
+// With the window off no retention is attempted at all, which means a retention failure
+// has stopped being a reason to skip anything. A skip row left over from when it was on
+// would park that file for as long as the setting stayed off - and the operator who
+// turned the key to 0 to stop paying for the window is exactly the one who would never
+// look for a guard named after it.
+func TestUndo_TurningTheWindowOffClearsAStaleRetentionFailureSkip(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+	// A file where the retention area has to go: the retention cannot be taken, and the
+	// blockage is left in place for the whole test, because with the window off it is
+	// not a blockage at all.
+	if err := os.WriteFile(filepath.Join(d, UndoDirName), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	eng, ts := undoEngine(t, ffmpeg, ffprobe, d, 24, nil)
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("scan 1: %v", err)
+	}
+	if got := skipReason(t, ts, "movie.mkv"); got != SkipUndoRetentionFailed {
+		t.Fatalf("scan 1: reason = %q, want %q - the fixture is not in the state this test is about", got, SkipUndoRetentionFailed)
+	}
+
+	eng.Cfg.UndoWindowHours = 0
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("scan 2: %v", err)
+	}
+
+	if got := codecOf(t, ffprobe, src); got != "hevc" {
+		t.Errorf("the file was not reclaimed after the window was turned off (codec %q) - a skip about a "+
+			"retention this configuration no longer takes parked it", got)
+	}
+	for _, row := range skippedRows(t, ts) {
+		if row.Outcome.Reason == SkipUndoRetentionFailed {
+			t.Errorf("a stale %q skip survived the window being turned off: %s", SkipUndoRetentionFailed, row.Path)
+		}
+	}
+}
+
 // ---- AC6/AC7: the undo window and the hardlink guard -------------------------
 
 // TestUndo_OurOwnRetainedLinkDoesNotTripTheHardlinkGuard is UNDO-6's sixth criterion.

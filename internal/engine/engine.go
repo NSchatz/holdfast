@@ -301,9 +301,15 @@ func (e *Engine) RunOneshot(ctx context.Context) error {
 	// space that release actually returned is reported. Doing it first means the
 	// figure an operator sees for this pass covers the whole pass, and that the disk
 	// this run is about to write to has already had back whatever the last one held.
-	if e.Cfg.UndoEnabled() {
-		e.undo().ReleaseExpired(ctx)
-	}
+	//
+	// It is deliberately NOT gated on undo_window_hours still being non-zero. Each
+	// retention carries the expiry it was GIVEN, so releasing is a promise this tool
+	// already made about bytes it is already holding — and setting the key back to 0
+	// is the documented way to stop paying for the window, so gating the sweep on it
+	// would make that setting strand every original it had retained: the second link
+	// on disk for ever, the row live for ever, the space never returned. The setting
+	// governs whether a NEW retention is taken, nothing else.
+	e.undo().ReleaseExpired(ctx)
 	e.cleanStaleTemps(ctx)
 	return e.scanOnce(ctx)
 }
@@ -536,12 +542,15 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// The undo window's own guard is MUTABLE (UNDO-6): a retention that could not be
 	// taken - a full disk, an unwritable retention area - is a condition that gets
 	// fixed, so a stale skip from a previous scan is dropped here and the file
-	// re-enters the normal path. Same discipline as the hardlink guard below, and
-	// gated on the window being enabled so a default configuration pays nothing.
-	if e.Cfg.UndoEnabled() {
-		if err := e.Store.ClearSkip(ctx, f, key, SkipUndoRetentionFailed); err != nil {
-			e.Log.Warn("clear stale undo-retention skip failed (continuing)", "file", f, "err", err)
-		}
+	// re-enters the normal path. Same discipline as the hardlink guard below.
+	//
+	// Not gated on the window still being enabled, for the same reason the release
+	// sweep and the hardlink discount are not: turning the window off must not strand
+	// what it left behind. With the window off no retention is attempted at all, so a
+	// retention failure is no longer a reason to skip anything, and a row left over
+	// from when it was on would park that file for as long as the setting stayed off.
+	if err := e.Store.ClearSkip(ctx, f, key, SkipUndoRetentionFailed); err != nil {
+		e.Log.Warn("clear stale undo-retention skip failed (continuing)", "file", f, "err", err)
 	}
 
 	// Hardlink guard. A file with >1 hard link is almost always an *arr import that

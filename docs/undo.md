@@ -12,6 +12,10 @@ back.
 **It is off by default.** With `undo_window_hours: 0` - the shipped default - nothing
 below applies, a swap is final, and `holdfast validate` and every startup say so.
 
+The startup announcement is logged at **WARN**, so it survives `log_level: warn`. At
+`log_level: error` it is silent - as is every other safety warning this tool prints, and
+that is the level's meaning - while `holdfast validate` prints it whatever the level is.
+
 ## Turning it on
 
 ```yaml
@@ -102,6 +106,28 @@ immediately.)
 If a record's retained original is no longer on disk - somebody deleted it - it is
 reported as **unrestorable**, the record is dropped, and zero bytes are reported. A
 ledger that promises a restore it cannot perform is worse than one that says nothing.
+
+## Turning it back off
+
+Setting `undo_window_hours` back to `0` stops **new** retentions and does nothing else.
+It is the documented way to stop paying for the window, so it has to be the setting that
+returns the space rather than the one that keeps it for ever. Everything the window has
+already left behind keeps its own promise:
+
+- **Each retention keeps the expiry it was given**, and the next scan pass releases it
+  on exactly that schedule. The release sweep is not conditioned on the setting.
+- **`holdfast restore` still works** on anything still inside its own window.
+- **A link this tool holds is still discounted** by the hardlink guard, so a retention
+  left behind by an interrupted run does not turn into a `hardlinked` skip the moment
+  the key changes - which would park that file for good, since what would clear the skip
+  is the extra link going away and the extra link is this tool's own.
+- **A stale `undo-retention-failed` skip is cleared** on the next scan. With the window
+  off no retention is attempted, so a retention failure is no longer a reason to skip
+  anything.
+
+There is deliberately no "release everything now" command. The same command would be the
+one that throws away an original an operator is still deciding about, and
+`holdfast restore` already lists what is held and how much longer each has.
 
 ## What a restore refuses to do
 

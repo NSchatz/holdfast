@@ -121,13 +121,19 @@ func (e *Engine) undo() *UndoWindow {
 }
 
 // retainedLinks is how many of f's hard links this tool holds through the undo
-// window. It is 0 - with no ledger read at all - when the window is disabled, which
-// is the default, so the hardlink guard costs a configuration without the window
-// exactly what it cost before.
+// window.
+//
+// It asks the same question whether or not undo_window_hours is still non-zero,
+// because the question is WHOSE link this is, and a link this tool took does not
+// become a foreign seed when a setting changes. Gating it on the setting is how an
+// operator who turns the window off parks the very file it was protecting, under a
+// guard token that is factually wrong about the extra link — and permanently, since
+// what would clear that token is the link going away and the link is this tool's own.
+//
+// The cost is bounded by the caller, not by the setting: the hardlink guard asks only
+// about a file that ALREADY has more than one link, which is rare, and a library that
+// never used the window answers it from an empty table.
 func (e *Engine) retainedLinks(ctx context.Context, f, fingerprint string) uint64 {
-	if !e.Cfg.UndoEnabled() {
-		return 0
-	}
 	return e.undo().heldLinks(ctx, f, fingerprint)
 }
 

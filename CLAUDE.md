@@ -422,10 +422,17 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   given a window to recover); a link this tool **can prove is its own** is discounted by the hardlink
   guard, while a foreign one still skips exactly as before; and a source whose original **cannot** be
   retained is skipped (`undo-retention-failed`, a mutable guard) rather than swapped, because the
-  window's promise is that a swap can be undone. The release runs at the start of every scan pass and
+  window's promise is that a swap can be undone. **`undo_window_hours` governs whether a NEW retention is
+  taken and nothing else**: the release sweep, the hardlink discount and that mutable skip are all driven
+  by what is actually RETAINED, never by the setting. Setting the key back to 0 is the documented way to
+  stop paying for the window, so gating those on it is precisely what would make that setting strand every
+  original already held - the second link on disk for ever, the ledger row live for ever, the space never
+  returned, and an interrupted run's own link re-read as a foreign seed. The release runs at the start of
+  every scan pass and
   reports the bytes it ACTUALLY returned — `unlink(2)` frees the data only when the removed name was the
   last one, so a retention whose data survives elsewhere reports zero rather than its size. Space still
-  held is published as its own figure, never folded into a reclaimed total. Full reference: `docs/undo.md`.
+  held is published as its own figure, never folded into a reclaimed total. The disabled-window
+  announcement is logged at WARN, not INFO, so it survives `log_level: warn`. Full reference: `docs/undo.md`.
 - `internal/logging`, `internal/version` — logger construction, build-stamped version.
 - `.github/workflows/ci.yml` — the gate (installs the pinned ffmpeg via `scripts/install-ffmpeg.sh` for the
   engine proof) + a `package` job (TRANSCODE-9) that builds BOTH arches and runs the image smoke gate.
