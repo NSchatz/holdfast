@@ -238,6 +238,49 @@ func residualWindowFor(c fsclass.Classification) string {
 	return store.ResidualWindowNetwork
 }
 
+// replacementIsAt reports where the replacement ACTUALLY is after a failed rename.
+//
+// Normally that is the temp path: the rename reported an error and did not move
+// anything. But the swap's target is not always the source path. When the output
+// container extension differs from the source's (movie.mp4 -> movie.mkv, `container_ext`
+// forced) the rename targets a DIFFERENT path, and a rename that took effect while
+// reporting an error - the rename(2) retransmission hazard this whole file exists for -
+// leaves the replacement at that target, under an ordinary source name, with the temp
+// path empty.
+//
+// Following the file is what keeps the record honest (AC15a records THE PATH THE
+// REPLACEMENT IS AT, so both files can be identified from the record alone) and what
+// lets the retained-name hold-back reach it at all (AC15i): an ordinary source name is
+// never held back on its name and must not be, so a replacement left sitting at one is
+// held by nothing. Locating it is what lets the caller move it to a name that IS held.
+//
+// It is deliberately conservative in three directions at once:
+//
+//   - it looks at the target ONLY when the temp path is empty, so a rename that plainly
+//     did not apply is never second-guessed;
+//   - it looks at the target only when the target is NOT the source path, so the file at
+//     the source path - which the four-case outcome decision is entirely about - is
+//     never something this moves or reasons about;
+//   - and it accepts what is at the target only when that file carries the attributes
+//     recorded for the REPLACEMENT before the swap, which is the same evidence AC14a
+//     case (a) decides on and the same evidence the record itself carries.
+//
+// Anything else falls back to the temp path. A record naming a path with no file at it
+// is a case the operator action already handles honestly (AC15b/AC15f report it absent
+// and still resolve the job); silently losing a file it never names is not.
+func (e *Engine) replacementIsAt(tmp, final, src string, replRec probe.Attributes) string {
+	if _, err := os.Lstat(tmp); err == nil {
+		return tmp
+	}
+	if final == src {
+		return tmp
+	}
+	if at, err := probe.StatAttributes(final); err == nil && at == replRec {
+		return final
+	}
+	return tmp
+}
+
 // crossFilesystemReport is the DISTINCT report AC17 requires, and it names both paths
 // (AC18) so an operator can see the boundary rather than infer it. It deliberately says
 // nothing about the state of the source: that is the outcome decision's to report, and
@@ -271,6 +314,13 @@ func (e *Engine) handleFailedSwap(ctx context.Context, f, key, tmp, final string
 
 	dec := decideFailedSwap(srcRec, replRec, observed, restatErr, cls)
 
+	// WHERE THE REPLACEMENT IS. The outcome above is decided at the SOURCE path, which
+	// is what AC13a names; where the replacement ended up is a separate question, and on
+	// the ext-changing shape (final != f) the answer is not always the temp path. Asked
+	// once, here, so every branch below records and holds back the path the file is
+	// actually at rather than the path it started from.
+	replAt := e.replacementIsAt(tmp, final, f, replRec)
+
 	cause := swapCause(renameErr)
 	out.SwapCause = cause
 	report := "swap failed: " + renameErr.Error()
@@ -279,13 +329,14 @@ func (e *Engine) handleFailedSwap(ctx context.Context, f, key, tmp, final string
 	}
 
 	// AC14e's guard: case (a) says the rename took effect, and a rename that took
-	// effect cannot account for two files. If something is still at the recorded
-	// replacement path, the applied story does not hold and the pair is parked.
+	// effect cannot account for two files. If something is still at the path the record
+	// will name as the replacement's, the applied story does not hold and the pair is
+	// parked.
 	if dec.Status == store.AppliedDespiteError {
-		if _, err := os.Lstat(tmp); err == nil {
+		if _, err := os.Lstat(replAt); err == nil {
 			dec = swapOutcome{
 				Status: store.Indeterminate, Case: "a-contradicted", Observed: dec.Observed,
-				Why: "the re-stat matched the replacement's pre-swap record but a file is STILL present at the recorded replacement path (" + tmp + "), and a rename that took effect cannot account for both",
+				Why: "the re-stat matched the replacement's pre-swap record but a file is STILL present at the recorded replacement path (" + replAt + "), and a rename that took effect cannot account for both",
 			}
 		}
 	}
@@ -296,11 +347,32 @@ func (e *Engine) handleFailedSwap(ctx context.Context, f, key, tmp, final string
 		// the pin always reported; the difference is that it is now established rather
 		// than assumed. The temp is discarded exactly as before: this job recorded a
 		// plain failure with the source intact, which is none of the three origins that
-		// make a replacement untouchable.
+		// make a replacement untouchable (AC15i).
 		_ = os.Remove(tmp)
-		e.Log.Warn("FAIL ("+report+"; source confirmed untouched)", "file", f,
-			"cause", causeOrNone(cause), "storage", cls.String(), "case", dec.Case)
 		out.Reason = report + " - " + dec.Why
+		if replAt != tmp {
+			// The ext-changing shape, on storage this run positively identified as
+			// local: the rename took effect at the TARGET even though it reported an
+			// error, so the gate-passed replacement is there beside a source this
+			// re-stat has just confirmed intact. Both files are on disk - the identical
+			// state a crash between the rename and the source removal leaves, which this
+			// repository already handles by leaving both and letting the collision guard
+			// reconcile the duplicate on the next scan. Nothing is deleted here: the
+			// source is established intact, so no data is at risk, and removing a file at
+			// an ordinary media name on the strength of a size-and-whole-second-mtime
+			// match is not a trade this tool makes. It IS reported, durably and not only
+			// in the log, because an operator told only "the source is untouched" would
+			// never learn a second file exists.
+			dup := "the gate-passed replacement is at " + replAt +
+				", beside the untouched source: both files are on disk and the next scan's collision guard reconciles the duplicate"
+			out.Reason += " - " + dup
+			e.Log.Warn("FAIL ("+report+"; source confirmed untouched; "+dup+")", "file", f,
+				"cause", causeOrNone(cause), "storage", cls.String(), "case", dec.Case,
+				"replacement", replAt)
+		} else {
+			e.Log.Warn("FAIL ("+report+"; source confirmed untouched)", "file", f,
+				"cause", causeOrNone(cause), "storage", cls.String(), "case", dec.Case)
+		}
 		e.finish(ctx, f, key, store.Failed, out)
 		return
 
@@ -311,8 +383,8 @@ func (e *Engine) handleFailedSwap(ctx context.Context, f, key, tmp, final string
 		e.recordIncident(ctx, store.SwapIncident{
 			SourcePath: f, SourceFingerprint: key,
 			// The replacement is AT the source path now; the recorded replacement path
-			// is where it was, and case (a) established there is nothing there.
-			ReplacementPath:  tmp,
+			// is where it was, and the guard above established there is nothing there.
+			ReplacementPath:  replAt,
 			SourceAttrs:      srcRec.String(),
 			ReplacementAttrs: replRec.String(),
 			ObservedAttrs:    dec.Observed,
@@ -321,14 +393,15 @@ func (e *Engine) handleFailedSwap(ctx context.Context, f, key, tmp, final string
 			SwapCause:        cause,
 			StorageClass:     string(cls.Class), StorageType: cls.Type,
 			JobOutcome: out,
-		}, f, tmp, srcRec, replRec)
+		}, f, replAt, srcRec, replRec)
 		return
 
 	default:
-		// Indeterminate. Both files are kept. The replacement is first moved to a
-		// retained name, which is what makes it recognisable WITHOUT a record - the
-		// store write below may be the very thing that fails.
-		retained := e.retainReplacement(tmp, final)
+		// Indeterminate. Both files are kept. The replacement is first moved from
+		// wherever it actually is to a retained name, which is what makes it
+		// recognisable WITHOUT a record - the store write below may be the very thing
+		// that fails.
+		retained := e.retainReplacement(replAt, final)
 		e.Log.Warn("INDETERMINATE ("+report+")", "file", f,
 			"cause", causeOrNone(cause), "storage", cls.String(), "case", dec.Case,
 			"replacement", retained, "source_record", srcRec.String(),
@@ -373,36 +446,46 @@ func (e *Engine) recordIncident(ctx context.Context, in store.SwapIncident,
 	e.emit(Event{Path: sourcePath, Status: in.Outcome, Outcome: in.JobOutcome})
 }
 
-// retainReplacement moves the temp to a retained-replacement name, so a later run
-// recognises it as a file holdfast wrote even if no record of it survives. It returns
-// the path the replacement is at - the retained one on success, the temp path when the
-// move could not be made, which is reported and is still covered by a record where one
-// could be written.
+// retainReplacement moves the replacement from wherever it is (`at` - see
+// replacementIsAt, which is not always the temp path) to a retained-replacement name, so
+// a later run recognises it as a file holdfast wrote even if no record of it survives.
+// It returns the path the replacement is at - the retained one on success, `at` itself
+// when the move could not be made, which is reported and is what the record then names.
+//
+// The name is derived from `final`, the swap's TARGET, so the retained file keeps the
+// extension the replacement was encoded to rather than the source's.
 //
 // It uses os.Rename DIRECTLY and not the swap's rename seam. The seam substitutes THE
 // SWAP - the one rename whose failure this whole file is about - and routing this move
 // through it would mean a test injecting a swap failure also broke the retention that
 // failure is supposed to trigger, hiding the behaviour under test behind the injection.
 // This move is a same-directory rename of holdfast's own file and touches no source.
-func (e *Engine) retainReplacement(tmp, final string) string {
-	dir := filepath.Dir(tmp)
+func (e *Engine) retainReplacement(at, final string) string {
+	dir := filepath.Dir(at)
 	base := filepath.Base(final)
 	ext := strings.TrimPrefix(filepath.Ext(base), ".")
 	stem := strings.TrimSuffix(base, filepath.Ext(base))
 	for n := 0; n < maxPathCandidates; n++ {
 		p := retainedReplacementPath(dir, stem, ext, n)
 		if _, err := os.Lstat(p); errors.Is(err, os.ErrNotExist) {
-			if err := os.Rename(tmp, p); err != nil {
-				e.Log.Warn("could not move the retained replacement to its held-back name - it stays at the temp path and is held back by its record",
-					"temp", tmp, "retained", p, "err", err)
-				return tmp
+			if err := os.Rename(at, p); err != nil {
+				// Say only what is true. The old wording here asserted the file "stays
+				// at the temp path and is held back by its record" - two claims this
+				// branch cannot make, since the move most often fails because there is
+				// nothing at that path at all, and the record that would hold it has not
+				// been written yet (it may be exactly what fails next). What IS true is
+				// the path the outcome record will name and whether a file is there.
+				_, statErr := os.Lstat(at)
+				e.Log.Warn("could not move the replacement to a held-back name - the outcome record below names this path and the operator action reports what is (or is not) there",
+					"replacement", at, "retained", p, "file_present_there", statErr == nil, "err", err)
+				return at
 			}
 			return p
 		}
 	}
-	e.Log.Warn("no free retained-replacement name - the replacement stays at the temp path",
-		"temp", tmp, "candidates", maxPathCandidates)
-	return tmp
+	e.Log.Warn("no free retained-replacement name - the replacement stays where it is",
+		"replacement", at, "candidates", maxPathCandidates)
+	return at
 }
 
 func causeOrNone(cause string) string {
@@ -467,12 +550,25 @@ func (h *holdBacks) held(p string) (string, bool) {
 // reported and the run continues WITHOUT the record-based hold-backs, because refusing
 // to scan at all would turn a store hiccup into a stopped library - but the record-free
 // name-based hold-back still applies, so no file holdfast wrote is enumerated either way.
+//
+// That trade is deliberate and it is bounded, so the report says exactly which guarantee
+// is standing on what:
+//
+//   - the RETAINED REPLACEMENT half is not affected at all. It is held back by its
+//     NAME, which needs no record (that is what the name is for), so a replacement is
+//     never enumerated, encoded or swept whatever the store says.
+//   - the PARKED SOURCE half loses its hold-back and falls back to Claim, which refuses
+//     an `indeterminate` row outright, so the file is not encoded or swapped. That
+//     refusal is keyed on path+fingerprint, so it covers a parked source whose bytes
+//     have not moved and NOT one that was rewritten since it was parked - which is the
+//     residue, and the log names it rather than implying AC15c is fully enforced.
 func (e *Engine) loadHoldBacks(ctx context.Context) *holdBacks {
 	h := &holdBacks{paths: map[string]string{}}
 
 	parked, err := e.Store.ParkedIncidents(ctx)
 	if err != nil {
-		e.Log.Error("could not read parked jobs (continuing; files holdfast wrote are still held back by name)", "err", err)
+		e.Log.Error("could not read parked jobs - CONTINUING WITHOUT the record-based hold-back on parked paths, which is the one AC15c names; a retained replacement is still held back by its NAME, and a parked source is still refused by Claim unless its bytes have changed since it was parked",
+			"err", err)
 	}
 	h.parked = parked
 	for _, in := range parked {
@@ -491,7 +587,8 @@ func (e *Engine) loadHoldBacks(ctx context.Context) *holdBacks {
 
 	excluded, err := e.Store.ExcludedReplacementPaths(ctx)
 	if err != nil {
-		e.Log.Error("could not read recorded replacement paths (continuing; files holdfast wrote are still held back by name)", "err", err)
+		e.Log.Error("could not read recorded replacement paths - CONTINUING WITHOUT the record-based exclusion AC15d carries; every retained replacement is still held back by its NAME, which is what that name exists for",
+			"err", err)
 	}
 	for _, p := range excluded {
 		if _, ok := h.paths[resolvedForm(p)]; !ok {

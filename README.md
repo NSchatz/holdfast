@@ -310,6 +310,13 @@ never an unrecorded deletion - and a replacement holdfast kept is never handed b
 it were a source. Files holdfast retained this way are named `*.__holdfast-replacement__.*` and are left
 alone by every later run, whether or not a record of them survived.
 
+When `container_ext` makes the output's extension differ from the source's, the swap's target is a
+**different path** from the source, so a rename that took effect while reporting an error leaves the
+replacement *there* rather than at the source path. holdfast follows the file: a parked job records where
+it actually is and retains it under the held-back name, and where the source is instead established
+untouched the recorded reason names the second file, so a duplicate is never something you have to
+notice for yourself (the next scan's collision guard reconciles it).
+
 #### Schema versioning
 
 The job store (`<state_dir>/jobs.db`) carries a schema version in SQLite's `PRAGMA user_version` and is
