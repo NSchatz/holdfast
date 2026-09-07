@@ -23,12 +23,19 @@ import (
 	"testing"
 )
 
+// gateInputs is the set of real files a fixture is built from. It grew in impl ordinal 6:
+// the gate no longer READS a `run:` step, it OBSERVES one, so every script a step invokes has
+// to exist in the fixture or the step invokes a program that is not there - which the gate
+// now refuses rather than passing. Only this list changed; no assertion in any of the
+// regression probes was touched.
 var gateInputs = []string{
 	".github/workflows/release.yml",
 	"docker-compose.yml",
 	"docs/release.md",
 	"go.mod",
 	"scripts/resolve-compose-image.sh",
+	"scripts/smoke-image.sh",
+	"scripts/install-ffmpeg.sh",
 }
 
 // fixture copies the real inputs into a scratch root and returns it.

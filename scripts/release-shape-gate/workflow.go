@@ -73,8 +73,9 @@ type Step struct {
 	With            map[string]any `yaml:"with"`
 	ContinueOnError any            `yaml:"continue-on-error"`
 
-	Index int    // declaration order within the job; the ordering property is about this
-	JobID string // which job it came from
+	Index   int            // declaration order within the job; the ordering property is about this
+	JobID   string         // which job it came from
+	Ambient map[string]any // the workflow's env merged with the job's, so a step can build its own
 }
 
 // Label is how a step is named in every message this gate prints.
@@ -137,9 +138,11 @@ func LoadWorkflow(path string) (*Workflow, error) {
 	}
 	total := 0
 	for id, job := range wf.Jobs {
+		ambient := mergeAny(wf.Env, job.Env)
 		for i := range job.Steps {
 			job.Steps[i].Index = i
 			job.Steps[i].JobID = id
+			job.Steps[i].Ambient = ambient
 		}
 		wf.Jobs[id] = job
 		total += len(job.Steps)
@@ -254,16 +257,25 @@ var classifiedLocalActions = []struct {
 func (s Step) Acts(ctx *evalCtx) ([]Act, error) {
 	var out []Act
 	seen := map[string]bool{}
-	for _, c := range s.commands() {
-		kind, why, err := c.Act()
+	if strings.TrimSpace(s.Run) != "" {
+		obs, err := s.Observed(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("%s %w.\nThis gate will not read a command it cannot decide as harmless: a command wrongly called publishing reds this gate, one wrongly called harmless is how an unreviewed publish ships", s.Label(), err)
+			return nil, fmt.Errorf("%s: %w", s.Label(), err)
 		}
-		if kind == "" || seen[string(kind)+"\x00"+why] {
-			continue
+		if err := obs.refusal(s); err != nil {
+			return nil, err
 		}
-		seen[string(kind)+"\x00"+why] = true
-		out = append(out, Act{Kind: kind, Step: s, Why: why})
+		for _, inv := range obs.Invocations {
+			kind, why, err := classifyObserved(inv.Argv)
+			if err != nil {
+				return nil, fmt.Errorf("%s %w.\nThis gate will not read a command it cannot decide as harmless: a command wrongly called publishing reds this gate, one wrongly called harmless is how an unreviewed publish ships", s.Label(), err)
+			}
+			if kind == "" || seen[string(kind)+"\x00"+why] {
+				continue
+			}
+			seen[string(kind)+"\x00"+why] = true
+			out = append(out, Act{Kind: kind, Step: s, Why: why})
+		}
 	}
 	matched := false
 	for _, d := range usesDetectors {
@@ -582,68 +594,255 @@ func tolerates(v any) (bool, string) {
 	}
 }
 
-// --- roles the ordering property is stated in terms of --------------------------------
+// --- what the step was OBSERVED to invoke ----------------------------------------------
+
+// Observed runs this step's shell in the observation environment (observe.go) and returns
+// every command it actually invoked. ctx is the event the step is being observed for; nil is
+// the STATIC question, where a `${{ … }}` span no event decides becomes an opaque word.
+func (s Step) Observed(ctx *evalCtx) (*Observation, error) {
+	o, err := observerFor(".")
+	if err != nil {
+		return nil, err
+	}
+	script, err := s.observedScript(ctx)
+	if err != nil {
+		return nil, err
+	}
+	env, err := s.observedEnv(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return o.Observe(script, env)
+}
+
+func (s Step) observedScript(ctx *evalCtx) (string, error) {
+	if ctx == nil {
+		return neutraliseExpressions(s.Run), nil
+	}
+	return Interpolate(s.Run, *ctx)
+}
+
+// observedEnv is the environment the step's shell sees: the workflow's env, the job's, then
+// the step's own, each decided against the event under test.
+func (s Step) observedEnv(ctx *evalCtx) (map[string]string, error) {
+	out := map[string]string{}
+	for _, m := range []map[string]any{s.Ambient, s.Env} {
+		for k, v := range m {
+			text := yamlString(v)
+			if ctx == nil {
+				out[k] = neutraliseExpressions(text)
+				continue
+			}
+			val, err := Interpolate(neutraliseSecrets(text), *ctx)
+			if err != nil {
+				return nil, fmt.Errorf("env %s: %w", k, err)
+			}
+			out[k] = val
+		}
+	}
+	if ctx == nil {
+		return out, nil
+	}
+	gh, _ := ctx.vars["github"].(map[string]any)
+	out["GITHUB_SHA"] = yamlString(gh["sha"])
+	out["GITHUB_REPOSITORY"] = yamlString(gh["repository"])
+	out["GITHUB_REF_NAME"] = yamlString(gh["ref_name"])
+	out["GITHUB_REF"] = yamlString(gh["ref"])
+	out["GITHUB_EVENT_NAME"] = yamlString(gh["event_name"])
+	out["GITHUB_ACTOR"] = yamlString(gh["actor"])
+	return out, nil
+}
 
 var (
-	reMakeCheck  = regexp.MustCompile(`(^|[\s;&|(])make\s+(-[^\s]+\s+)*check(\s|$|[;&|)])`)
-	reSmoke      = regexp.MustCompile(`smoke-image\.sh`)
-	reDockerPull = regexp.MustCompile(`\bdocker\s+pull\b`)
-	reArm64      = regexp.MustCompile(`\blinux/arm64\b`)
-	reAmd64      = regexp.MustCompile(`\blinux/amd64\b`)
-	reResolve    = regexp.MustCompile(`resolve-compose-image\.sh`)
+	reExprSpan   = regexp.MustCompile(`\$\{\{[^}]*\}\}`)
+	reSecretSpan = regexp.MustCompile(`\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}`)
 )
 
-// commands is the ONE reader of a step's shell, shared by the act catalogue and by every
-// role detector below. There used to be two - a comment stripper and a continuation joiner -
-// and having two was itself the defect: they disagreed about what a line is, in the
-// fail-open direction. command.go says what one reader costs and buys.
+// neutraliseSecrets gives a step's environment an opaque word where a secret would be. A
+// credential is never a destination and no act this gate decides turns on the VALUE of one,
+// so `GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}` must not stop the step being observed. It is
+// deliberately narrow, and deliberately NOT applied to `if:` guards: a guard that turns on a
+// secret is still undecidable, and undecidable still reds.
+func neutraliseSecrets(s string) string {
+	return reSecretSpan.ReplaceAllString(s, "__release_shape_secret__")
+}
+
+// neutraliseExpressions is what the STATIC question does with a `${{ … }}` span: no single
+// event decides it, so it becomes one opaque word. The command it sits in is still observed,
+// which is the property that matters - `docker push ${{ steps.plan.outputs.image }}` is a
+// push whatever that expression turns out to be.
+func neutraliseExpressions(s string) string {
+	return reExprSpan.ReplaceAllString(s, "__release_shape_expression__")
+}
+
+// refusal turns what the environment could NOT observe into an error. This is the deny-by-
+// default rule stated once: an invocation the environment could not intercept, a nested shell
+// it could not follow, or an exploration that had not run out of new paths, each reds by
+// name. None of them may pass as "this step publishes nothing".
+func (o *Observation) refusal(s Step) error {
+	if len(o.Refusals) > 0 {
+		return fmt.Errorf("%s invokes something this gate could NOT OBSERVE: %s.\nThe release definition is graded by running each step in an environment where nothing external executes and every invocation is recorded with its argv. A command word that names a program by a path this environment does not shim escapes that recorder, and a nested shell invoked without `-c` cannot be followed into. Either spelling is refused rather than reported as publishing nothing - the whole history of this gate is silence reading as a no",
+			s.Label(), strings.Join(o.Refusals, ", "))
+	}
+	if !o.Converged {
+		return fmt.Errorf("%s could not be observed to a conclusion: after %d runs the set of commands it invokes was still growing.\nThis gate re-runs a step varying which of its commands fail, because a publish behind `if ! …` is only reachable on one of those paths. A step whose control flow has not settled by then is UNDECIDED, which is not the same as clean",
+			s.Label(), o.Runs)
+	}
+	return nil
+}
+
+// --- roles the ordering property is stated in terms of --------------------------------
+//
+// Every one of these used to be a regular expression over the step's TEXT, and F13 is what
+// that costs: once the reader resolved quoting, `echo "make check"` read as the full gate, so
+// a step that prints the gate's name and runs nothing satisfied A7 and the promotion was
+// reported as gated. A role is now a property of what the step was OBSERVED to invoke - a
+// step runs the full gate because `make` was called with `check`, never because a string
+// mentioning it appeared somewhere.
+
+var (
+	// reMakeCheck matches the gate's TARGET among the targets a `make` invocation was
+	// observed to be handed. It is no longer applied to a step's text: `echo "make check"`
+	// invokes no make at all, so there is nothing for it to match.
+	reMakeCheck = regexp.MustCompile(`(^|\s)check(\s|$)`)
+	reArm64     = regexp.MustCompile(`\blinux/arm64\b`)
+	reAmd64     = regexp.MustCompile(`\blinux/amd64\b`)
+
+	// makeFlagsTakingAValue is what separates a target from a flag's argument, so a
+	// `make -C check build` is not read as running the gate.
+	makeFlagsTakingAValue = map[string]bool{
+		"-C": true, "-f": true, "-I": true, "-j": true, "-l": true, "-o": true, "-W": true,
+	}
+)
+
+// makeTargets is what a make invocation was actually asked to build.
+func makeTargets(args []string) string {
+	var out []string
+	for i := 1; i < len(args); i++ {
+		w := args[i]
+		if strings.HasPrefix(w, "-") {
+			if makeFlagsTakingAValue[w] {
+				i++
+			}
+			continue
+		}
+		if strings.Contains(w, "=") {
+			continue // a variable override, not a target
+		}
+		out = append(out, w)
+	}
+	return strings.Join(out, " ")
+}
+
+// commands is the lexical reader. It is no longer how an act is decided - observation is -
+// and it survives as the thing command_test.go grades against bash itself.
 func (s Step) commands() []Command { return ShellCommands(s.Run) }
 
-// script is what the role detectors match against: the step's shell as the reader read it,
-// one command per line, quoting removed. A pattern here can no longer be defeated by
-// pressing return, because the line it sees is the LOGICAL one the shell would run.
+// script renders what the step was observed to invoke, one command per line. It is the text
+// every message about a step prints, and the only text any pattern below is ever applied to:
+// nothing that was not executed can appear in it.
 func (s Step) script() string {
+	obs, err := s.Observed(nil)
+	if err != nil {
+		return ""
+	}
 	var b strings.Builder
-	for _, c := range s.commands() {
-		b.WriteString(c.String())
+	for _, inv := range obs.Invocations {
+		b.WriteString(inv.String())
 		b.WriteByte('\n')
 	}
 	return b.String()
 }
 
-func (s Step) RunsFullGate() bool      { return reMakeCheck.MatchString(s.script()) }
-func (s Step) RunsSmoke() bool         { return reSmoke.MatchString(s.script()) }
-func (s Step) PullsFromRegistry() bool { return reDockerPull.MatchString(s.script()) }
-func (s Step) ResolvesComposeRef() bool {
-	return reResolve.MatchString(s.script())
+// invocationsOf returns the observed invocations of one program, by the program a command
+// actually runs rather than by the word it was written as.
+func (s Step) invocationsOf(want func(prog string, args []string) bool) [][]string {
+	obs, err := s.Observed(nil)
+	if err != nil {
+		return nil
+	}
+	var out [][]string
+	for _, inv := range obs.Invocations {
+		prog, args, ok := Command{Words: inv.Argv}.invocation()
+		if ok && want(prog, args) {
+			out = append(out, args)
+		}
+	}
+	return out
 }
 
-// SmokeArches reports which architectures a smoke step covers. smoke-image.sh takes the
-// platform as its second argument and defaults to the runner's own (amd64), so a step
-// that names no platform is an amd64 smoke.
+// RunsFullGate: the step was observed to invoke `make` with `check` among its targets. The
+// pattern is applied to the ARGV make was handed, so quoting cannot put it there.
+func (s Step) RunsFullGate() bool {
+	return len(s.invocationsOf(func(prog string, args []string) bool {
+		return prog == "make" && reMakeCheck.MatchString(makeTargets(args))
+	})) > 0
+}
+
+// RunsSmoke: the step was observed to invoke the packaging gate itself.
+func (s Step) RunsSmoke() bool { return len(s.smokeRuns()) > 0 }
+
+func (s Step) smokeRuns() [][]string {
+	return s.invocationsOf(func(prog string, args []string) bool { return prog == "smoke-image.sh" })
+}
+
+// PullsFromRegistry: the step was observed to pull an image back.
+func (s Step) PullsFromRegistry() bool { return len(s.pulls()) > 0 }
+
+func (s Step) pulls() [][]string {
+	return s.invocationsOf(func(prog string, args []string) bool {
+		return hasWordPrefix(leadingWords(args), []string{"docker", "pull"})
+	})
+}
+
+// ResolvesComposeRef: the step was observed to invoke the resolver.
+func (s Step) ResolvesComposeRef() bool {
+	return len(s.invocationsOf(func(prog string, args []string) bool {
+		return prog == "resolve-compose-image.sh"
+	})) > 0
+}
+
+// SmokeArches reports which architectures a smoke step covers, read from the argv the smoke
+// script was actually handed. It takes the platform as its second argument and defaults to
+// the runner's own, so a run that names no platform is an amd64 smoke.
 func (s Step) SmokeArches() []string {
-	script := s.script()
-	var out []string
-	if reArm64.MatchString(script) {
-		out = append(out, "linux/arm64")
+	return archesIn(s.smokeRuns(), true)
+}
+
+// PullArches reports which architectures a step pulls back from the registry, read from the
+// argv each `docker pull` was handed.
+func (s Step) PullArches() []string {
+	return archesIn(s.pulls(), false)
+}
+
+func archesIn(runs [][]string, defaultAmd64 bool) []string {
+	seen := map[string]bool{}
+	for _, args := range runs {
+		text := strings.Join(args, " ")
+		if reArm64.MatchString(text) {
+			seen["linux/arm64"] = true
+		}
+		if reAmd64.MatchString(text) {
+			seen["linux/amd64"] = true
+		}
+		if defaultAmd64 && !reArm64.MatchString(text) && !reAmd64.MatchString(text) {
+			seen["linux/amd64"] = true
+		}
 	}
-	if reAmd64.MatchString(script) || len(out) == 0 {
-		out = append(out, "linux/amd64")
+	out := make([]string, 0, len(seen))
+	for a := range seen {
+		out = append(out, a)
 	}
 	sort.Strings(out)
 	return out
 }
 
-// PullArches reports which architectures a step pulls back from the registry.
-func (s Step) PullArches() []string {
-	script := s.script()
-	var out []string
-	if reArm64.MatchString(script) {
-		out = append(out, "linux/arm64")
+func mergeAny(maps ...map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, m := range maps {
+		for k, v := range m {
+			out[k] = v
+		}
 	}
-	if reAmd64.MatchString(script) {
-		out = append(out, "linux/amd64")
-	}
-	sort.Strings(out)
 	return out
 }

@@ -156,6 +156,15 @@ func (g *gate) run() error {
 	}
 	g.note("%s parses, and names %d job(s)", releaseWorkflow, len(wf.Jobs))
 
+	// The observation environment every `run:` step is watched in. It has to exist before
+	// the first question is asked, because "what does this step publish?" is now answered by
+	// running the step in it, not by reading the step.
+	obs, err := NewObserver(g.root)
+	if err != nil {
+		return err
+	}
+	defer obs.install()()
+
 	allActs, err := actsIn(wf)
 	if err != nil {
 		return err // an input that decides a publish and cannot be decided
@@ -671,32 +680,27 @@ func (g *gate) checkComposeReferenceAgreement(r *Runner, wf *Workflow, job Job, 
 		}
 	}
 
-	// Run the promotion for real, with docker stubbed, and read the reference it moved
-	// out of the argv it actually invoked. The workflow derives that reference at runtime
-	// from the repository name; reading the YAML would only ever produce `${IMAGE}:latest`.
-	env, err := stepEnv(wf, job, promote, p.ctx)
+	// OBSERVE the promotion with the values the planning logic produced, and read the
+	// reference it moved out of the argv it actually built. The workflow derives that
+	// reference at runtime from the repository name; reading the YAML would only ever
+	// produce `${IMAGE}:latest`.
+	observed, err := promote.Observed(&p.ctx)
 	if err != nil {
-		g.bad("cannot build the promotion step's environment: %v", err)
+		g.bad("cannot observe the promotion step: %v", err)
 		return
 	}
-	script, err := Interpolate(promote.Run, p.ctx)
-	if err != nil {
-		g.bad("cannot interpolate the promotion step: %v", err)
+	if err := observed.refusal(promote); err != nil {
+		g.bad("%v", err)
 		return
 	}
-	out, err := r.Run(script, env)
-	if err != nil {
-		g.bad("cannot execute the promotion step: %v", err)
-		return
+	argv := make([][]string, 0, len(observed.Invocations))
+	for _, inv := range observed.Invocations {
+		argv = append(argv, inv.Argv)
 	}
-	if out.ExitCode != 0 {
-		g.bad("the promotion step exits %d when run with the values the planning logic produced:\n%s", out.ExitCode, indent(out.Output))
-		return
-	}
-	targets, sources := tagMoveRefs(out.Argv)
+	targets, sources := tagMoveRefs(argv)
 	if len(targets) != 1 {
 		g.bad("could not read a single floating reference out of what %s actually ran (%d found). The gate refuses to guess which reference a release moves:\n%s",
-			promote.Label(), len(targets), indent(formatArgv(out.Argv)))
+			promote.Label(), len(targets), indent(formatArgv(argv)))
 		return
 	}
 	floating := targets[0]

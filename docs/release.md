@@ -318,32 +318,65 @@ unreviewed publish. The same rule holds for the references a push publishes, whi
 from `tags:` and from an `outputs:` entry's `name=`; a push whose references the gate cannot
 read reds rather than being assumed to name nothing.
 
-A step's `run:` script is decided the same way, and it takes the same two pieces: a reader
-and a destination model. ONE reader parses the block as the shell parses it - continuations
-joined (a quote opened before one is still open after it), comments dropped, quoting
-resolved, `$(…)` read as a script of its own - and yields the commands the runner would
-execute. It is graded against `bash` itself: the same text is run with a recording stub on
-PATH and the words the reader produced are compared with the words bash passed. Then each
-command's act is decided from WHERE IT SENDS WHAT IT BUILT: `--push`, `--load` and
-`--output=<spec>` go through the same function that decides an action's `outputs:` input,
-because `--push` and `outputs: type=registry` are one destination with two spellings.
+A step's `run:` script is **not read at all**. It is OBSERVED. Reading it lost six times in
+one direction - a publishing input the act decision could not see, detectors that could not
+cross a line continuation, a command catalogue that knew spellings and no destination, a push
+inside a quoted `sh -c "…"` or `eval "…"`, buildx's attached shorthand `-otype=registry`
+decided "local", and quote removal that made `echo "make check"` satisfy the full-gate role.
+Each fix made the reader cleverer and ordinary shell beat the next one. So each step the plan
+says runs is EXECUTED in a hermetic environment and what it invokes is recorded:
 
-The catalogue has an EDGE on both halves, and states it. Every `uses:` must sit either in
-the publishing half, whose destination inputs are then decided, or in the list of actions a
-human has checked and found to publish nothing. Every command that invokes a tool which can
-reach a registry, a remote or a package index - the same list the gate stubs before it
-executes anything - must likewise land on a rule naming the act it performs or the reason it
-performs none. Anything in neither reds by name. "Never asked" and "asked and answered no"
-have to look different, because `docker/bake-action` with `push: true`, `crane copy` and
-`regctl image copy` all publish.
+- `PATH` is one empty directory, so every command the shell resolves through it reaches
+  `command_not_found_handle`, which records the full argv **bash built** - after quote
+  removal, after expansion, after `eval`, from inside a pipeline, a subshell, a loop or a
+  command substitution - and performs nothing. There is no lexer left to defeat.
+- The repository is mirrored as directories plus a recording shim per executable file, and
+  that mirror is the working directory, so `./scripts/smoke-image.sh` is recorded with its
+  arguments and a shell script it ships is descended into. A command cannot hide one file
+  away.
+- Every tool the gate classifies is shimmed at its absolute path too, and a command word
+  beginning with `/` that has no shim is REFUSED before it runs. The environment says out
+  loud that it could not watch something rather than letting it through.
+- `set -e` and `set -u` are stripped, and each of the step's commands is made to fail in
+  turn across re-runs. The first is because the commands that would have created a file were
+  recorded rather than run, so stopping at the first failure would leave the rest unobserved;
+  the second is because `if ! docker manifest inspect X; then docker push X; fi` publishes on
+  exactly one path and the all-succeed run never takes it. Both observe MORE than the runner
+  reaches, which cannot hide an act.
 
-**Extending this:** an act is a property of a step's DEFINITION, so model the DESTINATION
-rather than the spelling, and give the model an edge. Matching spellings is how
-`docker image push` and `docker buildx build --output=type=registry` came to perform no act
-at all while a dry run pushed to GHCR, and adding the missing spelling closes the spelling,
-never the class - the spelling after that is always the one nobody wrote a pattern for. Read
-the input once, decide where it sends what it built, and make the case you have not thought
-of red rather than silent.
+Then each recorded invocation is classified, and the act of a build is decided from WHERE IT
+SENDS WHAT IT BUILT: `--push`, `--load` and `--output=<spec>` go through the same function
+that decides an action's `outputs:` input, and the flags are TOKENISED rather than matched,
+because `-o` is a pflag shorthand and pflag takes an attached value - `-otype=registry` IS
+`--output=type=registry`. A short flag cluster the gate cannot tokenise is an error, not a
+word it skips.
+
+**A role is what a step was observed to INVOKE**, never what its text mentions: a step runs
+the full gate because `make` was called with the `check` target, smokes because
+`scripts/smoke-image.sh` was called, pulls back because `docker pull` was called. A step that
+prints the gate's name runs nothing and satisfies nothing.
+
+The catalogue has an EDGE on every half, and states it. Every `uses:` must sit either in the
+publishing half, whose destination inputs are then decided, or in the list of actions a human
+has checked and found to publish nothing. Every command that invokes a tool which can reach a
+registry, a remote or a package index must land on a rule naming the act it performs or the
+reason it performs none. And **every program an observed step invokes at all** must be
+classified - as a registry tool, as a client whose destination this gate cannot model, or as
+one checked and found local. Anything in none of them reds by name. "Never asked" and "asked
+and answered no" have to look different, because `docker/bake-action` with `push: true`,
+`crane copy` and `regctl image copy` all publish.
+
+**Extending this:** do not teach the gate to read a new spelling. If a step's act is wrong,
+the question is what the step INVOKED, and the answer is in the recorded argv. If a program
+reds as unclassified, classify it with the reason a human checked it. If the environment says
+it could not watch something, do not widen the environment - respell the step so it invokes a
+program by name. The one thing this must never gain is a rule that reads a step's text and
+concludes it is harmless: silence reading as "no" is the single sentence all six fail-opens
+were an instance of.
+
+The one thing the environment does not reach, stated rather than left to be found: a command
+word that expands from a variable to an absolute path outside the set this gate shims. Every
+other quoting, nesting and spelling arrives at the recorder as argv.
 
 The example deployment's image reference has exactly ONE reader, in that gate.
 `scripts/resolve-compose-image.sh` asks for it (`release-shape-gate -print-compose-ref`)

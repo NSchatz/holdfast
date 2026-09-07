@@ -453,6 +453,132 @@ var registryTools = map[string]string{
 	"twine":   "uploads distributions to a package index",
 }
 
+// shellBuiltins are run by the shell itself and never reach a program, so none of them can
+// perform a published act. The observation environment never records one - a builtin does not
+// go through PATH - so this map exists for the lexical fallback that reads a script bash
+// would refuse, where `set -euo pipefail` is an ordinary line to read past.
+var shellBuiltins = map[string]string{
+	"alias": "a shell builtin", "bg": "a shell builtin", "bind": "a shell builtin",
+	"break": "a shell builtin", "builtin": "a shell builtin", "caller": "a shell builtin",
+	"cd": "a shell builtin", "compgen": "a shell builtin", "complete": "a shell builtin",
+	"continue": "a shell builtin", "declare": "a shell builtin", "dirs": "a shell builtin",
+	"disown": "a shell builtin", "enable": "a shell builtin", "eval": "a shell builtin",
+	"exec": "a shell builtin", "exit": "a shell builtin", "export": "a shell builtin",
+	"fg": "a shell builtin", "getopts": "a shell builtin", "hash": "a shell builtin",
+	"help": "a shell builtin", "history": "a shell builtin", "jobs": "a shell builtin",
+	"kill": "a shell builtin", "let": "a shell builtin", "local": "a shell builtin",
+	"logout": "a shell builtin", "mapfile": "a shell builtin", "popd": "a shell builtin",
+	"pushd": "a shell builtin", "read": "a shell builtin", "readarray": "a shell builtin",
+	"readonly": "a shell builtin", "return": "a shell builtin", "set": "a shell builtin",
+	"shift": "a shell builtin", "shopt": "a shell builtin", "source": "a shell builtin",
+	"suspend": "a shell builtin", "times": "a shell builtin", "trap": "a shell builtin",
+	"type": "a shell builtin", "typeset": "a shell builtin", "ulimit": "a shell builtin",
+	"umask": "a shell builtin", "unalias": "a shell builtin", "unset": "a shell builtin",
+	"wait": "a shell builtin", ".": "a shell builtin", ":": "a shell builtin",
+	"[": "a shell builtin", "[[": "a shell builtin",
+}
+
+// programsCheckedAndLocal is the third list the OBSERVED half needs, and it is the deny-by-
+// default edge made usable rather than a hole in it.
+//
+// Once a step's acts are decided from what it was OBSERVED to invoke, every invocation has to
+// be classified or the observation is not a gate: a program in none of these maps FAILS,
+// naming the step and the program (observe.go, classifyObserved). That edge is only tolerable
+// if the ordinary tooling a release runs is written down, so here it is, each entry the reason
+// a human checked it and found it cannot reach a registry, a remote or a package index on its
+// own. It is a list, and a list is exactly what lost six times - but it lost by being SILENT
+// about what it had not seen. This one reds.
+var programsCheckedAndLocal = map[string]string{
+	"make":        "runs the repository's own targets",
+	"go":          "the Go toolchain; `go build`/`test`/`vet` are local, and publishing a module is a tag push, decided on `git push`",
+	"gofmt":       "formats source",
+	"ffmpeg":      "encodes media",
+	"ffprobe":     "reads media",
+	"bash":        "a shell; its -c script is observed in this same environment",
+	"sh":          "a shell; its -c script is observed in this same environment",
+	"dash":        "a shell; its -c script is observed in this same environment",
+	"sudo":        "runs another program with different privileges; the act belongs to that program",
+	"env":         "runs another program with a different environment; the act belongs to that program",
+	"printf":      "writes text",
+	"echo":        "writes text",
+	"cat":         "reads files",
+	"head":        "reads the start of a file",
+	"tail":        "reads the end of a file",
+	"tee":         "copies a stream to a file",
+	"grep":        "matches text",
+	"sed":         "edits a stream",
+	"awk":         "processes text",
+	"tr":          "translates characters",
+	"cut":         "selects fields",
+	"sort":        "orders lines",
+	"uniq":        "collapses repeated lines",
+	"wc":          "counts",
+	"date":        "prints a time",
+	"sleep":       "waits",
+	"true":        "succeeds",
+	"false":       "fails",
+	"test":        "evaluates a condition",
+	"basename":    "reads a path",
+	"dirname":     "reads a path",
+	"realpath":    "resolves a path",
+	"readlink":    "reads a symlink",
+	"pwd":         "prints the working directory",
+	"ls":          "lists local files",
+	"find":        "walks the local filesystem",
+	"stat":        "reads file metadata",
+	"file":        "identifies a file",
+	"du":          "measures local disk use",
+	"df":          "measures local disk use",
+	"mkdir":       "creates a local directory",
+	"mktemp":      "creates a local temporary file or directory",
+	"touch":       "creates or timestamps a local file",
+	"cp":          "copies local files",
+	"mv":          "moves local files",
+	"rm":          "removes local files",
+	"ln":          "links local files",
+	"chmod":       "changes local permissions",
+	"chown":       "changes local ownership",
+	"install":     "copies local files with a mode",
+	"tar":         "packs or unpacks a local archive",
+	"gzip":        "compresses locally",
+	"gunzip":      "decompresses locally",
+	"zip":         "packs a local archive",
+	"unzip":       "unpacks a local archive",
+	"xz":          "compresses locally",
+	"zstd":        "compresses locally",
+	"sha256sum":   "hashes local files",
+	"sha512sum":   "hashes local files",
+	"md5sum":      "hashes local files",
+	"shasum":      "hashes local files",
+	"openssl":     "local cryptography; it reaches nothing on its own here",
+	"jq":          "reads JSON",
+	"yq":          "reads YAML",
+	"uname":       "prints host information",
+	"id":          "prints the current user",
+	"whoami":      "prints the current user",
+	"hostname":    "prints the host name",
+	"which":       "looks a program up on PATH",
+	"command":     "runs another program; the act belongs to that program",
+	"timeout":     "runs another program under a clock; the act belongs to that program",
+	"nice":        "runs another program at a priority; the act belongs to that program",
+	"nohup":       "runs another program detached; the act belongs to that program",
+	"stdbuf":      "runs another program with different buffering; the act belongs to that program",
+	"seq":         "prints a sequence",
+	"tput":        "reads terminal capabilities",
+	"getconf":     "reads system configuration",
+	"ldd":         "reads a binary's dynamic dependencies",
+	"strip":       "edits a local binary",
+	"diff":        "compares local files",
+	"cmp":         "compares local files",
+	"xxd":         "dumps bytes",
+	"od":          "dumps bytes",
+	"base64":      "encodes bytes",
+	"apt-get":     "installs system packages onto this machine; it publishes nothing",
+	"dpkg":        "installs system packages onto this machine; it publishes nothing",
+	"staticcheck": "lints source",
+	"govulncheck": "reads a vulnerability database; it writes nothing outward",
+}
+
 // clientsCheckedAndNotInventoried is the honest edge of the edge. A general-purpose HTTP
 // client or cloud CLI can upload something, but its argv names an API rather than a
 // destination this gate can model, so deciding every invocation of one would mean modelling
@@ -663,6 +789,60 @@ func (c Command) Act() (ActKind, string, error) {
 	return r.kind, r.what, nil
 }
 
+// classifyObserved decides ONE invocation the observation environment recorded (observe.go).
+//
+// This is the deny-by-default edge the conductor's ruling turns on: the argv here is the argv
+// bash built, after quote removal, after expansion, after `eval`, from inside whatever
+// pipeline, subshell, loop or nested shell produced it - so there is no spelling left to get
+// past a reader. What remains is the question the six fail-opens were each an instance of:
+// what does the gate do with an invocation it has not been taught? It FAILS, naming the step
+// and the program. Not silence, and not a guess.
+func classifyObserved(argv []string) (ActKind, string, error) {
+	c := Command{Words: argv}
+	prog, args, ok := c.invocation()
+	if !ok {
+		return "", "", nil // only assignments and keywords; nothing was invoked
+	}
+	if why, isBuiltin := shellBuiltins[prog]; isBuiltin {
+		// A builtin never reaches an external program, so it can perform no published act.
+		// It cannot arrive here from the recorder at all - a builtin is run by the shell
+		// itself - and only the lexical fallback for an unparseable script produces one.
+		return "", why, nil
+	}
+	if strings.HasPrefix(prog, "-") {
+		// A word beginning with a dash is not a program name. It reaches the recorder when a
+		// command really does end before it - an escaped backslash leaves a bare `--push` on
+		// the line below - and the runner's own shell would exit 127 on it, so it performs
+		// no act. Saying so is not silence: the invocation was seen, and named.
+		return "", "not a program name (`" + prog + "`); the runner's shell would refuse this command", nil
+	}
+	if _, decided := registryTools[prog]; decided {
+		return c.Act()
+	}
+	if why, decided := programsCheckedAndLocal[prog]; decided {
+		return "", why, nil
+	}
+	if why, decided := clientsCheckedAndNotInventoried[prog]; decided {
+		return "", why, nil
+	}
+	if isRepositoryProgram(args[0]) {
+		// A shell script in the repository is DESCENDED into by the observation
+		// environment, so its own invocations arrive here on their own. One that is not a
+		// shell script is recorded and named, which is what this branch reports.
+		return "", "a program in this repository, whose own invocations are observed in turn", nil
+	}
+	return "", "", fmt.Errorf("invokes `%s`, and this gate does not classify that program.\nThe release path was OBSERVED to run `%s`. Every program an observed step invokes has to be classified in scripts/release-shape-gate/command.go: registryTools (whose every invocation is then decided), clientsCheckedAndNotInventoried, or programsCheckedAndLocal - each entry carrying the reason a human checked it. A program in NONE of them is undecided, which is not the same as harmless: reading an unknown invocation as a no is how `docker image push`, `--output=type=registry`, `sh -c \"docker push …\"` and `-otype=registry` each shipped a dry run that publishes. Classify it, with the reason",
+		prog, c.String())
+}
+
+// isRepositoryProgram reports whether a program word names a file in the repository rather
+// than a program on PATH. The observation environment resolves exactly these against its
+// recording mirror of the repository, so they arrive here spelled as they were written.
+func isRepositoryProgram(word string) bool {
+	return strings.HasPrefix(word, "./") || strings.HasPrefix(word, "../") ||
+		(strings.Contains(word, "/") && !strings.HasPrefix(word, "/"))
+}
+
 // leadingWords is the subcommand path a rule matches against: the program, then the run of
 // words before the first flag. `docker image push ghcr.io/o/r:dev` selects on
 // `docker image push`; `docker buildx build --platform …` selects on `docker buildx build`.
@@ -709,59 +889,163 @@ func hasWordPrefix(words, prefix []string) bool {
 //     published act.
 //   - an `--output` whose exporter this gate does not model, whose `type=` is missing, or
 //     which cannot be read as attributes: an ERROR that names the specification.
+//
+// It reads the flags the way the flag PARSER does rather than the way they are usually
+// written, which is the difference F12 turned on. `-o` is a pflag shorthand, and pflag takes
+// an ATTACHED value, so `-otype=registry,name=…` is `--output=type=registry,name=…` and
+// really publishes - measured against a real buildx. A switch over the spellings `-o`, `-o=`,
+// `--output` and `--output=` decided that one "local", which is the destination model losing
+// to a flag spelling exactly as the command catalogue before it lost to a command spelling.
+// So the flags are TOKENISED, once, and a short cluster this gate cannot tokenise is an
+// error rather than a word it skips.
+//
+// And the two ways of having no publish are now separate values, because only one of them can
+// be wrong in the fail-open direction: `found` says a destination was READ, and its absence
+// is what `bake` refuses to call local.
 func decideBuildDestination(c Command, args []string) (ActKind, string, error) {
-	for i := 1; i < len(args); i++ {
-		w := args[i]
-		var spec string
-		switch {
-		case w == "--push":
-			return ActImagePush, "`--push`, which buildx documents as shorthand for `--output=type=registry`", nil
-		case strings.HasPrefix(w, "--push="):
-			switch v := strings.ToLower(strings.TrimPrefix(w, "--push=")); v {
-			case "true":
-				return ActImagePush, "`" + w + "`, which buildx documents as shorthand for `--output=type=registry`", nil
+	kind, detail, _, err := readBuildDestination(c, args)
+	return kind, detail, err
+}
+
+func readBuildDestination(c Command, args []string) (kind ActKind, detail string, found bool, err error) {
+	flags, ferr := tokeniseBuildFlags(args[1:])
+	if ferr != nil {
+		return "", "", false, fmt.Errorf("runs `%s`, and %w. Where the build is written is therefore unknown, and this gate will not read an unreadable command line as a local build", c.String(), ferr)
+	}
+	for _, f := range flags {
+		switch f.name {
+		case "push":
+			found = true
+			switch v := strings.ToLower(f.value); v {
+			case "", "true":
+				return ActImagePush, "`--push`, which buildx documents as shorthand for `--output=type=registry`", true, nil
 			case "false":
 				continue
 			default:
-				return "", "", fmt.Errorf("runs `%s`, whose `%s` is not a boolean, so whether the build reaches a registry is unknown", c.String(), w)
+				return "", "", true, fmt.Errorf("runs `%s`, whose `--push=%s` is not a boolean, so whether the build reaches a registry is unknown", c.String(), f.value)
 			}
-		case w == "--load" || w == "--load=true" || w == "--load=false":
-			continue // `--load` IS `--output=type=docker`: a local load
-		case w == "--output" || w == "-o":
-			if i+1 >= len(args) {
-				return "", "", fmt.Errorf("runs `%s`, whose `%s` names no destination, so where the build is written is unknown", c.String(), w)
+		case "load":
+			found = true // `--load` IS `--output=type=docker`: a local load, read and decided
+		case "output":
+			found = true
+			if f.value == "" {
+				return "", "", true, fmt.Errorf("runs `%s`, whose `%s` names no destination, so where the build is written is unknown", c.String(), f.spelling)
 			}
-			spec = args[i+1]
-			i++
-		case strings.HasPrefix(w, "--output="):
-			spec = strings.TrimPrefix(w, "--output=")
-		case strings.HasPrefix(w, "-o="):
-			spec = strings.TrimPrefix(w, "-o=")
-		case w == "--set" || strings.HasPrefix(w, "--set="):
-			return "", "", fmt.Errorf("runs `%s`, and `--set` can rewrite a target's own output destination. Where this build is written is therefore decided somewhere this gate does not read, so it will not report that the build publishes nothing", c.String())
-		default:
-			continue
-		}
-		publishes, detail, err := decideBuildxOutputs("--output", spec)
-		if err != nil {
-			return "", "", fmt.Errorf("runs `%s`: %w", c.String(), err)
-		}
-		if publishes {
-			return ActImagePush, detail, nil
+			publishes, why, derr := decideBuildxOutputs("--output", f.value)
+			if derr != nil {
+				return "", "", true, fmt.Errorf("runs `%s`: %w", c.String(), derr)
+			}
+			if publishes {
+				return ActImagePush, why, true, nil
+			}
+		case "set":
+			return "", "", true, fmt.Errorf("runs `%s`, and `--set` can rewrite a target's own output destination. Where this build is written is therefore decided somewhere this gate does not read, so it will not report that the build publishes nothing", c.String())
 		}
 	}
-	return "", "", nil
+	return "", "", found, nil
 }
 
-// decideBakeDestination is decideBuildDestination's fail-closed cousin. A bake target names
-// its own output in the bake FILE, which this gate does not read, so a bake with no
-// destination flag on the command line is undecided rather than local.
+// decideBakeDestination is decideBuildDestination's fail-closed cousin, and it is where the
+// distinction `found` carries earns its keep. A bake target names its own output in the bake
+// FILE, which this gate does not read, so "I read a destination and it is local" is a verdict
+// and "I read no destination at all" is not.
 func decideBakeDestination(c Command, args []string) (ActKind, string, error) {
-	kind, detail, err := decideBuildDestination(c, args)
+	kind, detail, found, err := readBuildDestination(c, args)
 	if err != nil || kind != "" {
 		return kind, detail, err
 	}
+	if found {
+		return "", detail, nil
+	}
 	return "", "", fmt.Errorf("runs `%s`, and a bake target's output destination lives in the bake definition, which this gate does not read. A bake with no destination on the command line is therefore undecided, not local - `docker buildx bake --push` is the spelling this gate can decide", c.String())
+}
+
+// buildFlag is one flag as the parser sees it, whatever it was written as.
+type buildFlag struct {
+	name     string // the long name, so `-o`, `-otype=…`, `--output x` and `--output=x` are one thing
+	value    string
+	spelling string // what was actually written, for the message
+}
+
+// shortBuildFlags maps a build command's shorthands onto their long names, and says whether
+// each takes a value. A cluster containing a shorthand that is not here cannot be tokenised -
+// whether the characters after it are more flags or a value is unknowable - so it is an
+// ERROR. That is the point: the previous code skipped what it did not recognise, and skipping
+// is how `-otype=registry` became a local build.
+var shortBuildFlags = map[byte]struct {
+	long      string
+	takesArgs bool
+}{
+	'o': {"output", true},
+	'f': {"file", true},
+	't': {"tag", true},
+	'm': {"memory", true},
+	'c': {"cpu-shares", true},
+	'q': {"quiet", false},
+}
+
+// longBuildFlagsWithValue are the long flags whose value is the NEXT word when it is not
+// attached with `=`. Anything not here is treated as a boolean, which is safe: the only way
+// that is wrong is a value being read as a flag, and a flag this gate does not model is
+// skipped rather than believed.
+var longBuildFlagsWithValue = map[string]bool{
+	"output": true, "file": true, "tag": true, "platform": true, "build-arg": true,
+	"cache-from": true, "cache-to": true, "target": true, "secret": true, "ssh": true,
+	"label": true, "annotation": true, "attest": true, "provenance": true, "sbom": true,
+	"metadata-file": true, "iidfile": true, "network": true, "add-host": true,
+	"allow": true, "builder": true, "progress": true, "set": true, "memory": true,
+	"cpu-shares": true, "shm-size": true, "ulimit": true, "no-cache-filter": true,
+	"call": true, "check": true,
+}
+
+func tokeniseBuildFlags(words []string) ([]buildFlag, error) {
+	var out []buildFlag
+	for i := 0; i < len(words); i++ {
+		w := words[i]
+		switch {
+		case w == "--":
+			return out, nil
+		case strings.HasPrefix(w, "--"):
+			name, value, attached := strings.Cut(strings.TrimPrefix(w, "--"), "=")
+			f := buildFlag{name: name, value: value, spelling: w}
+			if !attached && longBuildFlagsWithValue[name] {
+				if i+1 >= len(words) {
+					out = append(out, f)
+					return out, nil
+				}
+				f.value = words[i+1]
+				i++
+			}
+			out = append(out, f)
+		case len(w) > 1 && w[0] == '-':
+			cluster := w[1:]
+			for j := 0; j < len(cluster); j++ {
+				sh, known := shortBuildFlags[cluster[j]]
+				if !known {
+					return nil, fmt.Errorf("this gate cannot tokenise the short flag `-%c` in `%s`; whether the characters after it are more flags or its value is unknown", cluster[j], w)
+				}
+				if !sh.takesArgs {
+					out = append(out, buildFlag{name: sh.long, spelling: "-" + string(cluster[j])})
+					continue
+				}
+				rest := cluster[j+1:]
+				f := buildFlag{name: sh.long, spelling: w}
+				switch {
+				case rest != "":
+					// pflag takes an ATTACHED value: `-otype=registry` IS
+					// `--output=type=registry`, and `-o=type=registry` is the same with
+					// the separator written out.
+					f.value = strings.TrimPrefix(rest, "=")
+				case i+1 < len(words):
+					f.value = words[i+1]
+					i++
+				}
+				out = append(out, f)
+				j = len(cluster) // the value consumed the rest of the cluster
+			}
+		}
+	}
+	return out, nil
 }
 
 // decideGhAPI. `gh api` can perform any REST call the token allows, so the subcommand says

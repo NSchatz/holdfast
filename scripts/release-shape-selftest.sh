@@ -26,7 +26,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=62
+declared=71
 pass=0; failed=0
 
 repo="$work/repo"
@@ -35,12 +35,20 @@ gate="$work/release-shape-gate"
 
 # The inputs the gate reads. Copied from the WORKING TREE, so an uncommitted change - a fix
 # or a break - is graded as it stands, which is where the mistake gets made.
+#
+# The three scripts the release path INVOKES are here because the gate now observes each step
+# rather than reading it: it mirrors the repository, answers every invocation of a file in it
+# with a recorder, and descends into a shell script so a step cannot reach a registry by
+# putting the command one file away. A fixture missing one of them would be a fixture whose
+# steps invoke a program that is not there, which the gate refuses rather than passes.
 inputs=(
   .github/workflows/release.yml
   docker-compose.yml
   docs/release.md
   go.mod
   scripts/resolve-compose-image.sh
+  scripts/smoke-image.sh
+  scripts/install-ffmpeg.sh
 )
 
 ( cd "$here" && go build -o "$gate" ./scripts/release-shape-gate ) \
@@ -585,6 +593,98 @@ insert_before "- name: build the release binaries"
 changed "$wf" "a dispatch pushing through a wrapper command"
 expect 1 "a push behind a wrapper command is still caught on a dispatch" \
   "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
+reset
+
+# --- 3ac..3ai. THE OBSERVED GRADE ROUTE. Reading a `run:` step lost six times in one
+#         direction, so A6, A7 and A12 are no longer decided by reading it: each step is RUN
+#         in an environment where nothing external executes and every invocation is recorded
+#         with the argv bash built. These cases are the spellings that beat the reader, and
+#         the ones the environment itself has to refuse rather than pass.
+
+# --- 3ac. F11. A push inside a QUOTED WORD handed to a nested shell. To any lexer this is
+#          the single argv element `docker push …` belonging to `sh`; to the shell it is a
+#          push, and the observation follows the nested shell into it.
+dev_run_step 'sh -c "docker push ghcr.io/nschatz/holdfast:dev"'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch pushing from inside a quoted sh -c"
+expect 1 "a push inside a quoted sh -c is caught on a dispatch" \
+  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
+reset
+
+# --- 3ad. F11b. The same through `eval`, where stepping over the wrapper left the quoted
+#          string as the program name.
+dev_run_step 'eval "docker push ghcr.io/nschatz/holdfast:dev"'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch pushing from inside an evaled string"
+expect 1 "a push inside an evaled string is caught on a dispatch" \
+  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
+reset
+
+# --- 3ae. F12. buildx's `-o` is a pflag shorthand and pflag takes an ATTACHED value, so
+#          `-otype=registry` IS `--output=type=registry` and really publishes - measured
+#          against a real buildx. A switch over flag spellings decided it "local".
+dev_run_step 'docker buildx build --platform linux/amd64 -otype=registry,name=ghcr.io/nschatz/holdfast:dev .'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch pushing through buildx's attached short flag"
+expect 1 "a push through the attached shorthand -otype=registry is caught" \
+  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
+reset
+
+# --- 3af. THE OTHER DIRECTION for 3ae, and the one that keeps this a reading of the flag
+#          rather than a refusal of it: the same attached shorthand naming a LOCAL exporter
+#          must still pass.
+dev_run_step 'docker buildx build --platform linux/amd64 -otype=docker,dest=/tmp/img.tar .'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch whose attached short flag names a local exporter"
+expect 0 "an attached -otype=docker,dest= is decided as local, not refused as a publish"
+reset
+
+# --- 3ag. DENY BY DEFAULT. Every program an observed step invokes has to be classified. One
+#          that is not FAILS naming it, which is what turns the next unseen spelling into a
+#          loud stop instead of the seventh fail-open.
+dev_run_step 'rclone copy dist ghcr:holdfast'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch invoking a program the gate has never been taught"
+expect 1 "a program in none of the gate's lists reds by name rather than reading as harmless" \
+  "does not classify that program"
+reset
+
+# --- 3ah. A COMMAND THE ENVIRONMENT CANNOT WATCH. An absolute path is resolved by bash
+#          itself, so a program at one this gate has not shimmed would run for real and be
+#          recorded nowhere. It is refused before it runs.
+dev_run_step '/opt/vendor/bin/docker push ghcr.io/nschatz/holdfast:dev'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch invoking a program by an unshimmed absolute path"
+expect 1 "an invocation this environment could not watch is refused, not passed" \
+  "could NOT OBSERVE"
+reset
+
+# --- 3ai. THE PATH BEHIND A FAILURE. A publish reached only when an earlier command fails is
+#          never on the all-succeed path, so the environment re-runs the step making each of
+#          its commands fail in turn. One run down the happy path reports this as clean.
+dev_run_step 'if ! docker manifest inspect ghcr.io/nschatz/holdfast:dev; then' \
+             '  docker push ghcr.io/nschatz/holdfast:dev' \
+             'fi'
+insert_before "- name: build the release binaries"
+changed "$wf" "a dispatch that pushes only when an inspect fails"
+expect 1 "a push reachable only when an earlier command fails is still caught" \
+  "on a manual dispatch.*publish a dev image.*WOULD RUN.*published act"
+reset
+
+# --- 3aj. F13, in the ordering half. A step that PRINTS the gate's name and runs nothing
+#          satisfied the full-gate role once quoting was resolved, so A7 read the promotion
+#          as gated. A role is now what the step was observed to invoke.
+in_step "the full gate (make check)" 's|run: make check|run: echo "make check"|'
+changed "$wf" "a full gate reduced to an echo of its own name"
+expect 1 "a step that only prints the gate's name does not satisfy the full-gate role" \
+  "the full gate .make check. does not run before"
+reset
+
+# --- 3ak. THE OTHER DIRECTION for 3aj: the real gate, and a spelling of it that is still the
+#          gate, must both still read as one.
+in_step "the full gate (make check)" 's|run: make check|run: make -C . check|'
+changed "$wf" "the full gate spelled with a directory flag"
+expect 0 "a make invocation that really runs the check target still reads as the full gate"
 reset
 
 # =====================================================================================

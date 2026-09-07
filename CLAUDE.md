@@ -190,32 +190,46 @@ as "NONE of them publishes anything". Both inputs are decided, the step publishe
 `outputs:` spelling (`type=docker`, which is what `load: true` means) must still PASS, and an exporter this
 gate does not model reds naming itself rather than falling into the local bucket (cases 3e-3k). The same
 absent-key inference is closed one property along: the references a push publishes are read from BOTH
-`tags:` and an `outputs:` entry's `name=`. The other half of the catalogue, the `run:` commands, is built
-the same way and was not: it knew a list of command SPELLINGS and no destination at all, so
-`docker image push` (the management-command form of `docker push`) and
-`docker buildx build --output=type=registry` (the thing `push:` is documented shorthand FOR) each performed
-no act, on one physical line, with nothing exotic about them. It now takes the same two pieces the
-`uses:` half takes. ONE reader (`command.go`) parses a `run:` block as the shell parses it - continuations
-joined, quoting resolved, comments dropped, `$(…)` read as a script of its own - and yields the commands the
-runner would execute; it is graded against `bash` itself, by running the same text with a recording stub on
-PATH and comparing the words. There used to be TWO readers, a comment stripper and a continuation joiner,
-and having two was the defect: quote state reset at exactly the boundary the join erased, so a `#` inside a
-quoted argument on a continuation line ate the rest of the logical line and the `--push` below it. Then each
-command's act is decided from WHERE IT SENDS WHAT IT BUILT - `--push`, `--load` and `--output=<spec>` go
-through the SAME function that decides an action's `outputs:` input, so a local exporter stays local and an
-unmodelled one reds. And the catalogue has an EDGE on both halves, stated out loud: every `uses:` must sit
-in `usesDetectors` or in `classifiedLocalActions`, and every command invoking a tool that can reach a
-registry, a remote or a package index (`registryTools`, which is the same list `shell.go` stubs) must land
-on a rule in `commandRules` - each entry carrying the reason a human checked. Anything in neither reds by
-name instead of contributing silence, which is why `crane copy` reds without appearing anywhere in the gate.
-**The rule when you extend this**: an act is a property of a
-step's DEFINITION, so model the DESTINATION rather than the spelling and give the model an edge - a set of
-one is how this shipped a hole twice, and a catalogue of spellings is how it shipped one twice more. Read
-the input once, never let a value the gate cannot decide read as a no, and make the case nobody thought of
-red rather than silent, because the spelling after this one is always the one nobody wrote a pattern for.
-It also runs the
-promotion step under a
-stubbed `docker` and reads the reference it ACTUALLY moved out of the argv, which is the only honest way to
+`tags:` and an `outputs:` entry's `name=`. **The other half - a step's `run:` script - is not READ at all
+any more; it is OBSERVED**, and that change is the whole point of the design. Reading it lost six times in
+one direction: a publishing input the act decision could not see, detectors that could not cross a line
+continuation, a catalogue that knew command SPELLINGS and no destination, a push inside a quoted word
+(`sh -c "docker push …"`, `eval "docker push …"`), buildx's attached shorthand `-otype=registry` decided
+"local" (`-o` is a pflag shorthand and pflag takes an ATTACHED value, so that IS `--output=type=registry`,
+measured against a real buildx), and quote removal that made `echo "make check"` satisfy the full-gate role.
+Six holes, four mechanisms, one sentence: a spelling the reader had not been taught contributed SILENCE, and
+silence read as "this publishes nothing". Each fix made the reader cleverer and ordinary shell beat the next
+one. So `observe.go` RUNS each step the plan says runs, in an environment where **nothing external
+executes**: `PATH` is one empty directory, so every command the shell resolves through it lands in
+`command_not_found_handle`, which records the full argv **bash built** - after quote removal, after
+expansion, after `eval`, from inside a pipeline, a subshell, a loop or a command substitution - and performs
+nothing. The repository is MIRRORED as directories plus a recording shim per executable file, and that
+mirror is the working directory, so `./scripts/smoke-image.sh` is recorded with its arguments and a shell
+script it ships is descended into: a command cannot hide one file away. Every tool the gate classifies is
+shimmed at its absolute path too, and a command word beginning with `/` that has no shim is REFUSED by a
+DEBUG trap before it runs. Two departures from the runner, both in the direction that cannot hide an act:
+`set -e`/`set -u` are stripped (the commands that would have created a file were recorded rather than run,
+so stopping at the first failure would leave the rest unobserved), and each of the step's own commands is
+made to FAIL in turn across re-runs, because `if ! docker manifest inspect X; then docker push X; fi`
+publishes on exactly one path and the all-succeed run never takes it. Then each recorded invocation is
+classified, and a build's act is decided from WHERE IT SENDS WHAT IT BUILT - `--push`, `--load` and
+`--output=<spec>` go through the SAME function that decides an action's `outputs:` input, with the flags
+TOKENISED rather than matched, so a local exporter stays local and an unmodelled one reds. **A ROLE is what
+a step was observed to INVOKE**, never what its text mentions: a step runs the full gate because `make` was
+called with the `check` target, not because a string says so. And the catalogue has an EDGE on every half,
+stated out loud: every `uses:` must sit in `usesDetectors` or in `classifiedLocalActions`; every command
+invoking a tool that can reach a registry, a remote or a package index (`registryTools`, the same list
+`shell.go` stubs) must land on a rule in `commandRules`; and **every program an observed step invokes at
+all** must sit in `registryTools`, `clientsCheckedAndNotInventoried` or `programsCheckedAndLocal` - each
+entry carrying the reason a human checked. Anything in none of them reds by name instead of contributing
+silence, which is why `crane copy` reds without appearing anywhere in the gate.
+**The rule when you extend this**: do NOT teach the reader a new spelling - there is no reader. Ask what the
+step INVOKED and read it out of the recorded argv; classify an unclassified program with the reason;
+respell a step the environment says it could not watch. The one thing this must never gain is a rule that
+reads a step's text and concludes it is harmless. The residue, stated so nobody has to find it: a command
+word that expands from a VARIABLE to an absolute path outside the shimmed set is the one invocation this
+environment does not reach. The gate also observes the
+promotion step and reads the reference it ACTUALLY moved out of the argv, which is the only honest way to
 compare `docker-compose.yml` against a reference the workflow derives at run time from `github.repository`.
 That compose reference has exactly ONE reader: `scripts/resolve-compose-image.sh` asks the gate for it
 (`-print-compose-ref`) instead of parsing the file a second time in sed, because two readers agree on today's
