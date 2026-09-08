@@ -570,7 +570,9 @@ func TestRendered_EveryDataViewShowsLoadingEmptyAndUnreadableStatesDistinctly(t 
 			}
 			words[name][c.state] = got.Text
 		}
-		// The budget holds in every one of these renders.
+		// The budget holds in every one of these renders. The reading is logged whether or
+		// not it holds: this criterion is the one that measures the page in the states
+		// nobody looks at, and the numbers are the evidence the item is graded on.
 		for _, p := range readings {
 			for _, f := range gradeTotalBudget(p) {
 				t.Errorf("%s: %s", c.name, f)
@@ -578,6 +580,7 @@ func TestRendered_EveryDataViewShowsLoadingEmptyAndUnreadableStatesDistinctly(t 
 			for _, f := range gradeBlockCeiling(p) {
 				t.Errorf("%s: %s", c.name, f)
 			}
+			t.Logf("%s:\n%s", c.name, p)
 		}
 	}
 	for _, name := range dataViews {
