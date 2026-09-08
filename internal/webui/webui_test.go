@@ -705,7 +705,7 @@ func TestNoNewDependency_TheDashboardShipsNothingButItsOwnSource(t *testing.T) {
 			// An installed tree or a run's output under the graders' project is skipped
 			// whole: nothing inside somebody else's package, and nothing the runner wrote
 			// and git never took, is this repository's to account for.
-			if inE2E(p) && e2eIgnored[name] {
+			if inE2E(p) && e2eIgnored(name) {
 				return filepath.SkipDir
 			}
 			if what, bad := bannedDir[name]; bad && p != "." {
@@ -713,7 +713,7 @@ func TestNoNewDependency_TheDashboardShipsNothingButItsOwnSource(t *testing.T) {
 			}
 			return nil
 		}
-		if inE2E(p) && e2eIgnored[name] {
+		if inE2E(p) && e2eIgnored(name) {
 			return nil
 		}
 		seen++
@@ -808,34 +808,51 @@ func TestNoNewDependency_TheDashboardShipsNothingButItsOwnSource(t *testing.T) {
 	}
 }
 
-// readE2EIgnores is the graders' project's own .gitignore, as a set of names. Every entry
-// there is a bare name or a name with a trailing slash, which is all this needs to
-// understand; a pattern it cannot read is reported rather than silently widening the
-// exemption, because an exemption nobody can see is how a sweep stops sweeping.
-func readE2EIgnores(t *testing.T) map[string]bool {
+// readE2EIgnores is the graders' project's own .gitignore, as a predicate over names.
+// Every entry there is a bare name, a name with a trailing slash, or a name with a
+// trailing `*` - which is all this needs to understand. A pattern it cannot read is
+// REPORTED rather than silently widening the exemption, because an exemption nobody can
+// see is how a sweep stops sweeping.
+func readE2EIgnores(t *testing.T) func(string) bool {
 	t.Helper()
 	body, err := os.ReadFile(filepath.Join("e2e", ".gitignore"))
 	if err != nil {
 		t.Fatalf("reading the graders' project's .gitignore: %v", err)
 	}
-	out := map[string]bool{}
+	var names, prefixes []string
 	for _, line := range strings.Split(string(body), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		name := strings.TrimSuffix(line, "/")
-		if strings.ContainsAny(name, "/*?[!") {
-			t.Errorf("e2e/.gitignore carries the pattern %q, which this sweep reads as a bare name; "+
-				"keep the ignore file to plain names so the two cannot disagree about what is untracked output", line)
+		if prefix, ok := strings.CutSuffix(name, "*"); ok && !strings.ContainsAny(prefix, "/*?[!") && prefix != "" {
+			prefixes = append(prefixes, prefix)
 			continue
 		}
-		out[name] = true
+		if strings.ContainsAny(name, "/*?[!") {
+			t.Errorf("e2e/.gitignore carries the pattern %q, which this sweep reads as a plain name or a "+
+				"trailing-* prefix; keep the ignore file to those so the two cannot disagree about what is "+
+				"untracked output", line)
+			continue
+		}
+		names = append(names, name)
 	}
-	if !out["node_modules"] {
+	ignored := func(name string) bool {
+		if slices.Contains(names, name) {
+			return true
+		}
+		for _, p := range prefixes {
+			if strings.HasPrefix(name, p) {
+				return true
+			}
+		}
+		return false
+	}
+	if !ignored("node_modules") {
 		t.Fatal("e2e/.gitignore no longer ignores node_modules; the sweep would then account for somebody else's package tree")
 	}
-	return out
+	return ignored
 }
 
 // ownImport applies the Go convention: an import path whose first element carries a dot

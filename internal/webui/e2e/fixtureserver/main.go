@@ -31,7 +31,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/sourceoffer"
@@ -131,9 +130,12 @@ type fixtureServer struct {
 	mu          sync.Mutex
 	severedSeen map[string]int
 
-	// control lets a spec drive a REFUSED control action: the page's own click must
-	// produce the refusal, never a stub reaching inside the page.
-	controlStatus atomic.Int64
+	// controlStatus lets a spec drive a REFUSED control action: the page's own click must
+	// produce the refusal, never a stub reaching inside the page. It is keyed by the SAME
+	// client id the severed stream is, because the runner's specs share one server: a
+	// global switch here means one spec disarming the refusal another spec is still
+	// waiting on, and a case that fails or passes on which one got there first.
+	controlStatus map[string]int
 }
 
 func (s *fixtureServer) routes() http.Handler {
@@ -165,9 +167,9 @@ func (s *fixtureServer) routes() http.Handler {
 
 	// The mutating controls, so a spec can produce a refusal by a real click.
 	for _, ep := range []string{"/api/rescan", "/api/pause", "/api/resume"} {
-		mux.HandleFunc(ep, func(w http.ResponseWriter, _ *http.Request) {
+		mux.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			if code := int(s.controlStatus.Load()); code != 0 {
+			if code := s.controlStatusFor(clientOf(r)); code != 0 {
 				w.WriteHeader(code)
 				_, _ = w.Write([]byte(`{"reason":"the control token was refused"}`))
 				return
@@ -175,16 +177,46 @@ func (s *fixtureServer) routes() http.Handler {
 			_, _ = w.Write([]byte(`{"started":true}`))
 		})
 	}
-	// The one endpoint that is the TEST's, not the page's: it arms the refusal above.
+	// The one endpoint that is the TEST's, not the page's: it arms the refusal above, for
+	// the client that asked and no other.
 	mux.HandleFunc("/e2e/control-status", func(w http.ResponseWriter, r *http.Request) {
-		var code int64
+		var code int
 		_, _ = fmt.Sscanf(r.URL.Query().Get("code"), "%d", &code)
-		s.controlStatus.Store(code)
+		s.armControlStatus(clientOf(r), code)
 		w.WriteHeader(http.StatusNoContent)
 	})
 
 	mux.HandleFunc("/api/events", s.events)
 	return mux
+}
+
+// clientOf is the one page load a request belongs to. A request carrying no client cookie
+// is its own anonymous client rather than everybody's, so a stray call can never arm or
+// disarm a refusal a spec is relying on.
+func clientOf(r *http.Request) string {
+	if c, err := r.Cookie(clientCookie); err == nil && c.Value != "" {
+		return c.Value
+	}
+	return "anonymous"
+}
+
+func (s *fixtureServer) armControlStatus(client string, code int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.controlStatus == nil {
+		s.controlStatus = map[string]int{}
+	}
+	if code == 0 {
+		delete(s.controlStatus, client)
+		return
+	}
+	s.controlStatus[client] = code
+}
+
+func (s *fixtureServer) controlStatusFor(client string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.controlStatus[client]
 }
 
 func (s *fixtureServer) events(w http.ResponseWriter, r *http.Request) {

@@ -528,6 +528,11 @@ func runProbe(bin string, ps *probeServer, deadline time.Duration, profile strin
 	cmd.Stdout, cmd.Stderr = &log, &log
 	// A profile-local HOME and no session bus to look for: the runner has neither.
 	cmd.Env = append(os.Environ(), "HOME="+profile, "DBUS_SESSION_BUS_ADDRESS=disabled:")
+	// And a working directory inside the throwaway profile. A browser that dies writes its
+	// core dump into its own working directory, and the default is this package's, where it
+	// then sits as a file `make check` reports as something internal/webui must not ship -
+	// on every later run, long after the run that crashed has been forgotten.
+	cmd.Dir = profile
 	if err := cmd.Start(); err != nil {
 		return nil, "", fmt.Errorf("starting %s: %w", bin, err)
 	}
