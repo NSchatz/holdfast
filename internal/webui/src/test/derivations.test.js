@@ -176,14 +176,22 @@ test("vmafFigures carries both pooled statistics and the viewing condition", () 
 
 test("progressFigure exists for a running encode and for no other state", () => {
   const running = { status: "encoding", progress_fraction: 0.421, progress_seconds: 1200, progress_duration_seconds: 3600 };
-  assert.deepEqual(shape(d.progressFigure(running)), { unknown: false, percent: "42%", of: "20m 0s of 1h 0m" });
+  // `fraction` is the clamped measurement the percentage is rounded from. It is carried
+  // on the figure so the bar the cell draws and the percentage beside it are two
+  // readings of ONE number: a drawing computing its own would be a second answer.
+  assert.deepEqual(shape(d.progressFigure(running)),
+    { unknown: false, fraction: 0.421, percent: "42%", of: "20m 0s of 1h 0m" });
+  // Clamping is what the DRAWING depends on: a fraction outside 0..1 would put a mark
+  // outside its own track.
+  assert.equal(d.progressFigure({ ...running, progress_fraction: 3 }).fraction, 1);
+  assert.equal(d.progressFigure({ ...running, progress_fraction: -1 }).fraction, 0);
   // A position past the end is clamped to the duration, never rendered beyond it.
   assert.equal(d.progressFigure({ ...running, progress_seconds: 99_999 }).of, "1h 0m of 1h 0m");
   assert.equal(d.progressFigure({ ...running, progress_fraction: 3 }).percent, "100%");
   assert.equal(d.progressFigure({ ...running, progress_fraction: -1 }).percent, "0%");
   // No duration means no "x of y" line, but the fraction the encoder reported still shows.
   assert.deepEqual(shape(d.progressFigure({ status: "encoding", progress_fraction: 0.5 })),
-    { unknown: false, percent: "50%" });
+    { unknown: false, fraction: 0.5, percent: "50%" });
   // Every other state has no progress to have.
   for (const status of ["pending", "probing", "verifying", "done", "skipped", "failed"]) {
     assert.equal(d.progressFigure({ ...running, status }), null, status + " must carry no progress figure");

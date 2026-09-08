@@ -134,10 +134,18 @@ jobs:
   # turns a missing runtime into a failure, and scripts/webui-check.sh fails the run if
   # anything skipped or if either half did not execute at all.
   #
-  # It is a separate job because it needs two runtimes the gate does not: node (for the
-  # derivation units, in node's BUILT-IN test runner - no registry package, no lockfile)
-  # and a browser engine (for the rendered graders, which decide what the page SHOWS by
+  # It is a separate job because it needs runtimes the gate does not: node (for the
+  # derivation units, in node's BUILT-IN test runner, and for the Playwright graders' own
+  # runner) and a browser engine (for every grader that decides what the page SHOWS by
   # loading the served document rather than by matching its source text).
+  #
+  # The Playwright project is installed with `npm ci` from the committed lockfile, so what
+  # CI runs is the runner version this repository pinned. It is TEST tooling and reaches
+  # nothing a user runs: the generator is still Go and stdlib, `make build` is still a
+  # plain `go build`, and the image gains no stage - which is not asked for here, it is
+  # enforced by TestBuild_TheTestOnlyDependencyCannotReachTheBuiltArtifact inside the
+  # gate. The browser is the runner's own; Playwright is told to use it rather than
+  # downloading one, so no browser download enters this repository's CI.
   dashboard:
     runs-on: ubuntu-latest
     steps:
@@ -159,6 +167,17 @@ jobs:
           done
           echo "::error::no browser engine on PATH; the rendered graders cannot run and must not be skipped"
           exit 1
+
+      # The graders' runner, from the committed lockfile. `npm ci` REFUSES a lockfile that
+      # disagrees with the manifest, which is what makes this a pin rather than a request.
+      - name: the dashboard graders' test runner
+        run: npm ci --no-audit --no-fund
+        working-directory: internal/webui/e2e
+        env:
+          # The graders use the browser proved present above. Downloading a second one
+          # would put an unpinned, undigested browser build in the path of a repository
+          # whose entire packaging story is a pinned, digest-verified artifact.
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
 
       - name: the dashboard's unit suite and rendered graders, in required mode
         run: make webui-check

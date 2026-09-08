@@ -424,96 +424,6 @@ func (p *cdpPage) waitUntil(expr string, d time.Duration) error {
 	return fmt.Errorf("the page never satisfied %q within %s", expr, d)
 }
 
-// pressTab dispatches a REAL Tab key press. A KeyboardEvent constructed inside the page
-// is untrusted and moves focus nowhere, so this is the only way tab order is observable.
-func (p *cdpPage) pressTab(shift bool) {
-	p.b.t.Helper()
-	mods := 0
-	if shift {
-		mods = 8
-	}
-	for _, kind := range []string{"rawKeyDown", "keyUp"} {
-		p.b.mustCall(p.sid, "Input.dispatchKeyEvent", map[string]any{
-			"type": kind, "windowsVirtualKeyCode": 9, "nativeVirtualKeyCode": 9,
-			"key": "Tab", "code": "Tab", "modifiers": mods,
-		})
-	}
-}
-
-// clickAt dispatches a real mouse press and release at a viewport coordinate.
-func (p *cdpPage) clickAt(x, y float64) {
-	p.b.t.Helper()
-	for _, kind := range []string{"mousePressed", "mouseReleased"} {
-		p.b.mustCall(p.sid, "Input.dispatchMouseEvent", map[string]any{
-			"type": kind, "x": x, "y": y, "button": "left", "clickCount": 1, "buttons": 1,
-		})
-	}
-}
-
-// typeInto focuses an element and types text into it with real key input, so the page's
-// own input handlers run on real events.
-func (p *cdpPage) typeInto(selector, text string) {
-	p.b.t.Helper()
-	p.mustEval(`document.querySelector(`+jsString(selector)+`).focus(), true`, nil)
-	p.b.mustCall(p.sid, "Input.insertText", map[string]any{"text": text})
-}
-
-// axNode is one node of the accessibility tree the ENGINE computed. The name and its
-// sources are the engine's own answer to "what is this control called", which is a
-// question no inspection of the markup can settle: it is the outcome of the accessible
-// name computation over labels, ARIA, native semantics and content, in that engine.
-type axNode struct {
-	NodeID  string `json:"nodeId"`
-	Ignored bool   `json:"ignored"`
-	Role    struct {
-		Value string `json:"value"`
-	} `json:"role"`
-	Name *struct {
-		Value   string `json:"value"`
-		Sources []struct {
-			Type      string `json:"type"`
-			Attribute string `json:"attribute"`
-			Value     *struct {
-				Value string `json:"value"`
-			} `json:"value"`
-			Superseded bool `json:"superseded"`
-			Invalid    bool `json:"invalid"`
-		} `json:"sources"`
-	} `json:"name"`
-	BackendDOMNodeID int `json:"backendDOMNodeId"`
-}
-
-func (p *cdpPage) axTree() []axNode {
-	p.b.t.Helper()
-	var out struct {
-		Nodes []axNode `json:"nodes"`
-	}
-	mustJSON(p.b.t, p.b.mustCall(p.sid, "Accessibility.getFullAXTree", nil), &out)
-	return out.Nodes
-}
-
-// securityRefusals is every policy refusal the ENGINE reported, which is what clause F11
-// is graded on: not that a policy header was set, but that the browser made no refusal
-// against the shipped page while rendering it.
-func (b *cdpBrowser) securityRefusals(since int) []string {
-	b.logMu.Lock()
-	defer b.logMu.Unlock()
-	var out []string
-	for _, e := range b.entries[min(since, len(b.entries)):] {
-		if e.Source == "security" || strings.Contains(strings.ToLower(e.Text), "content security policy") ||
-			strings.Contains(strings.ToLower(e.Text), "trusted types") {
-			out = append(out, e.Level+": "+e.Text)
-		}
-	}
-	return out
-}
-
-func (b *cdpBrowser) logMark() int {
-	b.logMu.Lock()
-	defer b.logMu.Unlock()
-	return len(b.entries)
-}
-
 // --- small helpers ----------------------------------------------------------------
 
 func mustJSON(t *testing.T, raw json.RawMessage, out any) {
@@ -521,14 +431,4 @@ func mustJSON(t *testing.T, raw json.RawMessage, out any) {
 	if err := json.Unmarshal(raw, out); err != nil {
 		t.Fatalf("cdp: cannot decode %s: %v", raw, err)
 	}
-}
-
-// jsString quotes a Go string as a JavaScript string literal. encoding/json's escaping is
-// a subset of JavaScript's, so a JSON string is always a valid JavaScript one.
-func jsString(s string) string {
-	b, err := json.Marshal(s)
-	if err != nil {
-		return `""`
-	}
-	return string(b)
 }

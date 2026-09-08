@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -43,6 +44,25 @@ func freeAddr(t *testing.T) string {
 // writeServeConfig writes a valid serve config bound to addr and returns its path plus
 // the state directory it names (which must not exist if serve refused before doing
 // anything).
+// offerTagRe matches one element tag, so a decorative mark can be taken out of the link
+// before its displayed text is compared.
+var offerTagRe = regexp.MustCompile(`<[^>]*>`)
+
+// offerShownText is what a reader actually reads inside the offer's link: its content with
+// every tag removed. A mark contributes no text, so what is left must be the URL alone.
+func offerShownText(offer string) string {
+	open := strings.Index(offer, `<a class="source-offer-link"`)
+	end := strings.Index(offer, "</a>")
+	if open < 0 || end < open {
+		return ""
+	}
+	gt := strings.Index(offer[open:], ">")
+	if gt < 0 {
+		return ""
+	}
+	return strings.TrimSpace(offerTagRe.ReplaceAllString(offer[open+gt+1:end], ""))
+}
+
 func writeServeConfig(t *testing.T, addr string) (cfgPath, stateDir string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -361,9 +381,16 @@ func TestLdflags_StampedForkValueIsServedAndUpstreamIsAbsent(t *testing.T) {
 	page := httpGet(t, "http://"+addr+"/")
 
 	offer := dashboardOfferOf(t, page)
-	wantLink := `<a class="source-offer-link" href="` + forkValue + `">` + forkValue + `</a>`
-	if !strings.Contains(offer, wantLink) {
-		t.Errorf("the stamped fork value is not both the link target and the displayed text: %s", offer)
+	// The link may carry a DECORATIVE mark in front of the URL (the GitHub glyph is drawn
+	// inline when the source URL is a GitHub one), so the displayed text is read with the
+	// tags removed rather than matched as one literal string. What must remain is the URL
+	// and nothing else: the displayed URL is what discharges the section 13 offer, so a
+	// mark that replaced it, or one that said anything of its own, fails here.
+	if !strings.Contains(offer, `<a class="source-offer-link" href="`+forkValue+`">`) {
+		t.Errorf("the stamped fork value is not the link target: %s", offer)
+	}
+	if shown := offerShownText(offer); shown != forkValue {
+		t.Errorf("the link's displayed text is %q, want the stamped fork value %q: %s", shown, forkValue, offer)
 	}
 	if strings.Contains(offer, sourceoffer.Upstream) {
 		t.Errorf("the upstream URL occurs inside a stamped fork build's offer: %s", offer)

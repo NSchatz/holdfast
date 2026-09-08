@@ -160,6 +160,7 @@ function _tableFor(el) {
 function _linksIn(root, win) {
   return Array.prototype.map.call(root.querySelectorAll("a"), function (a) {
     return { href: a.href, raw: a.getAttribute("href") || "", text: _norm(a.textContent),
+             name: _norm(a.getAttribute("aria-label") || a.getAttribute("title") || a.textContent),
              shown: renderedFlag(a, win) };
   });
 }
@@ -346,10 +347,22 @@ type excludedText struct {
 	Clause string `json:"clause"`
 }
 
+// A link's NAME is what tells a reader what it is for. Text is one way of carrying one
+// and it is not the only way: the documentation link is a MARK, so its name is on the
+// element, and its accessible name is what a screen reader announces either way. What
+// must never happen is a link with no name at all - one that announces itself as "link"
+// and nothing more - so the name is collected from wherever it is carried and the
+// graders require it rather than requiring text.
+//
+// The authority on an accessible name is the ENGINE, not this reading: the accessibility
+// tree the browser computed is checked separately by the DevTools-protocol graders. This
+// is the cheap reading that keeps every other grader honest about the difference between
+// "has no text" and "has no name".
 type renderedLink struct {
 	Href  string `json:"href"`
 	Raw   string `json:"raw"`
 	Text  string `json:"text"`
+	Name  string `json:"name"`
 	Shown bool   `json:"shown"`
 }
 
@@ -1143,8 +1156,8 @@ func docLinkProblems(p proseReading) []string {
 			if !docs[0].Shown {
 				out = append(out, fmt.Sprintf("the section %q renders a documentation link a reader cannot see: %+v", s.Heading, docs[0]))
 			}
-			if docs[0].Text == "" {
-				out = append(out, fmt.Sprintf("the section %q renders a documentation link with no text at all", s.Heading))
+			if docs[0].Name == "" {
+				out = append(out, fmt.Sprintf("the section %q renders a documentation link with no name at all - it announces itself as \"link\" and nothing more: %+v", s.Heading, docs[0]))
 			}
 		}
 	}

@@ -1,0 +1,12 @@
+{
+  "name": "holdfast-dashboard-e2e",
+  "private": true,
+  "type": "module",
+  "description": "The dashboard's rendered graders. Test-only: nothing here enters the built page, the generator or the image.",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1"
+  }
+}

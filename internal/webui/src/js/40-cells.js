@@ -1,6 +1,18 @@
 // The cells. Each takes the value its derivation produced and puts it on screen; an
 // absent derivation is rendered as the page's honest absence, never as a zero.
 
+// The path cell. The file's own NAME leads and the directory that led to it recedes
+// above it, because both tables are read by scanning for a file and an unbroken column of
+// absolute paths hides the one segment a reader is looking for. Nothing is elided and
+// nothing is added: the two parts concatenate back to the path the server sent, so the
+// cell still carries it whole for anyone copying it out.
+function pathCell(td, path) {
+  const parts = pathParts(path);
+  if (parts.dir) td.appendChild(mk("span", "pdir", parts.dir));
+  if (parts.name) td.appendChild(mk("span", "pname", parts.name));
+  if (!parts.dir && !parts.name) td.appendChild(nrNode());
+}
+
 // The size cell: before → after with the percent reclaimed. Only meaningful on a done
 // row that recorded both sizes.
 function sizeCell(td, j) {
@@ -8,7 +20,10 @@ function sizeCell(td, j) {
   if (!f) { td.appendChild(nrNode()); return; }
   td.appendChild(mk("span", "before", f.before));
   td.appendChild(mk("span", "arrow", "→"));
-  td.appendChild(document.createTextNode(f.after));
+  // The replacement's size is an element rather than a bare text node so the column can
+  // give the two figures a shape: a before-and-after read down a column is read by its
+  // ARROWS, and an arrow that moves from row to row is a column with no shape at all.
+  td.appendChild(mk("span", "after", f.after));
   td.appendChild(mk("span", "pct", f.reduction));
 }
 
@@ -62,5 +77,10 @@ function progressCell(td, j) {
     return;
   }
   td.appendChild(mk("span", "pctv", f.percent));
+  // The same measurement, drawn. It is the figure the percentage above it was rounded
+  // from - not a second arithmetic - and it carries no value that text does not, so a
+  // reader who cannot see it has lost nothing. It is aria-hidden for that reason: the
+  // percentage is already there to be read.
+  td.appendChild(figBar(f.fraction));
   if (f.of) td.appendChild(mk("span", "of", f.of));
 }

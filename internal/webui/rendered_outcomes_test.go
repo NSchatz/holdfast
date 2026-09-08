@@ -286,9 +286,14 @@ func TestRendered_TheTwoNewOutcomesShowAsThemselves(t *testing.T) {
 		t.Errorf("the rendered parked row claims the source is untouched - which is the one thing nobody knows:\n%s", parkedRow)
 	}
 
-	// And the summary chips count them as themselves rather than folding them in.
+	// And the summary chips count them as themselves rather than folding them in. The
+	// chip is found by the CLASS it carries and not by its whole class attribute: a chip
+	// also records which group it is in (work in hand, or finished), and a check that
+	// matched the attribute whole would red on any class added beside the state without
+	// anything having stopped being counted as itself.
 	for _, state := range []string{"indeterminate", "applied-despite-error"} {
-		if !strings.Contains(dom, `class="chip `+state+`"`) {
+		re := regexp.MustCompile(`class="chip[^"]*\b` + regexp.QuoteMeta(state) + `\b[^"]*"`)
+		if !re.MatchString(dom) {
 			t.Errorf("the rendered page has no summary chip for %q", state)
 		}
 	}

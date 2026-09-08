@@ -1,0 +1,368 @@
+{
+  "summary": {
+    "pending": 1,
+    "probing": 1,
+    "encoding": 1,
+    "verifying": 1,
+    "done": 5,
+    "skipped": 4,
+    "failed": 1
+  },
+  "queue": [
+    {
+      "path": "/mnt/media/movies/Dune Part Two (2024).mkv",
+      "status": "encoding",
+      "worker": "w0",
+      "fail_count": 0,
+      "updated_at": 1788882583,
+      "progress_seconds": 412.5,
+      "progress_duration_seconds": 1660,
+      "progress_fraction": 0.2485
+    },
+    {
+      "path": "/mnt/media/tv/Halcyon Drift/Season 01/S01E04.mkv",
+      "status": "verifying",
+      "worker": "w1",
+      "fail_count": 0,
+      "updated_at": 1788882702,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null
+    },
+    {
+      "path": "/mnt/media/tv/Northwind/Season 02/S02E07.mkv",
+      "status": "probing",
+      "worker": "w2",
+      "fail_count": 0,
+      "updated_at": 1788882717,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null
+    },
+    {
+      "path": "/mnt/media/movies/A Very Long Title That Keeps Going And Going (2019).mkv",
+      "status": "pending",
+      "worker": "",
+      "fail_count": 0,
+      "updated_at": 1788882719,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null
+    }
+  ],
+  "history": [
+    {
+      "path": "/mnt/media/movies/Corrupt Rip (2004).mkv",
+      "status": "failed",
+      "worker": "w0",
+      "fail_count": 3,
+      "updated_at": 1788882556,
+      "reason": "unreadable-or-no-video-stream",
+      "vmaf_mean": null,
+      "vmaf_min": null,
+      "vmaf_chroma": null,
+      "source_bytes": null,
+      "output_bytes": null,
+      "encode_ms": null,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null
+    },
+    {
+      "path": "/mnt/media/tv/Northwind/Season 02/S02E05.mkv",
+      "status": "done",
+      "worker": "w0",
+      "fail_count": 0,
+      "updated_at": 1788882053,
+      "encoder": "cpu",
+      "vmaf_mean": 98.829679,
+      "vmaf_min": 96.51533,
+      "vmaf_model": "version=vmaf_v0.6.1",
+      "vmaf_pix_fmt": "yuv420p10le",
+      "vmaf_chroma": 44.392002,
+      "vmaf_chroma_metric": "psnr_cb/psnr_cr min (dB)",
+      "source_bytes": 1664293,
+      "output_bytes": 107078,
+      "encode_ms": 614,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null,
+      "guard_attributes": "size,mtime",
+      "guard_time_resolution": "1s",
+      "guard_residual_window": "residual-window-local"
+    },
+    {
+      "path": "/mnt/media/tv/Northwind/Season 02/S02E06.mkv",
+      "status": "skipped",
+      "worker": "w0",
+      "fail_count": 0,
+      "updated_at": 1788882053,
+      "reason": "interlaced",
+      "vmaf_mean": null,
+      "vmaf_min": null,
+      "vmaf_chroma": null,
+      "source_bytes": null,
+      "output_bytes": null,
+      "encode_ms": null,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null
+    },
+    {
+      "path": "/mnt/media/tv/Halcyon Drift/Season 01/S01E02.mkv",
+      "status": "done",
+      "worker": "w0",
+      "fail_count": 0,
+      "updated_at": 1788882051,
+      "encoder": "cpu",
+      "vmaf_mean": 99.663973,
+      "vmaf_min": 96.989122,
+      "vmaf_model": "version=vmaf_v0.6.1",
+      "vmaf_pix_fmt": "yuv420p10le",
+      "vmaf_chroma": 44.644672,
+      "vmaf_chroma_metric": "psnr_cb/psnr_cr min (dB)",
+      "source_bytes": 3626920,
+      "output_bytes": 103996,
+      "encode_ms": 662,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null,
+      "guard_attributes": "size,mtime",
+      "guard_time_resolution": "1s",
+      "guard_residual_window": "residual-window-local"
+    },
+    {
+      "path": "/mnt/media/tv/Halcyon Drift/Season 01/S01E03.mkv",
+      "status": "skipped",
+      "worker": "w0",
+      "fail_count": 0,
+      "updated_at": 1788882051,
+      "reason": "already-at-target-codec",
+      "vmaf_mean": null,
+      "vmaf_min": null,
+      "vmaf_chroma": null,
+      "source_bytes": null,
+      "output_bytes": null,
+      "encode_ms": null,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null
+    },
+    {
+      "path": "/mnt/media/tv/Halcyon Drift/Season 01/S01E01.mkv",
+      "status": "done",
+      "worker": "w0",
+      "fail_count": 0,
+      "updated_at": 1788882050,
+      "encoder": "cpu",
+      "vmaf_mean": 99.571787,
+      "vmaf_min": 96.989122,
+      "vmaf_model": "version=vmaf_v0.6.1",
+      "vmaf_pix_fmt": "yuv420p10le",
+      "vmaf_chroma": 44.917182,
+      "vmaf_chroma_metric": "psnr_cb/psnr_cr min (dB)",
+      "source_bytes": 1901715,
+      "output_bytes": 71365,
+      "encode_ms": 491,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null,
+      "guard_attributes": "size,mtime",
+      "guard_time_resolution": "1s",
+      "guard_residual_window": "residual-window-local"
+    },
+    {
+      "path": "/mnt/media/movies/Blade Runner 2049 (2017).mkv",
+      "status": "done",
+      "worker": "w0",
+      "fail_count": 0,
+      "updated_at": 1788882048,
+      "encoder": "cpu",
+      "vmaf_mean": 99.249688,
+      "vmaf_min": 96.787668,
+      "vmaf_model": "version=vmaf_v0.6.1",
+      "vmaf_pix_fmt": "yuv420p10le",
+      "vmaf_chroma": 46.532028,
+      "vmaf_chroma_metric": "psnr_cb/psnr_cr min (dB)",
+      "source_bytes": 4352043,
+      "output_bytes": 315713,
+      "encode_ms": 1210,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null,
+      "guard_attributes": "size,mtime",
+      "guard_time_resolution": "1s",
+      "guard_residual_window": "residual-window-local"
+    },
+    {
+      "path": "/mnt/media/movies/Seeded Release (1999).mkv",
+      "status": "skipped",
+      "fail_count": 0,
+      "updated_at": 1788882048,
+      "reason": "hardlinked",
+      "vmaf_mean": null,
+      "vmaf_min": null,
+      "vmaf_chroma": null,
+      "source_bytes": null,
+      "output_bytes": null,
+      "encode_ms": null,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null
+    },
+    {
+      "path": "/mnt/media/movies/Tiny Documentary (2011).mkv",
+      "status": "skipped",
+      "worker": "w0",
+      "fail_count": 0,
+      "updated_at": 1788882048,
+      "reason": "low-bitrate",
+      "vmaf_mean": null,
+      "vmaf_min": null,
+      "vmaf_chroma": null,
+      "source_bytes": null,
+      "output_bytes": null,
+      "encode_ms": null,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null
+    },
+    {
+      "path": "/mnt/media/movies/Arrival (2016).mp4",
+      "status": "done",
+      "worker": "w0",
+      "fail_count": 0,
+      "updated_at": 1788882045,
+      "encoder": "cpu",
+      "vmaf_mean": 99.039693,
+      "vmaf_min": 96.600987,
+      "vmaf_model": "version=vmaf_v0.6.1",
+      "vmaf_pix_fmt": "yuv420p10le",
+      "vmaf_chroma": 44.613942,
+      "vmaf_chroma_metric": "psnr_cb/psnr_cr min (dB)",
+      "source_bytes": 2139367,
+      "output_bytes": 146378,
+      "encode_ms": 648,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null,
+      "guard_attributes": "size,mtime",
+      "guard_time_resolution": "1s",
+      "guard_residual_window": "residual-window-local"
+    }
+  ],
+  "queue_total": {
+    "available": true,
+    "unavailable": "",
+    "covers": "every row in the ledger with status pending, probing, encoding, verifying",
+    "cap": 500,
+    "count": 4
+  },
+  "history_total": {
+    "available": true,
+    "unavailable": "",
+    "covers": "every row in the ledger with status done, skipped, failed, indeterminate, applied-despite-error",
+    "cap": 200,
+    "count": 10
+  },
+  "bytes_reclaimed_session": 4036330,
+  "bytes_reclaimed_lifetime": 12939808,
+  "bytes_held_by_undo_window": 13684338,
+  "paused": false,
+  "scanning": true,
+  "now": 1788882720,
+  "aggregates": {
+    "outcomes": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every terminal row in the ledger (done, skipped, failed, indeterminate, applied-despite-error)",
+      "window": "",
+      "counted": 10,
+      "excluded": 0,
+      "buckets": [
+        {
+          "key": "done",
+          "count": 5
+        },
+        {
+          "key": "skipped",
+          "count": 4
+        },
+        {
+          "key": "failed",
+          "count": 1
+        }
+      ]
+    },
+    "skips_by_guard": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every skipped row in the ledger",
+      "window": "",
+      "counted": 4,
+      "excluded": 0,
+      "buckets": [
+        {
+          "key": "already-at-target-codec",
+          "count": 1
+        },
+        {
+          "key": "hardlinked",
+          "count": 1
+        },
+        {
+          "key": "interlaced",
+          "count": 1
+        },
+        {
+          "key": "low-bitrate",
+          "count": 1
+        }
+      ]
+    },
+    "size_ratio": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every done row in the ledger",
+      "window": "",
+      "counted": 5,
+      "excluded": 0,
+      "min": 0.028673364728199133,
+      "mean": 0.05430065058628265,
+      "max": 0.07254363065806105
+    },
+    "encode_ms": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every done row in the ledger",
+      "window": "",
+      "counted": 5,
+      "excluded": 0,
+      "min": 491,
+      "mean": 725,
+      "max": 1210
+    },
+    "vmaf_mean": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every done row in the ledger",
+      "window": "",
+      "counted": 5,
+      "excluded": 0,
+      "min": 98.829679,
+      "mean": 99.270964,
+      "max": 99.663973
+    },
+    "vmaf_min": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every done row in the ledger",
+      "window": "",
+      "counted": 5,
+      "excluded": 0,
+      "min": 96.51533,
+      "mean": 96.7764458,
+      "max": 96.989122
+    }
+  }
+}

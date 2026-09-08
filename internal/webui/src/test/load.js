@@ -22,10 +22,10 @@ const JS_DIR = path.join(__dirname, "..", "js");
 // in a lexical scope that is not a property of the context object, so the epilogue below
 // - evaluated as part of the same script - is what carries them out.
 const NAMES = [
-  "NOT_RECORDED", "STATUSES", "PROGRESS_STATUS",
+  "NOT_RECORDED", "STATUSES", "PROGRESS_STATUS", "IN_FLIGHT",
   "GUARD_LABELS", "isNum", "fmtBytes", "fmtTime", "fmtDur", "fmtSpan", "pct", "fmtScore",
   "fmtCount", "clockOffsetFrom", "serverNow", "elapsedText", "sizeFigures",
-  "vmafFigures", "progressFigure", "guardLabel", "capNoteText", "CAP_TOTAL_UNAVAILABLE",
+  "vmafFigures", "progressFigure", "pathParts", "guardLabel", "capNoteText", "CAP_TOTAL_UNAVAILABLE",
   "announceText", "aggCoverageText", "aggExclusionText", "readBuckets", "bucketProportions",
   "spreadPositions",
 ];

@@ -2,6 +2,7 @@ package sourceoffer
 
 import (
 	"html"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode"
@@ -136,9 +137,22 @@ func TestOffer_BuildIdentityIsTheVersionBanner(t *testing.T) {
 
 // --- the fixed rendering (Definitions) ---------------------------------------
 
+// tagRe matches one element tag. It is used to take the DECORATION out of the link
+// before its displayed text is compared, and for nothing else.
+var tagRe = regexp.MustCompile(`<[^>]*>`)
+
+// shownText is what a reader actually reads inside the link: its content with every tag
+// removed. The link may carry a decorative mark - the GitHub glyph is drawn inline in
+// front of the URL - and a mark contributes no text, so removing the tags must leave the
+// URL and nothing else. Anything a mark tried to SAY survives this and is caught by the
+// comparison, which is the property that matters: the displayed URL is what discharges
+// the section 13 offer, so the rule is not "the link contains the URL" but "the link
+// shows the URL and shows nothing else".
+func shownText(inner string) string { return tagRe.ReplaceAllString(inner, "") }
+
 // linkProblems reports every way frag departs from the rendering Definitions fixes:
 //
-//	Corresponding Source: <a href="VALUE">VALUE</a>
+//	Corresponding Source: <a href="VALUE">[decorative mark]VALUE</a>
 //
 // It is a function returning findings rather than a pile of t.Errorf calls so the
 // mutation test below can prove it BITES: a grader that cannot fail is not evidence.
@@ -167,10 +181,11 @@ func linkProblems(frag, want string) []string {
 	if !strings.Contains(openTag, `href="`+esc+`"`) {
 		out = append(out, "the link target is not the source URL in effect: "+openTag)
 	}
-	if shown != esc {
-		out = append(out, "the link's displayed text is "+shown+", want the source URL in effect and nothing else")
+	text := shownText(shown)
+	if text != esc {
+		out = append(out, "the link's displayed text is "+text+", want the source URL in effect and nothing else")
 	}
-	if html.UnescapeString(shown) != want {
+	if html.UnescapeString(text) != want {
 		out = append(out, "the displayed text does not decode back to the value character for character")
 	}
 
@@ -223,13 +238,24 @@ func TestHTML_RendersTheFixedShapeForEveryVector(t *testing.T) {
 		if !strings.Contains(frag, html.EscapeString(version.String())) {
 			t.Errorf("%q: the fragment does not carry the build identity", v)
 		}
-		// AC11: the value introduced no element, no attribute and no script. The
-		// fragment is exactly two elements deep whatever the value carries, and the
-		// link's opening tag is exactly the two attributes this package writes -
-		// so `"><img src=x onerror=1>` inside the value cannot have closed the
-		// attribute, opened an element or added a handler.
-		if got := strings.Count(frag, "<"); got != 4 { // <p, <a, </a, </p
-			t.Errorf("%q: the fragment has %d tag openings, want 4: %s", v, got, frag)
+		// AC11: the value introduced no element, no attribute and no script.
+		//
+		// The rule is stated as INDEPENDENCE rather than as a count. The rendering
+		// carries a decorative mark for some URLs and not others, so a fixed number
+		// would have to be updated whenever the decoration changed - and a number
+		// somebody updates is a number that stops meaning anything. What must hold is
+		// that the value cannot change the SHAPE: this value's fragment has exactly as
+		// many tags as a benign value of the same class, so `"><img src=x onerror=1>`
+		// inside it cannot have closed the attribute, opened an element or added a
+		// handler.
+		benign := "https://example.invalid/plain"
+		if isGitHub(v) {
+			benign = "https://github.com/example/plain"
+		}
+		ref := Offer{SourceURL: benign, License: License, Build: version.String()}.HTML()
+		if got, want := strings.Count(frag, "<"), strings.Count(ref, "<"); got != want {
+			t.Errorf("%q: the fragment has %d tag openings and a benign value of the same class has %d, so the value changed the markup: %s",
+				v, got, want, frag)
 		}
 		wantOpen := `<a class="source-offer-link" href="` + html.EscapeString(v) + `">`
 		if !strings.Contains(frag, wantOpen) {
@@ -257,6 +283,15 @@ func TestLinkProblems_FailsAgainstEveryRenderingMutation(t *testing.T) {
 	if probs := linkProblems(good, v); probs != nil {
 		t.Fatalf("the conforming rendering was reported as broken: %v", probs)
 	}
+	// A GitHub URL renders the mark; the fork value above does not. Both are conforming
+	// and both must pass, or the mark would be admitted only where nobody drew one.
+	marked := Offer{SourceURL: Upstream, License: License, Build: "b"}.HTML()
+	if probs := linkProblems(marked, Upstream); probs != nil {
+		t.Fatalf("the rendering that carries the decorative mark was reported as broken: %v", probs)
+	}
+	if !strings.Contains(marked, "<svg") {
+		t.Fatal("the GitHub rendering carries no mark, so the mutations below prove nothing about one")
+	}
 	for name, mutant := range map[string]string{
 		"label text is the link text": `<p>Corresponding Source: <a href="` + v + `">` + Label + `</a></p>`,
 		"label is missing":            `<p>Source: <a href="` + v + `">` + v + `</a></p>`,
@@ -268,6 +303,15 @@ func TestLinkProblems_FailsAgainstEveryRenderingMutation(t *testing.T) {
 		"a second link": `<p>` + Label + `: <a href="` + v + `">` + v + `</a> <a href="` + v +
 			`">mirror</a></p>`,
 		"no link at all": `<p>` + Label + `: ` + v + `</p>`,
+		// The decorative mark is admitted, so the ways it could stop being decorative
+		// are driven here. A mark that SAYS something, or one that replaces the URL
+		// rather than sitting in front of it, is the offer being traded for an icon.
+		"a mark replaces the displayed URL": `<p>` + Label + `: <a href="` + v +
+			`"><svg aria-hidden="true"><path d="M0 0"/></svg></a></p>`,
+		"the mark carries text of its own": `<p>` + Label + `: <a href="` + v +
+			`"><svg aria-hidden="true"><title>source</title></svg><span>` + v + `</span></a></p>`,
+		"the mark carries a different URL": `<p>` + Label + `: <a href="` + v +
+			`"><svg aria-hidden="true"></svg><span>` + Upstream + `</span></a></p>`,
 	} {
 		if probs := linkProblems(mutant, v); probs == nil {
 			t.Errorf("the grader passed a mutation that breaks the rendering (%s): %s", name, mutant)

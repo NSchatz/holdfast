@@ -78,7 +78,7 @@ function markUnreadable() {
     if (!viewHasContent(view)) setViewState(view, "unreadable");
   }
   if (renderedOnce) return;
-  for (const id of ["reclaimed-session", "reclaimed-lifetime"]) {
+  for (const id of ["reclaimed-session", "reclaimed-lifetime", "bytes-held"]) {
     const el = $(id);
     if (el) el.replaceChildren(nrNode());
   }
