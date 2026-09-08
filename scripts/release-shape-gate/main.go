@@ -201,6 +201,7 @@ func (g *gate) run() error {
 	// them, because every shape below is one this gate INVENTS and they are only the right
 	// shapes if `on:` says so. See triggers.go.
 	g.checkTriggerSurface(wf)
+	g.checkWorkflowKeys(wf)
 
 	roles, err := locateRoles(wf, g.root)
 	if err != nil {
@@ -251,8 +252,164 @@ func (g *gate) run() error {
 	g.checkPreReleaseDoesNotPromote(runner, wf, roles, repo)
 	g.checkMajorVersionZero(runner, wf, roles, repo)
 	g.checkRunbookNamesEveryAct(wf)
+	g.checkHandedValues(wf, roles, tag, repo)
 	g.checkComposeReferenceAgreement(wf, roles, tag, repo)
 	return nil
+}
+
+// --- every value a role step HANDS its program -------------------------------------------
+//
+// A role is held by a step that INVOKES what the role names, and roles.go accounts for that
+// invocation over its whole structured surface - every `run:` field, every step key, every
+// `defaults:` block, every action input, and every environment NAME in scope. It did not read
+// the environment's VALUES, and that is a hole of exactly the shape the ones above are
+// (S0046 F22, F23): a step can invoke the right program against the wrong object, and every
+// other assertion here stays green while it does.
+//
+// One line is the whole of it. `REF: ${{ needs.build.outputs.image }}:latest` on the
+// re-smoke leaves the role held, the invocation untouched and the order sentence printing,
+// and pulls back the PREVIOUS release - which passes, because it was gated last time - while
+// the artefact this run pushed is never pulled back at all and the promotion then moves the
+// floating reference onto it. `VERSION: latest` on the resolver turns A11 into a comparison
+// of the compose reference's digest with its own, which cannot fail, and A11 is the only
+// enforcement A5 has on every release after the first (R6).
+//
+// So each name a role declares in `handsEnv` is HELD against a value produced outside the
+// step, and the step's value is compared WHOLE against it. Nothing is searched for inside
+// anything and no script is read: these are `env:` scalars, interpolated against the values
+// the planning logic produced, which is the mechanism this gate already uses one function
+// below. A declared name that resolves to no source reads CLOSED and reds by name, which is
+// what makes this the rule rather than the two spellings a review happened to find.
+func (g *gate) checkHandedValues(wf *Workflow, roles *Roles, p *planned, repo string) {
+	h, err := g.handedValues(roles, p, repo)
+	if err != nil {
+		g.bad("%v", err)
+		return
+	}
+	var held []string
+	for _, r := range releaseRoles {
+		if len(r.handsEnv) == 0 {
+			continue
+		}
+		s := roles.step(r.id)
+		jp, ok := p.jobs[s.JobID]
+		if !ok {
+			g.bad("%s holds the role `%s` (%s) and lives in job %q, which %s does not plan, so the values it is handed cannot be decided", s.Label(), r.id, r.what, s.JobID, p.shape.label)
+			continue
+		}
+		env, err := stepEnv(wf, wf.Jobs[s.JobID], s, jp.ctx)
+		if err != nil {
+			g.bad("cannot decide the environment %s runs with: %v", s.Label(), err)
+			continue
+		}
+		for _, name := range sortedEnvNames(r.handsEnv) {
+			spec := r.handsEnv[name]
+			want, from, ok := h.expected(spec.holds)
+			if !ok {
+				g.bad("%s holds the role `%s` (%s) and declares `%s` in its env, and this gate holds that value against NOTHING.\nA name whose VALUE nobody compares is the hole this check exists to refuse: the role holds, the invocation is untouched, and the step does the right thing to the wrong object. Give `%s` a source in that role's handsEnv, or stop declaring it",
+					s.Label(), r.id, r.what, name, name)
+				continue
+			}
+			got, present := env[name]
+			if !present {
+				g.bad("%s holds the role `%s` (%s), whose program reads `%s` - and nothing sets it, at any of the three levels.\nIt should be %s: %s. A role step handed nothing is a release step that fails in the middle of a release, or worse, one whose program falls back to a default nobody chose.",
+					s.Label(), r.id, r.what, name, from, want)
+				continue
+			}
+			if got != want {
+				g.bad("%s holds the role `%s` (%s) and is handed `%s: %s`, which is not %s.\nexpected: %s\nhanded:   %s\nCompared WHOLE, because the difference between the two is the difference between grading the artefact this run produced and grading some other one. Declaring what a value is FOR is not holding it to anything (S0046 F22, F23).",
+					s.Label(), r.id, r.what, name, got, from, want, got)
+				continue
+			}
+			held = append(held, fmt.Sprintf("%s `%s` = %s (%s)", s.Label(), name, got, from))
+		}
+	}
+	if len(held) > 0 {
+		g.note("every value a role step's `env:` hands its program is the value this run produced, compared whole:\n      %s", strings.Join(held, "\n      "))
+	}
+}
+
+// handed is the set of values a role step's `env:` may be held against. Every one is
+// produced OUTSIDE any role step - by the planning logic this gate executed, by this
+// module's own path, by the event shape being planned, or by the example deployment - which
+// is what makes the comparison mean something. A value a step spells for itself is a value
+// nothing constrains.
+type handed struct {
+	image    string
+	version  string
+	gated    string
+	floating string
+	event    string
+	refName  string
+	repo     string
+}
+
+func (g *gate) handedValues(roles *Roles, p *planned, repo string) (handed, error) {
+	plan := roles.step("plan")
+	jp, ok := p.jobs[plan.JobID]
+	if !ok {
+		return handed{}, fmt.Errorf("%s is in job %q, which %s does not plan, so nothing produced the values every other role step is handed", plan.Label(), plan.JobID, p.shape.label)
+	}
+	image, version := jp.outs["image"], jp.outs["version"]
+	if image == "" || version == "" {
+		return handed{}, fmt.Errorf("on %s the planning logic produced no `image` and/or `version` output (it produced %s).\nEvery reference this release pushes, re-smokes, promotes and resolves is built from those two values, so without them there is nothing to hold a role step's `env:` against - and an unheld value is how a re-smoke ends up grading the PREVIOUS release. %s must write both to $GITHUB_OUTPUT",
+			p.shape.label, outputsOf(p), plan.Label())
+	}
+	// The example deployment is the anchor for the floating tag: the promotion declares
+	// which reference it moves, and the only reference worth moving is the one a user pulls.
+	composeRef, err := composeImageRef(g.path(composeFile))
+	if err != nil {
+		return handed{}, err
+	}
+	tag, ok := refTag(composeRef)
+	if !ok {
+		return handed{}, fmt.Errorf("the example deployment %s names %q, which carries no tag, so the floating reference a release moves is held against nothing", composeFile, composeRef)
+	}
+	return handed{
+		image:    image,
+		version:  version,
+		gated:    image + ":" + version,
+		floating: tag,
+		event:    p.shape.event,
+		refName:  p.shape.refName,
+		repo:     repo,
+	}, nil
+}
+
+// expected answers what a declared name must carry, and where that value came from. An
+// envHeld with no case here is the zero value or one nobody wired up: it reads CLOSED.
+func (h handed) expected(e envHeld) (value, from string, ok bool) {
+	switch e {
+	case heldPlannedImage:
+		return h.image, "the image reference the planning logic produced", true
+	case heldPlannedVersion:
+		return h.version, "the version the planning logic produced", true
+	case heldGatedRef:
+		return h.gated, "the reference this run pushes and gates, from the planning logic's own image and version", true
+	case heldFloatingTag:
+		return h.floating, "the tag " + composeFile + " names, which is the reference a user actually pulls", true
+	case heldEventName:
+		return h.event, "the event this run is planned for", true
+	case heldRefName:
+		return h.refName, "the ref this run is planned for", true
+	case heldRepository:
+		return h.repo, "this module's own repository, derived from " + goModFile, true
+	}
+	return "", "", false
+}
+
+// refTag splits an image reference's tag off. The LAST colon, because a registry may carry a
+// port (`localhost:5000/x:tag`), and a colon inside the path half is not a tag at all.
+func refTag(ref string) (string, bool) {
+	i := strings.LastIndex(ref, ":")
+	if i < 0 {
+		return "", false
+	}
+	tag := ref[i+1:]
+	if tag == "" || strings.Contains(tag, "/") {
+		return "", false
+	}
+	return tag, true
 }
 
 // The gate executes shell, so what it executes is bounded and declared. Exactly one step -
@@ -276,6 +433,29 @@ func (g *gate) checkOnlyThePlanStepIsExecuted(wf *Workflow, roles *Roles) error 
 	}
 	g.note("exactly ONE step is ever executed by this gate: %s. No other step's script runs, here or in the self-test", plan.Label())
 	return nil
+}
+
+// checkWorkflowKeys is deny-by-default at the level that did not have it. capability.go
+// classifies every JOB key and every STEP key and reds on one nobody has, and this gate's
+// whole standard is that silence must be unreachable - but the WORKFLOW's own keys were
+// handled one at a time (`permissions`, `defaults`, `on`, `env`, `jobs`) and anything else
+// was never looked at. GitHub's top-level vocabulary is small and closed today and none of
+// the unhandled members can hand a job a credential, so this is a boundary rather than a
+// live hole; it is closed because two of the three levels said so when they met something
+// new and the third did not, and that asymmetry is invisible from the output.
+func (g *gate) checkWorkflowKeys(wf *Workflow) {
+	unclassified := 0
+	for _, k := range mappingKeys(wf.Node) {
+		if _, ok := workflowKeysCheckedAndCapabilityFree[k]; ok {
+			continue
+		}
+		unclassified++
+		g.bad("%s declares the top-level key `%s:`, which this gate has not classified.\nAn unclassified key reads CLOSED at every level this gate reads - the job's, the step's and here - because a key nobody looked at contributing silence is the failure mode the whole design exists to delete. Decide what `%s:` can hand a job and classify it in workflowKeysCheckedAndCapabilityFree with the reason, or refuse it.\nclassified: %s",
+			releaseWorkflow, k, k, strings.Join(sortedStringsOf(workflowKeysCheckedAndCapabilityFree), ", "))
+	}
+	if unclassified == 0 {
+		g.note("every top-level key in %s is classified (%s), so a key GitHub adds arrives as a refusal rather than as silence", releaseWorkflow, strings.Join(mappingKeys(wf.Node), ", "))
+	}
 }
 
 // --- planning -------------------------------------------------------------------------
@@ -887,6 +1067,9 @@ func (g *gate) checkComposeReferenceAgreement(wf *Workflow, roles *Roles, p *pla
 		g.bad("%s does not declare VERSION in its `env:`, so which version the floating reference is moved onto is unknown to this gate.", promote.Label())
 		return
 	}
+	// checkHandedValues holds this step's IMAGE and VERSION whole against the values the
+	// planning logic produced, so `gated` here is that run's own reference and not a second
+	// notion of it read out of the same file.
 	gated := image + ":" + version
 	push := roles.step("push-version")
 	pushed, err := interpolatedInput(wf, wf.Jobs[push.JobID], push, p.jobs[push.JobID].ctx, "tags")

@@ -847,3 +847,89 @@ jobs:
 		t.Fatal("a definition with no `on:` block must red rather than be graded against invented shapes")
 	}
 }
+
+// --- what a role step is HANDED ----------------------------------------------------------
+
+// The table property, asserted where the hole lived. Declaring an environment name on a role
+// and writing down what the value is FOR held it to nothing: `REF: …:latest` on the re-smoke
+// left the role held and the invocation untouched while the step pulled back the PREVIOUS
+// release (S0046 F22). So every name a role declares must resolve to a value produced OUTSIDE
+// the step, and a name that resolves to nothing reads CLOSED - the zero value of envHeld is
+// exactly that case, and it must not be reachable from the table.
+func TestHandsEnv_EveryDeclaredNameResolvesToAValueProducedOutsideTheStep(t *testing.T) {
+	h := sampleHanded()
+	for _, r := range releaseRoles {
+		for name, spec := range r.handsEnv {
+			want, from, ok := h.expected(spec.holds)
+			if !ok {
+				t.Fatalf("role %q declares `%s` and holds it against NOTHING. A name whose value nobody compares is the hole this check exists to refuse", r.id, name)
+			}
+			if want == "" || from == "" {
+				t.Fatalf("role %q declares `%s`, which resolves to an EMPTY expectation (%q from %q): a comparison against nothing passes on anything", r.id, name, want, from)
+			}
+			if spec.what == "" {
+				t.Fatalf("role %q declares `%s` with no description, so its refusal cannot say what the value is for", r.id, name)
+			}
+		}
+	}
+	if _, _, ok := h.expected(heldNothing); ok {
+		t.Fatal("the zero value of envHeld must read CLOSED, or a forgotten `holds:` silently passes")
+	}
+	if _, _, ok := h.expected(envHeld(9999)); ok {
+		t.Fatal("an envHeld nobody wired up must read CLOSED")
+	}
+}
+
+// The comparison itself, over the two values ordinal 8 found unheld. `REF` decides which
+// artefact the re-smoke grades and `VERSION` decides whether A11 compares anything at all;
+// a wrong value in either leaves every other assertion in this gate green.
+func TestHandedValues_AValueIsComparedWholeAgainstWhatTheRunProduced(t *testing.T) {
+	h := sampleHanded()
+	cases := []struct {
+		held envHeld
+		want string
+		bad  []string
+	}{
+		{heldGatedRef, "ghcr.io/o/r:v0.1.0", []string{"ghcr.io/o/r:latest", "ghcr.io/o/r:v0.0.1", "ghcr.io/o/r", ""}},
+		{heldPlannedVersion, "v0.1.0", []string{"latest", "v0.0.1", ""}},
+		{heldPlannedImage, "ghcr.io/o/r", []string{"ghcr.io/someone-else/r", ""}},
+		{heldFloatingTag, "latest", []string{"stable", "v0.1.0", ""}},
+	}
+	for _, c := range cases {
+		got, _, ok := h.expected(c.held)
+		if !ok || got != c.want {
+			t.Fatalf("expected(%d) = %q, %v; want %q", c.held, got, ok, c.want)
+		}
+		for _, b := range c.bad {
+			if b == got {
+				t.Fatalf("expected(%d) accepts %q, which is not the value the run produced", c.held, b)
+			}
+		}
+	}
+}
+
+// refTag is what holds the floating reference to the one a user actually pulls, so it has to
+// be right about a registry port: `localhost:5000/x` carries a colon and no tag.
+func TestRefTag_TheTagIsTheLastColonAndNotAPort(t *testing.T) {
+	for ref, want := range map[string]string{
+		"ghcr.io/nschatz/holdfast:latest": "latest",
+		"localhost:5000/x:v1":             "v1",
+	} {
+		got, ok := refTag(ref)
+		if !ok || got != want {
+			t.Fatalf("refTag(%q) = %q, %v; want %q", ref, got, ok, want)
+		}
+	}
+	for _, ref := range []string{"ghcr.io/nschatz/holdfast", "localhost:5000/x", "ghcr.io/x:"} {
+		if got, ok := refTag(ref); ok {
+			t.Fatalf("refTag(%q) = %q, true; a reference with no tag must not resolve to one", ref, got)
+		}
+	}
+}
+
+func sampleHanded() handed {
+	return handed{
+		image: "ghcr.io/o/r", version: "v0.1.0", gated: "ghcr.io/o/r:v0.1.0",
+		floating: "latest", event: "push", refName: "v0.1.0", repo: "O/R",
+	}
+}

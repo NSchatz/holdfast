@@ -44,6 +44,23 @@ package main
 // declared, with the reason it cannot make the invocation do less than it says, or refused.
 // The next unseen spelling is a loud stop rather than a silent pass.
 //
+// AND NAMING AN ENVIRONMENT VARIABLE IS NOT ACCOUNTING FOR IT. That table used to carry a
+// name and a sentence about the value's purpose, and nothing ever compared the value with
+// anything (S0046 F22, F23). `REF: ${{ … }}:latest` on the re-smoke is one line: the role
+// still holds, the invocation is untouched, the order sentence still prints - and the step
+// pulls back the PREVIOUS release, which passes, because it was gated last time, while the
+// artefact this run pushed is never pulled back at all and `:latest` is then moved onto it.
+// `VERSION: latest` on the resolver is the same line again and turns A11 into a comparison
+// of the compose reference's digest with its own, which can never fail.
+//
+// So every name a role declares is HELD: it resolves to a value produced outside the step -
+// the planning logic's own outputs, this module's repository, the event shape being planned,
+// or the tag `docker-compose.yml` names - and what the step hands over is compared whole
+// against it (checkHandedValues in main.go). A name that resolves to nothing is refused, and
+// that refusal is what makes this the rule rather than the two spellings a review happened
+// to find. There is no shell in the question: these are `env:` scalars, interpolated against
+// the values the planning logic produced.
+//
 // The cost is stated: this constrains the release definition. A role step may not be an
 // inline multi-line script, it may not carry a flag or an environment variable nobody has
 // classified, and renaming one of these scripts means editing this table. That is the trade
@@ -69,6 +86,31 @@ type fieldSpec struct {
 	why    string
 }
 
+// envHeld names the value a role step's `env:` entry must HAND its program. Every one of
+// these is produced OUTSIDE the step that carries it, which is the whole point: a value the
+// step spells for itself is a value nothing constrains. The zero value is deliberate - a
+// declared name that resolves to no source at all reads CLOSED and reds by name, exactly as
+// an unclassified field, key or input does.
+type envHeld int
+
+const (
+	heldNothing      envHeld = iota // the zero value: declared, held against nothing. Refused.
+	heldPlannedImage                // the image reference the planning logic produced
+	heldPlannedVersion
+	heldGatedRef    // image:version - the reference this run pushes, gates and publishes
+	heldFloatingTag // the tag docker-compose.yml names, which is what a user pulls
+	heldEventName   // the event the shape being planned is
+	heldRefName     // the ref that shape carries
+	heldRepository  // this module's own repository, derived from go.mod
+)
+
+// envSpec is one environment name a role's own program reads: what the value is for, and
+// the value it must be. `what` is prose for the messages; `holds` is the comparison.
+type envSpec struct {
+	holds envHeld
+	what  string
+}
+
 // role is one named position in the release, and what a step must invoke to hold it.
 type role struct {
 	id   string
@@ -85,9 +127,12 @@ type role struct {
 	mustInput map[string]string // `with:` inputs that must carry exactly this value
 	mayInput  map[string]string // the other inputs it may carry, each with why it is inert
 
-	// mayEnv are the environment names this role's own invocation reads. Every other name
-	// in scope for the step must be classified in envCheckedAndInertForRoleSteps.
-	mayEnv map[string]string
+	// handsEnv are the environment names this role's own invocation reads, and the value
+	// each must carry. Every other name in scope for the step must be classified in
+	// envCheckedAndInertForRoleSteps; every name HERE must be set for the step and must
+	// equal the value it is held against, or the role is held by a step that invokes the
+	// right program against the wrong object.
+	handsEnv map[string]envSpec
 
 	needsGrant bool // it performs an irreversible act, so it must live in a job granted one
 }
@@ -100,10 +145,10 @@ var releaseRoles = []role{
 		id:       "plan",
 		what:     "the planning logic (which decides whether this run publishes at all)",
 		planning: true,
-		mayEnv: map[string]string{
-			"EVENT":    "the event name the plan keys on; the gate supplies it per shape",
-			"REF_NAME": "the ref the plan keys on; the gate supplies it per shape",
-			"REPO":     "the repository the image reference is derived from",
+		handsEnv: map[string]envSpec{
+			"EVENT":    {heldEventName, "the event name the plan keys on"},
+			"REF_NAME": {heldRefName, "the ref the plan keys on"},
+			"REPO":     {heldRepository, "the repository the image reference is derived from"},
 		},
 	},
 	{
@@ -163,18 +208,26 @@ var releaseRoles = []role{
 		id:      "resmoke",
 		what:    "the re-smoke of the artefact pulled back from the registry",
 		program: "./scripts/release-resmoke.sh",
-		mayEnv: map[string]string{
-			"REF": "the reference release-resmoke.sh pulls back and smokes",
+		handsEnv: map[string]envSpec{
+			// Held against the reference this run PUSHED, and that is the whole of this
+			// role: a re-smoke of any other reference grades an artefact this run did not
+			// produce, passes, and lets the promotion move `:latest` onto one nothing
+			// pulled back. The push is a cache rebuild - release.yml says so at the push
+			// step - which is the reason the pull-back exists at all.
+			"REF": {heldGatedRef, "the reference release-resmoke.sh pulls back and smokes"},
 		},
 	},
 	{
 		id:      "promote-latest",
 		what:    "the promotion of the floating reference",
 		program: "./scripts/release-promote.sh",
-		mayEnv: map[string]string{
-			"IMAGE":        "the image the promotion moves, compared against docker-compose.yml",
-			"VERSION":      "the version it is retagged onto",
-			floatingTagEnv: "the floating reference it moves; declared here once and read by the script",
+		handsEnv: map[string]envSpec{
+			"IMAGE":   {heldPlannedImage, "the image the promotion moves"},
+			"VERSION": {heldPlannedVersion, "the version it is retagged onto"},
+			// Declared HERE once and read by the script rather than spelled a second time,
+			// and held against the tag docker-compose.yml names - because the floating
+			// reference this moves is precisely the one a user pulls.
+			floatingTagEnv: {heldFloatingTag, "the floating reference it moves"},
 		},
 		needsGrant: true,
 	},
@@ -182,9 +235,14 @@ var releaseRoles = []role{
 		id:      "resolve-compose",
 		what:    "the resolution of the example deployment's reference against the registry",
 		program: "./scripts/resolve-compose-image.sh",
-		mayEnv: map[string]string{
-			"IMAGE":   "the image whose gated digest the compose reference must resolve to",
-			"VERSION": "the version just published",
+		handsEnv: map[string]envSpec{
+			// A11 is "resolve … to the digest the run just gated", so these two ARE the
+			// criterion: `${IMAGE}:${VERSION}` is the reference whose digest the compose
+			// reference is compared against. Hand the step `VERSION: latest` and it
+			// compares the compose reference with itself - a check that cannot fail is
+			// not a check, and A11 is the only enforcement A5 has after the first release.
+			"IMAGE":   {heldPlannedImage, "the image whose gated digest the compose reference must resolve to"},
+			"VERSION": {heldPlannedVersion, "the version just published"},
 		},
 	},
 }
@@ -471,6 +529,10 @@ func (r role) checkStepKeys(s Step) error {
 // This is not fussiness: `MAKEFLAGS: -n` in the workflow's own `env:` block makes
 // `run: make check` print the gate's recipes and execute none of them, with the `run:` line
 // and every field of it untouched.
+//
+// This is the NAME half. The VALUE half is checkHandedValues, which runs once the planning
+// logic has produced the values a declared name is held against; a name that passes here and
+// carries the wrong value is a role held by a step doing the right thing to the wrong object.
 func (r role) checkEnv(wf *Workflow, job Job, s Step) error {
 	sources := []struct {
 		where string
@@ -485,10 +547,10 @@ func (r role) checkEnv(wf *Workflow, job Job, s Step) error {
 			if _, ok := envCheckedAndInertForRoleSteps[k]; ok {
 				continue
 			}
-			if _, ok := r.mayEnv[k]; ok {
+			if _, ok := r.handsEnv[k]; ok {
 				continue
 			}
-			return fmt.Errorf("%s holds the role `%s` (%s), and %s sets `%s`, which this gate has not classified.\nAn environment name in scope for a role step reads CLOSED, because it can change what the invocation does while the invocation reads exactly as it did: `MAKEFLAGS: -n` makes `run: make check` print the gate's recipes and run none of them.\nIf `%s` genuinely cannot, classify it in envCheckedAndInertForRoleSteps with the reason; if this role's own script reads it, declare it in that role's mayEnv. This role reads %v",
+			return fmt.Errorf("%s holds the role `%s` (%s), and %s sets `%s`, which this gate has not classified.\nAn environment name in scope for a role step reads CLOSED, because it can change what the invocation does while the invocation reads exactly as it did: `MAKEFLAGS: -n` makes `run: make check` print the gate's recipes and run none of them.\nIf `%s` genuinely cannot, classify it in envCheckedAndInertForRoleSteps with the reason; if this role's own script reads it, declare it in that role's handsEnv with the value it must carry. This role reads %v",
 				s.Label(), r.id, r.what, src.where, k, k, r.declaredEnv())
 		}
 	}
@@ -551,11 +613,20 @@ func (r role) permittedFields() []string {
 }
 
 func (r role) declaredEnv() []string {
-	out := append(sortedStringsOf(r.mayEnv), sortedStringsOf(envCheckedAndInertForRoleSteps)...)
+	out := append(sortedEnvNames(r.handsEnv), sortedStringsOf(envCheckedAndInertForRoleSteps)...)
 	sort.Strings(out)
 	if out == nil {
 		return []string{"(nothing)"}
 	}
+	return out
+}
+
+func sortedEnvNames(m map[string]envSpec) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
 	return out
 }
 

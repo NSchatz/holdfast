@@ -189,6 +189,24 @@ var jobKeysThatCarryCapability = map[string]string{
 	"secrets":     "secrets passed to a called workflow, including `inherit`, which hands over every secret the repository has",
 }
 
+// workflowKeysCheckedAndCapabilityFree is the same rule one level UP, and it was the level
+// this gate did not have it at: the top-level keys it reasons about were handled one at a
+// time and anything else was simply never looked at. Two of the three levels said so when
+// they met something new and the third did not, which is an asymmetry nobody reading the
+// output could see. GitHub's top-level vocabulary is small and closed, so classifying it is
+// cheap; the point is that the NEXT key GitHub adds arrives as a refusal by name rather than
+// as silence.
+var workflowKeysCheckedAndCapabilityFree = map[string]string{
+	"name":        "a label",
+	"run-name":    "a label for the run",
+	"on":          "the event surface, held to the shapes this gate plans (triggers.go)",
+	"permissions": "the default grant every job inherits unless it states its own, read by EffectiveGrants",
+	"env":         "values every job inherits; scanned for secret references, and refused for a role step unless classified",
+	"defaults":    "the shell and working directory every `run:` step gets - refused outright over a role step",
+	"concurrency": "queueing; it decides when a run happens, not what it may do",
+	"jobs":        "the work, every job's keys checked above",
+}
+
 // stepKeysCheckedAndCapabilityFree, same rule one level down.
 var stepKeysCheckedAndCapabilityFree = map[string]string{
 	"name":              "a label",

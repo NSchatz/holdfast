@@ -362,10 +362,13 @@ question:
   that one token and nothing else; a repository secret's scope is whatever was put in it. The
   scan walks every scalar in the job, so a reference in a key this gate does not model is
   found too.
-- **A job or step key nobody has classified reds by name.** `environment:` hands over that
-  environment's secrets; `container:`/`services:` may carry registry `credentials:`;
+- **A key nobody has classified reds by name, at all three levels.** `environment:` hands over
+  that environment's secrets; `container:`/`services:` may carry registry `credentials:`;
   `secrets: inherit` hands over everything. Each is named with what it grants, and a key in
-  neither list is refused rather than assumed harmless.
+  neither list is refused rather than assumed harmless. The workflow's OWN top-level keys are
+  classified the same way, so a key GitHub adds arrives here as a refusal rather than as
+  silence - two levels saying so and the third staying quiet is an asymmetry a reader of the
+  output cannot see.
 
 The consequence is the point: a step in the `build` job may say `docker push` in any spelling,
 quoting or nesting at all - `sh -c "…"`, `eval`, `exec`, after resetting `PATH` - and publish
@@ -463,9 +466,22 @@ the repository and fails if any defeat did not run.
 `scripts/release-promote.sh`, `scripts/release-resmoke.sh` and
 `scripts/resolve-compose-image.sh` are the bodies of three role steps, and the rule above -
 the gate does not decide what a `run:` step does - covers them too. The gate checks that each
-is in the repository and executable, that its step declares the role, and that the values it
-is HANDED (`IMAGE`, `VERSION`, `FLOATING_TAG`, `REF`) are the ones the workflow's own planning
-logic produced. It does not open them, and it must not.
+is in the repository and executable, that its step declares the role, and that every value its
+`env:` HANDS it is the one this run produced, compared whole: `IMAGE` and `VERSION` against
+the image and version the planning logic wrote to `$GITHUB_OUTPUT`, `REF` against
+`${IMAGE}:${VERSION}` - the reference this run pushed and gated - and `FLOATING_TAG` against
+the tag `docker-compose.yml` itself names, which is the reference a user actually pulls. It
+does not open the scripts, and it must not.
+
+That last part is not decoration, and it was missing until impl-gate ordinal 8 of S0046 asked
+for it. Naming what a value is FOR holds it to nothing: `REF: ${IMAGE}:latest` on the
+re-smoke is one line, it leaves the role held, the invocation untouched and the order sentence
+printing, and it makes the release pull back the PREVIOUS release - which passes, it was
+gated last time - while the artefact this run just pushed is never pulled back at all and
+`:latest` is then promoted onto it. `VERSION: latest` on the resolver is the same line again
+and turns the check below into a comparison of the compose reference's digest with its own,
+which can never fail. A name a role declares and nothing compares now reds by name, the same
+way an unclassified field, key or action input does.
 
 So the gate's own output says only what it checked. It used to end a green run with "the same
 digest, not a rebuild" and with an order sentence describing "the re-smoke of the pulled
@@ -492,6 +508,31 @@ It does NOT: dispatch anything, resolve anything against a live registry (that i
 `scripts/resolve-compose-image.sh`, on the release itself), compare versions between runs,
 know whether a GHCR package is publicly readable, read the bodies of the three release
 scripts above, know whether the `Makefile`'s own `check:` target still does anything (only
-that it still depends on `release-shape`), or know whether the GitHub repository has been
+that it still depends on `release-shape`), see what an EARLIER step in the same job did to
+the environment a later one runs in (below), or know whether the GitHub repository has been
 renamed - only that `go.mod`, `docker-compose.yml` and the workflow agree about the name it
 will use.
+
+**The third residue, and it is the largest one: a step can be neutered by a step above it,
+and nothing structural can see that.** Everything this gate grades about a role step is that
+step's OWN declared surface - its `run:` fields, the environment names in scope for it, the
+values it is handed, its keys, `defaults:`, an action's inputs. GitHub Actions gives an
+earlier step in the same job three ways past all of that. It can write `NAME=value` to the
+file named by `$GITHUB_ENV`, or a directory to `$GITHUB_PATH`, and the runner applies either
+to every LATER step in the job - `MAKEFLAGS=-n` through the first, or a `make` shim in front
+of `PATH` through the second, and the full gate runs nothing while its step reads exactly as
+it does today. It can also simply overwrite a file the later step depends on: a `check:`
+target rewritten to `@true` is as total as either and touches no environment at all. This is
+house style rather than obfuscation - `release.yml` already puts the pinned ffmpeg in front
+of `PATH` that way, three steps above the gate.
+
+Closing it means deciding what an ordinary `run:` script DOES, which is the question this
+whole design exists because nobody could answer - eight fail-opens over six review ordinals,
+by reading and by observing both - and which the conductor's capability ruling retires
+outright. A substring test for `GITHUB_ENV` would be that reader again, and the Makefile case
+proves it would not even be a complete one. So it is written down here instead of pretended
+away. What it costs, precisely: a release can publish having gated LESS than the gate's own
+output says it did. What it does not cost: nothing here can hand a dry run a credential - the
+`build` job holds `contents: read` whatever an earlier step in it wrote - so the capability
+split is untouched, and the reviewer of a change to `release.yml` is the control, which is
+why every step in the publishing job has to be named in the table at the top of this file.

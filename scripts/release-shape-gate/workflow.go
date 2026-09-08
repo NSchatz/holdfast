@@ -44,6 +44,7 @@ type Workflow struct {
 
 	HasPermissions bool                  // whether the key is present at all; absence is not "none"
 	HasDefaults    bool                  // a top-level `defaults:` decides what every `run:` step does
+	Node           *yaml.Node            // the raw top-level mapping - its keys are classified too
 	OnNode         *yaml.Node            // the raw `on:` node - the event surface, graded rather than assumed
 	JobNodes       map[string]*yaml.Node // the raw mapping node of each job
 }
@@ -125,6 +126,7 @@ func LoadWorkflow(path string) (*Workflow, error) {
 	if err := root.Decode(&wf); err != nil {
 		return nil, fmt.Errorf("the release definition CANNOT BE PARSED (%s): %v", path, err)
 	}
+	wf.Node = root
 	wf.HasPermissions = mappingValue(root, "permissions") != nil
 	wf.HasDefaults = mappingValue(root, "defaults") != nil
 	// `on:` is read from the RAW node. YAML resolves a bare `on` key differently between

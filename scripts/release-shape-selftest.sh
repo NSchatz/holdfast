@@ -32,7 +32,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=104
+declared=114
 pass=0; failed=0
 
 repo="$work/repo"
@@ -800,6 +800,85 @@ expect 1 "a promotion that declares no floating tag is red" "does not declare bo
 reset
 
 # =====================================================================================
+# WHAT A ROLE STEP IS HANDED. A role is held by a step that INVOKES what the role names,
+# and the invocation is the step's whole structured surface - which includes the VALUES its
+# `env:` hands the program, not only their names. Naming a value's purpose holds it to
+# nothing: every one of the cases below leaves the role held, the invocation untouched and
+# the order sentence printing, while the step does the right thing to the WRONG OBJECT.
+# =====================================================================================
+
+# --- 49a. The re-smoke pointed at the FLOATING reference. It then pulls back the PREVIOUS
+#          release - which passes, because it was gated last time - while the artefact this
+#          run just pushed is never pulled back at all, and the promotion moves `:latest`
+#          onto it. The push is a cache REBUILD (release.yml says so at that step), which is
+#          the entire reason the pull-back exists.
+in_step "smoke test the PUSHED image" 's|^          REF: .*|          REF: ${{ needs.build.outputs.image }}:latest|'
+changed "$wf" "the re-smoke handed the floating reference"
+expect 1 "a re-smoke of the floating reference rather than the pushed artefact is caught" \
+  "is not the reference this run pushes and gates"
+reset
+
+# --- 49b. And with a reference that has nothing to do with this run at all.
+in_step "smoke test the PUSHED image" 's|^          REF: .*|          REF: ghcr.io/nschatz/holdfast:v0.0.1|'
+changed "$wf" "the re-smoke handed an unrelated reference"
+expect 1 "a re-smoke of a reference this run never produced is caught" \
+  "is not the reference this run pushes and gates"
+reset
+
+# --- 49c. A11 MADE VACUOUS BY ONE WORD. `scripts/resolve-compose-image.sh` compares the
+#          compose reference's digest against `${IMAGE}:${VERSION}`; hand it `VERSION: latest`
+#          and that is the compose reference itself, which the gate has ALREADY proved offline
+#          is the same string. The release then compares a reference with itself and can never
+#          fail - and A11 is the only enforcement A5 has after the first release.
+in_step "must resolve to the gated digest" 's|^          VERSION: .*|          VERSION: latest|'
+changed "$wf" "the resolution handed the floating tag as its version"
+expect 1 "a resolution that would compare the compose reference against itself is caught" \
+  "is not the version the planning logic produced"
+reset
+
+# --- 49d. The softer half: some other version. It fails loudly at release time rather than
+#          silently, and it still resolves nothing about the artefact this run gated.
+in_step "must resolve to the gated digest" 's|^          VERSION: .*|          VERSION: v0.0.1|'
+changed "$wf" "the resolution handed another version"
+expect 1 "a resolution against a version this run never published is caught" \
+  "is not the version the planning logic produced"
+reset
+
+# --- 49e. And the image half of the same reference.
+in_step "must resolve to the gated digest" 's|^          IMAGE: .*|          IMAGE: ghcr.io/someone-else/holdfast|'
+changed "$wf" "the resolution handed another image"
+expect 1 "a resolution against an image this repository does not publish is caught" \
+  "is not the image reference the planning logic produced"
+reset
+
+# --- 49f. The promotion moved onto a version this run did not gate. `:latest` would point at
+#          an artefact no step in this run pushed, smoked or pulled back.
+in_step "promote :latest" 's|^          VERSION: .*|          VERSION: v0.0.1|'
+changed "$wf" "the promotion handed a version this run did not gate"
+expect 1 "a promotion onto a version this run never gated is caught" \
+  "is not the version the planning logic produced"
+reset
+
+# --- 49g. THE OTHER DIRECTION, or every case above would be satisfied by a gate that refuses
+#          any change at all. What is compared is the VALUE, not the expression that produced
+#          it: a differently spelled expression that yields the same reference still holds the
+#          role. (And it stays honest under a repository rename, because the image half is
+#          re-derived from go.mod on every run - spell it wrongly and 49e is what happens.)
+in_step "smoke test the PUSHED image" 's|^          REF: .*|          REF: ghcr.io/nschatz/holdfast:${{ needs.build.outputs.version }}|'
+changed "$wf" "the re-smoke's reference respelt to the same value"
+expect 0 "a respelt expression that hands over the SAME reference still holds the role"
+reset
+
+# --- 49h. And nothing handed at all. A role whose program reads a value that is set at none
+#          of the three levels either dies in the middle of a release or falls back to a
+#          default nobody chose; an absent value is not a harmless one.
+in_step "smoke test the PUSHED image" '/^          REF: /d'
+changed "$wf" "the re-smoke handed no reference at all"
+expect 1 "a role step handed nothing at all is caught, naming the value and what it should be" \
+  "nothing sets it, at any of the three levels"
+reset
+
+# =====================================================================================
 # A4 / A10 - the major-version-zero refusal, and the record it has to name.
 # =====================================================================================
 
@@ -965,6 +1044,23 @@ reset
 replace_line '^  workflow_dispatch:$' '  workflow_dispatch:\n    inputs:\n      publish:\n        type: boolean'
 changed "$wf" "a dispatch input"
 expect 1 "a workflow_dispatch input is caught, because it is a second dispatch shape" "A dispatch is planned as ONE shape"
+reset
+
+# --- 61e. DENY BY DEFAULT AT THE THIRD LEVEL. The job's keys and the step's keys have read
+#          CLOSED since the capability split; the WORKFLOW's own did not - they were handled
+#          one at a time and anything else was never looked at. Two levels saying so and the
+#          third staying quiet is an asymmetry nobody reading the output can see.
+replace_line '^permissions:$' 'some-future-workflow-key: whatever\npermissions:'
+changed "$wf" "an unclassified workflow-level key"
+expect 1 "an unclassified top-level key reads CLOSED and reds by name" \
+  "the top-level key .some-future-workflow-key:., which this gate has not classified"
+reset
+
+# --- 61f. And the other direction, or 61e would be satisfied by a gate that refuses any
+#          top-level key it does not itself use: a classified one still passes.
+replace_line '^permissions:$' 'run-name: release ${{ github.ref_name }}\npermissions:'
+changed "$wf" "a classified workflow-level key"
+expect 0 "a classified top-level key is accepted"
 reset
 
 # =====================================================================================

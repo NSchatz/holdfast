@@ -223,6 +223,15 @@ role DECLARED, with the reason it cannot make that invocation do less. A `-C` is
 and its VALUE is declared too, so `-C .` passes and `-C /tmp` reds. Anything undeclared reds BY NAME, which is
 the difference between this and the six catalogues of bad spellings that lost.
 
+**And a value is not accounted for by naming what it is FOR.** The invocation includes the VALUES a role
+step's `env:` hands its program, so each declared name is HELD against a value produced outside that step -
+the planning logic's own `$GITHUB_OUTPUT`, this module's repository, the event shape, or the tag
+`docker-compose.yml` names - and compared whole. `REF: ${IMAGE}:latest` on the re-smoke is one line that
+leaves the role held, the invocation untouched and the order sentence printing while the release pulls back
+the PREVIOUS artefact and promotes `:latest` onto one nothing gated; `VERSION: latest` on the resolver makes
+its digest comparison a tautology. A declared name held against NOTHING reds by name, which is what makes
+that a rule rather than two spellings.
+
 The order comes from `needs:` and declaration order; two jobs with no path between them are CONCURRENT and the
 gate refuses to order them. An ACT, for the runbook cross-check, is likewise every step in the job that holds
 the grant, identified by its id: nothing about what a step SAYS is consulted, so a new publishing step cannot
@@ -246,7 +255,12 @@ row; a step that must not goes in the job that holds none; an unclassified key, 
 action input gets CLASSIFIED, with what it can hand a job or with the reason it cannot change what an
 invocation does. The residues, stated so nobody has to find them: a planning script that resets `PATH` itself
 can still run a program (a property of running repository code at all, which `make check` already does), and a
-credential written LITERALLY into the workflow rather than through `secrets.` is outside the model.
+credential written LITERALLY into the workflow rather than through `secrets.` is outside the model. The
+largest one is that a step can be neutered by a step ABOVE it in the same job - through `$GITHUB_ENV`,
+`$GITHUB_PATH`, or by overwriting a file it reads - none of which touches the later step's own declared
+surface, and all of which need a reader to see. `docs/release.md`'s "It does NOT" list carries it in full:
+what it costs is a release that publishes having gated less than the output says, and what it does not cost
+is a credential, because the grant is a property of the job.
 The bodies of `scripts/release-promote.sh`, `scripts/release-resmoke.sh` and
 `scripts/resolve-compose-image.sh` are outside it too, by the same rule - the gate checks each is present,
 executable, and handed the values the planning logic produced, and says only that in its output. What they DO
