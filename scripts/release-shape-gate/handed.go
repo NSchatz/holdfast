@@ -113,10 +113,31 @@ var heldAs = map[envHeld]heldForm{
 		parts: []heldPart{{ref: srcGithub + "repository"}},
 		what:  "the repository this run belongs to, which the image reference is derived from",
 	},
+	heldPlannedPrerelease: {
+		parts: []heldPart{{ref: srcPlanOutput + "prerelease"}},
+		what:  "whether the planning logic decided this release is a pre-release",
+	},
 	heldFloatingTag: {
 		literalFrom: composeFile,
 		what:        "the floating reference a release moves, declared here once and held against the tag " + composeFile + " pins, which it must NOT be",
 	},
+}
+
+// heldPosition is the position a value is held FOR. There are two: a declared ROLE
+// (roles.go), and an irreversible ACT that holds no role (acts.go). Everything below serves
+// both, because the question - is this value the planning logic's own output, traced through
+// the `needs:` graph? - is the same question either way, and answering it twice would be two
+// traces to keep in step. What differs is only how the position is named in the refusal.
+type heldPosition struct {
+	id   string
+	what string
+	// phrase is how the position is described after the step's label: "holds the role `x`
+	// (y)" or "is the irreversible act `x` (y)".
+	phrase string
+}
+
+func rolePosition(r role) heldPosition {
+	return heldPosition{id: r.id, what: r.what, phrase: fmt.Sprintf("holds the role `%s` (%s)", r.id, r.what)}
 }
 
 // --- the check ----------------------------------------------------------------------------
@@ -135,24 +156,25 @@ func (g *gate) checkHandedValues(wf *Workflow, roles *Roles) {
 		}
 		s := roles.step(r.id)
 		job := wf.Jobs[s.JobID]
+		pos := rolePosition(r)
 
 		for _, name := range sortedEnvNames(r.handsEnv) {
 			raw, where, present := rawEnvValue(wf, job, s, name)
 			if !present {
-				g.badUnset(s, r, name, r.handsEnv[name])
+				g.badUnset(s, pos, name, r.handsEnv[name])
 				continue
 			}
-			if line, ok := g.holdOne(wf, plan, s, r, name, "`env:`"+where, raw, r.handsEnv[name], pinned, pinErr); ok {
+			if line, ok := g.holdOne(wf, plan, s, pos, name, "`env:`"+where, raw, r.handsEnv[name], pinned, pinErr); ok {
 				held = append(held, line)
 			}
 		}
 		for _, name := range sortedInputNames(r.handsInput) {
 			v, ok := s.With[name]
 			if !ok {
-				g.badUnset(s, r, name, r.handsInput[name])
+				g.badUnset(s, pos, name, r.handsInput[name])
 				continue
 			}
-			if line, ok := g.holdOne(wf, plan, s, r, name, "`with:`", yamlString(v), r.handsInput[name], pinned, pinErr); ok {
+			if line, ok := g.holdOne(wf, plan, s, pos, name, "`with:`", yamlString(v), r.handsInput[name], pinned, pinErr); ok {
 				held = append(held, line)
 			}
 		}
@@ -162,22 +184,22 @@ func (g *gate) checkHandedValues(wf *Workflow, roles *Roles) {
 	}
 }
 
-func (g *gate) badUnset(s Step, r role, name string, spec envSpec) {
+func (g *gate) badUnset(s Step, pos heldPosition, name string, spec envSpec) {
 	form, ok := heldAs[spec.holds]
 	what := "a value this gate has not classified"
 	if ok {
 		what = form.what
 	}
-	g.bad("%s holds the role `%s` (%s), whose act is performed on `%s` - and nothing sets it, at any of the three levels.\nIt has to be %s (%s). A role step handed nothing is a release step that fails in the middle of a release, or worse, one whose program falls back to a default nobody chose.",
-		s.Label(), r.id, r.what, name, what, spec.what)
+	g.bad("%s %s, whose act is performed on `%s` - and nothing sets it, at any of the three levels.\nIt has to be %s (%s). A role step handed nothing is a release step that fails in the middle of a release, or worse, one whose program falls back to a default nobody chose.",
+		s.Label(), pos.phrase, name, what, spec.what)
 }
 
 // holdOne decides one declared name and returns the line the green note prints for it.
-func (g *gate) holdOne(wf *Workflow, plan, s Step, r role, name, where, raw string, spec envSpec, pinned string, pinErr error) (string, bool) {
+func (g *gate) holdOne(wf *Workflow, plan, s Step, pos heldPosition, name, where, raw string, spec envSpec, pinned string, pinErr error) (string, bool) {
 	form, declared := heldAs[spec.holds]
 	if !declared {
-		g.bad("%s holds the role `%s` (%s) and declares `%s`, and this gate has said NOTHING about what that value must be.\nA name whose value nobody decides is the hole this check exists to refuse: the role holds, the invocation is untouched, and the step does the right thing to the wrong object. Give it a row in heldAs, or stop declaring it",
-			s.Label(), r.id, r.what, name)
+		g.bad("%s %s and declares `%s`, and this gate has said NOTHING about what that value must be.\nA name whose value nobody decides is the hole this check exists to refuse: the position holds, the invocation is untouched, and the step does the right thing to the wrong object. Give it a row in heldAs, or stop declaring it",
+			s.Label(), pos.phrase, name)
 		return "", false
 	}
 
@@ -190,17 +212,17 @@ func (g *gate) holdOne(wf *Workflow, plan, s Step, r role, name, where, raw stri
 		}
 		parts, err := splitTemplate(raw)
 		if err != nil {
-			g.bad("%s holds the role `%s` (%s) and its `%s` cannot be read: %v", s.Label(), r.id, r.what, name, err)
+			g.bad("%s %s and its `%s` cannot be read: %v", s.Label(), pos.phrase, name, err)
 			return "", false
 		}
 		if len(parts) != 1 || parts[0].ref != "" {
-			g.bad("%s holds the role `%s` (%s) and sets `%s: %s`, which carries an expression.\n`%s` is %s: it is the one value a release DECLARES rather than derives, so it is a plain literal here and it is held against %s. An expression would move it somewhere this gate cannot follow.",
-				s.Label(), r.id, r.what, name, raw, name, form.what, form.literalFrom)
+			g.bad("%s %s and sets `%s: %s`, which carries an expression.\n`%s` is %s: it is the one value a release DECLARES rather than derives, so it is a plain literal here and it is held against %s. An expression would move it somewhere this gate cannot follow.",
+				s.Label(), pos.phrase, name, raw, name, form.what, form.literalFrom)
 			return "", false
 		}
 		if raw == pinned {
-			g.bad("%s holds the role `%s` (%s) and sets `%s: %s`, which is the very tag %s PINS.\n`%s` is %s. That tag is RETAGGED onto each newly gated release, so the example deployment's tag and the digest pinned beside it would disagree the moment the next release lands - and retagging a version somebody already pulled modifies the contents of a released version, which semver.org forbids. The example deployment pins a version; the floating reference is published, never depended on.",
-				s.Label(), r.id, r.what, name, raw, form.literalFrom, name, form.what)
+			g.bad("%s %s and sets `%s: %s`, which is the very tag %s PINS.\n`%s` is %s. That tag is RETAGGED onto each newly gated release, so the example deployment's tag and the digest pinned beside it would disagree the moment the next release lands - and retagging a version somebody already pulled modifies the contents of a released version, which semver.org forbids. The example deployment pins a version; the floating reference is published, never depended on.",
+				s.Label(), pos.phrase, name, raw, form.literalFrom, name, form.what)
 			return "", false
 		}
 		return fmt.Sprintf("%s %s `%s` = %s (%s)", s.Label(), where, name, raw, form.what), true
@@ -208,12 +230,12 @@ func (g *gate) holdOne(wf *Workflow, plan, s Step, r role, name, where, raw stri
 
 	parts, err := splitTemplate(raw)
 	if err != nil {
-		g.bad("%s holds the role `%s` (%s) and its `%s` cannot be read: %v", s.Label(), r.id, r.what, name, err)
+		g.bad("%s %s and its `%s` cannot be read: %v", s.Label(), pos.phrase, name, err)
 		return "", false
 	}
 	if len(parts) != len(form.parts) {
-		g.bad("%s holds the role `%s` (%s) and is handed `%s: %s`, which is not %s.\nit has to BE: %s\nit is:       %s\nA role step's object is not COMPARED with a value, it has to BE the planning logic's own output: this gate traces the expression back through the `needs:` graph to the step holding the `plan` role. Nothing here is compared with a sample, so no sample can be copied into it (S0046 F22, F23, F26).",
-			s.Label(), r.id, r.what, name, raw, form.what, formSketch(form), sketchOf(parts))
+		g.bad("%s %s and is handed `%s: %s`, which is not %s.\nit has to BE: %s\nit is:       %s\nA release step's object is not COMPARED with a value, it has to BE the planning logic's own output: this gate traces the expression back through the `needs:` graph to the step holding the `plan` role. Nothing here is compared with a sample, so no sample can be copied into it (S0046 F22, F23, F26).",
+			s.Label(), pos.phrase, name, raw, form.what, formSketch(form), sketchOf(parts))
 		return "", false
 	}
 	var traced []string
@@ -221,26 +243,26 @@ func (g *gate) holdOne(wf *Workflow, plan, s Step, r role, name, where, raw stri
 		got := parts[i]
 		if want.ref == "" {
 			if got.ref != "" || got.lit != want.lit {
-				g.bad("%s holds the role `%s` (%s) and is handed `%s: %s`, which is not %s.\nit has to BE: %s\nit is:       %s\nThe separator is part of the object: %q was expected here.",
-					s.Label(), r.id, r.what, name, raw, form.what, formSketch(form), sketchOf(parts), want.lit)
+				g.bad("%s %s and is handed `%s: %s`, which is not %s.\nit has to BE: %s\nit is:       %s\nThe separator is part of the object: %q was expected here.",
+					s.Label(), pos.phrase, name, raw, form.what, formSketch(form), sketchOf(parts), want.lit)
 				return "", false
 			}
 			continue
 		}
 		if got.ref == "" {
-			g.bad("%s holds the role `%s` (%s) and is handed `%s: %s`, which is not %s: %q is a LITERAL where %s belongs.\nit has to BE: %s\nit is:       %s\nA literal is not held to anything - it is a value the step spells for itself, so a release cut at any other version performs this act on whatever the literal names, for ever, with every other assertion in this gate still green. Name the output instead of copying its value (S0046 F22, F23, F26).",
-				s.Label(), r.id, r.what, name, raw, form.what, got.lit, want.ref, formSketch(form), sketchOf(parts))
+			g.bad("%s %s and is handed `%s: %s`, which is not %s: %q is a LITERAL where %s belongs.\nit has to BE: %s\nit is:       %s\nA literal is not held to anything - it is a value the step spells for itself, so a release cut at any other version performs this act on whatever the literal names, for ever, with every other assertion in this gate still green. Name the output instead of copying its value (S0046 F22, F23, F26).",
+				s.Label(), pos.phrase, name, raw, form.what, got.lit, want.ref, formSketch(form), sketchOf(parts))
 			return "", false
 		}
 		src, err := traceRef(wf, plan, s.JobID, got.ref, 0)
 		if err != nil {
-			g.bad("%s holds the role `%s` (%s) and is handed `%s: %s`, and this gate CANNOT TRACE `${{ %s }}` back to the planning logic: %v\nAn expression this gate cannot follow reads CLOSED, exactly as an unclassified field, key or input does: it may name anything at all, including a value some earlier step invented.",
-				s.Label(), r.id, r.what, name, raw, got.ref, err)
+			g.bad("%s %s and is handed `%s: %s`, and this gate CANNOT TRACE `${{ %s }}` back to the planning logic: %v\nAn expression this gate cannot follow reads CLOSED, exactly as an unclassified field, key or input does: it may name anything at all, including a value some earlier step invented.",
+				s.Label(), pos.phrase, name, raw, got.ref, err)
 			return "", false
 		}
 		if src != want.ref {
-			g.bad("%s holds the role `%s` (%s) and is handed `%s: %s`, which names %s where %s belongs.\nit has to BE: %s\nit is:       %s\nThis role's act is performed on %s, and naming a different output performs it on a different object while the invocation reads exactly as it should.",
-				s.Label(), r.id, r.what, name, raw, src, want.ref, formSketch(form), sketchOf(parts), form.what)
+			g.bad("%s %s and is handed `%s: %s`, which names %s where %s belongs.\nit has to BE: %s\nit is:       %s\nThis position's act is performed on %s, and naming a different output performs it on a different object while the invocation reads exactly as it should.",
+				s.Label(), pos.phrase, name, raw, src, want.ref, formSketch(form), sketchOf(parts), form.what)
 			return "", false
 		}
 		traced = append(traced, fmt.Sprintf("${{ %s }} -> %s", got.ref, src))
@@ -248,15 +270,16 @@ func (g *gate) holdOne(wf *Workflow, plan, s Step, r role, name, where, raw stri
 	return fmt.Sprintf("%s %s `%s` = %s\n        %s (%s)", s.Label(), where, name, raw, strings.Join(traced, ", "), form.what), true
 }
 
-// checkPlanProducesEverythingARoleIsHeldTo closes the other end of the trace. The references
-// above are resolved against the workflow's own outputs graph, which says a value EXISTS; only
-// the executed planning logic says it was actually written. An output a role's object is built
-// from and that the plan never writes is an empty string at release time.
-func (g *gate) checkPlanProducesEverythingARoleIsHeldTo(roles *Roles, p *planned) {
+// checkPlanProducesEverythingAReleaseStepIsHeldTo closes the other end of the trace. The
+// references above are resolved against the workflow's own outputs graph, which says a value
+// EXISTS; only the executed planning logic says it was actually written. An output a role's or
+// an act's object is built from and that the plan never writes is an empty string at release
+// time.
+func (g *gate) checkPlanProducesEverythingAReleaseStepIsHeldTo(roles *Roles, p *planned) {
 	plan := roles.step("plan")
 	jp, ok := p.jobs[plan.JobID]
 	if !ok {
-		g.bad("%s is in job %q, which %s does not plan, so nothing produced the outputs every other role step's object is built from", plan.Label(), plan.JobID, p.shape.label)
+		g.bad("%s is in job %q, which %s does not plan, so nothing produced the outputs every other release step's object is built from", plan.Label(), plan.JobID, p.shape.label)
 		return
 	}
 	var named []string
@@ -271,7 +294,7 @@ func (g *gate) checkPlanProducesEverythingARoleIsHeldTo(roles *Roles, p *planned
 				continue
 			}
 			if jp.outs[key] == "" {
-				g.bad("a role step's object is built from `%s`, and on %s the planning logic wrote no `%s` output (it wrote %s).\nEvery reference this release pushes, re-smokes, promotes and resolves is built from those outputs, so an unwritten one is an EMPTY string in the middle of a release. %s must write it to $GITHUB_OUTPUT",
+				g.bad("a release step's object is built from `%s`, and on %s the planning logic wrote no `%s` output (it wrote %s).\nEvery reference this release pushes, re-smokes, promotes, resolves and cuts a release at is built from those outputs, so an unwritten one is an EMPTY string in the middle of a release. %s must write it to $GITHUB_OUTPUT",
 					part.ref, p.shape.label, key, outputsOf(p), plan.Label())
 				continue
 			}
@@ -279,7 +302,7 @@ func (g *gate) checkPlanProducesEverythingARoleIsHeldTo(roles *Roles, p *planned
 		}
 	}
 	if len(named) > 0 && !g.failed {
-		g.note("the planning logic really writes every output a role step's object is traced to (%s), so no traced reference is an empty string at release time", strings.Join(named, ", "))
+		g.note("the planning logic really writes every output a release step's object is traced to (%s), so no traced reference is an empty string at release time", strings.Join(named, ", "))
 	}
 }
 

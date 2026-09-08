@@ -33,7 +33,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=132
+declared=140
 pass=0; failed=0
 
 repo="$work/repo"
@@ -1052,6 +1052,82 @@ reset
 in_step "push the multi-arch image" '/^          tags: /d'
 changed "$wf" "the push handed no tags at all"
 expect 1 "a version-tag push that names no reference to publish is red" "declares no .tags:. input"
+reset
+
+# =====================================================================================
+# THE ACTS THAT HOLD NO ROLE. Every case above is a ROLE step, and the role table is not
+# the inventory of irreversible acts - the inventory is every step in the job that holds
+# the grant. `github-release` cuts the GitHub release and holds no role, so nothing held
+# the values its `env:` hands `gh` (S0065, closing S0046 F28): the notes it publishes tell
+# every reader which image to pull, and pinned to a literal they name that image on every
+# release after the edit, with the order, the grant and the runbook all still green.
+# acts.go is the hold; these are the same five questions asked of it.
+# =====================================================================================
+
+# --- 49u. The literal. `VERSION` and `PRERELEASE` are left alone, so nothing here is
+#          satisfied by holding the version instead.
+in_step "cut the GitHub release" 's|^          IMAGE: .*|          IMAGE: ghcr.io/nschatz/holdfast|'
+changed "$wf" "the release cut handed a hard-coded image"
+expect 1 "a GitHub release whose notes name a hard-coded image is caught, by step and by key" \
+  "github-release.*is handed .IMAGE"
+reset
+
+# --- 49v. A DIFFERENT source the gate can nonetheless trace. `github.repository` is what the
+#          planning logic DERIVES the image from, so this is the mutation that reads almost
+#          right; the value has to BE the output, not resemble it.
+in_step "cut the GitHub release" 's|^          IMAGE: .*|          IMAGE: ${{ github.repository }}|'
+changed "$wf" "the release cut handed the event's own repository"
+expect 1 "a release cut against a traceable but different source is caught" \
+  "names the workflow event's own repository where the planning logic's own output image belongs"
+reset
+
+# --- 49w. Absence is not satisfaction: `gh` would interpolate an empty `${IMAGE}` into the
+#          notes and publish a reference nobody can pull.
+in_step "cut the GitHub release" '/^          IMAGE: /d'
+changed "$wf" "the release cut handed no image at all"
+expect 1 "a release cut with no image declared at any of the three levels is caught" \
+  "nothing sets it, at any of the three levels"
+reset
+
+# --- 49x. An expression the gate cannot follow. GitHub hands this over as the empty string
+#          at release time - not an error, just notes naming nothing.
+in_step "cut the GitHub release" 's|^          IMAGE: .*|          IMAGE: ${{ steps.registry-login.outputs.image }}|'
+changed "$wf" "the release cut handed a value an earlier step invented"
+expect 1 "a release cut against an unfollowable expression reads CLOSED" "CANNOT TRACE"
+reset
+
+# --- 49y. THE HONEST OTHER DIRECTION, or every case above would be satisfied by a check that
+#          accepts one spelling. The SAME plan output through a job output nobody has seen.
+replace_line '^      image: .*steps[.]plan[.]outputs[.]image' '      image: ${{ steps.plan.outputs.image }}\n      notes_image: ${{ steps.plan.outputs.image }}'
+in_step "cut the GitHub release" 's|^          IMAGE: .*|          IMAGE: ${{ needs.build.outputs.notes_image }}|'
+changed "$wf" "the release cut reaching the same plan output through another job output"
+expect 0 "a release cut reaching the SAME planning output through a new job output is accepted"
+reset
+
+# --- 49z. DENY BY DEFAULT over the act's whole environment, not just the names it declares.
+#          A name nobody classified is how the next object arrives without anybody deciding
+#          what it must be - the F22/F23 shape, one step further along the job.
+in_step "cut the GitHub release" 's|^          GH_TOKEN: .*|          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n          NOTES_IMAGE: ghcr.io/nschatz/holdfast|'
+changed "$wf" "an unclassified environment name on the release cut"
+expect 1 "an environment name nobody classified on an irreversible act reads CLOSED" \
+  "sets .NOTES_IMAGE. in its own .env:., and this gate has not classified it"
+reset
+
+# --- 49aa. THE CREDENTIAL. `GH_TOKEN` is what AUTHORISES the act rather than what it is
+#           performed on, so it is held to the one credential `permissions:` bounds. A
+#           repository secret put there sits in the one job where holding a capability is
+#           expected, so no other assertion in this gate would notice it.
+in_step "cut the GitHub release" 's|^          GH_TOKEN: .*|          GH_TOKEN: ${{ secrets.RELEASE_PAT }}|'
+changed "$wf" "the release cut authenticated with an unbounded secret"
+expect 1 "a credential on an act that is not the scoped token is caught" "has to BE the scoped token"
+reset
+
+# --- 49ab. And the declaration must apply to SOMETHING. Rename the step and every hold above
+#           is asked of nothing at all, which is the vacuous pass this gate exists to refuse.
+in_step "cut the GitHub release" 's|^        id: github-release$|        id: cut-release|'
+changed "$wf" "the release-cutting act renamed out from under its declaration"
+expect 1 "an act this gate holds values for that no step declares is red" \
+  "declares .id: github-release."
 reset
 
 # =====================================================================================

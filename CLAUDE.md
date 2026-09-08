@@ -244,7 +244,15 @@ own output. The value is an EXPRESSION naming it, traced back through the `needs
 the `plan` role, and EVERY literal reds - as does any expression the trace cannot follow (`env.`, `inputs.`,
 a function call, a job this one does not `needs:`, an output the producing job never declares). No sample is
 in the question, so no sample can be copied into it. The gate follows the graph rather than matching text:
-the same output reached through a different job output passes, and so does a respelling. `FLOATING_TAG` is
+the same output reached through a different job output passes, and so does a respelling. **The role table is
+not the inventory of irreversible acts**, and S0065 extended that hold to the acts that hold no role - every
+step in the job that carries the grant, which is the same inventory `docs/release.md` has to name. The
+release cut is the one that mattered: its notes tell every reader which image to pull, so a literal `IMAGE:`
+there names an image the run never gated on every later release, with the order, the grant and the runbook
+all still green. An act's environment is deny-by-default like a role's, and `GH_TOKEN` is held to the one
+credential `permissions:` bounds. An act is NOT a role: its invocation is not accounted for field by field,
+because making it one would have moved `gh release create` into a new script on the one-way-door path to
+close a hole that is entirely about a value. `FLOATING_TAG` is
 the one exception, because it is the one value a release DECLARES rather than derives: it is a literal on
 purpose and is held against the tag `docker-compose.yml` PINS - which it must NOT be - and an expression
 there reds. That hold used to be an equality, back when the example deployment pulled `:latest` and the

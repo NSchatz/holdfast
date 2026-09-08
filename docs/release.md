@@ -515,6 +515,35 @@ so the same reference reached through a different job output is accepted and a r
 the same reference is accepted; that is the honest other direction, and `make
 release-shape-selftest` drives both.
 
+**AND THE ROLE TABLE IS NOT THE INVENTORY OF IRREVERSIBLE ACTS.** Everything above is keyed on
+the eight declared ROLES, and the acts are the eleven rows at the top of this file: every step
+in the job that holds the grant, whatever it says it does. Eight of those hold no role, and for
+eight of them nothing looked at the values their `env:` hands their programs at all.
+`publish/github-release` is where that was not academic - its notes tell every reader of a
+release which container image to pull, so `IMAGE: ghcr.io/nschatz/holdfast` in place of the
+expression is one line that leaves the order holding, the grant holding, this runbook naming
+every act and every other assertion in the gate green, while every release after the edit
+names an image that run never gated. It is the harm `REF: ${IMAGE}:latest` did to the
+re-smoke, three steps further down the same job.
+
+So the hold extends to the ACTS (`scripts/release-shape-gate/acts.go`), through the same trace
+and the same `needs:` graph: `IMAGE`, `VERSION` and `PRERELEASE` on the release cut each have
+to BE the planning output they name, every environment name in scope for an act is
+DENY-BY-DEFAULT and reds by name unless somebody classified it, and `GH_TOKEN` - which
+authorises the act rather than being what it is performed on - is held to `secrets.GITHUB_TOKEN`,
+the one credential the `permissions:` block above actually bounds. An act this gate holds values
+for and that no step in a granted job declares reds too, so renaming the step cannot silently
+retire the hold.
+
+What that route deliberately does NOT buy, because the alternative was worse: an act is not a
+ROLE, so its invocation is not accounted for field by field. Making it one would mean moving
+`gh release create` into a new `scripts/release-cut.sh` - a role step's `run:` must be one line
+whose first field is the program - which is a new file on the one-way-door path, running for
+real on the next tag push, to close a hole that is entirely about a value. The gate now changes
+no character of what a release EXECUTES. The residue is the standing one below: a literal
+written into the notes text INSIDE that `run:` script is still invisible, because the gate does
+not read a step's text and must not.
+
 `FLOATING_TAG` is the one exception and the reason is written into it: the floating reference
 is the one value a release DECLARES rather than derives, so it is a literal on purpose, read
 here and by `scripts/release-promote.sh` and `scripts/resolve-compose-image.sh` instead of
@@ -565,7 +594,10 @@ self-test cases above are where that property lives instead.
 It does NOT: dispatch anything, resolve anything against a live registry (that is
 `scripts/resolve-compose-image.sh`, on the release itself), compare versions between runs,
 know whether a GHCR package is publicly readable, read the bodies of the three release
-scripts above, know whether the `Makefile`'s own `check:` target still does anything (only
+scripts above, see a reference written into the BODY of an act's own inline `run:` script
+rather than handed to it through `env:` (`publish/github-release` is the one such body, and
+its notes text interpolates the values held above - a literal spelled inside it instead is
+the same unreadable-shell residue, not a second one), know whether the `Makefile`'s own `check:` target still does anything (only
 that it still depends on `release-shape`), see what an EARLIER step in the same job did to
 the environment a later one runs in (below), or know whether the GitHub repository has been
 renamed - only that `go.mod`, `docker-compose.yml` and the workflow agree about the name it
