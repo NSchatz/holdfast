@@ -113,6 +113,24 @@ type Outcome struct {
 	VmafMin   *float64
 	VmafModel string
 
+	// VmafPixFmt is the single pixel format BOTH streams were converted to before
+	// they were compared (GATE-4) - named by holdfast, never left to libavfilter's
+	// automatic negotiation. It belongs on the row for the same reason VmafModel
+	// does: `pixel_format: auto` floors output bit depth at 10, so an 8-bit source
+	// and its 10-bit replacement are routinely compared after a conversion, and
+	// upconverting the reference is not the same measurement as downconverting the
+	// output. A score whose comparison format is unrecorded is a score whose meaning
+	// cannot be stated afterwards.
+	//
+	// VmafChroma is the worst (sub)sampled frame's PSNR over the chroma planes, and
+	// VmafChromaMetric names what that number is and in what unit. The VMAF model is
+	// luma-only, so this is the ONLY figure on the row that says anything at all
+	// about whether the colour survived. Pointer/"" for the same reason as everything
+	// else here: 0.0 dB is an obliterated chroma plane, not a missing measurement.
+	VmafPixFmt       string
+	VmafChroma       *float64
+	VmafChromaMetric string
+
 	// SourceBytes and OutputBytes are the file sizes either side of the swap (Done).
 	// BOTH are persisted rather than only their difference: that is what makes a
 	// durable lifetime reclaimed total DERIVABLE (TRANSCODE-14 computes and shows it;
@@ -428,6 +446,90 @@ type Resolution struct {
 	RemovalError           string
 }
 
+// Prune is what one retention pass actually did (LEDGER-5). It is returned rather than
+// logged inside the store so the caller can report it: a prune is the one IRREVERSIBLE
+// act in this package, and an operator is owed the count.
+//
+// Removed is how many terminal rows were deleted. ReclaimedCarried is the number of bytes
+// those rows contributed to the lifetime reclaimed total, moved into the durable
+// carry-forward BEFORE they were deleted, so the published total does not move. Kept is
+// how many rows the pass EXAMINED and refused to remove because removing them would change
+// what the engine does with a file: a job parked at max_failures, or a row Prunable
+// declined. It counts examined rows, not the whole table - a pass stops offering rows the
+// moment enough are approved to meet the retention - so it is "what this pass refused",
+// which is the figure that tells an operator why a table stayed large.
+type Prune struct {
+	Removed          int64
+	ReclaimedCarried int64
+	Kept             int64
+}
+
+// Prunable answers the one question the retention pass cannot answer for itself: may the
+// terminal row for path+fingerprint be removed WITHOUT changing what the engine would do
+// with that file?
+//
+// It exists because a terminal row is a DECISION and not only a record. Claim refuses a
+// done or skipped row outright, and the skip guards that would re-derive the same verdict
+// run after Claim, under whatever configuration is current - so a pruned row re-derives
+// its own verdict only while the configuration it was taken under has not moved. Answering
+// it means knowing whether that file is still in the library, which is a question about
+// the filesystem, and this package never touches the filesystem (see the package comment:
+// the store records job STATE and nothing else). So the caller answers, and internal/engine
+// is the caller that can.
+//
+// TRUE means "removing this row can cause no encode": the file that row decided is no
+// longer in the library. FALSE is the safe answer and must be the answer whenever the
+// caller cannot tell.
+type Prunable func(path, fingerprint string, s Status) bool
+
+// RowTotal is a count of matching rows in the LEDGER, beside the capped rows a response
+// actually ships (LEDGER-5). It exists because /api/queue and /api/history return at most
+// a few hundred rows and, until now, said nothing about what they were a few hundred OF -
+// leaving a client to derive it, which is exactly what a client cannot do correctly.
+//
+// Count is the number of matching rows. Err is this figure's OWN failure, carried the way
+// an Aggregate carries one: a total that could not be read must be STATED as unreadable
+// beside rows that still ship, never reported as a total of zero.
+type RowTotal struct {
+	Coverage Coverage
+	Count    int64
+	Err      error
+}
+
+// Retained is one original the undo window is holding: a SECOND LINK to the bytes a
+// swap replaced, plus everything a restore needs to put them back safely (UNDO-6).
+//
+// It is not an Outcome and deliberately does not live on a jobs row: a jobs row is
+// keyed (path, fingerprint) and the pre-swap row is pruned by the swap itself, so a
+// retention recorded there would be deleted by the event it exists to undo.
+//
+// SourcePath is the path the original is restored TO - the file the swap consumed.
+// SwappedPath is what the swap produced: the same path for an in-place rename, a
+// different one when the container extension changed. RetainedPath is the second link
+// holding the original's bytes alive.
+//
+// SwappedFingerprint is the size:mtime of SwappedPath taken immediately after the
+// swap. A restore compares it against what is there NOW and refuses when the two
+// disagree, so an operator can never overwrite content this tool did not write.
+//
+// SourceBytes is the size of the retained original, which is what the undo window is
+// HOLDING - space a reclaimed figure must not count as returned, because it has not
+// been.
+//
+// RestoredAt is nil until the original is put back; a RELEASED retention is deleted
+// outright rather than flagged, so "something is retained for this path" is exactly
+// "a row exists whose RestoredAt is nil".
+type Retained struct {
+	SourcePath         string
+	SwappedPath        string
+	RetainedPath       string
+	SourceBytes        int64
+	SwappedFingerprint string
+	RetainedAt         int64
+	ExpiresAt          int64
+	RestoredAt         *int64
+}
+
 // Store is the persistent job ledger. Every method is safe for concurrent use by
 // multiple workers (goroutines) within one process.
 type Store interface {
@@ -487,7 +589,58 @@ type Store interface {
 	// figure must be built on instead of a per-process counter that resets to 0 on
 	// every restart. Rows written before the outcome columns existed carry no sizes
 	// and are simply not counted (never counted as 0-reclaimed). A pure read.
+	//
+	// It is the sum over the live rows PLUS the durable carry-forward a prune leaves
+	// behind (LEDGER-5), so bounding the ledger cannot make this figure run backwards.
 	ReclaimedTotal(ctx context.Context) (int64, error)
+
+	// PruneTerminal enforces a ledger retention of at most maxRows TERMINAL rows,
+	// deleting the oldest beyond it (LEDGER-5). maxRows <= 0 is retention DISABLED and
+	// is a no-op that reads nothing and deletes nothing - the shipped default, and the
+	// behaviour of a configuration that never mentions retention.
+	//
+	// Three rules govern what it may take, and every one of them is a criterion this
+	// method exists to satisfy rather than defensive taste:
+	//
+	//  1. A row's contribution to the durable lifetime reclaimed total is CARRIED FORWARD
+	//     into ledger_totals in the same transaction that deletes it, so the published
+	//     total is identical either side of a prune - on the running server, whose
+	//     baseline is frozen at startup, and after the restart that re-reads it. A row
+	//     that still contributed is therefore never lost, only relocated.
+	//  2. A row prunable says no to is KEPT. A terminal row is a decision the engine
+	//     enforces through Claim, so removing the row of a file that is still in the
+	//     library hands that file to the encoder whenever the configuration the verdict
+	//     was taken under has since moved. Only the caller can see the library; see
+	//     Prunable. A nil prunable keeps every row.
+	//  3. A FAILED row whose fail_count has reached maxFailures is PARKED: the engine
+	//     refuses to claim it, and deleting it would reset that accounting and hand the
+	//     file straight back to the encoder on the next scan. This one the store can see
+	//     in its own columns, so it is refused here as well as by rule 2 - the one
+	//     irreversible act in this package does not rest on a single check.
+	//
+	// Rules 2 and 3 are counted in Prune.Kept and are why the ledger may sit ABOVE
+	// maxRows: a retention that cannot be met without causing an encode is not met, and
+	// the count is reported rather than hidden.
+	//
+	// The pass runs in BATCHES, each its own transaction: a 300,000-row ledger must not
+	// hold the single serialized write connection for the length of one enormous DELETE,
+	// and a failure part way through leaves every row it did not remove in place with the
+	// total already correct for the rows it did.
+	PruneTerminal(ctx context.Context, maxRows, maxFailures int, prunable Prunable) (Prune, error)
+
+	// CountRows counts the rows matching statuses, over the WHOLE table - the total a
+	// capped response was capped against (LEDGER-5). An empty statuses counts every row.
+	//
+	// It is its own read, not a projection of Summary, for the reason the aggregates are
+	// their own reads: /api/queue and /api/history must still return their rows when this
+	// figure cannot be read, and a shared failure path would take the rows down with it.
+	CountRows(ctx context.Context, statuses []Status) RowTotal
+
+	// EachTerminal streams every terminal row, oldest transition first, calling fn once
+	// per row. It is the export's read (LEDGER-5): a ledger that has outgrown a capped
+	// API response has also outgrown a []Job, so the rows are handed over one at a time
+	// and never accumulated. fn's error stops the walk and is returned. A pure read.
+	EachTerminal(ctx context.Context, fn func(Job) error) error
 
 	// Aggregates computes the published whole-ledger figures - each over EVERY
 	// matching row in the table, never over the capped rows List ships. It is a pure
@@ -559,6 +712,45 @@ type Store interface {
 
 	// IncidentByID returns one incident.
 	IncidentByID(ctx context.Context, id int64) (SwapIncident, bool, error)
+
+	// HeldByUndoWindow is the number of bytes the undo window is still HOLDING: the
+	// sum of SourceBytes over every retention that has neither been restored nor
+	// released (UNDO-6). It is reported BESIDE ReclaimedTotal and never folded into
+	// it, because a retained original's bytes have not been returned to the
+	// filesystem - the second link is still there - and a reclaimed figure that
+	// counted them would tell an operator space is free while it is not. It falls to
+	// zero of its own accord as the window closes and the releases run. A pure read.
+	HeldByUndoWindow(ctx context.Context) (int64, error)
+
+	// Retain records one retained original (UNDO-6), replacing any earlier record for
+	// the same source path - an earlier one can only be a retention that was already
+	// restored (a live one blocks the swap, a released one is deleted), and that
+	// history is superseded by the swap now being recorded.
+	Retain(ctx context.Context, r Retained) error
+
+	// GetRetained returns the retention record for path, which may be named EITHER by
+	// its source path or by the path the swap produced: after a container-changing
+	// swap the only name an operator can see in their library is the latter, and being
+	// asked to restore the file that is actually there must not be a miss. Rows that
+	// have already been restored ARE returned (exists=true) so a caller can report the
+	// restore rather than an absence; a released retention is gone from the table
+	// entirely and reads as exists=false.
+	GetRetained(ctx context.Context, path string) (r Retained, exists bool, err error)
+
+	// ListRetained returns every LIVE retention (not yet restored), oldest expiry
+	// first. It is what the release sweep walks and what `holdfast restore` lists.
+	ListRetained(ctx context.Context) ([]Retained, error)
+
+	// MarkRestored stamps a retention as restored at unix second at. The row is KEPT:
+	// the restore is a ledger fact ("it happened, and when") and deleting it would
+	// leave the ledger reporting only the swap that has just been undone.
+	MarkRestored(ctx context.Context, sourcePath string, at int64) error
+
+	// DropRetained deletes a retention record outright. Used by the release sweep once
+	// the retained name is gone, and by a restore that finds the retained original no
+	// longer on disk: in both cases there is nothing left to restore, and a record that
+	// promises one would be a promise the tool cannot keep.
+	DropRetained(ctx context.Context, sourcePath string) error
 
 	// Close releases the underlying database handle.
 	Close() error

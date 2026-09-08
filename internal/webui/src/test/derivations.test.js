@@ -115,13 +115,35 @@ test("fmtScore renders a VMAF score to one decimal", () => {
   assert.equal(d.fmtScore(100), "100.0");
 });
 
-test("sumStatuses rolls the summary up over one table's states", () => {
-  const sum = { pending: 4, probing: 1, encoding: 2, verifying: 1, done: 9, skipped: 3, failed: 2 };
-  assert.equal(d.sumStatuses(sum, d.QUEUE_STATUSES), 8);
-  assert.equal(d.sumStatuses(sum, d.TERMINAL_STATUSES), 14);
-  assert.equal(d.sumStatuses({}, d.QUEUE_STATUSES), 0, "an empty ledger rolls up to a counted zero");
-  assert.equal(d.sumStatuses({ done: 2, encoding: "many" }, d.TERMINAL_STATUSES), 2,
-    "a non-numeric member contributes nothing rather than NaN");
+test("the page carries no way to derive the total a view was capped against", () => {
+  // LEDGER-5 removed the summary roll-up outright, which is a stronger statement than a
+  // test that the renderer stopped calling it: there is nothing left to call.
+  //
+  // This reads the MODULE SOURCES, and it has to. Asking load()'s api object instead
+  // (`assert.equal(d.sumStatuses, undefined)`) would measure load.js: that object is built
+  // from a fixed NAMES list, so ANY identifier the list does not mention is undefined on it
+  // whatever the modules declare - the assertion would pass unchanged against a page that
+  // had the roll-up back. And the scan covers every SHIPPED module, not just the two that
+  // load here, because a roll-up reintroduced in the renderer is the same defect.
+  const shipped = moduleSource("modules.txt").split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "" && !l.startsWith("#"));
+  assert.ok(shipped.length >= DERIVATION_MODULES.length,
+    "modules.txt names " + shipped.length + " modules; this scan would be vacuous");
+
+  const sources = shipped.map((name) => [name, moduleSource(name)]);
+  // Anti-vacuity: the scan is reading real module text, so a name that IS there is found.
+  // Without this, a mis-resolved path would read as "the identifier is gone" every time.
+  assert.ok(sources.some(([, src]) => src.includes("capNoteText")),
+    "the scan found no module declaring capNoteText, so it is not reading the shipped sources");
+
+  for (const [name, src] of sources) {
+    for (const gone of ["sumStatuses", "QUEUE_STATUSES", "TERMINAL_STATUSES"]) {
+      assert.ok(!src.includes(gone), name + " still carries " + gone
+        + ": the server reports the total, and a client-side roll-up beside it is a second answer"
+        + " to the same question for a later reader to reach for");
+    }
+  }
 });
 
 test("sizeFigures derives before, after and the percent reclaimed", () => {
@@ -173,13 +195,69 @@ test("guardLabel names each skip guard and never hides an unknown one", () => {
   assert.equal(d.guardLabel("low-bitrate"), "already efficient (low bitrate)");
   assert.equal(d.guardLabel("already-at-target-codec"), "already at target codec");
   assert.equal(d.guardLabel("a-guard-added-next-week"), "a-guard-added-next-week");
+  // A bucket key is attacker-influencable text off the wire, and every one of these
+  // names something on Object.prototype. An inherited lookup would put a function body
+  // (or "[object Object]") on screen where a guard name belongs; the label is an OWN
+  // property or it is the key itself.
+  for (const k of ["constructor", "toString", "hasOwnProperty", "__proto__", "valueOf"]) {
+    assert.equal(d.guardLabel(k), k, "guardLabel(" + k + ") must fall back to the key itself");
+  }
 });
 
-test("capNoteText claims a cap only when the ledger holds more than we were handed", () => {
-  assert.equal(d.capNoteText(200, 200), "");
-  assert.equal(d.capNoteText(200, 12), "");
-  assert.ok(d.capNoteText(200, 1500).startsWith("Showing the most recent 200 of 1,500"));
-  assert.ok(d.capNoteText(200, 1500).includes("this view is capped"));
+// The wire shape of a reported row total, available and carrying a count.
+function total(count) {
+  return { available: true, unavailable: "", covers: "every terminal row in the ledger", cap: 200, count: count };
+}
+
+test("capNoteText claims a cap only when the REPORTED total exceeds the rows we were handed", () => {
+  assert.equal(d.capNoteText(200, total(200)), "");
+  assert.equal(d.capNoteText(200, total(12)), "");
+  assert.ok(d.capNoteText(200, total(1500)).startsWith("Showing the most recent 200 of 1,500"));
+  assert.ok(d.capNoteText(200, total(1500)).includes("this view is capped"));
+});
+
+test("capNoteText reports the total the server sent, never one derived from the rows", () => {
+  // The rows on screen and the summary a page could add up say one thing; the ledger says
+  // another, and only the server can see it. The reported figure is the one that shows.
+  assert.ok(d.capNoteText(3, total(41_237)).includes("of 41,237"),
+    "the reported total must be the figure the notice carries");
+  assert.ok(!d.capNoteText(3, total(41_237)).includes("of 3"), "the rows returned are not the total");
+});
+
+test("capNoteText states an unreadable total as unavailable and shows no figure in its place", () => {
+  const unread = { available: false, unavailable: "this figure could not be read from the ledger",
+                   covers: "every terminal row in the ledger", cap: 200, count: null };
+  for (const t of [unread, {}, { available: true, count: null }, { available: true, count: "many" },
+                   { available: true, count: NaN }, { available: true, count: -1 }, [], "200", 200, true]) {
+    const text = d.capNoteText(200, t);
+    assert.equal(text, d.CAP_TOTAL_UNAVAILABLE, "capNoteText(200, " + JSON.stringify(t) + ")");
+    assert.ok(/unavailable/i.test(text), "the reader must be told the total is unavailable");
+    assert.ok(!/\d/.test(text),
+      "an unreadable total must put NO figure on screen - a number beside 'capped' reads AS the total: " + text);
+  }
+  // A total absent from the frame entirely is no readable total either, and answers the
+  // same way. The alternative - "" - is indistinguishable from an uncapped view, which is
+  // the one thing an unknown cap must not look like.
+  assert.equal(d.capNoteText(200, undefined), d.CAP_TOTAL_UNAVAILABLE);
+  assert.equal(d.capNoteText(200, null), d.CAP_TOTAL_UNAVAILABLE);
+  // And a page that does not know how many rows it drew claims nothing either.
+  assert.equal(d.capNoteText(undefined, total(1500)), "");
+});
+
+test("an unreadable total does not claim the view is capped, which it cannot know", () => {
+  // Cappedness is the comparison total > shown. With the total unreadable that comparison
+  // cannot be made, so the notice states the unavailability and stops there - it must not
+  // assert a cap the page has just said it cannot see. 3 rows out of a 3-row ledger is not
+  // a capped view, and the old wording called it one.
+  const unread = { available: false, unavailable: "this figure could not be read from the ledger",
+                   covers: "every terminal row in the ledger", cap: 200, count: null };
+  const text = d.capNoteText(3, unread);
+  assert.ok(/unavailable/i.test(text), "the reader must still be told the total is unavailable");
+  assert.ok(!/this view is capped/i.test(text),
+    "an unreadable total must not assert that the view IS capped - cappedness is the comparison "
+    + "total > shown, and the total is the half that could not be read: " + text);
+  assert.ok(/whether/i.test(text), "the notice must qualify the fact it cannot establish: " + text);
+  assert.ok(!/\d/.test(text), "and still no figure: " + text);
 });
 
 test("announceText is a short count summary a screen reader can hear on every snapshot", () => {
@@ -304,13 +382,11 @@ test("fmtCount answers an absent or non-finite count as not recorded", () => {
   }
 });
 
-test("sumStatuses answers an unusable summary as not rolled up, never as a total of 0", () => {
-  for (const v of [undefined, null, NaN, "9", 7, true]) {
-    assert.equal(d.sumStatuses(v, d.QUEUE_STATUSES), null, "sumStatuses(" + String(v) + ")");
-  }
-  assert.equal(d.sumStatuses({ done: 1 }, null), null, "no state list is nothing to roll up");
-  // And the cap notice claims nothing when the total could not be rolled up.
-  assert.equal(d.capNoteText(200, d.sumStatuses(null, d.TERMINAL_STATUSES)), "");
+test("a cap notice never renders a zero total as a real one", () => {
+  // The failure this whole field replaces: a figure nobody could read, shown as 0.
+  assert.equal(d.capNoteText(200, { available: false, count: 0 }), d.CAP_TOTAL_UNAVAILABLE);
+  // A genuine zero is a genuine answer, and it caps nothing.
+  assert.equal(d.capNoteText(0, total(0)), "");
 });
 
 test("elapsedText answers a row with no usable basis with no age at all", () => {
@@ -358,5 +434,76 @@ test("announceText and aggregate copy survive an unusable summary", () => {
   assert.equal(d.aggCoverageText({}), "over an unstated set");
   for (const v of ABSENT) {
     assert.equal(d.aggExclusionText({ excluded: v }), "", "excluded " + String(v));
+  }
+});
+
+// --- DASH-9: the value-to-geometry derivations behind the drawings -------------------
+//
+// These are the only arithmetic the figures do, so they are exercised here one input at
+// a time - including every degenerate input a real ledger produces. What the marks then
+// MEASURE on screen is a different question and is decided in a real browser engine
+// (dashboard_rendered_test.go), because no assertion here can say what was drawn.
+
+test("readBuckets accepts a published figure and refuses one that cannot be read", () => {
+  assert.deepEqual(
+    shape(d.readBuckets([{ key: "done", count: 9 }, { key: "failed", count: 2 }])),
+    [{ key: "done", count: 9 }, { key: "failed", count: 2 }]);
+  // A numeric key is a key; it arrives as text on the page either way.
+  assert.deepEqual(shape(d.readBuckets([{ key: 7, count: 1 }])), [{ key: "7", count: 1 }]);
+  // A count of zero is a MEASUREMENT and is kept; only an unusable one is refused.
+  assert.deepEqual(shape(d.readBuckets([{ key: "done", count: 0 }])), [{ key: "done", count: 0 }]);
+
+  // Absent, empty or malformed: each throws, which is what draws the card as unavailable
+  // rather than as a figure with a shape over a number nobody published.
+  for (const bad of [undefined, null, {}, "done=9", 3, true, []]) {
+    assert.throws(() => d.readBuckets(bad), "readBuckets(" + JSON.stringify(bad) + ")");
+  }
+  for (const bad of [
+    [null], [undefined], ["done"], [[]], [{ count: 9 }], [{ key: "done" }],
+    [{ key: "done", count: null }], [{ key: "done", count: "9" }], [{ key: "done", count: NaN }],
+    [{ key: "done", count: Infinity }], [{ key: "done", count: -1 }], [{ key: {}, count: 1 }],
+    [{ key: "done", count: 9 }, { key: "failed", count: null }],
+  ]) {
+    assert.throws(() => d.readBuckets(bad), "readBuckets(" + JSON.stringify(bad) + ")");
+  }
+});
+
+test("bucketProportions sizes every bar against the largest count in its own figure", () => {
+  assert.deepEqual(shape(d.bucketProportions([{ count: 9 }, { count: 3 }, { count: 2 }])),
+    [1, 1 / 3, 2 / 9]);
+  // One bucket is its own maximum.
+  assert.deepEqual(shape(d.bucketProportions([{ count: 4 }])), [1]);
+  // All-equal counts are all full length - the figure says "these are the same", which
+  // is what it measured.
+  assert.deepEqual(shape(d.bucketProportions([{ count: 5 }, { count: 5 }])), [1, 1]);
+  // A zero beside a real count is a real zero, and draws as no length at all.
+  assert.deepEqual(shape(d.bucketProportions([{ count: 10 }, { count: 0 }])), [1, 0]);
+  // Nothing to take a proportion against: no bar is drawn at all, rather than a row of
+  // full-length marks or a division by zero.
+  assert.equal(d.bucketProportions([{ count: 0 }, { count: 0 }]), null);
+  for (const bad of [undefined, null, [], {}, "x", 4, [{ count: null }], [{ count: "3" }],
+    [{ count: NaN }], [{ count: -2 }], [null], [{ count: 3 }, { count: undefined }]]) {
+    assert.equal(d.bucketProportions(bad), null, "bucketProportions(" + JSON.stringify(bad) + ")");
+  }
+});
+
+test("spreadPositions places the mean on the scale its own ends define", () => {
+  assert.deepEqual(shape(d.spreadPositions(0, 5, 10)), { mean: 0.5 });
+  assert.deepEqual(shape(d.spreadPositions(0.21, 0.38, 0.74)), { mean: (0.38 - 0.21) / (0.74 - 0.21) });
+  assert.deepEqual(shape(d.spreadPositions(10, 10, 20)), { mean: 0 });
+  assert.deepEqual(shape(d.spreadPositions(10, 20, 20)), { mean: 1 });
+  // A mean outside its own ends cannot be plotted honestly beyond them; it is clamped to
+  // the scale rather than drawn off the end of the card.
+  assert.deepEqual(shape(d.spreadPositions(10, 4, 20)), { mean: 0 });
+  assert.deepEqual(shape(d.spreadPositions(10, 40, 20)), { mean: 1 });
+  // Ends that coincide are a point, not a spread: nothing is drawn, and the three values
+  // are still stated as text by the card.
+  assert.equal(d.spreadPositions(7, 7, 7), null);
+  // A maximum below its minimum is a figure that cannot be true.
+  assert.equal(d.spreadPositions(9, 5, 1), null);
+  for (const v of ABSENT) {
+    assert.equal(d.spreadPositions(v, 5, 10), null, "min " + String(v));
+    assert.equal(d.spreadPositions(0, v, 10), null, "mean " + String(v));
+    assert.equal(d.spreadPositions(0, 5, v), null, "max " + String(v));
   }
 });

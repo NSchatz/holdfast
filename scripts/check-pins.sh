@@ -23,6 +23,44 @@ bad()  { printf '::error::%s\n' "$*" >&2; fail=1; }
 
 arg() { sed -n "s/^ARG $1=\\(.*\\)$/\\1/p" "$here/Dockerfile" | head -1; }
 
+# --- 0. Everything this gate reads must actually be there --------------------------
+# A check that could not run has NOT passed. Every assertion below is of the form "read
+# these files and compare them", so a file that has been moved, renamed or made
+# unreadable does not make its assertion vacuous in a visible way - it makes it vacuous
+# in an INVISIBLE one, because `sed` on a missing file prints nothing and an empty value
+# compares equal to another empty value. That is the same silent-green failure this whole
+# script exists to prevent, so the dependency list is stated up front and checked first.
+#
+# It exits IMMEDIATELY rather than accumulating into `fail`: with a required file absent,
+# every downstream section would be reading emptiness, and their messages would describe
+# a drift that is not the actual problem. Name what could not be read, and stop.
+need_file() {
+  if [ ! -e "$here/$1" ]; then
+    bad "MISSING: $1 - this gate reads it to $2, so the check cannot run. A check that could not run has not passed; refusing to report that the pins agree."
+  elif [ ! -f "$here/$1" ] || [ ! -r "$here/$1" ]; then
+    bad "UNREADABLE: $1 - this gate reads it to $2, so the check cannot run. A check that could not run has not passed; refusing to report that the pins agree."
+  fi
+}
+need_dir() {
+  if [ ! -e "$here/$1" ]; then
+    bad "MISSING: $1/ - this gate enumerates it to $2, so the check cannot run. An empty enumeration would pass every reference it never saw; refusing to report that the pins agree."
+  elif [ ! -d "$here/$1" ] || [ ! -r "$here/$1" ] || [ ! -x "$here/$1" ]; then
+    bad "UNREADABLE: $1/ - this gate enumerates it to $2, so the check cannot run. An empty enumeration would pass every reference it never saw; refusing to report that the pins agree."
+  fi
+}
+
+need_file "Dockerfile"                     "read the ffmpeg pin, the Go toolchain pin and every base-image ARG"
+need_file "NOTICE"                         "confirm the GPL source offer names the ffmpeg the image bundles"
+need_file "docker-compose.yml"             "confirm the example deployment pins the image it pulls"
+need_dir  ".github/workflows"              "confirm every action is pinned to a commit SHA"
+need_file ".github/workflows/ci.yml"       "confirm the gate runs on the Go the shipped binary is built with"
+need_file ".github/workflows/release.yml"  "confirm the release runs on the Go the shipped binary is built with"
+
+if [ "$fail" -ne 0 ]; then
+  printf '::error::%s\n' "check-pins: a file this gate depends on could not be read (named above). Refusing to report green." >&2
+  exit 1
+fi
+
 # --- 1. NOTICE must name the exact ffmpeg the image bundles ------------------------
 # It is the source offer for the GPL binaries the image redistributes. If it drifts, the
 # image ships binaries whose licence record names a DIFFERENT upstream build.
@@ -217,6 +255,341 @@ else
     bad "pre-rename identifier(s) survived the holdfast rename — these CANNOT be redirected after the first tag:
 $(printf '%s\n' "$leaks" | sed 's/^/       /')"
   fi
+fi
+
+# --- 5. Every action is pinned to a commit SHA (P3) --------------------------------
+# A tag like `v4` is MUTABLE and is moved by its publisher, so `uses: actions/checkout@v4`
+# is a standing grant to run whatever that publisher pushes there next, inside a job that
+# holds this repository's credentials. That is a supply-chain path straight into the
+# build, and - for this repository specifically - into the job that pushes the image whose
+# bundled ffmpeg is the instrument the no-loss verdict is measured with.
+#
+# The SHA is the pin; the trailing comment is what keeps it READABLE, and it is required
+# rather than encouraged: a bare 40-hex reference tells a reviewer nothing about how far
+# behind it is, so the comment is the only thing that makes a bump reviewable. Whether the
+# SHA really IS that version is a question only GitHub can answer, and asking it here
+# would put a third party's availability inside `make check` - refused, same as the ffmpeg
+# liveness probe. This checks the SHAPE, which is the half that can be checked offline.
+#
+# The directory is ENUMERATED, never listed by hand: a workflow added later must be
+# covered by the pin gate on the day it lands, not on the day somebody remembers to add
+# it here. `runs-on: ubuntu-latest` is deliberately NOT matched - that is a runner label,
+# not an image reference.
+wf_files=()
+while IFS= read -r f; do
+  [ -n "$f" ] && wf_files+=("$f")
+done < <(find "$here/.github/workflows" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) 2>/dev/null | sort)
+
+if [ "${#wf_files[@]}" -eq 0 ]; then
+  bad ".github/workflows/ contains no workflow files - this check enumerates that directory, so it just asserted nothing at all. An empty enumeration passes every reference it never saw."
+else
+  uses_total=0
+  uses_bad=0
+  for wf in "${wf_files[@]}"; do
+    rel="${wf#"$here"/}"
+    while IFS=: read -r lineno rest; do
+      [ -n "$lineno" ] || continue
+      trimmed="$(printf '%s' "$rest" | sed 's/^[[:space:]]*//; s/^-[[:space:]]*//')"
+      case "$trimmed" in
+        uses:*) ;;
+        *) continue ;;                      # prose, or a comment that merely says "uses:"
+      esac
+      uses_total=$((uses_total + 1))
+
+      val="${trimmed#uses:}"
+      before="${val%%#*}"
+      if [ "$before" = "$val" ]; then comment=""; else comment="${val#*#}"; fi
+      ref="$(printf '%s' "$before" | tr -d '\042\047' | awk '{print $1}')"
+      ver="$(printf '%s' "$comment" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+
+      # A local action is part of THIS repository and moves only when this repository
+      # moves, so there is no upstream publisher to pin against.
+      case "$ref" in
+        ./*|../*)
+          note "ok: $rel:$lineno uses a local action ($ref) - nothing upstream to pin"
+          continue
+          ;;
+      esac
+
+      if ! printf '%s' "$ref" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+@[0-9a-f]{40}$'; then
+        uses_bad=$((uses_bad + 1))
+        bad "MUTABLE ACTION REFERENCE at $rel line $lineno: '$ref'
+       An action must be pinned to a 40-character lowercase commit SHA:
+         uses: owner/action@0123456789abcdef0123456789abcdef01234567 # v4
+       A tag or branch is moved by its publisher, so this reference runs whatever they
+       push there next - inside a job holding this repository's credentials.
+       Resolve the tag once and pin the commit:
+         gh api repos/OWNER/ACTION/git/ref/tags/TAG --jq .object.sha"
+        continue
+      fi
+
+      if [ -z "$ver" ]; then
+        uses_bad=$((uses_bad + 1))
+        bad "UNREADABLE ACTION PIN at $rel line $lineno: '$ref'
+       The SHA is correct but there is no trailing version comment, so nobody reviewing a
+       bump can tell what this pin IS or how far behind it has fallen. Add the version the
+       SHA was resolved from:
+         uses: $ref # v4"
+      fi
+    done < <(grep -nE '(^|[[:space:]])uses:' "$wf" || true)
+  done
+  if [ "$uses_bad" -eq 0 ]; then
+    note "ok: all $uses_total action reference(s) across ${#wf_files[@]} workflow file(s) are SHA-pinned with a version comment"
+  fi
+fi
+
+# --- 6. The example deployment pins the image it pulls (P1) ------------------------
+# docker-compose.yml is not documentation, it is the stack definition a stranger copies
+# and runs. `image: ghcr.io/nschatz/holdfast:latest` hands them whatever that tag points
+# at on the day they pull - and `:latest` is the tag release.yml MOVES, so the example
+# would silently change the encoder and the libvmaf instrument the no-loss verdict is
+# measured with, under a user who changed nothing. A digest is the only reference that
+# names the artifact that was actually gated by scripts/smoke-image.sh.
+#
+# Publishing `:latest` is NOT depending on it: release.yml promotes that tag onto a digest
+# that has already passed the smoke gate, and this check never reads release.yml. P1
+# forbids depending on a mutable reference, not publishing one.
+#
+# The exemption is narrow and deliberate: a service that declares `build:` builds from
+# this checkout, so its `image:` is a LOCAL NAME for the thing just built, not something
+# fetched from a registry. `latest` is refused either way - as a name it says nothing, and
+# as a tag it floats.
+compose_map="$(awk '
+  {
+    line = $0
+    stripped = line
+    sub(/^[[:space:]]*/, "", stripped)
+    if (stripped ~ /^#/ || stripped == "") next
+    indent = match(line, /[^ ]/) - 1
+    if (line ~ /^services:[[:space:]]*$/) { in_svc = 1; svc_indent = -1; next }
+    if (indent == 0) { in_svc = 0; next }
+    if (!in_svc) next
+    if (svc_indent == -1) svc_indent = indent
+    if (indent == svc_indent && stripped ~ /^[A-Za-z0-9._-]+:[[:space:]]*$/) {
+      name = stripped; sub(/:[[:space:]]*$/, "", name); cur = name; next
+    }
+    if (indent > svc_indent && cur != "") {
+      if (stripped ~ /^image:/) {
+        v = stripped; sub(/^image:[[:space:]]*/, "", v)
+        printf "IMAGE\t%s\t%s\t%s\n", cur, NR, v
+      } else if (stripped ~ /^build:/) {
+        printf "BUILD\t%s\t%s\t\n", cur, NR
+      }
+    }
+  }
+' "$here/docker-compose.yml")"
+
+build_svcs=" "
+while IFS=$'\t' read -r kind svc _ln _v; do
+  [ "$kind" = "BUILD" ] || continue
+  build_svcs="$build_svcs$svc "
+done <<<"$compose_map"
+
+compose_imgs=0
+compose_bad=0
+while IFS=$'\t' read -r kind svc lineno raw; do
+  [ "$kind" = "IMAGE" ] || continue
+  compose_imgs=$((compose_imgs + 1))
+  img="$(printf '%s' "$raw" | sed 's/[[:space:]]*#.*$//; s/[[:space:]]*$//' | tr -d '\042\047')"
+
+  digest=""
+  case "$img" in *@*) digest="${img##*@}" ;; esac
+  namepart="${img%@*}"
+  lastseg="${namepart##*/}"
+  tag=""
+  case "$lastseg" in *:*) tag="${lastseg##*:}" ;; esac
+  is_registry=0
+  case "$namepart" in */*) is_registry=1 ;; esac
+  has_build=0
+  case "$build_svcs" in *" $svc "*) has_build=1 ;; esac
+
+  if [ "$tag" = "latest" ]; then
+    compose_bad=$((compose_bad + 1))
+    bad "FLOATING ':latest' IMAGE in docker-compose.yml line $lineno (service '$svc'): '$img'
+       \`latest\` is never a reference anything depends on. release.yml MOVES that tag onto
+       each newly gated release, so a user who changed nothing would silently get a
+       different encoder - and a different libvmaf instrument for the no-loss verdict -
+       on their next \`docker compose pull\`.
+       Pin the version tag AND the digest that scripts/smoke-image.sh actually gated:
+         image: ghcr.io/nschatz/holdfast:vX.Y.Z@sha256:<64 hex>
+       Resolve one with: docker buildx imagetools inspect ghcr.io/nschatz/holdfast:vX.Y.Z"
+    continue
+  fi
+
+  if [ "$is_registry" -eq 1 ]; then
+    if ! printf '%s' "$digest" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+      compose_bad=$((compose_bad + 1))
+      bad "UNPINNED IMAGE in docker-compose.yml line $lineno (service '$svc'): '$img'
+       A registry reference is pinned by tag AND digest - the tag stays readable to a
+       human, the digest is what actually resolves. Without the digest this example pulls
+       whatever the registry serves that day, which need not be an image that ever passed
+       scripts/smoke-image.sh.
+         image: ${namepart}:vX.Y.Z@sha256:<64 hex>"
+      continue
+    fi
+    if [ -z "$tag" ]; then
+      compose_bad=$((compose_bad + 1))
+      bad "DIGEST-ONLY IMAGE in docker-compose.yml line $lineno (service '$svc'): '$img'
+       The digest is right but the tag is missing, and a bare digest tells a human reading
+       this file nothing about which release they are running. Carry both:
+         image: ${namepart}:vX.Y.Z@$digest"
+      continue
+    fi
+  elif [ "$has_build" -eq 0 ]; then
+    compose_bad=$((compose_bad + 1))
+    bad "UNRESOLVABLE IMAGE in docker-compose.yml line $lineno (service '$svc'): '$img'
+       This is a bare local name, but service '$svc' declares no \`build:\`, so there is
+       nothing in this checkout that produces it and compose would try to PULL it. Either
+       add a \`build:\` stanza to that service, or use a registry reference pinned by tag
+       and digest."
+  fi
+done <<<"$compose_map"
+
+if [ "$compose_imgs" -eq 0 ]; then
+  bad "docker-compose.yml declares no service \`image:\` at all - this check parses that file and just asserted nothing. Either the example lost its image reference or the parser stopped understanding the file; both are refusals, not a green build."
+elif [ "$compose_bad" -eq 0 ]; then
+  note "ok: all $compose_imgs docker-compose.yml image reference(s) are pinned (tag + digest, or a local build)"
+fi
+
+# --- 7. Every base image is pinned by tag AND digest (P2) --------------------------
+# A `FROM` line is an image reference like any other, and section 3 above guards exactly
+# one of them: GO_IMAGE. FETCH_IMAGE and RUNTIME_IMAGE could lose their digests silently,
+# and RUNTIME_IMAGE is the worst of the three to lose - it is the base the shipped image
+# IS, and the in-image toolchain assertion that backstops GO_IMAGE cannot see it at all,
+# because nothing in the runtime stage runs.
+#
+# The FROM lines here reference ARGs, not literals, so a check that reads `FROM` lines
+# alone finds no digest anywhere and is wrong in BOTH directions: it would red on a
+# correctly pinned tree and pass a tree whose ARG default had been gutted. Resolve the ARG.
+stages=" "
+from_seen=0
+from_bad=0
+while IFS=: read -r lineno content; do
+  [ -n "$lineno" ] || continue
+  prev_stages="$stages"
+  stage="$(printf '%s' "$content" | sed -n 's/.*[[:space:]][Aa][Ss][[:space:]]\{1,\}\([A-Za-z0-9._-]\{1,\}\).*/\1/p')"
+  [ -n "$stage" ] && stages="$stages$stage "
+
+  imgtok="$(printf '%s' "$content" \
+    | sed 's/^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]\{1,\}//' \
+    | awk '{ for (i = 1; i <= NF; i++) if ($i !~ /^--/) { print $i; exit } }')"
+  [ -n "$imgtok" ] || continue
+
+  argname=""
+  case "$imgtok" in
+    '${'*'}') argname="${imgtok#\$\{}"; argname="${argname%\}}" ;;
+    '$'*)     argname="${imgtok#\$}" ;;
+  esac
+
+  if [ -n "$argname" ]; then
+    resolved="$(arg "$argname")"
+    label="ARG $argname (Dockerfile line $lineno)"
+    if [ -z "$resolved" ]; then
+      from_bad=$((from_bad + 1))
+      bad "UNRESOLVABLE BASE IMAGE: Dockerfile line $lineno builds FROM \$$argname, but ARG $argname has no default in this Dockerfile. The base image would be whatever the caller passed, or nothing - neither is a pin."
+      continue
+    fi
+  else
+    # A reference to an earlier build stage is not an image reference.
+    case "$prev_stages" in *" $imgtok "*) continue ;; esac
+    resolved="$imgtok"
+    label="the literal base image on Dockerfile line $lineno"
+    argname="(literal)"
+  fi
+
+  from_seen=$((from_seen + 1))
+  digest=""
+  case "$resolved" in *@*) digest="${resolved##*@}" ;; esac
+  namepart="${resolved%@*}"
+  lastseg="${namepart##*/}"
+  tag=""
+  case "$lastseg" in *:*) tag="${lastseg##*:}" ;; esac
+
+  if ! printf '%s' "$digest" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+    from_bad=$((from_bad + 1))
+    bad "UNPINNED BASE IMAGE - $label carries no \`@sha256:\` digest: '$resolved'
+       $argname names a TAG, and a tag is moved by its publisher, so this base floats to
+       whatever the registry serves on the day of the build. Pin both:
+         ARG $argname=${namepart}@sha256:<64 hex>
+       Resolve one with: docker buildx imagetools inspect $namepart"
+  elif [ -z "$tag" ]; then
+    from_bad=$((from_bad + 1))
+    bad "UNREADABLE BASE IMAGE PIN - $label has a digest but no tag: '$resolved'
+       The digest is what resolves; the tag is what tells a human which base this is. P2
+       requires both:
+         ARG $argname=<image>:<tag>@$digest"
+  elif [ "$tag" = "latest" ]; then
+    from_bad=$((from_bad + 1))
+    bad "FLOATING BASE IMAGE TAG - $label is tagged \`latest\`: '$resolved'
+       \`latest\` is never a reference anything depends on, even beside a digest: the next
+       person to refresh the digest would silently move to a different major version."
+  fi
+done < <(grep -nE '^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]' "$here/Dockerfile" || true)
+
+if [ "$from_seen" -eq 0 ]; then
+  bad "the Dockerfile declares no base image this check could resolve - it just asserted nothing. A parser that stopped understanding the Dockerfile is a refusal, not a green build."
+elif [ "$from_bad" -eq 0 ]; then
+  note "ok: all $from_seen base image(s) the Dockerfile's FROM lines resolve are pinned by tag AND digest"
+fi
+
+# --- 8. A node manifest must carry a lifecycle-script decision (P4) ----------------
+# There is no node manifest in this repository today and the dashboard is built by the Go
+# toolchain alone, so this check is a TRIPWIRE rather than a current assertion: the moment
+# somebody adds a package.json, `npm install` gains the right to execute arbitrary
+# `postinstall` code from every transitive dependency, on a runner holding this
+# repository's credentials.
+#
+# It scans the WORKING TREE, not the tracked files, on purpose. The moment to refuse a
+# manifest is the moment it is about to be committed - a tracked-files-only check would
+# stay green through the entire pull request that introduces it and only bite afterwards,
+# which is exactly one merge too late.
+#
+# The decision surface is a COMMITTED .npmrc, because a decision that is not in the
+# repository is not a decision anybody after you can see:
+#   ignore-scripts=true    - scripts off. Nothing further needed.
+#   ignore-scripts=false   - scripts on, and only legal beside a line carrying
+#                            `lifecycle-scripts-reason: <why>` in the same file.
+node_manifests=()
+while IFS= read -r m; do
+  [ -n "$m" ] && node_manifests+=("$m")
+done < <(find "$here" \( -name .git -o -name node_modules -o -name vendor \) -prune -o -type f -name package.json -print 2>/dev/null | sort)
+
+if [ "${#node_manifests[@]}" -eq 0 ]; then
+  note "ok: no node package manifest in the working tree - nothing can run a lifecycle script"
+else
+  for man in "${node_manifests[@]}"; do
+    mrel="${man#"$here"/}"
+    mdir="$(dirname "$man")"
+    decided=""
+    for cand in "$mdir/.npmrc" "$here/.npmrc"; do
+      [ -f "$cand" ] || continue
+      crel="${cand#"$here"/}"
+      git -C "$here" ls-files --error-unmatch -- "$crel" >/dev/null 2>&1 || continue
+      if grep -qE '^[[:space:]]*ignore-scripts[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$cand"; then
+        decided="$crel disables them (ignore-scripts=true)"
+        break
+      fi
+      if grep -qE '^[[:space:]]*ignore-scripts[[:space:]]*=[[:space:]]*false[[:space:]]*$' "$cand" \
+         && grep -qE 'lifecycle-scripts-reason:[[:space:]]*[^[:space:]]' "$cand"; then
+        decided="$crel enables them with a committed reason"
+        break
+      fi
+    done
+    if [ -n "$decided" ]; then
+      note "ok: $mrel has a committed lifecycle-script decision - $decided"
+    else
+      bad "NODE MANIFEST WITH NO LIFECYCLE-SCRIPT DECISION: $mrel
+       Installing from this manifest would let every transitive dependency run arbitrary
+       \`preinstall\`/\`postinstall\` code, on a runner holding this repository's
+       credentials. The repository must either DISABLE lifecycle scripts in a committed
+       .npmrc, or RECORD A REASON for enabling them:
+         echo 'ignore-scripts=true' > $(dirname "$mrel" | sed 's|^\.$||; s|$|/|; s|^/$||').npmrc
+       or, to enable them deliberately, in that same committed .npmrc:
+         ignore-scripts=false
+         # lifecycle-scripts-reason: <why this repository needs them>
+       Then commit it: a decision that is not in the repository is not a decision."
+    fi
+  done
 fi
 
 [ "$fail" -eq 0 ] || exit 1

@@ -11,88 +11,108 @@
 <body>
 <header>
   <h1>hold<span class="mono">fast</span></h1>
-  <div class="badges">
-    <span id="b-paused" class="badge">running</span>
-    <span id="b-scan" class="badge scan">idle</span>
-  </div>
   <span class="grow"></span>
-  <span class="reclaimed">reclaimed: <b id="reclaimed-lifetime">0 B</b>
-    <span class="sub">lifetime · this run <span id="reclaimed-session">0 B</span></span></span>
-  <span id="conn">connecting…</span>
+  <span id="conn">connecting</span>
 </header>
 <!-- Polite, atomic screen-reader summary. The SSE stream pushes a fresh snapshot on
      every job transition; announcing the whole table would spam a screen-reader reader
      on each one, so we announce only a short count summary, and only when it changes. -->
 <div id="sr-status" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
 <main>
-  <div class="chips" id="chips"></div>
+  <!-- The page is ordered by the two questions an operator actually has, in the order
+       they ask them: what is holdfast doing right now, and what has it done to my
+       library. Everything about the CURRENT RUN comes first and everything derived from
+       the ledger comes after, each under its own heading.
 
-  <div class="controls">
-    <label for="token" class="lbl">Control token</label>
-    <input id="token" type="password" placeholder="for pause / rescan" autocomplete="off">
-    <button id="rescan" class="primary">Rescan</button>
-    <button id="pause">Pause</button>
-    <button id="resume">Resume</button>
-    <span id="msg" role="status" aria-live="polite"></span>
-  </div>
+       Explanation lives in docs/dashboard-methodology.md (clause F8). What stays on the
+       surface is a short scope label per block and ONE documentation link per region;
+       every claim that used to be printed here is in that document. -->
+  <section id="region-now" aria-labelledby="h-now">
+    <h2 id="h-now">Right now</h2>
+    <p class="scope">Pushed live by the server.</p>
+    <!--holdfast:doc-now-->
 
-  <div class="controls">
-    <label for="filter" class="lbl">Filter</label>
-    <input id="filter" type="search" placeholder="filter queue &amp; history by path…" autocomplete="off">
-  </div>
+    <!-- The live-counts view. Every view on this page carries exactly one element with
+         a data-state attribute naming which of the three states F7 requires it is in;
+         the markup ships that element already in the loading state, so the state is on
+         screen before a single byte of snapshot has arrived. -->
+    <div id="counts" data-view="counts">
+      <p class="state" data-state="loading">Loading the live counts.</p>
+      <div class="badges">
+        <span id="b-paused" class="badge">running</span>
+        <span id="b-scan" class="badge scan">idle</span>
+        <span class="reclaimed">reclaimed this run: <b id="reclaimed-session">loading</b></span>
+      </div>
 
-  <section>
-    <h2>Across the whole ledger</h2>
-    <p class="note">Every figure here is computed by the server over <em>every</em> matching row in the
-      ledger, not over the capped rows the tables below ship, and each states the set it covers. A row
-      that recorded no value is excluded and counted, never read as a zero: a fact nobody measured is
-      reported as missing, not as 0. VMAF figures pool per-file scores, each measured against that
-      file's own source under one viewing condition, luma-only; they are not compared between files.</p>
-    <div class="aggs" id="aggregates"></div>
-  </section>
+      <div class="chips" id="chips"></div>
+    </div>
 
-  <section>
-    <h2>Queue &amp; active</h2>
-    <p class="note">Elapsed is how long the file has been in the state it is in now, recomputed from the
-      transition timestamp on each update rather than counted in this page. Progress is read from the
-      encoder's own progress stream and measured against the source duration, so it is shown while a file
-      is <i>encoding</i> and not in any other state — a file being probed or verified is covered by
-      Elapsed alone. Where the encoder has reported nothing yet, or the container reports no duration, it
-      reads <i>unknown</i> — never an estimate, and never a stale figure.</p>
+    <div class="controls">
+      <label for="token" class="lbl">Control token</label>
+      <input id="token" type="password" placeholder="for pause / rescan" autocomplete="off">
+      <button id="rescan" class="primary">Rescan</button>
+      <button id="pause">Pause</button>
+      <button id="resume">Resume</button>
+      <span id="msg" role="status" aria-live="polite"></span>
+    </div>
+
+    <div class="controls">
+      <label for="filter" class="lbl">Filter</label>
+      <input id="filter" type="search" placeholder="filter queue and history by path" autocomplete="off">
+    </div>
+
+    <h3 id="h-queue">Queue and active</h3>
+    <p class="scope">Being worked on, and since when.</p>
     <p class="note cap" id="queue-cap" hidden></p>
     <div class="tablewrap">
-      <table><thead><tr><th>File</th><th>Status</th><th>Elapsed</th><th>Progress</th><th>Worker</th></tr></thead>
-        <tbody id="queue"></tbody></table>
+      <table aria-labelledby="h-queue">
+        <thead><tr><th>File</th><th>Status</th><th>Elapsed</th><th>Progress</th><th>Worker</th></tr></thead>
+        <tbody id="queue" data-view="queue">
+          <tr data-state="loading"><td class="empty" colspan="5">Loading the work in hand.</td></tr>
+        </tbody></table>
     </div>
   </section>
 
-  <section>
-    <h2>Recent history</h2>
-    <p class="note">Each finished file, with the proof its swap was safe. A skipped file shows which
-      guard held it back; a failed one shows why. VMAF is a perceptual estimate under one viewing
-      condition — the model, its pooling, and its luma-only blind spot are shown with every score, and
-      scores are never compared across files (VMAF is not comparable between different sources).</p>
+  <section id="region-history" aria-labelledby="h-history">
+    <h2 id="h-history">What it has done to your library</h2>
+    <p class="scope">From the ledger, and survives restarts.</p>
+    <!--holdfast:doc-history-->
+    <p class="reclaimed">reclaimed lifetime: <b id="reclaimed-lifetime">loading</b></p>
+
+    <h3 id="h-aggs">Across the whole ledger</h3>
+    <p class="scope">Computed server-side over every matching row.</p>
+    <div class="aggs" id="aggregates" data-view="aggs">
+      <p class="state" data-state="loading">Loading these figures.</p>
+    </div>
+
+    <h3 id="h-hist">Recent history</h3>
+    <p class="scope">Each swap, with its proof of safety.</p>
     <p class="note cap" id="hist-cap" hidden></p>
     <div class="tablewrap">
-      <table class="hist">
+      <table class="hist" aria-labelledby="h-hist">
         <colgroup>
-          <col style="width:19%"><col style="width:17%"><col style="width:12%"><col style="width:23%">
-          <col style="width:8%"><col style="width:9%"><col style="width:12%">
+          <col class="c-file"><col class="c-result"><col class="c-size"><col class="c-vmaf">
+          <col class="c-enc"><col class="c-dur"><col class="c-upd">
         </colgroup>
         <thead><tr>
           <th>File</th><th>Result</th><th>Size</th><th>VMAF</th><th>Encoder</th><th>Encode</th><th>Updated</th>
         </tr></thead>
-        <tbody id="history"></tbody>
+        <tbody id="history" data-view="history">
+          <tr data-state="loading"><td class="empty" colspan="7">Loading finished swaps.</td></tr>
+        </tbody>
       </table>
     </div>
   </section>
 </main>
-<footer>holdfast — config-as-code, data-safe media transcoder. The YAML config is the source of truth;
-  this page reads and controls. It reports what was measured, and only that.
+<!-- The footer carries ONE short line of identity and the AGPL section 13 offer. The
+     product identity, what this page may and may not do, and the promise that it reports
+     only what was measured are all in docs/dashboard-methodology.md; the offer is required
+     verbatim and is not this page's to shorten. -->
+<footer>Reads and controls; the YAML config decides.
   <!--holdfast:source-offer--></footer>
 
 <!-- Row shells cloned per render. Rows are built as DOM nodes (createElement +
-     textContent) and filled from cloned templates — the page never assembles an HTML
+     textContent) and filled from cloned templates - the page never assembles an HTML
      string from job data, so an attacker-influencable media path is inert text, never
      markup. Trusted Types (enforced by the response CSP) makes that a hard guarantee. -->
 <template id="tpl-queue-row">
@@ -122,6 +142,30 @@
     <td class="dur"></td>
     <td class="upd"></td>
   </tr>
+</template>
+<!-- The figure shells. Every graphic on this page is an inline vector drawing whose SHAPE
+     is markup written here and whose only variable is a geometry attribute the renderer
+     sets from a number the server published. Cloning them is what keeps the graphics
+     inside the same idiom as the rows: no library, no image, no font, no data: URI, and
+     no element built from a string. The SVG namespace comes from the HTML parser reading
+     these templates, so no module needs to name it either.
+
+     Each drawing is aria-hidden and not focusable, because its values are carried in full
+     by the text the renderer puts beside it - announcing both would read every number
+     twice. Their painted heights come from the token file; the height attributes here are
+     the shells' intrinsic geometry and agree with those tokens. -->
+<template id="tpl-fig-bar">
+  <svg class="fig bar" width="100%" height="12" aria-hidden="true" focusable="false" preserveAspectRatio="none">
+    <rect class="mark" x="0" y="0" width="0" height="12"></rect>
+  </svg>
+</template>
+<template id="tpl-fig-spread">
+  <svg class="fig spread" viewBox="0 0 1000 24" width="100%" height="24" aria-hidden="true" focusable="false" preserveAspectRatio="none">
+    <line class="axis" x1="2" y1="12" x2="998" y2="12" vector-effect="non-scaling-stroke"></line>
+    <line class="tick min" x1="2" y1="4" x2="2" y2="20" vector-effect="non-scaling-stroke"></line>
+    <line class="tick mean" x1="500" y1="0" x2="500" y2="24" vector-effect="non-scaling-stroke"></line>
+    <line class="tick max" x1="998" y1="4" x2="998" y2="20" vector-effect="non-scaling-stroke"></line>
+  </svg>
 </template>
 
 <script>

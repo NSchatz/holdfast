@@ -75,7 +75,7 @@ func TestCoverageBoundedEnumerate_HoldsBackExactlyTheRecordedPaths(t *testing.T)
 	}
 
 	e := heldEngine(t, root, ts, []string{root, filepath.Join(root, "sub")})
-	got := e.enumerate()
+	got, _ := e.enumerate()
 
 	if contains(got, parkedSrc) {
 		t.Errorf("the parked job's SOURCE was enumerated: %v", got)
@@ -110,7 +110,7 @@ func TestCoverageBoundedEnumerate_ARetainedReplacementIsHeldWithNoRecordAtAll(t 
 	}
 
 	e := heldEngine(t, root, ts, []string{root})
-	got := e.enumerate()
+	got, _ := e.enumerate()
 
 	if contains(got, orphan) {
 		t.Errorf("a replacement holdfast wrote, with no record surviving, was enumerated: %v", got)

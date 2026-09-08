@@ -65,6 +65,20 @@ type jobDTO struct {
 	VmafMean  *float64 `json:"vmaf_mean"`
 	VmafMin   *float64 `json:"vmaf_min"`
 	VmafModel string   `json:"vmaf_model,omitempty"`
+	// What the comparison was made IN, and what it found in the colour planes
+	// (GATE-4). VmafPixFmt is the single pixel format both streams were converted to
+	// before scoring; VmafChromaMetric names the chroma metric and its unit.
+	//
+	// The two strings are `omitempty` - a row that recorded no comparison carries
+	// neither key, exactly as vmaf_model already behaves, so a client never has to
+	// decide what an empty string means. VmafChroma is a POINTER without omitempty,
+	// following vmaf_mean/vmaf_min: it serializes as an explicit JSON null, which
+	// states "not recorded" rather than leaving a client to infer it from a missing
+	// key - and it is the field where the distinction bites hardest, because 0.0 dB
+	// is an obliterated chroma plane and not an absence.
+	VmafPixFmt       string   `json:"vmaf_pix_fmt,omitempty"`
+	VmafChroma       *float64 `json:"vmaf_chroma"`
+	VmafChromaMetric string   `json:"vmaf_chroma_metric,omitempty"`
 	// The sizes either side of the swap, and how long the encode took.
 	SourceBytes *int64 `json:"source_bytes"`
 	OutputBytes *int64 `json:"output_bytes"`
@@ -116,11 +130,15 @@ func toDTOs(jobs []store.Job) []jobDTO {
 			FailCount: j.FailCount,
 			UpdatedAt: j.UpdatedAt,
 
-			Reason:      j.Outcome.Reason,
-			Encoder:     j.Outcome.Encoder,
-			VmafMean:    j.Outcome.VmafMean,
-			VmafMin:     j.Outcome.VmafMin,
-			VmafModel:   j.Outcome.VmafModel,
+			Reason:           j.Outcome.Reason,
+			Encoder:          j.Outcome.Encoder,
+			VmafMean:         j.Outcome.VmafMean,
+			VmafMin:          j.Outcome.VmafMin,
+			VmafModel:        j.Outcome.VmafModel,
+			VmafPixFmt:       j.Outcome.VmafPixFmt,
+			VmafChroma:       j.Outcome.VmafChroma,
+			VmafChromaMetric: j.Outcome.VmafChromaMetric,
+
 			SourceBytes: j.Outcome.SourceBytes,
 			OutputBytes: j.Outcome.OutputBytes,
 			EncodeMs:    j.Outcome.EncodeMs,
@@ -132,6 +150,25 @@ func toDTOs(jobs []store.Job) []jobDTO {
 		})
 	}
 	return out
+}
+
+// HistoryRowJSON marshals one ledger row into EXACTLY the object /api/history publishes
+// for it - the same struct, the same field names, the same explicit nulls (LEDGER-5).
+//
+// It is exported for the `holdfast export` subcommand, and it is a function rather than a
+// copied struct precisely so the two cannot drift: the export's format is defined as "what
+// the API publishes for a row", and a duplicate DTO in cmd/holdfast would make that a
+// promise nothing enforces. The pointer fields carry the whole point of the format - an
+// unmeasured VMAF, size or duration is an explicit JSON null and never a 0, because a VMAF
+// of 0.0 is a destroyed frame rather than a missing measurement, and a consumer of the
+// export must be able to tell those apart exactly as a consumer of the API can.
+//
+// A terminal row carries no live progress, so the three progress fields go out as the same
+// nulls /api/history sends for it. That is not an omission: they are part of the published
+// row shape, and "not recorded" is the honest value for a job no encoder is running.
+func HistoryRowJSON(j store.Job) ([]byte, error) {
+	dtos := toDTOs([]store.Job{j})
+	return json.Marshal(dtos[0])
 }
 
 // snapshot is the full state the SSE stream pushes and the read endpoints compose.
@@ -157,12 +194,31 @@ func toDTOs(jobs []store.Job) []jobDTO {
 // background tab's timers under policies with no normative guarantee, so an accumulated
 // counter drifts while a derived one cannot; and a client whose clock is skewed against
 // the server's would otherwise render nonsense (or a negative age) from updated_at alone.
+// QueueTotal and HistoryTotal are the totals the two capped tables were capped AGAINST
+// (LEDGER-5). Queue and History ship at most queueLimit / historyLimit rows, and until now
+// said nothing about what they were 500 and 200 OF - leaving a client to derive it from
+// the summary counts, which is a different question (the summary counts every row in a
+// status; the cap applies to the rows this response selected) and not one a client can
+// answer correctly. Each total is counted over the MATCHING rows in the ledger and never
+// over the rows returned, so asking for fewer rows than the cap reports the same total.
+//
+// BytesHeldByUndoWindow is space the swaps counted in the reclaimed figures have NOT
+// yet returned to the filesystem (UNDO-6): while an original is retained, its bytes
+// are still allocated under a second link, and they come back only when the window
+// closes. It ships as its OWN figure, never folded into either reclaimed total,
+// because a reclaimed number that quietly included space still being held would tell
+// an operator a disk is free when it is not. It is a POINTER: null means the figure
+// could not be read, which a reader must render as unavailable rather than as a
+// zero that would read as "nothing is being held".
 type snapshot struct {
 	Summary                map[string]int `json:"summary"`
 	Queue                  []jobDTO       `json:"queue"`
 	History                []jobDTO       `json:"history"`
+	QueueTotal             rowTotalDTO    `json:"queue_total"`
+	HistoryTotal           rowTotalDTO    `json:"history_total"`
 	BytesReclaimedSession  int64          `json:"bytes_reclaimed_session"`
 	BytesReclaimedLifetime int64          `json:"bytes_reclaimed_lifetime"`
+	BytesHeldByUndoWindow  *int64         `json:"bytes_held_by_undo_window"`
 	Paused                 bool           `json:"paused"`
 	Scanning               bool           `json:"scanning"`
 	Now                    int64          `json:"now"`
@@ -209,6 +265,28 @@ type spreadDTO struct {
 	Min         *float64 `json:"min"`
 	Mean        *float64 `json:"mean"`
 	Max         *float64 `json:"max"`
+}
+
+// rowTotalDTO is the total a capped response was capped against (LEDGER-5). It carries the
+// aggregates' envelope for exactly the same reason they do, and the one rule that matters
+// here is the last field's:
+//
+//	available   - false when the total could not be read; the response still ships its
+//	              rows and the page still draws them.
+//	unavailable - why, in the same fixed words the aggregates use; "" when available.
+//	covers      - the SET counted, always stated. Never the rows returned.
+//	cap         - the row limit this response applied, so "of N" is beside "showing M".
+//	count       - a POINTER, and deliberately not omitempty: an unreadable total goes out
+//	              as an explicit null, never as 0. A zero here would say "the ledger holds
+//	              nothing", which is the one thing a figure that could not be read must not
+//	              claim - and it is the claim a client would then render beside rows it can
+//	              see with its own eyes.
+type rowTotalDTO struct {
+	Available   bool   `json:"available"`
+	Unavailable string `json:"unavailable"`
+	Covers      string `json:"covers"`
+	Cap         int    `json:"cap"`
+	Count       *int64 `json:"count"`
 }
 
 type breakdownDTO struct {
@@ -558,13 +636,35 @@ func (h *Hub) buildSnapshot(ctx context.Context) (snapshot, error) {
 		// History rows are terminal, so they are projected WITHOUT live progress — a
 		// finished file carries the proof its swap was safe, never a running figure.
 		History:                toDTOs(hist),
+		QueueTotal:             h.rowTotal(ctx, "queue_total", activeAndPending, queueLimit),
+		HistoryTotal:           h.rowTotal(ctx, "history_total", terminal, historyLimit),
 		BytesReclaimedSession:  h.bytesReclaimed.Load(),
 		BytesReclaimedLifetime: h.ReclaimedLifetime(),
+		BytesHeldByUndoWindow:  h.heldByUndoWindow(ctx),
 		Paused:                 h.ctrl.Paused(),
 		Scanning:               h.ctrl.Scanning(),
 		Now:                    time.Now().Unix(),
 		Aggregates:             h.aggregates(ctx),
 	}, nil
+}
+
+// heldByUndoWindow reads the bytes the undo window is still holding. Unlike the
+// reclaimed lifetime total this is NOT baselined at startup: a held figure that could
+// not fall would keep reporting space as held after the release returned it, which is
+// the opposite of the honesty it exists for. The read is a SUM over the retained
+// table, which holds one row per original inside the window and nothing else - it is
+// bounded by what is currently retained, not by the ledger's history.
+//
+// A read failure yields nil (rendered as unavailable) and never fails the snapshot:
+// the same rule the whole-ledger aggregates follow, for the same reason - one
+// unreadable figure must not blank a live page.
+func (h *Hub) heldByUndoWindow(ctx context.Context) *int64 {
+	held, err := h.store.HeldByUndoWindow(ctx)
+	if err != nil {
+		h.log.Warn("undo-window held-bytes read failed (reported as unavailable)", "err", err)
+		return nil
+	}
+	return &held
 }
 
 // aggregates reads the whole-ledger figures for a snapshot. It CANNOT fail the
@@ -584,6 +684,35 @@ func (h *Hub) aggregates(ctx context.Context) aggregatesDTO {
 		VmafMean:     h.spread("vmaf_mean", a.VmafMean),
 		VmafMin:      h.spread("vmaf_min", a.VmafMin),
 	}
+}
+
+// rowTotal reads the total behind one cap and projects it onto the wire.
+//
+// Like the aggregates and for the same reason, it CANNOT fail the response that carries
+// it: buildSnapshot returns an error on a store read failure and broadcast then skips the
+// frame, and the read endpoints 500. A total that cannot be read must not cost an operator
+// the rows they can otherwise see, so the failure is carried in this figure alone and
+// rendered as unavailable. The real error is logged where an operator with server access
+// can read it; the unauthenticated response is told only that the figure could not be
+// read, which is the whole of what a client needs to render honestly.
+//
+// The count is over the MATCHING rows, never over the rows returned. That is the whole
+// point of the field: a total derived from the payload is the payload's own length.
+func (h *Hub) rowTotal(ctx context.Context, name string, statuses []store.Status, capApplied int) rowTotalDTO {
+	t := h.store.CountRows(ctx, statuses)
+	out := rowTotalDTO{
+		Available: t.Err == nil,
+		Covers:    t.Coverage.Set,
+		Cap:       capApplied,
+	}
+	if t.Err != nil {
+		h.log.Warn("row total unavailable (the rows still ship)", "total", name, "err", t.Err)
+		out.Unavailable = aggregateUnavailable
+		return out
+	}
+	n := t.Count
+	out.Count = &n
+	return out
 }
 
 // breakdown projects one keyed aggregate, logging the real error where an operator can

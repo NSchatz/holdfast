@@ -12,9 +12,18 @@
 
 services:
   holdfast:
-    image: ghcr.io/nschatz/holdfast:latest
-    # Build it yourself instead of pulling (the image is private until the repo is
-    # public — see the roadmap's PUB-FLIP gate):
+    # Pinned by TAG AND DIGEST. The tag is what you read; the digest is what actually
+    # resolves, and it names the exact multi-arch manifest that scripts/smoke-image.sh
+    # gated - a real encode inside this image, asserting the no-loss contract held -
+    # before release.yml promoted it. `:latest` is deliberately NOT used here: release.yml
+    # MOVES that tag onto each newly gated release, so a `docker compose pull` would
+    # silently change the encoder, and the libvmaf instrument the no-loss verdict is
+    # measured with, under a deployment nobody touched.
+    #
+    # To upgrade, resolve the digest of the release you want and change both halves:
+    #   docker buildx imagetools inspect ghcr.io/nschatz/holdfast:vX.Y.Z
+    image: ghcr.io/nschatz/holdfast:v0.1.0@sha256:302242b66f9c160e69b1e7c37d57925ec593bc7ed0ee9df851af0ec58c7cd4b2
+    # Build it yourself instead of pulling:
     # build:
     #   context: .
     container_name: holdfast

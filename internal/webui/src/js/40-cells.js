@@ -50,13 +50,15 @@ function resultCell(td, j) {
   }
 }
 
-// The progress cell for a queue row: the derivation's figure, "unknown" when the encoder
-// has reported nothing usable, and an empty cell for every state that has no progress.
+// The progress cell for a queue row: the derivation's figure, or the page's ONE absence
+// phrase (F3). A row that is not encoding has no measurement of a fraction, and a running
+// encode whose encoder has reported nothing usable has none either - to a reader those
+// are the same fact, nobody measured this, so both read as that one phrase rather than as
+// a blank cell a reader could take for a zero or for a figure that failed to draw.
 function progressCell(td, j) {
   const f = progressFigure(j);
-  if (!f) return; // not encoding: nothing measures a fraction here
-  if (f.unknown) {
-    td.appendChild(mk("span", "nr", "unknown"));
+  if (!f || f.unknown) {
+    td.appendChild(nrNode());
     return;
   }
   td.appendChild(mk("span", "pctv", f.percent));

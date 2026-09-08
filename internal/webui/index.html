@@ -10,217 +10,601 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>holdfast</title>
 <style>
+/* --- internal/webui/src/tokens.css --- */
+  /* ============================================================================
+     THE TOKEN FILE. Every colour and every length the dashboard paints is declared
+     here and NOWHERE else (styling clause S1): `dashboard.css` and the page shell
+     carry no hex value, no rgb(), no named colour and no length literal at all, and
+     a check inside `make check` refuses one that reappears.
+
+     Two themes, both HAND-AUTHORED value by value (S6). The light palette is NOT
+     derived from the dark one by any rule: a derived palette routinely misses a
+     contrast floor and the hand fixes land anyway, without the honesty of having
+     been chosen. The DEFAULT declared on :root is the LIGHT palette, so an engine
+     that reports no operating-system preference gets light - one named default, and
+     never a mixture of the two (F10).
+
+     Every pair that must clear a contrast floor carries its MEASURED ratio in BOTH
+     themes on the `contrast:` line beside it (S7). Those lines are machine-read:
+     `TestRendered_RecordedContrastRatiosAgreeWithTheEngine` recomputes each pair
+     from the colours the BROWSER resolved in each theme and fails if a recorded
+     ratio disagrees with the measured one or falls below its floor, so a value
+     cannot quietly move without its record moving with it.
+
+     Token groups, which the mechanical check knows by name:
+       colour     the fifteen role names S2 fixes. A token is named for its ROLE.
+       --sp-*     spacing. Every value is a multiple of 4px (S3). One density (S4).
+       --fs-*     the type scale.        --lh-*      line heights (unitless).
+       --radius-* corner radii.          --bw-*      border widths.
+       --w-*      layout widths.         --size-*    fixed element sizes.
+       --measure-* prose measures.       --font-*    the two families (S5).
+       --shadow-* the depth scale (S8).  --motion-*  transition durations (S9).
+     ============================================================================ */
   :root {
-    --bg:#0f1115; --panel:#171a21; --line:#252a34; --fg:#e6e9ef; --muted:#8b93a3;
-    --accent:#5b9dd9; --ok:#3fb950; --warn:#d29922; --bad:#f85149;
-    /* --border draws every interactive control's edge (buttons, inputs, badges) and
-       the focus ring's base. It is #606776 (3.33:1 on --bg), clearing WCAG 2.2's 3:1
-       floor for non-text UI. --line stays for purely decorative separators (table
-       rows, section rules) where the 3:1 component floor does not apply. */
-    --border:#606776;
+    /* Tell the engine both themes exist, so form controls, scrollbars and the
+       canvas the browser paints under the document follow the palette in force. */
+    color-scheme: light dark;
+
+    /* --- the LIGHT palette: the default, and what "no preference" renders ----- */
+    /* contrast: --fg on --bg | floor 4.5 | dark 15.54 | light 16.93 */
+    /* contrast: --fg on --panel | floor 4.5 | dark 14.32 | light 18.15 */
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    /* --line is the DECORATIVE separator (table rules, block dividers). It carries
+       no figure and is deliberately not held to the 3:1 non-text floor; --border
+       draws every boundary a reader has to find. */
+    --line: #e3e6eb;
+    --fg: #12161c;
+    /* contrast: --muted on --bg | floor 4.5 | dark 7.43 | light 6.12 */
+    /* contrast: --muted on --panel | floor 4.5 | dark 6.84 | light 6.56 */
+    --muted: #545e6d;
+    /* contrast: --accent on --bg | floor 4.5 | dark 8.11 | light 6.43 */
+    /* contrast: --accent on --panel | floor 4.5 | dark 7.47 | light 6.89 */
+    /* contrast: --bg on --accent | floor 4.5 | dark 8.11 | light 6.43 */
+    --accent: #0f5aa8;
+    /* contrast: --ok on --bg | floor 4.5 | dark 8.30 | light 6.44 */
+    /* contrast: --ok on --panel | floor 4.5 | dark 7.64 | light 6.90 */
+    --ok: #10682f;
+    /* contrast: --warn on --bg | floor 4.5 | dark 8.58 | light 6.59 */
+    /* contrast: --warn on --panel | floor 4.5 | dark 7.91 | light 7.06 */
+    /* contrast: --bg on --warn | floor 4.5 | dark 8.58 | light 6.59 */
+    --warn: #7a5000;
+    /* contrast: --bad on --bg | floor 4.5 | dark 6.77 | light 6.20 */
+    /* contrast: --bad on --panel | floor 4.5 | dark 6.24 | light 6.64 */
+    --bad: #b3221c;
+    /* --border draws every interactive control's edge and every boundary a reader
+       has to find to read the thing inside it, so it clears WCAG 2.2's 3:1 non-text
+       floor against BOTH surfaces this page draws it on. */
+    /* contrast: --border on --bg | floor 3.0 | dark 4.96 | light 4.08 */
+    /* contrast: --border on --panel | floor 3.0 | dark 4.57 | light 4.37 */
+    --border: #71798a;
+    /* --mark draws every mark of every figure: a distribution's bars, a spread's
+       scale and its three ticks. ONE token for all of them, deliberately - nothing
+       inside a drawing is told apart from anything else in it by colour. */
+    /* contrast: --mark on --bg | floor 3.0 | dark 8.11 | light 6.43 */
+    /* contrast: --mark on --panel | floor 3.0 | dark 7.47 | light 6.89 */
+    --mark: #0f5aa8;
+    /* contrast: --focus on --bg | floor 3.0 | dark 10.25 | light 6.43 */
+    /* contrast: --focus on --panel | floor 3.0 | dark 9.45 | light 6.89 */
+    --focus: #0f5aa8;
+    /* A disabled control is still READ, so --disabled clears the 4.5:1 TEXT floor
+       rather than taking WCAG's inactive-component exemption. What tells a disabled
+       control apart from an active one is its dashed edge, not its colour. */
+    /* contrast: --disabled on --bg | floor 4.5 | dark 7.26 | light 5.27 */
+    /* contrast: --disabled on --panel | floor 4.5 | dark 6.69 | light 5.65 */
+    --disabled: #5f6874;
+    /* contrast: --fg on --selected | floor 4.5 | dark 9.46 | light 14.28 */
+    --selected: #d6e6f7;
+    /* contrast: --link on --bg | floor 4.5 | dark 9.39 | light 7.61 */
+    /* contrast: --link on --panel | floor 4.5 | dark 8.66 | light 8.16 */
+    --link: #0b4f96;
+
+    /* --- spacing: the 4px scale, and the only one (S3, S4) ------------------- */
+    --sp-1: 4px;
+    --sp-2: 8px;
+    --sp-3: 12px;
+    --sp-4: 16px;
+    --sp-5: 20px;
+    --sp-6: 24px;
+    --sp-8: 32px;
+
+    /* --- the type scale ------------------------------------------------------ */
+    --fs-xs: 12px;
+    --fs-sm: 13px;
+    --fs-md: 14px;
+    --fs-lg: 15px;
+    --fs-xl: 18px;
+    --fs-2xl: 20px;
+    --fs-3xl: 22px;
+    --lh-tight: 1.3;
+    --lh-base: 1.5;
+
+    /* --- the two families (S5): monospace where column alignment carries
+           meaning, the system UI SANS face for headings, prose and controls.
+
+       The UI stack deliberately does NOT begin with the `system-ui` generic. That
+       generic names whatever face the host has nominated as its UI font, and the
+       host may nominate a FIXED-ADVANCE one: on the container this repository's
+       graders run in, `system-ui` resolves to a monospace face, so a page that led
+       with it would render its headings, its labels and its controls in the very
+       family S5 reserves for data - and would do so silently, on somebody else's
+       machine. The named platform faces below reach the real UI font on macOS,
+       Windows, Android and a Linux desktop, and the `sans-serif` generic at the end
+       is the one fallback that is proportional by definition. This is measured, not
+       assumed: TestRenderedCDP_TheShippedPageMeetsEveryConventionInBothThemesAtBothWidths
+       compares the advance width of sixteen narrow glyphs against sixteen wide ones
+       in the face the engine ACTUALLY used. */
+    --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif;
+    --font-mono: ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace;
+
+    /* --- edges and corners --------------------------------------------------- */
+    --bw-hair: 1px;
+    --bw-focus: 2px;
+    --bw-flag: 4px;
+    --radius-sm: 4px;
+    --radius-md: 8px;
+    --radius-pill: 9999px;
+
+    /* --- fixed sizes and layout widths --------------------------------------- */
+    --size-dot: 12px;
+    --size-figbar: 12px;
+    --size-figspread: 24px;
+    --size-tap: 24px;
+    --w-chip-min: 96px;
+    --w-agg-min: 248px;
+    --w-input: 224px;
+    --w-track-min: 48px;
+    --w-table-min: 640px;
+    --w-main-max: 1184px;
+    --measure-note: 70ch;
+    --measure-footer: 80ch;
+
+    /* --- depth (S8): ONE shadow token, for the ONE genuinely raised surface on
+           this page - the sticky header, which is painted over the document as it
+           scrolls under it. Every other surface separates by --border and a surface
+           token and computes no shadow at all. The value is per theme, because a
+           shadow tuned for dark does not work on light. ---------------------- */
+    --shadow-raised: 0 1px 4px rgba(9, 12, 18, 0.18);
+
+    /* --- motion (S9): decoration and affordance only. Nothing on this page is
+           communicated by movement, and the reduce block below zeroes every one
+           of these. ------------------------------------------------------------ */
+    --motion-fast: 120ms;
+    --motion-slow: 200ms;
   }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg);
-    font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
-  /* One focus-visible ring for every keyboard-reachable control (accent = 6.5:1 on
-     --bg). Mouse clicks keep no ring (:focus-visible), keyboard focus always shows one. */
-  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:3px; }
-  /* An off-screen but screen-reader-available region (the aria-live summary lives here). */
-  .visually-hidden { position:absolute; width:1px; height:1px; padding:0; margin:-1px;
-    overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0; }
-  header { display:flex; align-items:center; gap:16px; flex-wrap:wrap;
-    padding:14px 20px; border-bottom:1px solid var(--line); background:var(--panel); }
-  header h1 { font-size:18px; margin:0; letter-spacing:.5px; }
-  header h1 .mono { color:var(--accent); }
-  .badges { display:flex; gap:8px; flex-wrap:wrap; }
-  .badge { font-size:12px; padding:2px 9px; border-radius:20px; border:1px solid var(--border);
-    color:var(--muted); }
-  .badge.on { color:var(--bg); background:var(--warn); border-color:var(--warn); font-weight:600; }
-  .badge.scan.on { background:var(--accent); border-color:var(--accent); }
-  .grow { flex:1 1 auto; }
-  .reclaimed { font-size:13px; color:var(--muted); text-align:right; }
-  .reclaimed b { color:var(--ok); font-size:16px; }
-  .reclaimed .sub { display:block; font-size:11px; color:var(--muted); }
-  main { padding:20px; max-width:1180px; margin:0 auto; }
-  .chips { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px; }
-  .chip { background:var(--panel); border:1px solid var(--line); border-radius:8px;
-    padding:10px 14px; min-width:96px; }
-  .chip .n { font-size:22px; font-weight:700; }
-  .chip .k { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
-  .chip.done .n { color:var(--ok); } .chip.failed .n { color:var(--bad); }
-  .chip.indeterminate .n, .chip.applied-despite-error .n { color:var(--bad); }
-  .chip.encoding .n, .chip.probing .n, .chip.verifying .n { color:var(--accent); }
-  .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:14px; }
-  .lbl { font-size:12px; color:var(--muted); }
-  .controls input { background:var(--bg); border:1px solid var(--border); color:var(--fg);
-    padding:7px 10px; border-radius:6px; width:220px; }
-  .controls input::placeholder { color:var(--muted); }
-  button { background:var(--panel); border:1px solid var(--border); color:var(--fg);
-    padding:7px 14px; border-radius:6px; cursor:pointer; font-size:13px; }
-  button:hover:not(:disabled) { border-color:var(--accent); }
-  button.primary { background:var(--accent); border-color:var(--accent); color:var(--bg); font-weight:600; }
-  button:disabled { opacity:.45; cursor:not-allowed; border-color:var(--line); }
-  #msg { font-size:13px; color:var(--muted); min-height:18px; margin-left:6px; }
-  #msg.err { color:var(--bad); }
-  section h2 { font-size:14px; text-transform:uppercase; letter-spacing:.5px;
-    color:var(--muted); border-bottom:1px solid var(--line); padding-bottom:6px; margin:26px 0 6px; }
-  section .note { font-size:12px; color:var(--muted); margin:0 0 10px; max-width:70ch; }
-  /* The cap notice: the API caps the queue/history rows it ships, so a truncated view
-     could read as a complete one. This calls it out. Text is --fg (accessible); the
-     tint and rule are decorative. */
-  .note.cap { color:var(--fg); background:rgba(210,153,34,.12); border-left:3px solid var(--warn);
-    padding:6px 10px; border-radius:4px; }
-  /* Whole-ledger figures. Each card carries its number, the set that number is over,
-     and the rows it had to leave out; ".out" is the unavailable state, which colours the
-     card without removing it (an aggregate that vanished on failure would leave the page
-     looking complete). */
-  .aggs { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:10px; }
-  .agg { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 14px; }
-  .agg h3 { margin:0 0 6px; font-size:12px; color:var(--muted); text-transform:uppercase;
-    letter-spacing:.5px; font-weight:600; }
-  .agg .agg-v { font-size:14px; }
-  .agg .agg-v b { font-size:20px; font-weight:700; }
-  .agg .range { display:block; color:var(--muted); font-size:12px; margin-top:2px; }
-  .agg .bucket { display:flex; justify-content:space-between; gap:12px; font-size:13px; }
-  .agg .bucket .c { font-weight:600; }
-  .agg .agg-cov, .agg .agg-ex { margin:6px 0 0; font-size:11px; color:var(--muted); }
-  .agg.out .agg-v { color:var(--warn); }
-  .tablewrap { overflow-x:auto; }
-  table { width:100%; border-collapse:collapse; }
-  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);
-    font-size:13px; vertical-align:top; }
-  th { color:var(--muted); font-weight:600; font-size:12px; white-space:nowrap; }
-  td.path { font-family:ui-monospace,Menlo,Consolas,monospace; word-break:break-all; }
-  /* The history table is FIXED-width so its wide free-text cells (the VMAF viewing
-     condition, a failed row's reason) WRAP inside their column instead of blowing the
-     table past the viewport and pushing the fidelity proof off-screen. */
-  table.hist { table-layout:fixed; }
-  table.hist td { overflow-wrap:anywhere; }
-  /* The Result cell reuses the status styling but, unlike the queue, must WRAP — a
-     failed row's reason is long free text and td.st's nowrap would run it off-screen. */
-  table.hist td.st { white-space:normal; }
-  td.st { white-space:nowrap; }
-  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px;
-    background:var(--muted); vertical-align:middle; }
-  .st-done .dot { background:var(--ok); } .st-failed .dot { background:var(--bad); }
-  .st-skipped .dot { background:var(--muted); }
-  .st-indeterminate .dot, .st-applied-despite-error .dot { background:var(--bad); }
-  .st-encoding .dot,.st-probing .dot,.st-verifying .dot,.st-pending .dot { background:var(--accent); }
-  .reason { color:var(--muted); font-size:12px; }
-  .reason.fail { color:var(--bad); word-break:break-word; }
-  .size .before { color:var(--muted); }
-  .size .arrow { color:var(--muted); margin:0 4px; }
-  .size .pct { display:block; color:var(--ok); font-weight:600; margin-top:2px; }
-  .vmaf .pair { white-space:nowrap; }
-  .vmaf .mean { font-weight:600; }
-  .vmaf .worst { color:var(--fg); }
-  .vmaf .cond { display:block; color:var(--muted); font-size:11px; margin-top:2px; }
-  /* In-state age and the encoder's own progress figure, for the active queue only. */
-  td.elapsed { white-space:nowrap; font-variant-numeric:tabular-nums; }
-  td.prog { white-space:nowrap; }
-  td.prog .pctv { font-weight:600; font-variant-numeric:tabular-nums; }
-  td.prog .of { display:block; color:var(--muted); font-size:11px; margin-top:2px; }
-  .nr { color:var(--muted); font-style:italic; }
-  .empty { color:var(--muted); font-style:italic; padding:10px; }
-  footer { color:var(--muted); font-size:12px; text-align:center; padding:22px; max-width:80ch; margin:0 auto; }
+
+  /* The DARK palette, hand-authored value by value. It is applied by the operating
+     system preference alone - never by a class, an attribute or a stylesheet a test
+     injects, which is why the graders emulate the preference at the engine. */
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --panel: #171a21;
+      --line: #252a34;
+      --fg: #e6e9ef;
+      --muted: #9aa3b2;
+      --accent: #6cb0e8;
+      --ok: #4ac26b;
+      --warn: #e0a437;
+      --bad: #ff6b61;
+      --border: #7b8394;
+      --mark: #6cb0e8;
+      --focus: #8ec5f0;
+      --disabled: #99a1af;
+      --selected: #2a3a52;
+      --link: #7fbdf0;
+      --shadow-raised: 0 1px 4px rgba(0, 0, 0, 0.55);
+    }
+  }
+
+  /* Motion is never information (S9), so removing it removes nothing. Every
+     duration this stylesheet can compute is named here, and the graders assert the
+     engine computes 0s for every element AND that the page still shows every value,
+     state and status it showed with the motion in place. */
+  @media (prefers-reduced-motion: reduce) {
+    :root {
+      --motion-fast: 0s;
+      --motion-slow: 0s;
+    }
+    *, *::before, *::after {
+      transition-duration: 0s !important;
+      animation-duration: 0s !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+    }
+  }
+/* --- internal/webui/src/dashboard.css --- */
+  /* The dashboard's stylesheet. It declares NO colour and NO length of its own:
+     every one comes from `tokens.css`, which is the single committed token file
+     (S1), and a check inside `make check` refuses a hex value, an rgb(), a named
+     colour or a length literal that reappears here. */
+  * { box-sizing: border-box; }
+
+  /* The two families, split by what the text is FOR (S5). The document face is the
+     system UI face - headings, prose, labels and controls read as prose. Monospace
+     is reserved for the cells whose COLUMN ALIGNMENT carries meaning: paths, sizes,
+     scores, durations, counts and the figures' own numbers. */
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-ui);
+    font-size: var(--fs-md);
+    line-height: var(--lh-base);
+  }
+  .mono, td.path, td.elapsed, td.prog, td.dur, td.size, td.vmaf, td.upd, td.worker,
+  .chip .n, .reclaimed b, .agg .agg-v b, .buckets .bc, .spreadkeys .sv, .agg .range {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ONE focus-visible ring for every keyboard-reachable control, drawn in --focus,
+     which clears 3:1 against both surfaces it is drawn on. Mouse clicks keep no
+     ring (:focus-visible); keyboard focus always shows one. */
+  :focus-visible {
+    outline: var(--bw-focus) solid var(--focus);
+    outline-offset: var(--bw-focus);
+    border-radius: var(--radius-sm);
+  }
+  ::selection { background: var(--selected); color: var(--fg); }
+
+  /* An off-screen but screen-reader-available region (the aria-live summary). */
+  .visually-hidden {
+    position: absolute;
+    width: var(--bw-hair); height: var(--bw-hair);
+    padding: 0; margin: calc(-1 * var(--bw-hair));
+    overflow: hidden; clip-path: inset(50%);
+    white-space: nowrap; border: 0;
+  }
+
+  /* The ONE raised surface on this page (S8): the header is painted OVER the
+     document as it scrolls under, so it takes the single shadow token. Everything
+     else on the page separates by --border plus a surface token and computes no
+     shadow at all. */
+  header {
+    position: sticky; top: 0; z-index: 1;
+    display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap;
+    padding: var(--sp-3) var(--sp-5);
+    border-bottom: var(--bw-hair) solid var(--line);
+    background: var(--panel);
+    box-shadow: var(--shadow-raised);
+  }
+  header h1 { font-size: var(--fs-xl); margin: 0; }
+  header h1 .mono { color: var(--accent); }
+  .grow { flex: 1 1 auto; }
+  #conn { font-size: var(--fs-xs); color: var(--muted); }
+  #conn.live { color: var(--ok); }
+  #conn.down { color: var(--bad); }
+
+  main { padding: var(--sp-5); max-width: var(--w-main-max); margin: 0 auto; }
+
+  .badges { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center;
+    margin-bottom: var(--sp-3); }
+  .badge {
+    font-size: var(--fs-xs); padding: var(--sp-1) var(--sp-2);
+    border-radius: var(--radius-pill); border: var(--bw-hair) solid var(--border);
+    color: var(--muted); background: var(--panel);
+    transition: background-color var(--motion-fast) linear, color var(--motion-fast) linear;
+  }
+  .badge.on { color: var(--bg); background: var(--warn); border-color: var(--warn); font-weight: 600; }
+  .badge.scan.on { background: var(--accent); border-color: var(--accent); }
+  .reclaimed { font-size: var(--fs-sm); color: var(--muted); }
+  .reclaimed b { color: var(--ok); font-size: var(--fs-md); }
+
+  .chips { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-4); }
+  .chip { background: var(--panel); border: var(--bw-hair) solid var(--border);
+    border-radius: var(--radius-md); padding: var(--sp-2) var(--sp-3);
+    min-width: var(--w-chip-min); }
+  .chip .n { font-size: var(--fs-3xl); font-weight: 700; }
+  /* The chip's key is the STATE IN WORDS, always rendered, always beside the
+     number: the colour of the number above is a second reading of the same fact,
+     never the only one. */
+  .chip .k { font-size: var(--fs-xs); color: var(--muted); }
+  .chip.done .n { color: var(--ok); }
+  .chip.failed .n { color: var(--bad); }
+  /* The two FILESYSTEM-1 outcomes are counted as themselves, so they are coloured as
+     themselves rather than folded into done or failed. */
+  .chip.indeterminate .n, .chip.applied-despite-error .n { color: var(--bad); }
+  .chip.encoding .n, .chip.probing .n, .chip.verifying .n { color: var(--accent); }
+
+  /* Controls. Every pointer target on this page is at least --size-tap square at
+     every viewport width, which the padding and the min-height together buy. */
+  .controls { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap;
+    margin-bottom: var(--sp-3); }
+  .lbl { font-size: var(--fs-xs); color: var(--muted); }
+  .controls input {
+    background: var(--bg); border: var(--bw-hair) solid var(--border); color: var(--fg);
+    font-family: var(--font-ui); font-size: var(--fs-sm);
+    padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-sm);
+    width: var(--w-input); max-width: 100%;
+    min-height: var(--size-tap);
+    transition: border-color var(--motion-fast) linear;
+  }
+  .controls input::placeholder { color: var(--muted); }
+  button {
+    background: var(--panel); border: var(--bw-hair) solid var(--border); color: var(--fg);
+    font-family: var(--font-ui); font-size: var(--fs-sm);
+    padding: var(--sp-2) var(--sp-4); border-radius: var(--radius-sm); cursor: pointer;
+    min-height: var(--size-tap); min-width: var(--size-tap);
+    transition: border-color var(--motion-fast) linear, background-color var(--motion-fast) linear;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg);
+    font-weight: 600; }
+  /* A disabled control is told apart by its DASHED edge, not by being faded: an
+     opacity would take its text below the contrast floor and would say nothing at
+     all with the colours collapsed. */
+  button:disabled { color: var(--disabled); background: var(--panel);
+    border-style: dashed; border-color: var(--disabled); cursor: not-allowed; }
+  #msg { font-size: var(--fs-sm); color: var(--muted); min-height: var(--sp-5); }
+  #msg.err { color: var(--bad); }
+
+  /* The page's two regions. The h2 is the region; the h3s inside it are its blocks. */
+  section > h2 { font-size: var(--fs-lg); color: var(--fg);
+    border-bottom: var(--bw-hair) solid var(--border); padding-bottom: var(--sp-2);
+    margin: var(--sp-6) 0 var(--sp-2); }
+  section > h3 { font-size: var(--fs-md); color: var(--muted);
+    border-bottom: var(--bw-hair) solid var(--line); padding-bottom: var(--sp-2);
+    margin: var(--sp-5) 0 var(--sp-2); }
+  /* The short SCOPE label that stays on the surface (F8). The paragraphs that used
+     to explain the methodology here live in docs/dashboard-methodology.md and are
+     reached by the one documentation link each region carries. */
+  .scope { font-size: var(--fs-xs); color: var(--muted); margin: 0 0 var(--sp-2);
+    max-width: var(--measure-note); }
+  .docs { margin: 0 0 var(--sp-3); }
+  .doclink {
+    display: inline-block; color: var(--link); font-size: var(--fs-xs);
+    min-height: var(--size-tap); padding: var(--sp-1) var(--sp-1) var(--sp-1) 0;
+    transition: color var(--motion-fast) linear;
+  }
+
+  /* The three states every view owes (F7): loading, empty and unreadable, each in
+     words and each distinct from the other two. The state line replaces nothing -
+     it sits beside the view it describes, so rows already on screen stay on screen
+     when a stream drops. */
+  .state { font-size: var(--fs-sm); margin: 0 0 var(--sp-2); color: var(--muted); }
+  .state.unreadable { color: var(--bad); }
+  /* The figures view is a grid, so its state line spans the whole track rather than
+     sitting in the first column as if it were a card. */
+  .aggs > .state { grid-column: 1 / -1; margin: 0; }
+
+  /* The cap notice: the API caps the queue/history rows it ships, so a truncated
+     view could read as a complete one. Text is --fg; the rule beside it is
+     decorative and repeats nothing. */
+  .note.cap { color: var(--fg); border-left: var(--bw-flag) solid var(--warn);
+    padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-sm);
+    font-size: var(--fs-xs); margin: 0 0 var(--sp-2); }
+
+  /* Whole-ledger figures. Each card carries its number, its drawing, the set that
+     number is over, and the rows it had to leave out; ".out" is the unavailable
+     state, which colours the card without removing it and draws NO figure at all -
+     there is nothing measured to draw. */
+  .aggs { display: grid; grid-template-columns: repeat(auto-fit, minmax(var(--w-agg-min), 1fr));
+    gap: var(--sp-3); }
+  .agg { background: var(--panel); border: var(--bw-hair) solid var(--border);
+    border-radius: var(--radius-md); padding: var(--sp-3) var(--sp-4); }
+  .agg h3 { margin: 0 0 var(--sp-2); font-size: var(--fs-xs); color: var(--muted);
+    font-weight: 600; }
+  .agg .agg-v { font-size: var(--fs-md); }
+  .agg .agg-v b { font-size: var(--fs-2xl); font-weight: 700; }
+  .agg .range { display: block; color: var(--muted); font-size: var(--fs-xs);
+    margin-top: var(--sp-1); }
+  .agg .agg-cov, .agg .agg-ex { margin: var(--sp-1) 0 0; font-size: var(--fs-xs);
+    color: var(--muted); }
+  .agg.out .agg-v { color: var(--warn); }
+
+  /* --- the drawings ---------------------------------------------------------
+     A figure is an inline vector drawing built from DOM nodes cloned out of a
+     template, with one geometry attribute set per mark from a number the server
+     already published. It loads nothing: no library, no font, no image, no data:
+     URI. Every value it encodes is also rendered as text in the same card, in the
+     order the marks are drawn. */
+  .agg .fig { display: block; width: 100%; }
+  .agg .fig.bar { height: var(--size-figbar); }
+  .agg .fig.spread { height: var(--size-figspread); margin: var(--sp-1) 0; }
+  .agg .fig .mark { fill: var(--mark); }
+  .agg .fig .axis, .agg .fig .tick { stroke: var(--mark); fill: none; stroke-width: var(--bw-focus); }
+  /* The mean tick is TALLER and THICKER than the two ends it sits between - the one
+     thing that tells the three marks of a spread apart, since all three share a
+     colour. */
+  .agg .fig .tick.mean { stroke-width: calc(var(--bw-focus) + var(--bw-hair)); }
+  /* One grid for the whole distribution, so every bar is measured against the same
+     track width. Label, bar and count sit in one row per bucket, in the order the
+     marks are drawn. */
+  .buckets { display: grid;
+    grid-template-columns: max-content minmax(var(--w-track-min), 1fr) max-content;
+    align-items: center; gap: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); }
+  .buckets .bk { overflow-wrap: anywhere; }
+  .buckets .bc { font-weight: 600; }
+  /* The spread's text equivalent: minimum, mean and maximum, in the left-to-right
+     order the ticks above them are drawn. Lower case deliberately - what a reader
+     sees is what the grader reads back. */
+  .spreadkeys { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin-top: var(--sp-1);
+    font-size: var(--fs-xs); }
+  .spreadkeys .sn { color: var(--muted); margin-right: var(--sp-1); }
+  .spreadkeys .sv { font-weight: 600; }
+
+  /* Phone first (F9): the page body never scrolls sideways at 360px. Wide content -
+     these tables - scrolls inside its OWN container instead, which is what
+     .tablewrap is for. The min-width is what makes seven columns legible rather
+     than crushed; below it the wrapper, not the document, takes the scroll. */
+  .tablewrap { overflow-x: auto; }
+  table { width: 100%; min-width: var(--w-table-min); border-collapse: collapse; }
+  th, td { text-align: left; padding: var(--sp-2) var(--sp-3);
+    border-bottom: var(--bw-hair) solid var(--line);
+    font-size: var(--fs-sm); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: var(--fs-xs); white-space: nowrap; }
+  td.path { word-break: break-all; }
+  /* The history table is FIXED-width so its wide free-text cells wrap inside their
+     column instead of blowing the table past its wrapper. */
+  table.hist { table-layout: fixed; }
+  table.hist td { overflow-wrap: anywhere; }
+  table.hist td.st { white-space: normal; }
+  .hist .c-file { width: 19%; }
+  .hist .c-result { width: 17%; }
+  .hist .c-size { width: 12%; }
+  .hist .c-vmaf { width: 23%; }
+  .hist .c-enc { width: 8%; }
+  .hist .c-dur { width: 9%; }
+  .hist .c-upd { width: 12%; }
+  td.st { white-space: nowrap; }
+
+  /* A status dot's COLOUR is never the only carrier of its meaning. The state is
+     always spelled out beside it, and the three TERMINAL outcomes are given three
+     different SHAPES as well - a filled disc for done, a square for failed, a
+     diamond for skipped - so they stay apart with no colour vision at all. */
+  .dot { display: inline-block; width: var(--size-dot); height: var(--size-dot);
+    border-radius: var(--radius-pill); margin-right: var(--sp-2);
+    background: var(--muted); vertical-align: middle; }
+  .st-done .dot { background: var(--ok); }
+  .st-failed .dot { background: var(--bad); border-radius: 0; }
+  .st-skipped .dot { background: var(--muted); border-radius: 0; transform: rotate(45deg); }
+  /* The two FILESYSTEM-1 outcomes are terminal too, so the same rule binds them: shape
+     carries the meaning and colour only reinforces it. Neither is a success and neither
+     is `failed` - which on this page has always carried the second half of the sentence,
+     "and your source is fine". Indeterminate is a HOLLOW ring, the shape of a question
+     this tool could not answer; applied-despite-error is a filled ring with a heavy
+     edge, a swap that happened while reporting otherwise. Both stay apart from the
+     filled disc, the square and the diamond with no colour vision at all. */
+  .st-indeterminate .dot { background: none; border: var(--bw-flag) solid var(--bad); }
+  .st-applied-despite-error .dot { background: var(--bad); border: var(--bw-flag) solid var(--warn); }
+  .st-encoding .dot, .st-probing .dot, .st-verifying .dot, .st-pending .dot { background: var(--accent); }
+  .reason { color: var(--muted); font-size: var(--fs-xs); }
+  .reason.fail { color: var(--bad); word-break: break-word; }
+  .size .before { color: var(--muted); }
+  .size .arrow { color: var(--muted); margin: 0 var(--sp-1); }
+  .size .pct { display: block; color: var(--ok); font-weight: 600; margin-top: var(--sp-1); }
+  .vmaf .pair { white-space: nowrap; }
+  .vmaf .mean { font-weight: 600; }
+  .vmaf .worst { color: var(--fg); }
+  .vmaf .cond { display: block; color: var(--muted); font-size: var(--fs-xs);
+    margin-top: var(--sp-1); font-family: var(--font-ui); }
+  td.elapsed { white-space: nowrap; }
+  td.prog { white-space: nowrap; }
+  td.prog .pctv { font-weight: 600; }
+  td.prog .of { display: block; color: var(--muted); font-size: var(--fs-xs); margin-top: var(--sp-1); }
+  /* The page's ONE absence phrase, wherever a fact was never recorded. */
+  .nr { color: var(--muted); font-style: italic; font-family: var(--font-ui); }
+  .empty { color: var(--muted); font-style: italic; padding: var(--sp-3); }
+
+  footer { color: var(--muted); font-size: var(--fs-xs); text-align: center;
+    padding: var(--sp-6) var(--sp-5); max-width: var(--measure-footer); margin: 0 auto; }
   /* The AGPL section 13 source offer (LICENSE-3). It is rendered into the document
      server-side, so it is in the bytes of the root response whether or not a single
-     API call succeeds, and it carries its OWN class: nothing else on this page styles
-     it, and no hiding rule anywhere in this stylesheet names it. Do not add one - a
-     `display:none` or `visibility:hidden` naming .source-offer (or an ancestor of it)
-     would make the offer unreachable without interaction, which is the whole thing the
-     offer owes. */
-  .source-offer { margin:12px 0 0; }
-  .source-offer a { color:var(--accent); overflow-wrap:anywhere; }
-  #conn { font-size:12px; color:var(--muted); }
-  #conn.live { color:var(--ok); } #conn.down { color:var(--bad); }
+     API call succeeds, and it carries its OWN class: nothing else on this page
+     styles it, and no hiding rule anywhere in this stylesheet names it. Do not add
+     one - a `display:none` or `visibility:hidden` naming .source-offer (or an
+     ancestor of it) would make the offer unreachable without interaction, which is
+     the whole thing the offer owes. */
+  .source-offer { margin: var(--sp-3) 0 0; }
+  .source-offer a { color: var(--link); overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
 <header>
   <h1>hold<span class="mono">fast</span></h1>
-  <div class="badges">
-    <span id="b-paused" class="badge">running</span>
-    <span id="b-scan" class="badge scan">idle</span>
-  </div>
   <span class="grow"></span>
-  <span class="reclaimed">reclaimed: <b id="reclaimed-lifetime">0 B</b>
-    <span class="sub">lifetime · this run <span id="reclaimed-session">0 B</span></span></span>
-  <span id="conn">connecting…</span>
+  <span id="conn">connecting</span>
 </header>
 <!-- Polite, atomic screen-reader summary. The SSE stream pushes a fresh snapshot on
      every job transition; announcing the whole table would spam a screen-reader reader
      on each one, so we announce only a short count summary, and only when it changes. -->
 <div id="sr-status" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
 <main>
-  <div class="chips" id="chips"></div>
+  <!-- The page is ordered by the two questions an operator actually has, in the order
+       they ask them: what is holdfast doing right now, and what has it done to my
+       library. Everything about the CURRENT RUN comes first and everything derived from
+       the ledger comes after, each under its own heading.
 
-  <div class="controls">
-    <label for="token" class="lbl">Control token</label>
-    <input id="token" type="password" placeholder="for pause / rescan" autocomplete="off">
-    <button id="rescan" class="primary">Rescan</button>
-    <button id="pause">Pause</button>
-    <button id="resume">Resume</button>
-    <span id="msg" role="status" aria-live="polite"></span>
-  </div>
+       Explanation lives in docs/dashboard-methodology.md (clause F8). What stays on the
+       surface is a short scope label per block and ONE documentation link per region;
+       every claim that used to be printed here is in that document. -->
+  <section id="region-now" aria-labelledby="h-now">
+    <h2 id="h-now">Right now</h2>
+    <p class="scope">Pushed live by the server.</p>
+    <!--holdfast:doc-now-->
 
-  <div class="controls">
-    <label for="filter" class="lbl">Filter</label>
-    <input id="filter" type="search" placeholder="filter queue &amp; history by path…" autocomplete="off">
-  </div>
+    <!-- The live-counts view. Every view on this page carries exactly one element with
+         a data-state attribute naming which of the three states F7 requires it is in;
+         the markup ships that element already in the loading state, so the state is on
+         screen before a single byte of snapshot has arrived. -->
+    <div id="counts" data-view="counts">
+      <p class="state" data-state="loading">Loading the live counts.</p>
+      <div class="badges">
+        <span id="b-paused" class="badge">running</span>
+        <span id="b-scan" class="badge scan">idle</span>
+        <span class="reclaimed">reclaimed this run: <b id="reclaimed-session">loading</b></span>
+      </div>
 
-  <section>
-    <h2>Across the whole ledger</h2>
-    <p class="note">Every figure here is computed by the server over <em>every</em> matching row in the
-      ledger, not over the capped rows the tables below ship, and each states the set it covers. A row
-      that recorded no value is excluded and counted, never read as a zero: a fact nobody measured is
-      reported as missing, not as 0. VMAF figures pool per-file scores, each measured against that
-      file's own source under one viewing condition, luma-only; they are not compared between files.</p>
-    <div class="aggs" id="aggregates"></div>
-  </section>
+      <div class="chips" id="chips"></div>
+    </div>
 
-  <section>
-    <h2>Queue &amp; active</h2>
-    <p class="note">Elapsed is how long the file has been in the state it is in now, recomputed from the
-      transition timestamp on each update rather than counted in this page. Progress is read from the
-      encoder's own progress stream and measured against the source duration, so it is shown while a file
-      is <i>encoding</i> and not in any other state — a file being probed or verified is covered by
-      Elapsed alone. Where the encoder has reported nothing yet, or the container reports no duration, it
-      reads <i>unknown</i> — never an estimate, and never a stale figure.</p>
+    <div class="controls">
+      <label for="token" class="lbl">Control token</label>
+      <input id="token" type="password" placeholder="for pause / rescan" autocomplete="off">
+      <button id="rescan" class="primary">Rescan</button>
+      <button id="pause">Pause</button>
+      <button id="resume">Resume</button>
+      <span id="msg" role="status" aria-live="polite"></span>
+    </div>
+
+    <div class="controls">
+      <label for="filter" class="lbl">Filter</label>
+      <input id="filter" type="search" placeholder="filter queue and history by path" autocomplete="off">
+    </div>
+
+    <h3 id="h-queue">Queue and active</h3>
+    <p class="scope">Being worked on, and since when.</p>
     <p class="note cap" id="queue-cap" hidden></p>
     <div class="tablewrap">
-      <table><thead><tr><th>File</th><th>Status</th><th>Elapsed</th><th>Progress</th><th>Worker</th></tr></thead>
-        <tbody id="queue"></tbody></table>
+      <table aria-labelledby="h-queue">
+        <thead><tr><th>File</th><th>Status</th><th>Elapsed</th><th>Progress</th><th>Worker</th></tr></thead>
+        <tbody id="queue" data-view="queue">
+          <tr data-state="loading"><td class="empty" colspan="5">Loading the work in hand.</td></tr>
+        </tbody></table>
     </div>
   </section>
 
-  <section>
-    <h2>Recent history</h2>
-    <p class="note">Each finished file, with the proof its swap was safe. A skipped file shows which
-      guard held it back; a failed one shows why. VMAF is a perceptual estimate under one viewing
-      condition — the model, its pooling, and its luma-only blind spot are shown with every score, and
-      scores are never compared across files (VMAF is not comparable between different sources).</p>
+  <section id="region-history" aria-labelledby="h-history">
+    <h2 id="h-history">What it has done to your library</h2>
+    <p class="scope">From the ledger, and survives restarts.</p>
+    <!--holdfast:doc-history-->
+    <p class="reclaimed">reclaimed lifetime: <b id="reclaimed-lifetime">loading</b></p>
+
+    <h3 id="h-aggs">Across the whole ledger</h3>
+    <p class="scope">Computed server-side over every matching row.</p>
+    <div class="aggs" id="aggregates" data-view="aggs">
+      <p class="state" data-state="loading">Loading these figures.</p>
+    </div>
+
+    <h3 id="h-hist">Recent history</h3>
+    <p class="scope">Each swap, with its proof of safety.</p>
     <p class="note cap" id="hist-cap" hidden></p>
     <div class="tablewrap">
-      <table class="hist">
+      <table class="hist" aria-labelledby="h-hist">
         <colgroup>
-          <col style="width:19%"><col style="width:17%"><col style="width:12%"><col style="width:23%">
-          <col style="width:8%"><col style="width:9%"><col style="width:12%">
+          <col class="c-file"><col class="c-result"><col class="c-size"><col class="c-vmaf">
+          <col class="c-enc"><col class="c-dur"><col class="c-upd">
         </colgroup>
         <thead><tr>
           <th>File</th><th>Result</th><th>Size</th><th>VMAF</th><th>Encoder</th><th>Encode</th><th>Updated</th>
         </tr></thead>
-        <tbody id="history"></tbody>
+        <tbody id="history" data-view="history">
+          <tr data-state="loading"><td class="empty" colspan="7">Loading finished swaps.</td></tr>
+        </tbody>
       </table>
     </div>
   </section>
 </main>
-<footer>holdfast — config-as-code, data-safe media transcoder. The YAML config is the source of truth;
-  this page reads and controls. It reports what was measured, and only that.
+<!-- The footer carries ONE short line of identity and the AGPL section 13 offer. The
+     product identity, what this page may and may not do, and the promise that it reports
+     only what was measured are all in docs/dashboard-methodology.md; the offer is required
+     verbatim and is not this page's to shorten. -->
+<footer>Reads and controls; the YAML config decides.
   <!--holdfast:source-offer--></footer>
 
 <!-- Row shells cloned per render. Rows are built as DOM nodes (createElement +
-     textContent) and filled from cloned templates — the page never assembles an HTML
+     textContent) and filled from cloned templates - the page never assembles an HTML
      string from job data, so an attacker-influencable media path is inert text, never
      markup. Trusted Types (enforced by the response CSP) makes that a hard guarantee. -->
 <template id="tpl-queue-row">
@@ -251,6 +635,30 @@
     <td class="upd"></td>
   </tr>
 </template>
+<!-- The figure shells. Every graphic on this page is an inline vector drawing whose SHAPE
+     is markup written here and whose only variable is a geometry attribute the renderer
+     sets from a number the server published. Cloning them is what keeps the graphics
+     inside the same idiom as the rows: no library, no image, no font, no data: URI, and
+     no element built from a string. The SVG namespace comes from the HTML parser reading
+     these templates, so no module needs to name it either.
+
+     Each drawing is aria-hidden and not focusable, because its values are carried in full
+     by the text the renderer puts beside it - announcing both would read every number
+     twice. Their painted heights come from the token file; the height attributes here are
+     the shells' intrinsic geometry and agree with those tokens. -->
+<template id="tpl-fig-bar">
+  <svg class="fig bar" width="100%" height="12" aria-hidden="true" focusable="false" preserveAspectRatio="none">
+    <rect class="mark" x="0" y="0" width="0" height="12"></rect>
+  </svg>
+</template>
+<template id="tpl-fig-spread">
+  <svg class="fig spread" viewBox="0 0 1000 24" width="100%" height="24" aria-hidden="true" focusable="false" preserveAspectRatio="none">
+    <line class="axis" x1="2" y1="12" x2="998" y2="12" vector-effect="non-scaling-stroke"></line>
+    <line class="tick min" x1="2" y1="4" x2="2" y2="20" vector-effect="non-scaling-stroke"></line>
+    <line class="tick mean" x1="500" y1="0" x2="500" y2="24" vector-effect="non-scaling-stroke"></line>
+    <line class="tick max" x1="998" y1="4" x2="998" y2="20" vector-effect="non-scaling-stroke"></line>
+  </svg>
+</template>
 
 <script>
 // --- internal/webui/src/js/10-constants.js ---
@@ -264,13 +672,56 @@
 // rendering it as failed would be the more dangerous lie, because "failed" on this
 // dashboard has always meant "and your source is fine".
 const STATUSES = ["pending","probing","encoding","verifying","done","skipped","failed","indeterminate","applied-despite-error"];
-const QUEUE_STATUSES = ["pending","probing","encoding","verifying"];
 // The one state a progress figure can exist in. Progress is measured BY the encoder
 // against the source duration, so it is defined while the encoder runs and at no other
 // time: a probing row has not started one and a verifying row's encoder has exited. Those
 // states are covered by Elapsed alone, which is exactly what the phase scoped them to.
 const PROGRESS_STATUS = "encoding";
-const TERMINAL_STATUSES = ["done","skipped","failed","indeterminate","applied-despite-error"];
+// The per-table status lists this module used to carry are GONE (LEDGER-5). They existed
+// so the page could roll the summary up into the total each capped table was capped
+// against; the server reports that total now, and a list of statuses left here would be an
+// invitation to derive one again.
+
+// The three states every view owes (clause F7), in words, one wording per view so a
+// reader always knows WHICH view is loading, empty or unreadable. The three are
+// deliberately distinct strings inside each view: "nothing to show" and "could not be
+// read" are different facts and a page that says the same thing for both is lying about
+// one of them.
+//
+// A view holds exactly one element carrying `data-state`, and its container carries
+// `data-view`, so the state a view is in is a rendered property a browser can read back.
+//
+// Each phrasing names its view WITHOUT repeating the heading above it or a column header
+// beneath it (S0052 AC5): a state row sits inside its own table, so "the queue could not
+// be read" under a heading reading "Queue and active" is the page telling a reader a word
+// it has already read. The words a view is named by here are therefore the ones the
+// heading does not use, and every one of the four is inside the eight-word block ceiling.
+const VIEW_STATES = {
+  counts: {
+    loading: "Loading the live counts.",
+    empty: "No file recorded yet.",
+    unreadable: "The live counts are unreadable.",
+  },
+  queue: {
+    loading: "Loading the work in hand.",
+    empty: "No work in hand.",
+    unreadable: "The work in hand is unreadable.",
+  },
+  aggs: {
+    loading: "Loading these figures.",
+    empty: "No figure has a contributing row.",
+    unreadable: "These figures are unreadable.",
+  },
+  history: {
+    loading: "Loading finished swaps.",
+    empty: "No swap finished yet.",
+    unreadable: "Finished swaps are unreadable.",
+  },
+};
+
+// The column count of each table, so a state row spans the whole table rather than
+// sitting in the first column.
+const VIEW_COLUMNS = { queue: 5, history: 7 };
 
 // Human labels for the closed vocabulary of skip guards (internal/engine's Skip*
 // constants). An unknown token falls back to itself, so a new guard is never hidden.
@@ -341,13 +792,11 @@ function fmtScore(x) { return isNum(x) ? Number(x).toFixed(1) : NOT_RECORDED; }
 // The count an aggregate states its spread across. Absent is stated, never printed as NaN.
 function fmtCount(x) { return isNum(x) ? Number(x).toLocaleString() : NOT_RECORDED; }
 
-// The status roll-up behind each table's cap notice: how many rows the ledger holds in
-// the states this table shows. A summary that is not an object cannot be rolled up, and
-// says so with null rather than reporting a total of 0 nobody counted.
-function sumStatuses(sum, keys) {
-  if (!sum || typeof sum !== "object" || !Array.isArray(keys)) return null;
-  return keys.reduce((a, s) => a + (isNum(sum[s]) ? sum[s] : 0), 0);
-}
+// There is deliberately NO roll-up here any more. The cap notice used to add up the
+// summary counts for a table's states and present that as the total the view was capped
+// against; the server now REPORTS that total (see capNoteText), and keeping a derivation
+// beside it would only leave a second answer to the same question for a later reader to
+// reach for.
 
 // The offset between this page's clock and the server's, taken from the snapshot's own
 // `now` field. Every elapsed figure is DERIVED from it on each tick - never accumulated
@@ -395,6 +844,10 @@ function vmafFigures(j) {
   return {
     mean: isNum(j.vmaf_mean) ? fmtScore(j.vmaf_mean) : "?",
     worst: isNum(j.vmaf_min) ? fmtScore(j.vmaf_min) : "?",
+    // A SCOPE label, not an explanation (F8), and eleven words: the model, the two
+    // pooled statistics, the blind spot and what the score was measured against. The
+    // paragraphs that state what a VMAF score does and does not license live in
+    // docs/dashboard-methodology.md, linked once per region.
     condition: "model " + model + " · harmonic-mean + worst-frame pooling · luma-only · measured vs your source",
   };
 }
@@ -418,16 +871,52 @@ function progressFigure(j) {
 }
 
 // Human label for one skip guard. An unknown token falls back to itself, so a new guard
-// is never hidden behind a blank.
-function guardLabel(k) { return GUARD_LABELS[k] || k; }
+// is never hidden behind a blank. The lookup is an OWN-property lookup deliberately: a
+// bucket key arriving off the wire is attacker-influencable text, and a plain `obj[k]`
+// answers "constructor" or "toString" with something off Object.prototype, which would
+// put a function body on the screen where a guard name belongs.
+function guardLabel(k) {
+  return Object.prototype.hasOwnProperty.call(GUARD_LABELS, k) ? GUARD_LABELS[k] : k;
+}
 
 // Surface the API's silent row caps: it ships at most a fixed number of queue / history
-// rows, so a truncated view could read as the whole ledger. When the store holds more
-// than we were handed, say so; when the total could not be rolled up, claim nothing.
+// rows, so a truncated view could read as the whole ledger.
+//
+// The total is the one the SERVER REPORTED for this table (`queue_total` / `history_total`),
+// counted over every matching row in the ledger. It is never derived here. The page used to
+// roll it up from the summary counts, which was a different number wearing this one's name:
+// the summary counts rows in a status, the cap applies to the rows the response selected,
+// and only the server can see both. A figure a client derived and presented as the ledger's
+// own is the failure this field exists to end.
+//
+// A total that could not be read says exactly that AND SHOWS NO NUMBER IN ITS PLACE. Not a
+// zero, not the row count standing in for it: a reader who sees a figure beside "capped"
+// will read it as the total, so the honest answer here carries no digits at all.
+//
+// And it does not claim the view IS capped, because without the total nothing here knows
+// that. Cappedness is a COMPARISON - the ledger's total against the rows this response
+// carried - so the figure being unreadable takes the answer with it. A page told "this view
+// is capped" while showing 3 rows drawn from a 3-row ledger would be inventing the one fact
+// it has just said it cannot read.
+const CAP_TOTAL_UNAVAILABLE =
+  "The total behind this view is unavailable, so whether it is capped cannot be shown.";
+
 function capNoteText(shown, total) {
-  if (!isNum(shown) || !isNum(total) || total <= shown) return "";
+  if (!isNum(shown)) return "";
+  // No total on the wire at all is no readable total either, and is treated as one. The
+  // server's snapshot always carries both fields (they are plain struct fields, and the
+  // page is embedded in the binary that serves them), so this is unreachable in the shipped
+  // system - but "absent" and "present and unreadable" are the same fact to a reader, and
+  // answering them differently would leave a silent branch that renders an unknown cap as
+  // an uncapped view.
+  if (total === null || total === undefined) return CAP_TOTAL_UNAVAILABLE;
+  if (typeof total !== "object" || Array.isArray(total)) return CAP_TOTAL_UNAVAILABLE;
+  if (total.available !== true || !isNum(total.count) || total.count < 0) {
+    return CAP_TOTAL_UNAVAILABLE;
+  }
+  if (total.count <= shown) return "";
   return "Showing the most recent " + shown.toLocaleString() + " of "
-    + total.toLocaleString() + " — this view is capped.";
+    + Number(total.count).toLocaleString() + " — this view is capped.";
 }
 
 // The polite screen-reader summary: short counts, so a snapshot that shifts nothing can
@@ -462,6 +951,68 @@ function aggExclusionText(a) {
   return excluded.toLocaleString() + " row" + (excluded === 1 ? "" : "s") +
     " excluded: no recorded value";
 }
+
+// --- what a figure's DRAWING is derived from -----------------------------------
+//
+// The three functions below are the whole of the arithmetic the graphics do, and they
+// are here rather than beside the nodes they end up on for the same reason every other
+// derivation is: they map published numbers to a value, touch no DOM, and are therefore
+// exercisable one input at a time. None of them computes a STATISTIC - the server
+// already did that over the whole ledger; these turn a number that was published into a
+// length or a position, and nothing else.
+
+// readBuckets is the one gate between a published bucket figure and the page. It either
+// hands back a usable list of {key, count} or it THROWS, and a throw is what makes the
+// card render as unavailable: a figure whose buckets are absent, empty or malformed is a
+// figure that could not be read, and this page says exactly that rather than drawing a
+// shape over numbers nobody published.
+function readBuckets(buckets) {
+  if (!Array.isArray(buckets) || buckets.length === 0) {
+    throw new Error("this figure carries no readable buckets");
+  }
+  return buckets.map(function (b) {
+    if (!b || typeof b !== "object" || Array.isArray(b)) {
+      throw new Error("a bucket in this figure is not a bucket");
+    }
+    if (typeof b.key !== "string" && typeof b.key !== "number") {
+      throw new Error("a bucket in this figure carries no usable key");
+    }
+    if (!isNum(b.count) || b.count < 0) {
+      throw new Error("a bucket in this figure carries no usable count");
+    }
+    return { key: String(b.key), count: b.count };
+  });
+}
+
+// bucketProportions is the length of every bar of a distribution, as a share of the
+// LARGEST count in the same figure - so the bars of one figure are comparable with each
+// other and with nothing else. It answers null where there is nothing a proportion could
+// be taken against (an empty list, or a largest count of zero), and the renderer then
+// draws no bar at all: a zero-length mark on a shared axis reads as a measured zero, and
+// no row measured anything.
+function bucketProportions(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  let max = 0;
+  for (const b of rows) {
+    if (!b || !isNum(b.count) || b.count < 0) return null;
+    if (b.count > max) max = b.count;
+  }
+  if (max <= 0) return null;
+  return rows.map(function (b) { return b.count / max; });
+}
+
+// spreadPositions places a spread's mean on the scale its own minimum and maximum define:
+// 0 is the minimum end, 1 the maximum end. It answers null where there is no scale to
+// draw on - any of the three absent, a maximum below its minimum (a figure that cannot be
+// true), or ends that coincide, where a full-width axis would assert a spread that was
+// never measured. The three values are always rendered as text either way, so a figure
+// with no drawing still carries every number it has.
+function spreadPositions(min, mean, max) {
+  if (!isNum(min) || !isNum(mean) || !isNum(max)) return null;
+  if (max <= min) return null;
+  const t = (mean - min) / (max - min);
+  return { mean: Math.min(1, Math.max(0, t)) };
+}
 // --- internal/webui/src/js/30-dom.js ---
 // The DOM primitives. Everything the page puts on screen is built here or through here,
 // and there is exactly one way to do it: createElement plus textContent. No module in
@@ -481,6 +1032,12 @@ function mk(tag, cls, text) {
 }
 // The honest "not recorded" node for a nil/absent outcome field.
 function nrNode() { return mk("span", "nr", NOT_RECORDED); }
+
+// tplNode clones one shell out of a <template> in the document. It is how every row is
+// built, and it is also the ONLY way a vector element gets onto this page: the SVG
+// namespace comes from the HTML parser reading the template, so no module here names a
+// namespace URI, imports a drawing library, or builds an element from a string.
+function tplNode(id) { return $(id).content.cloneNode(true).firstElementChild; }
 // --- internal/webui/src/js/40-cells.js ---
 // The cells. Each takes the value its derivation produced and puts it on screen; an
 // absent derivation is rendered as the page's honest absence, never as a zero.
@@ -534,13 +1091,15 @@ function resultCell(td, j) {
   }
 }
 
-// The progress cell for a queue row: the derivation's figure, "unknown" when the encoder
-// has reported nothing usable, and an empty cell for every state that has no progress.
+// The progress cell for a queue row: the derivation's figure, or the page's ONE absence
+// phrase (F3). A row that is not encoding has no measurement of a fraction, and a running
+// encode whose encoder has reported nothing usable has none either - to a reader those
+// are the same fact, nobody measured this, so both read as that one phrase rather than as
+// a blank cell a reader could take for a zero or for a figure that failed to draw.
 function progressCell(td, j) {
   const f = progressFigure(j);
-  if (!f) return; // not encoding: nothing measures a fraction here
-  if (f.unknown) {
-    td.appendChild(mk("span", "nr", "unknown"));
+  if (!f || f.unknown) {
+    td.appendChild(nrNode());
     return;
   }
   td.appendChild(mk("span", "pctv", f.percent));
@@ -555,10 +1114,19 @@ function progressCell(td, j) {
 // timestamp the row carries. It runs on render AND on a timer, which is what makes the
 // figure move with no page reload and no state transition.
 function refreshElapsed() {
+  // A severed feed must not keep a figure reading as live (F6). Elapsed is the one
+  // figure on this page that would otherwise go on advancing with nothing behind it:
+  // it is recomputed on a timer from each row's own transition timestamp, and that
+  // timer knows nothing about the stream. So the ticker freezes the instant the stream
+  // is no longer live, and the ages a reader sees stay at the last moment the page had
+  // a server behind them. The connection state in the header says why.
+  if (!streamIsLive) return;
   const now = serverNow();
   for (const td of $("queue").querySelectorAll("td.elapsed")) {
     const age = elapsedText(now, td.dataset.since);
-    td.textContent = age === null ? "" : age;
+    // No usable basis is an absence, not an empty cell (F3).
+    if (age === null) td.replaceChildren(nrNode());
+    else td.textContent = age;
   }
 }
 
@@ -572,7 +1140,9 @@ function queueRow(j) {
   // is filled by refreshElapsed, so the row and the ticker can never disagree.
   tr.querySelector(".elapsed").dataset.since = String(j.updated_at || 0);
   progressCell(tr.querySelector(".prog"), j);
-  tr.querySelector(".worker").textContent = j.worker || "";
+  const worker = tr.querySelector(".worker");
+  if (j.worker) worker.textContent = j.worker;
+  else worker.appendChild(nrNode());
   return tr;
 }
 
@@ -581,25 +1151,109 @@ function histRow(j) {
   tr.dataset.path = (j.path || "").toLowerCase();
   tr.querySelector(".path").textContent = j.path;
   resultCell(tr.querySelector(".st"), j);
-  if (j.status === "done") sizeCell(tr.querySelector(".size"), j);
-  if (j.status === "done") vmafCell(tr.querySelector(".vmaf"), j);
+  // EVERY cell of a history row is filled, in every status. A skipped or failed row
+  // recorded no size, no score, no encoder and no encode time, and F3 says that reads
+  // as the page's one absence phrase in the field itself - not as a blank a reader is
+  // left to interpret. The cell renderers already answer an absent derivation that way,
+  // so they are called unconditionally rather than only on a done row.
+  sizeCell(tr.querySelector(".size"), j);
+  vmafCell(tr.querySelector(".vmaf"), j);
   const enc = tr.querySelector(".enc");
   if (j.encoder) enc.textContent = j.encoder;
-  else if (j.status === "done") enc.appendChild(nrNode());
+  else enc.appendChild(nrNode());
   const dur = tr.querySelector(".dur");
   if (isNum(j.encode_ms)) dur.textContent = fmtDur(j.encode_ms);
-  else if (j.status === "done") dur.appendChild(nrNode());
-  tr.querySelector(".upd").textContent = j.updated_at ? fmtTime(j.updated_at) : "";
+  else dur.appendChild(nrNode());
+  const upd = tr.querySelector(".upd");
+  if (isNum(j.updated_at) && j.updated_at > 0) upd.textContent = fmtTime(j.updated_at);
+  else upd.appendChild(nrNode());
   return tr;
 }
+// --- internal/webui/src/js/55-states.js ---
+// The three states every view owes (clause F7): what it shows while LOADING, what it
+// shows when there is NOTHING to show, and what it shows when the data CANNOT BE READ.
+//
+// One mechanism for all four views, because four copies of one mechanism is how one of
+// them silently stops being written. A view is a container carrying `data-view`, and
+// it holds at most one element carrying `data-state`; the wording comes from VIEW_STATES,
+// one phrasing per view, so a reader always knows WHICH view is in which state. The state
+// element is markup in the page shell too, already in the loading state, so a view says
+// what it is doing before a single byte of snapshot has arrived - and before this module
+// has run at all.
+//
+// The state element for a table view is a full-width row inside the tbody, because a
+// paragraph beside a table is not the table's own answer to "what am I showing". For a
+// view that is not a table it is a paragraph inside the view's own container.
 
-function emptyRow(cols, text) {
-  const tr = document.createElement("tr");
-  tr.dataset.empty = "1";
-  const td = mk("td", "empty", text);
-  td.colSpan = cols;
-  tr.appendChild(td);
-  return tr;
+// renderedOnce records whether a whole snapshot has ever gone through render(). It is the
+// difference between "the stream never delivered anything" (unreadable) and "the stream
+// stopped after delivering something" (stale, rows kept).
+let renderedOnce = false;
+
+// streamIsLive is whether the event stream is currently connected. It gates the elapsed
+// ticker: a figure that keeps advancing after its feed died is a figure presented as live
+// when it is stale, which F6 refuses outright.
+let streamIsLive = false;
+
+function viewHost(view) { return document.querySelector('[data-view="' + view + '"]'); }
+
+// viewHasContent answers whether a view is currently showing something of its own - a
+// row, a figure card, a count chip. It is what keeps an unreadable payload arriving AFTER
+// a good one from wiping rows off the screen: F6 says a severed feed keeps its rows, and
+// F5 says one unreadable figure costs nothing else.
+function viewHasContent(view) {
+  // The badges and the reclaimed figures are markup, present in every state; only a
+  // rendered chip is content the counts view produced from a snapshot.
+  if (view === "counts") {
+    const chips = $("chips");
+    return !!chips && chips.children.length > 0;
+  }
+  const host = viewHost(view);
+  if (!host) return false;
+  for (const el of host.children) {
+    if (!(el.dataset && el.dataset.state)) return true;
+  }
+  return false;
+}
+
+// setViewState puts one view into one of the three states, or clears the state element
+// when the view has its own content to show. It never touches anything else in the view.
+function setViewState(view, state) {
+  const host = viewHost(view);
+  if (!host) return;
+  for (const old of host.querySelectorAll("[data-state]")) old.remove();
+  if (!state) return;
+  const text = (VIEW_STATES[view] || {})[state];
+  if (!text) return;
+  const cols = VIEW_COLUMNS[view];
+  let el;
+  if (cols) {
+    el = document.createElement("tr");
+    const td = mk("td", "empty", text);
+    td.colSpan = cols;
+    el.appendChild(td);
+    // The empty row keeps the marker the rendered graders have always read it by.
+    if (state === "empty") el.dataset.empty = "1";
+  } else {
+    el = mk("p", state === "unreadable" ? "state unreadable" : "state", text);
+  }
+  el.dataset.state = state;
+  host.insertBefore(el, host.firstChild);
+}
+
+// markUnreadable is what a payload that cannot be read at all does to the page: every
+// view that has nothing of its own on screen says so, in words, in that view. A view that
+// IS showing rows keeps them - a stream that dies after a good snapshot has not made the
+// rows untrue, it has made them stale, and the connection state alone says that (F6).
+function markUnreadable() {
+  for (const view of ["counts", "queue", "aggs", "history"]) {
+    if (!viewHasContent(view)) setViewState(view, "unreadable");
+  }
+  if (renderedOnce) return;
+  for (const id of ["reclaimed-session", "reclaimed-lifetime"]) {
+    const el = $(id);
+    if (el) el.replaceChildren(nrNode());
+  }
 }
 // --- internal/webui/src/js/60-aggregates.js ---
 // --- whole-ledger aggregates -------------------------------------------------
@@ -609,23 +1263,93 @@ function emptyRow(cols, text) {
 // of a statistic about the library. These figures are computed server-side over every
 // matching row, and each arrives with the set it covers, the rows excluded for want of a
 // recorded value, and whether it could be read at all.
+//
+// Each one is DRAWN as well as stated, and the drawing is held to three rules:
+//
+//   1. It is built the way the rows are - a shell cloned from a <template> in this
+//      document, with one geometry attribute set per mark from a number the server
+//      published. No library, no image, no font, no data: URI, no string assigned to an
+//      HTML sink; the response Content-Security-Policy forbids the first four and
+//      Trusted Types the last.
+//   2. It encodes no value the text beside it does not also carry, in the order the
+//      marks are drawn. Delete every drawing from the document and the card still reads.
+//      That is what makes the figures answerable with a screen reader, and it is why the
+//      drawings are aria-hidden: they would otherwise be read out twice.
+//   3. Nothing inside a drawing is told apart from anything else in it by COLOUR. A bar
+//      is told apart by its row, its length and the label beside it; a minimum, a mean
+//      and a maximum by their position and the height of their tick. Every mark is one
+//      token (--mark), chosen for 3:1 against the card face behind it.
+
+// figBar is one bar of a distribution: the mark's length is this bucket's own count as a
+// share of the largest count in the SAME figure, which is the only comparison a reader
+// can safely make by eye and the only one this drawing offers.
+function figBar(share) {
+  const svg = tplNode("tpl-fig-bar");
+  svg.querySelector(".mark").setAttribute("width", (share * 100).toFixed(4) + "%");
+  return svg;
+}
+
+// The user-space ends of the spread shell's scale, inset so a 2px stroke centred on
+// either end is drawn inside the box rather than half-clipped by it.
+const SPREAD_LEFT = 2;
+const SPREAD_RIGHT = 998;
+
+// figSpread puts the mean on the scale its own minimum and maximum define. The two ends
+// are where the shell already draws them; only the mean moves.
+function figSpread(pos) {
+  const svg = tplNode("tpl-fig-spread");
+  const x = String(SPREAD_LEFT + pos.mean * (SPREAD_RIGHT - SPREAD_LEFT));
+  const mean = svg.querySelector(".tick.mean");
+  mean.setAttribute("x1", x);
+  mean.setAttribute("x2", x);
+  return svg;
+}
 
 // One card's value renderer per published figure. Each returns DOM nodes; none of them
 // invents a number, and each is only ever called when the figure reports data.
 function spreadNodes(a, fmt, lead) {
   const out = [mk("b", null, fmt(a.mean))];
   if (lead) out.push(document.createTextNode(" " + lead));
+  const pos = spreadPositions(a.min, a.mean, a.max);
+  if (pos) out.push(figSpread(pos));
+  out.push(spreadKeys(a, fmt));
   out.push(mk("span", "range", "range " + fmt(a.min) + " to " + fmt(a.max) + " across " +
     fmtCount(a.counted) + " files"));
   return out;
 }
+
+// spreadKeys is the drawing's text equivalent: the three values the ticks above it stand
+// for, named and in the left-to-right order those ticks are drawn.
+function spreadKeys(a, fmt) {
+  const box = mk("div", "spreadkeys");
+  for (const pair of [["min", a.min], ["mean", a.mean], ["max", a.max]]) {
+    const key = mk("span", "sk");
+    key.appendChild(mk("span", "sn", pair[0]));
+    key.appendChild(mk("span", "sv", fmt(pair[1])));
+    box.appendChild(key);
+  }
+  return box;
+}
+
+// bucketNodes draws a distribution: one row per bucket, in the order the figure ships
+// them, each row carrying its label, its bar and its count. Label and count are the
+// drawing's text equivalent and sit in the same row as the mark they describe, so the
+// card read straight through yields every value the bars encode.
+//
+// A figure whose buckets cannot be read at all throws out of readBuckets, and
+// renderAggregates turns that into an unavailable card.
 function bucketNodes(a, label) {
-  return a.buckets.map((b) => {
-    const row = mk("div", "bucket");
-    row.appendChild(mk("span", null, label(b.key)));
-    row.appendChild(mk("span", "c", fmtCount(b.count)));
-    return row;
+  const rows = readBuckets(a.buckets);
+  const shares = bucketProportions(rows);
+  const box = mk("div", "buckets");
+  rows.forEach(function (b, i) {
+    box.appendChild(mk("span", "bk", label(b.key)));
+    // No usable proportion means no mark: an empty cell keeps the grid aligned without
+    // drawing a length nobody measured.
+    box.appendChild(shares ? figBar(shares[i]) : mk("span", "bn"));
+    box.appendChild(mk("span", "bc", fmtCount(b.count)));
   });
+  return [box];
 }
 
 const AGGREGATES = [
@@ -639,9 +1363,10 @@ const AGGREGATES = [
 
 // aggCard renders ONE figure. An unavailable figure is drawn as unavailable - the card
 // stays on the page, saying it could not be read, because a card that disappeared would
-// leave the page looking complete while a number was missing from it.
+// leave the page looking complete while a number was missing from it. It carries no
+// drawing either: there is nothing measured to draw.
 function aggCard(a, title, nodes) {
-  const el = $("tpl-agg").content.cloneNode(true).firstElementChild;
+  const el = tplNode("tpl-agg");
   el.querySelector(".agg-k").textContent = title;
   const v = el.querySelector(".agg-v");
   const cov = el.querySelector(".agg-cov");
@@ -657,8 +1382,9 @@ function aggCard(a, title, nodes) {
 
   const counted = isNum(a.counted) ? a.counted : 0;
   if (counted === 0) {
-    // No row contributed a value. Say so - never 0, never an average of 0, and never an
-    // empty list that reads as a set of zero counts.
+    // No row contributed a value. Say so - never 0, never an average of 0, never an
+    // empty list that reads as a set of zero counts, and never a mark of any length: a
+    // drawing of nothing is a drawing of a measurement nobody took.
     v.appendChild(nrNode());
   } else {
     for (const n of nodes(a)) v.appendChild(n);
@@ -676,6 +1402,23 @@ function renderAggregates(aggs) {
   const host = $("aggregates");
   if (!host) return;
   host.replaceChildren();
+  // The view's own three states (F7), decided before a single card is built, and the
+  // three inputs that decide them are DIFFERENT FACTS about the wire:
+  //
+  //   aggregates: {}       the server published the figures and there are none - this
+  //                        view has nothing to show, which is the EMPTY state.
+  //   aggregates: null     the server could not publish them at all. That is six
+  //                        figures that could not be read, and each keeps its card and
+  //                        says "unavailable" (F5), because a view that went blank here
+  //                        would leave the page looking complete with six numbers gone.
+  //   aggregates: 7        not an object: the payload cannot be read (F7).
+  //
+  // None of the three is ever drawn as a grid of zeroes, and none leaves the loading
+  // state on screen for ever.
+  if (aggs !== null && aggs !== undefined) {
+    if (typeof aggs !== "object" || Array.isArray(aggs)) { setViewState("aggs", "unreadable"); return; }
+    if (Object.keys(aggs).length === 0) { setViewState("aggs", "empty"); return; }
+  }
   const src = aggs || {};
   for (const [key, title, nodes] of AGGREGATES) {
     let card;
@@ -686,9 +1429,20 @@ function renderAggregates(aggs) {
     }
     host.appendChild(card);
   }
+  setViewState("aggs", null);
 }
 // --- internal/webui/src/js/70-render.js ---
 // The whole-page render. One snapshot in, the page it describes out.
+
+// bytesInto writes one byte total into its field: the figure when the server recorded
+// one, and the page's ONE absence phrase when it did not. Never 0 B for a total nobody
+// measured, which is exactly what a zeroed counter would look like (F3).
+function bytesInto(id, v) {
+  const el = $(id);
+  if (!el) return;
+  if (isNum(v) && v >= 0) el.textContent = fmtBytes(v);
+  else el.replaceChildren(nrNode());
+}
 
 // Surface the API's silent row caps: it ships at most a fixed number of queue / history
 // rows, so a truncated view could read as the whole ledger.
@@ -720,6 +1474,10 @@ function announce(sum) {
 }
 
 function render(snap) {
+  // A payload that is not a snapshot object at all cannot be read, and says so in every
+  // view rather than being rendered as a page full of zeroes (F7).
+  if (!snap || typeof snap !== "object" || Array.isArray(snap)) { markUnreadable(); return; }
+
   // Re-anchor the elapsed basis to the server's clock as of this frame.
   if (isNum(snap.now)) clockOffset = clockOffsetFrom(snap.now, Date.now());
 
@@ -732,49 +1490,72 @@ function render(snap) {
   bs.classList.toggle("on", !!snap.scanning);
 
   // Reclaimed: the durable lifetime figure leads; the per-run figure is the subline.
-  $("reclaimed-lifetime").textContent = fmtBytes(snap.bytes_reclaimed_lifetime);
-  $("reclaimed-session").textContent = fmtBytes(snap.bytes_reclaimed_session);
+  // A total nobody recorded reads as the page's one absence phrase, never as 0 B (F3).
+  bytesInto("reclaimed-lifetime", snap.bytes_reclaimed_lifetime);
+  bytesInto("reclaimed-session", snap.bytes_reclaimed_session);
 
   // Pause is meaningless when already paused; Resume is meaningless when running.
   $("pause").disabled = !!snap.paused;
   $("resume").disabled = !snap.paused;
 
-  // Summary chips.
-  const sum = snap.summary || {};
+  // Summary chips. A status the summary does not name has NO ROW in that state - the
+  // server's own count is a `GROUP BY status`, which omits a status with nothing in it -
+  // so 0 here is a measured zero and is rendered as one. A summary that is not an object
+  // at all is a different fact: nothing was counted, and the view says it could not be
+  // read rather than drawing seven zeroes nobody measured (F3).
   const chips = $("chips");
   chips.replaceChildren();
-  for (const s of STATUSES) {
-    const chip = mk("div", "chip " + s);
-    chip.appendChild(mk("div", "n", String(isNum(sum[s]) ? sum[s] : 0)));
-    chip.appendChild(mk("div", "k", s));
-    chips.appendChild(chip);
+  const sum = snap.summary;
+  const sumOK = !!sum && typeof sum === "object" && !Array.isArray(sum);
+  if (sumOK) {
+    let counted = 0;
+    for (const s of STATUSES) {
+      const n = isNum(sum[s]) ? sum[s] : 0;
+      counted += n;
+      const chip = mk("div", "chip " + s);
+      chip.appendChild(mk("div", "n", String(n)));
+      chip.appendChild(mk("div", "k", s));
+      chips.appendChild(chip);
+    }
+    // The counts view has nothing to show when the ledger holds no row in ANY state,
+    // which is the empty state F7 requires of it. The chips still read their measured
+    // zeroes beside it.
+    setViewState("counts", counted > 0 ? null : "empty");
+  } else {
+    setViewState("counts", "unreadable");
   }
 
   // Queue.
-  const q = snap.queue || [];
+  const q = Array.isArray(snap.queue) ? snap.queue : [];
   const qbody = $("queue");
   qbody.replaceChildren();
-  if (!q.length) qbody.appendChild(emptyRow(5, "Nothing queued."));
-  else for (const j of q) qbody.appendChild(queueRow(j));
+  for (const j of q) qbody.appendChild(queueRow(j));
+  setViewState("queue", q.length ? null : "empty");
   refreshElapsed();
 
   // History - the trust surface: per file, the evidence its swap was safe.
-  const h = snap.history || [];
+  const h = Array.isArray(snap.history) ? snap.history : [];
   const hbody = $("history");
   hbody.replaceChildren();
-  if (!h.length) hbody.appendChild(emptyRow(7, "No history yet."));
-  else for (const j of h) hbody.appendChild(histRow(j));
+  for (const j of h) hbody.appendChild(histRow(j));
+  setViewState("history", h.length ? null : "empty");
 
-  // Honest row-cap notices (the summary counts are the authoritative totals).
-  capNote("queue-cap", q.length, sumStatuses(sum, QUEUE_STATUSES));
-  capNote("hist-cap", h.length, sumStatuses(sum, TERMINAL_STATUSES));
+  // Honest row-cap notices. The total is the one the SERVER reported for each table -
+  // counted over every matching row in the ledger - and never one this page derived from
+  // the summary counts, which answer a different question and cannot see the cap.
+  capNote("queue-cap", q.length, snap.queue_total);
+  capNote("hist-cap", h.length, snap.history_total);
 
-  announce(sum);
+  announce(sumOK ? sum : {});
   applyFilter();
 
   // Last, and guarded: the tables above are already drawn, so nothing that happens
   // inside the aggregate cards can cost the operator the rest of the page.
-  try { renderAggregates(snap.aggregates); } catch (_) {}
+  try { renderAggregates(snap.aggregates); } catch (_) { setViewState("aggs", "unreadable"); }
+
+  // One whole snapshot has now been through the page. From here a stream that dies is
+  // STALE, not unreadable: the rows stay and the connection state alone says so (F6).
+  renderedOnce = true;
 }
 // --- internal/webui/src/js/80-wire.js ---
 // The wiring: the controls, the ticker and the live stream. This is the only module that
@@ -798,17 +1579,33 @@ function connect() {
   es = new EventSource("/api/events");
   const conn = $("conn");
   es.addEventListener("snapshot", (e) => {
-    conn.textContent = "live"; conn.className = "live";
-    try { render(JSON.parse(e.data)); } catch (_) {}
+    conn.textContent = "live"; conn.className = "live"; streamIsLive = true;
+    // A payload that will not parse is a payload that cannot be read, and the views
+    // say so (F7). It is NOT swallowed: a page that silently keeps its loading state
+    // for ever is the failure this clause exists to refuse.
+    let snap;
+    try { snap = JSON.parse(e.data); }
+    catch (_) { markUnreadable(); return; }
+    render(snap);
   });
-  es.onopen = () => { conn.textContent = "live"; conn.className = "live"; };
-  es.onerror = () => { conn.textContent = "reconnecting…"; conn.className = "down"; };
+  es.onopen = () => { conn.textContent = "live"; conn.className = "live"; streamIsLive = true; };
+  es.onerror = () => {
+    conn.textContent = "reconnecting…"; conn.className = "down"; streamIsLive = false;
+    // A stream that failed BEFORE a single snapshot arrived leaves the page with
+    // nothing to show and no route to it: that is the unreadable state (F7), not a
+    // permanent "loading". A stream that drops with rows already on screen keeps them
+    // (F6) - markUnreadable only speaks for a view that has nothing of its own.
+    markUnreadable();
+  };
 }
 connect();
 
 // Controls: POST with the bearer token; show the server's reason on refusal.
+// A refusal says, in words, that the action DID NOT HAPPEN, and never renders anything a
+// reader could take for success. The rest of the page is untouched and every control
+// stays operable: a refused control action costs nothing but itself (F1, F5).
 async function control(path) {
-  const msg = $("msg"); msg.className = ""; msg.textContent = "…";
+  const msg = $("msg"); msg.className = ""; msg.textContent = "working";
   try {
     const res = await fetch(path, {
       method: "POST",
@@ -816,12 +1613,13 @@ async function control(path) {
     });
     let body = {};
     try { body = await res.json(); } catch (_) {}
-    if (res.status === 403) { msg.className = "err"; msg.textContent = "control disabled — set server_auth_token on the server."; return; }
-    if (res.status === 401) { msg.className = "err"; msg.textContent = "unauthorized — check the control token."; return; }
-    if (res.status === 409) { msg.textContent = "not started: " + (body.reason || "busy"); return; }
-    msg.textContent = "ok";
+    if (res.status === 403) { msg.className = "err"; msg.textContent = "refused: nothing changed. Control is disabled on this server."; return; }
+    if (res.status === 401) { msg.className = "err"; msg.textContent = "refused: nothing changed. Check the control token."; return; }
+    if (res.status === 409) { msg.className = "err"; msg.textContent = "not started: " + (body.reason || "already busy"); return; }
+    if (!res.ok) { msg.className = "err"; msg.textContent = "refused: nothing changed. The server returned " + res.status + "."; return; }
+    msg.textContent = "done";
   } catch (err) {
-    msg.className = "err"; msg.textContent = "request failed";
+    msg.className = "err"; msg.textContent = "refused: nothing changed. The request did not reach the server.";
   }
 }
 $("rescan").addEventListener("click", () => control("/api/rescan"));

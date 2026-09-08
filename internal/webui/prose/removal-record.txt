@@ -1,0 +1,93 @@
+# The removal record (S0052).
+#
+# The dashboard put 88 words of explanatory prose between an operator and the numbers on
+# a live snapshot, and up to 114 in the states where every view is speaking for itself.
+# This item cut it to 37. A claim removed from a page and written down nowhere is a claim
+# DROPPED, and nothing about a shorter page would ever have shown that up, so this file
+# exists to make the difference gradeable.
+#
+# [baseline] is every SENTENCE of page copy the dashboard rendered before this item
+# touched it. It was not typed from the template: it is what the browser engine reported
+# as visible in the served document at holdfast's default branch, 4cfad15, split into
+# sentences. It is taken from FOUR renders, not one, because a page speaks different words
+# in different states and a baseline drawn from the live render alone would let a loading,
+# empty or unreadable phrasing be deleted with no gate noticing:
+#
+#   live       88 words in 6 blocks   the six blocks a populated page carries
+#   loading   102 words in 10 blocks  the four views before any snapshot arrives
+#   empty     102 words in 9 blocks   a ledger with no rows
+#   unreadable 114 words in 10 blocks a payload that could not be read at all
+#
+# `internal/webui/prose_rendered_test.go` is the classifier that took it, and running it
+# against that commit reproduces the list.
+#
+# A baseline sentence that is no longer in the document the handler serves is in exactly
+# one of the two sections below. Neither is optional: TestProse_EveryClaimTakenOffThePage-
+# IsInTheDocumentationInstead, inside `make check`, fails on a sentence that is in neither.
+#
+# [moved] is a claim that LEFT the surface:
+#
+#   <sentence>  ==>  <path>#<anchor>
+#
+# The sentence must be gone from the served document, must name a heading that exists in a
+# committed document with body text beneath it, and that body must CARRY the sentence. A
+# record that points at a heading which does not say the thing is a record of a claim that
+# was dropped with extra steps.
+#
+# [reworded] is a claim the page STILL makes, in fewer words:
+#
+#   <old sentence>  ==>  <new sentence>  ==>  <path>#<anchor>
+#
+# The old sentence must be gone from the served document and the new one must be IN it, so
+# the record cannot claim a rewording that did not happen or one that lost the claim. The
+# heading is required exactly as [moved] requires one, and it is the section that documents
+# what the sentence says.
+#
+# Comparison is under one normalisation - one line, single spaces, and the typographic
+# dashes and quotes a page and a document routinely disagree about folded to their plain
+# equivalents - so a line wrap can never be the reason this gate reds.
+
+[baseline]
+holdfast, a config-as-code, data-safe media transcoder.
+The YAML config is the source of truth; this page reads and controls.
+It reports what was measured, and only that.
+The live state of this holdfast, pushed by the server as it changes.
+Files in flight, with in-state age and the encoder's own progress.
+Derived from the ledger, so it survives restarts and covers the whole library.
+Computed by the server over every matching row, never over the capped rows below.
+Each finished file, with the proof its swap was safe.
+Loading the live counts.
+Loading the queue.
+Loading the whole-ledger figures.
+Loading recent history.
+No file has been recorded in the ledger yet.
+Nothing queued.
+No whole-ledger figure has a contributing row yet.
+No history yet.
+The live counts could not be read.
+The queue could not be read.
+The whole-ledger figures could not be read.
+Recent history could not be read.
+
+[moved]
+holdfast, a config-as-code, data-safe media transcoder. ==> docs/dashboard-methodology.md#what-this-page-is
+The YAML config is the source of truth; this page reads and controls. ==> docs/dashboard-methodology.md#what-this-page-is
+It reports what was measured, and only that. ==> docs/dashboard-methodology.md#what-this-page-is
+The live state of this holdfast, pushed by the server as it changes. ==> docs/dashboard-methodology.md#right-now
+Files in flight, with in-state age and the encoder's own progress. ==> docs/dashboard-methodology.md#right-now
+Derived from the ledger, so it survives restarts and covers the whole library. ==> docs/dashboard-methodology.md#what-it-has-done-to-your-library
+Computed by the server over every matching row, never over the capped rows below. ==> docs/dashboard-methodology.md#the-whole-ledger-figures
+Each finished file, with the proof its swap was safe. ==> docs/dashboard-methodology.md#recent-history-the-proof-each-swap-was-safe
+
+[reworded]
+Loading the queue. ==> Loading the work in hand. ==> docs/dashboard-methodology.md#the-three-states-every-view-shows
+Loading the whole-ledger figures. ==> Loading these figures. ==> docs/dashboard-methodology.md#the-three-states-every-view-shows
+Loading recent history. ==> Loading finished swaps. ==> docs/dashboard-methodology.md#the-three-states-every-view-shows
+No file has been recorded in the ledger yet. ==> No file recorded yet. ==> docs/dashboard-methodology.md#the-three-states-every-view-shows
+Nothing queued. ==> No work in hand. ==> docs/dashboard-methodology.md#the-three-states-every-view-shows
+No whole-ledger figure has a contributing row yet. ==> No figure has a contributing row. ==> docs/dashboard-methodology.md#the-three-states-every-view-shows
+No history yet. ==> No swap finished yet. ==> docs/dashboard-methodology.md#the-three-states-every-view-shows
+The live counts could not be read. ==> The live counts are unreadable. ==> docs/dashboard-methodology.md#the-three-states-every-view-shows
+The queue could not be read. ==> The work in hand is unreadable. ==> docs/dashboard-methodology.md#the-three-states-every-view-shows
+The whole-ledger figures could not be read. ==> These figures are unreadable. ==> docs/dashboard-methodology.md#the-three-states-every-view-shows
+Recent history could not be read. ==> Finished swaps are unreadable. ==> docs/dashboard-methodology.md#the-three-states-every-view-shows

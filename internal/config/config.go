@@ -12,10 +12,13 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/knadh/koanf/parsers/yaml"
@@ -44,9 +47,10 @@ var knownKeys = map[string]bool{
 	"pixel_format": true, "container_ext": true, "min_bitrate_kbps": true,
 	"min_savings_percent": true, "duration_tolerance_sec": true,
 	"max_failures": true, "skip_hardlinked": true, "state_dir": true,
-	"allow_non_local": true,
-	"vmaf_enable":     true, "min_vmaf": true, "vmaf_min_pool": true,
-	"vmaf_subsample": true, "vmaf_model": true, "workers": true,
+	"allow_non_local": true, "history_retention_rows": true, "undo_window_hours": true,
+	"vmaf_enable": true, "min_vmaf": true, "vmaf_min_pool": true,
+	"vmaf_min_chroma": true,
+	"vmaf_subsample":  true, "vmaf_model": true, "workers": true,
 	"server_addr": true, "server_auth_token": true, "scan_interval_sec": true,
 	"metrics_enable": true, "notify_url": true, "run_window": true,
 	"max_load": true, "tautulli_url": true, "tautulli_api_key": true,
@@ -70,9 +74,12 @@ func defaultLayer() map[string]any {
 		"max_failures":           3,
 		"skip_hardlinked":        true,
 		"state_dir":              "state",
+		"history_retention_rows": 0,
+		"undo_window_hours":      0,
 		"vmaf_enable":            true,
 		"min_vmaf":               95.0,
 		"vmaf_min_pool":          60.0,
+		"vmaf_min_chroma":        30.0,
 		"vmaf_subsample":         1,
 		"vmaf_model":             "auto",
 		"workers":                1,
@@ -157,6 +164,46 @@ type Config struct {
 	// resolved by callers).
 	StateDir string `yaml:"state_dir"`
 
+	// HistoryRetentionRows bounds the ledger: the maximum number of terminal rows
+	// (done/skipped/failed) the job store retains. 0 - the DEFAULT, and what an absent
+	// key resolves to - disables retention entirely and keeps every row.
+	//
+	// It ships DISABLED and must stay that way. A prune is the one IRREVERSIBLE act in
+	// this package's blast radius: it deletes audit history, and no re-run recreates it.
+	// A later scan re-derives the file's CURRENT state instead, so a pruned `done` row
+	// for a file still on disk comes back as a `skipped` row carrying the
+	// already-at-target-codec guard - a weaker record of the same swap. A default that
+	// silently deleted those rows would be this tool's cardinal sin with the ledger
+	// instead of with the library.
+	//
+	// The prune it enables cannot lower the published lifetime reclaimed total (a pruned
+	// row's contribution is carried forward durably before the row is removed) and cannot
+	// cause a file to be encoded again: a terminal row is what holds that file out of the
+	// encoder, so a row is only ever removed when the scan LISTED the directory its file
+	// should be in and the file was not there. The ledger can therefore sit above this
+	// bound - on a library that is not churning, above it permanently.
+	// A negative value, or a value that is not a whole number of rows, is a startup
+	// REFUSAL naming the key and the offending value - never a silent default.
+	HistoryRetentionRows int `yaml:"history_retention_rows"`
+
+	// UndoWindowHours is how many hours a swapped-out original is kept retrievable
+	// (UNDO-6). 0 - the DEFAULT - disables the window, which is the configuration in
+	// which a swap is final the microsecond it happens; `validate` and startup both
+	// say so out loud.
+	//
+	// While the window is open the original is held by a SECOND HARD LINK to the same
+	// data, so retention costs no additional space at the moment it is taken - but the
+	// space the swap reclaimed is NOT returned to the filesystem until the window
+	// closes and the link is released. A library-wide first pass therefore holds every
+	// original it replaced for this many hours, which is the real cost of the setting:
+	// the reclaimed figure and the held figure are reported separately for exactly
+	// that reason.
+	//
+	// A source whose original cannot be retained is SKIPPED rather than swapped: the
+	// window's promise is that a swap can be walked back, and a swap that cannot be is
+	// not one this tool takes while the operator has asked for the window.
+	UndoWindowHours int `yaml:"undo_window_hours"`
+
 	// AllowNonLocal opts specific paths in to running on storage holdfast could
 	// not positively identify as local (FILESYSTEM-1). holdfast's no-loss
 	// contract is stated for a local filesystem - an atomic same-filesystem
@@ -215,6 +262,35 @@ type Config struct {
 	// `validate` warns when you do. The floor only ever REJECTS (the source is
 	// kept), so the failure it can cause is a wasted encode, never a lost original.
 	VmafMinPool float64 `yaml:"vmaf_min_pool"`
+	// VmafMinChroma is the CHROMA floor, in dB: an encode is rejected when the worst
+	// (sub)sampled frame's PSNR over the chroma planes - the worse of Cb and Cr -
+	// falls below it. Default 30.
+	//
+	// It exists because the VMAF model above is LUMA-ONLY and therefore structurally
+	// blind to chroma damage, and so is every structural gate: an output whose colour
+	// planes have been flattened, shifted or desaturated decodes perfectly, carries
+	// the right duration, packets and streams, and scores as well on VMAF as a
+	// faithful encode does. Before this floor existed the source was then deleted.
+	// Measured on real libvmaf: a 15% desaturation of the chroma planes leaves the
+	// pooled harmonic mean at ~99 and the worst frame at ~97 - clear of BOTH luma
+	// floors at their shipped defaults - while chroma PSNR falls to ~26 dB from the
+	// ~40 dB a faithful encode of the same source records.
+	//
+	// It is PSNR over Cb and Cr rather than a colour-difference metric because PSNR
+	// over those planes is computed over the chroma planes and nothing else, so a
+	// value that falls can only mean chroma changed. And it is the raw min over
+	// frames for the same reason VmafMinPool is: a mean hides a locally-broken
+	// segment.
+	//
+	// The default of 30 dB sits in a measured gap. Honest encodes at the shipped
+	// crf that still clear the luma gate bottom out around 40 dB (10 dB of
+	// headroom), while the weakest chroma-only damage that evades the luma gate
+	// reads ~26 dB. Rejecting a good encode costs a wasted encode and keeps the
+	// source; accepting a bad one deletes an original.
+	//
+	// 0 disables the floor, leaving chroma damage UNGUARDED. `validate` warns when
+	// you do. Range 0-100 (dB); libvmaf caps PSNR well below 100 in practice.
+	VmafMinChroma float64 `yaml:"vmaf_min_chroma"`
 	// VmafSubsample is the frame-sampling interval for VMAF (>=1; 1 = every frame;
 	// higher is cheaper but less precise). VMAF is a second full decode, so large
 	// libraries may raise this.
@@ -301,6 +377,25 @@ func (c *Config) EffectiveWorkers() int {
 	return c.Workers
 }
 
+// RetentionEnabled reports whether a bounded ledger is configured. It is false for the
+// shipped default (0) and for an absent key, which is what makes "keep every row" the
+// behaviour an operator gets without asking for anything.
+func (c *Config) RetentionEnabled() bool { return c.HistoryRetentionRows > 0 }
+
+// UndoEnabled reports whether the undo window is open at all. It is the single
+// reading of "is 0 the disabled sentinel", so the engine, the CLI and the warning
+// cannot disagree about what the default means.
+func (c *Config) UndoEnabled() bool { return c.UndoWindowHours > 0 }
+
+// UndoWindow is how long a retained original is kept. Zero when the window is
+// disabled, which no caller should reach - UndoEnabled gates them all.
+func (c *Config) UndoWindow() time.Duration {
+	if !c.UndoEnabled() {
+		return 0
+	}
+	return time.Duration(c.UndoWindowHours) * time.Hour
+}
+
 // VmafGate reports whether the VMAF gate is enabled, defaulting to true when unset.
 func (c *Config) VmafGate() bool { return c.VmafEnable == nil || *c.VmafEnable }
 
@@ -378,6 +473,17 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("load env overrides: %w", err)
 	}
 
+	// history_retention_rows is a COUNT OF ROWS, and the decoder below is deliberately
+	// weakly typed - it would turn `3.7` into 3 and `"12"` into 12 without a word. A
+	// retention that silently rounds is a retention the operator did not write, on the
+	// one knob whose effect is an irreversible delete of audit history, so the raw value
+	// is checked BEFORE the decoder can coerce it. Same discipline as the unknown-key
+	// rejection above: loud, never a silent default. (A NEGATIVE whole number decodes
+	// faithfully and is refused by Validate, with the rest of the range checks.)
+	if err := requireWholeRows(k.Get(retentionKey), retentionKey, path); err != nil {
+		return nil, err
+	}
+
 	var c Config
 	if err := k.UnmarshalWithConf("", &c, koanf.UnmarshalConf{
 		Tag: "yaml",
@@ -399,6 +505,51 @@ func Load(path string) (*Config, error) {
 	c.VideoExts = normalizeExts(c.VideoExts)
 
 	return &c, nil
+}
+
+// retentionKey is the one place the ledger-retention key is spelled. knownKeys,
+// defaultLayer and the whole-number refusal all read it from here, so a rename cannot
+// leave one of the three behind.
+const retentionKey = "history_retention_rows"
+
+// requireWholeRows refuses a value for a row-count key that is not a whole number of
+// rows, naming the key and the offending value. It runs against the RAW layered value
+// (defaults <- file <- env) rather than the decoded struct field, because the decoder is
+// WeaklyTypedInput: it would truncate 3.7 to 3, read "12" as 12 and read `true` as 1,
+// each of which is a configuration the operator did not write.
+//
+// An env override arrives as a string and a YAML integer as an int, so both spellings of
+// a genuine whole number are accepted; anything else - a fraction, a word, a boolean, a
+// list, or a key present with no value at all - is a refusal.
+func requireWholeRows(raw any, key, path string) error {
+	switch v := raw.(type) {
+	case int:
+		return nil
+	case int32:
+		return nil
+	case int64:
+		return nil
+	case uint:
+		return nil
+	case uint32:
+		return nil
+	case uint64:
+		return nil
+	case float32:
+		if float64(v) == math.Trunc(float64(v)) && !math.IsInf(float64(v), 0) {
+			return nil
+		}
+	case float64:
+		if v == math.Trunc(v) && !math.IsInf(v, 0) && !math.IsNaN(v) {
+			return nil
+		}
+	case string:
+		if _, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s must be a whole number of rows (0 disables retention and keeps every terminal row): "+
+		"%#v in %s is not one", key, raw, path)
 }
 
 // normalizeExts lowercases each video extension and strips a leading dot and any
@@ -500,6 +651,14 @@ func (c *Config) Validate() error {
 	if c.MaxFailures < 0 {
 		return fmt.Errorf("max_failures %d must be >= 0", c.MaxFailures)
 	}
+	// A negative retention has no reading: it is neither "keep everything" (0) nor a
+	// bound. Refuse it here, before the store is opened, rather than guessing which the
+	// operator meant on the one knob that deletes audit history.
+	if c.HistoryRetentionRows < 0 {
+		return fmt.Errorf("%s %d must be >= 0 (0 disables retention and keeps every terminal row; "+
+			"a positive value is the maximum number of terminal rows the ledger retains)",
+			retentionKey, c.HistoryRetentionRows)
+	}
 	if c.DurationToleranceSec < 0 {
 		return fmt.Errorf("duration_tolerance_sec %g must be >= 0", c.DurationToleranceSec)
 	}
@@ -512,19 +671,37 @@ func (c *Config) Validate() error {
 	if c.VmafMinPool < 0 || c.VmafMinPool > 100 {
 		return fmt.Errorf("vmaf_min_pool %g out of range (0-100)", c.VmafMinPool)
 	}
+	// The chroma floor bounds a PSNR in dB. 0 is the "disabled" sentinel (warned
+	// about, not refused); a negative floor could never reject and would be a silent
+	// no-op, and a value above 100 dB could never be cleared and would reject every
+	// encode there is. Both are configuration the operator did not mean, so both are
+	// refused BY NAME rather than clamped into something plausible.
+	if c.VmafMinChroma < 0 || c.VmafMinChroma > 100 {
+		return fmt.Errorf("vmaf_min_chroma %g out of range (0-100 dB; 0 disables the chroma floor)", c.VmafMinChroma)
+	}
 	if c.VmafSubsample < 0 {
 		// 0 means "use the default" (Load's koanf layer sets 1; the VMAF scorer also
 		// floors <1 to 1) — consistent with the other zero-defaulted knobs. Only a
 		// negative interval is invalid.
 		return fmt.Errorf("vmaf_subsample %d must be >= 0", c.VmafSubsample)
 	}
-	// Fail-safe: an explicitly-enabled VMAF gate with no effective threshold (both
-	// min_vmaf and vmaf_min_pool 0) is enabled-but-never-rejecting — a silent no-op on
-	// a delete-capable tool. Refuse it. (Checked only when vmaf_enable is EXPLICIT: a
-	// nil pointer is the default-on state, and Load always resolves it to true with
-	// min_vmaf=95, so a real config never trips this by omission.)
-	if c.VmafEnable != nil && *c.VmafEnable && c.MinVmaf == 0 && c.VmafMinPool == 0 {
-		return errors.New("vmaf_enable is true but both min_vmaf and vmaf_min_pool are 0 — the VMAF gate would never reject; set min_vmaf (e.g. 95) or disable the gate")
+	// Fail-safe: an explicitly-enabled VMAF gate with no effective threshold (every
+	// floor 0) is enabled-but-never-rejecting - a silent no-op on a delete-capable
+	// tool. Refuse it. (Checked only when vmaf_enable is EXPLICIT: a nil pointer is
+	// the default-on state, and Load always resolves it to true with min_vmaf=95, so
+	// a real config never trips this by omission.) The chroma floor counts here: a
+	// gate that rejects on chroma alone is a strange configuration but it is not a
+	// no-op, and refusing it would be refusing a gate that does gate.
+	if c.VmafEnable != nil && *c.VmafEnable && c.MinVmaf == 0 && c.VmafMinPool == 0 && c.VmafMinChroma == 0 {
+		return errors.New("vmaf_enable is true but min_vmaf, vmaf_min_pool and vmaf_min_chroma are all 0 - the VMAF gate would never reject; set min_vmaf (e.g. 95) or disable the gate")
+	}
+	// The undo window (UNDO-6). A negative retention is not a shorter window, it is a
+	// window that has already closed for every original it would hold - so it would
+	// retain a link and release it on the same pass, paying the cost of the feature
+	// and delivering none of it. Refused BY NAME rather than clamped to 0, which would
+	// silently turn a typo into "swaps are final".
+	if c.UndoWindowHours < 0 {
+		return fmt.Errorf("undo_window_hours %d must be >= 0 (0 disables the undo window; a swap is then final)", c.UndoWindowHours)
 	}
 	if c.Workers < 0 || c.Workers > 1024 {
 		return fmt.Errorf("workers %d out of range (0-1024; 0 means the default of 1)", c.Workers)
@@ -551,6 +728,38 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// Notices reports things this configuration MEANS that an operator must be told at
+// startup, whether or not they chose them. They are not Warnings: a warning says a
+// safety gate has been weakened from what this tool ships, and a shipped default can
+// never be that. Both are announced, and they are separate lists so that neither has
+// to lie about what it is - a default that produced a warning would train an operator
+// to skip warnings, and a real weakened gate is what they would skip next.
+//
+// The undo window is the case this exists for (UNDO-6). It is OFF by default, and off
+// means the swap - the only irreversible act this tool performs - cannot be walked
+// back. That is not a weakened gate, it is the tool's behaviour, and it is precisely
+// the behaviour somebody deleting originals should hear stated before the first one
+// goes.
+//
+// `validate` prints these as `note:`; `run` and `serve` log them at startup. They are
+// logged at WARN rather than INFO, not because a notice is a warning, but because
+// `log_level: warn` is a legal setting and a startup statement nobody can hear at a
+// level they may legitimately choose has not been made. The list stays separate from
+// Warnings regardless, which is where the distinction actually lives.
+func (c *Config) Notices() []string {
+	var n []string
+	if !c.UndoEnabled() {
+		n = append(n, "undo_window_hours is 0 - THE UNDO WINDOW IS DISABLED, so a swap is FINAL: "+
+			"the rename that replaces a source destroys it, nothing retains the original, and a bad "+
+			"encode that cleared every gate cannot be walked back. This is the default. Set "+
+			"undo_window_hours (e.g. 24) to keep each replaced original retrievable with "+
+			"`holdfast restore <path>` for that long: it costs no extra space at the moment it is "+
+			"taken (a second hard link to the same data), but the space a swap reclaimed is not "+
+			"returned to the filesystem until the window closes.")
+	}
+	return n
+}
+
 // Warnings reports configurations that are VALID but weaken a safety gate — the
 // things a delete-capable tool must say out loud rather than absorb silently. They
 // are not errors: each is a legitimate choice, and refusing to start would be
@@ -558,6 +767,11 @@ func (c *Config) Validate() error {
 // LOOKS like it has a worst-frame floor when it no longer meaningfully does.
 //
 // `validate` prints these, and `run`/`serve` log them at startup.
+//
+// A WARNING IS ALWAYS A WEAKENED GATE. Something that is merely worth stating about a
+// configuration - including a shipped default worth stating - belongs in Notices,
+// because a default configuration that warns is how an operator learns to skip
+// warnings, and the next one will be a real gate they have turned off.
 func (c *Config) Warnings() []string {
 	var w []string
 	// The gate off entirely is the operator's call — but it is also the WEAKEST
@@ -577,10 +791,19 @@ func (c *Config) Warnings() []string {
 			"If honest encodes are being rejected, LOWER the floor (e.g. 45) rather than setting it to 0 — "+
 			"a lower floor still bounds local damage; 0 bounds nothing.")
 	}
+	if c.VmafMinChroma <= 0 {
+		w = append(w, "vmaf_min_chroma is 0 - the chroma floor is DISABLED, so CHROMA DAMAGE IS "+
+			"UNGUARDED. The VMAF model is luma-only and every structural check passes an output whose "+
+			"colour planes have been flattened, shifted or desaturated: it decodes perfectly, carries "+
+			"the right duration, packets and streams, and scores ~99 on VMAF. The source is then deleted. "+
+			"If honest encodes are being rejected, LOWER the floor (e.g. 25) rather than setting it to 0 - "+
+			"a lower floor still bounds chroma damage; 0 bounds nothing.")
+	}
 	if c.VmafSubsample > 1 {
 		w = append(w, fmt.Sprintf("vmaf_subsample is %d — VMAF measures only every %dth frame, so the "+
-			"vmaf_min_pool worst-frame floor is a SAMPLE, not a guarantee: a damaged frame that is never "+
-			"sampled is never seen. Use vmaf_subsample: 1 on content you cannot re-acquire.",
+			"vmaf_min_pool and vmaf_min_chroma worst-frame floors are a SAMPLE, not a guarantee: a "+
+			"damaged frame that is never sampled is never seen. Use vmaf_subsample: 1 on content you "+
+			"cannot re-acquire.",
 			c.VmafSubsample, c.VmafSubsample))
 	}
 	return w

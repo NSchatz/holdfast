@@ -14,8 +14,10 @@ internal/webui/
   src/
     index.html.tmpl         the page shell: markup, plus one marker for the stylesheet
                             and one for the script
-    dashboard.css           the whole stylesheet (it moves as a unit; the phase does not
-                            split the CSS)
+    tokens.css              the ONE committed token file: every colour and every length
+                            the surface paints, in both themes, with each pair's measured
+                            contrast ratio recorded beside it
+    dashboard.css           the rules, which declare no colour and no length of their own
     js/modules.txt          the modules, in the order they are concatenated
     js/10-constants.js      the closed vocabularies the page reads off the wire
     js/20-derive.js         the VALUE DERIVATIONS. No DOM reference at all
@@ -24,6 +26,7 @@ internal/webui/
     js/50-rows.js           the rows, cloned from the document's own <template>s
     js/60-aggregates.js     the whole-ledger cards
     js/70-render.js         one snapshot in, the page it describes out
+    js/55-states.js         the three states every view owes: loading, empty, unreadable
     js/80-wire.js           the controls, the ticker and the SSE stream. The only module
                             that RUNS anything at load time
     test/                   the derivation unit suite (node's built-in test runner)
@@ -59,9 +62,9 @@ and the message names the offending file. The write itself goes through a temp f
 the destination directory and is renamed into place, so a generator that fails leaves the
 committed document exactly as it found it.
 
-## The two suites, and the runtimes each needs
+## The three suites, and the runtimes each needs
 
-Both are reachable from `go test ./internal/webui/...`.
+All three are reachable from `go test ./internal/webui/...`.
 
 **The derivation units** run in **node's built-in test runner** (`node --test`), which
 needs node and nothing else - the runner, the assertions and the module loader are all
@@ -79,13 +82,31 @@ Anything about what the page SHOWS is decided there and never by matching HTML o
 source text, because a text grader cannot decide what a rule applies to, what wins the
 cascade, or what is shown rather than merely built.
 
+**The DevTools-protocol graders** (S0053) drive the browser over the **Chrome DevTools
+Protocol** for the three things no expression evaluated inside the page can do:
+
+- emulate the operating system's colour-scheme preference, so the theme under test is set
+  at the ENGINE and never by a class, an attribute or a stylesheet injected into the page.
+  A grader that injects the theme is grading its own fixture;
+- read the **accessibility tree** the engine computed. An accessible name is the engine's
+  own answer over labels, ARIA, native semantics and content - not a property of markup
+  that anything can reconstruct by inspection;
+- dispatch **real key presses**. A `KeyboardEvent` constructed inside the page is
+  untrusted and moves focus nowhere, so tab order is not observable from the document.
+
+They cost **no module dependency**. `--remote-debugging-pipe` makes the browser speak CDP
+over file descriptors 3 and 4 as NUL-terminated JSON, `exec.Cmd.ExtraFiles` hands the child
+exactly those descriptors, and `encoding/json` does the rest - which keeps the whole
+toolchain Go and the standard library, as the generator already is, and adds nothing for
+`govulncheck` to carry. `internal/webui/cdp_test.go` is the driver.
+
 **Skip or fail.** `make check` is this repository's gate and stays green on a machine with
-no browser and no node: both suites skip, naming the runtime they wanted, exactly as the
+no browser and no node: the suites skip, naming the runtime they wanted, exactly as the
 docker gate does. That idiom's one failure mode is a suite that skips everywhere and
 reports "ok" forever, so `make webui-check` sets `HOLDFAST_WEBUI_REQUIRED=1`, which turns
 a missing runtime into a failure, and `scripts/webui-check.sh` additionally fails if
-anything skipped or if either half did not execute. CI runs `make webui-check` on every
-pull request, after proving both runtimes are present.
+anything skipped or if any of the three halves did not execute. CI runs `make webui-check`
+on every pull request, after proving both runtimes are present.
 
 ## What the graders will not let you change quietly
 
@@ -103,3 +124,60 @@ pull request, after proving both runtimes are present.
   navigation target the reader chooses, not a resource the page loads.
 - Absence. A fact nobody recorded renders as "not recorded" or "unavailable", never as 0,
   NaN or "undefined" - the store's own invariant, carried to the screen.
+- The cap notices. Each capped table states the total the SERVER reported for it
+  (`queue_total` / `history_total`), never one the page derived: the summary roll-up that
+  used to produce those figures is gone from `js/20-derive.js` outright, along with the
+  per-table status lists that fed it, so there is nothing left to derive one from. A
+  response whose total could not be read is shown as unavailable **with no figure in its
+  place** - the notice carries no digit at all, because a number beside the word "capped"
+  is read as the total whatever the sentence around it says. Nor does it claim the view IS
+  capped: cappedness is the comparison `total > shown`, so an unreadable total takes that
+  answer with it, and an absent total field answers the same way as an unreadable one.
+  Both are graded in the browser against a document mutated to derive its own total, to
+  hide the notice, to print a number where the unavailability belongs, and to say nothing
+  at all.
+
+## The page's shape, and its figures (DASH-9)
+
+The page is ordered by the two questions an operator has, in the order they ask them.
+**Right now** comes first in the document and first on the screen - the live badges, the
+counts, the controls, the filter and the queue - and **What it has done to your library**
+comes after it: the whole-ledger figures and the recent history. Each region is under its
+own heading, and the graders decide that order from document position AND from the
+rendered top edge of each region, not from the markup.
+
+Each whole-ledger figure is **drawn as well as stated**. A distribution (Outcomes, Skips
+by guard) draws one bar per bucket, sized against the largest count in that same figure; a
+spread (Replacement size, Encode time, VMAF pooled mean, VMAF worst frame) puts its
+minimum, mean and maximum on one scale. Four rules govern every one of them, and each is
+graded in the browser against a document deliberately mutated to defeat it:
+
+- **Built, never fetched.** A drawing is a shell cloned from a `<template>` in the page's
+  own markup, with one geometry attribute set per mark. The SVG namespace comes from the
+  HTML parser reading that template, so no module names a namespace URI either. No
+  library, no font, no image, no `data:` URI, no `package.json`, no lockfile: the response
+  policy is `default-src 'none'` and `img-src`, `font-src` and `media-src` all fall back
+  to it, so a dependency here would not be a heavier page, it would be a broken one.
+- **The drawing is never the sole carrier of a number.** Every value a figure encodes is
+  rendered as text in the same card, in the order the marks are drawn: label and count per
+  bar, and the three named values of a spread. Remove every drawing from the rendered
+  document and the cards still read - which is exactly what one grader does.
+- **Nothing means anything by colour alone.** Every mark of every figure is one token
+  (`--mark`), and the distinctions are position, length, tick height and the label beside
+  the mark. Elsewhere on the page a status dot, a count chip, a badge, the connection state
+  and an unavailable figure each pair their colour with rendered text, and the three
+  terminal outcomes are given three different dot shapes as well. The grader forces every
+  colour on the page to one value and requires the same distinctions to still be readable.
+- **3:1 against what is behind it.** Every mark, scale, tick, status dot and figure
+  boundary is measured from the browser's computed styles by WCAG 2.2's own relative
+  luminance ratio, and the Go side recomputes each ratio rather than trusting the page's.
+  `--border` (4.15:1 on the page, 3.82:1 on a card face) draws every boundary a reader has
+  to find; `--line` remains for decorative separators, where the floor does not apply.
+
+The value-to-geometry arithmetic behind the drawings (`readBuckets`, `bucketProportions`,
+`spreadPositions`) lives in `js/20-derive.js` with the rest of the derivations, so it is
+exercised input by input in node. Nothing in the browser computes a STATISTIC: the server
+already did that over the whole ledger, and these turn a published number into a length or
+a position and nothing else. A figure with nothing to draw draws nothing - an unavailable
+one, one no row contributed to, and a spread whose ends coincide or never arrived all keep
+their card and their words while drawing no mark that could be read as a measured zero.

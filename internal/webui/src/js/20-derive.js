@@ -52,13 +52,11 @@ function fmtScore(x) { return isNum(x) ? Number(x).toFixed(1) : NOT_RECORDED; }
 // The count an aggregate states its spread across. Absent is stated, never printed as NaN.
 function fmtCount(x) { return isNum(x) ? Number(x).toLocaleString() : NOT_RECORDED; }
 
-// The status roll-up behind each table's cap notice: how many rows the ledger holds in
-// the states this table shows. A summary that is not an object cannot be rolled up, and
-// says so with null rather than reporting a total of 0 nobody counted.
-function sumStatuses(sum, keys) {
-  if (!sum || typeof sum !== "object" || !Array.isArray(keys)) return null;
-  return keys.reduce((a, s) => a + (isNum(sum[s]) ? sum[s] : 0), 0);
-}
+// There is deliberately NO roll-up here any more. The cap notice used to add up the
+// summary counts for a table's states and present that as the total the view was capped
+// against; the server now REPORTS that total (see capNoteText), and keeping a derivation
+// beside it would only leave a second answer to the same question for a later reader to
+// reach for.
 
 // The offset between this page's clock and the server's, taken from the snapshot's own
 // `now` field. Every elapsed figure is DERIVED from it on each tick - never accumulated
@@ -106,6 +104,10 @@ function vmafFigures(j) {
   return {
     mean: isNum(j.vmaf_mean) ? fmtScore(j.vmaf_mean) : "?",
     worst: isNum(j.vmaf_min) ? fmtScore(j.vmaf_min) : "?",
+    // A SCOPE label, not an explanation (F8), and eleven words: the model, the two
+    // pooled statistics, the blind spot and what the score was measured against. The
+    // paragraphs that state what a VMAF score does and does not license live in
+    // docs/dashboard-methodology.md, linked once per region.
     condition: "model " + model + " · harmonic-mean + worst-frame pooling · luma-only · measured vs your source",
   };
 }
@@ -129,16 +131,52 @@ function progressFigure(j) {
 }
 
 // Human label for one skip guard. An unknown token falls back to itself, so a new guard
-// is never hidden behind a blank.
-function guardLabel(k) { return GUARD_LABELS[k] || k; }
+// is never hidden behind a blank. The lookup is an OWN-property lookup deliberately: a
+// bucket key arriving off the wire is attacker-influencable text, and a plain `obj[k]`
+// answers "constructor" or "toString" with something off Object.prototype, which would
+// put a function body on the screen where a guard name belongs.
+function guardLabel(k) {
+  return Object.prototype.hasOwnProperty.call(GUARD_LABELS, k) ? GUARD_LABELS[k] : k;
+}
 
 // Surface the API's silent row caps: it ships at most a fixed number of queue / history
-// rows, so a truncated view could read as the whole ledger. When the store holds more
-// than we were handed, say so; when the total could not be rolled up, claim nothing.
+// rows, so a truncated view could read as the whole ledger.
+//
+// The total is the one the SERVER REPORTED for this table (`queue_total` / `history_total`),
+// counted over every matching row in the ledger. It is never derived here. The page used to
+// roll it up from the summary counts, which was a different number wearing this one's name:
+// the summary counts rows in a status, the cap applies to the rows the response selected,
+// and only the server can see both. A figure a client derived and presented as the ledger's
+// own is the failure this field exists to end.
+//
+// A total that could not be read says exactly that AND SHOWS NO NUMBER IN ITS PLACE. Not a
+// zero, not the row count standing in for it: a reader who sees a figure beside "capped"
+// will read it as the total, so the honest answer here carries no digits at all.
+//
+// And it does not claim the view IS capped, because without the total nothing here knows
+// that. Cappedness is a COMPARISON - the ledger's total against the rows this response
+// carried - so the figure being unreadable takes the answer with it. A page told "this view
+// is capped" while showing 3 rows drawn from a 3-row ledger would be inventing the one fact
+// it has just said it cannot read.
+const CAP_TOTAL_UNAVAILABLE =
+  "The total behind this view is unavailable, so whether it is capped cannot be shown.";
+
 function capNoteText(shown, total) {
-  if (!isNum(shown) || !isNum(total) || total <= shown) return "";
+  if (!isNum(shown)) return "";
+  // No total on the wire at all is no readable total either, and is treated as one. The
+  // server's snapshot always carries both fields (they are plain struct fields, and the
+  // page is embedded in the binary that serves them), so this is unreachable in the shipped
+  // system - but "absent" and "present and unreadable" are the same fact to a reader, and
+  // answering them differently would leave a silent branch that renders an unknown cap as
+  // an uncapped view.
+  if (total === null || total === undefined) return CAP_TOTAL_UNAVAILABLE;
+  if (typeof total !== "object" || Array.isArray(total)) return CAP_TOTAL_UNAVAILABLE;
+  if (total.available !== true || !isNum(total.count) || total.count < 0) {
+    return CAP_TOTAL_UNAVAILABLE;
+  }
+  if (total.count <= shown) return "";
   return "Showing the most recent " + shown.toLocaleString() + " of "
-    + total.toLocaleString() + " — this view is capped.";
+    + Number(total.count).toLocaleString() + " — this view is capped.";
 }
 
 // The polite screen-reader summary: short counts, so a snapshot that shifts nothing can
@@ -172,4 +210,66 @@ function aggExclusionText(a) {
   if (excluded <= 0) return "";
   return excluded.toLocaleString() + " row" + (excluded === 1 ? "" : "s") +
     " excluded: no recorded value";
+}
+
+// --- what a figure's DRAWING is derived from -----------------------------------
+//
+// The three functions below are the whole of the arithmetic the graphics do, and they
+// are here rather than beside the nodes they end up on for the same reason every other
+// derivation is: they map published numbers to a value, touch no DOM, and are therefore
+// exercisable one input at a time. None of them computes a STATISTIC - the server
+// already did that over the whole ledger; these turn a number that was published into a
+// length or a position, and nothing else.
+
+// readBuckets is the one gate between a published bucket figure and the page. It either
+// hands back a usable list of {key, count} or it THROWS, and a throw is what makes the
+// card render as unavailable: a figure whose buckets are absent, empty or malformed is a
+// figure that could not be read, and this page says exactly that rather than drawing a
+// shape over numbers nobody published.
+function readBuckets(buckets) {
+  if (!Array.isArray(buckets) || buckets.length === 0) {
+    throw new Error("this figure carries no readable buckets");
+  }
+  return buckets.map(function (b) {
+    if (!b || typeof b !== "object" || Array.isArray(b)) {
+      throw new Error("a bucket in this figure is not a bucket");
+    }
+    if (typeof b.key !== "string" && typeof b.key !== "number") {
+      throw new Error("a bucket in this figure carries no usable key");
+    }
+    if (!isNum(b.count) || b.count < 0) {
+      throw new Error("a bucket in this figure carries no usable count");
+    }
+    return { key: String(b.key), count: b.count };
+  });
+}
+
+// bucketProportions is the length of every bar of a distribution, as a share of the
+// LARGEST count in the same figure - so the bars of one figure are comparable with each
+// other and with nothing else. It answers null where there is nothing a proportion could
+// be taken against (an empty list, or a largest count of zero), and the renderer then
+// draws no bar at all: a zero-length mark on a shared axis reads as a measured zero, and
+// no row measured anything.
+function bucketProportions(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  let max = 0;
+  for (const b of rows) {
+    if (!b || !isNum(b.count) || b.count < 0) return null;
+    if (b.count > max) max = b.count;
+  }
+  if (max <= 0) return null;
+  return rows.map(function (b) { return b.count / max; });
+}
+
+// spreadPositions places a spread's mean on the scale its own minimum and maximum define:
+// 0 is the minimum end, 1 the maximum end. It answers null where there is no scale to
+// draw on - any of the three absent, a maximum below its minimum (a figure that cannot be
+// true), or ends that coincide, where a full-width axis would assert a spread that was
+// never measured. The three values are always rendered as text either way, so a figure
+// with no drawing still carries every number it has.
+function spreadPositions(min, mean, max) {
+  if (!isNum(min) || !isNum(mean) || !isNum(max)) return null;
+  if (max <= min) return null;
+  const t = (mean - min) / (max - min);
+  return { mean: Math.min(1, Math.max(0, t)) };
 }

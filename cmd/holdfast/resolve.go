@@ -80,7 +80,7 @@ func cmdResolve(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	st, err := openStore(cfg)
+	st, err := openJobStore(cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "holdfast: %v\n", err)
 		return 1
@@ -94,10 +94,14 @@ func cmdResolve(args []string, stdout, stderr io.Writer) int {
 	return resolveOne(ctx, st, *id, *determination, *replacement, stdout, stderr)
 }
 
-// openStore opens the job store the configured state directory holds, using the same
+// openJobStore opens the job store the configured state directory holds, using the same
 // defaulting buildEngine applies so `resolve` can never open a DIFFERENT database from
 // the one the run wrote to.
-func openStore(cfg *config.Config) (store.Store, error) {
+//
+// Named openJobStore and not openStore: restore_test.go carries a test helper of the
+// latter name in this same package, and a production function sharing it would be a
+// collision waiting on whichever file compiled second.
+func openJobStore(cfg *config.Config) (store.Store, error) {
 	stateDir := cfg.StateDir
 	if stateDir == "" {
 		stateDir = "state"

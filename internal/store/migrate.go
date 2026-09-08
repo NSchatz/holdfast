@@ -108,8 +108,119 @@ CREATE INDEX IF NOT EXISTS idx_jobs_outcome ON jobs(status, source_bytes, output
 `,
 	},
 	{
-		// v4 - FILESYSTEM-1 (the swap half): the source-mutation guard's achieved
+		// v4 - GATE-4: what the quality gate actually compared, and what it found in
+		// the colour planes.
+		//
+		// vmaf_pix_fmt is the single format both streams were converted to before
+		// scoring. Until this phase nothing recorded it and nothing chose it: the two
+		// inputs disagree on the default path (pixel_format: auto floors output depth
+		// at 10, so an 8-bit source meets a 10-bit output) and libavfilter negotiated
+		// the conversion unobserved. vmaf_chroma + vmaf_chroma_metric are the chroma
+		// measurement and the name of the metric that produced it, which have to
+		// travel together: a bare dB figure with no metric attached is not something
+		// an operator can act on, exactly as vmaf_model established for the score.
+		//
+		// NULLABLE with NO DEFAULT, as v2 established. Every row written before this
+		// migration was scored by a gate that measured none of these things, and it
+		// must READ as not recorded rather than be backfilled with a value that would
+		// claim a chroma measurement nobody took. A DEFAULT here would invent evidence
+		// about swaps that already happened, in the one table whose whole job is to be
+		// evidence. 0.0 is legal for vmaf_chroma too - it is an obliterated plane.
+		name: "comparison format and chroma columns",
+		sql: `
+ALTER TABLE jobs ADD COLUMN vmaf_pix_fmt       TEXT;
+ALTER TABLE jobs ADD COLUMN vmaf_chroma        REAL;
+ALTER TABLE jobs ADD COLUMN vmaf_chroma_metric TEXT;
+`,
+	},
+	{
+		// v5 - UNDO-6: the retained originals the undo window can put back.
+		//
+		// A SEPARATE TABLE rather than columns on jobs, and that is forced by the
+		// lifetimes. A jobs row is keyed (path, fingerprint) and the swap DELETES the
+		// pre-swap row (ProcessFile prunes it once the done row lands under the final
+		// file's new key), so a retention recorded on that row would be pruned by the
+		// very swap it exists to undo. The retention outlives the row: it is keyed by
+		// the library PATH, which is the thing an operator asks to restore.
+		//
+		// source_path is where the original goes BACK; swapped_path is what the swap
+		// produced (the same path for an in-place rename, a different one when the
+		// container extension changed). Both are recorded because a restore has to put
+		// one back and remove the other, and deriving either from the other after the
+		// fact would be guessing at configuration that may since have changed.
+		//
+		// swapped_fingerprint is the size:mtime of the file the swap left at
+		// swapped_path, taken immediately after the swap. It is what makes a restore
+		// refuse to overwrite content that is not what this tool put there.
+		//
+		// restored_at is NULL until an operator restores, and a released retention is
+		// DELETED outright - so "is there anything to restore for this path" is exactly
+		// "a row exists with restored_at IS NULL", with no third state to get wrong.
+		name: "retained originals",
+		sql: `
+CREATE TABLE IF NOT EXISTS retained_originals (
+	source_path         TEXT NOT NULL PRIMARY KEY,
+	swapped_path        TEXT NOT NULL,
+	retained_path       TEXT NOT NULL,
+	source_bytes        INTEGER NOT NULL,
+	swapped_fingerprint TEXT NOT NULL,
+	retained_at         INTEGER NOT NULL,
+	expires_at          INTEGER NOT NULL,
+	restored_at         INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_retained_swapped ON retained_originals(swapped_path);
+CREATE INDEX IF NOT EXISTS idx_retained_expires ON retained_originals(restored_at, expires_at);
+`,
+	},
+	{
+		// v6 - LEDGER-5: the durable carry-forward a prune needs, and the index it reads
+		// the oldest rows through.
+		//
+		// It is v6 and NOT v4 or v5, which is the whole of what this slice's append-only
+		// rule is for. GATE-4's columns shipped as v4 and UNDO-6's retained_originals as
+		// v5 while this branch was open; a database in the field has already run both
+		// texts under those versions. Two different steps claiming one version would
+		// silently fork the schema in two - so this one moves to the end of the history
+		// rather than contesting an ordinal that is already spent.
+		//
+		// ledger_totals carries the ONE fact a pruned row would otherwise take with it.
+		// The published lifetime reclaimed total is a SUM over the done rows that recorded
+		// both sizes, so deleting such a row lowers it - not immediately (the server reads
+		// the baseline once, at startup) but at the next restart, which is precisely how a
+		// wrong total ships unnoticed. Prune therefore ADDS the rows' contribution here, in
+		// the same transaction that deletes them, and ReclaimedTotal reads live rows plus
+		// this. The row can only ever grow, so the total can never run backwards.
+		//
+		// One row, enforced by the CHECK: this is a singleton counter, not a table of
+		// them, and a second row would silently split the total in two. INSERT OR IGNORE
+		// seeds it so every later UPDATE has something to update - and re-running the
+		// migration (which cannot happen, but the whole mechanism is built on it being
+		// safe if it did) changes nothing.
+		//
+		// idx_jobs_status_updated is what makes "the oldest terminal rows" an index scan
+		// rather than a sort of the operator's entire library: the prune orders terminal
+		// rows by updated_at, on the same serialized connection the engine writes through.
+		name: "ledger retention totals",
+		sql: `
+CREATE TABLE IF NOT EXISTS ledger_totals (
+	id               INTEGER PRIMARY KEY CHECK (id = 1),
+	reclaimed_pruned INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO ledger_totals (id, reclaimed_pruned) VALUES (1, 0);
+CREATE INDEX IF NOT EXISTS idx_jobs_status_updated ON jobs(status, updated_at);
+`,
+	},
+	{
+		// v7 - FILESYSTEM-1 (the swap half): the source-mutation guard's achieved
 		// granularity, and the durable record of a swap that did not complete cleanly.
+		//
+		// It is v7 and NOT v4, which is this slice's append-only rule doing exactly the
+		// job LEDGER-5 records above it. This step was written as v4 while the branch was
+		// open; GATE-4 then shipped v4, UNDO-6 v5 and LEDGER-5 v6, and a database in the
+		// field has already run all three of those texts under those versions. Two
+		// different steps claiming one version would silently fork the schema in two, so
+		// this one moves to the end of the history rather than contesting an ordinal that
+		// is already spent. Nothing about the SQL changes; only where it sits.
 		//
 		// Two independent additions, in one step because they ship together.
 		//
@@ -185,9 +296,9 @@ func schemaVersion() int { return len(migrations) }
 // the engine would then be recording the proof of its swaps into columns that may or
 // may not exist.
 func migrate(ctx context.Context, db *sql.DB) error {
-	var have int
-	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&have); err != nil {
-		return fmt.Errorf("store: read schema version: %w", err)
+	have, err := readSchemaVersion(ctx, db)
+	if err != nil {
+		return err
 	}
 	want := schemaVersion()
 
@@ -198,15 +309,62 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	// operator rolls the binary forward (or the database back) and loses nothing
 	// meanwhile.
 	if have > want {
-		return fmt.Errorf("store: database schema version %d is newer than this build supports (%d) — "+
-			"refusing to open (running an older binary against a newer schema would silently discard data it cannot see; "+
-			"upgrade holdfast, or restore an older database)", have, want)
+		return errSchemaFromTheFuture(have, want)
 	}
 
 	for i := have; i < want; i++ {
 		if err := applyMigration(ctx, db, i+1, migrations[i]); err != nil {
 			return fmt.Errorf("store: migration %d (%s): %w", i+1, migrations[i].name, err)
 		}
+	}
+	return nil
+}
+
+// readSchemaVersion reads the stamp SQLite keeps in the database header. It is the one
+// place either door reads it, so a reader and a writer can never disagree about what
+// they are looking at.
+func readSchemaVersion(ctx context.Context, db *sql.DB) (int, error) {
+	var have int
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&have); err != nil {
+		return 0, fmt.Errorf("store: read schema version: %w", err)
+	}
+	return have, nil
+}
+
+// errSchemaFromTheFuture is the refusal both doors give a database this build cannot see
+// all of. Shared so the two cannot drift apart into two different explanations of the
+// same fact.
+func errSchemaFromTheFuture(have, want int) error {
+	return fmt.Errorf("store: database schema version %d is newer than this build supports (%d) — "+
+		"refusing to open (running an older binary against a newer schema would silently discard data it cannot see; "+
+		"upgrade holdfast, or restore an older database)", have, want)
+}
+
+// requireCurrentSchema is migrate's read-only counterpart (LEDGER-5): it CHECKS the
+// version and never moves it. OpenReadOnly is its only caller.
+//
+// Behind this build is a refusal here, where migrate would upgrade. That is the whole
+// point of the read-only door. Reading an older ledger would mean querying columns the
+// file may not have, and the only way to give it those columns is to migrate it — which
+// stamps a user_version the holdfast that wrote the file will then refuse. A reader that
+// did that would break the running daemon it was trying not to disturb. So it refuses and
+// names the deliberate act instead: no rows are lost, and migrating a ledger stays
+// something the operator does by starting holdfast, not something a read does behind
+// their back.
+func requireCurrentSchema(ctx context.Context, db *sql.DB) error {
+	have, err := readSchemaVersion(ctx, db)
+	if err != nil {
+		return err
+	}
+	want := schemaVersion()
+	switch {
+	case have > want:
+		return errSchemaFromTheFuture(have, want)
+	case have < want:
+		return fmt.Errorf("store: database schema version %d is older than this build's (%d) — "+
+			"refusing to open it read-only, because a read must not migrate the ledger it is reading "+
+			"(that would stamp a version the holdfast which wrote this file would then refuse to open). "+
+			"Run `holdfast run` or `holdfast serve` once with this build to migrate the store, then read it again", have, want)
 	}
 	return nil
 }

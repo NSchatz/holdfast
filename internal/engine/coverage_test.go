@@ -54,7 +54,7 @@ func TestEnumerate_TheStartupWalkCoverageBoundsWhatTheScanCanSee(t *testing.T) {
 	mustWrite(t, filepath.Join(root, "walked", "Half.__transcoding__.mkv"))
 
 	e := coverageEngine(t, root, []string{root, filepath.Join(root, "walked")})
-	got := e.enumerate()
+	got, observed := e.enumerate()
 	want := []string{
 		filepath.Join(root, "Top.mkv"),
 		filepath.Join(root, "walked", "Walked.mkv"),
@@ -62,12 +62,26 @@ func TestEnumerate_TheStartupWalkCoverageBoundsWhatTheScanCanSee(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("enumerate() = %v, want %v", got, want)
 	}
+	// The observed set is the same bound in its other form, and the retention pass
+	// depends on it being exactly this: a directory holdfast did NOT list is one it
+	// may draw no conclusion from, however absent a file under it looks.
+	wantObserved := map[string]bool{root: true, filepath.Join(root, "walked"): true}
+	if !reflect.DeepEqual(observed, wantObserved) {
+		t.Fatalf("enumerate() observed %v, want exactly %v", observed, wantObserved)
+	}
 
 	// Without a coverage set (an Engine built with no startup check) the old
 	// recursive behaviour is unchanged.
 	plain := coverageEngine(t, root, nil)
-	if n := len(plain.enumerate()); n != 4 {
+	plainFiles, plainObserved := plain.enumerate()
+	if n := len(plainFiles); n != 4 {
 		t.Fatalf("unbounded enumerate() found %d sources, want the 4 in the tree", n)
+	}
+	for _, dir := range []string{root, filepath.Join(root, "walked"), filepath.Join(root, "declined"),
+		filepath.Join(root, "walked", "deeper")} {
+		if !plainObserved[dir] {
+			t.Errorf("the unbounded walk listed %s and did not report observing it", dir)
+		}
 	}
 
 	// And an EMPTY bound is not an absent one. nil means "no startup check
@@ -75,8 +89,8 @@ func TestEnumerate_TheStartupWalkCoverageBoundsWhatTheScanCanSee(t *testing.T) {
 	// run may enumerate nothing". Confusing the two would un-bound the scan at
 	// exactly the moment the bound matters most, which is why the startup check
 	// never returns a nil Coverage (see startup.Result.Coverage).
-	if got := coverageEngine(t, root, []string{}).enumerate(); len(got) != 0 {
-		t.Fatalf("an empty coverage set enumerated %v, want nothing at all", got)
+	if got, obs := coverageEngine(t, root, []string{}).enumerate(); len(got) != 0 || len(obs) != 0 {
+		t.Fatalf("an empty coverage set enumerated %v and observed %v, want nothing at all", got, obs)
 	}
 }
 
@@ -87,8 +101,18 @@ func TestEnumerate_CoverageThatNoLongerExistsIsSkipped(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "Top.mkv"))
 	e := coverageEngine(t, root, []string{root, filepath.Join(root, "gone")})
-	if got, want := e.enumerate(), []string{filepath.Join(root, "Top.mkv")}; !reflect.DeepEqual(got, want) {
+	got, observed := e.enumerate()
+	if want := []string{filepath.Join(root, "Top.mkv")}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("enumerate() = %v, want %v", got, want)
+	}
+	// Skipped, and NOT reported as observed. A directory that has gone since the walk is
+	// one this run has no evidence about - which is what stops the retention pass reading
+	// an unmounted subtree as a library the operator deleted.
+	if observed[filepath.Join(root, "gone")] {
+		t.Fatal("a coverage entry that no longer exists was reported as a directory this run listed")
+	}
+	if !observed[root] {
+		t.Fatal("the root was listed and not reported as observed")
 	}
 }
 

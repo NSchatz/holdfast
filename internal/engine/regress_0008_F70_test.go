@@ -136,7 +136,8 @@ func TestRegress0008F70_AnExtChangingAppliedSwapLosesTrackOfTheReplacement(t *te
 	next := New(cfg, prober, FFmpegEncoder{FFmpeg: ffmpeg, Cfg: cfg, Probe: prober}, ts, discardLogger())
 	next.held.Store(next.loadHoldBacks(context.Background()))
 
-	for _, p := range next.enumerate() {
+	enumerated, _ := next.enumerate()
+	for _, p := range enumerated {
 		if p == final || p == in.ReplacementPath {
 			t.Errorf("AC15i: a later run ENUMERATES %q as a source. It is a file holdfast "+
 				"wrote as a replacement, still present inside a library root, for a job "+

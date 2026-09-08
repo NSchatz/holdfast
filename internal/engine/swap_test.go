@@ -205,7 +205,11 @@ func lsDir(t *testing.T, dir string) []string {
 	return out
 }
 
-func onlyRetained(t *testing.T, dir string) string {
+// onlyRetainedReplacement is the FILESYSTEM-1 helper: the single retained REPLACEMENT
+// left on disk under dir. It is deliberately not called onlyRetained - undo_test.go's
+// helper of that name answers the UNDO-6 question, the single retained ORIGINAL the
+// window is holding, and the two are different files with opposite meanings.
+func onlyRetainedReplacement(t *testing.T, dir string) string {
 	t.Helper()
 	files := retainedFiles(t, dir)
 	if len(files) != 1 {
@@ -361,7 +365,7 @@ func TestSwapS1_OnNetworkStorageTheOutcomeIsIndeterminateNotUntouched(t *testing
 	if in.SourcePath != f.src {
 		t.Errorf("recorded source path = %q, want %q", in.SourcePath, f.src)
 	}
-	retained := onlyRetained(t, f.dir)
+	retained := onlyRetainedReplacement(t, f.dir)
 	if in.ReplacementPath != retained {
 		t.Errorf("recorded replacement path = %q, but the replacement is at %q", in.ReplacementPath, retained)
 	}
@@ -681,7 +685,8 @@ func TestSwap_IndistinguishablePreSwapRecordsAreIndeterminate(t *testing.T) {
 		t.Fatalf("Claim: %v", err)
 	}
 	f.eng.fsLookup = lookups("ext4") // local, and still not untouched
-	f.eng.handleFailedSwap(context.Background(), f.src, key, tmp, f.src, same, same, errSwap, &store.Outcome{})
+	// nil abandon: this fixture takes no undo retention, so there is nothing to drop.
+	f.eng.handleFailedSwap(context.Background(), f.src, key, tmp, f.src, same, same, errSwap, &store.Outcome{}, nil)
 
 	row, ok := jobRow(t, f.ts, f.src, key)
 	if !ok {
@@ -694,7 +699,7 @@ func TestSwap_IndistinguishablePreSwapRecordsAreIndeterminate(t *testing.T) {
 		t.Errorf("the reason does not name the indistinguishable records: %q", row.Outcome.Reason)
 	}
 	f.assertSourceIntact(t)
-	if !exists(onlyRetained(t, f.dir)) {
+	if !exists(onlyRetainedReplacement(t, f.dir)) {
 		t.Error("the replacement was not kept")
 	}
 }
@@ -905,7 +910,7 @@ func TestRestart_TheParkedJobSurvivesAndWithholdsExactlyTwoFiles(t *testing.T) {
 	if !in.Parked() {
 		t.Fatal("the first run did not park the job")
 	}
-	retained := onlyRetained(t, f.dir)
+	retained := onlyRetainedReplacement(t, f.dir)
 	retainedMD5 := md5f(t, retained)
 
 	// A second source appears, and the run restarts: a NEW Engine over the SAME store,
@@ -1179,7 +1184,7 @@ func TestResolved_TheNextRunDoesExactlyWhatTheDispositionsSay(t *testing.T) {
 		f.run(t)
 
 		in := onlyIncident(t, f.ts)
-		retained := onlyRetained(t, f.dir)
+		retained := onlyRetainedReplacement(t, f.dir)
 		retainedMD5 := md5f(t, retained)
 
 		if err := f.ts.ResolveIncident(context.Background(), in.ID, store.Resolution{
@@ -1284,7 +1289,7 @@ func TestResolved_ARetainedReplacementIsLeftAloneUnderTheOTHERDeterminationToo(t
 	f.run(t)
 
 	in := onlyIncident(t, f.ts)
-	retained := onlyRetained(t, f.dir)
+	retained := onlyRetainedReplacement(t, f.dir)
 	retainedMD5 := md5f(t, retained)
 	if err := f.ts.ResolveIncident(context.Background(), in.ID, store.Resolution{
 		Determination:          store.SwapWasApplied,
@@ -1331,7 +1336,7 @@ func TestRetained_AFreshEncodeNeitherOverwritesNorIsBlockedByARetainedReplacemen
 	f.run(t)
 
 	in := onlyIncident(t, f.ts)
-	retained := onlyRetained(t, f.dir)
+	retained := onlyRetainedReplacement(t, f.dir)
 	retainedMD5 := md5f(t, retained)
 	if err := f.ts.ResolveIncident(context.Background(), in.ID, store.Resolution{
 		Determination:          store.SourceIsIntact,

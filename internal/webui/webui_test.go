@@ -1,14 +1,19 @@
 package webui
 
 import (
+	"fmt"
+	"go/parser"
+	"go/token"
 	"io"
 	"io/fs"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -348,7 +353,7 @@ func TestAccessibility_ContrastMeasured(t *testing.T) {
 	// The border token must actually be the one drawing the interactive edges, not a
 	// defined-but-unused value: buttons and control inputs reference it.
 	s := string(indexHTML)
-	if !strings.Contains(s, "button {") || !strings.Contains(s, "border:1px solid var(--border)") {
+	if !strings.Contains(s, "button {") || !strings.Contains(s, "border: var(--bw-hair) solid var(--border)") {
 		t.Error("buttons/inputs do not draw their border from the accessible --border token")
 	}
 }
@@ -423,28 +428,45 @@ func TestQueue_RendersInStateElapsedDerivedFromTheWireTimestamp(t *testing.T) {
 	}
 }
 
-// TestQueue_RendersProgressAndShowsUnknownAsUnknown is AC3's page half: a running encode
-// shows a figure taken from the encoder's own stream, and an absent one reads "unknown"
-// — never a stale figure, never an interpolated one, never a zero.
-func TestQueue_RendersProgressAndShowsUnknownAsUnknown(t *testing.T) {
+// TestQueue_RendersProgressAndShowsAbsenceAsAbsence is AC3's page half: a running encode
+// shows a figure taken from the encoder's own stream, and a row with no measurement reads
+// the page's ONE absence phrase - never a stale figure, never an interpolated one, never
+// a zero.
+//
+// S0053 changed two things here and both are asserted, not dropped. The absent-figure
+// word was "unknown" and is now that one phrase, because F3 requires the SAME phrase in
+// every field that can carry an absence. And the paragraphs explaining what the figure is
+// measured against moved off the surface into the linked document (F8) - so the claims
+// are asserted where they now live rather than deleted from the assertion.
+func TestQueue_RendersProgressAndShowsAbsenceAsAbsence(t *testing.T) {
 	s := string(indexHTML)
 	for _, want := range []string{
 		"progress_fraction", "progress_seconds", "progress_duration_seconds",
 		"<th>Progress</th>",
-		`mk("span", "nr", "unknown")`, // the honest absent-figure node
-		"never a stale figure",        // the copy says what the figure is and is not
-		"encoder's own progress stream",
+		"td.appendChild(nrNode());", // the honest absent-figure node
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("index.html missing progress element %q", want)
 		}
 	}
-	// The empty-queue rendering is unchanged in wording; only its column span moved with
-	// the two new columns.
-	if !strings.Contains(s, `"Nothing queued."`) {
+	doc := readRepoDoc(t, DocPath)
+	for _, want := range []string{
+		"never a stale figure",
+		"encoder's own progress stream",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("%s missing the progress claim %q, which moved off the surface under F8", DocPath, want)
+		}
+	}
+	// The empty-queue rendering is one entry in the per-view state vocabulary rather than
+	// a literal at the call site, and the column span comes from the same table. The
+	// WORDING is S0052's to set - it may not repeat the heading above the row or a column
+	// header beneath it - so what is pinned here is that the entry exists and says, in
+	// words, that the view has nothing to show.
+	if !strings.Contains(s, `empty: "No work in hand."`) {
 		t.Error("the empty-queue rendering was changed")
 	}
-	if !strings.Contains(s, `emptyRow(5, "Nothing queued.")`) {
+	if !strings.Contains(s, `const VIEW_COLUMNS = { queue: 5, history: 7 };`) {
 		t.Error("the empty-queue row does not span the queue table's columns")
 	}
 }
@@ -503,7 +525,10 @@ func TestQueue_ProgressAddsNoHTMLSinkAndNoExternalAsset(t *testing.T) {
 	if !strings.Contains(s, "function progressCell(td, j)") {
 		t.Fatal("no progressCell renderer")
 	}
-	if !strings.Contains(s, `td.textContent = age === null ? "" : age;`) {
+	// The elapsed cell is filled from the derivation and from nothing else: a text node
+	// when there is an age, and the page's absence node when there is not (F3).
+	if !strings.Contains(s, `if (age === null) td.replaceChildren(nrNode());`) ||
+		!strings.Contains(s, `else td.textContent = age;`) {
 		t.Error("the elapsed cell is not filled with textContent")
 	}
 }
@@ -554,7 +579,7 @@ func TestDashboard_AnUnavailableAggregateStillLeavesThePageRendering(t *testing.
 	if hist < 0 || agg < 0 || agg < hist {
 		t.Errorf("the aggregates render before the tables (history at %d, aggregates at %d) - an aggregate failure could then cost the rows", hist, agg)
 	}
-	if !strings.Contains(s, "try { renderAggregates(snap.aggregates); } catch (_) {}") {
+	if !strings.Contains(s, `try { renderAggregates(snap.aggregates); } catch (_) { setViewState("aggs", "unreadable"); }`) {
 		t.Error("the aggregate render is not guarded, so a throw inside it would abort the rest of render()")
 	}
 	// A figure with nothing recorded reads as "not recorded", never as 0.
@@ -593,6 +618,171 @@ func TestPage_FetchesNothingFromOutsideTheBinaryThatServedIt(t *testing.T) {
 			t.Errorf("index.html no longer talks to its own API: missing %q", want)
 		}
 	}
+}
+
+// --- DASH-9: the drawings cost the dashboard no dependency ----------------------
+
+// The figures this phase adds are DOM nodes built from values the server already
+// published, cloned out of templates in the page's own markup. That is not a style
+// preference: the response Content-Security-Policy this page is served with is
+// `default-src 'none'`, and `img-src`, `font-src` and `media-src` all fall back to it, so
+// a charting library, a webfont, an image and a `data:` image are each already forbidden
+// by the response the binary sends. A dependency added here would therefore not be a
+// heavier page, it would be a BROKEN one - and the only way to make it work would be to
+// widen the very policy this phase's fail-safe forbids widening.
+//
+// So the absence is asserted, over the whole of internal/webui: no package manifest, no
+// lockfile, no vendored library, no font file, no image file, and a generator whose
+// imports are still standard library only.
+func TestNoNewDependency_TheDashboardShipsNothingButItsOwnSource(t *testing.T) {
+	bannedName := map[string]string{
+		"package.json": "a package manifest", "package-lock.json": "a lockfile",
+		"npm-shrinkwrap.json": "a lockfile", "yarn.lock": "a lockfile",
+		"pnpm-lock.yaml": "a lockfile", "bun.lockb": "a lockfile",
+		"deno.json": "a package manifest", "bower.json": "a package manifest",
+		".npmrc": "a registry configuration", "requirements.txt": "a package manifest",
+	}
+	bannedDir := map[string]string{
+		"node_modules": "an installed dependency tree", "vendor": "a vendored library tree",
+		"dist": "a bundler output tree", "fonts": "a font tree",
+	}
+	bannedExt := map[string]string{
+		".woff": "a font file", ".woff2": "a font file", ".ttf": "a font file",
+		".otf": "a font file", ".eot": "a font file",
+		".png": "an image file", ".jpg": "an image file", ".jpeg": "an image file",
+		".gif": "an image file", ".webp": "an image file", ".avif": "an image file",
+		".ico": "an image file", ".bmp": "an image file", ".svg": "an image file",
+		".map": "a bundler source map", ".lock": "a lockfile",
+	}
+	// The whole of what internal/webui is allowed to be made of.
+	allowedExt := map[string]bool{
+		".go": true, ".js": true, ".css": true, ".html": true, ".tmpl": true, ".txt": true,
+	}
+
+	var goFiles []string
+	seen := 0
+	err := filepath.WalkDir(".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if what, bad := bannedDir[name]; bad && p != "." {
+				return fmt.Errorf("%s is %s: the dashboard is served under default-src 'none' and can fetch none of it", p, what)
+			}
+			return nil
+		}
+		seen++
+		if what, bad := bannedName[name]; bad {
+			t.Errorf("%s is %s; this dashboard has no third-party dependency to declare", p, what)
+		}
+		ext := strings.ToLower(filepath.Ext(name))
+		if what, bad := bannedExt[ext]; bad {
+			t.Errorf("%s is %s; the page's own policy forbids fetching one and its figures are drawn as DOM nodes instead", p, what)
+		}
+		if !allowedExt[ext] {
+			t.Errorf("%s has the extension %q, which is not one internal/webui is made of (%v)", p, ext, sortedKeys(allowedExt))
+		}
+		if strings.HasSuffix(name, ".min.js") {
+			t.Errorf("%s is a minified bundle; every script here is source this repository wrote", p)
+		}
+		if ext == ".go" && strings.HasPrefix(filepath.ToSlash(p), "gen/") {
+			goFiles = append(goFiles, p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking internal/webui: %v", err)
+	}
+	if seen < 10 {
+		t.Fatalf("the sweep looked at only %d files; it must cover the whole of internal/webui", seen)
+	}
+	if len(goFiles) == 0 {
+		t.Fatal("the sweep found no generator source to check the imports of")
+	}
+
+	// The generator's imports: the standard library, plus this repository's own packages.
+	// `make build` is a plain `go build` and the image gains no stage and no tool, which
+	// is only true while this holds. The module path is read from go.mod rather than
+	// spelled here, so a rename cannot silently turn this repo's own code into a
+	// third-party dependency in the eyes of this assertion (TRANSCODE-12 renamed it once).
+	self := moduleName(t)
+	fset := token.NewFileSet()
+	checked := 0
+	for _, p := range goFiles {
+		f, err := parser.ParseFile(fset, p, nil, parser.ImportsOnly)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", p, err)
+		}
+		for _, im := range f.Imports {
+			path, err := strconv.Unquote(im.Path.Value)
+			if err != nil {
+				t.Fatalf("%s: unquoting import %s: %v", p, im.Path.Value, err)
+			}
+			checked++
+			if !ownImport(path, self) {
+				t.Errorf("%s imports %q, which is neither the standard library nor this repository: the generator runs with the Go toolchain alone", p, path)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no import was checked at all, so this assertion cannot fail")
+	}
+	// The rule must BITE: anything outside the standard library and this module is
+	// reported, including a charting library, which is the specific thing a page of
+	// figures invites and this page's own policy could never load.
+	for _, foreign := range []string{
+		"golang.org/x/net/html",
+		"gopkg.in/yaml.v3",
+		"example.com/charts",
+		"github.com/wcharczuk/go-chart/v2",
+		"github.com/NSchatzOther/holdfast/internal/webui",
+	} {
+		if ownImport(foreign, self) {
+			t.Errorf("the dependency rule accepted %q, so it cannot fail", foreign)
+		}
+	}
+	for _, ours := range []string{"bytes", "io/fs", "path/filepath", "os", self + "/internal/webui/gen"} {
+		if !ownImport(ours, self) {
+			t.Errorf("the dependency rule rejected %q, which is the standard library or this repository", ours)
+		}
+	}
+}
+
+// ownImport applies the Go convention: an import path whose first element carries a dot
+// names a host, and a host is a dependency unless it is this module itself.
+func ownImport(path, self string) bool {
+	first, _, _ := strings.Cut(path, "/")
+	if !strings.Contains(first, ".") {
+		return true
+	}
+	return path == self || strings.HasPrefix(path, self+"/")
+}
+
+// moduleName reads the module path out of the repository's own go.mod, with no dependency
+// on a module-file parser.
+func moduleName(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "go.mod"))
+	if err != nil {
+		t.Fatalf("reading go.mod: %v", err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "module "); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	t.Fatal("go.mod names no module")
+	return ""
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
 }
 
 func TestHandler404sOtherPaths(t *testing.T) {

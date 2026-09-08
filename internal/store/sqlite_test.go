@@ -450,13 +450,16 @@ func TestFinish_RecordsAndRoundTripsTheOutcome(t *testing.T) {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	want := &Outcome{
-		Encoder:     "cpu",
-		VmafMean:    f64(97.25),
-		VmafMin:     f64(88.5),
-		VmafModel:   "version=vmaf_v0.6.1",
-		SourceBytes: i64(5_000_000),
-		OutputBytes: i64(2_000_000),
-		EncodeMs:    i64(12_345),
+		Encoder:          "cpu",
+		VmafMean:         f64(97.25),
+		VmafMin:          f64(88.5),
+		VmafModel:        "version=vmaf_v0.6.1",
+		VmafPixFmt:       "yuv420p10le",
+		VmafChroma:       f64(41.2),
+		VmafChromaMetric: "psnr_cb/psnr_cr min (dB)",
+		SourceBytes:      i64(5_000_000),
+		OutputBytes:      i64(2_000_000),
+		EncodeMs:         i64(12_345),
 	}
 	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Done, want); err != nil {
 		t.Fatalf("Finish: %v", err)
@@ -473,6 +476,17 @@ func TestFinish_RecordsAndRoundTripsTheOutcome(t *testing.T) {
 	if got.VmafMean == nil || *got.VmafMean != *want.VmafMean ||
 		got.VmafMin == nil || *got.VmafMin != *want.VmafMin {
 		t.Errorf("vmaf pair: got mean=%v min=%v", got.VmafMean, got.VmafMin)
+	}
+	// GATE-4: what the comparison was made IN, and what it found in the colour
+	// planes. Both are as much a part of the proof as the score is - a stored 97.25
+	// with no comparison format does not say which pixels were compared, and a
+	// verdict with no chroma figure does not say whether the colour survived.
+	if got.VmafPixFmt != want.VmafPixFmt || got.VmafChromaMetric != want.VmafChromaMetric {
+		t.Errorf("comparison format / chroma metric: got %q / %q, want %q / %q",
+			got.VmafPixFmt, got.VmafChromaMetric, want.VmafPixFmt, want.VmafChromaMetric)
+	}
+	if got.VmafChroma == nil || *got.VmafChroma != *want.VmafChroma {
+		t.Errorf("chroma: got %v, want %v", got.VmafChroma, want.VmafChroma)
 	}
 	if got.SourceBytes == nil || *got.SourceBytes != *want.SourceBytes ||
 		got.OutputBytes == nil || *got.OutputBytes != *want.OutputBytes ||
@@ -502,11 +516,97 @@ func TestFinish_NilOutcomeReadsAsNotRecordedNotZero(t *testing.T) {
 		t.Fatalf("List: rows=%d err=%v", len(rows), err)
 	}
 	o := rows[0].Outcome
-	if o.VmafMean != nil || o.VmafMin != nil || o.SourceBytes != nil || o.OutputBytes != nil || o.EncodeMs != nil {
+	if o.VmafMean != nil || o.VmafMin != nil || o.VmafChroma != nil ||
+		o.SourceBytes != nil || o.OutputBytes != nil || o.EncodeMs != nil {
 		t.Errorf("an unrecorded outcome must read back as nil, got %+v", o)
 	}
-	if o.Reason != "" || o.Encoder != "" || o.VmafModel != "" {
+	if o.Reason != "" || o.Encoder != "" || o.VmafModel != "" ||
+		o.VmafPixFmt != "" || o.VmafChromaMetric != "" {
 		t.Errorf("an unrecorded outcome must read back with empty strings, got %+v", o)
+	}
+}
+
+// TestFinish_ComparisonFormatAndChromaAreAbsentOnAnUnscoredRow is GATE-4's seventh
+// acceptance criterion, stated as the contrast it is really about: a row whose encode
+// WAS scored carries the comparison format and the chroma metric, and a row whose
+// encode was never scored carries NEITHER - not a zero, and not a placeholder string.
+//
+// The placeholder half matters as much as the zero half. "unknown", "n/a" or "-" in
+// vmaf_pix_fmt would be a value a reader has to know is not a pixel format, and the
+// first reader who does not know renders it as one. The column has exactly two
+// states: a real format, or NULL.
+func TestFinish_ComparisonFormatAndChromaAreAbsentOnAnUnscoredRow(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	// A scored row: the gate ran, so the format and the chroma pair are recorded.
+	if ok, err := s.Claim(ctx, "/a/scored.mkv", "fp1", "w0", 3); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if err := s.Finish(ctx, "/a/scored.mkv", "fp1", Done, &Outcome{
+		Encoder: "cpu", VmafMean: f64(98.4), VmafMin: f64(96.1), VmafModel: "version=vmaf_v0.6.1",
+		VmafPixFmt: "yuv420p10le", VmafChroma: f64(41.2), VmafChromaMetric: "psnr_cb/psnr_cr min (dB)",
+	}); err != nil {
+		t.Fatalf("Finish(scored): %v", err)
+	}
+
+	// An unscored row: the gate did not run (skipped by a guard before the encoder,
+	// or the VMAF gate disabled). Nothing was compared, so nothing is recorded.
+	if ok, err := s.Claim(ctx, "/a/unscored.mkv", "fp2", "w0", 3); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if err := s.Finish(ctx, "/a/unscored.mkv", "fp2", Skipped, &Outcome{
+		Reason: "already-target-codec",
+	}); err != nil {
+		t.Fatalf("Finish(unscored): %v", err)
+	}
+
+	rows, err := s.List(ctx, nil, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	byPath := map[string]Outcome{}
+	for _, r := range rows {
+		byPath[r.Path] = r.Outcome
+	}
+
+	scored := byPath["/a/scored.mkv"]
+	if scored.VmafPixFmt != "yuv420p10le" {
+		t.Errorf("a scored row must record the comparison pixel format; got %q", scored.VmafPixFmt)
+	}
+	if scored.VmafChromaMetric != "psnr_cb/psnr_cr min (dB)" {
+		t.Errorf("a scored row must record the chroma metric; got %q", scored.VmafChromaMetric)
+	}
+	if scored.VmafChroma == nil || *scored.VmafChroma != 41.2 {
+		t.Errorf("a scored row must record the chroma value; got %v", scored.VmafChroma)
+	}
+
+	unscored := byPath["/a/unscored.mkv"]
+	if unscored.VmafPixFmt != "" {
+		t.Errorf("an unscored row recorded a comparison pixel format %q - absent means absent, "+
+			"never a placeholder", unscored.VmafPixFmt)
+	}
+	if unscored.VmafChromaMetric != "" {
+		t.Errorf("an unscored row recorded a chroma metric %q - absent means absent, never a "+
+			"placeholder", unscored.VmafChromaMetric)
+	}
+	if unscored.VmafChroma != nil {
+		t.Errorf("an unscored row recorded a chroma value %v - absent means NULL, never 0 "+
+			"(0.0 dB is an obliterated plane, not a missing measurement)", *unscored.VmafChroma)
+	}
+
+	// And the columns really are NULL on disk, not empty strings or zeros that the
+	// scan is quietly normalising on the way out.
+	for _, col := range []string{"vmaf_pix_fmt", "vmaf_chroma", "vmaf_chroma_metric"} {
+		var n int
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM jobs WHERE path = ? AND `+col+` IS NULL`, "/a/unscored.mkv").Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", col, err)
+		}
+		if n != 1 {
+			t.Errorf("%s is not NULL on the unscored row - a stored empty string or 0 is a "+
+				"second representation of 'not recorded' that every reader would have to know about", col)
+		}
 	}
 }
 
@@ -1213,5 +1313,195 @@ func TestAggregates_ReportFailurePerFigureAndNeverAsAZero(t *testing.T) {
 		if sp.Min != nil || sp.Mean != nil || sp.Max != nil || sp.Counted != 0 {
 			t.Errorf("%s published a figure it could not read: %+v", name, sp)
 		}
+	}
+}
+
+// --- UNDO-6: what the undo window is holding ---------------------------------
+
+// retention is a Retained with the fields these tests do not care about filled in, so
+// each case reads as the one thing it is about.
+func retention(sourcePath, retainedPath string, bytes int64, expiresAt int64) Retained {
+	return Retained{
+		SourcePath: sourcePath, SwappedPath: sourcePath, RetainedPath: retainedPath,
+		SourceBytes: bytes, SwappedFingerprint: "1:1", RetainedAt: 1000, ExpiresAt: expiresAt,
+	}
+}
+
+// TestHeldByUndoWindow_IsItsOwnFigureBesideTheReclaimedTotal is UNDO-6's fifteenth
+// criterion. While an original is retained, the space the swap "reclaimed" has NOT
+// come back: the bytes are still allocated under the retained link, and they return
+// only when the window closes. So the held figure is published beside the reclaimed
+// one and never folded into it - a reclaimed number that quietly included space still
+// being held would tell an operator a disk is free when it is not.
+//
+// The falling-to-zero half is the one that could rot silently. A figure computed once
+// and cached (as the reclaimed lifetime baseline deliberately is) would keep reporting
+// space as held long after the release returned it, which is the same lie in the other
+// direction.
+func TestHeldByUndoWindow_IsItsOwnFigureBesideTheReclaimedTotal(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	// Two swaps, both retained: the ledger reclaims 4.5 MB and the window holds 9 MB.
+	done := func(path string, src, out int64) {
+		if ok, err := s.Claim(ctx, path, "fp", "w0", 3); err != nil || !ok {
+			t.Fatalf("claim %s: ok=%v err=%v", path, ok, err)
+		}
+		if err := s.Finish(ctx, path, "fp", Done, &Outcome{SourceBytes: i64(src), OutputBytes: i64(out)}); err != nil {
+			t.Fatalf("finish %s: %v", path, err)
+		}
+	}
+	done("/a/one.mkv", 5_000_000, 2_000_000)
+	done("/a/two.mkv", 4_000_000, 2_500_000)
+
+	if held, err := s.HeldByUndoWindow(ctx); err != nil {
+		t.Fatalf("HeldByUndoWindow: %v", err)
+	} else if held != 0 {
+		t.Errorf("nothing is retained but the window reports %d bytes held", held)
+	}
+
+	for _, r := range []Retained{
+		retention("/a/one.mkv", "/a/.holdfast-undo/one", 5_000_000, 2000),
+		retention("/a/two.mkv", "/a/.holdfast-undo/two", 4_000_000, 2000),
+	} {
+		if err := s.Retain(ctx, r); err != nil {
+			t.Fatalf("Retain %s: %v", r.SourcePath, err)
+		}
+	}
+
+	held, err := s.HeldByUndoWindow(ctx)
+	if err != nil {
+		t.Fatalf("HeldByUndoWindow: %v", err)
+	}
+	if want := int64(9_000_000); held != want {
+		t.Errorf("held = %d, want %d (the sum of the retained originals' sizes)", held, want)
+	}
+	// The two figures are DISTINCT: the reclaimed total is untouched by retention.
+	reclaimed, err := s.ReclaimedTotal(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := int64(4_500_000); reclaimed != want {
+		t.Errorf("ReclaimedTotal = %d, want %d - retention must not move the reclaimed figure", reclaimed, want)
+	}
+	if held == reclaimed {
+		t.Error("the held and reclaimed figures are the same number; this fixture cannot tell them apart")
+	}
+
+	// Release one: the held figure falls by exactly that original's size.
+	if err := s.DropRetained(ctx, "/a/one.mkv"); err != nil {
+		t.Fatal(err)
+	}
+	if held, err = s.HeldByUndoWindow(ctx); err != nil {
+		t.Fatal(err)
+	} else if want := int64(4_000_000); held != want {
+		t.Errorf("held after one release = %d, want %d", held, want)
+	}
+
+	// Release the other: it falls to zero, and the reclaimed total is still what it was.
+	if err := s.DropRetained(ctx, "/a/two.mkv"); err != nil {
+		t.Fatal(err)
+	}
+	if held, err = s.HeldByUndoWindow(ctx); err != nil {
+		t.Fatal(err)
+	} else if held != 0 {
+		t.Errorf("held after every release = %d, want 0", held)
+	}
+	if reclaimed, err = s.ReclaimedTotal(ctx); err != nil {
+		t.Fatal(err)
+	} else if want := int64(4_500_000); reclaimed != want {
+		t.Errorf("ReclaimedTotal = %d after the releases, want %d", reclaimed, want)
+	}
+}
+
+// A RESTORED retention holds nothing: its bytes went back to the library, not to the
+// filesystem. Counting it would report space as held that no undo window is holding.
+func TestHeldByUndoWindow_ExcludesARestoredRetention(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if err := s.Retain(ctx, retention("/a/one.mkv", "/a/.holdfast-undo/one", 5_000_000, 2000)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkRestored(ctx, "/a/one.mkv", 1234); err != nil {
+		t.Fatal(err)
+	}
+	if held, err := s.HeldByUndoWindow(ctx); err != nil {
+		t.Fatal(err)
+	} else if held != 0 {
+		t.Errorf("held = %d after a restore, want 0", held)
+	}
+	// The record itself survives, because the restore is a ledger fact.
+	r, ok, err := s.GetRetained(ctx, "/a/one.mkv")
+	if err != nil || !ok {
+		t.Fatalf("GetRetained: ok=%v err=%v", ok, err)
+	}
+	if r.RestoredAt == nil || *r.RestoredAt != 1234 {
+		t.Errorf("restored_at = %v, want 1234", r.RestoredAt)
+	}
+	// And it is no longer LIVE, so nothing tries to release or re-restore it.
+	if rows, err := s.ListRetained(ctx); err != nil {
+		t.Fatal(err)
+	} else if len(rows) != 0 {
+		t.Errorf("ListRetained returned a restored retention: %+v", rows)
+	}
+}
+
+// GetRetained answers to either name a swap produced. After a container-changing swap
+// the only path an operator can SEE in their library is the new one, so being asked to
+// restore the file that is actually there must not be a miss.
+func TestGetRetained_MatchesEitherTheSourceOrTheSwappedPath(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	r := Retained{
+		SourcePath: "/a/movie.mp4", SwappedPath: "/a/movie.mkv",
+		RetainedPath: "/a/.holdfast-undo/movie", SourceBytes: 10, SwappedFingerprint: "2:2",
+		RetainedAt: 1000, ExpiresAt: 2000,
+	}
+	if err := s.Retain(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	for _, ask := range []string{"/a/movie.mp4", "/a/movie.mkv"} {
+		got, ok, err := s.GetRetained(ctx, ask)
+		if err != nil || !ok {
+			t.Fatalf("GetRetained(%s): ok=%v err=%v", ask, ok, err)
+		}
+		if got.SourcePath != r.SourcePath || got.RetainedPath != r.RetainedPath {
+			t.Errorf("GetRetained(%s) = %+v, want the record for %s", ask, got, r.SourcePath)
+		}
+	}
+	if _, ok, err := s.GetRetained(ctx, "/a/somebody-else.mkv"); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Error("GetRetained matched a path it holds no record for")
+	}
+}
+
+// Retaining the same path again REPLACES the record and clears any restore stamp: the
+// row describes the swap that has just happened, not one an operator undid before it.
+func TestRetain_ReplacesAnEarlierRecordForTheSamePath(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if err := s.Retain(ctx, retention("/a/one.mkv", "/a/.holdfast-undo/first", 100, 2000)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkRestored(ctx, "/a/one.mkv", 111); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Retain(ctx, retention("/a/one.mkv", "/a/.holdfast-undo/second", 200, 3000)); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.ListRetained(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("ListRetained = %d rows, want 1: %+v", len(rows), rows)
+	}
+	got := rows[0]
+	if got.RetainedPath != "/a/.holdfast-undo/second" || got.SourceBytes != 200 || got.ExpiresAt != 3000 {
+		t.Errorf("the record was not replaced by the newer retention: %+v", got)
+	}
+	if got.RestoredAt != nil {
+		t.Errorf("the new retention carries the old record's restore stamp: %v", got.RestoredAt)
 	}
 }

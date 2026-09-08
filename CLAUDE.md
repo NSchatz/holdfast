@@ -304,8 +304,12 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
 
 ## Layout
 
-- `cmd/holdfast` - the CLI (`run` / `serve` / `resolve` / `validate` / `version`), structured `slog`
-  logging. `run`
+- `cmd/holdfast` — the CLI (`run` / `serve` / `resolve` / `restore` / `export` / `validate` /
+  `version`), structured `slog`
+  logging. `restore` (UNDO-6) is the operator's half of the undo window and is deliberately LOCAL, not an
+  HTTP endpoint: it overwrites a library file with older bytes, which is a mutation the read-and-control
+  API has no authorization story for. It loads the same config and opens the same state directory as
+  `run`/`serve` and stops there — no ffmpeg lookup, no capability check, no library walk. `run`
   builds and drives the engine oneshot with a signal-cancellable context; `serve` (TRANSCODE-7) wires the
   same engine to the API/UI and runs until SIGTERM (graceful HTTP drain). Engine setup shared by both is
   factored into `buildEngine`. `resolve` (FILESYSTEM-1) is the operator's way out of a job parked
@@ -460,6 +464,37 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   deletion AC15i forbids). Each of those is graded by a test in `internal/engine/stray_replacement_test.go`
   that reds when it is undone. `pickTempPath` applies the identical rule: it is the second route to the
   same deletion, and no sweep loop guards it.
+  `undo.go` (UNDO-6) is the bounded window in which the swap can be walked back, and it is OFF by
+  default (`undo_window_hours: 0`, announced at startup and by `validate`, because that is the setting
+  in which a swap is final). It is a second **hard link** taken before the rename, never a copy: one
+  inode, two names, no additional bytes — and therefore, by `link(2)`'s EXDEV rule, a retention area
+  that must live in the source's own directory (`.holdfast-undo/`), which is why there is no
+  configurable retention path. Three consequences bind anything that touches this: a retained original
+  is **never enumerated** as a source (it would be re-encoded and swapped over the bytes an operator was
+  given a window to recover); a link this tool **can prove is its own** is discounted by the hardlink
+  guard, while a foreign one still skips exactly as before; and a source whose original **cannot** be
+  retained is skipped (`undo-retention-failed`, a mutable guard) rather than swapped, because the
+  window's promise is that a swap can be undone. **`undo_window_hours` governs whether a NEW retention is
+  taken and nothing else**: the release sweep, the hardlink discount and that mutable skip are all driven
+  by what is actually RETAINED, never by the setting. Setting the key back to 0 is the documented way to
+  stop paying for the window, so gating those on it is precisely what would make that setting strand every
+  original already held - the second link on disk for ever, the ledger row live for ever, the space never
+  returned, and an interrupted run's own link re-read as a foreign seed. The release runs at the start of
+  every scan pass and
+  reports the bytes it ACTUALLY returned — `unlink(2)` frees the data only when the removed name was the
+  last one, so a retention whose data survives elsewhere reports zero rather than its size. Space still
+  held is published as its own figure, never folded into a reclaimed total. The disabled-window
+  announcement is logged at WARN, not INFO, so it survives `log_level: warn`. Full reference: `docs/undo.md`.
+  **Where UNDO-6 and FILESYSTEM-1 meet is the failed swap, and the rule there is the fail-safe
+  one.** Every path that decides NOT to swap drops the retention, because a retained link with no
+  swap behind it is an orphan raising the source's link count for nothing. A FAILED rename is not
+  such a path, because whether the swap happened is exactly the question `handleFailedSwap`
+  exists to answer: the retention is dropped in the ONE branch that ESTABLISHED the source
+  untouched (case (b)), and is HELD under `applied-despite-error` and under every indeterminate
+  outcome. Held, because if the rename did take effect the retained link is the only remaining
+  name for the original's bytes, and discarding it on a verdict this tool could not reach would
+  destroy the one file the phase exists to protect. Do not "tidy" that into an unconditional
+  `abandon()` beside the other refusals.
 - `internal/logging`, `internal/version` — logger construction, build-stamped version.
 - `.github/workflows/ci.yml` — the gate (installs the pinned ffmpeg via `scripts/install-ffmpeg.sh` for the
   engine proof) + a `package` job (TRANSCODE-9) that builds BOTH arches and runs the image smoke gate.

@@ -549,8 +549,19 @@ func crossFilesystemReport(tmp, target string) string {
 // It never returns an error to the caller for a per-file outcome - the scan must not
 // stop for one file - so every branch either records something or reports loudly that
 // it could not.
+//
+// abandon (UNDO-6) drops the undo window's retained original, and this function is
+// where that decision belongs, because it is the same question: did the swap happen?
+// A retention behind a swap that did NOT happen is an orphan raising the source's link
+// count for nothing, and every other refusal in ProcessFile drops it. But a retention
+// behind a swap that DID happen is the undo window doing its job, and a retention
+// behind a swap nobody can adjudicate may be the ONLY remaining name for the original's
+// bytes - discarding it there would delete the very thing this phase exists to protect.
+// So it is called in exactly one branch, case (b), the one that ESTABLISHED the source
+// untouched. Applied-despite-error and every indeterminate outcome HOLD it. It may be
+// nil when there was no retention to take.
 func (e *Engine) handleFailedSwap(ctx context.Context, f, key, tmp, final string,
-	srcRec, replRec probe.Attributes, renameErr error, out *store.Outcome) {
+	srcRec, replRec probe.Attributes, renameErr error, out *store.Outcome, abandon func()) {
 
 	// AC14d: the classification is taken NOW, for THIS swap, never lifted from a record
 	// made earlier in the run or by an earlier job. A NAS mounted beneath a root hours
@@ -601,6 +612,14 @@ func (e *Engine) handleFailedSwap(ctx context.Context, f, key, tmp, final string
 		// than assumed. The temp is discarded exactly as before: this job recorded a
 		// plain failure with the source intact, which is none of the three origins that
 		// make a replacement untouchable (AC15i).
+		//
+		// This is the ONE failed-swap branch that may drop the undo retention, and it may
+		// only because the re-stat positively established the source is still at its own
+		// path: the retained link therefore names bytes that are not the only copy. Every
+		// other outcome below holds it.
+		if abandon != nil {
+			abandon()
+		}
 		_ = os.Remove(tmp)
 		out.Reason = report + " - " + dec.Why
 		if replAt != tmp {

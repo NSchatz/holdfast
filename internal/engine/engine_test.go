@@ -1393,7 +1393,7 @@ func TestVmaf_UnavailableWhileEnabledRejects(t *testing.T) {
 		c.MinVmaf = 95
 	})
 	ts := eng.Store.(*testStore)
-	eng.vmafScore = func(ctx context.Context, distorted, reference string, sub int, model string) (vmaf.Result, error) {
+	eng.vmafScore = func(ctx context.Context, req vmaf.Request) (vmaf.Result, error) {
 		return vmaf.Result{}, vmaf.ErrUnavailable
 	}
 	if err := eng.RunOneshot(context.Background()); err != nil {
