@@ -281,6 +281,12 @@ function proseReading(doc, win, table) {
   });
 
   return {
+    // The page's OWN state vocabulary, read out of the running document rather than out
+    // of the source: the shell ships a loading element with its words already in it, and
+    // the modules write the same words from this object, so the two are a pair nothing
+    // else holds in step. null means the page has no such object, which is a failure
+    // rather than a vocabulary with nothing in it.
+    viewVocabulary: (typeof VIEW_STATES === "undefined") ? null : VIEW_STATES,
     blocks: out,
     excludedText: dropped,
     sections: sections,
@@ -414,23 +420,24 @@ type proseReading struct {
 		Text    string `json:"text"`
 		Shown   bool   `json:"shown"`
 	} `json:"sourceOffer"`
-	QueueParts      []rowParts  `json:"queueParts"`
-	HistoryParts    []rowParts  `json:"historyParts"`
-	AggregateParts  []aggParts  `json:"aggregateParts"`
-	QueuePaths      []string    `json:"queuePaths"`
-	HistoryPaths    []string    `json:"historyPaths"`
-	FailureReasons  []string    `json:"failureReasons"`
-	AbsencePhrases  []string    `json:"absencePhrases"`
-	Views           []viewState `json:"views"`
-	ElementCount    int         `json:"elementCount"`
-	ImgCount        int         `json:"imgCount"`
-	HandlerAttrs    int         `json:"handlerAttrs"`
-	ControlMessage  string      `json:"controlMessage"`
-	BodyText        string      `json:"bodyText"`
-	ViewportWidth   int         `json:"viewportWidth"`
-	ColourScheme    string      `json:"colourScheme"`
-	BodyScrollWidth float64     `json:"bodyScrollWidth"`
-	BodyClientWidth float64     `json:"bodyClientWidth"`
+	QueueParts      []rowParts                   `json:"queueParts"`
+	HistoryParts    []rowParts                   `json:"historyParts"`
+	AggregateParts  []aggParts                   `json:"aggregateParts"`
+	QueuePaths      []string                     `json:"queuePaths"`
+	HistoryPaths    []string                     `json:"historyPaths"`
+	FailureReasons  []string                     `json:"failureReasons"`
+	AbsencePhrases  []string                     `json:"absencePhrases"`
+	Views           []viewState                  `json:"views"`
+	Vocabulary      map[string]map[string]string `json:"viewVocabulary"`
+	ElementCount    int                          `json:"elementCount"`
+	ImgCount        int                          `json:"imgCount"`
+	HandlerAttrs    int                          `json:"handlerAttrs"`
+	ControlMessage  string                       `json:"controlMessage"`
+	BodyText        string                       `json:"bodyText"`
+	ViewportWidth   int                          `json:"viewportWidth"`
+	ColourScheme    string                       `json:"colourScheme"`
+	BodyScrollWidth float64                      `json:"bodyScrollWidth"`
+	BodyClientWidth float64                      `json:"bodyClientWidth"`
 }
 
 // viewState is one data view's own answer to "what am I showing": which of the three
@@ -1053,6 +1060,62 @@ func TestRendered_NoAccessibleNameOrDescriptionHidesTheCopyThePageLost(t *testin
 	}
 	t.Logf("graded %d accessibility-tree nodes: %d named, %d of those subject to the %d-word ceiling",
 		len(v.ax), named, capped, axNameCeiling)
+}
+
+// --- the shipped words and the vocabulary that writes them ----------------------
+
+// gradeShippedLoadingWords holds the page's TWO writers of the same words in step. The
+// shell ships each view already in its loading state, with the words in the markup, so a
+// view says what it is doing before a byte of script has run; the modules write the same
+// words from VIEW_STATES whenever they set a state afterwards. Two writers of one string
+// is how one of them quietly stops being edited, and nothing else on this page compares
+// them - the loading element the shell ships is never replaced by an identical one, so a
+// drift between the two would show up only as a view that changed its words the first
+// time a snapshot arrived.
+//
+// It is read off the RUNNING document, not the source: the vocabulary object comes back
+// from the page's own execution context and the shipped text from what the engine laid
+// out, so a page whose script never ran fails here rather than passing on its markup.
+func gradeShippedLoadingWords(p proseReading) []string {
+	if len(p.Vocabulary) == 0 {
+		return []string{"the rendered page exposes no view-state vocabulary at all, so nothing could be compared"}
+	}
+	var out []string
+	for _, v := range p.Views {
+		if v.State != "loading" {
+			out = append(out, fmt.Sprintf("the %s view is in the %q state before any snapshot arrived, want loading", v.View, v.State))
+			continue
+		}
+		want := p.Vocabulary[v.View]["loading"]
+		if want == "" {
+			out = append(out, fmt.Sprintf("the view-state vocabulary has no loading wording for the %s view", v.View))
+			continue
+		}
+		if v.Text != want {
+			out = append(out, fmt.Sprintf("the shell ships the %s view reading %q while the vocabulary the modules write from says %q; two writers of one string have drifted",
+				v.View, v.Text, want))
+		}
+	}
+	return out
+}
+
+func TestRendered_TheShellShipsTheWordsTheViewVocabularyHolds(t *testing.T) {
+	b := proseBrowser(t)
+	p := renderProse(t, b, proseOpts{noSnapshot: true}).prose
+	if len(p.Views) != len(dataViews) {
+		t.Fatalf("the rendered page carries %d views, want %d", len(p.Views), len(dataViews))
+	}
+	for _, f := range gradeShippedLoadingWords(p) {
+		t.Error(f)
+	}
+	// And it BITES: the shell says something the vocabulary does not (AC17).
+	drifted := renderProse(t, b, proseOpts{
+		noSnapshot: true,
+		mutate:     injectInto(t, `<td class="empty" colspan="5">Loading the work in hand.</td>`, `<td class="empty" colspan="5">Loading.</td>`),
+	}).prose
+	if probs := gradeShippedLoadingWords(drifted); probs == nil {
+		t.Error("the check passed a shell whose shipped words are not the ones the vocabulary holds")
+	}
 }
 
 // --- AC15: one documentation link per section -----------------------------------
