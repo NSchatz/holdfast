@@ -12,6 +12,7 @@
 // repository's own graders have always located one.
 import { defineConfig, devices } from "@playwright/test";
 import { accessSync, constants } from "node:fs";
+import { cpus } from "node:os";
 import { join } from "node:path";
 
 // browserPath resolves the engine the same way the rest of this repository does: an
@@ -20,7 +21,19 @@ import { join } from "node:path";
 // grader that quietly measures a different engine than the gate believes is a grader
 // nobody can reason about.
 function browserPath() {
-  if (process.env.HOLDFAST_BROWSER) return process.env.HOLDFAST_BROWSER;
+  if (process.env.HOLDFAST_BROWSER) {
+    const pinned = process.env.HOLDFAST_BROWSER;
+    try {
+      accessSync(pinned, constants.X_OK);
+    } catch {
+      throw new Error(
+        `HOLDFAST_BROWSER names ${pinned}, which is not an executable this process can run. ` +
+        "An explicit engine pin is never replaced by a browser found on PATH: a grader that " +
+        "silently measures a different engine than the gate believes is a grader nobody can reason about."
+      );
+    }
+    return pinned;
+  }
   const dirs = (process.env.PATH || "").split(":").filter(Boolean);
   for (const name of ["chromium", "chromium-browser", "google-chrome", "chrome"]) {
     for (const dir of dirs) {
@@ -39,6 +52,18 @@ function browserPath() {
 
 const PORT = Number(process.env.HOLDFAST_E2E_PORT || 8931);
 
+// How many engines run at once, and why it is CAPPED rather than left to the runner.
+//
+// Each worker holds a browser of its own, and every case here waits on a real render, a
+// real layout and a real animation settling - so the work is not CPU-bound and more
+// engines buy nothing past a handful. Playwright's default is half the machine's cores,
+// which on the 56-core host these graders run on is 28 browsers: every case then missed
+// its 30-second deadline, several chromiums died leaving core files beside the project,
+// and the whole run was still unfinished after ten minutes. The same suite at four
+// workers passes in under two.
+const WORKERS = Number(process.env.HOLDFAST_E2E_WORKERS || 0) ||
+  Math.min(4, Math.max(1, Math.ceil(cpus().length / 2)));
+
 // The specs that set up their own theme, viewport and preference. They run once, under the
 // `engine` project, and are ignored by the per-theme ones.
 const PAGE_DRIVEN = /(conventions|a11y|states|motion|policy|mutations|inert|docs|alignment)\.spec\.mjs$/;
@@ -52,7 +77,7 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: 0,
-  workers: process.env.CI ? 2 : undefined,
+  workers: process.env.CI ? 2 : WORKERS,
   reporter: process.env.CI ? [["list"], ["json", { outputFile: "results.json" }]] : [["list"]],
   use: {
     baseURL: `http://127.0.0.1:${PORT}`,

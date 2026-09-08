@@ -13,17 +13,25 @@ import { gradeNoPolicyRefusal, gradeRefusedControlActionCostsNothingElse, refuse
 
 
 
-test("no policy violation in either theme at either width through every interaction", async ({ browser, baseURL }) => {
-  const problems = [];
-  for (const theme of ["light", "dark"]) {
-    for (const width of [360, 1280]) {
-      for (const c of [
-        { name: "a live snapshot", scenario: "full" },
-        { name: "a severed stream", scenario: "severed", waitFor: waitDown },
-        { name: "a snapshot carrying hostile text", scenario: "hostile" },
-        { name: "a filter entry", scenario: "full", drive: async (p) => { await p.fill("#filter", "alpha"); } },
-        { name: "a control action", scenario: "full", refuse: 401, drive: async (p) => { await p.click("#rescan"); } },
-      ]) {
+// The five worlds the engine has to render without refusing anything, graded once per
+// theme and width. They are FOUR cases rather than one loop of twenty page loads: each
+// load takes a real render and a real settle, so the single case ran for longer than the
+// runner's own per-case deadline and reported a timeout instead of a verdict. Split, each
+// combination is well inside it, the four run in parallel, and a failure names the theme
+// and the width in the case title rather than only in the message.
+const INTERACTIONS = [
+  { name: "a live snapshot", scenario: "full" },
+  { name: "a severed stream", scenario: "severed", waitFor: waitDown },
+  { name: "a snapshot carrying hostile text", scenario: "hostile" },
+  { name: "a filter entry", scenario: "full", drive: async (p) => { await p.fill("#filter", "alpha"); } },
+  { name: "a control action", scenario: "full", refuse: 401, drive: async (p) => { await p.click("#rescan"); } },
+];
+
+for (const theme of ["light", "dark"]) {
+  for (const width of [360, 1280]) {
+    test(`no policy violation in the ${theme} theme at ${width}px through every interaction`, async ({ browser, baseURL }) => {
+      const problems = [];
+      for (const c of INTERACTIONS) {
         const { ctx, page, violations } = await open(browser, {
           url: pageURL(baseURL, c.scenario), theme, width, height: 900,
           waitFor: c.waitFor || waitRendered,
@@ -34,10 +42,12 @@ test("no policy violation in either theme at either width through every interact
         if (c.refuse) await armControlStatus(page, baseURL, 0);
         await ctx.close();
       }
-    }
+      expect(problems.length + INTERACTIONS.length,
+        "no interaction was driven at all, so this case asserted nothing").toBeGreaterThan(4);
+      expect(problems, problems.join("\n")).toEqual([]);
+    });
   }
-  expect(problems, problems.join("\n")).toEqual([]);
-});
+}
 
 // --- F1 / F5: a refused control action ------------------------------------------------------
 
