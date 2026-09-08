@@ -825,18 +825,7 @@ func TestRuntimeGate_SkipsWhenARuntimeIsAbsentAndFailsUnderRequiredMode(t *testi
 	if os.Getenv("HOLDFAST_WEBUI_GATE_CHILD") == "1" {
 		t.Skip("this is the child of the runtime-gate self-test; it does not recurse")
 	}
-	goBin, err := exec.LookPath("go")
-	if err != nil {
-		t.Skipf("no go toolchain on PATH to build the child test binary: %v", err)
-	}
-	bin := filepath.Join(t.TempDir(), "webui.test")
-	if out, err := exec.Command(goBin, "test", "-c", "-o", bin, ".").CombinedOutput(); err != nil {
-		t.Fatalf("building this package's test binary: %v\n%s", err, out)
-	}
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
+	bin, wd := childTestBinary(t)
 
 	run := func(required bool, name string) (string, error) {
 		cmd := exec.Command(bin, "-test.run", "^"+name+"$", "-test.v")
@@ -884,6 +873,106 @@ func TestRuntimeGate_SkipsWhenARuntimeIsAbsentAndFailsUnderRequiredMode(t *testi
 		}
 		if strings.Contains(out, "--- SKIP: "+c.test) {
 			t.Errorf("under required mode the suite still SKIPPED with no %s on PATH:\n%s", c.runtime, out)
+		}
+	}
+}
+
+// childTestBinary builds this package's own test binary, so a case can run one of these
+// tests under an environment this process cannot have - an empty PATH, or an engine pin
+// that names nothing. It returns the binary and the working directory it must be run from,
+// because every suite here reads the package's own files relative to it.
+func childTestBinary(t *testing.T) (bin, wd string) {
+	t.Helper()
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Skipf("no go toolchain on PATH to build the child test binary: %v", err)
+	}
+	bin = filepath.Join(t.TempDir(), "webui.test")
+	if out, err := exec.Command(goBin, "test", "-c", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("building this package's test binary: %v\n%s", err, out)
+	}
+	wd, err = os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	return bin, wd
+}
+
+// HOLDFAST_BROWSER is a PIN, and a pin that cannot be run makes the engine UNRESOLVABLE -
+// it is never quietly replaced by whatever browser happens to be on PATH.
+//
+// The failure this forbids is the worst kind a grader has: it is GREEN. A gate told to
+// measure one engine, silently measuring another, reports a page that renders correctly in
+// a browser nobody chose, and says nothing about the one the operator named. So the pin is
+// the only candidate, and when it does not answer the run behaves exactly as it does with
+// no browser at all: a skip that names it, and a failure under required mode.
+//
+// It is run with a REAL PATH, which is the whole point: there has to be something to fall
+// back to for "it did not fall back" to mean anything.
+func TestRuntimeGate_AnUnrunnableBrowserPinIsNeverReplacedByOneOnPath(t *testing.T) {
+	if os.Getenv("HOLDFAST_WEBUI_GATE_CHILD") == "1" {
+		t.Skip("this is the child of the runtime-gate self-test; it does not recurse")
+	}
+	if _, why := resolveBrowser(); why != "" {
+		t.Skipf("this host's own browser is unresolvable, so there is nothing to fall back to: %s", why)
+	}
+	if p, _ := resolveBrowser(); p == "" {
+		missingRuntime(t, "chromium", "this case proves an engine pin is not replaced by a browser on PATH, so it needs one on PATH")
+		return
+	}
+
+	bin, wd := childTestBinary(t)
+	const subject = "TestRendered_OfferIsShownToAReaderWithoutInteraction"
+
+	// Two ways a pin can fail to be a browser, and neither may reach PATH.
+	notExecutable := filepath.Join(t.TempDir(), "not-a-browser")
+	writeFile(t, notExecutable, "#!/bin/sh\n") // written 0644: present, and not runnable
+	pins := []struct{ what, path string }{
+		{"a path that does not exist", filepath.Join(t.TempDir(), "no-such-browser")},
+		{"a file that is not executable", notExecutable},
+	}
+
+	run := func(required bool, pin string) (string, error) {
+		cmd := exec.Command(bin, "-test.run", "^"+subject+"$", "-test.v")
+		cmd.Dir = wd
+		env := []string{
+			"PATH=" + os.Getenv("PATH"), // a browser IS findable here
+			"HOME=" + t.TempDir(),
+			"HOLDFAST_WEBUI_GATE_CHILD=1",
+			"HOLDFAST_BROWSER=" + pin,
+		}
+		if required {
+			env = append(env, "HOLDFAST_WEBUI_REQUIRED=1")
+		}
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	for _, pin := range pins {
+		out, err := run(false, pin.path)
+		if err != nil {
+			t.Errorf("with HOLDFAST_BROWSER naming %s, `make check` must stay green; it exited %v:\n%s", pin.what, err, out)
+		}
+		if strings.Contains(out, "--- PASS: "+subject) {
+			t.Errorf("with HOLDFAST_BROWSER naming %s the grader PASSED, so it measured a browser nobody named:\n%s", pin.what, out)
+		}
+		if !strings.Contains(out, "--- SKIP: "+subject) {
+			t.Errorf("with HOLDFAST_BROWSER naming %s the grader did not report itself SKIPPED:\n%s", pin.what, out)
+		}
+		if !strings.Contains(out, "HOLDFAST_BROWSER") || !strings.Contains(out, pin.path) {
+			t.Errorf("the skip message names neither HOLDFAST_BROWSER nor the pinned path %q:\n%s", pin.path, out)
+		}
+
+		out, err = run(true, pin.path)
+		if err == nil {
+			t.Errorf("under required mode the grader passed with HOLDFAST_BROWSER naming %s:\n%s", pin.what, out)
+		}
+		if !strings.Contains(out, "--- FAIL: "+subject) {
+			t.Errorf("under required mode the grader did not FAIL with HOLDFAST_BROWSER naming %s:\n%s", pin.what, out)
+		}
+		if !strings.Contains(out, "required runtime") || !strings.Contains(out, pin.path) {
+			t.Errorf("the required-mode failure does not name the pin it could not run:\n%s", out)
 		}
 	}
 }
