@@ -29,7 +29,7 @@
        every claim that used to be printed here is in that document. -->
   <section id="region-now" aria-labelledby="h-now">
     <h2 id="h-now">Right now</h2>
-    <p class="scope">The live state of this holdfast, pushed by the server as it changes.</p>
+    <p class="scope">Pushed live by the server.</p>
     <!--holdfast:doc-now-->
 
     <!-- The live-counts view. Every view on this page carries exactly one element with
@@ -62,31 +62,31 @@
     </div>
 
     <h3 id="h-queue">Queue and active</h3>
-    <p class="scope">Files in flight, with in-state age and the encoder's own progress.</p>
+    <p class="scope">Being worked on, and since when.</p>
     <p class="note cap" id="queue-cap" hidden></p>
     <div class="tablewrap">
       <table aria-labelledby="h-queue">
         <thead><tr><th>File</th><th>Status</th><th>Elapsed</th><th>Progress</th><th>Worker</th></tr></thead>
         <tbody id="queue" data-view="queue">
-          <tr data-state="loading"><td class="empty" colspan="5">Loading the queue.</td></tr>
+          <tr data-state="loading"><td class="empty" colspan="5">Loading the work in hand.</td></tr>
         </tbody></table>
     </div>
   </section>
 
   <section id="region-history" aria-labelledby="h-history">
     <h2 id="h-history">What it has done to your library</h2>
-    <p class="scope">Derived from the ledger, so it survives restarts and covers the whole library.</p>
+    <p class="scope">From the ledger, and survives restarts.</p>
     <!--holdfast:doc-history-->
     <p class="reclaimed">reclaimed lifetime: <b id="reclaimed-lifetime">loading</b></p>
 
     <h3 id="h-aggs">Across the whole ledger</h3>
-    <p class="scope">Computed by the server over every matching row, never over the capped rows below.</p>
+    <p class="scope">Computed server-side over every matching row.</p>
     <div class="aggs" id="aggregates" data-view="aggs">
-      <p class="state" data-state="loading">Loading the whole-ledger figures.</p>
+      <p class="state" data-state="loading">Loading these figures.</p>
     </div>
 
     <h3 id="h-hist">Recent history</h3>
-    <p class="scope">Each finished file, with the proof its swap was safe.</p>
+    <p class="scope">Each swap, with its proof of safety.</p>
     <p class="note cap" id="hist-cap" hidden></p>
     <div class="tablewrap">
       <table class="hist" aria-labelledby="h-hist">
@@ -98,14 +98,17 @@
           <th>File</th><th>Result</th><th>Size</th><th>VMAF</th><th>Encoder</th><th>Encode</th><th>Updated</th>
         </tr></thead>
         <tbody id="history" data-view="history">
-          <tr data-state="loading"><td class="empty" colspan="7">Loading recent history.</td></tr>
+          <tr data-state="loading"><td class="empty" colspan="7">Loading finished swaps.</td></tr>
         </tbody>
       </table>
     </div>
   </section>
 </main>
-<footer>holdfast, a config-as-code, data-safe media transcoder. The YAML config is the source of
-  truth; this page reads and controls. It reports what was measured, and only that.
+<!-- The footer carries ONE short line of identity and the AGPL section 13 offer. The
+     product identity, what this page may and may not do, and the promise that it reports
+     only what was measured are all in docs/dashboard-methodology.md; the offer is required
+     verbatim and is not this page's to shorten. -->
+<footer>Reads and controls; the YAML config decides.
   <!--holdfast:source-offer--></footer>
 
 <!-- Row shells cloned per render. Rows are built as DOM nodes (createElement +

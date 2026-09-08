@@ -1155,8 +1155,11 @@ func TestRendered_AnEmptySnapshotShowsBothEmptyStateRows(t *testing.T) {
 		rows []dashRow
 		want string
 	}{
-		{"queue", v.Queue, "Nothing queued."},
-		{"history", v.History, "No history yet."},
+		// The WORDING is S0052's to set: a state row sits inside its own table, so it may
+		// repeat neither the heading above it nor a column header beneath it. What B12
+		// asserts is that each view says, in its own words, that it has nothing to show.
+		{"queue", v.Queue, "No work in hand."},
+		{"history", v.History, "No swap finished yet."},
 	} {
 		if len(c.rows) != 1 {
 			t.Fatalf("the rendered %s has %d rows for an empty ledger, want exactly its empty-state row: %+v",
@@ -1317,7 +1320,7 @@ const absencePhrase = "not recorded"
 // document before it is used, so a drift here fails loudly rather than silently
 // mutating nothing.
 const aggHostMarkup = `<div class="aggs" id="aggregates" data-view="aggs">
-      <p class="state" data-state="loading">Loading the whole-ledger figures.</p>
+      <p class="state" data-state="loading">Loading these figures.</p>
     </div>`
 
 // --- B15 / A2: every rendered grader FAILS when its subject is hidden ------------
