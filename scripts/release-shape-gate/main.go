@@ -267,18 +267,46 @@ func (g *gate) run() error {
 	return nil
 }
 
-// refTag splits an image reference's tag off. The LAST colon, because a registry may carry a
-// port (`localhost:5000/x:tag`), and a colon inside the path half is not a tag at all.
+// An image reference has three parts and this gate needs each of them separately, because
+// they answer three different questions: the NAME says which repository publishes it (a
+// repository rename moves it), the TAG says which release a reader is looking at, and the
+// DIGEST says which bytes actually resolve. `docker-compose.yml` pins all three, and it is
+// the file the questions are asked of, so the decomposition lives beside its one reader
+// rather than being repeated in shell (the same rule that gave the file one reader at all).
+
+// refDigest splits the `@sha256:…` half off. It is the half that names the artefact rather
+// than a label, so it is separated FIRST: everything below reads the name half only.
+func refDigest(ref string) (rest, digest string) {
+	if i := strings.LastIndex(ref, "@"); i >= 0 {
+		return ref[:i], ref[i+1:]
+	}
+	return ref, ""
+}
+
+// refTag splits an image reference's tag off. The LAST colon of the name half, because a
+// registry may carry a port (`localhost:5000/x:tag`), a colon inside the path half is not a
+// tag at all, and the digest half carries a colon of its own (`@sha256:…`).
 func refTag(ref string) (string, bool) {
-	i := strings.LastIndex(ref, ":")
+	name, _ := refDigest(ref)
+	i := strings.LastIndex(name, ":")
 	if i < 0 {
 		return "", false
 	}
-	tag := ref[i+1:]
+	tag := name[i+1:]
 	if tag == "" || strings.Contains(tag, "/") {
 		return "", false
 	}
 	return tag, true
+}
+
+// refName is the reference with its tag and digest removed: the repository half alone, which
+// is what a release derives from `github.repository` and what a repository rename moves.
+func refName(ref string) string {
+	name, _ := refDigest(ref)
+	if tag, ok := refTag(ref); ok {
+		return strings.TrimSuffix(name, ":"+tag)
+	}
+	return name
 }
 
 // The gate executes shell, so what it executes is bounded and declared. Exactly one step -
@@ -888,8 +916,38 @@ func (g *gate) checkRunbookNamesEveryAct(wf *Workflow) {
 
 var reActID = regexp.MustCompile("`[a-z0-9_-]+/[a-z0-9-]+`")
 
+// A digest is 64 lowercase hex characters behind `sha256:`. Anything else - a truncated one,
+// an empty one, a tag that merely looks like one - is not a pin.
+var reSha256Digest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
 // --- A9, A17, A11 ---------------------------------------------------------------------------
 
+// THE EXAMPLE DEPLOYMENT NAMES ONE REFERENCE, AND IT USED TO PLAY TWO ROLES AT ONCE. Until
+// S0057 pinned it, docker-compose.yml said `ghcr.io/nschatz/holdfast:latest`, which was both
+// the reference a stranger PULLS and the reference a release MOVES - so a single comparison
+// (compose == `${IMAGE}:${FLOATING_TAG}`) decided both at once. P1 severed them: an example
+// deployment may not depend on a mutable reference, so it now pins a version tag AND the
+// digest scripts/smoke-image.sh gated, while `:latest` goes on being PUBLISHED and is no
+// longer depended on. Publishing a floating reference is not depending on one.
+//
+// So each half is held against the thing that now carries it, and none of them is dropped:
+//
+//   - the NAME is held against the image THIS module's repository produces. That is what A9
+//     is actually about: the reference is derived from `github.repository` at run time, so a
+//     repository rename moves it, and nothing rewrites a reference already sitting in a
+//     user's compose file.
+//   - the DIGEST must be there at all. A reference without one names a LABEL, and the label
+//     is exactly what a release moves, so an unpinned example deployment silently changes the
+//     encoder - and the libvmaf instrument the no-loss verdict is measured with - under a
+//     deployment nobody touched.
+//   - the TAG must NOT be the one this release MOVES. Pin the tag `promote-latest` retags and
+//     the example deployment's own tag and digest disagree the moment the next release lands,
+//     which is the drift the pin exists to prevent; it would also modify the contents of a
+//     released version, which semver.org forbids outright.
+//
+// The registry half - that the reference RESOLVES at all, and that what the promotion moved
+// resolves to the digest this run gated - cannot be decided offline. That is A11, and it is
+// scripts/resolve-compose-image.sh, driven for real by `make release-shape-selftest`.
 func (g *gate) checkComposeReferenceAgreement(wf *Workflow, roles *Roles, p *planned, repo string) {
 	composeRef, err := composeImageRef(g.path(composeFile))
 	if err != nil {
@@ -922,12 +980,32 @@ func (g *gate) checkComposeReferenceAgreement(wf *Workflow, roles *Roles, p *pla
 		return
 	}
 
-	if promoted != composeRef {
-		g.bad("the example deployment names an image reference this repository's own release would NEVER produce.\n%s names:  %s\n%s promotes: %s\nA user who runs the published compose file would pull a reference nothing publishes. The release image is derived from the repository name at run time, so a repository rename moves this reference too.",
-			composeFile, composeRef, promote.Label(), promoted)
+	composeName := refName(composeRef)
+	composeTag, hasTag := refTag(composeRef)
+	_, composeDigest := refDigest(composeRef)
+
+	if composeName != image {
+		g.bad("the example deployment names an image reference this repository's own release would NEVER produce.\n%s names:  %s\n%s publishes from: %s\nA user who runs the published compose file would pull a reference nothing publishes. The release image is derived from the repository name at run time, so a repository rename moves this reference too.",
+			composeFile, composeRef, promote.Label(), image)
 		return
 	}
-	g.note("the example deployment's image reference agrees with the one a release promotes\n      %s: %s\n      %s: %s", composeFile, composeRef, promote.Label(), promoted)
+	if !hasTag {
+		g.bad("the example deployment %s names %q, which carries NO TAG. A reference with no tag is `:latest` by default, which is the reference this release MOVES - so the example deployment would silently change under every user who pulled it, and there would be nothing for a reader to compare against the release they meant to run.",
+			composeFile, composeRef)
+		return
+	}
+	if !reSha256Digest.MatchString(composeDigest) {
+		g.bad("the example deployment %s names %q, which is NOT pinned to an `@sha256:` digest.\nA tag is a LABEL and this release path MOVES one (%s), so a reference without a digest names whatever the registry serves on the day a stranger pulls - not the artefact scripts/smoke-image.sh gated. Pin both halves:\n  image: %s:%s@sha256:<64 hex>\nResolve one with: docker buildx imagetools inspect %s:%s",
+			composeFile, composeRef, promoted, image, composeTag, image, composeTag)
+		return
+	}
+	if composeTag == floating {
+		g.bad("the example deployment %s PINS the tag this release MOVES.\n%s names:    %s\n%s promotes: %s\nThat tag is retagged onto each newly gated release, so the tag and the digest beside it would disagree the moment the next release lands - and a release that retags a version the example deployment pins MODIFIES the contents of an already-released version, which semver.org forbids outright. The example deployment pins a version tag; the floating reference is published, never depended on.",
+			composeFile, composeFile, composeRef, promote.Label(), promoted)
+		return
+	}
+	g.note("the example deployment's image reference is published by this repository's own release, and is not the reference a release MOVES\n      %s: %s\n        name %s = the image %s publishes from\n        tag  %s, pinned to %s\n      %s promotes: %s (moved, never depended on)",
+		composeFile, composeRef, composeName, promote.Label(), composeTag, composeDigest, promote.Label(), promoted)
 
 	// The floating reference must be retagged onto the version this run gated, and no
 	// earlier step may push the floating reference itself.

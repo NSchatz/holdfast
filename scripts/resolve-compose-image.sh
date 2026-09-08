@@ -1,15 +1,25 @@
 #!/usr/bin/env bash
-# Resolve the EXACT image reference the example deployment names, against the registry,
-# and prove it is the digest this release just gated. Run by release.yml after `:latest`
-# is promoted.
+# The two references only a REGISTRY can settle, resolved after the promotion:
 #
-# Everything else in the release works with `${IMAGE}:${VERSION}`, which the workflow
-# derives from `github.repository`, so it is correct by construction and proves nothing
-# about docker-compose.yml, which is the reference a stranger actually pulls. `make check`
-# holds the two in agreement offline; this is the half that agreement cannot cover: that
-# the reference RESOLVES, in the registry, to the digest that passed the gate. A release
-# that leaves the published compose file pointing at something that does not exist is
-# otherwise discovered only by the first person who tries to run it.
+#   1. the FLOATING reference the promotion just moved must resolve to the digest this run
+#      gated. The retag is a registry operation, and nothing else in the release says it
+#      landed - `make check` can only read what the workflow HANDS the promotion.
+#   2. the EXACT reference the example deployment names must resolve to an image. That is
+#      what a stranger pulls, and a release that leaves it pointing at something which does
+#      not exist is otherwise discovered only by the first person who tries to run it.
+#
+# Those two were ONE reference until the example deployment stopped depending on a mutable
+# one: it said `:latest`, which was both what a user pulled and what a release moved, so
+# resolving it once answered both. It now pins a version tag AND the digest that was gated
+# (S0057's P1), while `:latest` goes on being published - publishing a floating reference is
+# not depending on one. So each half is resolved against the reference that now carries it,
+# and neither assertion is dropped.
+#
+# Everything else in the release works with `${IMAGE}:${VERSION}`, which the workflow derives
+# from `github.repository`, so it is correct by construction and proves nothing about
+# docker-compose.yml. `make check` holds that file's NAME against this repository's own
+# release and refuses a reference that carries no digest or that pins the tag a release
+# moves; this is the half no offline check can cover.
 #
 # THE REFERENCE HAS ONE READER, and it is not this script. `scripts/release-shape-gate
 # -print-compose-ref` decodes docker-compose.yml with a YAML parser and refuses anything it
@@ -22,10 +32,10 @@
 #
 # Failure modes are distinct, named, and each exits with its own code:
 #
-#   2  IMAGE/VERSION not supplied - the caller is wrong, not the registry
+#   2  IMAGE/VERSION/FLOATING_TAG not supplied - the caller is wrong, not the registry
 #   3  docker-compose.yml carries no image reference the one reader can read
 #   4  a reference does not resolve at all
-#   5  the compose reference resolves to a DIFFERENT digest than the gated version
+#   5  the floating reference resolves to a DIFFERENT digest than the gated version
 #   6  the one reader cannot be run here at all - a missing toolchain, not a bad compose file
 set -euo pipefail
 
@@ -34,8 +44,9 @@ compose="$here/docker-compose.yml"
 
 image="${IMAGE:-${1-}}"
 version="${VERSION:-${2-}}"
-if [ -z "$image" ] || [ -z "$version" ]; then
-  echo "::error::resolve-compose-image: no IMAGE/VERSION given. Call it with the image and version the release just published." >&2
+floating="${FLOATING_TAG:-${3-}}"
+if [ -z "$image" ] || [ -z "$version" ] || [ -z "$floating" ]; then
+  echo "::error::resolve-compose-image: no IMAGE/VERSION/FLOATING_TAG given. Call it with the image and version the release just published, and the floating tag it just moved." >&2
   exit 2
 fi
 
@@ -90,21 +101,38 @@ if ! gated="$(digest "$gated_ref")" || [ -z "$gated" ]; then
   exit 4
 fi
 
+# 1. The promotion is a registry operation. This is the only thing in the release that says
+#    it landed on the artefact this run gated rather than on whatever was there before.
+floating_ref="${image}:${floating}"
+if ! moved="$(digest "$floating_ref")" || [ -z "$moved" ]; then
+  echo "::error::resolve-compose-image: the floating reference this release just promoted does NOT RESOLVE: $floating_ref" >&2
+  echo "       The promotion is the step that moves it, and it reported success. A reference that does not" >&2
+  echo "       resolve after it moved means nothing is published there at all." >&2
+  printf '       %s\n' "${moved:-(no output)}" >&2
+  exit 4
+fi
+
+if [ "$moved" != "$gated" ]; then
+  echo "::error::resolve-compose-image: the floating reference resolves to a DIFFERENT image than this release gated." >&2
+  echo "       floating:   $floating_ref" >&2
+  echo "                            -> $moved" >&2
+  echo "       just gated: $gated_ref" >&2
+  echo "                            -> $gated" >&2
+  echo "       Every user who pulls that reference would get an artefact this run never smoked." >&2
+  exit 5
+fi
+
+# 2. And the reference a stranger actually copies out of docker-compose.yml must be an image
+#    that is THERE. It is pinned to a digest, so this is not a comparison - it is A5's own
+#    assertion, "find an image at that exact reference", which only a registry can answer.
 if ! found="$(digest "$ref")" || [ -z "$found" ]; then
   echo "::error::resolve-compose-image: the example deployment's image reference does NOT RESOLVE: $ref" >&2
   echo "       docker-compose.yml hands that reference to every user who copies it. The release published" >&2
-  echo "       $gated_ref instead. If this repository was renamed, the published reference moved with it." >&2
+  echo "       $gated_ref instead. If this repository was renamed, the published reference moved with it;" >&2
+  echo "       if the package was deleted or the digest garbage-collected, the pin now names nothing." >&2
   printf '       %s\n' "${found:-(no output)}" >&2
   exit 4
 fi
 
-if [ "$found" != "$gated" ]; then
-  echo "::error::resolve-compose-image: the example deployment's image reference resolves to a DIFFERENT image than this release gated." >&2
-  echo "       docker-compose.yml: $ref" >&2
-  echo "                            -> $found" >&2
-  echo "       just gated:         $gated_ref" >&2
-  echo "                            -> $gated" >&2
-  exit 5
-fi
-
-echo "resolve-compose-image: $ref -> $found (the digest this release gated, published as $gated_ref)"
+echo "resolve-compose-image: $floating_ref -> $moved (the digest this release gated, published as $gated_ref)"
+echo "resolve-compose-image: $ref -> $found (the example deployment's own pinned reference resolves)"

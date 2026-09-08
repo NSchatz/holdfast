@@ -65,7 +65,7 @@ jobs:
       date: ${{ steps.plan.outputs.date }}
       prerelease: ${{ steps.plan.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: plan (publish? version? image?)
         id: plan
@@ -144,7 +144,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "publish=$publish  version=$version  prerelease=$prerelease  image=$image  date=$date"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: ${{ env.GO_VERSION }}
           check-latest: false
@@ -170,12 +170,12 @@ jobs:
         run: make check
 
       # QEMU is only needed to EXECUTE the arm64 image; building it cross-compiles.
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: build the image (linux/amd64)
         id: build-amd64
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: linux/amd64
@@ -195,7 +195,7 @@ jobs:
 
       - name: build the image (linux/arm64)
         id: build-arm64
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: linux/arm64
@@ -245,7 +245,7 @@ jobs:
       # asserted: the artifacts a tag WOULD ship are downloadable from the run. On a real
       # release this is also how the tarballs reach the publish job, which never builds
       # them - it ships exactly the bytes this job gated.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-dist-${{ steps.plan.outputs.version }}
           path: dist/
@@ -277,19 +277,19 @@ jobs:
     # unrecognisably. Nothing about what a step SAYS is consulted - it is in this job, so it
     # counts.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         id: checkout
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
         id: setup-qemu
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         id: setup-buildx
 
       # This job needs Go for one thing: scripts/resolve-compose-image.sh builds the single
       # reader of docker-compose.yml's image reference. `make check` and its own setup-go are
       # in the `build` job, which is a different runner, so without this the last step of a
       # release would depend on whatever Go `ubuntu-latest` happens to ship.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         id: setup-go
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -297,7 +297,7 @@ jobs:
 
       # The tarballs the build job gated. They are downloaded, never rebuilt: a rebuild
       # here would ship bytes nothing in this run has checked.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         id: download-dist
         with:
           name: release-dist-${{ needs.build.outputs.version }}
@@ -305,7 +305,7 @@ jobs:
 
       - name: log in to GHCR
         id: registry-login
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -323,7 +323,7 @@ jobs:
       # `:latest` is promoted only AFTER the pushed artifact passes, further down.
       - name: push the multi-arch image (version tag only)
         id: push-version
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -355,19 +355,28 @@ jobs:
           FLOATING_TAG: latest
         run: ./scripts/release-promote.sh
 
-      # The reference in docker-compose.yml is what a stranger actually pulls, and it is
-      # the ONE reference nothing above resolves: everything so far worked with
+      # The two references nothing above resolves, both of them decided against the real
+      # registry rather than against this file. Everything so far worked with
       # `${IMAGE}:${VERSION}`, which is derived from `github.repository` and is therefore
       # right by construction even if the compose file names something else entirely.
-      # `make check` proves the two agree offline; this proves the agreement survived
-      # contact with the registry, on the digest this run just gated. It runs after the
-      # promotion because before it there is nothing at `:latest` to resolve.
+      #
+      #   - the FLOATING reference the step above just moved must resolve to the digest
+      #     this run gated. The retag is a registry operation and this is the only thing
+      #     that says it landed.
+      #   - the reference docker-compose.yml PINS is what a stranger actually pulls, and it
+      #     must resolve to an image at that exact reference. `make check` proves offline
+      #     that it is published by this repository and is not the tag a release moves;
+      #     only the registry can say it is still there.
+      #
+      # It runs after the promotion because before it there is nothing at the floating
+      # reference to resolve.
       - name: the example deployment's image reference must resolve to the gated digest
         id: resolve-compose
         if: needs.build.outputs.prerelease == 'false'
         env:
           IMAGE: ${{ needs.build.outputs.image }}
           VERSION: ${{ needs.build.outputs.version }}
+          FLOATING_TAG: latest
         run: ./scripts/resolve-compose-image.sh
 
       - name: cut the GitHub release

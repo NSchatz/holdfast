@@ -37,11 +37,22 @@ package main
 //
 // THE ONE VALUE THAT IS NOT A PLANNING OUTPUT is the floating tag, and it is declared rather
 // than derived on purpose: `FLOATING_TAG: latest` is the single place a release says which
-// reference it moves, read here and by scripts/release-promote.sh instead of being spelled
-// twice. It is a literal by construction, so it gets the other treatment - held against the
-// tag `docker-compose.yml` itself names, which is a committed file rather than a sample, and
-// is the reference a user actually pulls. That difference is declared per source below and
-// said out loud in the gate's output; it is not smuggled in as though it were the same rule.
+// reference it moves, read here and by scripts/release-promote.sh and
+// scripts/resolve-compose-image.sh instead of being spelled three times. It is a literal by
+// construction, so it gets the other treatment - held against the tag `docker-compose.yml`
+// itself pins, which is a committed file rather than a sample.
+//
+// THAT HOLD IS AN EXCLUSION, and it used to be an equality. It was an equality while the
+// example deployment pulled `:latest`: the reference a user pulls and the reference a release
+// MOVES were the same string, so a release moving anything else moved one nobody pulled.
+// S0057's P1 severed them - an example deployment may not DEPEND on a mutable reference, so
+// it pins a version tag and the digest that was gated, while `:latest` goes on being
+// published. Publishing a floating reference is not depending on one. So the value held
+// against that file is now the one it must NOT be: retagging the version the example
+// deployment pins would leave its tag and its digest disagreeing on the day the next release
+// lands, and would modify the contents of an already-released version. The file is the same
+// committed anchor either way; what it anchors is stated below and in the gate's output
+// rather than smuggled in as though it were the same rule.
 
 import (
 	"fmt"
@@ -68,7 +79,8 @@ type heldPart struct {
 type heldForm struct {
 	parts []heldPart // the sequence the value must BE, for a value produced by the run
 	// A value that is NOT produced by the run at all: it is declared in the workflow, and
-	// held against the tag this committed file names. The floating reference is the only one.
+	// held against the tag this committed file PINS - which it must not be. The floating
+	// reference is the only one.
 	literalFrom string
 	what        string // how the source is described in every message
 }
@@ -103,7 +115,7 @@ var heldAs = map[envHeld]heldForm{
 	},
 	heldFloatingTag: {
 		literalFrom: composeFile,
-		what:        "the floating reference a release moves, declared here once and held against the tag " + composeFile + " names",
+		what:        "the floating reference a release moves, declared here once and held against the tag " + composeFile + " pins, which it must NOT be",
 	},
 }
 
@@ -114,7 +126,7 @@ var heldAs = map[envHeld]heldForm{
 // no value with a sample.
 func (g *gate) checkHandedValues(wf *Workflow, roles *Roles) {
 	plan := roles.step("plan")
-	floating, floatErr := g.floatingTagFromCompose()
+	pinned, pinErr := g.composePinnedTag()
 
 	var held []string
 	for _, r := range releaseRoles {
@@ -130,7 +142,7 @@ func (g *gate) checkHandedValues(wf *Workflow, roles *Roles) {
 				g.badUnset(s, r, name, r.handsEnv[name])
 				continue
 			}
-			if line, ok := g.holdOne(wf, plan, s, r, name, "`env:`"+where, raw, r.handsEnv[name], floating, floatErr); ok {
+			if line, ok := g.holdOne(wf, plan, s, r, name, "`env:`"+where, raw, r.handsEnv[name], pinned, pinErr); ok {
 				held = append(held, line)
 			}
 		}
@@ -140,7 +152,7 @@ func (g *gate) checkHandedValues(wf *Workflow, roles *Roles) {
 				g.badUnset(s, r, name, r.handsInput[name])
 				continue
 			}
-			if line, ok := g.holdOne(wf, plan, s, r, name, "`with:`", yamlString(v), r.handsInput[name], floating, floatErr); ok {
+			if line, ok := g.holdOne(wf, plan, s, r, name, "`with:`", yamlString(v), r.handsInput[name], pinned, pinErr); ok {
 				held = append(held, line)
 			}
 		}
@@ -161,7 +173,7 @@ func (g *gate) badUnset(s Step, r role, name string, spec envSpec) {
 }
 
 // holdOne decides one declared name and returns the line the green note prints for it.
-func (g *gate) holdOne(wf *Workflow, plan, s Step, r role, name, where, raw string, spec envSpec, floating string, floatErr error) (string, bool) {
+func (g *gate) holdOne(wf *Workflow, plan, s Step, r role, name, where, raw string, spec envSpec, pinned string, pinErr error) (string, bool) {
 	form, declared := heldAs[spec.holds]
 	if !declared {
 		g.bad("%s holds the role `%s` (%s) and declares `%s`, and this gate has said NOTHING about what that value must be.\nA name whose value nobody decides is the hole this check exists to refuse: the role holds, the invocation is untouched, and the step does the right thing to the wrong object. Give it a row in heldAs, or stop declaring it",
@@ -172,8 +184,8 @@ func (g *gate) holdOne(wf *Workflow, plan, s Step, r role, name, where, raw stri
 	// The floating reference: the one value a release DECLARES rather than derives. It is a
 	// literal on purpose and is held against a committed file, not against a planned run.
 	if form.literalFrom != "" {
-		if floatErr != nil {
-			g.bad("%v", floatErr)
+		if pinErr != nil {
+			g.bad("%v", pinErr)
 			return "", false
 		}
 		parts, err := splitTemplate(raw)
@@ -186,9 +198,9 @@ func (g *gate) holdOne(wf *Workflow, plan, s Step, r role, name, where, raw stri
 				s.Label(), r.id, r.what, name, raw, name, form.what, form.literalFrom)
 			return "", false
 		}
-		if raw != floating {
-			g.bad("%s holds the role `%s` (%s) and sets `%s: %s`, and %s names the tag %q.\n`%s` is %s. A release that moves a reference the example deployment does not name moves one nobody pulls, and leaves the one they do pull pointing wherever it already pointed.",
-				s.Label(), r.id, r.what, name, raw, form.literalFrom, floating, name, form.what)
+		if raw == pinned {
+			g.bad("%s holds the role `%s` (%s) and sets `%s: %s`, which is the very tag %s PINS.\n`%s` is %s. That tag is RETAGGED onto each newly gated release, so the example deployment's tag and the digest pinned beside it would disagree the moment the next release lands - and retagging a version somebody already pulled modifies the contents of a released version, which semver.org forbids. The example deployment pins a version; the floating reference is published, never depended on.",
+				s.Label(), r.id, r.what, name, raw, form.literalFrom, name, form.what)
 			return "", false
 		}
 		return fmt.Sprintf("%s %s `%s` = %s (%s)", s.Label(), where, name, raw, form.what), true
@@ -403,10 +415,10 @@ func sketchOf(parts []heldPart) string {
 	return sb.String()
 }
 
-// floatingTagFromCompose reads the tag the example deployment names. It is the only value in
-// this file held against a committed file rather than traced, because it is the only one a
-// release declares rather than derives.
-func (g *gate) floatingTagFromCompose() (string, error) {
+// composePinnedTag reads the tag the example deployment PINS. It is the only value in this
+// file held against a committed file rather than traced, because it is the only one a release
+// declares rather than derives.
+func (g *gate) composePinnedTag() (string, error) {
 	ref, err := composeImageRef(g.path(composeFile))
 	if err != nil {
 		return "", err

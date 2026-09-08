@@ -132,14 +132,14 @@ a change to the release path is exercised before a tag commits it.
 
 `release.yml` never spells the image out. It derives it:
 `ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')`. So the GitHub
-repository's name IS the published image reference, and `docker-compose.yml` names
-`ghcr.io/nschatz/holdfast:latest`.
+repository's name IS the published image reference, and the NAME half of what
+`docker-compose.yml` pins has to be that same reference.
 
 Check, before anything is published:
 
 ```sh
 gh repo view --json nameWithOwner -q .nameWithOwner            # must be NSchatz/holdfast
-go run ./scripts/release-shape-gate -print-compose-ref          # ghcr.io/nschatz/holdfast:latest
+go run ./scripts/release-shape-gate -print-compose-ref          # ghcr.io/nschatz/holdfast:vX.Y.Z@sha256:…
 make check                                                      # the gate that holds those two together
 ```
 
@@ -149,10 +149,12 @@ instead: a second reader agrees on today's file and diverges on the shapes that 
 
 `make check` fails if they disagree, and prints both. It derives the expected reference
 from `go.mod`'s module path, so it is checking the same fact the workflow will use, not a
-copy of it.
+copy of it. It also refuses a compose reference that carries no `@sha256:` digest, and one
+that pins the tag a release MOVES: the example deployment pins a version, and `:latest` is
+published rather than depended on.
 
-Status: done. The repository is `NSchatz/holdfast` and `docker-compose.yml` names
-`ghcr.io/nschatz/holdfast:latest`, which is what `v0.1.0` published under.
+Status: done. The repository is `NSchatz/holdfast` and `docker-compose.yml` pins
+`ghcr.io/nschatz/holdfast:v0.1.0` by digest, which is what `v0.1.0` published under.
 
 The window for this closed with the first release. A rename now would not just be
 irreversible, it would strand what is already out: `ghcr.io/nschatz/holdfast:v0.1.0` and
@@ -229,9 +231,11 @@ can publish is a tag, so a release always carries a real version name.
 **This is the second irreversible act, and it starts the other three.** The run then, in
 this order: runs the full `make check`; builds and smokes both architectures; pushes the
 version tag ONLY; pulls that artifact back for both architectures and re-smokes it;
-promotes `:latest` onto the same digest; resolves the reference `docker-compose.yml` names
-against the registry; cuts the GitHub release. `make check` refuses any reordering of that,
-and refuses any step before the promotion being marked `continue-on-error`.
+promotes `:latest` onto the same digest; resolves BOTH `:latest` (which must now carry the
+digest this run gated) and the reference `docker-compose.yml` pins (which must resolve to an
+image at all) against the registry; cuts the GitHub release. `make check` refuses any
+reordering of that, and refuses any step before the promotion being marked
+`continue-on-error`.
 
 If any gate or smoke run fails, the run stops there and `:latest` stays exactly where it
 was: the `publish` job `needs: build` and its `if:` calls no status function, so GitHub does
@@ -260,15 +264,16 @@ docker compose pull
 ```
 
 `docker compose pull` is the acceptance test for the whole phase: it resolves the exact
-reference the published compose file names. Every release from now on asserts it on its own
-(`scripts/resolve-compose-image.sh` runs after the promotion and fails the release if that
-reference does not resolve to the digest the run just gated), so this is confirmation, not
-the only check.
+reference the published compose file pins, tag and digest together. Every release from now
+on asserts it on its own (`scripts/resolve-compose-image.sh` runs after the promotion, fails
+the release if `:latest` does not resolve to the digest the run just gated, and fails it if
+the reference `docker-compose.yml` pins does not resolve at all), so this is confirmation,
+not the only check.
 
 Status: NOT confirmed. `v0.1.0` predates that step, so no run has ever resolved the compose
 reference. A GHCR package carries its OWN visibility, separate from the repository's, and it
 is not readable from a plain `gh` token - so whether a stranger with no credentials can pull
-`ghcr.io/nschatz/holdfast:latest` is exactly what this step, and only this step, settles. If
+`ghcr.io/nschatz/holdfast` is exactly what this step, and only this step, settles. If
 it 401s or 404s, the package is still private: link it to the repository and set it public
 in the package settings. Nothing above proves this one.
 
@@ -470,10 +475,10 @@ is in the repository and executable, that its step declares the role, and that e
 `env:` HANDS it IS the one this run produced: `IMAGE` and `VERSION` have to name the image and
 version outputs the planning logic writes to `$GITHUB_OUTPUT`, `REF` has to be exactly those
 two with a `:` between them - the reference this run pushed and gated - and `FLOATING_TAG` is
-held against the tag `docker-compose.yml` itself names, which is the reference a user actually
-pulls. The version-tag push is an action rather than a script and gets the same treatment on
-the one input that names its object: its `tags:` has to be those same two outputs. It does not
-open the scripts, and it must not.
+held against the tag `docker-compose.yml` itself pins, which it must NOT be. The version-tag
+push is an action rather than a script and gets the same treatment on the one input that names
+its object: its `tags:` has to be those same two outputs. It does not open the scripts, and it
+must not.
 
 That last part is not decoration, and it was missing until impl-gate ordinal 8 of S0046 asked
 for it. Naming what a value is FOR holds it to nothing: `REF: ${IMAGE}:latest` on the
@@ -481,7 +486,7 @@ re-smoke is one line, it leaves the role held, the invocation untouched and the 
 printing, and it makes the release pull back the PREVIOUS release - which passes, it was
 gated last time - while the artefact this run just pushed is never pulled back at all and
 `:latest` is then promoted onto it. `VERSION: latest` on the resolver is the same line again
-and turns the check below into a comparison of the compose reference's digest with its own,
+and turns the check below into a comparison of the floating reference's digest with its own,
 which can never fail. A name a role declares and nothing compares now reds by name, the same
 way an unclassified field, key or action input does.
 
@@ -512,10 +517,29 @@ release-shape-selftest` drives both.
 
 `FLOATING_TAG` is the one exception and the reason is written into it: the floating reference
 is the one value a release DECLARES rather than derives, so it is a literal on purpose, read
-here and by `scripts/release-promote.sh` instead of being spelled twice. It is held against the
-tag `docker-compose.yml` itself names - a committed file rather than a sample - and an
-expression there is refused, because an expression would move it somewhere the gate cannot
-follow. The gate's output says which of the two treatments each value got.
+here and by `scripts/release-promote.sh` and `scripts/resolve-compose-image.sh` instead of
+being spelled three times. It is held against the tag `docker-compose.yml` itself pins - a
+committed file rather than a sample - and an expression there is refused, because an
+expression would move it somewhere the gate cannot follow. The gate's output says which of the
+two treatments each value got.
+
+**That hold is an EXCLUSION, and it used to be an equality.** It was an equality while the
+example deployment pulled `:latest`: the reference a user pulls and the reference a release
+moves were the same string, so a release moving anything else moved a reference nobody
+pulled. An example deployment may no longer DEPEND on a mutable reference (P1), so it pins a
+version tag and the digest that was gated, while `:latest` goes on being published -
+publishing a floating reference is not depending on one. What the file anchors is therefore
+the value `FLOATING_TAG` must NOT be: retagging the version the example deployment pins would
+leave that file's own tag and digest disagreeing the day the next release lands, and would
+modify the contents of an already-released version, which semver.org forbids outright.
+
+The residue of that change, stated rather than left to be found: WHICH floating tag a release
+moves is no longer decided by anything. `FLOATING_TAG: stable` passes, because nothing in this
+repository depends on `:latest` any more - the compose file pins a digest and `docs/docker.md`
+names the pinned reference. What is still decided is that the tag it moves is not one this
+repository hands anybody, and that whatever it moves really carries this run's digest
+afterwards (step 7's resolution). If something here ever starts depending on the floating
+reference again, hold it against that thing.
 
 So the gate's own output says only what it checked. It used to end a green run with "the same
 digest, not a rebuild" and with an order sentence describing "the re-smoke of the pulled

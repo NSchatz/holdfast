@@ -107,7 +107,7 @@ const (
 	heldPlannedImage                // the image reference the planning logic produced
 	heldPlannedVersion
 	heldGatedRef    // image:version - the reference this run pushes, gates and publishes
-	heldFloatingTag // the tag docker-compose.yml names, which is what a user pulls
+	heldFloatingTag // the tag a release MOVES, which is the one docker-compose.yml must not pin
 	heldEventName   // the event the shape being planned is
 	heldRefName     // the ref that shape carries
 	heldRepository  // this module's own repository, derived from go.mod
@@ -274,9 +274,10 @@ var releaseRoles = []role{
 		handsEnv: map[string]envSpec{
 			"IMAGE":   {heldPlannedImage, "the image the promotion moves"},
 			"VERSION": {heldPlannedVersion, "the version it is retagged onto"},
-			// Declared HERE once and read by the script rather than spelled a second time,
-			// and held against the tag docker-compose.yml names - because the floating
-			// reference this moves is precisely the one a user pulls.
+			// Declared HERE once and read by the two scripts rather than spelled three
+			// times, and held against the tag docker-compose.yml PINS - which it must not
+			// be, because retagging the version the example deployment pins would leave
+			// that file's tag and digest disagreeing on the day the next release lands.
 			floatingTagEnv: {heldFloatingTag, "the floating reference it moves"},
 		},
 		needsGrant: true,
@@ -286,13 +287,23 @@ var releaseRoles = []role{
 		what:    "the resolution of the example deployment's reference against the registry",
 		program: "./scripts/resolve-compose-image.sh",
 		handsEnv: map[string]envSpec{
-			// A11 is "resolve … to the digest the run just gated", so these two ARE the
-			// criterion: `${IMAGE}:${VERSION}` is the reference whose digest the compose
-			// reference is compared against. Hand the step `VERSION: latest` and it
-			// compares the compose reference with itself - a check that cannot fail is
-			// not a check, and A11 is the only enforcement A5 has after the first release.
-			"IMAGE":   {heldPlannedImage, "the image whose gated digest the compose reference must resolve to"},
-			"VERSION": {heldPlannedVersion, "the version just published"},
+			// A11 is "resolve … to the digest the run just gated", so these ARE the
+			// criterion. `${IMAGE}:${VERSION}` is the reference this run gated, and it is
+			// what the FLOATING reference has to resolve to once the promotion has moved
+			// it: hand the step `VERSION: latest` and that comparison is the floating
+			// reference against itself, which cannot fail, and A11 is the only enforcement
+			// A5 has after the first release.
+			//
+			// FLOATING_TAG is here because the two references parted company when the
+			// example deployment stopped depending on a mutable one (S0057's P1). What a
+			// user pulls is now a PINNED reference and is resolved on its own - that is
+			// A5's half, "find an image at that exact reference" - while the reference the
+			// promotion just moved is the one that must carry this run's digest. One step
+			// resolves both, because both are a property of the release that just
+			// published, and neither can be decided without a registry.
+			"IMAGE":        {heldPlannedImage, "the image whose gated digest the floating reference must resolve to"},
+			"VERSION":      {heldPlannedVersion, "the version just published"},
+			floatingTagEnv: {heldFloatingTag, "the floating reference whose digest this run just moved"},
 		},
 	},
 }

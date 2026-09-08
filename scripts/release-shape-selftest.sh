@@ -6,7 +6,8 @@
 # planning logic and reading its `permissions:`, `secrets:` and `needs:` graph, that a dry
 # run can publish nothing, that `:latest` moves last, that a non-zero major is refused, that
 # the operator runbook names every step in the job that can publish, and that the reference
-# docker-compose.yml gives users is the one a release promotes.
+# docker-compose.yml gives users is one this repository's own release publishes, is pinned to
+# a digest, and is NOT the tag a release moves.
 #
 # A gate nobody has tried to defeat is a gate nobody knows works, and every way this one can
 # fail is a way it fails SILENTLY - by printing "ok" over a release that would publish from a
@@ -32,7 +33,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=127
+declared=132
 pass=0; failed=0
 
 repo="$work/repo"
@@ -571,7 +572,10 @@ expect 1 "a role step with a multi-line script is refused" "is more than one lin
 reset
 
 # --- 21. The action role pointed at a different action.
-in_step "push the multi-arch image" 's|^        uses: docker/build-push-action@v6$|        uses: someone/else@v1|'
+# The `@…` is matched loosely on purpose: every action in this repository is SHA-pinned with
+# a trailing version comment (scripts/check-pins.sh enforces it), and a mutation keyed to one
+# spelling of that pin would quietly stop running the day it is bumped.
+in_step "push the multi-arch image" 's|^        uses: docker/build-push-action@.*$|        uses: someone/else@v1|'
 changed "$wf" "the push role pointed at another action"
 expect 1 "a role that names an action is that action, not a lookalike" "but uses \"someone/else\""
 reset
@@ -778,18 +782,46 @@ expect 1 "a missing example deployment is red, naming the file" "docker-compose.
 reset
 
 # --- 47. The disagreement itself: the compose file names an image this repository's
-#         release would never produce. This is what a repository rename does, silently.
-sed -i 's|^\( *image: \).*|\1ghcr.io/someone-else/holdfast:latest|' "$compose"
+#         release would never produce. This is what a repository rename does, silently. The
+#         digest is left intact, so the case turns on the NAME half alone.
+sed -i 's|^\( *image: \).*|\1ghcr.io/someone-else/holdfast:v0.1.0@sha256:302242b66f9c160e69b1e7c37d57925ec593bc7ed0ee9df851af0ec58c7cd4b2|' "$compose"
 changed "$compose" "a compose reference naming a different repository"
-expect 1 "a compose reference nothing publishes is red, and prints both" "ghcr.io/someone-else/holdfast:latest"
+expect 1 "a compose reference nothing publishes is red, and prints both" "ghcr.io/someone-else/holdfast:v0.1.0"
 reset
 
-# --- 48. The floating tag moved. It is declared ONCE, in the promotion step's env, read by
-#         this gate and by scripts/release-promote.sh - so changing it there changes what a
-#         release promotes, and the compose file no longer names it.
-in_step "promote :latest" 's|^          FLOATING_TAG: latest$|          FLOATING_TAG: stable|'
-changed "$wf" "the floating tag moved to :stable"
-expect 1 "a promotion that moves a different floating reference than the compose file names is red" "ghcr.io/nschatz/holdfast:stable"
+# --- 47a. The reference stripped of its digest. A tag is a LABEL and this release path moves
+#          one, so an example deployment without a digest names whatever the registry serves
+#          on the day a stranger pulls - not the artefact scripts/smoke-image.sh gated.
+sed -i 's|^\( *image: \).*|\1ghcr.io/nschatz/holdfast:v0.1.0|' "$compose"
+changed "$compose" "a compose reference with no digest"
+expect 1 "an example deployment pinned to a tag alone is red" "NOT pinned to an .@sha256:. digest"
+reset
+
+# --- 47b. A digest that is not one. Dropping the pin outright is the loud way; truncating it
+#          is the quiet one, and it would sail past anything that only looked for an `@`.
+sed -i 's|^\( *image: \).*|\1ghcr.io/nschatz/holdfast:v0.1.0@sha256:302242b6|' "$compose"
+changed "$compose" "a compose reference with a truncated digest"
+expect 1 "an example deployment pinned to a malformed digest is red" "NOT pinned to an .@sha256:. digest"
+reset
+
+# --- 48. THE COLLISION OF THE TWO REFERENCES, and it points the opposite way to the check it
+#         replaced. The example deployment used to pull `:latest`, so the tag a release MOVES
+#         and the tag a user PULLS were one string and the gate held them equal. P1 severed
+#         them: the compose file pins a version and a digest, `:latest` is published rather
+#         than depended on. So the tag it pins is the one FLOATING_TAG must NOT be - retag
+#         `v0.1.0` and that file's own tag and digest disagree the moment the next release
+#         lands, and an already-released version has been modified.
+in_step "promote :latest" 's|^          FLOATING_TAG: latest$|          FLOATING_TAG: v0.1.0|'
+changed "$wf" "the floating tag pointed at the version the compose file pins"
+expect 1 "a promotion that retags the version the example deployment pins is red" "PINS"
+reset
+
+# --- 48a. The same on the resolution step, which reads the same declared value: it would then
+#          resolve the version tag rather than the reference the promotion moved, and the
+#          comparison against the gated digest becomes one the release cannot fail.
+in_step "must resolve to the gated digest" 's|^          FLOATING_TAG: latest$|          FLOATING_TAG: v0.1.0|'
+changed "$wf" "the resolution handed the version the compose file pins as the floating tag"
+expect 1 "a resolution handed the pinned version as the floating reference is red" "PINS"
 reset
 
 # --- 49. The floating tag removed altogether. Which reference a release moves is then
@@ -797,6 +829,13 @@ reset
 in_step "promote :latest" '/^          FLOATING_TAG: latest$/d'
 changed "$wf" "the floating tag undeclared"
 expect 1 "a promotion that declares no floating tag is red" "does not declare both IMAGE and FLOATING_TAG"
+reset
+
+# --- 49a0. And on the resolution step, whose registry comparison is the only thing that says
+#           the promotion landed on this run's digest.
+in_step "must resolve to the gated digest" '/^          FLOATING_TAG: latest$/d'
+changed "$wf" "the resolution declaring no floating tag"
+expect 1 "a resolution that declares no floating tag is red" "nothing sets it, at any of the three levels"
 reset
 
 # =====================================================================================
@@ -1051,8 +1090,11 @@ expect 1 "a resolution that runs before the promotion is red" "does NOT run befo
 reset
 
 # --- 55 to 58. scripts/resolve-compose-image.sh itself, driven against a fake registry.
-#         It is the enforcement behind A5, so its verdict has to be real: a matching digest
-#         passes, a different one fails, an unresolvable reference fails, and a compose file
+#         It carries the two assertions only a registry can settle - the FLOATING reference
+#         must now resolve to the digest this run gated, and the reference the example
+#         deployment PINS must resolve to an image at all - and it is the enforcement behind
+#         A5, so its verdict has to be real: both resolving passes, a floating reference on
+#         another digest fails, either reference failing to resolve fails, and a compose file
 #         with no reference fails - each with its own exit code and its own sentence.
 fake="$work/fakebin"; mkdir -p "$fake"
 cat > "$fake/docker" <<'FAKE'
@@ -1075,7 +1117,8 @@ digests="$work/digests"
 resolve() {  # resolve <name> <want-exit> <must-mention>
   local name="$1" want="$2" mention="$3" got=0 o
   o="$( cd "$repo" && PATH="$fake:$PATH" FAKE_DIGESTS="$digests" RELEASE_SHAPE_GATE="$gate" \
-        IMAGE=ghcr.io/nschatz/holdfast VERSION=v0.1.0 ./scripts/resolve-compose-image.sh 2>&1 )" || got=$?
+        IMAGE=ghcr.io/nschatz/holdfast VERSION=v0.1.0 FLOATING_TAG=latest \
+        ./scripts/resolve-compose-image.sh 2>&1 )" || got=$?
   if [ "$got" -ne "$want" ]; then
     printf '::error::selftest: %s - exited %s, wanted %s\n%s\n' "$name" "$got" "$want" "$o" >&2
     failed=$((failed + 1)); return
@@ -1087,18 +1130,42 @@ resolve() {  # resolve <name> <want-exit> <must-mention>
   printf '  ok: %s\n' "$name"; pass=$((pass + 1))
 }
 
-printf 'ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa\nghcr.io/nschatz/holdfast:latest sha256:aaa\n' > "$digests"
-resolve "the compose reference resolving to the gated digest passes" 0 "the digest this release gated"
+# The reference docker-compose.yml pins resolves to its own digest, as a digest reference
+# does; the gated version and the floating tag are the two labels this run touched.
+pinned_ref='ghcr.io/nschatz/holdfast:v0.1.0@sha256:302242b66f9c160e69b1e7c37d57925ec593bc7ed0ee9df851af0ec58c7cd4b2'
+pinned_digest='sha256:302242b66f9c160e69b1e7c37d57925ec593bc7ed0ee9df851af0ec58c7cd4b2'
+registry() {  # registry <line…> - each "<ref> <digest>"
+  : > "$digests"
+  local l
+  for l in "$@"; do printf '%s\n' "$l" >> "$digests"; done
+}
 
-printf 'ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa\nghcr.io/nschatz/holdfast:latest sha256:bbb\n' > "$digests"
-resolve "a compose reference resolving to a DIFFERENT digest fails the release" 5 "DIFFERENT image"
+registry "ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa" \
+         "ghcr.io/nschatz/holdfast:latest sha256:aaa" \
+         "$pinned_ref $pinned_digest"
+resolve "the floating reference resolving to the gated digest, with the pinned reference resolving too, passes" 0 "the digest this release gated"
 
-printf 'ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa\n' > "$digests"
-resolve "a compose reference that does not resolve at all fails the release" 4 "does NOT RESOLVE"
+registry "ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa" \
+         "ghcr.io/nschatz/holdfast:latest sha256:bbb" \
+         "$pinned_ref $pinned_digest"
+resolve "a floating reference resolving to a DIFFERENT digest than this run gated fails the release" 5 "DIFFERENT image"
+
+registry "ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa" \
+         "$pinned_ref $pinned_digest"
+resolve "a floating reference that does not resolve at all fails the release" 4 "just promoted does NOT RESOLVE"
+
+# The half A5 owns: the reference a stranger copies must be an image that is THERE. It is
+# pinned by digest, so this is not a comparison - it is "find an image at that exact
+# reference", and only a registry can answer it.
+registry "ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa" \
+         "ghcr.io/nschatz/holdfast:latest sha256:aaa"
+resolve "a pinned compose reference that does not resolve at all fails the release" 4 "example deployment's image reference does NOT RESOLVE"
 
 sed -i '/^ *image: ghcr/d' "$compose"
 changed "$compose" "resolving a compose file with no image reference"
-printf 'ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa\nghcr.io/nschatz/holdfast:latest sha256:aaa\n' > "$digests"
+registry "ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa" \
+         "ghcr.io/nschatz/holdfast:latest sha256:aaa" \
+         "$pinned_ref $pinned_digest"
 resolve "a compose file naming no image is refused before any registry call" 3 "names NO image reference"
 reset
 
@@ -1108,7 +1175,10 @@ reset
 #         service came first, which is what a `sed … | head -1` did.
 printf '\n  sidecar:\n    image: ghcr.io/nschatz/something-else:latest\n' >> "$compose"
 changed "$compose" "a compose file whose second service carries an image"
-printf 'ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa\nghcr.io/nschatz/holdfast:latest sha256:aaa\nghcr.io/nschatz/something-else:latest sha256:aaa\n' > "$digests"
+registry "ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa" \
+         "ghcr.io/nschatz/holdfast:latest sha256:aaa" \
+         "$pinned_ref $pinned_digest" \
+         "ghcr.io/nschatz/something-else:latest sha256:aaa"
 resolve "a second service's image reference is refused, not silently ignored" 3 "names 2 image references"
 reset
 
@@ -1116,10 +1186,13 @@ reset
 #         over, so the script builds the single reader itself. Driven against the real
 #         working tree, so the whole chain - script, reader, docker-compose.yml - is the
 #         committed one and not a fixture.
-printf 'ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa\nghcr.io/nschatz/holdfast:latest sha256:aaa\n' > "$digests"
+registry "ghcr.io/nschatz/holdfast:v0.1.0 sha256:aaa" \
+         "ghcr.io/nschatz/holdfast:latest sha256:aaa" \
+         "$pinned_ref $pinned_digest"
 got=0
 o="$( cd "$here" && PATH="$fake:$PATH" FAKE_DIGESTS="$digests" \
-      IMAGE=ghcr.io/nschatz/holdfast VERSION=v0.1.0 ./scripts/resolve-compose-image.sh 2>&1 )" || got=$?
+      IMAGE=ghcr.io/nschatz/holdfast VERSION=v0.1.0 FLOATING_TAG=latest \
+      ./scripts/resolve-compose-image.sh 2>&1 )" || got=$?
 if [ "$got" -eq 0 ] && grep -qE 'the digest this release gated' <<<"$o"; then
   printf '  ok: the script builds the single reader itself when no binary is handed to it\n'
   pass=$((pass + 1))
@@ -1365,7 +1438,7 @@ for t in bash dirname sed awk grep cat; do
 done
 ln -sf "$recbin/docker" "$nogo/docker"
 got=0
-o="$( cd "$repo" && PATH="$nogo" IMAGE=ghcr.io/nschatz/holdfast VERSION=v0.1.0 \
+o="$( cd "$repo" && PATH="$nogo" IMAGE=ghcr.io/nschatz/holdfast VERSION=v0.1.0 FLOATING_TAG=latest \
       ./scripts/resolve-compose-image.sh 2>&1 )" || got=$?
 if [ "$got" -eq 6 ] && grep -qE 'no Go toolchain on PATH' <<<"$o"; then
   printf '  ok: a missing Go toolchain names itself rather than blaming the compose file\n'; pass=$((pass + 1))

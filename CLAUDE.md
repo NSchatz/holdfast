@@ -227,7 +227,7 @@ the difference between this and the six catalogues of bad spellings that lost.
 step's `env:` hands its program (and, for the action role, the `tags:` input that names what it publishes),
 so each declared name is HELD against a value produced outside that step -
 the planning logic's own `$GITHUB_OUTPUT`, this module's repository, the event shape, or the tag
-`docker-compose.yml` names - and compared whole. `REF: ${IMAGE}:latest` on the re-smoke is one line that
+`docker-compose.yml` pins - and compared whole. `REF: ${IMAGE}:latest` on the re-smoke is one line that
 leaves the role held, the invocation untouched and the order sentence printing while the release pulls back
 the PREVIOUS artefact and promotes `:latest` onto one nothing gated; `VERSION: latest` on the resolver makes
 its digest comparison a tautology. A declared name held against NOTHING reds by name, which is what makes
@@ -246,7 +246,13 @@ a function call, a job this one does not `needs:`, an output the producing job n
 in the question, so no sample can be copied into it. The gate follows the graph rather than matching text:
 the same output reached through a different job output passes, and so does a respelling. `FLOATING_TAG` is
 the one exception, because it is the one value a release DECLARES rather than derives: it is a literal on
-purpose and is held against the tag `docker-compose.yml` names, and an expression there reds.
+purpose and is held against the tag `docker-compose.yml` PINS - which it must NOT be - and an expression
+there reds. That hold used to be an equality, back when the example deployment pulled `:latest` and the
+reference a user pulls and the reference a release moves were one string. P1 severed them: the compose file
+pins a version and the digest that was gated, `:latest` is published rather than depended on, and retagging
+the version that file pins would leave its own tag and digest disagreeing the day the next release lands.
+The residue is stated in `docs/release.md`: WHICH floating tag a release moves is no longer decided by
+anything, because nothing here depends on it any more.
 
 The order comes from `needs:` and declaration order; two jobs with no path between them are CONCURRENT and the
 gate refuses to order them. An ACT, for the runbook cross-check, is likewise every step in the job that holds
@@ -286,14 +292,17 @@ The compose reference has exactly ONE reader: `scripts/resolve-compose-image.sh`
 (`-print-compose-ref`) instead of parsing the file a second time in sed, because two readers agree on today's
 file and diverge on a quoted scalar, a second service with an `image:`, or an `image:` nested outside
 `services:` - the ffmpeg-pin lesson applied to one more duplicated value. The floating tag gets the same
-treatment: it is declared once, as `FLOATING_TAG` in the promotion step's `env:`, read by the gate and by
-`scripts/release-promote.sh`.
+treatment: it is declared once, as `FLOATING_TAG` in the promotion step's `env:` and the resolution step's,
+read by the gate and by `scripts/release-promote.sh` and `scripts/resolve-compose-image.sh`.
 The plan step REFUSES a tag whose major version is not zero, naming the record
 (`docs/release.md`, "Before a major version above zero") that must first declare the configuration keys, the
 HTTP surface and the metric names stable: 1.0.0 "defines the public API" and a released version can never be
 modified, so the first non-zero major is a promise, not a bigger number. `scripts/resolve-compose-image.sh`
-runs after the promotion and fails the release if the reference the example deployment names does not resolve
-to the digest that run just gated. `make release-shape-selftest` (CI, not `check`, because its mutations must
+runs after the promotion and settles the two references only a registry can settle: it fails the release if
+the floating reference the promotion just moved does not resolve to the digest that run gated, and if the
+reference the example deployment PINS does not resolve to an image at all. Those two were one reference until
+the example deployment stopped depending on a mutable one; each half is now resolved against the reference
+that carries it. `make release-shape-selftest` (CI, not `check`, because its mutations must
 not touch the tree `check` is grading) defeats every one of those ways on purpose and fails if any defeat did
 not run. How many ways is `declared=` in that script, its single writer, which the run prints - restating the
 number here would be one more copy to drift.

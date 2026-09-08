@@ -174,7 +174,8 @@ rejected, rather than serving an offer nobody can follow.
   (binary, glibc, bundled ffmpeg), which is what a cross-built image gets wrong. A real arm64
   encode has not been timed on real hardware; an SBC will be slow with libx265.
 - **No shell in the image.** `docker exec ... sh` will not work. To poke at the bundled ffmpeg:
-  `docker run --rm --entrypoint /usr/local/bin/ffmpeg ghcr.io/nschatz/holdfast:latest -version`.
+  `docker run --rm --entrypoint /usr/local/bin/ffmpeg ghcr.io/nschatz/holdfast:v0.1.0 -version`
+  (use the same tag and digest `docker-compose.yml` pins, so you are inspecting the image you run).
 - **Power-loss durability of the swap is filesystem-dependent.** holdfast follows the POSIX
   durable-rename discipline — `fsync` the encode before the rename, `fsync` the parent directory
   after it, and (in the container-changing case) never remove the source until that directory
@@ -186,5 +187,6 @@ rejected, rather than serving an offer nobody can follow.
   in CI (it needs a power-cut harness), so it is stated as a limitation, not a guarantee; prefer a
   local filesystem for the `/media` mount.
 - A GHCR package carries **its own visibility**, separate from the repository's. The repository is
-  public and `ghcr.io/nschatz/holdfast:latest` has been published; if a pull without credentials is
-  refused, the package itself is still private. `docs/release.md` step 8 is the check that settles it.
+  public and the reference `docker-compose.yml` pins has been published; if a pull without
+  credentials is refused, the package itself is still private. `docs/release.md` step 8 is the check
+  that settles it.
