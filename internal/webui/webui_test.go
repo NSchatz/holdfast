@@ -685,6 +685,14 @@ func TestNoNewDependency_TheDashboardShipsNothingButItsOwnSource(t *testing.T) {
 		s := filepath.ToSlash(p)
 		return s == "e2e" || strings.HasPrefix(s, "e2e/")
 	}
+	// What the graders' project keeps OUT of the repository, read from its own .gitignore
+	// rather than restated here. Those paths are the runner's output - an installed tree, a
+	// failed case's screenshots and trace, the JSON report - and none of them is repository
+	// content this sweep has to account for. Reading the ignore file is what keeps the two
+	// in step: a second list would agree with the first today and diverge the first time
+	// the runner learns a new output directory, whereupon `make check` would red over a
+	// file nobody committed, having been green over the run that produced it.
+	e2eIgnored := readE2EIgnores(t)
 
 	var goFiles []string
 	seen := 0
@@ -694,14 +702,18 @@ func TestNoNewDependency_TheDashboardShipsNothingButItsOwnSource(t *testing.T) {
 		}
 		name := d.Name()
 		if d.IsDir() {
-			// An installed tree under the graders' project is skipped whole: nothing
-			// inside somebody else's package is this repository's to account for.
-			if name == "node_modules" && inE2E(p) {
+			// An installed tree or a run's output under the graders' project is skipped
+			// whole: nothing inside somebody else's package, and nothing the runner wrote
+			// and git never took, is this repository's to account for.
+			if inE2E(p) && e2eIgnored[name] {
 				return filepath.SkipDir
 			}
 			if what, bad := bannedDir[name]; bad && p != "." {
 				return fmt.Errorf("%s is %s: the dashboard is served under default-src 'none' and can fetch none of it", p, what)
 			}
+			return nil
+		}
+		if inE2E(p) && e2eIgnored[name] {
 			return nil
 		}
 		seen++
@@ -794,6 +806,36 @@ func TestNoNewDependency_TheDashboardShipsNothingButItsOwnSource(t *testing.T) {
 			t.Errorf("the dependency rule rejected %q, which is the standard library or this repository", ours)
 		}
 	}
+}
+
+// readE2EIgnores is the graders' project's own .gitignore, as a set of names. Every entry
+// there is a bare name or a name with a trailing slash, which is all this needs to
+// understand; a pattern it cannot read is reported rather than silently widening the
+// exemption, because an exemption nobody can see is how a sweep stops sweeping.
+func readE2EIgnores(t *testing.T) map[string]bool {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("e2e", ".gitignore"))
+	if err != nil {
+		t.Fatalf("reading the graders' project's .gitignore: %v", err)
+	}
+	out := map[string]bool{}
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name := strings.TrimSuffix(line, "/")
+		if strings.ContainsAny(name, "/*?[!") {
+			t.Errorf("e2e/.gitignore carries the pattern %q, which this sweep reads as a bare name; "+
+				"keep the ignore file to plain names so the two cannot disagree about what is untracked output", line)
+			continue
+		}
+		out[name] = true
+	}
+	if !out["node_modules"] {
+		t.Fatal("e2e/.gitignore no longer ignores node_modules; the sweep would then account for somebody else's package tree")
+	}
+	return out
 }
 
 // ownImport applies the Go convention: an import path whose first element carries a dot

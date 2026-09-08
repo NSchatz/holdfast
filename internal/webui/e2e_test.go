@@ -32,8 +32,12 @@ import (
 //	and the standard library alone, `make build` is still a plain `go build`, the image
 //	still gains no stage and no tool, and the served document still resolves nothing at
 //	load time. Playwright is TEST tooling and lives under internal/webui/e2e; nothing it
-//	brings can reach an artifact a user runs. TestBuild_NoThirdPartyJavaScriptEnters...
-//	enforces exactly that boundary rather than a blanket refusal.
+//	brings can reach an artifact a user runs. That boundary is enforced rather than asked
+//	for on trust, by TestBuild_NoThirdPartyJavaScriptEntersThePageOrTheTooling (where a
+//	dependency may live) and TestBuild_TheTestOnlyDependencyCannotReachTheBuiltArtifact
+//	(that nothing it installs reaches the generator, the page, the binary or the image).
+//	Both names are written out whole: an abbreviated one names no test, and a citation
+//	that resolves to nothing is how a comment outlives the assertion it points at.
 //
 // This wrapper is what puts the suite inside `go test`, so `make check` runs it (skipping
 // where a runtime is absent, as the docker gate does) and `make webui-check` requires it.

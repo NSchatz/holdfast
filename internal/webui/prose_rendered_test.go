@@ -572,16 +572,16 @@ const unreadablePayload = `this is not a snapshot`
 
 // proseBrowser launches ONE browser for a whole test. Each reading gets its own tab, so a
 // suite of engine-driven graders costs one browser launch rather than one per reading.
-func proseBrowser(t *testing.T) *cdpBrowser {
+func proseBrowser(t *testing.T) *engineBrowser {
 	t.Helper()
-	return launchCDP(t)
+	return launchEngine(t)
 }
 
 // renderProse lays the served document out in the engine at a real viewport and colour
 // scheme, waits for the page to reach the state the reading is about, and returns the
 // page-copy classification, the dashboard reading the existing graders use, and the
 // accessibility tree.
-func renderProse(t *testing.T, b *cdpBrowser, o proseOpts) proseVerdict {
+func renderProse(t *testing.T, b *engineBrowser, o proseOpts) proseVerdict {
 	t.Helper()
 	if o.width == 0 {
 		o.width = proseDefaultWidth
@@ -634,20 +634,20 @@ func renderProse(t *testing.T, b *cdpBrowser, o proseOpts) proseVerdict {
 	case o.noSnapshot:
 	case o.badSnapshot:
 		if err := p.waitUntil(`!!document.querySelector('[data-state="unreadable"]')`, 60*time.Second); err != nil {
-			t.Fatalf("%v\nbrowser output:\n%s", err, b.browserLog())
+			t.Fatalf("%v\nbrowser output:\n%s", err, b.output())
 		}
 	default:
 		if err := p.waitUntil(`isReady(document)`, 60*time.Second); err != nil {
 			var state string
 			_ = p.eval(`connText(document)`, &state)
-			t.Fatalf("%v (connection state %q)\nbrowser output:\n%s", err, state, b.browserLog())
+			t.Fatalf("%v (connection state %q)\nbrowser output:\n%s", err, state, b.output())
 		}
 	}
 	if o.clickRescan {
 		p.mustEval(`document.getElementById("rescan").click(); true`, nil)
 		if err := p.waitUntil(`document.getElementById("msg").textContent.trim() !== "" &&
 			document.getElementById("msg").textContent.trim() !== "working"`, 30*time.Second); err != nil {
-			t.Fatalf("%v\nbrowser output:\n%s", err, b.browserLog())
+			t.Fatalf("%v\nbrowser output:\n%s", err, b.output())
 		}
 	}
 
@@ -661,7 +661,7 @@ func renderProse(t *testing.T, b *cdpBrowser, o proseOpts) proseVerdict {
 		p.mustEval("verdict(document, window)", &v.dash)
 	}
 	v.ax = p.proseAXTree()
-	v.log = b.browserLog()
+	v.log = b.output()
 	return v
 }
 
@@ -726,15 +726,16 @@ type proseAXNode struct {
 	Description *proseAXValue `json:"description"`
 }
 
-// proseAXTree reads the tree the ENGINE computed, with each value's SOURCES, which the
-// driver's own axTree does not decode. There is no web API for any of it: an accessible
-// name is the engine's answer, not a property of the markup.
-func (p *cdpPage) proseAXTree() []proseAXNode {
+// proseAXTree reads the tree the ENGINE computed, with each value's SOURCES. There is no
+// web API for any of it: an accessible name is the engine's answer, not a property of the
+// markup, and the SOURCES are what separate a name built from an element's own visible text
+// from one a reader meets only through a screen reader.
+func (p *enginePage) proseAXTree() []proseAXNode {
 	p.b.t.Helper()
 	var out struct {
 		Nodes []proseAXNode `json:"nodes"`
 	}
-	mustJSON(p.b.t, p.b.mustCall(p.sid, "Accessibility.getFullAXTree", nil), &out)
+	mustJSON(p.b.t, p.b.mustCall("ax", map[string]any{"page": p.id}), &out)
 	return out.Nodes
 }
 

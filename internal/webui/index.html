@@ -150,9 +150,10 @@
        machine. The named platform faces below reach the real UI font on macOS,
        Windows, Android and a Linux desktop, and the `sans-serif` generic at the end
        is the one fallback that is proportional by definition. This is measured, not
-       assumed: TestRenderedCDP_TheShippedPageMeetsEveryConventionInBothThemesAtBothWidths
-       compares the advance width of sixteen narrow glyphs against sixteen wide ones
-       in the face the engine ACTUALLY used. */
+       assumed: the case "the shipped page meets every convention in both themes at both
+       widths" (internal/webui/e2e/specs/conventions.spec.mjs) compares the advance width
+       of sixteen narrow glyphs against sixteen wide ones in the face the engine ACTUALLY
+       used. */
     --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif;
     --font-mono: ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace;
 

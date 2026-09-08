@@ -2,6 +2,7 @@ package webui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -186,15 +187,82 @@ func missingRuntime(t *testing.T, runtime, need string) {
 }
 
 // chromium locates the browser or skips (fails, under required mode).
+//
+// HOLDFAST_BROWSER is a PIN, not a hint: when it is set, it is the only candidate. An
+// explicit pin that silently falls back to whatever chromium happens to be on PATH is the
+// false green this whole layer exists to prevent - the gate would then believe it measured
+// the engine somebody named while measuring another one, and nothing in the output would
+// say so. A pin that cannot be run makes the engine UNRESOLVABLE, which is the same answer
+// as no browser at all: a skip here, a failure under required mode, named either way.
 func chromium(t *testing.T) string {
 	t.Helper()
-	for _, name := range []string{"chromium", "chromium-browser", "google-chrome", "chrome"} {
-		if p, err := exec.LookPath(name); err == nil {
-			return p
-		}
+	if p, why := resolveBrowser(); p != "" {
+		return p
+	} else if why != "" {
+		missingRuntime(t, "chromium", why)
+		return ""
 	}
 	missingRuntime(t, "chromium", "the rendered-page graders load the served document in a real browser engine, which no scan of source text can replace")
 	return ""
+}
+
+// browserResolution is decided ONCE per test binary. Deciding it per call would exec the
+// candidate for every grader in the package, and the answer cannot change under a running
+// process anyway.
+var browserResolution struct {
+	once sync.Once
+	path string
+	why  string
+}
+
+// resolveBrowser returns the engine to measure with, or "" plus the sentence naming why
+// there is none. A pinned path must be a program this process can actually RUN and that
+// answers --version: the pin exists so the gate knows which engine produced a reading, and
+// a path that is merely present decides nothing.
+func resolveBrowser() (string, string) {
+	browserResolution.once.Do(func() {
+		if pinned := os.Getenv("HOLDFAST_BROWSER"); pinned != "" {
+			if err := browserAnswers(pinned); err != nil {
+				browserResolution.why = fmt.Sprintf(
+					"HOLDFAST_BROWSER names %q, which is not a browser engine this process can run (%v). "+
+						"An explicit pin is never replaced by a browser found on PATH, so the engine is unresolvable", pinned, err)
+				return
+			}
+			browserResolution.path = pinned
+			return
+		}
+		for _, name := range []string{"chromium", "chromium-browser", "google-chrome", "chrome"} {
+			p, err := exec.LookPath(name)
+			if err != nil {
+				continue
+			}
+			if browserAnswers(p) == nil {
+				browserResolution.path = p
+				return
+			}
+		}
+	})
+	return browserResolution.path, browserResolution.why
+}
+
+// browserAnswers asks the candidate what it is. A path that exists and is executable can
+// still be a wrapper that never returns - which is what a snap shim does when its
+// confinement is unhappy, and what CI's own browser step already refuses - so the question
+// is asked under a deadline and an unanswered one is not a browser.
+func browserAnswers(path string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "--version").CombinedOutput()
+	if ctx.Err() != nil {
+		return fmt.Errorf("it did not answer --version within 60s")
+	}
+	if err != nil {
+		return fmt.Errorf("--version: %w", err)
+	}
+	if len(bytes.TrimSpace(out)) == 0 {
+		return fmt.Errorf("--version printed nothing")
+	}
+	return nil
 }
 
 // nodeRuntime locates node or skips (fails, under required mode). The dashboard's

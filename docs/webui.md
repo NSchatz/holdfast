@@ -35,6 +35,7 @@ internal/webui/
   e2e/                      the rendered graders (Playwright). TEST ONLY - see below
     fixtureserver/          a Go command that mounts the REAL webui.HandlerFor
     fixtures/               the snapshots the scenarios serve
+    driver.mjs              the one engine driver, for the Go graders that operate a browser
     specs/probe.mjs         the measuring script, which decides nothing
     specs/graders.mjs       the predicates, which measure nothing
     specs/*.spec.mjs        the cases, and mutations.spec.mjs which defeats every grader
@@ -114,10 +115,10 @@ the grader stays silent. The sharpest of those is the policy grader, which asser
 is EMPTY: a dead instrument and a clean page report the same nothing, and only a page the
 engine must refuse can tell the two apart.
 
-This replaced a suite that drove the browser over `--remote-debugging-pipe` by hand. The
-measuring script moved across VERBATIM - rewriting the thing that does the measuring would
-have put every grader's verdict in doubt at the same moment, with nothing left to check it
-against - and no grader was deleted until its replacement was proved to bite.
+The measuring script moved onto the runner VERBATIM - rewriting the thing that does the
+measuring would have put every grader's verdict in doubt at the same moment, with nothing
+left to check it against - and no grader was deleted until its replacement was proved to
+bite.
 
 **Where the dependency reaches**, which is the load-bearing half: the BUILD PATH and the
 SHIPPED PAGE take none of it. `internal/webui/gen` is still Go and the standard library
@@ -129,8 +130,14 @@ asking for it on trust. Lifecycle scripts are disabled in a committed `.npmrc`, 
 runner uses the browser the machine already has - `HOLDFAST_BROWSER` or one on PATH -
 rather than downloading its own.
 
-`internal/webui/cdp_test.go` remains as the driver for the prose suite's own
-accessibility-tree read, which was never part of the convention set.
+**One engine driver, and only one.** The PROSE graders in the second suite ask the same
+three engine-only questions - the preference, the accessibility tree with each name's
+sources, and an evaluation the served policy would refuse inside the page - and their
+decisions are several hundred lines of Go that read committed records, so they stay in Go
+and reach the engine through `internal/webui/e2e/driver.mjs`: one browser, one JSON command
+per line. Two drivers would be two answers to "what did the engine say" every time they
+disagreed, which is why the hand-written one this repository used to carry is gone rather
+than kept beside the runner that answers the same questions.
 
 **Skip or fail.** `make check` is this repository's gate and stays green on a machine with
 no browser and no node: the suites skip, naming the runtime they wanted, exactly as the

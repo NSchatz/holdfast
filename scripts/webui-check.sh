@@ -43,12 +43,11 @@ fi
 # computed, dispatching real key presses - and it decides them against the same served
 # document, because its fixture server mounts the real webui.HandlerFor.
 #
-# It replaced a suite that drove the browser over --remote-debugging-pipe by hand. That
-# suite is gone, and nothing here waits for it: every criterion it decided is decided in
-# the project below, and every grader it carried is defeated on purpose there before it
-# was allowed to leave. Its Go wrapper additionally refuses a run whose JSON report shows a
-# skip or too few cases, so "it executed" and "it decided something" are separate claims
-# and both are checked.
+# There is exactly ONE engine driver in this repository and it is that runner's: the Go
+# graders in the second half that need the browser OPERATED reach it through the same
+# project (internal/webui/e2e/driver.mjs). Its Go wrapper additionally refuses a run whose
+# JSON report shows a skip or too few cases, so "it executed" and "it decided something"
+# are separate claims and both are checked.
 missing=0
 for half in \
   'TestUnit_:the derivation unit suite (node)' \
