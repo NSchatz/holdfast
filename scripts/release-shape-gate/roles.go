@@ -1,7 +1,7 @@
 package main
 
 // WHICH STEP IS THE FULL GATE? - answered from a step's declared identity, never from
-// prose in its text.
+// prose in its text, and answered FAIL-CLOSED.
 //
 // A7 is about an ORDER: the floating reference moves only after the full gate, both
 // architectures' smoke runs, the version-tag push and the re-smoke of the artefact pulled
@@ -24,17 +24,50 @@ package main
 //     them can claim a role, and no quoting, nesting or spelling reaches the comparison,
 //     because nothing is being searched for inside anything.
 //
+// THAT WAS NOT ENOUGH, AND THE REASON IS THE WHOLE RULE BELOW. "The first field is the
+// program, and every field the role requires is present" is satisfied by `make -n check`,
+// which is GNU make's dry-run mode: it PRINTS every recipe in `check`, executes not one of
+// them, and exits 0 (S0046 F18). The invocation names the gate perfectly and runs no gate.
+// So do `make -q check`, `make --dry-run check`, `make -Bn check`, `make check SHELL=true`
+// (SHELL is a make variable, and overriding it from the command line replaces the
+// interpreter of every recipe), `env: MAKEFLAGS: -n` with the `run:` untouched, and
+// `shell: cat`, which makes GitHub print the script instead of running it. Enumerating
+// those is the mistake this specification has already died of six times, in the other half
+// of this gate: a catalogue buys exactly the spellings it names and the next one is already
+// written.
+//
+// DENY BY DEFAULT, then - the same standard capability.go holds for `permissions:` and for
+// job and step keys. A role's invocation is accounted for FIELD BY FIELD, and a field the
+// role has not classified reds BY NAME. So does an environment name in scope for it that
+// nobody classified, a step key that changes what runs or where, a `defaults:` block, and
+// an action input outside the ones declared. Nothing is searched for; everything is either
+// declared, with the reason it cannot make the invocation do less than it says, or refused.
+// The next unseen spelling is a loud stop rather than a silent pass.
+//
 // The cost is stated: this constrains the release definition. A role step may not be an
-// inline multi-line script, and renaming one of these scripts means editing this table.
-// That is the trade the conductor's ruling called for - make the question decidable
-// instead of solving it - and a drift between the two reds loudly rather than quietly.
+// inline multi-line script, it may not carry a flag or an environment variable nobody has
+// classified, and renaming one of these scripts means editing this table. That is the trade
+// the conductor's ruling called for - make the question decidable instead of solving it -
+// and a drift between the two reds loudly rather than quietly.
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
+
+// fieldSpec is one field a role's invocation MAY carry, and the reason a human read it and
+// found that it cannot make the invocation do less than the role says it does. A field with
+// `values` takes exactly one value, and that value has to be one of them: `-C .` is the
+// directory make would have run in anyway, while `-C /somewhere/else` is a different
+// Makefile's `check`.
+type fieldSpec struct {
+	field  string
+	values []string
+	why    string
+}
 
 // role is one named position in the release, and what a step must invoke to hold it.
 type role struct {
@@ -43,11 +76,18 @@ type role struct {
 
 	planning bool // the planning step: the one script this gate EXECUTES
 
-	program      string   // the first field the one-line `run:` must be
-	mustField    []string // fields that must appear, compared WHOLE
-	mustNotField []string // fields that must not
+	program      string      // the first field the one-line `run:` must be
+	mustField    []string    // fields that must appear, compared WHOLE
+	mustNotField []string    // fields that must not, each with its own diagnosis
+	mayField     []fieldSpec // the ONLY other fields the invocation may carry
 
-	action string // for a `uses:` step, the action before its `@version`
+	action    string            // for a `uses:` step, the action before its `@version`
+	mustInput map[string]string // `with:` inputs that must carry exactly this value
+	mayInput  map[string]string // the other inputs it may carry, each with why it is inert
+
+	// mayEnv are the environment names this role's own invocation reads. Every other name
+	// in scope for the step must be classified in envCheckedAndInertForRoleSteps.
+	mayEnv map[string]string
 
 	needsGrant bool // it performs an irreversible act, so it must live in a job granted one
 }
@@ -60,47 +100,124 @@ var releaseRoles = []role{
 		id:       "plan",
 		what:     "the planning logic (which decides whether this run publishes at all)",
 		planning: true,
+		mayEnv: map[string]string{
+			"EVENT":    "the event name the plan keys on; the gate supplies it per shape",
+			"REF_NAME": "the ref the plan keys on; the gate supplies it per shape",
+			"REPO":     "the repository the image reference is derived from",
+		},
 	},
 	{
 		id:        "full-gate",
 		what:      "the full gate (make check)",
 		program:   "make",
 		mustField: []string{"check"},
+		mayField: []fieldSpec{
+			{
+				field:  "-C",
+				values: []string{"."},
+				why:    "make changes to the directory it is given before reading a Makefile, and `.` is the directory it would have run in anyway. Any OTHER directory is a different Makefile's `check`, which is why this field's value is declared rather than free",
+			},
+		},
 	},
 	{
-		id:           "smoke-amd64",
-		what:         "the linux/amd64 smoke run (a real encode inside the built image)",
-		program:      "./scripts/smoke-image.sh",
+		id:      "smoke-amd64",
+		what:    "the linux/amd64 smoke run (a real encode inside the built image)",
+		program: "./scripts/smoke-image.sh",
+		// The image the amd64 build step loads. Without it the role was satisfied by
+		// `./scripts/smoke-image.sh` with no argument at all, which exits 2 having smoked
+		// nothing.
+		mustField:    []string{"holdfast:release"},
 		mustNotField: []string{"--no-encode", "linux/arm64"},
 	},
 	{
 		id:        "smoke-arm64",
 		what:      "the linux/arm64 smoke run",
 		program:   "./scripts/smoke-image.sh",
-		mustField: []string{"linux/arm64"},
+		mustField: []string{"holdfast:release-arm64", "linux/arm64"},
+		mayField: []fieldSpec{
+			{
+				field: "--no-encode",
+				why:   "the arm64 run is exec-only under QEMU, so it may skip the encode. It is OPTIONAL rather than required: dropping it makes that run stricter, and a role must not refuse a step that does MORE than it promises",
+			},
+		},
 	},
 	{
-		id:         "push-version",
-		what:       "the version-tag push",
-		action:     "docker/build-push-action",
+		id:     "push-version",
+		what:   "the version-tag push",
+		action: "docker/build-push-action",
+		mustInput: map[string]string{
+			// Without this the action builds and exports nothing to a registry, so the
+			// version tag is never published while the step still holds the role.
+			"push": "true",
+		},
+		mayInput: map[string]string{
+			"context":    "which directory is built; it cannot stop the result being pushed",
+			"platforms":  "which architectures are built; the re-smoke pulls both back by name",
+			"tags":       "the references pushed, read and compared against the promotion below",
+			"build-args": "values baked into the image",
+			"cache-from": "where layers are read from; a cache is not a destination",
+		},
 		needsGrant: true,
 	},
 	{
 		id:      "resmoke",
 		what:    "the re-smoke of the artefact pulled back from the registry",
 		program: "./scripts/release-resmoke.sh",
+		mayEnv: map[string]string{
+			"REF": "the reference release-resmoke.sh pulls back and smokes",
+		},
 	},
 	{
-		id:         "promote-latest",
-		what:       "the promotion of the floating reference",
-		program:    "./scripts/release-promote.sh",
+		id:      "promote-latest",
+		what:    "the promotion of the floating reference",
+		program: "./scripts/release-promote.sh",
+		mayEnv: map[string]string{
+			"IMAGE":        "the image the promotion moves, compared against docker-compose.yml",
+			"VERSION":      "the version it is retagged onto",
+			floatingTagEnv: "the floating reference it moves; declared here once and read by the script",
+		},
 		needsGrant: true,
 	},
 	{
 		id:      "resolve-compose",
 		what:    "the resolution of the example deployment's reference against the registry",
 		program: "./scripts/resolve-compose-image.sh",
+		mayEnv: map[string]string{
+			"IMAGE":   "the image whose gated digest the compose reference must resolve to",
+			"VERSION": "the version just published",
+		},
 	},
+}
+
+// envCheckedAndInertForRoleSteps are environment names that may be in scope for ANY role
+// step, because a human has read each and found it unable to change what that step's
+// program does. Everything else - MAKEFLAGS, GOFLAGS, PATH, SHELL, BASH_ENV, and whatever
+// is invented next - reds by name, which is the point: `env: MAKEFLAGS: -n` neuters
+// `run: make check` without touching one character of the invocation.
+var envCheckedAndInertForRoleSteps = map[string]string{
+	"GO_VERSION": "which Go toolchain actions/setup-go installs. It selects a compiler; it cannot make a program run less than its invocation says",
+}
+
+// roleStepKeysCheckedAndInert are the step keys a role step may carry, each with the reason
+// it cannot change what the invocation does.
+var roleStepKeysCheckedAndInert = map[string]string{
+	"name":              "a label",
+	"id":                "the declared identity this role is located by",
+	"run":               "the invocation itself, accounted for field by field",
+	"uses":              "the action an action role names, compared whole",
+	"with":              "an action's inputs, accounted for above",
+	"env":               "values, every name of which is classified above",
+	"if":                "a guard, decided from the values the planning logic produced",
+	"continue-on-error": "whether a failure fails the run; refused before the promotion by A14",
+	"timeout-minutes":   "a clock. It can make a step FAIL, which is loud; it cannot make one pass having done less",
+}
+
+// roleStepKeysThatChangeAnInvocation are the ones that DO, each with how. They are listed
+// separately from the unclassified case only so the refusal can say what the key would have
+// done - the verdict is the same.
+var roleStepKeysThatChangeAnInvocation = map[string]string{
+	"shell":             "which interpreter runs the script, so the first field of the `run:` line need not be executed as a program at all: GitHub appends the script to the command given, and `shell: cat` prints it and exits 0",
+	"working-directory": "which directory the script runs in, so `make check` becomes some other Makefile's `check`",
 }
 
 // mustPrecede is A7's order, written once. Each pair is "a must have finished before b".
@@ -124,6 +241,26 @@ func roleWhat(id string) string {
 	return id
 }
 
+// roleInvocation is how a role is named in the order sentence: what the step INVOKES, which
+// is what this gate compared, rather than what that program then goes on to do, which it
+// does not read. See the note above checkOrder.
+func roleInvocation(id string) string {
+	for _, r := range releaseRoles {
+		if r.id != id {
+			continue
+		}
+		switch {
+		case r.planning:
+			return "the planning script, executed by this gate"
+		case r.action != "":
+			return "uses " + r.action
+		default:
+			return "invokes " + r.program
+		}
+	}
+	return id
+}
+
 // Roles is where each declared role was found.
 type Roles struct {
 	steps map[string]Step
@@ -132,10 +269,11 @@ type Roles struct {
 func (r Roles) step(id string) Step { return r.steps[id] }
 
 // locateRoles finds every declared role and proves each step really invokes what the role
-// says it does. Everything here is a whole-value comparison; nothing searches inside a
-// value. An unfound or miscast role is a hard error: the gate refuses to grade an order
-// over steps it could not identify (A15's family - a pass over a set it could not build is
-// the vacuous pass this gate exists to refuse).
+// says it does. Everything here is a whole-value comparison against a DECLARED set;
+// nothing searches inside a value, and anything undeclared reds by name. An unfound or
+// miscast role is a hard error: the gate refuses to grade an order over steps it could not
+// identify (A15's family - a pass over a set it could not build is the vacuous pass this
+// gate exists to refuse).
 func locateRoles(wf *Workflow, root string) (*Roles, error) {
 	found := map[string][]Step{}
 	for _, jid := range wf.JobIDs() {
@@ -158,6 +296,15 @@ func locateRoles(wf *Workflow, root string) (*Roles, error) {
 		}
 		s := steps[0]
 		if err := r.matches(s); err != nil {
+			return nil, err
+		}
+		if err := r.checkStepKeys(s); err != nil {
+			return nil, err
+		}
+		if err := r.checkEnv(wf, wf.Jobs[s.JobID], s); err != nil {
+			return nil, err
+		}
+		if err := checkNoDefaults(wf, wf.Jobs[s.JobID], s); err != nil {
 			return nil, err
 		}
 		if err := r.programExists(root); err != nil {
@@ -210,7 +357,7 @@ func (r role) matches(s Step) error {
 		if name != r.action {
 			return fmt.Errorf("%s holds the role `%s` (%s) but uses %q, not %q. The role names the action that performs it; a different action is a different act, and this gate will not grade an order over a step it cannot identify", s.Label(), r.id, r.what, name, r.action)
 		}
-		return nil
+		return r.accountForInputs(s)
 
 	default:
 		fields, err := runFields(s.Run)
@@ -231,8 +378,134 @@ func (r role) matches(s Step) error {
 				return fmt.Errorf("%s holds the role `%s` (%s) but its script passes %q, which that role must not: the fields are %v", s.Label(), r.id, r.what, forbid, fields)
 			}
 		}
-		return nil
+		return r.accountForFields(s, fields)
 	}
+}
+
+// accountForFields is the deny-by-default half, and it is what closes S0046 F18. Naming the
+// program and carrying the fields the role requires is NOT enough, because a flag can make
+// that program do nothing at all: `make -n check` prints every recipe in the gate and runs
+// none of them, exiting 0. So every remaining field must be one the role has DECLARED, with
+// the reason it cannot make the invocation do less. Anything else reds by name.
+//
+// This deliberately does not enumerate the bad fields. -n, -q, -t, --dry-run, --touch,
+// --question, -Bn and `SHELL=true` are all refused by the same sentence as the flag nobody
+// has thought of yet, which is the difference between this and the six catalogues that lost.
+func (r role) accountForFields(s Step, fields []string) error {
+	for i := 1; i < len(fields); {
+		f := fields[i]
+		if hasField(r.mustField, f) {
+			i++
+			continue
+		}
+		spec, ok := r.maySpec(f)
+		if !ok {
+			return fmt.Errorf("%s holds the role `%s` (%s), and its script passes %q - a field this role has not classified.\n"+
+				"An unrecognised field reads CLOSED. Naming the program and carrying the fields the role requires is not enough: `make -n check` names the full gate, prints every recipe in it, executes not one of them and exits 0 (S0046 F18), and so do -q, -t, --dry-run, a clustered -Bn and `check SHELL=true`. Enumerating those buys exactly the spellings it names.\n"+
+				"So the fields a role's invocation may carry are DECLARED. If %q genuinely cannot make this invocation do less than %q says it does, add it to this role's mayField with that reason; if it can, this refusal is the gate working.\n"+
+				"fields: %v\nrequired: %v\npermitted: %v",
+				s.Label(), r.id, r.what, f, f, r.id, fields, r.mustField, r.permittedFields())
+		}
+		if len(spec.values) == 0 {
+			i++
+			continue
+		}
+		if i+1 >= len(fields) {
+			return fmt.Errorf("%s holds the role `%s` (%s), and its script ends with %q, which takes a value (one of %v) and has none. The fields are %v",
+				s.Label(), r.id, r.what, f, spec.values, fields)
+		}
+		if v := fields[i+1]; !hasField(spec.values, v) {
+			return fmt.Errorf("%s holds the role `%s` (%s), and its script passes `%s %s`. That field's value is DECLARED rather than free, and %q is not one of %v: %s.\nThe fields are %v",
+				s.Label(), r.id, r.what, f, v, v, spec.values, spec.why, fields)
+		}
+		i += 2
+	}
+	return nil
+}
+
+// accountForInputs is the same rule for a role performed by an action: an input the role
+// requires must carry exactly the value it names (`push: true`, without which
+// docker/build-push-action builds and publishes nothing while the step still holds the
+// role), and an input nobody has classified reds - `outputs: type=local,dest=…` would send
+// the build to a directory instead of the registry.
+func (r role) accountForInputs(s Step) error {
+	for _, k := range sortedStringsOf(r.mustInput) {
+		got, ok := s.With[k]
+		if !ok {
+			return fmt.Errorf("%s holds the role `%s` (%s) but declares no `%s:` input. That role requires `%s: %s`: without it the action performs no published act at all, and a role that is held by a step which does nothing is the whole defect this comparison exists to refuse", s.Label(), r.id, r.what, k, k, r.mustInput[k])
+		}
+		if v := strings.TrimSpace(yamlString(got)); v != r.mustInput[k] {
+			return fmt.Errorf("%s holds the role `%s` (%s) but passes `%s: %s`, and that role requires `%s: %s`. Compared whole, because the difference between the two is the difference between a release and a build nobody published", s.Label(), r.id, r.what, k, v, k, r.mustInput[k])
+		}
+	}
+	for _, k := range sortedKeys(s.With) {
+		if _, ok := r.mustInput[k]; ok {
+			continue
+		}
+		if _, ok := r.mayInput[k]; ok {
+			continue
+		}
+		return fmt.Errorf("%s holds the role `%s` (%s) and passes the input `%s:`, which this role has not classified.\nAn unclassified input reads CLOSED: `outputs: type=local,dest=./out` would send this build to a directory rather than to the registry while every other input still reads like a push. Decide what `%s:` can do to this act and add it to that role's mayInput with the reason, or to mustInput with the value it must carry.\ndeclared inputs: %v",
+			s.Label(), r.id, r.what, k, k, r.declaredInputs())
+	}
+	return nil
+}
+
+// checkStepKeys refuses a key on a role step that changes what the invocation does or that
+// nobody has classified. `shell:` and `working-directory:` are the worked examples: neither
+// touches one character of the `run:` line, and either makes it do something else.
+func (r role) checkStepKeys(s Step) error {
+	for _, k := range mappingKeys(s.Node) {
+		if _, ok := roleStepKeysCheckedAndInert[k]; ok {
+			continue
+		}
+		if why, ok := roleStepKeysThatChangeAnInvocation[k]; ok {
+			return fmt.Errorf("%s holds the role `%s` (%s) and carries `%s:`, which decides %s.\nA role is held by a step INVOKING what the role names, and this key changes what that invocation does without changing one character of it. Move the step, or drop the key", s.Label(), r.id, r.what, k, why)
+		}
+		return fmt.Errorf("%s holds the role `%s` (%s) and carries the step key `%s:`, which this gate has not classified.\nAn unclassified key on a role step reads CLOSED: a key that decides which interpreter runs the script, or where it runs, changes what the invocation does while the invocation itself still reads correctly. Classify it in roleStepKeysCheckedAndInert with the reason it cannot, or in roleStepKeysThatChangeAnInvocation with what it decides", s.Label(), r.id, r.what, k)
+	}
+	return nil
+}
+
+// checkEnv refuses an environment name in scope for a role step that nobody has classified.
+// This is not fussiness: `MAKEFLAGS: -n` in the workflow's own `env:` block makes
+// `run: make check` print the gate's recipes and execute none of them, with the `run:` line
+// and every field of it untouched.
+func (r role) checkEnv(wf *Workflow, job Job, s Step) error {
+	sources := []struct {
+		where string
+		m     map[string]any
+	}{
+		{"the workflow's top-level `env:`", wf.Env},
+		{fmt.Sprintf("job %q's `env:`", job.ID), job.Env},
+		{"its own `env:`", s.Env},
+	}
+	for _, src := range sources {
+		for _, k := range sortedKeys(src.m) {
+			if _, ok := envCheckedAndInertForRoleSteps[k]; ok {
+				continue
+			}
+			if _, ok := r.mayEnv[k]; ok {
+				continue
+			}
+			return fmt.Errorf("%s holds the role `%s` (%s), and %s sets `%s`, which this gate has not classified.\nAn environment name in scope for a role step reads CLOSED, because it can change what the invocation does while the invocation reads exactly as it did: `MAKEFLAGS: -n` makes `run: make check` print the gate's recipes and run none of them.\nIf `%s` genuinely cannot, classify it in envCheckedAndInertForRoleSteps with the reason; if this role's own script reads it, declare it in that role's mayEnv. This role reads %v",
+				s.Label(), r.id, r.what, src.where, k, k, r.declaredEnv())
+		}
+	}
+	return nil
+}
+
+// checkNoDefaults refuses a `defaults:` block over a role step. `defaults: run: shell:` and
+// `defaults: run: working-directory:` are the same two neuters as the step keys above, set
+// one or two levels further away, where nobody reading the step would see them.
+func checkNoDefaults(wf *Workflow, job Job, s Step) error {
+	if wf.HasDefaults {
+		return fmt.Errorf("%s holds a release role, and the workflow declares a top-level `defaults:` block. That block sets the shell and the working directory every `run:` step gets, so it decides what a role's invocation does from two levels away: `defaults: run: shell: cat` makes every step print its script and exit 0. A release definition this gate grades declares no `defaults:`", s.Label())
+	}
+	if job.Node != nil && mappingValue(job.Node, "defaults") != nil {
+		return fmt.Errorf("%s holds a release role, and job %q declares a `defaults:` block. That block sets the shell and the working directory its `run:` steps get, so it decides what this invocation does without appearing anywhere near it. A job carrying a release role declares no `defaults:`", s.Label(), job.ID)
+	}
+	return nil
 }
 
 // runFields splits a role step's script into whole words, refusing anything but one line.
@@ -251,6 +524,57 @@ func runFields(run string) ([]string, error) {
 		return nil, fmt.Errorf("its `run:` is empty")
 	}
 	return fields, nil
+}
+
+func (r role) maySpec(field string) (fieldSpec, bool) {
+	for _, m := range r.mayField {
+		if m.field == field {
+			return m, true
+		}
+	}
+	return fieldSpec{}, false
+}
+
+func (r role) permittedFields() []string {
+	var out []string
+	for _, m := range r.mayField {
+		if len(m.values) == 0 {
+			out = append(out, m.field)
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s %v", m.field, m.values))
+	}
+	if out == nil {
+		return []string{"(none)"}
+	}
+	return out
+}
+
+func (r role) declaredEnv() []string {
+	out := append(sortedStringsOf(r.mayEnv), sortedStringsOf(envCheckedAndInertForRoleSteps)...)
+	sort.Strings(out)
+	if out == nil {
+		return []string{"(nothing)"}
+	}
+	return out
+}
+
+func (r role) declaredInputs() []string {
+	out := append(sortedStringsOf(r.mustInput), sortedStringsOf(r.mayInput)...)
+	sort.Strings(out)
+	if out == nil {
+		return []string{"(none)"}
+	}
+	return out
+}
+
+func sortedStringsOf(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func hasField(fields []string, want string) bool {

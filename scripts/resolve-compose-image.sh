@@ -26,6 +26,7 @@
 #   3  docker-compose.yml carries no image reference the one reader can read
 #   4  a reference does not resolve at all
 #   5  the compose reference resolves to a DIFFERENT digest than the gated version
+#   6  the one reader cannot be run here at all - a missing toolchain, not a bad compose file
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -44,8 +45,26 @@ if [ ! -r "$compose" ]; then
 fi
 
 # Ask the one reader. RELEASE_SHAPE_GATE lets a caller that has already built it (the
-# self-test) hand over the binary; otherwise it is built from source, which the release job
-# can always do because `make check` in the same job needs the same toolchain.
+# self-test) hand over the binary; otherwise it is built from source here, which needs a Go
+# toolchain in THIS job - the job that runs `make check` is a different one, and its
+# `actions/setup-go` does not reach here.
+#
+# That preflight is the whole reason for exit 6. Without it a missing toolchain surfaces as
+# "docker-compose.yml names NO image reference", which sends the next person to read a file
+# that is perfectly correct.
+if [ -n "${RELEASE_SHAPE_GATE:-}" ]; then
+  if [ ! -x "$RELEASE_SHAPE_GATE" ]; then
+    echo "::error::resolve-compose-image: RELEASE_SHAPE_GATE is set to '$RELEASE_SHAPE_GATE', which is not an executable. That is the one reader of docker-compose.yml, and this script will not guess at the reference without it." >&2
+    exit 6
+  fi
+elif ! command -v go >/dev/null 2>&1; then
+  echo "::error::resolve-compose-image: no Go toolchain on PATH, and none was handed over in RELEASE_SHAPE_GATE." >&2
+  echo "       docker-compose.yml has exactly one reader - scripts/release-shape-gate -print-compose-ref - and building it needs Go." >&2
+  echo "       This is a missing toolchain in THIS job, not a problem with the compose file: set up Go in the job that runs" >&2
+  echo "       this step, or build the reader earlier and pass it in RELEASE_SHAPE_GATE." >&2
+  exit 6
+fi
+
 read_ref() {
   if [ -n "${RELEASE_SHAPE_GATE:-}" ]; then
     "$RELEASE_SHAPE_GATE" -root "$here" -print-compose-ref

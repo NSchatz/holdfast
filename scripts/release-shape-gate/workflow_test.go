@@ -13,11 +13,24 @@ package main
 // legitimate spelling that must not.
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	yaml "go.yaml.in/yaml/v3"
 )
+
+// mustNode parses a YAML mapping and returns its node, which is what the key checks read.
+func mustNode(t *testing.T, body string) *yaml.Node {
+	t.Helper()
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(body), &doc); err != nil {
+		t.Fatalf("cannot parse %q: %v", body, err)
+	}
+	return doc.Content[0]
+}
 
 // load parses a workflow from source, failing the test if it will not parse.
 func load(t *testing.T, body string) *Workflow {
@@ -266,6 +279,76 @@ jobs:
 	}
 }
 
+// The three places a secret reaches a job, all of which must be seen. The workflow's own
+// `env:` is the one a scan of the JOB node alone would miss: it appears nowhere inside the
+// job and every job inherits it.
+func TestCanPublish_ASecretIsSeenWhereverItReachesTheJob(t *testing.T) {
+	cases := map[string]string{
+		"the workflow's top-level env": `
+name: t
+permissions:
+  contents: read
+env:
+  GHCR_PAT: ${{ secrets.GHCR_PUBLISH_PAT }}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - id: x
+        run: echo hello
+`,
+		"the job's own env": `
+name: t
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      GHCR_PAT: ${{ secrets.GHCR_PUBLISH_PAT }}
+    steps:
+      - id: x
+        run: echo hello
+`,
+		"an action input, which is not a key this gate models": `
+name: t
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - id: login
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          password: ${{ secrets.GHCR_PUBLISH_PAT }}
+`,
+	}
+	for where, body := range cases {
+		wf := load(t, body)
+		problems, err := CanPublish(wf, wf.Jobs["build"])
+		if err != nil {
+			t.Fatalf("%s: %v", where, err)
+		}
+		named := false
+		for _, p := range problems {
+			if strings.Contains(p.Detail, "GHCR_PUBLISH_PAT") {
+				named = true
+			}
+		}
+		if !named {
+			t.Fatalf("a repository secret in %s reaches this job and was not named: %v", where, problems)
+		}
+	}
+}
+
 func TestCanPublish_AnUnclassifiedKeyReadsClosed(t *testing.T) {
 	// A key that carries a capability, named with what it hands over.
 	wf := load(t, `
@@ -353,8 +436,21 @@ jobs:
 // F13, closed by construction: a role is what a step DECLARES and INVOKES, not what its
 // text mentions. `echo "make check"` cannot be the full gate, and no quoting reaches the
 // comparison because nothing is searched for inside anything.
+// roleByID returns the SHIPPED declaration, so every test below grades the table this gate
+// actually runs with rather than a hand-built lookalike that can drift away from it.
+func roleByID(t *testing.T, id string) role {
+	t.Helper()
+	for _, r := range releaseRoles {
+		if r.id == id {
+			return r
+		}
+	}
+	t.Fatalf("no role declares id %q", id)
+	return role{}
+}
+
 func TestRoleMatch_ARoleCannotBeClaimedByMentioningIt(t *testing.T) {
-	gate := role{id: "full-gate", what: "the full gate", program: "make", mustField: []string{"check"}}
+	gate := roleByID(t, "full-gate")
 	mustFail := []string{
 		`echo "make check"`,
 		`printf '%s\n' "make check"`,
@@ -382,9 +478,47 @@ func TestRoleMatch_ARoleCannotBeClaimedByMentioningIt(t *testing.T) {
 	}
 }
 
+// S0046 F18. Naming the program and carrying the fields the role requires is NOT enough:
+// `make -n check` is GNU make's dry-run mode, so it prints every recipe in the gate,
+// executes none of them and exits 0. The role held, the gate printed its order sentence, and
+// a tag push would have published an image whose `make check` never ran.
+//
+// The fix is not a list of bad flags - that is the shape that lost six times in this gate's
+// other half. Every field a role's invocation carries must be one the role DECLARED, so the
+// spellings below are refused by one sentence, along with the one nobody has thought of.
+func TestRoleFields_AFieldTheRoleNeverDeclaredIsRefused(t *testing.T) {
+	gate := roleByID(t, "full-gate")
+	neutered := []string{
+		`make -n check`,              // dry run: prints the recipes, runs none
+		`make --dry-run check`,       // the same, spelled long
+		`make -q check`,              // question mode: runs nothing, answers up-to-date
+		`make -t check`,              // touch mode: marks the targets made, runs nothing
+		`make --touch check`,         //
+		`make -Bn check`,             // clustered, so no single-flag comparison sees the -n
+		`make -n -C . check`,         // beside a field that IS declared
+		`make check SHELL=/bin/true`, // SHELL is a make variable; every recipe becomes a no-op
+		`make check MAKEFLAGS=-n`,    // the same neuter as an operand
+		`make -f /dev/null check`,    // a different Makefile's check, which is empty
+		`make -C /tmp check`,         // a declared field, an undeclared VALUE
+		`make -C`,                    // a declared field with no value at all
+	}
+	for _, run := range neutered {
+		if err := gate.matches(Step{Run: run, ID: "full-gate"}); err == nil {
+			t.Fatalf("%q holds the full-gate role while running no gate", run)
+		}
+	}
+	// And the other direction, or the above would be satisfied by a role that refuses
+	// everything: a real invocation of the gate, respelt, still holds it.
+	for _, run := range []string{`make check`, `make -C . check`} {
+		if err := gate.matches(Step{Run: run, ID: "full-gate"}); err != nil {
+			t.Fatalf("%q really is the full gate, and was refused: %v", run, err)
+		}
+	}
+}
+
 func TestRoleMatch_TheSmokeRunsAreToldApartByWhatTheyPass(t *testing.T) {
-	amd := role{id: "smoke-amd64", program: "./scripts/smoke-image.sh", mustNotField: []string{"--no-encode", "linux/arm64"}}
-	arm := role{id: "smoke-arm64", program: "./scripts/smoke-image.sh", mustField: []string{"linux/arm64"}}
+	amd := roleByID(t, "smoke-amd64")
+	arm := roleByID(t, "smoke-arm64")
 
 	if err := amd.matches(Step{Run: "./scripts/smoke-image.sh holdfast:release"}); err != nil {
 		t.Fatalf("the amd64 smoke run was refused: %v", err)
@@ -392,8 +526,18 @@ func TestRoleMatch_TheSmokeRunsAreToldApartByWhatTheyPass(t *testing.T) {
 	if err := amd.matches(Step{Run: "./scripts/smoke-image.sh holdfast:release --no-encode"}); err == nil {
 		t.Fatal("the amd64 role must drive a REAL encode; --no-encode makes it an exec check")
 	}
+	// The hole a mustNotField-only role leaves: with no required field, the role was held by
+	// an invocation that smokes no image at all and exits 2 on its own usage message.
+	if err := amd.matches(Step{Run: "./scripts/smoke-image.sh"}); err == nil {
+		t.Fatal("a smoke run with no image argument smokes nothing and must not hold the role")
+	}
 	if err := arm.matches(Step{Run: "./scripts/smoke-image.sh holdfast:release-arm64 linux/arm64 --no-encode"}); err != nil {
 		t.Fatalf("the arm64 smoke run was refused: %v", err)
+	}
+	// --no-encode is OPTIONAL there. Dropping it makes the arm64 run STRICTER, and a role
+	// must not refuse a step that does more than it promises.
+	if err := arm.matches(Step{Run: "./scripts/smoke-image.sh holdfast:release-arm64 linux/arm64"}); err != nil {
+		t.Fatalf("an arm64 smoke run that also encodes was refused: %v", err)
 	}
 	if err := arm.matches(Step{Run: "./scripts/smoke-image.sh holdfast:release"}); err == nil {
 		t.Fatal("a run that names no architecture cannot be the arm64 smoke run")
@@ -401,14 +545,129 @@ func TestRoleMatch_TheSmokeRunsAreToldApartByWhatTheyPass(t *testing.T) {
 }
 
 func TestRoleMatch_AnActionRoleIsTheActionItNames(t *testing.T) {
-	push := role{id: "push-version", action: "docker/build-push-action"}
-	if err := push.matches(Step{Uses: "docker/build-push-action@v6"}); err != nil {
+	push := roleByID(t, "push-version")
+	real := map[string]any{
+		"context":   ".",
+		"platforms": "linux/amd64,linux/arm64",
+		"push":      true,
+		"tags":      "ghcr.io/x/y:v0.1.0",
+	}
+	if err := push.matches(Step{Uses: "docker/build-push-action@v6", With: real}); err != nil {
 		t.Fatalf("the real push step was refused: %v", err)
 	}
 	for _, uses := range []string{"", "actions/checkout@v4", "evil/docker-build-push-action@v6"} {
-		if err := push.matches(Step{Uses: uses}); err == nil {
+		if err := push.matches(Step{Uses: uses, With: real}); err == nil {
 			t.Fatalf("%q is not docker/build-push-action and must not hold that role", uses)
 		}
+	}
+}
+
+// The action-role half of F18's class. `push: false` and an unclassified input each leave
+// the step holding the version-tag-push role while nothing is published, and neither
+// changes the action's name.
+func TestRoleInputs_AnActionRoleIsAccountedForInputByInput(t *testing.T) {
+	push := roleByID(t, "push-version")
+	base := func() map[string]any {
+		return map[string]any{
+			"context":   ".",
+			"platforms": "linux/amd64,linux/arm64",
+			"push":      true,
+			"tags":      "ghcr.io/x/y:v0.1.0",
+		}
+	}
+	off := base()
+	off["push"] = false
+	if err := push.matches(Step{Uses: "docker/build-push-action@v6", With: off}); err == nil {
+		t.Fatal("`push: false` publishes nothing and must not hold the version-tag-push role")
+	}
+	none := base()
+	delete(none, "push")
+	if err := push.matches(Step{Uses: "docker/build-push-action@v6", With: none}); err == nil {
+		t.Fatal("an action role with no `push:` input at all must be refused")
+	}
+	diverted := base()
+	diverted["outputs"] = "type=local,dest=./out"
+	if err := push.matches(Step{Uses: "docker/build-push-action@v6", With: diverted}); err == nil {
+		t.Fatal("an unclassified action input reads CLOSED: `outputs: type=local` sends the build to a directory")
+	}
+}
+
+// A role step's ENVIRONMENT is part of what its invocation does. `MAKEFLAGS: -n` neuters
+// `run: make check` without touching one character of the `run:` line, so an environment
+// name nobody classified reds - at any of the three levels that reach the step.
+func TestRoleEnv_AnUnclassifiedNameInScopeReadsClosed(t *testing.T) {
+	gate := roleByID(t, "full-gate")
+	step := Step{Run: "make check", ID: "full-gate", JobID: "build"}
+	inert := map[string]any{"GO_VERSION": "1.25.14"}
+
+	if err := gate.checkEnv(&Workflow{Env: inert}, Job{ID: "build"}, step); err != nil {
+		t.Fatalf("a classified, inert name was refused: %v", err)
+	}
+	for _, at := range []string{"workflow", "job", "step"} {
+		wf, job, s := &Workflow{Env: inert}, Job{ID: "build"}, step
+		hostile := map[string]any{"MAKEFLAGS": "-n"}
+		switch at {
+		case "workflow":
+			wf = &Workflow{Env: map[string]any{"GO_VERSION": "1.25.14", "MAKEFLAGS": "-n"}}
+		case "job":
+			job.Env = hostile
+		case "step":
+			s.Env = hostile
+		}
+		if err := gate.checkEnv(wf, job, s); err == nil {
+			t.Fatalf("MAKEFLAGS at the %s level neuters `make check` and must red", at)
+		}
+	}
+	// The names a role's own script reads are declared by that role, and only by it.
+	promote := roleByID(t, "promote-latest")
+	withEnv := Step{Run: "./scripts/release-promote.sh", ID: "promote-latest", JobID: "publish",
+		Env: map[string]any{"IMAGE": "x", "VERSION": "v0.1.0", floatingTagEnv: "latest"}}
+	if err := promote.checkEnv(&Workflow{Env: inert}, Job{ID: "publish"}, withEnv); err != nil {
+		t.Fatalf("the promotion's own declared env was refused: %v", err)
+	}
+	if err := gate.checkEnv(&Workflow{Env: inert}, Job{ID: "build"}, Step{Run: "make check", ID: "full-gate", JobID: "build",
+		Env: map[string]any{"IMAGE": "x"}}); err == nil {
+		t.Fatal("a name declared by ANOTHER role must not be accepted here")
+	}
+}
+
+// The step-key half. Neither of these touches the `run:` line, and either makes it do
+// something else: `shell: cat` prints the script and exits 0.
+func TestRoleStepKeys_AKeyThatChangesTheInvocationIsRefused(t *testing.T) {
+	gate := roleByID(t, "full-gate")
+	for _, body := range []string{
+		"name: g\nid: full-gate\nrun: make check\n",
+		"name: g\nid: full-gate\nrun: make check\nif: always()\n",
+		"name: g\nid: full-gate\nrun: make check\ntimeout-minutes: 30\n",
+	} {
+		if err := gate.checkStepKeys(Step{Node: mustNode(t, body)}); err != nil {
+			t.Fatalf("an inert set of keys was refused (%s): %v", body, err)
+		}
+	}
+	for _, body := range []string{
+		"name: g\nid: full-gate\nrun: make check\nshell: cat\n",
+		"name: g\nid: full-gate\nrun: make check\nworking-directory: /tmp\n",
+		"name: g\nid: full-gate\nrun: make check\nsome-future-key: x\n",
+	} {
+		if err := gate.checkStepKeys(Step{Node: mustNode(t, body)}); err == nil {
+			t.Fatalf("a key that changes what the invocation does was accepted: %s", body)
+		}
+	}
+}
+
+// A `defaults:` block sets the shell and working directory of every `run:` step from one or
+// two levels away, where nobody reading the step would see it.
+func TestRoleDefaults_ADefaultsBlockOverARoleStepIsRefused(t *testing.T) {
+	s := Step{Run: "make check", ID: "full-gate", JobID: "build"}
+	if err := checkNoDefaults(&Workflow{}, Job{ID: "build"}, s); err != nil {
+		t.Fatalf("a definition with no defaults was refused: %v", err)
+	}
+	if err := checkNoDefaults(&Workflow{HasDefaults: true}, Job{ID: "build"}, s); err == nil {
+		t.Fatal("a workflow-level `defaults:` decides what every role invocation does and must red")
+	}
+	job := Job{ID: "build", Node: mustNode(t, "runs-on: ubuntu-latest\ndefaults:\n  run:\n    shell: cat\n")}
+	if err := checkNoDefaults(&Workflow{}, job, s); err == nil {
+		t.Fatal("a job-level `defaults:` over a role step must red")
 	}
 }
 
@@ -532,5 +791,59 @@ func TestTolerates_AnExpressionIsNotADecidedFalse(t *testing.T) {
 	}
 	if ok, why := tolerates("${{ github.event_name == 'push' }}"); !ok || !strings.Contains(why, "${{") {
 		t.Fatalf("an expression decides at run time whether a failure counts, and `may not fail the run` is the whole hazard: %v %q", ok, why)
+	}
+}
+
+// --- which events reach this workflow at all? ---------------------------------------------
+
+// The gate plans four event shapes, and for six ordinals it read `on:` to check they were
+// the shapes this workflow has exactly never. `on: push: branches: ["v0.**"]` beside the tag
+// filter makes a push to a BRANCH named `v0.9.9` a `push` event whose ref_name is `v0.9.9`,
+// which the planning logic - which cannot tell a branch from a tag - reads as a release, and
+// every assertion this gate makes stays green because the shape it graded is still the shape
+// it invented.
+func TestTriggerSurface_AnEventNoShapePlansIsRefused(t *testing.T) {
+	shaped := func(on string) *Workflow {
+		return load(t, on+`
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - id: plan
+        run: echo "publish=false" >> "$GITHUB_OUTPUT"
+`)
+	}
+	committed := "\non:\n  push:\n    tags: [\"v*\"]\n  workflow_dispatch:\n"
+	g := &gate{out: io.Discard}
+	g.checkTriggerSurface(shaped(committed))
+	if g.failed {
+		t.Fatal("the committed event surface must pass")
+	}
+
+	refused := map[string]string{
+		"a branch filter beside the tag filter": "\non:\n  push:\n    tags: [\"v*\"]\n    branches: [\"v0.**\"]\n  workflow_dispatch:\n",
+		"a branches-ignore filter":              "\non:\n  push:\n    tags: [\"v*\"]\n    branches-ignore: [\"nope\"]\n  workflow_dispatch:\n",
+		"a push with no tag filter":             "\non:\n  push:\n  workflow_dispatch:\n",
+		"the short sequence form":               "\non: [push, workflow_dispatch]\n",
+		"the short scalar form":                 "\non: push\n",
+		"an event nothing plans":                "\non:\n  push:\n    tags: [\"v*\"]\n  workflow_dispatch:\n  schedule:\n    - cron: \"0 3 * * *\"\n",
+		"a dispatch input":                      "\non:\n  push:\n    tags: [\"v*\"]\n  workflow_dispatch:\n    inputs:\n      publish:\n        type: boolean\n",
+		"a push filter nobody classified":       "\non:\n  push:\n    tags: [\"v*\"]\n    some-future-filter: x\n  workflow_dispatch:\n",
+	}
+	for name, on := range refused {
+		g := &gate{out: io.Discard}
+		g.checkTriggerSurface(shaped(on))
+		if !g.failed {
+			t.Fatalf("%s reaches the publishing path through a shape nothing planned, and was accepted", name)
+		}
+	}
+
+	// An absent `on:` is not "it triggers on nothing".
+	g = &gate{out: io.Discard}
+	g.checkTriggerSurface(&Workflow{})
+	if !g.failed {
+		t.Fatal("a definition with no `on:` block must red rather than be graded against invented shapes")
 	}
 }

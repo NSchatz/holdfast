@@ -202,17 +202,38 @@ the self-test asserts it: a `build` step may say `docker push`, `sh -c "docker p
 or `export PATH=/usr/bin:/bin; docker push …` and the gate PASSES, because none of them can publish - while
 the IDENTICAL step in a job granted `packages: write` reds. What decides the verdict is the grant.
 
-**A ROLE is DECLARED, not searched for.** A7 is an order, so the gate must know which step is the full gate
-and which the promotion; deciding that by searching a step for a mention of the thing is what let
-`echo "make check"` be the full gate. Each position now has a step `id:` the gate names, and the step must
-INVOKE what the role names, compared WHOLE: a role step's `run:` is ONE line, its fields are whole words, and
-the FIRST field must BE the program. `echo make check` and `"make" check` fail; `make check` and
-`make -C . check` pass. Nothing is searched for inside anything, so no quoting or nesting reaches the
-comparison - and that is why `scripts/release-resmoke.sh` and `scripts/release-promote.sh` are files rather
-than inline scripts. The order comes from `needs:` and declaration order; two jobs with no path between them
-are CONCURRENT and the gate refuses to order them. An ACT, for the runbook cross-check, is likewise every step
-in the job that holds the grant, identified by its id: nothing about what a step SAYS is consulted, so a new
-publishing step cannot avoid `docs/release.md` by being spelled unrecognisably.
+**A ROLE is DECLARED, not searched for - and ACCOUNTED FOR, not merely recognised.** A7 is an order, so the
+gate must know which step is the full gate and which the promotion; deciding that by searching a step for a
+mention of the thing is what let `echo "make check"` be the full gate. Each position now has a step `id:` the
+gate names, and the step must INVOKE what the role names, compared WHOLE: a role step's `run:` is ONE line,
+its fields are whole words, and the FIRST field must BE the program. `echo make check` and `"make" check`
+fail; `make check` and `make -C . check` pass. Nothing is searched for inside anything, so no quoting or
+nesting reaches the comparison - and that is why `scripts/release-resmoke.sh` and `scripts/release-promote.sh`
+are files rather than inline scripts.
+
+That much still let `make -n check` hold the full-gate role, and `-n` is GNU make's dry-run mode: it prints
+every recipe in `check`, executes not one of them and exits 0. The role held, the order sentence printed, and
+a tag push would have published an image whose `make check` never ran. So do `-q`, `-t`, `--dry-run`, a
+clustered `-Bn`, `check SHELL=/bin/true`, `env: MAKEFLAGS: -n` with the `run:` untouched, `shell: cat`
+(GitHub appends the script to whatever command is given), `working-directory: /tmp`, a `defaults:` block, and
+`push: false` on the action role. **Do not enumerate them.** A role's invocation is ACCOUNTED FOR,
+deny-by-default, over its whole structured surface - every `run:` field, every environment name in scope at
+any of the three levels, every step key, `defaults:` at either level, and every action input must be one the
+role DECLARED, with the reason it cannot make that invocation do less. A `-C` is permitted for the full gate
+and its VALUE is declared too, so `-C .` passes and `-C /tmp` reds. Anything undeclared reds BY NAME, which is
+the difference between this and the six catalogues of bad spellings that lost.
+
+The order comes from `needs:` and declaration order; two jobs with no path between them are CONCURRENT and the
+gate refuses to order them. An ACT, for the runbook cross-check, is likewise every step in the job that holds
+the grant, identified by its id: nothing about what a step SAYS is consulted, so a new publishing step cannot
+avoid `docs/release.md` by being spelled unrecognisably.
+
+**The EVENT SURFACE is graded, not assumed.** The four shapes the gate plans are shapes it invents, so `on:`
+is read and held to them: a trigger no shape plans reds by name, and so does a `push:` filter admitting
+anything but a tag. `branches: ["v0.**"]` beside `tags: ["v*"]` would make `git push origin HEAD:v0.9.9` a
+`push` event whose `ref_name` is `v0.9.9`, which the planning logic - which cannot tell a branch from a tag -
+reads as a release, with every other assertion here still green. `on: push`, `on: [push]` and a
+`workflow_dispatch:` carrying `inputs:` are refused for the same reason.
 
 **The gate executes exactly ONE step**, the one holding the `plan` role; a second step writing to
 `$GITHUB_OUTPUT` reds, because executing a workflow's step scripts to find out what they do is the mechanism
@@ -221,10 +242,16 @@ that could reach a registry, plus a declared set of pure utilities), `HOME` and 
 throwaway directory, and a 90-second timeout; invoking a registry tool from the planning step is itself an
 error. **The rule when you extend this**: do NOT teach the gate to read a step's text - there is no reader,
 and there will not be one. A step that must publish goes in the job that holds the grant and gains a runbook
-row; a step that must not goes in the job that holds none; an unclassified key gets classified with what it
-can hand a job. The residues, stated so nobody has to find them: a planning script that resets `PATH` itself
+row; a step that must not goes in the job that holds none; an unclassified key, field, environment name or
+action input gets CLASSIFIED, with what it can hand a job or with the reason it cannot change what an
+invocation does. The residues, stated so nobody has to find them: a planning script that resets `PATH` itself
 can still run a program (a property of running repository code at all, which `make check` already does), and a
 credential written LITERALLY into the workflow rather than through `secrets.` is outside the model.
+The bodies of `scripts/release-promote.sh`, `scripts/release-resmoke.sh` and
+`scripts/resolve-compose-image.sh` are outside it too, by the same rule - the gate checks each is present,
+executable, and handed the values the planning logic produced, and says only that in its output. What they DO
+is proved by `make release-shape-selftest`, which runs each of them against a recording stub and compares the
+invocations whole, the way `make install-ffmpeg-selftest` proves that script's five failure modes.
 The compose reference has exactly ONE reader: `scripts/resolve-compose-image.sh` asks the gate for it
 (`-print-compose-ref`) instead of parsing the file a second time in sed, because two readers agree on today's
 file and diverge on a quoted scalar, a second service with an `image:`, or an `image:` nested outside

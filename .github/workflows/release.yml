@@ -285,6 +285,16 @@ jobs:
       - uses: docker/setup-buildx-action@v3
         id: setup-buildx
 
+      # This job needs Go for one thing: scripts/resolve-compose-image.sh builds the single
+      # reader of docker-compose.yml's image reference. `make check` and its own setup-go are
+      # in the `build` job, which is a different runner, so without this the last step of a
+      # release would depend on whatever Go `ubuntu-latest` happens to ship.
+      - uses: actions/setup-go@v5
+        id: setup-go
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
       # The tarballs the build job gated. They are downloaded, never rebuilt: a rebuild
       # here would ship bytes nothing in this run has checked.
       - uses: actions/download-artifact@v4

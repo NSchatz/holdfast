@@ -43,6 +43,8 @@ type Workflow struct {
 	Permissions any            `yaml:"permissions"`
 
 	HasPermissions bool                  // whether the key is present at all; absence is not "none"
+	HasDefaults    bool                  // a top-level `defaults:` decides what every `run:` step does
+	OnNode         *yaml.Node            // the raw `on:` node - the event surface, graded rather than assumed
 	JobNodes       map[string]*yaml.Node // the raw mapping node of each job
 }
 
@@ -124,6 +126,11 @@ func LoadWorkflow(path string) (*Workflow, error) {
 		return nil, fmt.Errorf("the release definition CANNOT BE PARSED (%s): %v", path, err)
 	}
 	wf.HasPermissions = mappingValue(root, "permissions") != nil
+	wf.HasDefaults = mappingValue(root, "defaults") != nil
+	// `on:` is read from the RAW node. YAML resolves a bare `on` key differently between
+	// schema versions, and this gate refuses to depend on which: the key's own text is what
+	// GitHub reads, so it is what is looked up here.
+	wf.OnNode = mappingValue(root, "on")
 	if len(wf.Jobs) == 0 {
 		return nil, fmt.Errorf("the release definition NAMES NO JOB (%s)", path)
 	}

@@ -221,11 +221,14 @@ type secretRef struct {
 	where string
 }
 
-// secretsReachedBy lists every credential reference in a job.
-func secretsReachedBy(job Job) []secretRef {
+// secretsReachedBy lists every credential reference a job can see. That is the job's own
+// node AND the workflow's top-level `env:`, which every job inherits: a secret declared
+// there reaches a dispatch-path step without appearing anywhere inside the job, so a scan
+// that walked only the job node would have to be rescued by something else noticing.
+func secretsReachedBy(wf *Workflow, job Job) []secretRef {
 	var out []secretRef
 	seen := map[string]bool{}
-	scalars(job.Node, "", func(where, value string) {
+	scan := func(where, value string) {
 		for _, m := range reSecretRef.FindAllStringSubmatch(value, -1) {
 			name := ""
 			switch {
@@ -245,7 +248,13 @@ func secretsReachedBy(job Job) []secretRef {
 			seen[key] = true
 			out = append(out, secretRef{name: name, where: where})
 		}
-	})
+	}
+	scalars(job.Node, "", scan)
+	if wf != nil {
+		for _, k := range sortedKeys(wf.Env) {
+			scan("the workflow's top-level `env:`."+k, yamlString(wf.Env[k]))
+		}
+	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].name != out[j].name {
 			return out[i].name < out[j].name
@@ -282,7 +291,7 @@ func CanPublish(wf *Workflow, job Job) ([]CapabilityProblem, error) {
 			grants.Where, strings.Join(parts, ", "))})
 	}
 
-	for _, ref := range secretsReachedBy(job) {
+	for _, ref := range secretsReachedBy(wf, job) {
 		if ref.name == scopedToken {
 			continue // bounded by the grant checked immediately above
 		}

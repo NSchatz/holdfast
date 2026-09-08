@@ -32,7 +32,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=68
+declared=104
 pass=0; failed=0
 
 repo="$work/repo"
@@ -287,9 +287,36 @@ reset
 
 # --- 11. A repository secret on the dispatch path. `permissions:` does not bound one - its
 #         scope is whatever was put in it - so a step holding one can publish regardless.
-in_step "the full gate (make check)" 's|^      - name: .*|&\n        env:\n          TOKEN: ${{ secrets.RELEASE_PAT }}|'
+#         Put on a step that holds no ROLE, so that the capability check is what catches it:
+#         an unclassified environment name on a role step is refused one layer earlier, by
+#         role identity (case 17g), and this case is about the grant rather than the role.
+in_step "install ffmpeg" 's|^      - name: .*|&\n        env:\n          TOKEN: ${{ secrets.RELEASE_PAT }}|'
 changed "$wf" "a repository secret on the dispatch path"
 expect 1 "a secret other than the scoped GITHUB_TOKEN is caught on the dispatch path" "reads .secrets.RELEASE_PAT."
+reset
+
+# --- 11a. The SAME secret one level further out, in the workflow's own `env:`, which every
+#          job inherits. It reaches a dispatch-path step without appearing anywhere inside
+#          the job. TWO independent layers now refuse it and the first one wins here: an
+#          environment name in scope for a ROLE step must be classified (role identity), and
+#          the capability scan walks the workflow's env as well as the job's node. The second
+#          layer is asserted directly by TestCanPublish_ASecretInTheWorkflowEnvIsReachedByEveryJob,
+#          because a case can only ever see whichever refusal comes first.
+replace_line '^  GO_VERSION: "1.25.14"$' '  GO_VERSION: "1.25.14"\n  GHCR_PAT: ${{ secrets.GHCR_PUBLISH_PAT }}'
+changed "$wf" "a workflow-level env handing every job a repository secret"
+expect 1 "a repository secret in the workflow's own env is refused at the first layer that sees it" "GHCR_PAT., which this gate has not classified"
+reset
+
+# --- 11b. THE INHERITED GRANT. The workflow's top-level block widened to write-all and the
+#          dispatch-path job's own block removed, so what it runs with is the workflow's.
+#          A job's own `permissions:` REPLACES the workflow's, so removing one is not a
+#          narrowing.
+replace_line '^permissions:$' 'permissions: write-all'
+sed -i '/^  contents: read$/d' "$wf"
+sed -i '/^      contents: read # read the tree/d' "$wf"
+sed -i '/^    permissions:$/{0,/^    permissions:$/d}' "$wf"
+changed "$wf" "a dispatch-path job inheriting write-all"
+expect 1 "a dispatch-path job inheriting the workflow's write-all is caught" "grants WRITE on"
 reset
 
 # --- 12. `environment:` hands the job that environment's secrets, which this file cannot
@@ -348,6 +375,46 @@ changed "$wf" "the same publishing step, in a job granted packages: write"
 expect 1 "the identical step in a job granted packages: write IS caught - the grant is what decides" "grants WRITE on packages"
 reset
 
+# --- 15f, 15g. A GUARD THIS GATE CANNOT DECIDE IS NOT A GUARD THAT IS FALSE. The publishing
+#          job's `if:` is what keeps it off the dispatch path, and both of these make it
+#          undecidable: an expression function nobody implemented, and a context path this
+#          run never produced. Reading either as "does not run" is the fail-open in its
+#          purest form.
+sed -i "s|^    if: needs.build.outputs.publish == 'true'\$|    if: fromJSON(needs.build.outputs.publish)|" "$wf"
+changed "$wf" "a publishing guard using an unimplemented function"
+expect 1 "a publishing guard this gate cannot evaluate is refused, not read as false" "cannot be decided"
+reset
+
+sed -i "s|^    if: needs.build.outputs.publish == 'true'\$|    if: github.event.inputs.publish == 'true'|" "$wf"
+changed "$wf" "a publishing guard on a context nothing produced"
+expect 1 "a publishing guard on a context the run never produced is refused" "cannot be decided"
+reset
+
+# --- 15h. A publishing job written as a YAML ANCHOR and cloned by an alias. The node walk
+#          yields nothing for the alias, so the CLONE is never named - but the anchor job is
+#          a real mapping, is walked, and reds, so the definition as a whole is refused.
+#          (GitHub Actions does not accept anchors in a workflow file either.)
+cat > "$work/sidecar.yml" <<'YML'
+  sidecar: &sidecar
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: push a dev image so testers can pull dispatch builds
+        id: sidecar-push
+        run: docker push ghcr.io/nschatz/holdfast:dev
+
+  sidecar-clone: *sidecar
+
+YML
+awk -v f="$work/sidecar.yml" '
+  /^  build:$/ && !d { while ((getline line < f) > 0) print line; d = 1 }
+  { print }
+' "$wf" > "$wf.new" && mv "$wf.new" "$wf"
+changed "$wf" "an anchored publishing job cloned by an alias"
+expect 1 "an anchored dispatch-path job granted packages: write is caught" "holds a capability"
+reset
+
 # --- 16. The other half of the split: an irreversible act must live in a job that can
 #         actually perform it, or the boundary is decorative and the release fails at run
 #         time having passed this gate.
@@ -380,11 +447,113 @@ changed "$wf" "the full gate reduced to an unquoted echo"
 expect 1 "a step whose fields merely include the gate's cannot hold the role either" "the first word of its script has to BE that program"
 reset
 
+# --- 17b to 17f. F18, DRIVEN FOR REAL. Cases 17 and 17a both turn on the FIRST field, and
+#         until this loop no case drove a `make` invocation that makes make run nothing.
+#         `make -n check` names the full gate exactly, prints every recipe in it, executes
+#         not one of them, and exits 0 - so the role held, the order sentence printed, and a
+#         tag push would have published an image whose `make check` never ran.
+#
+#         These are FIVE spellings of one hole and they are refused by ONE rule: a field the
+#         role never declared reds by name. That is deliberately not a list of bad flags -
+#         a catalogue of spellings is what lost six times in this gate's other half - so the
+#         long form, the clustered form and the operand form are all refused by the same
+#         sentence as the flag nobody has thought of yet.
+for spelling in \
+  'make -n check' \
+  'make --dry-run check' \
+  'make -Bn check' \
+  'make check SHELL=/bin/true' \
+  'make -f /dev/null check'
+do
+  in_step "the full gate (make check)" "s|^        run: make check\$|        run: $spelling|"
+  changed "$wf" "the full gate neutered as: $spelling"
+  expect 1 "a full gate spelled \`$spelling\` runs no gate and cannot hold the role" \
+    "a field this role has not classified"
+  reset
+done
+
+# --- 17f2. A field the role DOES declare, carrying a value it does not. `-C` is permitted
+#         because `.` is the directory make would have run in anyway; any other directory is
+#         a different Makefile's `check`, which may be empty.
+in_step "the full gate (make check)" 's|^        run: make check$|        run: make -C /tmp check|'
+changed "$wf" "the full gate pointed at another directory"
+expect 1 "a declared field carrying an undeclared value is caught" "That field's value is DECLARED rather than free"
+reset
+
+# --- 17g. THE SAME NEUTER WITH THE INVOCATION UNTOUCHED. `MAKEFLAGS: -n` in the step's env
+#         makes `run: make check` a dry run without changing one character of the `run:`
+#         line, so a rule that only accounted for fields would print "ok" over it.
+in_step "the full gate (make check)" 's|^      - name: .*|&\n        env:\n          MAKEFLAGS: -n|'
+changed "$wf" "the full gate neutered through its environment"
+expect 1 "an unclassified environment name in scope for a role step is caught" "which this gate has not classified"
+reset
+
+# --- 17g2. And at the WORKFLOW level, where it reaches every role step at once.
+replace_line '^  GO_VERSION: "1.25.14"$' '  GO_VERSION: "1.25.14"\n  MAKEFLAGS: -n'
+changed "$wf" "a workflow-level MAKEFLAGS"
+expect 1 "a workflow-level environment name nobody classified is caught too" "which this gate has not classified"
+reset
+
+# --- 17h. `shell:` decides which interpreter runs the script. GitHub appends the script to
+#         the command given, so `shell: cat` prints it and exits 0.
+in_step "the full gate (make check)" 's|^      - name: .*|&\n        shell: cat|'
+changed "$wf" "the full gate handed to cat"
+expect 1 "a role step whose shell is not a shell is caught" "which decides which interpreter runs the script"
+reset
+
+# --- 17i. `working-directory:` makes `make check` some other Makefile's check.
+in_step "the full gate (make check)" 's|^      - name: .*|&\n        working-directory: /tmp|'
+changed "$wf" "the full gate run somewhere else"
+expect 1 "a role step moved to another directory is caught" "which decides which directory the script runs in"
+reset
+
+# --- 17j. The same two neuters set from the JOB, where nobody reading the step would see them.
+sed -i '0,/^    runs-on: ubuntu-latest$/s//&\n    defaults:\n      run:\n        shell: cat/' "$wf"
+changed "$wf" "a job-level defaults block over the role steps"
+expect 1 "a job \`defaults:\` block over a role step is caught" "declares a .defaults:. block"
+reset
+
+# --- 17k. THE OTHER ROLE WITH THIS HOLE. The amd64 smoke role declared what it must NOT
+#         pass and nothing it MUST, so `./scripts/smoke-image.sh` with no image argument held
+#         it - a run that smokes nothing and exits 2 on its own usage message.
+in_step "smoke test the image (real encode" 's|^        run: ./scripts/smoke-image.sh holdfast:release$|        run: ./scripts/smoke-image.sh|'
+changed "$wf" "the amd64 smoke run with no image at all"
+expect 1 "a smoke run that names no image cannot hold that role" "passes no argument"
+reset
+
+# --- 17l. And a script role handed a flag nobody declared.
+in_step "smoke test the PUSHED image" 's|^        run: ./scripts/release-resmoke.sh$|        run: ./scripts/release-resmoke.sh --skip|'
+changed "$wf" "the re-smoke handed an undeclared flag"
+expect 1 "an undeclared field on a script role is caught" "a field this role has not classified"
+reset
+
+# --- 17m. THE ACTION ROLE'S VERSION OF F18. `push: false` leaves the step being exactly the
+#         action the role names while publishing nothing at all.
+in_step "push the multi-arch image" 's|^          push: true$|          push: false|'
+changed "$wf" "the version-tag push turned off"
+expect 1 "an action role that publishes nothing cannot hold the push role" "that role requires .push: true"
+reset
+
+# --- 17n. And an input nobody classified: this one diverts the build to a local directory.
+in_step "push the multi-arch image" 's|^          push: true$|          push: true\n          outputs: type=local,dest=./out|'
+changed "$wf" "the version-tag push diverted to a directory"
+expect 1 "an unclassified action input reads CLOSED" "which this role has not classified"
+reset
+
 # --- 18. THE HONEST OTHER DIRECTION, and it is what keeps 17 a reading of the invocation
 #         rather than a refusal of every respelling: `make -C . check` IS the full gate.
 in_step "the full gate (make check)" 's|^        run: make check$|        run: make -C . check|'
 changed "$wf" "the full gate respelled with -C"
 expect 0 "a respelt but real invocation of the full gate still holds the role"
+reset
+
+# --- 18a. The other direction for the OPTIONAL half. `--no-encode` is permitted on the arm64
+#         smoke run, not required: dropping it makes that run STRICTER, and a role that
+#         refused a step for doing MORE than it promises would be exact equality by another
+#         name - which is what deny-by-default must not collapse into.
+in_step "smoke test the arm64 image" 's|^        run: ./scripts/smoke-image.sh holdfast:release-arm64 linux/arm64 --no-encode$|        run: ./scripts/smoke-image.sh holdfast:release-arm64 linux/arm64|'
+changed "$wf" "an arm64 smoke run that also encodes"
+expect 0 "an arm64 smoke run that drops its optional flag still holds the role"
 reset
 
 # --- 19. The role's declaration removed. The gate refuses rather than grading an order over
@@ -754,6 +923,249 @@ else
   printf '%s\n' "$o" | sed 's/^/       | /' >&2
   failed=$((failed + 1))
 fi
+
+# =====================================================================================
+# THE EVENT SURFACE. Every shape above is one the gate INVENTS - a dispatch, a version tag,
+# a pre-release tag, a non-zero major. They are only the right shapes if `on:` says so.
+# =====================================================================================
+
+# --- 61a. The hole this closes, in one line of YAML: a branch filter beside the tag filter.
+#          A push to a BRANCH named `v0.9.9` is a `push` event whose ref_name is `v0.9.9`,
+#          and the planning logic keys on the event name and the ref name - it cannot tell a
+#          branch from a tag. `git push origin HEAD:v0.9.9` would publish a release, and
+#          every assertion above would stay green, because the shape they graded is still the
+#          shape the gate invented.
+sed -i 's|^    tags: \["v\*"\]$|    tags: ["v*"]\n    branches: ["v0.**"]|' "$wf"
+changed "$wf" "a branch filter beside the tag filter"
+expect 1 "a push filter that admits a BRANCH is caught, naming what it lets through" "a push to a BRANCH"
+reset
+
+# --- 61b. The short form, which carries no filter at all, so every push to every branch runs
+#          this workflow.
+awk '
+  /^on:$/ && !d { print "on: [push, workflow_dispatch]"; d = 1; skip = 1; next }
+  skip && /^$/ { skip = 0 }
+  skip { next }
+  { print }
+' "$wf" > "$wf.new" && mv "$wf.new" "$wf"
+changed "$wf" "the short on: form"
+expect 1 "an \`on:\` that is not a mapping of events to filters is caught" "The short forms"
+reset
+
+# --- 61c. A trigger nothing plans. Every assertion here is made about a shape the gate
+#          planned, so an event outside that set is an entry nothing below says anything
+#          about - publishing job included.
+replace_line '^  workflow_dispatch:$' '  workflow_dispatch:\n  schedule:\n    - cron: "0 3 * * *"'
+changed "$wf" "a trigger no shape plans"
+expect 1 "a trigger this gate plans no shape for is caught by name" "which this gate plans no shape for"
+reset
+
+# --- 61d. `workflow_dispatch: inputs:` - which is how a dispatch-publish tick-box gets added.
+#          release.yml's own header says there is deliberately no such input.
+replace_line '^  workflow_dispatch:$' '  workflow_dispatch:\n    inputs:\n      publish:\n        type: boolean'
+changed "$wf" "a dispatch input"
+expect 1 "a workflow_dispatch input is caught, because it is a second dispatch shape" "A dispatch is planned as ONE shape"
+reset
+
+# =====================================================================================
+# THE RELEASE SCRIPTS THEMSELVES. The gate does NOT read them and must not - deciding what
+# a step's `run:` script does is the route six ordinals defeated. So what they do is proved
+# the way scripts/install-ffmpeg.sh's failure modes are: by RUNNING them, against a
+# recording stub, with every invocation compared whole. Nothing here reaches a network.
+#
+# Each assertion is also driven against a deliberately gutted copy of its script, because an
+# assertion that could not fail is not evidence - which is the same rule case 0 exists for.
+# =====================================================================================
+
+recbin="$work/recbin"; mkdir -p "$recbin"
+rec="$work/argv.log"
+cat > "$recbin/docker" <<'REC'
+#!/bin/sh
+# Records its argv and succeeds, unless REC_FAIL globs the invocation.
+printf '%s\n' "docker $*" >> "$REC_LOG"
+case "docker $*" in
+  ${REC_FAIL:-__never__}) exit 1 ;;
+esac
+exit 0
+REC
+chmod +x "$recbin/docker"
+
+# release-resmoke.sh drives the packaging gate itself; here that is a recorder too, so this
+# case measures WHICH references it smokes rather than re-running the real smoke test.
+stub_smoke() {
+  cat > "$repo/scripts/smoke-image.sh" <<'REC'
+#!/bin/sh
+printf '%s\n' "smoke-image.sh $*" >> "$REC_LOG"
+exit 0
+REC
+  chmod +x "$repo/scripts/smoke-image.sh"
+  changed "$repo/scripts/smoke-image.sh" "the packaging gate replaced by a recorder"
+}
+
+# run_release_script <script> <want-exit> -- runs it under the recording stub. Sets $out.
+run_release_script() {
+  local script="$1" want="$2" name="$3" got=0
+  : > "$rec"
+  out="$( cd "$repo" && PATH="$recbin:$PATH" REC_LOG="$rec" REC_FAIL="${REC_FAIL:-}" \
+          IMAGE="${S_IMAGE-}" VERSION="${S_VERSION-}" FLOATING_TAG="${S_FLOATING-}" REF="${S_REF-}" \
+          "./scripts/$script" 2>&1 )" || got=$?
+  if [ "$got" -ne "$want" ]; then
+    printf '::error::selftest: %s - %s exited %s, wanted %s\n' "$name" "$script" "$got" "$want" >&2
+    printf '%s\n' "$out" | sed 's/^/       | /' >&2
+    printf '%s\n' "$(cat "$rec")" | sed 's/^/       argv | /' >&2
+    return 1
+  fi
+  return 0
+}
+
+recorded() { grep -qxF -- "$1" "$rec"; }
+
+# --- 63. The promotion retags the exact version this run gated onto the floating reference,
+#         and the retag is `imagetools create`, which does not rebuild.
+S_IMAGE=ghcr.io/nschatz/holdfast S_VERSION=v0.1.0 S_FLOATING=latest S_REF='' REC_FAIL=''
+promote_argv='docker buildx imagetools create -t ghcr.io/nschatz/holdfast:latest ghcr.io/nschatz/holdfast:v0.1.0'
+if run_release_script release-promote.sh 0 "the promotion retags the gated version" && recorded "$promote_argv"; then
+  printf '  ok: the promotion retags the gated version reference onto the floating one\n'; pass=$((pass + 1))
+else
+  printf '::error::selftest: the promotion did not retag %s\n' "$promote_argv" >&2
+  sed 's/^/       argv | /' "$rec" >&2
+  failed=$((failed + 1))
+fi
+
+# --- 64. AND THAT ASSERTION BITES. The mutation is impl-gate ordinal 1's own F5 probe: the
+#         floating reference re-pointed at an image built locally that the run never pushed.
+sed -i 's|"${image}:${version}"|holdfast:release|g' "$repo/scripts/release-promote.sh"
+changed "$repo/scripts/release-promote.sh" "a promotion retagging from a locally built image"
+run_release_script release-promote.sh 0 "a promotion from a local build" >/dev/null 2>&1 || true
+if recorded "$promote_argv"; then
+  printf '::error::selftest: case 63 does not bite - a promotion from a locally built image still produced the expected argv\n' >&2
+  failed=$((failed + 1))
+else
+  printf '  ok: case 63 bites: a promotion pointing at a locally built image is not the gated retag\n'; pass=$((pass + 1))
+fi
+reset
+
+# --- 65. Its named failure modes, exit code by exit code. Refusing to guess which reference
+#         a release moves is the whole reason FLOATING_TAG is passed in rather than spelled.
+S_IMAGE='' S_VERSION='' S_FLOATING='' REC_FAIL=''
+if run_release_script release-promote.sh 2 "the promotion with nothing supplied" \
+   && grep -qE 'Refusing to guess which reference' <<<"$out"; then
+  printf '  ok: the promotion refuses to guess which reference to move\n'; pass=$((pass + 1))
+else
+  printf '::error::selftest: the promotion did not refuse an unsupplied reference by name\n' >&2
+  failed=$((failed + 1))
+fi
+
+# --- 66. A retag that does not take leaves the floating reference exactly where it was, and
+#         says so - which is A3's promise at the level of the one command that moves it.
+S_IMAGE=ghcr.io/nschatz/holdfast S_VERSION=v0.1.0 S_FLOATING=latest
+REC_FAIL='docker buildx imagetools create*'
+if run_release_script release-promote.sh 3 "a retag that does not take" \
+   && grep -qE 'left exactly where it was' <<<"$out"; then
+  printf '  ok: a failed retag reports that the floating reference did not move\n'; pass=$((pass + 1))
+else
+  printf '::error::selftest: a failed retag did not report the floating reference as unmoved\n' >&2
+  failed=$((failed + 1))
+fi
+REC_FAIL=
+reset
+
+# --- 67. The re-smoke pulls the reference that was PUSHED back out of the registry, for BOTH
+#         architectures, and drives the packaging gate over each. An unqualified `docker
+#         pull` resolves only the runner's own architecture, so the arm64 half would ship
+#         having been gated as a local build alone.
+stub_smoke
+S_IMAGE='' S_VERSION='' S_FLOATING='' S_REF=ghcr.io/nschatz/holdfast:v0.1.0
+resmoke_ok=1
+run_release_script release-resmoke.sh 0 "the re-smoke of the pushed artefact" || resmoke_ok=0
+for want in \
+  'docker pull --platform linux/amd64 ghcr.io/nschatz/holdfast:v0.1.0' \
+  'docker pull --platform linux/arm64 ghcr.io/nschatz/holdfast:v0.1.0' \
+  'smoke-image.sh ghcr.io/nschatz/holdfast:v0.1.0' \
+  'smoke-image.sh ghcr.io/nschatz/holdfast:v0.1.0 linux/arm64 --no-encode'
+do
+  recorded "$want" || { printf '::error::selftest: the re-smoke never ran: %s\n' "$want" >&2; resmoke_ok=0; }
+done
+if [ "$resmoke_ok" -eq 1 ]; then
+  printf '  ok: the re-smoke pulls the pushed reference back for both architectures and smokes each\n'; pass=$((pass + 1))
+else
+  sed 's/^/       argv | /' "$rec" >&2
+  failed=$((failed + 1))
+fi
+
+# --- 68. AND THAT ASSERTION BITES: the script gutted to `exit 0` pulls nothing and smokes
+#         nothing, and the gate cannot see it - which is exactly why this case is here.
+printf '#!/usr/bin/env bash\n# pulls nothing back, smokes nothing.\nexit 0\n' > "$repo/scripts/release-resmoke.sh"
+chmod +x "$repo/scripts/release-resmoke.sh"
+changed "$repo/scripts/release-resmoke.sh" "a gutted re-smoke"
+run_release_script release-resmoke.sh 0 "a gutted re-smoke" >/dev/null 2>&1 || true
+if [ -s "$rec" ]; then
+  printf '::error::selftest: case 67 does not bite - a re-smoke gutted to `exit 0` still recorded invocations\n' >&2
+  failed=$((failed + 1))
+else
+  printf '  ok: case 67 bites: a re-smoke gutted to `exit 0` pulls nothing and smokes nothing\n'; pass=$((pass + 1))
+fi
+reset
+
+# --- 69. Its named failure modes.
+stub_smoke
+S_REF=
+if run_release_script release-resmoke.sh 2 "the re-smoke with no reference" \
+   && grep -qE 'no REF given' <<<"$out"; then
+  printf '  ok: the re-smoke refuses when it is given no reference to pull back\n'; pass=$((pass + 1))
+else
+  printf '::error::selftest: the re-smoke did not refuse a missing reference by name\n' >&2
+  failed=$((failed + 1))
+fi
+
+# --- 70. A pushed image that does not pull back fails the release BEFORE the promotion, which
+#         is the ordering `:latest` depends on.
+S_REF=ghcr.io/nschatz/holdfast:v0.1.0
+REC_FAIL='docker pull*'
+if run_release_script release-resmoke.sh 3 "a pushed image that does not pull back" \
+   && grep -qE 'does not pull back' <<<"$out"; then
+  printf '  ok: a pushed image that does not pull back fails the re-smoke by name\n'; pass=$((pass + 1))
+else
+  printf '::error::selftest: a failed pull-back was not reported by name\n' >&2
+  failed=$((failed + 1))
+fi
+REC_FAIL=
+S_REF=
+reset
+
+# --- 71. resolve-compose-image.sh's own preflight. The one reader is BUILT here, and the job
+#         that runs `make check` (with its setup-go) is a different one - so a missing
+#         toolchain has to name itself rather than surface as "docker-compose.yml names no
+#         image reference", which sends the next person to read a file that is correct.
+nogo="$work/nogo"; mkdir -p "$nogo"
+for t in bash dirname sed awk grep cat; do
+  p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$nogo/$t"
+done
+ln -sf "$recbin/docker" "$nogo/docker"
+got=0
+o="$( cd "$repo" && PATH="$nogo" IMAGE=ghcr.io/nschatz/holdfast VERSION=v0.1.0 \
+      ./scripts/resolve-compose-image.sh 2>&1 )" || got=$?
+if [ "$got" -eq 6 ] && grep -qE 'no Go toolchain on PATH' <<<"$o"; then
+  printf '  ok: a missing Go toolchain names itself rather than blaming the compose file\n'; pass=$((pass + 1))
+else
+  printf '::error::selftest: resolve-compose-image.sh with no Go toolchain exited %s, wanted 6\n' "$got" >&2
+  printf '%s\n' "$o" | sed 's/^/       | /' >&2
+  failed=$((failed + 1))
+fi
+
+# =====================================================================================
+# WHAT THE GATE'S OWN OUTPUT CLAIMS. A6 grades a SENTENCE as well as an exit code, and the
+# two can come apart in both directions: a refusal that still reassures, and a PASS that
+# states something nothing checked.
+# =====================================================================================
+
+# --- 72, 73. A green run must not claim what the release scripts DO. Both of these sentences
+#         were printed by a green run until this loop, and gutting either script left both of
+#         them printing: the gate reads neither file beyond an executable-bit check, and it
+#         must not (the capability ruling). A sentence that states their effect reassures
+#         every reader who skims stdout over a question nothing asked.
+expect_absent 0 "a green run never claims the promotion is the same digest rather than a rebuild" "the same digest, not a rebuild"
+expect_absent 0 "a green run never claims the re-smoke pulled anything back" "the re-smoke of the pulled artefact"
 
 # --- 61. A6 grades a SENTENCE as well as an exit code, and the two can come apart: a gate
 #         that says "NONE of them holds a capability" over a question it just refused would

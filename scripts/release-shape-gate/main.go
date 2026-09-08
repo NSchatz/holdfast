@@ -197,6 +197,11 @@ func (g *gate) run() error {
 	}
 	g.note("%s parses, and names %d job(s): %s", releaseWorkflow, len(wf.Jobs), strings.Join(wf.JobIDs(), ", "))
 
+	// Which events can reach this workflow at all - graded before anything is planned for
+	// them, because every shape below is one this gate INVENTS and they are only the right
+	// shapes if `on:` says so. See triggers.go.
+	g.checkTriggerSurface(wf)
+
 	roles, err := locateRoles(wf, g.root)
 	if err != nil {
 		return err
@@ -583,10 +588,27 @@ func (g *gate) checkOrder(wf *Workflow, roles *Roles, p *planned) {
 		}
 	}
 	if problems == 0 {
-		g.note("on %s the order holds: %s -> both smoke runs -> the version-tag push -> the re-smoke of the pulled artefact -> %s -> %s",
-			p.shape.label, roleWhat("full-gate"), roles.step("promote-latest").Label(), roleWhat("resolve-compose"))
+		// WHAT THIS SENTENCE CLAIMS, AND WHAT IT DOES NOT. It names the STEPS, by declared
+		// id and by the program each invokes, in the order the `needs:` graph and
+		// declaration order put them. It does not say what any of those programs then does
+		// - this gate does not read scripts/release-resmoke.sh, scripts/release-promote.sh
+		// or scripts/smoke-image.sh, and it must not (the conductor's capability ruling:
+		// deciding what a step's `run:` script DOES is not an acceptable route). Those
+		// scripts' behaviour is driven for real, against a stubbed registry, by
+		// `make release-shape-selftest`. A sentence here that described their EFFECT would
+		// reassure every reader who skims stdout over a question nothing asked, which is
+		// what expect_absent exists to refuse.
+		var chain []string
+		for _, id := range orderedRoles {
+			chain = append(chain, fmt.Sprintf("%s (%s)", roles.step(id).Label(), roleInvocation(id)))
+		}
+		g.note("on %s the order holds, by declared id, `needs:` and declaration order:\n      %s\n      What each of those programs DOES is not read here; `make release-shape-selftest` drives the release scripts for real against a stubbed registry.",
+			p.shape.label, strings.Join(chain, "\n      -> "))
 	}
 }
+
+// orderedRoles is the chain the order sentence prints, in the sequence mustPrecede requires.
+var orderedRoles = []string{"full-gate", "smoke-amd64", "smoke-arm64", "push-version", "resmoke", "promote-latest", "resolve-compose"}
 
 // precedes decides whether `a` is guaranteed to have finished before `b` starts. Within one
 // job that is declaration order. Across jobs it is the `needs:` graph, and two jobs with no
@@ -887,12 +909,22 @@ func (g *gate) checkComposeReferenceAgreement(wf *Workflow, roles *Roles, p *pla
 		g.bad("%s does not push exactly the version this run gated.\nexpected: %s\nactually: %s", push.Label(), gated, strings.Join(refs, " "))
 		return
 	}
-	g.note("the promotion retags %s onto %s - the same digest, not a rebuild", promoted, gated)
+	// WHAT WAS CHECKED, AND BY WHOM. Everything above is structured YAML this gate read:
+	// the promotion step's `env:` names the floating reference it is handed, the push step's
+	// `tags:` input names the references it publishes, and those references are compared
+	// whole. Whether `scripts/release-promote.sh` then retags rather than rebuilds is a
+	// property of that script, which this gate does not read - it is driven for real,
+	// against a stubbed registry with its argv recorded, by `make release-shape-selftest`.
+	// The sentence used to say "the same digest, not a rebuild", which stated the script's
+	// EFFECT over a question nothing here asked.
+	g.note("%s is handed %s to move and %s to move it onto, and %s publishes %s and nothing else. What %s does with them is driven by `make release-shape-selftest`, not read here",
+		promote.Label(), promoted, gated, push.Label(), gated, roles.step("promote-latest").Run)
 
-	// A11's wiring: something resolves that reference against the registry after the
-	// promotion, or A5 has no enforcement behind it on any release after the first. The
-	// order is checked in checkOrder; this states what it buys.
-	g.note("the example deployment's reference is resolved against the registry after the promotion, by %s", roles.step("resolve-compose").Label())
+	// A11's wiring: a step declaring `id: resolve-compose` runs after the promotion, or A5
+	// has no enforcement behind it on any release after the first. The order is checked in
+	// checkOrder; this states which step carries it. What that script does against a
+	// registry is driven, four exit codes at a time, by `make release-shape-selftest`.
+	g.note("after the promotion, %s runs, invoking %s", roles.step("resolve-compose").Label(), roles.step("resolve-compose").Run)
 }
 
 // interpolatedInput reads one `with:` input, with every expression in it decided against the
