@@ -54,7 +54,8 @@ a build, and no build step depends on it being regenerated:
 |---|---|
 | `make webui-gen` | rewrite `internal/webui/index.html` from `internal/webui/src`. The only writer of that file |
 | `make webui-stale` | fail if the committed document is not what the sources generate. Part of `make check` |
-| `make webui-check` | the dashboard's two suites in REQUIRED mode (see below) |
+| `make webui-check` | the dashboard's three suites in REQUIRED mode (see below) |
+| `make webui-graders-selftest` | defeat each engine-only question on purpose and require the graders to red. NOT part of `make check`; CI runs it |
 
 The generator is **Go and the standard library only**. There is no JavaScript runtime, no
 bundler, no registry package, no lockfile and no network in the build path, so `make
@@ -106,6 +107,14 @@ They grade the **served document**: `e2e/fixtureserver` mounts the real
 `webui.HandlerFor`, so what a spec loads is the same bytes and the same
 Content-Security-Policy `holdfast serve` puts on the wire. There is one reader of that
 document in this repository, deliberately.
+
+Those three are the whole reason there is a browser in this gate, so they are the three
+`make webui-graders-selftest` DEFEATS on purpose - one palette wearing both preferences, a
+control whose label is detached so the engine names it by its placeholder, a control taken
+out of the tab order - against a mutated COPY of the tree, requiring each grader to red and
+to say what it saw, and failing if any defeat did not execute. It is not part of `make
+check` (mutations must not touch the tree `check` grades); CI runs it beside the gate. The
+count of cases is `declared=` in that script, its single writer, which the run prints.
 
 The layering is the point, and it is why every grader can be proved: `probe.mjs` MEASURES
 and decides nothing, `graders.mjs` DECIDES and measures nothing, the spec files drive the

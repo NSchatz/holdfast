@@ -182,6 +182,17 @@ jobs:
       - name: the dashboard's unit suite and rendered graders, in required mode
         run: make webui-check
 
+      # The engine-only graders' own self-test, on top of the gate. `make webui-check` RUNS
+      # them; this defeats each of the three questions that exist only at the engine - the
+      # operating system's colour-scheme preference, the accessible name the engine
+      # computes, the focus a real key press moves - against a mutated COPY of the tree, and
+      # fails if any defeat did not execute or came back green. Proving a grader REDS is a
+      # different assertion from running it, and these three are the whole reason there is a
+      # browser in this gate. It sits here rather than in `check` for the same reason the
+      # release-shape self-test does: its mutations must not touch the tree `check` grades.
+      - name: the engine-only graders must still bite
+        run: make webui-graders-selftest
+
   # The packaging gate. It runs on every PR the same script the release workflow runs
   # before it pushes anything (scripts/smoke-image.sh), so the image a tag ships is the
   # image that has been gated all along.

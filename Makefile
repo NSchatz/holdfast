@@ -45,7 +45,7 @@ PLATFORM ?= linux/amd64
 .PHONY: build test check fmt vet staticcheck govulncheck govulncheck-selftest \
         check-pins check-pins-selftest install-ffmpeg-selftest check-pin-live \
         release-shape release-shape-selftest \
-        webui-gen webui-stale webui-check \
+        webui-gen webui-stale webui-check webui-graders-selftest \
         tidy clean image image-smoke compose-check
 
 build:
@@ -146,6 +146,18 @@ webui-stale:
 # gate does, so a contributor with no browser is not blocked.
 webui-check:
 	./scripts/webui-check.sh
+
+# Proves the dashboard's ENGINE-ONLY graders still BITE. Three questions are the whole
+# reason there is a browser in this gate - the operating system's colour-scheme preference,
+# the accessible name the engine computes, and the focus a real key press moves - and none
+# of them is answerable from the document, so a grader that quietly stopped deciding one
+# would take the coverage with it and report "ok". Each is defeated on purpose here against
+# a mutated COPY of the tree, each defeat must be red AND say what it saw, and the run fails
+# if any defeat did not execute. Deliberately NOT part of `check`: the mutations belong in
+# their own target, and `check` must never re-render the tree it is grading. A guard nobody
+# tries to defeat is a guard nobody knows works.
+webui-graders-selftest:
+	./scripts/webui-graders-selftest.sh
 
 # THE gate. CI and the release workflow both run exactly this.
 check: check-pins check-pins-selftest install-ffmpeg-selftest release-shape webui-stale fmt vet build test staticcheck govulncheck govulncheck-selftest
