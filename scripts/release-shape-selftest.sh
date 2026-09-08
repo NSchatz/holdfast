@@ -33,7 +33,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=140
+declared=158
 pass=0; failed=0
 
 repo="$work/repo"
@@ -1128,6 +1128,124 @@ in_step "cut the GitHub release" 's|^        id: github-release$|        id: cut
 changed "$wf" "the release-cutting act renamed out from under its declaration"
 expect 1 "an act this gate holds values for that no step declares is red" \
   "declares .id: github-release."
+reset
+
+# =====================================================================================
+# AND THE TRACE ENDS AT THE PLANNING LOGIC'S OUTPUT. Every case above holds a release
+# step's object to that output. Nothing above holds the OUTPUT ITSELF to anything, so a
+# plan that pins the published version to a literal leaves every one of those references
+# structurally perfect - the push, the re-smoke, the promotion, the resolution and the
+# release cut all name `needs.build.outputs.version` - and republishes an already-released
+# version on every later tag, with the order, the grant and the runbook all still green
+# (S0046 F27). And the literal that makes it invisible is `v0.1.0`: the version this
+# repository has ACTUALLY published and the tag this gate plans its own real-release shape
+# with.
+#
+# The answer is not another sample - that is the shape that lost eight times over on the
+# other half of this gate - and it is not a longer list either, because a fixed list of tags
+# is a lookup table waiting to be written into the planning script. The gate triggers a
+# release on tags it DRAWS for that run, pairwise distinct and never one it names, and holds
+# the version each one produces to the tag that produced it.
+#
+# So each defeat below is graded TWICE against the same mutated tree: it must red for THIS
+# property's own reason, and it must not still print the satisfied note. A refusal that goes
+# on reassuring a reader who skims stdout is the failure mode case 61 exists for. The two
+# runs also draw different tags, which is the point.
+# =====================================================================================
+
+note_held='the version a release publishes is the tag the run was triggered on'
+not_the_tag='NOT the tag it was triggered on'
+undecided='CANNOT DECIDE what version'
+
+# --- 74. The property is CLAIMED by a green run at all. Without this, every case below could
+#         be satisfied by a check that never runs.
+expect 0 "a green run states that the version a release publishes is the tag the run was triggered on" "$note_held"
+
+# --- 75. THE SPELLING NOTHING ELSE IN THIS GATE CAN SEE, and the one a maintainer would
+#         actually write: the published version pinned to v0.1.0 whenever a run publishes and
+#         is not a pre-release. The major-zero refusal and the pre-release derivation are left
+#         keyed on the real ref, so `v1.0.0` is still refused and `v0.1.0-rc1` still does not
+#         promote - only the value that is pushed, re-smoked, promoted, resolved and named in
+#         the release notes is pinned.
+replace_line '^          case "[$]version" in [*]-[*]' '          case "$version" in *-*) prerelease=true ;; esac\n          if [ "$publish" = "true" ] && [ "$prerelease" = "false" ]; then\n            version="v0.1.0"\n          fi'
+changed "$wf" "the planning logic pinning the published version to the version already released"
+expect 1 "a plan that pins the published version to the version this repository has ALREADY published is caught" "$not_the_tag"
+expect_absent 1 "a plan pinned to the published version never prints the note that the version tracks the trigger tag" "$note_held"
+reset
+
+# --- 76. A version the plan DECORATES rather than replaces. `+build` is build metadata, so it
+#         carries no `-` and the pre-release derivation still says false: the release path
+#         accepts it, every reference stays traceable, and the artefact published is not the
+#         tag anybody cut.
+sed -i 's|^            version="[$]REF_NAME"$|            version="${REF_NAME}+build"|' "$wf"
+changed "$wf" "the planning logic decorating the trigger tag"
+expect 1 "a plan that decorates the trigger tag is caught" "$not_the_tag"
+expect_absent 1 "a plan that decorates the trigger tag never prints the note that the version tracks the trigger tag" "$note_held"
+reset
+
+# --- 77. THE CASE THAT DECIDES WHETHER THE TAGS ARE DRAWN OR LISTED. The plan echoes the
+#         trigger tag for exactly the tags this gate NAMES elsewhere and pins everything else
+#         to the published version. A gate holding the version over a fixed list of tags -
+#         however long the list - is green here; one that draws them cannot be.
+replace_line '^          case "[$]version" in [*]-[*]' '          case "$version" in *-*) prerelease=true ;; esac\n          case "$version" in v0.1.0|v0.1.0-rc1) : ;; *) if [ "$publish" = "true" ]; then version="v0.1.0"; fi ;; esac'
+changed "$wf" "the planning logic special-casing the tags this gate names"
+expect 1 "a plan that echoes the tag only for the tags this gate names elsewhere is caught, because the tags are DRAWN and not listed" "$not_the_tag"
+expect_absent 1 "a plan that special-cases the named tags never prints the note that the version tracks the trigger tag" "$note_held"
+reset
+
+# --- 78. AN UNDECIDED TAG IS NOT A PASSED TAG, and this is the shape that would make the hold
+#         vacuous the quiet way: the planning logic REFUSES every tag but the ones this gate
+#         names, so a check that skipped what it could not decide would be left holding the
+#         version over the one tag a literal can coincide with.
+replace_line '^          case "[$]version" in [*]-[*]' '          case "$version" in *-*) prerelease=true ;; esac\n          case "$version" in\n            v0.1.0|v0.1.0-rc1) : ;;\n            *) if [ "$publish" = "true" ]; then echo "::error::unrecognised tag $version" >&2; exit 3; fi ;;\n          esac'
+changed "$wf" "the planning logic refusing every tag but the ones this gate names"
+expect 1 "a planning run that fails for a tag the gate triggers a release on is red, naming the tag" "$undecided"
+expect_absent 1 "a tag the planning logic refused never prints the note that the version tracks the trigger tag" "$note_held"
+reset
+
+# --- 79. The same hole reached by writing nothing: the output is empty for every tag but the
+#         named ones, so the reference this run pushes, re-smokes, promotes and resolves is the
+#         empty string - and the compose agreement cannot see it either, because both sides of
+#         that comparison go empty together.
+replace_line '^          case "[$]version" in [*]-[*]' '          case "$version" in *-*) prerelease=true ;; esac\n          case "$version" in v0.1.0|v0.1.0-rc1) : ;; *) if [ "$publish" = "true" ]; then version="" ; fi ;; esac'
+changed "$wf" "the planning logic writing no version for the tags it was not told about"
+expect 1 "a planning run that writes no version for a tag the gate triggers a release on is red, naming the tag" "$undecided"
+expect_absent 1 "a tag the planning logic wrote no version for never prints the note that the version tracks the trigger tag" "$note_held"
+reset
+
+# --- 80. And by publishing nothing: a release path that publishes only the tags this gate
+#         happens to name is one whose published version nothing holds.
+replace_line '^          case "[$]version" in [*]-[*]' '          case "$version" in *-*) prerelease=true ;; esac\n          case "$version" in v0.1.0|v0.1.0-rc1) : ;; *) publish=false ;; esac'
+changed "$wf" "the planning logic publishing only the tags this gate names"
+expect 1 "a planning run that publishes nothing for a tag the gate triggers a release on is red, naming the tag" "$undecided"
+expect_absent 1 "a tag the planning logic would not publish never prints the note that the version tracks the trigger tag" "$note_held"
+reset
+
+# --- 81. And by reaching for a program on those tags. The planning step DECIDES; one that
+#         invokes a tool is not planning, and the gate must say it could not decide that tag
+#         rather than grade whatever the tool left behind.
+replace_line '^          case "[$]version" in [*]-[*]' '          case "$version" in *-*) prerelease=true ;; esac\n          case "$version" in v0.1.0|v0.1.0-rc1) : ;; *) if [ "$publish" = "true" ]; then curl -sS https://example.invalid/version >/dev/null; fi ;; esac'
+changed "$wf" "the planning logic invoking a program for the tags it was not told about"
+expect 1 "a planning run that invokes a program for a tag the gate triggers a release on is red, naming the tag" "$undecided"
+expect_absent 1 "a tag whose planning run invoked a program never prints the note that the version tracks the trigger tag" "$note_held"
+reset
+
+# --- 82 to 84. A definition this gate cannot read, cannot parse, or that names no planning
+#         step decides NOTHING about the version a release publishes. Cases 32, 33 and 36 above
+#         prove each is red and says which; these prove none of them still prints the sentence
+#         that the version tracks the trigger tag, which is the half a reader actually sees.
+rm -f "$wf"
+expect_absent 1 "a definition that cannot be read never prints the note that the version tracks the trigger tag" "$note_held"
+reset
+
+printf '\nthis is not: [valid: yaml\n' >> "$wf"
+changed "$wf" "an unparseable release definition"
+expect_absent 1 "a definition that cannot be parsed never prints the note that the version tracks the trigger tag" "$note_held"
+reset
+
+sed -i 's/GITHUB_OUTPUT/GITHUB_NOWHERE/g' "$wf"
+changed "$wf" "a release definition with no planning step"
+expect_absent 1 "a definition that names no planning step never prints the note that the version tracks the trigger tag" "$note_held"
 reset
 
 # =====================================================================================

@@ -56,6 +56,13 @@
 // that sample, and the sample was `v0.1.0` - the version this repository has actually
 // published (S0046 F26). See handed.go, and acts.go for the same hold on the irreversible acts
 // the role table does not name (S0046 F28).
+//
+// And that trace ENDS at the planning logic's output, so the last thing holding a release to
+// its tag is that the output IS the tag: a plan that pins the published version to a literal
+// leaves every one of those references structurally perfect and republishes the July release on
+// every later tag (S0046 F27). The version is therefore held to the ref the run was triggered
+// on, over tags this gate DRAWS rather than names - so there is no sample for a literal to
+// coincide with and no list for a planning script to special-case. See version.go.
 package main
 
 import (
@@ -268,6 +275,11 @@ func (g *gate) run() error {
 	// publishing job the role table does not name. See acts.go.
 	g.checkActsHandedValues(wf, roles)
 	g.checkPlanProducesEverythingAReleaseStepIsHeldTo(roles, tag)
+	// The other end of that trace. The three above say a release step's object IS the planning
+	// logic's own output and that the output is really written; not one of them holds the
+	// OUTPUT to anything, so a plan that pins the published version to a literal satisfies
+	// every one of them. See version.go.
+	g.checkPublishedVersionIsTheTriggerTag(runner, wf, roles, repo)
 	g.checkComposeReferenceAgreement(wf, roles, tag, repo)
 	return nil
 }
