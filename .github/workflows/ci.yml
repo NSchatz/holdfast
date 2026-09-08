@@ -96,6 +96,18 @@ jobs:
       - name: make check (the gate)
         run: make check
 
+      # The release-shape gate's own self-test, on top of the gate. `make check` runs the
+      # GATE (scripts/release-shape-gate); this defeats it on purpose, once per way it
+      # could fail silently, against mutated copies of release.yml, docker-compose.yml and
+      # docs/release.md - so the mutations stay out of `check`, which must never rewrite
+      # the tree it is grading. How MANY ways is `declared=` in the self-test, which is its
+      # single writer and which the run prints; a number restated here would be one more
+      # copy to drift, which is the mistake the comment above is about. Same reason the
+      # config self-test below sits here: proving a gate REDS is a different assertion from
+      # running it.
+      - name: release-shape self-test (the gate must still bite)
+        run: make release-shape-selftest
+
       # Config schema self-test (anti-advisory-only), on top of the gate: the committed
       # example must validate, and each known-invalid config must be REJECTED — one via
       # the schema (unknown key), one via value validation (out-of-range crf), so both
