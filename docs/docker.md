@@ -190,3 +190,8 @@ rejected, rather than serving an offer nobody can follow.
   public and the reference `docker-compose.yml` pins has been published; if a pull without
   credentials is refused, the package itself is still private. `docs/release.md` step 8 is the check
   that settles it.
+- **The source-mutation guard has a residual window, and it is different on local storage than on
+  a network mount.** The guard re-checks the source immediately before the swap, but it can only
+  be as sharp as the attributes it compares. Both windows are stated in
+  [The filesystem holdfast runs on](filesystem.md#residual-window-local): one place, so the two
+  statements cannot drift apart from each other or from the label holdfast records per job.

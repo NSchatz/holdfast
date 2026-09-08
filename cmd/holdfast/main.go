@@ -55,6 +55,7 @@ Usage:
 Commands:
   run        Load config and run one transcode scan over the library roots
   serve      Run the HTTP API + web UI (scan on demand / on an interval)
+  resolve    Report and resolve a job whose swap outcome could not be established
   restore    List what the undo window is holding, or put one original back
   export     Write every terminal ledger row to newline-delimited JSON (stdout, or --out)
   validate   Load and validate a config file, then exit
@@ -76,6 +77,8 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 		return cmdRun(args[1:], stdout, stderr)
 	case "serve":
 		return cmdServe(args[1:], stdout, stderr)
+	case "resolve":
+		return cmdResolve(args[1:], stdout, stderr)
 	case "restore":
 		return cmdRestore(args[1:], stdout, stderr)
 	case "export":

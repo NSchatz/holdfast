@@ -185,8 +185,17 @@ function announceText(sum) {
   const s = (sum && typeof sum === "object") ? sum : {};
   const n = (k) => (isNum(s[k]) ? s[k] : 0);
   const active = n("probing") + n("encoding") + n("verifying");
+  // BOTH FILESYSTEM-1 outcomes are counted SEPARATELY and named for what they are.
+  // Folding a parked job into "failed" would tell a screen-reader user the one thing
+  // this phase exists to stop holdfast saying: on this dashboard "failed" has always
+  // carried "and your source is fine", and a parked job is precisely the case where
+  // that is not established. Leaving applied-despite-error OUT is the same fault by
+  // omission - a sighted user sees a chip counting them and a listener heard nothing at
+  // all - so it is spoken beside the others, and neither is spoken as a success.
   return n("done") + " done, " + n("skipped") + " skipped, "
-    + n("failed") + " failed; " + active + " active, " + n("pending") + " pending.";
+    + n("failed") + " failed, " + n("indeterminate") + " parked awaiting a determination, "
+    + n("applied-despite-error") + " applied despite an error; "
+    + active + " active, " + n("pending") + " pending.";
 }
 
 // The set an aggregate is over, always stated; plus the bound, when it is not over all

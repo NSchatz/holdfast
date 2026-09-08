@@ -58,6 +58,36 @@ jobs:
           ./scripts/install-ffmpeg.sh /opt/ffmpeg
           echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
 
+      # The dashboard graders that concern what the page SHOWS load it in a real browser
+      # engine, because the rows are built by script from a snapshot and reading the
+      # source text cannot say what an operator sees. Resolve the browser HERE so its
+      # absence is a named step failure rather than a puzzling red inside a Go test,
+      # and so it fails loud rather than being skipped, which for a grader is a false
+      # green. GitHub's runner images ship Chrome; this only locates it.
+      #
+      # It does NOT trust `command -v`. On Ubuntu, /usr/bin/chromium is a snap shim that
+      # can sit for ever rather than fail when its confinement is unhappy, which is
+      # exactly what it did the first time this ran - so each candidate has to actually
+      # RENDER a page, under a timeout, before it is accepted.
+      - name: browser for the rendered dashboard graders
+        run: |
+          set -uo pipefail
+          probe="$(mktemp -d)"
+          for b in google-chrome google-chrome-stable chrome chromium chromium-browser; do
+            p="$(command -v "$b" 2>/dev/null || true)"
+            [ -n "$p" ] || continue
+            if HOME="$probe" timeout 60 "$p" --headless=new --disable-gpu --no-sandbox \
+                 --disable-dev-shm-usage --no-first-run --no-default-browser-check \
+                 --user-data-dir="$probe/profile" --dump-dom about:blank >/dev/null 2>&1; then
+              echo "HOLDFAST_BROWSER=$p" >> "$GITHUB_ENV"
+              echo "using $b: $p ($("$p" --version 2>/dev/null || echo 'version unknown'))"
+              exit 0
+            fi
+            echo "  $p found but did not render within 60s - trying the next candidate"
+          done
+          echo "::error::no browser on this runner could render a page - the dashboard graders need one" >&2
+          exit 1
+
       # THE gate. Invoked through the Makefile, and deliberately NOT re-listed as steps
       # here: the Makefile's `check:` target is the definition, so CI, the release workflow
       # and a human run the identical gate, and adding to it lands in one file. (Restating

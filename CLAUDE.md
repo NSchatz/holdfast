@@ -448,14 +448,32 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
 
 ## Layout
 
-- `cmd/holdfast` — the CLI (`run` / `serve` / `restore` / `validate` / `version`), structured `slog`
+- `cmd/holdfast` — the CLI (`run` / `serve` / `resolve` / `restore` / `export` / `validate` /
+  `version`), structured `slog`
   logging. `restore` (UNDO-6) is the operator's half of the undo window and is deliberately LOCAL, not an
   HTTP endpoint: it overwrites a library file with older bytes, which is a mutation the read-and-control
   API has no authorization story for. It loads the same config and opens the same state directory as
   `run`/`serve` and stops there — no ffmpeg lookup, no capability check, no library walk. `run`
   builds and drives the engine oneshot with a signal-cancellable context; `serve` (TRANSCODE-7) wires the
   same engine to the API/UI and runs until SIGTERM (graceful HTTP drain). Engine setup shared by both is
-  factored into `buildEngine`.
+  factored into `buildEngine`. `resolve` (FILESYSTEM-1) is the operator's way out of a job parked
+  `indeterminate`: it reports both recorded paths and what is at each RIGHT NOW (or that the file is
+  absent / uninspectable, named as which), takes an explicit determination, and makes the resolution
+  DURABLE BEFORE any licensed removal, so a store failure costs a repeated instruction, never an
+  unrecorded deletion. It lives on the CLI and not on the HTTP API deliberately: the API is a
+  read-and-control surface that never touches a media file, and this one deletes one on instruction.
+- `internal/fsclass` (FILESYSTEM-1) - the ONE enumeration of what this build calls `local`
+  (btrfs/ext2/ext3/ext4/f2fs/jfs/xfs/zfs) and what it knows to be network-backed, plus the
+  point-in-time `Classification` every lookup in the program lands on. `internal/startup` READS it
+  rather than declaring a second set, and so do the swap-time and guard-time lookups the engine makes
+  for itself: two sets that could drift would mean a run that started because startup called a path
+  local and then parked every swap on it, or the reverse (`startup.TestOneSet_*` pins it). Only a
+  POSITIVE local identification counts as local: network-backed AND undetermined are both "not local".
+- `internal/docscheck` (FILESYSTEM-1) - a MECHANICAL check, riding the ordinary test step, that the
+  shipped documentation still carries both residual-window statements under their two fixed anchors
+  (`residual-window-local`, `residual-window-network`) and that the network one attributes the window
+  to the client's attribute cache. The corpus is a WALK of every Markdown file in the repo, not a list,
+  so a statement moved to a new document is still checked and a document added joins the set.
 - `internal/server` (TRANSCODE-7) — the HTTP surface: a `Controller` (pause flag + scan orchestration, the
   single source of truth for both, wired into `engine.Paused`), an SSE `Hub` (the `engine.Observer`;
   coalesces events off the engine's critical path and broadcasts store-derived snapshots — an engine
@@ -555,7 +573,41 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   (`RecoverStale` → stale-temp cleanup → scan → fan out to a `Cfg.EffectiveWorkers()`-sized worker pool over
   a channel; a worker's in-flight temp is local to its own `ProcessFile` call, never a shared field, since N
   workers each hold at most one temp at a time). **This is the risk-critical heart — do not weaken the
-  invariant.**
+  invariant.** The stale-temp cleanup is no longer unconditional (FILESYSTEM-1): moving a gate-passed
+  replacement to its held-back `__holdfast-replacement__` name is a WRITE into the media directory, and the
+  failure that strands a replacement is usually the same failure that denies that write and the job-store
+  record with it — so a `__transcoding__` file is EXAMINED before it is reclaimed (`strayReplacementHold`).
+  The sweep needs a POSITIVE finding that the file is work in progress, and **anything it could not
+  establish HOLDS** — because a "no" here is a deletion of the one file the phase exists to protect. **The
+  ORDER is the guarantee, not a detail of it.** Its name must be exactly what `tempPath` constructs; then,
+  BEFORE any question that can fail, `sourceBeside` asks whether there is anything here to measure the file
+  against — `os.Lstat` alone, no subprocess, no config key, nothing a failing host can take away — and with
+  nothing beside it the file is held whatever else is true, because it may be the only copy of the film
+  there is. Only past that is ffprobe asked what the file IS, and its refusal licenses a deletion only when
+  three separate things say the refusal is about the FILE: it ANSWERED (`probe.VideoCodecAnswered`), this
+  host's ffprobe answers anything at all (`Prober.Usable`), and this process can actually READ the path
+  (`readableNow`). All four causes look identical on the wire, because `ProcessState.Exited()` is true
+  whether ffprobe exited on "not media" or on a failed `open()` — so a cancelled run, an ffprobe that cannot
+  be started, one that exits non-zero for every question, and a file this process may not read all HOLD.
+  That last one is not hypothetical: `docs/docker.md` documents `user:` as an operator knob and promises
+  getting it wrong is "safe but useless", and a restrictive mode, an NFS export squashing the writing uid,
+  an SELinux denial or a transient EIO each make a working ffprobe refuse a file that is present and
+  byte-intact. The codec question is asked as **could SOME encoder this build ships have written it**
+  (`encoder.TargetCodecs`), never "is it at the codec configured right now": a stranded file was written by
+  whichever encoder was configured THEN, and `encoder:` is an ordinary config key, so keying the hold to it
+  lets an unrelated edit license a deletion. Only then does `lengthParity` against the source beside it
+  decide finished-vs-fragment. **What that adds up to, stated as the property and not the intent:** past
+  the source-beside question a replacement that reached a swap passes the content checks by construction,
+  so the residue is what can make one of those two answers wrong about a file whose SOURCE IS STILL THERE —
+  a source replaced by a different film between the runs, a build whose encoder registry has since dropped
+  that codec, a sandbox denying ffprobe's domain a read this process is granted — each costing an encode,
+  never the only copy. Do not "simplify" that to the name alone (a killed encode reports codec `hevc` and
+  decodes cleanly — measured — so temps would accumulate for ever), do not re-key the codec question to
+  `e.targetCodec`, do not let an unanswered or unreadable probe read as "no", do not move the source-beside
+  question behind a question that can fail, and do not go back to an unconditional `os.Remove` (that is the
+  deletion AC15i forbids). Each of those is graded by a test in `internal/engine/stray_replacement_test.go`
+  that reds when it is undone. `pickTempPath` applies the identical rule: it is the second route to the
+  same deletion, and no sweep loop guards it.
   `undo.go` (UNDO-6) is the bounded window in which the swap can be walked back, and it is OFF by
   default (`undo_window_hours: 0`, announced at startup and by `validate`, because that is the setting
   in which a swap is final). It is a second **hard link** taken before the rename, never a copy: one
@@ -577,6 +629,16 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   last one, so a retention whose data survives elsewhere reports zero rather than its size. Space still
   held is published as its own figure, never folded into a reclaimed total. The disabled-window
   announcement is logged at WARN, not INFO, so it survives `log_level: warn`. Full reference: `docs/undo.md`.
+  **Where UNDO-6 and FILESYSTEM-1 meet is the failed swap, and the rule there is the fail-safe
+  one.** Every path that decides NOT to swap drops the retention, because a retained link with no
+  swap behind it is an orphan raising the source's link count for nothing. A FAILED rename is not
+  such a path, because whether the swap happened is exactly the question `handleFailedSwap`
+  exists to answer: the retention is dropped in the ONE branch that ESTABLISHED the source
+  untouched (case (b)), and is HELD under `applied-despite-error` and under every indeterminate
+  outcome. Held, because if the rename did take effect the retained link is the only remaining
+  name for the original's bytes, and discarding it on a verdict this tool could not reach would
+  destroy the one file the phase exists to protect. Do not "tidy" that into an unconditional
+  `abandon()` beside the other refusals.
 - `internal/logging`, `internal/version` — logger construction, build-stamped version.
 - `.github/workflows/ci.yml` — the gate (installs the pinned ffmpeg via `scripts/install-ffmpeg.sh` for the
   engine proof) + a `package` job (TRANSCODE-9) that builds BOTH arches and runs the image smoke gate.
@@ -611,6 +673,11 @@ gate** (`make webui-check`, needs node + a browser engine). That last one is del
 is where a missing runtime is a FAILURE and a run in which either half did not execute is refused.
 **Never claim green without running it.** Every phase that touches the engine must also extend the fixture suite so it *reds on
 the specific regression* — a data-safety tool proves its unhappy paths, not just that tests pass.
+The gate needs the **pinned ffmpeg** (`scripts/install-ffmpeg.sh`) and, since FILESYSTEM-1, a **browser**
+on `PATH` (or `HOLDFAST_BROWSER`): a criterion about what the DASHBOARD SHOWS is graded against the page
+loaded in a real engine, because the rows are built by script from a snapshot and the source text cannot
+say what an operator sees. Neither is skipped when absent (a grader that skips is a false green), so both
+fail loud and both workflows locate what the proof needs before running the gate.
 
 ## Conventions
 

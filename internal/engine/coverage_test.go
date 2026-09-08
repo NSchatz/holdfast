@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/probe"
 )
 
 func coverageEngine(t *testing.T, root string, coverage []string) *Engine {
@@ -18,7 +19,10 @@ func coverageEngine(t *testing.T, root string, coverage []string) *Engine {
 		LibraryRoots: []string{root},
 		VideoExts:    []string{"mkv", "mp4"},
 	}
-	e := New(cfg, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// A REAL prober (see heldEngine): the sweep asks the verify gate's own questions of
+	// a file before it may be removed.
+	ffmpeg, ffprobe := tools(t)
+	e := New(cfg, probe.New(ffmpeg, ffprobe), nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	e.Coverage = coverage
 	return e
 }
@@ -115,12 +119,21 @@ func TestEnumerate_CoverageThatNoLongerExistsIsSkipped(t *testing.T) {
 // TestCleanStaleTemps_IsBoundedByTheSameCoverage: the temp sweep mutates files
 // under a library root, so it obeys the same bound. A directory the startup walk
 // did not traverse is one this run touches in no way at all.
+//
+// Each temp is staged with its SOURCE beside it, which is what a killed run actually
+// leaves behind (tempPath puts the temp in the source's own directory under the
+// source's own stem). It is load-bearing rather than decoration: strayReplacementHold
+// asks whether there is anything beside the file to measure it against BEFORE it asks
+// anything that can fail, and a temp with no source beside it is held whatever else is
+// true - so a fixture without one would be testing the hold, not the coverage bound.
 func TestCleanStaleTemps_IsBoundedByTheSameCoverage(t *testing.T) {
 	root := t.TempDir()
 	inside := filepath.Join(root, "walked", "Film.__transcoding__.mkv")
 	outside := filepath.Join(root, "declined", "Film.__transcoding__.mkv")
 	mustWrite(t, inside)
 	mustWrite(t, outside)
+	mustWrite(t, filepath.Join(root, "walked", "Film.mkv"))
+	mustWrite(t, filepath.Join(root, "declined", "Film.mkv"))
 
 	e := coverageEngine(t, root, []string{root, filepath.Join(root, "walked")})
 	e.cleanStaleTemps(context.Background())

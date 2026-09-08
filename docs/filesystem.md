@@ -11,8 +11,9 @@ and three of the things it rests on are simply not true on a network filesystem:
   not.
 - **A stat can see a concurrent rewrite.** An NFS client refreshes a file's
   attributes only every few seconds, so the guard that re-checks a source
-  immediately before the swap has a window measured in seconds, not
-  microseconds.
+  immediately before the swap cannot see a change the client has not noticed.
+  That guard's blind spot is stated in full below, separately for local and for
+  network storage: see [the residual window](#residual-window-local).
 - **The job store works at all.** SQLite is explicit: "WAL does not work over a
   network filesystem", and `jobs.db` is opened in WAL mode wherever `state_dir`
   points.
@@ -68,6 +69,50 @@ with this file left unedited fails `make check`.
 Not on the list, and deliberately: `overlay`, `tmpfs`, `ramfs` and any `fuse.*`
 type. The name of such a filesystem does not by itself say what storage is
 underneath it, and what is underneath may be a NAS.
+
+## The residual window of the source-mutation guard
+
+holdfast re-checks the source immediately before the swap, so an encode that ran
+for hours over a file somebody rewrote in the meantime is refused rather than
+swapped over the newer content. That check compares the source's **size and its
+modification time in whole seconds**, and it can only be as sharp as those two
+facts are. What follows is the window it cannot see into. It is stated separately
+for local and for network storage because the two windows have different causes
+and different sizes, and holdfast **records which of the two applied to each job
+it guards** (`guard_residual_window` on the job's row, carrying the same
+identifier as the anchor below).
+
+Neither window is something holdfast shrinks. Which attributes the guard compares
+and at what time resolution is the storage's and the platform's to decide, not
+holdfast's; what changed is that the window is now measured, recorded per job,
+and written down here.
+
+<a id="residual-window-local"></a>
+
+**On a local filesystem.** The guard compares the byte count and the modification
+time truncated to a whole second. A rewrite that leaves the byte count unchanged
+and lands inside the same modification-time second is therefore invisible to it,
+as is any change made between that observation and the `rename` syscall itself.
+That whole-second resolution IS the local window: holdfast cannot see a same-size
+rewrite inside one second of the check, and no amount of care in this program
+narrows it, because a finer timestamp is not available to compare. Everything
+outside that window is caught, and a caught mutation refuses the swap and keeps
+the source.
+
+<a id="residual-window-network"></a>
+
+**On a network filesystem.** The same undetectability, widened by the **client's
+attribute cache**, and the widening belongs to the client rather than to
+holdfast's own timing. An NFS client does not read a file's attributes from the
+server on every stat: it refreshes them periodically and answers from its cache
+in between, so a change made on the server is invisible to holdfast until the
+client next checks. `nfs(5)` describes this as happening "every few seconds" and
+names **no interval and no tunable**, so this window has no value holdfast can
+state without inventing one, and none is stated here or recorded anywhere in a
+job's record. It is wider than the local window and it is not holdfast's to
+close. What holdfast does instead is say so: a guard that runs against storage it
+cannot positively identify as local records the network window, not the local
+one, and an unrecognised filesystem counts as not-local for exactly this reason.
 
 ## Opting in
 

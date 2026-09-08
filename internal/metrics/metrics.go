@@ -34,7 +34,7 @@ func New(st store.Store) *Metrics {
 		reg: prometheus.NewRegistry(),
 		filesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "holdfast_files_total",
-			Help: "Total files reaching a terminal outcome, by outcome (done|skipped|failed).",
+			Help: "Total files reaching a terminal outcome, by outcome (done|skipped|failed|indeterminate|applied-despite-error).",
 		}, []string{"outcome"}),
 		bytesReclaimed: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "holdfast_bytes_reclaimed_total",
@@ -52,7 +52,14 @@ func New(st store.Store) *Metrics {
 		}),
 	}
 	// Pre-create the outcome series so they read 0 (not absent) before the first event.
-	for _, o := range []string{"done", "skipped", "failed"} {
+	// The two FILESYSTEM-1 outcomes get their own series rather than being folded into
+	// done or failed: an alert on "a job holdfast could not establish the outcome of"
+	// is exactly the alert an operator wants, and it is unbuildable if the count is
+	// hidden inside another label.
+	for _, o := range []string{
+		string(store.Done), string(store.Skipped), string(store.Failed),
+		string(store.Indeterminate), string(store.AppliedDespiteError),
+	} {
 		m.filesTotal.WithLabelValues(o)
 	}
 	m.reg.MustRegister(m.filesTotal, m.bytesReclaimed, m.encodeDuration, m.vmaf)
@@ -88,9 +95,13 @@ func (m *Metrics) Observe(ev engine.Event) {
 			}
 		}
 	case store.Skipped:
-		m.filesTotal.WithLabelValues("skipped").Inc()
+		m.filesTotal.WithLabelValues(string(store.Skipped)).Inc()
 	case store.Failed:
-		m.filesTotal.WithLabelValues("failed").Inc()
+		m.filesTotal.WithLabelValues(string(store.Failed)).Inc()
+	case store.Indeterminate:
+		m.filesTotal.WithLabelValues(string(store.Indeterminate)).Inc()
+	case store.AppliedDespiteError:
+		m.filesTotal.WithLabelValues(string(store.AppliedDespiteError)).Inc()
 	}
 	// pending/probing/encoding/verifying are non-terminal — reflected live by the
 	// queue-depth gauge (read from the store on scrape), not counted here.

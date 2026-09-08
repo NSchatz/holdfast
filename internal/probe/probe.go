@@ -7,6 +7,7 @@ package probe
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"regexp"
@@ -33,28 +34,83 @@ func New(ffmpeg, ffprobe string) *Prober {
 	return &Prober{FFprobe: ffprobe, FFmpeg: ffmpeg}
 }
 
-// firstLine runs the command and returns the trimmed first line of stdout (stderr
-// discarded). A non-zero exit yields "" — callers treat empty as "unknown".
-func firstLine(ctx context.Context, name string, args ...string) string {
+// firstLineAnswered runs the command and returns BOTH the trimmed first line of stdout
+// (stderr discarded) and whether the command ANSWERED the question at all.
+//
+// firstLine cannot tell those apart — every failure is "" — and for most callers that
+// is right: an unknown bitrate and an unreadable file both mean "do not act on this".
+// For a caller deciding whether a FILE MAY BE DELETED the difference is the whole
+// question. "I read this path and it is not what you asked about" is evidence about the
+// file; "I could not run" is evidence about this host, and a hold that treated the
+// second as the first would delete a good file whenever the tool was missing.
+//
+// answered is true only when the process reached a verdict of its own: it exited 0 (the
+// value returned is its answer, and "" is a legitimate answer meaning "no such field"),
+// or it exited NON-ZERO having read the path, which is how ffprobe says a file is not
+// media it can decode. It is false when the binary could not be started at all, when
+// the process was killed by a signal rather than exiting, and when the caller's context
+// was cancelled — cancellation kills the subprocess mid-question and would otherwise be
+// indistinguishable from a refusal.
+func firstLineAnswered(ctx context.Context, name string, args ...string) (string, bool) {
 	out, err := exec.CommandContext(ctx, name, args...).Output()
+	if ctx.Err() != nil {
+		return "", false
+	}
 	if err != nil {
-		return ""
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || !ee.ProcessState.Exited() {
+			return "", false
+		}
+		return "", true
 	}
 	s := string(out)
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
-	return strings.TrimSpace(s)
+	return strings.TrimSpace(s), true
+}
+
+// firstLine runs the command and returns the trimmed first line of stdout (stderr
+// discarded). A non-zero exit yields "" — callers treat empty as "unknown".
+func firstLine(ctx context.Context, name string, args ...string) string {
+	s, _ := firstLineAnswered(ctx, name, args...)
+	return s
 }
 
 var intRe = regexp.MustCompile(`^[0-9]+$`)
 var floatRe = regexp.MustCompile(`^[0-9]+([.][0-9]+)?$`)
 
 // VideoCodec returns the codec_name of the first video stream, or "" if there is
-// no readable video stream.
+// no readable video stream. It cannot distinguish that from "ffprobe never ran"; a
+// caller for whom the difference decides whether a file may be DELETED must ask
+// VideoCodecAnswered instead.
 func (p *Prober) VideoCodec(ctx context.Context, f string) string {
-	return firstLine(ctx, p.FFprobe, "-v", "error", "-select_streams", "v:0",
+	codec, _ := p.VideoCodecAnswered(ctx, f)
+	return codec
+}
+
+// VideoCodecAnswered returns the codec_name of the first video stream AND reports
+// whether ffprobe answered the question at all (see firstLineAnswered). codec is "" in
+// two very different situations that VideoCodec conflates: answered=true means ffprobe
+// read the path and found no video stream it recognises, while answered=false means
+// ffprobe never got to look — a missing or unexecutable binary, or a cancelled context.
+func (p *Prober) VideoCodecAnswered(ctx context.Context, f string) (codec string, answered bool) {
+	return firstLineAnswered(ctx, p.FFprobe, "-v", "error", "-select_streams", "v:0",
 		"-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1", "--", f)
+}
+
+// Usable reports whether the configured ffprobe answers anything at all, by asking it
+// for its own version — a question every build answers and that no file can influence.
+//
+// It exists so a caller may confirm that a NEGATIVE answer about a file came from a
+// working ffprobe before acting on it irreversibly. A binary that is missing or
+// unexecutable is already caught by VideoCodecAnswered, but one that RUNS and exits
+// non-zero for everything (a half-installed build, a missing shared library) looks
+// exactly like ffprobe reading a file and refusing it — and only one of those is
+// evidence about the file.
+func (p *Prober) Usable(ctx context.Context) bool {
+	v, answered := firstLineAnswered(ctx, p.FFprobe, "-version")
+	return answered && v != ""
 }
 
 // BitrateKbps returns the source video bitrate in kbps, preferring the video
@@ -156,7 +212,59 @@ func Fingerprint(f string) string {
 	if err != nil {
 		return "0:0"
 	}
-	return strconv.FormatInt(fi.Size(), 10) + ":" + strconv.FormatInt(fi.ModTime().Unix(), 10)
+	return Attributes{SizeBytes: fi.Size(), MTimeUnix: fi.ModTime().Unix()}.String()
+}
+
+// Attributes is a file's RENAME-INVARIANT attribute record: the byte count and the
+// modification time in whole Unix seconds, and deliberately nothing else.
+//
+// Rename-invariance is the whole point and it constrains the field list rather than
+// decorating it. These attributes describe the CONTENT AT A PATH, so that a record
+// taken of a file at one path still matches when the file is observed at another - which
+// is exactly what a re-stat after a failed rename has to do to tell "the replacement is
+// now at the source path" from "the source is still there". Anything a rename changes is
+// therefore excluded by construction: the name and the path, the inode and link
+// identity, and ctime (which rename updates). mtime is not touched by rename, and neither
+// is the size.
+//
+// The two fields are also, precisely, what the source-mutation guard compares - so the
+// guard's granularity record (its attributes and its time resolution) describes this
+// type and cannot drift from it.
+type Attributes struct {
+	SizeBytes int64
+	// MTimeUnix is WHOLE Unix seconds. The truncation is not laziness, it is the
+	// platform's own resolution here, and it is the local residual window: a rewrite
+	// that keeps the byte count and lands inside the same mtime second is invisible.
+	MTimeUnix int64
+}
+
+// MTimeResolution is the resolution of the timestamp Attributes actually compares, as
+// a MEASURED duration. It is recorded per job beside the guard's compared attributes
+// (it is a fact about this build, not a label), and it is the local residual window:
+// a same-size rewrite inside one of these is undetectable.
+const MTimeResolution = "1s"
+
+// AttributeNames names the attributes Attributes compares, in a stable order, for the
+// guard's per-job granularity record. It is a closed vocabulary: a reader keys off it.
+const AttributeNames = "size,mtime"
+
+// String is the "size:mtime" spelling Fingerprint has always used, so an attribute
+// record and a job key are the same text and a reader never has to know two formats.
+func (a Attributes) String() string {
+	return strconv.FormatInt(a.SizeBytes, 10) + ":" + strconv.FormatInt(a.MTimeUnix, 10)
+}
+
+// StatAttributes reads f's rename-invariant attribute record. Unlike Fingerprint it
+// returns the ERROR rather than a "0:0" sentinel, because after a failed swap the
+// difference between "the file is not there" and "the file is there and is zero bytes
+// at the epoch" decides whether an outcome is reportable at all - a sentinel there
+// would be a fabricated observation.
+func StatAttributes(f string) (Attributes, error) {
+	fi, err := os.Stat(f)
+	if err != nil {
+		return Attributes{}, err
+	}
+	return Attributes{SizeBytes: fi.Size(), MTimeUnix: fi.ModTime().Unix()}, nil
 }
 
 // IsSymlink reports whether f is itself a symbolic link (Lstat, so it does NOT

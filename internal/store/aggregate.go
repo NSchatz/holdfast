@@ -47,11 +47,18 @@ func (s *SQLite) Aggregates(ctx context.Context) Aggregates {
 // outcomeCounts counts terminal rows per status over the whole table. Excluded is
 // always 0 here and that is a fact about the schema, not an omission: status is NOT
 // NULL, so no row can be terminal without recording which terminal state it reached.
+//
+// The two FILESYSTEM-1 outcomes are counted HERE, in their own buckets, and are not
+// folded into failed. This is a surface that reports job outcomes, so a parked job
+// counted as "failed" would tell an operator the source is fine - which is precisely
+// what nobody knows - and leaving it out of the set entirely would make the one job
+// waiting for a human the only one this figure never sees.
 func (s *SQLite) outcomeCounts(ctx context.Context) Breakdown {
-	b := Breakdown{Coverage: Coverage{Set: "every terminal row in the ledger (done, skipped, failed)"}}
+	b := Breakdown{Coverage: Coverage{
+		Set: "every terminal row in the ledger (done, skipped, failed, indeterminate, applied-despite-error)"}}
 	buckets, absent, err := s.groupCount(ctx,
-		`SELECT status, COUNT(*) FROM jobs WHERE status IN (?, ?, ?) GROUP BY status`,
-		string(Done), string(Skipped), string(Failed))
+		`SELECT status, COUNT(*) FROM jobs WHERE status IN (?, ?, ?, ?, ?) GROUP BY status`,
+		string(Done), string(Skipped), string(Failed), string(Indeterminate), string(AppliedDespiteError))
 	if err != nil {
 		b.Err = fmt.Errorf("store: aggregate outcome counts: %w", err)
 		return b

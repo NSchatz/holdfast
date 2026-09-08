@@ -2,6 +2,7 @@ package webui
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -988,8 +989,12 @@ func TestRendered_DashboardShowsQueueRowsHistoryRowsAndTheirFigures(t *testing.T
 	if v.ReclaimedLifetime != "5.0 GB" {
 		t.Errorf("the lifetime reclaimed figure reads %q, want 5.0 GB", v.ReclaimedLifetime)
 	}
-	if len(v.Chips) != 7 {
-		t.Errorf("the summary shows %d chips, want one per status (7)", len(v.Chips))
+	// One chip per status, counted against the vocabulary THE PAGE ITSELF declares rather
+	// than against a literal. The literal was 7 and FILESYSTEM-1 made it 9 (indeterminate
+	// and applied-despite-error), which is the second time a number in a test had to be
+	// chased; derived, it cannot go stale, and it still fails if a chip goes missing.
+	if want := declaredStatusCount(t); len(v.Chips) != want {
+		t.Errorf("the summary shows %d chips, want one per status the page declares (%d)", len(v.Chips), want)
 	}
 	// Both tables are capped by the API and the page must say so, visibly.
 	for _, c := range []struct {
@@ -1485,6 +1490,41 @@ func policyRefusals(browserLog string) []string {
 		}
 	}
 	return out
+}
+
+// declaredStatusCount reads the STATUSES vocabulary out of the SERVED document - the same
+// bytes the browser just rendered - so "one chip per status" is checked against what the
+// page says it has rather than against a number a reader has to keep in step by hand. It
+// fails loudly if the constant cannot be found, because a silently-zero count would make
+// the assertion it feeds unable to fail.
+func declaredStatusCount(t *testing.T) int {
+	t.Helper()
+	n, err := declaredStatusCountOrErr()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// declaredStatusCountOrErr is the same derivation for a caller that has no *testing.T to
+// fail on - the operational-fact probes are plain funcs returning problem strings, and a
+// probe that could not derive the number must report that as its own problem rather than
+// silently comparing against zero.
+func declaredStatusCountOrErr() (int, error) {
+	m := regexp.MustCompile(`const STATUSES = \[([^\]]*)\]`).FindSubmatch(indexHTML)
+	if m == nil {
+		return 0, errors.New("the served document declares no `const STATUSES = [...]`, so the chip count cannot be derived")
+	}
+	n := 0
+	for _, s := range strings.Split(string(m[1]), ",") {
+		if strings.TrimSpace(s) != "" {
+			n++
+		}
+	}
+	if n == 0 {
+		return 0, errors.New("the served document's STATUSES list is empty")
+	}
+	return n, nil
 }
 
 func TestRendered_NoPolicyViolationWhileRenderingRealData(t *testing.T) {
@@ -2466,8 +2506,9 @@ func TestRendered_AMalformedAggregatesObjectCostsOnlyItsOwnFigure(t *testing.T) 
 		if len(v.Queue) != 3 || len(v.History) != 2 {
 			t.Errorf("%s: a malformed figure cost the page its rows: %d queue, %d history", c.name, len(v.Queue), len(v.History))
 		}
-		if len(v.Chips) != 7 {
-			t.Errorf("%s: a malformed figure cost the page its counts: %d chips", c.name, len(v.Chips))
+		if want := declaredStatusCount(t); len(v.Chips) != want {
+			t.Errorf("%s: a malformed figure cost the page its counts: %d chips, want one per status the page declares (%d)",
+				c.name, len(v.Chips), want)
 		}
 		if !strings.Contains(v.BodyText, "Corresponding Source") {
 			t.Errorf("%s: a malformed figure cost the page the source offer in its footer", c.name)

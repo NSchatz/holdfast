@@ -129,6 +129,13 @@ func fakeFFprobeMain() {
 	args := os.Args[1:]
 	var entries, of, file string
 	for i := 0; i < len(args); i++ {
+		// A real ffprobe answers for its own version whatever else is on the command
+		// line, and Prober.Usable asks exactly that to tell a working binary from one
+		// that exits non-zero for everything.
+		if args[i] == "-version" {
+			fmt.Println("ffprobe version 0.0.0-fake")
+			os.Exit(0)
+		}
 		switch args[i] {
 		case "-show_entries":
 			if i+1 < len(args) {

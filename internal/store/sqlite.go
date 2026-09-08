@@ -190,6 +190,20 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 	switch {
 	case st == Done || st == Skipped:
 		return false, nil // permanent terminal state
+	case st == Indeterminate:
+		// PARKED. Whether the swap was applied is exactly what is unknown, so
+		// re-claiming would mean re-encoding and re-swapping a path that may already
+		// hold the replacement. Nothing here moves until an operator records a
+		// determination, which RELEASES the job by removing this row (see
+		// ResolveIncident) rather than by making it claimable again.
+		return false, nil
+	case st == AppliedDespiteError:
+		// The rename took effect: the file at this path is the replacement, and this
+		// row describes an attempt that is over. It is never re-attempted ON THE
+		// STRENGTH OF THIS JOB. The path itself is not held back - the file there now
+		// has a different size/mtime, so a later scan keys it as NEW work and the
+		// ordinary already-at-target-codec guard is what skips it.
+		return false, nil
 	case st == Failed:
 		if failCount >= maxFailures {
 			return false, nil // parked
@@ -218,7 +232,9 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 		`UPDATE jobs SET status = ?, worker = ?, updated_at = ?,
 			reason = NULL, encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
 			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL,
-			source_bytes = NULL, output_bytes = NULL, encode_ms = NULL
+			source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
+			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
+			swap_cause = NULL
 		 WHERE path = ? AND fingerprint = ?`,
 		string(Probing), worker, now(), path, fingerprint); err != nil {
 		return false, fmt.Errorf("store: claim update: %w", err)
@@ -254,26 +270,39 @@ func (s *SQLite) Finish(ctx context.Context, path, fingerprint string, st Status
 	// A "" string is stored as NULL, not as an empty string, so "not recorded" has ONE
 	// representation in the column rather than two the readers would both have to know
 	// about.
+	if _, err := s.db.ExecContext(ctx, finishQuery(st), finishArgs(st, o, path, fingerprint)...); err != nil {
+		return fmt.Errorf("store: finish: %w", err)
+	}
+	return nil
+}
+
+// finishQuery and finishArgs are shared by Finish and by RecordSwapIncident's
+// transaction, so the "every Finish fully defines the row's proof" rule cannot hold on
+// one path and quietly lapse on the other.
+func finishQuery(st Status) string {
 	q := `UPDATE jobs SET status = ?, updated_at = ?,
 		reason = ?, encoder = ?, vmaf_mean = ?, vmaf_min = ?, vmaf_model = ?,
 		vmaf_pix_fmt = ?, vmaf_chroma = ?, vmaf_chroma_metric = ?,
-		source_bytes = ?, output_bytes = ?, encode_ms = ?`
+		source_bytes = ?, output_bytes = ?, encode_ms = ?,
+		guard_attributes = ?, guard_time_resolution = ?, guard_residual_window = ?,
+		swap_cause = ?`
 	if st == Failed {
 		q += `, fail_count = fail_count + 1`
 	}
-	q += ` WHERE path = ? AND fingerprint = ?`
+	return q + ` WHERE path = ? AND fingerprint = ?`
+}
 
-	if _, err := s.db.ExecContext(ctx, q,
+func finishArgs(st Status, o *Outcome, path, fingerprint string) []any {
+	return []any{
 		string(st), now(),
 		nullString(o.Reason), nullString(o.Encoder),
 		nullFloat(o.VmafMean), nullFloat(o.VmafMin), nullString(o.VmafModel),
 		nullString(o.VmafPixFmt), nullFloat(o.VmafChroma), nullString(o.VmafChromaMetric),
 		nullInt(o.SourceBytes), nullInt(o.OutputBytes), nullInt(o.EncodeMs),
+		nullString(o.GuardAttributes), nullString(o.GuardTimeResolution),
+		nullString(o.GuardResidualWindow), nullString(o.SwapCause),
 		path, fingerprint,
-	); err != nil {
-		return fmt.Errorf("store: finish: %w", err)
 	}
-	return nil
 }
 
 // --- NULL helpers -------------------------------------------------------------
@@ -306,21 +335,29 @@ func nullInt(i *int64) any {
 // place, so the SELECT text and the scan destinations cannot drift apart when a
 // column is appended. Its order is the order outcomeScan expects.
 const outcomeColumns = `reason, encoder, vmaf_mean, vmaf_min, vmaf_model,
-	vmaf_pix_fmt, vmaf_chroma, vmaf_chroma_metric, source_bytes, output_bytes, encode_ms`
+	vmaf_pix_fmt, vmaf_chroma, vmaf_chroma_metric, source_bytes, output_bytes, encode_ms,
+	guard_attributes, guard_time_resolution, guard_residual_window, swap_cause`
 
 // outcomeScan holds one row's outcome columns on the way out of the driver. Every
 // field is a sql.Null* because every column is nullable: NULL is "not recorded" and
 // must not be scanned into a bare 0/"" a reader would mistake for a measurement.
 //
 // It exists as a struct rather than a list of locals because the column set grows
-// (v2 added eight, v4 added three) and a positional scan is the shape that silently
-// mis-binds when it does - swap two same-typed columns in the argument list and the
-// compiler is happy while a VMAF score arrives in the chroma field.
+// (v2 added eight, GATE-4 three, FILESYSTEM-1 four) and a positional scan is the
+// shape that silently mis-binds when it does - swap two same-typed columns in the
+// argument list and the compiler is happy while a VMAF score arrives in the chroma
+// field, or a residual window in the swap cause.
 type outcomeScan struct {
 	reason, encoder, model    sql.NullString
 	pixFmt, chromaMetric      sql.NullString
 	mean, worst, chroma       sql.NullFloat64
 	srcBytes, outBytes, encMs sql.NullInt64
+
+	// The source-mutation guard's achieved granularity and the distinctly-reported
+	// cause of a failed swap (FILESYSTEM-1). All four are strings and all four are
+	// nullable: a job that never reached the guard recorded no window, and a swap that
+	// never failed has no cause.
+	guardAttrs, guardRes, guardWindow, swapCause sql.NullString
 }
 
 // dest returns the scan destinations in outcomeColumns order.
@@ -328,6 +365,7 @@ func (s *outcomeScan) dest() []any {
 	return []any{
 		&s.reason, &s.encoder, &s.mean, &s.worst, &s.model,
 		&s.pixFmt, &s.chroma, &s.chromaMetric, &s.srcBytes, &s.outBytes, &s.encMs,
+		&s.guardAttrs, &s.guardRes, &s.guardWindow, &s.swapCause,
 	}
 }
 
@@ -338,6 +376,8 @@ func (s *outcomeScan) outcome() Outcome {
 	o := Outcome{
 		Reason: s.reason.String, Encoder: s.encoder.String, VmafModel: s.model.String,
 		VmafPixFmt: s.pixFmt.String, VmafChromaMetric: s.chromaMetric.String,
+		GuardAttributes: s.guardAttrs.String, GuardTimeResolution: s.guardRes.String,
+		GuardResidualWindow: s.guardWindow.String, SwapCause: s.swapCause.String,
 	}
 	o.VmafMean = nullableFloat(s.mean)
 	o.VmafMin = nullableFloat(s.worst)
@@ -616,7 +656,9 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 			status = excluded.status, reason = excluded.reason, worker = NULL, updated_at = excluded.updated_at,
 			encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
 			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL,
-			source_bytes = NULL, output_bytes = NULL, encode_ms = NULL
+			source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
+			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
+			swap_cause = NULL
 		 WHERE jobs.status = ?`,
 		path, fingerprint, string(Skipped), now(), nullString(reason), string(Pending))
 	if err != nil {

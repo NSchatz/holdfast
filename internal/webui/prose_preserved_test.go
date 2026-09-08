@@ -146,14 +146,25 @@ func operationalFacts() []operationalFact {
 			}
 			return out
 		}},
-		{"the per-status count of files, one figure per status the server published", func(v proseVerdict) []string {
+		{"the per-status count of files, one figure per status the page declares", func(v proseVerdict) []string {
+			// The counts the fixture publishes. It does NOT publish the two FILESYSTEM-1
+			// outcomes, and the page still draws a measured zero for each - which is the
+			// behaviour, not a gap: a chip that vanished when its count was zero would
+			// make "no parked job" and "this build cannot park one" look identical.
 			want := map[string]string{
 				"pending": "4", "probing": "1", "encoding": "1", "verifying": "1",
 				"done": "12", "skipped": "6", "failed": "3",
 			}
 			var out []string
-			if len(v.dash.Chips) != len(want) {
-				out = append(out, fmt.Sprintf("the page shows %d per-status counts, want one per published status (%d)", len(v.dash.Chips), len(want)))
+			// Counted against the vocabulary THE PAGE ITSELF declares rather than against a
+			// literal. The literal was 7 and FILESYSTEM-1 made it 9 (indeterminate and
+			// applied-despite-error); derived, it cannot go stale, and it still fails if a
+			// chip goes missing.
+			n, err := declaredStatusCountOrErr()
+			if err != nil {
+				out = append(out, err.Error())
+			} else if len(v.dash.Chips) != n {
+				out = append(out, fmt.Sprintf("the page shows %d per-status counts, want one per status the page declares (%d)", len(v.dash.Chips), n))
 			}
 			got := map[string]string{}
 			for _, c := range v.dash.Chips {
@@ -673,8 +684,9 @@ func TestRendered_ARefusedControlActionSaysNothingHappenedAndCostsNothingElse(t 
 		t.Errorf("a refused control action cost the page its views: %d queue, %d history, %d figures",
 			len(v.dash.Queue), len(v.dash.History), len(v.dash.Aggregates))
 	}
-	if len(v.dash.Chips) != 7 {
-		t.Errorf("a refused control action cost the page its counts: %d", len(v.dash.Chips))
+	if want := declaredStatusCount(t); len(v.dash.Chips) != want {
+		t.Errorf("a refused control action cost the page its counts: %d, want one per status the page declares (%d)",
+			len(v.dash.Chips), want)
 	}
 	// And the refusal is not counted against the budget.
 	if v.prose.isPageCopy(msg) {

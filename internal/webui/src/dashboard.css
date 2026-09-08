@@ -86,6 +86,9 @@
   .chip .k { font-size: var(--fs-xs); color: var(--muted); }
   .chip.done .n { color: var(--ok); }
   .chip.failed .n { color: var(--bad); }
+  /* The two FILESYSTEM-1 outcomes are counted as themselves, so they are coloured as
+     themselves rather than folded into done or failed. */
+  .chip.indeterminate .n, .chip.applied-despite-error .n { color: var(--bad); }
   .chip.encoding .n, .chip.probing .n, .chip.verifying .n { color: var(--accent); }
 
   /* Controls. Every pointer target on this page is at least --size-tap square at
@@ -240,6 +243,15 @@
   .st-done .dot { background: var(--ok); }
   .st-failed .dot { background: var(--bad); border-radius: 0; }
   .st-skipped .dot { background: var(--muted); border-radius: 0; transform: rotate(45deg); }
+  /* The two FILESYSTEM-1 outcomes are terminal too, so the same rule binds them: shape
+     carries the meaning and colour only reinforces it. Neither is a success and neither
+     is `failed` - which on this page has always carried the second half of the sentence,
+     "and your source is fine". Indeterminate is a HOLLOW ring, the shape of a question
+     this tool could not answer; applied-despite-error is a filled ring with a heavy
+     edge, a swap that happened while reporting otherwise. Both stay apart from the
+     filled disc, the square and the diamond with no colour vision at all. */
+  .st-indeterminate .dot { background: none; border: var(--bw-flag) solid var(--bad); }
+  .st-applied-despite-error .dot { background: var(--bad); border: var(--bw-flag) solid var(--warn); }
   .st-encoding .dot, .st-probing .dot, .st-verifying .dot, .st-pending .dot { background: var(--accent); }
   .reason { color: var(--muted); font-size: var(--fs-xs); }
   .reason.fail { color: var(--bad); word-break: break-word; }

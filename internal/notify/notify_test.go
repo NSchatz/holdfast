@@ -106,6 +106,79 @@ func TestNotify_ScanSummary(t *testing.T) {
 	}
 }
 
+// TestNotify_TheTwoSwapOutcomesAreReportedAsThemselves is this surface's half of the
+// rule that a job parked indeterminate, or one applied despite an error, is reported AS
+// THE STATE IT IS IN. The pre-existing failure message ends "(source left untouched)",
+// which on either of these would be the exact false comfort the phase exists to remove -
+// so neither is ever folded into the failed tally or the failed message.
+func TestNotify_TheTwoSwapOutcomesAreReportedAsThemselves(t *testing.T) {
+	n, sink := newWithSink(t, "generic://example")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Run(ctx)
+
+	n.ScanStarted()
+	n.Observe(engine.Event{
+		Status:  store.Indeterminate,
+		Path:    "/lib/parked.mkv",
+		Outcome: &store.Outcome{Reason: "the storage is non-local (nfs)"},
+	})
+	n.Observe(engine.Event{
+		Status:  store.AppliedDespiteError,
+		Path:    "/lib/applied.mkv",
+		Outcome: &store.Outcome{Reason: "the rename took effect despite reporting an error"},
+	})
+
+	var parked, applied string
+	deadline := time.After(2 * time.Second)
+	for parked == "" || applied == "" {
+		select {
+		case m := <-sink:
+			switch {
+			case strings.Contains(m, "/lib/parked.mkv"):
+				parked = m
+			case strings.Contains(m, "/lib/applied.mkv"):
+				applied = m
+			}
+		case <-deadline:
+			t.Fatalf("missing notification (parked=%q applied=%q)", parked, applied)
+		}
+	}
+	if !strings.Contains(parked, "PARKED") || !strings.Contains(parked, "could not establish") {
+		t.Errorf("the parked job was not reported as parked: %q", parked)
+	}
+	if strings.Contains(parked, "source left untouched") || strings.Contains(parked, "FAILED") {
+		t.Errorf("a parked job was reported as a failure that left the source intact: %q", parked)
+	}
+	if !strings.Contains(applied, "took effect") {
+		t.Errorf("the applied job was not reported as applied: %q", applied)
+	}
+	if strings.Contains(applied, "source left untouched") {
+		t.Errorf("an applied swap was reported as leaving the source untouched: %q", applied)
+	}
+
+	// The scan summary counts them separately, and does not disturb the sentence an
+	// operator has been reading for four phases.
+	n.ScanFinished()
+	var summary string
+	deadline = time.After(2 * time.Second)
+	for summary == "" {
+		select {
+		case m := <-sink:
+			if strings.Contains(m, "scan complete") {
+				summary = m
+			}
+		case <-deadline:
+			t.Fatal("no scan summary sent")
+		}
+	}
+	for _, want := range []string{"0 transcoded", "0 failed", "1 PARKED", "1 applied despite a reported error"} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("summary %q missing %q", summary, want)
+		}
+	}
+}
+
 func TestNotify_DisabledSendsNothing(t *testing.T) {
 	n, sink := newWithSink(t, "") // empty URL disables
 	ctx, cancel := context.WithCancel(context.Background())

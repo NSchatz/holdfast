@@ -39,6 +39,14 @@ function resultCell(td, j) {
     td.appendChild(mk("div", "reason", guardLabel(j.reason)));
   } else if (j.status === "failed") {
     td.appendChild(mk("div", "reason fail", j.reason ? j.reason : "reason not recorded"));
+  } else if (j.status === "indeterminate") {
+    td.appendChild(mk("div", "reason fail", j.reason ? j.reason : "reason not recorded"));
+    td.appendChild(mk("div", "cond",
+      "both files are intact and held; run `holdfast resolve` to record what happened"));
+  } else if (j.status === "applied-despite-error") {
+    td.appendChild(mk("div", "reason fail", j.reason ? j.reason : "reason not recorded"));
+    td.appendChild(mk("div", "cond",
+      "the rename took effect despite the error - the file at that path is the replacement"));
   }
 }
 

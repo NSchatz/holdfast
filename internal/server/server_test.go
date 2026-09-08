@@ -469,6 +469,103 @@ func TestHistoryEndpoint_ReturnsAReasonForFailedAndSkipped(t *testing.T) {
 	}
 }
 
+// TestHistoryEndpoint_TheTwoSwapOutcomesShowAsThemselves is this surface's half of the
+// rule that a job parked indeterminate, or one applied despite an error, is reported AS
+// THE STATE IT IS IN. Leaving them out of the history view would have made a parked job -
+// the one job on the whole dashboard actually waiting for a human - the only job that
+// never appears anywhere, which is the same failure as reporting it as a success.
+func TestHistoryEndpoint_TheTwoSwapOutcomesShowAsThemselves(t *testing.T) {
+	h := newHarness(t, "")
+	st := h.st
+	ctx := context.Background()
+
+	mustClaim(t, st, "/lib/parked.mkv", "5:5")
+	if err := st.RecordSwapIncident(ctx, store.SwapIncident{
+		SourcePath: "/lib/parked.mkv", SourceFingerprint: "5:5",
+		ReplacementPath:  "/lib/parked.__holdfast-replacement__.mkv",
+		SourceAttrs:      "5:5",
+		ReplacementAttrs: "4:6",
+		Outcome:          store.Indeterminate,
+		SwapError:        "swap failed - the storage is non-local (nfs), so a match proves nothing",
+		JobOutcome: &store.Outcome{
+			Encoder:             "cpu",
+			GuardAttributes:     "size,mtime",
+			GuardTimeResolution: "1s",
+			GuardResidualWindow: store.ResidualWindowNetwork,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mustClaim(t, st, "/lib/applied.mkv", "6:6")
+	if err := st.RecordSwapIncident(ctx, store.SwapIncident{
+		SourcePath: "/lib/applied.mkv", SourceFingerprint: "6:6",
+		ReplacementPath:  "/lib/applied.__transcoding__.mkv",
+		SourceAttrs:      "6:6",
+		ReplacementAttrs: "4:7",
+		Outcome:          store.AppliedDespiteError,
+		SwapError:        "the rename took effect despite reporting an error",
+		SwapCause:        store.SwapCauseCrossFilesystem,
+		JobOutcome:       &store.Outcome{Encoder: "cpu"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(h.srv)
+	defer ts.Close()
+
+	var got struct {
+		History []jobDTO `json:"history"`
+	}
+	getJSON(t, ts.URL+"/api/history", &got)
+	byPath := make(map[string]jobDTO, len(got.History))
+	for _, j := range got.History {
+		byPath[j.Path] = j
+	}
+
+	parked, ok := byPath["/lib/parked.mkv"]
+	if !ok {
+		t.Fatalf("a parked job is absent from history: %+v", got.History)
+	}
+	if parked.Status != string(store.Indeterminate) {
+		t.Errorf("parked job status = %q, want %q", parked.Status, store.Indeterminate)
+	}
+	if !strings.Contains(parked.Reason, "non-local") {
+		t.Errorf("parked job reason = %q, want the recorded outcome", parked.Reason)
+	}
+	// The guard's granularity travels with it: the two measured facts, and the window as
+	// a CLASS LABEL rather than a duration.
+	if parked.GuardAttributes != "size,mtime" || parked.GuardTimeResolution != "1s" {
+		t.Errorf("guard record = %q / %q, want the compared attributes and the measured resolution",
+			parked.GuardAttributes, parked.GuardTimeResolution)
+	}
+	if parked.GuardResidualWindow != store.ResidualWindowNetwork {
+		t.Errorf("window = %q, want %q", parked.GuardResidualWindow, store.ResidualWindowNetwork)
+	}
+
+	applied, ok := byPath["/lib/applied.mkv"]
+	if !ok {
+		t.Fatalf("an applied-despite-error job is absent from history: %+v", got.History)
+	}
+	if applied.Status != string(store.AppliedDespiteError) {
+		t.Errorf("applied job status = %q, want %q", applied.Status, store.AppliedDespiteError)
+	}
+	if applied.SwapCause != store.SwapCauseCrossFilesystem {
+		t.Errorf("swap cause = %q, want %q", applied.SwapCause, store.SwapCauseCrossFilesystem)
+	}
+	for _, j := range []jobDTO{parked, applied} {
+		if j.Status == string(store.Done) || j.Status == string(store.Failed) {
+			t.Errorf("%s was reported as %q", j.Path, j.Status)
+		}
+	}
+
+	// And the summary counts them under their own names.
+	var sum controlState
+	getJSON(t, ts.URL+"/api/summary", &sum)
+	if sum.Summary[string(store.Indeterminate)] != 1 || sum.Summary[string(store.AppliedDespiteError)] != 1 {
+		t.Errorf("summary = %v, want one of each new outcome", sum.Summary)
+	}
+}
+
 // A done row carries the fidelity proof, and an UNRECORDED field goes out as an explicit
 // JSON `null` — never as 0. Asserted on the raw bytes, because that distinction only
 // exists on the wire: decoding into a struct would turn both into the same Go value, and

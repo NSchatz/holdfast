@@ -153,7 +153,7 @@ func TestRendered_ThePreservationChecklistFailsWhenAnOperationalFactIsDeleted(t 
 			injectInto(t, lifetimeFigureMarkup, "")},
 		{"the label beside a reclaimed figure is deleted", "reclaimed this run, and reclaimed lifetime",
 			injectInto(t, "reclaimed lifetime: ", "")},
-		{"the per-status counts are never appended", "the per-status count of files, one figure per status the server published",
+		{"the per-status counts are never appended", "the per-status count of files, one figure per status the page declares",
 			injectInto(t, "chips.appendChild(chip);", "void chip;")},
 		{"the history cap notice is hidden", "the notice that a table is showing a capped subset, and the cap",
 			injectCSS(t, "#hist-cap { display:none; }")},
