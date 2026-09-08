@@ -44,48 +44,16 @@ import (
 	"time"
 )
 
-// browserCandidates are the binaries this grader will drive, in order. HOLDFAST_BROWSER
-// overrides the search, and CI sets it to a candidate it has already PROVED renders.
-//
-// The order is not alphabetical: a real vendor binary comes before `chromium`, because on
-// several distributions (Ubuntu among them) `/usr/bin/chromium` is a snap shim that can
-// sit for ever instead of failing when its confinement is unhappy - which is exactly what
-// it did the first time this ran on CI. renderBudget below turns any such hang into a
-// named failure rather than a ten-minute timeout of the whole package.
-//
-// When none is found the decision is NOT this file's: it goes to missingRuntime, the one
-// place in this package where skip-or-fail is decided (WEBUI-10). `make check` must stay
-// green on a machine with no browser and so gets a skip; `make webui-check` sets
-// HOLDFAST_WEBUI_REQUIRED=1, which makes the same absence a FAILURE and additionally
-// refuses a run in which anything skipped - so the "false green" this repo refuses
-// everywhere else is still refused, at the target that is meant to catch it. Before that
-// gate existed this file failed loud on its own; keeping a second, divergent rule here
-// would mean two answers to one question.
-var browserCandidates = []string{
-	"google-chrome", "google-chrome-stable", "chrome", "chromium", "chromium-browser",
-}
-
 // renderBudget bounds one render. A page this small renders in a second or two; anything
-// approaching this is a browser that is not going to answer at all.
+// approaching this is a browser that is not going to answer at all. It is what turns a
+// browser that sits for ever - which is what a snap shim does when its confinement is
+// unhappy, and what one did the first time this ran on CI - into a named failure rather
+// than a ten-minute timeout of the whole package.
 const renderBudget = 90 * time.Second
 
 func browserBin(t *testing.T) string {
 	t.Helper()
-	if v := os.Getenv("HOLDFAST_BROWSER"); v != "" {
-		if _, err := exec.LookPath(v); err != nil {
-			t.Fatalf("::error:: HOLDFAST_BROWSER=%q is not executable: %v", v, err)
-		}
-		return v
-	}
-	for _, c := range browserCandidates {
-		if p, err := exec.LookPath(c); err == nil {
-			return p
-		}
-	}
-	missingRuntime(t, "chromium", "the outcome grader loads the served document in a real "+
-		"browser engine, because what the page SHOWS cannot be read off its source text "+
-		"(tried "+strings.Join(browserCandidates, ", ")+", and HOLDFAST_BROWSER)")
-	return ""
+	return chromium(t)
 }
 
 // jobRow is one history row in the snapshot the page renders.
