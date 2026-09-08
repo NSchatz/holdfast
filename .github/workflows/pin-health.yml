@@ -34,7 +34,7 @@ jobs:
   ffmpeg-pin:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # Through the Makefile, like every other gate in this repository, so the scheduled
       # run and a human typing `make check-pin-live` are the identical check rather than
