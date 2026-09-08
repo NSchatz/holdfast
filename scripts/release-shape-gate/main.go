@@ -48,12 +48,14 @@
 //	        own release would promote
 //	A15     an unreadable, unparseable or step-less definition is red, and says which
 //
-// Every value a role step HANDS its program - the reference the re-smoke pulls back, the
-// version `:latest` is retagged onto, the references the push publishes - has to BE the
-// planning logic's own output rather than equal one: the expression is traced back through the
-// `needs:` graph and every literal reds. Comparing the value with what a planned release
-// produced bought back exactly one literal, the one equal to that sample, and the sample was
-// `v0.1.0` - the version this repository has actually published (S0046 F26). See handed.go.
+// Every value a release step HANDS its program - the reference the re-smoke pulls back, the
+// version `:latest` is retagged onto, the references the push publishes, the image the
+// release notes name - has to BE the planning logic's own output rather than equal one: the
+// expression is traced back through the `needs:` graph and every literal reds. Comparing the
+// value with what a planned release produced bought back exactly one literal, the one equal to
+// that sample, and the sample was `v0.1.0` - the version this repository has actually
+// published (S0046 F26). See handed.go, and acts.go for the same hold on the irreversible acts
+// the role table does not name (S0046 F28).
 package main
 
 import (
@@ -262,7 +264,10 @@ func (g *gate) run() error {
 	// Structured YAML and the workflow's own outputs graph; no planned run, and no sample. See
 	// handed.go.
 	g.checkHandedValues(wf, roles)
-	g.checkPlanProducesEverythingARoleIsHeldTo(roles, tag)
+	// The same trace, for the irreversible acts that hold no role - the eight steps of the
+	// publishing job the role table does not name. See acts.go.
+	g.checkActsHandedValues(wf, roles)
+	g.checkPlanProducesEverythingAReleaseStepIsHeldTo(roles, tag)
 	g.checkComposeReferenceAgreement(wf, roles, tag, repo)
 	return nil
 }

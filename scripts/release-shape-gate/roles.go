@@ -111,6 +111,10 @@ const (
 	heldEventName   // the event the shape being planned is
 	heldRefName     // the ref that shape carries
 	heldRepository  // this module's own repository, derived from go.mod
+	// whether the planning logic decided this release is a pre-release. It is not a
+	// reference, but it decides how an irreversible act is performed - marking a GitHub
+	// release `--prerelease` or not - so it is held the same way every other object is.
+	heldPlannedPrerelease
 )
 
 // What a value holding each of those sources must BE is declared in handed.go's `heldAs`, and
@@ -118,8 +122,11 @@ const (
 // workflow's own `needs:` graph. Nothing is compared with a sample. See handed.go's header for
 // why comparing was the wrong shape (S0046 F26).
 
-// heldSources is every source any role declares, so the checks over that table cover exactly
-// what is actually decided and nothing they invented.
+// heldSources is every source any role OR act declares, so the checks over that table cover
+// exactly what is actually decided and nothing they invented. The acts are in here for the
+// same reason the roles are: an output an act's object is traced to and that the planning
+// logic never writes is an empty string in the middle of a release, whether the step holding
+// it declares a role or not (checkPlanProducesEverythingAReleaseStepIsHeldTo).
 func heldSources() []envHeld {
 	seen := map[envHeld]bool{}
 	var out []envHeld
@@ -134,6 +141,9 @@ func heldSources() []envHeld {
 	for _, r := range releaseRoles {
 		add(r.handsEnv)
 		add(r.handsInput)
+	}
+	for _, a := range releaseActs {
+		add(a.handsEnv)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
@@ -164,7 +174,7 @@ type role struct {
 
 	// handsEnv are the environment names this role's own invocation reads, and the value
 	// each must carry. Every other name in scope for the step must be classified in
-	// envCheckedAndInertForRoleSteps; every name HERE must be set for the step and must
+	// envCheckedAndInertForReleaseSteps; every name HERE must be set for the step and must
 	// equal the value it is held against, or the role is held by a step that invokes the
 	// right program against the wrong object.
 	handsEnv map[string]envSpec
@@ -308,12 +318,15 @@ var releaseRoles = []role{
 	},
 }
 
-// envCheckedAndInertForRoleSteps are environment names that may be in scope for ANY role
-// step, because a human has read each and found it unable to change what that step's
-// program does. Everything else - MAKEFLAGS, GOFLAGS, PATH, SHELL, BASH_ENV, and whatever
-// is invented next - reds by name, which is the point: `env: MAKEFLAGS: -n` neuters
-// `run: make check` without touching one character of the invocation.
-var envCheckedAndInertForRoleSteps = map[string]string{
+// envCheckedAndInertForReleaseSteps are environment names that may be in scope for ANY step
+// this gate grades - a role step or an irreversible act (acts.go) - because a human has read
+// each and found it unable to change what that step's program does. Everything else -
+// MAKEFLAGS, GOFLAGS, PATH, SHELL, BASH_ENV, and whatever is invented next - reds by name,
+// which is the point: `env: MAKEFLAGS: -n` neuters `run: make check` without touching one
+// character of the invocation. One table for both positions, because a name that cannot
+// change what a role's program does cannot change what an act's does either, and two copies
+// of that judgement would drift.
+var envCheckedAndInertForReleaseSteps = map[string]string{
 	"GO_VERSION": "which Go toolchain actions/setup-go installs. It selects a compiler; it cannot make a program run less than its invocation says",
 }
 
@@ -613,13 +626,13 @@ func (r role) checkEnv(wf *Workflow, job Job, s Step) error {
 	}
 	for _, src := range sources {
 		for _, k := range sortedKeys(src.m) {
-			if _, ok := envCheckedAndInertForRoleSteps[k]; ok {
+			if _, ok := envCheckedAndInertForReleaseSteps[k]; ok {
 				continue
 			}
 			if _, ok := r.handsEnv[k]; ok {
 				continue
 			}
-			return fmt.Errorf("%s holds the role `%s` (%s), and %s sets `%s`, which this gate has not classified.\nAn environment name in scope for a role step reads CLOSED, because it can change what the invocation does while the invocation reads exactly as it did: `MAKEFLAGS: -n` makes `run: make check` print the gate's recipes and run none of them.\nIf `%s` genuinely cannot, classify it in envCheckedAndInertForRoleSteps with the reason; if this role's own script reads it, declare it in that role's handsEnv with the value it must carry. This role reads %v",
+			return fmt.Errorf("%s holds the role `%s` (%s), and %s sets `%s`, which this gate has not classified.\nAn environment name in scope for a role step reads CLOSED, because it can change what the invocation does while the invocation reads exactly as it did: `MAKEFLAGS: -n` makes `run: make check` print the gate's recipes and run none of them.\nIf `%s` genuinely cannot, classify it in envCheckedAndInertForReleaseSteps with the reason; if this role's own script reads it, declare it in that role's handsEnv with the value it must carry. This role reads %v",
 				s.Label(), r.id, r.what, src.where, k, k, r.declaredEnv())
 		}
 	}
@@ -682,7 +695,7 @@ func (r role) permittedFields() []string {
 }
 
 func (r role) declaredEnv() []string {
-	out := append(sortedEnvNames(r.handsEnv), sortedStringsOf(envCheckedAndInertForRoleSteps)...)
+	out := append(sortedEnvNames(r.handsEnv), sortedStringsOf(envCheckedAndInertForReleaseSteps)...)
 	sort.Strings(out)
 	if out == nil {
 		return []string{"(nothing)"}
