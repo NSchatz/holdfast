@@ -104,6 +104,10 @@ function vmafFigures(j) {
   return {
     mean: isNum(j.vmaf_mean) ? fmtScore(j.vmaf_mean) : "?",
     worst: isNum(j.vmaf_min) ? fmtScore(j.vmaf_min) : "?",
+    // A SCOPE label, not an explanation (F8), and eleven words: the model, the two
+    // pooled statistics, the blind spot and what the score was measured against. The
+    // paragraphs that state what a VMAF score does and does not license live in
+    // docs/dashboard-methodology.md, linked once per region.
     condition: "model " + model + " · harmonic-mean + worst-frame pooling · luma-only · measured vs your source",
   };
 }

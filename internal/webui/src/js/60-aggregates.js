@@ -144,6 +144,23 @@ function renderAggregates(aggs) {
   const host = $("aggregates");
   if (!host) return;
   host.replaceChildren();
+  // The view's own three states (F7), decided before a single card is built, and the
+  // three inputs that decide them are DIFFERENT FACTS about the wire:
+  //
+  //   aggregates: {}       the server published the figures and there are none - this
+  //                        view has nothing to show, which is the EMPTY state.
+  //   aggregates: null     the server could not publish them at all. That is six
+  //                        figures that could not be read, and each keeps its card and
+  //                        says "unavailable" (F5), because a view that went blank here
+  //                        would leave the page looking complete with six numbers gone.
+  //   aggregates: 7        not an object: the payload cannot be read (F7).
+  //
+  // None of the three is ever drawn as a grid of zeroes, and none leaves the loading
+  // state on screen for ever.
+  if (aggs !== null && aggs !== undefined) {
+    if (typeof aggs !== "object" || Array.isArray(aggs)) { setViewState("aggs", "unreadable"); return; }
+    if (Object.keys(aggs).length === 0) { setViewState("aggs", "empty"); return; }
+  }
   const src = aggs || {};
   for (const [key, title, nodes] of AGGREGATES) {
     let card;
@@ -154,4 +171,5 @@ function renderAggregates(aggs) {
     }
     host.appendChild(card);
   }
+  setViewState("aggs", null);
 }
