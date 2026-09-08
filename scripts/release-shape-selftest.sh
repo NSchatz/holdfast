@@ -32,7 +32,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=126
+declared=127
 pass=0; failed=0
 
 repo="$work/repo"
@@ -977,6 +977,17 @@ in_step "promote :latest" 's|^          FLOATING_TAG: .*|          FLOATING_TAG:
 changed "$wf" "the floating tag turned into an expression"
 expect 1 "a floating tag that is an expression rather than the declared literal is red" \
   "which carries an expression"
+reset
+
+# --- 49t. THE OTHER END OF THE TRACE. The `needs:` graph says an output EXISTS; only the
+#          executed planning logic says it was written. A plan that writes an empty `version`
+#          leaves every reference above structurally perfect and hands each role step an empty
+#          string at release time - and the compose agreement cannot see it either, because
+#          both sides of that comparison go empty together.
+sed -i 's|^            echo "version=$version"$|            echo "version="|' "$wf"
+changed "$wf" "the planning logic writing an empty version"
+expect 1 "a planning output that is traced but never written is red, naming the output" \
+  "wrote no .version. output"
 reset
 
 # --- 49n. THE OTHER DIRECTION for the input half, or the cases above would be satisfied by a
