@@ -70,6 +70,28 @@ func Lookup(key string) (Spec, bool) {
 	return Spec{}, false
 }
 
+// TargetCodecs returns every value ffprobe reports as codec_name for an output that
+// SOME encoder in this registry could have produced, deduplicated and sorted.
+//
+// It answers "could this build have written this file", which is a different question
+// from Lookup(cfg.Encoder).TargetCodec's "is this file at the codec currently
+// configured". A file already on disk was written by whichever encoder was configured
+// when it was written, and `encoder:` is an ordinary config key an operator may change
+// between runs — so anything deciding the FATE of a file holdfast wrote has to ask the
+// first question, never the second.
+func TargetCodecs() []string {
+	seen := make(map[string]bool, len(registry))
+	out := make([]string, 0, len(registry))
+	for _, spec := range registry {
+		if !seen[spec.TargetCodec] {
+			seen[spec.TargetCodec] = true
+			out = append(out, spec.TargetCodec)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Known returns every registered encoder key, sorted for stable error messages.
 func Known() []string {
 	keys := make([]string, 0, len(registry))

@@ -7,6 +7,7 @@ package probe
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"regexp"
@@ -33,28 +34,83 @@ func New(ffmpeg, ffprobe string) *Prober {
 	return &Prober{FFprobe: ffprobe, FFmpeg: ffmpeg}
 }
 
-// firstLine runs the command and returns the trimmed first line of stdout (stderr
-// discarded). A non-zero exit yields "" — callers treat empty as "unknown".
-func firstLine(ctx context.Context, name string, args ...string) string {
+// firstLineAnswered runs the command and returns BOTH the trimmed first line of stdout
+// (stderr discarded) and whether the command ANSWERED the question at all.
+//
+// firstLine cannot tell those apart — every failure is "" — and for most callers that
+// is right: an unknown bitrate and an unreadable file both mean "do not act on this".
+// For a caller deciding whether a FILE MAY BE DELETED the difference is the whole
+// question. "I read this path and it is not what you asked about" is evidence about the
+// file; "I could not run" is evidence about this host, and a hold that treated the
+// second as the first would delete a good file whenever the tool was missing.
+//
+// answered is true only when the process reached a verdict of its own: it exited 0 (the
+// value returned is its answer, and "" is a legitimate answer meaning "no such field"),
+// or it exited NON-ZERO having read the path, which is how ffprobe says a file is not
+// media it can decode. It is false when the binary could not be started at all, when
+// the process was killed by a signal rather than exiting, and when the caller's context
+// was cancelled — cancellation kills the subprocess mid-question and would otherwise be
+// indistinguishable from a refusal.
+func firstLineAnswered(ctx context.Context, name string, args ...string) (string, bool) {
 	out, err := exec.CommandContext(ctx, name, args...).Output()
+	if ctx.Err() != nil {
+		return "", false
+	}
 	if err != nil {
-		return ""
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || !ee.ProcessState.Exited() {
+			return "", false
+		}
+		return "", true
 	}
 	s := string(out)
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
-	return strings.TrimSpace(s)
+	return strings.TrimSpace(s), true
+}
+
+// firstLine runs the command and returns the trimmed first line of stdout (stderr
+// discarded). A non-zero exit yields "" — callers treat empty as "unknown".
+func firstLine(ctx context.Context, name string, args ...string) string {
+	s, _ := firstLineAnswered(ctx, name, args...)
+	return s
 }
 
 var intRe = regexp.MustCompile(`^[0-9]+$`)
 var floatRe = regexp.MustCompile(`^[0-9]+([.][0-9]+)?$`)
 
 // VideoCodec returns the codec_name of the first video stream, or "" if there is
-// no readable video stream.
+// no readable video stream. It cannot distinguish that from "ffprobe never ran"; a
+// caller for whom the difference decides whether a file may be DELETED must ask
+// VideoCodecAnswered instead.
 func (p *Prober) VideoCodec(ctx context.Context, f string) string {
-	return firstLine(ctx, p.FFprobe, "-v", "error", "-select_streams", "v:0",
+	codec, _ := p.VideoCodecAnswered(ctx, f)
+	return codec
+}
+
+// VideoCodecAnswered returns the codec_name of the first video stream AND reports
+// whether ffprobe answered the question at all (see firstLineAnswered). codec is "" in
+// two very different situations that VideoCodec conflates: answered=true means ffprobe
+// read the path and found no video stream it recognises, while answered=false means
+// ffprobe never got to look — a missing or unexecutable binary, or a cancelled context.
+func (p *Prober) VideoCodecAnswered(ctx context.Context, f string) (codec string, answered bool) {
+	return firstLineAnswered(ctx, p.FFprobe, "-v", "error", "-select_streams", "v:0",
 		"-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1", "--", f)
+}
+
+// Usable reports whether the configured ffprobe answers anything at all, by asking it
+// for its own version — a question every build answers and that no file can influence.
+//
+// It exists so a caller may confirm that a NEGATIVE answer about a file came from a
+// working ffprobe before acting on it irreversibly. A binary that is missing or
+// unexecutable is already caught by VideoCodecAnswered, but one that RUNS and exits
+// non-zero for everything (a half-installed build, a missing shared library) looks
+// exactly like ffprobe reading a file and refusing it — and only one of those is
+// evidence about the file.
+func (p *Prober) Usable(ctx context.Context) bool {
+	v, answered := firstLineAnswered(ctx, p.FFprobe, "-version")
+	return answered && v != ""
 }
 
 // BitrateKbps returns the source video bitrate in kbps, preferring the video

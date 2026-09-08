@@ -429,12 +429,22 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   replacement to its held-back `__holdfast-replacement__` name is a WRITE into the media directory, and the
   failure that strands a replacement is usually the same failure that denies that write and the job-store
   record with it — so a `__transcoding__` file is EXAMINED before it is reclaimed (`strayReplacementHold`).
-  It is kept when its name is exactly what `tempPath` constructs AND its content passes the verify gate's
-  own codec and `lengthParity` checks against the source beside it, which every replacement that ever
-  reached a swap passes by construction; a half-written encode is shorter and is still swept. Do not
-  "simplify" that to the name alone (a killed encode reports codec `hevc` and decodes cleanly — measured —
-  so temps would accumulate for ever) nor back to an unconditional `os.Remove` (that is the deletion AC15i
-  forbids). `pickTempPath` applies the identical rule: it is the second route to the same deletion.
+  The sweep needs a POSITIVE finding that the file is work in progress, and **anything it could not
+  establish HOLDS** — because a "no" here is a deletion of the one file the phase exists to protect. Its
+  name must be exactly what `tempPath` constructs; then ffprobe is asked what the file IS, and the answer
+  carries whether it was ANSWERED (`probe.VideoCodecAnswered`, beside `Prober.Usable`). A cancelled run, an
+  ffprobe that cannot be started, and an ffprobe that exits non-zero for every question all HOLD — `""` from
+  plain `VideoCodec` means "not video" and "never ran" alike, and a hold built on it deletes a good file the
+  moment the tool is missing. The codec question is asked as **could SOME encoder this build ships have
+  written it** (`encoder.TargetCodecs`), never "is it at the codec configured right now": a stranded file
+  was written by whichever encoder was configured THEN, and `encoder:` is an ordinary config key, so keying
+  the hold to it lets an unrelated edit license a deletion. Only then does `lengthParity` against the source
+  beside it decide finished-vs-fragment, and with NO source beside it there is nothing to measure, so it
+  holds. Do not "simplify" that to the name alone (a killed encode reports codec `hevc` and decodes cleanly
+  — measured — so temps would accumulate for ever), do not re-key the codec question to `e.targetCodec`, do
+  not let an unanswered probe read as "no", and do not go back to an unconditional `os.Remove` (that is the
+  deletion AC15i forbids). `pickTempPath` applies the identical rule: it is the second route to the same
+  deletion, and no sweep loop guards it.
 - `internal/logging`, `internal/version` — logger construction, build-stamped version.
 - `.github/workflows/ci.yml` — the gate (installs the pinned ffmpeg via `scripts/install-ffmpeg.sh` for the
   engine proof) + a `package` job (TRANSCODE-9) that builds BOTH arches and runs the image smoke gate.

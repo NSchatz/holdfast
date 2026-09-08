@@ -18,6 +18,13 @@ package engine
 // orphaned temp must still be swept, or a killed run's half-written encodes accumulate
 // for ever. The name alone cannot decide it - both files carry the same marker - so the
 // content decides, using the verify gate's own checks.
+//
+// The second block of tests below is the direction the first one missed: a "no" that is
+// not about the file. The hold used to ask whether the file was at the codec the RUNNING
+// engine targets, using a probe that reports "this is not video" and "ffprobe did not
+// run" with the same empty string - so an operator changing `encoder:`, or a SIGTERM, or
+// a missing binary each turned a gate-passed replacement into a deletion. Each of those
+// arms is a test here.
 
 import (
 	"context"
@@ -25,8 +32,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/probe"
 )
 
@@ -44,6 +53,15 @@ func mkHevcFrom(t *testing.T, ffmpeg, src, path, seconds string) {
 	args = append(args, "-c:v", "libx265", "-x265-params", "log-level=error", "-crf", "30",
 		"-preset", "ultrafast", "-pix_fmt", "yuv420p10le", "--", path)
 	ff(t, ffmpeg, args...)
+}
+
+// mkH264From encodes the WHOLE of src to path with libx264 - a complete, decodable file
+// of the source's own length at a codec NO encoder in this build's registry produces. It
+// is the control on the codec question: everything else about it says "finished".
+func mkH264From(t *testing.T, ffmpeg, src, path string) {
+	t.Helper()
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", src,
+		"-c:v", "libx264", "-crf", "30", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "--", path)
 }
 
 // TestStrayTemp_TheSweepKeepsAFinishedReplacementAndStillTakesAPartialEncode is the
@@ -314,5 +332,380 @@ func TestStrandedReplacement_AWholeLaterRunLeavesItAloneAndStillDoesItsWork(t *t
 	// no temp of its own behind.
 	if nTemp(t, d) != 1 {
 		t.Errorf("temps under %s = %v, want exactly the one stranded replacement", d, lsDir(t, d))
+	}
+}
+
+// ---- a "no" that is not about the file ---------------------------------------
+//
+// Everything below is one property, asked from five directions: the sweep needs a
+// POSITIVE finding that a file is work in progress, and anything it could not establish
+// HOLDS. AC15i's consequent is unconditional and names deletion, and it goes out of its
+// way to say the hold must not depend on something the stranding failure could also have
+// taken away - so a hold that releases on a question it could not ask, or on a config
+// key an operator may edit, is the criterion inverted rather than a gap in it.
+
+// strandedFixture is AC15h's aftermath, staged directly: a gate-passed hevc replacement
+// sitting at a path THIS BUILD'S temp construction produced, its source beside it, and
+// no record of either anywhere - because the store write that would have made one is
+// exactly what failed. AC15i: no later run may enumerate, encode, swap or DELETE it.
+func strandedFixture(t *testing.T) (dir, src, stranded, md5, ffmpeg, ffprobe string) {
+	t.Helper()
+	ffmpeg, ffprobe = tools(t)
+	dir = t.TempDir()
+	src = filepath.Join(dir, "movie.mkv")
+	mkH264Long(t, ffmpeg, src, "4M")
+	stranded = tempPath(dir, "movie", "mkv", 0)
+	mkHevcFrom(t, ffmpeg, src, stranded, "") // the WHOLE source: a finished replacement
+	return dir, src, stranded, md5f(t, stranded), ffmpeg, ffprobe
+}
+
+// brokenFFprobe writes an executable that RUNS and exits non-zero for every question -
+// a half-installed build, or one whose shared library is gone. It matters because it is
+// the shape that most resembles a legitimate refusal: ffprobe reading a file and saying
+// "this is not media" exits non-zero too.
+func brokenFFprobe(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "broken-ffprobe")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestStrayTemp_TheCodecQuestionAsksWhatThisBuildCouldHaveWrittenNotWhatIsConfigured.
+//
+// `encoder:` is an ordinary config key and svtav1 is a shipped value, so if the content
+// test asks whether a file is at the target codec of THE RUN DOING THE ASKING, an
+// operator switching encoders while a replacement is stranded has it deleted by the next
+// sweep - in a later run, exactly as AC15i forbids. The question has to be "could some
+// encoder this build ships have written this", which a stranded replacement always
+// passes whatever the current setting is.
+//
+// The control arm is what makes it an experiment: the same fixture under the encoder
+// that wrote it is held byte-identical, so the test measures the encoder key and nothing
+// else.
+func TestStrayTemp_TheCodecQuestionAsksWhatThisBuildCouldHaveWrittenNotWhatIsConfigured(t *testing.T) {
+	dir, _, stranded, md5, ffmpeg, ffprobe := strandedFixture(t)
+	ctx := context.Background()
+
+	same := buildEngine(t, ffmpeg, ffprobe, dir, nil, nil)
+	same.held.Store(same.loadHoldBacks(ctx))
+	same.cleanStaleTemps(ctx)
+	if !exists(stranded) {
+		t.Fatalf("control arm: the same-encoder run already swept %s - the fixture is not the case under test", stranded)
+	}
+	if md5f(t, stranded) != md5 {
+		t.Fatalf("control arm: %s was modified", stranded)
+	}
+
+	// The only change: the operator switched encoders. svtav1 is a shipped `encoder:`
+	// value (internal/encoder), so its target codec is av1 rather than hevc.
+	other := buildEngine(t, ffmpeg, ffprobe, dir, nil, func(c *config.Config) { c.Encoder = "svtav1" })
+	if other.targetCodec == same.targetCodec {
+		t.Fatalf("precondition: both engines target %q - the encoder switch did not move the target codec", other.targetCodec)
+	}
+	other.held.Store(other.loadHoldBacks(ctx))
+	other.cleanStaleTemps(ctx)
+
+	if !exists(stranded) {
+		t.Fatalf("AC15i: a later run under encoder %q (target %q) DELETED the gate-passed replacement at %s, "+
+			"which no record survived to name. The record-free hold's content test is asked against the "+
+			"asking run's target codec, so a config key an operator may change at any time releases a file "+
+			"AC15i says may never be deleted in any later run.",
+			"svtav1", other.targetCodec, stranded)
+	}
+	if md5f(t, stranded) != md5 {
+		t.Errorf("AC15i: the later run MODIFIED the stranded replacement %s", stranded)
+	}
+}
+
+// TestStrayTemp_AProbeThatCannotBeRunHoldsRatherThanReleases.
+//
+// The content test is decided by ffprobe, and probe.VideoCodec returns "" for "this is
+// not video" and for "ffprobe did not run" alike. So any failure to probe used to answer
+// "not a replacement" and the sweep DELETED the file. The failure direction has to be
+// the same one the no-source branch already takes: hold.
+func TestStrayTemp_AProbeThatCannotBeRunHoldsRatherThanReleases(t *testing.T) {
+	dir, _, stranded, md5, ffmpeg, _ := strandedFixture(t)
+	ctx := context.Background()
+
+	missing := filepath.Join(t.TempDir(), "no-such-ffprobe")
+	broken := buildEngine(t, ffmpeg, missing, dir, nil, nil)
+	broken.held.Store(broken.loadHoldBacks(ctx))
+	broken.cleanStaleTemps(ctx)
+
+	if !exists(stranded) {
+		t.Fatalf("AC15i: with the content probe unable to answer, the sweep DELETED the gate-passed "+
+			"replacement at %s. A probe that cannot answer is read as 'not a replacement', so the "+
+			"record-free hold fails OPEN; the same function's no-source-beside branch fails CLOSED. "+
+			"(ffprobe was %s)", stranded, missing)
+	}
+	if md5f(t, stranded) != md5 {
+		t.Errorf("the sweep MODIFIED %s", stranded)
+	}
+	// And it holds for THIS reason. The operator has two different things to go and fix
+	// depending on which it was, and the two branches are independently removable, so
+	// the reason is asserted rather than only the file's survival.
+	if why := broken.strayReplacementHold(ctx, stranded); !strings.Contains(why, "could not be asked about") {
+		t.Errorf("the hold reports %q; a probe that never ran must be reported as one", why)
+	}
+}
+
+// TestStrayTemp_AnFfprobeThatAnswersNothingAtAllHoldsToo is the harder half of the same
+// property, and the reason the hold asks Prober.Usable before acting on a refusal.
+//
+// A MISSING ffprobe is easy: exec fails and no verdict was reached. An ffprobe that runs
+// and exits non-zero for every question is not: on the wire it is identical to a working
+// ffprobe reading a file and rejecting it, which is the answer that legitimately licenses
+// the sweep. Only a question with a known answer - "what version are you" - separates
+// them, and a hold that skipped it would delete every stranded replacement on a host
+// whose ffprobe is half-installed.
+func TestStrayTemp_AnFfprobeThatAnswersNothingAtAllHoldsToo(t *testing.T) {
+	dir, _, stranded, md5, ffmpeg, _ := strandedFixture(t)
+	ctx := context.Background()
+
+	e := buildEngine(t, ffmpeg, brokenFFprobe(t), dir, nil, nil)
+	e.held.Store(e.loadHoldBacks(ctx))
+	e.cleanStaleTemps(ctx)
+
+	if !exists(stranded) {
+		t.Fatalf("AC15i: with an ffprobe that exits non-zero for EVERY question, the sweep DELETED the "+
+			"gate-passed replacement at %s. Its refusal was evidence about the host, not about the file.", stranded)
+	}
+	if md5f(t, stranded) != md5 {
+		t.Errorf("the sweep MODIFIED %s", stranded)
+	}
+	if why := e.strayReplacementHold(ctx, stranded); !strings.Contains(why, "answering nothing at all on this host") {
+		t.Errorf("the hold reports %q; an ffprobe that answers nothing must be reported as one, because "+
+			"it is a DIFFERENT thing for an operator to fix from a missing binary", why)
+	}
+}
+
+// TestStrayTemp_NothingBesideItHoldsWhateverElseCouldNotBeEstablished is what makes the
+// arms above a data-safety property rather than a lost encode.
+//
+// With NO source beside it there is nothing to measure the file against, and it may be
+// the only faithful copy of the film there is - the case the file's own RetainedMarker
+// comment says can never happen ("nothing in this program may ever delete it on its own
+// initiative"). That fail-safe used to sit behind a codec question that answered "no"
+// for reasons that were not about the file, so it was unreachable on exactly the paths
+// that needed it. Both of those paths are arms here.
+func TestStrayTemp_NothingBesideItHoldsWhateverElseCouldNotBeEstablished(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name    string
+		ffprobe string
+		mutate  func(*config.Config)
+	}{
+		{"the content probe cannot answer", "", nil},
+		{"a later run targets a different codec", ffprobe, func(c *config.Config) { c.Encoder = "svtav1" }},
+		{"nothing at all is wrong", ffprobe, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			// Build the replacement from a source, then take the source away: an
+			// operator moved the film, or a media manager did. Nothing is left beside
+			// the replacement to measure it against, which is the branch that holds.
+			seed := filepath.Join(dir, "seed.mkv")
+			mkH264Long(t, ffmpeg, seed, "4M")
+			stranded := tempPath(dir, "movie", "mkv", 0)
+			mkHevcFrom(t, ffmpeg, seed, stranded, "")
+			if err := os.Remove(seed); err != nil {
+				t.Fatal(err)
+			}
+
+			probeBin := tc.ffprobe
+			if probeBin == "" {
+				probeBin = filepath.Join(t.TempDir(), "no-such-ffprobe")
+			}
+			e := buildEngine(t, ffmpeg, probeBin, dir, nil, tc.mutate)
+			e.held.Store(e.loadHoldBacks(ctx))
+			e.cleanStaleTemps(ctx)
+
+			if !exists(stranded) {
+				t.Fatalf("AC15i: the sweep DELETED %s - a gate-passed replacement holdfast wrote, with NO "+
+					"record naming it and NO source beside it. strayReplacementHold's own no-source "+
+					"fail-safe is unreachable here, because the codec check runs first and answered no.",
+					stranded)
+			}
+		})
+	}
+}
+
+// TestStrayTemp_ACodecNoEncoderHereWritesIsStillSwept is the control on the codec
+// question, and the reason widening it to the whole encoder registry did not turn it
+// into a rule that holds everything.
+//
+// The two files differ in ONE way: both sit at the build's own temp construction, both
+// are real, complete, decodable ffmpeg output of the same length as the source beside
+// them - so length parity passes for both - and one is at a codec this build's encoders
+// produce while the other is not. The first is held; the second is swept.
+func TestStrayTemp_ACodecNoEncoderHereWritesIsStillSwept(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	ctx := context.Background()
+	prober := probe.New(ffmpeg, ffprobe)
+
+	oursSrc := filepath.Join(d, "ours.mkv")
+	theirsSrc := filepath.Join(d, "theirs.mkv")
+	mkH264Long(t, ffmpeg, oursSrc, "4M")
+	mkH264Long(t, ffmpeg, theirsSrc, "4M")
+
+	ours := tempPath(d, "ours", "mkv", 0)
+	theirs := tempPath(d, "theirs", "mkv", 0)
+	mkHevcFrom(t, ffmpeg, oursSrc, ours, "")             // hevc: something this build writes
+	mkH264From(t, ffmpeg, theirsSrc, theirs)             // h264: nothing here writes it
+	if got := codecOf(t, ffprobe, ours); got != "hevc" { // preconditions: the experiment is controlled
+		t.Fatalf("precondition: %s is %q, not hevc", ours, got)
+	}
+	if got := codecOf(t, ffprobe, theirs); got != "h264" {
+		t.Fatalf("precondition: %s is %q, not h264", theirs, got)
+	}
+	for _, p := range []string{ours, theirs} {
+		if !prober.DecodeOK(ctx, p) {
+			t.Fatalf("precondition: %s does not decode cleanly - both arms must be VALID output", p)
+		}
+	}
+	dOurs, ok1 := prober.DurationSec(ctx, ours)
+	dTheirs, ok2 := prober.DurationSec(ctx, theirs)
+	if !ok1 || !ok2 || dOurs < 1 || dTheirs < 1 {
+		t.Fatalf("precondition: both arms must be whole encodes (%.3fs ok=%v / %.3fs ok=%v)", dOurs, ok1, dTheirs, ok2)
+	}
+
+	e := buildEngine(t, ffmpeg, ffprobe, d, nil, nil)
+	e.held.Store(e.loadHoldBacks(ctx))
+	e.cleanStaleTemps(ctx)
+
+	if !exists(ours) {
+		t.Errorf("AC15i: the sweep deleted %s, which is at a codec this build's own encoders write", ours)
+	}
+	if exists(theirs) {
+		t.Errorf("crash-safety: %s is at a codec NO encoder in this build produces, so it cannot be a "+
+			"replacement holdfast wrote - widening the codec question to the registry must not become "+
+			"a rule that holds every temp", theirs)
+	}
+}
+
+// midLoopCancel is a context that is live for its first n Err() observations and
+// cancelled from then on - a SIGTERM landing INSIDE a loop, deterministically.
+//
+// It is a test double rather than a real context because no real one can stage this:
+// a context cancelled before the call is caught by the sweep's per-DIRECTORY check
+// before an entry is ever read, and cancelling from another goroutine mid-loop is a
+// race. The distinction it makes visible is exactly the finding's: whether the sweep
+// re-asks on each entry or only when it moves to the next directory.
+type midLoopCancel struct {
+	context.Context
+	live int
+	done chan struct{}
+	once sync.Once
+}
+
+func cancelAfter(n int) *midLoopCancel {
+	return &midLoopCancel{Context: context.Background(), live: n, done: make(chan struct{})}
+}
+
+func (c *midLoopCancel) Err() error {
+	if c.live > 0 {
+		c.live--
+		return nil
+	}
+	c.once.Do(func() { close(c.done) })
+	return context.Canceled
+}
+
+func (c *midLoopCancel) Done() <-chan struct{} { return c.done }
+
+// TestStrayTemp_ACancelledRunSweepsNothingAndStopsAtTheNextEntry.
+//
+// The production trigger that needs no operator at all: a SIGTERM lands while the sweep
+// is inside the coverage-bounded entry loop. Every question below the name is an ffprobe
+// subprocess and CommandContext kills it, so a cancelled run can establish nothing about
+// any remaining file - and a "no" here is a deletion.
+//
+// Two things are asserted, and they are independent. (1) Nothing is deleted, by EITHER
+// deletion route: the sweep and pickTempPath both ask strayReplacementHold, which now
+// refuses to answer on a cancelled context. (2) The sweep stops at the next ENTRY rather
+// than the next DIRECTORY - visible in the log, because a loop that carried on would ask
+// about every remaining file and report holding each one.
+func TestStrayTemp_ACancelledRunSweepsNothingAndStopsAtTheNextEntry(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+
+	// Three ORDINARY orphans - work in progress, each with its source beside it. A live
+	// run sweeps all three, so "nothing was deleted" cannot be confused with "there was
+	// nothing to delete".
+	var orphans []string
+	for _, stem := range []string{"a", "b", "c"} {
+		if err := os.WriteFile(filepath.Join(d, stem+".mkv"), []byte("a source"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		p := tempPath(d, stem, "mkv", 0)
+		if err := os.WriteFile(p, []byte("half an encode"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		orphans = append(orphans, p)
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	logs := &capturedLog{}
+	cfg := baseCfg(d)
+	e := New(cfg, probe.New(ffmpeg, ffprobe), nil, newTestStore(t, d), logs.logger())
+	e.Coverage = []string{d} // the branch that used to ask ctx once per DIRECTORY
+	e.held.Store(&holdBacks{paths: map[string]string{}})
+	e.cleanStaleTemps(cancelled)
+
+	for _, p := range orphans {
+		if !exists(p) {
+			t.Errorf("a cancelled run DELETED %s. Every question that decides a temp's fate is an "+
+				"ffprobe the cancellation kills, so the sweep would be acting on answers it never got", p)
+		}
+	}
+
+	// The same again with the cancellation landing INSIDE the entry loop, which is the
+	// shape the finding named and the only one the per-directory check does not cover:
+	// a context cancelled before the call never reaches an entry at all. cancelAfter(1)
+	// lets the directory check through and is done by the first entry.
+	midLoop := &capturedLog{}
+	mid := New(cfg, probe.New(ffmpeg, ffprobe), nil, newTestStore(t, d), midLoop.logger())
+	mid.Coverage = []string{d}
+	mid.held.Store(&holdBacks{paths: map[string]string{}})
+	mid.cleanStaleTemps(cancelAfter(1))
+
+	for _, p := range orphans {
+		if !exists(p) {
+			t.Errorf("a run cancelled INSIDE the entry loop DELETED %s", p)
+		}
+	}
+	if strings.Contains(midLoop.String(), "leaving a file holdfast wrote in place") {
+		t.Errorf("the sweep carried on judging entries after the run was cancelled, one file at a time, "+
+			"instead of stopping at the entry it was on:\n%s", midLoop.String())
+	}
+
+	// The hold itself refuses to answer, which is what protects the SECOND deletion
+	// route - pickTempPath, which no sweep loop guards.
+	if why := e.strayReplacementHold(cancelled, orphans[0]); !strings.Contains(why, "being cancelled") {
+		t.Errorf("strayReplacementHold reports %q on a cancelled context, want a hold naming the cancellation", why)
+	}
+	got, err := e.pickTempPath(cancelled, d, "a", "mkv")
+	if err != nil {
+		t.Fatalf("pickTempPath: %v", err)
+	}
+	if got == orphans[0] || !exists(orphans[0]) {
+		t.Errorf("pickTempPath chose or cleared %s on a cancelled context (it returned %q)", orphans[0], got)
+	}
+
+	// And the control: with a live context the same three files are ordinary orphans
+	// and every one of them is reclaimed, so the sweep has not been disarmed.
+	e.cleanStaleTemps(context.Background())
+	for _, p := range orphans {
+		if exists(p) {
+			t.Errorf("crash-safety: %s survived a LIVE sweep - a killed run's half-written encodes "+
+				"would accumulate for ever", p)
+		}
 	}
 }

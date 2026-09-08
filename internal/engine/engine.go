@@ -361,6 +361,15 @@ func (e *Engine) cleanStaleTemps(ctx context.Context) {
 				continue
 			}
 			for _, ent := range ents {
+				// Per ENTRY, not per directory. Deciding a file's fate costs probes
+				// that a cancelled context kills, so a SIGTERM landing inside this
+				// loop would otherwise leave every remaining file to be judged by
+				// questions nothing can answer. The walking branch below already
+				// checks per path; this is the same check, in the branch that was
+				// only asking once a directory.
+				if ctx.Err() != nil {
+					break
+				}
 				if !ent.IsDir() && isTempName(ent.Name()) && e.sweepTemp(ctx, filepath.Join(dir, ent.Name())) {
 					n++
 				}

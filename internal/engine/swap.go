@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/fsclass"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
@@ -159,27 +160,47 @@ func IsTempConstructionName(base string) bool {
 //
 // THE TENSION, stated rather than glossed: an ordinary orphaned temp MUST still be
 // swept, or a killed run's half-written encodes accumulate for ever and crash-safety
-// regresses. So a path is NOT held on the temp name alone. It is held when both halves
-// hold:
+// regresses. So a path is NOT held on the temp name alone, and the content decides.
 //
-//  1. its NAME is exactly what tempPath could have produced - never a widened
-//     temp-or-dotfile pattern (AC15i bounds the record-free basis to the construction);
-//     and
-//  2. its CONTENT is a FINISHED encode rather than a partial one.
+// THE RULE THAT DECIDES IT, and the direction each half fails in:
 //
-// Half 2 is decided by the verify gate's OWN checks, and that is what makes this a rule
-// rather than a guess: the output codec (gate 2) and length parity against the source
-// beside it (gate 3, lengthParity, the same function). Every replacement that ever
-// reached a swap passed both BY CONSTRUCTION, so this can never sweep one. It is
-// deliberately loose in the other direction - a partial encode that satisfies both is
-// KEPT and reported, which costs an operator some disk and never a file.
+//  1. its NAME must be exactly what tempPath could have produced - never a widened
+//     temp-or-dotfile pattern (AC15i bounds the record-free basis to the construction).
+//     A name outside the construction is not this rule's business at all.
+//  2. AN UNANSWERED QUESTION IS NOT A "NO". Every question below costs an ffprobe
+//     subprocess, and a "no" here is a DELETION - of the one file this phase exists to
+//     protect, on a repository whose blast radius is "a wrong verdict is unrecoverable".
+//     So the sweep needs a POSITIVE finding that the file is work in progress; anything
+//     it could not establish HOLDS. A cancelled run, an ffprobe that cannot be started,
+//     and an ffprobe that answers nothing at all on this host each hold.
+//  3. WHAT IS THIS FILE? Asked as "could SOME encoder this build ships have written
+//     it" (couldThisBuildHaveWrittenIt), never as "is it at the codec configured right
+//     now". A stranded file was written by whichever encoder was configured THEN, and
+//     `encoder:` is an ordinary config key: keying the hold to it would let an
+//     unrelated edit release a file AC15i says may never be deleted in any later run.
+//     This is the ONE question that is about the file and nothing else, which is why a
+//     negative answer to it - and ONLY to it - can license a deletion with nothing
+//     beside the file to check against.
+//  4. IS IT FINISHED? The verify gate's own length parity (gate 3, lengthParity, the
+//     same function - so the sweep's licence to delete and the gate's licence to swap
+//     cannot drift), measured against the source beside it. With NO source beside it
+//     there is nothing to measure and the answer is unavailable, so it holds: that is
+//     the case where the stranded file may be the only faithful copy of the film there
+//     is. lengthParity itself convicts only on evidence it has - two measured lengths
+//     that disagree - and returns "no objection" for anything it could not measure, so
+//     the fail-safe direction survives a probe failure here too.
 //
-// Both checks are needed and neither is decorative. Measured on real ffmpeg: a libx265
-// encode of a 20-second source, killed part-way, ends up 3.6 seconds long while
-// reporting codec `hevc` and DECODING CLEANLY - so the codec check alone (and a decode
-// integrity check alone) would hold every partial encode for ever, and the length check
-// is the one that tells them apart. A hard-killed encode leaves a zero-length or
-// header-only file, which fails the codec check and is swept by that half.
+// Every replacement that ever reached a swap passes 3 and 4 BY CONSTRUCTION, so this
+// can never sweep one. It is deliberately loose in the other direction - a partial
+// encode that satisfies both is KEPT and reported, which costs an operator some disk
+// and never a file.
+//
+// Both content checks are needed and neither is decorative. Measured on real ffmpeg: a
+// libx265 encode of a 20-second source, killed part-way, ends up 3.6 seconds long while
+// reporting codec `hevc` and DECODING CLEANLY - so question 3 alone (and a decode
+// integrity check alone) would hold every partial encode for ever, and question 4 is
+// what tells them apart. A hard-killed encode leaves a zero-length or header-only file,
+// which a working ffprobe REFUSES outright, and question 3 takes it.
 func (e *Engine) strayReplacementHold(ctx context.Context, path string) string {
 	// Nothing there, or not a regular file: nothing to hold, and no subprocess spent
 	// asking. This is also what keeps the picker's common case free of an extra probe.
@@ -190,20 +211,64 @@ func (e *Engine) strayReplacementHold(ctx context.Context, path string) string {
 	if !ok {
 		return ""
 	}
-	if codec := e.Probe.VideoCodec(ctx, path); codec != e.targetCodec {
-		return ""
+	// A cancelled run can establish nothing: CommandContext kills every probe below, so
+	// each would come back empty for a reason that is not about the file. The sweep's
+	// entry loops stop on the same signal; this is what makes the answer safe when the
+	// cancellation lands after that check, and what covers pickTempPath as well.
+	if ctx.Err() != nil {
+		return "a file at a temp path this build constructed, on a run that is being cancelled - " +
+			"nothing can be asked about it, and an unanswered question is not permission to delete"
 	}
+
+	// Question 3. The one question that is about THIS FILE and nothing else.
+	codec, answered := e.Probe.VideoCodecAnswered(ctx, path)
+	if !answered {
+		return "a file at a temp path this build constructed that ffprobe could not be asked about - " +
+			"an unanswered question is not permission to delete"
+	}
+	if !couldThisBuildHaveWrittenIt(codec) {
+		// ffprobe ran and answered about the file. Before that refusal licenses a
+		// deletion, confirm the refusal was ffprobe's verdict on the FILE and not the
+		// only thing a broken ffprobe can say: one that exits non-zero for everything
+		// is indistinguishable from one reading a file and rejecting it.
+		if !e.Probe.Usable(ctx) {
+			return "a file at a temp path this build constructed, with ffprobe answering nothing at all on " +
+				"this host - its refusal is evidence about the host, not about the file"
+		}
+		return "" // work in progress, or not media at all: the sweep's to take
+	}
+
+	// Question 4. It IS something this build could have written; all that is left is
+	// whether it is finished, and only the source beside it can say.
 	src, found := e.sourceBeside(filepath.Dir(path), stem, ext)
 	if !found {
-		// No source to measure against. Holding is the fail-safe answer and it is the
-		// rarer branch by construction: a swap that failed left the source where it was,
-		// so a replacement stranded at a temp path normally has its source beside it.
-		return "a finished " + e.targetCodec + " encode holdfast wrote, with no source beside it left to measure it against"
+		return "a finished " + codec + " encode holdfast wrote, with no source beside it left to measure it against"
 	}
 	if err := e.lengthParity(ctx, src, path); err != nil {
 		return "" // a truncated encode: work in progress, and the sweep's to take
 	}
-	return "a finished " + e.targetCodec + " encode holdfast wrote, the length of the source beside it (" + filepath.Base(src) + ")"
+	return "a finished " + codec + " encode holdfast wrote, the length of the source beside it (" + filepath.Base(src) + ")"
+}
+
+// couldThisBuildHaveWrittenIt reports whether codec is one ffprobe would report for an
+// output SOME encoder this build ships could have produced.
+//
+// It is deliberately the whole registry and not e.targetCodec. targetCodec is derived
+// from cfg.Encoder in New, and a replacement stranded on disk was written by whichever
+// encoder was configured when it was written - so asking about the current key would
+// make AC15i's protection turn on a setting that has nothing to do with the file, in
+// exactly the way the criterion forbids it to turn on a record ("holding it SHALL NOT
+// depend on one, since the write that failed is exactly what denied it").
+//
+// "h265" is ffprobe's legacy alias for hevc and is accepted for the same reason
+// isAlreadyTargetCodec accepts it: the question is what the file IS.
+func couldThisBuildHaveWrittenIt(codec string) bool {
+	for _, target := range encoder.TargetCodecs() {
+		if codec == target || (target == "hevc" && codec == "h265") {
+			return true
+		}
+	}
+	return false
 }
 
 // sourceBeside finds the source a stray temp was being encoded FROM: the sibling sharing

@@ -54,6 +54,44 @@ func TestLookup_KnownKeys(t *testing.T) {
 	}
 }
 
+// TestTargetCodecs_IsEveryEncodersOutputNotTheConfiguredOne. The set is what the
+// engine's record-free hold-back asks against when it decides whether a file at a temp
+// path is one holdfast could have written (AC15i). It must cover EVERY encoder in the
+// registry: a replacement stranded on disk was written by whichever one was configured
+// at the time, and `encoder:` is an ordinary config key an operator may change - so a
+// set that tracked the current setting would let an unrelated edit license a deletion.
+func TestTargetCodecs_IsEveryEncodersOutputNotTheConfiguredOne(t *testing.T) {
+	got := TargetCodecs()
+
+	// Every registered encoder's output is in it, whichever one a build is set to.
+	for _, key := range Known() {
+		spec, ok := Lookup(key)
+		if !ok {
+			t.Fatalf("Known() offered %q and Lookup refuses it", key)
+		}
+		found := false
+		for _, c := range got {
+			found = found || c == spec.TargetCodec
+		}
+		if !found {
+			t.Errorf("encoder %q writes %q and TargetCodecs() = %v does not carry it", key, spec.TargetCodec, got)
+		}
+	}
+	// Deduplicated and sorted, so callers can compare and report it stably. Five of the
+	// seven encoders target hevc, so a set that did not dedupe would be seven long.
+	for i := 1; i < len(got); i++ {
+		if got[i-1] >= got[i] {
+			t.Fatalf("TargetCodecs() = %v is not sorted-and-deduplicated", got)
+		}
+	}
+	// Both families are really in there - the test above would pass over a one-element
+	// set if the registry ever lost an encoder, and this is the case that matters:
+	// hevc and av1 are BOTH things this build writes.
+	if len(got) != 2 || got[0] != "av1" || got[1] != "hevc" {
+		t.Errorf("TargetCodecs() = %v, want exactly [av1 hevc]", got)
+	}
+}
+
 func TestLookup_FFmpegCodecAlias(t *testing.T) {
 	spec, ok := Lookup("libsvtav1")
 	if !ok || spec.Key != "svtav1" {

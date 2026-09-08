@@ -388,6 +388,69 @@ func TestSwapS1_OnNetworkStorageTheOutcomeIsIndeterminateNotUntouched(t *testing
 	}
 }
 
+// localLibraryDir returns a scratch directory the REAL classification calls `local`.
+// t.TempDir() is preferred; where TMPDIR is tmpfs (undetermined, and so not local by
+// the phase's own fail-safe) it falls back to a directory beside the package source,
+// which is on the repository's own filesystem.
+func localLibraryDir(t *testing.T) string {
+	t.Helper()
+	if d := t.TempDir(); fsclass.Of(nil, d).IsLocal() {
+		return d
+	}
+	d, err := os.MkdirTemp(".", "real-local-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(d) })
+	abs, err := filepath.Abs(d)
+	if err != nil {
+		t.Fatalf("Abs: %v", err)
+	}
+	if cls := fsclass.Of(nil, abs); !cls.IsLocal() {
+		t.Skipf("no recognised-local scratch storage on this gate (%s classifies %s)", abs, cls)
+	}
+	return abs
+}
+
+// TestSwapS1_OverTheRealClassificationAnIntactSourceIsUntouchedNotParked is AC13b's own
+// Given, run end to end with NOTHING substituted but the rename itself: the
+// classification is the real statfs on real local storage, so this is the one place the
+// recognised-local enumeration is load-bearing from the file to the recorded outcome.
+//
+// The spec's Verification notes ask for exactly this ("one test substitutes NOTHING,
+// because a suite made only of substituted lookups reporting local is green over a build
+// that can never say `local` at all"). Emptying fsclass's recognised-local set reds it.
+func TestSwapS1_OverTheRealClassificationAnIntactSourceIsUntouchedNotParked(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	dir := localLibraryDir(t)
+	cls := fsclass.Of(nil, dir)
+	src := filepath.Join(dir, "movie.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+	srcMD5 := md5f(t, src)
+
+	eng, ts := buildEngineWithStore(t, ffmpeg, ffprobe, dir)
+	eng.renameFn = failingRename(errSwap) // S1: the rename fails and does not apply
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+
+	if !exists(src) || md5f(t, src) != srcMD5 {
+		t.Fatal("the source is gone or was modified")
+	}
+	row := rowFor(t, ts, src)
+	if row.Status != store.Failed {
+		t.Fatalf("AC13b: over the REAL classification (%s) the outcome is %q, want %q (untouched)",
+			cls, row.Status, store.Failed)
+	}
+	if in := allIncidents(t, ts); len(in) != 0 {
+		t.Fatalf("AC13b: the swap was parked despite a demonstrably intact source on %s: %+v", cls, in)
+	}
+	if row.Outcome.GuardResidualWindow != store.ResidualWindowLocal {
+		t.Errorf("AC22: the guard record's window field is %q on %s, want %q",
+			row.Outcome.GuardResidualWindow, cls, store.ResidualWindowLocal)
+	}
+}
+
 // ---- S2: the rename took effect and reported an error anyway ------------------
 
 // TestSwapS2_AppliedIsReportedAppliedWhateverTheStorage is AC14a case (a) and AC14e.

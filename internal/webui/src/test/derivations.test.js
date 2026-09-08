@@ -185,9 +185,9 @@ test("capNoteText claims a cap only when the ledger holds more than we were hand
 test("announceText is a short count summary a screen reader can hear on every snapshot", () => {
   assert.equal(
     d.announceText({ pending: 4, probing: 1, encoding: 2, verifying: 1, done: 9, skipped: 3, failed: 2 }),
-    "9 done, 3 skipped, 2 failed, 0 parked awaiting a determination; 4 active, 4 pending.");
+    "9 done, 3 skipped, 2 failed, 0 parked awaiting a determination, 0 applied despite an error; 4 active, 4 pending.");
   assert.equal(d.announceText({}),
-    "0 done, 0 skipped, 0 failed, 0 parked awaiting a determination; 0 active, 0 pending.");
+    "0 done, 0 skipped, 0 failed, 0 parked awaiting a determination, 0 applied despite an error; 0 active, 0 pending.");
 });
 
 // A parked job is counted SEPARATELY and named for what it is (FILESYSTEM-1, AC15j). It is
@@ -198,10 +198,33 @@ test("announceText is a short count summary a screen reader can hear on every sn
 test("announceText counts a parked job as parked, never as a failure", () => {
   assert.equal(
     d.announceText({ done: 1, skipped: 0, failed: 2, indeterminate: 3, pending: 0 }),
-    "1 done, 0 skipped, 2 failed, 3 parked awaiting a determination; 0 active, 0 pending.");
+    "1 done, 0 skipped, 2 failed, 3 parked awaiting a determination, 0 applied despite an error; 0 active, 0 pending.");
   // The two counts move independently: parked jobs do not inflate the failure count.
   assert.ok(d.announceText({ failed: 0, indeterminate: 5 }).includes("0 failed, 5 parked"));
   assert.ok(d.announceText({ failed: 5, indeterminate: 0 }).includes("5 failed, 0 parked"));
+});
+
+// The OTHER FILESYSTEM-1 outcome, and the same fault caught by omission rather than by
+// mislabelling: applied-despite-error has its own chip, its own history rows and its own
+// result-cell text, so a sighted user sees the count while a screen-reader user hearing
+// the summary was told nothing about them at all. It is spoken, it is spoken as itself,
+// and it is independent of both "done" and "failed".
+test("announceText speaks applied-despite-error too, as itself", () => {
+  assert.equal(
+    d.announceText({ done: 1, failed: 0, indeterminate: 0, "applied-despite-error": 4 }),
+    "1 done, 0 skipped, 0 failed, 0 parked awaiting a determination, 4 applied despite an error; 0 active, 0 pending.");
+  // Never folded into a success, and never into a failure.
+  assert.ok(d.announceText({ done: 0, "applied-despite-error": 7 }).includes("0 done"));
+  assert.ok(d.announceText({ failed: 0, "applied-despite-error": 7 }).includes("0 failed"));
+  assert.ok(d.announceText({ "applied-despite-error": 7 }).includes("7 applied despite an error"));
+  // And every status the served document declares is either spoken or deliberately
+  // rolled into "active": a new outcome must not be able to go silent again.
+  const spoken = d.announceText({ done: 1, skipped: 1, failed: 1, indeterminate: 1, "applied-despite-error": 1 });
+  for (const s of ["done", "skipped", "failed", "indeterminate", "applied-despite-error"]) {
+    assert.ok(/1 /.test(spoken.split(",").find((p) => p.includes(s === "indeterminate" ? "parked" :
+      s === "applied-despite-error" ? "applied despite" : s)) || ""),
+      "the summary does not count " + s + ": " + spoken);
+  }
 });
 
 test("an aggregate states the set it covers and the rows it excluded", () => {
