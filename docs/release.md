@@ -470,8 +470,10 @@ is in the repository and executable, that its step declares the role, and that e
 `env:` HANDS it is the one this run produced, compared whole: `IMAGE` and `VERSION` against
 the image and version the planning logic wrote to `$GITHUB_OUTPUT`, `REF` against
 `${IMAGE}:${VERSION}` - the reference this run pushed and gated - and `FLOATING_TAG` against
-the tag `docker-compose.yml` itself names, which is the reference a user actually pulls. It
-does not open the scripts, and it must not.
+the tag `docker-compose.yml` itself names, which is the reference a user actually pulls. The
+version-tag push is an action rather than a script and gets the same treatment on the one
+input that names its object: its `tags:` is held against `${IMAGE}:${VERSION}` too. It does
+not open the scripts, and it must not.
 
 That last part is not decoration, and it was missing until impl-gate ordinal 8 of S0046 asked
 for it. Naming what a value is FOR holds it to nothing: `REF: ${IMAGE}:latest` on the
@@ -482,6 +484,26 @@ gated last time - while the artefact this run just pushed is never pulled back a
 and turns the check below into a comparison of the compose reference's digest with its own,
 which can never fail. A name a role declares and nothing compares now reds by name, the same
 way an unclassified field, key or action input does.
+
+**And a comparison is only as good as the value on its other side.** Those names were held
+against the outputs of ONE planned release, and that bought exactly one literal back: the one
+equal to the gate's own sample. The sample is `v0.1.0`, which is not an arbitrary string - it
+is the version this repository has actually published, it is named all over this file, and it
+is what a maintainer copies out of a green run's log. `REF: ghcr.io/nschatz/holdfast:v0.1.0`
+would then leave every assertion in the gate green while every later release pulled back and
+smoked the already-published v0.1.0, which passes because it was gated in July, and `:latest`
+moved onto an artefact nothing in that run had smoked. So each value the RUN produces is now
+held against SEVERAL independently planned runs - a real release, a second real release at a
+different version, and the dry run - and compared whole against each. A literal equals one
+value; it cannot equal three. The gate also grades its OWN anchor: if those runs did not
+actually produce different values for a name, it reds saying so, because an anchor that has
+quietly collapsed back to one sample is invisible in every other line it prints.
+
+Two of the values are anchored differently and the output says which: `IMAGE` and the
+repository it is derived from come from `go.mod`, and `FLOATING_TAG` comes from
+`docker-compose.yml`. Those are constant across every planned run by construction - the
+committed file IS the anchor, and there is no sample for a literal to coincide with - so the
+gate names the file rather than claiming a variation that did not happen.
 
 So the gate's own output says only what it checked. It used to end a green run with "the same
 digest, not a rebuild" and with an order sentence describing "the re-smoke of the pulled

@@ -224,13 +224,26 @@ and its VALUE is declared too, so `-C .` passes and `-C /tmp` reds. Anything und
 the difference between this and the six catalogues of bad spellings that lost.
 
 **And a value is not accounted for by naming what it is FOR.** The invocation includes the VALUES a role
-step's `env:` hands its program, so each declared name is HELD against a value produced outside that step -
+step's `env:` hands its program (and, for the action role, the `tags:` input that names what it publishes),
+so each declared name is HELD against a value produced outside that step -
 the planning logic's own `$GITHUB_OUTPUT`, this module's repository, the event shape, or the tag
 `docker-compose.yml` names - and compared whole. `REF: ${IMAGE}:latest` on the re-smoke is one line that
 leaves the role held, the invocation untouched and the order sentence printing while the release pulls back
 the PREVIOUS artefact and promotes `:latest` onto one nothing gated; `VERSION: latest` on the resolver makes
 its digest comparison a tautology. A declared name held against NOTHING reds by name, which is what makes
 that a rule rather than two spellings.
+
+**A COMPARISON AGAINST ONE PLANNED RUN IS A COINCIDENCE.** Held against a single planned release, that rule
+bought back exactly one literal - the one equal to the gate's own sample - and the sample is `v0.1.0`, the
+version actually published and the string a maintainer copies out of a green run's log. `REF:
+ghcr.io/nschatz/holdfast:v0.1.0` passed it, and every later release would then re-smoke the July artefact
+while `:latest` moved onto one nothing pulled back. So a value the RUN produces is held against SEVERAL
+independently planned runs - two real releases at different versions and the dry run - and compared whole
+against each; a literal equals one of them at most. The gate grades its OWN anchor too and reds if those
+runs did not produce different values, because a collapsed anchor is invisible everywhere else. The values
+anchored in a committed FILE instead (`IMAGE` and the repository, from `go.mod`; `FLOATING_TAG`, from
+`docker-compose.yml`) are constant by construction, and the output names the file rather than claiming a
+variation that did not happen.
 
 The order comes from `needs:` and declaration order; two jobs with no path between them are CONCURRENT and the
 gate refuses to order them. An ACT, for the runbook cross-check, is likewise every step in the job that holds

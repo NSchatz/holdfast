@@ -32,7 +32,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=114
+declared=121
 pass=0; failed=0
 
 repo="$work/repo"
@@ -876,6 +876,78 @@ in_step "smoke test the PUSHED image" '/^          REF: /d'
 changed "$wf" "the re-smoke handed no reference at all"
 expect 1 "a role step handed nothing at all is caught, naming the value and what it should be" \
   "nothing sets it, at any of the three levels"
+reset
+
+# =====================================================================================
+# AND THE OTHER SIDE OF THAT COMPARISON. Every case above was already caught when the values
+# were held against ONE planned release. These are the ones that were NOT: a literal equal to
+# that one sample passed as "the value the planning logic produced" (S0046 F26), and the
+# sample is `v0.1.0` - not an arbitrary string but the version this repository has actually
+# published, named throughout docs/release.md, CLAUDE.md and README.md, and the one a
+# maintainer copies out of a green run's log. Each is now held against several independently
+# planned runs, and each case below must red naming the run that disagreed.
+# =====================================================================================
+
+# --- 49i. The re-smoke pinned to the literal v0.1.0. Every later release then pulls back and
+#          smokes the ALREADY-PUBLISHED v0.1.0 - which passes, it was gated in July - while
+#          the artefact that run pushed is never pulled back at all and `:latest` moves onto
+#          it. This is 49a's harm at the one spelling one planned release cannot see.
+in_step "smoke test the PUSHED image" 's|^          REF: .*|          REF: ghcr.io/nschatz/holdfast:v0.1.0|'
+changed "$wf" "the re-smoke pinned to the sample tag"
+expect 1 "a re-smoke pinned to the literal the gate's own sample uses is caught by a SECOND planned release" \
+  "on a second version tag push"
+reset
+
+# --- 49j. The same coincidence on A11's resolution step: the compose reference's digest is
+#          compared against v0.1.0 on every future release, so A11 - the only enforcement A5
+#          has after the first release - stops grading anything this run published.
+in_step "must resolve to the gated digest" 's|^          VERSION: .*|          VERSION: v0.1.0|'
+changed "$wf" "the resolution pinned to the sample tag"
+expect 1 "a resolution pinned to the literal the gate's own sample uses is caught" \
+  "on a second version tag push"
+reset
+
+# --- 49k. And on the promotion, so `:latest` is retagged onto the previous release for ever.
+in_step "promote :latest" 's|^          VERSION: .*|          VERSION: v0.1.0|'
+changed "$wf" "the promotion pinned to the sample tag"
+expect 1 "a promotion pinned to the literal the gate's own sample uses is caught" \
+  "on a second version tag push"
+reset
+
+# --- 49l. The PUSH, whose object is an action input rather than an `env:` scalar. Pinned, a
+#          later tag republishes v0.1.0 - and semver.org, the authority this repository's
+#          version scheme rests on, is explicit that a released version's contents must never
+#          be modified.
+in_step "push the multi-arch image" 's|^          tags: .*|          tags: ghcr.io/nschatz/holdfast:v0.1.0|'
+changed "$wf" "the push pinned to the sample tag"
+expect 1 "a version-tag push pinned to the literal the gate's own sample uses is caught" \
+  "on a second version tag push"
+reset
+
+# --- 49m. All four at once, which is what a maintainer copying a green run's log would
+#          actually write, and the shape in which every other assertion in this gate stays
+#          green: the order holds, the grant holds, the runbook names every act.
+in_step "push the multi-arch image" 's|^          tags: .*|          tags: ghcr.io/nschatz/holdfast:v0.1.0|'
+in_step "smoke test the PUSHED image" 's|^          REF: .*|          REF: ghcr.io/nschatz/holdfast:v0.1.0|'
+in_step "promote :latest" 's|^          VERSION: .*|          VERSION: v0.1.0|'
+in_step "must resolve to the gated digest" 's|^          VERSION: .*|          VERSION: v0.1.0|'
+changed "$wf" "a release pinned end to end to the sample tag"
+expect 1 "a release pinned end to end to the sample tag is caught, so a later tag cannot republish an already-released version" \
+  "on a second version tag push"
+reset
+
+# --- 49n. THE OTHER DIRECTION for the input half, or the four cases above would be satisfied
+#          by a gate that refuses any change to `tags:` at all. A different spelling that
+#          yields the SAME reference still holds the role.
+in_step "push the multi-arch image" 's|^          tags: .*|          tags: "${{ needs.build.outputs.image }}:${{ needs.build.outputs.version }}"|'
+changed "$wf" "the push's tags respelt to the same value"
+expect 0 "a respelt input that publishes the SAME reference still holds the role"
+reset
+
+# --- 49o. And the input removed altogether. An act with no object is not that act.
+in_step "push the multi-arch image" '/^          tags: /d'
+changed "$wf" "the push handed no tags at all"
+expect 1 "a version-tag push that names no reference to publish is red" "declares no .tags:. input"
 reset
 
 # =====================================================================================

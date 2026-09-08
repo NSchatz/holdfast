@@ -927,6 +927,74 @@ func TestRefTag_TheTagIsTheLastColonAndNotAPort(t *testing.T) {
 	}
 }
 
+// THE OTHER SIDE OF THAT COMPARISON, which is what S0046 F26 was about: every value above was
+// compared whole, against the outputs of ONE planned release, so a literal equal to that one
+// sample passed as "the value the planning logic produced". The gate now holds each run-produced
+// value against SEVERAL independently planned runs - and refuses its own anchor if those runs
+// did not actually produce different values, because a collapsed anchor is invisible everywhere
+// else. These three tests are that refusal, driven in both directions.
+func TestAnchor_ADegenerateAnchorIsRefusedRatherThanSilentlyPassing(t *testing.T) {
+	same := sampleHanded()
+	g := &gate{out: io.Discard}
+	if g.checkAnchorDistinguishesALiteral(twoShapes(), []handed{same, same}) {
+		t.Fatal("two planned runs that produced the SAME version were accepted as an anchor. A literal equal to that version then passes as the value the planning logic produced, which is S0046 F26 exactly")
+	}
+	if !g.failed {
+		t.Fatal("a degenerate anchor was not even reported")
+	}
+}
+
+func TestAnchor_RunsThatDifferAreAcceptedAsAnAnchor(t *testing.T) {
+	a := sampleHanded()
+	b := sampleHanded()
+	b.version, b.gated, b.refName = "v0.4.2", "ghcr.io/o/r:v0.4.2", "v0.4.2"
+	b.event = "workflow_dispatch"
+	g := &gate{out: io.Discard}
+	if !g.checkAnchorDistinguishesALiteral(twoShapes(), []handed{a, b}) || g.failed {
+		t.Fatal("two planned runs that produced DIFFERENT values were refused as an anchor; the check would then refuse every tree and prove nothing")
+	}
+}
+
+// Deny by default at the level the anchor itself lives on: a source nobody classified must red
+// rather than be graded as whichever kind the zero value happens to be.
+func TestAnchor_AnUnclassifiedSourceReadsClosed(t *testing.T) {
+	saved, ok := anchorOf[heldPlannedVersion]
+	if !ok {
+		t.Fatal("heldPlannedVersion has no anchor row, so this test is grading nothing")
+	}
+	delete(anchorOf, heldPlannedVersion)
+	defer func() { anchorOf[heldPlannedVersion] = saved }()
+
+	a := sampleHanded()
+	b := sampleHanded()
+	b.version, b.gated, b.refName = "v0.4.2", "ghcr.io/o/r:v0.4.2", "v0.4.2"
+	b.event = "workflow_dispatch"
+	g := &gate{out: io.Discard}
+	if g.checkAnchorDistinguishesALiteral(twoShapes(), []handed{a, b}) {
+		t.Fatal("a held value with no declared anchor was accepted. An undeclared anchor must read CLOSED, or a new source is silently graded as though somebody had thought about it")
+	}
+}
+
+// Every source any role declares must have an anchor row, or the check above grades a subset
+// of what the gate actually compares.
+func TestAnchor_EverySourceARoleDeclaresIsAnchored(t *testing.T) {
+	for _, e := range heldSources() {
+		if _, ok := anchorOf[e]; !ok {
+			t.Fatalf("a role holds a value against envHeld(%d) and anchorOf has no row for it", e)
+		}
+	}
+	if len(heldSources()) == 0 {
+		t.Fatal("no role declares a held value at all, so the anchor check covers nothing")
+	}
+}
+
+func twoShapes() []*planned {
+	return []*planned{
+		{shape: shape{label: "a version tag push (v0.1.0)", event: "push", refName: "v0.1.0", repo: "O/R"}},
+		{shape: shape{label: "a second version tag push (v0.4.2)", event: "push", refName: "v0.4.2", repo: "O/R"}},
+	}
+}
+
 func sampleHanded() handed {
 	return handed{
 		image: "ghcr.io/o/r", version: "v0.1.0", gated: "ghcr.io/o/r:v0.1.0",

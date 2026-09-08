@@ -61,6 +61,14 @@ package main
 // to find. There is no shell in the question: these are `env:` scalars, interpolated against
 // the values the planning logic produced.
 //
+// AND HOLDING A VALUE AGAINST ONE PLANNED RUN IS A COINCIDENCE, NOT A COMPARISON. That rule
+// shipped comparing every name against the outputs of a single planned release, so a literal
+// equal to that one sample - `v0.1.0`, the version this repository has actually published and
+// the string a maintainer copies out of a green run's log - was accepted as "the value the
+// planning logic produced" (S0046 F26). A value the run produces is therefore held against
+// SEVERAL independently planned runs, and the gate refuses its own anchor when those runs did
+// not in fact produce different values. See anchorKind below.
+//
 // The cost is stated: this constrains the release definition. A role step may not be an
 // inline multi-line script, it may not carry a flag or an environment variable nobody has
 // classified, and renaming one of these scripts means editing this table. That is the trade
@@ -104,6 +112,76 @@ const (
 	heldRepository  // this module's own repository, derived from go.mod
 )
 
+// anchorKind says WHERE the value on the other side of that comparison comes from, and it is
+// the difference between a comparison and a coincidence.
+//
+// S0046 F26: every declared name WAS compared, and compared whole - against the outputs of
+// ONE planned release, the one carrying `sampleTag`. So a literal equal to that sample passed
+// as "the value the planning logic produced", and `v0.1.0` is not an arbitrary sample: it is
+// the version this repository has actually published, it is named throughout docs/release.md,
+// CLAUDE.md and README.md, and it is the string a maintainer copies out of a green run's log.
+// `REF: ghcr.io/nschatz/holdfast:v0.1.0` on the re-smoke would then have every later release
+// pull back and smoke the already-published v0.1.0 - which passes, it was gated in July -
+// while the artefact that run pushed is never pulled back at all. That is the F22 harm at the
+// one spelling the sample makes invisible.
+//
+// So a value PRODUCED BY THE RUN is held against several INDEPENDENTLY PLANNED runs and must
+// equal what each of them produced. A literal equals one value; it cannot equal two. And the
+// gate refuses its own anchor if those runs did not in fact produce different values for it
+// (checkAnchorDistinguishesALiteral), because an anchor that degenerates back to one sample is
+// precisely the defect, and nothing else in this file would notice.
+//
+// A value read out of a COMMITTED FILE is a different case and must not be dressed up as the
+// same one: the file IS the anchor, there is no sample to coincide with, and the honest thing
+// is to name the file rather than to claim a variation that did not happen.
+type anchorKind int
+
+const (
+	anchorInTheRun anchorKind = iota // produced by the run: must DIFFER across the planned shapes
+	anchorInAFile                    // read from a committed file: constant by construction
+)
+
+// anchorOf declares where each held value comes from. Deny-by-default like everything else
+// here: a source with no row reds by name rather than being anchored against whatever the
+// zero value happens to be.
+var anchorOf = map[envHeld]struct {
+	kind anchorKind
+	file string // for anchorInAFile: the committed file that IS the anchor
+}{
+	// The image is `ghcr.io/` + `github.repository`, and this gate plans every shape with the
+	// repository go.mod names, so the module path is what that value is anchored to. A stale
+	// literal here reds the moment go.mod moves, which is the same event a repository rename
+	// forces (Go has no module-path rename primitive).
+	heldPlannedImage:   {anchorInAFile, goModFile},
+	heldRepository:     {anchorInAFile, goModFile},
+	heldFloatingTag:    {anchorInAFile, composeFile},
+	heldPlannedVersion: {anchorInTheRun, ""},
+	heldGatedRef:       {anchorInTheRun, ""},
+	heldEventName:      {anchorInTheRun, ""},
+	heldRefName:        {anchorInTheRun, ""},
+}
+
+// heldSources is every value any role declares it is held against, in declaration order, so
+// the anchor check covers exactly what is actually compared and nothing it invented.
+func heldSources() []envHeld {
+	seen := map[envHeld]bool{}
+	var out []envHeld
+	add := func(m map[string]envSpec) {
+		for _, name := range sortedEnvNames(m) {
+			if e := m[name].holds; !seen[e] {
+				seen[e] = true
+				out = append(out, e)
+			}
+		}
+	}
+	for _, r := range releaseRoles {
+		add(r.handsEnv)
+		add(r.handsInput)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
 // envSpec is one environment name a role's own program reads: what the value is for, and
 // the value it must be. `what` is prose for the messages; `holds` is the comparison.
 type envSpec struct {
@@ -133,6 +211,14 @@ type role struct {
 	// equal the value it is held against, or the role is held by a step that invokes the
 	// right program against the wrong object.
 	handsEnv map[string]envSpec
+
+	// handsInput is the same rule for a role performed by an ACTION: an input whose VALUE
+	// decides which object the act is performed on. `tags:` is the whole of it - it names the
+	// references docker/build-push-action publishes, so a literal there publishes something
+	// other than what this run gated, exactly as a literal `REF:` re-smokes something other
+	// than what this run pushed. mustInput carries a FIXED value; this carries a value that
+	// has to track the run.
+	handsInput map[string]envSpec
 
 	needsGrant bool // it performs an irreversible act, so it must live in a job granted one
 }
@@ -198,9 +284,16 @@ var releaseRoles = []role{
 		mayInput: map[string]string{
 			"context":    "which directory is built; it cannot stop the result being pushed",
 			"platforms":  "which architectures are built; the re-smoke pulls both back by name",
-			"tags":       "the references pushed, read and compared against the promotion below",
 			"build-args": "values baked into the image",
 			"cache-from": "where layers are read from; a cache is not a destination",
+		},
+		handsInput: map[string]envSpec{
+			// The references this step PUBLISHES, and the one act in the release whose
+			// object is an action input rather than an `env:` scalar. Pinned to a literal,
+			// a later tag republishes whatever that literal names - and sources/semver.org,
+			// this repository's own authority for the version scheme, is explicit that a
+			// released version's contents must never be modified.
+			"tags": {heldGatedRef, "the references this push publishes"},
 		},
 		needsGrant: true,
 	},
@@ -496,11 +589,19 @@ func (r role) accountForInputs(s Step) error {
 			return fmt.Errorf("%s holds the role `%s` (%s) but passes `%s: %s`, and that role requires `%s: %s`. Compared whole, because the difference between the two is the difference between a release and a build nobody published", s.Label(), r.id, r.what, k, v, k, r.mustInput[k])
 		}
 	}
+	for _, k := range sortedInputNames(r.handsInput) {
+		if _, ok := s.With[k]; !ok {
+			return fmt.Errorf("%s holds the role `%s` (%s) but declares no `%s:` input, and that input names %s. A role step whose act has no object is not that act: the value is HELD against what the run produced (checkHandedValues), so it cannot simply be absent", s.Label(), r.id, r.what, k, r.handsInput[k].what)
+		}
+	}
 	for _, k := range sortedKeys(s.With) {
 		if _, ok := r.mustInput[k]; ok {
 			continue
 		}
 		if _, ok := r.mayInput[k]; ok {
+			continue
+		}
+		if _, ok := r.handsInput[k]; ok {
 			continue
 		}
 		return fmt.Errorf("%s holds the role `%s` (%s) and passes the input `%s:`, which this role has not classified.\nAn unclassified input reads CLOSED: `outputs: type=local,dest=./out` would send this build to a directory rather than to the registry while every other input still reads like a push. Decide what `%s:` can do to this act and add it to that role's mayInput with the reason, or to mustInput with the value it must carry.\ndeclared inputs: %v",
@@ -632,12 +733,17 @@ func sortedEnvNames(m map[string]envSpec) []string {
 
 func (r role) declaredInputs() []string {
 	out := append(sortedStringsOf(r.mustInput), sortedStringsOf(r.mayInput)...)
+	out = append(out, sortedInputNames(r.handsInput)...)
 	sort.Strings(out)
 	if out == nil {
 		return []string{"(none)"}
 	}
 	return out
 }
+
+// sortedInputNames is sortedEnvNames for the input half; the two maps carry the same type and
+// are kept apart because one is read from `env:` and the other from `with:`.
+func sortedInputNames(m map[string]envSpec) []string { return sortedEnvNames(m) }
 
 func sortedStringsOf(m map[string]string) []string {
 	out := make([]string, 0, len(m))
