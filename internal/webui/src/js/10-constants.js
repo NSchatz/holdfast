@@ -21,26 +21,32 @@ const PROGRESS_STATUS = "encoding";
 //
 // A view holds exactly one element carrying `data-state`, and its container carries
 // `data-view`, so the state a view is in is a rendered property a browser can read back.
+//
+// Each phrasing names its view WITHOUT repeating the heading above it or a column header
+// beneath it (S0052 AC5): a state row sits inside its own table, so "the queue could not
+// be read" under a heading reading "Queue and active" is the page telling a reader a word
+// it has already read. The words a view is named by here are therefore the ones the
+// heading does not use, and every one of the four is inside the eight-word block ceiling.
 const VIEW_STATES = {
   counts: {
     loading: "Loading the live counts.",
-    empty: "No file has been recorded in the ledger yet.",
-    unreadable: "The live counts could not be read.",
+    empty: "No file recorded yet.",
+    unreadable: "The live counts are unreadable.",
   },
   queue: {
-    loading: "Loading the queue.",
-    empty: "Nothing queued.",
-    unreadable: "The queue could not be read.",
+    loading: "Loading the work in hand.",
+    empty: "No work in hand.",
+    unreadable: "The work in hand is unreadable.",
   },
   aggs: {
-    loading: "Loading the whole-ledger figures.",
-    empty: "No whole-ledger figure has a contributing row yet.",
-    unreadable: "The whole-ledger figures could not be read.",
+    loading: "Loading these figures.",
+    empty: "No figure has a contributing row.",
+    unreadable: "These figures are unreadable.",
   },
   history: {
-    loading: "Loading recent history.",
-    empty: "No history yet.",
-    unreadable: "Recent history could not be read.",
+    loading: "Loading finished swaps.",
+    empty: "No swap finished yet.",
+    unreadable: "Finished swaps are unreadable.",
   },
 };
 

@@ -509,7 +509,7 @@
        every claim that used to be printed here is in that document. -->
   <section id="region-now" aria-labelledby="h-now">
     <h2 id="h-now">Right now</h2>
-    <p class="scope">The live state of this holdfast, pushed by the server as it changes.</p>
+    <p class="scope">Pushed live by the server.</p>
     <!--holdfast:doc-now-->
 
     <!-- The live-counts view. Every view on this page carries exactly one element with
@@ -542,31 +542,31 @@
     </div>
 
     <h3 id="h-queue">Queue and active</h3>
-    <p class="scope">Files in flight, with in-state age and the encoder's own progress.</p>
+    <p class="scope">Being worked on, and since when.</p>
     <p class="note cap" id="queue-cap" hidden></p>
     <div class="tablewrap">
       <table aria-labelledby="h-queue">
         <thead><tr><th>File</th><th>Status</th><th>Elapsed</th><th>Progress</th><th>Worker</th></tr></thead>
         <tbody id="queue" data-view="queue">
-          <tr data-state="loading"><td class="empty" colspan="5">Loading the queue.</td></tr>
+          <tr data-state="loading"><td class="empty" colspan="5">Loading the work in hand.</td></tr>
         </tbody></table>
     </div>
   </section>
 
   <section id="region-history" aria-labelledby="h-history">
     <h2 id="h-history">What it has done to your library</h2>
-    <p class="scope">Derived from the ledger, so it survives restarts and covers the whole library.</p>
+    <p class="scope">From the ledger, and survives restarts.</p>
     <!--holdfast:doc-history-->
     <p class="reclaimed">reclaimed lifetime: <b id="reclaimed-lifetime">loading</b></p>
 
     <h3 id="h-aggs">Across the whole ledger</h3>
-    <p class="scope">Computed by the server over every matching row, never over the capped rows below.</p>
+    <p class="scope">Computed server-side over every matching row.</p>
     <div class="aggs" id="aggregates" data-view="aggs">
-      <p class="state" data-state="loading">Loading the whole-ledger figures.</p>
+      <p class="state" data-state="loading">Loading these figures.</p>
     </div>
 
     <h3 id="h-hist">Recent history</h3>
-    <p class="scope">Each finished file, with the proof its swap was safe.</p>
+    <p class="scope">Each swap, with its proof of safety.</p>
     <p class="note cap" id="hist-cap" hidden></p>
     <div class="tablewrap">
       <table class="hist" aria-labelledby="h-hist">
@@ -578,14 +578,17 @@
           <th>File</th><th>Result</th><th>Size</th><th>VMAF</th><th>Encoder</th><th>Encode</th><th>Updated</th>
         </tr></thead>
         <tbody id="history" data-view="history">
-          <tr data-state="loading"><td class="empty" colspan="7">Loading recent history.</td></tr>
+          <tr data-state="loading"><td class="empty" colspan="7">Loading finished swaps.</td></tr>
         </tbody>
       </table>
     </div>
   </section>
 </main>
-<footer>holdfast, a config-as-code, data-safe media transcoder. The YAML config is the source of
-  truth; this page reads and controls. It reports what was measured, and only that.
+<!-- The footer carries ONE short line of identity and the AGPL section 13 offer. The
+     product identity, what this page may and may not do, and the promise that it reports
+     only what was measured are all in docs/dashboard-methodology.md; the offer is required
+     verbatim and is not this page's to shorten. -->
+<footer>Reads and controls; the YAML config decides.
   <!--holdfast:source-offer--></footer>
 
 <!-- Row shells cloned per render. Rows are built as DOM nodes (createElement +
@@ -670,26 +673,32 @@ const PROGRESS_STATUS = "encoding";
 //
 // A view holds exactly one element carrying `data-state`, and its container carries
 // `data-view`, so the state a view is in is a rendered property a browser can read back.
+//
+// Each phrasing names its view WITHOUT repeating the heading above it or a column header
+// beneath it (S0052 AC5): a state row sits inside its own table, so "the queue could not
+// be read" under a heading reading "Queue and active" is the page telling a reader a word
+// it has already read. The words a view is named by here are therefore the ones the
+// heading does not use, and every one of the four is inside the eight-word block ceiling.
 const VIEW_STATES = {
   counts: {
     loading: "Loading the live counts.",
-    empty: "No file has been recorded in the ledger yet.",
-    unreadable: "The live counts could not be read.",
+    empty: "No file recorded yet.",
+    unreadable: "The live counts are unreadable.",
   },
   queue: {
-    loading: "Loading the queue.",
-    empty: "Nothing queued.",
-    unreadable: "The queue could not be read.",
+    loading: "Loading the work in hand.",
+    empty: "No work in hand.",
+    unreadable: "The work in hand is unreadable.",
   },
   aggs: {
-    loading: "Loading the whole-ledger figures.",
-    empty: "No whole-ledger figure has a contributing row yet.",
-    unreadable: "The whole-ledger figures could not be read.",
+    loading: "Loading these figures.",
+    empty: "No figure has a contributing row.",
+    unreadable: "These figures are unreadable.",
   },
   history: {
-    loading: "Loading recent history.",
-    empty: "No history yet.",
-    unreadable: "Recent history could not be read.",
+    loading: "Loading finished swaps.",
+    empty: "No swap finished yet.",
+    unreadable: "Finished swaps are unreadable.",
   },
 };
 

@@ -11,7 +11,25 @@ claim was ever printed beside a number on that page, it is in this document, and
 `TestDocs_EveryClaimMovedOffTheSurfaceIsInTheLinkedDocument` fails the build if one
 is not.
 
-Two facts govern the whole page and are repeated nowhere on it:
+## What this page is
+
+holdfast, a config-as-code, data-safe media transcoder. The YAML config is the source of
+truth; this page reads and controls. It reports what was measured, and only that.
+
+Each of those three sentences is load-bearing and none of them is on the surface:
+
+- **config-as-code, data-safe.** The library is declared in a YAML file that lives in
+  git, and a source is never destroyed until its replacement has passed every gate.
+- **reads and controls.** The page can start a scan and pause or resume the feeding of
+  new files, and it can do nothing else. It cannot edit the configuration, cannot change
+  a job's outcome and cannot touch a media file; the mutating endpoints are token-gated
+  and are disabled outright when the server has no control token set.
+- **only what was measured.** Every figure on the page came off the wire from the server,
+  which computed it from the ledger. The page derives presentation - a percentage, a
+  duration in words, an elapsed age - and never a measurement. A value nobody recorded
+  reads as "not recorded" rather than as a zero, which is the same rule stated below.
+
+Two more facts govern the whole page and are repeated nowhere on it:
 
 - **A fact nobody recorded reads as "not recorded".** That is the page's ONE absence
   phrase, in every field that can carry one: a VMAF score, an encode duration, a
@@ -32,6 +50,15 @@ Everything in this region describes THIS run of `holdfast serve`. It is pushed b
 server over a Server-Sent Events stream as it changes, never polled by the page, and it
 covers whether holdfast is running or paused, whether a scan is under way, how many files
 stand in each state, and the work in flight.
+
+What the two blocks of the region cover, in full:
+
+- **The region.** The live state of this holdfast, pushed by the server as it changes.
+  Nothing here is derived from the ledger, so nothing here survives a restart; the other
+  region is where the durable figures are.
+- **The queue table.** Files in flight, with in-state age and the encoder's own progress.
+  The two are different measurements and neither substitutes for the other: elapsed is
+  time in the current state, progress is the encoder's own position in the source.
 
 ### The badges and the counts
 
@@ -90,12 +117,22 @@ it survives restarts and describes the library as a whole. `reclaimed lifetime` 
 over every done row that recorded both sizes; a pre-outcome-columns row that recorded
 neither contributes nothing rather than reading a NULL as `0`.
 
+In full, what the region covers: Derived from the ledger, so it survives restarts and
+covers the whole library. That is the difference between the two regions, and it is why a
+figure here can disagree with a count above without either being wrong - the counts above
+describe one process, these describe every file holdfast has ever finished.
+
 ### The whole-ledger figures
 
 Every figure here is computed by the server over *every* matching row in the ledger, not
 over the capped rows the tables ship, and each states the set it covers. A row that
 recorded no value is excluded and counted, never read as a zero: a fact nobody measured is
 reported as missing, not as 0.
+
+In full: Computed by the server over every matching row, never over the capped rows below.
+The tables below this block are capped by the API, so a figure derived from them would be
+a statistic about the last few hundred files wearing the clothes of a statistic about the
+library. That is why these figures are computed server-side and never in the browser.
 
 The six figures are the outcome distribution, the skips broken down by which guard fired,
 and four spreads: the replacement size as a share of the original, the encode time, the
@@ -132,8 +169,10 @@ deliberately mutated to defeat it:
 
 ### Recent history: the proof each swap was safe
 
-Each finished file is listed with the proof its swap was safe. A skipped file shows which
-guard held it back; a failed one shows why.
+Each finished file, with the proof its swap was safe. A skipped file shows which guard
+held it back; a failed one shows why. The proof is the row itself: the two sizes and the
+percentage reclaimed, both pooled VMAF statistics with the model that produced them, the
+encoder, how long the encode took, and when the row was last written.
 
 The size cell is the source size, the output size and the percentage reclaimed. The
 strictly-smaller gate precludes an output larger than its source, and the figure is
@@ -179,6 +218,26 @@ distinct:
 | loading | the page is connected and no snapshot has arrived yet |
 | empty | a snapshot arrived and this view has nothing to show |
 | unreadable | the payload could not be read at all, or the stream failed before one arrived |
+
+Each view says it in its own words, so a reader always knows WHICH view is in which
+state without reading the heading above it again:
+
+| view | loading | empty | unreadable |
+|---|---|---|---|
+| the live counts | Loading the live counts. | No file recorded yet. | The live counts are unreadable. |
+| the queue | Loading the work in hand. | No work in hand. | The work in hand is unreadable. |
+| the whole-ledger figures | Loading these figures. | No figure has a contributing row. | These figures are unreadable. |
+| recent history | Loading finished swaps. | No swap finished yet. | Finished swaps are unreadable. |
+
+Those wordings deliberately avoid the words in the heading above them and in the column
+headers beneath them: a state row sits INSIDE its own table, so naming the table again
+there spends a reader's attention on a word they have just read.
+
+**"Empty" is a fact about that view, not about the ledger.** A ledger with no rows leaves
+the queue and recent history with nothing to show while the whole-ledger figures still
+have six figures to draw, and a published aggregate set that is empty leaves the figures
+with nothing while the counts still have their measured zeroes. Each view answers for
+itself.
 
 A stream that drops with rows already on screen is a different case again: the rows STAY,
 and the connection state in the header alone says they are no longer live. A view never

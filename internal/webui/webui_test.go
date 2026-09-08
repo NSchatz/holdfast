@@ -458,10 +458,12 @@ func TestQueue_RendersProgressAndShowsAbsenceAsAbsence(t *testing.T) {
 			t.Errorf("%s missing the progress claim %q, which moved off the surface under F8", DocPath, want)
 		}
 	}
-	// The empty-queue rendering is unchanged in wording; it is now one entry in the
-	// per-view state vocabulary rather than a literal at the call site, and the column
-	// span comes from the same table.
-	if !strings.Contains(s, `empty: "Nothing queued."`) {
+	// The empty-queue rendering is one entry in the per-view state vocabulary rather than
+	// a literal at the call site, and the column span comes from the same table. The
+	// WORDING is S0052's to set - it may not repeat the heading above the row or a column
+	// header beneath it - so what is pinned here is that the entry exists and says, in
+	// words, that the view has nothing to show.
+	if !strings.Contains(s, `empty: "No work in hand."`) {
 		t.Error("the empty-queue rendering was changed")
 	}
 	if !strings.Contains(s, `const VIEW_COLUMNS = { queue: 5, history: 7 };`) {
