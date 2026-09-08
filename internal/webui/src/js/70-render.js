@@ -31,6 +31,29 @@ function applyFilter() {
   }
 }
 
+// markChipGroupBreak decides whether the group boundary is drawn at all.
+//
+// The boundary between work IN HAND and work FINISHED is a rule to the left of the first
+// terminal chip. A rule divides two things - so when the row wraps between the two groups
+// there is nothing to its left, and what a reader sees is a line hanging in the margin
+// beside a chip that is also indented for no reason. That happens at any width where the
+// nine chips break at exactly that point.
+//
+// CSS cannot ask whether two flex items share a line, so the page asks AFTER layout and
+// records the answer on the element; the stylesheet draws the rule only when they do. It
+// is a comparison with a tolerance rather than an equality because sub-pixel layout can
+// put two boxes on one line a fraction of a pixel apart.
+function markChipGroupBreak() {
+  const chips = $("chips");
+  if (!chips) return;
+  const first = chips.querySelector(".chip.terminal");
+  if (!first) return;
+  const prev = first.previousElementSibling;
+  const together = !!prev &&
+    Math.abs(prev.getBoundingClientRect().top - first.getBoundingClientRect().top) < 2;
+  first.classList.toggle("linestart", !together);
+}
+
 // The polite screen-reader summary, updated only when it changes so a snapshot that
 // shifts nothing stays silent.
 function announce(sum) {
@@ -59,6 +82,11 @@ function render(snap) {
   // A total nobody recorded reads as the page's one absence phrase, never as 0 B (F3).
   bytesInto("reclaimed-lifetime", snap.bytes_reclaimed_lifetime);
   bytesInto("reclaimed-session", snap.bytes_reclaimed_session);
+  // Space a swap has not yet given back. It is published as a POINTER precisely so that
+  // an unreadable figure and a figure of zero are two different answers, and bytesInto
+  // carries that distinction to the screen: null renders the page's one absence phrase,
+  // never a 0 a reader would take for an empty retention area.
+  bytesInto("bytes-held", snap.bytes_held_by_undo_window);
 
   // Pause is meaningless when already paused; Resume is meaningless when running.
   $("pause").disabled = !!snap.paused;
@@ -78,11 +106,18 @@ function render(snap) {
     for (const s of STATUSES) {
       const n = isNum(sum[s]) ? sum[s] : 0;
       counted += n;
-      const chip = mk("div", "chip " + s);
+      // The chip's GROUP is on the chip itself rather than in a wrapper element, so
+      // #chips keeps one flat list of children: a reader is told apart what is in hand
+      // from what is finished by a rule drawn before the first terminal chip, and nothing
+      // that reads this view has to descend through a box to find a count.
+      const chip = mk("div", "chip " + s + (IN_FLIGHT.indexOf(s) >= 0 ? " inflight" : " terminal"));
       chip.appendChild(mk("div", "n", String(n)));
       chip.appendChild(mk("div", "k", s));
       chips.appendChild(chip);
     }
+    // Where the two groups fall is a question about LAYOUT, so it is asked once the chips
+    // are in the document rather than while they are being built.
+    markChipGroupBreak();
     // The counts view has nothing to show when the ledger holds no row in ANY state,
     // which is the empty state F7 requires of it. The chips still read their measured
     // zeroes beside it.
@@ -94,16 +129,18 @@ function render(snap) {
   // Queue.
   const q = Array.isArray(snap.queue) ? snap.queue : [];
   const qbody = $("queue");
-  qbody.replaceChildren();
-  for (const j of q) qbody.appendChild(queueRow(j));
+  const qheaders = headersOf("queue");
+  // Reconciled, never rebuilt wholesale: a row the snapshot did not change keeps its own
+  // node, and with it whatever a reader was part-way through doing to it.
+  syncRows(qbody, q, (j) => queueRow(j, qheaders));
   setViewState("queue", q.length ? null : "empty");
   refreshElapsed();
 
   // History - the trust surface: per file, the evidence its swap was safe.
   const h = Array.isArray(snap.history) ? snap.history : [];
   const hbody = $("history");
-  hbody.replaceChildren();
-  for (const j of h) hbody.appendChild(histRow(j));
+  const hheaders = headersOf("history");
+  syncRows(hbody, h, (j) => histRow(j, hheaders));
   setViewState("history", h.length ? null : "empty");
 
   // Honest row-cap notices. The total is the one the SERVER reported for each table -

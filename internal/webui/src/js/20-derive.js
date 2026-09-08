@@ -98,6 +98,26 @@ function sizeFigures(j) {
 // statistics (harmonic mean AND worst frame), the model that produced them, its pooling,
 // its luma-only blind spot, and that it was measured against the operator's own source.
 // It never grades the result, never claims perfect fidelity, and never compares files.
+// pathParts splits a media path into the directory that leads to it and the file's own
+// name. Both tables are read by scanning for a FILE, and a column of absolute paths that
+// wrap mid-word buries the one part of each row a reader is actually looking for: the
+// name is the last segment, and everything before it is the same for every file in a
+// season.
+//
+// The split is on the last separator and nothing cleverer. A path with no separator is
+// all name and no directory; a path that ENDS in one has no name to show, so the whole
+// string is kept as the directory rather than inventing an empty name. The two parts
+// always concatenate back to the input exactly - no separator is added, moved or
+// dropped - so the cell's text is still the path the server sent, character for
+// character, which is what lets the filter and the graders keep reading it whole.
+function pathParts(path) {
+  const s = typeof path === "string" ? path : "";
+  const cut = s.lastIndexOf("/");
+  if (cut < 0) return { dir: "", name: s };
+  if (cut === s.length - 1) return { dir: s, name: "" };
+  return { dir: s.slice(0, cut + 1), name: s.slice(cut + 1) };
+}
+
 function vmafFigures(j) {
   if (!isNum(j.vmaf_mean) && !isNum(j.vmaf_min)) return null;
   const model = j.vmaf_model ? String(j.vmaf_model).replace(/^version=/, "") : "unspecified model";
@@ -122,7 +142,10 @@ function progressFigure(j) {
   if (j.status !== PROGRESS_STATUS) return null;
   if (!isNum(j.progress_fraction)) return { unknown: true };
   const frac = Math.min(1, Math.max(0, j.progress_fraction));
-  const out = { unknown: false, percent: Math.round(frac * 100) + "%" };
+  // `fraction` is the same clamped measurement the percentage is rounded from, carried
+  // through so a drawing and the text beside it are two readings of ONE number and can
+  // never disagree - a bar drawn from its own arithmetic would be a second answer.
+  const out = { unknown: false, fraction: frac, percent: Math.round(frac * 100) + "%" };
   if (isNum(j.progress_seconds) && isNum(j.progress_duration_seconds)) {
     out.of = fmtSpan(Math.min(j.progress_seconds, j.progress_duration_seconds))
       + " of " + fmtSpan(j.progress_duration_seconds);

@@ -365,6 +365,27 @@ func TestBuild_TheStaleCheckNamesTheArtifactItRefuses(t *testing.T) {
 // invariant that keeps the fourth inherited criterion (A4) decidable: whoever adopts a
 // rendering library later has to change this test to do it, in front of a reviewer, rather
 // than have a lockfile appear.
+// e2eDir is the ONE place in this repository a third-party JavaScript package may live:
+// the dashboard's Playwright graders. It is named here, once, so the boundary below is a
+// path and not a judgement call.
+const e2eDir = "internal/webui/e2e"
+
+// TestBuild_NoThirdPartyJavaScriptEntersThePageOrTheTooling draws the boundary this
+// repository actually needs, which is a boundary of PLACE and not a blanket refusal.
+//
+// The rule used to be "no registry package anywhere". That rule was doing two jobs at
+// once: keeping the BUILD PATH and the SHIPPED PAGE free of a toolchain the image would
+// have to carry and govulncheck could not see - which is load-bearing and is enforced
+// harder below than it was before - and keeping a dependency out of the TEST HARNESS,
+// which protects no artifact a user ever runs. The dashboard's rendered graders now use
+// Playwright, under internal/webui/e2e, and the half that matters is unchanged:
+//
+//	the generator is Go and the standard library alone, `make build` is a plain
+//	`go build`, the image gains no stage and no tool, and the served document still
+//	resolves nothing at load time.
+//
+// So: a package manifest, a lockfile or a node_modules under internal/webui/e2e is
+// expected. Anywhere else it is a build-path dependency and reds.
 func TestBuild_NoThirdPartyJavaScriptEntersThePageOrTheTooling(t *testing.T) {
 	root := filepath.Join("..", "..")
 	forbidden := []string{
@@ -381,11 +402,23 @@ func TestBuild_NoThirdPartyJavaScriptEntersThePageOrTheTooling(t *testing.T) {
 		if d.IsDir() && (name == ".git" || name == "dist" || name == "out") {
 			return filepath.SkipDir
 		}
+		rel, relErr := filepath.Rel(root, p)
+		if relErr != nil {
+			return nil
+		}
+		// The one exemption, and it does not recurse into a decision: everything at or
+		// under the graders' own directory is test tooling by construction.
+		if rel == e2eDir || strings.HasPrefix(rel, e2eDir+string(filepath.Separator)) {
+			if d.IsDir() && name == "node_modules" {
+				return filepath.SkipDir // nothing inside an installed tree is this test's business
+			}
+			return nil
+		}
 		for _, f := range forbidden {
 			if name == f {
-				rel, _ := filepath.Rel(root, p)
-				t.Errorf("%s exists: the dashboard and its tooling must introduce no registry package, "+
-					"no lockfile and no third-party JavaScript runtime", rel)
+				t.Errorf("%s exists outside %s: the dashboard's BUILD PATH and the page it ships must introduce "+
+					"no registry package, no lockfile and no third-party JavaScript runtime. Test tooling belongs under %s",
+					rel, e2eDir, e2eDir)
 			}
 		}
 		return nil
@@ -394,8 +427,10 @@ func TestBuild_NoThirdPartyJavaScriptEntersThePageOrTheTooling(t *testing.T) {
 		t.Fatalf("walking the repository: %v", err)
 	}
 
-	// Every module and every test file resolves only relative paths and node's own
-	// builtins. A bare specifier is a registry package by definition.
+	// The PAGE's own modules resolve only relative paths and node's builtins. A bare
+	// specifier here is a registry package inside the document that goes on the wire -
+	// which the response policy would refuse anyway, and which no exemption above
+	// reaches, because jsSources walks internal/webui/src and nothing else.
 	bareImport := regexp.MustCompile(`(?:require\(|from\s+|import\s*\()\s*["']([^"']+)["']`)
 	for _, f := range jsSources(t) {
 		body := readFile(t, f)
@@ -408,11 +443,84 @@ func TestBuild_NoThirdPartyJavaScriptEntersThePageOrTheTooling(t *testing.T) {
 		}
 	}
 
-	// And the go module gained no dependency for any of this.
+	// And the go module gained no dependency for any of this. The graders drive the
+	// browser through a runner the TEST project installs; nothing in the Go build does.
 	gomod := readRepoFile(t, "go.mod")
 	for _, tool := range []string{"esbuild", "goja", "otto", "quickjs", "v8go", "rod", "chromedp", "playwright"} {
 		if strings.Contains(gomod, tool) {
-			t.Errorf("go.mod requires %q; the generator is stdlib only and the graders drive the browser this container already ships", tool)
+			t.Errorf("go.mod requires %q; the generator is stdlib only and the graders drive the browser the test project installs", tool)
+		}
+	}
+}
+
+// TestBuild_TheTestOnlyDependencyCannotReachTheBuiltArtifact is the other half of the
+// boundary above, and it is the half that protects a user. The exemption is a path, so
+// this proves the path is all it is: nothing the graders install reaches the generator,
+// the generated document, the binary or the image.
+func TestBuild_TheTestOnlyDependencyCannotReachTheBuiltArtifact(t *testing.T) {
+	root := filepath.Join("..", "..")
+
+	// 1. The GENERATOR - the only thing that writes the served document - imports the
+	//    standard library and this module alone.
+	genFiles, err := filepath.Glob(filepath.Join("gen", "*.go"))
+	if err != nil {
+		t.Fatalf("globbing the generator: %v", err)
+	}
+	cmdFiles, err := filepath.Glob(filepath.Join("gen", "genindex", "*.go"))
+	if err != nil {
+		t.Fatalf("globbing the generator command: %v", err)
+	}
+	genFiles = append(genFiles, cmdFiles...)
+	if len(genFiles) == 0 {
+		t.Fatal("no generator sources found: a check with no subject proves nothing")
+	}
+	importLine := regexp.MustCompile(`"([a-zA-Z0-9_./\-]+)"`)
+	for _, f := range genFiles {
+		body := readFile(t, f)
+		start := strings.Index(body, "import (")
+		if start < 0 {
+			continue
+		}
+		block := body[start:]
+		if end := strings.Index(block, "\n)"); end > 0 {
+			block = block[:end]
+		}
+		for _, m := range importLine.FindAllStringSubmatch(block, -1) {
+			path := m[1]
+			if strings.HasPrefix(path, "github.com/NSchatz/holdfast/") {
+				continue
+			}
+			if strings.Contains(path, ".") { // a dot in the first segment means a hosted module
+				if first := strings.SplitN(path, "/", 2)[0]; strings.Contains(first, ".") {
+					t.Errorf("%s imports %q: the generator is Go and the standard library alone, so `make build` stays a plain `go build` and the image gains no stage", f, path)
+				}
+			}
+		}
+	}
+
+	// 2. The SERVED DOCUMENT carries nothing from an installed tree, and still names no
+	//    off-origin URL. It is one self-contained file; that has not moved.
+	doc := string(readRepoFile(t, filepath.Join("internal", "webui", "index.html")))
+	for _, marker := range []string{"node_modules", "@playwright", "playwright-core", "sourceMappingURL"} {
+		if strings.Contains(doc, marker) {
+			t.Errorf("the generated document contains %q: nothing the graders install may reach the page that ships", marker)
+		}
+	}
+
+	// 3. The IMAGE gains no JavaScript stage or tool. The graders run in CI, never in the
+	//    build of the artifact a user pulls.
+	dockerfile := string(readRepoFile(t, "Dockerfile"))
+	for _, tool := range []string{"npm ", "npx ", "pnpm", "yarn", "node_modules", "playwright"} {
+		if strings.Contains(dockerfile, tool) {
+			t.Errorf("the Dockerfile names %q: the image builds the binary and installs the pinned ffmpeg, and gains nothing else", tool)
+		}
+	}
+
+	// 4. The graders' project is where it says it is, and is a real project rather than
+	//    an empty directory the exemption above would silently cover.
+	for _, f := range []string{"package.json", "playwright.config.mjs"} {
+		if _, err := os.Stat(filepath.Join(root, e2eDir, f)); err != nil {
+			t.Errorf("%s/%s is missing: the exemption in the boundary test names a project that must exist", e2eDir, f)
 		}
 	}
 }

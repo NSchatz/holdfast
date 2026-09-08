@@ -152,7 +152,12 @@ func TestRendered_ThePreservationChecklistFailsWhenAnOperationalFactIsDeleted(t 
 		{"the lifetime reclaimed figure is deleted", "reclaimed this run, and reclaimed lifetime",
 			injectInto(t, lifetimeFigureMarkup, "")},
 		{"the label beside a reclaimed figure is deleted", "reclaimed this run, and reclaimed lifetime",
-			injectInto(t, "reclaimed lifetime: ", "")},
+			// The label sits AFTER the figure now - the two byte figures a swap
+			// produces are a stat band, each a value with its name under it - so the
+			// mutation deletes the element that carries it. What is being proved is
+			// unchanged: a figure whose label is gone must be reported as a missing
+			// fact, because a number nobody can name is not a fact a reader has.
+			injectInto(t, `<span class="stat-k">reclaimed lifetime</span>`, "")},
 		{"the per-status counts are never appended", "the per-status count of files, one figure per status the page declares",
 			injectInto(t, "chips.appendChild(chip);", "void chip;")},
 		{"the history cap notice is hidden", "the notice that a table is showing a capped subset, and the cap",

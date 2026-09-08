@@ -37,17 +37,23 @@ fi
 # Every half must have EXECUTED. A gate that passes because a suite was filtered out,
 # renamed away or compiled out is not a gate.
 #
-# The third half (S0053) is the DevTools-protocol suite: the graders that emulate the
-# operating system's colour-scheme preference, read the accessibility tree the engine
-# computed and dispatch real key presses. Those are engine OPERATIONS rather than page
-# reads, so they are a separate suite driving the browser over --remote-debugging-pipe,
-# and a gate that could come back green with them absent would be a gate that never
-# measured a theme, a tab order or an accessible name.
+# The third half is the Playwright project under internal/webui/e2e. It holds every
+# grader that needs to OPERATE the engine rather than read the page - emulating the
+# operating system's colour-scheme preference, reading the accessibility tree the engine
+# computed, dispatching real key presses - and it decides them against the same served
+# document, because its fixture server mounts the real webui.HandlerFor.
+#
+# It replaced a suite that drove the browser over --remote-debugging-pipe by hand. That
+# suite is gone, and nothing here waits for it: every criterion it decided is decided in
+# the project below, and every grader it carried is defeated on purpose there before it
+# was allowed to leave. Its Go wrapper additionally refuses a run whose JSON report shows a
+# skip or too few cases, so "it executed" and "it decided something" are separate claims
+# and both are checked.
 missing=0
 for half in \
   'TestUnit_:the derivation unit suite (node)' \
   'TestRendered_:the rendered graders (browser engine)' \
-  'TestRenderedCDP_:the DevTools-protocol graders (theme emulation, accessibility tree, real key input)'
+  'TestPlaywright_:the Playwright graders (against the real handler, in every theme and width)'
 do
   prefix="${half%%:*}"
   what="${half#*:}"

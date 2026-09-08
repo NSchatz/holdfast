@@ -648,7 +648,11 @@ func TestRendered_GraderFailsAgainstEveryHidingMutation(t *testing.T) {
 func TestRendered_HostileValueIntroducesNoElementOrAttribute(t *testing.T) {
 	bin := chromium(t)
 
-	benign := renderAndRead(t, bin, serveDocument(t, sourceoffer.Upstream, nil))
+	// Both documents are built from a NON-GitHub value, so neither draws the offer's
+	// decorative mark and any difference between them can only have come from what the
+	// value contains. Comparing against a GitHub value would be comparing two different
+	// renderings and calling the difference an injection.
+	benign := renderAndRead(t, bin, serveDocument(t, forkValue, nil))
 	hostile := renderAndRead(t, bin, serveDocument(t, hostileValue, nil))
 
 	if !hostile.Found {

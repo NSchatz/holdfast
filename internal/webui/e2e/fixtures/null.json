@@ -1,0 +1,130 @@
+{
+  "summary": {
+    "pending": 1,
+    "probing": 0,
+    "encoding": 1,
+    "verifying": 0,
+    "done": 1,
+    "skipped": 0,
+    "failed": 0
+  },
+  "queue": [
+    {
+      "path": "/media/films/alpha.mkv",
+      "status": "pending",
+      "worker": null,
+      "updated_at": 1788892811,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null
+    },
+    {
+      "path": "/media/films/bravo.mkv",
+      "status": "encoding",
+      "worker": null,
+      "updated_at": null,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null
+    }
+  ],
+  "history": [
+    {
+      "path": "/media/films/delta.mkv",
+      "status": "done",
+      "worker": null,
+      "updated_at": null,
+      "encoder": null,
+      "vmaf_mean": null,
+      "vmaf_min": null,
+      "vmaf_model": null,
+      "source_bytes": null,
+      "output_bytes": null,
+      "encode_ms": null
+    }
+  ],
+  "queue_total": {
+    "available": true,
+    "unavailable": "",
+    "covers": "every row in the ledger with status pending, probing, encoding, verifying",
+    "cap": 500,
+    "count": 2
+  },
+  "history_total": {
+    "available": true,
+    "unavailable": "",
+    "covers": "every row in the ledger with status done, skipped, failed, indeterminate, applied-despite-error",
+    "cap": 200,
+    "count": 1
+  },
+  "bytes_reclaimed_session": null,
+  "bytes_reclaimed_lifetime": null,
+  "bytes_held_by_undo_window": null,
+  "paused": false,
+  "scanning": false,
+  "now": 1788892841,
+  "aggregates": {
+    "outcomes": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every terminal row in the ledger",
+      "window": "",
+      "counted": 0,
+      "excluded": 4,
+      "buckets": []
+    },
+    "skips_by_guard": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every skipped row in the ledger",
+      "window": "",
+      "counted": 0,
+      "excluded": 2,
+      "buckets": []
+    },
+    "size_ratio": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every done row that recorded both sizes",
+      "window": "",
+      "counted": 0,
+      "excluded": 1,
+      "min": null,
+      "mean": null,
+      "max": null
+    },
+    "encode_ms": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every done row that recorded a duration",
+      "window": "",
+      "counted": 0,
+      "excluded": 1,
+      "min": null,
+      "mean": null,
+      "max": null
+    },
+    "vmaf_mean": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every done row that recorded a mean",
+      "window": "",
+      "counted": 0,
+      "excluded": 1,
+      "min": null,
+      "mean": null,
+      "max": null
+    },
+    "vmaf_min": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every done row that recorded a worst frame",
+      "window": "",
+      "counted": 0,
+      "excluded": 1,
+      "min": null,
+      "mean": null,
+      "max": null
+    }
+  }
+}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode"
@@ -329,9 +330,14 @@ func TestSourceOffer_HTMLSignificantValueIntroducesNoMarkup(t *testing.T) {
 	if got, want := strings.Count(doc, "<script"), strings.Count(string(indexHTML), "<script"); got != want {
 		t.Errorf("the served document has %d script tags, the embedded one has %d", got, want)
 	}
-	benign := renderedTagCount(t, sourceoffer.Upstream)
+	// The offer draws a decorative mark for a GitHub URL and none for anything else, so a
+	// count taken against a benign value only means something when that value is of the
+	// SAME class as the one under test. forkValue is the benign non-GitHub reference: the
+	// hostile value below is one too, so a difference between them can only have come
+	// from what the value CONTAINS.
+	benign := renderedTagCount(t, forkValue)
 	if got := renderedTagCount(t, hostileValue); got != benign {
-		t.Errorf("the hostile value changed the served document's tag count: %d, want %d", got, benign)
+		t.Errorf("the hostile value changed the served document's tag count: %d, want %d (both are non-GitHub values, so the mark is drawn for neither)", got, benign)
 	}
 	if got := rec.Header().Get("Content-Security-Policy"); got != pinnedCSP {
 		t.Errorf("CSP changed to carry a hostile value.\n got: %q\nwant: %q", got, pinnedCSP)
@@ -415,12 +421,29 @@ func TestSourceOffer_HandlerRefusesEveryRejectedValue(t *testing.T) {
 // character. The mutation proof for this grader is in
 // internal/sourceoffer.TestLinkProblems_FailsAgainstEveryRenderingMutation, which
 // runs it against eleven renderings that each break exactly one clause.
+// offerTagRe matches one element tag, so a decorative mark can be taken out of the link
+// before its displayed text is compared. See offerLinkProblems.
+var offerTagRe = regexp.MustCompile(`<[^>]*>`)
+
+func offerShownText(inner string) string { return offerTagRe.ReplaceAllString(inner, "") }
+
 func offerLinkProblems(region, want string) []string {
 	var out []string
 	esc := html.EscapeString(want)
-	wantLink := `<a class="source-offer-link" href="` + esc + `">` + esc + `</a>`
-	if !strings.Contains(region, wantLink) {
-		out = append(out, "the offer does not carry "+want+" as both the link target and the displayed text")
+	// The link may carry a DECORATIVE mark in front of the URL (the GitHub glyph is
+	// drawn inline when the source URL is a GitHub one), so the displayed text is read
+	// with the tags removed rather than matched as one literal string. What must remain
+	// is the URL and nothing else: the displayed URL is what discharges the offer, so a
+	// mark that replaced it, or one that said anything of its own, fails here.
+	linkOpen := strings.Index(region, `<a class="source-offer-link" href="`+esc+`">`)
+	end := strings.Index(region, "</a>")
+	if linkOpen < 0 || end < linkOpen {
+		out = append(out, "the offer does not carry "+want+" as the link target")
+	} else {
+		inner := region[linkOpen+strings.Index(region[linkOpen:], ">")+1 : end]
+		if offerShownText(inner) != esc {
+			out = append(out, "the offer does not carry "+want+" as its displayed text; it shows "+offerShownText(inner))
+		}
 	}
 	if html.UnescapeString(esc) != want {
 		out = append(out, "the document's escaping does not decode back to the value character for character")

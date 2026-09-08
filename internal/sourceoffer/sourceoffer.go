@@ -27,6 +27,7 @@ package sourceoffer
 import (
 	"fmt"
 	"html"
+	"net/url"
 	"strings"
 
 	"github.com/NSchatz/holdfast/internal/version"
@@ -120,6 +121,37 @@ func Resolve() (Offer, error) {
 	return Current(), nil
 }
 
+// githubMark is the GitHub mark, drawn inline.
+//
+// It is DRAWN and not fetched, for the same reason every other graphic on this surface
+// is: the served Content-Security-Policy is `default-src \'none\'` and `img-src` falls
+// back to it, so a referenced image here would not be a heavier page, it would be a
+// broken one. It carries no URL, no font and no data: URI.
+//
+// It is aria-hidden because it names nothing the link does not already say - the link's
+// text is the source URL itself, which is the accessible name and the offer both.
+const githubMark = `<svg class="gh" viewBox="0 0 24 24" width="16" height="16" ` +
+	`aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 .297c-6.63 0-12 5.373-12 12 0 ` +
+	`5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 ` +
+	`18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 ` +
+	`3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 ` +
+	`0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 ` +
+	`2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 ` +
+	`3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>`
+
+// isGitHub reports whether a source URL is served by GitHub itself, which is the only
+// condition under which the mark above is drawn. A fork points this at its own tree - the
+// Makefile documents git.example.org - and putting GitHub's mark beside a GitLab URL
+// would be a page telling a reader something untrue about where its source is.
+func isGitHub(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	h := strings.ToLower(u.Hostname())
+	return h == "github.com" || strings.HasSuffix(h, ".github.com")
+}
+
 // HTML renders the offer as the dashboard fragment.
 //
 // The rendering is FIXED: the link's displayed text is the source URL in effect and
@@ -129,6 +161,13 @@ func Resolve() (Offer, error) {
 // displayed text - it can introduce no element, no attribute and no script, which is
 // what lets the page keep its tight Content-Security-Policy and its
 // no-HTML-string-sink render idiom exactly as they are.
+//
+// The mark is an ADDITION to that and never a replacement for it. The displayed URL is
+// what discharges the section 13 offer - it is how a reader learns where the
+// Corresponding Source is without hovering over anything or reading any markup - so an
+// icon-only link would be a smaller footer bought by dropping the obligation the footer
+// exists for. The mark is decoration in front of the text, drawn only when the URL is
+// actually a GitHub one.
 func (o Offer) HTML() string {
 	u := html.EscapeString(o.SourceURL)
 	var b strings.Builder
@@ -141,8 +180,12 @@ func (o Offer) HTML() string {
 	b.WriteString(`: <a class="source-offer-link" href="`)
 	b.WriteString(u)
 	b.WriteString(`">`)
+	if isGitHub(o.SourceURL) {
+		b.WriteString(githubMark)
+	}
+	b.WriteString(`<span class="source-offer-url">`)
 	b.WriteString(u)
-	b.WriteString(`</a></p>`)
+	b.WriteString(`</span></a></p>`)
 	return b.String()
 }
 

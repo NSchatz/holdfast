@@ -22,14 +22,10 @@
 //      and a maximum by their position and the height of their tick. Every mark is one
 //      token (--mark), chosen for 3:1 against the card face behind it.
 
-// figBar is one bar of a distribution: the mark's length is this bucket's own count as a
-// share of the largest count in the SAME figure, which is the only comparison a reader
-// can safely make by eye and the only one this drawing offers.
-function figBar(share) {
-  const svg = tplNode("tpl-fig-bar");
-  svg.querySelector(".mark").setAttribute("width", (share * 100).toFixed(4) + "%");
-  return svg;
-}
+// One bar of a distribution is drawn by figBar (30-dom.js), the shared primitive: the
+// mark's length is this bucket's own count as a share of the largest count in the SAME
+// figure, which is the only comparison a reader can safely make by eye and the only one
+// this drawing offers.
 
 // The user-space ends of the spread shell's scale, inset so a 2px stroke centred on
 // either end is drawn inside the box rather than half-clipped by it.
@@ -55,8 +51,12 @@ function spreadNodes(a, fmt, lead) {
   const pos = spreadPositions(a.min, a.mean, a.max);
   if (pos) out.push(figSpread(pos));
   out.push(spreadKeys(a, fmt));
-  out.push(mk("span", "range", "range " + fmt(a.min) + " to " + fmt(a.max) + " across " +
-    fmtCount(a.counted) + " files"));
+  // How many files the spread was taken over. It used to restate the minimum and the
+  // maximum as well - "range 491 ms to 1s across 5 files" - directly under the line that
+  // had just named both, so the only fact it carried that the card did not already show
+  // was the count. The drawing rule is untouched: every value the ticks encode is still
+  // rendered as text, in the order the ticks are drawn, by spreadKeys above.
+  out.push(mk("span", "range", "across " + fmtCount(a.counted) + " files"));
   return out;
 }
 

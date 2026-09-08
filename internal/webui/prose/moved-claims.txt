@@ -1,0 +1,22 @@
+# Every claim this dashboard took OFF its surface (clause F8).
+#
+# It is one file with two readers - the Go source check that each claim is in the linked
+# document, and the rendered grader that each is no longer printed on the page - because a
+# list of sentences kept in two places agrees with itself today and disagrees the first
+# time either is edited. That is the failure this repository has spent whole phases
+# refusing everywhere else, and a claim that quietly dropped off one copy would be exactly
+# the claim nobody checks.
+#
+# Lines starting with # and blank lines are ignored. One claim per line, verbatim.
+how many files stand in each state
+recomputed from the transition timestamp on each update rather than counted in this page
+encoder's own progress stream
+never a stale figure
+it survives restarts and describes the library as a whole
+not over the capped rows
+excluded and counted, never read as a zero
+the bars of a distribution are in proportion to the counts beside them
+minimum, mean and maximum on one scale
+no figure is readable only by pointing at it
+A skipped file shows which guard held it back; a failed one shows why.
+VMAF is not comparable between different sources
