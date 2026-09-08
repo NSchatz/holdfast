@@ -489,7 +489,15 @@ func TestStrayTemp_AnFfprobeThatAnswersNothingAtAllHoldsToo(t *testing.T) {
 // comment says can never happen ("nothing in this program may ever delete it on its own
 // initiative"). That fail-safe used to sit behind a codec question that answered "no"
 // for reasons that were not about the file, so it was unreachable on exactly the paths
-// that needed it. Both of those paths are arms here.
+// that needed it. Every one of those paths is an arm here, and the question is now asked
+// FIRST - by os.Lstat alone, with no subprocess and no configuration in it - so the arms
+// are the ways the OLD ordering could be reached and not the ways the new one can fail.
+//
+// The last arm is the one that outlived the reordering's first attempt: an ffprobe that
+// runs, is demonstrably a working binary, and exits non-zero because it could not OPEN
+// the path. On the wire that is identical to a verdict about the file, and it is what a
+// restrictive mode, a `user:` change, an NFS export squashing the writing uid, an
+// SELinux denial or a transient EIO each produce.
 func TestStrayTemp_NothingBesideItHoldsWhateverElseCouldNotBeEstablished(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
 	ctx := context.Background()
@@ -498,10 +506,13 @@ func TestStrayTemp_NothingBesideItHoldsWhateverElseCouldNotBeEstablished(t *test
 		name    string
 		ffprobe string
 		mutate  func(*config.Config)
+		stage   func(*testing.T, string) // applied to the stranded file before the sweep
 	}{
-		{"the content probe cannot answer", "", nil},
-		{"a later run targets a different codec", ffprobe, func(c *config.Config) { c.Encoder = "svtav1" }},
-		{"nothing at all is wrong", ffprobe, nil},
+		{name: "the content probe cannot answer", ffprobe: ""},
+		{name: "a later run targets a different codec", ffprobe: ffprobe,
+			mutate: func(c *config.Config) { c.Encoder = "svtav1" }},
+		{name: "nothing at all is wrong", ffprobe: ffprobe},
+		{name: "this process cannot read the file", ffprobe: ffprobe, stage: denyRead},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -515,6 +526,13 @@ func TestStrayTemp_NothingBesideItHoldsWhateverElseCouldNotBeEstablished(t *test
 			if err := os.Remove(seed); err != nil {
 				t.Fatal(err)
 			}
+			if got := codecOf(t, ffprobe, stranded); got != "hevc" {
+				t.Fatalf("precondition: %s is %q, not hevc - the fixture is not a gate-passed replacement", stranded, got)
+			}
+			want := md5f(t, stranded)
+			if tc.stage != nil {
+				tc.stage(t, stranded)
+			}
 
 			probeBin := tc.ffprobe
 			if probeBin == "" {
@@ -526,9 +544,184 @@ func TestStrayTemp_NothingBesideItHoldsWhateverElseCouldNotBeEstablished(t *test
 
 			if !exists(stranded) {
 				t.Fatalf("AC15i: the sweep DELETED %s - a gate-passed replacement holdfast wrote, with NO "+
-					"record naming it and NO source beside it. strayReplacementHold's own no-source "+
-					"fail-safe is unreachable here, because the codec check runs first and answered no.",
-					stranded)
+					"record naming it and NO source beside it. The one question that cannot fail for a "+
+					"reason that is not about the file - is there anything here to measure it against - "+
+					"must be asked before any that can.", stranded)
+			}
+			allowRead(t, stranded)
+			if got := md5f(t, stranded); got != want {
+				t.Errorf("the sweep MODIFIED %s", stranded)
+			}
+		})
+	}
+}
+
+// denyRead takes this process's read access to path away and gives it back at the end of
+// the test. It is the ONE staging that produces an ffprobe refusal which is not about the
+// file: ProcessState.Exited() is true whether ffprobe exited because the file is not
+// media or because open() failed, so the two are the same answer on the wire.
+//
+// Under uid 0 a file mode denies nothing, so the case cannot be staged and the test skips
+// rather than passing vacuously.
+func denyRead(t *testing.T, path string) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a file mode cannot deny this process a read, so the case cannot be staged")
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+}
+
+func allowRead(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStrayTemp_AFileThisProcessCannotReadHoldsEvenWithItsSourceBesideIt is the same
+// property WITHOUT the no-source fail-safe standing behind it, which is what makes the
+// readability confirmation load-bearing rather than belt-and-braces.
+//
+// The source IS beside the file here, so every earlier hold is out of the way and the
+// only thing that can hold it is the confirmation that ffprobe's refusal was about the
+// FILE. The experiment is controlled: ONE fixture, swept twice, and the only thing that
+// changes between the two sweeps is whether the running process may read it. The control
+// arm keeps it (a readable, finished, length-matching replacement), so the second arm
+// measures the access and nothing else.
+//
+// docs/docker.md documents the commonest cause as an operator knob and promises that
+// getting `user:` wrong is "safe but useless: every encode fails at the write step, and
+// every source is left byte-for-byte intact". Deleting a gate-passed replacement on that
+// knob would make the sentence false.
+func TestStrayTemp_AFileThisProcessCannotReadHoldsEvenWithItsSourceBesideIt(t *testing.T) {
+	dir, src, stranded, md5, ffmpeg, ffprobe := strandedFixture(t)
+	ctx := context.Background()
+
+	// Arm 1, the control: readable, its source beside it. Held, byte for byte.
+	ctl := buildEngine(t, ffmpeg, ffprobe, dir, nil, nil)
+	ctl.held.Store(ctl.loadHoldBacks(ctx))
+	ctl.cleanStaleTemps(ctx)
+	if !exists(stranded) || md5f(t, stranded) != md5 {
+		t.Fatalf("control arm: the sweep took or modified %s while it was readable - the fixture is not the case under test", stranded)
+	}
+
+	// Arm 2: the same file, present and unchanged, that this process may not read.
+	denyRead(t, stranded)
+
+	// The preconditions that ARE the finding, asserted rather than assumed: ffprobe
+	// exits of its own accord (so the probe reports "answered"), the answer it carries is
+	// the empty string, and the binary is demonstrably fine (so Usable cannot separate
+	// the two either). Without these three the test would prove nothing about this route.
+	prober := probe.New(ffmpeg, ffprobe)
+	codec, answered := prober.VideoCodecAnswered(ctx, stranded)
+	if !answered || codec != "" {
+		t.Fatalf("precondition: on an unreadable file VideoCodecAnswered returned (%q, %v); this test "+
+			"assumes ffprobe exits non-zero having reached a verdict of its own", codec, answered)
+	}
+	if !prober.Usable(ctx) {
+		t.Fatal("precondition: ffprobe must be a working binary, or the hold's own Usable check would catch this")
+	}
+	if !exists(src) {
+		t.Fatalf("precondition: the source %s is gone, so the no-source hold would carry this arm instead", src)
+	}
+
+	e := buildEngine(t, ffmpeg, ffprobe, dir, nil, nil)
+	e.held.Store(e.loadHoldBacks(ctx))
+	e.cleanStaleTemps(ctx)
+
+	if !exists(stranded) {
+		t.Fatalf("AC15i: the sweep DELETED %s - a gate-passed hevc replacement holdfast wrote, at a path its "+
+			"own temp construction produced, with NO record naming it. The file was present and "+
+			"byte-identical; the only thing holdfast could not do was READ it, and an empty codec from an "+
+			"ffprobe that exited on its own was read as a positive finding that the file is work in "+
+			"progress. That answer is about the ACCESS to the path, not about the content of the file.", stranded)
+	}
+	allowRead(t, stranded)
+	if got := md5f(t, stranded); got != md5 {
+		t.Errorf("the sweep MODIFIED %s", stranded)
+	}
+
+	// And it holds for THIS reason. The operator has a different thing to go and fix
+	// depending on which hold fired, and the branches are independently removable, so the
+	// reason is asserted rather than only the file's survival.
+	denyRead(t, stranded)
+	if why := e.strayReplacementHold(ctx, stranded); !strings.Contains(why, "cannot read") {
+		t.Errorf("the hold reports %q; a file this process cannot read must be reported as one - an "+
+			"unanswerable question is not permission to delete, and this one was never answered", why)
+	}
+}
+
+// TestStrayTemp_TheSourceBesideQuestionIsAskedBeforeAnythingThatCanFail is the ORDERING
+// itself, graded where the ordering is the only thing that decides the answer.
+//
+// Every other hold in this file is now also carried by a later question, so removing the
+// hoist would leave them all green - and the ordering is the property with the widest
+// guarantee, because it is decided by os.Lstat alone: no subprocess, no configuration,
+// nothing a failing host or a shrunken encoder registry can take away. It is what makes
+// "anything the sweep could not establish HOLDS" a property of the function rather than
+// an intention about the questions inside it.
+//
+// The two arms differ in ONE way and it is not the file: both are the same h264 encode at
+// the build's own temp construction - complete, decodable, readable, with a working
+// ffprobe answering about it, at a codec NO encoder here writes, so the codec question
+// gives a POSITIVE and well-founded "not one of ours" for both. One has its source beside
+// it and is swept; the other does not, and is held. Holding it costs disk and it is the
+// trade this file already declares ("costs an operator some disk and never a file").
+func TestStrayTemp_TheSourceBesideQuestionIsAskedBeforeAnythingThatCanFail(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name       string
+		keepSource bool
+		wantSwept  bool
+	}{
+		{name: "with its source beside it the sweep still reclaims it", keepSource: true, wantSwept: true},
+		{name: "with nothing beside it the sweep holds", keepSource: false, wantSwept: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := filepath.Join(dir, "movie.mkv")
+			mkH264Long(t, ffmpeg, src, "4M")
+			orphan := tempPath(dir, "movie", "mkv", 0)
+			mkH264From(t, ffmpeg, src, orphan)
+			if got := codecOf(t, ffprobe, orphan); got != "h264" {
+				t.Fatalf("precondition: %s is %q, not h264 - the codec question must answer a positive "+
+					"'no encoder here writes this' for both arms", orphan, got)
+			}
+			if err := readableNow(orphan); err != nil {
+				t.Fatalf("precondition: %s is not readable (%v), so the readability confirmation would "+
+					"carry this arm instead of the ordering", orphan, err)
+			}
+			if !tc.keepSource {
+				if err := os.Remove(src); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			e := buildEngine(t, ffmpeg, ffprobe, dir, nil, nil)
+			e.held.Store(e.loadHoldBacks(ctx))
+			e.cleanStaleTemps(ctx)
+
+			switch {
+			case tc.wantSwept && exists(orphan):
+				t.Errorf("crash-safety: %s survived the sweep with its source beside it and a positive "+
+					"finding about its content - the ordering must not have become a rule that holds "+
+					"every temp", orphan)
+			case !tc.wantSwept && !exists(orphan):
+				t.Errorf("AC15i: the sweep DELETED %s, a file at this build's own temp construction with "+
+					"NOTHING beside it to measure against. That question is answered by os.Lstat alone and "+
+					"must be asked before any question that can fail for a reason which is not about the "+
+					"file; behind one, the fail-safe is unreachable exactly when it is needed.", orphan)
+			}
+			if !tc.wantSwept {
+				if why := e.strayReplacementHold(ctx, orphan); !strings.Contains(why, "no source beside it") {
+					t.Errorf("the hold reports %q, want the no-source hold - an operator has a different "+
+						"thing to go and look for depending on which one fired", why)
+				}
 			}
 		})
 	}

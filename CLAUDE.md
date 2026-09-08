@@ -430,21 +430,36 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   failure that strands a replacement is usually the same failure that denies that write and the job-store
   record with it — so a `__transcoding__` file is EXAMINED before it is reclaimed (`strayReplacementHold`).
   The sweep needs a POSITIVE finding that the file is work in progress, and **anything it could not
-  establish HOLDS** — because a "no" here is a deletion of the one file the phase exists to protect. Its
-  name must be exactly what `tempPath` constructs; then ffprobe is asked what the file IS, and the answer
-  carries whether it was ANSWERED (`probe.VideoCodecAnswered`, beside `Prober.Usable`). A cancelled run, an
-  ffprobe that cannot be started, and an ffprobe that exits non-zero for every question all HOLD — `""` from
-  plain `VideoCodec` means "not video" and "never ran" alike, and a hold built on it deletes a good file the
-  moment the tool is missing. The codec question is asked as **could SOME encoder this build ships have
-  written it** (`encoder.TargetCodecs`), never "is it at the codec configured right now": a stranded file
-  was written by whichever encoder was configured THEN, and `encoder:` is an ordinary config key, so keying
-  the hold to it lets an unrelated edit license a deletion. Only then does `lengthParity` against the source
-  beside it decide finished-vs-fragment, and with NO source beside it there is nothing to measure, so it
-  holds. Do not "simplify" that to the name alone (a killed encode reports codec `hevc` and decodes cleanly
-  — measured — so temps would accumulate for ever), do not re-key the codec question to `e.targetCodec`, do
-  not let an unanswered probe read as "no", and do not go back to an unconditional `os.Remove` (that is the
-  deletion AC15i forbids). `pickTempPath` applies the identical rule: it is the second route to the same
-  deletion, and no sweep loop guards it.
+  establish HOLDS** — because a "no" here is a deletion of the one file the phase exists to protect. **The
+  ORDER is the guarantee, not a detail of it.** Its name must be exactly what `tempPath` constructs; then,
+  BEFORE any question that can fail, `sourceBeside` asks whether there is anything here to measure the file
+  against — `os.Lstat` alone, no subprocess, no config key, nothing a failing host can take away — and with
+  nothing beside it the file is held whatever else is true, because it may be the only copy of the film
+  there is. Only past that is ffprobe asked what the file IS, and its refusal licenses a deletion only when
+  three separate things say the refusal is about the FILE: it ANSWERED (`probe.VideoCodecAnswered`), this
+  host's ffprobe answers anything at all (`Prober.Usable`), and this process can actually READ the path
+  (`readableNow`). All four causes look identical on the wire, because `ProcessState.Exited()` is true
+  whether ffprobe exited on "not media" or on a failed `open()` — so a cancelled run, an ffprobe that cannot
+  be started, one that exits non-zero for every question, and a file this process may not read all HOLD.
+  That last one is not hypothetical: `docs/docker.md` documents `user:` as an operator knob and promises
+  getting it wrong is "safe but useless", and a restrictive mode, an NFS export squashing the writing uid,
+  an SELinux denial or a transient EIO each make a working ffprobe refuse a file that is present and
+  byte-intact. The codec question is asked as **could SOME encoder this build ships have written it**
+  (`encoder.TargetCodecs`), never "is it at the codec configured right now": a stranded file was written by
+  whichever encoder was configured THEN, and `encoder:` is an ordinary config key, so keying the hold to it
+  lets an unrelated edit license a deletion. Only then does `lengthParity` against the source beside it
+  decide finished-vs-fragment. **What that adds up to, stated as the property and not the intent:** past
+  the source-beside question a replacement that reached a swap passes the content checks by construction,
+  so the residue is what can make one of those two answers wrong about a file whose SOURCE IS STILL THERE —
+  a source replaced by a different film between the runs, a build whose encoder registry has since dropped
+  that codec, a sandbox denying ffprobe's domain a read this process is granted — each costing an encode,
+  never the only copy. Do not "simplify" that to the name alone (a killed encode reports codec `hevc` and
+  decodes cleanly — measured — so temps would accumulate for ever), do not re-key the codec question to
+  `e.targetCodec`, do not let an unanswered or unreadable probe read as "no", do not move the source-beside
+  question behind a question that can fail, and do not go back to an unconditional `os.Remove` (that is the
+  deletion AC15i forbids). Each of those is graded by a test in `internal/engine/stray_replacement_test.go`
+  that reds when it is undone. `pickTempPath` applies the identical rule: it is the second route to the
+  same deletion, and no sweep loop guards it.
 - `internal/logging`, `internal/version` — logger construction, build-stamped version.
 - `.github/workflows/ci.yml` — the gate (installs the pinned ffmpeg via `scripts/install-ffmpeg.sh` for the
   engine proof) + a `package` job (TRANSCODE-9) that builds BOTH arches and runs the image smoke gate.

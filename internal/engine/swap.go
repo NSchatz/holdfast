@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -167,40 +168,66 @@ func IsTempConstructionName(base string) bool {
 //  1. its NAME must be exactly what tempPath could have produced - never a widened
 //     temp-or-dotfile pattern (AC15i bounds the record-free basis to the construction).
 //     A name outside the construction is not this rule's business at all.
-//  2. AN UNANSWERED QUESTION IS NOT A "NO". Every question below costs an ffprobe
+//  2. AN UNANSWERED QUESTION IS NOT A "NO". Every question past 3 costs an ffprobe
 //     subprocess, and a "no" here is a DELETION - of the one file this phase exists to
 //     protect, on a repository whose blast radius is "a wrong verdict is unrecoverable".
 //     So the sweep needs a POSITIVE finding that the file is work in progress; anything
-//     it could not establish HOLDS. A cancelled run, an ffprobe that cannot be started,
-//     and an ffprobe that answers nothing at all on this host each hold.
-//  3. WHAT IS THIS FILE? Asked as "could SOME encoder this build ships have written
+//     it could not establish HOLDS.
+//  3. IS THERE ANYTHING BESIDE IT TO MEASURE IT AGAINST? Asked FIRST, before any
+//     question that can fail, and answered by os.Lstat alone - no subprocess, no
+//     configuration, nothing a failing host can take away. With no source beside it
+//     there is nothing to measure the file against and NOTHING here can establish what
+//     it is, so it holds; that is the case where the file may be the only copy of the
+//     film there is, and the case the RetainedMarker comment above says can never
+//     happen ("nothing in this program may ever delete it on its own initiative").
+//     Being first is the whole point: a fail-safe reached only after three questions
+//     that can each answer "no" for reasons that are not about the file is a fail-safe
+//     that is unreachable exactly when it is needed.
+//  4. WHAT IS THIS FILE? Asked as "could SOME encoder this build ships have written
 //     it" (couldThisBuildHaveWrittenIt), never as "is it at the codec configured right
 //     now". A stranded file was written by whichever encoder was configured THEN, and
 //     `encoder:` is an ordinary config key: keying the hold to it would let an
 //     unrelated edit release a file AC15i says may never be deleted in any later run.
-//     This is the ONE question that is about the file and nothing else, which is why a
-//     negative answer to it - and ONLY to it - can license a deletion with nothing
-//     beside the file to check against.
-//  4. IS IT FINISHED? The verify gate's own length parity (gate 3, lengthParity, the
+//     A refusal here licenses a deletion only when the refusal is positively ABOUT THE
+//     FILE, which takes three separate confirmations, because on the wire a verdict
+//     about the file is indistinguishable from three things that are not one: it must
+//     have ANSWERED (probe.VideoCodecAnswered -
+//     not a binary that could not be started, not a killed subprocess), this host's
+//     ffprobe must answer anything at all (Prober.Usable - a half-installed build exits
+//     non-zero for every question, which is indistinguishable from reading a file and
+//     rejecting it), and this process must be able to READ THE PATH (readableNow - a
+//     restrictive mode, a `user:` change, an NFS export squashing the writing uid, an
+//     SELinux denial and a transient EIO all make a perfectly working ffprobe exit
+//     non-zero on a file that is present and byte-intact, and that is an answer about
+//     the ACCESS, not about the content).
+//  5. IS IT FINISHED? The verify gate's own length parity (gate 3, lengthParity, the
 //     same function - so the sweep's licence to delete and the gate's licence to swap
-//     cannot drift), measured against the source beside it. With NO source beside it
-//     there is nothing to measure and the answer is unavailable, so it holds: that is
-//     the case where the stranded file may be the only faithful copy of the film there
-//     is. lengthParity itself convicts only on evidence it has - two measured lengths
-//     that disagree - and returns "no objection" for anything it could not measure, so
-//     the fail-safe direction survives a probe failure here too.
+//     cannot drift), measured against the source question 3 found. lengthParity itself
+//     convicts only on evidence it has - two measured lengths that disagree - and
+//     returns "no objection" for anything it could not measure, so the fail-safe
+//     direction survives a probe failure here too.
 //
-// Every replacement that ever reached a swap passes 3 and 4 BY CONSTRUCTION, so this
-// can never sweep one. It is deliberately loose in the other direction - a partial
-// encode that satisfies both is KEPT and reported, which costs an operator some disk
-// and never a file.
+// WHAT THIS ACTUALLY GUARANTEES, stated as the property rather than as the intent.
+// Question 3 is unconditional and needs no subprocess, so a replacement with nothing
+// beside it is held whatever else fails - no probe, no host and no config key can reach
+// that answer. Past it, a replacement that reached a swap passes 4 and 5 by
+// construction, so the residue is bounded to what can make one of those two answers
+// wrong ABOUT A FILE THAT STILL HAS ITS SOURCE BESIDE IT: a source replaced by a
+// DIFFERENT film between the two runs (length parity then fails against a file that is
+// not the one the replacement was encoded from), a build whose encoder registry has
+// since dropped the codec the file was written at, and a sandbox that denies ffprobe's
+// domain a read this process is granted. Each costs an ENCODE, never the only copy,
+// because the source is by construction still there. It is deliberately loose in the
+// other direction - a partial encode that satisfies 4 and 5 is KEPT and reported, which
+// costs an operator some disk and never a file.
 //
 // Both content checks are needed and neither is decorative. Measured on real ffmpeg: a
 // libx265 encode of a 20-second source, killed part-way, ends up 3.6 seconds long while
-// reporting codec `hevc` and DECODING CLEANLY - so question 3 alone (and a decode
-// integrity check alone) would hold every partial encode for ever, and question 4 is
+// reporting codec `hevc` and DECODING CLEANLY - so question 4 alone (and a decode
+// integrity check alone) would hold every partial encode for ever, and question 5 is
 // what tells them apart. A hard-killed encode leaves a zero-length or header-only file,
-// which a working ffprobe REFUSES outright, and question 3 takes it.
+// which a working ffprobe REFUSES outright while it stays perfectly readable, and
+// question 4 takes it.
 func (e *Engine) strayReplacementHold(ctx context.Context, path string) string {
 	// Nothing there, or not a regular file: nothing to hold, and no subprocess spent
 	// asking. This is also what keeps the picker's common case free of an extra probe.
@@ -220,34 +247,74 @@ func (e *Engine) strayReplacementHold(ctx context.Context, path string) string {
 			"nothing can be asked about it, and an unanswered question is not permission to delete"
 	}
 
-	// Question 3. The one question that is about THIS FILE and nothing else.
+	// Question 3, FIRST. The only question here that cannot fail for a reason that is
+	// not about the file, so it is the one the deepest fail-safe is built on.
+	src, found := e.sourceBeside(filepath.Dir(path), stem, ext)
+	if !found {
+		return "a file at a temp path this build constructed with no source beside it left to measure it " +
+			"against - nothing here can establish what it is, and it may be the only copy of the film there is"
+	}
+
+	// Question 4. What is this file?
 	codec, answered := e.Probe.VideoCodecAnswered(ctx, path)
 	if !answered {
 		return "a file at a temp path this build constructed that ffprobe could not be asked about - " +
 			"an unanswered question is not permission to delete"
 	}
 	if !couldThisBuildHaveWrittenIt(codec) {
-		// ffprobe ran and answered about the file. Before that refusal licenses a
-		// deletion, confirm the refusal was ffprobe's verdict on the FILE and not the
-		// only thing a broken ffprobe can say: one that exits non-zero for everything
-		// is indistinguishable from one reading a file and rejecting it.
+		// ffprobe exited of its own accord. That is NOT yet a verdict on the file:
+		// ProcessState.Exited() is true whether it exited because the file is not media
+		// or because open() failed, and the two are the same on the wire. Both remaining
+		// confirmations are about which of those it was.
 		if !e.Probe.Usable(ctx) {
 			return "a file at a temp path this build constructed, with ffprobe answering nothing at all on " +
 				"this host - its refusal is evidence about the host, not about the file"
 		}
+		if err := readableNow(path); err != nil {
+			return "a file at a temp path this build constructed that this process cannot read (" + err.Error() +
+				") - ffprobe's refusal is evidence about the access to the path, not about the content of the file"
+		}
 		return "" // work in progress, or not media at all: the sweep's to take
 	}
 
-	// Question 4. It IS something this build could have written; all that is left is
+	// Question 5. It IS something this build could have written; all that is left is
 	// whether it is finished, and only the source beside it can say.
-	src, found := e.sourceBeside(filepath.Dir(path), stem, ext)
-	if !found {
-		return "a finished " + codec + " encode holdfast wrote, with no source beside it left to measure it against"
-	}
 	if err := e.lengthParity(ctx, src, path); err != nil {
 		return "" // a truncated encode: work in progress, and the sweep's to take
 	}
 	return "a finished " + codec + " encode holdfast wrote, the length of the source beside it (" + filepath.Base(src) + ")"
+}
+
+// readableNow reports whether THIS PROCESS can actually read the bytes at path, right
+// now, and returns the reason it cannot.
+//
+// It exists for one caller and one purpose: ffprobe reports "I read this path and it is
+// not media" and "I could not open this path" with the SAME wire answer - a non-zero
+// exit of its own accord - and only the first of those is evidence about the file. The
+// second is evidence about this process's access to it, and docs/docker.md documents the
+// commonest cause as an operator knob (`user:`), promising that getting it wrong is
+// "safe but useless: every encode fails at the write step, and every source is left
+// byte-for-byte intact". A restrictive umask, an NFS export that squashes the writing
+// uid, an SELinux denial and a transient EIO on a failing disk all produce the same
+// answer, and each would otherwise license deleting a gate-passed replacement that is
+// present and byte-intact.
+//
+// It opens and READS, rather than stat-ing or checking a mode: a mode says what the
+// kernel intends to allow, and the failures above are decided at open() and at the first
+// read, by things a mode cannot see. A zero-length file reads io.EOF immediately and IS
+// readable - a hard-killed encode leaves exactly that, and it is one the sweep must
+// still take.
+func readableNow(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	var b [1]byte
+	if _, err := f.Read(b[:]); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
 }
 
 // couldThisBuildHaveWrittenIt reports whether codec is one ffprobe would report for an
@@ -661,19 +728,20 @@ func (e *Engine) retainReplacement(at, final string) string {
 				// the same write that is about to deny the outcome record below.
 				//
 				// What holds the file then is strayReplacementHold: a file at a path THIS
-				// BUILD'S TEMP CONSTRUCTION produced, whose content is a finished encode
-				// at the target codec matching the length of the source beside it, is
-				// never enumerated, encoded, swapped or swept - with or without a record.
-				// What that does NOT cover is a file at an ordinary media name, which is
-				// reachable only when the rename took effect at a target whose extension
-				// differs from the source's; the rename having taken effect is itself
-				// evidence the directory accepts writes, so the move above is expected to
-				// succeed in exactly that case.
+				// BUILD'S TEMP CONSTRUCTION produced is never enumerated, encoded, swapped
+				// or swept - with or without a record - unless the sweep can positively
+				// establish it is work in progress, which takes a source beside it to
+				// measure against AND a readable file AND a working ffprobe answering
+				// about it. What that does NOT cover is a file at an ordinary media name,
+				// which is reachable only when the rename took effect at a target whose
+				// extension differs from the source's; the rename having taken effect is
+				// itself evidence the directory accepts writes, so the move above is
+				// expected to succeed in exactly that case.
 				_, statErr := os.Lstat(at)
 				held := "no file is there"
 				if statErr == nil {
-					held = "the file there is held back on its name and its content (a finished " +
-						e.targetCodec + " encode at a temp path this build constructed), with or without a record"
+					held = "the file there is held back on its name and its content (a whole encode at a codec " +
+						"this build's own encoders write, at a temp path this build constructed), with or without a record"
 					if !IsTempConstructionName(filepath.Base(at)) {
 						held = "the file there is at an ordinary media name, so ONLY the outcome record below can hold it back - " +
 							"if that record cannot be written either, move or remove this file by hand"

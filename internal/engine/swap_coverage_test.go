@@ -127,6 +127,11 @@ func TestCoverageBoundedEnumerate_ARetainedReplacementIsHeldWithNoRecordAtAll(t 
 // same Coverage bound, and it must not take a file a live record calls a job's
 // replacement - which is what a replacement that could not be MOVED to its retained name
 // looks like. A work-in-progress temp nothing records is still swept, unchanged.
+//
+// Both temps are staged with their SOURCE beside them, as a killed run leaves them:
+// strayReplacementHold holds anything with nothing beside it to measure against before
+// it asks any question that can fail, so an orphan staged alone would survive for that
+// reason rather than for the one this test is about.
 func TestCoverageBoundedSweep_LeavesATempARecordNames(t *testing.T) {
 	root := t.TempDir()
 	ts := newTestStore(t, root)
@@ -136,6 +141,8 @@ func TestCoverageBoundedSweep_LeavesATempARecordNames(t *testing.T) {
 	orphaned := filepath.Join(root, "Abandoned."+TempMarker+".mkv")
 	mustWrite(t, recorded)
 	mustWrite(t, orphaned)
+	mustWrite(t, filepath.Join(root, "Held.mkv"))
+	mustWrite(t, filepath.Join(root, "Abandoned.mkv"))
 
 	if err := ts.RecordSwapIncident(context.Background(), store.SwapIncident{
 		SourcePath: filepath.Join(root, "Held.mkv"), SourceFingerprint: "1:1",

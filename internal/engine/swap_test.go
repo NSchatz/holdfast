@@ -1556,6 +1556,14 @@ func TestPickTempPath_SkipsAPathARecordHoldsBackAndNeverClearsIt(t *testing.T) {
 	if err := os.WriteFile(first, []byte("a recorded replacement stuck at a temp path"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// The source this temp belongs to, which is what makes the second half of this test
+	// about pickTempPath: strayReplacementHold holds any temp with nothing beside it to
+	// measure against, before it asks anything else, so an unheld stale temp is only
+	// cleared where its source is still there - which is where a fresh encode of that
+	// source is happening.
+	if err := os.WriteFile(filepath.Join(d, "movie.mkv"), []byte("the source being re-encoded"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	before := md5f(t, first)
 
 	ctx := context.Background()
