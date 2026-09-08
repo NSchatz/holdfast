@@ -1,16 +1,30 @@
 name: Release
 
-# Publishing happens on a TAG PUSH ONLY — a deliberate human act. Nothing here fires on
-# a merge to main, and the image stays private while the repository is (GHCR package
-# visibility follows the repo — see the umbrella's PUB-FLIP gate).
+# Publishing happens on a TAG PUSH ONLY - a deliberate human act. Nothing here fires on
+# a merge to main.
 #
-# `workflow_dispatch` is ALWAYS a dry run: it does everything a tag does — builds both
+# `workflow_dispatch` is ALWAYS a dry run: it does everything a tag does - builds both
 # architectures, drives a real encode inside the built image, and produces the exact
-# binaries a release would ship — and pushes nothing. Run it once before you cut the
-# first tag.
+# binaries a release would ship - and pushes nothing. Run it before every tag; it is free.
+#
+# THAT IS NOT ENFORCED BY THESE COMMENTS, AND IT IS NOT ENFORCED BY READING THE STEPS
+# EITHER. It is enforced by the CAPABILITY SPLIT below: every step that can publish lives
+# in the `publish` job, that job runs only when the planning logic says a tag is being
+# released, and it is the ONLY job granted a write permission. The `build` job - the whole
+# of a dry run - holds `contents: read` and nothing else, so a step in it may say
+# `docker push` in any spelling, quoting or nesting it likes and still publish nothing: it
+# holds no credential that a registry, a ref or a release would accept. Six attempts to
+# decide "does this text publish?" were each beaten by ordinary shell (S0046 F1, F5, F7, F9,
+# F11, F12, F14, F15); the question is undecidable and has been replaced by one that is not.
+#
+# scripts/release-shape-gate (inside `make check`) decides that split rather than restating
+# it, and docs/release.md carries the record and the order.
+#
+# This path is LIVE: v0.1.0 was published from it, so a release now moves a `:latest` that
+# real users pull.
 #
 # There is deliberately no "publish" input to tick. The only thing that can publish is a
-# tag, so the version a release carries is always a real tag name — a dispatch-publish
+# tag, so the version a release carries is always a real tag name - a dispatch-publish
 # would push `0.0.0-dev-<sha>`, move `:latest` onto it, and cut a GitHub release named
 # after a sha. An escape hatch that can only be used wrongly should not exist.
 #
@@ -22,12 +36,14 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# The default every job inherits unless it says otherwise, and it is deny-shaped: a job
+# that forgets to declare its own permissions gets read, never write.
 permissions:
   contents: read
 
 env:
   # No staticcheck/govulncheck pins here: the gate is `make check`, so the Makefile owns
-  # those versions — and ci.yml goes through the same target, so the PR gate and the
+  # those versions - and ci.yml goes through the same target, so the PR gate and the
   # release gate cannot run different tools. One gate, defined once.
   #
   # This value is not free: govulncheck reports stdlib advisories against the toolchain
@@ -36,11 +52,18 @@ env:
   GO_VERSION: "1.25.14"
 
 jobs:
-  release:
+  # Everything a DRY RUN does, and everything a release does before anything leaves the
+  # machine. This job is the whole of a `workflow_dispatch`.
+  build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # cut the GitHub release
-      packages: write # push the image to GHCR
+      contents: read # read the tree; nothing here may write anything anywhere
+    outputs:
+      publish: ${{ steps.plan.outputs.publish }}
+      version: ${{ steps.plan.outputs.version }}
+      image: ${{ steps.plan.outputs.image }}
+      date: ${{ steps.plan.outputs.date }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -52,7 +75,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # A tag push publishes. Nothing else does — see the header.
+          # A tag push publishes. Nothing else does - see the header.
           if [ "$EVENT" = "push" ]; then
             publish=true
             version="$REF_NAME"
@@ -65,7 +88,43 @@ jobs:
           # One timestamp for every artifact this run produces.
           date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-          # A pre-release tag (v1.0.0-rc1, v2.0.0-beta.1 — anything with a suffix) must
+          # THE MAJOR VERSION MUST BE ZERO, and this refuses before anything is published.
+          #
+          # Semantic Versioning: "Major version zero (0.y.z) is for initial development.
+          # Anything MAY change at any time. The public API SHOULD NOT be considered
+          # stable." and "Version 1.0.0 defines the public API." So the first non-zero
+          # major is not a bigger number, it is a PROMISE about three surfaces this
+          # project has not yet frozen (the configuration keys, the HTTP surface and the
+          # metric names), and "Once a versioned package has been released, the contents
+          # of that version MUST NOT be modified", so the promise cannot be taken back.
+          #
+          # docs/release.md, section "Before a major version above zero", is the record
+          # that has to declare those three surfaces stable first. Lifting this refusal is
+          # an edit to this step, made only after that record says so.
+          if [ "$publish" = "true" ]; then
+            case "$version" in
+              v0.*)
+                : ;;
+              *)
+                echo "::error::refusing to publish $version: its major version is not zero." >&2
+                echo "       Major version zero is for initial development and promises nothing; the first" >&2
+                echo "       non-zero major DEFINES the public API and a released version can never be" >&2
+                echo "       modified afterwards. docs/release.md, section 'Before a major version above" >&2
+                echo "       zero', is the record that must first declare the configuration keys, the HTTP" >&2
+                echo "       surface and the metric names stable. Cut a v0.y.z tag, or update that record" >&2
+                echo "       and this step together." >&2
+                exit 1 ;;
+            esac
+            # A tag that is not a version at all would sail past the case above on its way
+            # to becoming an image tag and a GitHub release name.
+            if ! printf '%s' "$version" | grep -qE '^v0\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+              echo "::error::refusing to publish $version: it is not a v0.MINOR.PATCH semantic version." >&2
+              echo "       See docs/release.md for the tag this release path accepts." >&2
+              exit 1
+            fi
+          fi
+
+          # A pre-release tag (v1.0.0-rc1, v2.0.0-beta.1 - anything with a suffix) must
           # NOT become `:latest`, or `docker pull` hands a release candidate to everyone
           # who did not ask for one.
           prerelease=false
@@ -90,14 +149,15 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           check-latest: false
 
-      # A release re-gates itself rather than trusting that CI ran on this commit — a tag
+      # A release re-gates itself rather than trusting that CI ran on this commit - a tag
       # can point at ANY commit, including one CI never ran on or one CI failed on, and
       # ci.yml does not trigger on tags. So run the repo's whole gate here, not a token
-      # slice of it: `make check` — the same target CI and a human run, whose definition
+      # slice of it: `make check` - the same target CI and a human run, whose definition
       # lives in the Makefile (it includes the real-ffmpeg fixture suite, the data-safety
       # proof). A release whose only gate was govulncheck would happily publish an image
       # whose verify/swap logic is red. "Zero runs is not a pass, it is an unknown."
-      - name: install ffmpeg (the pin the image ships) — the fixture suite needs it
+      - name: install ffmpeg (the pin the image ships) - the fixture suite needs it
+        id: install-ffmpeg
         run: |
           set -euo pipefail
           sudo mkdir -p /opt/ffmpeg
@@ -106,6 +166,7 @@ jobs:
           echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
 
       - name: the full gate (make check)
+        id: full-gate
         run: make check
 
       # QEMU is only needed to EXECUTE the arm64 image; building it cross-compiles.
@@ -113,6 +174,7 @@ jobs:
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: build the image (linux/amd64)
+        id: build-amd64
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -128,9 +190,11 @@ jobs:
 
       # The image we are about to push must pass a REAL encode, not merely build.
       - name: smoke test the image (real encode, real gate)
+        id: smoke-amd64
         run: ./scripts/smoke-image.sh holdfast:release
 
       - name: build the image (linux/arm64)
+        id: build-arm64
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -145,9 +209,11 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: smoke test the arm64 image (exec only, under QEMU)
+        id: smoke-arm64
         run: ./scripts/smoke-image.sh holdfast:release-arm64 linux/arm64 --no-encode
 
       - name: build the release binaries
+        id: build-binaries
         env:
           VERSION: ${{ steps.plan.outputs.version }}
           DATE: ${{ steps.plan.outputs.date }}
@@ -156,7 +222,7 @@ jobs:
           mkdir -p dist
           # The licence text travels INSIDE each archive. holdfast is AGPL-3.0-only, so
           # a tarball carrying the binary and nothing else distributes it with no licence
-          # at all — which is the gap the NOTICE file was added to close, and it does not
+          # at all - which is the gap the NOTICE file was added to close, and it does not
           # close it by sitting next to the tarball in a CI artifact that expires.
           cp LICENSE NOTICE dist/
           for target in linux/amd64 linux/arm64; do
@@ -176,16 +242,69 @@ jobs:
           ls -l dist
 
       # Uploaded even on a dry run, so "the release is green" is inspectable rather than
-      # asserted: the artifacts a tag WOULD ship are downloadable from the run.
+      # asserted: the artifacts a tag WOULD ship are downloadable from the run. On a real
+      # release this is also how the tarballs reach the publish job, which never builds
+      # them - it ships exactly the bytes this job gated.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-dist-${{ steps.plan.outputs.version }}
           path: dist/
           if-no-files-found: error
 
-      # --- everything below this line only happens on a real release ------------------
+  # ------------------------------------------------------------------------------------
+  # EVERY IRREVERSIBLE ACT LIVES HERE, AND NOWHERE ELSE.
+  #
+  # This job is the capability boundary. It is the only one granted `packages: write` or
+  # `contents: write`, and it does not run on a `workflow_dispatch` at all: its `if:` reads
+  # the value the planning logic PRODUCED, and a dispatch produces `publish=false`. On a
+  # dry run this job never starts, so no token with a write scope is ever minted.
+  #
+  # `needs: build` is load-bearing twice over. It is the ordering - the full gate and both
+  # architectures' smoke runs are behind it - and it is the failure rule: a job with
+  # `needs:` and no status function in its `if:` does not run when what it needs failed, so
+  # a red gate leaves `:latest` exactly where it was.
+  # ------------------------------------------------------------------------------------
+  publish:
+    needs: build
+    if: needs.build.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # cut the GitHub release
+      packages: write # push the image to GHCR
+    # Every step here carries an `id:`, and the gate requires it: an act in this job is
+    # identified by its declared id and the operator runbook has to name each one, so a step
+    # added to the job that can publish cannot slip past review by being spelled
+    # unrecognisably. Nothing about what a step SAYS is consulted - it is in this job, so it
+    # counts.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        id: checkout
+
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        id: setup-qemu
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        id: setup-buildx
+
+      # This job needs Go for one thing: scripts/resolve-compose-image.sh builds the single
+      # reader of docker-compose.yml's image reference. `make check` and its own setup-go are
+      # in the `build` job, which is a different runner, so without this the last step of a
+      # release would depend on whatever Go `ubuntu-latest` happens to ship.
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        id: setup-go
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
+      # The tarballs the build job gated. They are downloaded, never rebuilt: a rebuild
+      # here would ship bytes nothing in this run has checked.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        id: download-dist
+        with:
+          name: release-dist-${{ needs.build.outputs.version }}
+          path: dist
+
       - name: log in to GHCR
-        if: steps.plan.outputs.publish == 'true'
+        id: registry-login
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -193,67 +312,80 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # This is a REBUILD from the buildx cache, not a push of the exact bits the two
-      # smoke steps loaded — buildx cannot push a multi-arch manifest it only loaded
+      # smoke steps loaded - buildx cannot push a multi-arch manifest it only loaded
       # locally. The inputs are identical and ffmpeg is sha-pinned, so it is equivalent
-      # — but "equivalent" is not "the same artifact", and this repo does not accept a
+      # - but "equivalent" is not "the same artifact", and this repo does not accept a
       # gate by equivalence. So we pull the pushed image back and smoke it below.
       #
-      # ONLY the version tag is pushed here. `:latest` is NOT — because a tag push is
+      # ONLY the version tag is pushed here. `:latest` is NOT - because a tag push is
       # immediately pullable, and if the gate below then reds, `:latest` would already be
       # pointing at an image that failed it, for every user running `docker compose pull`.
       # `:latest` is promoted only AFTER the pushed artifact passes, further down.
       - name: push the multi-arch image (version tag only)
-        if: steps.plan.outputs.publish == 'true'
+        id: push-version
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.plan.outputs.image }}:${{ steps.plan.outputs.version }}
+          tags: ${{ needs.build.outputs.image }}:${{ needs.build.outputs.version }}
           build-args: |
-            VERSION=${{ steps.plan.outputs.version }}
+            VERSION=${{ needs.build.outputs.version }}
             COMMIT=${{ github.sha }}
-            DATE=${{ steps.plan.outputs.date }}
+            DATE=${{ needs.build.outputs.date }}
           cache-from: type=gha
 
-      # The gate on the ARTIFACT, not on a local build of it: pull back what was actually
-      # pushed, for BOTH architectures of the manifest, and drive a real encode through
-      # the native one. An unqualified `docker pull` resolves only the runner's own arch,
-      # so the arm64 half would otherwise ship having been gated only as a local build —
-      # the exact gate-by-equivalence this step exists to reject.
+      # The gate on the ARTIFACT, not on a local build of it. scripts/release-resmoke.sh.
       - name: smoke test the PUSHED image (both arches)
-        if: steps.plan.outputs.publish == 'true'
+        id: resmoke
         env:
-          REF: ${{ steps.plan.outputs.image }}:${{ steps.plan.outputs.version }}
-        run: |
-          set -euo pipefail
-          docker image rm -f "$REF" >/dev/null 2>&1 || true   # never smoke a local leftover
-          docker pull --platform linux/amd64 "$REF"
-          ./scripts/smoke-image.sh "$REF"
+          REF: ${{ needs.build.outputs.image }}:${{ needs.build.outputs.version }}
+        run: ./scripts/release-resmoke.sh
 
-          docker pull --platform linux/arm64 "$REF"
-          ./scripts/smoke-image.sh "$REF" linux/arm64 --no-encode
-
-      # Now, and only now, does `:latest` move — onto the exact digest that just passed.
-      # imagetools retags the existing manifest; it does not rebuild, so `:latest` and
-      # `:<version>` are the same bytes, not two builds that ought to agree.
+      # Now, and only now, does the floating reference move - onto the exact digest that
+      # just passed. FLOATING_TAG is declared HERE, once: it is the value `make check`
+      # compares against docker-compose.yml, and scripts/release-promote.sh reads it
+      # rather than spelling it a second time.
       - name: promote :latest to the gated image
-        if: steps.plan.outputs.publish == 'true' && steps.plan.outputs.prerelease == 'false'
+        id: promote-latest
+        if: needs.build.outputs.prerelease == 'false'
         env:
-          IMAGE: ${{ steps.plan.outputs.image }}
-          VERSION: ${{ steps.plan.outputs.version }}
-        run: |
-          set -euo pipefail
-          docker buildx imagetools create -t "${IMAGE}:latest" "${IMAGE}:${VERSION}"
-          docker buildx imagetools inspect "${IMAGE}:latest" | head -20
+          IMAGE: ${{ needs.build.outputs.image }}
+          VERSION: ${{ needs.build.outputs.version }}
+          FLOATING_TAG: latest
+        run: ./scripts/release-promote.sh
+
+      # The two references nothing above resolves, both of them decided against the real
+      # registry rather than against this file. Everything so far worked with
+      # `${IMAGE}:${VERSION}`, which is derived from `github.repository` and is therefore
+      # right by construction even if the compose file names something else entirely.
+      #
+      #   - the FLOATING reference the step above just moved must resolve to the digest
+      #     this run gated. The retag is a registry operation and this is the only thing
+      #     that says it landed.
+      #   - the reference docker-compose.yml PINS is what a stranger actually pulls, and it
+      #     must resolve to an image at that exact reference. `make check` proves offline
+      #     that it is published by this repository and is not the tag a release moves;
+      #     only the registry can say it is still there.
+      #
+      # It runs after the promotion because before it there is nothing at the floating
+      # reference to resolve.
+      - name: the example deployment's image reference must resolve to the gated digest
+        id: resolve-compose
+        if: needs.build.outputs.prerelease == 'false'
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+          VERSION: ${{ needs.build.outputs.version }}
+          FLOATING_TAG: latest
+        run: ./scripts/resolve-compose-image.sh
 
       - name: cut the GitHub release
-        if: steps.plan.outputs.publish == 'true'
+        id: github-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.plan.outputs.version }}
-          IMAGE: ${{ steps.plan.outputs.image }}
-          PRERELEASE: ${{ steps.plan.outputs.prerelease }}
+          VERSION: ${{ needs.build.outputs.version }}
+          IMAGE: ${{ needs.build.outputs.image }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
         run: |
           set -euo pipefail
           args=(--title "$VERSION" --generate-notes)
@@ -261,5 +393,5 @@ jobs:
           gh release create "$VERSION" "${args[@]}" \
             --notes "Container image: \`${IMAGE}:${VERSION}\` (linux/amd64, linux/arm64).
 
-          The binaries need \`ffmpeg\`/\`ffprobe\` **with libx265 and libvmaf** on PATH. The image bundles a pinned, checksum-verified build — it is the supported way to run this." \
+          The binaries need \`ffmpeg\`/\`ffprobe\` **with libx265 and libvmaf** on PATH. The image bundles a pinned, checksum-verified build - it is the supported way to run this." \
             dist/*.tar.gz dist/SHA256SUMS

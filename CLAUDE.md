@@ -156,12 +156,156 @@ failure mode is loud. `release.yml` publishes on a **tag push only** — a delib
 human act, never on a merge — and `workflow_dispatch` is ALWAYS a full dry run (both arches, both smoke
 tests, the real binaries; pushes nothing). There is deliberately no `publish` input to tick: the only thing
 that can publish is a tag, so a release always carries a real tag name — a dispatch-publish could only ever
-push `0.0.0-dev-<sha>` and move `:latest` onto it. **Outstanding: `release.yml` has never executed.** GitHub
-offers `workflow_dispatch` only for workflows already on the default branch, so its dry run is unrunnable
-from a PR — dispatch it once after this lands and **before the first tag**, or the release path ships having
-never run. Note it is NOT a reusable workflow called from
+push `0.0.0-dev-<sha>` and move `:latest` onto it. **`docs/release.md` is the ordered runbook, and it also
+carries the record of what has already been published**: the dispatch dry run, the repository rename, the
+visibility flip, the tag, and which of those can be undone. Do not restate that procedure or that record
+anywhere else; they moved out of here for the same reason every other duplicated value did. Note it is NOT a reusable workflow called from
 CI: a called workflow cannot hold permissions its caller lacks, so a PR-triggered call declaring
-`packages: write` would fail to load — hence the shared *script* rather than a shared workflow. **Not yet released** (cutting a tag is a human call — the umbrella's `PUB-FLIP` gate).
+`packages: write` would fail to load — hence the shared *script* rather than a shared workflow. **`v0.1.0`
+is released** (2026-07-18, by a tag push; the repository is public and `:latest` resolves to that digest).
+The next release is a HIGHER version: a released version's contents must not be modified, so `v0.1.0` is
+spent. `docs/release.md` has the evidence and the `gh` commands that re-derive it.
+
+`S0046` **stopped asserting the release path's invariants in comments and started deciding them - and, in the
+end, stopped asking a question that cannot be answered.** The dry run publishing nothing, the version tag
+being pushed before `:latest` moves, `:latest` being promoted only onto a digest that was pulled back and
+re-smoked: all three were prose inside `release.yml`, on the path that publishes. `scripts/release-shape-gate`
+(in `make check`) does not match that text. It EXECUTES the workflow's own planning shell, once per event
+shape, with the publishing binaries stubbed, and decides each guard from the values that run produced, through
+a real GitHub-expression evaluator that models the implicit `success() &&` every `if:` carries. The difference
+is the whole design: flip the planning script so a dispatch sets `publish=true` and not one `if:` in the file
+changes, so a text matcher stays green while the publishing job runs (`release-shape-selftest` case 3).
+
+**THE UNDECIDABLE HALF, AND WHAT REPLACED IT.** "Does this step publish?" was asked of a step's `run:` script
+eight times and answered wrongly eight times. First by READING it: a publishing input the decision could not
+see, detectors that could not cross a shell line continuation, a catalogue that knew command SPELLINGS and no
+destination, a push inside a quoted word (`sh -c "docker push …"`, `eval "docker push …"`), buildx's attached
+shorthand `-otype=registry` decided "local", and quote removal that made `echo "make check"` satisfy the
+full-gate role. Then by OBSERVING it - running each step where `PATH` was one empty directory and every
+resolved name reached a recording `command_not_found_handle`. That lasted one review. Every control such an
+environment has lives INSIDE the shell it is watching: the recorder is a shell function, the guard a `DEBUG`
+trap, the emptied `PATH` an ordinary exported variable the step owns. `export PATH=/usr/bin:/bin` is one line,
+and after it a real `git push` ran and was recorded nowhere; `exec docker push …` reached no recorder at all,
+because `exec` is a builtin and the shell resolves the program itself. Eight holes, one sentence: whatever
+decides what arbitrary shell does can be defeated by arbitrary shell.
+
+**So the release definition is CONSTRAINED and the gate decides the constraint.** A step publishes nothing it
+holds no credential for. `release.yml` is two jobs: `build` is the whole of a dry run and holds
+`contents: read`; `publish` holds `packages: write` and `contents: write`, carries every irreversible act, and
+runs only when the planning logic said `publish=true` - so on a dispatch it never starts and no write-scoped
+token is ever minted. The gate asserts that from `permissions:`, `secrets:`, `needs:` and `if:` - structured
+YAML, no shell in the question - and DENIES BY DEFAULT at every point: an unstated `permissions:` reads CLOSED
+and reds (the repository default is not in the file and may be write-all), a scope outside GitHub's vocabulary
+reds by name, a value outside read/write/none reds, any secret but `GITHUB_TOKEN` (which those very
+permissions bound) reds, and a job or step key nobody classified reds saying so. The payoff is the point and
+the self-test asserts it: a `build` step may say `docker push`, `sh -c "docker push …"`, `exec docker push …`
+or `export PATH=/usr/bin:/bin; docker push …` and the gate PASSES, because none of them can publish - while
+the IDENTICAL step in a job granted `packages: write` reds. What decides the verdict is the grant.
+
+**A ROLE is DECLARED, not searched for - and ACCOUNTED FOR, not merely recognised.** A7 is an order, so the
+gate must know which step is the full gate and which the promotion; deciding that by searching a step for a
+mention of the thing is what let `echo "make check"` be the full gate. Each position now has a step `id:` the
+gate names, and the step must INVOKE what the role names, compared WHOLE: a role step's `run:` is ONE line,
+its fields are whole words, and the FIRST field must BE the program. `echo make check` and `"make" check`
+fail; `make check` and `make -C . check` pass. Nothing is searched for inside anything, so no quoting or
+nesting reaches the comparison - and that is why `scripts/release-resmoke.sh` and `scripts/release-promote.sh`
+are files rather than inline scripts.
+
+That much still let `make -n check` hold the full-gate role, and `-n` is GNU make's dry-run mode: it prints
+every recipe in `check`, executes not one of them and exits 0. The role held, the order sentence printed, and
+a tag push would have published an image whose `make check` never ran. So do `-q`, `-t`, `--dry-run`, a
+clustered `-Bn`, `check SHELL=/bin/true`, `env: MAKEFLAGS: -n` with the `run:` untouched, `shell: cat`
+(GitHub appends the script to whatever command is given), `working-directory: /tmp`, a `defaults:` block, and
+`push: false` on the action role. **Do not enumerate them.** A role's invocation is ACCOUNTED FOR,
+deny-by-default, over its whole structured surface - every `run:` field, every environment name in scope at
+any of the three levels, every step key, `defaults:` at either level, and every action input must be one the
+role DECLARED, with the reason it cannot make that invocation do less. A `-C` is permitted for the full gate
+and its VALUE is declared too, so `-C .` passes and `-C /tmp` reds. Anything undeclared reds BY NAME, which is
+the difference between this and the six catalogues of bad spellings that lost.
+
+**And a value is not accounted for by naming what it is FOR.** The invocation includes the VALUES a role
+step's `env:` hands its program (and, for the action role, the `tags:` input that names what it publishes),
+so each declared name is HELD against a value produced outside that step -
+the planning logic's own `$GITHUB_OUTPUT`, this module's repository, the event shape, or the tag
+`docker-compose.yml` pins - and compared whole. `REF: ${IMAGE}:latest` on the re-smoke is one line that
+leaves the role held, the invocation untouched and the order sentence printing while the release pulls back
+the PREVIOUS artefact and promotes `:latest` onto one nothing gated; `VERSION: latest` on the resolver makes
+its digest comparison a tautology. A declared name held against NOTHING reds by name, which is what makes
+that a rule rather than two spellings.
+
+**AND IT IS NOT COMPARED WITH A VALUE, IT HAS TO BE ONE.** Held against a single planned release, that rule
+bought back exactly one literal - the one equal to the gate's own sample - and the sample is `v0.1.0`, the
+version actually published and the string a maintainer copies out of a green run's log. `REF:
+ghcr.io/nschatz/holdfast:v0.1.0` passed it, and every later release would then re-smoke the July artefact
+while `:latest` moved onto one nothing pulled back. Widening the comparison to two samples only moves the
+coincidence: it is still deciding whether a value is right by looking at the value, which is the shape that
+lost eight times over on the other half of this gate. So a role step's object must BE the planning logic's
+own output. The value is an EXPRESSION naming it, traced back through the `needs:` graph to the step holding
+the `plan` role, and EVERY literal reds - as does any expression the trace cannot follow (`env.`, `inputs.`,
+a function call, a job this one does not `needs:`, an output the producing job never declares). No sample is
+in the question, so no sample can be copied into it. The gate follows the graph rather than matching text:
+the same output reached through a different job output passes, and so does a respelling. `FLOATING_TAG` is
+the one exception, because it is the one value a release DECLARES rather than derives: it is a literal on
+purpose and is held against the tag `docker-compose.yml` PINS - which it must NOT be - and an expression
+there reds. That hold used to be an equality, back when the example deployment pulled `:latest` and the
+reference a user pulls and the reference a release moves were one string. P1 severed them: the compose file
+pins a version and the digest that was gated, `:latest` is published rather than depended on, and retagging
+the version that file pins would leave its own tag and digest disagreeing the day the next release lands.
+The residue is stated in `docs/release.md`: WHICH floating tag a release moves is no longer decided by
+anything, because nothing here depends on it any more.
+
+The order comes from `needs:` and declaration order; two jobs with no path between them are CONCURRENT and the
+gate refuses to order them. An ACT, for the runbook cross-check, is likewise every step in the job that holds
+the grant, identified by its id: nothing about what a step SAYS is consulted, so a new publishing step cannot
+avoid `docs/release.md` by being spelled unrecognisably.
+
+**The EVENT SURFACE is graded, not assumed.** The four shapes the gate plans are shapes it invents, so `on:`
+is read and held to them: a trigger no shape plans reds by name, and so does a `push:` filter admitting
+anything but a tag. `branches: ["v0.**"]` beside `tags: ["v*"]` would make `git push origin HEAD:v0.9.9` a
+`push` event whose `ref_name` is `v0.9.9`, which the planning logic - which cannot tell a branch from a tag -
+reads as a release, with every other assertion here still green. `on: push`, `on: [push]` and a
+`workflow_dispatch:` carrying `inputs:` are refused for the same reason.
+
+**The gate executes exactly ONE step**, the one holding the `plan` role; a second step writing to
+`$GITHUB_OUTPUT` reds, because executing a workflow's step scripts to find out what they do is the mechanism
+that was defeated. That script runs with `PATH` set to a stub directory alone (recording stubs for every tool
+that could reach a registry, plus a declared set of pure utilities), `HOME` and the working directory in a
+throwaway directory, and a 90-second timeout; invoking a registry tool from the planning step is itself an
+error. **The rule when you extend this**: do NOT teach the gate to read a step's text - there is no reader,
+and there will not be one. A step that must publish goes in the job that holds the grant and gains a runbook
+row; a step that must not goes in the job that holds none; an unclassified key, field, environment name or
+action input gets CLASSIFIED, with what it can hand a job or with the reason it cannot change what an
+invocation does. The residues, stated so nobody has to find them: a planning script that resets `PATH` itself
+can still run a program (a property of running repository code at all, which `make check` already does), and a
+credential written LITERALLY into the workflow rather than through `secrets.` is outside the model. The
+largest one is that a step can be neutered by a step ABOVE it in the same job - through `$GITHUB_ENV`,
+`$GITHUB_PATH`, or by overwriting a file it reads - none of which touches the later step's own declared
+surface, and all of which need a reader to see. `docs/release.md`'s "It does NOT" list carries it in full:
+what it costs is a release that publishes having gated less than the output says, and what it does not cost
+is a credential, because the grant is a property of the job.
+The bodies of `scripts/release-promote.sh`, `scripts/release-resmoke.sh` and
+`scripts/resolve-compose-image.sh` are outside it too, by the same rule - the gate checks each is present,
+executable, and handed the values the planning logic produced, and says only that in its output. What they DO
+is proved by `make release-shape-selftest`, which runs each of them against a recording stub and compares the
+invocations whole, the way `make install-ffmpeg-selftest` proves that script's five failure modes.
+The compose reference has exactly ONE reader: `scripts/resolve-compose-image.sh` asks the gate for it
+(`-print-compose-ref`) instead of parsing the file a second time in sed, because two readers agree on today's
+file and diverge on a quoted scalar, a second service with an `image:`, or an `image:` nested outside
+`services:` - the ffmpeg-pin lesson applied to one more duplicated value. The floating tag gets the same
+treatment: it is declared once, as `FLOATING_TAG` in the promotion step's `env:` and the resolution step's,
+read by the gate and by `scripts/release-promote.sh` and `scripts/resolve-compose-image.sh`.
+The plan step REFUSES a tag whose major version is not zero, naming the record
+(`docs/release.md`, "Before a major version above zero") that must first declare the configuration keys, the
+HTTP surface and the metric names stable: 1.0.0 "defines the public API" and a released version can never be
+modified, so the first non-zero major is a promise, not a bigger number. `scripts/resolve-compose-image.sh`
+runs after the promotion and settles the two references only a registry can settle: it fails the release if
+the floating reference the promotion just moved does not resolve to the digest that run gated, and if the
+reference the example deployment PINS does not resolve to an image at all. Those two were one reference until
+the example deployment stopped depending on a mutable one; each half is now resolved against the reference
+that carries it. `make release-shape-selftest` (CI, not `check`, because its mutations must
+not touch the tree `check` is grading) defeats every one of those ways on purpose and fails if any defeat did
+not run. How many ways is `declared=` in that script, its single writer, which the run prints - restating the
+number here would be one more copy to drift.
 `TRANSCODE-12` **renamed the project `transcode` → `holdfast`**, and it had to land before the first tag
 because not one of these surfaces can be redirected afterwards: Go has **no module-path rename primitive**
 (golang/go#59766, closed *not planned*), **nothing** rewrites a container-image reference in a user's
@@ -439,7 +583,9 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   `.github/workflows/release.yml` (TRANSCODE-9) — tag-triggered: runs the full `make check`, builds both
   arches, smokes them, pushes the version tag, re-smokes what it pulled back, and only then promotes
   `:latest` and cuts the release. Publishing happens on a **tag push only**; `workflow_dispatch` is always
-  a dry run.
+  a dry run - enforced by the capability split (S0046), not by the guards alone: the `build` job holds
+  `contents: read`, the `publish` job holds every write scope and every irreversible act, and it runs only
+  when the planning logic says a tag is being released.
 - `Dockerfile` (TRANSCODE-9) — the production image (multi-arch, distroless `cc`, non-root, pinned ffmpeg);
   its `FFMPEG_*` ARGs are the single source of truth for the pin. `scripts/install-ffmpeg.sh` — installs
   exactly that pin by parsing them (CI + release + local dev all use it), with five distinct, self-naming
