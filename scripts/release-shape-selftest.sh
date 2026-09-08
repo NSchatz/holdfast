@@ -137,11 +137,22 @@ in_step() {
 }
 
 # replace_line <awk-regex> <replacement, may contain \n> - the FIRST matching line only.
+#
+# A pattern that matches NOTHING exits non-zero rather than copying the file through, and
+# that is not defensive tidying: `changed` cannot see this one. Several cases call
+# `replace_line` AND a `sed` mutation, so the file differs from pristine either way and a
+# silently-unmatched pattern leaves a case grading the baseline while reporting a verdict.
+# It happened: the pattern was written with `\$\{\{ … \}\}`, and awk's -v assignment
+# processes those escapes before the regex ever exists - one awk yields the literal
+# characters, another yields `$`, `{`, `}` as REGEX metacharacters and matches nothing. The
+# case passed here and reds in CI, which is the worst way to find out. Do not put a
+# backslash escape in one of these patterns; use a bracket expression (`[.]`, `[$]`).
 replace_line() {
   awk -v pat="$1" -v repl="$2" '
-    $0 ~ pat && !done { print repl; done = 1; next }
+    $0 ~ pat && !done { print repl; done = 1; hit = 1; next }
     { print }
-  ' "$wf" > "$wf.new" || { echo "::error::selftest: could not replace /$1/" >&2; exit 1; }
+    END { exit (hit ? 0 : 9) }
+  ' "$wf" > "$wf.new" || { echo "::error::selftest: /$1/ matched no line in $wf - that mutation did NOT run" >&2; exit 1; }
   mv "$wf.new" "$wf"
 }
 
@@ -911,7 +922,7 @@ reset
 #           through a DIFFERENT job output. The gate follows the `needs:` graph rather than
 #           matching a spelling, so a second output carrying the same plan output is accepted -
 #           which is what stops this rule being one more catalogue of permitted strings.
-replace_line '^      image: \$\{\{ steps.plan.outputs.image \}\}$' '      image: ${{ steps.plan.outputs.image }}\n      alias: ${{ steps.plan.outputs.image }}'
+replace_line '^      image: .*steps[.]plan[.]outputs[.]image' '      image: ${{ steps.plan.outputs.image }}\n      alias: ${{ steps.plan.outputs.image }}'
 in_step "smoke test the PUSHED image" 's|^          REF: .*|          REF: ${{ needs.build.outputs.alias }}:${{ needs.build.outputs.version }}|'
 changed "$wf" "the re-smoke reaching the same plan output through another job output"
 expect 0 "a reference that reaches the same planning output through a different job output still holds the role"
