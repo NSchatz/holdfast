@@ -34,12 +34,20 @@ if grep -q -- '--- SKIP:' "$log"; then
   exit 1
 fi
 
-# Both halves must have EXECUTED. A gate that passes because a suite was filtered out,
+# Every half must have EXECUTED. A gate that passes because a suite was filtered out,
 # renamed away or compiled out is not a gate.
+#
+# The third half (S0053) is the DevTools-protocol suite: the graders that emulate the
+# operating system's colour-scheme preference, read the accessibility tree the engine
+# computed and dispatch real key presses. Those are engine OPERATIONS rather than page
+# reads, so they are a separate suite driving the browser over --remote-debugging-pipe,
+# and a gate that could come back green with them absent would be a gate that never
+# measured a theme, a tab order or an accessible name.
 missing=0
 for half in \
   'TestUnit_:the derivation unit suite (node)' \
-  'TestRendered_:the rendered graders (browser engine)'
+  'TestRendered_:the rendered graders (browser engine)' \
+  'TestRenderedCDP_:the DevTools-protocol graders (theme emulation, accessibility tree, real key input)'
 do
   prefix="${half%%:*}"
   what="${half#*:}"
@@ -50,4 +58,4 @@ do
 done
 [ "$missing" -eq 0 ] || exit 1
 
-echo "webui-check: OK - both halves executed in required mode, nothing skipped"
+echo "webui-check: OK - every half executed in required mode, nothing skipped"

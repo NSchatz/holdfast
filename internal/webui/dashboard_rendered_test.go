@@ -884,8 +884,10 @@ func TestRendered_DashboardShowsQueueRowsHistoryRowsAndTheirFigures(t *testing.T
 		t.Fatalf("the rendered queue has %d rows, want one per pending/active job (3)\nrows: %+v\nbrowser output:\n%s",
 			len(v.Queue), v.Queue, log)
 	}
+	// A pending row has no worker yet, and since S0053 that reads as the page's one
+	// absence phrase rather than as a blank cell (F3).
 	wantQueue := []struct{ path, status, worker string }{
-		{"/media/films/alpha.mkv", "pending", ""},
+		{"/media/films/alpha.mkv", "pending", absencePhrase},
 		{"/media/films/bravo.mkv", "encoding", "w2"},
 		{"/media/films/charlie.mkv", "verifying", "w3"},
 	}
@@ -926,14 +928,16 @@ func TestRendered_DashboardShowsQueueRowsHistoryRowsAndTheirFigures(t *testing.T
 		t.Errorf("the three rows' ages are %v: each must come from its OWN wire timestamp, not one figure for the table", ages)
 	}
 
-	// A progress figure for the running encode, and for NO other row.
+	// A progress figure for the running encode, and for NO other row. Since S0053 a row
+	// with no progress measurement does not show an EMPTY cell - it shows the page's one
+	// absence phrase (F3), because a blank is a fact a reader has to guess at.
 	if got := v.Queue[1].Progress; !strings.Contains(got, "33%") || !strings.Contains(got, "20m 0s of 1h 0m") {
 		t.Errorf("the running encode shows progress %q, want the encoder's own figure and its position", got)
 	}
 	for _, i := range []int{0, 2} {
-		if v.Queue[i].Progress != "" {
-			t.Errorf("queue row %d (%s) shows a progress figure %q; only a running encode has one",
-				i, v.Queue[i].Status, v.Queue[i].Progress)
+		if v.Queue[i].Progress != absencePhrase {
+			t.Errorf("queue row %d (%s) shows a progress figure %q; only a running encode has one, and every other row must read %q",
+				i, v.Queue[i].Status, v.Queue[i].Progress, absencePhrase)
 		}
 	}
 
@@ -1288,16 +1292,33 @@ func TestRendered_ASkippedRowNamesItsGuardAndAFailedRowItsReason(t *testing.T) {
 	if !strings.Contains(failed.Status, "failed") || !strings.Contains(failed.Status, "below the floor 60") {
 		t.Errorf("the failed row shows %q, want the failure reason verbatim", failed.Status)
 	}
-	// Neither invents a size or a score it never had.
+	// Neither invents a size or a score it never had. Since S0053 the cell is not left
+	// blank either: an encode that never happened recorded no size and no score, and F3
+	// says the field says so in words, in the page's ONE absence phrase.
 	for _, r := range []dashRow{skipped, failed} {
-		if r.Size != "" || r.Vmaf != "" {
-			t.Errorf("the %q row shows size %q and VMAF %q for an encode that never happened", r.Path, r.Size, r.Vmaf)
+		if r.Size != absencePhrase || r.Vmaf != absencePhrase {
+			t.Errorf("the %q row shows size %q and VMAF %q for an encode that never happened, want %q in both",
+				r.Path, r.Size, r.Vmaf, absencePhrase)
 		}
 	}
 	if !strings.Contains(v.BodyText, "hardlinked (would break a seed)") {
 		t.Error("the guard label is in the DOM but not in the text a reader can see")
 	}
 }
+
+// absencePhrase is the page's ONE absence phrase (clause F3). A fact nobody recorded
+// reads as this, in words, in EVERY field that can carry one - never 0, never a bare
+// dash, never a blank cell a reader has to interpret.
+const absencePhrase = "not recorded"
+
+// aggHostMarkup is the whole-ledger figures view exactly as the page shell writes it,
+// including the loading state it ships in. The mutations that move or remove that view
+// need the block verbatim, and every one of them is asserted to have CHANGED the served
+// document before it is used, so a drift here fails loudly rather than silently
+// mutating nothing.
+const aggHostMarkup = `<div class="aggs" id="aggregates" data-view="aggs">
+      <p class="state" data-state="loading">Loading the whole-ledger figures.</p>
+    </div>`
 
 // --- B15 / A2: every rendered grader FAILS when its subject is hidden ------------
 
@@ -1320,9 +1341,9 @@ func hidingMutations() map[string]func([]byte) []byte {
 		"a selector naming nothing the rows carry":   css("section > div > table > tbody > tr { display:none; }"),
 		"a specificity fight the hiding rule wins":   css("body main section .tablewrap table tbody tr { display:none !important; }"),
 		"an opaque overlay painted over the page":    css("body::after { content:''; position:fixed; inset:0; background:#000; z-index:9999; }"),
-		"a hidden attribute on the table bodies":     domReplace(`<tbody id="queue">`, `<tbody id="queue" hidden>`, `<tbody id="history">`, `<tbody id="history" hidden>`),
-		"a hidden attribute on the aggregate host":   domReplace(`<div class="aggs" id="aggregates">`, `<div class="aggs" id="aggregates" hidden>`),
-		"the aggregate host removed from the markup": domReplace(`<div class="aggs" id="aggregates"></div>`, ``),
+		"a hidden attribute on the table bodies":     domReplace(`<tbody id="queue" data-view="queue">`, `<tbody id="queue" data-view="queue" hidden>`, `<tbody id="history" data-view="history">`, `<tbody id="history" data-view="history" hidden>`),
+		"a hidden attribute on the aggregate host":   domReplace(`<div class="aggs" id="aggregates" data-view="aggs">`, `<div class="aggs" id="aggregates" data-view="aggs" hidden>`),
+		"the aggregate host removed from the markup": domReplace(aggHostMarkup, ``),
 	}
 }
 
@@ -2316,6 +2337,17 @@ func scriptMutation(body string) func([]byte) []byte {
 	}
 }
 
+// inlineScriptMutation appends a statement to the page's OWN inline script instead of
+// adding a second script element. It exists for the counterexamples aimed at graders that
+// COUNT what the document carries: a mutation that added a script element would move the
+// very count such a grader compares, and would then "fail" it for a reason the mutation
+// itself introduced rather than for the property under test.
+func inlineScriptMutation(body string) func([]byte) []byte {
+	return func(b []byte) []byte {
+		return []byte(strings.Replace(string(b), "\n</script>", "\n"+body+"\n</script>", 1))
+	}
+}
+
 // --- B13: nothing on a figure needs to be pointed at --------------------------------
 
 func TestRendered_NoFigureIsReadableOnlyByPointingAtIt(t *testing.T) {
@@ -2617,11 +2649,13 @@ func TestRendered_EveryDASH9GraderFailsAgainstItsOwnMutation(t *testing.T) {
 			scriptMutation(`var t=document.querySelectorAll(".fig.spread .tick");` +
 				`for (var i=0;i<t.length;i++){t[i].setAttribute("x1","500");t[i].setAttribute("x2","500");}`),
 			"the marks of a spread are told apart by position"},
+		// Collapsed onto the SURFACE TOKEN rather than onto a hard-coded hex, so the
+		// counterexample stays a counterexample in whichever theme the engine is in.
 		{"a mark's colour collapsed onto the card face behind it",
-			cssMutation(`.agg .fig .mark, .agg .fig .axis, .agg .fig .tick { fill:#171a21 !important; stroke:#171a21 !important; }`),
+			cssMutation(`.agg .fig .mark, .agg .fig .axis, .agg .fig .tick { fill:var(--panel) !important; stroke:var(--panel) !important; }`),
 			"every graphical element clears 3:1 against what is behind it"},
 		{"a status dot's colour collapsed onto the page behind it",
-			cssMutation(`td.st .dot { background:#0f1115 !important; }`),
+			cssMutation(`td.st .dot { background:var(--bg) !important; }`),
 			"every graphical element clears 3:1 against what is behind it"},
 		{"the status word hidden beside its dot",
 			cssMutation(`td.st .stlabel { display:none; }`),
@@ -2637,9 +2671,9 @@ func TestRendered_EveryDASH9GraderFailsAgainstItsOwnMutation(t *testing.T) {
 			"the current run is presented before the history"},
 		{"the whole-ledger figures moved into the current-run region",
 			domReplace(
-				`<div class="aggs" id="aggregates"></div>`, ``,
+				aggHostMarkup, ``,
 				`<div class="chips" id="chips"></div>`,
-				`<div class="chips" id="chips"></div><div class="aggs" id="aggregates"></div>`),
+				`<div class="chips" id="chips"></div>`+aggHostMarkup),
 			"the current run is presented before the history"},
 		{"an off-origin reference injected into a drawing",
 			cssMutation(`.agg .fig .mark { fill:url(https://example.invalid/paint.svg#g); }`),
@@ -2891,6 +2925,153 @@ func TestRendered_EveryCapTotalGraderFailsAgainstItsOwnMutation(t *testing.T) {
 		if probs := c.grade(v); probs == nil {
 			t.Errorf("the grader passed a page that breaks the property it asserts (%s)\nqueue notice: %q\nhistory notice: %q\nbrowser output:\n%s",
 				c.name, v.QueueCap.Text, v.HistCap.Text, log)
+		}
+	}
+}
+
+// --- S0053: hostile free text, and where the methodology went ------------------------
+
+// Clause F11's second half: the three places the wire carries free text a reader sees are
+// a media path, a failure reason and a bucket label. Each is rendered as INERT TEXT - it
+// introduces no element, no attribute and no handler, and the browser refuses nothing
+// while rendering it.
+//
+// It is driven over the DevTools protocol rather than through the iframe harness for one
+// reason that matters to this criterion: the document is loaded at the TOP LEVEL, so the
+// response's own Content-Security-Policy governs it exactly as it governs a reader's
+// page, and the engine's report of every refusal is read straight off its log.
+// domCounts is what the hostile value must not move: the elements, scripts, media
+// elements and event-handler attributes the rendered document carries.
+type domCounts struct {
+	Elements int `json:"elements"`
+	Scripts  int `json:"scripts"`
+	Media    int `json:"media"`
+	Handlers int `json:"handlers"`
+}
+
+const domCountsJS = `(function(){ return {
+  elements: document.getElementsByTagName("*").length,
+  scripts: document.getElementsByTagName("script").length,
+  media: document.querySelectorAll("img, iframe, object, embed, svg image, use").length,
+  handlers: document.querySelectorAll("[onerror],[onload],[onclick],[onmouseover],[onfocus],[onanimationend]").length
+}; })()`
+
+// gradeHostileTextIsInert decides clause F11's second half: the hostile values are SHOWN,
+// as text a reader can see, and nothing came with them - no element, no attribute, no
+// handler, no policy refusal - and the page showing them still meets every convention.
+func gradeHostileTextIsInert(base, got domCounts, s convSnapshot, refusals []string) []string {
+	var out []string
+	// The values are on the screen, as TEXT a reader can see.
+	for _, want := range []string{"onerror=alert(1)", "onmouseover=", "<script>alert(2)</script>"} {
+		if !strings.Contains(s.BodyText, want) {
+			out = append(out, fmt.Sprintf("the hostile value %q is not in the text a reader can see; it must be shown, inert, not swallowed", want))
+		}
+	}
+	// And nothing came with them.
+	if got.Scripts != base.Scripts {
+		out = append(out, fmt.Sprintf("hostile text changed the script count from %d to %d", base.Scripts, got.Scripts))
+	}
+	if got.Media != 0 || base.Media != 0 {
+		out = append(out, fmt.Sprintf("hostile text put %d media elements on the page (the clean page has %d, and both must be 0)", got.Media, base.Media))
+	}
+	if got.Handlers != 0 || base.Handlers != 0 {
+		out = append(out, fmt.Sprintf("hostile text put %d event-handler attributes on the page (the clean page has %d, and both must be 0)",
+			got.Handlers, base.Handlers))
+	}
+	out = append(out, gradeNoPolicyRefusal("rendering hostile text", refusals)...)
+	// The whole convention set still holds on the page showing it.
+	for _, g := range convGraders() {
+		if g.name == "wide content scrolls inside its own container" {
+			continue
+		}
+		for _, prob := range g.probe(s) {
+			out = append(out, fmt.Sprintf("with hostile text on the page, %s: %s", g.name, prob))
+		}
+	}
+	return out
+}
+
+// readHostileTextPair renders the shipped page twice - once with ordinary data, for the
+// counts a hostile value must not move, and once with hostile text in all three places at
+// once. mutate, when non-nil, is applied to the hostile document only, which is how this
+// grader's counterexample is built.
+func readHostileTextPair(t *testing.T, b *cdpBrowser, p *cdpPage, mutate func([]byte) []byte) (base, got domCounts, s convSnapshot, refusals []string) {
+	t.Helper()
+	clean := serveDocumentWith(t, serveOpts{url: upstreamForTest, snapshot: fixtureSnapshot()})
+	p.loadConventions(t, clean.url, convOpts{theme: "light"})
+	p.mustEval(domCountsJS, &base)
+
+	hostile := serveDocumentWith(t, serveOpts{url: upstreamForTest, snapshot: hostileSnapshot(), mutate: mutate})
+	mark := b.logMark()
+	p.loadConventions(t, hostile.url, convOpts{theme: "light"})
+	p.mustEval(domCountsJS, &got)
+	s = p.collect(t)
+	return base, got, s, b.securityRefusals(mark)
+}
+
+func TestRendered_HostilePathReasonAndBucketAreRenderedAsInertText(t *testing.T) {
+	b := launchCDP(t)
+	p := b.newPage()
+
+	base, got, s, refusals := readHostileTextPair(t, b, p, nil)
+	for _, prob := range gradeHostileTextIsInert(base, got, s, refusals) {
+		t.Error(prob)
+	}
+}
+
+// Clause F8, both halves: each REGION renders exactly one link to this repository's own
+// documentation for that region's methodology, and every claim taken off the surface is
+// in the document that link names. The first half is decided in the browser, on the
+// rendered document; the second is a read of the committed document, because "the claim
+// is in the doc" is not a rendered property of the dashboard.
+func TestRendered_EachRegionLinksItsMethodologyOnceAndEveryMovedClaimIsInThatDocument(t *testing.T) {
+	b := launchCDP(t)
+	p := b.newPage()
+	ps := serveDocumentWith(t, serveOpts{url: upstreamForTest, snapshot: fixtureSnapshot()})
+	p.loadConventions(t, ps.url, convOpts{theme: "light"})
+	s := p.collect(t)
+
+	if probs := gradeDocLinks(s); probs != nil {
+		for _, prob := range probs {
+			t.Error(prob)
+		}
+	}
+	if len(s.Doclinks) != 2 {
+		t.Fatalf("the page rendered %d regions, want the two the dashboard has", len(s.Doclinks))
+	}
+	// Each region's link names the section of the document that carries ITS methodology,
+	// not merely the document.
+	wantFragment := map[string]string{
+		"region-now":     "#right-now",
+		"region-history": "#what-it-has-done-to-your-library",
+	}
+	for _, r := range s.Doclinks {
+		if r.Count != 1 {
+			continue
+		}
+		want, ok := wantFragment[r.Region]
+		if !ok {
+			t.Errorf("the page rendered an unexpected region %q", r.Region)
+			continue
+		}
+		if !strings.HasSuffix(r.Hrefs[0], want) {
+			t.Errorf("the region %s links %q, which does not name its own section (%s)", r.Region, r.Hrefs[0], want)
+		}
+		if !strings.Contains(r.Hrefs[0], DocPath) {
+			t.Errorf("the region %s links %q, which does not name %s", r.Region, r.Hrefs[0], DocPath)
+		}
+	}
+
+	// And the claims that came off the surface are in the document those links name.
+	doc := flattenText(readRepoDoc(t, DocPath))
+	surface := flattenText(s.BodyText)
+	for _, claim := range movedClaims {
+		flat := flattenText(claim)
+		if !strings.Contains(doc, flat) {
+			t.Errorf("the claim %q left the dashboard and is not in %s; F8 moves claims, it does not drop them", claim, DocPath)
+		}
+		if strings.Contains(surface, flat) {
+			t.Errorf("the claim %q is still printed on the surface; F8 puts the paragraphs in the docs", claim)
 		}
 	}
 }

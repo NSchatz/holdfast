@@ -14,8 +14,10 @@ internal/webui/
   src/
     index.html.tmpl         the page shell: markup, plus one marker for the stylesheet
                             and one for the script
-    dashboard.css           the whole stylesheet (it moves as a unit; the phase does not
-                            split the CSS)
+    tokens.css              the ONE committed token file: every colour and every length
+                            the surface paints, in both themes, with each pair's measured
+                            contrast ratio recorded beside it
+    dashboard.css           the rules, which declare no colour and no length of their own
     js/modules.txt          the modules, in the order they are concatenated
     js/10-constants.js      the closed vocabularies the page reads off the wire
     js/20-derive.js         the VALUE DERIVATIONS. No DOM reference at all
@@ -24,6 +26,7 @@ internal/webui/
     js/50-rows.js           the rows, cloned from the document's own <template>s
     js/60-aggregates.js     the whole-ledger cards
     js/70-render.js         one snapshot in, the page it describes out
+    js/55-states.js         the three states every view owes: loading, empty, unreadable
     js/80-wire.js           the controls, the ticker and the SSE stream. The only module
                             that RUNS anything at load time
     test/                   the derivation unit suite (node's built-in test runner)
@@ -59,9 +62,9 @@ and the message names the offending file. The write itself goes through a temp f
 the destination directory and is renamed into place, so a generator that fails leaves the
 committed document exactly as it found it.
 
-## The two suites, and the runtimes each needs
+## The three suites, and the runtimes each needs
 
-Both are reachable from `go test ./internal/webui/...`.
+All three are reachable from `go test ./internal/webui/...`.
 
 **The derivation units** run in **node's built-in test runner** (`node --test`), which
 needs node and nothing else - the runner, the assertions and the module loader are all
@@ -79,13 +82,31 @@ Anything about what the page SHOWS is decided there and never by matching HTML o
 source text, because a text grader cannot decide what a rule applies to, what wins the
 cascade, or what is shown rather than merely built.
 
+**The DevTools-protocol graders** (S0053) drive the browser over the **Chrome DevTools
+Protocol** for the three things no expression evaluated inside the page can do:
+
+- emulate the operating system's colour-scheme preference, so the theme under test is set
+  at the ENGINE and never by a class, an attribute or a stylesheet injected into the page.
+  A grader that injects the theme is grading its own fixture;
+- read the **accessibility tree** the engine computed. An accessible name is the engine's
+  own answer over labels, ARIA, native semantics and content - not a property of markup
+  that anything can reconstruct by inspection;
+- dispatch **real key presses**. A `KeyboardEvent` constructed inside the page is
+  untrusted and moves focus nowhere, so tab order is not observable from the document.
+
+They cost **no module dependency**. `--remote-debugging-pipe` makes the browser speak CDP
+over file descriptors 3 and 4 as NUL-terminated JSON, `exec.Cmd.ExtraFiles` hands the child
+exactly those descriptors, and `encoding/json` does the rest - which keeps the whole
+toolchain Go and the standard library, as the generator already is, and adds nothing for
+`govulncheck` to carry. `internal/webui/cdp_test.go` is the driver.
+
 **Skip or fail.** `make check` is this repository's gate and stays green on a machine with
-no browser and no node: both suites skip, naming the runtime they wanted, exactly as the
+no browser and no node: the suites skip, naming the runtime they wanted, exactly as the
 docker gate does. That idiom's one failure mode is a suite that skips everywhere and
 reports "ok" forever, so `make webui-check` sets `HOLDFAST_WEBUI_REQUIRED=1`, which turns
 a missing runtime into a failure, and `scripts/webui-check.sh` additionally fails if
-anything skipped or if either half did not execute. CI runs `make webui-check` on every
-pull request, after proving both runtimes are present.
+anything skipped or if any of the three halves did not execute. CI runs `make webui-check`
+on every pull request, after proving both runtimes are present.
 
 ## What the graders will not let you change quietly
 

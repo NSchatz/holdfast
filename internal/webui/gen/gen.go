@@ -31,8 +31,13 @@ const (
 	// TemplateFile is the page shell: the markup, with one marker for the stylesheet and
 	// one for the script.
 	TemplateFile = "index.html.tmpl"
-	// StyleFile is the whole stylesheet. The phase does not split the CSS; it moves as a
-	// unit.
+	// TokenFile is the SINGLE committed token file (styling clause S1): every colour and
+	// every length the surface paints is declared there and nowhere else. It is inlined
+	// FIRST, ahead of StyleFile, because the rest of the stylesheet resolves against the
+	// custom properties it declares.
+	TokenFile = "tokens.css"
+	// StyleFile is the rest of the stylesheet. It declares no colour and no length of its
+	// own; a check inside `make check` refuses one that reappears.
 	StyleFile = "dashboard.css"
 	// ManifestFile names the script modules, in the order they are concatenated.
 	ManifestFile = "js/modules.txt"
@@ -71,12 +76,21 @@ func Document(fsys fs.FS) ([]byte, error) {
 		return nil, fmt.Errorf("%s: the script marker %q appears %d times, want exactly 1", TemplateFile, jsMarker, n)
 	}
 
-	css, err := readText(fsys, StyleFile)
-	if err != nil {
-		return nil, err
-	}
-	if i := indexFold(css, "</style"); i >= 0 {
-		return nil, fmt.Errorf("%s: contains %q at byte %d, which would close the inlined <style> element early", StyleFile, "</style", i)
+	// The stylesheet is TWO sources concatenated in a fixed order: the token file first,
+	// then the rules that resolve against it. Both are read and checked before a byte is
+	// written, exactly as every other source is.
+	var css strings.Builder
+	for _, name := range []string{TokenFile, StyleFile} {
+		body, err := readText(fsys, name)
+		if err != nil {
+			return nil, err
+		}
+		if i := indexFold(body, "</style"); i >= 0 {
+			return nil, fmt.Errorf("%s: contains %q at byte %d, which would close the inlined <style> element early", name, "</style", i)
+		}
+		css.WriteString("/* --- internal/webui/src/" + name + " --- */\n")
+		css.WriteString(strings.TrimRight(body, "\n"))
+		css.WriteString("\n")
 	}
 
 	mods, err := Modules(fsys)
@@ -101,7 +115,7 @@ func Document(fsys fs.FS) ([]byte, error) {
 	}
 
 	out := doctype + banner + strings.TrimPrefix(tmpl, doctype)
-	out = strings.Replace(out, cssMarker, strings.TrimRight(css, "\n"), 1)
+	out = strings.Replace(out, cssMarker, strings.TrimRight(css.String(), "\n"), 1)
 	out = strings.Replace(out, jsMarker, strings.TrimRight(js.String(), "\n"), 1)
 	return []byte(out), nil
 }
