@@ -2,7 +2,7 @@
 
 **A config-as-code, data-safe, self-hosted media transcoder — an open-source [Tdarr](https://tdarr.io) replacement.**
 
-![The holdfast web dashboard: live queue, per-status summary, reclaimed-space total, and history — served from the single binary by `holdfast serve`.](docs/dashboard.png)
+![The holdfast web dashboard: live queue, per-status summary, reclaimed-space totals, whole-ledger figures, and history with each swap's proof of safety — served from the single binary by `holdfast serve`.](docs/dashboard.png)
 
 `holdfast` watches a media library, re-encodes bloated non-HEVC/non-AV1 video to a smaller modern codec
 to reclaim disk space, and — the whole point — **never destroys a source until a replacement is provably
