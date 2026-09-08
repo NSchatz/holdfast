@@ -196,6 +196,17 @@ type convControl struct {
 	Disabled bool   `json:"disabled"`
 }
 
+// convStableText is the text a reader sees with the page's ONE wall-clock figure - the
+// queue's elapsed column - replaced by a constant, plus the count of those cells and the
+// values they were carrying. It is what makes a comparison BETWEEN TWO RENDERS honest:
+// two renders cannot be taken at the same instant, so the clock moves between them by
+// construction, and everything else must not.
+type convStableText struct {
+	Text   string   `json:"text"`
+	Cells  int      `json:"cells"`
+	Values []string `json:"values"`
+}
+
 // convSnapshot is one whole reading of the rendered page.
 type convSnapshot struct {
 	Tokens     convTokens
@@ -212,6 +223,7 @@ type convSnapshot struct {
 	Painted    convPainted
 	Figures    convFigures
 	Controls   []convControl
+	Stable     convStableText
 	BodyText   string
 	ConnText   string
 	Offer      struct {
@@ -341,6 +353,7 @@ func (p *cdpPage) collect(t *testing.T) convSnapshot {
 		{`JSON.stringify(__hf.painted())`, &s.Painted},
 		{`JSON.stringify(__hf.figures())`, &s.Figures},
 		{`JSON.stringify(__hf.controls())`, &s.Controls},
+		{`JSON.stringify(__hf.bodyTextWithoutTheLiveClock())`, &s.Stable},
 		{`JSON.stringify(__hf.sourceOffer())`, &s.Offer},
 		{`JSON.stringify(__hf.msg())`, &s.Msg},
 		{`JSON.stringify(__hf.badges())`, &s.Badges},

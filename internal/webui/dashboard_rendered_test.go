@@ -2337,6 +2337,17 @@ func scriptMutation(body string) func([]byte) []byte {
 	}
 }
 
+// inlineScriptMutation appends a statement to the page's OWN inline script instead of
+// adding a second script element. It exists for the counterexamples aimed at graders that
+// COUNT what the document carries: a mutation that added a script element would move the
+// very count such a grader compares, and would then "fail" it for a reason the mutation
+// itself introduced rather than for the property under test.
+func inlineScriptMutation(body string) func([]byte) []byte {
+	return func(b []byte) []byte {
+		return []byte(strings.Replace(string(b), "\n</script>", "\n"+body+"\n</script>", 1))
+	}
+}
+
 // --- B13: nothing on a figure needs to be pointed at --------------------------------
 
 func TestRendered_NoFigureIsReadableOnlyByPointingAtIt(t *testing.T) {
@@ -2929,67 +2940,82 @@ func TestRendered_EveryCapTotalGraderFailsAgainstItsOwnMutation(t *testing.T) {
 // reason that matters to this criterion: the document is loaded at the TOP LEVEL, so the
 // response's own Content-Security-Policy governs it exactly as it governs a reader's
 // page, and the engine's report of every refusal is read straight off its log.
-func TestRendered_HostilePathReasonAndBucketAreRenderedAsInertText(t *testing.T) {
-	b := launchCDP(t)
-	p := b.newPage()
+// domCounts is what the hostile value must not move: the elements, scripts, media
+// elements and event-handler attributes the rendered document carries.
+type domCounts struct {
+	Elements int `json:"elements"`
+	Scripts  int `json:"scripts"`
+	Media    int `json:"media"`
+	Handlers int `json:"handlers"`
+}
 
-	type domCounts struct {
-		Elements int `json:"elements"`
-		Scripts  int `json:"scripts"`
-		Media    int `json:"media"`
-		Handlers int `json:"handlers"`
-	}
-	const counts = `(function(){ return {
-	  elements: document.getElementsByTagName("*").length,
-	  scripts: document.getElementsByTagName("script").length,
-	  media: document.querySelectorAll("img, iframe, object, embed, svg image, use").length,
-	  handlers: document.querySelectorAll("[onerror],[onload],[onclick],[onmouseover],[onfocus],[onanimationend]").length
-	}; })()`
+const domCountsJS = `(function(){ return {
+  elements: document.getElementsByTagName("*").length,
+  scripts: document.getElementsByTagName("script").length,
+  media: document.querySelectorAll("img, iframe, object, embed, svg image, use").length,
+  handlers: document.querySelectorAll("[onerror],[onload],[onclick],[onmouseover],[onfocus],[onanimationend]").length
+}; })()`
 
-	// The shipped page with ordinary data, for the counts a hostile value must not move.
-	clean := serveDocumentWith(t, serveOpts{url: upstreamForTest, snapshot: fixtureSnapshot()})
-	p.loadConventions(t, clean.url, convOpts{theme: "light"})
-	var base domCounts
-	p.mustEval(counts, &base)
-
-	// The same page, given hostile text in all three places at once.
-	hostile := serveDocumentWith(t, serveOpts{url: upstreamForTest, snapshot: hostileSnapshot()})
-	mark := b.logMark()
-	p.loadConventions(t, hostile.url, convOpts{theme: "light"})
-	var got domCounts
-	p.mustEval(counts, &got)
-	s := p.collect(t)
-
+// gradeHostileTextIsInert decides clause F11's second half: the hostile values are SHOWN,
+// as text a reader can see, and nothing came with them - no element, no attribute, no
+// handler, no policy refusal - and the page showing them still meets every convention.
+func gradeHostileTextIsInert(base, got domCounts, s convSnapshot, refusals []string) []string {
+	var out []string
 	// The values are on the screen, as TEXT a reader can see.
 	for _, want := range []string{"onerror=alert(1)", "onmouseover=", "<script>alert(2)</script>"} {
 		if !strings.Contains(s.BodyText, want) {
-			t.Errorf("the hostile value %q is not in the text a reader can see; it must be shown, inert, not swallowed", want)
+			out = append(out, fmt.Sprintf("the hostile value %q is not in the text a reader can see; it must be shown, inert, not swallowed", want))
 		}
 	}
 	// And nothing came with them.
 	if got.Scripts != base.Scripts {
-		t.Errorf("hostile text changed the script count from %d to %d", base.Scripts, got.Scripts)
+		out = append(out, fmt.Sprintf("hostile text changed the script count from %d to %d", base.Scripts, got.Scripts))
 	}
 	if got.Media != 0 || base.Media != 0 {
-		t.Errorf("hostile text put %d media elements on the page (the clean page has %d, and both must be 0)", got.Media, base.Media)
+		out = append(out, fmt.Sprintf("hostile text put %d media elements on the page (the clean page has %d, and both must be 0)", got.Media, base.Media))
 	}
 	if got.Handlers != 0 || base.Handlers != 0 {
-		t.Errorf("hostile text put %d event-handler attributes on the page (the clean page has %d, and both must be 0)",
-			got.Handlers, base.Handlers)
+		out = append(out, fmt.Sprintf("hostile text put %d event-handler attributes on the page (the clean page has %d, and both must be 0)",
+			got.Handlers, base.Handlers))
 	}
-	if refusals := b.securityRefusals(mark); refusals != nil {
-		t.Errorf("rendering hostile text produced policy refusals: %v", refusals)
-	}
+	out = append(out, gradeNoPolicyRefusal("rendering hostile text", refusals)...)
 	// The whole convention set still holds on the page showing it.
 	for _, g := range convGraders() {
 		if g.name == "wide content scrolls inside its own container" {
 			continue
 		}
-		if probs := g.probe(s); probs != nil {
-			for _, prob := range probs {
-				t.Errorf("with hostile text on the page, %s: %s", g.name, prob)
-			}
+		for _, prob := range g.probe(s) {
+			out = append(out, fmt.Sprintf("with hostile text on the page, %s: %s", g.name, prob))
 		}
+	}
+	return out
+}
+
+// readHostileTextPair renders the shipped page twice - once with ordinary data, for the
+// counts a hostile value must not move, and once with hostile text in all three places at
+// once. mutate, when non-nil, is applied to the hostile document only, which is how this
+// grader's counterexample is built.
+func readHostileTextPair(t *testing.T, b *cdpBrowser, p *cdpPage, mutate func([]byte) []byte) (base, got domCounts, s convSnapshot, refusals []string) {
+	t.Helper()
+	clean := serveDocumentWith(t, serveOpts{url: upstreamForTest, snapshot: fixtureSnapshot()})
+	p.loadConventions(t, clean.url, convOpts{theme: "light"})
+	p.mustEval(domCountsJS, &base)
+
+	hostile := serveDocumentWith(t, serveOpts{url: upstreamForTest, snapshot: hostileSnapshot(), mutate: mutate})
+	mark := b.logMark()
+	p.loadConventions(t, hostile.url, convOpts{theme: "light"})
+	p.mustEval(domCountsJS, &got)
+	s = p.collect(t)
+	return base, got, s, b.securityRefusals(mark)
+}
+
+func TestRendered_HostilePathReasonAndBucketAreRenderedAsInertText(t *testing.T) {
+	b := launchCDP(t)
+	p := b.newPage()
+
+	base, got, s, refusals := readHostileTextPair(t, b, p, nil)
+	for _, prob := range gradeHostileTextIsInert(base, got, s, refusals) {
+		t.Error(prob)
 	}
 }
 

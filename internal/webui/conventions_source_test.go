@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/NSchatz/holdfast/internal/webui/gen"
 )
 
 // The MECHANICAL half of the styling conventions (S0053).
@@ -31,7 +33,24 @@ const tokenFileName = "tokens.css"
 
 // otherSurfaceSources is every source of the surface that is NOT the token file. A colour
 // or a length appearing in any of them is the thing S1 refuses.
-var otherSurfaceSources = []string{"dashboard.css", "index.html.tmpl"}
+//
+// The script modules are in it, and are read from the MANIFEST rather than listed here.
+// They are surface sources by the criterion's own words ("anywhere else in the surface's
+// sources") and they set element attributes, so a value written into one of them reaches
+// the page exactly as a value written into the stylesheet does. Reading the manifest also
+// means a module added later is covered the day it is added, instead of the day somebody
+// remembers to extend a list.
+func otherSurfaceSources(t *testing.T) []string {
+	t.Helper()
+	mods, err := gen.Modules(os.DirFS(srcDir))
+	if err != nil {
+		t.Fatalf("reading the module manifest: %v", err)
+	}
+	if len(mods) == 0 {
+		t.Fatalf("the module manifest names no script module; the surface has several")
+	}
+	return append([]string{"dashboard.css", "index.html.tmpl"}, mods...)
+}
 
 func readSurfaceSource(t *testing.T, name string) string {
 	t.Helper()
@@ -73,6 +92,26 @@ func stripCSSComments(s string) string {
 		}
 		s = s[i+j+2:]
 	}
+}
+
+// stripJSLineComments removes `// ...` to the end of the line, which is the comment form
+// the script modules use and the one neither of the strippers above sees. Same reason as
+// theirs: a comment paints nothing, and the only value in any module today is the word
+// "2px" inside a sentence explaining a stroke width.
+//
+// It is safe on these sources because none of them writes `//` inside a string literal or
+// a regular expression - asserted below, so the day one does, the assertion says so
+// instead of the stripper quietly eating the rest of that line.
+func stripJSLineComments(s string) string {
+	var out strings.Builder
+	for _, line := range strings.Split(s, "\n") {
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		out.WriteString(line)
+		out.WriteByte('\n')
+	}
+	return out.String()
 }
 
 func stripHTMLComments(s string) string {
@@ -144,6 +183,9 @@ func valueEscapes(name, body string) []string {
 	if strings.HasSuffix(name, ".tmpl") || strings.HasSuffix(name, ".html") {
 		body = stripHTMLComments(body)
 	}
+	if strings.HasSuffix(name, ".js") {
+		body = stripJSLineComments(body)
+	}
 	body = stripCSSComments(body)
 
 	var out []string
@@ -178,8 +220,36 @@ func valueEscapes(name, body string) []string {
 	return out
 }
 
+// stripJSLineComments is only safe while no module writes `//` anywhere but at the start
+// of a comment line. That is a condition on the sources, so it is ASSERTED rather than
+// assumed: the day a module carries a URL or a regular expression containing `//`, this
+// reds and names the line, instead of the stripper silently eating the rest of it and
+// hiding a value written after it.
+func TestTokens_NoScriptModuleWritesADoubleSlashOutsideALineComment(t *testing.T) {
+	modules := 0
+	for _, name := range otherSurfaceSources(t) {
+		if !strings.HasSuffix(name, ".js") {
+			continue
+		}
+		modules++
+		for i, line := range strings.Split(readSurfaceSource(t, name), "\n") {
+			j := strings.Index(line, "//")
+			if j < 0 {
+				continue
+			}
+			if strings.TrimSpace(line[:j]) != "" {
+				t.Errorf("%s:%d writes `//` after code (%q); stripJSLineComments would eat the rest of that line and could hide a value written there",
+					name, i+1, strings.TrimSpace(line))
+			}
+		}
+	}
+	if modules == 0 {
+		t.Fatal("no script module was checked; the surface has several and they are surface sources by S1's own words")
+	}
+}
+
 func TestTokens_NoColourAndNoLengthEscapesTheOneTokenFile(t *testing.T) {
-	for _, name := range otherSurfaceSources {
+	for _, name := range otherSurfaceSources(t) {
 		if probs := valueEscapes(name, readSurfaceSource(t, name)); probs != nil {
 			for _, p := range probs {
 				t.Error(p)

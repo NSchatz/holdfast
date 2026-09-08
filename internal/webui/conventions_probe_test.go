@@ -462,9 +462,47 @@ function figures() {
 
 function elapsedValues() {
   const out = [];
-  const q = document.getElementById("queue");
-  if (q) for (const td of q.querySelectorAll("td.elapsed")) out.push(visText(td));
+  for (const td of liveClockCells()) out.push(visText(td));
   return out;
+}
+
+// --- the live clock, named structurally so a grader can exclude exactly it -------------
+//
+// The queue's elapsed column is the ONE thing a reader sees whose text is a function of
+// the WALL CLOCK rather than of the snapshot: 80-wire.js rewrites every cell each second
+// from the row's own transition timestamp. Two renders of the same page can never be
+// taken at the same instant, so any grader that compares the whole of innerText across a
+// pair of renders is comparing how OLD each page happened to be as well as the property
+// it is actually about - and reds on a correct page whenever the two readings straddle a
+// second.
+//
+// bodyTextWithoutTheLiveClock is the text a reader sees with those cells, and only those
+// cells, replaced by a constant. The substitution is structural (a selector), never a
+// guess at which words look like a duration, and it is undone before the function
+// returns. The whole of it runs in one task, so the page's own one-second ticker cannot
+// interleave with it.
+//
+// The exclusion is not a hole: the cells are COUNTED and their values reported alongside,
+// so a column that disappeared, was blanked, or gained a member is visible to the Go side
+// rather than hidden inside the part that was excluded.
+const LIVE_CLOCK_SELECTOR = "#queue td.elapsed";
+const LIVE_CLOCK_MASK = "(live clock)";
+
+function liveClockCells() {
+  return Array.prototype.slice.call(document.querySelectorAll(LIVE_CLOCK_SELECTOR));
+}
+
+function bodyTextWithoutTheLiveClock() {
+  const cells = liveClockCells();
+  const values = cells.map(function (td) { return visText(td); });
+  const saved = cells.map(function (td) { return Array.prototype.slice.call(td.childNodes); });
+  for (const td of cells) td.replaceChildren(document.createTextNode(LIVE_CLOCK_MASK));
+  let text;
+  try { text = document.body.innerText; }
+  finally {
+    for (let i = 0; i < cells.length; i++) cells[i].replaceChildren.apply(cells[i], saved[i]);
+  }
+  return { text: text, cells: cells.length, values: values };
 }
 
 function controls() {
@@ -495,6 +533,7 @@ return {
   figures: figures, elapsedValues: elapsedValues, controls: controls,
   connText: connText, rendered: rendered,
   bodyText: function () { return document.body.innerText; },
+  bodyTextWithoutTheLiveClock: bodyTextWithoutTheLiveClock,
   sourceOffer: function () {
     const p = document.querySelector("p.source-offer");
     return { present: !!p, shown: isRendered(p), text: p ? visText(p) : "" };
