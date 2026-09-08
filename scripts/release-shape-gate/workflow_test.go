@@ -853,58 +853,29 @@ jobs:
 // The table property, asserted where the hole lived. Declaring an environment name on a role
 // and writing down what the value is FOR held it to nothing: `REF: …:latest` on the re-smoke
 // left the role held and the invocation untouched while the step pulled back the PREVIOUS
-// release (S0046 F22). So every name a role declares must resolve to a value produced OUTSIDE
-// the step, and a name that resolves to nothing reads CLOSED - the zero value of envHeld is
-// exactly that case, and it must not be reachable from the table.
-func TestHandsEnv_EveryDeclaredNameResolvesToAValueProducedOutsideTheStep(t *testing.T) {
-	h := sampleHanded()
+// release (S0046 F22). So every name a role declares names a SOURCE, that source has a row
+// saying what a value holding it must BE, and the zero value - a forgotten `holds:` - must not
+// be reachable from the table.
+func TestHandsEnv_EveryDeclaredNameNamesADecidedSource(t *testing.T) {
+	declared := 0
 	for _, r := range releaseRoles {
-		for name, spec := range r.handsEnv {
-			want, from, ok := h.expected(spec.holds)
-			if !ok {
-				t.Fatalf("role %q declares `%s` and holds it against NOTHING. A name whose value nobody compares is the hole this check exists to refuse", r.id, name)
-			}
-			if want == "" || from == "" {
-				t.Fatalf("role %q declares `%s`, which resolves to an EMPTY expectation (%q from %q): a comparison against nothing passes on anything", r.id, name, want, from)
-			}
-			if spec.what == "" {
-				t.Fatalf("role %q declares `%s` with no description, so its refusal cannot say what the value is for", r.id, name)
-			}
-		}
-	}
-	if _, _, ok := h.expected(heldNothing); ok {
-		t.Fatal("the zero value of envHeld must read CLOSED, or a forgotten `holds:` silently passes")
-	}
-	if _, _, ok := h.expected(envHeld(9999)); ok {
-		t.Fatal("an envHeld nobody wired up must read CLOSED")
-	}
-}
-
-// The comparison itself, over the two values ordinal 8 found unheld. `REF` decides which
-// artefact the re-smoke grades and `VERSION` decides whether A11 compares anything at all;
-// a wrong value in either leaves every other assertion in this gate green.
-func TestHandedValues_AValueIsComparedWholeAgainstWhatTheRunProduced(t *testing.T) {
-	h := sampleHanded()
-	cases := []struct {
-		held envHeld
-		want string
-		bad  []string
-	}{
-		{heldGatedRef, "ghcr.io/o/r:v0.1.0", []string{"ghcr.io/o/r:latest", "ghcr.io/o/r:v0.0.1", "ghcr.io/o/r", ""}},
-		{heldPlannedVersion, "v0.1.0", []string{"latest", "v0.0.1", ""}},
-		{heldPlannedImage, "ghcr.io/o/r", []string{"ghcr.io/someone-else/r", ""}},
-		{heldFloatingTag, "latest", []string{"stable", "v0.1.0", ""}},
-	}
-	for _, c := range cases {
-		got, _, ok := h.expected(c.held)
-		if !ok || got != c.want {
-			t.Fatalf("expected(%d) = %q, %v; want %q", c.held, got, ok, c.want)
-		}
-		for _, b := range c.bad {
-			if b == got {
-				t.Fatalf("expected(%d) accepts %q, which is not the value the run produced", c.held, b)
+		for _, m := range []map[string]envSpec{r.handsEnv, r.handsInput} {
+			for name, spec := range m {
+				if spec.holds == heldNothing {
+					t.Fatalf("role %q declares `%s` and names NO source. A name whose value nobody decides is the hole this check exists to refuse", r.id, name)
+				}
+				if _, ok := heldAs[spec.holds]; !ok {
+					t.Fatalf("role %q declares `%s`, whose source has no row in heldAs, so nothing says what that value must BE", r.id, name)
+				}
+				if spec.what == "" {
+					t.Fatalf("role %q declares `%s` with no description, so its refusal cannot say what the value is for", r.id, name)
+				}
+				declared++
 			}
 		}
+	}
+	if declared == 0 {
+		t.Fatal("no role declares a handed value at all, so this property is vacuous")
 	}
 }
 
@@ -927,77 +898,130 @@ func TestRefTag_TheTagIsTheLastColonAndNotAPort(t *testing.T) {
 	}
 }
 
-// THE OTHER SIDE OF THAT COMPARISON, which is what S0046 F26 was about: every value above was
-// compared whole, against the outputs of ONE planned release, so a literal equal to that one
-// sample passed as "the value the planning logic produced". The gate now holds each run-produced
-// value against SEVERAL independently planned runs - and refuses its own anchor if those runs
-// did not actually produce different values, because a collapsed anchor is invisible everywhere
-// else. These three tests are that refusal, driven in both directions.
-func TestAnchor_ADegenerateAnchorIsRefusedRatherThanSilentlyPassing(t *testing.T) {
-	same := sampleHanded()
-	g := &gate{out: io.Discard}
-	if g.checkAnchorDistinguishesALiteral(twoShapes(), []handed{same, same}) {
-		t.Fatal("two planned runs that produced the SAME version were accepted as an anchor. A literal equal to that version then passes as the value the planning logic produced, which is S0046 F26 exactly")
-	}
-	if !g.failed {
-		t.Fatal("a degenerate anchor was not even reported")
-	}
-}
-
-func TestAnchor_RunsThatDifferAreAcceptedAsAnAnchor(t *testing.T) {
-	a := sampleHanded()
-	b := sampleHanded()
-	b.version, b.gated, b.refName = "v0.4.2", "ghcr.io/o/r:v0.4.2", "v0.4.2"
-	b.event = "workflow_dispatch"
-	g := &gate{out: io.Discard}
-	if !g.checkAnchorDistinguishesALiteral(twoShapes(), []handed{a, b}) || g.failed {
-		t.Fatal("two planned runs that produced DIFFERENT values were refused as an anchor; the check would then refuse every tree and prove nothing")
-	}
-}
-
-// Deny by default at the level the anchor itself lives on: a source nobody classified must red
-// rather than be graded as whichever kind the zero value happens to be.
-func TestAnchor_AnUnclassifiedSourceReadsClosed(t *testing.T) {
-	saved, ok := anchorOf[heldPlannedVersion]
-	if !ok {
-		t.Fatal("heldPlannedVersion has no anchor row, so this test is grading nothing")
-	}
-	delete(anchorOf, heldPlannedVersion)
-	defer func() { anchorOf[heldPlannedVersion] = saved }()
-
-	a := sampleHanded()
-	b := sampleHanded()
-	b.version, b.gated, b.refName = "v0.4.2", "ghcr.io/o/r:v0.4.2", "v0.4.2"
-	b.event = "workflow_dispatch"
-	g := &gate{out: io.Discard}
-	if g.checkAnchorDistinguishesALiteral(twoShapes(), []handed{a, b}) {
-		t.Fatal("a held value with no declared anchor was accepted. An undeclared anchor must read CLOSED, or a new source is silently graded as though somebody had thought about it")
-	}
-}
-
-// Every source any role declares must have an anchor row, or the check above grades a subset
-// of what the gate actually compares.
-func TestAnchor_EverySourceARoleDeclaresIsAnchored(t *testing.T) {
-	for _, e := range heldSources() {
-		if _, ok := anchorOf[e]; !ok {
-			t.Fatalf("a role holds a value against envHeld(%d) and anchorOf has no row for it", e)
+// THE TRACE, which is what replaced that comparison (S0046 F26). Holding a value against the
+// outputs of a planned release bought back exactly one literal - the one equal to that sample -
+// and the sample was `v0.1.0`, the version this repository has actually published. So a role
+// step's object must BE the planning logic's own output rather than equal one, and traceRef is
+// what follows the expression back to it. Bidirectional, as everything else here: the shapes
+// that must resolve, and the ones that must read CLOSED.
+func TestTraceRef_FollowsAReferenceBackToThePlanningLogic(t *testing.T) {
+	wf, plan := traceFixture(t)
+	for expr, want := range map[string]string{
+		"needs.build.outputs.image":   srcPlanOutput + "image",
+		"needs.build.outputs.version": srcPlanOutput + "version",
+		"steps.plan.outputs.version":  srcPlanOutput + "version",
+		"github.repository":           srcGithub + "repository",
+		"github.event_name":           srcGithub + "event_name",
+	} {
+		job := "publish"
+		if strings.HasPrefix(expr, "steps.") {
+			job = "build"
+		}
+		got, err := traceRef(wf, plan, job, expr, 0)
+		if err != nil || got != want {
+			t.Fatalf("traceRef(%q) = %q, %v; want %q", expr, got, err, want)
 		}
 	}
+}
+
+func TestTraceRef_AnythingItCannotFollowReadsClosed(t *testing.T) {
+	wf, plan := traceFixture(t)
+	for _, expr := range []string{
+		// A value some other step invented: this gate never saw it produced.
+		"steps.somewhere.outputs.version",
+		// A job whose outputs this one does not receive: the empty string at release time.
+		"needs.nobody.outputs.version",
+		// An output the producing job does not declare.
+		"needs.build.outputs.nosuch",
+		// Computed rather than named - and this gate does not evaluate a value to accept it.
+		"format('{0}', needs.build.outputs.version)",
+		"needs.build.outputs.version == 'v0.1.0'",
+		"'v0.1.0'",
+		// Context paths nobody classified, each of which could carry anything.
+		"env.VERSION",
+		"inputs.version",
+		"vars.VERSION",
+		"github",
+	} {
+		if got, err := traceRef(wf, plan, "publish", expr, 0); err == nil {
+			t.Fatalf("traceRef(%q) resolved to %q; an expression this gate cannot follow must read CLOSED", expr, got)
+		}
+	}
+}
+
+// The `steps.` form is only the plan step's own job: another job's `steps.` context is not in
+// scope there at all, so accepting it would be accepting a reference to nothing.
+func TestTraceRef_ThePlanStepsOutputsAreOnlyReachableInsideItsOwnJob(t *testing.T) {
+	wf, plan := traceFixture(t)
+	if _, err := traceRef(wf, plan, "publish", "steps.plan.outputs.version", 0); err == nil {
+		t.Fatal("a `steps.plan.outputs.*` reference from another job was accepted")
+	}
+}
+
+// splitTemplate decides what a value IS MADE OF, and the whole rule rests on it: one stray
+// literal segment is one act performed on the wrong object.
+func TestSplitTemplate_SeparatesEveryLiteralFromEveryReference(t *testing.T) {
+	parts, err := splitTemplate("${{ a.b }}:${{ c.d }}")
+	if err != nil || len(parts) != 3 || parts[0].ref != "a.b" || parts[1].lit != ":" || parts[2].ref != "c.d" {
+		t.Fatalf("splitTemplate = %#v, %v", parts, err)
+	}
+	parts, _ = splitTemplate("ghcr.io/o/r:v0.1.0")
+	if len(parts) != 1 || parts[0].ref != "" || parts[0].lit != "ghcr.io/o/r:v0.1.0" {
+		t.Fatalf("a pure literal must be one literal part: %#v", parts)
+	}
+	parts, _ = splitTemplate("${{ a.b }}:latest")
+	if len(parts) != 2 || parts[0].ref != "a.b" || parts[1].lit != ":latest" {
+		t.Fatalf("the `:latest` half must survive as a LITERAL, or F22 is invisible: %#v", parts)
+	}
+	if _, err := splitTemplate("${{ a.b "); err == nil {
+		t.Fatal("an unterminated expression must be an error, not a literal")
+	}
+}
+
+// Every source a role declares must have a row saying what a value holding it must BE, or the
+// gate decides a subset of what it actually reads.
+func TestHeldAs_EverySourceARoleDeclaresIsDecided(t *testing.T) {
 	if len(heldSources()) == 0 {
-		t.Fatal("no role declares a held value at all, so the anchor check covers nothing")
+		t.Fatal("no role declares a held value at all, so this table decides nothing")
+	}
+	for _, e := range heldSources() {
+		form, ok := heldAs[e]
+		if !ok {
+			t.Fatalf("a role holds a value against envHeld(%d) and heldAs has no row for it", e)
+		}
+		if form.what == "" {
+			t.Fatalf("envHeld(%d) has no description, so its refusal cannot say what the value is for", e)
+		}
+		if len(form.parts) == 0 && form.literalFrom == "" {
+			t.Fatalf("envHeld(%d) is neither traced to the run nor held against a committed file, so nothing decides it", e)
+		}
+		for _, p := range form.parts {
+			if p.ref == "" && p.lit == "" {
+				t.Fatalf("envHeld(%d) declares an empty part", e)
+			}
+			if p.ref != "" && !strings.HasPrefix(p.ref, srcPlanOutput) && !strings.HasPrefix(p.ref, srcGithub) {
+				t.Fatalf("envHeld(%d) names the source %q, which traceRef can never return", e, p.ref)
+			}
+		}
+	}
+	if _, ok := heldAs[heldNothing]; ok {
+		t.Fatal("the zero value of envHeld must read CLOSED, or a forgotten `holds:` silently passes")
 	}
 }
 
-func twoShapes() []*planned {
-	return []*planned{
-		{shape: shape{label: "a version tag push (v0.1.0)", event: "push", refName: "v0.1.0", repo: "O/R"}},
-		{shape: shape{label: "a second version tag push (v0.4.2)", event: "push", refName: "v0.4.2", repo: "O/R"}},
-	}
-}
-
-func sampleHanded() handed {
-	return handed{
-		image: "ghcr.io/o/r", version: "v0.1.0", gated: "ghcr.io/o/r:v0.1.0",
-		floating: "latest", event: "push", refName: "v0.1.0", repo: "O/R",
-	}
+// traceFixture is the shape of release.yml's data flow: a `build` job whose outputs are the
+// plan step's, and a `publish` job that needs it.
+func traceFixture(t *testing.T) (*Workflow, Step) {
+	t.Helper()
+	wf := &Workflow{Jobs: map[string]Job{
+		"build": {
+			ID: "build",
+			Outputs: map[string]string{
+				"image":   "${{ steps.plan.outputs.image }}",
+				"version": "${{ steps.plan.outputs.version }}",
+			},
+		},
+		"publish": {ID: "publish", Needs: "build"},
+	}}
+	return wf, Step{JobID: "build", Index: 1, ID: "plan"}
 }

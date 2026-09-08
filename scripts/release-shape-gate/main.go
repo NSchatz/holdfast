@@ -49,12 +49,11 @@
 //	A15     an unreadable, unparseable or step-less definition is red, and says which
 //
 // Every value a role step HANDS its program - the reference the re-smoke pulls back, the
-// version `:latest` is retagged onto, the references the push publishes - is held against
-// what the run produced, and against SEVERAL independently planned runs rather than one.
-// One is not an anchor: a literal equal to that run's own version passes it, and the sample
-// is `v0.1.0`, the version this repository has actually published. The gate refuses its own
-// anchor if those runs did not produce different values (checkAnchorDistinguishesALiteral),
-// because a collapsed anchor is invisible in every other line of output.
+// version `:latest` is retagged onto, the references the push publishes - has to BE the
+// planning logic's own output rather than equal one: the expression is traced back through the
+// `needs:` graph and every literal reds. Comparing the value with what a planned release
+// produced bought back exactly one literal, the one equal to that sample, and the sample was
+// `v0.1.0` - the version this repository has actually published (S0046 F26). See handed.go.
 package main
 
 import (
@@ -79,14 +78,6 @@ const (
 	// The tag the gate plans a real release with. Any 0.y.z would do; this one is a
 	// version shape, not a claim about which version comes next.
 	sampleTag = "v0.1.0"
-	// A SECOND real release, planned so the values a role step is handed are held against
-	// more than one of them. Its only job is to differ from sampleTag: with one planned
-	// release the comparison cannot tell a value that TRACKS the run from a literal that
-	// happens to equal that one sample, and sampleTag is the least arbitrary literal in the
-	// repository - v0.1.0 is the version actually published, named throughout docs/release.md,
-	// CLAUDE.md and README.md, and the string a maintainer copies out of a green run (S0046
-	// F26). Two planned releases, and a literal cannot satisfy both.
-	sampleTagB = "v0.4.2"
 	// A tag whose major is not zero. The planning logic must refuse it (A4, A10).
 	sampleMajorTag = "v1.0.0"
 	// A pre-release must publish without becoming the floating reference.
@@ -173,10 +164,6 @@ type shape struct {
 	label   string
 	event   string
 	refName string
-	// The repository the run belongs to. Every shape carries the one go.mod names - the image
-	// a release publishes is derived from `github.repository`, so planning a run as some other
-	// repository would grade a release this module cannot cut.
-	repo string
 }
 
 // jobPlan is one job under one event shape.
@@ -247,30 +234,22 @@ func (g *gate) run() error {
 
 	// Every shape below is PLANNED by executing the workflow's planning step. Nothing
 	// downstream re-reads a script.
-	dispatch, err := g.plan(runner, wf, roles, shape{"a manual dispatch", "workflow_dispatch", "main", repo})
+	dispatch, err := g.plan(runner, wf, roles, repo, shape{"a manual dispatch", "workflow_dispatch", "main"})
 	if err != nil {
 		return err
 	}
 	if dispatch.failed {
 		return fmt.Errorf("the planning logic FAILED on %s (exit %d) - a dry run must be able to plan itself:\n%s", dispatch.shape.label, dispatch.exitCode, indent(dispatch.output))
 	}
-	tag, err := g.plan(runner, wf, roles, shape{"a version tag push (" + sampleTag + ")", "push", sampleTag, repo})
+	tag, err := g.plan(runner, wf, roles, repo, shape{"a version tag push (" + sampleTag + ")", "push", sampleTag})
 	if err != nil {
 		return err
 	}
 	if tag.failed {
 		return fmt.Errorf("the planning logic FAILED on %s (exit %d):\n%s", tag.shape.label, tag.exitCode, indent(tag.output))
 	}
-	// A SECOND real release, and the only reason it exists is the anchor: see sampleTagB.
-	tagB, err := g.plan(runner, wf, roles, shape{"a second version tag push (" + sampleTagB + ")", "push", sampleTagB, repo})
-	if err != nil {
-		return err
-	}
-	if tagB.failed {
-		return fmt.Errorf("the planning logic FAILED on %s (exit %d):\n%s", tagB.shape.label, tagB.exitCode, indent(tagB.output))
-	}
-	g.note("the planning logic RAN for both event shapes; dispatch produced %s, %s produced %s, %s produced %s",
-		outputsOf(dispatch), sampleTag, outputsOf(tag), sampleTagB, outputsOf(tagB))
+	g.note("the planning logic RAN for both event shapes; dispatch produced %s, %s produced %s",
+		outputsOf(dispatch), sampleTag, outputsOf(tag))
 
 	g.checkDispatchHoldsNoCapability(wf, dispatch)
 	g.checkIrreversibleActsLiveBehindAGrant(wf, roles)
@@ -280,297 +259,12 @@ func (g *gate) run() error {
 	g.checkPreReleaseDoesNotPromote(runner, wf, roles, repo)
 	g.checkMajorVersionZero(runner, wf, roles, repo)
 	g.checkRunbookNamesEveryAct(wf)
-	// The real release leads; the second release and the dry run are what stop a literal
-	// equal to the first one's own version passing as the value the run produced (S0046 F26).
-	g.checkHandedValues(wf, roles, []*planned{tag, tagB, dispatch})
+	// Structured YAML and the workflow's own outputs graph; no planned run, and no sample. See
+	// handed.go.
+	g.checkHandedValues(wf, roles)
+	g.checkPlanProducesEverythingARoleIsHeldTo(roles, tag)
 	g.checkComposeReferenceAgreement(wf, roles, tag, repo)
 	return nil
-}
-
-// --- every value a role step HANDS its program -------------------------------------------
-//
-// A role is held by a step that INVOKES what the role names, and roles.go accounts for that
-// invocation over its whole structured surface - every `run:` field, every step key, every
-// `defaults:` block, every action input, and every environment NAME in scope. It did not read
-// the environment's VALUES, and that is a hole of exactly the shape the ones above are
-// (S0046 F22, F23): a step can invoke the right program against the wrong object, and every
-// other assertion here stays green while it does.
-//
-// One line is the whole of it. `REF: ${{ needs.build.outputs.image }}:latest` on the
-// re-smoke leaves the role held, the invocation untouched and the order sentence printing,
-// and pulls back the PREVIOUS release - which passes, because it was gated last time - while
-// the artefact this run pushed is never pulled back at all and the promotion then moves the
-// floating reference onto it. `VERSION: latest` on the resolver turns A11 into a comparison
-// of the compose reference's digest with its own, which cannot fail, and A11 is the only
-// enforcement A5 has on every release after the first (R6).
-//
-// So each name a role declares in `handsEnv` is HELD against a value produced outside the
-// step, and the step's value is compared WHOLE against it. Nothing is searched for inside
-// anything and no script is read: these are `env:` scalars, interpolated against the values
-// the planning logic produced, which is the mechanism this gate already uses one function
-// below. A declared name that resolves to no source reads CLOSED and reds by name, which is
-// what makes this the rule rather than the two spellings a review happened to find.
-//
-// AND THE OTHER SIDE OF THE COMPARISON IS ITSELF A QUESTION (S0046 F26). Holding every value
-// against the outputs of ONE planned release buys exactly one literal back: the one equal to
-// that sample. So each value the RUN produces is held against SEVERAL independently planned
-// runs and must equal what each of them produced - a literal equals one of them at most - and
-// the gate refuses its own anchor if those runs did not actually produce different values
-// (checkAnchorDistinguishesALiteral). A value read out of a committed file is anchored to that
-// file instead, which is stronger, and the output says which of the two each one is rather
-// than claiming a variation that did not happen.
-func (g *gate) checkHandedValues(wf *Workflow, roles *Roles, ps []*planned) {
-	if len(ps) < 2 {
-		g.bad("the values a role step hands its program are held against %d planned run(s). One is not an anchor: a literal equal to that run's own version passes it, and every later release then pushes, re-smokes, promotes or resolves whatever that literal names (S0046 F26). Plan at least two releases that differ.", len(ps))
-		return
-	}
-	hs := make([]handed, 0, len(ps))
-	for _, p := range ps {
-		h, err := g.handedValues(roles, p)
-		if err != nil {
-			g.bad("%v", err)
-			return
-		}
-		hs = append(hs, h)
-	}
-	if !g.checkAnchorDistinguishesALiteral(ps, hs) {
-		return
-	}
-
-	var held []string
-	for _, r := range releaseRoles {
-		if len(r.handsEnv) == 0 && len(r.handsInput) == 0 {
-			continue
-		}
-		s := roles.step(r.id)
-
-		// The step's own surface, decided once per planned run. `env:` and `with:` are both
-		// interpolated against the values THAT run's planning logic produced, so a value
-		// spelled as an expression moves with the run and a literal does not.
-		envs := make([]map[string]string, len(ps))
-		bail := false
-		for i, p := range ps {
-			jp, ok := p.jobs[s.JobID]
-			if !ok {
-				g.bad("%s holds the role `%s` (%s) and lives in job %q, which %s does not plan, so the values it is handed cannot be decided", s.Label(), r.id, r.what, s.JobID, p.shape.label)
-				bail = true
-				break
-			}
-			env, err := stepEnv(wf, wf.Jobs[s.JobID], s, jp.ctx)
-			if err != nil {
-				g.bad("cannot decide the environment %s runs with: %v", s.Label(), err)
-				bail = true
-				break
-			}
-			envs[i] = env
-		}
-		if bail {
-			continue
-		}
-		for _, name := range sortedEnvNames(r.handsEnv) {
-			if line, ok := g.holdAcrossRuns(ps, hs, s, r, name, "env", r.handsEnv[name], func(i int) (string, bool, error) {
-				v, present := envs[i][name]
-				return v, present, nil
-			}); ok {
-				held = append(held, line)
-			}
-		}
-		for _, name := range sortedInputNames(r.handsInput) {
-			if line, ok := g.holdAcrossRuns(ps, hs, s, r, name, "with", r.handsInput[name], func(i int) (string, bool, error) {
-				v, err := interpolatedInput(wf, wf.Jobs[s.JobID], s, ps[i].jobs[s.JobID].ctx, name)
-				if err != nil {
-					return "", false, err
-				}
-				return v, true, nil
-			}); ok {
-				held = append(held, line)
-			}
-		}
-	}
-	if len(held) > 0 {
-		g.note("every value a role step HANDS its program is the value the run produced, compared whole against EACH of %d independently planned runs (so a literal, which equals one value, cannot satisfy it):\n      %s",
-			len(ps), strings.Join(held, "\n      "))
-	}
-}
-
-// holdAcrossRuns compares one declared name against what every planned run produced for it.
-// It reports at most one failure per name - the same defect seen from three runs is one
-// defect - and returns the line the green note prints when the name holds.
-func (g *gate) holdAcrossRuns(ps []*planned, hs []handed, s Step, r role, name, where string, spec envSpec, valueIn func(i int) (string, bool, error)) (string, bool) {
-	_, from, ok := hs[0].expected(spec.holds)
-	if !ok {
-		g.bad("%s holds the role `%s` (%s) and declares `%s` in its %s, and this gate holds that value against NOTHING.\nA name whose VALUE nobody compares is the hole this check exists to refuse: the role holds, the invocation is untouched, and the step does the right thing to the wrong object. Give `%s` a source in that role's declaration, or stop declaring it",
-			s.Label(), r.id, r.what, name, where, name)
-		return "", false
-	}
-	var values []string
-	for i := range ps {
-		w, _, _ := hs[i].expected(spec.holds)
-		got, present, err := valueIn(i)
-		if err != nil {
-			g.bad("%s holds the role `%s` (%s), whose act is performed on `%s`, and this gate cannot read it: %v", s.Label(), r.id, r.what, name, err)
-			return "", false
-		}
-		if !present {
-			g.bad("%s holds the role `%s` (%s), whose program reads `%s` - and nothing sets it, at any of the three levels.\nIt should be %s: %s. A role step handed nothing is a release step that fails in the middle of a release, or worse, one whose program falls back to a default nobody chose.",
-				s.Label(), r.id, r.what, name, from, w)
-			return "", false
-		}
-		if got != w {
-			g.bad("%s holds the role `%s` (%s) and is handed `%s: %s`, which is not %s.\nexpected: %s\nhanded:   %s\non %s\nCompared WHOLE against EACH of %d independently planned runs, because the difference between the two is the difference between grading the artefact this run produced and grading some other one - and against ONE run a literal equal to that run's own value passes (S0046 F22, F23, F26). What each run produced:\n%s",
-				s.Label(), r.id, r.what, name, got, from, w, got, ps[i].shape.label, len(ps), indent(strings.Join(expectedTable(ps, hs, spec.holds), "\n")))
-			return "", false
-		}
-		values = appendDistinct(values, got)
-	}
-	// Say which of the two anchors this one has, per name. A single value beside a name whose
-	// anchor is a committed file is the right answer; the same thing beside a name the run
-	// produces would be the collapsed anchor F26 was about, and the reader should not have to
-	// tell them apart by eye.
-	how := "it moved with every planned run"
-	if a, ok := anchorOf[spec.holds]; ok && a.kind == anchorInAFile {
-		how = "anchored in " + a.file
-	}
-	return fmt.Sprintf("%s `%s` = %s (%s; %s)", s.Label(), name, strings.Join(values, " | "), from, how), true
-}
-
-func expectedTable(ps []*planned, hs []handed, e envHeld) []string {
-	var out []string
-	for i := range ps {
-		v, _, _ := hs[i].expected(e)
-		out = append(out, fmt.Sprintf("%-40s %s", ps[i].shape.label, v))
-	}
-	return out
-}
-
-func appendDistinct(in []string, v string) []string {
-	for _, x := range in {
-		if x == v {
-			return in
-		}
-	}
-	return append(in, v)
-}
-
-// checkAnchorDistinguishesALiteral grades THIS GATE'S OWN anchor, and it is the part S0046
-// F26 was about. Every comparison above is only as good as the value on its right-hand side:
-// hold a name against the outputs of one planned release and a literal equal to that release's
-// own version is accepted as "the value the planning logic produced", which is the F22 harm at
-// the one spelling the sample makes invisible.
-//
-// So a value the RUN produces must actually DIFFER across the planned runs. If it does not,
-// the comparison has silently collapsed back to one sample and nothing else in this file would
-// notice - so it reds here, by name, rather than reporting a green run over an anchor that
-// cannot fail. A value read out of a committed file is constant by construction and says so.
-func (g *gate) checkAnchorDistinguishesALiteral(ps []*planned, hs []handed) bool {
-	ok := true
-	var varying, pinned []string
-	for _, e := range heldSources() {
-		a, declared := anchorOf[e]
-		_, from, known := hs[0].expected(e)
-		if !known {
-			g.bad("a role declares a value this gate cannot produce at all, so the comparison would be against the empty string. Every source a role names has to be answered by handed.expected.")
-			ok = false
-			continue
-		}
-		if !declared {
-			g.bad("this gate holds a role step's value against %s and has NOT declared where that value comes from.\nAn undeclared anchor reads CLOSED, because the two cases are graded differently: a value the run produces has to differ across the planned runs (or a literal equal to the one sample passes - S0046 F26), and a value read out of a committed file is constant by construction and names the file. Add it to anchorOf.", from)
-			ok = false
-			continue
-		}
-		var distinct []string
-		for i := range ps {
-			v, _, _ := hs[i].expected(e)
-			distinct = appendDistinct(distinct, v)
-		}
-		switch a.kind {
-		case anchorInTheRun:
-			if len(distinct) < 2 {
-				g.bad("the anchor for %s is DEGENERATE: all %d planned runs produced the same value (%q), so a literal equal to it would be accepted as the value the planning logic produced.\nThat is exactly S0046 F26: the check reads as a comparison and is a coincidence. Plan runs that differ in this value, or declare it in anchorOf as read from a committed file and name the file.\n%s",
-					from, len(ps), distinct[0], indent(strings.Join(expectedTable(ps, hs, e), "\n")))
-				ok = false
-				continue
-			}
-			varying = append(varying, fmt.Sprintf("%s = %s", from, strings.Join(distinct, " | ")))
-		case anchorInAFile:
-			pinned = append(pinned, fmt.Sprintf("%s = %s, from %s - derived from that committed file, so it is the same in every planned run by construction and a literal here reds the moment the file moves", from, distinct[0], a.file))
-		}
-	}
-	if !ok {
-		return false
-	}
-	g.note("the values a role step is held against are anchored, and the anchor can tell a literal from an expression:\n      it MOVED with each of the %d planned runs, so no literal equals it in all of them -\n      %s\n      it is READ FROM A COMMITTED FILE, so there is no sample to coincide with -\n      %s",
-		len(ps), strings.Join(varying, "\n      "), strings.Join(pinned, "\n      "))
-	return true
-}
-
-// handed is the set of values a role step's `env:` may be held against. Every one is
-// produced OUTSIDE any role step - by the planning logic this gate executed, by this
-// module's own path, by the event shape being planned, or by the example deployment - which
-// is what makes the comparison mean something. A value a step spells for itself is a value
-// nothing constrains.
-type handed struct {
-	image    string
-	version  string
-	gated    string
-	floating string
-	event    string
-	refName  string
-	repo     string
-}
-
-func (g *gate) handedValues(roles *Roles, p *planned) (handed, error) {
-	plan := roles.step("plan")
-	jp, ok := p.jobs[plan.JobID]
-	if !ok {
-		return handed{}, fmt.Errorf("%s is in job %q, which %s does not plan, so nothing produced the values every other role step is handed", plan.Label(), plan.JobID, p.shape.label)
-	}
-	image, version := jp.outs["image"], jp.outs["version"]
-	if image == "" || version == "" {
-		return handed{}, fmt.Errorf("on %s the planning logic produced no `image` and/or `version` output (it produced %s).\nEvery reference this release pushes, re-smokes, promotes and resolves is built from those two values, so without them there is nothing to hold a role step's `env:` against - and an unheld value is how a re-smoke ends up grading the PREVIOUS release. %s must write both to $GITHUB_OUTPUT",
-			p.shape.label, outputsOf(p), plan.Label())
-	}
-	// The example deployment is the anchor for the floating tag: the promotion declares
-	// which reference it moves, and the only reference worth moving is the one a user pulls.
-	composeRef, err := composeImageRef(g.path(composeFile))
-	if err != nil {
-		return handed{}, err
-	}
-	tag, ok := refTag(composeRef)
-	if !ok {
-		return handed{}, fmt.Errorf("the example deployment %s names %q, which carries no tag, so the floating reference a release moves is held against nothing", composeFile, composeRef)
-	}
-	return handed{
-		image:    image,
-		version:  version,
-		gated:    image + ":" + version,
-		floating: tag,
-		event:    p.shape.event,
-		refName:  p.shape.refName,
-		repo:     p.shape.repo,
-	}, nil
-}
-
-// expected answers what a declared name must carry, and where that value came from. An
-// envHeld with no case here is the zero value or one nobody wired up: it reads CLOSED.
-func (h handed) expected(e envHeld) (value, from string, ok bool) {
-	switch e {
-	case heldPlannedImage:
-		return h.image, "the image reference the planning logic produced", true
-	case heldPlannedVersion:
-		return h.version, "the version the planning logic produced", true
-	case heldGatedRef:
-		return h.gated, "the reference this run pushes and gates, from the planning logic's own image and version", true
-	case heldFloatingTag:
-		return h.floating, "the tag " + composeFile + " names, which is the reference a user actually pulls", true
-	case heldEventName:
-		return h.event, "the event this run is planned for", true
-	case heldRefName:
-		return h.refName, "the ref this run is planned for", true
-	case heldRepository:
-		return h.repo, "this module's own repository, derived from " + goModFile, true
-	}
-	return "", "", false
 }
 
 // refTag splits an image reference's tag off. The LAST colon, because a registry may carry a
@@ -638,7 +332,7 @@ func (g *gate) checkWorkflowKeys(wf *Workflow) {
 // plan walks the jobs in `needs:` order, decides which run for this event shape, and
 // executes the planning step of each that does. The values that run produces are what every
 // guard downstream is decided against - the workflow's own logic, not a restatement of it.
-func (g *gate) plan(r *Runner, wf *Workflow, roles *Roles, sh shape) (*planned, error) {
+func (g *gate) plan(r *Runner, wf *Workflow, roles *Roles, repo string, sh shape) (*planned, error) {
 	order, err := topoJobs(wf)
 	if err != nil {
 		return nil, err
@@ -650,7 +344,7 @@ func (g *gate) plan(r *Runner, wf *Workflow, roles *Roles, sh shape) (*planned, 
 	for _, id := range order {
 		job := wf.Jobs[id]
 		ctx := evalCtx{success: true, vars: map[string]any{
-			"github": githubCtx(sh),
+			"github": githubCtx(repo, sh),
 			"env":    mergeEnv(wf.Env, job.Env),
 			"steps":  map[string]any{},
 			"needs":  needs,
@@ -738,13 +432,13 @@ func (g *gate) plan(r *Runner, wf *Workflow, roles *Roles, sh shape) (*planned, 
 	return res, nil
 }
 
-func githubCtx(sh shape) map[string]any {
-	owner, _, _ := strings.Cut(sh.repo, "/")
+func githubCtx(repo string, sh shape) map[string]any {
+	owner, _, _ := strings.Cut(repo, "/")
 	return map[string]any{
 		"event_name":       sh.event,
 		"ref_name":         sh.refName,
 		"ref":              refFor(sh),
-		"repository":       sh.repo,
+		"repository":       repo,
 		"repository_owner": owner,
 		"sha":              fakeSHA,
 		"actor":            "release-shape-gate",
@@ -1075,7 +769,7 @@ func (g *gate) checkNothingPublishesAfterAFailure(wf *Workflow, p *planned) {
 // --- the pre-release invariant -----------------------------------------------------------
 
 func (g *gate) checkPreReleaseDoesNotPromote(r *Runner, wf *Workflow, roles *Roles, repo string) {
-	pre, err := g.plan(r, wf, roles, shape{"a pre-release tag push (" + samplePreTag + ")", "push", samplePreTag, repo})
+	pre, err := g.plan(r, wf, roles, repo, shape{"a pre-release tag push (" + samplePreTag + ")", "push", samplePreTag})
 	if err != nil {
 		g.bad("cannot plan a pre-release tag: %v", err)
 		return
@@ -1099,7 +793,7 @@ func (g *gate) checkPreReleaseDoesNotPromote(r *Runner, wf *Workflow, roles *Rol
 // --- A4, A10 ------------------------------------------------------------------------------
 
 func (g *gate) checkMajorVersionZero(r *Runner, wf *Workflow, roles *Roles, repo string) {
-	major, err := g.plan(r, wf, roles, shape{"a tag whose major version is not zero (" + sampleMajorTag + ")", "push", sampleMajorTag, repo})
+	major, err := g.plan(r, wf, roles, repo, shape{"a tag whose major version is not zero (" + sampleMajorTag + ")", "push", sampleMajorTag})
 	if err != nil {
 		g.bad("cannot plan %s: %v", sampleMajorTag, err)
 		return
@@ -1242,9 +936,9 @@ func (g *gate) checkComposeReferenceAgreement(wf *Workflow, roles *Roles, p *pla
 		g.bad("%s does not declare VERSION in its `env:`, so which version the floating reference is moved onto is unknown to this gate.", promote.Label())
 		return
 	}
-	// checkHandedValues holds this step's IMAGE and VERSION whole against the values the
-	// planning logic produced, so `gated` here is that run's own reference and not a second
-	// notion of it read out of the same file.
+	// checkHandedValues (handed.go) has already required this step's IMAGE and VERSION to BE
+	// the planning logic's own outputs, traced through the `needs:` graph, so `gated` here is
+	// this run's own reference and not a second notion of it read out of the same file.
 	gated := image + ":" + version
 	push := roles.step("push-version")
 	pushed, err := interpolatedInput(wf, wf.Jobs[push.JobID], push, p.jobs[push.JobID].ctx, "tags")

@@ -233,17 +233,20 @@ the PREVIOUS artefact and promotes `:latest` onto one nothing gated; `VERSION: l
 its digest comparison a tautology. A declared name held against NOTHING reds by name, which is what makes
 that a rule rather than two spellings.
 
-**A COMPARISON AGAINST ONE PLANNED RUN IS A COINCIDENCE.** Held against a single planned release, that rule
+**AND IT IS NOT COMPARED WITH A VALUE, IT HAS TO BE ONE.** Held against a single planned release, that rule
 bought back exactly one literal - the one equal to the gate's own sample - and the sample is `v0.1.0`, the
 version actually published and the string a maintainer copies out of a green run's log. `REF:
 ghcr.io/nschatz/holdfast:v0.1.0` passed it, and every later release would then re-smoke the July artefact
-while `:latest` moved onto one nothing pulled back. So a value the RUN produces is held against SEVERAL
-independently planned runs - two real releases at different versions and the dry run - and compared whole
-against each; a literal equals one of them at most. The gate grades its OWN anchor too and reds if those
-runs did not produce different values, because a collapsed anchor is invisible everywhere else. The values
-anchored in a committed FILE instead (`IMAGE` and the repository, from `go.mod`; `FLOATING_TAG`, from
-`docker-compose.yml`) are constant by construction, and the output names the file rather than claiming a
-variation that did not happen.
+while `:latest` moved onto one nothing pulled back. Widening the comparison to two samples only moves the
+coincidence: it is still deciding whether a value is right by looking at the value, which is the shape that
+lost eight times over on the other half of this gate. So a role step's object must BE the planning logic's
+own output. The value is an EXPRESSION naming it, traced back through the `needs:` graph to the step holding
+the `plan` role, and EVERY literal reds - as does any expression the trace cannot follow (`env.`, `inputs.`,
+a function call, a job this one does not `needs:`, an output the producing job never declares). No sample is
+in the question, so no sample can be copied into it. The gate follows the graph rather than matching text:
+the same output reached through a different job output passes, and so does a respelling. `FLOATING_TAG` is
+the one exception, because it is the one value a release DECLARES rather than derives: it is a literal on
+purpose and is held against the tag `docker-compose.yml` names, and an expression there reds.
 
 The order comes from `needs:` and declaration order; two jobs with no path between them are CONCURRENT and the
 gate refuses to order them. An ACT, for the runbook cross-check, is likewise every step in the job that holds

@@ -32,7 +32,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=121
+declared=126
 pass=0; failed=0
 
 repo="$work/repo"
@@ -860,13 +860,22 @@ expect 1 "a promotion onto a version this run never gated is caught" \
 reset
 
 # --- 49g. THE OTHER DIRECTION, or every case above would be satisfied by a gate that refuses
-#          any change at all. What is compared is the VALUE, not the expression that produced
-#          it: a differently spelled expression that yields the same reference still holds the
-#          role. (And it stays honest under a repository rename, because the image half is
-#          re-derived from go.mod on every run - spell it wrongly and 49e is what happens.)
-in_step "smoke test the PUSHED image" 's|^          REF: .*|          REF: ghcr.io/nschatz/holdfast:${{ needs.build.outputs.version }}|'
-changed "$wf" "the re-smoke's reference respelt to the same value"
-expect 0 "a respelt expression that hands over the SAME reference still holds the role"
+#          any change at all. What is decided is the SOURCE the expression names, not the text
+#          it is written in: quoting the scalar and closing up the braces changes every
+#          character the old text matchers would have looked at and names the same two outputs.
+in_step "smoke test the PUSHED image" 's|^          REF: .*|          REF: "${{needs.build.outputs.image}}:${{  needs.build.outputs.version  }}"|'
+changed "$wf" "the re-smoke's reference respelt around the same references"
+expect 0 "a respelt expression naming the SAME planning outputs still holds the role"
+reset
+
+# --- 49g2. And the stronger half of that direction: the reference reaches the planning logic
+#           through a DIFFERENT job output. The gate follows the `needs:` graph rather than
+#           matching a spelling, so a second output carrying the same plan output is accepted -
+#           which is what stops this rule being one more catalogue of permitted strings.
+replace_line '^      image: \$\{\{ steps.plan.outputs.image \}\}$' '      image: ${{ steps.plan.outputs.image }}\n      alias: ${{ steps.plan.outputs.image }}'
+in_step "smoke test the PUSHED image" 's|^          REF: .*|          REF: ${{ needs.build.outputs.alias }}:${{ needs.build.outputs.version }}|'
+changed "$wf" "the re-smoke reaching the same plan output through another job output"
+expect 0 "a reference that reaches the same planning output through a different job output still holds the role"
 reset
 
 # --- 49h. And nothing handed at all. A role whose program reads a value that is set at none
@@ -879,39 +888,40 @@ expect 1 "a role step handed nothing at all is caught, naming the value and what
 reset
 
 # =====================================================================================
-# AND THE OTHER SIDE OF THAT COMPARISON. Every case above was already caught when the values
-# were held against ONE planned release. These are the ones that were NOT: a literal equal to
-# that one sample passed as "the value the planning logic produced" (S0046 F26), and the
-# sample is `v0.1.0` - not an arbitrary string but the version this repository has actually
-# published, named throughout docs/release.md, CLAUDE.md and README.md, and the one a
-# maintainer copies out of a green run's log. Each is now held against several independently
-# planned runs, and each case below must red naming the run that disagreed.
+# THE SPELLING NO COMPARISON CAN SEE. Every case above is caught by a gate that compares the
+# value with the one a planned release produced. These are the ones that are NOT: a literal
+# equal to that sample. The sample was `v0.1.0` - not an arbitrary string but the version this
+# repository has actually published, named throughout docs/release.md, CLAUDE.md and
+# README.md, and the one a maintainer copies out of a green run's log (S0046 F26). They are
+# caught here because nothing is compared with a sample at all: a role step's object has to BE
+# the planning logic's own output, traced through the `needs:` graph, so EVERY literal reds -
+# the one that coincides with a sample no differently from the one that does not.
 # =====================================================================================
 
-# --- 49i. The re-smoke pinned to the literal v0.1.0. Every later release then pulls back and
-#          smokes the ALREADY-PUBLISHED v0.1.0 - which passes, it was gated in July - while
+# --- 49i. The re-smoke pinned to the literal v0.1.0. Every later release would then pull back
+#          and smoke the ALREADY-PUBLISHED v0.1.0 - which passes, it was gated in July - while
 #          the artefact that run pushed is never pulled back at all and `:latest` moves onto
-#          it. This is 49a's harm at the one spelling one planned release cannot see.
+#          it. This is 49a's harm at the one spelling a comparison cannot see.
 in_step "smoke test the PUSHED image" 's|^          REF: .*|          REF: ghcr.io/nschatz/holdfast:v0.1.0|'
-changed "$wf" "the re-smoke pinned to the sample tag"
-expect 1 "a re-smoke pinned to the literal the gate's own sample uses is caught by a SECOND planned release" \
-  "on a second version tag push"
+changed "$wf" "the re-smoke pinned to the published version"
+expect 1 "a re-smoke pinned to a literal equal to the published version is caught" \
+  "is not the reference this run pushes and gates"
 reset
 
-# --- 49j. The same coincidence on A11's resolution step: the compose reference's digest is
+# --- 49j. The same spelling on A11's resolution step: the compose reference's digest would be
 #          compared against v0.1.0 on every future release, so A11 - the only enforcement A5
-#          has after the first release - stops grading anything this run published.
+#          has after the first release - stops grading anything that run published.
 in_step "must resolve to the gated digest" 's|^          VERSION: .*|          VERSION: v0.1.0|'
-changed "$wf" "the resolution pinned to the sample tag"
-expect 1 "a resolution pinned to the literal the gate's own sample uses is caught" \
-  "on a second version tag push"
+changed "$wf" "the resolution pinned to the published version"
+expect 1 "a resolution pinned to a literal equal to the published version is caught" \
+  "is a LITERAL where"
 reset
 
 # --- 49k. And on the promotion, so `:latest` is retagged onto the previous release for ever.
 in_step "promote :latest" 's|^          VERSION: .*|          VERSION: v0.1.0|'
-changed "$wf" "the promotion pinned to the sample tag"
-expect 1 "a promotion pinned to the literal the gate's own sample uses is caught" \
-  "on a second version tag push"
+changed "$wf" "the promotion pinned to the published version"
+expect 1 "a promotion pinned to a literal equal to the published version is caught" \
+  "is a LITERAL where"
 reset
 
 # --- 49l. The PUSH, whose object is an action input rather than an `env:` scalar. Pinned, a
@@ -919,9 +929,9 @@ reset
 #          version scheme rests on, is explicit that a released version's contents must never
 #          be modified.
 in_step "push the multi-arch image" 's|^          tags: .*|          tags: ghcr.io/nschatz/holdfast:v0.1.0|'
-changed "$wf" "the push pinned to the sample tag"
-expect 1 "a version-tag push pinned to the literal the gate's own sample uses is caught" \
-  "on a second version tag push"
+changed "$wf" "the push pinned to the published version"
+expect 1 "a version-tag push pinned to a literal equal to the published version is caught" \
+  "is not the reference this run pushes and gates"
 reset
 
 # --- 49m. All four at once, which is what a maintainer copying a green run's log would
@@ -931,17 +941,50 @@ in_step "push the multi-arch image" 's|^          tags: .*|          tags: ghcr.
 in_step "smoke test the PUSHED image" 's|^          REF: .*|          REF: ghcr.io/nschatz/holdfast:v0.1.0|'
 in_step "promote :latest" 's|^          VERSION: .*|          VERSION: v0.1.0|'
 in_step "must resolve to the gated digest" 's|^          VERSION: .*|          VERSION: v0.1.0|'
-changed "$wf" "a release pinned end to end to the sample tag"
-expect 1 "a release pinned end to end to the sample tag is caught, so a later tag cannot republish an already-released version" \
-  "on a second version tag push"
+changed "$wf" "a release pinned end to end to the published version"
+expect 1 "a release pinned end to end to the published version is caught, so a later tag cannot republish an already-released version" \
+  "is not the reference this run pushes and gates"
 reset
 
-# --- 49n. THE OTHER DIRECTION for the input half, or the four cases above would be satisfied
-#          by a gate that refuses any change to `tags:` at all. A different spelling that
-#          yields the SAME reference still holds the role.
-in_step "push the multi-arch image" 's|^          tags: .*|          tags: "${{ needs.build.outputs.image }}:${{ needs.build.outputs.version }}"|'
-changed "$wf" "the push's tags respelt to the same value"
-expect 0 "a respelt input that publishes the SAME reference still holds the role"
+# --- 49p. AN EXPRESSION THIS GATE CANNOT FOLLOW IS NOT A HARMLESS ONE. `env.` is in scope for
+#          a `with:` input and for an `env:` value, it names something set anywhere at all, and
+#          following it would mean reading whatever put it there. It reads CLOSED.
+in_step "must resolve to the gated digest" 's|^          VERSION: .*|          VERSION: ${{ env.GO_VERSION }}|'
+changed "$wf" "the resolution's version taken from an environment name"
+expect 1 "a reference this gate cannot trace back to the planning logic reads CLOSED" \
+  "CANNOT TRACE"
+reset
+
+# --- 49q. A reference to a job whose outputs this one does not receive. GitHub hands a job the
+#          outputs of the jobs it NEEDS and nothing else, so this is the empty string at
+#          release time - not an error, just an act performed on nothing.
+in_step "smoke test the PUSHED image" 's|^          REF: .*|          REF: ${{ needs.nobody.outputs.image }}:${{ needs.build.outputs.version }}|'
+changed "$wf" "the re-smoke reading a job that is not needed"
+expect 1 "a reference to a job this one does not need reads CLOSED" "CANNOT TRACE"
+reset
+
+# --- 49r. And an output the producing job does not declare, which is the same empty string
+#          reached the other way.
+in_step "smoke test the PUSHED image" 's|^          REF: .*|          REF: ${{ needs.build.outputs.image }}:${{ needs.build.outputs.nosuch }}|'
+changed "$wf" "the re-smoke reading an output that does not exist"
+expect 1 "a reference to an output the producing job does not declare reads CLOSED" "CANNOT TRACE"
+reset
+
+# --- 49s. THE FLOATING TAG IS THE ONE VALUE A RELEASE DECLARES RATHER THAN DERIVES, so it is
+#          the one literal this rule permits - and it is held against docker-compose.yml
+#          instead. An EXPRESSION there moves it somewhere the gate cannot follow.
+in_step "promote :latest" 's|^          FLOATING_TAG: .*|          FLOATING_TAG: ${{ needs.build.outputs.version }}|'
+changed "$wf" "the floating tag turned into an expression"
+expect 1 "a floating tag that is an expression rather than the declared literal is red" \
+  "which carries an expression"
+reset
+
+# --- 49n. THE OTHER DIRECTION for the input half, or the cases above would be satisfied by a
+#          gate that refuses any change to `tags:` at all. A different spelling naming the same
+#          two planning outputs still holds the role.
+in_step "push the multi-arch image" 's|^          tags: .*|          tags: "${{needs.build.outputs.image}}:${{ needs.build.outputs.version }}"|'
+changed "$wf" "the push's tags respelt around the same references"
+expect 0 "a respelt input naming the SAME planning outputs still holds the role"
 reset
 
 # --- 49o. And the input removed altogether. An act with no object is not that act.

@@ -467,13 +467,13 @@ the repository and fails if any defeat did not run.
 `scripts/resolve-compose-image.sh` are the bodies of three role steps, and the rule above -
 the gate does not decide what a `run:` step does - covers them too. The gate checks that each
 is in the repository and executable, that its step declares the role, and that every value its
-`env:` HANDS it is the one this run produced, compared whole: `IMAGE` and `VERSION` against
-the image and version the planning logic wrote to `$GITHUB_OUTPUT`, `REF` against
-`${IMAGE}:${VERSION}` - the reference this run pushed and gated - and `FLOATING_TAG` against
-the tag `docker-compose.yml` itself names, which is the reference a user actually pulls. The
-version-tag push is an action rather than a script and gets the same treatment on the one
-input that names its object: its `tags:` is held against `${IMAGE}:${VERSION}` too. It does
-not open the scripts, and it must not.
+`env:` HANDS it IS the one this run produced: `IMAGE` and `VERSION` have to name the image and
+version outputs the planning logic writes to `$GITHUB_OUTPUT`, `REF` has to be exactly those
+two with a `:` between them - the reference this run pushed and gated - and `FLOATING_TAG` is
+held against the tag `docker-compose.yml` itself names, which is the reference a user actually
+pulls. The version-tag push is an action rather than a script and gets the same treatment on
+the one input that names its object: its `tags:` has to be those same two outputs. It does not
+open the scripts, and it must not.
 
 That last part is not decoration, and it was missing until impl-gate ordinal 8 of S0046 asked
 for it. Naming what a value is FOR holds it to nothing: `REF: ${IMAGE}:latest` on the
@@ -485,25 +485,37 @@ and turns the check below into a comparison of the compose reference's digest wi
 which can never fail. A name a role declares and nothing compares now reds by name, the same
 way an unclassified field, key or action input does.
 
-**And a comparison is only as good as the value on its other side.** Those names were held
-against the outputs of ONE planned release, and that bought exactly one literal back: the one
-equal to the gate's own sample. The sample is `v0.1.0`, which is not an arbitrary string - it
-is the version this repository has actually published, it is named all over this file, and it
-is what a maintainer copies out of a green run's log. `REF: ghcr.io/nschatz/holdfast:v0.1.0`
-would then leave every assertion in the gate green while every later release pulled back and
-smoked the already-published v0.1.0, which passes because it was gated in July, and `:latest`
-moved onto an artefact nothing in that run had smoked. So each value the RUN produces is now
-held against SEVERAL independently planned runs - a real release, a second real release at a
-different version, and the dry run - and compared whole against each. A literal equals one
-value; it cannot equal three. The gate also grades its OWN anchor: if those runs did not
-actually produce different values for a name, it reds saying so, because an anchor that has
-quietly collapsed back to one sample is invisible in every other line it prints.
+**And a comparison is only as good as the value on its other side, so the values are not
+compared at all.** They were, at first: each name was held against the outputs of a planned
+release, which bought exactly one literal back - the one equal to that sample. The sample was
+`v0.1.0`, which is not an arbitrary string: it is the version this repository has actually
+published, it is named all over this file, and it is what a maintainer copies out of a green
+run's log. `REF: ghcr.io/nschatz/holdfast:v0.1.0` passed, and every later release would then
+have pulled back and smoked the already-published v0.1.0 - which passes, it was gated in July
+- while `:latest` moved onto an artefact nothing in that run had smoked. Widening the
+comparison to two samples, or three, only moves the coincidence; it is still deciding whether
+a value is right by looking at the value, which is the shape that lost eight times over on the
+other half of this gate.
 
-Two of the values are anchored differently and the output says which: `IMAGE` and the
-repository it is derived from come from `go.mod`, and `FLOATING_TAG` comes from
-`docker-compose.yml`. Those are constant across every planned run by construction - the
-committed file IS the anchor, and there is no sample for a literal to coincide with - so the
-gate names the file rather than claiming a variation that did not happen.
+**A role step's object has to BE the planning logic's own output, not equal one.** The `env:`
+scalar must be an EXPRESSION naming that output, and the gate traces the reference back through
+the `needs:` graph to the step holding the `plan` role: `${{ needs.build.outputs.version }}`
+resolves because the `build` job declares that output as `${{ steps.plan.outputs.version }}`.
+Any literal is refused. So is any expression the trace cannot follow - an `env.`, an `inputs.`,
+a `format(...)`, a reference to a job this one does not `needs:` (which GitHub hands over as
+the empty string), or an output the producing job never declares. There is no sample anywhere
+in the question, so there is nothing for a literal to coincide with, and what the refusal names
+is the step and the key rather than a spelling. It follows the graph rather than matching text,
+so the same reference reached through a different job output is accepted and a respelling of
+the same reference is accepted; that is the honest other direction, and `make
+release-shape-selftest` drives both.
+
+`FLOATING_TAG` is the one exception and the reason is written into it: the floating reference
+is the one value a release DECLARES rather than derives, so it is a literal on purpose, read
+here and by `scripts/release-promote.sh` instead of being spelled twice. It is held against the
+tag `docker-compose.yml` itself names - a committed file rather than a sample - and an
+expression there is refused, because an expression would move it somewhere the gate cannot
+follow. The gate's output says which of the two treatments each value got.
 
 So the gate's own output says only what it checked. It used to end a green run with "the same
 digest, not a rebuild" and with an order sentence describing "the re-smoke of the pulled
