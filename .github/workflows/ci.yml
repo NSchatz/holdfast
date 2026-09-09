@@ -65,28 +65,22 @@ jobs:
       # and so it fails loud rather than being skipped, which for a grader is a false
       # green. GitHub's runner images ship Chrome; this only locates it.
       #
-      # It does NOT trust `command -v`. On Ubuntu, /usr/bin/chromium is a snap shim that
-      # can sit for ever rather than fail when its confinement is unhappy, which is
-      # exactly what it did the first time this ran - so each candidate has to actually
-      # RENDER a page, under a timeout, before it is accepted.
+      # The resolution is scripts/find-browser.sh, and it is a SCRIPT because this repeated
+      # it: the `dashboard` job below carried a second, weaker copy that asked `command -v`
+      # and printed a version, so the two jobs measured different engines and the weaker
+      # answer was on the job that exists to make a missing browser fatal. One definition,
+      # run by both jobs, by the release workflow and by a human typing `make find-browser`.
+      #
+      # The resolved path is assigned BEFORE it is echoed, deliberately: `echo "X=$(cmd)"`
+      # exits 0 however cmd exited, so a failed resolution would write an empty pin and the
+      # step would go green - and an empty HOLDFAST_BROWSER is not a pin at all, it is the
+      # PATH search this step exists to replace.
       - name: browser for the rendered dashboard graders
         run: |
-          set -uo pipefail
-          probe="$(mktemp -d)"
-          for b in google-chrome google-chrome-stable chrome chromium chromium-browser; do
-            p="$(command -v "$b" 2>/dev/null || true)"
-            [ -n "$p" ] || continue
-            if HOME="$probe" timeout 60 "$p" --headless=new --disable-gpu --no-sandbox \
-                 --disable-dev-shm-usage --no-first-run --no-default-browser-check \
-                 --user-data-dir="$probe/profile" --dump-dom about:blank >/dev/null 2>&1; then
-              echo "HOLDFAST_BROWSER=$p" >> "$GITHUB_ENV"
-              echo "using $b: $p ($("$p" --version 2>/dev/null || echo 'version unknown'))"
-              exit 0
-            fi
-            echo "  $p found but did not render within 60s - trying the next candidate"
-          done
-          echo "::error::no browser on this runner could render a page - the dashboard graders need one" >&2
-          exit 1
+          set -euo pipefail
+          p="$(./scripts/find-browser.sh)"
+          [ -n "$p" ] || { echo "::error::the browser resolution produced no path"; exit 1; }
+          echo "HOLDFAST_BROWSER=$p" >> "$GITHUB_ENV"
 
       # THE gate. Invoked through the Makefile, and deliberately NOT re-listed as steps
       # here: the Makefile's `check:` target is the definition, so CI, the release workflow
@@ -158,15 +152,22 @@ jobs:
 
       # Named and proven present BEFORE the gate runs, so "the browser was missing" is a
       # sentence in the log rather than a mystery inside a test binary.
+      #
+      # PROVEN, which this step used to only claim. It asked `command -v` and printed a
+      # `--version`, which every candidate answers - including the one that then never
+      # paints - and it exported nothing, so the graders were left to search for themselves
+      # and found the runner's /usr/bin/chromium. Two of them spent 90 seconds each waiting
+      # on it, eight minutes into every run, while the identical graders were green in
+      # `build` above, because `build` had pinned an engine it had watched render. The
+      # resolution is one script now and it PINS what it proved, so both jobs measure the
+      # same engine and the log says which.
       - name: the runtimes the dashboard suites require
         run: |
           set -euo pipefail
           node --version
-          for b in chromium chromium-browser google-chrome chrome; do
-            if command -v "$b" >/dev/null 2>&1; then "$b" --version; exit 0; fi
-          done
-          echo "::error::no browser engine on PATH; the rendered graders cannot run and must not be skipped"
-          exit 1
+          p="$(./scripts/find-browser.sh)"
+          [ -n "$p" ] || { echo "::error::the browser resolution produced no path"; exit 1; }
+          echo "HOLDFAST_BROWSER=$p" >> "$GITHUB_ENV"
 
       # The graders' runner, from the committed lockfile. `npm ci` REFUSES a lockfile that
       # disagrees with the manifest, which is what makes this a pin rather than a request.
