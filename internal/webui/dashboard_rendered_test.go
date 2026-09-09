@@ -61,6 +61,78 @@ func collapseSpace(s string) string { return strings.Join(strings.Fields(s), " "
 // and are not relaxed here: no --dump-dom and no --virtual-time-budget, each of which
 // cost this repository a CI run.
 
+// WHY THESE GRADERS RETURNED DIFFERENT VERDICTS ON IDENTICAL BYTES, AND WHAT NOW STOPS
+// THEM (S0069).
+//
+// The symptom was run 34236997921: this suite went red on main, the rerun of the same
+// commit went green, and nothing in either log said which of them was right. A grader
+// that decides the same bytes two ways is not measuring the page, it is measuring the
+// machine - and this one is the operator's only rendered check on a queue and history
+// surface belonging to a tool that DELETES the source file after a transcode it judged
+// faithful. So the causes are named here, with the mechanism and the repair, because the
+// next reader has this file and does not have the session that found them.
+//
+// Both causes were reproduced deliberately before anything was changed. Neither was
+// found by staring at the code, and neither is a guess about what run 34236997921 hit:
+// this file's own graders can now reproduce each on demand, which is the point.
+//
+// CAUSE 1 - THE ROW-AGE WINDOWS WERE A WALL CLOCK.
+// Mechanism: the page renders a queue row's in-state age as its own clock now, less that
+// row's transition timestamp, recomputed on a one-second ticker (src/js/20-derive.js,
+// serverNow / elapsedText). The page's clock is anchored to the snapshot's `now` field
+// when the snapshot renders, so a rendered age is (snapNow - updated_at) PLUS every
+// second of real time between that render and the reading being taken. B9 graded those
+// ages against fixed windows - 3600..3720, 90..150, 45..105 - so the verdict was "these
+// ages are right if this machine got from render to reading in under sixty seconds".
+// Reproduced by holding the reading back 120 seconds: rows stamped 90s and 45s before
+// the snapshot rendered as 209s and 164s, and two assertions flipped from pass to fail
+// on bytes that had not changed.
+// Repair: the windows are gone and the DERIVATION is graded instead. Each row publishes
+// the basis it derived from (the elapsed cell's own data-since), and the reading must be
+// consistent with ONE page clock - there must exist a single instant at which all three
+// rendered ages are what the page would show, each against its own basis. That pins
+// every row to its own timestamp exactly, at any latency, because delay moves the
+// instant and not the relationship between the rows. One anchor remains, and it is
+// bounded by what the render MEASURED rather than by a guess: the instant must lie
+// between the snapshot's own clock and that clock plus the time this render actually
+// took, which is what catches a page reading ages off the browser's clock instead of the
+// server's. TestRendered_TheAgeReadingFailsAgainstAMisderivedAge defeats both halves on
+// purpose.
+//
+// CAUSE 2 - TWO DEADLINES THAT COULD DISAGREE, AND THE TIGHTER ONE WAS A GUESS.
+// Mechanism: the probe page polled for the page to reach the state a grader measures
+// under a fixed 15-second in-page budget, while the Go side held a 90-second deadline.
+// The dashboard fills its tables from an SSE snapshot that lands after `load`, so on a
+// loaded runner, a cold browser profile or a busy scheduler the snapshot can arrive
+// after 15 seconds - whereupon the probe POSTED a not-ready verdict and mustRender
+// turned it into "the page never reached the state the grader measures", six times
+// sooner than the deadline the test itself was prepared to wait. Reproduced by holding
+// the snapshot back 45 seconds: that exact failure, with the page's own connection state
+// reported as "live", on an otherwise healthy page.
+// Repair: one budget. readinessBudget derives the in-page poll from the deadline the Go
+// side is holding (deadlineFor), so the two cannot disagree and the only page that fails
+// readiness is one no deadline here could have waited for. The ten arbitrary per-case
+// budgets that had accumulated beside it - 8s, 10s, 15s, 30s - are gone with it.
+// TestRendered_ASnapshotThatArrivesLateChangesNoVerdict holds it.
+//
+// WHAT WAS RULED OUT, so nobody re-runs the experiment. The ten DASH-9 properties
+// themselves - order, drawings shown, bucket text, spread text, bar proportion, spread
+// mark positions, colour carriers, the 3:1 contrast floor, off-origin fetches and
+// tooltips - were measured with the reading held back two minutes and returned
+// character-identical problem lists. They read geometry, computed style and text that a
+// settled layout does not change with time. The dbus noise the browser prints on every
+// run (the container has no session bus) is not a cause: it appears in passing and
+// failing runs alike and reaches no assertion.
+//
+// AND WHAT DOES NOT COUNT AS A REPAIR HERE. Not a wider window, not a retry until the
+// page looks acceptable, and not a deleted grader. A tolerance that swallows a mutation
+// removes the only rendered check this surface has, and unlike a flake it never reports
+// itself again. TestRendered_AMutatedDocumentStillFailsItsGraderAfterTheLongestDelay
+// serves a document mutated to defeat five named properties, waits out the longest delay
+// this work introduces, and requires all five graders to still fail; and no reading is
+// retried at all - the probe page posts every reading it takes and the test server, not
+// the page, counts them, so renderDashboard can refuse any count but one.
+
 // dashProbeJS is the measuring script. It runs in the PARENT page and reaches into the
 // same-origin iframe holding the real served document.
 //

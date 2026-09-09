@@ -671,7 +671,8 @@ func probeArgs(profile, url string) []string {
 //
 // It returns an error rather than failing the test, so the deadline itself is gradeable.
 func runProbe(bin string, ps *probeServer, deadline time.Duration, profile string) (raw []byte, browserLog string, err error) {
-	cmd := exec.Command(bin, probeArgs(profile, ps.url+"/probe")...)
+	page := ps.url + "/probe"
+	cmd := exec.Command(bin, probeArgs(profile, page)...)
 	var log bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &log, &log
 	// A profile-local HOME and no session bus to look for: the runner has neither.
@@ -701,7 +702,7 @@ func runProbe(bin string, ps *probeServer, deadline time.Duration, profile strin
 	case <-time.After(deadline):
 		stop()
 		return nil, log.String(), fmt.Errorf("the browser never posted a verdict for %s within %s\nbrowser output:\n%s",
-			ps.url, deadline, log.String())
+			page, deadline, log.String())
 	}
 }
 
@@ -949,9 +950,12 @@ func TestRendered_ForkBuildShowsItsOwnTreeAndNeverUpstream(t *testing.T) {
 // deadline that replaced it still bites.
 func TestRendered_ABrowserThatNeverAnswersFailsOnTheGradersOwnDeadline(t *testing.T) {
 	bin := chromium(t)
-	// A probe that is never ready: the browser loads the page and keeps retrying for far
-	// longer than the deadline this grader gives it.
-	const neverReady = `function verdict(doc, win) { return { ready: false }; }`
+	// A probe that is never ready: the browser loads the page and keeps polling for far
+	// longer than the deadline this grader gives it. The readiness budget is set
+	// explicitly rather than derived, because the point of the case is that the probe
+	// must NOT give up before the deadline being proved does.
+	const neverReady = `function probeReady(doc, win) { return false; }
+function verdict(doc, win) { return { ready: false }; }`
 	ps := serveDocumentWith(t, serveOpts{url: sourceoffer.Upstream, probe: neverReady, wait: 10 * time.Minute})
 
 	start := time.Now()
@@ -964,7 +968,11 @@ func TestRendered_ABrowserThatNeverAnswersFailsOnTheGradersOwnDeadline(t *testin
 	if elapsed > 60*time.Second {
 		t.Errorf("the grader waited %s on a browser that never answered; its deadline was 5s", elapsed)
 	}
-	for _, want := range []string{"never posted a verdict", "5s", "browser output"} {
+	// Three things a reader needs and cannot recover afterwards: WHICH page the browser
+	// was pointed at, WHAT deadline it was given, and what the browser itself said. The
+	// page URL is asserted as the real value rather than as a word, because a message
+	// that merely mentions a page is not a message that names this one.
+	for _, want := range []string{"never posted a verdict", ps.url + "/probe", "5s", "browser output"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the failure does not carry %q, so a reader cannot tell what happened: %v", want, err)
 		}

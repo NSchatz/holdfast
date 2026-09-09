@@ -183,6 +183,22 @@ jobs:
       - name: the dashboard's unit suite and rendered graders, in required mode
         run: make webui-check
 
+      # The rendered graders must AGREE WITH THEMSELVES. The step above asks whether they
+      # pass; this one runs them repeatedly against the one tree this job checked out and
+      # fails if two repetitions decided the same bytes differently. It is here because
+      # that is exactly how the defect it guards arrived: a grader whose verdict depended
+      # on how loaded the runner was broke main, and the rerun that passed made it look
+      # like nothing had happened. A rerun is not evidence when the thing being tested is
+      # whether reruns agree.
+      #
+      # Repetitions cannot prove determinism, only fail to disprove it. The criteria that
+      # remove the mechanism are graders inside the suite above - a reading held back for
+      # two minutes, a snapshot held back past any budget the harness carries - and this
+      # step is the cheap disconfirmation that runs beside them and catches a NEW clock
+      # dependence introduced by someone who has read none of that.
+      - name: the rendered graders must agree with themselves
+        run: make webui-repeat-check
+
       # The engine-only graders' own self-test, on top of the gate. `make webui-check` RUNS
       # them; this defeats each of the three questions that exist only at the engine - the
       # operating system's colour-scheme preference, the accessible name the engine
