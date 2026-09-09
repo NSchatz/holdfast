@@ -140,10 +140,19 @@ func (e FFmpegEncoder) Encode(ctx context.Context, in, out string, props *probe.
 // pipe cannot be opened at all, the -progress option is simply not passed and the encode
 // runs precisely as it did before this existed.
 func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, props *probe.VideoProps, sink ProgressSink) error {
-	prof := e.profile()
-	spec, ok := encoder.Lookup(prof.Encoder)
+	// THIS JOB's settings: the profile of the root the engine handed this encoder,
+	// overlaid with the first encode profile whose pattern matches the SOURCE path
+	// (TRANSCODE-PROFILES). It is a pure function of the configuration, that profile
+	// and the path, so the engine - which needs the same answer for the
+	// already-at-target-codec skip, the output container and the output-codec
+	// acceptance check - resolves it independently from the same three inputs and
+	// cannot disagree with what is built here. `in` is always the source: the encoder
+	// READS the source and WRITES the working file, wherever scratch_dir puts the
+	// latter.
+	ts := e.Cfg.TranscodeIn(e.profile(), in)
+	spec, ok := encoder.Lookup(ts.Encoder)
 	if !ok {
-		return fmt.Errorf("unknown encoder %q (known: %v)", prof.Encoder, encoder.Known())
+		return fmt.Errorf("unknown encoder %q (known: %v)", ts.Encoder, encoder.Known())
 	}
 	if e.Probe == nil {
 		return fmt.Errorf("FFmpegEncoder.Probe is nil (required to derive colour/pixel-format args from the source)")
@@ -156,8 +165,8 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 		props = e.Probe.VideoProps(ctx, in)
 	}
 
-	pixFmt := prof.PixelFormat
-	if prof.PixelFormatAuto() {
+	pixFmt := ts.PixelFormat
+	if ts.PixelFormatAuto() {
 		derived, ok := hdr.DerivePixFmt(props.PixFmt())
 		if !ok {
 			// The engine's pix_fmt guard runs before Encode and should already have
@@ -225,7 +234,7 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 	for _, i := range attachedPictureCopyIndexes(streams) {
 		args = append(args, "-c:v:"+strconv.Itoa(i), "copy")
 	}
-	args = append(args, buildArgs(spec, prof, pixFmt, colorArgs, x265Color)...)
+	args = append(args, buildArgs(spec, ts, pixFmt, colorArgs, x265Color)...)
 	args = append(args, "--", out)
 
 	if e.argvObserver != nil {
@@ -334,48 +343,123 @@ func closeProgressPipe(r, w *os.File) {
 //     ever running unless a real device is present; the arg shape is reasonable
 //     but not battle-tested.
 //   - hevc_amf: -rc cqp -qp_i <CRF> -qp_p <CRF>.
-func buildArgs(spec encoder.Spec, cfg config.Profile, pixFmt string, colorArgs []string, x265Color string) []string {
+//
+// A job whose effective settings carry a positive BitrateKbps takes the
+// TARGET-BITRATE shape instead, per family (see bitrateArgs). The quality knob is
+// then not passed AT ALL — no -crf, -cq, -global_quality, -qp or -qp_i/-qp_p, and
+// no -rc cqp — because a rate control and a quality target are two different
+// instructions and passing both leaves which one wins to the encoder's own
+// precedence rules rather than to the operator. Everything else is unchanged: the
+// pixel format, the colour tags, -fps_mode passthrough and the libx265 preset and
+// x265Color block are the same on both paths, so a bitrate-targeted encode carries
+// exactly the same source fidelity as a quality-targeted one.
+func buildArgs(spec encoder.Spec, ts config.Transcode, pixFmt string, colorArgs []string, x265Color string) []string {
 	args := []string{"-pix_fmt", pixFmt}
 	args = append(args, colorArgs...)
 	args = append(args, "-fps_mode", "passthrough") // a VFR source is not forced to CFR
 
+	if ts.TargetsBitrate() {
+		return append(args, bitrateArgs(spec, ts, x265Color)...)
+	}
+
 	switch spec.Key {
 	case "cpu":
 		args = append(args,
-			"-preset", cfg.Preset,
-			"-crf", strconv.Itoa(cfg.CRF),
+			"-preset", ts.Preset,
+			"-crf", strconv.Itoa(ts.CRF),
 			"-x265-params", "log-level=error"+x265Color,
 		)
 	case "svtav1":
 		args = append(args,
-			"-preset", strconv.Itoa(svtav1Preset(cfg.Preset)),
-			"-crf", strconv.Itoa(cfg.CRF),
+			"-preset", strconv.Itoa(svtav1Preset(ts.Preset)),
+			"-crf", strconv.Itoa(ts.CRF),
 		)
 	case "nvenc", "av1_nvenc":
 		args = append(args,
 			"-rc", "vbr",
-			"-cq", strconv.Itoa(cfg.CRF),
+			"-cq", strconv.Itoa(ts.CRF),
 			"-b:v", "0",
 			"-preset", "p5",
 		)
 	case "qsv":
-		args = append(args, "-global_quality", strconv.Itoa(cfg.CRF))
+		args = append(args, "-global_quality", strconv.Itoa(ts.CRF))
 	case "vaapi":
 		// -vaapi_device itself is emitted by Encode (a global option that must
 		// precede -i — see Encode's doc comment on the vaapi special case); here we
 		// only add the encode-side args that come after -c:v.
 		args = append(args,
 			"-vf", "format=nv12,hwupload",
-			"-qp", strconv.Itoa(cfg.CRF),
+			"-qp", strconv.Itoa(ts.CRF),
 		)
 	case "amf":
 		args = append(args,
 			"-rc", "cqp",
-			"-qp_i", strconv.Itoa(cfg.CRF),
-			"-qp_p", strconv.Itoa(cfg.CRF),
+			"-qp_i", strconv.Itoa(ts.CRF),
+			"-qp_p", strconv.Itoa(ts.CRF),
 		)
 	}
 	return args
+}
+
+// bitrateArgs is the TARGET-BITRATE half of buildArgs: everything after the
+// universal pixel-format/colour/fps block, for a job whose effective settings carry
+// a positive BitrateKbps.
+//
+// `-b:v <n>k` is the target in every family — it is ffmpeg's own codec-independent
+// bitrate option — and what varies is only the rate-control MODE each family needs
+// told, because several of them default to a constant-quality mode that would
+// otherwise ignore the target:
+//
+//   - libx265 (cpu): -b:v alone selects libx265's ABR mode. -preset and the
+//     -x265-params HDR10 block stay exactly as they are on the quality path.
+//   - libsvtav1 (svtav1): -b:v alone selects SVT-AV1's VBR mode; the numeric
+//     preset stays.
+//   - hevc_nvenc/av1_nvenc: -rc vbr with a real -b:v. The quality path passes
+//     `-cq <CRF> -b:v 0`, which is NVENC's constant-quality spelling; here the
+//     -cq is dropped entirely and the 0 replaced by the target.
+//   - hevc_qsv: -b:v alone. -global_quality is what selects ICQ and is dropped.
+//   - hevc_vaapi: the hwupload filter chain is unchanged; -qp is dropped and the
+//     target passed. Untestable in this environment (no VAAPI device), exactly as
+//     the quality path is.
+//   - hevc_amf: -rc vbr_peak with the target, in place of -rc cqp and the two QP
+//     values. AMF's cqp is a fixed-quantiser mode that ignores -b:v outright.
+func bitrateArgs(spec encoder.Spec, ts config.Transcode, x265Color string) []string {
+	rate := strconv.Itoa(ts.BitrateKbps) + "k"
+	switch spec.Key {
+	case "cpu":
+		return []string{
+			"-preset", ts.Preset,
+			"-b:v", rate,
+			"-x265-params", "log-level=error" + x265Color,
+		}
+	case "svtav1":
+		return []string{
+			"-preset", strconv.Itoa(svtav1Preset(ts.Preset)),
+			"-b:v", rate,
+		}
+	case "nvenc", "av1_nvenc":
+		return []string{
+			"-rc", "vbr",
+			"-b:v", rate,
+			"-preset", "p5",
+		}
+	case "qsv":
+		return []string{"-b:v", rate}
+	case "vaapi":
+		return []string{
+			"-vf", "format=nv12,hwupload",
+			"-b:v", rate,
+		}
+	case "amf":
+		return []string{
+			"-rc", "vbr_peak",
+			"-b:v", rate,
+		}
+	}
+	// A Spec this build ships but this function does not name would silently lose
+	// the operator's target, so it gets the codec-independent option and nothing
+	// else rather than the quality knob it did not ask for.
+	return []string{"-b:v", rate}
 }
 
 // svtav1Preset maps the config Preset word to SVT-AV1's numeric 0-13 preset scale
