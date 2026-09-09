@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -72,9 +74,11 @@ func collapseSpace(s string) string { return strings.Join(strings.Fields(s), " "
 // faithful. So the causes are named here, with the mechanism and the repair, because the
 // next reader has this file and does not have the session that found them.
 //
-// Both causes were reproduced deliberately before anything was changed. Neither was
-// found by staring at the code, and neither is a guess about what run 34236997921 hit:
-// this file's own graders can now reproduce each on demand, which is the point.
+// Every cause below was reproduced deliberately, on the unchanged tree at pin
+// f525a9e6, before anything was changed. None was found by staring at the code and none
+// is a guess about what run 34236997921 hit: each is stated with the perturbation that
+// flipped a verdict, and the first two this file's own graders can now reproduce on
+// demand, which is the point.
 //
 // CAUSE 1 - THE ROW-AGE WINDOWS WERE A WALL CLOCK.
 // Mechanism: the page renders a queue row's in-state age as its own clock now, less that
@@ -114,6 +118,35 @@ func collapseSpace(s string) string { return strings.Join(strings.Fields(s), " "
 // readiness is one no deadline here could have waited for. The ten arbitrary per-case
 // budgets that had accumulated beside it - 8s, 10s, 15s, 30s - are gone with it.
 // TestRendered_ASnapshotThatArrivesLateChangesNoVerdict holds it.
+//
+// CAUSE 3 - A SWEEP COULD BE SATISFIED BY A PAGE THAT NEVER RENDERED.
+// Mechanism: dashProblems and the two cap-total graders report an unrendered page as a
+// problem, which is right for a grader and wrong for a MUTATION SWEEP that asks only
+// "did this grader report something?". A page that had not rendered therefore satisfied
+// those loops, so on a slow machine they went green having looked at no mutation at all.
+// This is the worst of the four, because it does not lose the run - it loses the
+// coverage, silently, and a grader that has stopped deciding anything reports "ok" for
+// ever. Reproduced by making the page take 12 seconds to render, over those sweeps' own
+// 8-second budget, with one extra mutation added that hides NOTHING: with no delay the
+// sweep correctly FAILS on it, and with the delay the sweep PASSES and reports the
+// harmless mutation as caught.
+// Repair: a sweep that asks whether a subject was hidden must first have SEEN the page.
+// Both loops now require the render, and the one hiding mutation that legitimately
+// prevents it - the aggregate host removed from the markup, where there is nothing for
+// the page to fill - is named as the exception rather than covered by the same silence.
+//
+// CAUSE 4 - THE FIXTURE SERVER'S PORT WAS DECIDED BY WHAT ELSE WAS ON THE MACHINE.
+// Mechanism: the Playwright project bound a fixed 127.0.0.1:8931 and correctly refuses to
+// ADOPT a server it did not start, because an adopted server is a binary built from a
+// tree nobody can name. With a fixed port those two rules combine badly: one killed run
+// leaves a fixture server listening and every later run on that host then fails at
+// start-up until somebody finds the process by hand, and two worktrees grading in
+// parallel - this repository's normal operating mode - collide with each other. Either
+// way the verdict is about the machine rather than the page, which is this whole spec.
+// Repair: the port is one nothing was listening on when the run started, chosen once and
+// published into the environment (the config module is re-evaluated in every worker). The
+// no-adoption rule is not weakened, it is made unreachable: there is no listener to adopt,
+// and the fixture server is still compiled and started from THIS tree.
 //
 // WHAT WAS RULED OUT, so nobody re-runs the experiment. The ten DASH-9 properties
 // themselves - order, drawings shown, bucket text, spread text, bar proportion, spread
@@ -173,6 +206,16 @@ function isReady(doc) {
 // the reading below happens exactly once, after this has answered yes. probePage counts
 // the readings and reports the count, so that separation is measured and not merely meant.
 function probeReady(doc) { return isReady(doc); }
+
+// probeWhy is what the harness PRINTS for a poll that answered "not yet". Waiting is not
+// a retry of a reading, but it is still the thing a loaded machine does to this suite, so
+// a reading that had to wait says what it was waiting for rather than passing
+// indistinguishably from one that did not.
+function probeWhy(doc) {
+  return "the page reports its connection as \"" + connText(doc) + "\" and " +
+    (rendered(doc) ? "has rendered a snapshot" : "has not rendered a snapshot yet") +
+    "; this grader is waiting for mode \"" + MODE + "\"";
+}
 
 function textOf(el) { return el ? el.textContent.trim() : ""; }
 function cellText(tr, sel) { const td = tr.querySelector(sel); return td ? td.textContent.trim() : ""; }
@@ -746,7 +789,10 @@ type dashVerdict struct {
 	// measurement for this render. This harness retries READINESS and never a reading,
 	// so it is 1, and TestRendered_TheHarnessTakesExactlyOneReadingPerGrader holds it
 	// there for every world the graders are run against.
-	Readings  int    `json:"readings"`
+	Readings int `json:"readings"`
+	// And what the harness had to WAIT for before taking it, which is reported rather
+	// than swallowed (see probeWait).
+	probeWait
 	Origin    string `json:"origin"`
 	ConnText  string `json:"connText"`
 	ConnClass string `json:"connClass"`
@@ -885,6 +931,10 @@ func renderDashboard(t *testing.T, bin string, o dashOpts) (dashVerdict, string)
 			"this harness retries READINESS and never a reading, so any other count means a measurement was taken more "+
 			"than once and a pass could be a later attempt's\nbrowser output:\n%s", max(seen, v.Readings), v.Readings, seen, log)
 	}
+	// Waiting is not a retry of a reading, but it is what a loaded machine does to this
+	// suite, so it is never silent: every recorded readiness attempt is printed with the
+	// grader, its number and the page's own reason.
+	reportWait(t, v.probeWait)
 	return v, log
 }
 
@@ -2885,6 +2935,16 @@ func TestRendered_AFailedStreamKeepsTheDrawingsAndTheirText(t *testing.T) {
 
 // --- B23: every grader above FAILS against the mutation that would defeat it ---------
 
+// graderNames is the enumeration itself, for a failure that has to show which properties
+// this suite still holds.
+func graderNames(gs []dash9Grader) []string {
+	out := make([]string, 0, len(gs))
+	for _, g := range gs {
+		out = append(out, g.name)
+	}
+	return out
+}
+
 // A grader that cannot fail is not evidence, and this repository has already lost a whole
 // spec to exactly that. Each row below serves the REAL document with one deliberate change
 // that defeats one named property, and requires that property's grader to report it.
@@ -2901,7 +2961,7 @@ func TestRendered_EveryDASH9GraderFailsAgainstItsOwnMutation(t *testing.T) {
 	}
 
 	plain := servedDocument(t)
-	for _, c := range []struct {
+	cases := []struct {
 		name    string
 		mutate  func([]byte) []byte
 		defeats string
@@ -2961,7 +3021,33 @@ func TestRendered_EveryDASH9GraderFailsAgainstItsOwnMutation(t *testing.T) {
 			scriptMutation(`var a=document.querySelectorAll("#aggregates .agg *");` +
 				`for (var i=0;i<a.length;i++) a[i].setAttribute("title","hover to read me");`),
 			"no figure is readable only by pointing at it"},
-	} {
+	}
+
+	// AC6: the ten named properties are all still HERE, and each is still proved to bite
+	// by something that defeats it. A grader whose counterexample went missing is one this
+	// suite quietly stopped deciding anything about, and a grader deleted outright is the
+	// cheapest way of all to make a flaky check agree with itself - so both are refused by
+	// name rather than left to be noticed.
+	graders := dash9Graders()
+	if len(graders) < 10 {
+		t.Fatalf("dash9Graders() enumerates %d properties; DASH-9 is TEN, and no work on this harness may shrink that set:\n%v",
+			len(graders), graderNames(graders))
+	}
+	defeated := map[string]int{}
+	for _, c := range cases {
+		defeated[c.defeats]++
+	}
+	for _, g := range graders {
+		if defeated[g.name] == 0 {
+			t.Errorf("no mutation defeats the grader %q, so nothing here proves it can fail", g.name)
+		}
+		delete(defeated, g.name)
+	}
+	for name := range defeated {
+		t.Errorf("a mutation names the grader %q, which dash9Graders() does not enumerate", name)
+	}
+
+	for _, c := range cases {
 		if string(c.mutate([]byte(plain))) == plain {
 			t.Fatalf("the mutation %q did not change the served document - the assertion below would be vacuous", c.name)
 		}
@@ -3189,6 +3275,63 @@ func TestRendered_TheHarnessTakesExactlyOneReadingPerGrader(t *testing.T) {
 			seen, log)
 	} else {
 		t.Logf("a reading retried once is counted as %d readings, which renderDashboard refuses", ps.postsSeen())
+	}
+}
+
+// AC4's first branch, answered even though this harness takes the second one.
+//
+// No READING is retried here - the case above holds that on every render, and the test
+// server counts it. But readiness is POLLED, and a poll that answers "not yet" is the one
+// thing a loaded machine reliably produces in this suite. So it is bounded by a maximum
+// stated in the code (readinessBudget, derived from the deadline the test owns) and it is
+// never silent: this case forces a first attempt to fail by holding the snapshot back on
+// an open stream, and then reads the report back out of a CHILD run's real output, because
+// "the output names it" is a claim about what a reader sees rather than about a string
+// this process happened to build.
+func TestRendered_AReadingThatHadToWaitSaysSoInTheOutput(t *testing.T) {
+	const subject = "TestRendered_AReadingThatHadToWaitSaysSoInTheOutput"
+	const held = 3 * time.Second
+
+	if os.Getenv("HOLDFAST_WEBUI_WAIT_CHILD") == "1" {
+		bin := chromium(t)
+		v, log := mustRender(t, bin, dashOpts{snapshot: fixtureSnapshot(), snapshotDelay: held})
+		if v.AttemptCount == 0 {
+			t.Fatalf("the snapshot was held back %s and the readiness poll still never had to wait, so this case decides "+
+				"nothing\nbrowser output:\n%s", held, log)
+		}
+		// Bounded, by a maximum stated in the code and derived from the test's own
+		// deadline - never by the browser's idea of how long is reasonable.
+		budget := readinessBudget(deadlineFor(held))
+		for _, a := range v.Attempts {
+			if a.AtMs > float64(budget/time.Millisecond) {
+				t.Errorf("readiness attempt %d was made %.0fms in, past the stated budget of %s", a.N, a.AtMs, budget)
+			}
+		}
+		return
+	}
+
+	bin, wd := childTestBinary(t)
+	cmd := exec.Command(bin, "-test.run", "^"+subject+"$", "-test.v")
+	cmd.Dir = wd
+	cmd.Env = append(os.Environ(), "HOLDFAST_WEBUI_WAIT_CHILD=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("the child run of %s failed: %v\n%s", subject, err, out)
+	}
+	text := string(out)
+	for _, want := range []string{
+		subject,                           // the grader
+		"readiness attempt 1",             // the attempt number
+		"has not rendered a snapshot yet", // the reason that attempt gave
+		"one reading was then taken",      // and that a reading followed it, once
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("a reading that had to wait produced output carrying no %q, so waiting is invisible in it:\n%s", want, text)
+		}
+	}
+	// The report must not appear when nothing waited, or it says nothing when it does.
+	if strings.Count(text, "readiness attempt 1") > 1 {
+		t.Logf("more than one render in the child had to wait, which is fine; the report is per render")
 	}
 }
 

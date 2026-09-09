@@ -521,8 +521,11 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   failed one. And no reading is graded against a wall clock: a figure the page derives from time is
   graded on the DERIVATION, against the basis the page publishes beside it, so holding the reading
   back changes the figure and never the verdict. `make webui-repeat-check` is the repeated
-  disconfirmation that runs beside those, and the diagnosis of record - both causes, how each was
-  reproduced, what replaced it - is at the head of `internal/webui/dashboard_rendered_test.go`. Do
+  disconfirmation that runs beside those, and the diagnosis of record - every cause found, how each
+  was reproduced, what replaced it - is at the head of `internal/webui/dashboard_rendered_test.go`.
+  It covers two more that are the same defect wearing different clothes: a mutation sweep that a page
+  which never rendered could satisfy (so it went green having looked at nothing), and a fixture
+  server on a fixed port, which made a run's fate depend on what else was listening on the host. Do
   not buy agreement back with a wider window, a retry, or a deleted grader: a tolerance that swallows
   a mutation removes this surface's only rendered check and, unlike a flake, never reports itself
   again. Full reference: `docs/webui.md`.

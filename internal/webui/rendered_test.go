@@ -143,6 +143,22 @@ window.addEventListener("load", function () {
   const ready = (typeof probeReady === "function") ? probeReady : function () { return true; };
   let readings = 0;
   let delayed = false;
+  // WAITING IS NOT FREE OF INTEREST, so it is recorded. Every readiness poll that
+  // answered "not yet" is kept with its number, when it was made and the reason the page
+  // gave, and the Go side prints them: a reading that had to wait then says so in the
+  // output instead of passing indistinguishably from one that did not. The RECORD is
+  // capped and the COUNT is not - a page that waits a minute polls it a thousand times
+  // and gives the same reason each time.
+  const ATTEMPT_CAP = 8;
+  const attempts = [];
+  let attemptCount = 0;
+  const startedAt = Date.now();
+  function note(why) {
+    attemptCount++;
+    if (attempts.length < ATTEMPT_CAP) {
+      attempts.push({ n: attemptCount, atMs: Date.now() - startedAt, why: String(why) });
+    }
+  }
   // EVERY reading is posted, and the TEST's own server takes the first one as the
   // measurement and counts the rest. Two refusals, and they are separate.
   //
@@ -155,7 +171,13 @@ window.addEventListener("load", function () {
   // the page does not control, which is the same reason the verdict is POSTed rather than
   // read out of the browser's exit.
   function post(v) {
-    if (v && typeof v === "object") v.readings = readings;
+    if (v && typeof v === "object") {
+      v.readings = readings;
+      v.attempts = attempts;
+      v.attemptCount = attemptCount;
+      v.readyMs = Date.now() - startedAt;
+      v.delayMs = DELAY;
+    }
     fetch("/verdict", { method: "POST", body: JSON.stringify(v) });
   }
   // take is the ONE reading. It is reached once, from the end of the readiness poll, and
@@ -171,7 +193,13 @@ window.addEventListener("load", function () {
     let ok;
     try { ok = ready(f.contentDocument, f.contentWindow); }
     catch (e) { post({ error: String(e) }); return; }
-    if (!ok && Date.now() < deadline) { setTimeout(attempt, 50); return; }
+    if (!ok) {
+      let why = "the page is not ready";
+      try { if (typeof probeWhy === "function") why = probeWhy(f.contentDocument); }
+      catch (e) { why = String(e); }
+      note(why);
+      if (Date.now() < deadline) { setTimeout(attempt, 50); return; }
+    }
     if (ok && DELAY > 0 && !delayed) { delayed = true; setTimeout(attempt, DELAY); return; }
     take();
   }
@@ -179,13 +207,63 @@ window.addEventListener("load", function () {
 });
 </script></body></html>`
 
+// probeAttempt is ONE readiness poll that answered "not yet": its number, when it was
+// made, and the reason the page gave for not being ready.
+type probeAttempt struct {
+	N      int     `json:"n"`
+	AtMs   float64 `json:"atMs"`
+	Reason string  `json:"why"`
+}
+
+// probeWait is how a reading came to be taken when it was: the readiness polls that had
+// to wait, how many there were in total, when the page became ready, and the delay the
+// case asked to pass afterwards.
+//
+// A reading is never RETRIED here - the page computes one measurement and the test server
+// counts them - but it can be WAITED FOR, and waiting is exactly what a loaded machine
+// imposes. So it is reported rather than swallowed: reportWait prints every recorded
+// attempt with the grader, the attempt number and the page's own reason, so a pass that
+// needed the harness to wait is distinguishable in the output from one that did not.
+type probeWait struct {
+	// Attempts is the first few (the page caps the record); AttemptCount is all of them.
+	Attempts     []probeAttempt `json:"attempts"`
+	AttemptCount int            `json:"attemptCount"`
+	ReadyMs      float64        `json:"readyMs"`
+	DelayMs      float64        `json:"delayMs"`
+}
+
+// reportWait prints what a reading had to wait for, naming the GRADER (the test's own
+// name), each recorded ATTEMPT NUMBER and the REASON the page gave. It returns the same
+// lines it logged, so a case can assert on exactly what a reader sees.
+func reportWait(t *testing.T, w probeWait) []string {
+	t.Helper()
+	if w.AttemptCount == 0 {
+		return nil
+	}
+	lines := make([]string, 0, len(w.Attempts)+1)
+	for _, a := range w.Attempts {
+		lines = append(lines, fmt.Sprintf("%s: readiness attempt %d at %.0fms was not ready: %s",
+			t.Name(), a.N, a.AtMs, a.Reason))
+	}
+	lines = append(lines, fmt.Sprintf(
+		"%s: the page became ready after %d readiness attempt(s); one reading was then taken, %.0fms into the run and %.0fms after the declared delay",
+		t.Name(), w.AttemptCount, w.ReadyMs, w.DelayMs))
+	for _, line := range lines {
+		t.Log(line)
+	}
+	return lines
+}
+
 type renderVerdict struct {
 	Found bool   `json:"found"`
 	Error string `json:"error"`
 	// Readings is how many times the probe page computed a measurement. It is the
 	// harness's own count, not an assertion about it, and it is 1 for every render this
 	// package takes.
-	Readings              int      `json:"readings"`
+	Readings int `json:"readings"`
+	// And how long it had to wait before taking that one reading, which is reported
+	// rather than swallowed: see probeWait.
+	probeWait
 	Text                  string   `json:"text"`
 	LinkText              string   `json:"linkText"`
 	LinkHref              string   `json:"linkHref"`
@@ -738,6 +816,7 @@ func renderAndReadLog(t *testing.T, bin string, ps *probeServer) (renderVerdict,
 		t.Fatalf("this render took %d readings (the probe counted %d, the test server received %d), want exactly 1\nbrowser output:\n%s",
 			max(seen, v.Readings), v.Readings, seen, log)
 	}
+	reportWait(t, v.probeWait)
 	return v, log
 }
 

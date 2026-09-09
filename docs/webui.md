@@ -195,8 +195,11 @@ never about the machine, and this suite has been on the other side of that: run
 either log saying which was right. Two mechanisms turned elapsed time into a verdict - row
 ages graded against fixed windows that tolerated sixty seconds of wall clock, and an
 in-page readiness budget of fifteen seconds sitting under a ninety-second deadline - and
-both are gone rather than widened. The diagnosis of record, with each mechanism, how it
-was reproduced and what replaced it, is at the head of
+both are gone rather than widened. Two more made a verdict depend on the machine without
+depending on a clock: a mutation sweep an unrendered page could satisfy, which went green
+having looked at nothing, and a fixture server on a fixed port, which made a run's fate a
+question about what else was listening on the host. The diagnosis of record, with each
+mechanism, how it was reproduced and what replaced it, is at the head of
 `internal/webui/dashboard_rendered_test.go`. What holds it now: a grader that holds the
 reading back two full minutes and requires every DASH-9 property to return the verdict it
 returns with none, a grader that holds the SNAPSHOT back past any budget this harness
