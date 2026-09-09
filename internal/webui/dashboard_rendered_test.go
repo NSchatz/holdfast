@@ -3339,50 +3339,105 @@ func TestRendered_AMutatedDocumentStillFailsItsGraderAfterTheLongestDelay(t *tes
 	bin := chromium(t)
 	t.Parallel() // see TestRendered_EveryDASH9GraderIgnoresHowLongTheMeasurementTook
 
-	// One document defeating five of the ten at once, so the full delay is paid once
-	// rather than per grader. Each rule is one of the counterexamples the per-grader
-	// matrix already runs; put together they leave the page failing five named properties.
-	const mutation = "every drawing hidden, every bucket label and count stripped, every spread value stripped, " +
-		"every status word hidden beside its dot, and the history painted above the current run"
-	mutate := cssMutation(`.agg .fig { display:none; }
+	// TWO documents, between them defeating all ten properties, so the full delay is paid
+	// twice over rather than ten times - and the two are rendered ALONGSIDE each other, so
+	// it is paid once in wall clock. Every rule and every statement here is one of the
+	// counterexamples the per-grader matrix already runs; grouped, each document leaves the
+	// page failing five named properties at once.
+	//
+	// Splitting them at five and five is not arbitrary. The two halves of the second
+	// document that touch a mark's paint would otherwise fight over the same declaration -
+	// a fill collapsed onto the surface behind it and a fill pointed off-origin are the same
+	// property with two different values - so the contrast counterexample is carried by the
+	// status dot's background and the off-origin one by the bar's fill.
+	docs := []struct {
+		mutation string
+		mutate   func([]byte) []byte
+		defeats  []string
+	}{
+		{
+			mutation: "every drawing hidden, every bucket label and count stripped, every spread value stripped, " +
+				"every status word hidden beside its dot, and the history painted above the current run",
+			mutate: cssMutation(`.agg .fig { display:none; }
 .buckets .bk, .buckets .bc { display:none; }
 .spreadkeys { display:none; }
 td.st .stlabel { display:none; }
-main { display:flex; flex-direction:column-reverse; }`)
-
-	plain := servedDocument(t)
-	if string(mutate([]byte(plain))) == plain {
-		t.Fatalf("the mutation %q did not change the served document - the assertion below would be vacuous", mutation)
+main { display:flex; flex-direction:column-reverse; }`),
+			defeats: []string{
+				"every drawing reached the screen",
+				"every bucket figure states its labels and counts as text",
+				"every spread figure states its minimum, mean and maximum as text",
+				"every colour carrier is paired with text or shape",
+				"the current run is presented before the history",
+			},
+		},
+		{
+			mutation: "every bar forced to one length, every spread tick moved onto one position, the status dots " +
+				"collapsed onto the page behind them, the bars' paint pointed off-origin, and every figure value put behind a tooltip",
+			mutate: func(b []byte) []byte {
+				css := cssMutation(`.agg .fig.bar .mark { width:100% !important; }
+td.st .dot { background:var(--bg) !important; }
+.agg .fig .mark { fill:url(https://example.invalid/paint.svg#g); }`)
+				return scriptMutation(`var t=document.querySelectorAll(".fig.spread .tick");` +
+					`for (var i=0;i<t.length;i++){t[i].setAttribute("x1","500");t[i].setAttribute("x2","500");}` +
+					`var a=document.querySelectorAll("#aggregates .agg *");` +
+					`for (var j=0;j<a.length;j++) a[j].setAttribute("title","hover to read me");`)(css(b))
+			},
+			defeats: []string{
+				"every bar is in proportion to its own count",
+				"the marks of a spread are told apart by position",
+				"every graphical element clears 3:1 against what is behind it",
+				"nothing is fetched from another origin",
+				"no figure is readable only by pointing at it",
+			},
+		},
 	}
 
-	v, log := mustRender(t, bin, dashOpts{snapshot: mixedSnapshot(), mutate: mutate, delay: latencyCase})
+	// Between them the two documents must reach every property this suite holds. A grader
+	// left out here is one whose bite is proved at no delay and asked about at none.
+	held := map[string]bool{}
+	for _, d := range docs {
+		for _, name := range d.defeats {
+			held[name] = true
+		}
+	}
+	for _, g := range dash9Graders() {
+		if !held[g.name] {
+			t.Errorf("no document here defeats the grader %q, so its bite is never asked about under a delay", g.name)
+		}
+	}
 
-	for _, want := range []string{
-		"every drawing reached the screen",
-		"every bucket figure states its labels and counts as text",
-		"every spread figure states its minimum, mean and maximum as text",
-		"every colour carrier is paired with text or shape",
-		"the current run is presented before the history",
-	} {
-		found := false
-		for _, g := range dash9Graders() {
-			if g.name != want {
-				continue
-			}
-			found = true
-			probs := g.probe(v)
-			if probs == nil {
-				t.Errorf("after a %s delay the grader %q PASSED a document mutated to defeat it (%s): a tolerance that swallows a "+
-					"mutation has removed the only rendered check this page has\nbrowser output:\n%s", latencyCase, g.name, mutation, log)
-				continue
-			}
-			// The failure has to say what was done to the page. A report that names only
-			// the property leaves the next reader to rediscover the counterexample.
-			t.Logf("mutation %q still defeats %q after %s -> %s", mutation, g.name, latencyCase, probs[0])
+	plain := servedDocument(t)
+	for _, d := range docs {
+		if string(d.mutate([]byte(plain))) == plain {
+			t.Fatalf("the mutation %q did not change the served document - the assertion below would be vacuous", d.mutation)
 		}
-		if !found {
-			t.Fatalf("the case names a grader that does not exist: %q", want)
-		}
+		t.Run(d.mutation, func(t *testing.T) {
+			t.Parallel()
+			v, log := mustRender(t, bin, dashOpts{snapshot: mixedSnapshot(), mutate: d.mutate, delay: latencyCase})
+			for _, want := range d.defeats {
+				found := false
+				for _, g := range dash9Graders() {
+					if g.name != want {
+						continue
+					}
+					found = true
+					probs := g.probe(v)
+					if probs == nil {
+						t.Errorf("after a %s delay the grader %q PASSED a document mutated to defeat it (%s): a tolerance that swallows a "+
+							"mutation has removed the only rendered check this page has\nbrowser output:\n%s",
+							latencyCase, g.name, d.mutation, log)
+						continue
+					}
+					// The failure has to say what was done to the page. A report that names
+					// only the property leaves the next reader to rediscover the counterexample.
+					t.Logf("mutation %q still defeats %q after %s -> %s", d.mutation, g.name, latencyCase, probs[0])
+				}
+				if !found {
+					t.Fatalf("the case names a grader that does not exist: %q", want)
+				}
+			}
+		})
 	}
 }
 
