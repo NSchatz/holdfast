@@ -190,7 +190,7 @@ type Outcome struct {
 	// to its encoder as a success is.
 	Encoder string
 
-	// Profile is the name of the transcode_profiles entry that supplied this job's
+	// Profile is the name of the encode_profiles entry that supplied this job's
 	// settings, and "" when the top-level settings did — which is every row a
 	// configuration without profiles can produce.
 	//

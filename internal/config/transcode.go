@@ -10,7 +10,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/encoder"
 )
 
-// EncodeProfile is one entry of transcode_profiles: a match over the source plus
+// EncodeProfile is one entry of encode_profiles: a match over the source plus
 // overrides for the transcode settings.
 //
 // It is NOT the per-library Profile in profile.go, and the two names are kept apart
@@ -150,8 +150,8 @@ func (c *Config) BaseTranscode(prof Profile) Transcode {
 // root's own settings rather than to settings nobody wrote.
 func (c *Config) TranscodeIn(prof Profile, sourcePath string) Transcode {
 	t := c.BaseTranscode(prof)
-	for i := range c.TranscodeProfiles {
-		p := &c.TranscodeProfiles[i]
+	for i := range c.EncodeProfiles {
+		p := &c.EncodeProfiles[i]
 		ok, err := MatchSource(p.Match, sourcePath)
 		if err != nil || !ok {
 			continue
@@ -290,34 +290,34 @@ func validateEncoderKey(key string) error {
 // offending key and value in every refusal. A profile that reached here has already
 // passed the unknown-key refusal in Load.
 func (c *Config) validateProfiles() error {
-	seen := make(map[string]int, len(c.TranscodeProfiles))
-	for i := range c.TranscodeProfiles {
-		p := &c.TranscodeProfiles[i]
+	seen := make(map[string]int, len(c.EncodeProfiles))
+	for i := range c.EncodeProfiles {
+		p := &c.EncodeProfiles[i]
 		name := strings.TrimSpace(p.Name)
 		if name == "" {
-			return fmt.Errorf("transcode_profiles[%d] has an empty name: a profile's name is what its jobs' ledger rows record, so it must be set", i)
+			return fmt.Errorf("encode_profiles[%d] has an empty name: a profile's name is what its jobs' ledger rows record, so it must be set", i)
 		}
 		if j, dup := seen[name]; dup {
-			return fmt.Errorf("transcode_profiles[%d] name %q duplicates transcode_profiles[%d]: two profiles with one name make a ledger row ambiguous about which ran", i, name, j)
+			return fmt.Errorf("encode_profiles[%d] name %q duplicates encode_profiles[%d]: two profiles with one name make a ledger row ambiguous about which ran", i, name, j)
 		}
 		seen[name] = i
 
 		if err := ValidateMatch(p.Match); err != nil {
-			return fmt.Errorf("transcode_profiles[%d] (%s) match %q cannot be parsed: %w", i, name, p.Match, err)
+			return fmt.Errorf("encode_profiles[%d] (%s) match %q cannot be parsed: %w", i, name, p.Match, err)
 		}
 		if p.Encoder != nil {
 			if err := validateEncoderKey(*p.Encoder); err != nil {
-				return fmt.Errorf("transcode_profiles[%d] (%s) %w", i, name, err)
+				return fmt.Errorf("encode_profiles[%d] (%s) %w", i, name, err)
 			}
 		}
 		if p.CRF != nil && (*p.CRF < 0 || *p.CRF > 51) {
-			return fmt.Errorf("transcode_profiles[%d] (%s) crf %d out of range (0-51)", i, name, *p.CRF)
+			return fmt.Errorf("encode_profiles[%d] (%s) crf %d out of range (0-51)", i, name, *p.CRF)
 		}
 		if p.ContainerExt != nil && strings.ContainsAny(*p.ContainerExt, "./\\") {
-			return fmt.Errorf("transcode_profiles[%d] (%s) container_ext %q must be a bare extension (no dot or slash)", i, name, *p.ContainerExt)
+			return fmt.Errorf("encode_profiles[%d] (%s) container_ext %q must be a bare extension (no dot or slash)", i, name, *p.ContainerExt)
 		}
 		if p.BitrateKbps != nil && *p.BitrateKbps < 0 {
-			return fmt.Errorf("transcode_profiles[%d] (%s) bitrate_kbps %d must be >= 0 (0 keeps the quality target)", i, name, *p.BitrateKbps)
+			return fmt.Errorf("encode_profiles[%d] (%s) bitrate_kbps %d must be >= 0 (0 keeps the quality target)", i, name, *p.BitrateKbps)
 		}
 	}
 	return nil
@@ -330,8 +330,8 @@ func (c *Config) bitrateInEffect() bool {
 	if c.BitrateKbps > 0 {
 		return true
 	}
-	for i := range c.TranscodeProfiles {
-		if b := c.TranscodeProfiles[i].BitrateKbps; b != nil && *b > 0 {
+	for i := range c.EncodeProfiles {
+		if b := c.EncodeProfiles[i].BitrateKbps; b != nil && *b > 0 {
 			return true
 		}
 	}

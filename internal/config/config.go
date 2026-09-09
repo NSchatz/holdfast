@@ -54,11 +54,11 @@ var knownKeys = map[string]bool{
 	"server_addr": true, "server_auth_token": true, "scan_interval_sec": true,
 	"metrics_enable": true, "notify_url": true, "run_window": true,
 	"max_load": true, "tautulli_url": true, "tautulli_api_key": true,
-	"bitrate_kbps": true, "transcode_profiles": true,
+	"bitrate_kbps": true, "encode_profiles": true,
 	"scratch_dir": true, "scratch_min_free_gb": true,
 }
 
-// profileKeys are the keys accepted inside one `transcode_profiles` entry. The
+// profileKeys are the keys accepted inside one `encode_profiles` entry. The
 // unknown-key refusal has to bite INSIDE a profile as well as at the top level:
 // `encodr: svtav1` nested in a profile is the same typo with the same consequence
 // (a silent fall back to the top-level encoder), and a check that only looked at
@@ -198,7 +198,7 @@ type Config struct {
 	// value (see requireWholeKbps), never a silently truncated bitrate; a negative
 	// value is refused by Validate.
 	BitrateKbps int `yaml:"bitrate_kbps"`
-	// TranscodeProfiles is an ORDERED list of named profiles, each with a match
+	// EncodeProfiles is an ORDERED list of named profiles, each with a match
 	// over the source and overrides for the transcode settings above. The FIRST
 	// profile whose match selects a source supplies that job's settings, overlaid
 	// on the top-level ones; a later matching profile has no effect on that job,
@@ -211,7 +211,7 @@ type Config struct {
 	// deliberately no per-profile VMAF threshold, undo window, retention or any
 	// other safety-gate knob: a profile must never be able to move a gate that
 	// decides whether a source is destroyed.
-	TranscodeProfiles []EncodeProfile `yaml:"transcode_profiles"`
+	EncodeProfiles []EncodeProfile `yaml:"encode_profiles"`
 	// ScratchDir is the directory the encoder's working file is written to. Empty
 	// - the DEFAULT, and what an absent key resolves to - writes it beside the
 	// source, which is this tool's original behaviour.
@@ -665,11 +665,11 @@ func Load(path string) (*Config, error) {
 		explicitTop[top] = true
 	}
 	// The unknown-key refusal, one level down. kf.Keys() flattens a list of maps to
-	// `transcode_profiles.0.encodr`, and the loop above deliberately only looks at
+	// `encode_profiles.0.encodr`, and the loop above deliberately only looks at
 	// the token before the first dot - so a typo INSIDE a profile passed the check
 	// that exists to catch typos. The raw list is walked here instead, before
 	// anything is merged or decoded.
-	if err := checkProfileKeys(kf.Get("transcode_profiles"), path); err != nil {
+	if err := checkProfileKeys(kf.Get("encode_profiles"), path); err != nil {
 		return nil, err
 	}
 	if err := k.Merge(kf); err != nil {
@@ -743,9 +743,9 @@ func Load(path string) (*Config, error) {
 	if err := requireWholeKbps(k.Get(scratchFloorKey), scratchFloorKey, "gibibytes", path); err != nil {
 		return nil, err
 	}
-	for i, raw := range profileMaps(kf.Get("transcode_profiles")) {
+	for i, raw := range profileMaps(kf.Get("encode_profiles")) {
 		if v, ok := raw["bitrate_kbps"]; ok {
-			key := fmt.Sprintf("transcode_profiles[%d].bitrate_kbps", i)
+			key := fmt.Sprintf("encode_profiles[%d].bitrate_kbps", i)
 			if err := requireWholeKbps(v, key, "kbps", path); err != nil {
 				return nil, err
 			}
@@ -797,7 +797,7 @@ const (
 	scratchFloorKey = "scratch_min_free_gb"
 )
 
-// profileMaps returns the raw `transcode_profiles` entries as they were AUTHORED,
+// profileMaps returns the raw `encode_profiles` entries as they were AUTHORED,
 // before the weakly-typed decoder has seen them. Anything that is not a list of
 // maps yields nothing here and is reported by the decoder instead, which is the
 // right division: this function exists to look at the values inside a well-shaped
@@ -825,7 +825,7 @@ func checkProfileKeys(raw any, path string) error {
 	for i, m := range profileMaps(raw) {
 		for key := range m {
 			if !profileKeys[key] {
-				return fmt.Errorf("unknown config key %q in transcode_profiles[%d] in %s (typo?): "+
+				return fmt.Errorf("unknown config key %q in encode_profiles[%d] in %s (typo?): "+
 					"a profile accepts name, match, encoder, crf, preset, pixel_format, container_ext, bitrate_kbps",
 					key, i, path)
 			}

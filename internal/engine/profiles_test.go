@@ -58,7 +58,7 @@ func TestProfiles_FirstMatchWinsAndAnUnmentionedSettingKeepsItsTopLevelValue(t *
 
 	ts := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
 		c.ContainerExt = "mkv" // top-level, mentioned by NEITHER profile
-		c.TranscodeProfiles = []config.EncodeProfile{
+		c.EncodeProfiles = []config.EncodeProfile{
 			{Name: "first", Match: "**/4K/**", Encoder: strp("svtav1"), Preset: strp("fast"), CRF: intp(30)},
 			{Name: "second", Match: "**/4K/**", Encoder: strp("cpu"), CRF: intp(10)},
 		}
@@ -98,7 +98,7 @@ func TestProfiles_NoMatchTranscodesUnderTheTopLevelSettings(t *testing.T) {
 	mkH264(t, ffmpeg, src, "8M")
 
 	ts := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
-		c.TranscodeProfiles = []config.EncodeProfile{
+		c.EncodeProfiles = []config.EncodeProfile{
 			{Name: "only-4k", Match: "**/4K/**", Encoder: strp("svtav1")},
 		}
 	})
@@ -152,7 +152,7 @@ func TestProfiles_AlreadyAtTheTopLevelCodecButTheProfileTargetsAnother_IsTransco
 
 		ts := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
 			c.MinVmaf = 90
-			c.TranscodeProfiles = []config.EncodeProfile{
+			c.EncodeProfiles = []config.EncodeProfile{
 				{Name: "to-av1", Match: "*.mkv", Encoder: strp("svtav1"), Preset: strp("fast"), CRF: intp(30)},
 			}
 		})
@@ -199,7 +199,7 @@ func TestProfiles_TheOutputCodecCheckIsDecidedAgainstTheJobsOwnTarget(t *testing
 		})
 
 		ts := run(t, ffmpeg, ffprobe, d, writesHevc, func(c *config.Config) {
-			c.TranscodeProfiles = []config.EncodeProfile{
+			c.EncodeProfiles = []config.EncodeProfile{
 				{Name: "to-av1", Match: "*.mkv", Encoder: strp("svtav1")},
 			}
 		})
@@ -239,7 +239,7 @@ func TestProfiles_TheOutputCodecCheckIsDecidedAgainstTheJobsOwnTarget(t *testing
 
 		ts := run(t, ffmpeg, ffprobe, d, writesHevc, func(c *config.Config) {
 			c.Encoder = "svtav1" // the RUN's target is av1
-			c.TranscodeProfiles = []config.EncodeProfile{
+			c.EncodeProfiles = []config.EncodeProfile{
 				{Name: "to-hevc", Match: "*.mkv", Encoder: strp("cpu")}, // the JOB's is hevc
 			}
 		})
@@ -266,7 +266,7 @@ func TestProfiles_ASkippedJobRecordsTheProfileThatDecidedIt(t *testing.T) {
 	mkAV1(t, ffmpeg, src, "40")
 
 	ts := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
-		c.TranscodeProfiles = []config.EncodeProfile{
+		c.EncodeProfiles = []config.EncodeProfile{
 			{Name: "to-av1", Match: "*.mkv", Encoder: strp("svtav1")},
 		}
 	})
