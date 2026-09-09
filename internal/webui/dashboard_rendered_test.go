@@ -1230,12 +1230,6 @@ func TestRendered_DashboardShowsQueueRowsHistoryRowsAndTheirFigures(t *testing.T
 
 var elapsedRe = regexp.MustCompile(`^(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?$`)
 
-func elapsedSeconds(t *testing.T, s string) int {
-	t.Helper()
-	secs, _ := elapsedSpan(t, s)
-	return secs
-}
-
 // elapsedSpan reads a rendered age and reports BOTH the seconds it states and the
 // granularity it states them at. The page drops the seconds field once an age passes an
 // hour ("1h 2m"), so a rendered age is not a number but an interval: the true age is
