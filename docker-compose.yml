@@ -69,8 +69,12 @@ services:
       # what `library_roots` says in config.yaml.
       - /srv/media:/media
 
-    # The control surface is HTTP. Publish it on LOOPBACK ONLY unless you have set an
-    # auth token and put it behind a reverse proxy with TLS. (config.yaml must say
+    # The control surface is HTTP, and its READ half carries no authentication of its
+    # own, so where this port is published is what decides who can reach it. LOOPBACK
+    # ONLY is the posture of THIS example deployment, not a property of the daemon: put
+    # holdfast behind a reverse proxy and that proxy's own authentication becomes the
+    # only barrier in front of the dashboard and the read API. Read the reverse-proxy
+    # posture in docs/docker.md before you give it a hostname. (config.yaml must say
     # `server_addr: 0.0.0.0:8080` for the container to accept the forwarded connection
     # at all — 127.0.0.1 inside a container namespace is not reachable from the host.)
     ports:
