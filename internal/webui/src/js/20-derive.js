@@ -153,6 +153,75 @@ function progressFigure(j) {
   return out;
 }
 
+// --- what a DRY RUN's recorded decision shows ----------------------------------
+//
+// A candidate row is the one row on this page with a source and no output: nothing has
+// encoded that file, so there is no output size, no saving and no ratio, and inventing one
+// would be the same overclaim as rendering an unmeasured VMAF as 0.0. What it does carry
+// is the two facts an operator sizing the job needs - what the source is IN, and how big
+// it is - and both must read as absent when they were never recorded.
+
+// codecText is the source codec a candidate row shows. Absent, null, empty, whitespace or
+// not a string at all is NOT RECORDED: the wire carries an explicit null when the codec
+// was never read, and a blank cell would leave a reader to decide for themselves whether
+// that meant "no codec" or "nobody looked".
+function codecText(v) {
+  return (typeof v === "string" && v.trim() !== "") ? v.trim() : NOT_RECORDED;
+}
+
+// sourceSizeText is the size of the file a candidate row describes. fmtBytes already
+// answers NOT_RECORDED for an absent, null, non-numeric, non-finite or negative value, so
+// this is the same rule under the name the cell reads it by.
+function sourceSizeText(j) {
+  return fmtBytes(j && j.source_bytes);
+}
+
+// candidateTotal is the total SOURCE BYTES the rendered candidates account for, with the
+// rows it had to leave out.
+//
+// It is a total of SOURCE bytes and nothing else. No projected saving, no projected output
+// size, no projected reclaim: nobody has encoded these files, so no honest number exists
+// for what they would give back, and a figure that guessed would be read as a measurement.
+//
+// null means THERE ARE NO CANDIDATE ROWS, and the page then shows no figure at all rather
+// than a zero - a total of 0 B beside an empty candidate list reads as "these files are
+// worth nothing", which is a claim about files nobody has looked at.
+//
+// A row whose size was never recorded is EXCLUDED and COUNTED, never folded in as a zero,
+// and the count is what the page states beside the figure. bytes is null when no row
+// contributed one, which the figure renders as the page's own absence phrase.
+function candidateTotal(rows) {
+  if (!Array.isArray(rows)) return null;
+  let counted = 0, excluded = 0, bytes = 0;
+  for (const j of rows) {
+    if (!j || typeof j !== "object" || j.status !== CANDIDATE_STATUS) continue;
+    if (isNum(j.source_bytes) && j.source_bytes >= 0) {
+      counted++;
+      bytes += j.source_bytes;
+    } else {
+      excluded++;
+    }
+  }
+  if (counted + excluded === 0) return null;
+  return { counted: counted, excluded: excluded, bytes: counted > 0 ? bytes : null };
+}
+
+// The SET the total was taken over, stated beside it (clause F4). It says SHOWN, because
+// that is what it is: the terminal view is capped by the server, so this is a total over
+// the candidate rows this response carried and never a claim about the whole ledger.
+function candidateCoverageText(t) {
+  const n = t ? t.counted + t.excluded : 0;
+  return "over " + n.toLocaleString() + " candidate row" + (n === 1 ? "" : "s") + " shown";
+}
+
+// The rows the total had to leave out for want of a recorded size, counted and reported.
+// "" when none, exactly as an aggregate card's exclusion line behaves.
+function candidateExclusionText(t) {
+  const n = (t && isNum(t.excluded)) ? t.excluded : 0;
+  if (n <= 0) return "";
+  return n.toLocaleString() + " row" + (n === 1 ? "" : "s") + " excluded: no recorded size";
+}
+
 // Human label for one skip guard. An unknown token falls back to itself, so a new guard
 // is never hidden behind a blank. The lookup is an OWN-property lookup deliberately: a
 // bucket key arriving off the wire is attacker-influencable text, and a plain `obj[k]`
@@ -215,8 +284,15 @@ function announceText(sum) {
   // that is not established. Leaving applied-despite-error OUT is the same fault by
   // omission - a sighted user sees a chip counting them and a listener heard nothing at
   // all - so it is spoken beside the others, and neither is spoken as a success.
+  // A dry run's decisions are spoken as their OWN named figure. Folding them into skipped
+  // would say the files do not qualify, which is the opposite of what the row records;
+  // folding them into done would claim transcodes that never happened; and leaving them
+  // out is the fault by omission - a sighted reader sees a chip counting them and a
+  // listener hears nothing, on the one page an operator uses to decide whether to let
+  // this tool start deleting things.
   return n("done") + " done, " + n("skipped") + " skipped, "
-    + n("failed") + " failed, " + n("indeterminate") + " parked awaiting a determination, "
+    + n("failed") + " failed, " + n(CANDIDATE_STATUS) + " would be transcoded, "
+    + n("indeterminate") + " parked awaiting a determination, "
     + n("applied-despite-error") + " applied despite an error; "
     + active + " active, " + n("pending") + " pending.";
 }

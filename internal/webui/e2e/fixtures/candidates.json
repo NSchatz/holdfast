@@ -1,0 +1,238 @@
+{
+  "summary": {
+    "pending": 0,
+    "probing": 1,
+    "encoding": 0,
+    "verifying": 0,
+    "done": 1,
+    "skipped": 1,
+    "failed": 0,
+    "would-transcode": 4
+  },
+  "queue": [
+    {
+      "path": "/mnt/media/tv/Northwind/Season 02/S02E07.mkv",
+      "status": "probing",
+      "worker": "w0",
+      "fail_count": 0,
+      "updated_at": 1788882717,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null
+    }
+  ],
+  "history": [
+    {
+      "path": "/mnt/media/movies/Dune Part Two (2024).mkv",
+      "status": "would-transcode",
+      "worker": "",
+      "fail_count": 0,
+      "updated_at": 1788882600,
+      "source_codec": "h264",
+      "source_bytes": 8388608,
+      "output_bytes": null,
+      "encode_ms": null,
+      "vmaf_mean": null,
+      "vmaf_min": null,
+      "vmaf_chroma": null,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null
+    },
+    {
+      "path": "/mnt/media/movies/Arrival (2016).mp4",
+      "status": "would-transcode",
+      "worker": "",
+      "fail_count": 0,
+      "updated_at": 1788882590,
+      "source_codec": "mpeg4",
+      "source_bytes": 2097152,
+      "output_bytes": null,
+      "encode_ms": null,
+      "vmaf_mean": null,
+      "vmaf_min": null,
+      "vmaf_chroma": null,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null
+    },
+    {
+      "path": "/mnt/media/tv/Halcyon Drift/Season 01/S01E09.mkv",
+      "status": "would-transcode",
+      "worker": "",
+      "fail_count": 0,
+      "updated_at": 1788882580,
+      "source_codec": null,
+      "source_bytes": null,
+      "output_bytes": null,
+      "encode_ms": null,
+      "vmaf_mean": null,
+      "vmaf_min": null,
+      "vmaf_chroma": null,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null
+    },
+    {
+      "path": "/mnt/media/tv/Halcyon Drift/Season 01/S01E10.mkv",
+      "status": "would-transcode",
+      "worker": "",
+      "fail_count": 0,
+      "updated_at": 1788882570,
+      "source_codec": "",
+      "source_bytes": "4194304",
+      "output_bytes": null,
+      "encode_ms": null,
+      "vmaf_mean": null,
+      "vmaf_min": null,
+      "vmaf_chroma": null,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null
+    },
+    {
+      "path": "/mnt/media/tv/Northwind/Season 02/S02E05.mkv",
+      "status": "done",
+      "worker": "w0",
+      "fail_count": 0,
+      "updated_at": 1788882053,
+      "encoder": "cpu",
+      "vmaf_mean": 98.829679,
+      "vmaf_min": 96.51533,
+      "vmaf_model": "version=vmaf_v0.6.1",
+      "vmaf_pix_fmt": "yuv420p10le",
+      "vmaf_chroma": 44.392002,
+      "vmaf_chroma_metric": "psnr_cb/psnr_cr min (dB)",
+      "source_codec": null,
+      "source_bytes": 1664293,
+      "output_bytes": 107078,
+      "encode_ms": 614,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null,
+      "guard_attributes": "size,mtime",
+      "guard_time_resolution": "1s",
+      "guard_residual_window": "residual-window-local"
+    },
+    {
+      "path": "/mnt/media/tv/Northwind/Season 02/S02E06.mkv",
+      "status": "skipped",
+      "worker": "w0",
+      "fail_count": 0,
+      "updated_at": 1788882050,
+      "reason": "interlaced",
+      "source_codec": null,
+      "source_bytes": null,
+      "output_bytes": null,
+      "encode_ms": null,
+      "vmaf_mean": null,
+      "vmaf_min": null,
+      "vmaf_chroma": null,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null
+    }
+  ],
+  "queue_total": {
+    "available": true,
+    "unavailable": "",
+    "covers": "every row in the ledger with status pending, probing, encoding, verifying",
+    "cap": 500,
+    "count": 1
+  },
+  "history_total": {
+    "available": true,
+    "unavailable": "",
+    "covers": "every row in the ledger with status done, skipped, failed, would-transcode, indeterminate, applied-despite-error",
+    "cap": 200,
+    "count": 6
+  },
+  "bytes_reclaimed_session": 1557215,
+  "bytes_reclaimed_lifetime": 1557215,
+  "bytes_held_by_undo_window": 0,
+  "paused": false,
+  "scanning": false,
+  "now": 1788882720,
+  "aggregates": {
+    "outcomes": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every terminal row in the ledger (done, skipped, failed, would-transcode, indeterminate, applied-despite-error)",
+      "window": "",
+      "counted": 6,
+      "excluded": 0,
+      "buckets": [
+        {
+          "key": "would-transcode",
+          "count": 4
+        },
+        {
+          "key": "done",
+          "count": 1
+        },
+        {
+          "key": "skipped",
+          "count": 1
+        }
+      ]
+    },
+    "skips_by_guard": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every skipped row in the ledger",
+      "window": "",
+      "counted": 1,
+      "excluded": 0,
+      "buckets": [
+        {
+          "key": "interlaced",
+          "count": 1
+        }
+      ]
+    },
+    "size_ratio": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every done row in the ledger",
+      "window": "",
+      "counted": 1,
+      "excluded": 0,
+      "min": 0.06433413,
+      "mean": 0.06433413,
+      "max": 0.06433413
+    },
+    "encode_ms": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every done row in the ledger",
+      "window": "",
+      "counted": 1,
+      "excluded": 0,
+      "min": 614,
+      "mean": 614,
+      "max": 614
+    },
+    "vmaf_mean": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every done row in the ledger",
+      "window": "",
+      "counted": 1,
+      "excluded": 0,
+      "min": 98.829679,
+      "mean": 98.829679,
+      "max": 98.829679
+    },
+    "vmaf_min": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every done row in the ledger",
+      "window": "",
+      "counted": 1,
+      "excluded": 0,
+      "min": 96.51533,
+      "mean": 96.51533,
+      "max": 96.51533
+    }
+  }
+}

@@ -19,6 +19,31 @@ function capNote(id, shown, total) {
   el.hidden = text === "";
 }
 
+// candidateNote is the total SOURCE BYTES the rendered candidates account for, the set it
+// was taken over, and the rows it had to leave out.
+//
+// The whole block goes when there is no candidate row to total, which is the F3 answer
+// rather than a tidiness: a "0 B under consideration" beside an empty candidate list reads
+// as "these files are worth nothing", and nobody has looked at any files. The exclusion
+// line goes when there is nothing to exclude, exactly as an aggregate card's does.
+//
+// There is deliberately no projected saving here and none in the rows. Nothing has encoded
+// these files, so no honest figure exists for what they would give back; a projection
+// would be read as a measurement, which is the overclaim this whole surface refuses.
+function candidateNote(rows) {
+  const host = $("cand");
+  if (!host) return;
+  const t = candidateTotal(rows);
+  host.hidden = !t;
+  if (!t) return;
+  bytesInto("cand-bytes", t.bytes);
+  $("cand-cov").textContent = candidateCoverageText(t);
+  const ex = $("cand-ex");
+  const exText = candidateExclusionText(t);
+  ex.textContent = exText;
+  ex.hidden = exText === "";
+}
+
 // Client-side path filter over the rows already loaded (which are themselves capped -
 // see capNote). Hides non-matching rows in both tables; empty term shows all.
 function applyFilter() {
@@ -142,6 +167,8 @@ function render(snap) {
   const hheaders = headersOf("history");
   syncRows(hbody, h, (j) => histRow(j, hheaders));
   setViewState("history", h.length ? null : "empty");
+  // What the candidates add up to, over the rows just rendered.
+  candidateNote(h);
 
   // Honest row-cap notices. The total is the one the SERVER reported for each table -
   // counted over every matching row in the ledger - and never one this page derived from

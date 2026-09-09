@@ -7,7 +7,16 @@
 // established must show as the state it is in: rendering it as done would be a lie and
 // rendering it as failed would be the more dangerous lie, because "failed" on this
 // dashboard has always meant "and your source is fine".
-const STATUSES = ["pending","probing","encoding","verifying","done","skipped","failed","indeterminate","applied-despite-error"];
+// "would-transcode" is a DRY RUN's recorded decision: the file passed every guard, so a
+// run allowed to transcode would take it. It is a state of the FINISHED group and not of
+// the work in hand - the decision is taken and nothing is examining that file - which is
+// also where an operator reads it, beside the skipped and the actually-reclaimed counts.
+// Before it existed those files sat under `probing` and the page reported a dry run as
+// having concluded nothing at all.
+const STATUSES = ["pending","probing","encoding","verifying","done","skipped","failed","would-transcode","indeterminate","applied-despite-error"];
+// The one status whose rows carry a source codec and a source size and no output at all,
+// named once here so the cells, the total and the graders read the same constant.
+const CANDIDATE_STATUS = "would-transcode";
 // The one state a progress figure can exist in. Progress is measured BY the encoder
 // against the source duration, so it is defined while the encoder runs and at no other
 // time: a probing row has not started one and a verifying row's encoder has exited. Those

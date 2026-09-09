@@ -16,6 +16,17 @@ function pathCell(td, path) {
 // The size cell: before → after with the percent reclaimed. Only meaningful on a done
 // row that recorded both sizes.
 function sizeCell(td, j) {
+  // A CANDIDATE row has a source and no output: nothing has encoded that file. So the cell
+  // is the SOURCE's own size, named as that, and never a before-and-after - and there is
+  // no percentage, because a share of a saving nobody has measured is not a figure this
+  // page is allowed to draw.
+  if (j && j.status === CANDIDATE_STATUS) {
+    const size = sourceSizeText(j);
+    if (size === NOT_RECORDED) { td.appendChild(nrNode()); return; }
+    td.appendChild(mk("span", "srcsize", size));
+    td.appendChild(mk("span", "srck", "source"));
+    return;
+  }
   const f = sizeFigures(j);
   if (!f) { td.appendChild(nrNode()); return; }
   td.appendChild(mk("span", "before", f.before));
@@ -62,6 +73,17 @@ function resultCell(td, j) {
     td.appendChild(mk("div", "reason fail", j.reason ? j.reason : "reason not recorded"));
     td.appendChild(mk("div", "cond",
       "the rename took effect despite the error - the file at that path is the replacement"));
+  } else if (j.status === CANDIDATE_STATUS) {
+    // The source's CODEC, on the row, as selectable text. It is the other half of what an
+    // operator sizing a dry run needs - the size beside it says how much, this says what
+    // of - and a candidate list that omitted it would send them off to probe the files
+    // themselves. A codec nobody read renders as the page's one absence phrase, never as
+    // a blank a reader could take for "no video".
+    const codec = mk("div", "cond");
+    codec.appendChild(document.createTextNode("source codec: "));
+    const value = codecText(j.source_codec);
+    codec.appendChild(value === NOT_RECORDED ? nrNode() : mk("span", "codec", value));
+    td.appendChild(codec);
   }
 }
 

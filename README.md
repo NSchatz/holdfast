@@ -177,7 +177,7 @@ invariant is entirely unaffected.
 | `GET /` | - | the embedded dashboard |
 | `GET /api/summary` | - | counts per status + bytes reclaimed (**lifetime** and this-run) + `bytes_held_by_undo_window` (space a retained original still holds, never folded into either reclaimed figure; `null` = unreadable) + paused/scanning + the **whole-ledger aggregates** (see below) |
 | `GET /api/queue` | - | pending + active jobs, capped, with `queue_total` - see *The total behind a cap* |
-| `GET /api/history?limit=N` | - | recent terminal jobs (done/skipped/failed, plus `indeterminate` and `applied-despite-error`) with their recorded outcome, capped, with `history_total` - see below |
+| `GET /api/history?limit=N` | - | recent terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, capped, with `history_total` - see below |
 | `GET /api/events` | - | SSE: a fresh snapshot on every state change |
 | `GET /metrics` | - | Prometheus metrics (when `metrics_enable`, default on) |
 | `POST /api/rescan` | token | start a library scan (409 if paused / scanning / outside the run window) |

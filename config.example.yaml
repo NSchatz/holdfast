@@ -22,7 +22,15 @@ library_roots:
 # Log verbosity: debug | info | warn | error  (default: info)
 log_level: info
 
-# When true, report intended actions without changing any file.
+# When true, report intended actions without changing any file: every guard runs, and
+# nothing is encoded, swapped or deleted. A file that passes every guard is RECORDED as
+# `would-transcode` - a terminal outcome that says what a real run would do to it,
+# carrying that file's source codec and source size - so the dashboard, /api/history and
+# holdfast_files_total{outcome="would-transcode"} answer "which files would this
+# transcode?" instead of leaving them looking like work still in progress.
+#
+# It is a decision about a scan, not a disposal of the file: turning this back off and
+# running again transcodes exactly the files that list named.
 dry_run: false
 
 # --- what to scan ---

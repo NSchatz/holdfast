@@ -17,6 +17,16 @@ import { tabThroughEveryControl, gradeTabOrderAndFocusRing, gradeAccessibleNames
 import { gradeEveryUnmeasuredFieldReadsTheAbsencePhrase, gradeSeveredStreamKeepsItsRowsAndStopsEveryFigure, severedStreamReading } from "./states.mjs";
 import { gradeNoPolicyRefusal, gradeRefusedControlActionCostsNothingElse, refuseAControlAction, gradeServerErrorStillRendersTheOfferAndTheControls } from "./interaction.mjs";
 import { motionPair, gradeReducedMotionCostsNoValue } from "./motionpair.mjs";
+import {
+  CANDIDATES,
+  readCandidates,
+  gradeCandidateCountIsItsOwnTerminalFigure,
+  gradeEveryCandidateRowShowsItsCodecAndSize,
+  gradeTheTotalUnderConsiderationIsSourceBytesAndNoProjection,
+  gradeAnUnrecordedFactReadsAsNotRecordedAndIsExcluded,
+  gradeNoCandidateFigureWhenNothingWasDecided,
+  gradeTheAnnouncementNamesTheCandidateCount,
+} from "./candidates.mjs";
 
 // Refuses a mutation that did not change the served document at all.
 async function mustChange(page, baseURL, mutation) {
@@ -302,6 +312,176 @@ test("the severed-stream grader fails against a ticker that keeps running", asyn
   const probs = gradeSeveredStreamKeepsItsRowsAndStopsEveryFigure(first, before, after);
   expect(probs.length,
     `the grader PASSED a severed page whose elapsed figures kept advancing (${JSON.stringify(before)} then ${JSON.stringify(after)})`
+  ).toBeGreaterThan(0);
+});
+
+// --- the graders for a DRY RUN's recorded decisions -------------------------------------
+//
+// Every one of them is defeated here on purpose. The page renders the whole snapshot on
+// each frame, so a mutation that ran once at parse time would be undone by the first
+// render - each of these therefore REPEATS, exactly as the three-state and absence-phrase
+// counterexamples above do, and each case asserts the mutation really reached the
+// rendered document before asking the grader what it saw.
+
+// candidateReadingUnder opens the candidates scenario under one mutation and takes the
+// same reading the shipped graders take. `settle` is what makes a repeating mutation
+// safe to measure: it waits for the falsification to be ON THE PAGE, so a grader that
+// stays silent cannot be excused as "the mutation never landed".
+async function candidateReadingUnder(browser, baseURL, mutation, settle) {
+  const { ctx, page } = await open(browser, {
+    url: pageURL(baseURL, CANDIDATES.scenario), theme: "light",
+    mutation, waitFor: settle || waitRendered,
+  });
+  const s = await readCandidates(page);
+  await ctx.close();
+  return s;
+}
+
+// AC15's grader. The chip moved into the WORK IN HAND group - which is the misreading the
+// state exists to end, said by the page itself.
+test("the candidate-count grader fails against a chip drawn with the work in hand", async ({ browser, baseURL }) => {
+  const mutation = mutate.script(`setInterval(function(){
+    for (const c of document.querySelectorAll("#chips .chip")) {
+      if (c.querySelector(".k") && c.querySelector(".k").textContent === "would-transcode") {
+        c.classList.remove("terminal"); c.classList.add("inflight");
+      }
+    }
+  }, 20);`);
+  const s = await candidateReadingUnder(browser, baseURL, mutation, (p) => p.waitForFunction(() => {
+    for (const c of document.querySelectorAll("#chips .chip.inflight")) {
+      const k = c.querySelector(".k");
+      if (k && k.textContent === "would-transcode") return true;
+    }
+    return false;
+  }, null, { timeout: 15000 }));
+  const probs = gradeCandidateCountIsItsOwnTerminalFigure(s, CANDIDATES.chip);
+  expect(probs.length,
+    "the grader PASSED a page drawing the candidate count among the states a worker is still examining"
+  ).toBeGreaterThan(0);
+});
+
+// AC16's grader, first half: the codec taken off the row entirely.
+test("the candidate-row grader fails against a source codec taken off the row", async ({ browser, baseURL }) => {
+  const mutation = mutate.script(`setInterval(function(){
+    for (const el of document.querySelectorAll("#history td.st .cond")) el.remove();
+  }, 20);`);
+  const s = await candidateReadingUnder(browser, baseURL, mutation, (p) => p.waitForFunction(
+    () => document.querySelectorAll("#history tr").length > 0 &&
+      document.querySelectorAll("#history td.st .cond").length === 0,
+    null, { timeout: 15000 }));
+  const probs = gradeEveryCandidateRowShowsItsCodecAndSize(s, CANDIDATES.rows);
+  expect(probs.length, "the grader PASSED a candidate row that shows no source codec at all").toBeGreaterThan(0);
+});
+
+// AC16's grader, second half, and the sharper one: the text is still THERE and still
+// rendered - only a reader can no longer take it away. `innerText` alone cannot tell the
+// two apart, which is why the grader asks a real Range.
+test("the candidate-row grader fails against a codec a reader cannot select", async ({ browser, baseURL }) => {
+  const mutation = mutate.css(`#history td.st .cond, #history td.size { user-select: none !important; -webkit-user-select: none !important; }`);
+  const s = await candidateReadingUnder(browser, baseURL, mutation);
+  const probs = gradeEveryCandidateRowShowsItsCodecAndSize(s, CANDIDATES.rows);
+  expect(probs.length,
+    "the grader PASSED a page whose candidate rows render the codec and the size as text no reader can select"
+  ).toBeGreaterThan(0);
+});
+
+// AC17's grader. A projected saving put beside the total - the one figure this page may
+// never draw, because nothing has encoded these files.
+test("the total-under-consideration grader fails against a projected saving", async ({ browser, baseURL }) => {
+  const mutation = mutate.script(`setInterval(function(){
+    var cov = document.getElementById("cand-cov");
+    if (cov && cov.textContent.indexOf("projected") < 0) {
+      cov.textContent = cov.textContent + " - projected saving 6.0 MB";
+    }
+  }, 20);`);
+  const s = await candidateReadingUnder(browser, baseURL, mutation, (p) => p.waitForFunction(
+    () => {
+      const cov = document.getElementById("cand-cov");
+      return !!cov && cov.textContent.indexOf("projected") >= 0;
+    }, null, { timeout: 15000 }));
+  const probs = gradeTheTotalUnderConsiderationIsSourceBytesAndNoProjection(s, CANDIDATES.total);
+  expect(probs.length,
+    "the grader PASSED a page projecting a saving for files nothing has encoded"
+  ).toBeGreaterThan(0);
+});
+
+// AC18's grader. The figure forced onto a page that has no candidate row to total, which
+// is what a block written to always render would do.
+test("the no-candidate grader fails against a total shown with nothing to total", async ({ browser, baseURL }) => {
+  const mutation = mutate.script(`setInterval(function(){
+    var el = document.getElementById("cand");
+    if (el) { el.hidden = false; var b = document.getElementById("cand-bytes"); if (b) b.textContent = "0 B"; }
+  }, 20);`);
+  const { ctx, page } = await open(browser, {
+    url: pageURL(baseURL, "full"), theme: "light", mutation,
+    waitFor: (p) => p.waitForFunction(() => {
+      const el = document.getElementById("cand");
+      return !!el && el.hidden === false;
+    }, null, { timeout: 15000 }),
+  });
+  const s = await readCandidates(page);
+  await ctx.close();
+  const probs = gradeNoCandidateFigureWhenNothingWasDecided(s);
+  expect(probs.length,
+    'the grader PASSED a page showing "0 B under consideration" with no candidate row to total'
+  ).toBeGreaterThan(0);
+});
+
+// AC19's grader, first half: an unrecorded size rendered as a zero, which is the number an
+// operator would add up.
+test("the unrecorded-fact grader fails against a size nobody recorded rendered as zero", async ({ browser, baseURL }) => {
+  const mutation = mutate.script(`setInterval(function(){
+    for (const td of document.querySelectorAll("#history td.size")) {
+      if (td.querySelector(".nr")) td.textContent = "0 B";
+    }
+  }, 20);`);
+  const s = await candidateReadingUnder(browser, baseURL, mutation, (p) => p.waitForFunction(
+    () => {
+      for (const td of document.querySelectorAll("#history td.size")) {
+        if (td.textContent.trim() === "0 B") return true;
+      }
+      return false;
+    }, null, { timeout: 15000 }));
+  const probs = gradeAnUnrecordedFactReadsAsNotRecordedAndIsExcluded(s, CANDIDATES.absent);
+  expect(probs.length, "the grader PASSED a page rendering a size nobody recorded as 0 B").toBeGreaterThan(0);
+});
+
+// AC19's second half: the rows ARE excluded and the page stops saying so. A total that
+// silently dropped rows reads as covering everything.
+test("the unrecorded-fact grader fails against an exclusion the page stops stating", async ({ browser, baseURL }) => {
+  const mutation = mutate.script(`setInterval(function(){
+    var ex = document.getElementById("cand-ex");
+    if (ex) { ex.textContent = ""; ex.hidden = true; }
+  }, 20);`);
+  const s = await candidateReadingUnder(browser, baseURL, mutation, (p) => p.waitForFunction(
+    () => {
+      const ex = document.getElementById("cand-ex");
+      return !!ex && ex.textContent.trim() === "";
+    }, null, { timeout: 15000 }));
+  const probs = gradeAnUnrecordedFactReadsAsNotRecordedAndIsExcluded(s, CANDIDATES.absent);
+  expect(probs.length,
+    "the grader PASSED a total that left two rows out and said nothing about it"
+  ).toBeGreaterThan(0);
+});
+
+// AC20's grader. The candidates folded into the skipped count - the exact fault both
+// FILESYSTEM-1 outcomes were spoken separately to avoid.
+test("the announcement grader fails against a candidate count folded into another state", async ({ browser, baseURL }) => {
+  const mutation = mutate.script(`setInterval(function(){
+    var sr = document.getElementById("sr-status");
+    if (sr && sr.textContent.indexOf("would be transcoded") >= 0) {
+      sr.textContent = "1 done, 5 skipped, 0 failed, 0 parked awaiting a determination, " +
+        "0 applied despite an error; 1 active, 0 pending.";
+    }
+  }, 20);`);
+  const s = await candidateReadingUnder(browser, baseURL, mutation, (p) => p.waitForFunction(
+    () => {
+      const sr = document.getElementById("sr-status");
+      return !!sr && sr.textContent.trim() !== "" && sr.textContent.indexOf("would be transcoded") < 0;
+    }, null, { timeout: 15000 }));
+  const probs = gradeTheAnnouncementNamesTheCandidateCount(s, CANDIDATES.spoken);
+  expect(probs.length,
+    "the grader PASSED an announcement that folded a dry run's decisions into the skipped count"
   ).toBeGreaterThan(0);
 });
 

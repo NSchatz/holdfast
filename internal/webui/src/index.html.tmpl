@@ -105,6 +105,17 @@
 
     <h3 id="h-hist">Recent history</h3>
     <p class="scope">Each swap, with its proof of safety.</p>
+    <!-- What a DRY RUN decided, added up. It is the total SOURCE bytes the candidate rows
+         account for and nothing else: nobody has encoded these files, so there is no
+         honest figure for what they would give back, and a projected saving here would be
+         read as a measurement. The block is absent entirely when no row was decided that
+         way - a "0 B" beside an empty candidate list would be a claim about files nobody
+         has looked at. -->
+    <div class="cand" id="cand" hidden>
+      <p class="note cand-v"><b id="cand-bytes">not recorded</b><span class="cand-k">under consideration</span></p>
+      <p class="note cand-cov" id="cand-cov"></p>
+      <p class="note cand-ex" id="cand-ex" hidden></p>
+    </div>
     <p class="note cap" id="hist-cap" hidden></p>
     <div class="tablewrap">
       <table class="hist" aria-labelledby="h-hist">

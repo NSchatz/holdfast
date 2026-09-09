@@ -522,6 +522,27 @@
     padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-sm);
     font-size: var(--fs-xs); margin: 0 0 var(--sp-2); }
 
+  /* What a DRY RUN decided, totalled. It is drawn as its own small card rather than as a
+     line of the reclaimed band above it, because those two figures are space that CAME
+     BACK and this one is space that is merely under consideration - a reader who met the
+     three together would add them up. The flag is --accent and not --ok for the same
+     reason: nothing here has been reclaimed. */
+  .cand { background: var(--panel); border: var(--bw-hair) solid var(--border);
+    border-left: var(--bw-flag) solid var(--accent);
+    border-radius: var(--radius-md);
+    padding: var(--sp-3) var(--sp-4);
+    padding-left: calc(var(--sp-4) - var(--bw-flag) + var(--bw-hair));
+    margin: 0 0 var(--sp-3); }
+  .cand .note { margin: 0; }
+  .cand .cand-v { display: flex; flex-direction: column; gap: var(--sp-1); }
+  .cand .cand-v b { font-size: var(--fs-2xl); line-height: var(--lh-tight); font-weight: 700;
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .cand .cand-k { font-size: var(--fs-xs); color: var(--muted); }
+  /* The set the total was taken over and the rows it left out, in the same roles an
+     aggregate card gives them: stated beside the figure, never implied. */
+  .cand .cand-cov, .cand .cand-ex { font-size: var(--fs-xs); color: var(--muted);
+    margin-top: var(--sp-1); }
+
   /* Whole-ledger figures. Each card carries its number, its drawing, the set that
      number is over, and the rows it had to leave out; ".out" is the unavailable
      state, which colours the card without removing it and draws NO figure at all -
@@ -661,6 +682,12 @@
      filled disc, the square and the diamond with no colour vision at all. */
   .st-indeterminate .dot { background: none; border: var(--bw-flag) solid var(--bad); }
   .st-applied-despite-error .dot { background: var(--bad); border: var(--bw-flag) solid var(--warn); }
+  /* A dry run's recorded decision is terminal too, so it takes a shape of its own: a
+     HOLLOW SQUARE - the outline of the filled square `failed` draws, for a file nothing
+     has done anything to yet. It stays apart from all five other marks with no colour
+     vision at all, and the state is spelled out beside it as it is on every other row. */
+  .st-would-transcode .dot { background: none; border: var(--bw-flag) solid var(--accent);
+    border-radius: 0; }
   .st-encoding .dot, .st-probing .dot, .st-verifying .dot, .st-pending .dot { background: var(--accent); }
   .reason { color: var(--muted); font-size: var(--fs-xs); }
   .reason.fail { color: var(--bad); word-break: break-word; }
@@ -672,6 +699,15 @@
   .size .arrow { color: var(--muted); margin: 0 var(--sp-1); }
   .size .pct { display: block; color: var(--ok); font-weight: 600; margin-top: var(--sp-1);
     white-space: normal; }
+  /* A candidate row's size is the SOURCE's, named as that. It is deliberately NOT painted
+     --ok: green on this page means space that came back, and nothing has come back from a
+     file nothing has encoded. */
+  .size .srcsize { color: var(--fg); }
+  .size .srck { display: block; color: var(--muted); font-size: var(--fs-xs);
+    margin-top: var(--sp-1); white-space: normal; }
+  /* The source codec on a candidate row. It sits in the result cell under the state, in
+     the same footnote role the VMAF condition line takes on a done row. */
+  .st .cond .codec { color: var(--fg); font-family: var(--font-mono); }
   .vmaf .pair { white-space: normal; }
   .vmaf .mean { font-weight: 700; font-size: var(--fs-md); }
   .vmaf .worst { color: var(--fg); font-weight: 600; }
@@ -886,6 +922,17 @@
 
     <h3 id="h-hist">Recent history</h3>
     <p class="scope">Each swap, with its proof of safety.</p>
+    <!-- What a DRY RUN decided, added up. It is the total SOURCE bytes the candidate rows
+         account for and nothing else: nobody has encoded these files, so there is no
+         honest figure for what they would give back, and a projected saving here would be
+         read as a measurement. The block is absent entirely when no row was decided that
+         way - a "0 B" beside an empty candidate list would be a claim about files nobody
+         has looked at. -->
+    <div class="cand" id="cand" hidden>
+      <p class="note cand-v"><b id="cand-bytes">not recorded</b><span class="cand-k">under consideration</span></p>
+      <p class="note cand-cov" id="cand-cov"></p>
+      <p class="note cand-ex" id="cand-ex" hidden></p>
+    </div>
     <p class="note cap" id="hist-cap" hidden></p>
     <div class="tablewrap">
       <table class="hist" aria-labelledby="h-hist">
@@ -978,7 +1025,16 @@
 // established must show as the state it is in: rendering it as done would be a lie and
 // rendering it as failed would be the more dangerous lie, because "failed" on this
 // dashboard has always meant "and your source is fine".
-const STATUSES = ["pending","probing","encoding","verifying","done","skipped","failed","indeterminate","applied-despite-error"];
+// "would-transcode" is a DRY RUN's recorded decision: the file passed every guard, so a
+// run allowed to transcode would take it. It is a state of the FINISHED group and not of
+// the work in hand - the decision is taken and nothing is examining that file - which is
+// also where an operator reads it, beside the skipped and the actually-reclaimed counts.
+// Before it existed those files sat under `probing` and the page reported a dry run as
+// having concluded nothing at all.
+const STATUSES = ["pending","probing","encoding","verifying","done","skipped","failed","would-transcode","indeterminate","applied-despite-error"];
+// The one status whose rows carry a source codec and a source size and no output at all,
+// named once here so the cells, the total and the graders read the same constant.
+const CANDIDATE_STATUS = "would-transcode";
 // The one state a progress figure can exist in. Progress is measured BY the encoder
 // against the source duration, so it is defined while the encoder runs and at no other
 // time: a probing row has not started one and a verifying row's encoder has exited. Those
@@ -1206,6 +1262,75 @@ function progressFigure(j) {
   return out;
 }
 
+// --- what a DRY RUN's recorded decision shows ----------------------------------
+//
+// A candidate row is the one row on this page with a source and no output: nothing has
+// encoded that file, so there is no output size, no saving and no ratio, and inventing one
+// would be the same overclaim as rendering an unmeasured VMAF as 0.0. What it does carry
+// is the two facts an operator sizing the job needs - what the source is IN, and how big
+// it is - and both must read as absent when they were never recorded.
+
+// codecText is the source codec a candidate row shows. Absent, null, empty, whitespace or
+// not a string at all is NOT RECORDED: the wire carries an explicit null when the codec
+// was never read, and a blank cell would leave a reader to decide for themselves whether
+// that meant "no codec" or "nobody looked".
+function codecText(v) {
+  return (typeof v === "string" && v.trim() !== "") ? v.trim() : NOT_RECORDED;
+}
+
+// sourceSizeText is the size of the file a candidate row describes. fmtBytes already
+// answers NOT_RECORDED for an absent, null, non-numeric, non-finite or negative value, so
+// this is the same rule under the name the cell reads it by.
+function sourceSizeText(j) {
+  return fmtBytes(j && j.source_bytes);
+}
+
+// candidateTotal is the total SOURCE BYTES the rendered candidates account for, with the
+// rows it had to leave out.
+//
+// It is a total of SOURCE bytes and nothing else. No projected saving, no projected output
+// size, no projected reclaim: nobody has encoded these files, so no honest number exists
+// for what they would give back, and a figure that guessed would be read as a measurement.
+//
+// null means THERE ARE NO CANDIDATE ROWS, and the page then shows no figure at all rather
+// than a zero - a total of 0 B beside an empty candidate list reads as "these files are
+// worth nothing", which is a claim about files nobody has looked at.
+//
+// A row whose size was never recorded is EXCLUDED and COUNTED, never folded in as a zero,
+// and the count is what the page states beside the figure. bytes is null when no row
+// contributed one, which the figure renders as the page's own absence phrase.
+function candidateTotal(rows) {
+  if (!Array.isArray(rows)) return null;
+  let counted = 0, excluded = 0, bytes = 0;
+  for (const j of rows) {
+    if (!j || typeof j !== "object" || j.status !== CANDIDATE_STATUS) continue;
+    if (isNum(j.source_bytes) && j.source_bytes >= 0) {
+      counted++;
+      bytes += j.source_bytes;
+    } else {
+      excluded++;
+    }
+  }
+  if (counted + excluded === 0) return null;
+  return { counted: counted, excluded: excluded, bytes: counted > 0 ? bytes : null };
+}
+
+// The SET the total was taken over, stated beside it (clause F4). It says SHOWN, because
+// that is what it is: the terminal view is capped by the server, so this is a total over
+// the candidate rows this response carried and never a claim about the whole ledger.
+function candidateCoverageText(t) {
+  const n = t ? t.counted + t.excluded : 0;
+  return "over " + n.toLocaleString() + " candidate row" + (n === 1 ? "" : "s") + " shown";
+}
+
+// The rows the total had to leave out for want of a recorded size, counted and reported.
+// "" when none, exactly as an aggregate card's exclusion line behaves.
+function candidateExclusionText(t) {
+  const n = (t && isNum(t.excluded)) ? t.excluded : 0;
+  if (n <= 0) return "";
+  return n.toLocaleString() + " row" + (n === 1 ? "" : "s") + " excluded: no recorded size";
+}
+
 // Human label for one skip guard. An unknown token falls back to itself, so a new guard
 // is never hidden behind a blank. The lookup is an OWN-property lookup deliberately: a
 // bucket key arriving off the wire is attacker-influencable text, and a plain `obj[k]`
@@ -1268,8 +1393,15 @@ function announceText(sum) {
   // that is not established. Leaving applied-despite-error OUT is the same fault by
   // omission - a sighted user sees a chip counting them and a listener heard nothing at
   // all - so it is spoken beside the others, and neither is spoken as a success.
+  // A dry run's decisions are spoken as their OWN named figure. Folding them into skipped
+  // would say the files do not qualify, which is the opposite of what the row records;
+  // folding them into done would claim transcodes that never happened; and leaving them
+  // out is the fault by omission - a sighted reader sees a chip counting them and a
+  // listener hears nothing, on the one page an operator uses to decide whether to let
+  // this tool start deleting things.
   return n("done") + " done, " + n("skipped") + " skipped, "
-    + n("failed") + " failed, " + n("indeterminate") + " parked awaiting a determination, "
+    + n("failed") + " failed, " + n(CANDIDATE_STATUS) + " would be transcoded, "
+    + n("indeterminate") + " parked awaiting a determination, "
     + n("applied-despite-error") + " applied despite an error; "
     + active + " active, " + n("pending") + " pending.";
 }
@@ -1410,6 +1542,17 @@ function pathCell(td, path) {
 // The size cell: before → after with the percent reclaimed. Only meaningful on a done
 // row that recorded both sizes.
 function sizeCell(td, j) {
+  // A CANDIDATE row has a source and no output: nothing has encoded that file. So the cell
+  // is the SOURCE's own size, named as that, and never a before-and-after - and there is
+  // no percentage, because a share of a saving nobody has measured is not a figure this
+  // page is allowed to draw.
+  if (j && j.status === CANDIDATE_STATUS) {
+    const size = sourceSizeText(j);
+    if (size === NOT_RECORDED) { td.appendChild(nrNode()); return; }
+    td.appendChild(mk("span", "srcsize", size));
+    td.appendChild(mk("span", "srck", "source"));
+    return;
+  }
   const f = sizeFigures(j);
   if (!f) { td.appendChild(nrNode()); return; }
   td.appendChild(mk("span", "before", f.before));
@@ -1456,6 +1599,17 @@ function resultCell(td, j) {
     td.appendChild(mk("div", "reason fail", j.reason ? j.reason : "reason not recorded"));
     td.appendChild(mk("div", "cond",
       "the rename took effect despite the error - the file at that path is the replacement"));
+  } else if (j.status === CANDIDATE_STATUS) {
+    // The source's CODEC, on the row, as selectable text. It is the other half of what an
+    // operator sizing a dry run needs - the size beside it says how much, this says what
+    // of - and a candidate list that omitted it would send them off to probe the files
+    // themselves. A codec nobody read renders as the page's one absence phrase, never as
+    // a blank a reader could take for "no video".
+    const codec = mk("div", "cond");
+    codec.appendChild(document.createTextNode("source codec: "));
+    const value = codecText(j.source_codec);
+    codec.appendChild(value === NOT_RECORDED ? nrNode() : mk("span", "codec", value));
+    td.appendChild(codec);
   }
 }
 
@@ -1920,6 +2074,31 @@ function capNote(id, shown, total) {
   el.hidden = text === "";
 }
 
+// candidateNote is the total SOURCE BYTES the rendered candidates account for, the set it
+// was taken over, and the rows it had to leave out.
+//
+// The whole block goes when there is no candidate row to total, which is the F3 answer
+// rather than a tidiness: a "0 B under consideration" beside an empty candidate list reads
+// as "these files are worth nothing", and nobody has looked at any files. The exclusion
+// line goes when there is nothing to exclude, exactly as an aggregate card's does.
+//
+// There is deliberately no projected saving here and none in the rows. Nothing has encoded
+// these files, so no honest figure exists for what they would give back; a projection
+// would be read as a measurement, which is the overclaim this whole surface refuses.
+function candidateNote(rows) {
+  const host = $("cand");
+  if (!host) return;
+  const t = candidateTotal(rows);
+  host.hidden = !t;
+  if (!t) return;
+  bytesInto("cand-bytes", t.bytes);
+  $("cand-cov").textContent = candidateCoverageText(t);
+  const ex = $("cand-ex");
+  const exText = candidateExclusionText(t);
+  ex.textContent = exText;
+  ex.hidden = exText === "";
+}
+
 // Client-side path filter over the rows already loaded (which are themselves capped -
 // see capNote). Hides non-matching rows in both tables; empty term shows all.
 function applyFilter() {
@@ -2043,6 +2222,8 @@ function render(snap) {
   const hheaders = headersOf("history");
   syncRows(hbody, h, (j) => histRow(j, hheaders));
   setViewState("history", h.length ? null : "empty");
+  // What the candidates add up to, over the rows just rendered.
+  candidateNote(h);
 
   // Honest row-cap notices. The total is the one the SERVER reported for each table -
   // counted over every matching row in the ledger - and never one this page derived from
