@@ -112,10 +112,25 @@ function verdict(doc, win) {
 // browser that never sends one fails the test with its stderr attached.
 // The one wrinkle the dashboard graders added to it: the shipped page fills its tables
 // from an SSE snapshot, which lands AFTER load, so a verdict computed once in `load` can
-// be computed before its subject exists. A probe may therefore report `ready: false` and
-// be retried on a plain setTimeout - still no virtual time, and the TEST still owns the
-// outer deadline. A probe that never sets `ready` (the source-offer graders below) posts
-// on the first attempt, exactly as it always did.
+// be computed before its subject exists.
+//
+// WAITING FOR READINESS IS NOT TAKING A READING, and this page keeps the two apart in its
+// structure rather than by convention. `probeReady` is polled - it asks the page's own
+// state and computes no measurement - and `verdict` is then called EXACTLY ONCE, and its
+// result is what is posted. A probe that declares no `probeReady` (the source-offer
+// graders below) is ready immediately and reads on the first attempt.
+//
+// That separation is what makes "this harness never retries a reading" a checkable
+// property rather than a claim: the page counts its own calls to `verdict` and reports
+// the count in the verdict it posts, and a grader asserts it is 1. A retry loop
+// reintroduced anywhere above would have to move that number, and it is asserted for
+// every render the dashboard graders take.
+//
+// DELAY is real wall-clock time held between the page reaching the state a grader
+// measures and the reading being taken. It exists so that "does this reading depend on
+// how long the measurement took" can be ASKED rather than assumed, and it is the one
+// knob a latency-insensitivity grader needs. It is a plain setTimeout: still no virtual
+// time, and the TEST still owns the outer deadline.
 const probePage = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>probe</title></head>
 <body><iframe id="f" src="%SRC%" width="1200" height="900" style="border:0"></iframe>
 <script>
@@ -123,26 +138,54 @@ const probePage = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>probe
 window.addEventListener("load", function () {
   const f = document.getElementById("f");
   const deadline = Date.now() + %WAIT%;
-  let sent = false;
+  const DELAY = %DELAY%;
+  // A probe that declares no readiness question is ready the moment the page has loaded.
+  const ready = (typeof probeReady === "function") ? probeReady : function () { return true; };
+  let readings = 0;
+  let delayed = false;
+  // EVERY reading is posted, and the TEST's own server takes the first one as the
+  // measurement and counts the rest. Two refusals, and they are separate.
+  //
+  // The first post is the measurement, so a second reading can never become the answer:
+  // "retry until it passes" cannot be built on this page even by someone trying.
+  //
+  // And every reading is posted rather than suppressed here, so a second one cannot
+  // happen QUIETLY. A page that hid its retries behind a sent-once guard would report a
+  // single reading whatever it did; this one hands the count to the side of the harness
+  // the page does not control, which is the same reason the verdict is POSTed rather than
+  // read out of the browser's exit.
   function post(v) {
-    if (sent) return;
-    sent = true;
+    if (v && typeof v === "object") v.readings = readings;
     fetch("/verdict", { method: "POST", body: JSON.stringify(v) });
   }
-  function attempt() {
+  // take is the ONE reading. It is reached once, from the end of the readiness poll, and
+  // it counts itself so the single-reading property is measured rather than asserted.
+  function take() {
     let v;
+    readings++;
     try { v = verdict(f.contentDocument, f.contentWindow); }
     catch (e) { v = { error: String(e) }; }
-    if (v && v.ready === false && Date.now() < deadline) { setTimeout(attempt, 50); return; }
     post(v);
+  }
+  function attempt() {
+    let ok;
+    try { ok = ready(f.contentDocument, f.contentWindow); }
+    catch (e) { post({ error: String(e) }); return; }
+    if (!ok && Date.now() < deadline) { setTimeout(attempt, 50); return; }
+    if (ok && DELAY > 0 && !delayed) { delayed = true; setTimeout(attempt, DELAY); return; }
+    take();
   }
   attempt();
 });
 </script></body></html>`
 
 type renderVerdict struct {
-	Found                 bool     `json:"found"`
-	Error                 string   `json:"error"`
+	Found bool   `json:"found"`
+	Error string `json:"error"`
+	// Readings is how many times the probe page computed a measurement. It is the
+	// harness's own count, not an assertion about it, and it is 1 for every render this
+	// package takes.
+	Readings              int      `json:"readings"`
 	Text                  string   `json:"text"`
 	LinkText              string   `json:"linkText"`
 	LinkHref              string   `json:"linkHref"`
@@ -295,7 +338,15 @@ func nodeRuntime(t *testing.T) string {
 type probeServer struct {
 	url     string
 	verdict chan []byte
+	// posts counts every verdict the probe page POSTed. It is the harness's own count of
+	// how many readings were taken, kept on the side the page does not control, and it is
+	// what makes "this harness never retries a reading" a measurement rather than a claim.
+	posts atomic.Int32
 }
+
+// postsSeen is how many readings the probe posted. Read after runProbe has reaped the
+// browser, so it covers the settle window runProbe already waits out.
+func (ps *probeServer) postsSeen() int { return int(ps.posts.Load()) }
 
 // serveOpts is everything a grader can vary about the page under measurement. The
 // DOCUMENT is always the one the real handler produces, under the real response headers;
@@ -308,14 +359,35 @@ type serveOpts struct {
 	mutate func([]byte) []byte
 	// probe is the measuring script. probeJS when empty.
 	probe string
-	// wait is how long the probe retries a verdict that reports itself not ready.
+	// wait is how long the probe polls a page that is not yet in the state the grader
+	// measures. Left unset it is DERIVED from the deadline the Go side is holding
+	// (readinessBudget), so this harness has ONE budget rather than two that can
+	// disagree - a page still loading under contention used to lose to an in-page 15s
+	// guess six times tighter than the deadline the test itself was prepared to wait.
+	// A grader proving the outer deadline itself sets this deliberately long.
 	wait time.Duration
+	// delay is real wall-clock time held between the page reaching the state a grader
+	// measures and the reading being taken. It is how a criterion asks whether its
+	// verdict depends on how long the measurement took.
+	delay time.Duration
 	// snapshot, when non-nil, is pushed to the page as a real SSE `snapshot` event on
 	// /api/events, which is how the dashboard gets every value it renders.
 	snapshot []byte
 	// streamFails drops the event stream after the first snapshot and answers every
 	// reconnection with 500, so the page's connection state must leave "live".
 	streamFails bool
+	// snapshotDelay holds the SSE snapshot back by that much real time after the stream
+	// opens. It is the OTHER latency a rendered grader is exposed to - not "the reading
+	// was taken late" but "the thing to read arrived late" - and it is what a loaded
+	// machine, a cold browser profile or a busy scheduler actually does to this harness.
+	snapshotDelay time.Duration
+	// probePageMutate rewrites the PROBE page - the harness's own measuring instrument,
+	// never the served document - to build a counterexample against a property of the
+	// harness itself. The single-reading guard is the one thing here that cannot be
+	// defeated from a probe script, because the probe cannot reach the loop that calls
+	// it, so this is how that guard is shown to bite. nil serves the probe page as the
+	// graders use it.
+	probePageMutate func(string) string
 
 	// --- S0053: the worlds the frontend-convention graders need ------------------
 	//
@@ -352,7 +424,7 @@ func serveDocumentWith(t *testing.T, o serveOpts) *probeServer {
 		o.probe = probeJS
 	}
 	if o.wait <= 0 {
-		o.wait = 15 * time.Second
+		o.wait = readinessBudget(deadlineFor(o.delay + o.snapshotDelay))
 	}
 	// An SSE `data:` field is ONE line. The fixtures are written readably, so they are
 	// compacted here - and a fixture that is not valid JSON fails now, loudly, rather than
@@ -384,11 +456,16 @@ func serveDocumentWith(t *testing.T, o serveOpts) *probeServer {
 		page := strings.Replace(probePage, "%JS%", o.probe, 1)
 		page = strings.Replace(page, "%SRC%", "/", 1)
 		page = strings.Replace(page, "%WAIT%", strconv.Itoa(int(o.wait/time.Millisecond)), 1)
+		page = strings.Replace(page, "%DELAY%", strconv.Itoa(int(o.delay/time.Millisecond)), 1)
+		if o.probePageMutate != nil {
+			page = o.probePageMutate(page)
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(page))
 	})
 	mux.HandleFunc("/verdict", func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		ps.posts.Add(1)
 		select {
 		case ps.verdict <- b:
 		default:
@@ -479,6 +556,21 @@ func serveDocumentWith(t *testing.T, o serveOpts) *probeServer {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// The stream is open and the page is connected; the snapshot it renders from is
+		// simply late. Held here rather than before the headers so the page is in the
+		// state a slow server really leaves it in.
+		if o.snapshotDelay > 0 {
+			select {
+			case <-time.After(o.snapshotDelay):
+			case <-done:
+				return
+			case <-r.Context().Done():
+				return
+			}
+		}
 		_, _ = fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", o.snapshot)
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
@@ -528,6 +620,49 @@ var hermeticFlags = []string{
 // hanging until the CI runner kills the whole job with nothing to read (B21).
 const verdictDeadline = 90 * time.Second
 
+// deadlineFor is the deadline a render gets when it deliberately HOLDS the reading back.
+// A held delay is time the harness itself asked for, so it is added to the budget rather
+// than spent out of it: with a bare constant the only thing a latency case could measure
+// is that 120 seconds is more than 90, which is a fact about the constant and not about
+// the page.
+func deadlineFor(delay time.Duration) time.Duration {
+	if delay <= 0 {
+		return verdictDeadline
+	}
+	return verdictDeadline + delay
+}
+
+// readinessBudget is how long the probe polls for the page to reach the state a grader
+// measures, DERIVED from the deadline the Go side is holding so the two can never
+// disagree. The grace is what the POST needs to travel after the last poll: the probe
+// must report "the page never became ready, and here is the state it was in" rather than
+// leave the Go side to time out with only the browser's log, because the first names the
+// page's own connection state and the second cannot.
+//
+// Deriving it is the repair for a real flake, not a tidy-up. A fixed budget six times
+// tighter than the deadline means a page that is merely SLOW - a loaded runner, a cold
+// browser profile, a snapshot behind a busy scheduler - is reported as a page that never
+// rendered, and the same bytes then grade differently depending on how busy the machine
+// was. Under this derivation the only page that fails readiness is one the test was never
+// going to be able to wait for.
+const readinessGrace = 10 * time.Second
+
+func readinessBudget(deadline time.Duration) time.Duration {
+	if b := deadline - readinessGrace; b > 0 {
+		return b
+	}
+	return deadline / 2
+}
+
+// probeArgs is the WHOLE command line every rendered grader launches the browser with.
+// It is a function rather than an expression inlined into runProbe so that the argv a
+// grader actually hands the engine is the thing a guard can be pointed at: the rule that
+// this harness never delegates the timing of a measurement to the browser is about the
+// launch, and a sweep over source-text literals cannot see a flag assembled from parts.
+func probeArgs(profile, url string) []string {
+	return append(append([]string{}, hermeticFlags...), "--user-data-dir="+profile, url)
+}
+
 // runProbe points the browser at the probe page and returns the raw verdict together with
 // everything the browser wrote to stdout/stderr. The browser is killed as soon as the
 // verdict arrives (after a short grace, so a console message raised during the render is
@@ -536,8 +671,7 @@ const verdictDeadline = 90 * time.Second
 //
 // It returns an error rather than failing the test, so the deadline itself is gradeable.
 func runProbe(bin string, ps *probeServer, deadline time.Duration, profile string) (raw []byte, browserLog string, err error) {
-	args := append(append([]string{}, hermeticFlags...), "--user-data-dir="+profile, ps.url+"/probe")
-	cmd := exec.Command(bin, args...)
+	cmd := exec.Command(bin, probeArgs(profile, ps.url+"/probe")...)
 	var log bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &log, &log
 	// A profile-local HOME and no session bus to look for: the runner has neither.
@@ -596,6 +730,12 @@ func renderAndReadLog(t *testing.T, bin string, ps *probeServer) (renderVerdict,
 	}
 	if v.Error != "" {
 		t.Fatalf("the probe failed inside the browser: %s\nbrowser output:\n%s", v.Error, log)
+	}
+	// The same single-reading property the dashboard graders hold, held here too: this
+	// harness has one reading per render and the test server is what counts them.
+	if seen := ps.postsSeen(); seen != 1 || v.Readings != 1 {
+		t.Fatalf("this render took %d readings (the probe counted %d, the test server received %d), want exactly 1\nbrowser output:\n%s",
+			max(seen, v.Readings), v.Readings, seen, log)
 	}
 	return v, log
 }
