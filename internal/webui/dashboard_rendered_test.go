@@ -3004,6 +3004,13 @@ const latencyCase = 120 * time.Second
 // time a busy machine would have imposed, deliberately rather than by luck.
 func TestRendered_EveryDASH9GraderIgnoresHowLongTheMeasurementTook(t *testing.T) {
 	bin := chromium(t)
+	// The three cases that hold a render back run alongside each other rather than one
+	// after another. It is not only that four minutes of deliberate waiting should not be
+	// four minutes of suite: two engines rendering at once is exactly the contention that
+	// used to decide these verdicts, so overlapping the cases that claim insensitivity to
+	// it is a stronger demonstration than serialising them. Each holds its own server, its
+	// own browser and its own profile directory.
+	t.Parallel()
 
 	quick, quickLog := mustRender(t, bin, dashOpts{snapshot: fixtureSnapshot()})
 	start := time.Now()
@@ -3077,6 +3084,7 @@ const slowSnapshot = 45 * time.Second
 // that fails readiness is one no deadline here could have waited for.
 func TestRendered_ASnapshotThatArrivesLateChangesNoVerdict(t *testing.T) {
 	bin := chromium(t)
+	t.Parallel() // see TestRendered_EveryDASH9GraderIgnoresHowLongTheMeasurementTook
 
 	prompt, promptLog := mustRender(t, bin, dashOpts{snapshot: fixtureSnapshot()})
 	start := time.Now()
@@ -3192,6 +3200,7 @@ func TestRendered_TheHarnessTakesExactlyOneReadingPerGrader(t *testing.T) {
 // removes it.
 func TestRendered_AMutatedDocumentStillFailsItsGraderAfterTheLongestDelay(t *testing.T) {
 	bin := chromium(t)
+	t.Parallel() // see TestRendered_EveryDASH9GraderIgnoresHowLongTheMeasurementTook
 
 	// One document defeating five of the ten at once, so the full delay is paid once
 	// rather than per grader. Each rule is one of the counterexamples the per-grader
