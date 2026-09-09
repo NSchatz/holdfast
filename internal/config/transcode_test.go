@@ -129,7 +129,7 @@ func TestBitrateKbps_AnnouncesThatTheQualityTargetIsNotInUse_AsANoticeNotAWarnin
 	// that only covered the top-level key would go silent for exactly the
 	// configuration that most needs it - one where SOME files run at a bitrate.
 	t.Run("a profile that sets it", func(t *testing.T) {
-		cfg, err := loadAndValidate(t, "transcode_profiles:\n  - name: bulk\n    match: '**/TV/**'\n    bitrate_kbps: 3000\n")
+		cfg, err := loadAndValidate(t, "encode_profiles:\n  - name: bulk\n    match: '**/TV/**'\n    bitrate_kbps: 3000\n")
 		if err != nil {
 			t.Fatalf("load: %v", err)
 		}
@@ -152,7 +152,7 @@ func TestBitrateKbps_AnnouncesThatTheQualityTargetIsNotInUse_AsANoticeNotAWarnin
 	})
 }
 
-// AC-A5: with no transcode_profiles, every job resolves to exactly the top-level
+// AC-A5: with no encode_profiles, every job resolves to exactly the top-level
 // settings and the recorded profile name is empty.
 func TestTranscodeFor_NoProfilesResolvesToTheTopLevelSettingsAndAnEmptyName(t *testing.T) {
 	cfg, err := loadAndValidate(t, "encoder: cpu\ncrf: 22\npreset: slow\npixel_format: auto\ncontainer_ext: source\n")
@@ -174,7 +174,7 @@ func TestTranscodeFor_NoProfilesResolvesToTheTopLevelSettingsAndAnEmptyName(t *t
 // AC-A8: every per-profile refusal, each naming the profile and the offending key
 // and value. The unknown-key refusal is asserted to bite INSIDE a profile, which is
 // the limb the top-level check structurally cannot reach.
-func TestTranscodeProfiles_RefuseEveryMalformedProfileByName(t *testing.T) {
+func TestEncodeProfiles_RefuseEveryMalformedProfileByName(t *testing.T) {
 	cases := []struct {
 		name  string
 		body  string
@@ -182,57 +182,57 @@ func TestTranscodeProfiles_RefuseEveryMalformedProfileByName(t *testing.T) {
 	}{
 		{
 			name:  "a key the schema does not define",
-			body:  "transcode_profiles:\n  - name: p\n    encodr: svtav1\n",
-			names: []string{"encodr", "transcode_profiles[0]"},
+			body:  "encode_profiles:\n  - name: p\n    encodr: svtav1\n",
+			names: []string{"encodr", "encode_profiles[0]"},
 		},
 		{
 			name:  "an unknown encoder",
-			body:  "transcode_profiles:\n  - name: p\n    encoder: notacodec\n",
+			body:  "encode_profiles:\n  - name: p\n    encoder: notacodec\n",
 			names: []string{"p", "notacodec"},
 		},
 		{
 			name:  "a crf above the range",
-			body:  "transcode_profiles:\n  - name: p\n    crf: 52\n",
+			body:  "encode_profiles:\n  - name: p\n    crf: 52\n",
 			names: []string{"p", "crf", "52"},
 		},
 		{
 			name:  "a crf below the range",
-			body:  "transcode_profiles:\n  - name: p\n    crf: -1\n",
+			body:  "encode_profiles:\n  - name: p\n    crf: -1\n",
 			names: []string{"p", "crf"},
 		},
 		{
 			name:  "a container_ext carrying a dot",
-			body:  "transcode_profiles:\n  - name: p\n    container_ext: .mkv\n",
+			body:  "encode_profiles:\n  - name: p\n    container_ext: .mkv\n",
 			names: []string{"p", "container_ext", ".mkv"},
 		},
 		{
 			name:  "a container_ext carrying a slash",
-			body:  "transcode_profiles:\n  - name: p\n    container_ext: a/b\n",
+			body:  "encode_profiles:\n  - name: p\n    container_ext: a/b\n",
 			names: []string{"p", "container_ext"},
 		},
 		{
 			name:  "a negative bitrate",
-			body:  "transcode_profiles:\n  - name: p\n    bitrate_kbps: -5\n",
+			body:  "encode_profiles:\n  - name: p\n    bitrate_kbps: -5\n",
 			names: []string{"p", "bitrate_kbps"},
 		},
 		{
 			name:  "a non-whole bitrate",
-			body:  "transcode_profiles:\n  - name: p\n    bitrate_kbps: 3000.5\n",
-			names: []string{"transcode_profiles[0].bitrate_kbps", "3000.5"},
+			body:  "encode_profiles:\n  - name: p\n    bitrate_kbps: 3000.5\n",
+			names: []string{"encode_profiles[0].bitrate_kbps", "3000.5"},
 		},
 		{
 			name:  "an empty name",
-			body:  "transcode_profiles:\n  - name: ''\n    crf: 30\n",
-			names: []string{"transcode_profiles[0]", "name"},
+			body:  "encode_profiles:\n  - name: ''\n    crf: 30\n",
+			names: []string{"encode_profiles[0]", "name"},
 		},
 		{
 			name:  "a duplicate name",
-			body:  "transcode_profiles:\n  - name: p\n    crf: 30\n  - name: p\n    crf: 31\n",
+			body:  "encode_profiles:\n  - name: p\n    crf: 30\n  - name: p\n    crf: 31\n",
 			names: []string{"p", "duplicate"},
 		},
 		{
 			name:  "a match pattern that cannot be parsed",
-			body:  "transcode_profiles:\n  - name: p\n    match: '**/[unclosed/*.mkv'\n",
+			body:  "encode_profiles:\n  - name: p\n    match: '**/[unclosed/*.mkv'\n",
 			names: []string{"p", "match"},
 		},
 	}
@@ -254,7 +254,7 @@ func TestTranscodeProfiles_RefuseEveryMalformedProfileByName(t *testing.T) {
 	// eleven refusals above are about what is wrong with each one and not about the
 	// list existing at all.
 	t.Run("a well-formed profile is accepted", func(t *testing.T) {
-		cfg, err := loadAndValidate(t, "transcode_profiles:\n"+
+		cfg, err := loadAndValidate(t, "encode_profiles:\n"+
 			"  - name: everything\n"+
 			"    match: '**/4K/**'\n"+
 			"    encoder: svtav1\n"+
@@ -266,8 +266,8 @@ func TestTranscodeProfiles_RefuseEveryMalformedProfileByName(t *testing.T) {
 		if err != nil {
 			t.Fatalf("a well-formed profile was refused: %v", err)
 		}
-		if len(cfg.TranscodeProfiles) != 1 {
-			t.Fatalf("want 1 profile, got %d", len(cfg.TranscodeProfiles))
+		if len(cfg.EncodeProfiles) != 1 {
+			t.Fatalf("want 1 profile, got %d", len(cfg.EncodeProfiles))
 		}
 	})
 }
@@ -277,9 +277,9 @@ func TestTranscodeProfiles_RefuseEveryMalformedProfileByName(t *testing.T) {
 // (crf 0 is lossless; bitrate_kbps 0 is "use the quality target"), so a schema that
 // could not tell the two apart would silently drop half the settings an operator can
 // write.
-func TestTranscodeProfiles_AnExplicitZeroOverridesAndAnAbsentKeyDoesNot(t *testing.T) {
+func TestEncodeProfiles_AnExplicitZeroOverridesAndAnAbsentKeyDoesNot(t *testing.T) {
 	cfg, err := loadAndValidate(t, "crf: 22\nbitrate_kbps: 5000\n"+
-		"transcode_profiles:\n"+
+		"encode_profiles:\n"+
 		"  - name: lossless\n"+
 		"    match: 'keep-*.mkv'\n"+
 		"    crf: 0\n"+
@@ -356,7 +356,7 @@ func TestConfigExample_CarriesTheNewSettingsAndStillLoads(t *testing.T) {
 	// Each key, commented, with the default spelled as today's behaviour.
 	for _, want := range []string{
 		"# bitrate_kbps: 0",
-		"# transcode_profiles:",
+		"# encode_profiles:",
 		`# scratch_dir: ""`,
 		"# scratch_min_free_gb: 50",
 	} {

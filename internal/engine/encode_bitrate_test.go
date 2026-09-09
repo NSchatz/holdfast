@@ -50,7 +50,7 @@ var pinArgs = map[string][]string{
 }
 
 // AC-A1: a config file that predates this item - no bitrate_kbps, no
-// transcode_profiles, no scratch_dir - produces the SAME encoder argument list this
+// encode_profiles, no scratch_dir - produces the SAME encoder argument list this
 // repository produced before, for every encoder key in the registry, and the same
 // effective container extension and pixel format.
 //
@@ -61,7 +61,7 @@ func TestPreS0079Config_ProducesTheSameArgumentsForEveryEncoderInTheRegistry(t *
 	cfg := config.Config{
 		Encoder: "cpu", CRF: 22, Preset: "slow",
 		PixelFormat: "auto", ContainerExt: "source",
-		// bitrate_kbps, transcode_profiles and scratch_dir are all absent, which is
+		// bitrate_kbps, encode_profiles and scratch_dir are all absent, which is
 		// exactly what a config written before this item is.
 	}
 
@@ -173,7 +173,7 @@ func TestBitrateKbps_TargetsTheBitrateAndPassesNoQualityTarget_ForEveryEncoder(t
 		three := 3000
 		pcfg := config.Config{
 			Encoder: "cpu", CRF: 22, Preset: "slow",
-			TranscodeProfiles: []config.EncodeProfile{
+			EncodeProfiles: []config.EncodeProfile{
 				{Name: "bulk", Match: "**/TV/**", BitrateKbps: &three},
 				{Name: "films", Match: "**/Films/**"},
 			},

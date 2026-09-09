@@ -150,7 +150,7 @@ dry_run: false
 #                         # key and the value, never a silently truncated bitrate.
 
 # --- per-job settings: transcode profiles ---
-# transcode_profiles is an ORDERED list. The FIRST profile whose match selects a
+# encode_profiles is an ORDERED list. The FIRST profile whose match selects a
 # source supplies that job's settings, laid over the top-level ones above; a later
 # matching profile has NO effect on that job, and any setting a matching profile
 # does not override keeps its top-level value. A source no profile matches is
@@ -177,7 +177,7 @@ dry_run: false
 # profile must never be able to move a gate that decides whether a source is
 # destroyed.
 #
-# transcode_profiles:
+# encode_profiles:
 #   - name: 4k-av1
 #     match: "**/4K/**"    # everything under any directory named 4K
 #     encoder: svtav1

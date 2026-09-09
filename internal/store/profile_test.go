@@ -54,7 +54,7 @@ func TestOutcome_TheProfileThatSuppliedTheSettingsIsOnTheTerminalRow(t *testing.
 // An outcome belongs to an ATTEMPT, not to a file, and the profile is part of that
 // outcome: a job re-claimed for a retry must not sit in probing/encoding/verifying
 // still advertising the profile of the attempt that failed - the operator may have
-// edited transcode_profiles between the two, which is exactly why the row is being
+// edited encode_profiles between the two, which is exactly why the row is being
 // re-tried.
 func TestClaim_ARetryClearsThePreviousAttemptsProfile(t *testing.T) {
 	s := openTest(t)

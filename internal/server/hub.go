@@ -66,7 +66,7 @@ type jobDTO struct {
 	Reason string `json:"reason,omitempty"`
 	// Encoder that ran (cpu / svtav1 / nvenc / …).
 	Encoder string `json:"encoder,omitempty"`
-	// Profile is the transcode_profiles entry that supplied this job's settings, or
+	// Profile is the encode_profiles entry that supplied this job's settings, or
 	// "" for the top-level settings.
 	//
 	// It is deliberately NOT `omitempty`, unlike Encoder beside it. "" is a REAL

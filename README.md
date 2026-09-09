@@ -147,10 +147,10 @@ anything in user space (FUSE) are all treated as not-local, because a false warn
 configuration and a false clear costs a film. **[docs/filesystem.md](docs/filesystem.md)** has the
 recognised-local set, the opt-in rules and what the startup traversal costs.
 
-### Per-job settings - `transcode_profiles`
+### Per-job settings - `encode_profiles`
 
 The top-level `encoder`, `crf`, `preset`, `pixel_format`, `container_ext` and `bitrate_kbps` are what
-every file is transcoded under. `transcode_profiles` is an **ordered** list that overrides them per
+every file is transcoded under. `encode_profiles` is an **ordered** list that overrides them per
 job: the **first** profile whose `match` selects a source supplies that job's settings, laid over the
 top-level ones. A later matching profile has no effect on that job; a setting the matching profile does
 not override keeps its top-level value; and a source no profile matches is transcoded under the
@@ -158,7 +158,7 @@ top-level settings - never skipped, never failed.
 
 ```yaml
 crf: 22                    # everything else keeps today's HEVC at crf 22
-transcode_profiles:
+encode_profiles:
   - name: 4k-av1
     match: "**/4K/**"      # everything under any directory named 4K
     encoder: svtav1
