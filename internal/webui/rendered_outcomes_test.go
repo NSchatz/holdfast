@@ -27,29 +27,33 @@ package webui
 // new statuses is `src/js/10-constants.js`, `src/js/40-cells.js`, `src/js/20-derive.js`
 // and `src/dashboard.css`; `make webui-stale` is what keeps the two in step, so this
 // grader can never be reading a document the sources no longer produce.
+//
+// HOW the DOM is obtained is not this file's own business, and used to be. It drove the
+// browser itself and read the document out of `--dump-dom` under a virtual time budget,
+// which is the ONE thing this package had already decided against: an SSE page holds a
+// fetch open, virtual time cannot advance while one is pending, and the dashboard's own
+// EventSource reconnects the moment the stream ends - so whether the dump ever happens is
+// a race between a reconnect and a budget. rendered_test.go's probePage carries the
+// history in as many words ("Two CI runs were lost to exactly that"), and this file was
+// the third: it read the DOM out of --dump-dom for 90 seconds and was killed, on the one
+// CI job whose engine is not the one the other job proved. It takes its measurement
+// through the package's ONE harness now - the served document in a same-origin iframe, a
+// stream held open so the page is not reconnecting while it is read, and a verdict the
+// page POSTs back, so the TEST owns the deadline and the browser has no say in when the
+// measurement is available. What the grader DECIDES is unchanged.
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
+	"sync/atomic"
 	"testing"
 	"time"
-)
 
-// renderBudget bounds one render. A page this small renders in a second or two; anything
-// approaching this is a browser that is not going to answer at all. It is what turns a
-// browser that sits for ever - which is what a snap shim does when its confinement is
-// unhappy, and what one did the first time this ran on CI - into a named failure rather
-// than a ten-minute timeout of the whole package.
-const renderBudget = 90 * time.Second
+	"github.com/NSchatz/holdfast/internal/sourceoffer"
+)
 
 func browserBin(t *testing.T) string {
 	t.Helper()
@@ -67,7 +71,7 @@ type jobRow struct {
 // snapshotJSON is the wire shape the page's SSE listener parses. Only the fields the
 // render path reads are set; the rest are absent, which is what a real snapshot's
 // "not recorded" looks like.
-func snapshotJSON(t *testing.T, history []jobRow, summary map[string]int) string {
+func snapshotJSON(t *testing.T, history []jobRow, summary map[string]int) []byte {
 	t.Helper()
 	snap := map[string]any{
 		"now":     time.Now().UnixMilli(),
@@ -80,83 +84,81 @@ func snapshotJSON(t *testing.T, history []jobRow, summary map[string]int) string
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(b)
+	return b
 }
 
-// renderPage serves pageHTML at "/" and one SSE snapshot at "/api/events", drives the
-// browser at it, and returns the DOM the page produced.
-func renderPage(t *testing.T, pageHTML, snapshot string) string {
+// fixturePaths are the four jobs every case here renders. They are what makes the verdict
+// READY: the snapshot arrives over SSE, which is after `load`, so a reading taken in the
+// probe's load handler can be taken before the rows it is about exist.
+var fixturePaths = []string{"/lib/done.mkv", "/lib/failed.mkv", "/lib/parked.mkv", "/lib/applied.mkv"}
+
+// outcomesProbeJS runs inside the probe page and hands back the DOM the dashboard
+// produced, exactly as it stands after the page's own script has rendered the snapshot.
+// It decides nothing: every assertion is Go's, over the same bytes as before.
+const outcomesProbeJS = `
+var WANT = %PATHS%;
+function verdict(doc, win) {
+  var rows = Array.prototype.slice.call(doc.querySelectorAll("tr"));
+  var rendered = WANT.filter(function (p) {
+    return rows.some(function (r) { return r.textContent.indexOf(p) !== -1; });
+  });
+  return { ready: rendered.length === WANT.length, rendered: rendered,
+           dom: doc.documentElement.outerHTML };
+}
+`
+
+// outcomesVerdict is what the probe posts back.
+type outcomesVerdict struct {
+	Ready    bool     `json:"ready"`
+	Rendered []string `json:"rendered"`
+	DOM      string   `json:"dom"`
+	Error    string   `json:"error"`
+}
+
+// renderPage serves the REAL document (mutate rewrites the served bytes to build a
+// counterexample), pushes it one real SSE snapshot, and returns the DOM the page produced.
+//
+// The stream the harness opens is held until the test finishes, which is the property the
+// old driver did not have: a page whose EventSource is reconnecting is a page with a fetch
+// permanently pending, and nothing that waits on the browser to decide it is done can
+// terminate against one.
+func renderPage(t *testing.T, mutate func([]byte) []byte, snapshot []byte) string {
 	t.Helper()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(pageHTML))
-	})
-	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", snapshot)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		// Hold the stream open briefly so the page stays "live" while the DOM is
-		// dumped, then let it close.
-		select {
-		case <-r.Context().Done():
-		case <-time.After(3 * time.Second):
-		}
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
 	bin := browserBin(t)
-	home := t.TempDir()
 
-	ctx, cancel := context.WithTimeout(context.Background(), renderBudget)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, bin,
-		"--headless=new",
-		"--disable-gpu",
-		"--no-sandbox",
-		"--disable-dev-shm-usage",
-		"--no-first-run",
-		"--no-default-browser-check",
-		"--disable-extensions",
-		"--user-data-dir="+filepath.Join(home, "profile"),
-		"--virtual-time-budget=6000",
-		"--run-all-compositor-stages-before-draw",
-		"--dump-dom",
-		srv.URL+"/",
-	)
-	// A writable HOME of its own: a browser denied one can sit rather than fail, and a
-	// grader that hangs is a grader that reports nothing.
-	cmd.Env = append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+home, "XDG_CACHE_HOME="+home)
-	// Killing the process group as well: a browser that spawns helpers and then wedges
-	// leaves them holding the pipe, and CombinedOutput would wait on THEM after the
-	// context killed the parent.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.WaitDelay = 5 * time.Second
-
-	out, err := cmd.CombinedOutput()
-	if ctx.Err() != nil {
-		t.Fatalf("::error:: %s did not render within %s - the dashboard grader needs a browser that "+
-			"actually answers (set HOLDFAST_BROWSER to one). Output so far:\n%s",
-			bin, renderBudget, truncate(string(out)))
-	}
+	paths, err := json.Marshal(fixturePaths)
 	if err != nil {
-		t.Fatalf("::error:: rendering the dashboard with %s failed: %v\n%s", bin, err, truncate(string(out)))
+		t.Fatal(err)
 	}
-	dom := string(out)
-	if !strings.Contains(dom, "<table") {
-		t.Fatalf("the browser produced no rendered dashboard (%d bytes):\n%s", len(dom), truncate(dom))
+	ps := serveDocumentWith(t, serveOpts{
+		url:      sourceoffer.Upstream,
+		mutate:   mutate,
+		probe:    strings.Replace(outcomesProbeJS, "%PATHS%", string(paths), 1),
+		snapshot: snapshot,
+	})
+
+	raw, log, err := runProbe(bin, ps, verdictDeadline, t.TempDir())
+	if err != nil {
+		t.Fatalf("::error:: %v", err)
 	}
-	return dom
+	var v outcomesVerdict
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("the verdict is not JSON (%v): %s\nbrowser output:\n%s", err, truncate(string(raw)), log)
+	}
+	if v.Error != "" {
+		t.Fatalf("the probe failed inside the browser: %s\nbrowser output:\n%s", v.Error, log)
+	}
+	// A page that never rendered the rows is a page with nothing to decide, and reading a
+	// missing row as a caught lie would make the mutation proof pass against a build that
+	// simply died. Say which rows arrived.
+	if !v.Ready {
+		t.Fatalf("the rendered page carries only %d of the %d fixture rows (%v)\nbrowser output:\n%s\n%s",
+			len(v.Rendered), len(fixturePaths), v.Rendered, log, truncate(v.DOM))
+	}
+	if !strings.Contains(v.DOM, "<table") {
+		t.Fatalf("the browser produced no rendered dashboard (%d bytes):\n%s", len(v.DOM), truncate(v.DOM))
+	}
+	return v.DOM
 }
 
 func truncate(s string) string {
@@ -237,7 +239,7 @@ func TestRendered_TheTwoNewOutcomesShowAsThemselves(t *testing.T) {
 	summary := map[string]int{
 		"done": 1, "failed": 1, "indeterminate": 1, "applied-despite-error": 1,
 	}
-	dom := renderPage(t, string(indexHTML), snapshotJSON(t, history, summary))
+	dom := renderPage(t, nil, snapshotJSON(t, history, summary))
 
 	if problems := readOutcomes(dom); len(problems) > 0 {
 		t.Fatalf("the RENDERED dashboard misreports a swap outcome:\n  %s", strings.Join(problems, "\n  "))
@@ -274,14 +276,26 @@ func TestRendered_TheTwoNewOutcomesShowAsThemselves(t *testing.T) {
 // path, and the SAME reading of the SAME DOM must then report the problem.
 func TestRendered_TheGraderBitesWhenTheDashboardLies(t *testing.T) {
 	const shipped = `const st = mk("span", "st st-" + j.status);`
-	page := string(indexHTML)
-	if !strings.Contains(page, shipped) {
+	if !strings.Contains(string(indexHTML), shipped) {
 		t.Fatalf("the page no longer builds the status cell as %q - the mutation would prove nothing", shipped)
 	}
 	// Report every terminal state as "failed", which is exactly the pre-existing lie:
-	// "failed" on this dashboard has always meant the source survived.
-	lying := strings.Replace(page, shipped,
-		`const st = mk("span", "st st-failed"); j = Object.assign({}, j, { status: "failed" });`, 1)
+	// "failed" on this dashboard has always meant the source survived. The rewrite is
+	// applied to the bytes the REAL handler served, so what is measured is the shipped
+	// document with one line changed and nothing else.
+	// `applied` is checked after the render rather than inside the rewrite: the harness
+	// routes every unmatched path through the same handler, so the rewrite also sees the
+	// 404 body of a stray favicon request, and refusing THAT would fail a run in which the
+	// document was mutated perfectly well.
+	const lie = `const st = mk("span", "st st-failed"); j = Object.assign({}, j, { status: "failed" });`
+	var applied atomic.Bool
+	lying := func(b []byte) []byte {
+		if !bytes.Contains(b, []byte(shipped)) {
+			return b
+		}
+		applied.Store(true)
+		return bytes.Replace(b, []byte(shipped), []byte(lie), 1)
+	}
 
 	now := time.Now().UnixMilli()
 	history := []jobRow{
@@ -293,6 +307,9 @@ func TestRendered_TheGraderBitesWhenTheDashboardLies(t *testing.T) {
 	dom := renderPage(t, lying, snapshotJSON(t, history, map[string]int{
 		"done": 1, "failed": 1, "indeterminate": 1, "applied-despite-error": 1,
 	}))
+	if !applied.Load() {
+		t.Fatal("the served document never carried the status cell the mutation rewrites - the proof measured the shipped page")
+	}
 
 	problems := readOutcomes(dom)
 	if len(problems) == 0 {
