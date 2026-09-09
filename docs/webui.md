@@ -55,6 +55,7 @@ a build, and no build step depends on it being regenerated:
 | `make webui-gen` | rewrite `internal/webui/index.html` from `internal/webui/src`. The only writer of that file |
 | `make webui-stale` | fail if the committed document is not what the sources generate. Part of `make check` |
 | `make webui-check` | the dashboard's three suites in REQUIRED mode (see below) |
+| `make webui-repeat-check` | run the rendered graders repeatedly against one unchanged tree and fail if two repetitions decided the same bytes differently. NOT part of `make check` or of `webui-check`; CI runs it |
 | `make webui-graders-selftest` | defeat each engine-only question on purpose and require the graders to red. NOT part of `make check`; CI runs it |
 
 The generator is **Go and the standard library only**. There is no JavaScript runtime, no
@@ -178,9 +179,34 @@ killed at the deadline before that was written down anywhere a check could read 
 `internal/webui/render_idiom_test.go` that reads it now.
 
 **Running them by hand.** From `internal/webui/e2e`: `npm ci` once, then `npx playwright
-test`. The fixture server is started for you. `--project=engine` is the convention set
-(it drives its own theme and viewport); `--project=dark-wide|light-wide|dark-narrow` are
-the specs that read the page as the project presents it.
+test`. The fixture server is started for you, on a port nothing was listening on when the
+run began - so two checkouts grading at once do not collide, and a killed run that left a
+listener behind cannot poison every later run on the host. A run never ADOPTS a server it
+did not start: that binary was built from a tree nobody can name, so the graders would
+report on a document this checkout did not produce. `HOLDFAST_E2E_PORT` pins an address
+for hand iteration, and `HOLDFAST_E2E_REUSE_SERVER=1` is the one case where adopting is
+what you meant. `--project=engine` is the convention set (it drives its own theme and
+viewport); `--project=dark-wide|light-wide|dark-narrow` are the specs that read the page
+as the project presents it.
+
+**A grader that disagrees with itself.** A rendered verdict must be a fact about the page,
+never about the machine, and this suite has been on the other side of that: run
+34236997921 went red on main and its rerun of the same commit went green, with nothing in
+either log saying which was right. Two mechanisms turned elapsed time into a verdict - row
+ages graded against fixed windows that tolerated sixty seconds of wall clock, and an
+in-page readiness budget of fifteen seconds sitting under a ninety-second deadline - and
+both are gone rather than widened. The diagnosis of record, with each mechanism, how it
+was reproduced and what replaced it, is at the head of
+`internal/webui/dashboard_rendered_test.go`. What holds it now: a grader that holds the
+reading back two full minutes and requires every DASH-9 property to return the verdict it
+returns with none, a grader that holds the SNAPSHOT back past any budget this harness
+carries, a mutated document that must still fail its graders after that same delay, a
+single-reading count the test server keeps rather than the page, and
+`make webui-repeat-check` as the cheap repeated disconfirmation beside them.
+
+Repetition cannot prove determinism; it can only fail to disprove it. That is why the
+criteria that REMOVE the mechanism are graders in the suite and the repetition loop is a
+separate target: a grader that no longer depends on a clock beats a loop that samples one.
 
 ## What the graders will not let you change quietly
 

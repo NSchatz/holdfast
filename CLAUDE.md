@@ -511,8 +511,21 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   grader cannot decide what a rule applies to, what wins the cascade, or what is SHOWN rather than built.
   `make check` lets both suites SKIP when their runtime is absent (as the docker gate does); `make
   webui-check` sets `HOLDFAST_WEBUI_REQUIRED=1`, which makes a missing runtime a FAILURE, and refuses a
-  run in which anything skipped or either half did not execute. CI runs it on every PR. Full reference:
-  `docs/webui.md`.
+  run in which anything skipped or either half did not execute. CI runs it on every PR.
+  **A rendered verdict is a fact about the PAGE, never about the machine**, and three rules keep it
+  one. The harness owns the timing: the page POSTs its verdict back to the test and the TEST holds the
+  deadline, so the launch carries neither `--dump-dom` nor `--virtual-time-budget` - each has already
+  cost a CI run, and `internal/webui/render_idiom_test.go` now checks the ARGV, not only the source
+  text. There is ONE budget, not two: the in-page readiness poll is DERIVED from the deadline the Go
+  side is holding, because a fixed budget tighter than that deadline turns a merely slow page into a
+  failed one. And no reading is graded against a wall clock: a figure the page derives from time is
+  graded on the DERIVATION, against the basis the page publishes beside it, so holding the reading
+  back changes the figure and never the verdict. `make webui-repeat-check` is the repeated
+  disconfirmation that runs beside those, and the diagnosis of record - both causes, how each was
+  reproduced, what replaced it - is at the head of `internal/webui/dashboard_rendered_test.go`. Do
+  not buy agreement back with a wider window, a retry, or a deleted grader: a tolerance that swallows
+  a mutation removes this surface's only rendered check and, unlike a flake, never reports itself
+  again. Full reference: `docs/webui.md`.
 - `internal/metrics` (TRANSCODE-8) — Prometheus `client_golang` collectors on a private registry: an
   `engine.Observer` adapter (counts terminal outcomes; records reclaimed bytes + encode-duration + VMAF on
   the Done event) + a queue-depth collector that reads `store.Summary` at scrape time + a `/metrics`
