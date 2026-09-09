@@ -129,8 +129,8 @@ func TestWalk_MountBeneathARootRefusesWithoutAnOptInAndStartsWithOne(t *testing.
 	t.Run("an opt-in naming the mount starts the run and records the reduced guarantee", func(t *testing.T) {
 		f := build()
 		res := check(f, []string{"/srv/media"}, "/var/state", "/srv/media/tv")
-		if !res.Start || res.Row != 5 {
-			t.Fatalf("row = %d, start = %v, want 5/true: %+v", res.Row, res.Start, res.Causes)
+		if !res.Start || res.Row != rowStart {
+			t.Fatalf("row = %d, start = %v, want %d/true: %+v", res.Row, res.Start, rowStart, res.Causes)
 		}
 		if !hasNotice(res, NoticeReducedGuarantee, "/srv/media/tv") {
 			t.Fatalf("no reduced-guarantee record for the covered mount: %+v", res.Notices)

@@ -509,7 +509,13 @@ func startupCheck(cfg *config.Config, log *slog.Logger, stderr io.Writer) (start
 		StateDir:     stateDirPath(cfg),
 		Declarations: cfg.AllowNonLocal,
 		IsMediaFile:  func(base string) bool { return engine.IsSourceName(base, cfg.VideoExts) },
-		Platform:     startupPlatform(),
+		// The configured working location, checked in the same decision and before
+		// anything is encoded: a scratch directory that is missing, is not a
+		// directory, is unwritable, is short of the floor or overlaps a library
+		// root refuses the run here rather than failing every file mid-encode.
+		ScratchDir:       cfg.ScratchDir,
+		ScratchMinFreeGB: cfg.ScratchMinFreeGB,
+		Platform:         startupPlatform(),
 	})
 	res.Log(log)
 	if !res.Start {

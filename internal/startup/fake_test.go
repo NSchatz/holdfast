@@ -35,6 +35,9 @@ type fakeFS struct {
 	readErr     map[string]error
 	readPartial map[string]bool
 	statErr     map[string]error
+	free        map[string]uint64 // free space per path, for the scratch floor
+	freeErr     map[string]error
+	writeErr    map[string]error // what the writability probe reports
 	ino         int
 
 	// call counts, so a test can show what the walk's cost is bounded BY. There
@@ -44,6 +47,7 @@ type fakeFS struct {
 	inspects int
 	readDirs int
 	types    int
+	probes   int
 }
 
 type fnode struct {
@@ -65,6 +69,9 @@ func newFS() *fakeFS {
 		readErr:     map[string]error{},
 		readPartial: map[string]bool{},
 		statErr:     map[string]error{},
+		free:        map[string]uint64{},
+		freeErr:     map[string]error{},
+		writeErr:    map[string]error{},
 	}
 	f.nodes["/"] = &fnode{dir: true, dev: "dev0", fsID: "fs0", ino: f.nextIno(), typ: "ext4"}
 	return f
@@ -316,6 +323,53 @@ func (f *fakeFS) MountPoint(p string) (bool, error) {
 		return false, ErrMountInfoUnavailable
 	}
 	return f.table[cleanPath(p)], nil
+}
+
+// FreeBytes answers from the injected table, defaulting to a figure that clears
+// any floor a test sets. A default of zero would make every scratch check refuse
+// for want of space, which would mask the check under test in every other case.
+func (f *fakeFS) FreeBytes(p string) (uint64, error) {
+	if err, bad := f.freeErr[cleanPath(p)]; bad {
+		return 0, err
+	}
+	if n, ok := f.free[cleanPath(p)]; ok {
+		return n, nil
+	}
+	return defaultFakeFree, nil
+}
+
+// ProbeWritable answers from the injected table. It writes NOTHING - the fake has
+// no way to create a file at all - so a test that proves the unwritable refusal is
+// proving the decision and not the syscall, and the probe counter below is what
+// says whether the decision even asked.
+func (f *fakeFS) ProbeWritable(p string) error {
+	f.probes++
+	if err, bad := f.writeErr[cleanPath(p)]; bad {
+		return err
+	}
+	if _, ok := f.nodes[cleanPath(p)]; !ok {
+		return fs.ErrNotExist
+	}
+	return nil
+}
+
+// defaultFakeFree is what an unconfigured path reports: a terabyte, comfortably
+// above any floor a test would set.
+const defaultFakeFree = 1 << 40
+
+func (f *fakeFS) setFree(path string, n uint64) *fakeFS {
+	f.free[cleanPath(path)] = n
+	return f
+}
+
+func (f *fakeFS) failFree(path string, err error) *fakeFS {
+	f.freeErr[cleanPath(path)] = err
+	return f
+}
+
+func (f *fakeFS) failWrite(path string, err error) *fakeFS {
+	f.writeErr[cleanPath(path)] = err
+	return f
 }
 
 // mediaByExt is the media-file test the walk is given: by NAME alone, so no file

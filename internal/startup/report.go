@@ -66,6 +66,11 @@ func (res Result) Log(log *slog.Logger) {
 			log.Warn("REDUCED no-loss guarantee on storage that is not local", attrs...)
 		case NoticeUnnecessary:
 			log.Warn("opt-in declaration is unnecessary and covers nothing", attrs...)
+		case NoticeScratchNotLocal:
+			// A statement about throughput, not about safety: the no-loss
+			// guarantee is not reduced here, so this is not the reduced-guarantee
+			// warning wearing another name.
+			log.Warn("the scratch directory is on storage that is not local (the run starts; no declaration is required)", attrs...)
 		default:
 			log.Warn(string(n.Kind), attrs...)
 		}
@@ -83,8 +88,8 @@ func (res Result) WriteRefusal(w io.Writer) {
 	if res.Start {
 		return
 	}
-	fmt.Fprintf(w, "holdfast: refusing to start - %d problem(s) with the storage this run would act on (decided at check %d of 5):\n",
-		len(res.Causes), res.Row)
+	fmt.Fprintf(w, "holdfast: refusing to start - %d problem(s) with the storage this run would act on (decided at check %d of %d):\n",
+		len(res.Causes), res.Row, rowStart)
 	for _, c := range res.Causes {
 		fmt.Fprintf(w, "\n  %s\n      %s: %s\n", c.Path, c.Kind, c.Detail)
 		if c.Declaration != "" {
@@ -97,4 +102,15 @@ func (res Result) WriteRefusal(w io.Writer) {
 	}
 	fmt.Fprintf(w, "\nholdfast: nothing was encoded, no file under a library root was created, renamed or removed,\n"+
 		"          and nothing was created in or under the state directory.\n")
+	// The whole truth, and the only thing this check ever writes anywhere. The
+	// scratch writability probe creates one zero-length file and removes it, and it
+	// is asked LAST - after existence, kind, resolution, overlap and free space -
+	// so a run refused for any of those reasons never reached it, and a run refused
+	// BY it was refused because the creation failed. The line prints when a probe
+	// could have run at all, so an operator reading a refusal is never left to
+	// wonder whether "created nothing" was the whole sentence.
+	if res.ScratchProbed {
+		fmt.Fprintf(w, "          The one exception, stated in full: a zero-length probe file was created in the\n"+
+			"          scratch directory and removed again, to establish that it is writable.\n")
+	}
 }

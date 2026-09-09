@@ -134,6 +134,60 @@ dry_run: false
 #                         # still applies whenever the effective extension differs
 #                         # from the source's own.
 
+# bitrate_kbps: 0        # 0 (the DEFAULT) keeps the crf/quality target above,
+#                         # which is this tool's archival posture. A positive value
+#                         # switches the affected jobs to a TARGET-BITRATE rate
+#                         # control at that many kbps, and then NO quality target is
+#                         # passed to the encoder at all — no -crf, -cq,
+#                         # -global_quality or -qp — because a rate control and a
+#                         # quality target are two different instructions and
+#                         # passing both leaves which one wins to the encoder.
+#                         # It is announced at startup as a NOTICE, not a warning:
+#                         # every no-loss gate still runs, and an encode that misses
+#                         # one is still rejected with the source untouched.
+#                         # Must be a whole number of kbps; 8000.5, "8000" with a
+#                         # unit, true or a list is a startup REFUSAL naming the
+#                         # key and the value, never a silently truncated bitrate.
+
+# --- per-job settings: transcode profiles ---
+# transcode_profiles is an ORDERED list. The FIRST profile whose match selects a
+# source supplies that job's settings, laid over the top-level ones above; a later
+# matching profile has NO effect on that job, and any setting a matching profile
+# does not override keeps its top-level value. A source no profile matches is
+# transcoded under the top-level settings — never skipped, never failed. Absent
+# (the default) resolves every job to exactly the top-level settings.
+#
+# `match` is a glob over the source's path:
+#   - no "/" in the pattern  -> matched against the file's BASENAME (`*.mkv`)
+#   - a "/" in the pattern   -> matched against the WHOLE path, segment by
+#                               segment. `*`, `?` and `[...]` do not cross a
+#                               separator; `**` matches zero or more whole
+#                               segments (`**/4K/**`).
+#   - an EMPTY match         -> selects every source (the catch-all; only ever
+#                               reached by what no earlier profile matched).
+#
+# A profile accepts exactly: name, match, encoder, crf, preset, pixel_format,
+# container_ext, bitrate_kbps. Any other key is a startup REFUSAL naming the
+# profile and the key — a typo inside a profile is caught, not silently ignored.
+# The name is recorded on every terminal ledger row the profile decided, and on
+# the `holdfast export` NDJSON row, so "what ran" stays answerable.
+#
+# A profile selects what the ENCODER PRODUCES and nothing else. There is
+# deliberately no per-profile VMAF threshold, undo window or retention setting: a
+# profile must never be able to move a gate that decides whether a source is
+# destroyed.
+#
+# transcode_profiles:
+#   - name: 4k-av1
+#     match: "**/4K/**"    # everything under any directory named 4K
+#     encoder: svtav1
+#     crf: 32
+#     container_ext: mkv
+#   - name: bulk-tv
+#     match: "**/TV/**/*.mkv"
+#     bitrate_kbps: 3000   # this profile's jobs run at a target bitrate; the
+#                           # rest of the library keeps the crf above
+
 # --- HDR / colour + source-property fidelity (TRANSCODE-3; not separately
 # configurable — always on) ---
 # SKIPPED, never silently converted:
@@ -288,6 +342,53 @@ dry_run: false
 
 # --- runtime ---
 # state_dir: state           # holds the resumable SQLite job store (jobs.db)
+#
+# --- the scratch directory: where the encode's working file lives ---
+# Full reference, including what this honestly buys and what it costs:
+# docs/scratch.md.
+#
+# scratch_dir: ""            # "" (the DEFAULT, and what an absent key means) writes
+#                            # each encode's working file BESIDE THE SOURCE, which is
+#                            # the behaviour this tool has always had. An absolute
+#                            # path moves the WORKING FILE there — and only the
+#                            # working file.
+#                            #
+#                            # IT DOES NOT MOVE THE SWAP. Once the acceptance gates
+#                            # have accepted, the result is copied into a temp beside
+#                            # the source, re-read off disk and proved byte-for-byte
+#                            # to be the bytes the gates passed, made durable, and
+#                            # handed to the SAME atomic same-directory rename as
+#                            # ever. Nothing is renamed or moved out of here onto a
+#                            # source, on any mount.
+#                            #
+#                            # What it buys is the SHAPE of the I/O: seek thrash
+#                            # avoided on a spinning disk, parity read-modify-write
+#                            # churn avoided on unRAID/SnapRAID/RAIDZ, failed and
+#                            # aborted transcodes kept off the array entirely, and a
+#                            # better write pattern over NFS/SMB. What it costs is a
+#                            # full write-plus-read cycle on the scratch device — on
+#                            # an SSD, write endurance spent at video-file sizes. It
+#                            # does NOT change how many bytes the source's drive
+#                            # handles: that drive is read once and written once
+#                            # either way.
+#                            #
+#                            # Refused at STARTUP, before anything is encoded, if it
+#                            # does not exist, is not a directory, cannot be
+#                            # inspected or written to, is short of the floor below,
+#                            # or overlaps a library root (either way round, after
+#                            # symlink resolution). Storage here that is not local is
+#                            # REPORTED and does not refuse: nothing irreversible
+#                            # happens in this directory, so no allow_non_local entry
+#                            # is required or possible for it.
+#
+# scratch_min_free_gb: 50    # the free-space floor, in GiB, the scratch filesystem
+#                            # must clear at startup. 0 disables the floor. It is a
+#                            # floor and NOT a prediction — startup has no per-file
+#                            # size to check against — so each job also re-checks,
+#                            # immediately before it encodes, that its source will
+#                            # fit, and fails THAT job (naming the path, the free
+#                            # space and the source size, source untouched) if it
+#                            # will not. Ignored entirely when scratch_dir is unset.
 #
 # history_retention_rows: 0  # THE LEDGER'S SIZE BOUND, AND IT SHIPS DISABLED.
 #                            #   0 (the default, and what an absent key means) keeps EVERY
