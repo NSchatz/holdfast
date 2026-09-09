@@ -8,6 +8,14 @@ tokenInput.addEventListener("change", () => localStorage.setItem("holdfast_token
 
 $("filter").addEventListener("input", applyFilter);
 
+// Where the count chips break across lines changes with the viewport and with nothing
+// else, so it is answered again whenever the row's own size changes. An observer rather
+// than a resize listener: it fires for the box that actually moved, and not for every
+// window event a page might otherwise have to filter.
+if (typeof ResizeObserver === "function" && $("chips")) {
+  new ResizeObserver(markChipGroupBreak).observe($("chips"));
+}
+
 // The elapsed ticker. It recomputes from each row's own transition timestamp, so a
 // throttled or long-delayed tick produces a correct figure rather than a lagging one -
 // the tick decides only HOW OFTEN the page refreshes, never WHAT it says.

@@ -32,6 +32,13 @@ internal/webui/
     test/                   the derivation unit suite (node's built-in test runner)
   gen/                      the generator, Go and stdlib only
   gen/genindex/             its command
+  e2e/                      the rendered graders (Playwright). TEST ONLY - see below
+    fixtureserver/          a Go command that mounts the REAL webui.HandlerFor
+    fixtures/               the snapshots the scenarios serve
+    driver.mjs              the one engine driver, for the Go graders that operate a browser
+    specs/probe.mjs         the measuring script, which decides nothing
+    specs/graders.mjs       the predicates, which measure nothing
+    specs/*.spec.mjs        the cases, and mutations.spec.mjs which defeats every grader
 ```
 
 The modules are plain scripts sharing one top-level scope, concatenated into a single
@@ -47,7 +54,8 @@ a build, and no build step depends on it being regenerated:
 |---|---|
 | `make webui-gen` | rewrite `internal/webui/index.html` from `internal/webui/src`. The only writer of that file |
 | `make webui-stale` | fail if the committed document is not what the sources generate. Part of `make check` |
-| `make webui-check` | the dashboard's two suites in REQUIRED mode (see below) |
+| `make webui-check` | the dashboard's three suites in REQUIRED mode (see below) |
+| `make webui-graders-selftest` | defeat each engine-only question on purpose and require the graders to red. NOT part of `make check`; CI runs it |
 
 The generator is **Go and the standard library only**. There is no JavaScript runtime, no
 bundler, no registry package, no lockfile and no network in the build path, so `make
@@ -82,8 +90,9 @@ Anything about what the page SHOWS is decided there and never by matching HTML o
 source text, because a text grader cannot decide what a rule applies to, what wins the
 cascade, or what is shown rather than merely built.
 
-**The DevTools-protocol graders** (S0053) drive the browser over the **Chrome DevTools
-Protocol** for the three things no expression evaluated inside the page can do:
+**The Playwright graders** (`internal/webui/e2e`) hold every criterion that needs the
+browser OPERATED rather than the page read - the three things no expression evaluated
+inside the page can do:
 
 - emulate the operating system's colour-scheme preference, so the theme under test is set
   at the ENGINE and never by a class, an attribute or a stylesheet injected into the page.
@@ -94,19 +103,84 @@ Protocol** for the three things no expression evaluated inside the page can do:
 - dispatch **real key presses**. A `KeyboardEvent` constructed inside the page is
   untrusted and moves focus nowhere, so tab order is not observable from the document.
 
-They cost **no module dependency**. `--remote-debugging-pipe` makes the browser speak CDP
-over file descriptors 3 and 4 as NUL-terminated JSON, `exec.Cmd.ExtraFiles` hands the child
-exactly those descriptors, and `encoding/json` does the rest - which keeps the whole
-toolchain Go and the standard library, as the generator already is, and adds nothing for
-`govulncheck` to carry. `internal/webui/cdp_test.go` is the driver.
+They grade the **served document**: `e2e/fixtureserver` mounts the real
+`webui.HandlerFor`, so what a spec loads is the same bytes and the same
+Content-Security-Policy `holdfast serve` puts on the wire. There is one reader of that
+document in this repository, deliberately.
+
+Those three are the whole reason there is a browser in this gate, so they are the three
+`make webui-graders-selftest` DEFEATS on purpose - one palette wearing both preferences, a
+control whose label is detached so the engine names it by its placeholder, a control taken
+out of the tab order - against a mutated COPY of the tree, requiring each grader to red and
+to say what it saw, and failing if any defeat did not execute. It is not part of `make
+check` (mutations must not touch the tree `check` grades); CI runs it beside the gate. The
+count of cases is `declared=` in that script, its single writer, which the run prints.
+
+The layering is the point, and it is why every grader can be proved: `probe.mjs` MEASURES
+and decides nothing, `graders.mjs` DECIDES and measures nothing, the spec files drive the
+world. Because a grader is a pure function of a snapshot, `mutations.spec.mjs` can run
+every one of them against a document deliberately built to defeat it and fail the run if
+the grader stays silent. The sharpest of those is the policy grader, which asserts a list
+is EMPTY: a dead instrument and a clean page report the same nothing, and only a page the
+engine must refuse can tell the two apart.
+
+The measuring script moved onto the runner VERBATIM - rewriting the thing that does the
+measuring would have put every grader's verdict in doubt at the same moment, with nothing
+left to check it against - and no grader was deleted until its replacement was proved to
+bite.
+
+**Where the dependency reaches**, which is the load-bearing half: the BUILD PATH and the
+SHIPPED PAGE take none of it. `internal/webui/gen` is still Go and the standard library
+alone, `make build` is still a plain `go build`, the image gains no stage and no tool, and
+the served document still resolves nothing at load time.
+`TestBuild_TheTestOnlyDependencyCannotReachTheBuiltArtifact` proves that of the
+generator's imports, the generated document, the Dockerfile and `go.mod` rather than
+asking for it on trust. Lifecycle scripts are disabled in a committed `.npmrc`, and the
+runner uses the browser the machine already has - `HOLDFAST_BROWSER` or one on PATH -
+rather than downloading its own.
+
+**One engine driver, and only one.** The PROSE graders in the second suite ask the same
+three engine-only questions - the preference, the accessibility tree with each name's
+sources, and an evaluation the served policy would refuse inside the page - and their
+decisions are several hundred lines of Go that read committed records, so they stay in Go
+and reach the engine through `internal/webui/e2e/driver.mjs`: one browser, one JSON command
+per line. Two drivers would be two answers to "what did the engine say" every time they
+disagreed, which is why the hand-written one this repository used to carry is gone rather
+than kept beside the runner that answers the same questions.
 
 **Skip or fail.** `make check` is this repository's gate and stays green on a machine with
 no browser and no node: the suites skip, naming the runtime they wanted, exactly as the
 docker gate does. That idiom's one failure mode is a suite that skips everywhere and
 reports "ok" forever, so `make webui-check` sets `HOLDFAST_WEBUI_REQUIRED=1`, which turns
 a missing runtime into a failure, and `scripts/webui-check.sh` additionally fails if
-anything skipped or if any of the three halves did not execute. CI runs `make webui-check`
-on every pull request, after proving both runtimes are present.
+anything skipped or if any of the three halves did not execute. The Playwright half's Go
+wrapper reads the runner's own JSON report and refuses a run that skipped a case or
+executed too few, so "it ran" and "it decided something" are separate claims and both are
+checked. CI runs `make webui-check` on every pull request, after proving both runtimes are
+present and installing the graders' runner with `npm ci` from the committed lockfile.
+
+**Which engine, and who decides.** `scripts/find-browser.sh` is the one resolution, run by
+both CI jobs and by the release workflow, and what it exports is a PIN: `HOLDFAST_BROWSER`,
+which every grader here treats as the only candidate. A candidate is taken only once it has
+actually RENDERED a page under a timeout - answering `--version` settles nothing, because
+`/usr/bin/chromium` is a snap shim on several distributions and can sit for ever rather
+than fail when its confinement is unhappy, which is why a real vendor binary is tried
+first. Ask it of your own machine with `make find-browser`; `make find-browser-selftest`
+(inside `make check`, and hermetic) is where it is defeated on purpose.
+
+**How a grader gets its reading.** Either the page POSTs a verdict back to the test that
+served it (`probePage` + `runProbe`), or the grader operates the engine over
+`internal/webui/e2e/driver.mjs`. Never out of the browser's own exit: every page here holds
+an SSE stream open, `--virtual-time-budget` cannot advance while a fetch is pending, and
+the dashboard's own EventSource opens a new one the instant the stream ends - so a
+`--dump-dom` reading is a race between a reconnect and a budget, and three CI runs were
+killed at the deadline before that was written down anywhere a check could read it. It is
+`internal/webui/render_idiom_test.go` that reads it now.
+
+**Running them by hand.** From `internal/webui/e2e`: `npm ci` once, then `npx playwright
+test`. The fixture server is started for you. `--project=engine` is the convention set
+(it drives its own theme and viewport); `--project=dark-wide|light-wide|dark-narrow` are
+the specs that read the page as the project presents it.
 
 ## What the graders will not let you change quietly
 

@@ -5,6 +5,11 @@
 # and a blanket `git add` swept an 18MB binary into the commit. A blob in git history
 # outlives a tag. Leave both.
 /transcode
+# The e2e fixture server, built at the repository root by a plain `go build
+# ./internal/webui/e2e/fixtureserver`. Ignored for the same reason the two above are: a
+# blanket `git add` sweeps an 8MB ELF into a commit, and a blob in git history outlives
+# the branch that carried it.
+/fixtureserver
 /dist/
 /out/
 

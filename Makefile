@@ -44,8 +44,9 @@ PLATFORM ?= linux/amd64
 
 .PHONY: build test check fmt vet staticcheck govulncheck govulncheck-selftest \
         check-pins check-pins-selftest install-ffmpeg-selftest check-pin-live \
+        find-browser find-browser-selftest \
         release-shape release-shape-selftest \
-        webui-gen webui-stale webui-check \
+        webui-gen webui-stale webui-check webui-graders-selftest \
         tidy clean image image-smoke compose-check
 
 build:
@@ -100,6 +101,22 @@ check-pins-selftest:
 install-ffmpeg-selftest:
 	./scripts/install-ffmpeg-selftest.sh
 
+# Proves scripts/find-browser.sh - the ONE browser resolution both CI jobs and the release
+# workflow use - still refuses a browser it has not seen render. That question used to be
+# asked two ways in one workflow: `build` proved a candidate could render, `dashboard`
+# printed its `--version`, and the weaker one was on the job whose whole purpose is that
+# the dashboard graders cannot come back green without a browser. Hermetic (every engine
+# here is a shell script), so it runs on a machine with no browser at all. A guard nobody
+# tries to defeat is a guard nobody knows works.
+find-browser-selftest:
+	./scripts/find-browser-selftest.sh
+
+# What THIS machine's browser resolution answers, for a human debugging a red grader. It is
+# the same script the workflows run, so "which engine did the gate measure" has one answer
+# a contributor can also ask.
+find-browser:
+	@./scripts/find-browser.sh
+
 # --- the release path (S0046) -------------------------------------------------
 # Everything that decides whether the one-way door opens correctly - that a manual
 # dispatch publishes nothing, that the version tag is pushed before `:latest` moves, that
@@ -147,8 +164,20 @@ webui-stale:
 webui-check:
 	./scripts/webui-check.sh
 
+# Proves the dashboard's ENGINE-ONLY graders still BITE. Three questions are the whole
+# reason there is a browser in this gate - the operating system's colour-scheme preference,
+# the accessible name the engine computes, and the focus a real key press moves - and none
+# of them is answerable from the document, so a grader that quietly stopped deciding one
+# would take the coverage with it and report "ok". Each is defeated on purpose here against
+# a mutated COPY of the tree, each defeat must be red AND say what it saw, and the run fails
+# if any defeat did not execute. Deliberately NOT part of `check`: the mutations belong in
+# their own target, and `check` must never re-render the tree it is grading. A guard nobody
+# tries to defeat is a guard nobody knows works.
+webui-graders-selftest:
+	./scripts/webui-graders-selftest.sh
+
 # THE gate. CI and the release workflow both run exactly this.
-check: check-pins check-pins-selftest install-ffmpeg-selftest release-shape webui-stale fmt vet build test staticcheck govulncheck govulncheck-selftest
+check: check-pins check-pins-selftest install-ffmpeg-selftest find-browser-selftest release-shape webui-stale fmt vet build test staticcheck govulncheck govulncheck-selftest
 
 # Asks UPSTREAM whether the pinned ffmpeg release is still served. Deliberately NOT part
 # of `check`: the PR gate must not red because a third party had a bad afternoon. CI runs

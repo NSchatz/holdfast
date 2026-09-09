@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/encoder"
+	"github.com/NSchatz/holdfast/internal/fsclass"
 	"github.com/NSchatz/holdfast/internal/sourceoffer"
 	"github.com/NSchatz/holdfast/internal/version"
 	"github.com/NSchatz/holdfast/internal/webui"
@@ -43,6 +45,25 @@ func freeAddr(t *testing.T) string {
 // writeServeConfig writes a valid serve config bound to addr and returns its path plus
 // the state directory it names (which must not exist if serve refused before doing
 // anything).
+// offerTagRe matches one element tag, so a decorative mark can be taken out of the link
+// before its displayed text is compared.
+var offerTagRe = regexp.MustCompile(`<[^>]*>`)
+
+// offerShownText is what a reader actually reads inside the offer's link: its content with
+// every tag removed. A mark contributes no text, so what is left must be the URL alone.
+func offerShownText(offer string) string {
+	open := strings.Index(offer, `<a class="source-offer-link"`)
+	end := strings.Index(offer, "</a>")
+	if open < 0 || end < open {
+		return ""
+	}
+	gt := strings.Index(offer[open:], ">")
+	if gt < 0 {
+		return ""
+	}
+	return strings.TrimSpace(offerTagRe.ReplaceAllString(offer[open+gt+1:end], ""))
+}
+
 func writeServeConfig(t *testing.T, addr string) (cfgPath, stateDir string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -76,8 +97,17 @@ func setSourceURL(t *testing.T, v string) {
 // safety proof, which fails loud and must keep doing so. Every assertion that can be
 // made without an encoder - the whole AC6 refusal set, and every rendering assertion
 // in internal/webui and internal/server - runs unconditionally.
+// It guards the OTHER precondition serve has for coming up too, for the same reason and
+// with the same rule: FILESYSTEM-1 refuses to start on storage it cannot positively
+// identify as local, and a host whose temp directory is a tmpfs - which several container
+// images are - hands every one of these tests a library root and a state directory the
+// tool is right to refuse. That refusal is a PROPERTY under test elsewhere
+// (TestRun_RefusesAStateDirectoryOnNetworkStorageAndLeavesNothingBehind), so here it is a
+// reason to skip, never a reason to relax the rule or to point these tests at a directory
+// the host has not offered.
 func requireWorkingEncoder(t *testing.T) {
 	t.Helper()
+	requireDurableTempDir(t)
 	ffmpeg := envOr("HOLDFAST_FFMPEG", "ffmpeg")
 	ffprobe := envOr("HOLDFAST_FFPROBE", "ffprobe")
 	if _, err := exec.LookPath(ffmpeg); err != nil {
@@ -86,6 +116,23 @@ func requireWorkingEncoder(t *testing.T) {
 	if _, err := encoder.RequireAvailable(context.Background(), ffmpeg, ffprobe, "cpu"); err != nil {
 		t.Skipf("this host's ffmpeg cannot encode with the default encoder, so `serve` cannot start: %v", err)
 	}
+}
+
+// requireDurableTempDir skips when the directory these tests build their fixtures in is
+// not storage `holdfast` will act on. It asks internal/fsclass - the ONE enumeration of
+// what this build calls local, which startup itself reads - rather than naming filesystem
+// types a second time here, because two sets that could drift would mean a test that
+// skipped where the tool runs, or ran where the tool refuses.
+func requireDurableTempDir(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	c := fsclass.Of(nil, dir)
+	if c.IsLocal() {
+		return
+	}
+	t.Skipf("this host's temp directory (%s) classifies as %s, and `serve` refuses to start on storage it "+
+		"cannot identify as local, so it cannot come up here (%s). Set TMPDIR to a local filesystem to run this",
+		dir, c, c.Reason)
 }
 
 // AC6: a build whose Corresponding Source URL is unusable REFUSES to start any
@@ -361,9 +408,16 @@ func TestLdflags_StampedForkValueIsServedAndUpstreamIsAbsent(t *testing.T) {
 	page := httpGet(t, "http://"+addr+"/")
 
 	offer := dashboardOfferOf(t, page)
-	wantLink := `<a class="source-offer-link" href="` + forkValue + `">` + forkValue + `</a>`
-	if !strings.Contains(offer, wantLink) {
-		t.Errorf("the stamped fork value is not both the link target and the displayed text: %s", offer)
+	// The link may carry a DECORATIVE mark in front of the URL (the GitHub glyph is drawn
+	// inline when the source URL is a GitHub one), so the displayed text is read with the
+	// tags removed rather than matched as one literal string. What must remain is the URL
+	// and nothing else: the displayed URL is what discharges the section 13 offer, so a
+	// mark that replaced it, or one that said anything of its own, fails here.
+	if !strings.Contains(offer, `<a class="source-offer-link" href="`+forkValue+`">`) {
+		t.Errorf("the stamped fork value is not the link target: %s", offer)
+	}
+	if shown := offerShownText(offer); shown != forkValue {
+		t.Errorf("the link's displayed text is %q, want the stamped fork value %q: %s", shown, forkValue, offer)
 	}
 	if strings.Contains(offer, sourceoffer.Upstream) {
 		t.Errorf("the upstream URL occurs inside a stamped fork build's offer: %s", offer)

@@ -1,20 +1,24 @@
-package webui
-
-// The measuring script for the frontend-convention graders (S0053).
+// The measuring script for the frontend-convention graders.
 //
-// It runs from the DEVTOOLS side against the SERVED document loaded at the top level -
-// not inside an iframe - so the response headers, the Content-Security-Policy and the
-// media the engine emulates all apply to the document under measurement exactly as they
-// would to a reader's. Everything it reports is something the ENGINE computed: the
-// resolved value of a custom property after the cascade and the media queries, a real
-// layout box, the colour actually painted behind a run of text, the font the layout
-// engine actually used, and the text innerText says a reader can see.
+// It runs against the SERVED document loaded at the top level - not inside an iframe - so
+// the response headers, the Content-Security-Policy and the media the engine emulates all
+// apply to the document under measurement exactly as they would to a reader's. Everything
+// it reports is something the ENGINE computed: the resolved value of a custom property
+// after the cascade and the media queries, a real layout box, the colour actually painted
+// behind a run of text, the font the layout engine actually used, and the text innerText
+// says a reader can see.
 //
-// Nothing here decides anything. Every predicate lives in Go, in
-// conventions_rendered_test.go, so each one can be run against a document deliberately
-// mutated to defeat it - which is the only way to know a grader can fail at all.
+// Nothing here decides anything. Every predicate lives in graders.mjs, so each one can be
+// run against a document deliberately mutated to defeat it - which is the only way to know
+// a grader can fail at all.
+//
+// THIS FILE IS THE MEASUREMENT LAYER AND IT MOVED VERBATIM. It was a Go string literal
+// driven over the DevTools protocol by hand; it is the same script, evaluated by a runner
+// that already speaks to the engine. Carrying it across unchanged is deliberate: a rewrite
+// of the thing that does the measuring would have put every grader's verdict in doubt at
+// the same moment, with nothing left to check it against.
 
-const conventionsProbeJS = `
+export const probeSource = String.raw`
 window.__hf = (function () {
 
 // --- colour arithmetic, WCAG 2.2's own definitions --------------------------------
@@ -254,10 +258,13 @@ function doclinks() {
   const out = [];
   for (const section of document.querySelectorAll("main section")) {
     const links = section.querySelectorAll("a.doclink");
-    const rec = { region: section.id, count: links.length, hrefs: [], texts: [], shown: [] };
+    const rec = { region: section.id, count: links.length, hrefs: [], texts: [], names: [], shown: [] };
     for (const a of links) {
       rec.hrefs.push(a.getAttribute("href"));
       rec.texts.push(visText(a));
+      // A link carries a NAME however it carries one: its own text, or a label on the
+      // element when the link is a mark. A link with none announces itself as "link".
+      rec.names.push(a.getAttribute("aria-label") || a.getAttribute("title") || visText(a));
       rec.shown.push(isRendered(a));
     }
     out.push(rec);
@@ -546,4 +553,4 @@ return {
 };
 })();
 true
-`
+`;

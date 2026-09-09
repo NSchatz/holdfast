@@ -13,6 +13,12 @@ const STATUSES = ["pending","probing","encoding","verifying","done","skipped","f
 // time: a probing row has not started one and a verifying row's encoder has exited. Those
 // states are covered by Elapsed alone, which is exactly what the phase scoped them to.
 const PROGRESS_STATUS = "encoding";
+// The statuses that are WORK IN HAND, as against the terminal ones. It is a partition of
+// STATUSES and nothing else: the page draws the two groups apart, and a status that
+// appeared in neither would be a status the page silently mis-grouped, so the split is
+// declared here beside the vocabulary it partitions rather than inferred at the point of
+// use. A file is in flight until it reaches a status it can never leave.
+const IN_FLIGHT = ["pending", "probing", "encoding", "verifying"];
 // The per-table status lists this module used to carry are GONE (LEDGER-5). They existed
 // so the page could roll the summary up into the total each capped table was capped
 // against; the server reports that total now, and a list of statuses left here would be an

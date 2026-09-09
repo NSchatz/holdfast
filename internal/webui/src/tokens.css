@@ -82,6 +82,12 @@
     --disabled: #5f6874;
     /* contrast: --fg on --selected | floor 4.5 | dark 9.46 | light 14.28 */
     --selected: #d6e6f7;
+    /* The surface a table row takes under the pointer. It carries NO meaning - a row is
+       not selected, marked or actionable by being hovered - so it is an affordance and
+       nothing else, and every value drawn on it still clears its own text floor. */
+    /* contrast: --fg on --surface-hover | floor 4.5 | dark 13.41 | light 16.02 */
+    /* contrast: --muted on --surface-hover | floor 4.5 | dark 6.41 | light 5.75 */
+    --surface-hover: #eef1f5;
     /* contrast: --link on --bg | floor 4.5 | dark 9.39 | light 7.61 */
     /* contrast: --link on --panel | floor 4.5 | dark 8.66 | light 8.16 */
     --link: #0b4f96;
@@ -94,6 +100,7 @@
     --sp-5: 20px;
     --sp-6: 24px;
     --sp-8: 32px;
+    --sp-10: 40px;
 
     /* --- the type scale ------------------------------------------------------ */
     --fs-xs: 12px;
@@ -103,8 +110,20 @@
     --fs-xl: 18px;
     --fs-2xl: 20px;
     --fs-3xl: 22px;
+    /* The one figure the history region leads with. A page whose most important number is
+       set at the same size as its labels has no most important number. */
+    --fs-4xl: 30px;
+    /* The heading scale. A page whose region headings were set two pixels above its body
+       text had no visible hierarchy at all: a reader could not see, at a glance, where
+       one question ended and the next began. */
+    --fs-h2: 24px;
+    --fs-h3: 16px;
     --lh-tight: 1.3;
     --lh-base: 1.5;
+    /* Letter spacing, in em, because it tracks the type size rather than the grid: the
+       same value has to work under a 24px heading and under a 12px column header. */
+    --ls-caps: 0.04em;
+    --ls-tight: -0.01em;
 
     /* --- the two families (S5): monospace where column alignment carries
            meaning, the system UI SANS face for headings, prose and controls.
@@ -118,9 +137,10 @@
        machine. The named platform faces below reach the real UI font on macOS,
        Windows, Android and a Linux desktop, and the `sans-serif` generic at the end
        is the one fallback that is proportional by definition. This is measured, not
-       assumed: TestRenderedCDP_TheShippedPageMeetsEveryConventionInBothThemesAtBothWidths
-       compares the advance width of sixteen narrow glyphs against sixteen wide ones
-       in the face the engine ACTUALLY used. */
+       assumed: the case "the shipped page meets every convention in both themes at both
+       widths" (internal/webui/e2e/specs/conventions.spec.mjs) compares the advance width
+       of sixteen narrow glyphs against sixteen wide ones in the face the engine ACTUALLY
+       used. */
     --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif;
     --font-mono: ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace;
 
@@ -138,11 +158,27 @@
     --size-figspread: 24px;
     --size-tap: 24px;
     --w-chip-min: 96px;
-    --w-agg-min: 248px;
+    --w-stat-min: 200px;
+    /* Sized so the whole-ledger grid resolves to THREE columns at the page's maximum
+       width and the six cards fall 3 + 3. At 248px it resolved to four, which left the
+       second row two cards wide with a third of the band empty beside them - a gap a
+       reader reads as a missing figure. */
+    --w-agg-min: 320px;
     --w-input: 224px;
+    /* The column-name gutter a stacked row reserves for the label it carries inline. */
+    --w-label: 96px;
     --w-track-min: 48px;
-    --w-table-min: 640px;
+    /* The narrowest a table may be drawn before its own container takes the scroll. It
+       is set by the widest cell the history table has to lay out without breaking - the
+       before-and-after size figure, which is one reading and must not wrap - so that
+       between this width and the width at which a row STACKS, the wrapper scrolls rather
+       than a cell spilling into the column beside it. */
+    --w-table-min: 960px;
     --w-main-max: 1184px;
+    /* The width the size column reserves for its BEFORE figure, so every arrow in the
+       column lands on one vertical line. In characters, because the figures are set in
+       the tabular monospace face and a character is exactly what they are counted in. */
+    --measure-figure: 8ch;
     --measure-note: 70ch;
     --measure-footer: 80ch;
 
@@ -179,6 +215,7 @@
       --focus: #8ec5f0;
       --disabled: #99a1af;
       --selected: #2a3a52;
+      --surface-hover: #1c2029;
       --link: #7fbdf0;
       --shadow-raised: 0 1px 4px rgba(0, 0, 0, 0.55);
     }

@@ -95,6 +95,12 @@
     --disabled: #5f6874;
     /* contrast: --fg on --selected | floor 4.5 | dark 9.46 | light 14.28 */
     --selected: #d6e6f7;
+    /* The surface a table row takes under the pointer. It carries NO meaning - a row is
+       not selected, marked or actionable by being hovered - so it is an affordance and
+       nothing else, and every value drawn on it still clears its own text floor. */
+    /* contrast: --fg on --surface-hover | floor 4.5 | dark 13.41 | light 16.02 */
+    /* contrast: --muted on --surface-hover | floor 4.5 | dark 6.41 | light 5.75 */
+    --surface-hover: #eef1f5;
     /* contrast: --link on --bg | floor 4.5 | dark 9.39 | light 7.61 */
     /* contrast: --link on --panel | floor 4.5 | dark 8.66 | light 8.16 */
     --link: #0b4f96;
@@ -107,6 +113,7 @@
     --sp-5: 20px;
     --sp-6: 24px;
     --sp-8: 32px;
+    --sp-10: 40px;
 
     /* --- the type scale ------------------------------------------------------ */
     --fs-xs: 12px;
@@ -116,8 +123,20 @@
     --fs-xl: 18px;
     --fs-2xl: 20px;
     --fs-3xl: 22px;
+    /* The one figure the history region leads with. A page whose most important number is
+       set at the same size as its labels has no most important number. */
+    --fs-4xl: 30px;
+    /* The heading scale. A page whose region headings were set two pixels above its body
+       text had no visible hierarchy at all: a reader could not see, at a glance, where
+       one question ended and the next began. */
+    --fs-h2: 24px;
+    --fs-h3: 16px;
     --lh-tight: 1.3;
     --lh-base: 1.5;
+    /* Letter spacing, in em, because it tracks the type size rather than the grid: the
+       same value has to work under a 24px heading and under a 12px column header. */
+    --ls-caps: 0.04em;
+    --ls-tight: -0.01em;
 
     /* --- the two families (S5): monospace where column alignment carries
            meaning, the system UI SANS face for headings, prose and controls.
@@ -131,9 +150,10 @@
        machine. The named platform faces below reach the real UI font on macOS,
        Windows, Android and a Linux desktop, and the `sans-serif` generic at the end
        is the one fallback that is proportional by definition. This is measured, not
-       assumed: TestRenderedCDP_TheShippedPageMeetsEveryConventionInBothThemesAtBothWidths
-       compares the advance width of sixteen narrow glyphs against sixteen wide ones
-       in the face the engine ACTUALLY used. */
+       assumed: the case "the shipped page meets every convention in both themes at both
+       widths" (internal/webui/e2e/specs/conventions.spec.mjs) compares the advance width
+       of sixteen narrow glyphs against sixteen wide ones in the face the engine ACTUALLY
+       used. */
     --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif;
     --font-mono: ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace;
 
@@ -151,11 +171,27 @@
     --size-figspread: 24px;
     --size-tap: 24px;
     --w-chip-min: 96px;
-    --w-agg-min: 248px;
+    --w-stat-min: 200px;
+    /* Sized so the whole-ledger grid resolves to THREE columns at the page's maximum
+       width and the six cards fall 3 + 3. At 248px it resolved to four, which left the
+       second row two cards wide with a third of the band empty beside them - a gap a
+       reader reads as a missing figure. */
+    --w-agg-min: 320px;
     --w-input: 224px;
+    /* The column-name gutter a stacked row reserves for the label it carries inline. */
+    --w-label: 96px;
     --w-track-min: 48px;
-    --w-table-min: 640px;
+    /* The narrowest a table may be drawn before its own container takes the scroll. It
+       is set by the widest cell the history table has to lay out without breaking - the
+       before-and-after size figure, which is one reading and must not wrap - so that
+       between this width and the width at which a row STACKS, the wrapper scrolls rather
+       than a cell spilling into the column beside it. */
+    --w-table-min: 960px;
     --w-main-max: 1184px;
+    /* The width the size column reserves for its BEFORE figure, so every arrow in the
+       column lands on one vertical line. In characters, because the figures are set in
+       the tabular monospace face and a character is exactly what they are counted in. */
+    --measure-figure: 8ch;
     --measure-note: 70ch;
     --measure-footer: 80ch;
 
@@ -192,6 +228,7 @@
       --focus: #8ec5f0;
       --disabled: #99a1af;
       --selected: #2a3a52;
+      --surface-hover: #1c2029;
       --link: #7fbdf0;
       --shadow-raised: 0 1px 4px rgba(0, 0, 0, 0.55);
     }
@@ -264,22 +301,35 @@
   header {
     position: sticky; top: 0; z-index: 1;
     display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap;
-    padding: var(--sp-3) var(--sp-5);
-    border-bottom: var(--bw-hair) solid var(--line);
+    padding: var(--sp-4) var(--sp-6);
+    border-bottom: var(--bw-hair) solid var(--border);
     background: var(--panel);
     box-shadow: var(--shadow-raised);
   }
-  header h1 { font-size: var(--fs-xl); margin: 0; }
+  header h1 { font-size: var(--fs-h2); margin: 0; letter-spacing: var(--ls-tight); }
   header h1 .mono { color: var(--accent); }
   .grow { flex: 1 1 auto; }
-  #conn { font-size: var(--fs-xs); color: var(--muted); }
-  #conn.live { color: var(--ok); }
-  #conn.down { color: var(--bad); }
+  /* The connection state, which is the one thing on this page that says whether anything
+     else on it is still true. It is a pill with a dot AND the state in words: the dot is
+     a second reading of the word beside it and never the only one. */
+  #conn {
+    display: inline-flex; align-items: center; gap: var(--sp-2);
+    font-size: var(--fs-xs); color: var(--muted);
+    border: var(--bw-hair) solid var(--border); border-radius: var(--radius-pill);
+    padding: var(--sp-1) var(--sp-3); min-height: var(--size-tap);
+    transition: color var(--motion-fast) linear, border-color var(--motion-fast) linear;
+  }
+  #conn::before {
+    content: ""; width: var(--sp-2); height: var(--sp-2);
+    border-radius: var(--radius-pill); background: currentColor; flex: none;
+  }
+  #conn.live { color: var(--ok); border-color: var(--ok); }
+  #conn.down { color: var(--bad); border-color: var(--bad); }
 
   main { padding: var(--sp-5); max-width: var(--w-main-max); margin: 0 auto; }
 
-  .badges { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center;
-    margin-bottom: var(--sp-3); }
+  .badges { display: flex; gap: var(--sp-3); flex-wrap: wrap; align-items: center;
+    margin-bottom: var(--sp-4); }
   .badge {
     font-size: var(--fs-xs); padding: var(--sp-1) var(--sp-2);
     border-radius: var(--radius-pill); border: var(--bw-hair) solid var(--border);
@@ -290,9 +340,64 @@
   .badge.scan.on { background: var(--accent); border-color: var(--accent); }
   .reclaimed { font-size: var(--fs-sm); color: var(--muted); }
   .reclaimed b { color: var(--ok); font-size: var(--fs-md); }
+  /* The run's own reclaimed figure sits beside the two state badges, and it is the only
+     number on that line - so it is set as a number and not as part of the sentence
+     naming it. */
+  .badges .reclaimed b { font-size: var(--fs-xl); }
 
-  .chips { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-4); }
-  .chip { background: var(--panel); border: var(--bw-hair) solid var(--border);
+  /* The two byte figures a swap produces, drawn as one band so a reader meets them
+     together. They are never summed and never nested: the reclaimed figure is space the
+     ledger says came back, and the held figure is space that has NOT come back yet, so a
+     page showing only the first tells an operator a disk is free when it is not. */
+  .stats { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin: 0 0 var(--sp-4); }
+  .stat { display: flex; flex-direction: column; gap: var(--sp-1); margin: 0;
+    background: var(--panel); border: var(--bw-hair) solid var(--border);
+    border-radius: var(--radius-md); padding: var(--sp-3) var(--sp-4);
+    min-width: var(--w-stat-min); flex: 1 1 var(--w-stat-min); }
+  .stat b { font-size: var(--fs-4xl); line-height: var(--lh-tight); font-weight: 700; }
+  /* The held figure is not a gain, so it is not painted as one. It takes the page's
+     neutral foreground and its own leading rule; only the reclaimed figure is --ok. */
+  .stat.held b { color: var(--fg); }
+  /* The flag is a THICKER left border, and a thicker border eats the padding behind it -
+     which started this card's text three pixels right of its neighbour's. The padding
+     gives back exactly what the border took, so the two cards begin on one line. */
+  .stat.held { border-left: var(--bw-flag) solid var(--warn);
+    padding-left: calc(var(--sp-4) - var(--bw-flag) + var(--bw-hair)); }
+  .stat .stat-k { font-size: var(--fs-xs); color: var(--muted); }
+
+  .chips { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-4);
+    align-items: stretch; }
+  /* The counts are two different questions - what is in hand, and what is finished - and
+     the page drew them as one undifferentiated row of nine. The boundary is a rule before
+     the first terminal chip, so the grouping costs no wrapper element and #chips keeps the
+     one flat list of children every reader of this view walks.
+
+     The arithmetic is the whole of it, and it was wrong twice. A separator sits BETWEEN two
+     things, so the space either side of it has to be the same: the row's own gap (--sp-2)
+     plus this margin is the whole space, and the rule is drawn at half of it. --sp-4 makes
+     that 8 + 16 = 24, and 12 either side. It used to be --sp-5, which made the space 28 and
+     put the rule 16 from one chip and 12 from the other.
+
+     And it has to be as TALL as the things it divides. An absolutely positioned box is laid
+     out against its ancestor's PADDING box, so `top: 0; bottom: 0` stopped inside the
+     chip's own border and drew a rule two pixels short of the chips either side of it -
+     visibly floating, once you have seen it. The inset is negative by exactly that border. */
+  .chip.inflight + .chip.terminal { margin-left: var(--sp-4); }
+  /* The row wrapped between the two groups, so there is nothing to divide and the rule is
+     not drawn: it would otherwise hang in the margin beside the first chip of the new line.
+     The MARGIN stays, deliberately. Taking it back would change the layout that produced
+     this answer - without it the chip fits on the line again, which re-draws the rule,
+     which pushes it off again, and the row flickers between the two. So the space is left
+     alone and only the rule goes; a second group that begins its own line, indented, still
+     reads as a second group. */
+  .chip.inflight + .chip.terminal.linestart::before { content: none; }
+  .chip.inflight + .chip.terminal::before {
+    content: ""; position: absolute; left: calc(-1 * var(--sp-3));
+    top: calc(-1 * var(--bw-hair)); bottom: calc(-1 * var(--bw-hair));
+    border-left: var(--bw-hair) solid var(--border);
+  }
+  .chip { position: relative; background: var(--panel);
+    border: var(--bw-hair) solid var(--border);
     border-radius: var(--radius-md); padding: var(--sp-2) var(--sp-3);
     min-width: var(--w-chip-min); }
   .chip .n { font-size: var(--fs-3xl); font-weight: 700; }
@@ -305,12 +410,20 @@
   /* The two FILESYSTEM-1 outcomes are counted as themselves, so they are coloured as
      themselves rather than folded into done or failed. */
   .chip.indeterminate .n, .chip.applied-despite-error .n { color: var(--bad); }
-  .chip.encoding .n, .chip.probing .n, .chip.verifying .n { color: var(--accent); }
+  .chip.pending .n, .chip.encoding .n, .chip.probing .n, .chip.verifying .n { color: var(--accent); }
 
   /* Controls. Every pointer target on this page is at least --size-tap square at
      every viewport width, which the padding and the min-height together buy. */
+  /* The control surface, drawn as the one bar it is. It used to be two unbordered rows
+     floating in the document flow, which read as an unfinished form rather than as the
+     page's controls. */
   .controls { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap;
-    margin-bottom: var(--sp-3); }
+    background: var(--panel); border: var(--bw-hair) solid var(--border);
+    padding: var(--sp-3) var(--sp-4); margin: 0; }
+  .controls:first-of-type { border-radius: var(--radius-md) var(--radius-md) 0 0; }
+  .controls + .controls { border-top: 0;
+    border-radius: 0 0 var(--radius-md) var(--radius-md); margin-bottom: var(--sp-6); }
+  .controls .lbl { min-width: var(--w-track-min); }
   .lbl { font-size: var(--fs-xs); color: var(--muted); }
   .controls input {
     background: var(--bg); border: var(--bw-hair) solid var(--border); color: var(--fg);
@@ -340,23 +453,57 @@
   #msg.err { color: var(--bad); }
 
   /* The page's two regions. The h2 is the region; the h3s inside it are its blocks. */
-  section > h2 { font-size: var(--fs-lg); color: var(--fg);
-    border-bottom: var(--bw-hair) solid var(--border); padding-bottom: var(--sp-2);
-    margin: var(--sp-6) 0 var(--sp-2); }
-  section > h3 { font-size: var(--fs-md); color: var(--muted);
+  /* The space above this rule is the padding PLUS the half-leading a line box carries
+     under its glyphs, which is why the two are not the same number: 12px of padding
+     measures 15.2px from the letterforms, so the margin below is the 16 that matches it.
+     A rule with more air on one side than the other reads as belonging to whichever block
+     it is nearer, and this one belongs to the heading. */
+  section > h2 { font-size: var(--fs-h2); color: var(--fg); font-weight: 700;
+    line-height: var(--lh-tight); letter-spacing: var(--ls-tight);
+    border-bottom: var(--bw-hair) solid var(--border); padding-bottom: var(--sp-3);
+    margin: var(--sp-10) 0 var(--sp-4); }
+  section:first-of-type > h2 { margin-top: var(--sp-4); }
+  /* A block heading inside a region. It takes the page's own foreground rather than the
+     muted role: it names a block a reader is looking FOR, and a heading set in the same
+     colour as the note beneath it is a heading a reader has to hunt for. */
+  section > h3 { font-size: var(--fs-h3); color: var(--fg); font-weight: 600;
     border-bottom: var(--bw-hair) solid var(--line); padding-bottom: var(--sp-2);
-    margin: var(--sp-5) 0 var(--sp-2); }
+    margin: var(--sp-8) 0 var(--sp-3); }
   /* The short SCOPE label that stays on the surface (F8). The paragraphs that used
      to explain the methodology here live in docs/dashboard-methodology.md and are
      reached by the one documentation link each region carries. */
-  .scope { font-size: var(--fs-xs); color: var(--muted); margin: 0 0 var(--sp-2);
+  /* A region's opening line: what this region is, and where its method is written down.
+     The two used to stack as a sentence and then a full-width underlined sentence under
+     it, which gave a footnote the weight of a heading. They share one row now, the
+     scope on the left and the reference on the right. */
+  /* Centred rather than baseline-aligned: the reference beside the scope line is a MARK,
+     and a box holding only a drawing has no text baseline to align on - it aligns on its
+     own bottom edge, which put it a few pixels above the line it sits beside. */
+  .regionintro { display: flex; align-items: center; justify-content: space-between;
+    gap: var(--sp-4); flex-wrap: wrap; margin: 0 0 var(--sp-4); }
+  .scope { font-size: var(--fs-sm); color: var(--muted); margin: 0;
     max-width: var(--measure-note); }
-  .docs { margin: 0 0 var(--sp-3); }
+  /* A FLEX container, so the mark inside it is a flex item and not a character on a line.
+     As an inline box it sat on this paragraph's text BASELINE, and a line box reserves
+     descender space under the baseline whether or not anything is written on it - so the
+     paragraph came out 26px tall around a 24px mark, and the mark sat a pixel above the
+     centre of its own box while the row it is in grew two pixels for text that does not
+     exist. Nothing here is text; the paragraph is a wrapper the source offer's own marker
+     produces, and this makes its height the mark's height. */
+  .docs { margin: 0; display: flex; align-items: center; }
+  /* A mark, not a sentence. It is a pointer target like any other on this page, so it
+     is at least --size-tap square at every width, and it keeps a visible EDGE: an icon
+     that is told apart from the page around it only by being a different colour is an
+     affordance carried by colour alone. */
   .doclink {
-    display: inline-block; color: var(--link); font-size: var(--fs-xs);
-    min-height: var(--size-tap); padding: var(--sp-1) var(--sp-1) var(--sp-1) 0;
-    transition: color var(--motion-fast) linear;
+    display: inline-flex; align-items: center; justify-content: center;
+    color: var(--link); text-decoration: none;
+    min-height: var(--size-tap); min-width: var(--size-tap);
+    border: var(--bw-hair) solid var(--border); border-radius: var(--radius-pill);
+    transition: color var(--motion-fast) linear, border-color var(--motion-fast) linear;
   }
+  .doclink:hover { border-color: var(--link); }
+  .doclink .docmark { flex: none; }
 
   /* The three states every view owes (F7): loading, empty and unreadable, each in
      words and each distinct from the other two. The state line replaces nothing -
@@ -399,15 +546,18 @@
      already published. It loads nothing: no library, no font, no image, no data:
      URI. Every value it encodes is also rendered as text in the same card, in the
      order the marks are drawn. */
-  .agg .fig { display: block; width: 100%; }
-  .agg .fig.bar { height: var(--size-figbar); }
-  .agg .fig.spread { height: var(--size-figspread); margin: var(--sp-1) 0; }
-  .agg .fig .mark { fill: var(--mark); }
-  .agg .fig .axis, .agg .fig .tick { stroke: var(--mark); fill: none; stroke-width: var(--bw-focus); }
+  /* Scoped to the DRAWING, not to the card it happened to be introduced in: two views
+     draw one now (a distribution's buckets, and how far through its source a running
+     encode is) and both are held to the same rules. */
+  .fig { display: block; width: 100%; }
+  .fig.bar { height: var(--size-figbar); }
+  .fig.spread { height: var(--size-figspread); margin: var(--sp-1) 0; }
+  .fig .mark { fill: var(--mark); }
+  .fig .axis, .fig .tick { stroke: var(--mark); fill: none; stroke-width: var(--bw-focus); }
   /* The mean tick is TALLER and THICKER than the two ends it sits between - the one
      thing that tells the three marks of a spread apart, since all three share a
      colour. */
-  .agg .fig .tick.mean { stroke-width: calc(var(--bw-focus) + var(--bw-hair)); }
+  .fig .tick.mean { stroke-width: calc(var(--bw-focus) + var(--bw-hair)); }
   /* One grid for the whole distribution, so every bar is measured against the same
      track width. Label, bar and count sit in one row per bucket, in the order the
      marks are drawn. */
@@ -433,20 +583,58 @@
   th, td { text-align: left; padding: var(--sp-2) var(--sp-3);
     border-bottom: var(--bw-hair) solid var(--line);
     font-size: var(--fs-sm); vertical-align: top; }
-  th { color: var(--muted); font-weight: 600; font-size: var(--fs-xs); white-space: nowrap; }
-  td.path { word-break: break-all; }
+  /* A table on this page paints no edge of its own, so its content IS the page column and
+     has to begin on it. The cell padding that separates one column from the next was
+     doing so at the outer edges too, which set every file name twelve pixels inside the
+     heading above it and the whole table twelve pixels short of the column's right edge -
+     a table that looked indented from everything around it for no reason a reader could
+     see. A CARD is a different case and keeps its padding: it draws a border, and content
+     inset from a border it can see is what a reader expects. */
+  th:first-child, td:first-child { padding-left: 0; }
+  th:last-child, td:last-child { padding-right: 0; }
+  th { color: var(--muted); font-weight: 700; font-size: var(--fs-xs); white-space: nowrap;
+    letter-spacing: var(--ls-caps); text-transform: uppercase;
+    border-bottom: var(--bw-focus) solid var(--border); }
+  /* An affordance and nothing more: a hovered row is not selected, marked or actionable,
+     and every value on it still clears its own contrast floor against this surface. */
+  tbody tr:hover { background: var(--surface-hover); }
+  /* The path cell. The NAME is what a reader scans for, so it takes the page's own
+     foreground on its own line; the directory recedes above it and is the part allowed to
+     break, because it is the part that repeats down the column. Nothing is elided: the
+     two together are still the path the server sent. */
+  td.path { word-break: normal; overflow-wrap: anywhere; }
+  td.path .pdir { display: block; color: var(--muted); font-size: var(--fs-xs);
+    overflow-wrap: anywhere; }
+  td.path .pname { display: block; color: var(--fg); overflow-wrap: anywhere; }
   /* The history table is FIXED-width so its wide free-text cells wrap inside their
      column instead of blowing the table past its wrapper. */
   table.hist { table-layout: fixed; }
   table.hist td { overflow-wrap: anywhere; }
   table.hist td.st { white-space: normal; }
-  .hist .c-file { width: 19%; }
-  .hist .c-result { width: 17%; }
-  .hist .c-size { width: 12%; }
-  .hist .c-vmaf { width: 23%; }
+  /* The queue table is fixed-width too. Its File column carried the whole table before:
+     four narrow columns were pushed to the right edge, so a reader's eye crossed an empty
+     third of the page between a file and its state. */
+  table.queue { table-layout: fixed; }
+  /* Every value in a queue row is one line; the file beside it is two, the directory
+     above the name. Top alignment put each value level with the DIRECTORY, so the eye
+     paired a status with a folder rather than with the file it belongs to. */
+  table.queue td { overflow-wrap: anywhere; vertical-align: middle; }
+  .queue .q-file { width: 40%; }
+  .queue .q-status { width: 14%; }
+  .queue .q-elapsed { width: 12%; }
+  .queue .q-prog { width: 20%; }
+  .queue .q-worker { width: 14%; }
+
+  .hist .c-file { width: 21%; }
+  .hist .c-result { width: 14%; }
+  .hist .c-size { width: 16%; }
+  .hist .c-vmaf { width: 22%; }
   .hist .c-enc { width: 8%; }
   .hist .c-dur { width: 9%; }
-  .hist .c-upd { width: 12%; }
+  .hist .c-upd { width: 10%; }
+  /* A fixed-layout column does not grow for a header that will not break, it lets the
+     header run into the next column. These wrap instead. */
+  table.hist th { white-space: normal; }
   td.st { white-space: nowrap; }
 
   /* A status dot's COLOUR is never the only carrier of its meaning. The state is
@@ -458,7 +646,12 @@
     background: var(--muted); vertical-align: middle; }
   .st-done .dot { background: var(--ok); }
   .st-failed .dot { background: var(--bad); border-radius: 0; }
-  .st-skipped .dot { background: var(--muted); border-radius: 0; transform: rotate(45deg); }
+  /* A square rotated by 45 degrees has a diagonal wider than its side, so it reached
+     past the box the disc and the square sit in and hung to the left of both. Scaling by
+     1/root-2 puts its diagonal back on the box's own width: the shape still reads as a
+     diamond and its edges line up with every other status mark in the column. */
+  .st-skipped .dot { background: var(--muted); border-radius: 0;
+    transform: rotate(45deg) scale(0.7071); }
   /* The two FILESYSTEM-1 outcomes are terminal too, so the same rule binds them: shape
      carries the meaning and colour only reinforces it. Neither is a success and neither
      is `failed` - which on this page has always carried the second half of the sentence,
@@ -471,20 +664,43 @@
   .st-encoding .dot, .st-probing .dot, .st-verifying .dot, .st-pending .dot { background: var(--accent); }
   .reason { color: var(--muted); font-size: var(--fs-xs); }
   .reason.fail { color: var(--bad); word-break: break-word; }
-  .size .before { color: var(--muted); }
+  td.size { white-space: nowrap; }
+  /* The before-figure is right-aligned in a fixed measure, so every arrow in the column
+     falls on one vertical line however wide the figures either side of it are. */
+  .size .before { display: inline-block; min-width: var(--measure-figure);
+    text-align: right; color: var(--muted); }
   .size .arrow { color: var(--muted); margin: 0 var(--sp-1); }
-  .size .pct { display: block; color: var(--ok); font-weight: 600; margin-top: var(--sp-1); }
-  .vmaf .pair { white-space: nowrap; }
-  .vmaf .mean { font-weight: 600; }
-  .vmaf .worst { color: var(--fg); }
+  .size .pct { display: block; color: var(--ok); font-weight: 600; margin-top: var(--sp-1);
+    white-space: normal; }
+  .vmaf .pair { white-space: normal; }
+  .vmaf .mean { font-weight: 700; font-size: var(--fs-md); }
+  .vmaf .worst { color: var(--fg); font-weight: 600; }
+  /* The condition line states what the two numbers above it license, and it is the same
+     sentence on every row - so it is set as the footnote it is. It is NOT removed: what
+     the score does and does not mean is the point of showing a score at all. */
   .vmaf .cond { display: block; color: var(--muted); font-size: var(--fs-xs);
-    margin-top: var(--sp-1); font-family: var(--font-ui); }
+    line-height: var(--lh-tight); margin-top: var(--sp-1); font-family: var(--font-ui); }
   td.elapsed { white-space: nowrap; }
-  td.prog { white-space: nowrap; }
-  td.prog .pctv { font-weight: 600; }
+  /* The cell stacks: the percentage, the bar that draws it, and the position it was
+     measured from. nowrap would keep all three on one line and push the bar through the
+     column beside it. */
+  td.prog { white-space: normal; }
+  td.prog .pctv { font-weight: 700; font-size: var(--fs-md); display: block; }
+  /* The bar's TRACK. Without one a short bar is just a short bar - a reader cannot see
+     what it is a share of - so the track is drawn as an outline that clears 3:1 against
+     the surface behind it, exactly as every other boundary on this page does. */
+  td.prog .fig.bar {
+    margin-top: var(--sp-1); border: var(--bw-hair) solid var(--border);
+    border-radius: var(--radius-sm); background: var(--bg);
+  }
   td.prog .of { display: block; color: var(--muted); font-size: var(--fs-xs); margin-top: var(--sp-1); }
   /* The page's ONE absence phrase, wherever a fact was never recorded. */
-  .nr { color: var(--muted); font-style: italic; font-family: var(--font-ui); }
+  /* The page's ONE absence phrase, wherever a fact was never recorded. It fills four
+     columns of every skipped and failed row, so it is set at the smallest size on the
+     scale - still --muted, which clears the 4.5:1 text floor in both themes, because a
+     fact nobody recorded still has to be READ as that and not mistaken for an empty cell. */
+  .nr { color: var(--muted); font-style: italic; font-family: var(--font-ui);
+    font-size: var(--fs-xs); }
   .empty { color: var(--muted); font-style: italic; padding: var(--sp-3); }
 
   footer { color: var(--muted); font-size: var(--fs-xs); text-align: center;
@@ -498,6 +714,79 @@
      the whole thing the offer owes. */
   .source-offer { margin: var(--sp-3) 0 0; }
   .source-offer a { color: var(--link); overflow-wrap: anywhere; }
+  /* The mark is drawn in front of the URL, never instead of it: the displayed URL is
+     what discharges the section 13 offer. It is decoration, so it takes the link's own
+     colour and carries no meaning the text beside it does not. */
+  .source-offer-link { display: inline-flex; align-items: center; gap: var(--sp-2);
+    vertical-align: bottom; }
+  .source-offer-link .gh { flex: none; }
+  .source-offer-url { overflow-wrap: anywhere; }
+
+  /* --- the narrow viewport ---------------------------------------------------
+     Phone first (F9) has always meant the BODY never scrolls sideways, and it never
+     did: the wide tables scrolled inside their own container instead. But a table of
+     seven fixed columns inside a 360px container is not read by scrolling it, it is
+     abandoned - every column arrives about forty pixels wide and a size figure of
+     "1.6 MB -> 104.6 KB" comes down the page one character at a time.
+
+     So below the width where seven columns stop being seven columns, a row STACKS.
+     Each cell keeps its own text and gains the name of the column it came from, read
+     off that table's own <th> at render time - one source for a column's name, never
+     a second copy in this stylesheet that would agree with the header today and
+     disagree with it later.
+
+     Nothing is hidden and nothing is dropped: every cell a wide row renders, a narrow
+     row renders too, in the same order, with the value the server sent. The column
+     header row is the one thing that goes, because a stacked row carries its labels
+     inline and a header above it would name columns that are no longer there. */
+  @media (max-width: 760px) {
+    .tablewrap { overflow-x: visible; }
+    table, table.hist, table.queue { min-width: 0; table-layout: auto; display: block; }
+    table colgroup { display: none; }
+    table thead { display: none; }
+    table tbody { display: block; }
+    table tbody tr {
+      display: block; padding: var(--sp-2) 0;
+      border-bottom: var(--bw-hair) solid var(--border);
+    }
+    /* The label is taken OUT of flow rather than made a layout box beside the value.
+       A grid or a flex container here would make every child of the cell an item of
+       its own, and several of these cells are built from several elements - the size
+       cell alone is "before", an arrow, the after figure and the percentage - so the
+       figure "1.6 MB -> 104.6 KB" would come apart one element per line. Positioning
+       the label absolutely leaves the cell's own children in ordinary inline flow,
+       exactly as they are at full width. */
+    table tbody td {
+      display: block; position: relative; border-bottom: 0;
+      padding: var(--sp-1) var(--sp-3) var(--sp-1) var(--w-label);
+      min-height: var(--size-tap);
+    }
+    /* The column's own name, carried onto the cell by the renderer. It is generated
+       content, so it is decoration a reader is given and never text the page's own
+       copy budget is spent on. */
+    table tbody td::before {
+      content: attr(data-label);
+      position: absolute; left: var(--sp-3); top: var(--sp-1);
+      width: calc(var(--w-label) - var(--sp-5));
+      color: var(--muted); font-size: var(--fs-xs); font-family: var(--font-ui);
+      font-weight: 700; letter-spacing: var(--ls-caps); text-transform: uppercase;
+      overflow-wrap: anywhere;
+    }
+    /* A state row (loading / empty / unreadable) speaks for the whole table, so it
+       keeps neither a label nor a column. */
+    table tbody tr[data-state] td, table tbody tr[data-empty] td {
+      display: block; padding: var(--sp-3);
+    }
+    /* The size cell's percentage is a second line under the figure at full width; here
+       it sits inline with it, because the cell is already one line per row. */
+    table tbody td.size .pct { display: inline; margin-left: var(--sp-2); }
+    table tbody tr[data-state] td::before, table tbody tr[data-empty] td::before { content: none; }
+    /* The file is the row's subject at this width, so it leads the card at full width
+       rather than sitting in a labelled field beside its own name. */
+    table tbody td.path { padding-left: var(--sp-3); padding-bottom: var(--sp-2); }
+    table tbody td.path::before { content: none; }
+    table tbody td.path .pname { font-weight: 700; }
+  }
 </style>
 </head>
 <body>
@@ -521,8 +810,10 @@
        every claim that used to be printed here is in that document. -->
   <section id="region-now" aria-labelledby="h-now">
     <h2 id="h-now">Right now</h2>
-    <p class="scope">Pushed live by the server.</p>
-    <!--holdfast:doc-now-->
+    <div class="regionintro">
+      <p class="scope">Pushed live by the server.</p>
+      <!--holdfast:doc-now-->
+    </div>
 
     <!-- The live-counts view. Every view on this page carries exactly one element with
          a data-state attribute naming which of the three states F7 requires it is in;
@@ -557,7 +848,10 @@
     <p class="scope">Being worked on, and since when.</p>
     <p class="note cap" id="queue-cap" hidden></p>
     <div class="tablewrap">
-      <table aria-labelledby="h-queue">
+      <table class="queue" aria-labelledby="h-queue">
+        <colgroup>
+          <col class="q-file"><col class="q-status"><col class="q-elapsed"><col class="q-prog"><col class="q-worker">
+        </colgroup>
         <thead><tr><th>File</th><th>Status</th><th>Elapsed</th><th>Progress</th><th>Worker</th></tr></thead>
         <tbody id="queue" data-view="queue">
           <tr data-state="loading"><td class="empty" colspan="5">Loading the work in hand.</td></tr>
@@ -567,9 +861,22 @@
 
   <section id="region-history" aria-labelledby="h-history">
     <h2 id="h-history">What it has done to your library</h2>
-    <p class="scope">From the ledger, and survives restarts.</p>
-    <!--holdfast:doc-history-->
-    <p class="reclaimed">reclaimed lifetime: <b id="reclaimed-lifetime">loading</b></p>
+    <div class="regionintro">
+      <p class="scope">From the ledger, and survives restarts.</p>
+      <!--holdfast:doc-history-->
+    </div>
+    <!-- The two byte figures a swap produces, side by side and never added together.
+         `reclaimed lifetime` is space the ledger says came back; `held by the undo window`
+         is space a swap has NOT yet returned, because while an original is retained its
+         bytes are still allocated under a second link (UNDO-6). The server publishes both
+         and has always said the second must be rendered as its own figure - a reclaimed
+         number that quietly included space still being held would tell an operator a disk
+         is free when it is not. Until now the page rendered the first and dropped the
+         second, which is the same lie by omission. -->
+    <div class="stats">
+      <p class="stat reclaimed"><b id="reclaimed-lifetime">loading</b><span class="stat-k">reclaimed lifetime</span></p>
+      <p class="stat reclaimed held"><b id="bytes-held">loading</b><span class="stat-k">held by the undo window</span></p>
+    </div>
 
     <h3 id="h-aggs">Across the whole ledger</h3>
     <p class="scope">Computed server-side over every matching row.</p>
@@ -587,7 +894,7 @@
           <col class="c-enc"><col class="c-dur"><col class="c-upd">
         </colgroup>
         <thead><tr>
-          <th>File</th><th>Result</th><th>Size</th><th>VMAF</th><th>Encoder</th><th>Encode</th><th>Updated</th>
+          <th>File</th><th>Result</th><th>Size</th><th>VMAF</th><th>Encoder</th><th>Encode time</th><th>Updated</th>
         </tr></thead>
         <tbody id="history" data-view="history">
           <tr data-state="loading"><td class="empty" colspan="7">Loading finished swaps.</td></tr>
@@ -677,6 +984,12 @@ const STATUSES = ["pending","probing","encoding","verifying","done","skipped","f
 // time: a probing row has not started one and a verifying row's encoder has exited. Those
 // states are covered by Elapsed alone, which is exactly what the phase scoped them to.
 const PROGRESS_STATUS = "encoding";
+// The statuses that are WORK IN HAND, as against the terminal ones. It is a partition of
+// STATUSES and nothing else: the page draws the two groups apart, and a status that
+// appeared in neither would be a status the page silently mis-grouped, so the split is
+// declared here beside the vocabulary it partitions rather than inferred at the point of
+// use. A file is in flight until it reaches a status it can never leave.
+const IN_FLIGHT = ["pending", "probing", "encoding", "verifying"];
 // The per-table status lists this module used to carry are GONE (LEDGER-5). They existed
 // so the page could roll the summary up into the total each capped table was capped
 // against; the server reports that total now, and a list of statuses left here would be an
@@ -838,6 +1151,26 @@ function sizeFigures(j) {
 // statistics (harmonic mean AND worst frame), the model that produced them, its pooling,
 // its luma-only blind spot, and that it was measured against the operator's own source.
 // It never grades the result, never claims perfect fidelity, and never compares files.
+// pathParts splits a media path into the directory that leads to it and the file's own
+// name. Both tables are read by scanning for a FILE, and a column of absolute paths that
+// wrap mid-word buries the one part of each row a reader is actually looking for: the
+// name is the last segment, and everything before it is the same for every file in a
+// season.
+//
+// The split is on the last separator and nothing cleverer. A path with no separator is
+// all name and no directory; a path that ENDS in one has no name to show, so the whole
+// string is kept as the directory rather than inventing an empty name. The two parts
+// always concatenate back to the input exactly - no separator is added, moved or
+// dropped - so the cell's text is still the path the server sent, character for
+// character, which is what lets the filter and the graders keep reading it whole.
+function pathParts(path) {
+  const s = typeof path === "string" ? path : "";
+  const cut = s.lastIndexOf("/");
+  if (cut < 0) return { dir: "", name: s };
+  if (cut === s.length - 1) return { dir: s, name: "" };
+  return { dir: s.slice(0, cut + 1), name: s.slice(cut + 1) };
+}
+
 function vmafFigures(j) {
   if (!isNum(j.vmaf_mean) && !isNum(j.vmaf_min)) return null;
   const model = j.vmaf_model ? String(j.vmaf_model).replace(/^version=/, "") : "unspecified model";
@@ -862,7 +1195,10 @@ function progressFigure(j) {
   if (j.status !== PROGRESS_STATUS) return null;
   if (!isNum(j.progress_fraction)) return { unknown: true };
   const frac = Math.min(1, Math.max(0, j.progress_fraction));
-  const out = { unknown: false, percent: Math.round(frac * 100) + "%" };
+  // `fraction` is the same clamped measurement the percentage is rounded from, carried
+  // through so a drawing and the text beside it are two readings of ONE number and can
+  // never disagree - a bar drawn from its own arithmetic would be a second answer.
+  const out = { unknown: false, fraction: frac, percent: Math.round(frac * 100) + "%" };
   if (isNum(j.progress_seconds) && isNum(j.progress_duration_seconds)) {
     out.of = fmtSpan(Math.min(j.progress_seconds, j.progress_duration_seconds))
       + " of " + fmtSpan(j.progress_duration_seconds);
@@ -1014,8 +1350,9 @@ function spreadPositions(min, mean, max) {
   return { mean: Math.min(1, Math.max(0, t)) };
 }
 // --- internal/webui/src/js/30-dom.js ---
-// The DOM primitives. Everything the page puts on screen is built here or through here,
-// and there is exactly one way to do it: createElement plus textContent. No module in
+// The DOM primitives, plus the ONE drawing primitive two different views now build from.
+// Everything the page puts on screen is built here or through here, and there is exactly
+// one way to do it: createElement plus textContent. No module in
 // this directory assigns a string to an HTML sink, which is what makes the response
 // Content-Security-Policy's `require-trusted-types-for 'script'` a guarantee rather than
 // a hope - a regression that string-built from an attacker-influencable media path would
@@ -1038,9 +1375,37 @@ function nrNode() { return mk("span", "nr", NOT_RECORDED); }
 // namespace comes from the HTML parser reading the template, so no module here names a
 // namespace URI, imports a drawing library, or builds an element from a string.
 function tplNode(id) { return $(id).content.cloneNode(true).firstElementChild; }
+
+// figBar is a proportional bar: a shell cloned from the document's own <template> with
+// ONE geometry attribute set from a number that was already measured elsewhere. It draws
+// nothing it computes itself.
+//
+// It lives here, with the other primitives, because two views draw one: a distribution's
+// buckets in the whole-ledger cards, and how far through its source a running encode is.
+// The rules are the same in both places and are the drawings' own (60-aggregates.js): no
+// library, no image, no font, no data: URI, no string assigned to an HTML sink; nothing
+// told apart by colour alone; and every value it encodes rendered as text beside it, so
+// removing every drawing from the page costs a reader no number at all.
+function figBar(share) {
+  const svg = tplNode("tpl-fig-bar");
+  svg.querySelector(".mark").setAttribute("width", (share * 100).toFixed(4) + "%");
+  return svg;
+}
 // --- internal/webui/src/js/40-cells.js ---
 // The cells. Each takes the value its derivation produced and puts it on screen; an
 // absent derivation is rendered as the page's honest absence, never as a zero.
+
+// The path cell. The file's own NAME leads and the directory that led to it recedes
+// above it, because both tables are read by scanning for a file and an unbroken column of
+// absolute paths hides the one segment a reader is looking for. Nothing is elided and
+// nothing is added: the two parts concatenate back to the path the server sent, so the
+// cell still carries it whole for anyone copying it out.
+function pathCell(td, path) {
+  const parts = pathParts(path);
+  if (parts.dir) td.appendChild(mk("span", "pdir", parts.dir));
+  if (parts.name) td.appendChild(mk("span", "pname", parts.name));
+  if (!parts.dir && !parts.name) td.appendChild(nrNode());
+}
 
 // The size cell: before → after with the percent reclaimed. Only meaningful on a done
 // row that recorded both sizes.
@@ -1049,7 +1414,10 @@ function sizeCell(td, j) {
   if (!f) { td.appendChild(nrNode()); return; }
   td.appendChild(mk("span", "before", f.before));
   td.appendChild(mk("span", "arrow", "→"));
-  td.appendChild(document.createTextNode(f.after));
+  // The replacement's size is an element rather than a bare text node so the column can
+  // give the two figures a shape: a before-and-after read down a column is read by its
+  // ARROWS, and an arrow that moves from row to row is a column with no shape at all.
+  td.appendChild(mk("span", "after", f.after));
   td.appendChild(mk("span", "pct", f.reduction));
 }
 
@@ -1103,12 +1471,109 @@ function progressCell(td, j) {
     return;
   }
   td.appendChild(mk("span", "pctv", f.percent));
+  // The same measurement, drawn. It is the figure the percentage above it was rounded
+  // from - not a second arithmetic - and it carries no value that text does not, so a
+  // reader who cannot see it has lost nothing. It is aria-hidden for that reason: the
+  // percentage is already there to be read.
+  td.appendChild(figBar(f.fraction));
   if (f.of) td.appendChild(mk("span", "of", f.of));
 }
 // --- internal/webui/src/js/50-rows.js ---
 // The rows. Each is cloned from a <template> in the document and filled cell by cell, so
 // the row's shape is markup the author wrote and its content is text the browser can only
 // ever treat as text.
+
+// --- reconciling rows, rather than rebuilding them ----------------------------------
+//
+// The page renders a whole snapshot at a time, and it used to do that by emptying each
+// tbody and building every row again. That is correct and it is invisible - until an
+// operator tries to USE the page while holdfast is working. Every snapshot destroyed
+// every row NODE, so a path being selected to copy vanished mid-gesture, and snapshots
+// arrive on every job transition. Reading a failing file's path off this dashboard during
+// a scan was not difficult, it was impossible.
+//
+// So a row is now KEYED by its path and carries a signature of everything it renders. A
+// row whose signature is unchanged is left alone - the same node, with the same selection
+// and the same scroll position in it - and only a row that actually changed is replaced.
+// Rows are then ordered by moving nodes rather than by recreating them.
+//
+// The signature is taken from the JOB, not from the row built out of it - the whole DTO
+// the server sent, serialised. Two properties matter and they pull in opposite directions:
+//
+//   it can never be under-sensitive. A row is a pure function of its job, so a signature
+//   over the whole job changes whenever anything the row could render changes. A list of
+//   "the fields this row uses" would be a second place to remember, and the first field
+//   somebody adds without updating it is a row that silently stops refreshing - which is
+//   a stale figure presented as a live one, the exact thing F6 refuses.
+//
+//   it may be over-sensitive, and that costs nothing. A field the row does not render
+//   changing rebuilds that one row for no visible reason. Nobody can see it.
+//
+// It is deliberately NOT taken by serialising the built row back to markup. That would
+// mean touching one of the HTML-string sinks this page's render idiom refuses, and the
+// idiom refuses them by NAME rather than by intent: the sweep inside `make check` cannot
+// tell a read from a write, and it should not have to - a rule that admitted "reading one
+// is fine" would be a rule with a hole in it that the next person has to know about.
+function stamp(tr, key, job) {
+  tr.dataset.key = key;
+  tr.dataset.sig = JSON.stringify(job);
+  return tr;
+}
+
+// syncRows brings one tbody into agreement with the rows a snapshot describes, touching
+// as little of the document as it can.
+function syncRows(body, items, build) {
+  const have = new Map();
+  for (const tr of Array.from(body.children)) {
+    // A state row (loading / empty / unreadable) speaks for the whole table and is not a
+    // row of data; it is removed here and re-added by setViewState if it still applies.
+    if (tr.dataset && tr.dataset.key && !tr.dataset.state) have.set(tr.dataset.key, tr);
+    else tr.remove();
+  }
+  let i = 0;
+  for (const j of items) {
+    const built = build(j);
+    const existing = have.get(built.dataset.key);
+    let tr = built;
+    if (existing) {
+      have.delete(built.dataset.key);
+      // Unchanged: keep the node a reader may be part-way through interacting with.
+      if (existing.dataset.sig === built.dataset.sig) tr = existing;
+    }
+    const at = body.children[i];
+    if (at !== tr) body.insertBefore(tr, at || null);
+    i++;
+  }
+  // Everything the snapshot no longer describes has been pushed past the rows it does.
+  while (body.children.length > items.length) body.removeChild(body.lastChild);
+}
+
+// labelCells copies each column's own header onto the cells beneath it, so that a
+// viewport too narrow for seven columns can stack a row and still say which value is
+// which. The label is read from the table's OWN <th>, never written a second time in a
+// stylesheet or a constant: a column header restated somewhere else agrees with the table
+// today and disagrees with it the first time either moves, which is the drift this
+// repository has spent whole phases refusing.
+//
+// It sets an attribute and nothing else. The cell's text is untouched, so every reader of
+// these rows - the filter, the graders, an operator copying a path - still sees exactly
+// what the server sent.
+function labelCells(tr, headers) {
+  const tds = tr.children;
+  for (let i = 0; i < tds.length && i < headers.length; i++) {
+    tds[i].dataset.label = headers[i];
+  }
+}
+
+// headersOf reads one table's column headers once per render, in document order.
+function headersOf(tbodyId) {
+  const body = $(tbodyId);
+  const table = body ? body.closest("table") : null;
+  if (!table) return [];
+  return Array.prototype.map.call(table.querySelectorAll("thead th"), function (th) {
+    return th.textContent.trim();
+  });
+}
 
 // refreshElapsed recomputes every active row's in-state age from the transition
 // timestamp the row carries. It runs on render AND on a timer, which is what makes the
@@ -1130,10 +1595,10 @@ function refreshElapsed() {
   }
 }
 
-function queueRow(j) {
+function queueRow(j, headers) {
   const tr = $("tpl-queue-row").content.cloneNode(true).firstElementChild;
   tr.dataset.path = (j.path || "").toLowerCase();
-  tr.querySelector(".path").textContent = j.path;
+  pathCell(tr.querySelector(".path"), j.path);
   tr.querySelector(".st").classList.add("st-" + j.status);
   tr.querySelector(".stlabel").textContent = j.status;
   // The elapsed basis is the transition timestamp already on the wire; the cell itself
@@ -1143,13 +1608,14 @@ function queueRow(j) {
   const worker = tr.querySelector(".worker");
   if (j.worker) worker.textContent = j.worker;
   else worker.appendChild(nrNode());
-  return tr;
+  if (headers) labelCells(tr, headers);
+  return stamp(tr, "q:" + (j.path || ""), j);
 }
 
-function histRow(j) {
+function histRow(j, headers) {
   const tr = $("tpl-hist-row").content.cloneNode(true).firstElementChild;
   tr.dataset.path = (j.path || "").toLowerCase();
-  tr.querySelector(".path").textContent = j.path;
+  pathCell(tr.querySelector(".path"), j.path);
   resultCell(tr.querySelector(".st"), j);
   // EVERY cell of a history row is filled, in every status. A skipped or failed row
   // recorded no size, no score, no encoder and no encode time, and F3 says that reads
@@ -1167,7 +1633,8 @@ function histRow(j) {
   const upd = tr.querySelector(".upd");
   if (isNum(j.updated_at) && j.updated_at > 0) upd.textContent = fmtTime(j.updated_at);
   else upd.appendChild(nrNode());
-  return tr;
+  if (headers) labelCells(tr, headers);
+  return stamp(tr, "h:" + (j.path || ""), j);
 }
 // --- internal/webui/src/js/55-states.js ---
 // The three states every view owes (clause F7): what it shows while LOADING, what it
@@ -1250,7 +1717,7 @@ function markUnreadable() {
     if (!viewHasContent(view)) setViewState(view, "unreadable");
   }
   if (renderedOnce) return;
-  for (const id of ["reclaimed-session", "reclaimed-lifetime"]) {
+  for (const id of ["reclaimed-session", "reclaimed-lifetime", "bytes-held"]) {
     const el = $(id);
     if (el) el.replaceChildren(nrNode());
   }
@@ -1280,14 +1747,10 @@ function markUnreadable() {
 //      and a maximum by their position and the height of their tick. Every mark is one
 //      token (--mark), chosen for 3:1 against the card face behind it.
 
-// figBar is one bar of a distribution: the mark's length is this bucket's own count as a
-// share of the largest count in the SAME figure, which is the only comparison a reader
-// can safely make by eye and the only one this drawing offers.
-function figBar(share) {
-  const svg = tplNode("tpl-fig-bar");
-  svg.querySelector(".mark").setAttribute("width", (share * 100).toFixed(4) + "%");
-  return svg;
-}
+// One bar of a distribution is drawn by figBar (30-dom.js), the shared primitive: the
+// mark's length is this bucket's own count as a share of the largest count in the SAME
+// figure, which is the only comparison a reader can safely make by eye and the only one
+// this drawing offers.
 
 // The user-space ends of the spread shell's scale, inset so a 2px stroke centred on
 // either end is drawn inside the box rather than half-clipped by it.
@@ -1313,8 +1776,12 @@ function spreadNodes(a, fmt, lead) {
   const pos = spreadPositions(a.min, a.mean, a.max);
   if (pos) out.push(figSpread(pos));
   out.push(spreadKeys(a, fmt));
-  out.push(mk("span", "range", "range " + fmt(a.min) + " to " + fmt(a.max) + " across " +
-    fmtCount(a.counted) + " files"));
+  // How many files the spread was taken over. It used to restate the minimum and the
+  // maximum as well - "range 491 ms to 1s across 5 files" - directly under the line that
+  // had just named both, so the only fact it carried that the card did not already show
+  // was the count. The drawing rule is untouched: every value the ticks encode is still
+  // rendered as text, in the order the ticks are drawn, by spreadKeys above.
+  out.push(mk("span", "range", "across " + fmtCount(a.counted) + " files"));
   return out;
 }
 
@@ -1465,6 +1932,29 @@ function applyFilter() {
   }
 }
 
+// markChipGroupBreak decides whether the group boundary is drawn at all.
+//
+// The boundary between work IN HAND and work FINISHED is a rule to the left of the first
+// terminal chip. A rule divides two things - so when the row wraps between the two groups
+// there is nothing to its left, and what a reader sees is a line hanging in the margin
+// beside a chip that is also indented for no reason. That happens at any width where the
+// nine chips break at exactly that point.
+//
+// CSS cannot ask whether two flex items share a line, so the page asks AFTER layout and
+// records the answer on the element; the stylesheet draws the rule only when they do. It
+// is a comparison with a tolerance rather than an equality because sub-pixel layout can
+// put two boxes on one line a fraction of a pixel apart.
+function markChipGroupBreak() {
+  const chips = $("chips");
+  if (!chips) return;
+  const first = chips.querySelector(".chip.terminal");
+  if (!first) return;
+  const prev = first.previousElementSibling;
+  const together = !!prev &&
+    Math.abs(prev.getBoundingClientRect().top - first.getBoundingClientRect().top) < 2;
+  first.classList.toggle("linestart", !together);
+}
+
 // The polite screen-reader summary, updated only when it changes so a snapshot that
 // shifts nothing stays silent.
 function announce(sum) {
@@ -1493,6 +1983,11 @@ function render(snap) {
   // A total nobody recorded reads as the page's one absence phrase, never as 0 B (F3).
   bytesInto("reclaimed-lifetime", snap.bytes_reclaimed_lifetime);
   bytesInto("reclaimed-session", snap.bytes_reclaimed_session);
+  // Space a swap has not yet given back. It is published as a POINTER precisely so that
+  // an unreadable figure and a figure of zero are two different answers, and bytesInto
+  // carries that distinction to the screen: null renders the page's one absence phrase,
+  // never a 0 a reader would take for an empty retention area.
+  bytesInto("bytes-held", snap.bytes_held_by_undo_window);
 
   // Pause is meaningless when already paused; Resume is meaningless when running.
   $("pause").disabled = !!snap.paused;
@@ -1512,11 +2007,18 @@ function render(snap) {
     for (const s of STATUSES) {
       const n = isNum(sum[s]) ? sum[s] : 0;
       counted += n;
-      const chip = mk("div", "chip " + s);
+      // The chip's GROUP is on the chip itself rather than in a wrapper element, so
+      // #chips keeps one flat list of children: a reader is told apart what is in hand
+      // from what is finished by a rule drawn before the first terminal chip, and nothing
+      // that reads this view has to descend through a box to find a count.
+      const chip = mk("div", "chip " + s + (IN_FLIGHT.indexOf(s) >= 0 ? " inflight" : " terminal"));
       chip.appendChild(mk("div", "n", String(n)));
       chip.appendChild(mk("div", "k", s));
       chips.appendChild(chip);
     }
+    // Where the two groups fall is a question about LAYOUT, so it is asked once the chips
+    // are in the document rather than while they are being built.
+    markChipGroupBreak();
     // The counts view has nothing to show when the ledger holds no row in ANY state,
     // which is the empty state F7 requires of it. The chips still read their measured
     // zeroes beside it.
@@ -1528,16 +2030,18 @@ function render(snap) {
   // Queue.
   const q = Array.isArray(snap.queue) ? snap.queue : [];
   const qbody = $("queue");
-  qbody.replaceChildren();
-  for (const j of q) qbody.appendChild(queueRow(j));
+  const qheaders = headersOf("queue");
+  // Reconciled, never rebuilt wholesale: a row the snapshot did not change keeps its own
+  // node, and with it whatever a reader was part-way through doing to it.
+  syncRows(qbody, q, (j) => queueRow(j, qheaders));
   setViewState("queue", q.length ? null : "empty");
   refreshElapsed();
 
   // History - the trust surface: per file, the evidence its swap was safe.
   const h = Array.isArray(snap.history) ? snap.history : [];
   const hbody = $("history");
-  hbody.replaceChildren();
-  for (const j of h) hbody.appendChild(histRow(j));
+  const hheaders = headersOf("history");
+  syncRows(hbody, h, (j) => histRow(j, hheaders));
   setViewState("history", h.length ? null : "empty");
 
   // Honest row-cap notices. The total is the one the SERVER reported for each table -
@@ -1567,6 +2071,14 @@ tokenInput.value = localStorage.getItem("holdfast_token") || "";
 tokenInput.addEventListener("change", () => localStorage.setItem("holdfast_token", tokenInput.value));
 
 $("filter").addEventListener("input", applyFilter);
+
+// Where the count chips break across lines changes with the viewport and with nothing
+// else, so it is answered again whenever the row's own size changes. An observer rather
+// than a resize listener: it fires for the box that actually moved, and not for every
+// window event a page might otherwise have to filter.
+if (typeof ResizeObserver === "function" && $("chips")) {
+  new ResizeObserver(markChipGroupBreak).observe($("chips"));
+}
 
 // The elapsed ticker. It recomputes from each row's own transition timestamp, so a
 // throttled or long-delayed tick produces a correct figure rather than a lagging one -

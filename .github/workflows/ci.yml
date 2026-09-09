@@ -65,28 +65,22 @@ jobs:
       # and so it fails loud rather than being skipped, which for a grader is a false
       # green. GitHub's runner images ship Chrome; this only locates it.
       #
-      # It does NOT trust `command -v`. On Ubuntu, /usr/bin/chromium is a snap shim that
-      # can sit for ever rather than fail when its confinement is unhappy, which is
-      # exactly what it did the first time this ran - so each candidate has to actually
-      # RENDER a page, under a timeout, before it is accepted.
+      # The resolution is scripts/find-browser.sh, and it is a SCRIPT because this repeated
+      # it: the `dashboard` job below carried a second, weaker copy that asked `command -v`
+      # and printed a version, so the two jobs measured different engines and the weaker
+      # answer was on the job that exists to make a missing browser fatal. One definition,
+      # run by both jobs, by the release workflow and by a human typing `make find-browser`.
+      #
+      # The resolved path is assigned BEFORE it is echoed, deliberately: `echo "X=$(cmd)"`
+      # exits 0 however cmd exited, so a failed resolution would write an empty pin and the
+      # step would go green - and an empty HOLDFAST_BROWSER is not a pin at all, it is the
+      # PATH search this step exists to replace.
       - name: browser for the rendered dashboard graders
         run: |
-          set -uo pipefail
-          probe="$(mktemp -d)"
-          for b in google-chrome google-chrome-stable chrome chromium chromium-browser; do
-            p="$(command -v "$b" 2>/dev/null || true)"
-            [ -n "$p" ] || continue
-            if HOME="$probe" timeout 60 "$p" --headless=new --disable-gpu --no-sandbox \
-                 --disable-dev-shm-usage --no-first-run --no-default-browser-check \
-                 --user-data-dir="$probe/profile" --dump-dom about:blank >/dev/null 2>&1; then
-              echo "HOLDFAST_BROWSER=$p" >> "$GITHUB_ENV"
-              echo "using $b: $p ($("$p" --version 2>/dev/null || echo 'version unknown'))"
-              exit 0
-            fi
-            echo "  $p found but did not render within 60s - trying the next candidate"
-          done
-          echo "::error::no browser on this runner could render a page - the dashboard graders need one" >&2
-          exit 1
+          set -euo pipefail
+          p="$(./scripts/find-browser.sh)"
+          [ -n "$p" ] || { echo "::error::the browser resolution produced no path"; exit 1; }
+          echo "HOLDFAST_BROWSER=$p" >> "$GITHUB_ENV"
 
       # THE gate. Invoked through the Makefile, and deliberately NOT re-listed as steps
       # here: the Makefile's `check:` target is the definition, so CI, the release workflow
@@ -134,10 +128,18 @@ jobs:
   # turns a missing runtime into a failure, and scripts/webui-check.sh fails the run if
   # anything skipped or if either half did not execute at all.
   #
-  # It is a separate job because it needs two runtimes the gate does not: node (for the
-  # derivation units, in node's BUILT-IN test runner - no registry package, no lockfile)
-  # and a browser engine (for the rendered graders, which decide what the page SHOWS by
+  # It is a separate job because it needs runtimes the gate does not: node (for the
+  # derivation units, in node's BUILT-IN test runner, and for the Playwright graders' own
+  # runner) and a browser engine (for every grader that decides what the page SHOWS by
   # loading the served document rather than by matching its source text).
+  #
+  # The Playwright project is installed with `npm ci` from the committed lockfile, so what
+  # CI runs is the runner version this repository pinned. It is TEST tooling and reaches
+  # nothing a user runs: the generator is still Go and stdlib, `make build` is still a
+  # plain `go build`, and the image gains no stage - which is not asked for here, it is
+  # enforced by TestBuild_TheTestOnlyDependencyCannotReachTheBuiltArtifact inside the
+  # gate. The browser is the runner's own; Playwright is told to use it rather than
+  # downloading one, so no browser download enters this repository's CI.
   dashboard:
     runs-on: ubuntu-latest
     steps:
@@ -150,18 +152,47 @@ jobs:
 
       # Named and proven present BEFORE the gate runs, so "the browser was missing" is a
       # sentence in the log rather than a mystery inside a test binary.
+      #
+      # PROVEN, which this step used to only claim. It asked `command -v` and printed a
+      # `--version`, which every candidate answers - including the one that then never
+      # paints - and it exported nothing, so the graders were left to search for themselves
+      # and found the runner's /usr/bin/chromium. Two of them spent 90 seconds each waiting
+      # on it, eight minutes into every run, while the identical graders were green in
+      # `build` above, because `build` had pinned an engine it had watched render. The
+      # resolution is one script now and it PINS what it proved, so both jobs measure the
+      # same engine and the log says which.
       - name: the runtimes the dashboard suites require
         run: |
           set -euo pipefail
           node --version
-          for b in chromium chromium-browser google-chrome chrome; do
-            if command -v "$b" >/dev/null 2>&1; then "$b" --version; exit 0; fi
-          done
-          echo "::error::no browser engine on PATH; the rendered graders cannot run and must not be skipped"
-          exit 1
+          p="$(./scripts/find-browser.sh)"
+          [ -n "$p" ] || { echo "::error::the browser resolution produced no path"; exit 1; }
+          echo "HOLDFAST_BROWSER=$p" >> "$GITHUB_ENV"
+
+      # The graders' runner, from the committed lockfile. `npm ci` REFUSES a lockfile that
+      # disagrees with the manifest, which is what makes this a pin rather than a request.
+      - name: the dashboard graders' test runner
+        run: npm ci --no-audit --no-fund
+        working-directory: internal/webui/e2e
+        env:
+          # The graders use the browser proved present above. Downloading a second one
+          # would put an unpinned, undigested browser build in the path of a repository
+          # whose entire packaging story is a pinned, digest-verified artifact.
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
 
       - name: the dashboard's unit suite and rendered graders, in required mode
         run: make webui-check
+
+      # The engine-only graders' own self-test, on top of the gate. `make webui-check` RUNS
+      # them; this defeats each of the three questions that exist only at the engine - the
+      # operating system's colour-scheme preference, the accessible name the engine
+      # computes, the focus a real key press moves - against a mutated COPY of the tree, and
+      # fails if any defeat did not execute or came back green. Proving a grader REDS is a
+      # different assertion from running it, and these three are the whole reason there is a
+      # browser in this gate. It sits here rather than in `check` for the same reason the
+      # release-shape self-test does: its mutations must not touch the tree `check` grades.
+      - name: the engine-only graders must still bite
+        run: make webui-graders-selftest
 
   # The packaging gate. It runs on every PR the same script the release workflow runs
   # before it pushes anything (scripts/smoke-image.sh), so the image a tag ships is the

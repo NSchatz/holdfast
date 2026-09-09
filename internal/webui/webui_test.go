@@ -574,7 +574,11 @@ func TestDashboard_AnUnavailableAggregateStillLeavesThePageRendering(t *testing.
 	if !strings.Contains(s, "card = aggCard(null, title, nodes);") {
 		t.Error("cards are not built independently - one figure that throws would take the others with it")
 	}
-	hist := strings.Index(s, "hbody.appendChild(histRow(j))")
+	// The tables are RECONCILED rather than rebuilt (a row the snapshot did not change
+	// keeps its own node), so the call this looks for is the reconciliation and not an
+	// append. What is being decided is unchanged and is a property of the CODE's order,
+	// which is why it is read from the source here and not from a render.
+	hist := strings.Index(s, "syncRows(hbody,")
 	agg := strings.Index(s, "renderAggregates(snap.aggregates)")
 	if hist < 0 || agg < 0 || agg < hist {
 		t.Errorf("the aggregates render before the tables (history at %d, aggregates at %d) - an aggregate failure could then cost the rows", hist, agg)
@@ -658,6 +662,37 @@ func TestNoNewDependency_TheDashboardShipsNothingButItsOwnSource(t *testing.T) {
 	allowedExt := map[string]bool{
 		".go": true, ".js": true, ".css": true, ".html": true, ".tmpl": true, ".txt": true,
 	}
+	// The graders' own project (internal/webui/e2e) is TEST tooling and is made of a few
+	// more things: an ES-module spec, a snapshot fixture, a manifest and its lockfile. It
+	// is exempted HERE and nowhere else, and the exemption is narrow on purpose - a font,
+	// an image, a minified bundle, a vendored tree or a bundler output is still refused
+	// there, because none of those is anything a grader needs.
+	//
+	// What the exemption cannot do is let a dependency reach a reader: nothing under e2e
+	// is embedded, served or built into the binary, and that is not asked for on trust -
+	// TestBuild_TheTestOnlyDependencyCannotReachTheBuiltArtifact proves the generator, the
+	// generated document, the Dockerfile and go.mod are each free of it.
+	e2eExt := map[string]bool{".mjs": true, ".json": true, ".md": true}
+	// A dotfile's whole name IS its extension as far as filepath.Ext is concerned, so the
+	// graders' project names the few it carries: its manifest, its lockfile, the paths it
+	// keeps out of the repository, and the registry configuration that DISABLES lifecycle
+	// scripts for it (scripts/check-pins.sh requires that decision to exist and be
+	// committed, so this must admit the file that records it).
+	e2eName := map[string]bool{
+		"package.json": true, "package-lock.json": true, ".gitignore": true, ".npmrc": true,
+	}
+	inE2E := func(p string) bool {
+		s := filepath.ToSlash(p)
+		return s == "e2e" || strings.HasPrefix(s, "e2e/")
+	}
+	// What the graders' project keeps OUT of the repository, read from its own .gitignore
+	// rather than restated here. Those paths are the runner's output - an installed tree, a
+	// failed case's screenshots and trace, the JSON report - and none of them is repository
+	// content this sweep has to account for. Reading the ignore file is what keeps the two
+	// in step: a second list would agree with the first today and diverge the first time
+	// the runner learns a new output directory, whereupon `make check` would red over a
+	// file nobody committed, having been green over the run that produced it.
+	e2eIgnored := readE2EIgnores(t)
 
 	var goFiles []string
 	seen := 0
@@ -667,16 +702,40 @@ func TestNoNewDependency_TheDashboardShipsNothingButItsOwnSource(t *testing.T) {
 		}
 		name := d.Name()
 		if d.IsDir() {
+			// An installed tree or a run's output under the graders' project is skipped
+			// whole: nothing inside somebody else's package, and nothing the runner wrote
+			// and git never took, is this repository's to account for.
+			if inE2E(p) && e2eIgnored(name) {
+				return filepath.SkipDir
+			}
 			if what, bad := bannedDir[name]; bad && p != "." {
 				return fmt.Errorf("%s is %s: the dashboard is served under default-src 'none' and can fetch none of it", p, what)
 			}
 			return nil
 		}
+		if inE2E(p) && e2eIgnored(name) {
+			return nil
+		}
 		seen++
+		ext := strings.ToLower(filepath.Ext(name))
+		if inE2E(p) {
+			// The graders' project. The bans that protect a READER still apply; the ones
+			// that only said "this repository declares no dependency" do not.
+			if what, bad := bannedExt[ext]; bad {
+				t.Errorf("%s is %s; a grader needs none of those, and internal/webui ships none", p, what)
+			}
+			if strings.HasSuffix(name, ".min.js") {
+				t.Errorf("%s is a minified bundle; every script this repository wrote is source", p)
+			}
+			if !e2eExt[ext] && !allowedExt[ext] && !e2eName[name] {
+				t.Errorf("%s has the extension %q, which is not one the graders' project is made of (%v plus %v)",
+					p, ext, sortedKeys(allowedExt), sortedKeys(e2eExt))
+			}
+			return nil
+		}
 		if what, bad := bannedName[name]; bad {
 			t.Errorf("%s is %s; this dashboard has no third-party dependency to declare", p, what)
 		}
-		ext := strings.ToLower(filepath.Ext(name))
 		if what, bad := bannedExt[ext]; bad {
 			t.Errorf("%s is %s; the page's own policy forbids fetching one and its figures are drawn as DOM nodes instead", p, what)
 		}
@@ -747,6 +806,53 @@ func TestNoNewDependency_TheDashboardShipsNothingButItsOwnSource(t *testing.T) {
 			t.Errorf("the dependency rule rejected %q, which is the standard library or this repository", ours)
 		}
 	}
+}
+
+// readE2EIgnores is the graders' project's own .gitignore, as a predicate over names.
+// Every entry there is a bare name, a name with a trailing slash, or a name with a
+// trailing `*` - which is all this needs to understand. A pattern it cannot read is
+// REPORTED rather than silently widening the exemption, because an exemption nobody can
+// see is how a sweep stops sweeping.
+func readE2EIgnores(t *testing.T) func(string) bool {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("e2e", ".gitignore"))
+	if err != nil {
+		t.Fatalf("reading the graders' project's .gitignore: %v", err)
+	}
+	var names, prefixes []string
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name := strings.TrimSuffix(line, "/")
+		if prefix, ok := strings.CutSuffix(name, "*"); ok && !strings.ContainsAny(prefix, "/*?[!") && prefix != "" {
+			prefixes = append(prefixes, prefix)
+			continue
+		}
+		if strings.ContainsAny(name, "/*?[!") {
+			t.Errorf("e2e/.gitignore carries the pattern %q, which this sweep reads as a plain name or a "+
+				"trailing-* prefix; keep the ignore file to those so the two cannot disagree about what is "+
+				"untracked output", line)
+			continue
+		}
+		names = append(names, name)
+	}
+	ignored := func(name string) bool {
+		if slices.Contains(names, name) {
+			return true
+		}
+		for _, p := range prefixes {
+			if strings.HasPrefix(name, p) {
+				return true
+			}
+		}
+		return false
+	}
+	if !ignored("node_modules") {
+		t.Fatal("e2e/.gitignore no longer ignores node_modules; the sweep would then account for somebody else's package tree")
+	}
+	return ignored
 }
 
 // ownImport applies the Go convention: an import path whose first element carries a dot

@@ -196,9 +196,23 @@ func valueEscapes(name, body string) []string {
 		out = append(out, fmt.Sprintf("%s: the colour function %s is written here; every colour lives in %s (S1)",
 			name, strings.TrimSpace(m), tokenFileName))
 	}
+	// A media query's CONDITION is the one place on this surface where a length cannot
+	// come from the token file: `@media (max-width: var(--x))` is not valid CSS and never
+	// has been - a custom property is not substituted in a media feature. So the prelude
+	// is removed before the length sweep, and the breakpoints it contained are held to
+	// their own rule below instead of being pretended into the token file.
+	body, breakpoints := splitMediaPreludes(body)
 	for _, m := range lengthRe.FindAllStringSubmatch(body, -1) {
 		out = append(out, fmt.Sprintf("%s: the length %s%s is written here; every length lives in %s (S1, S3)",
 			name, m[1], m[2], tokenFileName))
+	}
+	// The rule that replaces it: this surface has ONE breakpoint. A page that scatters
+	// them has a layout nobody can hold in their head, and a set of numbers nobody can
+	// find - which is the failure the token file exists to prevent, arriving by the one
+	// door the token file cannot cover.
+	if len(breakpoints) > 1 {
+		out = append(out, fmt.Sprintf("%s: %d different breakpoints are written here (%s); this surface declares ONE, because a media condition is the one length CSS cannot take from %s",
+			name, len(breakpoints), strings.Join(breakpoints, ", "), tokenFileName))
 	}
 	for _, d := range declRe.FindAllStringSubmatch(body, -1) {
 		prop, value := d[1], d[2]
@@ -210,6 +224,20 @@ func valueEscapes(name, body string) []string {
 		for _, tok := range strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
 			return !(r >= 'a' && r <= 'z')
 		}) {
+			// `currentColor` introduces NO value. It defers to the colour already in
+			// force on the element, which on this surface can only have come from a
+			// token - so it is the one keyword that SERVES S1 rather than escaping it.
+			// The alternative is worse by the clause's own measure: the connection
+			// state's dot takes its colour from the state, so without this it needs one
+			// rule per state naming that state's token again, which is three more
+			// colour references in this file rather than none.
+			//
+			// `transparent` is left in the banned set deliberately. It is a value, it
+			// paints nothing, and a boundary painted with it is a boundary that fails the
+			// 3:1 floor while looking, in the source, like it was drawn.
+			if tok == "currentcolor" {
+				continue
+			}
 			if namedColourSet[tok] {
 				out = append(out, fmt.Sprintf("%s: the named colour %q appears in `%s: %s`; every colour lives in %s (S1)",
 					name, tok, prop, strings.TrimSpace(value), tokenFileName))
@@ -218,6 +246,32 @@ func valueEscapes(name, body string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// mediaPreludeRe matches a media query's condition - everything from `@media` up to the
+// block it opens - which is where a breakpoint length is written.
+var mediaPreludeRe = regexp.MustCompile(`@media[^{]*`)
+
+// mediaBreakpointRe pulls the lengths out of one prelude.
+var mediaBreakpointRe = regexp.MustCompile(`\d+(?:\.\d+)?(?:px|em|rem|ch)`)
+
+// splitMediaPreludes removes every media-query condition from a stylesheet and returns
+// the distinct breakpoint lengths they named, in the order first seen. A feature query
+// with no length in it (prefers-color-scheme, prefers-reduced-motion) contributes none,
+// which is why those two blocks are not breakpoints and are not counted as any.
+func splitMediaPreludes(body string) (string, []string) {
+	var seen []string
+	inSeen := map[string]bool{}
+	out := mediaPreludeRe.ReplaceAllStringFunc(body, func(prelude string) string {
+		for _, bp := range mediaBreakpointRe.FindAllString(prelude, -1) {
+			if !inSeen[bp] {
+				inSeen[bp] = true
+				seen = append(seen, bp)
+			}
+		}
+		return "@media "
+	})
+	return out, seen
 }
 
 // stripJSLineComments is only safe while no module writes `//` anywhere but at the start
@@ -261,6 +315,56 @@ func TestTokens_NoColourAndNoLengthEscapesTheOneTokenFile(t *testing.T) {
 // The check has to BITE. Each mutation writes exactly one value where S1 forbids it, and
 // a check that reports none of them is a check that could never have caught the fourteen
 // off-scale lengths this repository actually carried.
+// The three narrowings above each removed something the escape check used to refuse, so
+// each is driven here against what it must STILL refuse. A narrowing nobody tries to
+// defeat is a hole nobody knows about - which is the whole reason this file already
+// mutation-tests the check it belongs to.
+func TestTokens_TheNarrowedEscapeCheckStillRefusesWhatItAlwaysDid(t *testing.T) {
+	for _, c := range []struct {
+		what string
+		body string
+		want string // a substring of the complaint the check must make
+	}{
+		// currentColor is admitted; every other named colour is not, including the one
+		// that paints nothing and would silently fail a contrast floor.
+		{"a named colour beside currentColor", `a { color: currentColor; border-color: rebeccapurple; }`, "rebeccapurple"},
+		{"transparent, which is a value and not a reference", `a { background: transparent; }`, "transparent"},
+		{"currentcolor spelled as a value in a shorthand", `a { border: 1px solid darkred; }`, "darkred"},
+
+		// A media PRELUDE is exempt; the block it opens is not.
+		{"a length inside a media block", "@media (max-width: 760px) { a { padding: 13px; } }", "13px"},
+		{"a hex colour inside a media block", "@media (max-width: 760px) { a { color: #abcdef; } }", "#abcdef"},
+		{"a second breakpoint", "@media (max-width: 760px) { a { color: red; } }\n@media (min-width: 900px) { b { color: red; } }", "2 different breakpoints"},
+
+		// The two new families are families in the TOKEN file. Writing one of their
+		// values inline is still an escape.
+		{"a tracking value written inline", `a { letter-spacing: 0.04em; }`, "0.04em"},
+	} {
+		probs := valueEscapes("dashboard.css", c.body)
+		found := false
+		for _, p := range probs {
+			if strings.Contains(p, c.want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("the narrowed check no longer refuses %s; it reported %v, wanted something naming %q",
+				c.what, probs, c.want)
+		}
+	}
+
+	// And the three things it now admits are admitted for the stated reasons.
+	for _, c := range []struct{ what, body string }{
+		{"currentColor, which introduces no value", `a { background: currentColor; }`},
+		{"one breakpoint in a media prelude", "@media (max-width: 760px) { a { color: var(--fg); } }"},
+		{"a feature query carrying no length at all", "@media (prefers-reduced-motion: reduce) { a { color: var(--fg); } }"},
+	} {
+		if probs := valueEscapes("dashboard.css", c.body); probs != nil {
+			t.Errorf("the check refuses %s, which the narrowing exists to admit: %v", c.what, probs)
+		}
+	}
+}
+
 func TestTokens_TheEscapeCheckFailsAgainstEveryWayAValueCanBeWrittenInline(t *testing.T) {
 	clean := readSurfaceSource(t, "dashboard.css")
 	if probs := valueEscapes("dashboard.css", clean); probs != nil {
@@ -362,6 +466,25 @@ var tokenGroups = []tokenGroup{
 	{prefix: "--measure-", why: "a prose measure is counted in characters, not pixels", check: func(v string) error {
 		if !strings.HasSuffix(v, "ch") {
 			return fmt.Errorf("%q is not a measure in ch", v)
+		}
+		return nil
+	}},
+	{prefix: "--ls-", why: "letter spacing tracks the TYPE SIZE, not the 4px grid: one value has to work under a 24px heading and under a 12px column header", check: func(v string) error {
+		if !strings.HasSuffix(v, "em") {
+			return fmt.Errorf("%q is not a tracking value in em", v)
+		}
+		if _, err := strconv.ParseFloat(strings.TrimSuffix(v, "em"), 64); err != nil {
+			return fmt.Errorf("%q is not a number of em", v)
+		}
+		return nil
+	}},
+	// A SURFACE is a colour a reader never reads text off directly - it is what text is
+	// read ON - so it is not one of S2's fifteen ROLE names, which are named for what
+	// they colour. It is still a colour, so it is still hand-authored per theme and it
+	// still carries a recorded contrast ratio for everything drawn on it.
+	{prefix: "--surface-", why: "a surface is a colour, not a length", check: func(v string) error {
+		if !hexColourRe.MatchString(v) {
+			return fmt.Errorf("%q is not a colour value", v)
 		}
 		return nil
 	}},
@@ -526,7 +649,12 @@ func TestTokens_EverySpacingTokenIsOnTheFourPixelScale(t *testing.T) {
 
 // --- F8: the documentation links resolve --------------------------------------------
 
-var doclinkRe = regexp.MustCompile(`<a class="doclink" href="([^"]+)">([^<]*)</a>`)
+// The link's content may be a MARK rather than text, so the second group is anything up
+// to the closing tag rather than "characters that are not markup". What this regex is for
+// is the HREF - the check below resolves it to a committed document and an anchor that
+// document carries - and the content is captured only so a link with neither text nor a
+// name can be named in the failure.
+var doclinkRe = regexp.MustCompile(`(?s)<a class="doclink" href="([^"]+)"[^>]*>(.*?)</a>`)
 
 // headingAnchors returns every GitHub-style fragment a markdown document carries, derived
 // from its headings the way every markdown renderer derives them: lower case, spaces to
@@ -593,19 +721,27 @@ const upstreamForTest = "https://github.com/NSchatz/holdfast"
 // the linked document (clause F8: "The claims are not dropped; they move"). Each is
 // asserted to be absent from the surface and present in the document, so a claim cannot
 // be quietly deleted under cover of the relocation.
-var movedClaims = []string{
-	"how many files stand in each state",
-	"recomputed from the transition timestamp on each update rather than counted in this page",
-	"encoder's own progress stream",
-	"never a stale figure",
-	"it survives restarts and describes the library as a whole",
-	"not over the capped rows",
-	"excluded and counted, never read as a zero",
-	"the bars of a distribution are in proportion to the counts beside them",
-	"minimum, mean and maximum on one scale",
-	"no figure is readable only by pointing at it",
-	"A skipped file shows which guard held it back; a failed one shows why.",
-	"VMAF is not comparable between different sources",
+// movedClaims is every claim taken off the dashboard's surface, read from the ONE file
+// that holds them. See internal/webui/prose/moved-claims.txt for why it is a file.
+var movedClaims = readMovedClaims()
+
+func readMovedClaims() []string {
+	body, err := os.ReadFile(filepath.Join("prose", "moved-claims.txt"))
+	if err != nil {
+		panic("reading the moved-claims list: " + err.Error())
+	}
+	var out []string
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		out = append(out, line)
+	}
+	if len(out) == 0 {
+		panic("the moved-claims list is empty; a check with no subject proves nothing")
+	}
+	return out
 }
 
 // flattenText collapses every run of whitespace to one space, so a claim is compared as

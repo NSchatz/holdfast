@@ -54,14 +54,35 @@ var docLinks = []struct {
 	{"<!--holdfast:doc-history-->", "what-it-has-done-to-your-library", "How the ledger figures are computed"},
 }
 
+// docMark is the glyph a documentation link is rendered as: an information mark, drawn
+// inline. Like every other graphic on this surface it is DRAWN and not fetched - the
+// served policy is `default-src 'none'` and `img-src` falls back to it, so a referenced
+// image would be a broken page rather than a heavier one.
+//
+// It is aria-hidden, and the link carries its own accessible name instead. A glyph is not
+// a name: an icon-only link with nothing but a picture inside it is a link that announces
+// itself as "link" and nothing more.
+const docMark = `<svg class="docmark" viewBox="0 0 24 24" width="16" height="16" ` +
+	`aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" ` +
+	`stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle>` +
+	`<path d="M12 11v5.5"></path><path d="M12 7.5v.01"></path></svg>`
+
 // docLinkHTML renders one region's documentation link. Every value that reaches the
 // document is escaped, exactly as the offer's is, so a source URL can appear ONLY as the
 // link's target: it can introduce no element, no attribute and no script, which is what
 // lets the page keep its tight Content-Security-Policy and its no-HTML-string-sink render
 // idiom unchanged.
+//
+// The link is a MARK rather than a sentence. What it is for is carried by its accessible
+// name and its tooltip, both of which are the same words the link used to render, so no
+// reader loses the sentence - it stops competing with the scope line beside it for the
+// space directly under a region heading, which is the one place on this page a reader is
+// trying to find out what the region IS.
 func docLinkHTML(base, fragment, text string) string {
 	href := html.EscapeString(strings.TrimSuffix(base, "/") + "/blob/main/" + DocPath + "#" + fragment)
-	return `<p class="docs"><a class="doclink" href="` + href + `">` + html.EscapeString(text) + `</a></p>`
+	label := html.EscapeString(text)
+	return `<p class="docs"><a class="doclink" href="` + href + `" aria-label="` + label +
+		`" title="` + label + `">` + docMark + `</a></p>`
 }
 
 // csp is the response Content-Security-Policy, byte for byte. A tight CSP: the page

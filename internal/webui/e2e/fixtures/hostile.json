@@ -1,0 +1,137 @@
+{
+  "summary": {
+    "pending": 0,
+    "probing": 0,
+    "encoding": 0,
+    "verifying": 0,
+    "done": 1,
+    "skipped": 0,
+    "failed": 1
+  },
+  "queue": [
+    {
+      "path": "/media/<img src=x onerror=alert(1)><script>alert(2)</script>\" onmouseover=\"alert(3).mkv",
+      "status": "encoding",
+      "worker": "w0",
+      "updated_at": 1788892836,
+      "progress_seconds": null,
+      "progress_duration_seconds": null,
+      "progress_fraction": null
+    }
+  ],
+  "history": [
+    {
+      "path": "/media/<img src=x onerror=alert(1)><script>alert(2)</script>\" onmouseover=\"alert(3).mkv",
+      "status": "failed",
+      "worker": "w0",
+      "updated_at": 1788892831,
+      "reason": "<img src=x onerror=alert(1)><script>alert(2)</script>\" onmouseover=\"alert(3)"
+    },
+    {
+      "path": "/media/films/ok.mkv",
+      "status": "done",
+      "worker": "w0",
+      "updated_at": 1788892821,
+      "encoder": "cpu",
+      "vmaf_mean": 98.0,
+      "vmaf_min": 92.0,
+      "vmaf_model": "version=vmaf_v0.6.1",
+      "source_bytes": 1000,
+      "output_bytes": 500,
+      "encode_ms": 900
+    }
+  ],
+  "queue_total": {
+    "available": true,
+    "unavailable": "",
+    "covers": "every row in the ledger with status pending, probing, encoding, verifying",
+    "cap": 500,
+    "count": 1
+  },
+  "history_total": {
+    "available": true,
+    "unavailable": "",
+    "covers": "every row in the ledger with status done, skipped, failed, indeterminate, applied-despite-error",
+    "cap": 200,
+    "count": 2
+  },
+  "bytes_reclaimed_session": 500,
+  "bytes_reclaimed_lifetime": 500,
+  "bytes_held_by_undo_window": 0,
+  "paused": false,
+  "scanning": false,
+  "now": 1788892841,
+  "aggregates": {
+    "outcomes": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every terminal row",
+      "window": "",
+      "counted": 2,
+      "excluded": 0,
+      "buckets": [
+        {
+          "key": "<img src=x onerror=alert(1)><script>alert(2)</script>\" onmouseover=\"alert(3)",
+          "count": 1
+        },
+        {
+          "key": "done",
+          "count": 1
+        }
+      ]
+    },
+    "skips_by_guard": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every skipped row",
+      "window": "",
+      "counted": 0,
+      "excluded": 0,
+      "buckets": []
+    },
+    "size_ratio": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every done row",
+      "window": "",
+      "counted": 1,
+      "excluded": 0,
+      "min": 0.5,
+      "mean": 0.5,
+      "max": 0.5
+    },
+    "encode_ms": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every done row",
+      "window": "",
+      "counted": 1,
+      "excluded": 0,
+      "min": 900,
+      "mean": 900,
+      "max": 900
+    },
+    "vmaf_mean": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every done row",
+      "window": "",
+      "counted": 1,
+      "excluded": 0,
+      "min": 98,
+      "mean": 98,
+      "max": 98
+    },
+    "vmaf_min": {
+      "available": true,
+      "unavailable": "",
+      "covers": "every done row",
+      "window": "",
+      "counted": 1,
+      "excluded": 0,
+      "min": 92,
+      "mean": 92,
+      "max": 92
+    }
+  }
+}
