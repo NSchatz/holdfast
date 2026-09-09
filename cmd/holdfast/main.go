@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -139,6 +140,19 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	if cfg == nil {
 		return code
 	}
+	// The configured working location, checked here for the same reason `run` and
+	// `serve` check it before their first encode: a missing, unwritable, overlapping
+	// or short-of-space scratch directory refuses those runs, and an operator asking
+	// `validate` whether their configuration will start is owed that answer rather
+	// than a "config OK" the next `run` contradicts.
+	//
+	// Only the SCRATCH half of the decision runs. `validate` is deliberately cheap -
+	// it loads the configuration and stops, with no ffmpeg lookup, no capability
+	// check and no library walk - and none of the scratch questions needs one.
+	if scratchCode := validateScratch(cfg, stderr); scratchCode != 0 {
+		return scratchCode
+	}
+
 	fmt.Fprintf(stdout, "config OK: %d library root(s)\n", len(cfg.LibraryRoots))
 	printResolvedProfiles(stdout, cfg)
 	// What this configuration MEANS, before what it has weakened. A disabled undo
@@ -221,6 +235,28 @@ func printResolvedProfiles(w io.Writer, cfg *config.Config) {
 			fmt.Fprintf(w, "  %-20s %-24s from %s\n", k.Knob, k.Value, k.Layer)
 		}
 	}
+}
+
+// validateScratch reports the scratch directory's start-or-refuse causes, in exactly
+// the account `run` and `serve` print, and returns a nonzero exit code when it would
+// refuse. With no scratch_dir configured it checks nothing at all and returns 0, so a
+// configuration that predates this item is unchanged.
+func validateScratch(cfg *config.Config, stderr io.Writer) int {
+	if strings.TrimSpace(cfg.ScratchDir) == "" {
+		return 0
+	}
+	res := startup.RunScratchOnly(startup.Check{
+		Roots:            cfg.LibraryRoots,
+		StateDir:         stateDirPath(cfg),
+		ScratchDir:       cfg.ScratchDir,
+		ScratchMinFreeGB: cfg.ScratchMinFreeGB,
+		Platform:         startupPlatform(),
+	})
+	if res.Start {
+		return 0
+	}
+	res.WriteRefusal(stderr)
+	return 1
 }
 
 // cmdRestore is the operator's half of the undo window (UNDO-6): with no argument it

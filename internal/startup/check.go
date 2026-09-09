@@ -277,6 +277,41 @@ func Run(c Check) Result {
 	return r.res
 }
 
+// RunScratchOnly takes the SCRATCH half of the decision and nothing else: the same
+// five refusals, the same causes, the same operator-facing account - without the
+// library walk.
+//
+// It exists for `holdfast validate`, which owes an operator the same answer about a
+// configured working location that `run` and `serve` would give, and which is
+// deliberately cheap: it loads the configuration and stops there, with no ffmpeg
+// lookup, no capability check and no library traversal. Making it pay a whole-library
+// walk to report that a scratch directory is missing would be a worse trade than the
+// one it exists to avoid.
+//
+// Nothing about the scratch questions needs the walk. Existence, kind, resolution,
+// free space and writability are properties of one path, and the overlap comparison
+// is against the CONFIGURED roots in resolved form - which is a resolve per root, not
+// a traversal of one.
+func RunScratchOnly(c Check) Result {
+	r := &checkRun{
+		c:           c,
+		res:         Result{LocalSet: LocalTypes(), Coverage: []string{}},
+		byResolved:  map[string]int{},
+		byPath:      map[string]int{},
+		entered:     map[Region]regionEntry{},
+		coveredSet:  map[string]bool{},
+		regionMedia: map[Region]bool{},
+		regionKids:  map[Region][]Region{},
+		declined:    map[string]bool{},
+	}
+	for _, root := range c.Roots {
+		r.roots = append(r.roots, cleanPath(root))
+	}
+	r.checkScratch()
+	r.decide()
+	return r.res
+}
+
 type checkRun struct {
 	c   Check
 	res Result
