@@ -107,9 +107,11 @@ changed() {  # changed <case-name>
 }
 
 # --- the harness --------------------------------------------------------------------------
-# Each run gets a port of its own and is told it is CI, so the runner starts the fixture
-# server from THIS copy rather than reusing one somebody else left listening. A reused server
-# would serve the unmutated page while the case reported on the mutated one.
+# Each run gets a port of its own, so the runner starts the fixture server from THIS COPY
+# and a run of the real suite happening beside it cannot be the one answering. A server
+# built from another tree would serve the unmutated page while the case reported on the
+# mutated one, which is a green over a defeated grader. CI=1 is set for its other effect:
+# a `.only` left in a spec is refused rather than quietly narrowing what ran.
 port=8940
 out=""; status=0
 run_graders() {  # run_graders <case-title-regex>

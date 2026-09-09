@@ -107,10 +107,20 @@ export default defineConfig({
     { name: "light-wide",  testIgnore: PAGE_DRIVEN, use: { ...devices["Desktop Chrome"], colorScheme: "light", viewport: { width: 1440, height: 1000 } } },
     { name: "dark-narrow", testIgnore: PAGE_DRIVEN, use: { ...devices["Desktop Chrome"], colorScheme: "dark",  viewport: { width: 360,  height: 900  } } },
   ],
+  // The fixture server is COMPILED FROM THIS TREE, which is the whole reason these specs
+  // grade the document `holdfast serve` produces. So a run starts its own and never adopts
+  // one that is already listening: an adopted server is a binary built from a tree nobody
+  // can name, and the graders would report on a page this checkout did not produce. That
+  // was not hypothetical - a killed run left one on this port and every later run silently
+  // graded against it, including one that came back green over a defect since fixed.
+  //
+  // A port already in use is therefore a LOUD failure rather than a quiet adoption. Hand
+  // iteration against a server you started yourself is the one case where adopting is what
+  // you meant, and it says so.
   webServer: {
     command: `go run ./fixtureserver -addr 127.0.0.1:${PORT} -fixtures ./fixtures`,
     url: `http://127.0.0.1:${PORT}/`,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: process.env.HOLDFAST_E2E_REUSE_SERVER === "1",
     timeout: 120_000,
     stdout: "pipe",
     stderr: "pipe",
