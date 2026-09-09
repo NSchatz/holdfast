@@ -41,6 +41,21 @@ const (
 	// records a determination.
 	Indeterminate Status = "indeterminate"
 
+	// WouldTranscode is a file a DRY RUN decided: it passed every guard, so a run with
+	// dry-run disabled would have transcoded it. It is TERMINAL for that scan - the
+	// decision is taken, nothing further happens to the file in this run - and it is the
+	// only terminal state that is RE-CLAIMABLE (see Claim).
+	//
+	// Both halves are load-bearing. Terminal, because the alternative is what shipped
+	// before it existed: the row was left wherever the worker parked it while deciding, so
+	// a decided file sat under `probing` beside files a worker was still examining, and
+	// every figure that says what the run CONCLUDED reported the run as having concluded
+	// nothing. Re-claimable, because this is a recorded decision about a scan and NOT a
+	// disposal of the file: treating it the way done/skipped are treated would mean every
+	// file decided during a dry run is silently skipped for ever once the operator turns
+	// dry-run off - the library never transcoded, and nothing on the page saying so.
+	WouldTranscode Status = "would-transcode"
+
 	// AppliedDespiteError is a swap whose rename returned an error and whose
 	// post-failure re-stat established that the rename NONETHELESS took effect - the
 	// hazard rename(2) documents for NFS, where a retransmitted request reports a
@@ -57,9 +72,14 @@ const (
 // is a terminal record of an attempt). Indeterminate and AppliedDespiteError are
 // terminal for the same reason done/skipped are: the attempt is over and its record
 // stands. Neither is ever re-claimed (see Claim).
+//
+// WouldTranscode is terminal in exactly that sense and no stronger one: the dry run's
+// decision is taken and recorded, so the attempt is over, and the row is the record of
+// it. Terminal is NOT a synonym for "never claimed again" here - Failed already is not,
+// and this one is not either.
 func (s Status) Terminal() bool {
 	switch s {
-	case Done, Skipped, Failed, Indeterminate, AppliedDespiteError:
+	case Done, Skipped, Failed, WouldTranscode, Indeterminate, AppliedDespiteError:
 		return true
 	default:
 		return false
@@ -130,6 +150,17 @@ type Outcome struct {
 	VmafPixFmt       string
 	VmafChroma       *float64
 	VmafChromaMetric string
+
+	// SourceCodec is the video codec the SOURCE was in when this job was decided, as
+	// ffprobe named it ("h264", "mpeg4", …). It is recorded on a dry-run decision, which
+	// is the row whose whole purpose is to say what a real run WOULD do to that file: an
+	// operator sizing the job needs to know what is being re-encoded, and a candidate list
+	// that does not say is a list they have to go and probe themselves.
+	//
+	// "" is NOT RECORDED, the same rule every string here keeps. It is NULL in the column
+	// and an explicit absence on the wire; it is never a fabricated codec and never an
+	// empty string presented as one.
+	SourceCodec string
 
 	// SourceBytes and OutputBytes are the file sizes either side of the swap (Done).
 	// BOTH are persisted rather than only their difference: that is what makes a
@@ -545,6 +576,11 @@ type Store interface {
 	// already at/over maxFailures (parked), or currently active (held by another
 	// worker, or stale — see RecoverStale). A fresh path+fingerprint with no row
 	// yields a claim.
+	//
+	// A WouldTranscode row DOES yield a claim. It records what a dry run decided about
+	// that scan, not a disposal of the file, so the run that is allowed to transcode must
+	// be able to pick the file up - otherwise turning dry-run off would leave every file
+	// the dry run examined permanently untouched.
 	Claim(ctx context.Context, path, fingerprint, worker string, maxFailures int) (bool, error)
 
 	// Advance records a non-terminal state transition for a job the caller already

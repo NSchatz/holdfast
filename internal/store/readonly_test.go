@@ -75,20 +75,15 @@ func windBackOneSchemaVersion(t *testing.T, path string) int {
 		t.Fatalf("raw open %s: %v", path, err)
 	}
 	defer func() { _ = db.Close() }()
-	// Exactly what the NEWEST migration added, undone. That is v7 (FILESYSTEM-1's swap
-	// guard record and swap_incidents) and not v6 (LEDGER-5's ledger_totals): this helper
-	// has to track the end of the migrations slice, because the whole point of it is to
-	// produce the database the PREVIOUS build wrote, and a wind-back that undid a step
-	// which is no longer the last one would leave a database Open migrates by re-running
-	// a step it has already run - which is a duplicate-column error, not an older ledger.
+	// Exactly what the NEWEST migration added, undone. That is v8 (the source codec a
+	// dry-run decision records) and not v7 (FILESYSTEM-1's swap guard record and
+	// swap_incidents): this helper has to track the end of the migrations slice, because
+	// the whole point of it is to produce the database the PREVIOUS build wrote, and a
+	// wind-back that undid a step which is no longer the last one would leave a database
+	// Open migrates by re-running a step it has already run - which is a duplicate-column
+	// error, not an older ledger.
 	for _, stmt := range []string{
-		`DROP TABLE IF EXISTS swap_incidents`,
-		`DROP INDEX IF EXISTS idx_incidents_parked`,
-		`DROP INDEX IF EXISTS idx_incidents_excluded`,
-		`ALTER TABLE jobs DROP COLUMN guard_attributes`,
-		`ALTER TABLE jobs DROP COLUMN guard_time_resolution`,
-		`ALTER TABLE jobs DROP COLUMN guard_residual_window`,
-		`ALTER TABLE jobs DROP COLUMN swap_cause`,
+		`ALTER TABLE jobs DROP COLUMN source_codec`,
 		fmt.Sprintf(`PRAGMA user_version = %d`, prev),
 	} {
 		if _, err := db.Exec(stmt); err != nil {

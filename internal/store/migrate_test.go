@@ -318,7 +318,7 @@ func TestMigrate_FreshDatabaseIsStampedAndComplete(t *testing.T) {
 var headColumns = []string{
 	"reason", "encoder", "vmaf_mean", "vmaf_min", "vmaf_model",
 	"vmaf_pix_fmt", "vmaf_chroma", "vmaf_chroma_metric",
-	"source_bytes", "output_bytes", "encode_ms",
+	"source_codec", "source_bytes", "output_bytes", "encode_ms",
 }
 
 // A database from the FUTURE is a startup REFUSAL, not a silent downgrade. Finish writes
@@ -740,6 +740,9 @@ func TestMigrations_ShippedTextIsNeverEdited(t *testing.T) {
 		{"aggregate indexes", "f37a79b51a174ce3fa9eee7dd10780f75c8d6cb0eaa70277cdbc54be65d29188"},
 		{"comparison format and chroma columns", "78f72aa49e83685be32c26550f09f4190203719480a5e262c24ef3dd483b1522"},
 		{"retained originals", "27b4e3a4954ff0b060797b229f1d0ec6f60c7c4a08b0fb571c479a7ab88c25b7"},
+		{"ledger retention totals", "44635e1577347481b3322bc04f2a1ac54a2560b452b59c1f5e3a9d7cb392d4a5"},
+		{"swap guard record + swap incidents", "1a2162b7e4061ca5a90f53adc9916d85969e05705baf232fc1e5431a13125dbf"},
+		{"source codec", "4f8cf21fb8743b51e8609fef458308f65e4e36782d98213cff15833aacc3b164"},
 	}
 	if len(migrations) < len(shipped) {
 		t.Fatalf("migrations has %d entries, fewer than the %d that have shipped - an entry was "+
