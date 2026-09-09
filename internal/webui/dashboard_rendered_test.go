@@ -161,10 +161,13 @@ func collapseSpace(s string) string { return strings.Join(strings.Fields(s), " "
 // page looks acceptable, and not a deleted grader. A tolerance that swallows a mutation
 // removes the only rendered check this surface has, and unlike a flake it never reports
 // itself again. TestRendered_AMutatedDocumentStillFailsItsGraderAfterTheLongestDelay
-// serves a document mutated to defeat five named properties, waits out the longest delay
-// this work introduces, and requires all five graders to still fail; and no reading is
-// retried at all - the probe page posts every reading it takes and the test server, not
-// the page, counts them, so renderDashboard can refuse any count but one.
+// serves two documents which between them defeat ALL TEN named properties, waits out the
+// longest delay this work introduces on each, and requires every one of the ten graders to
+// still fail and to name the mutation it caught - five and five, rendered alongside each
+// other so the delay is paid twice over and once in wall clock, and refusing any grader no
+// document there defeats. And no reading is retried at all: the probe page posts every
+// reading it takes and the test server, not the page, counts them, so renderDashboard can
+// refuse any count but one.
 
 // dashProbeJS is the measuring script. It runs in the PARENT page and reaches into the
 // same-origin iframe holding the real served document.
