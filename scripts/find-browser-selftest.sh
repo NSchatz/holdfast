@@ -19,7 +19,7 @@ finder="$here/scripts/find-browser.sh"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-declared=6
+declared=7
 pass=0
 failed=0
 
@@ -82,9 +82,16 @@ stage() {
 
 # run invokes the finder with PATH pointing at the staged directory FIRST. The rest of PATH
 # stays so the script can still find mktemp, timeout and rm.
+#
+# HOLDFAST_BROWSER is UNSET before every case, and that is not tidiness. This selftest runs
+# inside `make check`, and in CI's `build` job `make check` runs with HOLDFAST_BROWSER
+# already exported to the engine the workflow proved - so without this the pin would satisfy
+# every case, four of them would report the runner's own Chrome as their answer, and the
+# PATH search these cases are about would never execute. The pin cases set it back
+# themselves, through "$@".
 run() {
   local dir="$1"; shift
-  env PATH="$dir:$PATH" HOLDFAST_BROWSER_PROBE_SECONDS=3 "$@" "$finder"
+  env -u HOLDFAST_BROWSER PATH="$dir:$PATH" HOLDFAST_BROWSER_PROBE_SECONDS=3 "$@" "$finder"
 }
 
 ok()   { pass=$((pass + 1)); echo "  ok: $1"; }
@@ -147,6 +154,21 @@ if out="$(run "$d" 2>/dev/null)" && [ "$out" = "$d/google-chrome" ]; then
 else
   bad "case 6: took '${out:-<nothing>}', wanted $d/google-chrome"
 fi
+
+# --- case 7: this selftest is hermetic against the environment `make check` has ---------
+# CI's `build` job exports HOLDFAST_BROWSER before running `make check`, so every case above
+# runs with a real pin in the environment. Without `env -u` in run(), the pin would answer
+# all of them and the PATH search they are about would never execute - which is not a
+# hypothetical: it is what this file did on its first CI run, reporting the runner's own
+# Chrome for four cases. This case IS that environment.
+export HOLDFAST_BROWSER=/nonexistent/inherited-pin
+d="$work/c7"; stage "$d" "chromium=renderer"
+if out="$(run "$d" 2>/dev/null)" && [ "$out" = "$d/chromium" ]; then
+  ok "a HOLDFAST_BROWSER inherited from the caller does not decide a PATH-search case"
+else
+  bad "case 7: took '${out:-<nothing>}', wanted $d/chromium - the caller's pin leaked in and every case above proved nothing"
+fi
+unset HOLDFAST_BROWSER
 
 echo
 # Report against the number of cases DECLARED, not the number that ran: "$pass/$pass" is
