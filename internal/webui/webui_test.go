@@ -900,3 +900,159 @@ func TestHandler404sOtherPaths(t *testing.T) {
 		t.Fatalf("GET /nope.js: code %d, want 404", rec.Code)
 	}
 }
+
+// --- the page is served at the HOST ROOT, and asks for everything root-relative ----
+//
+// A reverse proxy that strips or rewrites a path prefix breaks this page SILENTLY: the
+// document is served, and then every request it makes underneath goes to a path that no
+// longer exists. Nothing in a 200-with-a-blank-dashboard says which of the two ends is
+// wrong, so the constraint is asserted at the end that can be: the page must ask for its
+// own API and its own assets with ROOT-RELATIVE paths, and must carry no
+// scheme-and-host origin of its own to be reached by instead.
+//
+// The AGPL section 13 source offer is exempt and must be: it names the SOURCE of this
+// binary, which is somebody else's server by construction, and is not one of the page's
+// own endpoints. The documentation links are built from that same value (webui.go's
+// docLinks), so the exemption is stated as an ORIGIN - the offer's - rather than as one
+// URL, and anything reaching a different origin is still a failure.
+
+// ownAPIRefRe matches the WHOLE reference carrying one of holdfast's own API paths: the
+// maximal run of URL characters around "api/", so an origin glued in front of a path is
+// part of the match rather than invisible to it. The leading slash is deliberately NOT
+// in the pattern - a reference that LOST it ("api/rescan", resolved against whatever
+// path the page happens to be at) is precisely one of the failures this has to catch, so
+// a pattern anchored on "/api/" would be blind to it.
+var ownAPIRefRe = regexp.MustCompile(`[^\s"'()<>]*\bapi/[A-Za-z0-9_.~/-]*`)
+
+// absoluteURLRe matches any scheme-and-host origin.
+var absoluteURLRe = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.\-]*://[^\s"'<>)]+`)
+
+// rootRelativeProblems applies the whole rule to one document. exemptOrigin is the
+// source-offer URL whose origin the offer and the doc links are allowed to name; pass ""
+// for a document that may name no origin at all (the embedded bundle, before the offer
+// is substituted in). Every problem is reported, not just the first.
+func rootRelativeProblems(doc, exemptOrigin string) []string {
+	var problems []string
+	for _, ref := range ownAPIRefRe.FindAllString(doc, -1) {
+		if !strings.HasPrefix(ref, "/api/") {
+			problems = append(problems, fmt.Sprintf(
+				"the page asks for its own API at %q, which is not a root-relative path - "+
+					"a proxy that rewrites or strips a prefix breaks this silently", ref))
+		}
+	}
+	for _, u := range absoluteURLRe.FindAllString(doc, -1) {
+		if exemptOrigin != "" && strings.HasPrefix(u, exemptOrigin) {
+			continue // the AGPL section 13 source offer and the doc links built from it
+		}
+		problems = append(problems, fmt.Sprintf(
+			"the page carries the absolute origin %q - its own endpoints and assets are "+
+				"reached root-relative, and it fetches nothing from anywhere else", u))
+	}
+	for _, protocolRelative := range []string{`"//`, `'//`} {
+		if strings.Contains(doc, protocolRelative) {
+			problems = append(problems, fmt.Sprintf(
+				"the page carries a protocol-relative reference (%s) - that is an origin too, "+
+					"just one spelled without a scheme", protocolRelative))
+		}
+	}
+	return problems
+}
+
+// The generated bundle: every reference to one of its own endpoints is root-relative,
+// and there is no absolute origin in it at all (the offer is substituted in later, at
+// render time - these are the committed bytes).
+func TestGeneratedBundle_RequestsItsOwnEndpointsRootRelative(t *testing.T) {
+	doc := string(indexHTML)
+
+	// Anti-vacuity FIRST: a sweep that found nothing would report a clean document
+	// however the page was written. These are the four endpoints the page actually
+	// requests, and each must be present as a root-relative literal.
+	for _, want := range []string{`"/api/events"`, `"/api/rescan"`, `"/api/pause"`, `"/api/resume"`} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("the generated bundle no longer requests %s as a root-relative literal", want)
+		}
+	}
+	if refs := ownAPIRefRe.FindAllString(doc, -1); len(refs) < 4 {
+		t.Fatalf("the reference sweep found %d own-API references, want at least the four the page requests", len(refs))
+	}
+
+	if problems := rootRelativeProblems(doc, ""); len(problems) > 0 {
+		t.Fatalf("the generated dashboard bundle is not root-relative:\n  %s", strings.Join(problems, "\n  "))
+	}
+}
+
+// The SERVED document, which is what a browser behind the proxy actually receives: the
+// offer has been substituted in, so the one absolute origin allowed is the offer's own.
+func TestServedDocument_RequestsItsOwnEndpointsRootRelativeAndExemptsOnlyTheSourceOffer(t *testing.T) {
+	const source = "https://example.invalid/holdfast"
+	doc := string(render(offerFor(source)))
+
+	if !strings.Contains(doc, source) {
+		t.Fatalf("the served document does not carry the source offer at all - the exemption would be vacuous")
+	}
+	if problems := rootRelativeProblems(doc, source); len(problems) > 0 {
+		t.Fatalf("the served dashboard is not root-relative:\n  %s", strings.Join(problems, "\n  "))
+	}
+
+	// The exemption is an ORIGIN, not "any absolute URL": a document that reached a
+	// DIFFERENT origin must still fail, or the exemption would excuse everything.
+	hostile := strings.Replace(doc, source, "https://someone-else.invalid/holdfast", 1)
+	if len(rootRelativeProblems(hostile, source)) == 0 {
+		t.Fatal("an absolute origin other than the source offer's was accepted - the exemption is too wide")
+	}
+}
+
+// The grader itself, proved to bite. A check that cannot fail is not evidence, so each
+// way of breaking the property is applied to the real document and must be reported.
+func TestRootRelativeGrader_RedsOnEveryWayOfBreakingIt(t *testing.T) {
+	const source = "https://example.invalid/holdfast"
+	base := string(render(offerFor(source)))
+
+	for _, m := range []struct {
+		name   string
+		mutate func(string) string
+		names  string
+	}{
+		{
+			name: "the SSE stream is given an absolute origin",
+			mutate: func(s string) string {
+				return strings.Replace(s, `"/api/events"`, `"https://holdfast.invalid/api/events"`, 1)
+			},
+			names: "/api/events",
+		},
+		{
+			name:   "a control endpoint is made relative to the current path",
+			mutate: func(s string) string { return strings.Replace(s, `"/api/rescan"`, `"api/rescan"`, 1) },
+			names:  "api/rescan",
+		},
+		{
+			name:   "the page is given a prefix a proxy would have to add",
+			mutate: func(s string) string { return strings.Replace(s, `"/api/pause"`, `"holdfast/api/pause"`, 1) },
+			names:  "holdfast/api/pause",
+		},
+		{
+			name:   "an off-origin asset is added",
+			mutate: func(s string) string { return s + "\n<script src=\"https://cdn.invalid/chart.js\"></script>\n" },
+			names:  "cdn.invalid",
+		},
+		{
+			name:   "an asset is referenced protocol-relative",
+			mutate: func(s string) string { return s + "\n<img src=\"//cdn.invalid/logo.png\">\n" },
+			names:  "//",
+		},
+	} {
+		t.Run(m.name, func(t *testing.T) {
+			mutated := m.mutate(base)
+			if mutated == base {
+				t.Fatal("the mutation changed nothing - it proves nothing")
+			}
+			problems := rootRelativeProblems(mutated, source)
+			if len(problems) == 0 {
+				t.Fatalf("the grader did not red on: %s", m.name)
+			}
+			if !strings.Contains(strings.Join(problems, "\n"), m.names) {
+				t.Errorf("the problem does not name %q: %v", m.names, problems)
+			}
+		})
+	}
+}

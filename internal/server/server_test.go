@@ -1446,3 +1446,327 @@ func getRaw(t *testing.T, url string) string {
 	}
 	return string(b)
 }
+
+// --- the authorization posture behind a reverse proxy ------------------------
+//
+// The read endpoints and the dashboard are "protected by the localhost-default bind,
+// not a token". The moment a reverse proxy fronts this daemon that bind protects
+// nothing and the proxy is the only barrier, and the whole safety argument for such a
+// deployment rests on ONE property of this package: a proxy-supplied identity header is
+// never authorization for a mutating endpoint. Only a matching bearer token is.
+//
+// The property holds. These tests LOCK it, so a later refactor that reads Remote-User
+// "because the proxy already authenticated the request" reds here rather than shipping a
+// control surface a forgeable header can start a scan on.
+
+// identityHeaderSet is one shape a forward-auth proxy is known to add.
+type identityHeaderSet struct {
+	name    string
+	headers map[string]string
+}
+
+// allProxyIdentityHeaders is the Authelia Remote-* set plus the X-Forwarded-*
+// equivalents, as one request would carry them.
+var allProxyIdentityHeaders = map[string]string{
+	"Remote-User":        "noah",
+	"Remote-Groups":      "admins,media",
+	"Remote-Email":       "noah@example.invalid",
+	"Remote-Name":        "Noah Schatz",
+	"X-Forwarded-User":   "noah",
+	"X-Forwarded-Email":  "noah@example.invalid",
+	"X-Forwarded-Proto":  "https",
+	"X-Forwarded-Host":   "holdfast.example.invalid",
+	"X-Forwarded-For":    "192.168.0.10",
+	"X-Forwarded-Method": "POST",
+}
+
+// proxyIdentityHeaderSets is every combination asserted: all of them at once, and each
+// identity header on its own. A surface that honoured ONE of these and not the others
+// would be no better than one that honoured all of them, so each is asserted rather
+// than sampled.
+func proxyIdentityHeaderSets() []identityHeaderSet {
+	sets := []identityHeaderSet{{name: "every proxy identity header at once", headers: allProxyIdentityHeaders}}
+	for _, h := range []string{
+		"Remote-User", "Remote-Groups", "Remote-Email", "Remote-Name",
+		"X-Forwarded-User", "X-Forwarded-Email",
+	} {
+		sets = append(sets, identityHeaderSet{name: h + " alone", headers: map[string]string{h: allProxyIdentityHeaders[h]}})
+	}
+	return sets
+}
+
+var mutatingEndpoints = []string{"/api/rescan", "/api/pause", "/api/resume"}
+
+// assertNothingChanged proves a refusal was a refusal: no scan started, and the pause
+// flag is exactly where it was. A 403 that had already kicked a scan would be a refusal
+// in the status line only.
+func assertNothingChanged(t *testing.T, h *harness, wasPaused bool) {
+	t.Helper()
+	select {
+	case <-h.scanStarted:
+		t.Fatal("a refused request started a scan")
+	case <-time.After(150 * time.Millisecond):
+	}
+	if h.ctrl.Scanning() {
+		t.Fatal("a refused request left the controller scanning")
+	}
+	if h.ctrl.Paused() != wasPaused {
+		t.Fatalf("a refused request changed the pause state: paused=%v, want %v", h.ctrl.Paused(), wasPaused)
+	}
+}
+
+// With NO control token configured the mutating endpoints are disabled outright: 403 to
+// every caller, however the request is dressed. That is the posture a proxied deployment
+// ships with the token unset - the proxy authenticates a surface whose controls are
+// already off.
+func TestProxyIdentityHeaders_NoTokenConfigured_403AndNothingChanged(t *testing.T) {
+	for _, set := range proxyIdentityHeaderSets() {
+		for _, ep := range mutatingEndpoints {
+			t.Run(set.name+" "+ep, func(t *testing.T) {
+				h := newHarness(t, "") // no control token configured
+				ts := httptest.NewServer(h.srv)
+				defer ts.Close()
+				wasPaused := h.ctrl.Paused()
+
+				code, body := postWithHeaders(t, ts.URL+ep, set.headers)
+				if code != http.StatusForbidden {
+					t.Fatalf("POST %s with %s: code %d, want 403 (body %q)", ep, set.name, code, body)
+				}
+				assertNothingChanged(t, h, wasPaused)
+			})
+		}
+	}
+}
+
+// With a control token CONFIGURED, a proxy identity header is still no substitute for
+// it: no Authorization header means 401, whatever the proxy claims about who the caller
+// is.
+func TestProxyIdentityHeaders_TokenConfigured_401AndNothingChanged(t *testing.T) {
+	for _, set := range proxyIdentityHeaderSets() {
+		for _, ep := range mutatingEndpoints {
+			t.Run(set.name+" "+ep, func(t *testing.T) {
+				h := newHarness(t, "a-real-control-token")
+				ts := httptest.NewServer(h.srv)
+				defer ts.Close()
+				wasPaused := h.ctrl.Paused()
+
+				code, body := postWithHeaders(t, ts.URL+ep, set.headers)
+				if code != http.StatusUnauthorized {
+					t.Fatalf("POST %s with %s: code %d, want 401 (body %q)", ep, set.name, code, body)
+				}
+				assertNothingChanged(t, h, wasPaused)
+			})
+		}
+	}
+}
+
+// A bearer token that does not match is 401 whether or not proxy identity headers
+// accompany it: the headers must not upgrade a wrong token into a right one, and must
+// not weaken the comparison either.
+func TestWrongBearer_Is401_WithAndWithoutProxyIdentityHeaders(t *testing.T) {
+	for _, withHeaders := range []bool{false, true} {
+		for _, ep := range mutatingEndpoints {
+			name := ep + " bare"
+			if withHeaders {
+				name = ep + " with proxy identity headers"
+			}
+			t.Run(name, func(t *testing.T) {
+				h := newHarness(t, "a-real-control-token")
+				ts := httptest.NewServer(h.srv)
+				defer ts.Close()
+				wasPaused := h.ctrl.Paused()
+
+				headers := map[string]string{"Authorization": "Bearer not-the-token"}
+				if withHeaders {
+					for k, v := range allProxyIdentityHeaders {
+						headers[k] = v
+					}
+				}
+				code, body := postWithHeaders(t, ts.URL+ep, headers)
+				if code != http.StatusUnauthorized {
+					t.Fatalf("POST %s with a wrong bearer: code %d, want 401 (body %q)", ep, code, body)
+				}
+				assertNothingChanged(t, h, wasPaused)
+			})
+		}
+	}
+}
+
+// The read endpoints are UNAUTHENTICATED BY DESIGN, and this asserts it rather than
+// leaving it assumed. A deployment behind a proxy claims the proxy is the ONLY barrier
+// in front of the dashboard and the read API; that claim is only true if these really do
+// answer a credential-less request. If this ever starts failing because holdfast grew
+// read authentication of its own, that deployment's statement needs rewriting - which is
+// exactly why it is asserted here.
+func TestReadEndpoints_AnswerWithNoCredentialsOfAnyKind(t *testing.T) {
+	h := newHarness(t, "a-real-control-token") // even WITH control enabled
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.hub.Run(ctx)
+	ts := httptest.NewServer(h.srv)
+	defer ts.Close()
+
+	for _, ep := range []string{"/api/summary", "/api/queue", "/api/history", "/api/events"} {
+		t.Run(ep, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+ep, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("GET %s: %v", ep, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("GET %s with no credentials: status %d, want 200", ep, resp.StatusCode)
+			}
+			if ch := resp.Header.Get("WWW-Authenticate"); ch != "" {
+				t.Fatalf("GET %s challenged for credentials: %q", ep, ch)
+			}
+		})
+	}
+}
+
+// A proxy in the path makes a dropped SSE connection ordinary rather than exceptional:
+// an idle timeout, a dynamic-config hot reload, a restarted proxy. EventSource
+// reconnects by itself, and the page comes back CORRECT without a reload only if the
+// new connection's first message is a FULL snapshot rather than a delta whose base the
+// client missed.
+func TestSSE_AReconnectGetsAFullSnapshotAsItsFirstMessage(t *testing.T) {
+	h := newHarness(t, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.hub.Run(ctx)
+	ts := httptest.NewServer(h.srv)
+	defer ts.Close()
+
+	open := func() *http.Response {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/events", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET /api/events: %v", err)
+		}
+		return resp
+	}
+
+	// First connection: read its snapshot, then DROP it mid-stream.
+	first := open()
+	if ev, _ := readSSEFrame(t, first.Body, 2*time.Second); ev != "snapshot" {
+		t.Fatalf("first connection's first event = %q, want snapshot", ev)
+	}
+	_ = first.Body.Close()
+
+	// Something happens while the client is away, so a client replaying only deltas
+	// from its reconnect point would be wrong rather than merely stale.
+	mustClaim(t, h.st, "/lib/arrived-while-away.mkv", "9:9")
+
+	second := open()
+	defer func() { _ = second.Body.Close() }()
+	ev, data := readSSEFrame(t, second.Body, 2*time.Second)
+	if ev != "snapshot" {
+		t.Fatalf("reconnect's first event = %q, want snapshot", ev)
+	}
+	var snap snapshot
+	if err := json.Unmarshal([]byte(data), &snap); err != nil {
+		t.Fatalf("reconnect's first frame is not snapshot JSON: %v (%q)", err, data)
+	}
+	// FULL, not a delta: summary, queue and history are all there, and the row that
+	// arrived while the client was disconnected is in it.
+	if snap.Summary[string(store.Done)] != 1 {
+		t.Fatalf("reconnect snapshot lost the terminal rows: %+v", snap.Summary)
+	}
+	if len(snap.History) != 1 {
+		t.Fatalf("reconnect snapshot carries %d history rows, want the full history", len(snap.History))
+	}
+	sawNewRow := false
+	for _, j := range snap.Queue {
+		if j.Path == "/lib/arrived-while-away.mkv" {
+			sawNewRow = true
+		}
+	}
+	if !sawNewRow {
+		t.Fatalf("the row that arrived during the disconnect is missing from the reconnect snapshot: %+v", snap.Queue)
+	}
+	if len(snap.Queue) < 2 {
+		t.Fatalf("reconnect snapshot carries %d queue rows, want the whole queue", len(snap.Queue))
+	}
+}
+
+// subscriberCount reads the hub's live subscriber set. In-package on purpose: a leaked
+// subscription is invisible from the wire - the symptom is a hub holding a channel
+// nobody drains.
+func subscriberCount(h *Hub) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.subs)
+}
+
+// A proxy makes cancelled requests routine: a client that navigates away, a health probe
+// that gives up, a proxy that times its upstream out during a reload. If the request
+// dies between Subscribe and the first write, the subscription must go with it -
+// otherwise every such probe leaves a channel in the hub nobody drains.
+func TestSSE_ARequestCancelledBeforeTheFirstEventLeaksNoSubscriber(t *testing.T) {
+	h := newHarness(t, "")
+	hubCtx, cancelHub := context.WithCancel(context.Background())
+	defer cancelHub()
+	go h.hub.Run(hubCtx)
+
+	if n := subscriberCount(h.hub); n != 0 {
+		t.Fatalf("hub starts with %d subscribers, want 0", n)
+	}
+
+	// Cancelled BEFORE the handler runs, so no event can have been written yet.
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	cancelReq()
+	req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(reqCtx)
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { h.srv.ServeHTTP(rec, req); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the SSE handler did not return on a request cancelled before the first event")
+	}
+
+	if body := rec.Body.String(); strings.Contains(body, "event: snapshot") {
+		t.Fatalf("a snapshot was written for a request cancelled before the first event: %q", body)
+	}
+	if n := subscriberCount(h.hub); n != 0 {
+		t.Fatalf("the cancelled request left %d subscriber(s) in the hub", n)
+	}
+
+	// And the hub still publishes: a later event reaches a live subscriber promptly, so
+	// nothing the cancelled request left behind blocks a publisher.
+	ch, unsub := h.hub.Subscribe()
+	defer unsub()
+	h.hub.Trigger()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a later publisher never reached a live subscriber after a cancelled request")
+	}
+}
+
+// postWithHeaders POSTs with an arbitrary header set (proxy identity headers, a bearer
+// token, or both) and returns the status and body.
+func postWithHeaders(t *testing.T, url string, headers map[string]string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		t.Fatalf("new request %s: %v", url, err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
+}

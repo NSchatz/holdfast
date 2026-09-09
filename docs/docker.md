@@ -83,13 +83,41 @@ ports:
   - "127.0.0.1:8080:8080"   # loopback ONLY
 ```
 
-That is the shipped default, and it is the one to keep unless you have set
-`HOLDFAST_SERVER_AUTH_TOKEN` **and** put a TLS-terminating reverse proxy in front. Without a
-token the mutating endpoints (`rescan` / `pause` / `resume`) are **disabled entirely**, which
-is a safe default, not a broken one — the dashboard and the read API still work.
+That is the shipped default. It is loopback-only for THAT deployment, and it is the one to
+keep until putting holdfast behind a reverse proxy is a decision you have actually made.
+Publishing the port more widely, or letting a proxy reach the container over a shared
+container network, IS that decision: it removes the only protection the read surface has.
 
-Set the token via the environment (`.env`), never in `config.yaml`: an env var beats the file,
-so an empty env var would override a token set there.
+<a id="reverse-proxy-posture"></a>
+
+**Reverse-proxy posture.** Read this before you give holdfast a hostname.
+
+The dashboard and the read API (`/api/summary`, `/api/queue`, `/api/history`,
+`/api/events`) are **unauthenticated**. Nothing in this daemon checks a credential for
+them; on the shipped defaults they are protected by the loopback bind and by nothing else.
+Put a proxy in front and that bind protects nothing, so the proxy's own authentication
+becomes **the only barrier** in front of every media path in your library. Configure
+forward auth (Authelia, oauth2-proxy, whatever your proxy calls it) on the route before
+the hostname resolves, not after.
+
+The mutating endpoints stay **disabled** until a control token is configured. With no
+`server_auth_token` set (or `HOLDFAST_SERVER_AUTH_TOKEN` in the environment), `rescan`,
+`pause` and `resume` answer **403** to every caller - a safe default, not a broken one, and
+the dashboard and the read API still work. A proxy identity header (`Remote-User`,
+`Remote-Groups`, `Remote-Email`, `Remote-Name`, any `X-Forwarded-*`) is **never**
+authorization for them: only a matching `Authorization: Bearer` token is, so a proxy that
+can be talked into forging one of those headers gains nothing by it. Enabling the controls
+is a decision separate from putting a proxy in front, and it is the one that gives a stolen
+bearer token something to buy.
+
+Serve holdfast at the **host root**, on a hostname of its own. The page asks for its own
+API and its own assets with **root-relative** paths (`/api/events`, `/api/rescan`), so a
+router that strips or rewrites a path prefix breaks it silently: the document loads and
+every request under it 404s. Pass the Host header through, and put no prefix strip and no
+path rewrite on this route.
+
+Set the control token via the environment (`.env`), never in `config.yaml`: an env var
+beats the file, so an empty env var would override a token set there.
 
 ## GPU passthrough
 

@@ -18,9 +18,10 @@
 // well written, or complete - no mechanical check can, and one that pretended to would
 // either fail good documentation or pass bad. Precisely:
 //
-//   - Two fixed anchors must exist: residual-window-local and residual-window-network.
-//     They are FIXED here rather than chosen per-run, because a check free to pick its
-//     own anchor is a check that can be made to pass by moving the goalposts.
+//   - Three fixed anchors must exist: residual-window-local, residual-window-network
+//     and reverse-proxy-posture. They are FIXED here rather than chosen per-run,
+//     because a check free to pick its own anchor is a check that can be made to pass
+//     by moving the goalposts.
 //   - A statement is PRESENT only when its anchor exists AND at least one non-blank
 //     line follows it, before the next anchor or heading, that is not itself a heading
 //     or an anchor. An anchor with nothing under it is not a statement.
@@ -29,6 +30,22 @@
 //     "attributes the window to the client's attribute caching", mechanically: the
 //     network window belongs to the client's cache and a network statement that never
 //     says so is not the statement that was owed.
+//   - The reverse-proxy statement must carry one token for EACH of the three clauses it
+//     owes (see ReverseProxyClauses), and they must be carried by ONE statement: a
+//     document saying one clause here and another clause somewhere else has not said
+//     what a deploying operator has to read in one place.
+//
+// # Why the reverse-proxy anchor exists
+//
+// The read endpoints and the dashboard carry no authentication of their own. On the
+// shipped defaults they are protected by the loopback bind, so the day a reverse proxy
+// can reach the container that bind protects nothing and the proxy is the only barrier
+// left. Three facts decide whether that deployment is safe or quietly open, and none of
+// them is discoverable from the API's own responses: the read surface is
+// unauthenticated, the mutating endpoints are off until a control token is configured,
+// and the page's own requests are root-relative so it must be served at the host root.
+// An operator can only weigh those if they are written down, which is the same argument
+// the residual-window statements are here for.
 //
 // # The corpus
 //
@@ -53,10 +70,11 @@
 // docs/docker.md, docs/filesystem.md and docs/migration.md. Which of them carries the
 // anchors is not fixed and is not this package's business - the obligation is about the
 // TEXT the repository ships, so a statement anywhere in the corpus satisfies it and a
-// statement outside the corpus satisfies nothing however it is anchored. (Today they
-// are in docs/filesystem.md, beside the rest of what the storage a library sits on
-// costs; that is a choice about where the prose reads best, not a narrowing of the set
-// this package checks.)
+// statement outside the corpus satisfies nothing however it is anchored. (Today the two
+// residual-window statements are in docs/filesystem.md, beside the rest of what the
+// storage a library sits on costs, and the reverse-proxy posture statement is in
+// docs/docker.md beside the rest of the control surface; that is a choice about where
+// the prose reads best, not a narrowing of the set this package checks.)
 package docscheck
 
 import (
@@ -77,6 +95,51 @@ const (
 	AnchorLocal   = "residual-window-local"
 	AnchorNetwork = "residual-window-network"
 )
+
+// AnchorReverseProxy introduces the reverse-proxy posture statement: what changes about
+// this daemon's authorization the moment it is reached over something other than
+// loopback.
+const AnchorReverseProxy = "reverse-proxy-posture"
+
+// ReverseProxyRootPathToken carries the ROOT-PATH constraint, and it is the one token
+// here whose absence is a deployment that BREAKS rather than one that is merely
+// undocumented: the dashboard requests its own API and its own assets with
+// root-relative paths, so a router that strips or rewrites a path prefix serves the
+// document and 404s everything under it. It is called out as its own exported constant
+// because that is the clause a proxy configuration gets wrong.
+const ReverseProxyRootPathToken = "root-relative"
+
+// ReverseProxyClause is one of the three things the reverse-proxy posture statement
+// must say, and the case-insensitive token that carries it. The token is what is
+// CHECKED; the clause is what a failure message says was missing, so a reader learns
+// what to write rather than which string to paste.
+type ReverseProxyClause struct {
+	Token  string
+	Clause string
+}
+
+// ReverseProxyClauses is the whole obligation. Each token is the shortest string that
+// carries its clause and could not plausibly be written by accident while meaning
+// something else, and two of the three are identifiers this repository already treats
+// as fixed (`server_auth_token` is a config key; `root-relative` is how the page's own
+// requests are described everywhere else).
+var ReverseProxyClauses = []ReverseProxyClause{
+	{
+		Token: "the only barrier",
+		Clause: "that the dashboard and the read API are unauthenticated, " +
+			"so a reverse proxy in front of them is the only barrier",
+	},
+	{
+		Token: "server_auth_token",
+		Clause: "that the mutating endpoints stay disabled until a control token " +
+			"(server_auth_token / HOLDFAST_SERVER_AUTH_TOKEN) is configured",
+	},
+	{
+		Token: ReverseProxyRootPathToken,
+		Clause: "that holdfast must be served at the host root, because the page requests " +
+			"its own API and assets with root-relative paths",
+	},
+}
 
 // NetworkToken is the case-insensitive substring the NETWORK statement must carry. It
 // is the shortest string that matches both "attribute cache" and "attribute caching"
@@ -243,7 +306,67 @@ func Check(files []string) ([]string, error) {
 			firstPresent(network).File, NetworkToken))
 	}
 
+	proxy, err := statements(files, AnchorReverseProxy)
+	if err != nil {
+		return nil, err
+	}
+	problems = append(problems, checkReverseProxy(proxy)...)
+
 	return problems, nil
+}
+
+// checkReverseProxy applies the reverse-proxy rule. Every failure it can report says
+// MISSING, because that is what each of them IS: an anchor nobody wrote, an anchor with
+// nothing under it, and a statement that never says one of the three things - a reader
+// who needs that clause finds nothing in all three cases, and a message that called the
+// third "incomplete" would suggest the clause is there in weaker words.
+func checkReverseProxy(sts []Statement) []string {
+	switch {
+	case len(sts) == 0:
+		return []string{fmt.Sprintf(
+			"no shipped document carries the anchor %q - the reverse-proxy posture statement is MISSING", AnchorReverseProxy)}
+	case !anyPresent(sts):
+		return []string{fmt.Sprintf(
+			"%s: the anchor %q is present but nothing follows it - an anchor with no text is not a statement, "+
+				"so the reverse-proxy posture statement is MISSING",
+			sts[0].File, AnchorReverseProxy)}
+	}
+
+	// ONE statement must carry all three clauses. Report against the strongest
+	// near-miss, so a failure names a file to edit rather than saying "nowhere".
+	best := bestReverseProxyStatement(sts)
+	var problems []string
+	for _, c := range ReverseProxyClauses {
+		if !strings.Contains(normalize(best.Text), c.Token) {
+			problems = append(problems, fmt.Sprintf(
+				"%s: the reverse-proxy posture statement never says %q, so the statement that %s is MISSING",
+				best.File, c.Token, c.Clause))
+		}
+	}
+	return problems
+}
+
+// bestReverseProxyStatement returns the present statement carrying the most clauses.
+// A statement carrying all of them makes the check pass; when none does, this is the
+// one closest to being the statement that was owed.
+func bestReverseProxyStatement(sts []Statement) Statement {
+	best := firstPresent(sts)
+	bestScore := -1
+	for _, s := range sts {
+		if !s.Present() {
+			continue
+		}
+		score := 0
+		for _, c := range ReverseProxyClauses {
+			if strings.Contains(normalize(s.Text), c.Token) {
+				score++
+			}
+		}
+		if score > bestScore {
+			best, bestScore = s, score
+		}
+	}
+	return best
 }
 
 // statements returns every occurrence of an anchor across the corpus, in corpus order.

@@ -184,8 +184,11 @@ invariant is entirely unaffected.
 | `POST /api/pause` | token | stop feeding **new** files (in-flight encodes finish safely) |
 | `POST /api/resume` | token | clear the pause flag |
 
-Fail-safes: the server **binds `127.0.0.1` by default** (front it with a reverse proxy for real
-multi-user); the mutating endpoints require a bearer token (`server_auth_token`, best set via
+Fail-safes: the server **binds `127.0.0.1` by default**, and that bind is the whole of what
+protects the read endpoints and the dashboard - they carry no authentication of their own, so
+a reverse proxy in front of them is the only barrier there is (the reverse-proxy posture is in
+[docs/docker.md](docs/docker.md), and it is worth reading before you give holdfast a hostname);
+the mutating endpoints require a bearer token (`server_auth_token`, best set via
 `HOLDFAST_SERVER_AUTH_TOKEN`) and are **disabled entirely when no token is set**; pause only ever
 *delays* work — it never interrupts an encode or the atomic swap. **Known limitation:** single-token auth
 (no per-user accounts); the queue/history views are capped at the most recent rows, not the whole ledger —
