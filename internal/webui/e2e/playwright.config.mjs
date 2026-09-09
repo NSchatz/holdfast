@@ -34,8 +34,13 @@ function browserPath() {
     }
     return pinned;
   }
+  // The candidates in the order scripts/find-browser.sh uses: a real vendor binary before
+  // `chromium`, because on several distributions /usr/bin/chromium is a snap shim that
+  // hangs instead of failing. CI never reaches this loop - it exports HOLDFAST_BROWSER,
+  // pinned to an engine it watched render - so this is the answer for a machine that
+  // named none.
   const dirs = (process.env.PATH || "").split(":").filter(Boolean);
-  for (const name of ["chromium", "chromium-browser", "google-chrome", "chrome"]) {
+  for (const name of ["google-chrome", "google-chrome-stable", "chrome", "chromium", "chromium-browser"]) {
     for (const dir of dirs) {
       const candidate = join(dir, name);
       try {

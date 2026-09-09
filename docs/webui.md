@@ -159,6 +159,24 @@ executed too few, so "it ran" and "it decided something" are separate claims and
 checked. CI runs `make webui-check` on every pull request, after proving both runtimes are
 present and installing the graders' runner with `npm ci` from the committed lockfile.
 
+**Which engine, and who decides.** `scripts/find-browser.sh` is the one resolution, run by
+both CI jobs and by the release workflow, and what it exports is a PIN: `HOLDFAST_BROWSER`,
+which every grader here treats as the only candidate. A candidate is taken only once it has
+actually RENDERED a page under a timeout - answering `--version` settles nothing, because
+`/usr/bin/chromium` is a snap shim on several distributions and can sit for ever rather
+than fail when its confinement is unhappy, which is why a real vendor binary is tried
+first. Ask it of your own machine with `make find-browser`; `make find-browser-selftest`
+(inside `make check`, and hermetic) is where it is defeated on purpose.
+
+**How a grader gets its reading.** Either the page POSTs a verdict back to the test that
+served it (`probePage` + `runProbe`), or the grader operates the engine over
+`internal/webui/e2e/driver.mjs`. Never out of the browser's own exit: every page here holds
+an SSE stream open, `--virtual-time-budget` cannot advance while a fetch is pending, and
+the dashboard's own EventSource opens a new one the instant the stream ends - so a
+`--dump-dom` reading is a race between a reconnect and a budget, and three CI runs were
+killed at the deadline before that was written down anywhere a check could read it. It is
+`internal/webui/render_idiom_test.go` that reads it now.
+
 **Running them by hand.** From `internal/webui/e2e`: `npm ci` once, then `npx playwright
 test`. The fixture server is started for you. `--project=engine` is the convention set
 (it drives its own theme and viewport); `--project=dark-wide|light-wide|dark-narrow` are

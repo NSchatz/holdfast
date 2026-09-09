@@ -51,7 +51,10 @@ if [ -n "$browser" ]; then
     echo "::error::webui-graders selftest: HOLDFAST_BROWSER names '$browser', which does not answer --version" >&2
     exit 1; }
 else
-  for b in chromium chromium-browser google-chrome chrome; do
+  # The order scripts/find-browser.sh uses: a real vendor binary before `chromium`, which
+  # on several distributions is a snap shim that hangs instead of failing. CI pins
+  # HOLDFAST_BROWSER, so this branch is for a machine that named no engine.
+  for b in google-chrome google-chrome-stable chrome chromium chromium-browser; do
     p="$(command -v "$b" 2>/dev/null || true)"
     [ -n "$p" ] || continue
     if "$p" --version >/dev/null 2>&1; then browser="$p"; break; fi

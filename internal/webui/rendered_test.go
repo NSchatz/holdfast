@@ -231,7 +231,21 @@ func resolveBrowser() (string, string) {
 			browserResolution.path = pinned
 			return
 		}
-		for _, name := range []string{"chromium", "chromium-browser", "google-chrome", "chrome"} {
+		// With no pin, the candidates in the order scripts/find-browser.sh uses - a real
+		// vendor binary before `chromium`, because on several distributions (Ubuntu among
+		// them) /usr/bin/chromium is a snap shim that can sit for ever rather than fail
+		// when its confinement is unhappy. That reason used to live beside a second list
+		// in rendered_outcomes_test.go, and folding that file onto this resolver deleted
+		// it: this package then measured the shim on the one CI job that pinned nothing,
+		// and two graders spent 90 seconds each finding out.
+		//
+		// The question asked here is weaker than the workflow's, deliberately: it is
+		// "does this answer", not "does this paint", because a search that renders a page
+		// per candidate would run inside every developer's `make check`. What that costs
+		// is a slow red - a browser that answers and never paints fails at the graders'
+		// own deadlines, naming itself - and not a green, which is why CI PINS the engine
+		// it watched render rather than leaving this search to decide anything there.
+		for _, name := range []string{"google-chrome", "google-chrome-stable", "chrome", "chromium", "chromium-browser"} {
 			p, err := exec.LookPath(name)
 			if err != nil {
 				continue
