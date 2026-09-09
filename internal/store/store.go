@@ -190,6 +190,22 @@ type Outcome struct {
 	// to its encoder as a success is.
 	Encoder string
 
+	// Profile is the name of the transcode_profiles entry that supplied this job's
+	// settings, and "" when the top-level settings did — which is every row a
+	// configuration without profiles can produce.
+	//
+	// It is on the row because Encoder alone stops answering "what ran" the moment
+	// profiles exist. Two files in one run can be encoded by two different encoders
+	// at two different quality targets in two different containers, and an operator
+	// auditing a swap after the source is gone needs to know WHICH set of settings
+	// decided it — including for a skip, where the profile is what decided that the
+	// file was already at its target codec.
+	//
+	// "" is a real value here and not a missing measurement: it says the top-level
+	// settings ran. It is stored as NULL like every other empty string in this
+	// struct, and read back as "" — the two are the same statement for this field.
+	Profile string
+
 	// VmafMean and VmafMin are the pooled harmonic-mean and the worst-frame VMAF, and
 	// VmafModel names the libvmaf model that produced them. All are nil/"" when the
 	// VMAF gate did not run (disabled). The model is NOT decoration: a VMAF score

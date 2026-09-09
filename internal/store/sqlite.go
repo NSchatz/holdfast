@@ -289,7 +289,7 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 			source_codec = NULL, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
 			swap_cause = NULL, failure_class = NULL, decision_inputs = NULL,
-			library_root = NULL, profile_digest = NULL
+			library_root = NULL, profile_digest = NULL, profile = NULL
 		 WHERE path = ? AND fingerprint = ?`,
 		string(Probing), worker, now(), path, fingerprint); err != nil {
 		return false, fmt.Errorf("store: claim update: %w", err)
@@ -502,7 +502,7 @@ func finishQuery(st Status, o *Outcome, maxFailures int) string {
 		source_codec = ?, source_bytes = ?, output_bytes = ?, encode_ms = ?,
 		guard_attributes = ?, guard_time_resolution = ?, guard_residual_window = ?,
 		swap_cause = ?, failure_class = ?, decision_inputs = ?,
-		library_root = ?, profile_digest = ?`
+		library_root = ?, profile_digest = ?, profile = ?`
 	switch {
 	case st != Failed:
 	case o.FailureClass.Final() && maxFailures > 0:
@@ -536,7 +536,7 @@ func finishArgs(st Status, o *Outcome, path, fingerprint string) []any {
 		nullString(o.GuardAttributes), nullString(o.GuardTimeResolution),
 		nullString(o.GuardResidualWindow), nullString(o.SwapCause), nullString(class),
 		nullString(o.DecisionInputs.Encode()),
-		nullString(o.LibraryRoot), nullString(o.ProfileDigest),
+		nullString(o.LibraryRoot), nullString(o.ProfileDigest), nullString(o.Profile),
 		path, fingerprint,
 	}
 }
@@ -575,7 +575,7 @@ const outcomeColumns = `reason, encoder, vmaf_mean, vmaf_min, vmaf_model,
 	source_codec, source_bytes, output_bytes, encode_ms,
 	guard_attributes, guard_time_resolution, guard_residual_window, swap_cause,
 	failure_class, decision_inputs,
-	library_root, profile_digest`
+	library_root, profile_digest, profile`
 
 // outcomeScan holds one row's outcome columns on the way out of the driver. Every
 // field is a sql.Null* because every column is nullable: NULL is "not recorded" and
@@ -622,6 +622,11 @@ type outcomeScan struct {
 	// a row written before per-library profiles existed was decided by a build that had
 	// one global profile and recorded neither fact, and must read as not recorded.
 	libraryRoot, profileDigest sql.NullString
+
+	// The ENCODE profile that supplied this job's settings - the pattern-matched
+	// overrides laid over the library profile above, not the library profile itself.
+	// Nullable like the rest, and here NULL and "" say the same thing: none matched.
+	profile sql.NullString
 }
 
 // dest returns the scan destinations in outcomeColumns order.
@@ -632,7 +637,7 @@ func (s *outcomeScan) dest() []any {
 		&s.srcCodec, &s.srcBytes, &s.outBytes, &s.encMs,
 		&s.guardAttrs, &s.guardRes, &s.guardWindow, &s.swapCause,
 		&s.failClass, &s.inputs,
-		&s.libraryRoot, &s.profileDigest,
+		&s.libraryRoot, &s.profileDigest, &s.profile,
 	}
 }
 
@@ -655,6 +660,7 @@ func (s *outcomeScan) outcome() Outcome {
 		GuardResidualWindow: s.guardWindow.String, SwapCause: s.swapCause.String,
 		FailureClass:   FailureClass(s.failClass.String).Class(),
 		DecisionInputs: ParseDecisionInputs(s.inputs.String),
+		Profile:        s.profile.String,
 		Decision: Decision{
 			LibraryRoot:   s.libraryRoot.String,
 			ProfileDigest: s.profileDigest.String,
@@ -941,7 +947,7 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL, vmaf_stream = NULL,
 			source_codec = NULL, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
-			swap_cause = NULL, decision_inputs = NULL
+			swap_cause = NULL, decision_inputs = NULL, profile = NULL
 		 WHERE jobs.status = ?`,
 		path, fingerprint, string(Skipped), now(), nullString(reason),
 		nullString(by.LibraryRoot), nullString(by.ProfileDigest), string(Pending))

@@ -75,18 +75,18 @@ func windBackOneSchemaVersion(t *testing.T, path string) int {
 		t.Fatalf("raw open %s: %v", path, err)
 	}
 	defer func() { _ = db.Close() }()
-	// Exactly what the NEWEST migration added, undone. That is v12 (which library profile
-	// decided the row) and not the step before it: this helper has to track the END of
-	// the migrations slice, because the whole point of it is to produce the database the
-	// PREVIOUS build wrote, and a wind-back that undid a step which is no longer the last
-	// one would leave a database Open migrates by re-running a step it has already run -
-	// which is a duplicate-column error, not an older ledger.
+	// Exactly what the NEWEST migration added, undone. That is v13 (the encode profile
+	// that supplied a job's settings) and not the step before it (v12, which library
+	// profile decided the row): this helper has to track the END of the migrations slice,
+	// because the whole point of it is to produce the database the PREVIOUS build wrote,
+	// and a wind-back that undid a step which is no longer the last one would leave a
+	// database Open migrates by re-running a step it has already run - which is a
+	// duplicate-column error, not an older ledger.
 	//
 	// Any index goes first: SQLite refuses to drop a column an index refers to. The
-	// newest step adds none, so there is nothing to drop ahead of the columns today.
+	// newest step adds none, so there is nothing to drop ahead of the column today.
 	for _, stmt := range []string{
-		`ALTER TABLE jobs DROP COLUMN library_root`,
-		`ALTER TABLE jobs DROP COLUMN profile_digest`,
+		`ALTER TABLE jobs DROP COLUMN profile`,
 		fmt.Sprintf(`PRAGMA user_version = %d`, prev),
 	} {
 		if _, err := db.Exec(stmt); err != nil {

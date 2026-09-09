@@ -33,6 +33,21 @@ const (
 	InputTargetCodec = "target_codec"
 )
 
+// Every value here is read from ONE LIBRARY ROOT's resolved profile, and never from the
+// encode profile a pattern may then lay over it. An input's only job is to be COMPARED,
+// and it is compared where the root's profile is the unit: by Claim, against the profile
+// in force for that root, and by the survey the startup report and `validate` print,
+// which asks one whole-ledger question with one value. Record a value only a pattern
+// match can reach and the row never matches its own configuration again - re-opened on
+// every scan for ever, which is the exact pathology DecisionInputs exists to end.
+//
+// The encode profile is not lost: a terminal row also carries its NAME (the profile
+// column, and see because), so a reader holding the row and the configuration can
+// resolve what this job's guard actually compared against. What it costs is narrower and
+// worth stating: editing an ENCODE profile's encoder does not re-open the rows its own
+// guards skipped, because no input those rows recorded moved. `holdfast requeue --guard
+// already-at-target-codec` is the lever for that.
+
 // DecisionInputsForProfile is every decision input ONE RESOLVED PROFILE offers: the one
 // place the value of each key is read, so the value a guard RECORDS and the value a later
 // scan COMPARES it against cannot come from two different readings of the same key.
@@ -45,7 +60,7 @@ const (
 // leaving alone the one that did.
 func DecisionInputsForProfile(prof config.Profile) store.DecisionInputs {
 	return store.InputsRead(map[string]string{
-		InputTargetCodec:    targetCodecFor(prof),
+		InputTargetCodec:    targetCodecFor(prof.Encoder),
 		InputEncoder:        prof.Encoder,
 		InputCRF:            strconv.Itoa(prof.CRF),
 		InputPreset:         prof.Preset,
@@ -71,13 +86,14 @@ func DecisionInputsFor(cfg config.Config) store.DecisionInputs {
 // an unknown encoder before the engine is ever built, so the default is a fallback and
 // not a live path).
 //
-// It is PER PROFILE because `encoder` is: one root may re-encode to hevc while another
-// re-encodes to av1, and the skip-already-target guard and the output-codec check must
-// each ask about the encoder that root actually uses. Asking about the top-level encoder
-// would skip every av1 file under an av1 root as "already at target" and reject every
-// hevc output under an hevc root.
-func targetCodecFor(prof config.Profile) string {
-	if spec, ok := encoder.Lookup(prof.Encoder); ok {
+// It takes the KEY rather than a profile because two different resolutions of `encoder`
+// have to ask it: one root may re-encode to hevc while another re-encodes to av1, and an
+// encode profile may override either for the files its pattern selects. The
+// skip-already-target guard and the output-codec check must each ask about the encoder
+// THAT JOB actually uses - asking about a run-global one would skip every av1 file under
+// an av1 root as "already at target" and reject every hevc output under an hevc root.
+func targetCodecFor(key string) string {
+	if spec, ok := encoder.Lookup(key); ok {
 		return spec.TargetCodec
 	}
 	return "hevc"

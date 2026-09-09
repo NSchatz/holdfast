@@ -399,7 +399,7 @@ func TestEncode_SVTAV1WiresCodecColorAndPreset(t *testing.T) {
 // "what would we send" and "do we ever send it without checking" halves of the
 // hardware story are covered.
 func TestBuildArgs_HardwareEncoderShapes(t *testing.T) {
-	cfg := config.Profile{CRF: 23, Preset: "slow"}
+	cfg := config.Transcode{CRF: 23, Preset: "slow"}
 
 	nvencSpec, _ := encoder.Lookup("nvenc")
 	nvencArgs := buildArgs(nvencSpec, cfg, "yuv420p10le", nil, "")
