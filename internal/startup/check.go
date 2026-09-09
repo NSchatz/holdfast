@@ -18,6 +18,11 @@ const (
 	KindLibraryRoot Kind = "library-root"
 	KindStateDir    Kind = "state-dir"
 	KindMount       Kind = "mount"
+	// KindScratchDir is the configured working location (scratch_dir), when one
+	// is configured. It is a checked path like the others - it is inspected,
+	// classified and reported before anything is encoded - but the not-local row
+	// does NOT apply to it: see applyDeclarations and NoticeScratchNotLocal.
+	KindScratchDir Kind = "scratch-dir"
 )
 
 // Record is one classification record: one per DISTINCT checked path, so a path
@@ -91,6 +96,15 @@ const (
 	// NoticeReducedGuarantee: a checked path that is not local and that an
 	// opt-in covers. The run proceeds there and the no-loss guarantee is reduced.
 	NoticeReducedGuarantee NoticeKind = "reduced-guarantee"
+	// NoticeScratchNotLocal: the configured scratch directory is on storage this
+	// build could not positively identify as local. The run STARTS, no
+	// declaration is required and none can be written for it, and the no-loss
+	// guarantee is not reduced - nothing irreversible happens in that directory
+	// and the swap still runs beside the source on storage the checks above have
+	// already adjudicated. It is reported because "the encode is running over
+	// NFS" explains a throughput complaint an operator would otherwise chase for
+	// a week.
+	NoticeScratchNotLocal NoticeKind = "scratch-dir-storage-is-not-local"
 )
 
 // Notice is one report that does not decide the run.
@@ -109,6 +123,34 @@ const (
 	CauseDenied      CauseKind = "permission-denied"
 	CauseUnlistable  CauseKind = "library-root-could-not-be-listed"
 	CauseNotLocal    CauseKind = "storage-is-not-local"
+
+	// The five grounds on which a configured scratch directory refuses the run.
+	// They are their own row (scratchRow) rather than being folded into the rows
+	// above, because the questions are different ones: a scratch directory is
+	// holdfast's working area, and whether it exists, is a directory, is writable,
+	// has room and is clear of the library are five things no library root is ever
+	// asked. Storage that is not local is deliberately NOT among them (D6).
+	CauseScratchMissing    CauseKind = "scratch-dir-does-not-exist"
+	CauseScratchNotDir     CauseKind = "scratch-dir-is-not-a-directory"
+	CauseScratchDenied     CauseKind = "scratch-dir-could-not-be-inspected"
+	CauseScratchUnwritable CauseKind = "scratch-dir-is-not-writable"
+	CauseScratchLowSpace   CauseKind = "scratch-dir-free-space-is-below-the-floor"
+	CauseScratchOverlaps   CauseKind = "scratch-dir-overlaps-a-library-root"
+)
+
+// The rows of the ordered decision that can REFUSE, and the row that starts. They
+// are named rather than spelled as literals because the count appears in the
+// operator-facing refusal ("decided at check N of M") and a row appended without
+// moving that number would print a lie.
+const (
+	rowMalformed  = 1
+	rowMissing    = 2
+	rowUninspect  = 3
+	rowNotLocal   = 4
+	rowScratch    = 5
+	rowStart      = 6
+	refusalRows   = rowStart - 1
+	gibibyteBytes = 1 << 30
 )
 
 // Cause is one established ground for refusing. The decision stops at the first
@@ -140,9 +182,10 @@ type Result struct {
 	// Row is the row of the ordered decision that decided: 1 a malformed
 	// declaration, 2 a missing library root, 3 a path that cannot be inspected
 	// or a root that cannot be listed, 4 storage that is not local and
-	// uncovered, 5 the run starts.
+	// uncovered, 5 a configured scratch directory this run cannot use, 6 the run
+	// starts.
 	Row int
-	// Start is true exactly when Row is 5.
+	// Start is true exactly when Row is rowStart.
 	Start bool
 	// Coverage is every directory the walk traversed SUCCESSFULLY, in walk
 	// order. It BOUNDS the run: a source may be enumerated only from one of
@@ -176,6 +219,12 @@ type Result struct {
 	// LocalSet is the complete set of filesystem types this build classifies
 	// local.
 	LocalSet []string
+	// ScratchProbed records whether the scratch directory's writability probe
+	// actually ran - which is the only moment this check creates anything at all,
+	// and then only a zero-length file it removes again. It is on the Result so
+	// the operator-facing refusal can say so rather than print an unqualified
+	// "nothing was created" that would be a shade less than true.
+	ScratchProbed bool
 }
 
 // Check is one startup check: the configuration it reads and the platform it
@@ -195,6 +244,13 @@ type Check struct {
 	// enumerate as a source. Deciding it needs no read of any file, which is why
 	// the walk's cost is bounded by the directory tree and not by the library.
 	IsMediaFile func(base string) bool
+	// ScratchDir is the configured working location, or "" when the encoder
+	// writes beside the source. It is checked, classified and reported, and it
+	// is never walked: it is not a library and nothing is enumerated from it.
+	ScratchDir string
+	// ScratchMinFreeGB is the free-space floor, in GiB, the scratch directory's
+	// filesystem must clear. 0 disables the floor.
+	ScratchMinFreeGB int
 	// Platform is the substitutable view of the host.
 	Platform Platform
 }
@@ -274,11 +330,17 @@ func (r *checkRun) run() {
 	// file: a root that was listed and holds no media file anywhere beneath it.
 	r.reportEmptyRoots(rootInfo)
 
-	// (5) Coverage of the checked paths by the declarations, which is the last
-	// row's input.
+	// (5) Coverage of the checked paths by the declarations, which is the
+	// not-local row's input.
 	r.applyDeclarations(wellFormed)
 
-	// (6) The one decision.
+	// (6) The configured working location, if there is one. It runs AFTER the
+	// roots are known, because two of its five questions are about them: whether
+	// it overlaps one, and the fact that a scratch directory is never walked or
+	// enumerated the way a root is.
+	r.checkScratch()
+
+	// (7) The one decision.
 	r.decide()
 }
 
@@ -292,7 +354,7 @@ func (r *checkRun) checkDeclarations() []string {
 	for _, d := range r.c.Declarations {
 		text := strings.TrimSpace(d)
 		if text == "" || !filepath.IsAbs(text) {
-			r.refuse(Cause{Kind: CauseMalformed, Row: 1, Path: d,
+			r.refuse(Cause{Kind: CauseMalformed, Row: rowMalformed, Path: d,
 				Detail: "a declaration must be an absolute path",
 				Remedy: r.wellFormedHint()})
 			continue
@@ -310,7 +372,7 @@ func (r *checkRun) checkDeclarations() []string {
 			}
 		}
 		if !beneath {
-			r.refuse(Cause{Kind: CauseMalformed, Row: 1, Path: d,
+			r.refuse(Cause{Kind: CauseMalformed, Row: rowMalformed, Path: d,
 				Detail: "names neither a configured library root, nor the state directory, nor a path beneath a configured library root",
 				Remedy: r.wellFormedHint()})
 			continue
@@ -341,7 +403,7 @@ func (r *checkRun) inspectRoot(root string) *Info {
 			// cover a path with no storage (see applyDeclarations).
 			r.addRecord(Record{Kind: KindLibraryRoot, Path: root, Resolved: r.resolvedOrEmpty(root),
 				Class: Unclassified, Missing: true, Reason: "the path does not exist"})
-			r.refuse(Cause{Kind: CauseMissingRoot, Row: 2, Path: root,
+			r.refuse(Cause{Kind: CauseMissingRoot, Row: rowMissing, Path: root,
 				Detail: "the configured library root does not exist",
 				Remedy: "create it, mount it, or point library_roots at storage that exists"})
 		case errors.Is(err, fs.ErrPermission):
@@ -473,7 +535,7 @@ func (r *checkRun) classifyStorageOf(path string) classification {
 }
 
 func deniedCause(path string) Cause {
-	return Cause{Kind: CauseDenied, Row: 3, Path: path,
+	return Cause{Kind: CauseDenied, Row: rowUninspect, Path: path,
 		Detail: "the process could not inspect this path",
 		Remedy: "grant the process permission to read it, or point the setting at storage holdfast can inspect"}
 }
@@ -629,6 +691,20 @@ func (r *checkRun) applyDeclarations(decls []string) {
 		if rec.Missing || rec.Class.IsLocal() {
 			continue
 		}
+		// The scratch directory is exempt from the not-local row, and it is the
+		// only checked path that is. The declaration exists because holdfast's
+		// no-loss contract needs local rename semantics WHERE THE IRREVERSIBLE ACT
+		// HAPPENS, and no irreversible act happens in the working area: the
+		// encode's working file is disposable by construction, and the swap still
+		// runs beside the source on storage the roots' own check adjudicated.
+		// Refusing here would be a gate that protects nothing while training an
+		// operator to add declarations - and it could not even be lifted, since a
+		// path outside every library root is not one a well-formed declaration may
+		// name. It is REPORTED instead (checkScratch), because what it explains is
+		// real.
+		if rec.Kind == KindScratchDir {
+			continue
+		}
 		if rec.Covered {
 			r.notice(NoticeReducedGuarantee, rec.Path,
 				fmt.Sprintf("classified %s: an opt-in covers it, and holdfast's no-loss guarantee is REDUCED here", rec.describeClass()))
@@ -637,7 +713,7 @@ func (r *checkRun) applyDeclarations(decls []string) {
 		if rec.Denied {
 			continue // permission denial is row 3's, and no declaration lifts it
 		}
-		cause := Cause{Kind: CauseNotLocal, Row: 4, Path: rec.Path, Detail: rec.describeClass()}
+		cause := Cause{Kind: CauseNotLocal, Row: rowNotLocal, Path: rec.Path, Detail: rec.describeClass()}
 		if rec.Resolved == "" {
 			cause.Remedy = "point the setting at storage holdfast can resolve, or repair the storage"
 		} else {
@@ -645,6 +721,164 @@ func (r *checkRun) applyDeclarations(decls []string) {
 		}
 		r.refuse(cause)
 	}
+}
+
+// checkScratch establishes the configured working location, in a fixed order, and
+// refuses the run at row 5 for any of the five things that make it unusable:
+// it does not exist, it is not a directory, it cannot be inspected, it overlaps a
+// library root, it is already below the configured free-space floor, or this
+// process cannot create and remove a file in it.
+//
+// THE ORDER IS PART OF THE CONTRACT, because one of these questions writes.
+// Existence, kind, resolution, overlap and free space are all READS, and each of
+// them returns immediately on a refusal - so a run refused for any of those
+// reasons has created nothing, anywhere, which is what a startup refusal owes. The
+// writability probe is asked LAST and only when every read has passed; when it
+// fails, the creation itself is what failed, so nothing was created then either.
+// The one case in which a probe file exists at all is the case where the scratch
+// directory is fine, and the probe removes it. WriteRefusal states that outright
+// rather than leaving an operator to infer it.
+//
+// Storage that is NOT LOCAL is deliberately not on the list. It is classified,
+// recorded and reported like every other checked path, and the run starts.
+func (r *checkRun) checkScratch() {
+	dir := strings.TrimSpace(r.c.ScratchDir)
+	if dir == "" {
+		return
+	}
+	clean := cleanPath(dir)
+
+	info, err := r.c.Platform.Inspect(clean)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		r.addRecord(Record{Kind: KindScratchDir, Path: clean, Resolved: r.resolvedOrEmpty(clean),
+			Class: Unclassified, Missing: true, Reason: "the path does not exist"})
+		r.refuse(Cause{Kind: CauseScratchMissing, Row: rowScratch, Path: clean,
+			Detail: "the configured scratch_dir does not exist",
+			Remedy: "create it, mount it, point scratch_dir at a directory that exists, or unset scratch_dir to encode beside the source"})
+		return
+	case errors.Is(err, fs.ErrPermission):
+		r.addRecord(Record{Kind: KindScratchDir, Path: clean, Class: Undetermined, Denied: true,
+			Reason: "the process is not permitted to inspect this path"})
+		r.refuse(Cause{Kind: CauseScratchDenied, Row: rowScratch, Path: clean,
+			Detail: "the process could not inspect the configured scratch_dir",
+			Remedy: "grant the process permission to read it, point scratch_dir at storage holdfast can inspect, or unset scratch_dir"})
+		return
+	case err != nil:
+		r.addRecord(Record{Kind: KindScratchDir, Path: clean, Resolved: r.resolvedOrEmpty(clean),
+			Class: Undetermined, Reason: fmt.Sprintf("the path could not be inspected: %v", err)})
+		r.refuse(Cause{Kind: CauseScratchDenied, Row: rowScratch, Path: clean,
+			Detail: fmt.Sprintf("the configured scratch_dir could not be inspected: %v", err),
+			Remedy: "repair the storage, point scratch_dir at storage holdfast can inspect, or unset scratch_dir"})
+		return
+	case !info.IsDir:
+		r.addRecord(Record{Kind: KindScratchDir, Path: clean, Resolved: r.resolvedOrEmpty(clean),
+			Class: Unclassified, Reason: "the path exists but is not a directory"})
+		r.refuse(Cause{Kind: CauseScratchNotDir, Row: rowScratch, Path: clean,
+			Detail: "the configured scratch_dir exists but is not a directory",
+			Remedy: "point scratch_dir at a directory, or unset scratch_dir to encode beside the source"})
+		return
+	}
+
+	rec := r.newRecord(KindScratchDir, clean)
+	r.addRecord(rec)
+	if rec.Denied {
+		r.refuse(Cause{Kind: CauseScratchDenied, Row: rowScratch, Path: clean,
+			Detail: rec.Reason,
+			Remedy: "grant the process permission to read it, point scratch_dir at storage holdfast can inspect, or unset scratch_dir"})
+		return
+	}
+
+	// Overlap with a library root, compared in RESOLVED FORM on both sides, as
+	// every other path comparison in this package is - a symbolic link into the
+	// library is the whole reason a lexical comparison is not enough here.
+	//
+	// A working area inside the tree the walk classifies and the scan enumerates
+	// delivers none of the four things a scratch location is for (it is the same
+	// storage), and it puts holdfast's own working files where its own sweep,
+	// hold-backs and collision guards have to reason about them twice.
+	if r.refuseScratchOverlap(rec) {
+		return
+	}
+
+	if floor := r.c.ScratchMinFreeGB; floor > 0 {
+		free, ferr := r.c.Platform.FreeBytes(clean)
+		if ferr != nil {
+			r.refuse(Cause{Kind: CauseScratchDenied, Row: rowScratch, Path: clean,
+				Detail: fmt.Sprintf("the free space on the filesystem holding the configured scratch_dir could not be established: %v", ferr),
+				Remedy: "repair the storage, point scratch_dir at storage holdfast can inspect, or unset scratch_dir"})
+			return
+		}
+		want := uint64(floor) * gibibyteBytes
+		if free < want {
+			r.refuse(Cause{Kind: CauseScratchLowSpace, Row: rowScratch, Path: clean,
+				Detail: fmt.Sprintf("%d byte(s) free, and scratch_min_free_gb requires at least %d GiB (%d byte(s))",
+					free, floor, want),
+				Remedy: "free space on that filesystem, point scratch_dir at a larger device, lower scratch_min_free_gb " +
+					"(0 disables the floor), or unset scratch_dir to encode beside the source"})
+			return
+		}
+	}
+
+	// LAST, and the only thing this package writes. See the doc comment.
+	r.res.ScratchProbed = true
+	if werr := r.c.Platform.ProbeWritable(clean); werr != nil {
+		r.refuse(Cause{Kind: CauseScratchUnwritable, Row: rowScratch, Path: clean,
+			Detail: fmt.Sprintf("this process cannot create and remove a file in the configured scratch_dir: %v", werr),
+			Remedy: "grant the process write permission there (holdfast writes every encode's working file into it), " +
+				"point scratch_dir at a writable directory, or unset scratch_dir to encode beside the source"})
+		return
+	}
+
+	if !rec.Class.IsLocal() {
+		r.notice(NoticeScratchNotLocal, clean, fmt.Sprintf(
+			"classified %s. The run STARTS: nothing irreversible happens in the working area - the encode's working "+
+				"file is disposable, and the swap still happens beside the source on storage the checks above adjudicated - "+
+				"so no %s declaration is required here, and none can be written for a path outside every library root. "+
+				"It is reported because it is the answer to why encoding is slow.",
+			rec.describeClass(), ConfigKey))
+	}
+}
+
+// refuseScratchOverlap refuses a scratch directory that is a library root, is
+// beneath one, or has one beneath it, and reports whether it did. Both directions
+// are refused because both are the same mistake: the working area and the library
+// must not be the same tree.
+func (r *checkRun) refuseScratchOverlap(rec Record) bool {
+	scratch := rec.Resolved
+	if scratch == "" {
+		scratch = rec.Path
+	}
+	for i, root := range r.roots {
+		resolved := ""
+		if r.rootsResolved && i < len(r.resolvedRoots) {
+			resolved = r.resolvedRoots[i]
+		}
+		if resolved == "" {
+			resolved = r.resolvedOrEmpty(root)
+		}
+		if resolved == "" {
+			resolved = root
+		}
+		var how string
+		switch {
+		case scratch == resolved:
+			how = "is the configured library root"
+		case lexicallyBeneath(scratch, resolved):
+			how = "is beneath the configured library root"
+		case lexicallyBeneath(resolved, scratch):
+			how = "contains the configured library root"
+		default:
+			continue
+		}
+		r.refuse(Cause{Kind: CauseScratchOverlaps, Row: rowScratch, Path: rec.Path,
+			Detail: fmt.Sprintf("the configured scratch_dir (resolved %s) %s %s (resolved %s), "+
+				"so holdfast's working area would sit inside the tree it scans - on the same storage, "+
+				"delivering none of what a scratch location is for", scratch, how, root, resolved),
+			Remedy: "point scratch_dir at a directory outside every library root, or unset scratch_dir to encode beside the source"})
+		return true
+	}
+	return false
 }
 
 // unresolvableRecord finds a checked path whose RESOLVED FORM could not be
@@ -681,7 +915,7 @@ func (rec Record) describeClass() string {
 // is CLOSED: nothing else in this package decides whether the run proceeds.
 func (r *checkRun) decide() {
 	sort.SliceStable(r.res.Causes, func(i, j int) bool { return r.res.Causes[i].Row < r.res.Causes[j].Row })
-	for _, row := range []int{1, 2, 3, 4} {
+	for row := 1; row <= refusalRows; row++ {
 		for _, c := range r.res.Causes {
 			if c.Row == row {
 				r.res.Row = row
@@ -690,6 +924,6 @@ func (r *checkRun) decide() {
 			}
 		}
 	}
-	r.res.Row = 5
+	r.res.Row = rowStart
 	r.res.Start = true
 }

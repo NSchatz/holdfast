@@ -147,6 +147,82 @@ anything in user space (FUSE) are all treated as not-local, because a false warn
 configuration and a false clear costs a film. **[docs/filesystem.md](docs/filesystem.md)** has the
 recognised-local set, the opt-in rules and what the startup traversal costs.
 
+### Per-job settings - `transcode_profiles`
+
+The top-level `encoder`, `crf`, `preset`, `pixel_format`, `container_ext` and `bitrate_kbps` are what
+every file is transcoded under. `transcode_profiles` is an **ordered** list that overrides them per
+job: the **first** profile whose `match` selects a source supplies that job's settings, laid over the
+top-level ones. A later matching profile has no effect on that job; a setting the matching profile does
+not override keeps its top-level value; and a source no profile matches is transcoded under the
+top-level settings - never skipped, never failed.
+
+```yaml
+crf: 22                    # everything else keeps today's HEVC at crf 22
+transcode_profiles:
+  - name: 4k-av1
+    match: "**/4K/**"      # everything under any directory named 4K
+    encoder: svtav1
+    crf: 32
+  - name: bulk-tv
+    match: "**/TV/**/*.mkv"
+    bitrate_kbps: 3000     # this profile's jobs run at a TARGET BITRATE instead
+```
+
+`match` is a glob over the source's path: a pattern with no `/` matches the **basename**, a pattern
+containing `/` matches the **whole path** segment by segment (`*`, `?` and `[...]` do not cross a
+separator; `**` matches zero or more whole segments), and an empty `match` selects everything - the
+catch-all, only ever reached by what no earlier profile matched.
+
+A profile accepts exactly `name`, `match`, `encoder`, `crf`, `preset`, `pixel_format`, `container_ext`
+and `bitrate_kbps`. **Any other key is a startup refusal naming the profile and the key** - the
+unknown-key check bites inside a profile, not only at the top level, because `encodr: svtav1` nested in
+one is the same typo with the same consequence. So is an unknown encoder, a `crf` outside 0-51, a
+`container_ext` carrying a dot or a slash, an empty or duplicate name, and a match pattern that cannot
+be parsed.
+
+The **profile that decided a job is recorded on its terminal ledger row** and on the `holdfast export`
+NDJSON row (`"profile"`, empty for the top-level settings). `encoder` alone stops answering "what ran"
+the moment two encoders can run in one scan - and the skip decisions move with the profile too: a
+source already in the top-level target codec whose matching profile targets a **different** codec is
+transcoded rather than skipped, and its output is accepted only if it carries the **profile's** target
+codec.
+
+A profile selects what the encoder **produces**, and nothing else. There is deliberately no per-profile
+VMAF threshold, undo window or retention setting: a profile must never be able to move a gate that
+decides whether a source is destroyed.
+
+`bitrate_kbps` (top-level or per-profile) selects a **target-bitrate rate control** at that many kbps,
+and then no quality target is passed to the encoder at all - no `-crf`, `-cq`, `-global_quality` or
+`-qp`. It is announced at startup as a **note**, not a warning: every no-loss gate still runs and a
+rejected encode still leaves the source untouched. `0` (the default) keeps the quality target, so an
+existing config produces byte-identical encoder arguments.
+
+Everything here is reachable from the config file and its `HOLDFAST_*` environment override, and from
+nowhere else - `run`, `serve` and `validate` gain no flags.
+
+### Where the encode's working file lives - `scratch_dir`
+
+By default the encoder writes beside the source and holdfast finalizes with an atomic same-directory
+rename. `scratch_dir` moves the **working file** to a device of your choosing - and moves nothing else:
+
+```yaml
+scratch_dir: /mnt/cache/holdfast
+scratch_min_free_gb: 50    # startup floor in GiB; 0 disables it
+```
+
+The encoder writes there, the acceptance gates run there, and **nothing at all appears under the
+source's directory until the gates have accepted**. Only then is the result copied into a temp beside
+the source, re-read off disk and proved byte-for-byte to be the bytes the gates passed, made durable,
+and handed to the **same** atomic rename as ever. holdfast never renames or moves out of the scratch
+directory onto a source, whether or not the two share a filesystem.
+
+What that buys is the **shape** of the I/O - seek thrash avoided on a spinning disk, parity
+read-modify-write churn avoided on unRAID/SnapRAID/RAIDZ, failed and aborted transcodes kept off the
+array, a better write pattern over NFS/SMB - at the cost of a full **write-plus-read cycle** on the
+scratch device, which on an SSD is write endurance spent at video-file sizes. It does not change how
+many bytes the source's drive handles. **[docs/scratch.md](docs/scratch.md)** has the arithmetic, the
+startup refusals and the two honest limits of the free-space floor.
+
 ### The undo window (`restore`) - off by default
 
 The swap is the one irreversible thing holdfast does, and every gate in front of it is an **estimate**.
