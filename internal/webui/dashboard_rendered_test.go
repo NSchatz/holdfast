@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -61,6 +63,112 @@ func collapseSpace(s string) string { return strings.Join(strings.Fields(s), " "
 // and are not relaxed here: no --dump-dom and no --virtual-time-budget, each of which
 // cost this repository a CI run.
 
+// WHY THESE GRADERS RETURNED DIFFERENT VERDICTS ON IDENTICAL BYTES, AND WHAT NOW STOPS
+// THEM (S0069).
+//
+// The symptom was run 34236997921: this suite went red on main, the rerun of the same
+// commit went green, and nothing in either log said which of them was right. A grader
+// that decides the same bytes two ways is not measuring the page, it is measuring the
+// machine - and this one is the operator's only rendered check on a queue and history
+// surface belonging to a tool that DELETES the source file after a transcode it judged
+// faithful. So the causes are named here, with the mechanism and the repair, because the
+// next reader has this file and does not have the session that found them.
+//
+// Every cause below was reproduced deliberately, on the unchanged tree at pin
+// f525a9e6, before anything was changed. None was found by staring at the code and none
+// is a guess about what run 34236997921 hit: each is stated with the perturbation that
+// flipped a verdict, and the first two this file's own graders can now reproduce on
+// demand, which is the point.
+//
+// CAUSE 1 - THE ROW-AGE WINDOWS WERE A WALL CLOCK.
+// Mechanism: the page renders a queue row's in-state age as its own clock now, less that
+// row's transition timestamp, recomputed on a one-second ticker (src/js/20-derive.js,
+// serverNow / elapsedText). The page's clock is anchored to the snapshot's `now` field
+// when the snapshot renders, so a rendered age is (snapNow - updated_at) PLUS every
+// second of real time between that render and the reading being taken. B9 graded those
+// ages against fixed windows - 3600..3720, 90..150, 45..105 - so the verdict was "these
+// ages are right if this machine got from render to reading in under sixty seconds".
+// Reproduced by holding the reading back 120 seconds: rows stamped 90s and 45s before
+// the snapshot rendered as 209s and 164s, and two assertions flipped from pass to fail
+// on bytes that had not changed.
+// Repair: the windows are gone and the DERIVATION is graded instead. Each row publishes
+// the basis it derived from (the elapsed cell's own data-since), and the reading must be
+// consistent with ONE page clock - there must exist a single instant at which all three
+// rendered ages are what the page would show, each against its own basis. That pins
+// every row to its own timestamp exactly, at any latency, because delay moves the
+// instant and not the relationship between the rows. One anchor remains, and it is
+// bounded by what the render MEASURED rather than by a guess: the instant must lie
+// between the snapshot's own clock and that clock plus the time this render actually
+// took, which is what catches a page reading ages off the browser's clock instead of the
+// server's. TestRendered_TheAgeReadingFailsAgainstAMisderivedAge defeats both halves on
+// purpose.
+//
+// CAUSE 2 - TWO DEADLINES THAT COULD DISAGREE, AND THE TIGHTER ONE WAS A GUESS.
+// Mechanism: the probe page polled for the page to reach the state a grader measures
+// under a fixed 15-second in-page budget, while the Go side held a 90-second deadline.
+// The dashboard fills its tables from an SSE snapshot that lands after `load`, so on a
+// loaded runner, a cold browser profile or a busy scheduler the snapshot can arrive
+// after 15 seconds - whereupon the probe POSTED a not-ready verdict and mustRender
+// turned it into "the page never reached the state the grader measures", six times
+// sooner than the deadline the test itself was prepared to wait. Reproduced by holding
+// the snapshot back 45 seconds: that exact failure, with the page's own connection state
+// reported as "live", on an otherwise healthy page.
+// Repair: one budget. readinessBudget derives the in-page poll from the deadline the Go
+// side is holding (deadlineFor), so the two cannot disagree and the only page that fails
+// readiness is one no deadline here could have waited for. The ten arbitrary per-case
+// budgets that had accumulated beside it - 8s, 10s, 15s, 30s - are gone with it.
+// TestRendered_ASnapshotThatArrivesLateChangesNoVerdict holds it.
+//
+// CAUSE 3 - A SWEEP COULD BE SATISFIED BY A PAGE THAT NEVER RENDERED.
+// Mechanism: dashProblems and the two cap-total graders report an unrendered page as a
+// problem, which is right for a grader and wrong for a MUTATION SWEEP that asks only
+// "did this grader report something?". A page that had not rendered therefore satisfied
+// those loops, so on a slow machine they went green having looked at no mutation at all.
+// This is the worst of the four, because it does not lose the run - it loses the
+// coverage, silently, and a grader that has stopped deciding anything reports "ok" for
+// ever. Reproduced by making the page take 12 seconds to render, over those sweeps' own
+// 8-second budget, with one extra mutation added that hides NOTHING: with no delay the
+// sweep correctly FAILS on it, and with the delay the sweep PASSES and reports the
+// harmless mutation as caught.
+// Repair: a sweep that asks whether a subject was hidden must first have SEEN the page.
+// Both loops now require the render, and the one hiding mutation that legitimately
+// prevents it - the aggregate host removed from the markup, where there is nothing for
+// the page to fill - is named as the exception rather than covered by the same silence.
+//
+// CAUSE 4 - THE FIXTURE SERVER'S PORT WAS DECIDED BY WHAT ELSE WAS ON THE MACHINE.
+// Mechanism: the Playwright project bound a fixed 127.0.0.1:8931 and correctly refuses to
+// ADOPT a server it did not start, because an adopted server is a binary built from a
+// tree nobody can name. With a fixed port those two rules combine badly: one killed run
+// leaves a fixture server listening and every later run on that host then fails at
+// start-up until somebody finds the process by hand, and two worktrees grading in
+// parallel - this repository's normal operating mode - collide with each other. Either
+// way the verdict is about the machine rather than the page, which is this whole spec.
+// Repair: the port is one nothing was listening on when the run started, chosen once and
+// published into the environment (the config module is re-evaluated in every worker). The
+// no-adoption rule is not weakened, it is made unreachable: there is no listener to adopt,
+// and the fixture server is still compiled and started from THIS tree.
+//
+// WHAT WAS RULED OUT, so nobody re-runs the experiment. The ten DASH-9 properties
+// themselves - order, drawings shown, bucket text, spread text, bar proportion, spread
+// mark positions, colour carriers, the 3:1 contrast floor, off-origin fetches and
+// tooltips - were measured with the reading held back two minutes and returned
+// character-identical problem lists. They read geometry, computed style and text that a
+// settled layout does not change with time. The dbus noise the browser prints on every
+// run (the container has no session bus) is not a cause: it appears in passing and
+// failing runs alike and reaches no assertion.
+//
+// AND WHAT DOES NOT COUNT AS A REPAIR HERE. Not a wider window, not a retry until the
+// page looks acceptable, and not a deleted grader. A tolerance that swallows a mutation
+// removes the only rendered check this surface has, and unlike a flake it never reports
+// itself again. TestRendered_AMutatedDocumentStillFailsItsGraderAfterTheLongestDelay
+// serves two documents which between them defeat ALL TEN named properties, waits out the
+// longest delay this work introduces on each, and requires every one of the ten graders to
+// still fail and to name the mutation it caught - five and five, rendered alongside each
+// other so the delay is paid twice over and once in wall clock, and refusing any grader no
+// document there defeats. And no reading is retried at all: the probe page posts every
+// reading it takes and the test server, not the page, counts them, so renderDashboard can
+// refuse any count but one.
+
 // dashProbeJS is the measuring script. It runs in the PARENT page and reaches into the
 // same-origin iframe holding the real served document.
 //
@@ -94,6 +202,22 @@ function isReady(doc) {
   const t = connText(doc);
   if (MODE === "down") return t.indexOf("reconnecting") === 0 && rendered(doc);
   return t === "live" && rendered(doc);
+}
+
+// probeReady is the question the harness POLLS. It asks the page's own state and computes
+// no measurement, which is what keeps "waiting for the page" and "taking a reading" apart:
+// the reading below happens exactly once, after this has answered yes. probePage counts
+// the readings and reports the count, so that separation is measured and not merely meant.
+function probeReady(doc) { return isReady(doc); }
+
+// probeWhy is what the harness PRINTS for a poll that answered "not yet". Waiting is not
+// a retry of a reading, but it is still the thing a loaded machine does to this suite, so
+// a reading that had to wait says what it was waiting for rather than passing
+// indistinguishably from one that did not.
+function probeWhy(doc) {
+  return "the page reports its connection as \"" + connText(doc) + "\" and " +
+    (rendered(doc) ? "has rendered a snapshot" : "has not rendered a snapshot yet") +
+    "; this grader is waiting for mode \"" + MODE + "\"";
 }
 
 function textOf(el) { return el ? el.textContent.trim() : ""; }
@@ -132,6 +256,12 @@ function rowsOf(doc, win, id) {
       path: cellText(tr, "td.path"),
       status: cellText(tr, "td.st"),
       elapsed: cellText(tr, "td.elapsed"),
+      // The BASIS the page derived that age from: the row's own transition timestamp,
+      // as the page itself holds it. Reported beside the age so the Go side can ask
+      // whether the age follows from it, which is a question about the derivation and
+      // not about how long the measurement took.
+      since: (function () { const td = tr.querySelector("td.elapsed");
+                            return td && td.dataset ? String(td.dataset.since || "") : ""; })(),
       progress: cellText(tr, "td.prog"),
       worker: cellText(tr, "td.worker"),
       size: cellText(tr, "td.size"),
@@ -546,6 +676,7 @@ type dashRow struct {
 	Path     string   `json:"path"`
 	Status   string   `json:"status"`
 	Elapsed  string   `json:"elapsed"`
+	Since    string   `json:"since"`
 	Progress string   `json:"progress"`
 	Worker   string   `json:"worker"`
 	Size     string   `json:"size"`
@@ -655,8 +786,16 @@ type dashRegions struct {
 }
 
 type dashVerdict struct {
-	Ready     bool   `json:"ready"`
-	Error     string `json:"error"`
+	Ready bool   `json:"ready"`
+	Error string `json:"error"`
+	// Readings is the probe page's own count of how many times it computed a
+	// measurement for this render. This harness retries READINESS and never a reading,
+	// so it is 1, and TestRendered_TheHarnessTakesExactlyOneReadingPerGrader holds it
+	// there for every world the graders are run against.
+	Readings int `json:"readings"`
+	// And what the harness had to WAIT for before taking it, which is reported rather
+	// than swallowed (see probeWait).
+	probeWait
 	Origin    string `json:"origin"`
 	ConnText  string `json:"connText"`
 	ConnClass string `json:"connClass"`
@@ -734,6 +873,15 @@ type dashOpts struct {
 	// taken, and changes nothing else. It is how the text equivalents are asked whether
 	// they carry the figure on their own.
 	strip bool
+	// delay holds the reading back by that much REAL time after the page has reached the
+	// state the grader measures. The page goes on running throughout - its elapsed ticker
+	// fires once a second - so this is the actual latency a busy machine imposes, not a
+	// simulation of one. The Go deadline is extended by it (deadlineFor).
+	delay time.Duration
+	// snapshotDelay holds back the SSE snapshot the page renders from, so the page is
+	// connected and empty for that long. It is what a loaded machine does to this
+	// harness, and it is what the readiness budget has to be able to absorb.
+	snapshotDelay time.Duration
 }
 
 // renderDashboard serves the real document, pushes it one real SSE snapshot, and returns
@@ -751,19 +899,22 @@ func renderDashboard(t *testing.T, bin string, o dashOpts) (dashVerdict, string)
 		strip = "1"
 	}
 	js = strings.Replace(js, "%STRIP%", strip, 1)
-	wait := o.wait
-	if wait <= 0 {
-		wait = 15 * time.Second
-	}
+	// ONE deadline, and the in-page readiness budget is derived from it. The two used to
+	// be independent - 15 seconds in the page against 90 in the test - which made "the
+	// page never reached the state the grader measures" a verdict about how loaded the
+	// machine was rather than about the page.
+	deadline := deadlineFor(o.delay + o.snapshotDelay)
 	ps := serveDocumentWith(t, serveOpts{
-		url:         sourceoffer.Upstream,
-		mutate:      o.mutate,
-		probe:       js,
-		wait:        wait,
-		snapshot:    o.snapshot,
-		streamFails: o.streamFails,
+		url:           sourceoffer.Upstream,
+		mutate:        o.mutate,
+		probe:         js,
+		wait:          o.wait,
+		delay:         o.delay,
+		snapshotDelay: o.snapshotDelay,
+		snapshot:      o.snapshot,
+		streamFails:   o.streamFails,
 	})
-	raw, log, err := runProbe(bin, ps, verdictDeadline, t.TempDir())
+	raw, log, err := runProbe(bin, ps, deadline, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -774,6 +925,19 @@ func renderDashboard(t *testing.T, bin string, o dashOpts) (dashVerdict, string)
 	if v.Error != "" {
 		t.Fatalf("the probe failed inside the browser: %s\nbrowser output:\n%s", v.Error, log)
 	}
+	// The single-reading property, held on EVERY render rather than in one case that
+	// could be the only place it is true. This harness polls READINESS and reads once;
+	// the count is the test server's own, so a page that retried a reading cannot report
+	// otherwise. AC4's second branch: there is no retry of a reading here to bound.
+	if seen := ps.postsSeen(); seen != 1 || v.Readings != 1 {
+		t.Fatalf("this render took %d readings (the probe counted %d, the test server received %d), want exactly 1: "+
+			"this harness retries READINESS and never a reading, so any other count means a measurement was taken more "+
+			"than once and a pass could be a later attempt's\nbrowser output:\n%s", max(seen, v.Readings), v.Readings, seen, log)
+	}
+	// Waiting is not a retry of a reading, but it is what a loaded machine does to this
+	// suite, so it is never silent: every recorded readiness attempt is printed with the
+	// grader, its number and the page's own reason.
+	reportWait(t, v.probeWait)
 	return v, log
 }
 
@@ -909,7 +1073,9 @@ func mixedSnapshot() []byte {
 
 func TestRendered_DashboardShowsQueueRowsHistoryRowsAndTheirFigures(t *testing.T) {
 	bin := chromium(t)
+	start := time.Now()
 	v, log := mustRender(t, bin, dashOpts{snapshot: fixtureSnapshot()})
+	took := time.Since(start)
 
 	// One queue row per pending or active job, each SHOWN.
 	if len(v.Queue) != 3 {
@@ -943,20 +1109,40 @@ func TestRendered_DashboardShowsQueueRowsHistoryRowsAndTheirFigures(t *testing.T
 	}
 
 	// The elapsed figure is DERIVED from each row's own wire timestamp against the
-	// snapshot's own clock: three rows stamped 3600s, 90s and 45s before it read three
-	// different ages, in that order, none of them counted in the page.
-	ages := []int{
-		elapsedSeconds(t, v.Queue[0].Elapsed),
-		elapsedSeconds(t, v.Queue[1].Elapsed),
-		elapsedSeconds(t, v.Queue[2].Elapsed),
-	}
-	for i, want := range []struct{ lo, hi int }{{3600, 3720}, {90, 150}, {45, 105}} {
-		if ages[i] < want.lo || ages[i] > want.hi {
-			t.Errorf("queue row %d (%s, stamped %ds before the snapshot) shows an age of %q (%ds), want between %ds and %ds",
-				i, v.Queue[i].Status, []int{3600, 90, 45}[i], v.Queue[i].Elapsed, ages[i], want.lo, want.hi)
+	// snapshot's own clock, and that DERIVATION is what is graded here.
+	//
+	// It used to be graded by windows - 3600 to 3720, 90 to 150, 45 to 105 - and those
+	// windows are a wall clock: a row's age is (snapNow - updated_at) plus however much
+	// real time passes before the reading is taken, so they said "this page is right if
+	// this machine took under sixty seconds to render and read it". That is a fact about
+	// the machine, and it is one of the two mechanisms that made this suite return
+	// different verdicts on identical bytes (see the diagnosis at the foot of this file).
+	//
+	// What replaces it decides the same property with no wall clock in it at all. Each
+	// row publishes the basis it derived from, so the reading is asked to be CONSISTENT
+	// with one page clock: there must exist a single instant T at which all three
+	// rendered ages are what the page would show, each against its OWN basis. That
+	// pins every row to its own timestamp (the property the ordering check was reaching
+	// for) exactly, at any latency, because holding the reading back moves T and not the
+	// relationship between the rows.
+	ages := rowAgeReadings(t, v.Queue)
+	if lo, hi, ok := oneClockBehind(ages); !ok {
+		t.Errorf("no single instant explains the three rendered ages %v: each age must be this page's clock less that row's OWN "+
+			"transition timestamp, so one figure cannot be derived from another row's basis or from no basis at all", ages)
+	} else {
+		// The one anchor left, and it is bounded by what this render MEASURED rather
+		// than by a guess: the page's clock has to be the SERVER's - at or after the
+		// snapshot's own `now`, and no later than the snapshot plus the real time this
+		// render actually took. A page reading ages off the browser's own clock lands
+		// years outside it, whatever the machine was doing.
+		if lo < snapNow || hi > float64(snapNow)+took.Seconds()+1 {
+			t.Errorf("the page's clock behind the rendered ages is in [%.0f, %.0f), which is not the snapshot's clock (%d) "+
+				"advanced by the %s this render took: the ages are not being derived from the server's clock",
+				lo, hi, snapNow, took.Round(time.Second))
 		}
 	}
-	if !(ages[0] > ages[1] && ages[1] > ages[2]) {
+	// And the three ages are still three, in the order their timestamps put them.
+	if !(ages[0].seconds > ages[1].seconds && ages[1].seconds > ages[2].seconds) {
 		t.Errorf("the three rows' ages are %v: each must come from its OWN wire timestamp, not one figure for the table", ages)
 	}
 
@@ -1047,7 +1233,12 @@ func TestRendered_DashboardShowsQueueRowsHistoryRowsAndTheirFigures(t *testing.T
 
 var elapsedRe = regexp.MustCompile(`^(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?$`)
 
-func elapsedSeconds(t *testing.T, s string) int {
+// elapsedSpan reads a rendered age and reports BOTH the seconds it states and the
+// granularity it states them at. The page drops the seconds field once an age passes an
+// hour ("1h 2m"), so a rendered age is not a number but an interval: the true age is
+// somewhere in [seconds, seconds+granularity). Carrying that interval is what lets the
+// derivation be checked exactly instead of within a tolerance somebody had to pick.
+func elapsedSpan(t *testing.T, s string) (seconds, granularity int) {
 	t.Helper()
 	m := elapsedRe.FindStringSubmatch(strings.TrimSpace(s))
 	if m == nil {
@@ -1060,7 +1251,65 @@ func elapsedSeconds(t *testing.T, s string) int {
 		v, _ := strconv.Atoi(x)
 		return v
 	}
-	return n(m[1])*3600 + n(m[2])*60 + n(m[3])
+	granularity = 1
+	if m[1] != "" {
+		granularity = 60 // the hour form carries no seconds field
+	}
+	return n(m[1])*3600 + n(m[2])*60 + n(m[3]), granularity
+}
+
+// rowAge is one rendered age together with the basis the page derived it from, which is
+// everything needed to ask whether the derivation holds without asking what time it is.
+type rowAge struct {
+	path        string
+	status      string
+	rendered    string
+	seconds     int
+	granularity int
+	since       int64
+}
+
+func (r rowAge) String() string {
+	return fmt.Sprintf("%s(%s: %q = %ds since %d)", r.path, r.status, r.rendered, r.seconds, r.since)
+}
+
+func rowAgeReadings(t *testing.T, rows []dashRow) []rowAge {
+	t.Helper()
+	out := make([]rowAge, 0, len(rows))
+	for _, r := range rows {
+		secs, gran := elapsedSpan(t, r.Elapsed)
+		since, err := strconv.ParseInt(strings.TrimSpace(r.Since), 10, 64)
+		if err != nil {
+			t.Fatalf("the queue row %q renders an age of %q but publishes no transition timestamp to derive it from (%q): %v",
+				r.Path, r.Elapsed, r.Since, err)
+		}
+		out = append(out, rowAge{path: r.Path, status: r.Status, rendered: r.Elapsed,
+			seconds: secs, granularity: gran, since: since})
+	}
+	return out
+}
+
+// oneClockBehind asks whether ONE instant explains every rendered age. Each reading
+// constrains the page's clock to [since+seconds, since+seconds+granularity); the readings
+// agree exactly when those intervals intersect, and the intersection is the clock they
+// agree on. No wall clock enters the question, so holding the reading back by two minutes
+// moves the answer and never the verdict.
+func oneClockBehind(ages []rowAge) (lo, hi float64, ok bool) {
+	if len(ages) == 0 {
+		return 0, 0, false
+	}
+	lo, hi = math.Inf(-1), math.Inf(1)
+	for _, a := range ages {
+		l := float64(a.since + int64(a.seconds))
+		h := l + float64(a.granularity)
+		if l > lo {
+			lo = l
+		}
+		if h < hi {
+			hi = h
+		}
+	}
+	return lo, hi, lo < hi
 }
 
 // --- B10: each aggregate card states its set and its exclusions -----------------
@@ -1241,7 +1490,7 @@ func TestRendered_AFailedEventStreamLeavesTheConnectionDownAndKeepsTheRows(t *te
 	bin := chromium(t)
 	// The stream delivers one snapshot and then drops, and every reconnection - the page's
 	// only API call - is answered 500. Both halves of B13's antecedent hold at once.
-	v, log := mustRender(t, bin, dashOpts{snapshot: fixtureSnapshot(), streamFails: true, mode: "down", wait: 30 * time.Second})
+	v, log := mustRender(t, bin, dashOpts{snapshot: fixtureSnapshot(), streamFails: true, mode: "down"})
 
 	if v.ConnText == "live" || v.ConnText == "" {
 		t.Errorf("the page reports its connection as %q after the stream failed", v.ConnText)
@@ -1419,7 +1668,17 @@ func TestRendered_EveryDashboardGraderFailsAgainstEveryHidingMutation(t *testing
 		if string(mutate([]byte(plain))) == plain {
 			t.Fatalf("the mutation %q did not change the served document - the assertion below would be vacuous", name)
 		}
-		v, log := renderDashboard(t, bin, dashOpts{snapshot: fixtureSnapshot(), mutate: mutate, wait: 8 * time.Second})
+		// The page has to RENDER for the mutation to have been caught. A verdict from a
+		// page that never rendered reports every subject missing, so this case would
+		// "catch" a mutation by never having seen the page - and which way it went would
+		// then depend on how busy the machine was. The one mutation that removes the
+		// aggregate host from the markup is the exception and says so: there is nothing
+		// there for the page to fill, and its absence is itself the counterexample.
+		v, log := renderDashboard(t, bin, dashOpts{snapshot: fixtureSnapshot(), mutate: mutate})
+		if !v.Ready && !strings.Contains(name, "removed from the markup") {
+			t.Fatalf("%s: the page did not render at all, so this mutation was not caught - it was never looked at "+
+				"(connection state %q)\nbrowser output:\n%s", name, v.ConnText, log)
+		}
 		probs := dashProblems(v)
 		if probs == nil {
 			t.Errorf("the rendered graders passed a mutation that hides their subject from a reader (%s)\nverdict: %+v\nbrowser output:\n%s",
@@ -1497,12 +1756,9 @@ func TestRendered_PageFetchesNothingFromOutsideTheServerThatServedIt(t *testing.
 		"an off-origin iframe": domReplace(
 			`</main>`, `<iframe src="https://example.invalid/frame"></iframe></main>`),
 	} {
-		v, log := renderDashboard(t, bin, dashOpts{snapshot: fixtureSnapshot(), mutate: mutate, wait: 15 * time.Second})
-		if !v.Ready {
-			t.Fatalf("%s: the page did not render at all\nbrowser output:\n%s", name, log)
-		}
+		v, log := mustRender(t, bin, dashOpts{snapshot: fixtureSnapshot(), mutate: mutate})
 		if len(v.OffOrigin) == 0 {
-			t.Errorf("the off-origin grader passed a page that reaches off-origin (%s)", name)
+			t.Errorf("the off-origin grader passed a page that reaches off-origin (%s)\nbrowser output:\n%s", name, log)
 		}
 	}
 }
@@ -1578,7 +1834,7 @@ func TestRendered_NoPolicyViolationWhileRenderingRealData(t *testing.T) {
 		"a resource from an origin default-src 'none' refuses": domReplace(
 			`</body>`, `<img src="https://example.invalid/pixel.png" alt=""></body>`),
 	} {
-		_, log := renderDashboard(t, bin, dashOpts{snapshot: fixtureSnapshot(), mutate: mutate, wait: 15 * time.Second})
+		_, log := mustRender(t, bin, dashOpts{snapshot: fixtureSnapshot(), mutate: mutate})
 		refusals := policyRefusals(log)
 		if len(refusals) == 0 {
 			t.Fatalf("the browser reported no refusal for %q, so this grader cannot fail.\nbrowser output:\n%s", name, log)
@@ -2392,12 +2648,9 @@ func TestRendered_TheDrawingsFetchNothingFromAnotherOrigin(t *testing.T) {
 		"a data: URI on an image element": domReplace(
 			`</main>`, `<img alt="" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></main>`),
 	} {
-		v, log := renderDashboard(t, bin, dashOpts{snapshot: fixtureSnapshot(), mutate: mutate, wait: 15 * time.Second})
-		if !v.Ready {
-			t.Fatalf("%s: the page did not render at all\nbrowser output:\n%s", name, log)
-		}
+		v, log := mustRender(t, bin, dashOpts{snapshot: fixtureSnapshot(), mutate: mutate})
 		if probs := gradeOffOrigin(v); probs == nil {
-			t.Errorf("the off-origin scan passed a page that reaches off-origin (%s)", name)
+			t.Errorf("the off-origin scan passed a page that reaches off-origin (%s)\nbrowser output:\n%s", name, log)
 		}
 	}
 }
@@ -2653,7 +2906,7 @@ func hostileAggregates2() string {
 func TestRendered_AFailedStreamKeepsTheDrawingsAndTheirText(t *testing.T) {
 	bin := chromium(t)
 	v, log := mustRender(t, bin, dashOpts{
-		snapshot: fixtureSnapshot(), streamFails: true, mode: "down", wait: 30 * time.Second})
+		snapshot: fixtureSnapshot(), streamFails: true, mode: "down"})
 
 	for _, g := range []dash9Grader{
 		{"every drawing reached the screen", gradeDrawingsShown},
@@ -2679,6 +2932,16 @@ func TestRendered_AFailedStreamKeepsTheDrawingsAndTheirText(t *testing.T) {
 
 // --- B23: every grader above FAILS against the mutation that would defeat it ---------
 
+// graderNames is the enumeration itself, for a failure that has to show which properties
+// this suite still holds.
+func graderNames(gs []dash9Grader) []string {
+	out := make([]string, 0, len(gs))
+	for _, g := range gs {
+		out = append(out, g.name)
+	}
+	return out
+}
+
 // A grader that cannot fail is not evidence, and this repository has already lost a whole
 // spec to exactly that. Each row below serves the REAL document with one deliberate change
 // that defeats one named property, and requires that property's grader to report it.
@@ -2695,7 +2958,7 @@ func TestRendered_EveryDASH9GraderFailsAgainstItsOwnMutation(t *testing.T) {
 	}
 
 	plain := servedDocument(t)
-	for _, c := range []struct {
+	cases := []struct {
 		name    string
 		mutate  func([]byte) []byte
 		defeats string
@@ -2755,14 +3018,37 @@ func TestRendered_EveryDASH9GraderFailsAgainstItsOwnMutation(t *testing.T) {
 			scriptMutation(`var a=document.querySelectorAll("#aggregates .agg *");` +
 				`for (var i=0;i<a.length;i++) a[i].setAttribute("title","hover to read me");`),
 			"no figure is readable only by pointing at it"},
-	} {
+	}
+
+	// AC6: the ten named properties are all still HERE, and each is still proved to bite
+	// by something that defeats it. A grader whose counterexample went missing is one this
+	// suite quietly stopped deciding anything about, and a grader deleted outright is the
+	// cheapest way of all to make a flaky check agree with itself - so both are refused by
+	// name rather than left to be noticed.
+	graders := dash9Graders()
+	if len(graders) < 10 {
+		t.Fatalf("dash9Graders() enumerates %d properties; DASH-9 is TEN, and no work on this harness may shrink that set:\n%v",
+			len(graders), graderNames(graders))
+	}
+	defeated := map[string]int{}
+	for _, c := range cases {
+		defeated[c.defeats]++
+	}
+	for _, g := range graders {
+		if defeated[g.name] == 0 {
+			t.Errorf("no mutation defeats the grader %q, so nothing here proves it can fail", g.name)
+		}
+		delete(defeated, g.name)
+	}
+	for name := range defeated {
+		t.Errorf("a mutation names the grader %q, which dash9Graders() does not enumerate", name)
+	}
+
+	for _, c := range cases {
 		if string(c.mutate([]byte(plain))) == plain {
 			t.Fatalf("the mutation %q did not change the served document - the assertion below would be vacuous", c.name)
 		}
-		v, log := renderDashboard(t, bin, dashOpts{snapshot: mixedSnapshot(), mutate: c.mutate, wait: 15 * time.Second})
-		if !v.Ready {
-			t.Fatalf("%s: the page did not render at all\nbrowser output:\n%s", c.name, log)
-		}
+		v, log := mustRender(t, bin, dashOpts{snapshot: mixedSnapshot(), mutate: c.mutate})
 		found := false
 		for _, g := range dash9Graders() {
 			if g.name != c.defeats {
@@ -2782,6 +3068,427 @@ func TestRendered_EveryDASH9GraderFailsAgainstItsOwnMutation(t *testing.T) {
 	}
 }
 
+// --- S0069: the readings do not depend on how long the measurement took ------------
+
+// latencyCase is the real delay held between the page rendering its snapshot and the
+// reading being taken. Two minutes is longer than any tolerance this harness carries and
+// longer than the whole rendered suite's per-render cost, so a reading that survives it
+// is not surviving by being quick.
+const latencyCase = 120 * time.Second
+
+// Every DASH-9 property returns the SAME verdict when the reading is held back by two
+// minutes of real time as it does with no delay.
+//
+// This is the criterion that removes the mechanism rather than sampling the outcome.
+// Running the suite five times can only fail to disprove determinism; asking each grader
+// to survive a latency far beyond anything a loaded runner will impose asks whether the
+// verdict is a function of the page at all. The page is NOT frozen while the delay runs -
+// its elapsed ticker fires once a second throughout - so this is the same passage of real
+// time a busy machine would have imposed, deliberately rather than by luck.
+func TestRendered_EveryDASH9GraderIgnoresHowLongTheMeasurementTook(t *testing.T) {
+	bin := chromium(t)
+	// The three cases that hold a render back run alongside each other rather than one
+	// after another. It is not only that four minutes of deliberate waiting should not be
+	// four minutes of suite: two engines rendering at once is exactly the contention that
+	// used to decide these verdicts, so overlapping the cases that claim insensitivity to
+	// it is a stronger demonstration than serialising them. Each holds its own server, its
+	// own browser and its own profile directory.
+	t.Parallel()
+
+	quick, quickLog := mustRender(t, bin, dashOpts{snapshot: fixtureSnapshot()})
+	start := time.Now()
+	held, heldLog := mustRender(t, bin, dashOpts{snapshot: fixtureSnapshot(), delay: latencyCase})
+	took := time.Since(start)
+
+	// The delay was REAL, and the page went on running through it. Without this the case
+	// could pass by not having delayed anything.
+	if took < latencyCase {
+		t.Fatalf("the held render returned after %s, which is less than the %s it was told to hold: the delay did not happen",
+			took.Round(time.Second), latencyCase)
+	}
+
+	for _, g := range dash9Graders() {
+		q, h := g.probe(quick), g.probe(held)
+		if (q == nil) != (h == nil) {
+			t.Errorf("the grader %q returns %s with no delay and %s after %s: a criterion decided by how long the measurement "+
+				"took is a fact about the machine, not about the page\nno delay: %v\nheld:     %v\nbrowser output (no delay):\n%s\nbrowser output (held):\n%s",
+				g.name, verdictWord(q), verdictWord(h), latencyCase, q, h, quickLog, heldLog)
+			continue
+		}
+		if strings.Join(q, "\n") != strings.Join(h, "\n") {
+			t.Errorf("the grader %q reports different problems with and without a %s delay\nno delay: %v\nheld:     %v",
+				g.name, latencyCase, q, h)
+		}
+	}
+
+	// The row ages are the one reading on this page that is a function of real time by
+	// construction, so they are asked the same question here rather than only in B9: held
+	// back for two minutes, they must still be consistent with ONE page clock derived
+	// from each row's own basis. Under the windows this replaced, this delay was a
+	// FAILURE - 90 seconds of age rendered as 210 against a window ending at 150.
+	ages := rowAgeReadings(t, held.Queue)
+	if _, _, ok := oneClockBehind(ages); !ok {
+		t.Errorf("after a %s delay no single instant explains the rendered ages %v", latencyCase, ages)
+	}
+	if !(ages[0].seconds > ages[1].seconds && ages[1].seconds > ages[2].seconds) {
+		t.Errorf("after a %s delay the ages %v are no longer in the order their timestamps put them", latencyCase, ages)
+	}
+	// And the ages DID move, so the delay reached the page rather than the harness having
+	// quietly frozen it: a reading that is insensitive because nothing happened proves
+	// nothing about a reading that is insensitive because it is derived.
+	quickAges := rowAgeReadings(t, quick.Queue)
+	if ages[1].seconds <= quickAges[1].seconds {
+		t.Errorf("the running encode's age is %ds after a %s delay and was %ds without one: the page did not advance during the "+
+			"delay, so this case measured nothing", ages[1].seconds, latencyCase, quickAges[1].seconds)
+	}
+}
+
+func verdictWord(problems []string) string {
+	if problems == nil {
+		return "pass"
+	}
+	return "fail"
+}
+
+// slowSnapshot is a snapshot that arrives far later than the in-page readiness budget
+// this harness used to carry. It is the OTHER half of the same defect: not "the reading
+// was late" but "the thing to read was late", which is what a loaded runner, a cold
+// browser profile or a busy scheduler actually does here.
+const slowSnapshot = 45 * time.Second
+
+// A page whose snapshot arrives late renders the same page, and every DASH-9 property
+// returns the verdict it returns when the snapshot is prompt.
+//
+// This is the case the fixed 15-second in-page budget decided. That budget sat under a
+// 90-second deadline the test itself was prepared to wait, and when it expired the probe
+// posted a NOT-READY verdict, which mustRender turned into "the page never reached the
+// state the grader measures" - a failure about how busy the machine was, on bytes that
+// had not changed. The budget is now derived from that same deadline, so the only page
+// that fails readiness is one no deadline here could have waited for.
+func TestRendered_ASnapshotThatArrivesLateChangesNoVerdict(t *testing.T) {
+	bin := chromium(t)
+	t.Parallel() // see TestRendered_EveryDASH9GraderIgnoresHowLongTheMeasurementTook
+
+	prompt, promptLog := mustRender(t, bin, dashOpts{snapshot: fixtureSnapshot()})
+	start := time.Now()
+	late, lateLog := mustRender(t, bin, dashOpts{snapshot: fixtureSnapshot(), snapshotDelay: slowSnapshot})
+	took := time.Since(start)
+
+	if took < slowSnapshot {
+		t.Fatalf("the late render returned after %s, less than the %s the snapshot was held for: the delay did not happen",
+			took.Round(time.Second), slowSnapshot)
+	}
+	for _, g := range dash9Graders() {
+		p, l := g.probe(prompt), g.probe(late)
+		if (p == nil) != (l == nil) || strings.Join(p, "\n") != strings.Join(l, "\n") {
+			t.Errorf("the grader %q returns %s on a prompt snapshot and %s on one held for %s\nprompt: %v\nlate:   %v\n"+
+				"browser output (prompt):\n%s\nbrowser output (late):\n%s",
+				g.name, verdictWord(p), verdictWord(l), slowSnapshot, p, l, promptLog, lateLog)
+		}
+	}
+	// The rest of the page too: a late snapshot is not a different page.
+	if late.Badges.Scan != prompt.Badges.Scan || late.Badges.Paused != prompt.Badges.Paused {
+		t.Errorf("a late snapshot changed the badges from %+v to %+v", prompt.Badges, late.Badges)
+	}
+	if late.ReclaimedLifetime != prompt.ReclaimedLifetime {
+		t.Errorf("a late snapshot changed the lifetime reclaimed figure from %q to %q", prompt.ReclaimedLifetime, late.ReclaimedLifetime)
+	}
+	if len(late.Queue) != len(prompt.Queue) || len(late.History) != len(prompt.History) {
+		t.Errorf("a late snapshot rendered %d queue and %d history rows, against %d and %d when it was prompt",
+			len(late.Queue), len(late.History), len(prompt.Queue), len(prompt.History))
+	}
+}
+
+// AC4's second branch, and it is the branch this harness takes: no reading is retried, so
+// what is asserted is the single-reading property itself.
+//
+// The probe page polls READINESS - a question about the page's own state that computes no
+// measurement - and then calls the measuring function exactly once. Every reading it takes
+// is POSTed, and the TEST's own server counts them, so the count is kept on the side of
+// the harness the page does not control. renderDashboard holds it on every render the
+// dashboard graders take; this case holds it on the worlds where a retry would be most
+// tempting, and then proves the count can move, because a count that is always 1 whatever
+// happens is not evidence.
+func TestRendered_TheHarnessTakesExactlyOneReadingPerGrader(t *testing.T) {
+	bin := chromium(t)
+	for _, c := range []struct {
+		name string
+		o    dashOpts
+	}{
+		{"the healthy page", dashOpts{snapshot: fixtureSnapshot()}},
+		{"a page whose stream was severed", dashOpts{snapshot: fixtureSnapshot(), streamFails: true, mode: "down"}},
+		{"a page read after a deliberate delay", dashOpts{snapshot: fixtureSnapshot(), delay: 3 * time.Second}},
+		{"a page whose snapshot arrived late", dashOpts{snapshot: fixtureSnapshot(), snapshotDelay: 5 * time.Second}},
+		{"an empty ledger", dashOpts{snapshot: emptySnapshot()}},
+	} {
+		// renderDashboard fails the test if the count is anything but 1; asserting it
+		// again here would only restate that. What this loop adds is the SET of worlds
+		// the property is held in.
+		v, log := mustRender(t, bin, c.o)
+		if v.Readings != 1 {
+			t.Errorf("%s: the probe computed %d readings, want exactly 1\nbrowser output:\n%s", c.name, v.Readings, log)
+		}
+	}
+
+	// The counter BITES, and it is defeated the only way it can be: by mutating the
+	// HARNESS's own measuring instrument, since no probe script can reach the loop that
+	// calls it. The mutation is a retry of the READING - exactly the repair this spec
+	// exists to refuse - and the count has to report it even though the reading that is
+	// posted is still the first one.
+	//
+	// A retry is deliberately made VISIBLE rather than impossible. Impossible would rest
+	// on nobody ever reintroducing one; visible fails the next run that does.
+	retryTheReading := func(page string) string {
+		return strings.Replace(page, "    take();\n  }\n  attempt();",
+			"    take();\n    setTimeout(take, 30);\n  }\n  attempt();", 1)
+	}
+	js := strings.NewReplacer("%MODE%", "live", "%FILTER%", "", "%STRIP%", "0").Replace(dashProbeJS)
+	ps := serveDocumentWith(t, serveOpts{
+		url: sourceoffer.Upstream, probe: js, snapshot: fixtureSnapshot(),
+		probePageMutate: func(page string) string {
+			out := retryTheReading(page)
+			if out == page {
+				t.Fatal("the single-reading counterexample did not change the probe page, so the check below would be vacuous")
+			}
+			return out
+		},
+	})
+	raw, log, err := runProbe(bin, ps, verdictDeadline, t.TempDir())
+	if err != nil {
+		t.Fatalf("the double-reading counterexample never posted a verdict: %v", err)
+	}
+	var v dashVerdict
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("the counterexample's verdict is not JSON (%v): %s\nbrowser output:\n%s", err, raw, log)
+	}
+	// The measurement is still the FIRST reading - a retry cannot become the answer -
+	// and the retry is nonetheless COUNTED, which is what renderDashboard refuses.
+	if v.Readings != 1 {
+		t.Errorf("the verdict taken from a harness that read twice carries reading %d, want the FIRST reading: "+
+			"a later attempt must never become the answer", v.Readings)
+	}
+	if seen := ps.postsSeen(); seen < 2 {
+		t.Errorf("a harness that reads twice was counted as %d readings, so the single-reading check cannot fail\nbrowser output:\n%s",
+			seen, log)
+	} else {
+		t.Logf("a reading retried once is counted as %d readings, which renderDashboard refuses", ps.postsSeen())
+	}
+}
+
+// AC4's first branch, answered even though this harness takes the second one.
+//
+// No READING is retried here - the case above holds that on every render, and the test
+// server counts it. But readiness is POLLED, and a poll that answers "not yet" is the one
+// thing a loaded machine reliably produces in this suite. So it is bounded by a maximum
+// stated in the code (readinessBudget, derived from the deadline the test owns) and it is
+// never silent: this case forces a first attempt to fail by holding the snapshot back on
+// an open stream, and then reads the report back out of a CHILD run's real output, because
+// "the output names it" is a claim about what a reader sees rather than about a string
+// this process happened to build.
+func TestRendered_AReadingThatHadToWaitSaysSoInTheOutput(t *testing.T) {
+	const subject = "TestRendered_AReadingThatHadToWaitSaysSoInTheOutput"
+	const held = 3 * time.Second
+
+	if os.Getenv("HOLDFAST_WEBUI_WAIT_CHILD") == "1" {
+		bin := chromium(t)
+		v, log := mustRender(t, bin, dashOpts{snapshot: fixtureSnapshot(), snapshotDelay: held})
+		if v.AttemptCount == 0 {
+			t.Fatalf("the snapshot was held back %s and the readiness poll still never had to wait, so this case decides "+
+				"nothing\nbrowser output:\n%s", held, log)
+		}
+		// Bounded, by a maximum stated in the code and derived from the test's own
+		// deadline - never by the browser's idea of how long is reasonable.
+		budget := readinessBudget(deadlineFor(held))
+		for _, a := range v.Attempts {
+			if a.AtMs > float64(budget/time.Millisecond) {
+				t.Errorf("readiness attempt %d was made %.0fms in, past the stated budget of %s", a.N, a.AtMs, budget)
+			}
+		}
+		return
+	}
+
+	bin, wd := childTestBinary(t)
+	cmd := exec.Command(bin, "-test.run", "^"+subject+"$", "-test.v")
+	cmd.Dir = wd
+	cmd.Env = append(os.Environ(), "HOLDFAST_WEBUI_WAIT_CHILD=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("the child run of %s failed: %v\n%s", subject, err, out)
+	}
+	text := string(out)
+	for _, want := range []string{
+		subject,                           // the grader
+		"readiness attempt 1",             // the attempt number
+		"has not rendered a snapshot yet", // the reason that attempt gave
+		"one reading was then taken",      // and that a reading followed it, once
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("a reading that had to wait produced output carrying no %q, so waiting is invisible in it:\n%s", want, text)
+		}
+	}
+	// The report must not appear when nothing waited, or it says nothing when it does.
+	if strings.Count(text, "readiness attempt 1") > 1 {
+		t.Logf("more than one render in the child had to wait, which is fine; the report is per render")
+	}
+}
+
+// AC5 at the full tolerance: a document mutated to defeat a grader is STILL reported by
+// that grader after the longest delay this work introduces, and the report names the
+// mutation. This is the route the whole spec exists to close - a repair that buys
+// agreement by waiting until the page looks acceptable - and it fails here by
+// construction, because the mutation is in the served bytes and no amount of waiting
+// removes it.
+func TestRendered_AMutatedDocumentStillFailsItsGraderAfterTheLongestDelay(t *testing.T) {
+	bin := chromium(t)
+	t.Parallel() // see TestRendered_EveryDASH9GraderIgnoresHowLongTheMeasurementTook
+
+	// TWO documents, between them defeating all ten properties, so the full delay is paid
+	// twice over rather than ten times - and the two are rendered ALONGSIDE each other, so
+	// it is paid once in wall clock. Every rule and every statement here is one of the
+	// counterexamples the per-grader matrix already runs; grouped, each document leaves the
+	// page failing five named properties at once.
+	//
+	// Splitting them at five and five is not arbitrary. The two halves of the second
+	// document that touch a mark's paint would otherwise fight over the same declaration -
+	// a fill collapsed onto the surface behind it and a fill pointed off-origin are the same
+	// property with two different values - so the contrast counterexample is carried by the
+	// status dot's background and the off-origin one by the bar's fill.
+	docs := []struct {
+		mutation string
+		mutate   func([]byte) []byte
+		defeats  []string
+	}{
+		{
+			mutation: "every drawing hidden, every bucket label and count stripped, every spread value stripped, " +
+				"every status word hidden beside its dot, and the history painted above the current run",
+			mutate: cssMutation(`.agg .fig { display:none; }
+.buckets .bk, .buckets .bc { display:none; }
+.spreadkeys { display:none; }
+td.st .stlabel { display:none; }
+main { display:flex; flex-direction:column-reverse; }`),
+			defeats: []string{
+				"every drawing reached the screen",
+				"every bucket figure states its labels and counts as text",
+				"every spread figure states its minimum, mean and maximum as text",
+				"every colour carrier is paired with text or shape",
+				"the current run is presented before the history",
+			},
+		},
+		{
+			mutation: "every bar forced to one length, every spread tick moved onto one position, the status dots " +
+				"collapsed onto the page behind them, the bars' paint pointed off-origin, and every figure value put behind a tooltip",
+			mutate: func(b []byte) []byte {
+				css := cssMutation(`.agg .fig.bar .mark { width:100% !important; }
+td.st .dot { background:var(--bg) !important; }
+.agg .fig .mark { fill:url(https://example.invalid/paint.svg#g); }`)
+				return scriptMutation(`var t=document.querySelectorAll(".fig.spread .tick");` +
+					`for (var i=0;i<t.length;i++){t[i].setAttribute("x1","500");t[i].setAttribute("x2","500");}` +
+					`var a=document.querySelectorAll("#aggregates .agg *");` +
+					`for (var j=0;j<a.length;j++) a[j].setAttribute("title","hover to read me");`)(css(b))
+			},
+			defeats: []string{
+				"every bar is in proportion to its own count",
+				"the marks of a spread are told apart by position",
+				"every graphical element clears 3:1 against what is behind it",
+				"nothing is fetched from another origin",
+				"no figure is readable only by pointing at it",
+			},
+		},
+	}
+
+	// Between them the two documents must reach every property this suite holds. A grader
+	// left out here is one whose bite is proved at no delay and asked about at none.
+	held := map[string]bool{}
+	for _, d := range docs {
+		for _, name := range d.defeats {
+			held[name] = true
+		}
+	}
+	for _, g := range dash9Graders() {
+		if !held[g.name] {
+			t.Errorf("no document here defeats the grader %q, so its bite is never asked about under a delay", g.name)
+		}
+	}
+
+	plain := servedDocument(t)
+	for _, d := range docs {
+		if string(d.mutate([]byte(plain))) == plain {
+			t.Fatalf("the mutation %q did not change the served document - the assertion below would be vacuous", d.mutation)
+		}
+		t.Run(d.mutation, func(t *testing.T) {
+			t.Parallel()
+			v, log := mustRender(t, bin, dashOpts{snapshot: mixedSnapshot(), mutate: d.mutate, delay: latencyCase})
+			for _, want := range d.defeats {
+				found := false
+				for _, g := range dash9Graders() {
+					if g.name != want {
+						continue
+					}
+					found = true
+					probs := g.probe(v)
+					if probs == nil {
+						t.Errorf("after a %s delay the grader %q PASSED a document mutated to defeat it (%s): a tolerance that swallows a "+
+							"mutation has removed the only rendered check this page has\nbrowser output:\n%s",
+							latencyCase, g.name, d.mutation, log)
+						continue
+					}
+					// The failure has to say what was done to the page. A report that names
+					// only the property leaves the next reader to rediscover the counterexample.
+					t.Logf("mutation %q still defeats %q after %s -> %s", d.mutation, g.name, latencyCase, probs[0])
+				}
+				if !found {
+					t.Fatalf("the case names a grader that does not exist: %q", want)
+				}
+			}
+		})
+	}
+}
+
+// The latency-insensitive age reading BITES. Two ways a page can get a row's age wrong
+// that the windows this replaced would also have caught, and one they could not: an age
+// that does not follow from that row's own basis.
+func TestRendered_TheAgeReadingFailsAgainstAMisderivedAge(t *testing.T) {
+	bin := chromium(t)
+
+	for _, c := range []struct {
+		name    string
+		mutate  func([]byte) []byte
+		defeats string
+	}{
+		{"one row's age overwritten with a figure its own timestamp cannot produce",
+			// A full hour added to the last queue row's rendered age, and to that row
+			// alone. Every row still shows a plausible span, they are still in order,
+			// and no single page clock explains all three.
+			scriptMutation(`var c=document.querySelectorAll("#queue td.elapsed");` +
+				`if(c.length){var t=c[c.length-1];if(t.textContent.indexOf("h")<0)t.textContent="1h "+t.textContent;}`),
+			"no single instant explains"},
+		{"every age derived from the browser's own clock rather than the server's",
+			scriptMutation(`var c=document.querySelectorAll("#queue td.elapsed");` +
+				`for(var i=0;i<c.length;i++){var s=Number(c[i].dataset.since||0);` +
+				`var x=Math.max(0,Math.floor(Date.now()/1000-s));var h=Math.floor(x/3600),m=Math.floor(x/60)%60;` +
+				`c[i].textContent=h?(h+"h "+m+"m"):(m+"m "+(x%60)+"s");}`),
+			"not being derived from the server's clock"},
+	} {
+		plain := servedDocument(t)
+		if string(c.mutate([]byte(plain))) == plain {
+			t.Fatalf("the mutation %q did not change the served document", c.name)
+		}
+		start := time.Now()
+		v, log := mustRender(t, bin, dashOpts{snapshot: fixtureSnapshot(), mutate: c.mutate})
+		took := time.Since(start)
+
+		ages := rowAgeReadings(t, v.Queue)
+		lo, hi, ok := oneClockBehind(ages)
+		anchored := ok && lo >= snapNow && hi <= float64(snapNow)+took.Seconds()+1
+		if anchored {
+			t.Errorf("the age reading PASSED a page mutated so that %s, so it cannot fail (%s)\nages: %v\nbrowser output:\n%s",
+				c.name, c.defeats, ages, log)
+		} else {
+			t.Logf("%-70s -> caught (one-clock=%v, ages %v)", c.name, ok, ages)
+		}
+	}
+}
+
 // And the colour-collapse reading is proved to bite too: with every colour forced to one
 // value AND the text equivalents stripped, the same graders that pass above must fail.
 func TestRendered_TheColourCollapseReadingFailsWhenTheTextIsStripped(t *testing.T) {
@@ -2790,10 +3497,7 @@ func TestRendered_TheColourCollapseReadingFailsWhenTheTextIsStripped(t *testing.
 		return cssMutation(`.buckets .bk, .buckets .bc, .spreadkeys, td.st .stlabel, #chips .chip .k { display:none; }`)(
 			collapseColours()(b))
 	}
-	v, log := renderDashboard(t, bin, dashOpts{snapshot: mixedSnapshot(), mutate: both, wait: 15 * time.Second})
-	if !v.Ready {
-		t.Fatalf("the page did not render at all\nbrowser output:\n%s", log)
-	}
+	v, _ := mustRender(t, bin, dashOpts{snapshot: mixedSnapshot(), mutate: both})
 	for _, g := range []dash9Grader{
 		{"every bucket figure states its labels and counts as text", gradeBucketText},
 		{"every spread figure states its minimum, mean and maximum as text", gradeSpreadText},
@@ -2994,7 +3698,11 @@ func TestRendered_EveryCapTotalGraderFailsAgainstItsOwnMutation(t *testing.T) {
 		if string(c.mutate([]byte(plain))) == plain {
 			t.Fatalf("the mutation %q did not change the served document - the assertion below would be vacuous", c.name)
 		}
-		v, log := renderDashboard(t, bin, dashOpts{snapshot: c.snapshot, mutate: c.mutate, wait: 10 * time.Second})
+		// mustRender, not renderDashboard: a mutation is only proved to be CAUGHT if the
+		// page it mutated actually rendered. A grader handed a page that never rendered
+		// reports everything missing and passes for a reason nobody asked about, which is
+		// the same verdict-decided-by-timing this work is removing.
+		v, log := mustRender(t, bin, dashOpts{snapshot: c.snapshot, mutate: c.mutate})
 		if probs := c.grade(v); probs == nil {
 			t.Errorf("the grader passed a page that breaks the property it asserts (%s)\nqueue notice: %q\nhistory notice: %q\nbrowser output:\n%s",
 				c.name, v.QueueCap.Text, v.HistCap.Text, log)

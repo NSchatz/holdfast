@@ -46,7 +46,7 @@ PLATFORM ?= linux/amd64
         check-pins check-pins-selftest install-ffmpeg-selftest check-pin-live \
         find-browser find-browser-selftest \
         release-shape release-shape-selftest \
-        webui-gen webui-stale webui-check webui-graders-selftest \
+        webui-gen webui-stale webui-check webui-repeat-check webui-graders-selftest \
         tidy clean image image-smoke compose-check
 
 build:
@@ -163,6 +163,19 @@ webui-stale:
 # gate does, so a contributor with no browser is not blocked.
 webui-check:
 	./scripts/webui-check.sh
+
+# The DETERMINISM gate. `webui-check` asks whether the rendered graders pass; this asks
+# whether they AGREE WITH THEMSELVES - it runs them more than once against one unchanged
+# tree, prints how many repetitions it ran, and fails if any two repetitions decided the
+# same bytes differently. A grader that returns a different verdict on identical input is
+# reporting how busy the machine was, and it cannot carry an acceptance criterion; one of
+# those broke main once, and the rerun that passed is what made it look like nothing.
+#
+# Deliberately NOT inside `check` and not inside `webui-check`: it is the same suite run
+# N times, so folding it into either would multiply the cost of every PR by N to re-ask a
+# question those targets do not ask. HOLDFAST_WEBUI_REPEAT sets the count (default 3).
+webui-repeat-check:
+	./scripts/webui-repeat-check.sh
 
 # Proves the dashboard's ENGINE-ONLY graders still BITE. Three questions are the whole
 # reason there is a browser in this gate - the operating system's colour-scheme preference,
