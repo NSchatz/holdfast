@@ -41,6 +41,11 @@ var costParts = []struct {
 		Name:  "that the cost grows with the size of the directory tree, every entry being read, and not with the size or content of the media files",
 		Needs: []string{"grows with the size of the directory tree", "every entry", "no media file is opened"},
 	},
+	{
+		Name: "that the walk keeps what it read, so the scan that follows lists none of it again, and what that costs is memory held until that scan uses it",
+		Needs: []string{"keeps the entry names it read", "lists nothing the walk already listed",
+			"released directory by directory"},
+	},
 }
 
 // CheckCostStatement reports whether the shipped documentation states what

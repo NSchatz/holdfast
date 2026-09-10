@@ -45,13 +45,17 @@ type listings struct {
 	selfListed int
 }
 
-// newListings takes the entry information a startup walk collected. The engine
-// takes OWNERSHIP of that map: it releases each directory's entries as the scan
-// consumes them, so nothing may read it afterwards.
+// newListings takes the entry information a startup walk collected, and takes it
+// literally: the walk's map is EMPTIED as this one is filled, so what the engine
+// holds is the only reference to those entries and releasing one really does
+// release it. A caller that kept the walk's result would otherwise keep every
+// entry name of the library alive for the life of the process, which is the one
+// way this could cost memory it does not need to.
 func newListings(walked map[string][]startup.Entry) *listings {
-	l := &listings{byDir: map[string]listed{}}
+	l := &listings{byDir: make(map[string]listed, len(walked))}
 	for dir, ents := range walked {
 		l.byDir[dir] = listed{entries: ents}
+		delete(walked, dir)
 	}
 	return l
 }
@@ -148,10 +152,10 @@ func isDirectory(path string) bool {
 // returned, which the first scan after that walk uses instead of listing them
 // again.
 //
-// The engine takes ownership of entries and releases each directory's listing as
-// it consumes it, so nothing may read that map afterwards. Passing nil entries
-// is a coverage set with no entry information: the scan then lists those
-// directories itself and says so.
+// The engine takes ownership of entries: the map is emptied here and each
+// directory's listing is released as the scan consumes it, so nothing may read
+// it afterwards. Passing nil entries is a coverage set with no entry
+// information: the scan then lists those directories itself and says so.
 func (e *Engine) SetCoverage(dirs []string, entries map[string][]startup.Entry) {
 	e.Coverage = dirs
 	e.carried.Store(newListings(entries))
