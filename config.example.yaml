@@ -138,8 +138,8 @@ dry_run: false
 #                         # which is this tool's archival posture. A positive value
 #                         # switches the affected jobs to a TARGET-BITRATE rate
 #                         # control at that many kbps, and then NO quality target is
-#                         # passed to the encoder at all — no -crf, -cq,
-#                         # -global_quality or -qp — because a rate control and a
+#                         # passed to the encoder at all - no -crf, -cq,
+#                         # -global_quality or -qp - because a rate control and a
 #                         # quality target are two different instructions and
 #                         # passing both leaves which one wins to the encoder.
 #                         # It is announced at startup as a NOTICE, not a warning:
@@ -154,7 +154,7 @@ dry_run: false
 # source supplies that job's settings, laid over the top-level ones above; a later
 # matching profile has NO effect on that job, and any setting a matching profile
 # does not override keeps its top-level value. A source no profile matches is
-# transcoded under the top-level settings — never skipped, never failed. Absent
+# transcoded under the top-level settings - never skipped, never failed. Absent
 # (the default) resolves every job to exactly the top-level settings.
 #
 # `match` is a glob over the source's path:
@@ -168,7 +168,7 @@ dry_run: false
 #
 # A profile accepts exactly: name, match, encoder, crf, preset, pixel_format,
 # container_ext, bitrate_kbps. Any other key is a startup REFUSAL naming the
-# profile and the key — a typo inside a profile is caught, not silently ignored.
+# profile and the key - a typo inside a profile is caught, not silently ignored.
 # The name is recorded on every terminal ledger row the profile decided, and on
 # the `holdfast export` NDJSON row, so "what ran" stays answerable.
 #
@@ -350,7 +350,7 @@ dry_run: false
 # scratch_dir: ""            # "" (the DEFAULT, and what an absent key means) writes
 #                            # each encode's working file BESIDE THE SOURCE, which is
 #                            # the behaviour this tool has always had. An absolute
-#                            # path moves the WORKING FILE there — and only the
+#                            # path moves the WORKING FILE there - and only the
 #                            # working file.
 #                            #
 #                            # IT DOES NOT MOVE THE SWAP. Once the acceptance gates
@@ -366,7 +366,7 @@ dry_run: false
 #                            # churn avoided on unRAID/SnapRAID/RAIDZ, failed and
 #                            # aborted transcodes kept off the array entirely, and a
 #                            # better write pattern over NFS/SMB. What it costs is a
-#                            # full write-plus-read cycle on the scratch device — on
+#                            # full write-plus-read cycle on the scratch device - on
 #                            # an SSD, write endurance spent at video-file sizes. It
 #                            # does NOT change how many bytes the source's drive
 #                            # handles: that drive is read once and written once
@@ -383,8 +383,8 @@ dry_run: false
 #
 # scratch_min_free_gb: 50    # the free-space floor, in GiB, the scratch filesystem
 #                            # must clear at startup. 0 disables the floor. It is a
-#                            # floor and NOT a prediction — startup has no per-file
-#                            # size to check against — so each job also re-checks,
+#                            # floor and NOT a prediction - startup has no per-file
+#                            # size to check against - so each job also re-checks,
 #                            # immediately before it encodes, that its source will
 #                            # fit, and fails THAT job (naming the path, the free
 #                            # space and the source size, source untouched) if it

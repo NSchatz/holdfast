@@ -112,7 +112,7 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.P
 		return none, store.FailureTransient, fmt.Errorf("temp missing or empty")
 	}
 
-	// 2. output codec must be the codec THIS JOB's encoder targets (hevc or av1 —
+	// 2. output codec must be the codec THIS JOB's encoder targets (hevc or av1 -
 	// TRANSCODE-6 generalized this away from a hardcoded "hevc" so a hardware/AV1
 	// encode is held to exactly the same bar as CPU libx265; the root's profile and
 	// the encode profiles make it per-job, so two encoders in one run are each held

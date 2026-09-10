@@ -14,6 +14,7 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | `reason` | failed | the error that rejected it (the encode error, or **which gate** refused the output) |
 | `reason` | skipped | **which guard** fired - `already-at-target-codec`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `multi-video-stream`, `target-already-exists`, `undo-retention-failed`, `restored-original` |
 | `encoder` | any job that reached the encoder | the encoder that ran (`cpu`, `svtav1`, `nvenc`, …) - a skip, or a file with no readable video stream, never gets that far and records none |
+| `profile` | every terminal row | the `encode_profiles` entry that supplied this job's settings, `""` for the top-level ones. `encoder` alone stops answering "what ran" once two encoders can run in one scan, and a **skip** carries it too - the profile is what decided the file was already at its target codec. `""` is a **real value**, not a missing measurement, so the key is always present |
 | `vmaf_mean`, `vmaf_min` | done, and a VMAF-rejected failure | the pooled harmonic mean **and the worst frame** |
 | `vmaf_model` | as above | the libvmaf model that produced them |
 | `vmaf_pix_fmt` | as above | the single pixel format **both streams were converted to** before scoring - chosen and named by holdfast, so a score says which pixels were compared |

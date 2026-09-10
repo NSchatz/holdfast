@@ -1403,7 +1403,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// Every terminal path below hands this same value to both the store and the
 	// Observer, so the ledger and the live UI cannot disagree about what happened.
 	// From here on the file has reached the encoder, so the encoder is attributable —
-	// on a failure as much as on a success — and so is the encode profile that chose it.
+	// on a failure as much as on a success - and so is the encode profile that chose it.
 	out := &store.Outcome{Encoder: ts.Encoder, Profile: ts.Profile, Decision: by}
 
 	encStart := time.Now()

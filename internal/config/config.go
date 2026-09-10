@@ -1118,7 +1118,7 @@ func (c *Config) validateScratch() error {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return errors.New("cannot determine the home directory (set $HOME) — refusing to validate scratch_dir safely")
+		return errors.New("cannot determine the home directory (set $HOME) - refusing to validate scratch_dir safely")
 	}
 	clean := filepath.Clean(dir)
 	// holdfast SWEEPS this directory on every start, so the same rule the library
