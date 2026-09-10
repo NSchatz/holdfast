@@ -17,43 +17,36 @@ import (
 	"github.com/NSchatz/holdfast/internal/store"
 )
 
-// The honest outcome of a FAILED swap (FILESYSTEM-1).
+// The honest outcome of a FAILED swap.
 //
-// Before this file, the rename error path was three lines: log "swap error, source
-// untouched", delete the temp, record Failed. On a local filesystem that is true. On a
-// network one rename(2) says outright that it is not knowable - "On NFS filesystems,
-// you can not assume that if the operation failed, the file was not renamed. If the
-// server does the rename operation and then crashes, the retransmitted RPC which will
-// be processed when the server is up again causes a failure" - so holdfast was telling
-// an operator the most comforting thing it could say at the exact moment it had the
-// least idea whether the thing was true.
-//
-// What replaces it: re-stat the source after EVERY failed swap, whatever the storage,
-// and decide between four exhaustive cases. Only one of them is allowed to say
-// "untouched", and it requires BOTH that the observed attributes are the ones recorded
-// for the source AND that the storage is positively classified local - because a client
-// attribute cache populated before the swap returns exactly the pre-swap answer whether
-// or not the rename was applied, so on network storage a match proves nothing at all.
+// On a local filesystem "swap error, source untouched" is true. On a network one rename(2)
+// says outright that it is not knowable - "On NFS filesystems, you can not assume that if
+// the operation failed, the file was not renamed" - and saying it anyway is the most
+// comforting thing holdfast could say at the moment it has the least idea whether it is
+// true. So the source is re-stat'ed after EVERY failed swap, whatever the storage, and one
+// of four exhaustive cases is recorded. Only one may say "untouched", and it requires BOTH
+// that the observed attributes are the ones recorded for the source AND that the storage is
+// positively classified local: a client attribute cache populated before the swap returns
+// exactly the pre-swap answer whether or not the rename was applied, so on network storage
+// a match proves nothing at all.
 
 // RetainedMarker is the fixed infix in the name of a replacement holdfast is KEEPING
 // because the job that produced it did not complete cleanly. It is deliberately a
 // DIFFERENT marker from TempMarker, and the difference is load-bearing.
 //
-// A `__transcoding__` file is USUALLY work in progress: a killed run leaves them behind
-// and the next startup sweeps them, which is right, because a partial encode is worth
-// nothing. A `__holdfast-replacement__` file is the opposite: it PASSED every gate, it
-// may be the only faithful copy of a source whose fate is unknown, and nothing in this
-// program may ever delete it on its own initiative. Giving the two states two names is
-// what lets the sweep keep doing its job while the retained file is untouchable - and
-// it is what stops a fresh encode of a reclaimed source from colliding with a retained
-// replacement of the same source, since the two constructions cannot produce the same
-// string.
+// A `__transcoding__` file is USUALLY work in progress: a killed run leaves them behind and
+// the next startup sweeps them, because a partial encode is worth nothing. A
+// `__holdfast-replacement__` file is the opposite: it PASSED every gate, it may be the only
+// faithful copy of a source whose fate is unknown, and nothing in this program may ever
+// delete it on its own initiative. Two names are what let the sweep keep doing its job
+// while the retained file is untouchable, and what stops a fresh encode of a reclaimed
+// source colliding with a retained replacement of the same source.
 //
-// "Usually" is the load-bearing word, and it is why strayReplacementHold exists. Moving
-// a replacement to this name is a WRITE into the media directory, and the failure that
-// strands a replacement in the first place is very often the same failure that denies
-// that write. A `__transcoding__` file therefore has to be examined rather than assumed
-// disposable; the name is the cheap half of the question and the content is the rest.
+// "Usually" is the load-bearing word, and it is why strayReplacementHold exists. Moving a
+// replacement to this name is a WRITE into the media directory, and the failure that
+// strands a replacement is very often the same failure that denies that write, so a
+// `__transcoding__` file is examined rather than assumed disposable: the name is the cheap
+// half of the question and the content is the rest.
 const RetainedMarker = "__holdfast-replacement__"
 
 // maxPathCandidates bounds the search for a free constructed path. It is small on
@@ -61,15 +54,13 @@ const RetainedMarker = "__holdfast-replacement__"
 // failure beats silently walking a directory.
 const maxPathCandidates = 64
 
-// tempPath and retainedReplacementPath ARE the build's own construction of a
-// replacement path, and they are the whole of it. Everything that holds a path back on
-// its NAME rather than on a record matches exactly what these produce and nothing else
-// - never a widened "anything with a dot in it" or "anything that looks temporary"
-// pattern, which would hold back files holdfast did not write.
+// tempPath and retainedReplacementPath ARE the build's own construction of a replacement
+// path, and they are the whole of it. Everything that holds a path back on its NAME rather
+// than on a record matches exactly what these produce and nothing else, never a widened
+// "looks temporary" pattern that would hold back files holdfast did not write.
 //
-// The n suffix exists so a second retained replacement for the same source does not
-// have to overwrite the first. n == 0 is the bare form, so the common case is the name
-// this repo has always used.
+// The n suffix exists so a second retained replacement for the same source need not
+// overwrite the first; n == 0 is the bare form.
 func tempPath(dir, stem, ext string, n int) string {
 	return filepath.Join(dir, stem+"."+TempMarker+suffix(n)+"."+ext)
 }
@@ -90,16 +81,16 @@ func suffix(n int) string {
 // construction could have produced: a non-empty stem, the marker, an optional all-digit
 // ordinal, and a simple extension.
 //
-// It is the whole of the RECORD-FREE basis, for BOTH markers. That basis exists because
-// the one case that most needs holding back is the one where no record could be written -
-// the job store was unwritable, which is precisely what denied the record - so a
-// hold-back that depended on a record would be absent exactly when it matters. It is
-// matched exactly rather than by pattern: nothing else in the library is held back on
-// its name, so an ordinary source in the same roots still enumerates, encodes and swaps.
+// It is the whole of the RECORD-FREE basis, for BOTH markers. That basis exists because the
+// case that most needs holding back is the one where no record could be written - the job
+// store was unwritable, which is precisely what denied the record - so a hold-back that
+// depended on a record would be absent exactly when it matters. Nothing else in the library
+// is held back on its name, so an ordinary source in the same roots still enumerates,
+// encodes and swaps.
 //
-// The extension is not checked against the configured video extensions, deliberately.
-// Tying the matcher to configuration would mean editing a config key silently released
-// a file holdfast wrote back into enumeration, and the fail-safe runs the other way.
+// The extension is deliberately not checked against the configured video extensions: tying
+// the matcher to configuration would let a config edit silently release a file holdfast
+// wrote back into enumeration, and the fail-safe runs the other way.
 func splitConstruction(base, marker string) (stem, ext string, ok bool) {
 	infix := "." + marker + "."
 	i := strings.Index(base, infix)
@@ -128,16 +119,12 @@ func IsRetainedReplacementName(base string) bool {
 }
 
 // IsTempConstructionName reports whether base is EXACTLY a name tempPath could have
-// produced. It is the SECOND half of the record-free basis, and it is deliberately
-// narrower than isTempName.
-//
-// isTempName ("contains .__transcoding__.") decides what the stale-temp SWEEP looks at,
-// and it has to stay wide: a temp that ends up with an odd name is still work in
-// progress and still has to be reclaimed. This one decides what may be HELD BACK on its
-// name, and AC15i bounds that to what the build's own construction could have produced -
-// "matched exactly and never by a widened temp-or-dotfile pattern". Holding a path back
-// withholds it from the library for as long as the file is there, so the two questions
-// get two matchers rather than one loose one shared between them.
+// produced. It is the SECOND half of the record-free basis and is deliberately narrower
+// than isTempName, which decides what the stale-temp SWEEP looks at and has to stay wide: a
+// temp with an odd name is still work in progress and still has to be reclaimed. This one
+// decides what may be HELD BACK on its name, which withholds it from the library for as
+// long as the file is there, so the two questions get two matchers rather than one loose
+// one shared between them.
 func IsTempConstructionName(base string) bool {
 	_, _, ok := splitConstruction(base, TempMarker)
 	return ok
@@ -208,17 +195,14 @@ func IsTempConstructionName(base string) bool {
 //     direction survives a probe failure here too.
 //
 // WHAT THIS ACTUALLY GUARANTEES, stated as the property rather than as the intent.
-// Question 3 is unconditional and needs no subprocess, so a replacement with nothing
-// beside it is held whatever else fails - no probe, no host and no config key can reach
-// that answer. Past it, a replacement that reached a swap passes 4 and 5 by
-// construction, so the residue is bounded to what can make one of those two answers
-// wrong ABOUT A FILE THAT STILL HAS ITS SOURCE BESIDE IT: a source replaced by a
-// DIFFERENT film between the two runs (length parity then fails against a file that is
-// not the one the replacement was encoded from), a build whose encoder registry has
-// since dropped the codec the file was written at, and a sandbox that denies ffprobe's
-// domain a read this process is granted. Each costs an ENCODE, never the only copy,
-// because the source is by construction still there. It is deliberately loose in the
-// other direction - a partial encode that satisfies 4 and 5 is KEPT and reported, which
+// Question 3 is unconditional and needs no subprocess, so a replacement with nothing beside
+// it is held whatever else fails. Past it, a replacement that reached a swap passes 4 and 5
+// by construction, so the residue is bounded to what can make one of those answers wrong
+// ABOUT A FILE THAT STILL HAS ITS SOURCE BESIDE IT: a source replaced by a DIFFERENT film
+// between runs, a build whose encoder registry has since dropped the codec the file was
+// written at, and a sandbox denying ffprobe's domain a read this process is granted. Each
+// costs an ENCODE and never the only copy, because the source is still there. It is
+// deliberately loose the other way: a partial encode satisfying 4 and 5 is KEPT, which
 // costs an operator some disk and never a file.
 //
 // Both content checks are needed and neither is decorative. Measured on real ffmpeg: a
@@ -288,22 +272,17 @@ func (e *Engine) strayReplacementHold(ctx context.Context, path string) string {
 // readableNow reports whether THIS PROCESS can actually read the bytes at path, right
 // now, and returns the reason it cannot.
 //
-// It exists for one caller and one purpose: ffprobe reports "I read this path and it is
-// not media" and "I could not open this path" with the SAME wire answer - a non-zero
-// exit of its own accord - and only the first of those is evidence about the file. The
-// second is evidence about this process's access to it, and docs/docker.md documents the
-// commonest cause as an operator knob (`user:`), promising that getting it wrong is
-// "safe but useless: every encode fails at the write step, and every source is left
-// byte-for-byte intact". A restrictive umask, an NFS export that squashes the writing
-// uid, an SELinux denial and a transient EIO on a failing disk all produce the same
-// answer, and each would otherwise license deleting a gate-passed replacement that is
-// present and byte-intact.
+// It exists for one caller and one purpose: ffprobe reports "I read this path and it is not
+// media" and "I could not open this path" with the SAME wire answer, a non-zero exit of its
+// own accord, and only the first is evidence about the file. A restrictive umask, an NFS
+// export squashing the writing uid, an SELinux denial and a transient EIO on a failing disk
+// all produce the second, and each would otherwise license deleting a gate-passed
+// replacement that is present and byte-intact.
 //
-// It opens and READS, rather than stat-ing or checking a mode: a mode says what the
-// kernel intends to allow, and the failures above are decided at open() and at the first
-// read, by things a mode cannot see. A zero-length file reads io.EOF immediately and IS
-// readable - a hard-killed encode leaves exactly that, and it is one the sweep must
-// still take.
+// It opens and READS rather than checking a mode: a mode says what the kernel intends to
+// allow, and the failures above are decided at open() and at the first read. A zero-length
+// file reads io.EOF immediately and IS readable, which is what a hard-killed encode leaves
+// and what the sweep must still take.
 func readableNow(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -320,15 +299,11 @@ func readableNow(path string) error {
 // couldThisBuildHaveWrittenIt reports whether codec is one ffprobe would report for an
 // output SOME encoder this build ships could have produced.
 //
-// It is deliberately the whole registry and not e.targetCodec. targetCodec is derived
-// from cfg.Encoder in New, and a replacement stranded on disk was written by whichever
-// encoder was configured when it was written - so asking about the current key would
-// make AC15i's protection turn on a setting that has nothing to do with the file, in
-// exactly the way the criterion forbids it to turn on a record ("holding it SHALL NOT
-// depend on one, since the write that failed is exactly what denied it").
-//
-// "h265" is ffprobe's legacy alias for hevc and is accepted for the same reason
-// isAlreadyTargetCodec accepts it: the question is what the file IS.
+// It is deliberately the whole registry and not e.targetCodec, which is derived from
+// cfg.Encoder: a replacement stranded on disk was written by whichever encoder was
+// configured then, so asking about the current key would make the protection turn on a
+// setting that has nothing to do with the file. "h265" is ffprobe's legacy alias for hevc
+// and is accepted because the question is what the file IS.
 func couldThisBuildHaveWrittenIt(codec string) bool {
 	for _, target := range encoder.TargetCodecs() {
 		if codec == target || (target == "hevc" && codec == "h265") {
@@ -389,10 +364,10 @@ func isSimpleExt(s string) bool {
 // mounted at multiple points, but rename() does not work across different mount points,
 // even if the same filesystem is mounted on both)".
 //
-// It returns "" for every other error, which is the whole of AC19: no other swap
-// failure is attributed to this cause. holdfast does not copy or fall back across the
-// boundary either - the cause is REPORTED, not worked around, because a cross-filesystem
-// copy is a different operation with a different (non-atomic) safety story.
+// It returns "" for every other error: no other swap failure is attributed to this cause.
+// holdfast does not copy or fall back across the boundary either - the cause is REPORTED,
+// not worked around, because a cross-filesystem copy is a different operation with a
+// different, non-atomic safety story.
 func swapCause(err error) string {
 	if errors.Is(err, syscall.EXDEV) {
 		return store.SwapCauseCrossFilesystem
@@ -474,16 +449,13 @@ func decideFailedSwap(srcRec, replRec probe.Attributes, observed probe.Attribute
 	}
 }
 
-// residualWindowFor is the CLASS LABEL for the residual window that applies to storage
-// with this classification. There are exactly two windows and no third: `undetermined`
-// takes the NETWORK one, the same fail-safe that makes an unrecognised type not-local,
-// so a guard-time lookup that failed, returned nothing, returned a name this build does
-// not know, or was denied yields the network window.
+// residualWindowFor is the CLASS LABEL for the residual window that applies to storage with
+// this classification. There are exactly two and no third: `undetermined` takes the NETWORK
+// one, the same fail-safe that makes an unrecognised type not-local.
 //
-// It is a label and never a duration. The network window belongs to the client's
-// attribute cache and nfs(5) states only "Every few seconds" - no interval, no tunable -
-// so a number here would be invented. What IS measured (the attributes compared and the
-// resolution of the timestamp compared) is recorded beside it.
+// It is a label and never a duration. The network window belongs to the client's attribute
+// cache and nfs(5) states only "Every few seconds" - no interval, no tunable - so a number
+// here would be invented. What IS measured is recorded beside it.
 func residualWindowFor(c fsclass.Classification) string {
 	if c.IsLocal() {
 		return store.ResidualWindowLocal
@@ -493,34 +465,30 @@ func residualWindowFor(c fsclass.Classification) string {
 
 // replacementIsAt reports where the replacement ACTUALLY is after a failed rename.
 //
-// Normally that is the temp path: the rename reported an error and did not move
-// anything. But the swap's target is not always the source path. When the output
-// container extension differs from the source's (movie.mp4 -> movie.mkv, `container_ext`
-// forced) the rename targets a DIFFERENT path, and a rename that took effect while
-// reporting an error - the rename(2) retransmission hazard this whole file exists for -
-// leaves the replacement at that target, under an ordinary source name, with the temp
-// path empty.
+// Normally that is the temp path: the rename reported an error and did not move anything.
+// But the swap's target is not always the source path. When the output container extension
+// differs from the source's (`container_ext` forced) the rename targets a DIFFERENT path,
+// and a rename that took effect while reporting an error - the retransmission hazard this
+// whole file exists for - leaves the replacement there, under an ordinary source name, with
+// the temp path empty.
 //
-// Following the file is what keeps the record honest (AC15a records THE PATH THE
-// REPLACEMENT IS AT, so both files can be identified from the record alone) and what
-// lets the retained-name hold-back reach it at all (AC15i): an ordinary source name is
-// never held back on its name and must not be, so a replacement left sitting at one is
-// held by nothing. Locating it is what lets the caller move it to a name that IS held.
+// Following the file is what keeps the record honest, since the record names THE PATH THE
+// REPLACEMENT IS AT, and what lets the retained-name hold-back reach it at all: an ordinary
+// source name is never held back on its name, so a replacement left at one is held by
+// nothing until the caller moves it to a name that IS held.
 //
 // It is deliberately conservative in three directions at once:
 //
 //   - it looks at the target ONLY when the temp path is empty, so a rename that plainly
 //     did not apply is never second-guessed;
 //   - it looks at the target only when the target is NOT the source path, so the file at
-//     the source path - which the four-case outcome decision is entirely about - is
-//     never something this moves or reasons about;
+//     the source path - which the four-case outcome decision is entirely about - is never
+//     something this moves or reasons about;
 //   - and it accepts what is at the target only when that file carries the attributes
-//     recorded for the REPLACEMENT before the swap, which is the same evidence AC14a
-//     case (a) decides on and the same evidence the record itself carries.
+//     recorded for the REPLACEMENT before the swap, the same evidence case (a) decides on.
 //
-// Anything else falls back to the temp path. A record naming a path with no file at it
-// is a case the operator action already handles honestly (AC15b/AC15f report it absent
-// and still resolve the job); silently losing a file it never names is not.
+// Anything else falls back to the temp path. A record naming a path with no file at it is
+// handled honestly by the operator action; silently losing a file it never names is not.
 func (e *Engine) replacementIsAt(tmp, final, src string, replRec probe.Attributes) string {
 	if _, err := os.Lstat(tmp); err == nil {
 		return tmp
@@ -550,16 +518,13 @@ func crossFilesystemReport(tmp, target string) string {
 // stop for one file - so every branch either records something or reports loudly that
 // it could not.
 //
-// abandon (UNDO-6) drops the undo window's retained original, and this function is
-// where that decision belongs, because it is the same question: did the swap happen?
-// A retention behind a swap that did NOT happen is an orphan raising the source's link
-// count for nothing, and every other refusal in ProcessFile drops it. But a retention
-// behind a swap that DID happen is the undo window doing its job, and a retention
-// behind a swap nobody can adjudicate may be the ONLY remaining name for the original's
-// bytes - discarding it there would delete the very thing this phase exists to protect.
-// So it is called in exactly one branch, case (b), the one that ESTABLISHED the source
-// untouched. Applied-despite-error and every indeterminate outcome HOLD it. It may be
-// nil when there was no retention to take.
+// abandon drops the undo window's retained original, and the decision belongs here because
+// it is the same question: did the swap happen? A retention behind a swap that did NOT
+// happen is an orphan raising the source's link count for nothing. A retention behind a
+// swap that DID happen is the undo window doing its job, and a retention behind a swap
+// nobody can adjudicate may be the ONLY remaining name for the original's bytes. So it is
+// called in exactly one branch, case (b), the one that ESTABLISHED the source untouched;
+// every other outcome HOLDS it. It may be nil when there was no retention to take.
 func (e *Engine) handleFailedSwap(ctx context.Context, f, key, tmp, final string,
 	srcRec, replRec probe.Attributes, renameErr error, out *store.Outcome, abandon func()) {
 
