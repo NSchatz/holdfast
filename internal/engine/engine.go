@@ -174,7 +174,25 @@ type Engine struct {
 	// nil restores the pre-check behaviour of walking the roots directly, which
 	// is what an Engine built without the startup check (the engine's own tests)
 	// gets.
+	//
+	// Set it with SetCoverage to carry the walk's own listings across with it;
+	// assigning the field alone is a coverage set with no entry information, and
+	// the scan then lists those directories itself.
 	Coverage []string
+
+	// carried is the entry information one startup walk collected, waiting for
+	// the FIRST scan after that walk (see listings.go). RunOneshot takes it -
+	// atomically, so a second scan racing it gets nothing rather than a shared
+	// half-consumed map - and it is gone once that scan has used it.
+	carried atomic.Pointer[listings]
+
+	// readDirFn, when non-nil, replaces the directory listing the
+	// coverage-bounded pass makes. Production leaves it nil. It is a seam in its
+	// own right because what a pass COSTS is a property nothing else can
+	// observe: a test substitutes it to count the listings a whole run issues,
+	// which is how "each covered directory is listed once" is asserted rather
+	// than assumed.
+	readDirFn func(dir string) ([]os.DirEntry, error)
 
 	// Paused, when non-nil and returning true, tells scanOnce to stop feeding NEW
 	// files to workers this pass (TRANSCODE-7's pause control). It is checked
@@ -362,6 +380,12 @@ func (e *Engine) RunOneshot(ctx context.Context) error {
 	// live exclusion - are withheld from the sweep, from the scan and from the workers.
 	e.held.Store(e.loadHoldBacks(ctx))
 
+	// This pass's listings, taken here and used by the sweep and the enumeration
+	// between them, so every covered directory is listed exactly once for the
+	// whole pass: the startup walk's own listings where this is the first scan
+	// after that walk, and this scan's where it is not.
+	pass := e.passListings()
+
 	if _, err := e.Store.RecoverStale(ctx); err != nil {
 		// Fail safe: if we can't tell what was left active by a prior crash, log and
 		// continue — a stuck "active" row just means that one file is skipped this
@@ -383,8 +407,8 @@ func (e *Engine) RunOneshot(ctx context.Context) error {
 	// on disk for ever, the row live for ever, the space never returned. The setting
 	// governs whether a NEW retention is taken, nothing else.
 	e.undo().ReleaseExpired(ctx)
-	e.cleanStaleTemps(ctx)
-	observed, err := e.scanOnce(ctx)
+	e.sweepStaleTemps(ctx, pass)
+	observed, err := e.scanOnce(ctx, pass)
 	if err != nil {
 		return err
 	}
@@ -516,7 +540,13 @@ func (e *Engine) Restore(ctx context.Context, path string) (RestoreResult, error
 //   - a temp path holding a FINISHED replacement with no record at all, which is what a
 //     library that went read-only leaves behind: the same failure denies the swap, the
 //     move to the retained name and the incident write alike (strayReplacementHold).
-func (e *Engine) cleanStaleTemps(ctx context.Context) {
+func (e *Engine) cleanStaleTemps(ctx context.Context) { e.sweepStaleTemps(ctx, e.passListings()) }
+
+// sweepStaleTemps is the sweep as a pass runs it: over the listings that pass
+// already has, and listing only what it does not. It reads them and does not
+// release them - the enumeration wants the same entries next, and the whole
+// point is that neither asks the filesystem twice.
+func (e *Engine) sweepStaleTemps(ctx context.Context, pass *listings) {
 	n := 0
 	if e.Coverage != nil {
 		// Bounded by the startup walk exactly as the scan is: a directory the
@@ -525,11 +555,11 @@ func (e *Engine) cleanStaleTemps(ctx context.Context) {
 			if ctx.Err() != nil {
 				break
 			}
-			ents, err := os.ReadDir(dir)
-			if err != nil {
+			got := e.listIn(pass, dir)
+			if got.err != nil {
 				continue
 			}
-			for _, ent := range ents {
+			for _, ent := range got.entries {
 				// Per ENTRY, not per directory. Deciding a file's fate costs probes
 				// that a cancelled context kills, so a SIGTERM landing inside this
 				// loop would otherwise leave every remaining file to be judged by
@@ -539,7 +569,11 @@ func (e *Engine) cleanStaleTemps(ctx context.Context) {
 				if ctx.Err() != nil {
 					break
 				}
-				if !ent.IsDir() && isTempName(ent.Name()) && e.sweepTemp(ctx, filepath.Join(dir, ent.Name())) {
+				// The kind the LISTING reported, links not followed, which is the
+				// same question this branch asked when it listed for itself: a
+				// symbolic link is a name to remove here, never a directory to
+				// step into.
+				if !ent.IsDir && isTempName(ent.Name) && e.sweepTemp(ctx, filepath.Join(dir, ent.Name)) {
 					n++
 				}
 			}
@@ -607,8 +641,8 @@ func (e *Engine) sweepTemp(ctx context.Context, path string) bool {
 // read a missing file as a file that is gone (see rowIsSpent). It is the enumeration's
 // own record rather than a re-derivation, so the two cannot disagree about where
 // holdfast looked.
-func (e *Engine) scanOnce(ctx context.Context) (map[string]bool, error) {
-	files, observed := e.enumerate()
+func (e *Engine) scanOnce(ctx context.Context, pass *listings) (map[string]bool, error) {
+	files, observed := e.enumerateIn(pass)
 
 	n := e.Cfg.EffectiveWorkers()
 	ch := make(chan string)
@@ -696,10 +730,19 @@ feed:
 // and never narrows the run.
 //
 // The observed set is the SAME evidence in its other form: a directory is in it only
-// when a listing of that directory returned, here, in this run. A directory that is
-// missing, unreadable, or that the walk declined is absent from it, and the retention
-// pass reads that as "no evidence" rather than as "the files are gone".
-func (e *Engine) enumerate() ([]string, map[string]bool) {
+// when a listing of that directory returned and that listing is the one this scan drew
+// its sources from. A directory that is missing, unreadable, or that the walk declined
+// is absent from it, and the retention pass reads that as "no evidence" rather than as
+// "the files are gone". A covered directory that listed EMPTY is in it: holdfast looked
+// and found nothing, which is evidence and is not the same as never having looked.
+func (e *Engine) enumerate() ([]string, map[string]bool) { return e.enumerateIn(e.passListings()) }
+
+// enumerateIn is the enumeration as a pass runs it, over the listings that pass
+// holds: the startup walk's where this is the first scan after that walk, the
+// sweep's where the sweep already listed for this one, and its own otherwise. It
+// RELEASES each directory's entries as it consumes them, so the entry
+// information a walk collected does not outlive the scan that used it.
+func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
 	var files []string
 	observed := map[string]bool{}
 	if e.Coverage != nil {
@@ -712,21 +755,39 @@ func (e *Engine) enumerate() ([]string, map[string]bool) {
 			if filepath.Base(dir) == UndoDirName {
 				continue
 			}
-			ents, err := os.ReadDir(dir)
-			if err != nil {
+			got, ok := pass.take(dir)
+			if !ok {
+				ents, err := e.listDir(dir)
+				got = listed{entries: ents, err: err}
+				pass.selfListed++
+			}
+			if got.err != nil {
 				continue
 			}
 			observed[dir] = true
-			for _, ent := range ents {
-				if ent.IsDir() {
+			for _, ent := range got.entries {
+				source := IsSourceName(ent.Name, e.Cfg.VideoExts)
+				// The kind the listing reported, and - where anything established
+				// it - what following the entry reaches. A directory under a source
+				// name is not a source by either spelling.
+				if ent.IsDir || ent.ResolvesToDir {
+					if source {
+						e.skipSourceNamedDirectory(filepath.Join(dir, ent.Name))
+					}
 					continue
 				}
-				if IsSourceName(ent.Name(), e.Cfg.VideoExts) {
-					if p := filepath.Join(dir, ent.Name()); e.offered(p) {
+				if source {
+					if p := filepath.Join(dir, ent.Name); e.offered(p) {
 						files = append(files, p)
 					}
 				}
 			}
+		}
+		if pass.selfListed > 0 {
+			// Entry information that was never collected is never evidence: where
+			// none was carried in, this scan listed for itself and says so.
+			e.Log.Info("this scan listed covered directories itself; the startup walk's own listings serve the first scan after that walk and no later one",
+				"directories_this_scan_listed", pass.selfListed, "directories_covered", len(e.Coverage))
 		}
 		sort.Strings(files)
 		return files, observed
@@ -753,10 +814,23 @@ func (e *Engine) enumerate() ([]string, map[string]bool) {
 					return filepath.SkipDir
 				}
 				observed[path] = true
+				if IsSourceName(d.Name(), e.Cfg.VideoExts) {
+					e.skipSourceNamedDirectory(path)
+				}
 				return nil
 			}
-			if IsSourceName(filepath.Base(path), e.Cfg.VideoExts) && e.offered(path) {
-				files = append(files, path)
+			if IsSourceName(filepath.Base(path), e.Cfg.VideoExts) {
+				// A walk does not follow links, so a symbolic link to a DIRECTORY
+				// arrives here looking exactly like a file. Both branches answer it
+				// the same way, and this is the branch that has to ask: the other
+				// is told by the startup walk, which followed the link already.
+				if d.Type()&fs.ModeSymlink != 0 && isDirectory(path) {
+					e.skipSourceNamedDirectory(path)
+					return nil
+				}
+				if e.offered(path) {
+					files = append(files, path)
+				}
 			}
 			return nil
 		})

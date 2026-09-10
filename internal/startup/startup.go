@@ -72,9 +72,18 @@ type Info struct {
 
 // Entry is one entry of a directory listing.
 type Entry struct {
-	Name   string
+	Name string
+	// IsDir is the kind the LISTING itself reports, with no link followed: a
+	// symbolic link is not a directory here, whatever it points at.
 	IsDir  bool
 	IsLink bool
+	// ResolvesToDir reports that FOLLOWING this entry reaches a directory. A
+	// Platform leaves it false - a listing does not follow links - and the walk
+	// fills it in from the inspection it already makes of every link and every
+	// subdirectory it meets. False therefore means "not established to be a
+	// directory", which is what a consumer that never followed the link would
+	// have concluded anyway.
+	ResolvesToDir bool
 }
 
 // Platform is the substitutable view of the host that the startup check reads.

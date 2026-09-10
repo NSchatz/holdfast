@@ -343,8 +343,10 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 	// The startup walk's coverage BOUNDS the run: this scan enumerates sources
 	// from exactly the directories that walk traversed successfully, so a
 	// subtree it declined, could not read or failed to traverse yields no file
-	// and no swap can happen under it.
-	eng.Coverage = res.Coverage
+	// and no swap can happen under it. Its listings come across with it, so the
+	// first scan reads the entries that walk already read rather than paying for
+	// the same directories twice more.
+	eng.SetCoverage(res.Coverage, res.Entries)
 	return eng, st, 0
 }
 
