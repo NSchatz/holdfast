@@ -346,8 +346,8 @@ func closeProgressPipe(r, w *os.File) {
 //
 // A job whose effective settings carry a positive BitrateKbps takes the
 // TARGET-BITRATE shape instead, per family (see bitrateArgs). The quality knob is
-// then not passed AT ALL — no -crf, -cq, -global_quality, -qp or -qp_i/-qp_p, and
-// no -rc cqp — because a rate control and a quality target are two different
+// then not passed AT ALL - no -crf, -cq, -global_quality, -qp or -qp_i/-qp_p, and
+// no -rc cqp - because a rate control and a quality target are two different
 // instructions and passing both leaves which one wins to the encoder's own
 // precedence rules rather than to the operator. Everything else is unchanged: the
 // pixel format, the colour tags, -fps_mode passthrough and the libx265 preset and
@@ -405,8 +405,8 @@ func buildArgs(spec encoder.Spec, ts config.Transcode, pixFmt string, colorArgs 
 // universal pixel-format/colour/fps block, for a job whose effective settings carry
 // a positive BitrateKbps.
 //
-// `-b:v <n>k` is the target in every family — it is ffmpeg's own codec-independent
-// bitrate option — and what varies is only the rate-control MODE each family needs
+// `-b:v <n>k` is the target in every family - it is ffmpeg's own codec-independent
+// bitrate option - and what varies is only the rate-control MODE each family needs
 // told, because several of them default to a constant-quality mode that would
 // otherwise ignore the target:
 //
