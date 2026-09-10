@@ -126,8 +126,24 @@ dry_run: false
 # min_bitrate_kbps: 2500     # skip sources below this — re-encoding them only bloats
 # min_savings_percent: 0     # accept only if output <= input*(1-this/100); 0 = strictly smaller
 # duration_tolerance_sec: 1  # reject if output duration drifts more than this
-# max_failures: 3            # retry a failing file this many times before parking it
+# max_failures: 3            # attempts to spend on a failure that MAY come out differently
 # skip_hardlinked: true      # skip files with >1 hard link (an active seed/dup)
+#
+# max_failures BOUNDS THE RETRIES THAT ARE WORTH SOMETHING, and only those. It governs a
+# failure a later attempt could answer differently - a full disk, an OOM-killed encoder, a
+# store error - and such a file is retried up to this many times before it is parked.
+#
+# A failure this configuration makes FINAL is not retried at all: it parks the file at its
+# FIRST occurrence. Most of what the gate rejects is a pure function of the source bytes,
+# these settings and the pinned ffmpeg build - an output that came out bigger than its
+# source, one that is not the target codec, a truncated encode, a dropped track, a VMAF or
+# chroma floor - so attempts two and three would each pay a full encode (hours, on a
+# feature-length source at preset slow) to reach the identical rejection. The row says so:
+# its reason names the gate that rejected the file AND states that the verdict is final.
+#
+# Final means final UNDER THIS CONFIGURATION, never "this file is hopeless". Change what
+# the verdict depends on - min_savings_percent, the encoder, crf/preset, a VMAF floor - and
+# it is a different question, to be asked again.
 
 # --- VMAF perceptual-quality gate (the last no-loss layer) ---
 # After the structural checks pass, VMAF compares the output against the source and

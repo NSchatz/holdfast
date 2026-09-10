@@ -1505,3 +1505,277 @@ func TestRetain_ReplacesAnEarlierRecordForTheSamePath(t *testing.T) {
 		t.Errorf("the new retention carries the old record's restore stamp: %v", got.RestoredAt)
 	}
 }
+
+// ---- the class of a failure -------------------------------------------------
+//
+// The class is a CLOSED two-value vocabulary and a stored fact. These cases pin the
+// three things that make it safe to store: what an unrecognised value reads back as,
+// what a row written before the column existed reads back as, and the fact that the
+// class itself never blocks a claim - the attempt count remains the only thing that
+// parks a row.
+
+// rawFailureClass reads the column straight off the row, with no mapping in between: the
+// assertions about what a read RESOLVES have to be distinguishable from what is stored.
+func rawFailureClass(t *testing.T, s *SQLite, path, fp string) (string, bool) {
+	t.Helper()
+	var v sql.NullString
+	err := s.db.QueryRowContext(context.Background(),
+		`SELECT failure_class FROM jobs WHERE path = ? AND fingerprint = ?`, path, fp).Scan(&v)
+	if err != nil {
+		t.Fatalf("read failure_class for %s: %v", path, err)
+	}
+	return v.String, v.Valid
+}
+
+// failedFor returns the failed row for path.
+func failedFor(t *testing.T, s *SQLite, path string) Job {
+	t.Helper()
+	rows, err := s.List(context.Background(), []Status{Failed}, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, r := range rows {
+		if r.Path == path {
+			return r
+		}
+	}
+	t.Fatalf("no failed row for %s", path)
+	return Job{}
+}
+
+// TestFailureClass_AnythingOutsideTheVocabularyReadsBackAsRetryable.
+//
+// There are two classes and no third, so every other value has to resolve to one of
+// them, and WHICH one is the whole safety argument: a value this build does not
+// recognise - a token a newer build wrote, or anything an operator's repair script put
+// in the column - must read as "a later attempt may differ". Reading it as final would
+// park a file on a value nobody in this build can even interpret.
+func TestFailureClass_AnythingOutsideTheVocabularyReadsBackAsRetryable(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	const path, fp = "/a/movie.mkv", "fp1"
+
+	if ok, err := s.Claim(ctx, path, fp, "w0", 3); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if err := s.Finish(ctx, path, fp, Failed, &Outcome{Reason: "some gate"}, 3); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	// Put a value in the column that is in no vocabulary this build has.
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE jobs SET failure_class = ? WHERE path = ? AND fingerprint = ?`,
+		"a-class-from-some-later-build", path, fp); err != nil {
+		t.Fatalf("seed an out-of-vocabulary class: %v", err)
+	}
+
+	if got := failedFor(t, s, path).Outcome.FailureClass; got != FailureTransient {
+		t.Errorf("an out-of-vocabulary class read back as %q, want %q - the fail-safe direction "+
+			"is to retry, because a wrong 'final' is a file nobody revisits", got, FailureTransient)
+	}
+	// It is resolved on the way OUT, not repaired in place: nothing rewrites an
+	// operator's row behind their back.
+	if raw, _ := rawFailureClass(t, s, path, fp); raw != "a-class-from-some-later-build" {
+		t.Errorf("the stored column was rewritten to %q; a read must resolve the value, not repair it", raw)
+	}
+	// This build never WRITES such a value, whatever it is handed.
+	if err := s.Finish(ctx, path, fp, Failed, &Outcome{FailureClass: "nonsense", Reason: "some gate"}, 3); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if raw, ok := rawFailureClass(t, s, path, fp); !ok || raw != string(FailureTransient) {
+		t.Errorf("a write stored the class %q (present=%v); the column may only ever hold a member "+
+			"of the vocabulary", raw, ok)
+	}
+}
+
+// TestFailureClass_ALegacyFailureRowIsRetryableAndIsNotRewritten.
+//
+// Every failure row already in an operator's ledger was written by a build that had no
+// class at all. Such a row must keep behaving exactly as it always has - claimed,
+// retried, parked at the bound - and must not be repaired, re-classified or refused on
+// the strength of a column it predates.
+func TestFailureClass_ALegacyFailureRowIsRetryableAndIsNotRewritten(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	const path, fp = "/a/legacy.mkv", "fp1"
+
+	// A row exactly as an older build left it: failed, one attempt spent, no class.
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, updated_at, reason)
+		 VALUES (?, ?, ?, 1, ?, ?)`,
+		path, fp, string(Failed), now(), "encode error from a build that classified nothing"); err != nil {
+		t.Fatalf("seed a legacy row: %v", err)
+	}
+	if _, ok := rawFailureClass(t, s, path, fp); ok {
+		t.Fatal("the seeded legacy row already carries a class, so it is not the row this case is about")
+	}
+
+	// It reads back as retryable, and reading it changed nothing.
+	if got := failedFor(t, s, path).Outcome.FailureClass; got != FailureTransient {
+		t.Errorf("a row with no class read back as %q, want %q", got, FailureTransient)
+	}
+	if _, ok := rawFailureClass(t, s, path, fp); ok {
+		t.Error("reading a legacy row wrote a class onto it; a read must never rewrite the row")
+	}
+
+	// And it is claimed and parked by the attempt count, exactly as it always was.
+	for attempt := 2; attempt <= 3; attempt++ {
+		ok, err := s.Claim(ctx, path, fp, "w0", 3)
+		if err != nil {
+			t.Fatalf("attempt %d: Claim on a legacy row errored: %v", attempt, err)
+		}
+		if !ok {
+			t.Fatalf("attempt %d: a legacy failed row below the bound was refused", attempt)
+		}
+		if err := s.Finish(ctx, path, fp, Failed, &Outcome{Reason: "still failing"}, 3); err != nil {
+			t.Fatalf("attempt %d: Finish: %v", attempt, err)
+		}
+	}
+	if _, fc, _, err := s.Get(ctx, path, fp); err != nil || fc != 3 {
+		t.Fatalf("after two retries fail_count = %d (err=%v), want 3", fc, err)
+	}
+	if ok, err := s.Claim(ctx, path, fp, "w0", 3); err != nil || ok {
+		t.Errorf("a legacy row at the bound was claimed again: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestFinish_ADeterministicFailureSpendsTheBoundInOneWrite.
+//
+// The park is the ORDINARY one: the same failed status, and the same fail_count >=
+// max_failures rule Claim has always refused on. What the class changes is only how much
+// of the bound one failure spends.
+func TestFinish_ADeterministicFailureSpendsTheBoundInOneWrite(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	const path, fp = "/a/never-smaller.mkv", "fp1"
+
+	if ok, err := s.Claim(ctx, path, fp, "w0", 3); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if err := s.Finish(ctx, path, fp, Failed,
+		&Outcome{FailureClass: FailureDeterministic, Reason: "size-increase reject"}, 3); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+
+	st, fc, exists, err := s.Get(ctx, path, fp)
+	if err != nil || !exists {
+		t.Fatalf("Get: exists=%v err=%v", exists, err)
+	}
+	if st != Failed {
+		t.Errorf("status = %q, want %q - a deterministic park introduces no new status", st, Failed)
+	}
+	if fc != 3 {
+		t.Errorf("fail_count = %d after ONE deterministic failure, want the bound (3)", fc)
+	}
+	if ok, err := s.Claim(ctx, path, fp, "w0", 3); err != nil || ok {
+		t.Errorf("the parked row was claimed again: ok=%v err=%v", ok, err)
+	}
+	// It is the BOUND that parks it, not the class: raise the bound and the same row is
+	// claimable again, which is what makes the park undoable by the same means as any
+	// other exhausted failure.
+	if ok, err := s.Claim(ctx, path, fp, "w0", 5); err != nil || !ok {
+		t.Errorf("under a higher bound the same row was still refused (ok=%v err=%v) - something "+
+			"other than the attempt count is holding it", ok, err)
+	}
+	// A bound of 0 or less is no bound at all, and must never be read as one to park at.
+	const other = "/a/unbounded.mkv"
+	if ok, err := s.Claim(ctx, other, fp, "w0", 0); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if err := s.Finish(ctx, other, fp, Failed,
+		&Outcome{FailureClass: FailureDeterministic, Reason: "size-increase reject"}, 0); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if _, fc, _, err := s.Get(ctx, other, fp); err != nil || fc != 1 {
+		t.Errorf("with no bound configured fail_count = %d (err=%v), want the ordinary 1", fc, err)
+	}
+}
+
+// TestClaim_TheClassIsNeverItselfAClaimBlocker.
+//
+// The attempt count is the ONLY thing that parks a row. A deterministic failure whose
+// count is below the bound - one recorded under a higher max_failures, or one whose count
+// something later lowered to restore it - is claimed like any other retry. If the class
+// were a second block, anything that restored an exhausted failure would leave the
+// deterministic ones stuck behind a block nobody could see.
+func TestClaim_TheClassIsNeverItselfAClaimBlocker(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	const path, fp = "/a/movie.mkv", "fp1"
+
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, updated_at, reason, failure_class)
+		 VALUES (?, ?, ?, 1, ?, ?, ?)`,
+		path, fp, string(Failed), now(), "size-increase reject", string(FailureDeterministic)); err != nil {
+		t.Fatalf("seed a deterministic row below the bound: %v", err)
+	}
+
+	ok, err := s.Claim(ctx, path, fp, "w0", 3)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !ok {
+		t.Fatal("a deterministic failure with attempts left was refused - the class must never be " +
+			"a claim blocker, or lowering the count would not be enough to revisit the file")
+	}
+	// The claim began a new attempt, so the previous attempt's class is gone with the
+	// rest of its proof - an in-flight row must never carry a verdict about an encode
+	// that no longer exists.
+	if raw, present := rawFailureClass(t, s, path, fp); present {
+		t.Errorf("claiming left the previous attempt's class %q on an in-flight row", raw)
+	}
+}
+
+// TestAggregates_ADeterministicFailureAddsNothingToTheSkipBreakdown.
+//
+// skips_by_guard answers "which GUARD declined this file", and a deterministic failure is
+// not a guard declining anything: the encoder ran and the output was rejected. Folding
+// one in would tell an operator a guard skipped a file that was actually encoded.
+func TestAggregates_ADeterministicFailureAddsNothingToTheSkipBreakdown(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	// One real skip, so the breakdown is not vacuously empty.
+	if ok, err := s.Claim(ctx, "/a/thin.mkv", "fp1", "w0", 3); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if err := s.Finish(ctx, "/a/thin.mkv", "fp1", Skipped, &Outcome{Reason: "low-bitrate"}, 3); err != nil {
+		t.Fatalf("Finish(skipped): %v", err)
+	}
+	before := s.Aggregates(ctx).SkipsByGuard
+	if before.Err != nil {
+		t.Fatalf("SkipsByGuard: %v", before.Err)
+	}
+	if before.Counted != 1 {
+		t.Fatalf("the breakdown counted %d rows before the failure, want 1", before.Counted)
+	}
+
+	if ok, err := s.Claim(ctx, "/a/never-smaller.mkv", "fp2", "w0", 3); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if err := s.Finish(ctx, "/a/never-smaller.mkv", "fp2", Failed,
+		&Outcome{FailureClass: FailureDeterministic, Reason: "size-increase reject"}, 3); err != nil {
+		t.Fatalf("Finish(failed): %v", err)
+	}
+
+	after := s.Aggregates(ctx).SkipsByGuard
+	if after.Err != nil {
+		t.Fatalf("SkipsByGuard: %v", after.Err)
+	}
+	if after.Counted != before.Counted || after.Excluded != before.Excluded {
+		t.Errorf("the skip breakdown moved from counted=%d excluded=%d to counted=%d excluded=%d",
+			before.Counted, before.Excluded, after.Counted, after.Excluded)
+	}
+	if len(after.Buckets) != len(before.Buckets) {
+		t.Errorf("the skip breakdown gained a bucket: %+v, was %+v", after.Buckets, before.Buckets)
+	}
+	for _, b := range after.Buckets {
+		if strings.Contains(b.Key, "size-increase") || b.Key == string(FailureDeterministic) {
+			t.Errorf("a failure appears in the skip breakdown as %q", b.Key)
+		}
+		for _, was := range before.Buckets {
+			if was.Key == b.Key && was.Count != b.Count {
+				t.Errorf("bucket %q grew from %d to %d because of a failure", b.Key, was.Count, b.Count)
+			}
+		}
+	}
+}
