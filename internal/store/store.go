@@ -98,6 +98,59 @@ func (s Status) Active() bool {
 	}
 }
 
+// FailureClass says whether a terminal failure's verdict is a pure function of that
+// job's inputs - the source bytes, the configuration and the pinned ffmpeg build - or
+// whether a later attempt could reach a different one.
+//
+// It is a CLOSED vocabulary of exactly two values and, like the engine's skip tokens,
+// it is a WIRE FORMAT: it is stored on the row, so renaming one changes what an
+// operator's existing rows mean. It is NOT a status and NOT a guard token; a failure
+// carries a class beside its reason, and nothing else does.
+//
+// It is what lets `max_failures` mean what it says. That bound buys re-attempts, and a
+// re-attempt is only worth anything when the next one could come out differently: a
+// size-increase reject on the same file under the same configuration will reject
+// identically on attempt three, after another full encode. So the class decides whether
+// the bound is spent one attempt at a time or all at once (see Finish).
+//
+// Anything outside the vocabulary is TRANSIENT, including the empty value a row written
+// before the class existed carries. That is the fail-safe direction and the direction is
+// not symmetric: the cost of a wrong "transient" is CPU, and the cost of a wrong
+// "deterministic" is a file parked at its first failure that nobody revisits.
+type FailureClass string
+
+// The two failure classes. There is no third, and no "unknown": an unrecognised value
+// resolves to Transient rather than becoming a state of its own (see Class).
+const (
+	// FailureTransient: a later attempt may reach a different verdict. A full disk, an
+	// OOM-killed ffmpeg, a store error, an output that did not decode. Retried under
+	// max_failures exactly as every failure has always been.
+	FailureTransient FailureClass = "transient"
+
+	// FailureDeterministic: the same source, the same configuration and the same
+	// ffmpeg build will produce this same verdict, so the attempts max_failures would
+	// buy are all spent reaching it again.
+	FailureDeterministic FailureClass = "deterministic"
+)
+
+// Class resolves c to a member of the vocabulary. Exactly one value is deterministic;
+// EVERYTHING else - the empty value, a token from a newer build, anything an operator or
+// a repair script put in the column by hand - is transient, because retrying costs CPU
+// and refusing to retry costs a file.
+//
+// It is applied on the way IN and on the way OUT (see Finish and outcomeScan.outcome),
+// so a stored class is always one of the two and a read never hands a caller a value it
+// would have to interpret for itself.
+func (c FailureClass) Class() FailureClass {
+	if c == FailureDeterministic {
+		return FailureDeterministic
+	}
+	return FailureTransient
+}
+
+// Final reports whether c is the class whose verdict no re-attempt can change.
+func (c FailureClass) Final() bool { return c.Class() == FailureDeterministic }
+
 // Outcome is the durable PROOF of a terminal job's result — the facts the engine
 // computed while deciding whether a swap was safe (TRANSCODE-13). Before this phase
 // every one of them was computed and then thrown away, which is precisely why the
@@ -113,10 +166,24 @@ func (s Status) Active() bool {
 // meaning of its own.
 type Outcome struct {
 	// Reason is WHY the job reached this status. For Failed it is the error text (the
-	// encode error, or the gate that rejected the output). For Skipped it is the name
-	// of the GUARD that fired — a stable token from internal/engine, not prose, so a
-	// UI can key off it. Done needs no excuse and leaves it "".
+	// encode error, or the gate that rejected the output), and where that verdict is
+	// FINAL it says so in front of that text rather than instead of it: an operator
+	// reading the row learns both that it will not be tried again and what rejected it,
+	// without going to the logs. For Skipped it is the name of the GUARD that fired — a
+	// stable token from internal/engine, not prose, so a UI can key off it. Done needs
+	// no excuse and leaves it "".
 	Reason string
+
+	// FailureClass is whether this failure's verdict is a pure function of the job's
+	// inputs (see FailureClass). It is meaningful on a FAILED row and is "not recorded"
+	// on every other status, exactly as the fields below are on a row that never reached
+	// the code that fills them.
+	//
+	// Absence is NOT representable in the way the numeric fields' absence is, and that
+	// is deliberate rather than an oversight: there is no "unclassified" failure to
+	// represent, because a class that could not be established IS the transient one.
+	// A read therefore always yields a member of the vocabulary.
+	FailureClass FailureClass
 
 	// Encoder is the encoder key (cpu / svtav1 / nvenc / …) the job actually ran, set
 	// on every row that reached the encoder at all — a failure is as worth attributing
@@ -596,7 +663,18 @@ type Store interface {
 	// describe its CURRENT status. A file that failed (reason recorded), was retried,
 	// and then succeeded must not sit in the ledger as "done" with the old failure's
 	// reason still attached to it.
-	Finish(ctx context.Context, path, fingerprint string, s Status, o *Outcome) error
+	//
+	// maxFailures is the attempt bound the caller is running under - the same bound it
+	// passes to Claim, which is why it is a parameter here rather than a setting this
+	// package holds. It governs ONE thing: a Failed row whose class is deterministic
+	// spends the whole bound in this write instead of one attempt of it, because the
+	// verdict is a pure function of inputs that have not moved and the remaining
+	// attempts would each cost a full encode to reach it again. No new status and no
+	// second parking mechanism: the row is an ordinary failed row that Claim then
+	// refuses on the ordinary fail_count >= maxFailures rule, and the count is the only
+	// thing holding it. A transient failure is unaffected, and so is every non-Failed
+	// status; 0 or less means "no bound", under which nothing is parked early.
+	Finish(ctx context.Context, path, fingerprint string, s Status, o *Outcome, maxFailures int) error
 
 	// Delete removes the row for path+fingerprint (a no-op if absent). Used to prune
 	// a job row that has been superseded — after a successful transcode the pre-swap

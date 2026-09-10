@@ -1107,7 +1107,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	out.EncodeMs = ptr(encodeDur.Milliseconds())
 
 	e.advance(ctx, f, key, store.Verifying)
-	proof, reason := e.verifyOutput(ctx, f, tmp)
+	proof, class, reason := e.verifyOutput(ctx, f, tmp)
 	// Record whatever VMAF measured, on the reject path too: the numbers that rejected
 	// an encode are exactly the ones an operator wants to see, and a rejection whose
 	// score is thrown away is the defect this phase exists to fix.
@@ -1122,9 +1122,14 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			_ = os.Remove(tmp)
 			return ctx.Err()
 		}
-		e.Log.Warn("FAIL (verify rejected, source untouched)", "file", f, "reason", reason.Error())
+		e.Log.Warn("FAIL (verify rejected, source untouched)", "file", f,
+			"reason", reason.Error(), "failure_class", class.Class())
 		_ = os.Remove(tmp)
-		out.Reason = reason.Error()
+		// The gate's own verdict decides both of these, and it decided them at the line
+		// that rejected the encode - nothing here re-reads the message to work out what
+		// kind of rejection it was.
+		out.FailureClass = class
+		out.Reason = failureReason(class, reason.Error())
 		e.finish(ctx, f, key, store.Failed, out)
 		return nil
 	}
@@ -1419,8 +1424,18 @@ func (e *Engine) advance(ctx context.Context, path, key string, s store.Status) 
 // finishStore records a terminal outcome + its proof in the store WITHOUT emitting an
 // event. The Done swap path uses this (then emits one rich Done event itself); every
 // other terminal path uses finish, which emits as well.
+//
+// The attempt bound goes with the write because a deterministic failure is parked by
+// spending it (see store.Finish), and this run's bound is the one that applies.
+//
+// A store error is LOGGED AND SURVIVED, which is the pre-existing fail-safe and is
+// deliberately unchanged for the park. Nothing on disk depends on this write: the source
+// is byte-for-byte intact either way, and with no durable record of the park a later pass
+// simply meets the file again and is free to attempt it. The alternative - treating an
+// unwritten park as a park - would be a park that exists only in a process that has since
+// exited, which is not a park at all.
 func (e *Engine) finishStore(ctx context.Context, path, key string, s store.Status, o *store.Outcome) {
-	if err := e.Store.Finish(ctx, path, key, s, o); err != nil {
+	if err := e.Store.Finish(ctx, path, key, s, o, e.Cfg.MaxFailures); err != nil {
 		e.Log.Warn("store finish failed", "file", path, "status", s, "err", err)
 	}
 }
@@ -1436,6 +1451,30 @@ func (e *Engine) finish(ctx context.Context, path, key string, s store.Status, o
 // because builds the one-field Outcome that a guard records: WHICH guard fired. Skips
 // happen before the encoder runs, so there is nothing else to prove about them.
 func because(reason string) *store.Outcome { return &store.Outcome{Reason: reason} }
+
+// finalVerdictPrefix precedes the gate's own text on a failure no retry can change. It
+// is the operator-facing half of the class: the column says "deterministic" to a
+// machine, and this says the same thing to whoever is reading the row.
+//
+// It states the SCOPE of the finality as well as the fact, because the finality is
+// relative to a configuration and not absolute - the same file under a different
+// min_savings_percent, a different encoder or a different VMAF floor is a different
+// question, and an operator who reads "final" as "this file is hopeless" has been
+// misled by a row that meant "final while nothing changes".
+const finalVerdictPrefix = "FINAL under this configuration (parked now, not retried; " +
+	"a configuration change or a requeue is what revisits it): "
+
+// failureReason composes what a failed row records. A transient failure records the
+// error text alone, exactly as every failure always has. A deterministic one records
+// that same text WITH the verdict's finality in front of it - never instead of it: an
+// operator reading the row has to learn both that it will not be tried again and what
+// rejected it, and a row that says only the first sends them to the logs for the second.
+func failureReason(class store.FailureClass, text string) string {
+	if class.Final() {
+		return finalVerdictPrefix + text
+	}
+	return text
+}
 
 // ptr takes the address of a value — the Outcome's numeric fields are pointers so that
 // "not recorded" (nil) stays distinct from a recorded zero, and Go has no way to take

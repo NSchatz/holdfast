@@ -92,7 +92,7 @@ func TestMetrics_TheLiveDepthGaugeReportsCandidatesAsThemselves(t *testing.T) {
 		if ok, err := st.Claim(ctx, p, "1:1", "w0", 3); err != nil || !ok {
 			t.Fatalf("Claim(%s): ok=%v err=%v", p, ok, err)
 		}
-		if err := st.Finish(ctx, p, "1:1", store.WouldTranscode, &store.Outcome{SourceCodec: "h264"}); err != nil {
+		if err := st.Finish(ctx, p, "1:1", store.WouldTranscode, &store.Outcome{SourceCodec: "h264"}, 3); err != nil {
 			t.Fatalf("Finish(%s): %v", p, err)
 		}
 	}
@@ -124,7 +124,7 @@ func TestMetrics_NoNewMetricNameIsPublished(t *testing.T) {
 	if ok, err := st.Claim(ctx, "/lib/a.mkv", "1:1", "w0", 3); err != nil || !ok {
 		t.Fatalf("Claim: ok=%v err=%v", ok, err)
 	}
-	if err := st.Finish(ctx, "/lib/a.mkv", "1:1", store.WouldTranscode, &store.Outcome{SourceCodec: "h264"}); err != nil {
+	if err := st.Finish(ctx, "/lib/a.mkv", "1:1", store.WouldTranscode, &store.Outcome{SourceCodec: "h264"}, 3); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 

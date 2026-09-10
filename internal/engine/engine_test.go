@@ -1863,3 +1863,347 @@ func TestEngine_FailedEncodeWithProgressStillRecordsTheError(t *testing.T) {
 		t.Error("no progress was collected on the failing run — the proof would be vacuous")
 	}
 }
+
+// ---- what a failure COSTS: the class, the park, and the retry that survives ----
+//
+// `max_failures` buys re-attempts, and a re-attempt is only worth an encode when the
+// next one could come out differently. These cases pin both halves of that: a verdict
+// that is a pure function of (source, configuration, ffmpeg build) costs ONE encode, and
+// everything else still costs up to the bound, as it always has.
+
+// failedRow returns the recorded failed row for path, and fails the test if there is
+// none. The class and the composed reason are both on it, so both are asserted from the
+// row an operator would actually read rather than from a log line.
+func failedRow(t *testing.T, ts *testStore, path string) store.Job {
+	t.Helper()
+	rows, err := ts.List(context.Background(), []store.Status{store.Failed}, 0)
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	for _, r := range rows {
+		if r.Path == path {
+			return r
+		}
+	}
+	t.Fatalf("no failed row for %s", path)
+	return store.Job{}
+}
+
+// biggerThanItsSource writes an HEVC clip that is the same length as src and LARGER than
+// it: 720p lossless against a 240p source, so it is bigger whatever x265 does with the
+// bitrate. It is written OUTSIDE the library root, so a scan of that root still has
+// exactly one file to offer.
+func biggerThanItsSource(t *testing.T, ffmpeg, src string) string {
+	t.Helper()
+	big := filepath.Join(t.TempDir(), "big.mkv")
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=2:size=1280x720:rate=10",
+		"-c:v", "libx265", "-x265-params", "lossless=1:log-level=error", "-pix_fmt", "yuv420p", "--", big)
+	if probe.FileSize(big) <= probe.FileSize(src) {
+		t.Fatalf("fixture drifted: the 'bigger' replacement (%d B) is not bigger than the source (%d B), "+
+			"so the size gate is not what rejects it", probe.FileSize(big), probe.FileSize(src))
+	}
+	return big
+}
+
+// TestFailure_SizeIncreaseParksOnFirstOccurrence.
+//
+// A file that cannot be beaten under the current configuration - an already-efficient
+// encode, a grain-heavy master, anything at a bitrate the CRF cannot undercut - is
+// rejected by the size gate, and every retry re-runs the same encode to produce the same
+// rejection. On a feature-length source at preset slow that is hours per attempt, three
+// times, across however many such files a library holds.
+//
+// So the FIRST occurrence parks it: fail_count reaches max_failures in the same write
+// that records the failure, and the next pass does not invoke the encoder at all. The
+// row still carries the gate's own text, with the finality in front of it, so an
+// operator reading the dashboard is not left wondering whether it will be tried again.
+func TestFailure_SizeIncreaseParksOnFirstOccurrence(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, ffmpeg, src, "300k")
+	before := md5f(t, src)
+	big := biggerThanItsSource(t, ffmpeg, src)
+
+	calls := 0
+	enc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
+		calls++
+		b, err := os.ReadFile(big)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(out, b, 0o644)
+	})
+
+	ts := newTestStore(t, d)
+	cfg := baseCfg(d)
+	cfg.MaxFailures = 3
+	prober := probe.New(ffmpeg, ffprobe)
+	scan := func() {
+		eng := New(cfg, prober, enc, ts, discardLogger())
+		if err := eng.RunOneshot(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	scan()
+	if calls != 1 {
+		t.Fatalf("the first pass invoked the encoder %d times, want 1", calls)
+	}
+	if !ledgerHas(t, ts, store.Failed, "movie.mkv") {
+		t.Fatal("the first pass recorded no failed row")
+	}
+	if got := failCount(t, ts, "movie.mkv"); got != cfg.MaxFailures {
+		t.Fatalf("after ONE deterministic failure fail_count = %d, want max_failures = %d - "+
+			"the remaining attempts would each pay a full encode to reach the identical verdict",
+			got, cfg.MaxFailures)
+	}
+
+	row := failedRow(t, ts, src)
+	if row.Outcome.FailureClass != store.FailureDeterministic {
+		t.Errorf("recorded class = %q, want %q", row.Outcome.FailureClass, store.FailureDeterministic)
+	}
+	// The reason carries BOTH: what rejected the encode, and that the verdict is final.
+	if !strings.Contains(row.Outcome.Reason, "size-increase reject") {
+		t.Errorf("the recorded reason lost the gate's own text, so an operator cannot see WHY "+
+			"it was rejected without the logs: %q", row.Outcome.Reason)
+	}
+	lower := strings.ToLower(row.Outcome.Reason)
+	if !strings.Contains(lower, "final") || !strings.Contains(lower, "retr") {
+		t.Errorf("the recorded reason does not say the verdict is final, so an operator cannot see "+
+			"that it will NOT be tried again: %q", row.Outcome.Reason)
+	}
+
+	// The park is the ordinary one. No new status, and the file is refused by the same
+	// attempt bound that parks an exhausted transient failure.
+	if row.Status != store.Failed {
+		t.Errorf("terminal status = %q, want %q - a deterministic park introduces no new status",
+			row.Status, store.Failed)
+	}
+
+	// The second pass: the file is not claimed, so the encoder is never reached.
+	scan()
+	if calls != 1 {
+		t.Fatalf("the second pass invoked the encoder again (%d calls total) - the park bought nothing", calls)
+	}
+	if got := failCount(t, ts, "movie.mkv"); got != cfg.MaxFailures {
+		t.Errorf("the second pass moved fail_count to %d, want it left at %d", got, cfg.MaxFailures)
+	}
+	if md5f(t, src) != before {
+		t.Error("the source was modified by a rejected encode")
+	}
+	if nTemp(t, d) != 0 {
+		t.Error("a rejected encode left a temp behind")
+	}
+}
+
+// TestFailure_EncodeErrorStillRetries is the control that stops the change above from
+// being "park everything".
+//
+// An encode error is not a verdict about the source: a full disk, an OOM-killed ffmpeg,
+// a transient I/O error are all conditions of the RUN, and the next attempt genuinely
+// may differ. Such a failure therefore costs one attempt of the bound, exactly as every
+// failure did before any of them were told apart, and the file is parked only when the
+// bound is actually exhausted.
+func TestFailure_EncodeErrorStillRetries(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, ffmpeg, src, "3M")
+	before := md5f(t, src)
+
+	calls := 0
+	enc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
+		calls++
+		return errFake
+	})
+	ts := newTestStore(t, d)
+	cfg := baseCfg(d)
+	cfg.MaxFailures = 3
+	prober := probe.New(ffmpeg, ffprobe)
+	scan := func() {
+		eng := New(cfg, prober, enc, ts, discardLogger())
+		if err := eng.RunOneshot(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for attempt := 1; attempt <= cfg.MaxFailures; attempt++ {
+		scan()
+		if calls != attempt {
+			t.Fatalf("attempt %d: the encoder ran %d times in total, want %d - a transient failure "+
+				"must still be retried", attempt, calls, attempt)
+		}
+		if got := failCount(t, ts, "movie.mkv"); got != attempt {
+			t.Fatalf("attempt %d: fail_count = %d, want %d - a transient failure must spend ONE "+
+				"attempt of the bound, not all of it", attempt, got, attempt)
+		}
+	}
+
+	// Only now, with the bound genuinely exhausted, is it parked.
+	scan()
+	if calls != cfg.MaxFailures {
+		t.Errorf("the file was attempted again after max_failures (%d encoder calls)", calls)
+	}
+	if got := failCount(t, ts, "movie.mkv"); got != cfg.MaxFailures {
+		t.Errorf("after max_failures fail_count = %d, want %d", got, cfg.MaxFailures)
+	}
+
+	row := failedRow(t, ts, src)
+	if row.Outcome.FailureClass != store.FailureTransient {
+		t.Errorf("recorded class = %q, want %q - an encode error is not a verdict about the source",
+			row.Outcome.FailureClass, store.FailureTransient)
+	}
+	// It records the error and nothing more: a transient failure must not tell an
+	// operator the verdict is final, because it is not.
+	if !strings.Contains(row.Outcome.Reason, errFake.Error()) {
+		t.Errorf("the recorded reason lost the encoder's error: %q", row.Outcome.Reason)
+	}
+	if strings.Contains(strings.ToLower(row.Outcome.Reason), "final") {
+		t.Errorf("a retryable failure's reason claims the verdict is final: %q", row.Outcome.Reason)
+	}
+	if md5f(t, src) != before {
+		t.Error("the source was modified across the retries")
+	}
+}
+
+// TestFailure_AnUnclassifiedFailureIsRetriedNotParked is the fail-safe direction, and it
+// is deliberately asymmetric: the cost of a wrong "may differ" is CPU, and the cost of a
+// wrong "final" is a file parked at its first failure that nobody revisits.
+//
+// So a terminal failure carrying NO class - which is what a gate rejection added later
+// without one produces, and what every row written before the class existed carries -
+// must be recorded as retryable and must actually be retried. The row is written through
+// the same store call the engine's recording site uses, with the class left unset.
+func TestFailure_AnUnclassifiedFailureIsRetriedNotParked(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, ffmpeg, src, "3M")
+
+	ts := newTestStore(t, d)
+	cfg := baseCfg(d)
+	cfg.MaxFailures = 3
+	ctx := context.Background()
+	key := probe.Fingerprint(src)
+
+	if ok, err := ts.Claim(ctx, src, key, "w0", cfg.MaxFailures); err != nil || !ok {
+		t.Fatalf("seed claim: ok=%v err=%v", ok, err)
+	}
+	// A rejection this build's classifier says nothing about.
+	if err := ts.Finish(ctx, src, key, store.Failed,
+		&store.Outcome{Reason: "a gate rejection this build does not classify"}, cfg.MaxFailures); err != nil {
+		t.Fatalf("seed finish: %v", err)
+	}
+
+	if got := failCount(t, ts, "movie.mkv"); got != 1 {
+		t.Fatalf("an unclassified failure spent fail_count = %d of the bound, want 1 - an "+
+			"unrecognised rejection must cost CPU, never a file nobody revisits", got)
+	}
+	if got := failedRow(t, ts, src).Outcome.FailureClass; got != store.FailureTransient {
+		t.Errorf("an unclassified failure reads back as %q, want %q", got, store.FailureTransient)
+	}
+
+	// And it is genuinely retried: the next pass claims the file and reaches the encoder.
+	calls := 0
+	enc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
+		calls++
+		return errFake
+	})
+	prober := probe.New(ffmpeg, ffprobe)
+	eng := New(cfg, prober, enc, ts, discardLogger())
+	if err := eng.RunOneshot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Errorf("the next pass reached the encoder %d times, want 1 - an unclassified failure "+
+			"was treated as parked", calls)
+	}
+}
+
+// finishBlockedStore is a store whose terminal write can be made to fail on demand,
+// leaving everything else real. It is the only way to drive the one window that matters
+// here: the park was DECIDED and could not be made durable.
+type finishBlockedStore struct {
+	*testStore
+	blocking bool
+	blocked  int
+}
+
+func (s *finishBlockedStore) Finish(ctx context.Context, path, fingerprint string, st store.Status, o *store.Outcome, maxFailures int) error {
+	if s.blocking {
+		s.blocked++
+		return errors.New("simulated store failure: the terminal row could not be written")
+	}
+	return s.testStore.Finish(ctx, path, fingerprint, st, o, maxFailures)
+}
+
+// TestFailure_AParkThatCouldNotBeWrittenIsNotAPark.
+//
+// The park is a durable fact or it is nothing. If the write that records it fails, the
+// process must not behave as though the file were parked: nothing on disk was touched,
+// so a later pass meeting the same file is free to attempt it again, and it is a later
+// pass - not this one - that gets to decide. A park that existed only in a process that
+// has since exited would be a file quietly dropped from the library.
+func TestFailure_AParkThatCouldNotBeWrittenIsNotAPark(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, ffmpeg, src, "300k")
+	before := md5f(t, src)
+	big := biggerThanItsSource(t, ffmpeg, src)
+
+	calls := 0
+	enc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
+		calls++
+		b, err := os.ReadFile(big)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(out, b, 0o644)
+	})
+
+	ts := newTestStore(t, d)
+	blocked := &finishBlockedStore{testStore: ts, blocking: true}
+	cfg := baseCfg(d)
+	cfg.MaxFailures = 3
+	prober := probe.New(ffmpeg, ffprobe)
+	scan := func() {
+		eng := New(cfg, prober, enc, blocked, discardLogger())
+		if err := eng.RunOneshot(context.Background()); err != nil {
+			t.Fatalf("a failed terminal write must not take the run down: %v", err)
+		}
+	}
+
+	scan()
+	if blocked.blocked == 0 {
+		t.Fatal("the terminal write was never attempted, so this proves nothing about it failing")
+	}
+	// The source is byte-for-byte intact and nothing was left behind.
+	if md5f(t, src) != before {
+		t.Error("the source changed when the park could not be recorded")
+	}
+	if codecOf(t, ffprobe, src) != "h264" {
+		t.Error("the source was swapped for the rejected encode")
+	}
+	if nTemp(t, d) != 0 {
+		t.Error("a temp was left behind when the park could not be recorded")
+	}
+	// And NOTHING is parked: no durable record of the park exists.
+	if got := failCount(t, ts, "movie.mkv"); got != 0 {
+		t.Errorf("fail_count = %d after a park that was never written, want 0", got)
+	}
+
+	// A later pass is free to attempt the file again - and now that the store is
+	// healthy, that attempt is the one that parks it.
+	blocked.blocking = false
+	scan()
+	if calls != 2 {
+		t.Fatalf("the encoder ran %d times in total, want 2 - a park that was never recorded "+
+			"must not hold the file out of a later pass", calls)
+	}
+	if got := failCount(t, ts, "movie.mkv"); got != cfg.MaxFailures {
+		t.Errorf("fail_count = %d after the park was recorded for real, want %d", got, cfg.MaxFailures)
+	}
+}

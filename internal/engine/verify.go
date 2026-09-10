@@ -6,6 +6,7 @@ import (
 	"math"
 
 	"github.com/NSchatz/holdfast/internal/probe"
+	"github.com/NSchatz/holdfast/internal/store"
 	"github.com/NSchatz/holdfast/internal/vmaf"
 )
 
@@ -52,54 +53,88 @@ type vmafProof struct {
 	ChromaMetric string
 }
 
-// verifyOutput returns the VMAF proof it measured alongside its pass/fail error. The
-// error is what governs the gate, exactly as before; the proof is evidence, and is
-// returned on the REJECT paths too — a VMAF rejection whose score is then thrown away
-// would be re-committing the very defect this phase exists to fix. The proof is the
-// zero value whenever VMAF did not run.
-func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (vmafProof, error) {
+// verifyOutput returns the VMAF proof it measured, and the CLASS of the rejection,
+// alongside its pass/fail error. The error is what governs the gate, exactly as before;
+// the proof is evidence, and is returned on the REJECT paths too — a VMAF rejection whose
+// score is then thrown away would be re-committing the very defect this phase exists to
+// fix. The proof is the zero value whenever VMAF did not run.
+//
+// # The class, and why it is produced HERE
+//
+// Most of what this function refuses is a pure function of three things that do not move
+// between attempts: the source bytes, the configuration, and the pinned ffmpeg build.
+// An output that came out bigger than its source comes out bigger again; a source whose
+// audio track the encoder drops drops it again. Retrying those costs a full encode each -
+// hours on a feature-length source at preset slow - to reach a verdict that was final the
+// first time. So each rejection says which kind it is, and the recording site parks the
+// final ones at once (see ProcessFile, store.Finish).
+//
+// It is carried OUT of the gate beside the error rather than re-derived from the error
+// text afterwards, and that is the whole design. A classifier that matched on strings
+// would be a second, silently-drifting copy of this function's verdicts: reword a message
+// here and a file that should park would retry for ever, or worse, a file that should
+// retry would park - and nothing would fail. The class travels with the verdict because
+// only the line that produced the verdict knows what it means.
+//
+// The class is meaningful ONLY beside a non-nil error; a passing gate returns the zero
+// value, which nothing reads. Every rejection this function does NOT classify explicitly
+// is transient, which is the fail-safe direction: an unrecognised rejection costs CPU,
+// where a wrongly-final one costs a file nobody revisits.
+func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (vmafProof, store.FailureClass, error) {
 	var none vmafProof
 
-	// 1. exists & non-empty
+	// 1. exists & non-empty. TRANSIENT: an empty temp is what a full disk, a killed
+	// ffmpeg or a write that never landed leaves behind, and none of those is a
+	// property of the source.
 	if probe.FileSize(tmp) <= 0 {
-		return none, fmt.Errorf("temp missing or empty")
+		return none, store.FailureTransient, fmt.Errorf("temp missing or empty")
 	}
 
 	// 2. output codec must be the engine's configured target codec (hevc or av1 —
 	// TRANSCODE-6 generalizes this away from a hardcoded "hevc" so a hardware/AV1
-	// encode is held to exactly the same bar as CPU libx265).
+	// encode is held to exactly the same bar as CPU libx265). DETERMINISTIC: the
+	// configured encoder produces the codec it produces.
 	if oc := e.Probe.VideoCodec(ctx, tmp); oc != e.targetCodec {
-		return none, fmt.Errorf("output codec is %q, not %s", oc, e.targetCodec)
+		return none, store.FailureDeterministic, fmt.Errorf("output codec is %q, not %s", oc, e.targetCodec)
 	}
 
-	// 3. length: the encode must not be truncated.
-	if err := e.lengthParity(ctx, in, tmp); err != nil {
-		return none, err
+	// 3. length: the encode must not be truncated. lengthParity classifies its own two
+	// rejections (both deterministic).
+	if class, err := e.lengthParity(ctx, in, tmp); err != nil {
+		return none, class, err
 	}
 
-	// 4. size: reclaiming space is the whole point.
+	// 4. size: reclaiming space is the whole point. DETERMINISTIC, and the headline
+	// case: a source this configuration cannot beat - an already-efficient encode, a
+	// grain-heavy master, anything at a bitrate the CRF cannot undercut - produces the
+	// identical arithmetic on every attempt.
 	sin := probe.FileSize(in)
 	sout := probe.FileSize(tmp)
 	limit := float64(sin) * (1 - float64(e.Cfg.MinSavingsPercent)/100.0)
 	if !(sout > 0 && float64(sout) <= limit && sout < sin) {
-		return none, fmt.Errorf("size-increase reject (in=%dB out=%dB min_savings=%d%%)", sin, sout, e.Cfg.MinSavingsPercent)
+		return none, store.FailureDeterministic, fmt.Errorf("size-increase reject (in=%dB out=%dB min_savings=%d%%)", sin, sout, e.Cfg.MinSavingsPercent)
 	}
 
 	// 5. per-type stream-count parity: no audio/subtitle/attachment track dropped.
 	// Size + duration + a clean decode can all pass while a track was silently lost.
 	// The encode maps every stream but data, so a/s/t counts must not fall below the
-	// source. Data streams are dropped on purpose and never counted.
+	// source. Data streams are dropped on purpose and never counted. DETERMINISTIC:
+	// which streams this source has, and which of them this build's mapping carries
+	// into this container, is fixed.
 	for _, typ := range []string{"a", "s", "t"} {
 		cin := e.Probe.StreamCount(ctx, in, typ)
 		cout := e.Probe.StreamCount(ctx, tmp, typ)
 		if cout < cin {
-			return none, fmt.Errorf("stream-count parity failed (type=%s in=%d out=%d — a track was dropped)", typ, cin, cout)
+			return none, store.FailureDeterministic, fmt.Errorf("stream-count parity failed (type=%s in=%d out=%d — a track was dropped)", typ, cin, cout)
 		}
 	}
 
-	// 6. decode-integrity healthcheck on EVERY encode.
+	// 6. decode-integrity healthcheck on EVERY encode. TRANSIENT: an output that does
+	// not fully decode is a damaged FILE, and the commonest ways to get one - a disk
+	// that filled, a process that was killed, a bit that flipped - are conditions of
+	// the run rather than properties of the source.
 	if !e.Probe.DecodeOK(ctx, tmp) {
-		return none, fmt.Errorf("decode-integrity check failed (output does not fully decode)")
+		return none, store.FailureTransient, fmt.Errorf("decode-integrity check failed (output does not fully decode)")
 	}
 
 	// 7. VMAF perceptual-quality gate (costliest — a second full decode — so last).
@@ -110,7 +145,7 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (vmafProof, e
 	if e.Cfg.VmafGate() {
 		return e.vmafGate(ctx, tmp, in)
 	}
-	return none, nil
+	return none, "", nil
 }
 
 // lengthParity is gate 3 on its own: an encode of `in` must not be TRUNCATED, so its
@@ -127,15 +162,20 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (vmafProof, e
 // frame count and a truncated encode has far fewer packets. Neither measurable is a
 // PASS - this gate cannot convict on evidence it does not have, and the layers around
 // it (decode integrity, stream counts, VMAF) are what cover that case.
-func (e *Engine) lengthParity(ctx context.Context, in, out string) error {
+// Both of its rejections are DETERMINISTIC: how long this source is, and how many video
+// packets it holds, are properties of the file, and this build's encode of it truncates
+// at the same place every time. It returns the class beside the error for the same reason
+// verifyOutput does - the verdict and what it means travel together, never a text match
+// afterwards - and the class is meaningful only when the error is non-nil.
+func (e *Engine) lengthParity(ctx context.Context, in, out string) (store.FailureClass, error) {
 	din, okIn := e.Probe.DurationSec(ctx, in)
 	dout, okOut := e.Probe.DurationSec(ctx, out)
 	if okIn && okOut {
 		// Both durations known: strict parity — a truncated encode is shorter.
 		if math.Abs(din-dout) > e.Cfg.DurationToleranceSec {
-			return fmt.Errorf("duration parity failed (in=%.3fs out=%.3fs tol=%gs)", din, dout, e.Cfg.DurationToleranceSec)
+			return store.FailureDeterministic, fmt.Errorf("duration parity failed (in=%.3fs out=%.3fs tol=%gs)", din, dout, e.Cfg.DurationToleranceSec)
 		}
-		return nil
+		return "", nil
 	}
 	// Duration unknown (e.g. MPEG-TS reports N/A) — use video-packet-count parity.
 	// Only enforce when the source is countable.
@@ -144,10 +184,10 @@ func (e *Engine) lengthParity(ctx context.Context, in, out string) error {
 	if okp && pin > 0 && okpo {
 		// Same tolerance as the bash: |pin-pout| <= pin*0.02 + 2.
 		if math.Abs(float64(pin-pout)) > float64(pin)*0.02+2 {
-			return fmt.Errorf("packet-count parity failed (in=%d out=%d — truncated encode?)", pin, pout)
+			return store.FailureDeterministic, fmt.Errorf("packet-count parity failed (in=%d out=%d — truncated encode?)", pin, pout)
 		}
 	}
-	return nil
+	return "", nil
 }
 
 // vmafGate measures the output (distorted) against the source (reference) - in ONE
@@ -177,7 +217,16 @@ func (e *Engine) lengthParity(ctx context.Context, in, out string) error {
 // alongside the gate error. The proof is returned on BOTH outcomes: a rejected encode
 // is exactly the case where an operator most wants to see the numbers that rejected
 // it, so it is persisted onto the failed row rather than living only in a log line.
-func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (vmafProof, error) {
+// Its rejections split cleanly, and the split is what the class exists to record. The
+// three FLOORS are deterministic: the same two files scored by the same model with the
+// same subsample produce the same numbers, so a retry buys another full encode and
+// another measurement to arrive at the identical comparison. The two rejections about the
+// MEASUREMENT ITSELF - libvmaf missing from the ffmpeg build, or a measurement that
+// failed - are transient: they are conditions of the installation and the run, and an
+// operator who installs a libvmaf-capable build has changed exactly the thing that
+// rejected. The unnameable comparison format is deterministic, because it is decided by
+// the two files' own pixel formats before anything is measured at all.
+func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (vmafProof, store.FailureClass, error) {
 	model := resolveVmafModel(e.Cfg.VmafModel, e.Probe.Height(ctx, distorted))
 
 	// Name the comparison format BEFORE anything is measured, from the two streams'
@@ -190,7 +239,7 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (vma
 	// encode and keeps the source.
 	pixFmt, ok := vmaf.ComparisonFormat(e.Probe.PixFmt(ctx, reference), e.Probe.PixFmt(ctx, distorted))
 	if !ok {
-		return vmafProof{}, fmt.Errorf(
+		return vmafProof{}, store.FailureDeterministic, fmt.Errorf(
 			"cannot name a comparison pixel format for source pix_fmt %q and output pix_fmt %q "+
 				"(refusing to score a pair whose comparison format would be chosen by filter negotiation)",
 			e.Probe.PixFmt(ctx, reference), e.Probe.PixFmt(ctx, distorted))
@@ -199,7 +248,7 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (vma
 	score := e.vmafScore
 	if score == nil {
 		if !vmaf.Available(ctx, e.Probe.FFmpeg) {
-			return vmafProof{}, fmt.Errorf("VMAF gate enabled but libvmaf is not available in the ffmpeg build (refusing to accept an unmeasured encode)")
+			return vmafProof{}, store.FailureTransient, fmt.Errorf("VMAF gate enabled but libvmaf is not available in the ffmpeg build (refusing to accept an unmeasured encode)")
 		}
 		score = func(ctx context.Context, req vmaf.Request) (vmaf.Result, error) {
 			return vmaf.Score(ctx, e.Probe.FFmpeg, req)
@@ -218,7 +267,7 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (vma
 		// zeroed one. (vmaf.Score already refuses a log missing ANY pooled statistic -
 		// TRANSCODE-11 for the luma pair, GATE-4 for the chroma planes - so this really
 		// is "no measurement", never a partial one scored on what did report.)
-		return vmafProof{}, fmt.Errorf("VMAF measurement failed (refusing to accept an unmeasured encode): %w", err)
+		return vmafProof{}, store.FailureTransient, fmt.Errorf("VMAF measurement failed (refusing to accept an unmeasured encode): %w", err)
 	}
 	proof := vmafProof{
 		Mean: &res.HarmonicMean, Min: &res.Min, Model: model,
@@ -226,13 +275,13 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (vma
 	}
 
 	if res.HarmonicMean < e.Cfg.MinVmaf {
-		return proof, fmt.Errorf("VMAF below threshold (harmonic_mean=%.2f < min_vmaf=%.2f)", res.HarmonicMean, e.Cfg.MinVmaf)
+		return proof, store.FailureDeterministic, fmt.Errorf("VMAF below threshold (harmonic_mean=%.2f < min_vmaf=%.2f)", res.HarmonicMean, e.Cfg.MinVmaf)
 	}
 	// The worst-frame floor. On by default (vmaf_min_pool=60): a locally-broken
 	// encode is invisible to the mean above and to every structural check, so this
 	// is the only gate standing between it and the deletion of the source.
 	if e.Cfg.VmafMinPool > 0 && res.Min < e.Cfg.VmafMinPool {
-		return proof, fmt.Errorf(
+		return proof, store.FailureDeterministic, fmt.Errorf(
 			"VMAF worst-frame below floor (min=%.2f < vmaf_min_pool=%.2f) — the encode is locally broken: "+
 				"its average is fine (harmonic_mean=%.2f) but at least one frame collapsed, so the source is kept",
 			res.Min, e.Cfg.VmafMinPool, res.HarmonicMean)
@@ -247,13 +296,13 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (vma
 	// because "rejected" without them sends an operator to the logs to find out which
 	// of three gates fired.
 	if e.Cfg.VmafMinChroma > 0 && res.ChromaMin < e.Cfg.VmafMinChroma {
-		return proof, fmt.Errorf(
+		return proof, store.FailureDeterministic, fmt.Errorf(
 			"chroma below floor (%s=%.2f < vmaf_min_chroma=%.2f) - the encode is damaged in its COLOUR "+
 				"planes: its luma is fine (harmonic_mean=%.2f, worst frame=%.2f) and the VMAF model is "+
 				"luma-only, so nothing else would have seen this; the source is kept",
 			res.ChromaMetric, res.ChromaMin, e.Cfg.VmafMinChroma, res.HarmonicMean, res.Min)
 	}
-	return proof, nil
+	return proof, "", nil
 }
 
 // resolveVmafModel maps the config VmafModel to a libvmaf model spec. "auto"/""

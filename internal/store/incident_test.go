@@ -436,7 +436,7 @@ func TestAggregates_TheTwoSwapOutcomesAreCountedAsThemselves(t *testing.T) {
 	if ok, err := s.Claim(ctx, "/lib/ordinary.mkv", "fp1", "w0", 3); err != nil || !ok {
 		t.Fatalf("Claim: ok=%v err=%v", ok, err)
 	}
-	if err := s.Finish(ctx, "/lib/ordinary.mkv", "fp1", Failed, &Outcome{Reason: "encode error"}); err != nil {
+	if err := s.Finish(ctx, "/lib/ordinary.mkv", "fp1", Failed, &Outcome{Reason: "encode error"}, 3); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 

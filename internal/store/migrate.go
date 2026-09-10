@@ -300,6 +300,33 @@ CREATE INDEX IF NOT EXISTS idx_incidents_excluded ON swap_incidents(replacement_
 ALTER TABLE jobs ADD COLUMN source_codec TEXT;
 `,
 	},
+	{
+		// v9 - the class of a terminal failure: whether a re-attempt could differ.
+		//
+		// One nullable TEXT column holding a two-value vocabulary (store.FailureClass).
+		// It is a column on jobs rather than a table of its own because its lifetime IS
+		// the row's: it describes THIS attempt's verdict, Claim clears it when a new
+		// attempt begins, and a successful transcode prunes it with everything else the
+		// attempt recorded.
+		//
+		// NULLABLE with NO DEFAULT, which is the rule v2 set and every step since has
+		// kept - but here the reason is the opposite of the usual one. Elsewhere a
+		// DEFAULT would invent evidence; here NULL is not "unknown" at all, because
+		// there is no unknown class to represent: an absent class READS as transient
+		// (FailureClass.Class), which is the retry direction and the only fail-safe one.
+		// Every failure row already in the field was written by a build that retried
+		// every failure alike, so reading them as transient is not a fallback, it is
+		// exactly what those rows mean. A backfill would be a rewrite of history with
+		// nothing to gain: the read already answers correctly, and no row's behaviour
+		// under Claim changes.
+		//
+		// No index. Nothing queries BY the class: Claim keys on (path, fingerprint) and
+		// decides on fail_count alone, and every other reader has the row in hand.
+		name: "failure class",
+		sql: `
+ALTER TABLE jobs ADD COLUMN failure_class TEXT;
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

@@ -73,7 +73,7 @@ func seedRow(t *testing.T, ts *testStore, path string, st store.Status, o *store
 	if _, err := ts.Claim(ctx, path, "seed", "w0", 3); err != nil {
 		t.Fatalf("seed claim %s: %v", path, err)
 	}
-	if err := ts.Finish(ctx, path, "seed", st, o); err != nil {
+	if err := ts.Finish(ctx, path, "seed", st, o, 3); err != nil {
 		t.Fatalf("seed finish %s: %v", path, err)
 	}
 }
@@ -89,7 +89,7 @@ func seedRowForRealFile(t *testing.T, ts *testStore, path string, st store.Statu
 	if err != nil || !ok {
 		t.Fatalf("seed claim %s: ok=%v err=%v", path, ok, err)
 	}
-	if err := ts.Finish(ctx, path, key, st, o); err != nil {
+	if err := ts.Finish(ctx, path, key, st, o, 3); err != nil {
 		t.Fatalf("seed finish %s: %v", path, err)
 	}
 }
@@ -181,7 +181,7 @@ func parkFile(t *testing.T, ts *testStore, path string, maxFailures int) {
 		if !ok {
 			t.Fatalf("park claim %s refused on attempt %d", path, i+1)
 		}
-		if err := ts.Finish(ctx, path, key, store.Failed, &store.Outcome{Reason: "simulated"}); err != nil {
+		if err := ts.Finish(ctx, path, key, store.Failed, &store.Outcome{Reason: "simulated"}, 3); err != nil {
 			t.Fatalf("park finish %s: %v", path, err)
 		}
 	}
