@@ -43,6 +43,7 @@ IMAGE    ?= holdfast:dev
 PLATFORM ?= linux/amd64
 
 .PHONY: build test check fmt vet staticcheck govulncheck govulncheck-selftest \
+        comment-density \
         check-pins check-pins-selftest install-ffmpeg-selftest check-pin-live \
         find-browser find-browser-selftest \
         release-shape release-shape-selftest \
@@ -176,8 +177,16 @@ webui-check:
 webui-graders-selftest:
 	./scripts/webui-graders-selftest.sh
 
+# The prose ceiling on Go source, and the ranked table it is decided from. Counting is
+# by TOKENS - the Go parser decides what a comment is - and the ceiling, the warn band
+# and the exemption list all live in internal/commentdensity, never here: a threshold
+# written in two places is a threshold that drifts. docs/comment-density.md carries the
+# measurement it was derived from.
+comment-density:
+	go run ./scripts/comment-density-gate
+
 # THE gate. CI and the release workflow both run exactly this.
-check: check-pins check-pins-selftest install-ffmpeg-selftest find-browser-selftest release-shape webui-stale fmt vet build test staticcheck govulncheck govulncheck-selftest
+check: check-pins check-pins-selftest install-ffmpeg-selftest find-browser-selftest release-shape webui-stale comment-density fmt vet build test staticcheck govulncheck govulncheck-selftest
 
 # Asks UPSTREAM whether the pinned ffmpeg release is still served. Deliberately NOT part
 # of `check`: the PR gate must not red because a third party had a bad afternoon. CI runs
