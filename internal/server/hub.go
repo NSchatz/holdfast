@@ -146,6 +146,22 @@ type jobDTO struct {
 	// SwapCause names a swap failure's cause when it is one holdfast reports
 	// distinctly - today only "cross-filesystem". Absent for every other failure.
 	SwapCause string `json:"swap_cause,omitempty"`
+
+	// Which library profile decided this file: the cleaned path of the root it was
+	// enumerated under, and a digest of that root's resolved overridable knobs.
+	//
+	// Both are POINTERS and deliberately not omitempty, for the reason source_codec is:
+	// they ARE the fact rather than a companion to one, so a row that simply dropped the
+	// key would leave a client deciding for itself whether nothing was recorded or the
+	// field had gone away. An explicit JSON null says which. A row written before
+	// per-library profiles existed carries two nulls - never a fabricated root, and
+	// never a digest of whatever the configuration says now.
+	//
+	// The digest travels WITH the root because the root alone stops being interpretable
+	// the moment its profile is edited: the row would go on naming /mnt/tv while /mnt/tv
+	// now means something else.
+	LibraryRoot   *string `json:"library_root"`
+	ProfileDigest *string `json:"profile_digest"`
 }
 
 func toDTOs(jobs []store.Job) []jobDTO {
@@ -177,6 +193,9 @@ func toDTOs(jobs []store.Job) []jobDTO {
 			GuardTimeResolution: j.Outcome.GuardTimeResolution,
 			GuardResidualWindow: j.Outcome.GuardResidualWindow,
 			SwapCause:           j.Outcome.SwapCause,
+
+			LibraryRoot:   nullableText(j.Outcome.LibraryRoot),
+			ProfileDigest: nullableText(j.Outcome.ProfileDigest),
 		})
 	}
 	return out

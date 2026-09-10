@@ -330,7 +330,8 @@ func TestRequeue_ReopensAMultiVideoStreamRow(t *testing.T) {
 
 	// The row exactly as the guard writes it, built by the guard's own helper: the token,
 	// and the empty set of decision inputs that a verdict no key can move records.
-	seedTerminal(t, ts, path, store.Skipped, (&Engine{Cfg: cfg}).because(SkipMultiVideoStream))
+	seedTerminal(t, ts, path, store.Skipped,
+		(&Engine{Cfg: cfg}).because(SkipMultiVideoStream, store.Decision{}, cfg.TopLevelProfile()))
 
 	// The precondition that makes this the case requeue exists for: a MOVED configuration
 	// re-opens nothing here, because the row read nothing for a new value to disagree with.
@@ -372,7 +373,7 @@ func TestRequeue_ReopensAMultiVideoStreamRow(t *testing.T) {
 func TestRequeue_LeavesRestoredOriginalAlone(t *testing.T) {
 	ts := requeueStore(t)
 	ctx := context.Background()
-	if _, err := ts.RecordSkip(ctx, "/lib/rescued.mkv", "fp", SkipRestoredOriginal); err != nil {
+	if _, err := ts.RecordSkip(ctx, "/lib/rescued.mkv", "fp", SkipRestoredOriginal, store.Decision{}); err != nil {
 		t.Fatalf("RecordSkip: %v", err)
 	}
 	seedTerminal(t, ts, "/lib/ordinary.mkv", store.Skipped,

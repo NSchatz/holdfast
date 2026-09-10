@@ -320,12 +320,15 @@ func readableNow(path string) error {
 // couldThisBuildHaveWrittenIt reports whether codec is one ffprobe would report for an
 // output SOME encoder this build ships could have produced.
 //
-// It is deliberately the whole registry and not e.targetCodec. targetCodec is derived
-// from cfg.Encoder in New, and a replacement stranded on disk was written by whichever
-// encoder was configured when it was written - so asking about the current key would
-// make AC15i's protection turn on a setting that has nothing to do with the file, in
-// exactly the way the criterion forbids it to turn on a record ("holding it SHALL NOT
-// depend on one, since the write that failed is exactly what denied it").
+// It is deliberately the whole registry and not one profile's target codec. A target
+// codec is derived from a root profile's `encoder` (targetCodecFor), and a replacement
+// stranded on disk was written by whichever encoder was configured for whichever root it
+// lay under when it was written - so asking about a current key would make AC15i's
+// protection turn on a setting that has nothing to do with the file, in exactly the way
+// the criterion forbids it to turn on a record ("holding it SHALL NOT depend on one,
+// since the write that failed is exactly what denied it"). Per-root profiles make that
+// argument stronger, not weaker: there is now more than one current key to be wrong
+// about.
 //
 // "h265" is ffprobe's legacy alias for hevc and is accepted for the same reason
 // isAlreadyTargetCodec accepts it: the question is what the file IS.

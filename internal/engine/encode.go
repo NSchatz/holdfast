@@ -32,6 +32,21 @@ type Encoder interface {
 	Encode(ctx context.Context, in, out string, props *probe.VideoProps) error
 }
 
+// ProfileEncoder is an Encoder whose output depends on the LIBRARY PROFILE deciding the
+// file rather than on one global configuration. The engine hands it the resolved profile
+// of the root the file was enumerated under and encodes with what comes back.
+//
+// It is a separate, optional interface rather than a parameter on Encode because an
+// Encoder that has no per-root behaviour has nothing to do with a profile: a test's
+// deterministic fake writes the bytes it was told to write, and forcing every one of
+// them to accept and ignore a profile would say the opposite. ForProfile must return an
+// Encoder equivalent to the receiver in every respect but the profile's knobs, and must
+// not mutate the receiver - the engine's workers share one Encoder across goroutines.
+type ProfileEncoder interface {
+	Encoder
+	ForProfile(prof config.Profile) Encoder
+}
+
 // EncoderFunc adapts a plain function to Encoder (used by tests).
 type EncoderFunc func(ctx context.Context, in, out string, props *probe.VideoProps) error
 
@@ -61,12 +76,46 @@ type FFmpegEncoder struct {
 	Cfg    config.Config
 	Probe  *probe.Prober
 
+	// Prof is the LIBRARY PROFILE this encoder builds an encode from - the resolved
+	// knobs of the root the file was enumerated under. The engine sets it per file
+	// through ForProfile; nil means "the top-level values of Cfg", which is what an
+	// encoder constructed directly (and every configuration written before profiles
+	// existed) encodes at.
+	Prof *config.Profile
+
 	// newProgressPipe, when non-nil, replaces os.Pipe when opening the channel ffmpeg
 	// writes -progress reports to. Unexported test seam (the engine tests are in this
 	// package): returning an error from it is how a test drives the "progress collection
 	// could not be started at all" path, which must degrade to exactly the encode this
 	// package performed before progress existed. Production leaves it nil.
 	newProgressPipe func() (r *os.File, w *os.File, err error)
+
+	// argvObserver, when non-nil, receives the full ffmpeg argv immediately before the
+	// subprocess starts. Unexported test seam (the engine tests are in this package),
+	// nil in production, and it exists for one question no output file can answer:
+	// WHICH PROFILE built this encode. Two roots at different CRFs both produce a valid
+	// hevc file of the same source, so the argv is the only place the difference is
+	// visible - and it is the real argv the production encoder assembled, not a
+	// re-derivation of it.
+	argvObserver func(args []string)
+}
+
+// ForProfile returns this encoder built from prof's knobs. The receiver is a VALUE, so
+// the copy is the whole of the isolation the engine's workers need: several files under
+// several roots encode concurrently and none of them can see another's profile.
+func (e FFmpegEncoder) ForProfile(prof config.Profile) Encoder {
+	e.Prof = &prof
+	return e
+}
+
+// profile is the knobs this encoder builds an encode from: the library profile the
+// engine handed it, or - for an encoder constructed without one - the top-level values
+// of the configuration it was built with.
+func (e FFmpegEncoder) profile() config.Profile {
+	if e.Prof != nil {
+		return *e.Prof
+	}
+	return e.Cfg.TopLevelProfile()
 }
 
 // Encode runs ffmpeg. It returns an error if the configured encoder is unknown, if
@@ -91,9 +140,10 @@ func (e FFmpegEncoder) Encode(ctx context.Context, in, out string, props *probe.
 // pipe cannot be opened at all, the -progress option is simply not passed and the encode
 // runs precisely as it did before this existed.
 func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, props *probe.VideoProps, sink ProgressSink) error {
-	spec, ok := encoder.Lookup(e.Cfg.Encoder)
+	prof := e.profile()
+	spec, ok := encoder.Lookup(prof.Encoder)
 	if !ok {
-		return fmt.Errorf("unknown encoder %q (known: %v)", e.Cfg.Encoder, encoder.Known())
+		return fmt.Errorf("unknown encoder %q (known: %v)", prof.Encoder, encoder.Known())
 	}
 	if e.Probe == nil {
 		return fmt.Errorf("FFmpegEncoder.Probe is nil (required to derive colour/pixel-format args from the source)")
@@ -106,8 +156,8 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 		props = e.Probe.VideoProps(ctx, in)
 	}
 
-	pixFmt := e.Cfg.PixelFormat
-	if e.Cfg.PixelFormatAuto() {
+	pixFmt := prof.PixelFormat
+	if prof.PixelFormatAuto() {
 		derived, ok := hdr.DerivePixFmt(props.PixFmt())
 		if !ok {
 			// The engine's pix_fmt guard runs before Encode and should already have
@@ -175,8 +225,12 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 	for _, i := range attachedPictureCopyIndexes(streams) {
 		args = append(args, "-c:v:"+strconv.Itoa(i), "copy")
 	}
-	args = append(args, buildArgs(spec, e.Cfg, pixFmt, colorArgs, x265Color)...)
+	args = append(args, buildArgs(spec, prof, pixFmt, colorArgs, x265Color)...)
 	args = append(args, "--", out)
+
+	if e.argvObserver != nil {
+		e.argvObserver(args)
+	}
 
 	cmd := exec.CommandContext(ctx, e.FFmpeg, args...)
 	// exec.Cmd.CombinedOutput is exactly this: one buffer behind both streams, then
@@ -280,7 +334,7 @@ func closeProgressPipe(r, w *os.File) {
 //     ever running unless a real device is present; the arg shape is reasonable
 //     but not battle-tested.
 //   - hevc_amf: -rc cqp -qp_i <CRF> -qp_p <CRF>.
-func buildArgs(spec encoder.Spec, cfg config.Config, pixFmt string, colorArgs []string, x265Color string) []string {
+func buildArgs(spec encoder.Spec, cfg config.Profile, pixFmt string, colorArgs []string, x265Color string) []string {
 	args := []string{"-pix_fmt", pixFmt}
 	args = append(args, colorArgs...)
 	args = append(args, "-fps_mode", "passthrough") // a VFR source is not forced to CFR

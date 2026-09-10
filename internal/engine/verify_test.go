@@ -579,7 +579,8 @@ func TestVerify_EveryRejectionCarriesTheClassOfItsVerdict(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, class, err := eng.verifyOutput(context.Background(), tc.in, tc.tmp)
+			top := eng.Cfg.TopLevelProfile()
+			_, class, err := eng.verifyOutput(context.Background(), tc.in, tc.tmp, top, targetCodecFor(top))
 			if err == nil {
 				t.Fatalf("the gate ACCEPTED this pair; the case proves nothing about the class of a rejection")
 			}
@@ -628,7 +629,8 @@ func TestVerify_EveryRejectionCarriesTheClassOfItsVerdict(t *testing.T) {
 			t.Skipf("the control fixture did not come out smaller (%d >= %d), so it cannot pass the size gate",
 				probe.FileSize(good), probe.FileSize(src))
 		}
-		_, class, err := eng.verifyOutput(context.Background(), src, good)
+		top := eng.Cfg.TopLevelProfile()
+		_, class, err := eng.verifyOutput(context.Background(), src, good, top, targetCodecFor(top))
 		if err != nil {
 			t.Fatalf("the gate rejected a faithful smaller HEVC encode: %v", err)
 		}
@@ -700,7 +702,7 @@ func TestVmafGate_FloorsAreFinalAndAnUnmeasurableRunIsNot(t *testing.T) {
 				}
 				return tc.result, nil
 			}
-			_, class, err := eng.vmafGate(context.Background(), src, src)
+			_, class, err := eng.vmafGate(context.Background(), src, src, eng.Cfg.TopLevelProfile())
 			if err == nil {
 				t.Fatal("the gate accepted this measurement; the case proves nothing about a rejection")
 			}
@@ -720,7 +722,7 @@ func TestVmafGate_FloorsAreFinalAndAnUnmeasurableRunIsNot(t *testing.T) {
 		c.MinVmaf, c.VmafMinPool, c.VmafMinChroma = 95, 60, 30
 	})
 	eng.vmafScore = func(context.Context, vmaf.Request) (vmaf.Result, error) { return passing(), nil }
-	if _, class, err := eng.vmafGate(context.Background(), src, src); err != nil || class != "" {
+	if _, class, err := eng.vmafGate(context.Background(), src, src, eng.Cfg.TopLevelProfile()); err != nil || class != "" {
 		t.Errorf("a passing measurement produced err=%v class=%q, want no rejection and no class", err, class)
 	}
 }
@@ -776,7 +778,7 @@ func TestVmafGate_UnnameableComparisonFormatIsARejection(t *testing.T) {
 		return passing(), nil
 	}
 
-	proof, class, err := eng.vmafGate(context.Background(), normal, exotic)
+	proof, class, err := eng.vmafGate(context.Background(), normal, exotic, eng.Cfg.TopLevelProfile())
 	if err == nil {
 		t.Fatal("vmafGate accepted a pair whose comparison format cannot be named")
 	}
@@ -800,7 +802,7 @@ func TestVmafGate_UnnameableComparisonFormatIsARejection(t *testing.T) {
 
 	// Anti-vacuity: the SAME gate over a nameable pair reaches the scorer and passes.
 	called = false
-	if _, _, err := eng.vmafGate(context.Background(), normal, normal); err != nil {
+	if _, _, err := eng.vmafGate(context.Background(), normal, normal, eng.Cfg.TopLevelProfile()); err != nil {
 		t.Fatalf("the nameable-pair control failed (%v) - the case above proves nothing", err)
 	}
 	if !called {
