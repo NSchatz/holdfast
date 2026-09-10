@@ -13,15 +13,13 @@ import (
 // discarded so the terminal ledger row can keep it. Its zero value means the gate did not
 // run, which is why the scores are pointers: nil is "not measured" and 0.0 is a real,
 // terrible score, and collapsing the two is how a store ends up displaying a fabricated
-// fidelity number. Every field here is a FACT ABOUT THE MEASUREMENT - the model that
-// produced the score, the format the comparison was made in, the chroma statistic - because
-// nobody reading a stored 98.4 can otherwise say which pixels were compared or whether the
-// colour survived.
+// fidelity number. Every field here is a FACT ABOUT THE MEASUREMENT - the model actually
+// passed to the filter rather than the config's possibly-"auto" request, the format the
+// comparison was made in, the chroma statistic - because nobody reading a stored 98.4 can
+// otherwise say which pixels were compared or whether the colour survived.
 type vmafProof struct {
-	Mean *float64
-	Min  *float64
-	// Model is the spec actually passed to the filter, not the config's possibly-"auto"
-	// request.
+	Mean  *float64
+	Min   *float64
 	Model string
 
 	// PixFmt is the pixel format BOTH streams were converted to before scoring, named by
