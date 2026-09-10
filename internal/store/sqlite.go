@@ -457,7 +457,7 @@ func (s *outcomeScan) outcome() Outcome {
 		SourceCodec:     s.srcCodec.String,
 		GuardAttributes: s.guardAttrs.String, GuardTimeResolution: s.guardRes.String,
 		GuardResidualWindow: s.guardWindow.String, SwapCause: s.swapCause.String,
-		FailureClass:        FailureClass(s.failClass.String).Class(),
+		FailureClass: FailureClass(s.failClass.String).Class(),
 	}
 	o.VmafMean = nullableFloat(s.mean)
 	o.VmafMin = nullableFloat(s.worst)
