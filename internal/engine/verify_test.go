@@ -288,12 +288,19 @@ func TestVmafGate_UnnameableComparisonFormatIsARejection(t *testing.T) {
 		return passing(), nil
 	}
 
-	proof, err := eng.vmafGate(context.Background(), normal, exotic)
+	proof, class, err := eng.vmafGate(context.Background(), normal, exotic)
 	if err == nil {
 		t.Fatal("vmafGate accepted a pair whose comparison format cannot be named")
 	}
 	if called {
 		t.Error("the scorer ran for a pair whose comparison format could not be named")
+	}
+	// The pair's own pixel formats decide this, before anything is measured: no retry
+	// under this configuration reaches a different answer.
+	if class != store.FailureDeterministic {
+		t.Errorf("class = %q, want %q - the comparison format is derived from the two "+
+			"files' own pix_fmts, so a re-encode cannot change the verdict",
+			class, store.FailureDeterministic)
 	}
 	if !strings.Contains(err.Error(), "comparison pixel format") || !strings.Contains(err.Error(), "yuv411p") {
 		t.Errorf("the error must say the comparison format could not be named, and name the "+
@@ -305,7 +312,7 @@ func TestVmafGate_UnnameableComparisonFormatIsARejection(t *testing.T) {
 
 	// Anti-vacuity: the SAME gate over a nameable pair reaches the scorer and passes.
 	called = false
-	if _, err := eng.vmafGate(context.Background(), normal, normal); err != nil {
+	if _, _, err := eng.vmafGate(context.Background(), normal, normal); err != nil {
 		t.Fatalf("the nameable-pair control failed (%v) - the case above proves nothing", err)
 	}
 	if !called {

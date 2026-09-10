@@ -201,7 +201,7 @@ func TestMigrate_V0DatabaseOnDiskGainsTheOutcomeColumns(t *testing.T) {
 	if err := s.Finish(ctx, "/lib/fresh.mkv", "50:500", Done, &Outcome{
 		Encoder: "cpu", VmafMean: f64(97.0), VmafMin: f64(90.0), VmafModel: "version=vmaf_v0.6.1",
 		SourceBytes: i64(1000), OutputBytes: i64(400), EncodeMs: i64(999),
-	}); err != nil {
+	}, 3); err != nil {
 		t.Fatalf("Finish on a migrated database: %v", err)
 	}
 	got, err := s.List(ctx, []Status{Done}, 0)
@@ -535,7 +535,7 @@ func TestMigrate_PreGate4DatabaseGainsTheNewColumnsUnbackfilled(t *testing.T) {
 	if err := s.Finish(ctx, "/lib/fresh.mkv", "50:500", Done, &Outcome{
 		Encoder: "cpu", VmafMean: f64(98.4), VmafMin: f64(96.1), VmafModel: "version=vmaf_v0.6.1",
 		VmafPixFmt: "yuv420p10le", VmafChroma: f64(41.2), VmafChromaMetric: "psnr_cb/psnr_cr min (dB)",
-	}); err != nil {
+	}, 3); err != nil {
 		t.Fatalf("Finish on a migrated database: %v", err)
 	}
 	after, err := s.List(ctx, []Status{Done}, 0)

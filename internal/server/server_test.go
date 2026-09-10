@@ -39,7 +39,7 @@ func newStore(t *testing.T) *store.SQLite {
 		t.Fatal(err)
 	}
 	mustClaim(t, st, "/lib/done.mkv", "2:2")
-	if err := st.Finish(ctx, "/lib/done.mkv", "2:2", store.Done, nil); err != nil {
+	if err := st.Finish(ctx, "/lib/done.mkv", "2:2", store.Done, nil, 3); err != nil {
 		t.Fatal(err)
 	}
 	return st
@@ -280,7 +280,7 @@ func TestHub_ReclaimedLifetimeIsBaselinePlusSession(t *testing.T) {
 	mustClaim(t, st, "/lib/old.mkv", "9:9")
 	src, out := int64(5_000_000), int64(2_000_000)
 	if err := st.Finish(ctx, "/lib/old.mkv", "9:9", store.Done,
-		&store.Outcome{SourceBytes: &src, OutputBytes: &out}); err != nil {
+		&store.Outcome{SourceBytes: &src, OutputBytes: &out}, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -426,12 +426,12 @@ func TestHistoryEndpoint_ReturnsAReasonForFailedAndSkipped(t *testing.T) {
 
 	mustClaim(t, st, "/lib/broke.mkv", "3:3")
 	if err := st.Finish(ctx, "/lib/broke.mkv", "3:3", store.Failed,
-		&store.Outcome{Reason: "decode-integrity check failed (output does not fully decode)", Encoder: "cpu"}); err != nil {
+		&store.Outcome{Reason: "decode-integrity check failed (output does not fully decode)", Encoder: "cpu"}, 3); err != nil {
 		t.Fatal(err)
 	}
 	mustClaim(t, st, "/lib/thin.mkv", "4:4")
 	if err := st.Finish(ctx, "/lib/thin.mkv", "4:4", store.Skipped,
-		&store.Outcome{Reason: engine.SkipLowBitrate}); err != nil {
+		&store.Outcome{Reason: engine.SkipLowBitrate}, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -582,7 +582,7 @@ func TestHistoryEndpoint_UnrecordedOutcomeIsNullNotZero(t *testing.T) {
 	if err := st.Finish(ctx, "/lib/proved.mkv", "5:5", store.Done, &store.Outcome{
 		Encoder: "cpu", VmafMean: &mean, VmafMin: &min, VmafModel: "version=vmaf_v0.6.1",
 		SourceBytes: &src, OutputBytes: &out, EncodeMs: &ms,
-	}); err != nil {
+	}, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -634,7 +634,7 @@ func TestHistoryEndpoint_CarriesTheComparisonFormatAndChromaBesideTheScore(t *te
 	if err := st.Finish(ctx, "/lib/scored.mkv", "6:6", store.Done, &store.Outcome{
 		Encoder: "cpu", VmafMean: &mean, VmafMin: &worst, VmafModel: "version=vmaf_v0.6.1",
 		VmafPixFmt: "yuv420p10le", VmafChroma: &chroma, VmafChromaMetric: "psnr_cb/psnr_cr min (dB)",
-	}); err != nil {
+	}, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -682,7 +682,7 @@ func TestQueueEndpoint_InFlightRetryCarriesNoStaleProof(t *testing.T) {
 	mustClaim(t, st, "/lib/retry.mkv", "7:7")
 	if err := st.Finish(ctx, "/lib/retry.mkv", "7:7", store.Failed, &store.Outcome{
 		Reason: "VMAF worst-frame below floor", Encoder: "cpu", VmafMean: &mean, VmafMin: &min,
-	}); err != nil {
+	}, 3); err != nil {
 		t.Fatal(err)
 	}
 	// Retry: claim it again and put it in flight.
@@ -749,14 +749,14 @@ func seedOverCap(t *testing.T, st *store.SQLite) (done, skipped, queued int) {
 		if err := st.Finish(ctx, p, "d:d", store.Done, &store.Outcome{
 			Encoder: "cpu", VmafMean: &mean, VmafMin: &worst, VmafModel: "version=vmaf_v0.6.1",
 			SourceBytes: &src, OutputBytes: &out, EncodeMs: &ms,
-		}); err != nil {
+		}, 3); err != nil {
 			t.Fatalf("seed done: %v", err)
 		}
 	}
 	for i := 0; i < skipped; i++ {
 		p := "/lib/over/skip" + strconv.Itoa(i) + ".mkv"
 		mustClaim(t, st, p, "s:s")
-		if err := st.Finish(ctx, p, "s:s", store.Skipped, &store.Outcome{Reason: engine.SkipLowBitrate}); err != nil {
+		if err := st.Finish(ctx, p, "s:s", store.Skipped, &store.Outcome{Reason: engine.SkipLowBitrate}, 3); err != nil {
 			t.Fatalf("seed skipped: %v", err)
 		}
 	}
@@ -966,7 +966,7 @@ func TestSnapshot_TerminalJobStopsReportingProgress(t *testing.T) {
 
 	// The engine finishes the job: the store row goes terminal and a terminal event is
 	// emitted, exactly as ProcessFile does.
-	if err := h.st.Finish(context.Background(), "/lib/active.mkv", "1:1", store.Done, nil); err != nil {
+	if err := h.st.Finish(context.Background(), "/lib/active.mkv", "1:1", store.Done, nil, 3); err != nil {
 		t.Fatal(err)
 	}
 	h.hub.Observe(engine.Event{Path: "/lib/active.mkv", Status: store.Done})
@@ -1058,7 +1058,7 @@ func TestSnapshot_NoActiveJobsPublishNoLiveProgress(t *testing.T) {
 	h.hub.Observe(progressEvent("/lib/gone.mp4", 10, &dur))
 
 	// Everything finishes; the queue empties.
-	if err := h.st.Finish(ctx, "/lib/active.mkv", "1:1", store.Done, nil); err != nil {
+	if err := h.st.Finish(ctx, "/lib/active.mkv", "1:1", store.Done, nil, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1250,7 +1250,7 @@ func TestSnapshot_AnAggregateWithNoDataIsNullNotZero(t *testing.T) {
 	// A done row with NO recorded outcome: the shape of every row written before the
 	// outcome columns existed.
 	mustClaim(t, st, "/lib/unmeasured.mkv", "1:1")
-	if err := st.Finish(ctx, "/lib/unmeasured.mkv", "1:1", store.Done, nil); err != nil {
+	if err := st.Finish(ctx, "/lib/unmeasured.mkv", "1:1", store.Done, nil, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1364,7 +1364,7 @@ func TestSnapshot_AggregatesAddNoAuthorizationAndNoPerFileDatum(t *testing.T) {
 	mustClaim(t, h.st, "/lib/a-very-distinctive-path.mkv", "9:9")
 	src, out := int64(9_000_000), int64(3_000_000)
 	if err := h.st.Finish(ctx, "/lib/a-very-distinctive-path.mkv", "9:9", store.Done,
-		&store.Outcome{Encoder: "cpu", SourceBytes: &src, OutputBytes: &out}); err != nil {
+		&store.Outcome{Encoder: "cpu", SourceBytes: &src, OutputBytes: &out}, 3); err != nil {
 		t.Fatal(err)
 	}
 

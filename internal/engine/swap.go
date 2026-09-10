@@ -279,7 +279,7 @@ func (e *Engine) strayReplacementHold(ctx context.Context, path string) string {
 
 	// Question 5. It IS something this build could have written; all that is left is
 	// whether it is finished, and only the source beside it can say.
-	if err := e.lengthParity(ctx, src, path); err != nil {
+	if _, err := e.lengthParity(ctx, src, path); err != nil {
 		return "" // a truncated encode: work in progress, and the sweep's to take
 	}
 	return "a finished " + codec + " encode holdfast wrote, the length of the source beside it (" + filepath.Base(src) + ")"

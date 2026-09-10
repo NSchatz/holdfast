@@ -32,7 +32,7 @@ func seedTwoTerminalRows(t *testing.T, dbPath string) {
 		if err != nil || !ok {
 			t.Fatalf("seed claim %s: ok=%v err=%v", p, ok, err)
 		}
-		if err := st.Finish(ctx, p, "fp", Skipped, &Outcome{Reason: "already-at-target-codec"}); err != nil {
+		if err := st.Finish(ctx, p, "fp", Skipped, &Outcome{Reason: "already-at-target-codec"}, 3); err != nil {
 			t.Fatalf("seed finish %s: %v", p, err)
 		}
 	}
@@ -75,15 +75,14 @@ func windBackOneSchemaVersion(t *testing.T, path string) int {
 		t.Fatalf("raw open %s: %v", path, err)
 	}
 	defer func() { _ = db.Close() }()
-	// Exactly what the NEWEST migration added, undone. That is v8 (the source codec a
-	// dry-run decision records) and not v7 (FILESYSTEM-1's swap guard record and
-	// swap_incidents): this helper has to track the end of the migrations slice, because
-	// the whole point of it is to produce the database the PREVIOUS build wrote, and a
-	// wind-back that undid a step which is no longer the last one would leave a database
-	// Open migrates by re-running a step it has already run - which is a duplicate-column
-	// error, not an older ledger.
+	// Exactly what the NEWEST migration added, undone. That is v9 (the class of a
+	// terminal failure) and not the step before it: this helper has to track the END of
+	// the migrations slice, because the whole point of it is to produce the database the
+	// PREVIOUS build wrote, and a wind-back that undid a step which is no longer the last
+	// one would leave a database Open migrates by re-running a step it has already run -
+	// which is a duplicate-column error, not an older ledger.
 	for _, stmt := range []string{
-		`ALTER TABLE jobs DROP COLUMN source_codec`,
+		`ALTER TABLE jobs DROP COLUMN failure_class`,
 		fmt.Sprintf(`PRAGMA user_version = %d`, prev),
 	} {
 		if _, err := db.Exec(stmt); err != nil {
@@ -118,7 +117,7 @@ func TestOpenReadOnly_ReadsEveryRowAndRefusesEveryWrite(t *testing.T) {
 
 	// The refusal is the DRIVER's, not a rule in Go above it: mode=ro means no future
 	// caller can quietly reintroduce a write on this path.
-	if err := st.Finish(ctx, "/lib/a.mkv", "fp", Done, &Outcome{Encoder: "cpu"}); err == nil {
+	if err := st.Finish(ctx, "/lib/a.mkv", "fp", Done, &Outcome{Encoder: "cpu"}, 3); err == nil {
 		t.Error("a read-only handle accepted a write; `never writes to the store it reads` must be enforced, not promised")
 	}
 	if _, err := st.PruneTerminal(ctx, 1, 3, everyRowSpent); err == nil {

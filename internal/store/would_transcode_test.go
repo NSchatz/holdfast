@@ -36,7 +36,7 @@ func TestClaim_AWouldTranscodeRowIsClaimedByARunAllowedToTranscode(t *testing.T)
 	}
 	if err := s.Finish(ctx, path, fp, WouldTranscode, &Outcome{
 		SourceCodec: "h264", SourceBytes: i64(1_000_000),
-	}); err != nil {
+	}, 3); err != nil {
 		t.Fatalf("Finish(would-transcode): %v", err)
 	}
 	if st, _, _, err := s.Get(ctx, path, fp); err != nil || st != WouldTranscode {
@@ -81,7 +81,7 @@ func TestClaim_AWouldTranscodeRowIsClaimedByARunAllowedToTranscode(t *testing.T)
 	// The transcode then completes on the ordinary path.
 	if err := s.Finish(ctx, path, fp, Done, &Outcome{
 		Encoder: "cpu", SourceBytes: i64(1_000_000), OutputBytes: i64(250_000),
-	}); err != nil {
+	}, 3); err != nil {
 		t.Fatalf("Finish(done): %v", err)
 	}
 	if st, _, _, err := s.Get(ctx, path, fp); err != nil || st != Done {
@@ -113,7 +113,7 @@ func TestClaim_TwoDryRunsOverAnUnchangedFileReportOneCandidate(t *testing.T) {
 		}
 		if err := s.Finish(ctx, path, fp, WouldTranscode, &Outcome{
 			SourceCodec: "h264", SourceBytes: i64(4242),
-		}); err != nil {
+		}, 3); err != nil {
 			t.Fatalf("dry-run pass %d: Finish: %v", pass, err)
 		}
 	}
@@ -427,7 +427,7 @@ func TestMigrate_PreSourceCodecDatabaseOnDiskGainsTheColumnUnbackfilled(t *testi
 	}
 	if err := s.Finish(ctx, "/lib/fresh.mkv", "50:500", WouldTranscode, &Outcome{
 		SourceCodec: "h264", SourceBytes: i64(987654),
-	}); err != nil {
+	}, 3); err != nil {
 		t.Fatalf("Finish on a migrated database: %v", err)
 	}
 	after, err := s.List(ctx, []Status{WouldTranscode}, 0)

@@ -101,7 +101,7 @@ func TestMetrics_QueueDepthReadsStore(t *testing.T) {
 		}
 	}
 	if ok, _ := st.Claim(ctx, "/lib/c.mkv", "2:2", "w0", 3); ok {
-		_ = st.Finish(ctx, "/lib/c.mkv", "2:2", store.Done, nil)
+		_ = st.Finish(ctx, "/lib/c.mkv", "2:2", store.Done, nil, 3)
 	}
 
 	m := New(st)

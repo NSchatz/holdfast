@@ -89,7 +89,7 @@ func seedSkipped(t *testing.T, st *store.SQLite, root string, from, to int) {
 		if err != nil || !ok {
 			t.Fatalf("seed claim %s: ok=%v err=%v", p, ok, err)
 		}
-		if err := st.Finish(ctx, p, "fp", store.Skipped, &store.Outcome{Reason: engine.SkipLowBitrate}); err != nil {
+		if err := st.Finish(ctx, p, "fp", store.Skipped, &store.Outcome{Reason: engine.SkipLowBitrate}, 3); err != nil {
 			t.Fatalf("seed finish %s: %v", p, err)
 		}
 	}
@@ -263,7 +263,7 @@ func seedOneRowInEveryOtherState(t *testing.T, st *store.SQLite) {
 		{"/lib/state-failed.mkv", store.Failed},
 	} {
 		claim(c.path)
-		if err := st.Finish(ctx, c.path, "fp", c.to, &store.Outcome{Encoder: "cpu"}); err != nil {
+		if err := st.Finish(ctx, c.path, "fp", c.to, &store.Outcome{Encoder: "cpu"}, 3); err != nil {
 			t.Fatalf("seed finish %s as %s: %v", c.path, c.to, err)
 		}
 	}

@@ -63,7 +63,7 @@ func TestClaim_AfterDoneFails(t *testing.T) {
 	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
-	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Done, nil); err != nil {
+	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Done, nil, 3); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 	ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3)
@@ -81,7 +81,7 @@ func TestClaim_AfterSkippedFails(t *testing.T) {
 	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
-	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Skipped, nil); err != nil {
+	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Skipped, nil, 3); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 	ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3)
@@ -105,7 +105,7 @@ func TestClaim_FailedRetriesThenParks(t *testing.T) {
 		if !ok {
 			t.Fatalf("claim attempt %d: expected true (fail_count=%d < max=%d)", i, i-1, maxFailures)
 		}
-		if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Failed, nil); err != nil {
+		if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Failed, nil, 3); err != nil {
 			t.Fatalf("Finish attempt %d: %v", i, err)
 		}
 		_, fc, _, err := s.Get(ctx, "/a/movie.mkv", "fp1")
@@ -185,7 +185,7 @@ func TestRecoverStale_LeavesTerminalAndPendingAlone(t *testing.T) {
 	if ok, _ := s.Claim(ctx, "/a/done.mkv", "fp1", "w0", 3); !ok {
 		t.Fatal("claim done.mkv")
 	}
-	if err := s.Finish(ctx, "/a/done.mkv", "fp1", Done, nil); err != nil {
+	if err := s.Finish(ctx, "/a/done.mkv", "fp1", Done, nil, 3); err != nil {
 		t.Fatal(err)
 	}
 	n, err := s.RecoverStale(ctx)
@@ -288,7 +288,7 @@ func TestHammer_DifferentKeysNoDatabaseLocked(t *testing.T) {
 					errCh <- err
 					continue
 				}
-				if err := s.Finish(ctx, path, fp, Done, nil); err != nil {
+				if err := s.Finish(ctx, path, fp, Done, nil, 3); err != nil {
 					errCh <- err
 					continue
 				}
@@ -344,7 +344,7 @@ func seed(t *testing.T, s *SQLite, path, fp string, final Status) {
 		}
 		return
 	}
-	if err := s.Finish(ctx, path, fp, final, nil); err != nil {
+	if err := s.Finish(ctx, path, fp, final, nil, 3); err != nil {
 		t.Fatalf("seed Finish(%s,%s): %v", path, final, err)
 	}
 }
@@ -461,7 +461,7 @@ func TestFinish_RecordsAndRoundTripsTheOutcome(t *testing.T) {
 		OutputBytes:      i64(2_000_000),
 		EncodeMs:         i64(12_345),
 	}
-	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Done, want); err != nil {
+	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Done, want, 3); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 
@@ -508,7 +508,7 @@ func TestFinish_NilOutcomeReadsAsNotRecordedNotZero(t *testing.T) {
 	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
-	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Done, nil); err != nil {
+	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Done, nil, 3); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 	rows, err := s.List(ctx, []Status{Done}, 0)
@@ -546,7 +546,7 @@ func TestFinish_ComparisonFormatAndChromaAreAbsentOnAnUnscoredRow(t *testing.T) 
 	if err := s.Finish(ctx, "/a/scored.mkv", "fp1", Done, &Outcome{
 		Encoder: "cpu", VmafMean: f64(98.4), VmafMin: f64(96.1), VmafModel: "version=vmaf_v0.6.1",
 		VmafPixFmt: "yuv420p10le", VmafChroma: f64(41.2), VmafChromaMetric: "psnr_cb/psnr_cr min (dB)",
-	}); err != nil {
+	}, 3); err != nil {
 		t.Fatalf("Finish(scored): %v", err)
 	}
 
@@ -557,7 +557,7 @@ func TestFinish_ComparisonFormatAndChromaAreAbsentOnAnUnscoredRow(t *testing.T) 
 	}
 	if err := s.Finish(ctx, "/a/unscored.mkv", "fp2", Skipped, &Outcome{
 		Reason: "already-target-codec",
-	}); err != nil {
+	}, 3); err != nil {
 		t.Fatalf("Finish(unscored): %v", err)
 	}
 
@@ -621,7 +621,7 @@ func TestFinish_LaterOutcomeReplacesTheEarlierOne(t *testing.T) {
 	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
-	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Failed, &Outcome{Reason: "encode blew up", Encoder: "cpu"}); err != nil {
+	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Failed, &Outcome{Reason: "encode blew up", Encoder: "cpu"}, 3); err != nil {
 		t.Fatalf("Finish(failed): %v", err)
 	}
 	// Retry (failed is retryable under MaxFailures) and succeed this time.
@@ -630,7 +630,7 @@ func TestFinish_LaterOutcomeReplacesTheEarlierOne(t *testing.T) {
 	}
 	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Done, &Outcome{
 		Encoder: "cpu", SourceBytes: i64(100), OutputBytes: i64(40),
-	}); err != nil {
+	}, 3); err != nil {
 		t.Fatalf("Finish(done): %v", err)
 	}
 
@@ -662,7 +662,7 @@ func TestOutcome_SurvivesAReopen(t *testing.T) {
 	if err := s.Finish(ctx, "/a/one.mkv", "fp", Done, &Outcome{
 		Encoder: "cpu", VmafMean: f64(97.25), VmafMin: f64(88.5), VmafModel: "version=vmaf_v0.6.1",
 		SourceBytes: i64(1000), OutputBytes: i64(400), EncodeMs: i64(12_345),
-	}); err != nil {
+	}, 3); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 	if err := s.Close(); err != nil {
@@ -713,7 +713,7 @@ func TestClaim_RetryClearsThePreviousAttemptsOutcome(t *testing.T) {
 		Reason:  "VMAF worst-frame below floor (min=41.00 < vmaf_min_pool=60.00)",
 		Encoder: "cpu", VmafMean: f64(87.5), VmafMin: f64(41.0), VmafModel: "version=vmaf_v0.6.1",
 		EncodeMs: i64(12_345),
-	}); err != nil {
+	}, 3); err != nil {
 		t.Fatalf("Finish(failed): %v", err)
 	}
 
@@ -759,7 +759,7 @@ func TestReclaimedTotal_SumsDoneRowsWithBothSizes(t *testing.T) {
 		if ok, err := s.Claim(ctx, path, "fp", "w0", 3); err != nil || !ok {
 			t.Fatalf("claim %s: ok=%v err=%v", path, ok, err)
 		}
-		if err := s.Finish(ctx, path, "fp", Done, &Outcome{SourceBytes: i64(src), OutputBytes: i64(out)}); err != nil {
+		if err := s.Finish(ctx, path, "fp", Done, &Outcome{SourceBytes: i64(src), OutputBytes: i64(out)}, 3); err != nil {
 			t.Fatalf("finish %s: %v", path, err)
 		}
 	}
@@ -771,7 +771,7 @@ func TestReclaimedTotal_SumsDoneRowsWithBothSizes(t *testing.T) {
 	if ok, err := s.Claim(ctx, "/a/legacy.mkv", "fp", "w0", 3); err != nil || !ok {
 		t.Fatalf("claim legacy: ok=%v err=%v", ok, err)
 	}
-	if err := s.Finish(ctx, "/a/legacy.mkv", "fp", Done, nil); err != nil {
+	if err := s.Finish(ctx, "/a/legacy.mkv", "fp", Done, nil, 3); err != nil {
 		t.Fatalf("finish legacy: %v", err)
 	}
 	// A skipped row is not a reclaim and must not count.
@@ -844,7 +844,7 @@ func TestRecordSkip_DoesNotClobberARealOutcome(t *testing.T) {
 	}
 	proof := &Outcome{Encoder: "cpu", VmafMean: f64(97.0), VmafMin: f64(90.0),
 		SourceBytes: i64(5_000_000), OutputBytes: i64(2_000_000)}
-	if err := s.Finish(ctx, "/a/movie.mkv", "fp", Done, proof); err != nil {
+	if err := s.Finish(ctx, "/a/movie.mkv", "fp", Done, proof, 3); err != nil {
 		t.Fatalf("finish: %v", err)
 	}
 
@@ -918,7 +918,7 @@ func seedTerminal(t *testing.T, s *SQLite, path string, st Status, o *Outcome) {
 	if err != nil || !ok {
 		t.Fatalf("seedTerminal Claim(%s): ok=%v err=%v", path, ok, err)
 	}
-	if err := s.Finish(ctx, path, "fp", st, o); err != nil {
+	if err := s.Finish(ctx, path, "fp", st, o, 3); err != nil {
 		t.Fatalf("seedTerminal Finish(%s): %v", path, err)
 	}
 }
@@ -1347,7 +1347,7 @@ func TestHeldByUndoWindow_IsItsOwnFigureBesideTheReclaimedTotal(t *testing.T) {
 		if ok, err := s.Claim(ctx, path, "fp", "w0", 3); err != nil || !ok {
 			t.Fatalf("claim %s: ok=%v err=%v", path, ok, err)
 		}
-		if err := s.Finish(ctx, path, "fp", Done, &Outcome{SourceBytes: i64(src), OutputBytes: i64(out)}); err != nil {
+		if err := s.Finish(ctx, path, "fp", Done, &Outcome{SourceBytes: i64(src), OutputBytes: i64(out)}, 3); err != nil {
 			t.Fatalf("finish %s: %v", path, err)
 		}
 	}

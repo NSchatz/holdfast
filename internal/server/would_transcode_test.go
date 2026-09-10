@@ -21,7 +21,7 @@ import (
 func seedCandidate(t *testing.T, st *store.SQLite, path, fp string, o *store.Outcome) {
 	t.Helper()
 	mustClaim(t, st, path, fp)
-	if err := st.Finish(context.Background(), path, fp, store.WouldTranscode, o); err != nil {
+	if err := st.Finish(context.Background(), path, fp, store.WouldTranscode, o, 3); err != nil {
 		t.Fatalf("Finish(would-transcode, %s): %v", path, err)
 	}
 }

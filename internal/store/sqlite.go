@@ -243,13 +243,21 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 	// exists. A fabricated score is exactly what this schema exists to prevent, and the
 	// rule in Finish's doc — a row's proof always describes its CURRENT status — has to
 	// hold on the way IN as well as on the way out.
+	//
+	// The failure class is cleared with the rest of them, and note what that means: the
+	// class is NEVER read by this method. Every decision above is taken on the status
+	// and the attempt count alone, so a failed row carrying the deterministic class and
+	// a count below the bound is claimed exactly like any other retry - the class is not
+	// a claim blocker, and whatever lowers a count to restore an exhausted failure
+	// therefore restores a parked deterministic one by the same act, with no second
+	// block to clear.
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE jobs SET status = ?, worker = ?, updated_at = ?,
 			reason = NULL, encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
 			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL,
 			source_codec = NULL, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
-			swap_cause = NULL
+			swap_cause = NULL, failure_class = NULL
 		 WHERE path = ? AND fingerprint = ?`,
 		string(Probing), worker, now(), path, fingerprint); err != nil {
 		return false, fmt.Errorf("store: claim update: %w", err)
@@ -278,14 +286,15 @@ func (s *SQLite) Advance(ctx context.Context, path, fingerprint string, st Statu
 // finally succeeds must not carry the previous attempt's failure reason next to its
 // "done", and the only way to guarantee that without a special case per column is to
 // let every Finish fully define the row's proof.
-func (s *SQLite) Finish(ctx context.Context, path, fingerprint string, st Status, o *Outcome) error {
+func (s *SQLite) Finish(ctx context.Context, path, fingerprint string, st Status, o *Outcome, maxFailures int) error {
 	if o == nil {
 		o = &Outcome{}
 	}
 	// A "" string is stored as NULL, not as an empty string, so "not recorded" has ONE
 	// representation in the column rather than two the readers would both have to know
 	// about.
-	if _, err := s.db.ExecContext(ctx, finishQuery(st), finishArgs(st, o, path, fingerprint)...); err != nil {
+	if _, err := s.db.ExecContext(ctx, finishQuery(st, o, maxFailures),
+		finishArgs(st, o, path, fingerprint)...); err != nil {
 		return fmt.Errorf("store: finish: %w", err)
 	}
 	return nil
@@ -294,20 +303,54 @@ func (s *SQLite) Finish(ctx context.Context, path, fingerprint string, st Status
 // finishQuery and finishArgs are shared by Finish and by RecordSwapIncident's
 // transaction, so the "every Finish fully defines the row's proof" rule cannot hold on
 // one path and quietly lapse on the other.
-func finishQuery(st Status) string {
+//
+// The attempt count is where a deterministic failure is parked, and it is parked IN THIS
+// WRITE - the same statement that records the status and the proof - so there is no
+// window in which the row says "failed, final" while still offering attempts. Two
+// details of the arithmetic are load-bearing:
+//
+//   - MAX(fail_count + 1, ?) and not `= ?`. The count only ever RISES: a bound
+//     misconfigured to 0 or below is refused before this (maxFailures > 0), and a row
+//     that had somehow already passed the bound is not reduced to it. A park may never
+//     hand a file back to the encoder.
+//   - It is spelled in SQL rather than read-then-written in Go, so it is atomic against
+//     the increment itself.
+//
+// A transient failure takes the ordinary +1, and a non-Failed status does not touch the
+// count at all, exactly as before. The bound is formatted into the statement rather than
+// bound as a parameter only because finishArgs is shared with the incident path and its
+// argument list has to stay fixed; it is an int the caller passed, never text, so there
+// is no injection surface - the same reasoning applyMigration's PRAGMA already rests on.
+func finishQuery(st Status, o *Outcome, maxFailures int) string {
 	q := `UPDATE jobs SET status = ?, updated_at = ?,
 		reason = ?, encoder = ?, vmaf_mean = ?, vmaf_min = ?, vmaf_model = ?,
 		vmaf_pix_fmt = ?, vmaf_chroma = ?, vmaf_chroma_metric = ?,
 		source_codec = ?, source_bytes = ?, output_bytes = ?, encode_ms = ?,
 		guard_attributes = ?, guard_time_resolution = ?, guard_residual_window = ?,
-		swap_cause = ?`
-	if st == Failed {
+		swap_cause = ?, failure_class = ?`
+	switch {
+	case st != Failed:
+	case o.FailureClass.Final() && maxFailures > 0:
+		q += fmt.Sprintf(`, fail_count = MAX(fail_count + 1, %d)`, maxFailures)
+	default:
 		q += `, fail_count = fail_count + 1`
 	}
 	return q + ` WHERE path = ? AND fingerprint = ?`
 }
 
+// finishArgs binds the values finishQuery's placeholders expect, in that order.
+//
+// The class is written ONLY on a failed row, and it is written through Class() so what
+// lands in the column is always a member of the closed vocabulary: no build of holdfast
+// can store a third token, and a done or skipped row carries none at all rather than a
+// meaningless "transient". Reading is normalised too (outcomeScan.outcome), which is what
+// covers the rows this code did not write - one from an older build, or one an operator's
+// repair script edited.
 func finishArgs(st Status, o *Outcome, path, fingerprint string) []any {
+	class := ""
+	if st == Failed {
+		class = string(o.FailureClass.Class())
+	}
 	return []any{
 		string(st), now(),
 		nullString(o.Reason), nullString(o.Encoder),
@@ -315,7 +358,7 @@ func finishArgs(st Status, o *Outcome, path, fingerprint string) []any {
 		nullString(o.VmafPixFmt), nullFloat(o.VmafChroma), nullString(o.VmafChromaMetric),
 		nullString(o.SourceCodec), nullInt(o.SourceBytes), nullInt(o.OutputBytes), nullInt(o.EncodeMs),
 		nullString(o.GuardAttributes), nullString(o.GuardTimeResolution),
-		nullString(o.GuardResidualWindow), nullString(o.SwapCause),
+		nullString(o.GuardResidualWindow), nullString(o.SwapCause), nullString(class),
 		path, fingerprint,
 	}
 }
@@ -352,7 +395,8 @@ func nullInt(i *int64) any {
 const outcomeColumns = `reason, encoder, vmaf_mean, vmaf_min, vmaf_model,
 	vmaf_pix_fmt, vmaf_chroma, vmaf_chroma_metric,
 	source_codec, source_bytes, output_bytes, encode_ms,
-	guard_attributes, guard_time_resolution, guard_residual_window, swap_cause`
+	guard_attributes, guard_time_resolution, guard_residual_window, swap_cause,
+	failure_class`
 
 // outcomeScan holds one row's outcome columns on the way out of the driver. Every
 // field is a sql.Null* because every column is nullable: NULL is "not recorded" and
@@ -379,6 +423,11 @@ type outcomeScan struct {
 	// nullable: a job that never reached the guard recorded no window, and a swap that
 	// never failed has no cause.
 	guardAttrs, guardRes, guardWindow, swapCause sql.NullString
+
+	// The class of a terminal failure. Nullable like the rest, and the ONE column whose
+	// NULL is not surfaced as "not recorded": there is no unclassified failure, so it
+	// resolves to the transient class on the way out (see outcome).
+	failClass sql.NullString
 }
 
 // dest returns the scan destinations in outcomeColumns order.
@@ -388,12 +437,19 @@ func (s *outcomeScan) dest() []any {
 		&s.pixFmt, &s.chroma, &s.chromaMetric,
 		&s.srcCodec, &s.srcBytes, &s.outBytes, &s.encMs,
 		&s.guardAttrs, &s.guardRes, &s.guardWindow, &s.swapCause,
+		&s.failClass,
 	}
 }
 
 // outcome maps the scanned columns back to an Outcome, turning SQL NULL into the nil
 // pointer / empty string that means "not recorded". The inverse of the null* helpers
 // above; the round-trip is asserted by the store tests.
+//
+// The failure class is the one column that does not round-trip through "not recorded",
+// and it is the read side of the vocabulary being CLOSED. It is resolved through Class(),
+// so a NULL - every row written before the column existed - and any value that is not one
+// of the two tokens both read back as the transient class. That is the retry direction,
+// and it is what makes an unrecognised value cost CPU rather than a file nobody revisits.
 func (s *outcomeScan) outcome() Outcome {
 	o := Outcome{
 		Reason: s.reason.String, Encoder: s.encoder.String, VmafModel: s.model.String,
@@ -401,6 +457,7 @@ func (s *outcomeScan) outcome() Outcome {
 		SourceCodec:     s.srcCodec.String,
 		GuardAttributes: s.guardAttrs.String, GuardTimeResolution: s.guardRes.String,
 		GuardResidualWindow: s.guardWindow.String, SwapCause: s.swapCause.String,
+		FailureClass:        FailureClass(s.failClass.String).Class(),
 	}
 	o.VmafMean = nullableFloat(s.mean)
 	o.VmafMin = nullableFloat(s.worst)
