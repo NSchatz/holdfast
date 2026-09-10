@@ -26,6 +26,8 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | `guard_attributes`, `guard_time_resolution` | any job that reached the swap | which source attributes the source-mutation guard compared (`size,mtime`) and the resolution of the timestamp it compared (`1s`) - the granularity that check actually achieved |
 | `guard_residual_window` | as above | which of the two documented residual windows applies to the storage the guard ran against: `residual-window-local` or `residual-window-network`. A **class label**, never a duration - see [docs/filesystem.md](docs/filesystem.md#residual-window-local) |
 | `swap_cause` | a swap failure with a distinct cause | today only `cross-filesystem` - the temp and the target were not on the same mounted filesystem. Absent for every other failure |
+| `library_root` | any row this build decided | the **cleaned path of the library root** whose profile decided the file. `null` when it was not recorded: a row written before per-library profiles existed, or one no profile decided (a `restored-original` skip is an operator's act, not a gate's) |
+| `profile_digest` | as above | a stable identifier for that root's **resolved** overridable knobs. `null` on the same rows `library_root` is null on |
 
 **A `null` means "not recorded", and you must read it that way.** It is never a zero. A numeric field is
 `null` - not `0` - whenever the fact was not measured (VMAF disabled, or a row written before these
@@ -52,6 +54,15 @@ explicitly in its filtergraph and records it in `vmaf_stream`. On a file carryin
 stream that is what stops the gate measuring a stream the other checks never inspected, and what lets a
 reader of the row say which one it was. It is not configurable, for the same reason the probes' stream is
 not.
+
+**Which library profile decided the file is part of the record, because it is no longer derivable from
+the configuration.** Each `library_roots` entry may carry its own encoder, crf, bitrate floor and VMAF
+floors, so the file was judged by *one* of several profiles and the configuration cannot say which. The
+row therefore carries both `library_root` and `profile_digest`, and the digest is what makes the pair
+survive an edit: the path alone would go on naming `/mnt/tv` after `/mnt/tv` had been changed to mean
+something else. Two rows decided under identical resolved values carry the same digest; a row decided
+under any different value carries a different one. Run `holdfast validate` to see which of your roots
+currently digests to what, beside the resolved value of every knob and the layer that supplied it.
 
 An outcome is recorded per *attempt*, not per file: **claiming a job for a retry clears it**, so a file
 that is being re-encoded never advertises the rejected attempt's score while it is in flight.

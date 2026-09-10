@@ -577,9 +577,10 @@ func bumpSchemaVersion(t *testing.T, dbPath string, version int) {
 
 // olderSchemaVersion is the schema this repository shipped immediately before the NEWEST
 // migration appended its own step: the shape a database written by the previous holdfast
-// has. That newest step is which library profile decided a row, so the version below and
-// the objects seedOlderLedger removes both track it. It is a literal because cmd/holdfast
-// cannot see the store's unexported version counter - and
+// has. That newest step is now which library profile decided the row, appended after what
+// a terminal decision read from the configuration, so the version below and the objects
+// seedOlderLedger removes both moved with it. It is a literal because cmd/holdfast cannot
+// see the store's unexported version counter - and
 // TestExport_TheDaemonsDoorIsWhatMigratesAndThatIsWhyTheExportDoesNotUseIt keeps the literal
 // honest by asserting store.Open really does move a fixture built from it.
 const olderSchemaVersion = 11

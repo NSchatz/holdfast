@@ -16,8 +16,37 @@
 # Directory trees to scan and re-encode files under. This is the ONLY place holdfast
 # ever mutates the filesystem, so it is validated strictly: each root must be absolute
 # and must not be "/" or your home directory.
+#
+# AN ENTRY IS EITHER A PATH OR A PATH WITH A PROFILE. Write a bare path and that root
+# uses every setting below. Write a mapping with `path` plus any of the per-library
+# knobs and that root uses those instead, for those knobs only - everything it does not
+# name it inherits.
+#
+# The inheritance is three layers, innermost last:
+#   built-in default  <-  this file's top level (then HOLDFAST_*)  <-  the entry itself
+# A knob PRESENT in an entry wins even when its value is zero (`crf: 0` means 0); a knob
+# ABSENT from it inherits. `holdfast validate` prints what each root actually resolved
+# to, and which layer supplied each value, so you never have to work it out from here.
+#
+# A root may override ONLY these: encoder, crf, preset, pixel_format, container_ext,
+# min_bitrate_kbps, min_savings_percent, skip_hardlinked, vmaf_enable, min_vmaf,
+# vmaf_min_pool, vmaf_min_chroma, vmaf_subsample, vmaf_model. Anything else inside an
+# entry refuses to start: workers, state_dir, server_*, undo_window_hours,
+# history_retention_rows, run_window, max_load and the notification keys describe the
+# PROCESS, not a library, and stay at the top level.
+#
+# NO ROOT MAY CONTAIN ANOTHER. Nesting is refused rather than resolved by a precedence
+# rule, because a file under two roots would have two answers to what may be done to it.
 library_roots:
+  # A plain path: this root, every setting below.
   - /mnt/media
+  # The same list, with a root that decides its own. A 22 that is right for a film is
+  # wasteful on a 22-minute sitcom, and grain and dark scenes are where an honest encode
+  # dips lowest - so this one encodes a little harder and accepts a lower worst frame,
+  # while inheriting the encoder, the preset and everything else from the top level.
+  - path: /mnt/anime
+    crf: 20
+    vmaf_min_pool: 45
 
 # Log verbosity: debug | info | warn | error  (default: info)
 log_level: info

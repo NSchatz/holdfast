@@ -36,11 +36,13 @@ import (
 // it leaves an operator unable to tell an inherited default from a choice they made.
 type Layer string
 
-// The three layers, in the order they override one another.
+// The three layers, in the order they override one another. Each is spelled to read as
+// the tail of "... came from <layer>", because that is the only sentence it is ever put
+// in and a token an operator has to translate is a token they will misread.
 const (
-	LayerDefault  Layer = "built-in default"
-	LayerTopLevel Layer = "top-level"
-	LayerProfile  Layer = "this root's profile"
+	LayerDefault  Layer = "the built-in default"
+	LayerTopLevel Layer = "the top-level configuration"
+	LayerProfile  Layer = "this root's own profile"
 )
 
 // profileKnobs is THE enumeration of the knobs a library_roots entry may override, and
@@ -323,6 +325,29 @@ func (r Root) LayerOf(knob string) Layer {
 		return l
 	}
 	return LayerTopLevel
+}
+
+// EffectiveKnob is one resolved knob of a root's profile: the config key, the value the
+// three layers produced, and which layer supplied it.
+type EffectiveKnob struct {
+	Knob  string
+	Value string
+	Layer Layer
+}
+
+// Effective is this root's profile as the inheritance PRODUCED it, in profileKnobs
+// order, each value beside the layer it came from.
+//
+// It is what `holdfast validate` prints, and it reads the same values() the digest is
+// taken over - so the configuration an operator is shown and the profile a row is
+// attributed to can never describe different things.
+func (r Root) Effective() []EffectiveKnob {
+	vals := r.Profile.values()
+	out := make([]EffectiveKnob, 0, len(profileKnobs))
+	for i, knob := range profileKnobs {
+		out = append(out, EffectiveKnob{Knob: knob, Value: vals[i], Layer: r.LayerOf(knob)})
+	}
+	return out
 }
 
 // underRoot reports whether child is root, or lies beneath it, comparing on PATH

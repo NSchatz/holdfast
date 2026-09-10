@@ -1,0 +1,9 @@
+# Invalid via the SCHEMA/Load path, INSIDE a library_roots entry: `workers` is a
+# DAEMON-level key - it describes the process, not a library - so it may only be set at
+# the top level. Silently ignoring it is how an operator ends up believing a root has a
+# worker count it does not. The CI self-test asserts `holdfast validate` REJECTS this.
+library_roots:
+  - /mnt/media
+  - path: /mnt/anime
+    crf: 20
+    workers: 4
