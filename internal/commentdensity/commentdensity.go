@@ -52,7 +52,12 @@ type Exemption struct {
 }
 
 // Exemptions is the whole list. Empty is the healthy state.
-var Exemptions []Exemption
+var Exemptions = []Exemption{
+	{
+		Path:   "internal/store/store.go",
+		Reason: "declarations only: the comments ARE the ledger's contract, and none of them restates the code",
+	},
+}
 
 // Counts is a prose and code line tally.
 type Counts struct {

@@ -95,8 +95,31 @@ and nothing but comment text was: no `//go:` or `//lint:` directive was removed,
 comment recording a safety invariant, a `rename-guard-allow` marker, or a rationale
 nobody could re-derive from the code. What went was restatement and narrated history -
 the same fact said three times, and the account of what the code used to do, which git
-already holds.
+already holds. 560 prose lines went in all.
+
+## The one exemption
+
+`internal/store/store.go` is the single entry on the exemption list. It was trimmed from
+507 prose lines to 363 and is still at 64.0%, because it is a declarations-only file: a
+package doc, eight statuses, five structs and a thirty-method interface, and its comments
+ARE the ledger's contract. What `nil` means on each field, what each status licenses, what
+a prune may take and why, what a disposition promises: none of it is re-derivable from the
+code, and bringing the file under C means deleting rules rather than restatement. The
+entry lives beside the thresholds in `internal/commentdensity`, it is checked on every run,
+and it fails the suite the day the file drops under the ceiling or moves.
 
 ## Post-trim
 
-The same four numbers, re-measured after the trim: NOT YET MEASURED.
+The same four numbers, re-measured after the trim:
+
+| number | value |
+|---|---|
+| eligible files | 159 |
+| module-wide aggregate ratio | 24.2% prose (14026 prose lines, 43927 code lines) |
+| maximum per-file ratio | 64.0% - `internal/store/store.go`, the exempt file |
+| P90 | 46.03% |
+
+Every non-exempt file is under C, so `make comment-density` and `make check` exit zero.
+The post-trim P90 is recorded for continuity only. It is NOT an input to anything: C and W
+were derived once, above, and a threshold re-derived from a later measurement would follow
+the drift it exists to catch.
