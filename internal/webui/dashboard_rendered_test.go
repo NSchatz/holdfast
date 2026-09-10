@@ -91,17 +91,25 @@ func collapseSpace(s string) string { return strings.Join(strings.Fields(s), " "
 // Reproduced by holding the reading back 120 seconds: rows stamped 90s and 45s before
 // the snapshot rendered as 209s and 164s, and two assertions flipped from pass to fail
 // on bytes that had not changed.
-// Repair: the windows are gone and the DERIVATION is graded instead. Each row publishes
-// the basis it derived from (the elapsed cell's own data-since), and the reading must be
-// consistent with ONE page clock - there must exist a single instant at which all three
-// rendered ages are what the page would show, each against its own basis. That pins
-// every row to its own timestamp exactly, at any latency, because delay moves the
-// instant and not the relationship between the rows. One anchor remains, and it is
-// bounded by what the render MEASURED rather than by a guess: the instant must lie
-// between the snapshot's own clock and that clock plus the time this render actually
-// took, which is what catches a page reading ages off the browser's clock instead of the
-// server's. TestRendered_TheAgeReadingFailsAgainstAMisderivedAge defeats both halves on
-// purpose.
+// Repair: the windows are gone and the DERIVATION is graded instead (gradeRowAges, which
+// is the whole decision in one place so the cases proving it bites run the grader itself).
+// It asks four things and not one of them asks what time it is. FIRST, each row's basis is
+// the timestamp the SERVER put on the wire - three integer comparisons against the stamps
+// this file's own fixture is built from (fixtureQueueSince). That question is first
+// because the three after it are arithmetic, and arithmetic over a basis the PAGE chose is
+// a page grading its own arithmetic: shift every data-since by half a minute and let the
+// ticker recompute, and a consistency check alone passes a dashboard telling an operator a
+// job transitioned at a moment the ledger never reported. Then the reading must be
+// consistent with ONE page clock - a single instant at which all three rendered ages are
+// what the page would show, each against its own basis - which pins every row to its own
+// timestamp at any latency, because delay moves the instant and not the relationship
+// between the rows. Then that instant must lie between the snapshot's own clock and that
+// clock plus the time this render actually MEASURED, which catches a page reading ages off
+// the browser's clock instead of the server's. And last the rows must fall in the order
+// the wire puts them. No wall clock enters any of it, so the repair costs the latency
+// insensitivity nothing. TestRendered_TheAgeReadingFailsAgainstAMisderivedAge defeats all
+// three halves on purpose, and TestAgeGrader_TheDerivationAloneAcceptsABasisTheWireNeverCarried
+// shows the basis question is the ONLY one that catches the third of them.
 //
 // CAUSE 2 - TWO DEADLINES THAT COULD DISAGREE, AND THE TIGHTER ONE WAS A GUESS.
 // Mechanism: the probe page polled for the page to reach the state a grader measures
@@ -959,6 +967,13 @@ func mustRender(t *testing.T, bin string, o dashOpts) (dashVerdict, string) {
 // real time passes before the measurement is taken.
 const snapNow = 1_700_000_000
 
+// fixtureQueueSince is the transition timestamp fixtureSnapshot() puts ON THE WIRE for
+// each of its three queue rows, in row order. The snapshot is built from it and the
+// rendered ages are graded against it, so the two cannot drift apart - and, more to the
+// point, what a row's age is derived FROM is decided by the value the server sent rather
+// than by the basis the page chose to publish beside the figure.
+var fixtureQueueSince = []int64{snapNow - 3600, snapNow - 90, snapNow - 45}
+
 // fixtureSnapshot is B9's own case: a pending job, a running encode and completed jobs,
 // with the summary reporting more of each than the capped tables were handed.
 func fixtureSnapshot() []byte {
@@ -986,7 +1001,8 @@ func fixtureSnapshot() []byte {
   "bytes_reclaimed_lifetime": 5368709120,
   "paused": false, "scanning": true, "now": %d,
   "aggregates": %s
-}`, snapNow-3600, snapNow-90, snapNow-45, snapNow-7200, snapNow-9000, snapNow, healthyAggregates))
+}`, fixtureQueueSince[0], fixtureQueueSince[1], fixtureQueueSince[2],
+		snapNow-7200, snapNow-9000, snapNow, healthyAggregates))
 }
 
 // healthyAggregates is every published figure, available, each stating the set it covers
@@ -1109,41 +1125,22 @@ func TestRendered_DashboardShowsQueueRowsHistoryRowsAndTheirFigures(t *testing.T
 	}
 
 	// The elapsed figure is DERIVED from each row's own wire timestamp against the
-	// snapshot's own clock, and that DERIVATION is what is graded here.
+	// snapshot's own clock, and that DERIVATION is what is graded here - starting with the
+	// basis, because everything after it is arithmetic over a number, and a number the
+	// PAGE chose would let a page grade its own arithmetic.
 	//
 	// It used to be graded by windows - 3600 to 3720, 90 to 150, 45 to 105 - and those
 	// windows are a wall clock: a row's age is (snapNow - updated_at) plus however much
 	// real time passes before the reading is taken, so they said "this page is right if
 	// this machine took under sixty seconds to render and read it". That is a fact about
 	// the machine, and it is one of the two mechanisms that made this suite return
-	// different verdicts on identical bytes (see the diagnosis at the foot of this file).
+	// different verdicts on identical bytes (see the diagnosis at the head of this file).
 	//
-	// What replaces it decides the same property with no wall clock in it at all. Each
-	// row publishes the basis it derived from, so the reading is asked to be CONSISTENT
-	// with one page clock: there must exist a single instant T at which all three
-	// rendered ages are what the page would show, each against its OWN basis. That
-	// pins every row to its own timestamp (the property the ordering check was reaching
-	// for) exactly, at any latency, because holding the reading back moves T and not the
-	// relationship between the rows.
-	ages := rowAgeReadings(t, v.Queue)
-	if lo, hi, ok := oneClockBehind(ages); !ok {
-		t.Errorf("no single instant explains the three rendered ages %v: each age must be this page's clock less that row's OWN "+
-			"transition timestamp, so one figure cannot be derived from another row's basis or from no basis at all", ages)
-	} else {
-		// The one anchor left, and it is bounded by what this render MEASURED rather
-		// than by a guess: the page's clock has to be the SERVER's - at or after the
-		// snapshot's own `now`, and no later than the snapshot plus the real time this
-		// render actually took. A page reading ages off the browser's own clock lands
-		// years outside it, whatever the machine was doing.
-		if lo < snapNow || hi > float64(snapNow)+took.Seconds()+1 {
-			t.Errorf("the page's clock behind the rendered ages is in [%.0f, %.0f), which is not the snapshot's clock (%d) "+
-				"advanced by the %s this render took: the ages are not being derived from the server's clock",
-				lo, hi, snapNow, took.Round(time.Second))
-		}
-	}
-	// And the three ages are still three, in the order their timestamps put them.
-	if !(ages[0].seconds > ages[1].seconds && ages[1].seconds > ages[2].seconds) {
-		t.Errorf("the three rows' ages are %v: each must come from its OWN wire timestamp, not one figure for the table", ages)
+	// What replaces them decides the same property with no wall clock in it at all, and
+	// the whole decision lives in gradeRowAges so that the cases which prove it can fail
+	// run the grader itself rather than a copy of it.
+	for _, p := range gradeRowAges(rowAgeReadings(t, v.Queue), fixtureQueueSince, took) {
+		t.Errorf("%s\nbrowser output:\n%s", p, log)
 	}
 
 	// A progress figure for the running encode, and for NO other row. Since S0053 a row
@@ -1310,6 +1307,64 @@ func oneClockBehind(ages []rowAge) (lo, hi float64, ok bool) {
 		}
 	}
 	return lo, hi, lo < hi
+}
+
+// gradeRowAges is the WHOLE decision this file takes about the rendered queue ages, in one
+// function so that the cases which prove it bites run the grader itself and not a copy of
+// it that can drift away from it. Four questions, and not one of them asks what time it is.
+//
+//  1. EACH AGE IS DERIVED FROM THE TIMESTAMP THE SERVER PUT ON THE WIRE for that row.
+//     This is first because the three below are arithmetic, and without it they are
+//     arithmetic over a number the page itself published: a document that shifts every
+//     basis and then derives every age from it consistently satisfies all three, while
+//     telling a reader a job transitioned at a moment the ledger never reported. It is
+//     three integer comparisons against the snapshot this test wrote, so it costs the
+//     latency insensitivity nothing.
+//  2. ONE instant explains every age, each measured against its own basis. That pins each
+//     row to its own timestamp at any latency, because holding the reading back moves the
+//     instant and not the relationship between the rows.
+//  3. That instant is the SNAPSHOT's clock, advanced by no more than the real time this
+//     render MEASURED - which is what catches ages read off the browser's own clock.
+//  4. The rows fall in the order the wire puts them: an earlier transition timestamp is an
+//     older row.
+//
+// wire is the per-row transition timestamp the snapshot carries, in row order.
+func gradeRowAges(ages []rowAge, wire []int64, took time.Duration) []string {
+	if len(ages) != len(wire) {
+		return []string{fmt.Sprintf("the page rendered %d queue rows with an age, want one per row the snapshot carried (%d): %v",
+			len(ages), len(wire), ages)}
+	}
+	var out []string
+	for i, a := range ages {
+		if a.since != wire[i] {
+			out = append(out, fmt.Sprintf("queue row %d (%s) renders an age of %q derived from a published basis of %d, but the "+
+				"snapshot put %d on the wire for that row - a difference of %ds. An age graded only against the basis the PAGE "+
+				"publishes lets a page that published the wrong one grade its own arithmetic, and a reader is then told a job "+
+				"transitioned at a moment the server never reported",
+				i, a.path, a.rendered, a.since, wire[i], a.since-wire[i]))
+		}
+	}
+	if lo, hi, ok := oneClockBehind(ages); !ok {
+		out = append(out, fmt.Sprintf("no single instant explains the rendered ages %v: each age must be this page's clock less "+
+			"that row's OWN transition timestamp, so one figure cannot be derived from another row's basis or from no basis at all",
+			ages))
+	} else if lo < snapNow || hi > float64(snapNow)+took.Seconds()+1 {
+		out = append(out, fmt.Sprintf("the page's clock behind the rendered ages is in [%.0f, %.0f), which is not the snapshot's "+
+			"clock (%d) advanced by the %s this render took: the ages are not being derived from the server's clock",
+			lo, hi, snapNow, took.Round(time.Second)))
+	}
+	for i := 1; i < len(ages); i++ {
+		if wire[i-1] >= wire[i] {
+			continue // the snapshot does not order these two, so neither does this check
+		}
+		if ages[i-1].seconds <= ages[i].seconds {
+			out = append(out, fmt.Sprintf("the row stamped %d renders %ds and the row stamped %d renders %ds: the earlier "+
+				"timestamp is the older row, so each age must come from its OWN wire timestamp and not from one figure for "+
+				"the whole table",
+				wire[i-1], ages[i-1].seconds, wire[i], ages[i].seconds))
+		}
+	}
+	return out
 }
 
 // --- B10: each aggregate card states its set and its exclusions -----------------
@@ -3122,16 +3177,14 @@ func TestRendered_EveryDASH9GraderIgnoresHowLongTheMeasurementTook(t *testing.T)
 	}
 
 	// The row ages are the one reading on this page that is a function of real time by
-	// construction, so they are asked the same question here rather than only in B9: held
-	// back for two minutes, they must still be consistent with ONE page clock derived
-	// from each row's own basis. Under the windows this replaced, this delay was a
-	// FAILURE - 90 seconds of age rendered as 210 against a window ending at 150.
+	// construction, so the WHOLE age decision is taken again here rather than only in B9:
+	// held back for two minutes, every row must still be derived from the timestamp the
+	// wire carried for it and all three still be consistent with ONE page clock. Under the
+	// windows this replaced, this delay was a FAILURE - 90 seconds of age rendered as 210
+	// against a window ending at 150.
 	ages := rowAgeReadings(t, held.Queue)
-	if _, _, ok := oneClockBehind(ages); !ok {
-		t.Errorf("after a %s delay no single instant explains the rendered ages %v", latencyCase, ages)
-	}
-	if !(ages[0].seconds > ages[1].seconds && ages[1].seconds > ages[2].seconds) {
-		t.Errorf("after a %s delay the ages %v are no longer in the order their timestamps put them", latencyCase, ages)
+	for _, p := range gradeRowAges(ages, fixtureQueueSince, took) {
+		t.Errorf("after a %s delay the age reading reports: %s\nbrowser output:\n%s", latencyCase, p, heldLog)
 	}
 	// And the ages DID move, so the delay reached the page rather than the harness having
 	// quietly frozen it: a reading that is insensitive because nothing happened proves
@@ -3444,15 +3497,27 @@ td.st .dot { background:var(--bg) !important; }
 	}
 }
 
-// The latency-insensitive age reading BITES. Two ways a page can get a row's age wrong
-// that the windows this replaced would also have caught, and one they could not: an age
-// that does not follow from that row's own basis.
+// basisSkew is how far a counterexample below moves each row's PUBLISHED basis off the
+// timestamp the wire carried. It is under 45 so every rendered age stays positive and the
+// rows stay in the order their timestamps put them - the mutation has to be invisible to
+// every other half of the decision, or it would not test the half it is aimed at.
+const basisSkew = 30
+
+// The latency-insensitive age reading BITES. Three ways a page can get a row's age wrong:
+// two the windows this replaced would also have caught, and one that NOTHING in this
+// repository caught until the basis itself was graded against the wire.
+//
+// Each case runs gradeRowAges - the grader B9 runs, not a copy of it - and each is
+// required to produce a failure that NAMES the property it defeated, because a sweep that
+// only counts failures cannot tell a counterexample that was caught from one that was
+// caught for the wrong reason.
 func TestRendered_TheAgeReadingFailsAgainstAMisderivedAge(t *testing.T) {
 	bin := chromium(t)
 
 	for _, c := range []struct {
 		name    string
 		mutate  func([]byte) []byte
+		delay   time.Duration
 		defeats string
 	}{
 		{"one row's age overwritten with a figure its own timestamp cannot produce",
@@ -3461,30 +3526,105 @@ func TestRendered_TheAgeReadingFailsAgainstAMisderivedAge(t *testing.T) {
 			// and no single page clock explains all three.
 			scriptMutation(`var c=document.querySelectorAll("#queue td.elapsed");` +
 				`if(c.length){var t=c[c.length-1];if(t.textContent.indexOf("h")<0)t.textContent="1h "+t.textContent;}`),
+			0,
 			"no single instant explains"},
 		{"every age derived from the browser's own clock rather than the server's",
 			scriptMutation(`var c=document.querySelectorAll("#queue td.elapsed");` +
 				`for(var i=0;i<c.length;i++){var s=Number(c[i].dataset.since||0);` +
 				`var x=Math.max(0,Math.floor(Date.now()/1000-s));var h=Math.floor(x/3600),m=Math.floor(x/60)%60;` +
 				`c[i].textContent=h?(h+"h "+m+"m"):(m+"m "+(x%60)+"s");}`),
+			0,
 			"not being derived from the server's clock"},
+		{"every row's basis published as a timestamp the wire never carried",
+			// Only the BASIS moves, and nothing here writes an age: the page's own
+			// one-second ticker recomputes every visible figure from the falsified basis,
+			// so what a reader is shown is the page's derivation. That is the whole
+			// counterexample - each rendered age is internally consistent, one clock
+			// explains all three, that clock is the snapshot's, and the rows stay in
+			// order, while every figure on screen is basisSkew seconds short of what the
+			// server's own timestamps support. data-orig makes the shift idempotent under
+			// scriptMutation's 20ms interval.
+			scriptMutation(fmt.Sprintf(
+				`var c=document.querySelectorAll("#queue td.elapsed");`+
+					`for(var i=0;i<c.length;i++){var td=c[i];`+
+					`if(td.dataset.orig===undefined){td.dataset.orig=td.dataset.since||"0";`+
+					`td.dataset.since=String(Number(td.dataset.orig)+%d);}}`, basisSkew)),
+			// The reading is held back so the page's ticker has certainly recomputed every
+			// cell from the shifted basis, which is what makes the rendered figure the
+			// page's own arithmetic rather than the value it first drew.
+			2 * time.Second,
+			"the snapshot put"},
 	} {
 		plain := servedDocument(t)
 		if string(c.mutate([]byte(plain))) == plain {
 			t.Fatalf("the mutation %q did not change the served document", c.name)
 		}
 		start := time.Now()
-		v, log := mustRender(t, bin, dashOpts{snapshot: fixtureSnapshot(), mutate: c.mutate})
+		v, log := mustRender(t, bin, dashOpts{snapshot: fixtureSnapshot(), mutate: c.mutate, delay: c.delay})
 		took := time.Since(start)
 
 		ages := rowAgeReadings(t, v.Queue)
-		lo, hi, ok := oneClockBehind(ages)
-		anchored := ok && lo >= snapNow && hi <= float64(snapNow)+took.Seconds()+1
-		if anchored {
-			t.Errorf("the age reading PASSED a page mutated so that %s, so it cannot fail (%s)\nages: %v\nbrowser output:\n%s",
-				c.name, c.defeats, ages, log)
-		} else {
-			t.Logf("%-70s -> caught (one-clock=%v, ages %v)", c.name, ok, ages)
+		probs := gradeRowAges(ages, fixtureQueueSince, took)
+		named := false
+		for _, p := range probs {
+			if strings.Contains(p, c.defeats) {
+				named = true
+			}
+		}
+		switch {
+		case len(probs) == 0:
+			t.Errorf("the age reading PASSED a page mutated so that %s, so it cannot fail (it should have reported %q)\n"+
+				"ages: %v\nbrowser output:\n%s", c.name, c.defeats, ages, log)
+		case !named:
+			t.Errorf("the age reading failed a page mutated so that %s, but no report names it (%q): a counterexample caught "+
+				"for the wrong reason proves nothing about the property it was aimed at\nreported: %v\nages: %v\nbrowser output:\n%s",
+				c.name, c.defeats, probs, ages, log)
+		default:
+			t.Logf("%-70s -> caught, naming %q (ages %v)", c.name, c.defeats, ages)
+		}
+	}
+}
+
+// And the basis check is not redundant with the three questions beside it: THESE are the
+// readings the counterexample above produces, and every other half of the decision accepts
+// them.
+//
+// It is asked of the decision function rather than of a render, deliberately. "The rest of
+// the check would have passed this page" is a claim about the grader, not about the
+// browser, and asking it of a real render would make it depend on whether a one-second
+// ticker had fired yet - a verdict decided by how busy the machine was, which is the exact
+// defect this spec exists to remove. No browser, no clock, no wall time.
+func TestAgeGrader_TheDerivationAloneAcceptsABasisTheWireNeverCarried(t *testing.T) {
+	const took = 3 * time.Second
+	const pageClock = snapNow + 2 // one instant, inside the anchor the render measured
+
+	shifted := make([]rowAge, len(fixtureQueueSince))
+	published := make([]int64, len(fixtureQueueSince))
+	for i, w := range fixtureQueueSince {
+		since := w + basisSkew
+		secs := int(pageClock - since)
+		published[i] = since
+		shifted[i] = rowAge{
+			path: fmt.Sprintf("/media/films/row%d.mkv", i), status: "pending",
+			rendered: fmt.Sprintf("%ds", secs), seconds: secs, granularity: 1, since: since,
+		}
+	}
+
+	// Graded against the bases the PAGE published - the check as it stood before the wire
+	// entered it - every one of them passes.
+	if probs := gradeRowAges(shifted, published, took); probs != nil {
+		t.Fatalf("the derivation half rejected readings that are internally consistent, so the case below decides nothing: %v", probs)
+	}
+	// Graded against the wire, the same readings fail, once per row and for that reason
+	// alone: the basis check is the only thing standing between this page and a green run.
+	probs := gradeRowAges(shifted, fixtureQueueSince, took)
+	if len(probs) != len(fixtureQueueSince) {
+		t.Fatalf("readings whose every basis is %ds off the wire produced %d problems, want exactly one per row (%d): %v",
+			basisSkew, len(probs), len(fixtureQueueSince), probs)
+	}
+	for _, p := range probs {
+		if !strings.Contains(p, "the snapshot put") {
+			t.Errorf("a problem reported against a falsified basis does not name the wire timestamp it was measured against: %s", p)
 		}
 	}
 }

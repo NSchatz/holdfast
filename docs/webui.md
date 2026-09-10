@@ -207,6 +207,17 @@ carries, a mutated document that must still fail its graders after that same del
 single-reading count the test server keeps rather than the page, and
 `make webui-repeat-check` as the cheap repeated disconfirmation beside them.
 
+The row ages are the reading that replaced a wall clock, so what replaced it is worth
+stating exactly: a rendered age is graded on its DERIVATION, and the derivation is graded
+from the wire inwards. Each row's published basis must be the transition timestamp the
+SERVER sent for that row; the three rendered ages must then be explained by one page clock,
+each against its own basis; that clock must be the snapshot's, advanced by no more than the
+time the render itself measured; and the rows must fall in the order their timestamps put
+them. The first question is the load-bearing one. Grade only the arithmetic and a page that
+publishes a basis the wire never carried grades its own arithmetic - shift every
+`data-since` by half a minute and every figure on screen is half a minute short of what the
+ledger says, with every consistency check still green.
+
 Repetition cannot prove determinism; it can only fail to disprove it. That is why the
 criteria that REMOVE the mechanism are graders in the suite and the repetition loop is a
 separate target: a grader that no longer depends on a clock beats a loop that samples one.

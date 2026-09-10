@@ -519,8 +519,10 @@ in the umbrella that tracks this repo (`operations/roadmaps/holdfast.md`).
   text. There is ONE budget, not two: the in-page readiness poll is DERIVED from the deadline the Go
   side is holding, because a fixed budget tighter than that deadline turns a merely slow page into a
   failed one. And no reading is graded against a wall clock: a figure the page derives from time is
-  graded on the DERIVATION, against the basis the page publishes beside it, so holding the reading
-  back changes the figure and never the verdict. `make webui-repeat-check` is the repeated
+  graded on the DERIVATION, so holding the reading back changes the figure and never the verdict -
+  and the BASIS the page publishes beside the figure is itself held to the timestamp the server put
+  on the wire, because arithmetic graded only against a number the page chose is a page grading its
+  own arithmetic. `make webui-repeat-check` is the repeated
   disconfirmation that runs beside those, and the diagnosis of record - every cause found, how each
   was reproduced, what replaced it - is at the head of `internal/webui/dashboard_rendered_test.go`.
   It covers two more that are the same defect wearing different clothes: a mutation sweep that a page
