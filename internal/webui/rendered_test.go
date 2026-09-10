@@ -502,7 +502,7 @@ func serveDocumentWith(t *testing.T, o serveOpts) *probeServer {
 		o.probe = probeJS
 	}
 	if o.wait <= 0 {
-		o.wait = readinessBudget(deadlineFor(o.delay + o.snapshotDelay))
+		o.wait = derivedReadinessBudget(o.delay, o.snapshotDelay)
 	}
 	// An SSE `data:` field is ONE line. The fixtures are written readably, so they are
 	// compacted here - and a fixture that is not valid JSON fails now, loudly, rather than
@@ -730,6 +730,61 @@ func readinessBudget(deadline time.Duration) time.Duration {
 		return b
 	}
 	return deadline / 2
+}
+
+// derivedReadinessBudget is the budget a render gets when it does not set one, and it is
+// the one place that arithmetic lives so the guard below grades what serveDocumentWith
+// actually uses.
+//
+// The deadline covers readiness AND the delay the page then spends INSIDE it, so the delay
+// is taken back out before the readiness share is derived. Left in, a 120-second case hands
+// the in-page poll 200s of a 210s deadline while only about 90s of it is reachable - so in
+// exactly the renders that hold a reading back, a merely slow page ends at runProbe's
+// timeout carrying the browser's log instead of at the probe's own "the page never became
+// ready, and here is the state it was in", which is the report naming the page's own
+// connection state and the reason this derivation exists. A held SNAPSHOT is NOT taken back
+// out: that latency is spent before readiness and is precisely what the poll waits through.
+func derivedReadinessBudget(delay, snapshotDelay time.Duration) time.Duration {
+	return readinessBudget(deadlineFor(delay+snapshotDelay) - delay)
+}
+
+// ONE budget is a claim about arithmetic, so it is graded as one. Whatever the in-page poll
+// is given, PLUS the delay the page will spend after readiness, PLUS the grace the POST
+// needs, must fit inside the deadline the Go side is holding - and the poll must still
+// outlast a snapshot this harness itself asked to be held back, or a latency the test
+// requested would expire the poll waiting for it.
+//
+// It bites against the arithmetic it replaced: without the delay taken back out, the
+// 120-second case gives the poll 200s of a 210s deadline, so 330 seconds of budget are
+// promised inside 210 and a merely slow page in that case is reported by runProbe's timeout
+// rather than by the probe's own account of the state the page was in.
+func TestRenderHarness_TheReadinessBudgetLeavesRoomForTheDelayItWillSpend(t *testing.T) {
+	for _, c := range []struct{ delay, snapshot time.Duration }{
+		{0, 0},
+		{0, slowSnapshot},
+		{3 * time.Second, 0},
+		{latencyCase, 0},
+		{latencyCase, slowSnapshot},
+		{latencyCase, latencyCase},
+	} {
+		deadline := deadlineFor(c.delay + c.snapshot)
+		budget := derivedReadinessBudget(c.delay, c.snapshot)
+		if budget <= 0 {
+			t.Errorf("a render holding the reading %s with the snapshot held %s derives a readiness budget of %s: a poll with no "+
+				"time in it reports a page it never asked", c.delay, c.snapshot, budget)
+			continue
+		}
+		if spent := budget + c.delay + readinessGrace; spent > deadline {
+			t.Errorf("a render holding the reading %s with the snapshot held %s gives the in-page poll %s, then spends %s inside "+
+				"the same %s deadline: %s is promised where %s exists, so a merely slow page ends at the outer timeout with only "+
+				"the browser's log instead of at the probe's own report",
+				c.delay, c.snapshot, budget, c.delay, deadline, spent, deadline)
+		}
+		if budget <= c.snapshot {
+			t.Errorf("a render whose snapshot is held back %s polls for readiness for only %s: the poll would expire waiting for a "+
+				"latency this harness asked for itself", c.snapshot, budget)
+		}
+	}
 }
 
 // probeArgs is the WHOLE command line every rendered grader launches the browser with.

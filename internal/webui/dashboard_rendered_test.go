@@ -121,11 +121,19 @@ func collapseSpace(s string) string { return strings.Join(strings.Fields(s), " "
 // sooner than the deadline the test itself was prepared to wait. Reproduced by holding
 // the snapshot back 45 seconds: that exact failure, with the page's own connection state
 // reported as "live", on an otherwise healthy page.
-// Repair: one budget. readinessBudget derives the in-page poll from the deadline the Go
-// side is holding (deadlineFor), so the two cannot disagree and the only page that fails
+// Repair: one budget. derivedReadinessBudget derives the in-page poll from the deadline the
+// Go side is holding (deadlineFor), so the two cannot disagree and the only page that fails
 // readiness is one no deadline here could have waited for. The ten arbitrary per-case
-// budgets that had accumulated beside it - 8s, 10s, 15s, 30s - are gone with it.
-// TestRendered_ASnapshotThatArrivesLateChangesNoVerdict holds it.
+// budgets that had accumulated beside it - 8s, 10s, 15s, 30s - are gone with it. The
+// derivation subtracts the delay a render will spend AFTER readiness inside that same
+// deadline, because a budget that promises 200 seconds of polling inside a 210-second
+// deadline that also has to cover 120 seconds of held reading is the same disagreement with
+// a bigger number in it - a merely slow page in a latency case would be reported by the
+// outer timeout, carrying the browser's log, instead of by the probe's own account of the
+// state the page was in. TestRendered_ASnapshotThatArrivesLateChangesNoVerdict holds the
+// budget against a real held snapshot and
+// TestRenderHarness_TheReadinessBudgetLeavesRoomForTheDelayItWillSpend holds the arithmetic
+// against every latency this file asks for.
 //
 // CAUSE 3 - A SWEEP COULD BE SATISFIED BY A PAGE THAT NEVER RENDERED.
 // Mechanism: dashProblems and the two cap-total graders report an unrendered page as a
@@ -141,7 +149,10 @@ func collapseSpace(s string) string { return strings.Join(strings.Fields(s), " "
 // Repair: a sweep that asks whether a subject was hidden must first have SEEN the page.
 // Both loops now require the render, and the one hiding mutation that legitimately
 // prevents it - the aggregate host removed from the markup, where there is nothing for
-// the page to fill - is named as the exception rather than covered by the same silence.
+// the page to fill - DECLARES the exemption on the case itself (hidingMutation's
+// allowsUnrendered) rather than being recognised by its name. A permission that is granted
+// by a substring of a map key is a permission a rename hands to another case in silence,
+// which is this same cause wearing its third set of clothes.
 //
 // CAUSE 4 - THE FIXTURE SERVER'S PORT WAS DECIDED BY WHAT ELSE WAS ON THE MACHINE.
 // Mechanism: the Playwright project bound a fixed 127.0.0.1:8931 and correctly refuses to
@@ -1674,28 +1685,47 @@ const aggHostMarkup = `<div class="aggs" id="aggregates" data-view="aggs">
 
 // --- B15 / A2: every rendered grader FAILS when its subject is hidden ------------
 
+// hidingMutation is one counterexample per way a subject can be in the served bytes and
+// still never reach a reader, together with the ONE exemption the sweep grants.
+//
+// allowsUnrendered is a field rather than a test on the name because the sweep's whole
+// repair for cause 3 is "the page must have RENDERED before a mutation counts as caught",
+// and an exemption keyed to how a map key is spelled is an exemption a rename can hand to
+// any other case silently. Declared here, the sweep's own rule stays readable: exactly the
+// cases that say so may be satisfied by a page that never rendered, and every other case
+// must have been looked at.
+type hidingMutation struct {
+	name             string
+	mutate           func([]byte) []byte
+	allowsUnrendered bool
+}
+
 // hidingMutations is one counterexample per way a subject can be in the served bytes and
 // still never reach a reader. A grader that passes any of these is a grader that cannot
 // fail, and this repository has already lost a whole spec to exactly that.
-func hidingMutations() map[string]func([]byte) []byte {
+func hidingMutations() []hidingMutation {
 	css := func(rule string) func([]byte) []byte {
 		return func(b []byte) []byte {
 			return []byte(strings.Replace(string(b), "</style>", rule+"\n</style>", 1))
 		}
 	}
-	return map[string]func([]byte) []byte{
-		"display:none on the rows":                   css("#queue tr, #history tr { display:none; }"),
-		"display:none on the aggregate cards":        css(".agg { display:none; }"),
-		"visibility:hidden on an ancestor":           css(".tablewrap, .aggs { visibility:hidden; }"),
-		"opacity:0 on an ancestor":                   css("main { opacity:0; }"),
-		"an ancestor collapsed":                      css("main { display:none; }"),
-		"a zero-size box":                            css("#queue tr, #history tr, .agg { position:absolute; width:0; height:0; overflow:hidden; }"),
-		"a selector naming nothing the rows carry":   css("section > div > table > tbody > tr { display:none; }"),
-		"a specificity fight the hiding rule wins":   css("body main section .tablewrap table tbody tr { display:none !important; }"),
-		"an opaque overlay painted over the page":    css("body::after { content:''; position:fixed; inset:0; background:#000; z-index:9999; }"),
-		"a hidden attribute on the table bodies":     domReplace(`<tbody id="queue" data-view="queue">`, `<tbody id="queue" data-view="queue" hidden>`, `<tbody id="history" data-view="history">`, `<tbody id="history" data-view="history" hidden>`),
-		"a hidden attribute on the aggregate host":   domReplace(`<div class="aggs" id="aggregates" data-view="aggs">`, `<div class="aggs" id="aggregates" data-view="aggs" hidden>`),
-		"the aggregate host removed from the markup": domReplace(aggHostMarkup, ``),
+	return []hidingMutation{
+		{name: "display:none on the rows", mutate: css("#queue tr, #history tr { display:none; }")},
+		{name: "display:none on the aggregate cards", mutate: css(".agg { display:none; }")},
+		{name: "visibility:hidden on an ancestor", mutate: css(".tablewrap, .aggs { visibility:hidden; }")},
+		{name: "opacity:0 on an ancestor", mutate: css("main { opacity:0; }")},
+		{name: "an ancestor collapsed", mutate: css("main { display:none; }")},
+		{name: "a zero-size box", mutate: css("#queue tr, #history tr, .agg { position:absolute; width:0; height:0; overflow:hidden; }")},
+		{name: "a selector naming nothing the rows carry", mutate: css("section > div > table > tbody > tr { display:none; }")},
+		{name: "a specificity fight the hiding rule wins", mutate: css("body main section .tablewrap table tbody tr { display:none !important; }")},
+		{name: "an opaque overlay painted over the page", mutate: css("body::after { content:''; position:fixed; inset:0; background:#000; z-index:9999; }")},
+		{name: "a hidden attribute on the table bodies", mutate: domReplace(`<tbody id="queue" data-view="queue">`, `<tbody id="queue" data-view="queue" hidden>`, `<tbody id="history" data-view="history">`, `<tbody id="history" data-view="history" hidden>`)},
+		{name: "a hidden attribute on the aggregate host", mutate: domReplace(`<div class="aggs" id="aggregates" data-view="aggs">`, `<div class="aggs" id="aggregates" data-view="aggs" hidden>`)},
+		// The one exemption, and the reason it is one: this mutation deletes the host the
+		// aggregate cards are written INTO, so there is nothing for the page to fill and
+		// its absence is itself the counterexample. Every other case leaves a page that
+		// can render, so a verdict from one that did not is a verdict about the machine.
+		{name: "the aggregate host removed from the markup", mutate: domReplace(aggHostMarkup, ``), allowsUnrendered: true},
 	}
 }
 
@@ -1719,25 +1749,24 @@ func TestRendered_EveryDashboardGraderFailsAgainstEveryHidingMutation(t *testing
 	}
 
 	plain := servedDocument(t)
-	for name, mutate := range hidingMutations() {
-		if string(mutate([]byte(plain))) == plain {
-			t.Fatalf("the mutation %q did not change the served document - the assertion below would be vacuous", name)
+	for _, m := range hidingMutations() {
+		if string(m.mutate([]byte(plain))) == plain {
+			t.Fatalf("the mutation %q did not change the served document - the assertion below would be vacuous", m.name)
 		}
 		// The page has to RENDER for the mutation to have been caught. A verdict from a
 		// page that never rendered reports every subject missing, so this case would
 		// "catch" a mutation by never having seen the page - and which way it went would
-		// then depend on how busy the machine was. The one mutation that removes the
-		// aggregate host from the markup is the exception and says so: there is nothing
-		// there for the page to fill, and its absence is itself the counterexample.
-		v, log := renderDashboard(t, bin, dashOpts{snapshot: fixtureSnapshot(), mutate: mutate})
-		if !v.Ready && !strings.Contains(name, "removed from the markup") {
+		// then depend on how busy the machine was. The exemption is declared on the case
+		// (allowsUnrendered), never inferred from how the case is spelled.
+		v, log := renderDashboard(t, bin, dashOpts{snapshot: fixtureSnapshot(), mutate: m.mutate})
+		if !v.Ready && !m.allowsUnrendered {
 			t.Fatalf("%s: the page did not render at all, so this mutation was not caught - it was never looked at "+
-				"(connection state %q)\nbrowser output:\n%s", name, v.ConnText, log)
+				"(connection state %q)\nbrowser output:\n%s", m.name, v.ConnText, log)
 		}
 		probs := dashProblems(v)
 		if probs == nil {
 			t.Errorf("the rendered graders passed a mutation that hides their subject from a reader (%s)\nverdict: %+v\nbrowser output:\n%s",
-				name, v, log)
+				m.name, v, log)
 		}
 	}
 }

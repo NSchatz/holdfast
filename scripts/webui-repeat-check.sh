@@ -15,6 +15,16 @@
 # disconfirmation that runs beside them, and it is what catches a NEW clock dependence
 # somebody introduces later without having read any of that.
 #
+# WHAT THIS LOOP DOES NOT COVER, stated rather than left to be discovered. The selector is
+# TestRendered_, so the loop is the Go graders that read the page. The Playwright half
+# (TestPlaywright_, the graders that need the engine OPERATED) is NOT repeated here and is
+# not asked whether it agrees with itself. That is a deliberate scope, not an oversight: the
+# subject of this work is the rendered graders, and a repetition of the Playwright project
+# costs minutes per pass against a gate that has a declared timeout to stay inside. It is
+# also a real gap - a Playwright case has been seen to time out under heavy host contention
+# and pass on the same bytes on an idle machine - so a reader chasing a disagreement that
+# this loop reports nothing about should look there next, with `make webui-check`.
+#
 # HOLDFAST_WEBUI_REPEAT sets the repetition count (default 3, minimum 2). The count is
 # PRINTED, because "it was repeated" is a claim a reader has to be able to check.
 set -euo pipefail
@@ -35,6 +45,7 @@ trap 'rm -rf "$work"' EXIT
 
 echo "webui-repeat-check: running $sel* in $run $repeat times against one unchanged tree"
 echo "webui-repeat-check: repetitions=$repeat"
+echo "webui-repeat-check: scope is $sel* only; the Playwright half (TestPlaywright_) is outside this loop - see 'make webui-check'"
 
 # The tree must not move under the graders, or a disagreement below would be a fact about
 # the edit and not about the harness. Recorded before the first repetition and checked
