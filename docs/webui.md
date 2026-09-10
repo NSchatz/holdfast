@@ -38,6 +38,8 @@ internal/webui/
     driver.mjs              the one engine driver, for the Go graders that operate a browser
     specs/probe.mjs         the measuring script, which decides nothing
     specs/graders.mjs       the predicates, which measure nothing
+    specs/candidates.mjs    the same split for what a DRY RUN decided: one reading, then
+                            the predicates over it, plus the fixture's expectations
     specs/*.spec.mjs        the cases, and mutations.spec.mjs which defeats every grader
 ```
 

@@ -53,12 +53,19 @@ func (s *SQLite) Aggregates(ctx context.Context) Aggregates {
 // counted as "failed" would tell an operator the source is fine - which is precisely
 // what nobody knows - and leaving it out of the set entirely would make the one job
 // waiting for a human the only one this figure never sees.
+//
+// A dry run's decision is counted here for the same reason and against the same failure:
+// leaving would-transcode out of the declared set would leave an operator reading an
+// outcomes breakdown that reports a dry run as having concluded nothing, which is the
+// exact misreading the state exists to end. The SET is declared with it, because a set
+// that names four of five statuses is a figure whose scope is wrong rather than unstated.
 func (s *SQLite) outcomeCounts(ctx context.Context) Breakdown {
 	b := Breakdown{Coverage: Coverage{
-		Set: "every terminal row in the ledger (done, skipped, failed, indeterminate, applied-despite-error)"}}
+		Set: "every terminal row in the ledger (done, skipped, failed, would-transcode, indeterminate, applied-despite-error)"}}
 	buckets, absent, err := s.groupCount(ctx,
-		`SELECT status, COUNT(*) FROM jobs WHERE status IN (?, ?, ?, ?, ?) GROUP BY status`,
-		string(Done), string(Skipped), string(Failed), string(Indeterminate), string(AppliedDespiteError))
+		`SELECT status, COUNT(*) FROM jobs WHERE status IN (?, ?, ?, ?, ?, ?) GROUP BY status`,
+		string(Done), string(Skipped), string(Failed), string(WouldTranscode),
+		string(Indeterminate), string(AppliedDespiteError))
 	if err != nil {
 		b.Err = fmt.Errorf("store: aggregate outcome counts: %w", err)
 		return b

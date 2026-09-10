@@ -269,6 +269,27 @@
     padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-sm);
     font-size: var(--fs-xs); margin: 0 0 var(--sp-2); }
 
+  /* What a DRY RUN decided, totalled. It is drawn as its own small card rather than as a
+     line of the reclaimed band above it, because those two figures are space that CAME
+     BACK and this one is space that is merely under consideration - a reader who met the
+     three together would add them up. The flag is --accent and not --ok for the same
+     reason: nothing here has been reclaimed. */
+  .cand { background: var(--panel); border: var(--bw-hair) solid var(--border);
+    border-left: var(--bw-flag) solid var(--accent);
+    border-radius: var(--radius-md);
+    padding: var(--sp-3) var(--sp-4);
+    padding-left: calc(var(--sp-4) - var(--bw-flag) + var(--bw-hair));
+    margin: 0 0 var(--sp-3); }
+  .cand .note { margin: 0; }
+  .cand .cand-v { display: flex; flex-direction: column; gap: var(--sp-1); }
+  .cand .cand-v b { font-size: var(--fs-2xl); line-height: var(--lh-tight); font-weight: 700;
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .cand .cand-k { font-size: var(--fs-xs); color: var(--muted); }
+  /* The set the total was taken over and the rows it left out, in the same roles an
+     aggregate card gives them: stated beside the figure, never implied. */
+  .cand .cand-cov, .cand .cand-ex { font-size: var(--fs-xs); color: var(--muted);
+    margin-top: var(--sp-1); }
+
   /* Whole-ledger figures. Each card carries its number, its drawing, the set that
      number is over, and the rows it had to leave out; ".out" is the unavailable
      state, which colours the card without removing it and draws NO figure at all -
@@ -408,6 +429,12 @@
      filled disc, the square and the diamond with no colour vision at all. */
   .st-indeterminate .dot { background: none; border: var(--bw-flag) solid var(--bad); }
   .st-applied-despite-error .dot { background: var(--bad); border: var(--bw-flag) solid var(--warn); }
+  /* A dry run's recorded decision is terminal too, so it takes a shape of its own: a
+     HOLLOW SQUARE - the outline of the filled square `failed` draws, for a file nothing
+     has done anything to yet. It stays apart from all five other marks with no colour
+     vision at all, and the state is spelled out beside it as it is on every other row. */
+  .st-would-transcode .dot { background: none; border: var(--bw-flag) solid var(--accent);
+    border-radius: 0; }
   .st-encoding .dot, .st-probing .dot, .st-verifying .dot, .st-pending .dot { background: var(--accent); }
   .reason { color: var(--muted); font-size: var(--fs-xs); }
   .reason.fail { color: var(--bad); word-break: break-word; }
@@ -419,6 +446,15 @@
   .size .arrow { color: var(--muted); margin: 0 var(--sp-1); }
   .size .pct { display: block; color: var(--ok); font-weight: 600; margin-top: var(--sp-1);
     white-space: normal; }
+  /* A candidate row's size is the SOURCE's, named as that. It is deliberately NOT painted
+     --ok: green on this page means space that came back, and nothing has come back from a
+     file nothing has encoded. */
+  .size .srcsize { color: var(--fg); }
+  .size .srck { display: block; color: var(--muted); font-size: var(--fs-xs);
+    margin-top: var(--sp-1); white-space: normal; }
+  /* The source codec on a candidate row. It sits in the result cell under the state, in
+     the same footnote role the VMAF condition line takes on a done row. */
+  .st .cond .codec { color: var(--fg); font-family: var(--font-mono); }
   .vmaf .pair { white-space: normal; }
   .vmaf .mean { font-weight: 700; font-size: var(--fs-md); }
   .vmaf .worst { color: var(--fg); font-weight: 600; }

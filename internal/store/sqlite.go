@@ -204,6 +204,21 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 		// has a different size/mtime, so a later scan keys it as NEW work and the
 		// ordinary already-at-target-codec guard is what skips it.
 		return false, nil
+	case st == WouldTranscode:
+		// A DRY RUN's recorded decision, and it is RE-CLAIMABLE. The row says "a run
+		// allowed to transcode would take this file"; the run that is allowed to must
+		// therefore be able to take it, or turning dry_run off would leave every file the
+		// dry run examined excluded for ever - the library never transcoded and nothing on
+		// the dashboard saying why. A LATER DRY RUN re-claims it for the same reason, which
+		// is also what keeps two successive dry runs reporting ONE candidate row for a file
+		// rather than two.
+		//
+		// Nothing about the file was touched to get here, so there is nothing to undo: the
+		// update below clears the outcome columns exactly as it does for a Failed retry and
+		// the new attempt writes its own. fail_count is untouched, deliberately - a dry-run
+		// decision is not an attempt that went wrong, so it must never consume a retry.
+		//
+		// fall through to claim
 	case st == Failed:
 		if failCount >= maxFailures {
 			return false, nil // parked
@@ -232,7 +247,7 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 		`UPDATE jobs SET status = ?, worker = ?, updated_at = ?,
 			reason = NULL, encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
 			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL,
-			source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
+			source_codec = NULL, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
 			swap_cause = NULL
 		 WHERE path = ? AND fingerprint = ?`,
@@ -283,7 +298,7 @@ func finishQuery(st Status) string {
 	q := `UPDATE jobs SET status = ?, updated_at = ?,
 		reason = ?, encoder = ?, vmaf_mean = ?, vmaf_min = ?, vmaf_model = ?,
 		vmaf_pix_fmt = ?, vmaf_chroma = ?, vmaf_chroma_metric = ?,
-		source_bytes = ?, output_bytes = ?, encode_ms = ?,
+		source_codec = ?, source_bytes = ?, output_bytes = ?, encode_ms = ?,
 		guard_attributes = ?, guard_time_resolution = ?, guard_residual_window = ?,
 		swap_cause = ?`
 	if st == Failed {
@@ -298,7 +313,7 @@ func finishArgs(st Status, o *Outcome, path, fingerprint string) []any {
 		nullString(o.Reason), nullString(o.Encoder),
 		nullFloat(o.VmafMean), nullFloat(o.VmafMin), nullString(o.VmafModel),
 		nullString(o.VmafPixFmt), nullFloat(o.VmafChroma), nullString(o.VmafChromaMetric),
-		nullInt(o.SourceBytes), nullInt(o.OutputBytes), nullInt(o.EncodeMs),
+		nullString(o.SourceCodec), nullInt(o.SourceBytes), nullInt(o.OutputBytes), nullInt(o.EncodeMs),
 		nullString(o.GuardAttributes), nullString(o.GuardTimeResolution),
 		nullString(o.GuardResidualWindow), nullString(o.SwapCause),
 		path, fingerprint,
@@ -335,7 +350,8 @@ func nullInt(i *int64) any {
 // place, so the SELECT text and the scan destinations cannot drift apart when a
 // column is appended. Its order is the order outcomeScan expects.
 const outcomeColumns = `reason, encoder, vmaf_mean, vmaf_min, vmaf_model,
-	vmaf_pix_fmt, vmaf_chroma, vmaf_chroma_metric, source_bytes, output_bytes, encode_ms,
+	vmaf_pix_fmt, vmaf_chroma, vmaf_chroma_metric,
+	source_codec, source_bytes, output_bytes, encode_ms,
 	guard_attributes, guard_time_resolution, guard_residual_window, swap_cause`
 
 // outcomeScan holds one row's outcome columns on the way out of the driver. Every
@@ -353,6 +369,11 @@ type outcomeScan struct {
 	mean, worst, chroma       sql.NullFloat64
 	srcBytes, outBytes, encMs sql.NullInt64
 
+	// The source's own video codec, recorded by a dry-run decision. Nullable like every
+	// other outcome column: a row written before it existed, and any row that never
+	// probed a codec, reads as not recorded.
+	srcCodec sql.NullString
+
 	// The source-mutation guard's achieved granularity and the distinctly-reported
 	// cause of a failed swap (FILESYSTEM-1). All four are strings and all four are
 	// nullable: a job that never reached the guard recorded no window, and a swap that
@@ -364,7 +385,8 @@ type outcomeScan struct {
 func (s *outcomeScan) dest() []any {
 	return []any{
 		&s.reason, &s.encoder, &s.mean, &s.worst, &s.model,
-		&s.pixFmt, &s.chroma, &s.chromaMetric, &s.srcBytes, &s.outBytes, &s.encMs,
+		&s.pixFmt, &s.chroma, &s.chromaMetric,
+		&s.srcCodec, &s.srcBytes, &s.outBytes, &s.encMs,
 		&s.guardAttrs, &s.guardRes, &s.guardWindow, &s.swapCause,
 	}
 }
@@ -376,6 +398,7 @@ func (s *outcomeScan) outcome() Outcome {
 	o := Outcome{
 		Reason: s.reason.String, Encoder: s.encoder.String, VmafModel: s.model.String,
 		VmafPixFmt: s.pixFmt.String, VmafChromaMetric: s.chromaMetric.String,
+		SourceCodec:     s.srcCodec.String,
 		GuardAttributes: s.guardAttrs.String, GuardTimeResolution: s.guardRes.String,
 		GuardResidualWindow: s.guardWindow.String, SwapCause: s.swapCause.String,
 	}
@@ -656,7 +679,7 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 			status = excluded.status, reason = excluded.reason, worker = NULL, updated_at = excluded.updated_at,
 			encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
 			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL,
-			source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
+			source_codec = NULL, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
 			swap_cause = NULL
 		 WHERE jobs.status = ?`,

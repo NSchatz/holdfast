@@ -132,6 +132,14 @@ type Engine struct {
 	// BOTH files on disk (a duplicate, never a loss) for the next scan to reconcile.
 	hookAfterRename func() error
 
+	// hookBeforeDryRunRecord, when non-nil, is called immediately before a dry run's
+	// decision is recorded, carrying the path it is about. Production leaves it nil; it
+	// exists only so a test can drive the one condition under which the source size read
+	// can fail on a file that has already passed every guard - the file going away in
+	// that window - and prove the decision is still recorded with the size NOT RECORDED
+	// rather than fabricated as a zero.
+	hookBeforeDryRunRecord func(path string)
+
 	// hookAfterRetain, when non-nil, is called immediately after the undo window has
 	// taken its second link to the source and BEFORE the re-fingerprint and the
 	// rename. Production leaves it nil. It exists so a test can observe the state
@@ -1023,7 +1031,38 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	}
 
 	if e.Cfg.DryRun {
-		e.Log.Info("DRY_RUN would transcode", "file", f, "codec", codec, "target", final)
+		// A DRY RUN'S DECISION IS RECORDED, and that is the whole of what changes here.
+		//
+		// The file has passed every guard, so a run with dry_run off would transcode it -
+		// the question an operator turns dry_run on to answer. Until now the answer was
+		// thrown away: this branch returned with the row still sitting in `probing`, where
+		// the worker's claim had left it, so the file was indistinguishable from one a
+		// worker was still examining and every figure that says what the run CONCLUDED
+		// reported the run as having concluded nothing.
+		//
+		// Nothing else about a dry run changes. Nothing is encoded, nothing is swapped and
+		// nothing is deleted: this returns before the temp path is even chosen, exactly as
+		// it did before, and the two facts recorded below are read from the source and
+		// written to the ledger.
+		//
+		// The size is a FRESH stat of the file that was decided rather than the one taken
+		// at the top of ProcessFile, so what is recorded is the file as it was at the
+		// moment of the decision. A stat that fails records NOTHING - nil is "not
+		// recorded", which a reader shows as such - because a fabricated size would put a
+		// number into the one figure an operator uses to size the job.
+		// Test seam: nil in production, so this is a no-op there.
+		if e.hookBeforeDryRunRecord != nil {
+			e.hookBeforeDryRunRecord(f)
+		}
+		out := &store.Outcome{SourceCodec: codec}
+		if st, err := os.Stat(f); err == nil {
+			out.SourceBytes = ptr(st.Size())
+		} else {
+			e.Log.Warn("dry-run decision: source size could not be read (recorded as not recorded)", "file", f, "err", err)
+		}
+		e.Log.Info("DRY_RUN would transcode", "file", f, "codec", codec,
+			"source_bytes", logSize(out.SourceBytes), "target", final)
+		e.finish(ctx, f, key, store.WouldTranscode, out)
 		return nil
 	}
 
@@ -1409,6 +1448,16 @@ func ptr[T any](v T) *T { return &v }
 // %v is its address. That would silently gut the one operator-facing line that reports
 // what a swap was worth.
 func logScore(p *float64) any {
+	if p == nil {
+		return "not recorded"
+	}
+	return *p
+}
+
+// logSize is logScore for a byte count: the number, or "not recorded" when the stat that
+// would have produced it failed. Handing slog the *int64 directly would print the POINTER,
+// for the same reason logScore exists.
+func logSize(p *int64) any {
 	if p == nil {
 		return "not recorded"
 	}

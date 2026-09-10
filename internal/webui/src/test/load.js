@@ -22,12 +22,13 @@ const JS_DIR = path.join(__dirname, "..", "js");
 // in a lexical scope that is not a property of the context object, so the epilogue below
 // - evaluated as part of the same script - is what carries them out.
 const NAMES = [
-  "NOT_RECORDED", "STATUSES", "PROGRESS_STATUS", "IN_FLIGHT",
+  "NOT_RECORDED", "STATUSES", "PROGRESS_STATUS", "IN_FLIGHT", "CANDIDATE_STATUS",
   "GUARD_LABELS", "isNum", "fmtBytes", "fmtTime", "fmtDur", "fmtSpan", "pct", "fmtScore",
   "fmtCount", "clockOffsetFrom", "serverNow", "elapsedText", "sizeFigures",
   "vmafFigures", "progressFigure", "pathParts", "guardLabel", "capNoteText", "CAP_TOTAL_UNAVAILABLE",
   "announceText", "aggCoverageText", "aggExclusionText", "readBuckets", "bucketProportions",
   "spreadPositions",
+  "codecText", "sourceSizeText", "candidateTotal", "candidateCoverageText", "candidateExclusionText",
 ];
 
 // The modules that hold no DOM reference at all, and so load anywhere.

@@ -18,7 +18,9 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | `vmaf_model` | as above | the libvmaf model that produced them |
 | `vmaf_pix_fmt` | as above | the single pixel format **both streams were converted to** before scoring - chosen and named by holdfast, so a score says which pixels were compared |
 | `vmaf_chroma`, `vmaf_chroma_metric` | as above | the worst frame's chroma measurement and what it is (`psnr_cb/psnr_cr min (dB)`) - the only figure on the row that says whether the **colour** survived |
+| `source_codec` | would-transcode | the video codec the SOURCE was in when a dry run decided it - `null` when it was never read |
 | `source_bytes`, `output_bytes` | done | the sizes either side of the swap |
+| `source_bytes` | would-transcode | the size of the file that was decided. `output_bytes` is `null`: nothing encoded it, so there is no output to have a size |
 | `encode_ms` | done, and a failure after the encode ran | wall-clock encode time |
 | `guard_attributes`, `guard_time_resolution` | any job that reached the swap | which source attributes the source-mutation guard compared (`size,mtime`) and the resolution of the timestamp it compared (`1s`) - the granularity that check actually achieved |
 | `guard_residual_window` | as above | which of the two documented residual windows applies to the storage the guard ran against: `residual-window-local` or `residual-window-network`. A **class label**, never a duration - see [docs/filesystem.md](docs/filesystem.md#residual-window-local) |
@@ -45,6 +47,27 @@ scored twice are compared in the same format both times.
 
 An outcome is recorded per *attempt*, not per file: **claiming a job for a retry clears it**, so a file
 that is being re-encoded never advertises the rejected attempt's score while it is in flight.
+
+### `would-transcode`: what a dry run decided
+
+`dry_run: true` is how you answer "which files would this transcode?" before you let holdfast delete
+anything. Every guard runs and **nothing is encoded, swapped or deleted**; a file that passes every guard
+is one a run with `dry_run: false` would transcode, and that conclusion is **recorded** as a terminal
+`would-transcode` row carrying that file's **source codec** and **source size**. Without that record those
+files sit in the state the worker parked them in while deciding (`probing`), so the summary, the outcomes
+breakdown and `/metrics` all report the run as having concluded nothing, and an operator reading that page
+concludes "nothing qualifies".
+
+Two properties are load-bearing and neither is negotiable:
+
+- **It counts decisions, never transcodes.** Nothing has encoded these files, so the row carries no output
+  size, no percentage reclaimed and no VMAF, and the dashboard shows no projected saving anywhere. The
+  figure beside the candidate rows is the **total source bytes** they account for and nothing else: the
+  size of what is under consideration, with the rows it left out for want of a recorded size counted and
+  reported beside it.
+- **It is terminal, but re-claimable.** Unlike `done` and `skipped`, a recorded decision does not exclude
+  the file from a later run: set `dry_run: false`, run again, and exactly the files that list named are
+  the files that get transcoded. Two dry runs over an unchanged file still report **one** candidate.
 
 The **dashboard renders all of this per file** - size before → after and percent reclaimed, the encoder,
 the encode duration, and the VMAF pair shown with its model, its pooling and its luma-only blind spot - so
@@ -299,6 +322,14 @@ what upgrades it.
   `holdfast_encode_duration_seconds`, `holdfast_vmaf_score` (perceptual-quality distribution), and a
   `holdfast_queue_depth{state}` gauge read live from the store. Metrics are read-only instrumentation -
   best-effort, never affecting file handling.
+  The `outcome` label set is `done | skipped | failed | would-transcode | indeterminate |
+  applied-despite-error`. **`would-transcode` counts DECISIONS a dry run took, never transcodes that
+  happened**: under `dry_run: true` holdfast applies every guard and encodes, swaps and deletes nothing, so
+  that series is "how many files a real run would transcode" and not "how many it did". Every one of those
+  series is pre-created, so each reads `0` before its first event and an alert can be written against the
+  candidate count before the first dry run. The same value appears as a `holdfast_queue_depth{state}`
+  series, where it is counted as itself and **not** inside `probing`: that state means claimed and not yet
+  decided.
 - **Notifications** (`notify_url`, [shoutrrr](https://shoutrrr.nickfedor.com/)): one service URL fans out to
   ntfy/Discord/Gotify/… - a message per failed file and a per-scan summary. Sends run off the engine's path,
   and a send failure is logged, never crashing the daemon or altering files. Empty URL disables it.

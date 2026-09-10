@@ -280,6 +280,26 @@ CREATE INDEX IF NOT EXISTS idx_incidents_excluded ON swap_incidents(replacement_
 	WHERE disposition_replacement IS NULL OR disposition_replacement = 'retained-excluded';
 `,
 	},
+	{
+		// v8 - the source codec a dry-run decision records.
+		//
+		// The dry-run branch decided a file and threw the decision away, so nothing in the
+		// ledger said which files a real run would transcode. Recording that decision needs
+		// one fact the outcome columns did not already carry: what the SOURCE is in. The
+		// size is source_bytes, which v2 added and which means the same thing on this row
+		// as on a done row - the size of the file that was examined.
+		//
+		// NULLABLE with NO DEFAULT, which is the rule v2 set and every step since has kept.
+		// Every row already in the field was written by a build that probed a codec and
+		// never stored one, so it must READ AS NOT RECORDED. A DEFAULT here - '' or
+		// 'unknown' or anything else - would put a codec on rows nobody recorded one for,
+		// including rows about sources that have since been deleted, in the one table whose
+		// whole job is to be evidence.
+		name: "source codec",
+		sql: `
+ALTER TABLE jobs ADD COLUMN source_codec TEXT;
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

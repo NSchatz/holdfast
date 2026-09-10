@@ -31,8 +31,14 @@ var activeAndPending = []store.Status{store.Pending, store.Probing, store.Encodi
 // IT IS IN. Leaving them out would have made a parked job - the one job on the whole
 // dashboard that is actually waiting for a human - the only job that never appears
 // anywhere, which is the same failure as reporting it as a success.
+//
+// A dry run's recorded decision is here too, and the split it lands on is a partition of
+// the whole vocabulary, so it goes in exactly one side. It is the terminal one: the
+// decision is complete for that scan, and the operator reading it is comparing candidates
+// against the skipped and the actually-reclaimed counts - which is this view. Serving it
+// in the queue would say a worker is still examining a file nothing is examining.
 var terminal = []store.Status{
-	store.Done, store.Skipped, store.Failed,
+	store.Done, store.Skipped, store.Failed, store.WouldTranscode,
 	store.Indeterminate, store.AppliedDespiteError,
 }
 
@@ -79,7 +85,21 @@ type jobDTO struct {
 	VmafPixFmt       string   `json:"vmaf_pix_fmt,omitempty"`
 	VmafChroma       *float64 `json:"vmaf_chroma"`
 	VmafChromaMetric string   `json:"vmaf_chroma_metric,omitempty"`
-	// The sizes either side of the swap, and how long the encode took.
+	// SourceCodec is what the source was in when the job was decided - the fact a
+	// would-transcode row exists to carry, beside the size, so an operator can size the
+	// job from the page instead of going and probing the files themselves.
+	//
+	// It is a POINTER and deliberately not omitempty, unlike the other strings here. Those
+	// travel with a measurement whose absence the reader can already see (a row with no
+	// vmaf_mean has no model either), while this one IS the fact: a candidate row that
+	// simply dropped the key would leave a client deciding for itself whether the codec
+	// was unrecorded or the field had gone away. An explicit JSON null says which, and
+	// says it apart from a real empty string exactly as source_bytes' null is apart from
+	// a real 0.
+	SourceCodec *string `json:"source_codec"`
+	// The sizes either side of the swap, and how long the encode took. On a
+	// would-transcode row source_bytes is the size of the file that was decided and
+	// output_bytes is null - nothing has encoded it, so there is no output to have a size.
 	SourceBytes *int64 `json:"source_bytes"`
 	OutputBytes *int64 `json:"output_bytes"`
 	EncodeMs    *int64 `json:"encode_ms"`
@@ -139,6 +159,7 @@ func toDTOs(jobs []store.Job) []jobDTO {
 			VmafChroma:       j.Outcome.VmafChroma,
 			VmafChromaMetric: j.Outcome.VmafChromaMetric,
 
+			SourceCodec: nullableText(j.Outcome.SourceCodec),
 			SourceBytes: j.Outcome.SourceBytes,
 			OutputBytes: j.Outcome.OutputBytes,
 			EncodeMs:    j.Outcome.EncodeMs,
@@ -150,6 +171,18 @@ func toDTOs(jobs []store.Job) []jobDTO {
 		})
 	}
 	return out
+}
+
+// nullableText carries the store's "" = NOT RECORDED onto the wire as an explicit JSON
+// null. The store uses "" because an empty reason, encoder or codec carries no meaning of
+// its own; a CLIENT should not have to know that convention, and a field that is the fact
+// rather than a companion to one must be able to say "nobody recorded this" in a way that
+// is not also a legal value.
+func nullableText(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // HistoryRowJSON marshals one ledger row into EXACTLY the object /api/history publishes
