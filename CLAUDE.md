@@ -41,7 +41,9 @@ and only with a `rename-guard-allow` marker.
   the API and UI, graceful drain on SIGTERM), `resolve` (operator determination
   for a job parked indeterminate, made durable BEFORE any licensed removal),
   `restore` (the undo window's operator half; LOCAL by design, never an HTTP
-  endpoint, because it overwrites a library file with older bytes), `export`,
+  endpoint, because it overwrites a library file with older bytes), `requeue`
+  (offers a file a terminal row already answered back to the pipeline; LOCAL for
+  the same reason `restore` is, by ratified operator decision), `export`,
   `validate`, `version`.
 - `internal/engine` - the orchestrator. `ProcessFile` runs the skip guards, the
   encode, the gates and the swap.

@@ -662,7 +662,7 @@ type Store interface {
 	// Returns (true, nil) if the caller now owns the job (row moved to probing) and
 	// (false, nil) if it does not: the job is done/skipped and its recorded decision
 	// inputs still hold, failed and already at/over maxFailures (parked), or currently
-	// active (held by another worker, or stale — see RecoverStale). A fresh
+	// active (held by another worker, or stale - see RecoverStale). A fresh
 	// path+fingerprint with no row yields a claim.
 	//
 	// A done or skipped row is terminal only FOR THE CONFIGURATION IT WAS TAKEN UNDER.
