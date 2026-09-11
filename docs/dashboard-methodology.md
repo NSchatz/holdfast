@@ -223,6 +223,11 @@ score.
 - **The model is luma-only.** It is structurally blind to chroma damage, which only the
   structural gates (codec, duration and packet parity, stream-count parity, full decode
   integrity, strictly-smaller) catch.
+- **One video stream was compared, and the label says which.** A file can carry more than
+  one; the gate always measures the FIRST (`v:0`), the same stream every property read and
+  the decode-integrity check inspect, so the score lines up with the guards that passed the
+  file. A row that predates this fact, or whose gate never ran, says `unspecified stream`
+  rather than name one nobody recorded.
 - **Scores are never compared across files.** VMAF is not comparable between different
   sources, and this page never puts two files' scores on one scale for that reason. The
   whole-ledger VMAF figures pool per-file scores; they are a summary of this library's
