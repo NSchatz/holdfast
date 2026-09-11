@@ -97,6 +97,98 @@ func TestEncode_FpsModePassthroughWired(t *testing.T) {
 	}
 }
 
+// TestEncode_SingleVideoStreamArgvUnchanged is the no-regression half of the
+// attached-picture work, and it is asserted against the literal command line because
+// that is the only way to prove an ABSENCE: a source carrying one video stream - every
+// ordinary file in a library - must get the argv this encoder has always built, with no
+// per-stream copy option added to it.
+//
+// The second arm is what stops the first from being vacuous. "No -c:v:N option appears"
+// is satisfied trivially by an encoder that can never emit one, so the identical encoder
+// over a source that DOES carry an attached picture must emit exactly `-c:v:1 copy` -
+// and only then does its absence above mean anything.
+func TestEncode_SingleVideoStreamArgvUnchanged(t *testing.T) {
+	realFFmpeg, realFFprobe := tools(t)
+
+	t.Run("one video stream", func(t *testing.T) {
+		d := t.TempDir()
+		src := filepath.Join(d, "movie.mkv")
+		mkH264(t, realFFmpeg, src, "3M")
+
+		fakeFFmpeg, argvLog := captureFFmpeg(t, d, realFFmpeg)
+		cfg := baseCfg(d)
+		prober := probe.New(realFFmpeg, realFFprobe)
+		enc := FFmpegEncoder{FFmpeg: fakeFFmpeg, Cfg: cfg, Probe: prober}
+
+		out := filepath.Join(d, "out.mkv")
+		if err := enc.Encode(context.Background(), src, out, nil); err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
+		args := readArgv(t, argvLog)
+
+		// The graded property, in its own words: no per-stream video option at all.
+		for i, a := range args {
+			if strings.HasPrefix(a, "-c:v:") {
+				t.Errorf("argv[%d] = %q - a single-video-stream source must get no per-stream "+
+					"copy option: %v", i, a, args)
+			}
+		}
+		// And the whole command line is the one that predates attached pictures being
+		// handled at all. A legitimate change to the encoder's argv updates this list;
+		// an accidental one reds here, which is the point of writing it out.
+		want := []string{
+			"-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+			"-i", src,
+			"-map", "0", "-map", "-0:d?",
+			"-c", "copy", "-c:v", "libx265",
+			"-pix_fmt", "yuv420p10le",
+			"-color_range", "tv",
+			"-fps_mode", "passthrough",
+			"-preset", "ultrafast",
+			"-crf", "22",
+			"-x265-params", "log-level=error",
+			"--", out,
+		}
+		if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
+			t.Errorf("the single-video-stream argv changed.\n got: %v\nwant: %v", args, want)
+		}
+	})
+
+	t.Run("an attached picture does get its own copy option", func(t *testing.T) {
+		d := t.TempDir()
+		src := filepath.Join(d, "movie.mp4")
+		mkMP4WithCoverArt(t, realFFmpeg, realFFprobe, src, "3M")
+
+		fakeFFmpeg, argvLog := captureFFmpeg(t, d, realFFmpeg)
+		cfg := baseCfg(d)
+		prober := probe.New(realFFmpeg, realFFprobe)
+		enc := FFmpegEncoder{FFmpeg: fakeFFmpeg, Cfg: cfg, Probe: prober}
+
+		out := filepath.Join(d, "out.mp4")
+		if err := enc.Encode(context.Background(), src, out, nil); err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
+		args := readArgv(t, argvLog)
+		if !hasArgPair(args, "-c:v:1", "copy") {
+			t.Fatalf("argv missing -c:v:1 copy for the attached picture at v:1: %v", args)
+		}
+		// It must OVERRIDE the blanket -c:v, so it has to come after it.
+		blanket, perStream := -1, -1
+		for i, a := range args {
+			if a == "-c:v" && blanket < 0 {
+				blanket = i
+			}
+			if a == "-c:v:1" {
+				perStream = i
+			}
+		}
+		if blanket < 0 || perStream < blanket {
+			t.Errorf("-c:v:1 (at %d) must come after the blanket -c:v (at %d), which is what it "+
+				"overrides: %v", perStream, blanket, args)
+		}
+	})
+}
+
 // TestEncode_ColorArgsWiredForHDR10 proves DeriveColorArgs' output actually reaches
 // the ffmpeg command line (both the -color_* flags and the x265-params colour
 // suffix) for an HDR10 source. REDS if the colour-args wiring in Encode is removed
@@ -187,6 +279,48 @@ func TestEncode_ExoticPixFmtRefusesToEncode(t *testing.T) {
 	}
 	if _, statErr := os.Stat(out); statErr == nil {
 		t.Error("Encode wrote an output despite refusing the exotic pix_fmt")
+	}
+}
+
+// TestEncode_RefusesASourceWhoseVideoStreamShapeIsNotEstablished is the second
+// encoder-side backstop and the same shape as the one above. The engine's source-shape
+// guard skips a file whose video streams ffprobe could not establish; if that guard were
+// ever bypassed - or this EXPORTED encoder called directly, in which case it builds its
+// own snapshot - Encode must refuse rather than encode on a guess about whether one of
+// those streams is artwork that has to be carried unencoded rather than re-encoded.
+//
+// The fake ffprobe refuses exactly the stream-shape question and hands every other one to
+// the real binary, so the encode reaches this backstop with a derived pix_fmt and colour
+// tags in hand: what it refuses is the unknown shape and nothing else.
+func TestEncode_RefusesASourceWhoseVideoStreamShapeIsNotEstablished(t *testing.T) {
+	realFFmpeg, realFFprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, realFFmpeg, src, "3M")
+
+	blind := delegatingFFprobe(t, d, realFFprobe, "stream=index:stream_disposition=attached_pic", "")
+	cfg := baseCfg(d)
+	enc := FFmpegEncoder{FFmpeg: realFFmpeg, Cfg: cfg, Probe: probe.New(realFFmpeg, blind)}
+
+	out := filepath.Join(d, "out.mkv")
+	err := enc.Encode(context.Background(), src, out, nil)
+	if err == nil {
+		t.Fatal("Encode succeeded on a source whose video-stream shape ffprobe could not establish - " +
+			"an unknown shape must fail safe, not default to the common one")
+	}
+	if !strings.Contains(err.Error(), "video streams") {
+		t.Errorf("the refusal does not say what could not be established: %v", err)
+	}
+	if _, statErr := os.Stat(out); statErr == nil {
+		t.Error("Encode wrote an output despite refusing the unestablished stream shape")
+	}
+
+	// Anti-vacuity: the same encoder over the same source with a WORKING probe encodes.
+	// Without it, a refusal caused by anything else about this fixture would read as proof.
+	working := FFmpegEncoder{FFmpeg: realFFmpeg, Cfg: cfg, Probe: probe.New(realFFmpeg, realFFprobe)}
+	control := filepath.Join(d, "control.mkv")
+	if cerr := working.Encode(context.Background(), src, control, nil); cerr != nil {
+		t.Fatalf("the control encode failed, so the refusal above proves nothing: %v", cerr)
 	}
 }
 

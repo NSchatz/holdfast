@@ -41,7 +41,10 @@ import (
 //
 // The two mutable guards are deliberately absent. Both are cleared and re-derived on
 // every pass already, so there is nothing for a requeue to re-open: the file is offered
-// to the pipeline by the next scan whatever anybody does here.
+// to the pipeline by the next scan whatever anybody does here. THAT IS THE ONLY
+// EXEMPTION: every other skip token belongs here, and the ones that read no configuration
+// key at all belong here most of all, because for those this verb is the only lever there
+// is - no configuration change re-derives a verdict that read no configuration.
 //
 // SkipRestoredOriginal IS here, and that is not an oversight: an operator naming it must
 // learn that the rows are protected rather than that the token does not exist. Requeue
@@ -56,6 +59,12 @@ var SkipGuards = []string{
 	SkipExoticPixelFormat,
 	SkipTargetExists,
 	SkipSymlink,
+	// The source-SHAPE guard. It reads no configuration key (what video streams a file
+	// carries is a property of the file), so its rows record nothing read and no
+	// configuration change will ever offer one back to the pipeline. A re-muxed source,
+	// or an ffprobe that can now establish a shape the one before it could not, is
+	// exactly the change only an operator can see - so this is the lever for it.
+	SkipMultiVideoStream,
 	SkipRestoredOriginal,
 }
 

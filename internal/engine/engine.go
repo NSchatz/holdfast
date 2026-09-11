@@ -62,6 +62,19 @@ const (
 	SkipTargetExists          = "target-already-exists"
 	SkipSymlink               = "symlinked-source"
 
+	// SkipMultiVideoStream is the source-SHAPE guard: the source carries a video
+	// stream beyond the first that is not an attached picture, or ffprobe could not
+	// establish what its video streams are.
+	//
+	// Every property this pipeline derives is read from v:0 - the codec, the bitrate,
+	// the field order, the pixel format, the colour tags, the HDR class - and the VMAF
+	// gate compares v:0 against v:0. A second moving-picture stream would therefore be
+	// re-encoded against a description of a DIFFERENT stream, and not one decision in
+	// front of the swap would ever have inspected it. Refusing is the whole answer:
+	// there is no honest claim to preserve a stream nothing read. An indeterminate probe
+	// answer skips under the same token rather than encoding on a guess.
+	SkipMultiVideoStream = "multi-video-stream"
+
 	// SkipUndoRetentionFailed is the undo window's own guard (UNDO-6): the original
 	// could not be retained, so the swap that would have destroyed it does not run.
 	// It is a MUTABLE guard, like the hardlink one - a full disk or an unwritable
@@ -1067,6 +1080,32 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		}
 	}
 
+	// Source-shape guard. Everything above reads v:0 and only v:0, so a source carrying
+	// a SECOND moving-picture stream is one this pipeline cannot honestly claim to
+	// preserve: the encode would map and re-encode it off the first stream's properties,
+	// and no gate in front of the swap ever looked at it. An ATTACHED PICTURE (cover art
+	// carried as a one-frame video stream) is the one exception, because it is carried
+	// through unencoded rather than re-encoded - see attachedPictureCopyIndexes and the
+	// -c:v:N copy options FFmpegEncoder emits for it.
+	//
+	// The probe is the second and last ffprobe a file pays for, and it is taken here
+	// rather than in the eager snapshot so that a file which skipped at one of the cheap
+	// guards above never pays for it at all.
+	//
+	// The outcome records NO decision inputs, because this guard reads no configuration
+	// key: a source's video-stream shape is a property of the file, so no value an
+	// operator edits re-derives the verdict. That is the honest record (see because), and
+	// it is exactly why the token is in SkipGuards - `requeue --guard multi-video-stream`
+	// is then the only lever there is, and a token missing from that list would be a
+	// permanent exclusion with no lever at all.
+	streams, established := props.VideoStreams()
+	if !established || !carriableVideoStreams(streams) {
+		e.Log.Info("skip (a video stream beyond the first that is not an attached picture, or a stream shape the probe could not establish)",
+			"file", f, "video_streams", len(streams), "probe_established", established)
+		e.finish(ctx, f, key, store.Skipped, e.because(SkipMultiVideoStream))
+		return nil
+	}
+
 	// Output container: "source"/"auto" (default) matches the SOURCE file's own
 	// extension (in-place transcode) so a stream type that doesn't round-trip
 	// through a different container (e.g. MP4 mov_text into MKV) isn't forced to
@@ -1624,6 +1663,60 @@ func (e *Engine) isAlreadyTargetCodec(codec string) bool {
 	default:
 		return codec == e.targetCodec
 	}
+}
+
+// carriableVideoStreams reports whether a source's video streams are ones this pipeline
+// can honestly carry through an encode: at most one MOVING-picture stream, and it sits at
+// v:0, with every other video stream an attached picture.
+//
+// The rule follows from what the pipeline reads. Codec, bitrate, field order, pixel
+// format, the colour tags, the HDR class and both sides of the VMAF comparison all come
+// from v:0, so a second moving-picture stream would be re-encoded against a description
+// of another stream and would enter no decision at all. A stream shape with no moving
+// picture at v:0 - every video stream an attached picture - fails for the same reason
+// from the other side: the properties everything downstream derives would be a cover
+// image's, so the file is refused rather than encoded on that basis.
+//
+// A source carrying exactly ONE video stream is every ordinary file and is always
+// carriable, attached picture or not: it is the path that existed before this guard, and
+// nothing here narrows it.
+func carriableVideoStreams(streams []probe.VideoStream) bool {
+	if len(streams) <= 1 {
+		return true
+	}
+	if streams[0].AttachedPicture {
+		return false
+	}
+	for _, s := range streams[1:] {
+		if !s.AttachedPicture {
+			return false
+		}
+	}
+	return true
+}
+
+// attachedPictureCopyIndexes returns the VIDEO-RELATIVE indexes (the N of an ffmpeg
+// `v:N` specifier) of the attached-picture streams that must be carried through the
+// encode UNENCODED, in stream order.
+//
+// It is empty for a source carrying one video stream, which is the whole of the ordinary
+// path: a single-video-stream source gets the identical argv it got before attached
+// pictures were handled at all, no per-stream option added. Cover art is a JPEG or PNG,
+// and running it through the configured video encoder either fails the mux outright (the
+// common case, which then costs max_failures full encodes to rediscover) or succeeds and
+// leaves a one-frame HEVC stream where a picture used to be. Copying it is the only
+// outcome under which the bytes survive.
+func attachedPictureCopyIndexes(streams []probe.VideoStream) []int {
+	if len(streams) <= 1 {
+		return nil
+	}
+	var idx []int
+	for i, s := range streams {
+		if s.AttachedPicture {
+			idx = append(idx, i)
+		}
+	}
+	return idx
 }
 
 // isTempName reports whether a basename is a transcoder work-in-progress temp.

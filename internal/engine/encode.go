@@ -153,6 +153,28 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 		"-map", "0", "-map", "-0:d?",
 		"-c", "copy", "-c:v", spec.FFmpegCodec,
 	)
+	// An ATTACHED PICTURE is a video stream and `-c:v` above would re-encode it, so each
+	// one is pinned back to copy by its own per-stream option. It must come AFTER the
+	// blanket -c:v, which is what it overrides; `-map 0` preserves stream order, so the
+	// N of an output `v:N` is the N of the source's. A single-video-stream source yields
+	// no such option and therefore byte-identical argv to the encoder that predates this.
+	//
+	// Whether ffprobe ESTABLISHED that shape is not dropped. An encoder that could not
+	// find out what video streams its source carries cannot know whether one of them is
+	// artwork that must be pinned back to copy, and an unknown shape has to fail safe
+	// rather than default to the common one - the same posture the engine's own
+	// source-shape guard takes, and the same one the pixel-format derivation above takes
+	// for the same class of unknown. Through the engine this is unreachable: that guard
+	// skipped the file already and hands this call the snapshot it read. It is the
+	// backstop for a direct caller of this exported type, which builds its own.
+	streams, established := props.VideoStreams()
+	if !established {
+		return fmt.Errorf("cannot establish the video streams of %q (ffprobe did not answer): "+
+			"refusing to encode without knowing whether one of them is an attached picture", in)
+	}
+	for _, i := range attachedPictureCopyIndexes(streams) {
+		args = append(args, "-c:v:"+strconv.Itoa(i), "copy")
+	}
 	args = append(args, buildArgs(spec, e.Cfg, pixFmt, colorArgs, x265Color)...)
 	args = append(args, "--", out)
 
