@@ -27,6 +27,14 @@ import (
 // recorded, so the next Claim reads a verdict it cannot re-derive - rather than by
 // deleting the row. Deleting would take a done row's contribution to the lifetime
 // reclaimed total with it, and a failed row's attempt accounting with it.
+//
+// That mechanism is what re-opens a done or skipped row. A row parked at max_failures is
+// held by its attempt count and by nothing else, so re-opening one means clearing the
+// count - and which SELECTOR reached it does not change what holds it. A requeue that
+// cleared the count only under --failed would tell an operator who named their one parked
+// file that it was back in the pipeline, and the next scan would refuse it exactly as
+// before: the silent no-op this whole feature exists to end, rebuilt inside the lever
+// built to end it.
 
 // SkipGuards is the closed vocabulary `--guard` accepts, in the order `requeue` lists
 // them when it refuses one it does not recognise.
@@ -63,7 +71,9 @@ func KnownGuard(token string) bool {
 
 // RequeueSelector names the rows one requeue is about. Exactly one of the three is set;
 // none is refused (ErrNoSelector), because a requeue with no selector would be a request
-// to re-open the whole ledger and nobody types that by accident.
+// to re-open the whole ledger and nobody types that by accident, and more than one is
+// refused (ErrTooManySelectors), because acting on one of them would hand an operator a
+// different set from the one they typed without telling them.
 type RequeueSelector struct {
 	// Path is one library path. Every terminal row at it is re-opened - there is
 	// normally one, but a path the library has held more than one version of carries a
@@ -78,6 +88,22 @@ type RequeueSelector struct {
 
 // Empty reports whether nothing was selected.
 func (s RequeueSelector) Empty() bool { return s.Path == "" && s.Guard == "" && !s.Failed }
+
+// Given names each selector that was set, in the order the usage lists them. A requeue
+// carries exactly one; this is what the refusal prints when it carries more.
+func (s RequeueSelector) Given() []string {
+	var given []string
+	if s.Path != "" {
+		given = append(given, "a path")
+	}
+	if s.Guard != "" {
+		given = append(given, "--guard "+s.Guard)
+	}
+	if s.Failed {
+		given = append(given, "--failed")
+	}
+	return given
+}
 
 // describe names what a requeue looked for, for the refusal that has to say so.
 func (s RequeueSelector) describe() string {
@@ -106,11 +132,34 @@ type RequeueResult struct {
 	Reopened []string
 	// Protected is every matched row that was left exactly as it was.
 	Protected []ProtectedRow
+	// AttemptsCleared is how many of the re-opened rows were parked on their attempt
+	// count, so re-opening them handed the file back its retries. It is reported
+	// because that is a different act from clearing what a row recorded about the
+	// configuration: the next scan will ENCODE those files if the guards let it.
+	AttemptsCleared int
+}
+
+// reopening is one row a requeue is about to re-open, and how.
+type reopening struct {
+	path, fingerprint string
+	clearFailures     bool
 }
 
 // ErrNoSelector is `requeue` with no path, no --guard and no --failed.
 var ErrNoSelector = errors.New("requeue needs a path, --guard <token> or --failed: " +
 	"re-opening the whole ledger is not something this command will do on an empty selector")
+
+// ErrTooManySelectors is a requeue carrying more than one of path, --guard and --failed.
+// Each names a different set, and the ledger has no reading of two of them together: a
+// command that picked one would act on a set the operator did not ask for and report that
+// as success, which is the same silence this whole feature exists to end.
+type ErrTooManySelectors struct{ Given []string }
+
+func (e ErrTooManySelectors) Error() string {
+	return fmt.Sprintf("requeue takes ONE selector and got %d (%s): each names a different set of "+
+		"rows, so run the command once per set rather than have it guess which one you meant",
+		len(e.Given), strings.Join(e.Given, ", "))
+}
 
 // ErrUnknownGuard is a --guard token this build does not recognise. It is distinct from
 // "matched nothing" on purpose: a typo and an empty set are different problems, and
@@ -150,6 +199,9 @@ func Requeue(ctx context.Context, st store.Store, sel RequeueSelector, maxFailur
 	if sel.Empty() {
 		return res, ErrNoSelector
 	}
+	if given := sel.Given(); len(given) > 1 {
+		return res, ErrTooManySelectors{Given: given}
+	}
 	if sel.Guard != "" && !KnownGuard(sel.Guard) {
 		return res, ErrUnknownGuard{Token: sel.Guard}
 	}
@@ -158,8 +210,7 @@ func Requeue(ctx context.Context, st store.Store, sel RequeueSelector, maxFailur
 	if err != nil {
 		return res, fmt.Errorf("reading the ledger: %w", err)
 	}
-	type key struct{ path, fingerprint string }
-	var matched []key
+	var matched []reopening
 	for _, j := range rows {
 		if !selects(sel, j, maxFailures) {
 			continue
@@ -168,16 +219,30 @@ func Requeue(ctx context.Context, st store.Store, sel RequeueSelector, maxFailur
 			res.Protected = append(res.Protected, ProtectedRow{Path: j.Path, Why: why})
 			continue
 		}
-		matched = append(matched, key{j.Path, j.Fingerprint})
+		matched = append(matched, reopening{
+			path:        j.Path,
+			fingerprint: j.Fingerprint,
+			// What holds a row out of the pipeline is a property of THE ROW, so what
+			// re-opens it is too. A failed row is held by its attempt count and by
+			// nothing else (see store.Claim): clearing what it recorded about the
+			// configuration would change nothing an operator could observe, so a
+			// command that stopped there would report a file back in the pipeline that
+			// the next scan refuses exactly as before. Reading it off the selector
+			// instead made that true of every route to a failed row but --failed.
+			clearFailures: j.Status == store.Failed,
+		})
 	}
 
-	for _, k := range matched {
-		changed, err := st.Reopen(ctx, k.path, k.fingerprint, sel.Failed)
+	for _, m := range matched {
+		changed, err := st.Reopen(ctx, m.path, m.fingerprint, m.clearFailures)
 		if err != nil {
-			return res, fmt.Errorf("re-opening %s: %w", k.path, err)
+			return res, fmt.Errorf("re-opening %s: %w", m.path, err)
 		}
 		if changed {
-			res.Reopened = append(res.Reopened, k.path)
+			res.Reopened = append(res.Reopened, m.path)
+			if m.clearFailures {
+				res.AttemptsCleared++
+			}
 		}
 	}
 	sort.Strings(res.Reopened)

@@ -48,8 +48,14 @@ Flags:
   --guard    a skip guard's token; --guard '' is not a selector
   --failed   select every row whose attempts have reached max_failures
 
+ONE selector per run. A path, --guard and --failed name three different sets, so two of
+them together is a refusal rather than a guess at which one was meant.
+
 Re-opening is not re-encoding: the guards run again, and a file that reaches the same
 verdict reaches it in microseconds with nothing encoded and nothing written beside it.
+A row parked at max_failures is the exception, and it is held by its attempt count rather
+than by a verdict: re-opening one - by name or with --failed - hands the file its attempts
+back, so whatever failed that encode will be attempted again.
 
 A scan already re-opens a row whose recorded decision inputs no longer match the
 configuration, so this is for what that cannot reach. Three rows are never re-opened, by
@@ -82,6 +88,11 @@ func cmdRequeue(args []string, stdout, stderr io.Writer) int {
 	}
 	if sel.Empty() {
 		fmt.Fprintf(stderr, "holdfast: %v\n\n", engine.ErrNoSelector)
+		fs.Usage()
+		return 2
+	}
+	if given := sel.Given(); len(given) > 1 {
+		fmt.Fprintf(stderr, "holdfast: %v\n\n", engine.ErrTooManySelectors{Given: given})
 		fs.Usage()
 		return 2
 	}
@@ -130,6 +141,10 @@ func reportRequeue(ctx context.Context, st store.Store, sel engine.RequeueSelect
 		fmt.Fprintf(stdout, "re-opened: %s\n", p)
 	}
 	fmt.Fprintf(stdout, "re-opened %d row(s); the next scan runs the guards over them again.\n", len(res.Reopened))
+	if res.AttemptsCleared > 0 {
+		fmt.Fprintf(stdout, "%d of them were parked at max_failures and got their attempts back; "+
+			"whatever failed those encodes will be attempted again.\n", res.AttemptsCleared)
+	}
 	if len(res.Protected) > 0 {
 		fmt.Fprintf(stdout, "left %d row(s) alone (named above).\n", len(res.Protected))
 	}
@@ -150,21 +165,28 @@ func decisionInputsReport(ctx context.Context, st store.Store, cfg *config.Confi
 
 // decisionInputsLines renders the survey as the operator-facing sentences both callers
 // print, so `validate` and a daemon cannot describe the same ledger differently.
+//
+// BOTH FIGURES ARE ALWAYS NUMBERS, including when they are zero. "Nothing has moved" is
+// the answer an operator most wants to be able to trust, and a sentence that only appears
+// when there is something to report is indistinguishable from a report that was not
+// attempted - so the zero is printed rather than summarised away. The one case with no
+// figures is an empty ledger, where the two counts would describe a set that is not there.
 func decisionInputsLines(s store.DecisionInputsSurvey) []string {
 	if s.Reopening() == 0 && s.Matching == 0 {
 		return []string{"the ledger holds no terminal row a configuration change could re-open"}
 	}
-	if s.Reopening() == 0 {
-		return []string{fmt.Sprintf(
-			"every one of the %d terminal row(s) a configuration change could re-open was taken under "+
-				"the configuration in force; the next scan re-opens none of them", s.Matching)}
-	}
-	return []string{
+	lines := []string{
 		fmt.Sprintf("%d terminal row(s) were taken under a configuration that has since moved", s.Moved),
 		fmt.Sprintf("%d terminal row(s) record no decision inputs at all (written before holdfast recorded them)", s.NotRecorded),
-		fmt.Sprintf("the next scan offers those %d file(s) to the guards again; that is a re-decision, not a "+
-			"re-encode - a file that reaches the same verdict reaches it with nothing encoded", s.Reopening()),
 	}
+	if s.Reopening() == 0 {
+		return append(lines, fmt.Sprintf("so the next scan re-opens none of them: every one of the %d "+
+			"terminal row(s) a configuration change could re-open was taken under the configuration in "+
+			"force", s.Matching))
+	}
+	return append(lines, fmt.Sprintf("the next scan offers those %d file(s) to the guards again; that is a "+
+		"re-decision, not a re-encode - a file that reaches the same verdict reaches it with nothing "+
+		"encoded", s.Reopening()))
 }
 
 // absoluteLedgerPath turns what the operator typed into the path the ledger is keyed by.

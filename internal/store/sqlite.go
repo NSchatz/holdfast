@@ -92,6 +92,21 @@ func Open(path string) (*SQLite, error) {
 // one in WAL mode, as any reader does; the database file itself — its rows, its schema
 // and its version — is left exactly as it was found.
 func OpenReadOnly(path string) (*SQLite, error) {
+	db, err := openReadOnlyDB(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireCurrentSchema(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &SQLite{db: db}, nil
+}
+
+// openReadOnlyDB is the read-only handle itself, with no schema rule attached. It is
+// shared so the physical read-only property has ONE definition: every reader in this
+// package gets mode=ro whatever it then decides about the schema it is looking at.
+func openReadOnlyDB(path string) (*sql.DB, error) {
 	// No MkdirAll and no create: a read that finds nothing to read says so. The
 	// pragmas are deliberately not Open's — journal_mode and synchronous are writes to
 	// the header, and a reader has no business setting either. query_only is belt and
@@ -102,12 +117,7 @@ func OpenReadOnly(path string) (*SQLite, error) {
 		return nil, fmt.Errorf("store: open %q read-only: %w", path, err)
 	}
 	db.SetMaxOpenConns(1)
-
-	if err := requireCurrentSchema(context.Background(), db); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return &SQLite{db: db}, nil
+	return db, nil
 }
 
 // New wraps an already-open *sql.DB (test seam — e.g. an in-memory database) and
@@ -376,17 +386,39 @@ func (s *SQLite) Reopen(ctx context.Context, path, fingerprint string, clearFail
 // would otherwise arrive in NotRecorded - and this figure is read as "what the next scan
 // will re-open", which that row never is, under any configuration.
 func (s *SQLite) SurveyDecisionInputs(ctx context.Context, current DecisionInputs) (DecisionInputsSurvey, error) {
-	var out DecisionInputsSurvey
+	where, args := surveyedRows(true)
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT decision_inputs, COUNT(*) FROM jobs
-		 WHERE status IN (?, ?) AND NOT (status = ? AND reason = ?)
-		 GROUP BY decision_inputs`,
-		string(Done), string(Skipped), string(Skipped), GuardRestoredOriginal)
+		`SELECT decision_inputs, COUNT(*) FROM jobs WHERE `+where+` GROUP BY decision_inputs`, args...)
 	if err != nil {
-		return out, fmt.Errorf("store: survey decision inputs: %w", err)
+		return DecisionInputsSurvey{}, fmt.Errorf("store: survey decision inputs: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
+	return classifyRecordedInputs(rows, current)
+}
 
+// surveyedRows is the WHERE both surveys count over, and the reason they must agree: the
+// two figures a run announces and the two `validate` prints are the same statement about
+// the same ledger, so one of them reading a wider or narrower row set than the other would
+// be a disagreement an operator has no way to resolve.
+//
+// hasReason is false only for a ledger older than the outcome columns, which cannot hold a
+// restored-original row at all - that guard is many migrations younger than they are - so
+// leaving the clause off such a file excludes nothing that is there.
+func surveyedRows(hasReason bool) (string, []any) {
+	where := `status IN (?, ?)`
+	args := []any{string(Done), string(Skipped)}
+	if hasReason {
+		where += ` AND NOT (status = ? AND reason = ?)`
+		args = append(args, string(Skipped), GuardRestoredOriginal)
+	}
+	return where, args
+}
+
+// classifyRecordedInputs turns (decision_inputs, COUNT(*)) groups into the survey. It is
+// the one place the three-way reading of a stored record lives, so the startup report and
+// `validate` cannot classify the same row differently.
+func classifyRecordedInputs(rows *sql.Rows, current DecisionInputs) (DecisionInputsSurvey, error) {
+	var out DecisionInputsSurvey
 	for rows.Next() {
 		var recorded sql.NullString
 		var n int64

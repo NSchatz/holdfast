@@ -459,6 +459,59 @@ func TestRequeue_ReopensTheRowsItNames(t *testing.T) {
 		}
 	})
 
+	t.Run("a path re-opens a parked row and hands back its attempts", func(t *testing.T) {
+		ts := requeueStore(t)
+		seedTerminal(t, ts, "/lib/parked.mkv", store.Failed, &store.Outcome{Reason: "ffmpeg died"})
+		for i := 0; i < 2; i++ { // three failures in all: the bound is 3
+			if err := ts.Finish(ctx, "/lib/parked.mkv", "fp", store.Failed,
+				&store.Outcome{Reason: "ffmpeg died"}, 3); err != nil {
+				t.Fatalf("Finish: %v", err)
+			}
+		}
+		if ok, _ := ts.Claim(ctx, "/lib/parked.mkv", "fp", "w0", 3, store.DecisionInputs{}); ok {
+			t.Fatal("the fixture is wrong: the row is not parked, so re-opening it proves nothing")
+		}
+
+		res, err := Requeue(ctx, ts, RequeueSelector{Path: "/lib/parked.mkv"}, 3)
+		if err != nil {
+			t.Fatalf("Requeue: %v", err)
+		}
+		// The attempt count is what holds this row, so the selector that reached it is
+		// not what decides whether the count is cleared - the row is.
+		if ok, err := ts.Claim(ctx, "/lib/parked.mkv", "fp", "w0", 3, store.DecisionInputs{}); err != nil || !ok {
+			t.Errorf("a path requeue reported the parked row re-opened and the next scan still "+
+				"refuses it: ok=%v err=%v", ok, err)
+		}
+		if res.AttemptsCleared != 1 {
+			t.Errorf("the requeue cleared %d attempt count(s), want 1 - an operator whose file "+
+				"will be ENCODED again is owed that in the output", res.AttemptsCleared)
+		}
+	})
+
+	t.Run("two selectors are refused", func(t *testing.T) {
+		ts := requeueStore(t)
+		seedTerminal(t, ts, "/lib/quiet.mkv", store.Skipped,
+			&store.Outcome{Reason: SkipLowBitrate, DecisionInputs: recorded(ts)})
+		before := ledgerSnapshot(t, ts)
+
+		var many ErrTooManySelectors
+		_, err := Requeue(ctx, ts, RequeueSelector{Guard: SkipLowBitrate, Failed: true}, 3)
+		if !asErr(err, &many) {
+			t.Fatalf("want an ErrTooManySelectors, got %T: %v", err, err)
+		}
+		if !strings.Contains(err.Error(), "--failed") || !strings.Contains(err.Error(), SkipLowBitrate) {
+			t.Errorf("the refusal does not name both selectors it was given: %v", err)
+		}
+		assertLedgerUnchanged(t, ts, before)
+
+		// And the narrowing it refuses to do silently is a real one: the guard alone
+		// matches this row, so acting on the first selector in a switch would have
+		// re-opened it and reported success.
+		if _, err := Requeue(ctx, ts, RequeueSelector{Guard: SkipLowBitrate}, 3); err != nil {
+			t.Fatalf("requeue of the guard alone: %v", err)
+		}
+	})
+
 	t.Run("no selector is refused", func(t *testing.T) {
 		ts := requeueStore(t)
 		seedTerminal(t, ts, "/lib/one.mkv", store.Skipped,

@@ -44,9 +44,17 @@ next scan leaves it alone.
 
 `run` and `serve` report, before the scan re-opens anything, how many rows were taken under
 a configuration that has since moved and how many record no inputs at all. `validate`
-reports the same two counts - reading the ledger **read-only**, because a validate that
-migrated your store as a side effect of describing it would leave that file unopenable by
-the daemon still running against it. With no ledger yet, `validate` says so and still passes.
+reports the same two counts - as numbers, including when both are zero, because "nothing has
+moved" is the answer worth being able to trust - and reads the ledger **read-only**, because
+a validate that migrated your store as a side effect of describing it would leave that file
+unopenable by the daemon still running against it. With no ledger yet, `validate` says so and
+still passes.
+
+A ledger an **earlier holdfast** wrote is reported too, and that is the upgrade you most
+want the figures for: no row in it records anything, so the first scan under the new build
+re-opens every terminal row it holds. Reading it needs no migration - a schema with no column
+for the inputs is one in which no row can have recorded any - so `validate` counts those rows
+and still leaves the file exactly as the running daemon left it.
 
 ## `holdfast requeue`
 
@@ -62,11 +70,19 @@ holdfast requeue --config config.yaml --guard low-bitrate # every row that guard
 holdfast requeue --config config.yaml --failed            # every row parked at max_failures
 ```
 
-Each prints what it re-opened and the count. It re-opens by the same mechanism a
-configuration change does - clearing what the row recorded - rather than by deleting the
-row, which would take a `done` row's contribution to the lifetime reclaimed total with it
-and a failed row's attempt accounting with it. `--failed` additionally resets that count,
-because the count is the only thing holding a parked row.
+Each prints what it re-opened and the count, and takes **one selector per run**: a path,
+`--guard` and `--failed` name three different sets, so two of them together is a refusal
+rather than a guess at which one you meant.
+
+It re-opens by the same mechanism a configuration change does - clearing what the row
+recorded - rather than by deleting the row, which would take a `done` row's contribution to
+the lifetime reclaimed total with it and a failed row's attempt accounting with it.
+
+A row parked at `max_failures` is the exception, because what holds it is its **attempt
+count** and not a verdict: re-opening one resets that count, whether `--failed` or the
+file's own path named it. So a parked file you requeue by name really does come back, and
+whatever failed that encode will be attempted again - which is the one case where
+re-opening does lead to an encode.
 
 It **refuses**, non-zero and having changed nothing, when:
 
@@ -77,6 +93,8 @@ It **refuses**, non-zero and having changed nothing, when:
   typo and an empty match set are different problems;
 - there is no selector at all. Re-opening the whole ledger is not something anybody types
   by accident;
+- there is more than one selector. Acting on one of them would hand you a different set from
+  the one you asked for and report it as a success;
 - the state directory holds no ledger. It reports that and creates neither.
 
 It is a **local** command and never an HTTP endpoint, for the reason `restore` is not one:

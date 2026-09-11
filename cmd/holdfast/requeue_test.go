@@ -348,6 +348,107 @@ func TestValidate_ReportsTheRowsTakenUnderAMovedConfiguration(t *testing.T) {
 	}
 }
 
+// TestValidate_ReadsALedgerAnEarlierBuildWroteWithoutMigratingIt. Upgrade day is when the
+// two counts carry the most: every row the previous build wrote records nothing, so the
+// first scan is about to offer the whole terminal set to the guards again. `validate` has
+// to say so over a file whose schema it does not share - and it has to do that WITHOUT
+// migrating it, because stamping a newer version onto an operator's ledger would make that
+// file unopenable by the holdfast still running against it.
+//
+// The counts need no migration to be true: a schema with no column for them is one in which
+// no row can have recorded any.
+func TestValidate_ReadsALedgerAnEarlierBuildWroteWithoutMigratingIt(t *testing.T) {
+	cfgPath, state := ledgerConfig(t, "")
+	seedOlderLedger(t, state)
+	dbPath := filepath.Join(state, "jobs.db")
+	if got := readSchemaStamp(t, dbPath); got != olderSchemaVersion {
+		t.Fatalf("the fixture is at schema %d, want %d - it is not a previous build's ledger",
+			got, olderSchemaVersion)
+	}
+	before := sha256File(t, dbPath)
+
+	code, out, errOut := cli(t, "validate", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("validate exited %d, want 0 (stderr: %s)", code, errOut)
+	}
+	// Two terminal rows in the fixture, both recording nothing, and both re-opened by the
+	// first scan this build runs.
+	for _, want := range []string{
+		"0 terminal row(s) were taken under a configuration that has since moved",
+		"2 terminal row(s) record no decision inputs",
+		"2 file(s)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("validate does not report %q for a ledger the previous build wrote:\n%s", want, out)
+		}
+	}
+	if got := readSchemaStamp(t, dbPath); got != olderSchemaVersion {
+		t.Errorf("validate MIGRATED the ledger it was describing: schema is now %d, was %d",
+			got, olderSchemaVersion)
+	}
+	if after := sha256File(t, dbPath); after != before {
+		t.Error("validate changed the ledger it was describing")
+	}
+}
+
+// TestValidate_PrintsBothFiguresWhenNothingHasMoved. "Nothing has moved" is the answer an
+// operator most needs to be able to trust, so both figures are printed as NUMBERS even when
+// both are zero: a line that only appears when there is something to report cannot be told
+// apart from a report that was never attempted.
+func TestValidate_PrintsBothFiguresWhenNothingHasMoved(t *testing.T) {
+	cfgPath, state := ledgerConfig(t, "crf: 23\n")
+	live := inForce(t, cfgPath)
+	seedLedger(t, state, func(st *store.SQLite) {
+		seedTerminalRow(t, st, "/lib/a.mkv", store.Done, "", live)
+		seedTerminalRow(t, st, "/lib/b.mkv", store.Skipped, engine.SkipLowBitrate, live)
+	})
+
+	code, out, errOut := cli(t, "validate", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("validate exited %d, want 0 (stderr: %s)", code, errOut)
+	}
+	for _, want := range []string{
+		"0 terminal row(s) were taken under a configuration that has since moved",
+		"0 terminal row(s) record no decision inputs",
+		"re-opens none of them",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("validate does not report %q for a ledger entirely in force:\n%s", want, out)
+		}
+	}
+}
+
+// TestRequeue_RefusesTwoSelectorsRatherThanActingOnOne. A path, --guard and --failed name
+// three different sets. Given two, acting on one would hand an operator a set they did not
+// ask for and report it as success, which is the silence this command exists to end.
+func TestRequeue_RefusesTwoSelectorsRatherThanActingOnOne(t *testing.T) {
+	cfgPath, state := ledgerConfig(t, "")
+	live := inForce(t, cfgPath)
+	seedLedger(t, state, func(st *store.SQLite) {
+		seedTerminalRow(t, st, "/lib/quiet.mkv", store.Skipped, engine.SkipLowBitrate, live)
+	})
+
+	code, out, errOut := cli(t, "requeue", "--config", cfgPath, "--guard", engine.SkipLowBitrate, "--failed")
+	if code == 0 {
+		t.Fatalf("requeue accepted two selectors and exited 0:\n%s", out)
+	}
+	if !strings.Contains(errOut, "ONE selector") && !strings.Contains(errOut, "takes ONE selector") {
+		t.Errorf("the refusal does not say one selector per run:\n%s", errOut)
+	}
+	if claimable(t, state, "/lib/quiet.mkv", live) {
+		t.Error("the refused requeue re-opened the row the guard selector would have matched")
+	}
+
+	// Anti-vacuity: the same guard ALONE re-opens that row, so the refusal above is about
+	// the two selectors and not about a command that can do nothing.
+	if code, out, errOut := cli(t, "requeue", "--config", cfgPath, "--guard", engine.SkipLowBitrate); code != 0 {
+		t.Fatalf("requeue of the guard alone exited %d:\n%s\n%s", code, out, errOut)
+	}
+	if !claimable(t, state, "/lib/quiet.mkv", live) {
+		t.Error("the guard selector alone did not re-open the row")
+	}
+}
+
 // TestValidate_WithNoLedgerStillPasses. A fresh install validates cleanly, says there is
 // nothing to read, and has created neither the state directory nor the database - which
 // is what keeps this widening of what `validate` touches from reddening a first run.

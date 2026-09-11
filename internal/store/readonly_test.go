@@ -245,6 +245,69 @@ func TestOpenReadOnly_CreatesNothingWhenThereIsNothingToRead(t *testing.T) {
 	}
 }
 
+// SurveyLedgerDecisionInputs is the read `validate` goes through, and it is deliberately
+// NOT OpenReadOnly's rule: a ledger behind this build is the one population the two counts
+// matter most for, so it is answered rather than refused. What it must still never do is
+// migrate the file, and a ledger from the future is still a refusal.
+func TestSurveyLedgerDecisionInputs_AnswersForAnOlderLedgerWithoutMigratingIt(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "jobs.db")
+	seedTwoTerminalRows(t, dbPath)
+	prev := windBackOneSchemaVersion(t, dbPath)
+	before := fileDigest(t, dbPath)
+
+	got, err := SurveyLedgerDecisionInputs(context.Background(), dbPath, sameConfig)
+	if err != nil {
+		t.Fatalf("SurveyLedgerDecisionInputs over a ledger the previous build wrote: %v", err)
+	}
+	// The fixture's rows were seeded recording the configuration in force, and the
+	// wind-back took the column with them: under that schema NO row can record anything,
+	// which is the whole reason the count needs no migration to be true.
+	want := DecisionInputsSurvey{NotRecorded: 2}
+	if got != want {
+		t.Errorf("surveyed %+v, want %+v", got, want)
+	}
+	if v := rawUserVersion(t, dbPath); v != prev {
+		t.Errorf("the survey migrated the ledger it was reading: user_version is now %d, was %d", v, prev)
+	}
+	if after := fileDigest(t, dbPath); after != before {
+		t.Error("the survey changed the ledger it was reading")
+	}
+}
+
+func TestSurveyLedgerDecisionInputs_RefusesALedgerFromTheFuture(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "jobs.db")
+	seedTwoTerminalRows(t, dbPath)
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 9999`); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	_ = db.Close()
+
+	if _, err := SurveyLedgerDecisionInputs(context.Background(), dbPath, sameConfig); err == nil {
+		t.Fatal("the survey described a ledger whose shape this build cannot see all of")
+	} else if !strings.Contains(err.Error(), "9999") {
+		t.Errorf("the refusal does not name the version it read: %v", err)
+	}
+}
+
+func TestSurveyLedgerDecisionInputs_CreatesNothingWhenThereIsNothingToRead(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "absent", "jobs.db")
+
+	if _, err := SurveyLedgerDecisionInputs(context.Background(), dbPath, sameConfig); err == nil {
+		t.Fatal("the survey read a ledger that does not exist")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "absent")); statErr == nil {
+		t.Error("the survey created the state directory it was asked to read from")
+	}
+}
+
 func TestOpenReadOnly_RefusesAFileThatIsNotADatabase(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "jobs.db")

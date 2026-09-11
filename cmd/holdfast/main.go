@@ -169,7 +169,12 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 //     daemon still running against it (see store.OpenReadOnly);
 //   - a state directory with no ledger in it is not a failure and is not created. A
 //     fresh install has nothing to say here and `validate` must still pass, so this
-//     reports the absence and returns.
+//     reports the absence and returns;
+//   - a ledger the PREVIOUS build wrote still yields both figures. That is the
+//     population they matter most for - every row in it records nothing, so the first
+//     scan after an upgrade re-opens the whole terminal set - and reading it needs no
+//     migration, because a schema without the column is a schema under which no row can
+//     have recorded anything (see store.SurveyLedgerDecisionInputs).
 //
 // Nothing here can fail the command. `validate` validates a CONFIGURATION; a ledger that
 // could not be read is reported as unreadable beside a config that is still valid.
@@ -179,17 +184,11 @@ func reportLedgerAgainstConfig(cfg *config.Config, stdout io.Writer) {
 		fmt.Fprintf(stdout, "ledger: none at %s yet, so there is nothing to re-open\n", dbPath)
 		return
 	}
-	st, err := store.OpenReadOnly(dbPath)
+	survey, err := store.SurveyLedgerDecisionInputs(context.Background(), dbPath,
+		engine.DecisionInputsFor(*cfg))
 	if err != nil {
 		fmt.Fprintf(stdout, "ledger: %s could not be read, so what it was decided under cannot be "+
 			"reported here: %v\n", dbPath, err)
-		return
-	}
-	defer func() { _ = st.Close() }()
-
-	survey, err := decisionInputsReport(context.Background(), st, cfg)
-	if err != nil {
-		fmt.Fprintf(stdout, "ledger: the decision inputs could not be read: %v\n", err)
 		return
 	}
 	for _, line := range decisionInputsLines(survey) {
