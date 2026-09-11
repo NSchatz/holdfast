@@ -95,7 +95,7 @@ and nothing but comment text was: no `//go:` or `//lint:` directive was removed,
 comment recording a safety invariant, a `rename-guard-allow` marker, or a rationale
 nobody could re-derive from the code. What went was restatement and narrated history -
 the same fact said three times, and the account of what the code used to do, which git
-already holds. 560 prose lines went in all.
+already holds. 562 prose lines went in all.
 
 ## The one exemption
 
@@ -115,7 +115,7 @@ The same four numbers, re-measured after the trim:
 | number | value |
 |---|---|
 | eligible files | 159 |
-| module-wide aggregate ratio | 24.2% prose (14026 prose lines, 43927 code lines) |
+| module-wide aggregate ratio | 24.2% prose (14024 prose lines, 43927 code lines) |
 | maximum per-file ratio | 64.0% - `internal/store/store.go`, the exempt file |
 | P90 | 46.03% |
 
