@@ -172,24 +172,28 @@ var ReverseProxyClauses = []Clause{
 // The last one is the clause a reader is most likely to need and least likely to guess:
 // nothing in holdfast's output says that a POSIX ACL or an SELinux label on the source did
 // not survive the swap, and an operator relying on one has no other way to find out.
+// The Clause texts here deliberately do NOT open with "that", the way the reverse-proxy
+// table's do: the shared failure message already supplies one ("so the statement that %s
+// is MISSING"), and a clause that supplies a second reads as a stutter in the one place an
+// operator meets it.
 var SwapMetadataClauses = []Clause{
 	{
 		Token:  "carries the source's mode",
-		Clause: "that the replacement carries the source's mode whatever umask holdfast runs under",
+		Clause: "the replacement carries the source's mode whatever umask holdfast runs under",
 	},
 	{
 		Token: "only where holdfast is privileged",
-		Clause: "that ownership is carried only where holdfast is privileged to carry it, " +
+		Clause: "ownership is carried only where holdfast is privileged to carry it, " +
 			"and is otherwise the holdfast uid",
 	},
 	{
 		Token: "preserve_mtime",
-		Clause: "that the modification time is carried from the source unless preserve_mtime " +
+		Clause: "the modification time is carried from the source unless preserve_mtime " +
 			"is false",
 	},
 	{
 		Token:  "acls and xattrs are not carried",
-		Clause: "that ACLs and xattrs are not carried onto the replacement",
+		Clause: "ACLs and xattrs are not carried onto the replacement",
 	},
 }
 
