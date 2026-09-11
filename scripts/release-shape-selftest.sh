@@ -819,10 +819,14 @@ reset
 #         replaced. The example deployment used to pull `:latest`, so the tag a release MOVES
 #         and the tag a user PULLS were one string and the gate held them equal. P1 severed
 #         them: the compose file pins a version and a digest, `:latest` is published rather
-#         than depended on. So the tag it pins is the one FLOATING_TAG must NOT be - retag
-#         `v0.1.0` and that file's own tag and digest disagree the moment the next release
+#         than depended on. So the tag it pins is the one FLOATING_TAG must NOT be - retag the
+#         version that file pins and its own tag and digest disagree the moment the next release
 #         lands, and an already-released version has been modified.
-in_step "promote :latest" 's|^          FLOATING_TAG: latest$|          FLOATING_TAG: v0.1.0|'
+#
+#         The mutated value has to BE the tag docker-compose.yml currently pins, because that
+#         file is what the gate holds FLOATING_TAG against. Pin and mutation move together: a
+#         stale literal here makes the collision vanish and the case go green over a hole.
+in_step "promote :latest" 's|^          FLOATING_TAG: latest$|          FLOATING_TAG: v0.2.0|'
 changed "$wf" "the floating tag pointed at the version the compose file pins"
 expect 1 "a promotion that retags the version the example deployment pins is red" "PINS"
 reset
@@ -830,7 +834,7 @@ reset
 # --- 48a. The same on the resolution step, which reads the same declared value: it would then
 #          resolve the version tag rather than the reference the promotion moved, and the
 #          comparison against the gated digest becomes one the release cannot fail.
-in_step "must resolve to the gated digest" 's|^          FLOATING_TAG: latest$|          FLOATING_TAG: v0.1.0|'
+in_step "must resolve to the gated digest" 's|^          FLOATING_TAG: latest$|          FLOATING_TAG: v0.2.0|'
 changed "$wf" "the resolution handed the version the compose file pins as the floating tag"
 expect 1 "a resolution handed the pinned version as the floating reference is red" "PINS"
 reset
@@ -1337,8 +1341,12 @@ resolve() {  # resolve <name> <want-exit> <must-mention>
 
 # The reference docker-compose.yml pins resolves to its own digest, as a digest reference
 # does; the gated version and the floating tag are the two labels this run touched.
-pinned_ref='ghcr.io/nschatz/holdfast:v0.1.0@sha256:302242b66f9c160e69b1e7c37d57925ec593bc7ed0ee9df851af0ec58c7cd4b2'
-pinned_digest='sha256:302242b66f9c160e69b1e7c37d57925ec593bc7ed0ee9df851af0ec58c7cd4b2'
+#
+# This pair IS the reference that file pins, and it moves with the pin: the fake registry below
+# has to answer for the reference the one reader reads out of the working tree, or the case that
+# asserts a resolution PASSING reds for a missing entry instead.
+pinned_ref='ghcr.io/nschatz/holdfast:v0.2.0@sha256:cb5125e1e95c93ee05256a37a8878c30349b75bb2ee2918c6e7b0ee9b4a5ec32'
+pinned_digest='sha256:cb5125e1e95c93ee05256a37a8878c30349b75bb2ee2918c6e7b0ee9b4a5ec32'
 registry() {  # registry <line…> - each "<ref> <digest>"
   : > "$digests"
   local l
