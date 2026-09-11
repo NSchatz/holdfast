@@ -722,7 +722,7 @@ func TestScan_ObservedIsTheListingThisScanDrewItsSourcesFrom(t *testing.T) {
 	ghost := filepath.Join(undo, "vanished."+UndoMarker+".mkv")
 	seedRow(t, rows, ghost, store.Done, nil)
 	for i := 0; i < 5; i++ {
-		seedRow(t, rows, filepath.Join(empty, "gone"+strconv.Itoa(i)+".mkv"), store.Skipped, because(SkipLowBitrate))
+		seedRow(t, rows, filepath.Join(empty, "gone"+strconv.Itoa(i)+".mkv"), store.Skipped, &store.Outcome{Reason: SkipLowBitrate})
 	}
 	res2 := walkOver(t, root, e2.Cfg.VideoExts, counts)
 	e2.SetCoverage(res2.Coverage, res2.Entries)

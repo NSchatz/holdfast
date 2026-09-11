@@ -48,6 +48,19 @@ scored twice are compared in the same format both times.
 An outcome is recorded per *attempt*, not per file: **claiming a job for a retry clears it**, so a file
 that is being re-encoded never advertises the rejected attempt's score while it is in flight.
 
+### The decision inputs a row was taken under
+
+Beside the proof, a terminal row records **the configuration values the decision that wrote it actually
+read** - and only those. It is what makes a row re-derivable rather than permanent: a scan offers a
+`done` or `skipped` file back to the guards when the values it recorded no longer match the
+configuration in force, so an edit to the YAML reaches the files a previous configuration already
+answered. Per-guard table, the re-opening rule, and the `holdfast requeue` lever for the rows a
+configuration change cannot reason about: **[docs/requeue.md](requeue.md)**.
+
+These values are internal to the store and are **not published on the HTTP surface**, and neither is
+requeue: it changes what the engine will do to a media file, which is the same reason `restore` is not
+an endpoint either.
+
 ### `would-transcode`: what a dry run decided
 
 `dry_run: true` is how you answer "which files would this transcode?" before you let holdfast delete
@@ -234,11 +247,16 @@ What a prune will never do, whatever you set:
   the total once, at startup, so deleting contributing rows shows a correct figure until the next restart.)
 - **It cannot cause a file to be encoded again.** A terminal row is a *decision*, not only a record: it is
   what holds that file out of the encoder on every later scan, and the guards that would re-derive the same
-  verdict run under whatever configuration is current, so a deleted row means a re-encode the moment the
-  configuration it was taken under has moved (a different `encoder` target codec, a lowered
-  `min_bitrate_kbps`, a file parked at `max_failures`). **So a row is only ever removed when the scan
-  listed the directory that file should be in and the file was not there**: gone, or replaced by different
-  content. Retention bounds what your library has *finished with*.
+  verdict run under whatever configuration is current. Deleting it therefore hands the file back with no
+  recorded verdict at all - which is a re-encode outright for a row parked at `max_failures` (the count was
+  the only thing holding it) and for a `skipped / restored-original` row (see below). **So a row is only ever
+  removed when the scan listed the directory that file should be in and the file was not there**: gone, or
+  replaced by different content. Retention bounds what your library has *finished with*.
+
+  A row whose recorded decision inputs have MOVED is re-opened by the scan whether it was pruned or not -
+  that is the point of recording them - but re-opening runs the guards again rather than the encoder, and a
+  file that reaches the same verdict reaches it before anything is encoded. Pruning is what removes the
+  verdict itself; a configuration change only asks for it again.
 - **It cannot take anything the undo window is holding**, and it does not release it either. A retained
   original is a file that is still present, so the `done` row for the swap that produced it is a row the
   prune may not remove - and the retention itself lives in its own table the prune never reads or writes,

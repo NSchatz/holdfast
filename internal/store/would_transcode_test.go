@@ -31,7 +31,7 @@ func TestClaim_AWouldTranscodeRowIsClaimedByARunAllowedToTranscode(t *testing.T)
 	const path, fp = "/lib/candidate.mkv", "1000:9"
 
 	// A dry run decided it: claimed, then finished as the recorded decision.
-	if ok, err := s.Claim(ctx, path, fp, "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, path, fp, "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("first claim: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, path, fp, WouldTranscode, &Outcome{
@@ -44,7 +44,7 @@ func TestClaim_AWouldTranscodeRowIsClaimedByARunAllowedToTranscode(t *testing.T)
 	}
 
 	// The same path and the same fingerprint, met by a run that IS allowed to transcode.
-	ok, err := s.Claim(ctx, path, fp, "w1", 3)
+	ok, err := s.Claim(ctx, path, fp, "w1", 3, sameConfig)
 	if err != nil {
 		t.Fatalf("re-claim: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestClaim_TwoDryRunsOverAnUnchangedFileReportOneCandidate(t *testing.T) {
 	const path, fp = "/lib/unchanged.mkv", "2000:7"
 
 	for pass := 1; pass <= 2; pass++ {
-		ok, err := s.Claim(ctx, path, fp, "w0", 3)
+		ok, err := s.Claim(ctx, path, fp, "w0", 3, sameConfig)
 		if err != nil {
 			t.Fatalf("dry-run pass %d: Claim: %v", pass, err)
 		}
@@ -164,7 +164,7 @@ func TestClaim_AnUnrecognisedStatusIsStillRefused(t *testing.T) {
 		t.Fatalf("seed the unrecognised row: %v", err)
 	}
 
-	ok, err := s.Claim(ctx, path, fp, "w0", 3)
+	ok, err := s.Claim(ctx, path, fp, "w0", 3, sameConfig)
 	if ok {
 		t.Fatal("a row carrying a status this build does not recognise was CLAIMED. The fail-safe " +
 			"default is what stops a word this binary cannot read from handing a file to the encoder")
@@ -422,7 +422,7 @@ func TestMigrate_PreSourceCodecDatabaseOnDiskGainsTheColumnUnbackfilled(t *testi
 	}
 
 	// 3. And the migrated database is WRITABLE through the new column.
-	if ok, err := s.Claim(ctx, "/lib/fresh.mkv", "50:500", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/lib/fresh.mkv", "50:500", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("Claim on a migrated database: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, "/lib/fresh.mkv", "50:500", WouldTranscode, &Outcome{

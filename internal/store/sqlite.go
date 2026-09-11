@@ -92,6 +92,21 @@ func Open(path string) (*SQLite, error) {
 // one in WAL mode, as any reader does; the database file itself — its rows, its schema
 // and its version — is left exactly as it was found.
 func OpenReadOnly(path string) (*SQLite, error) {
+	db, err := openReadOnlyDB(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireCurrentSchema(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &SQLite{db: db}, nil
+}
+
+// openReadOnlyDB is the read-only handle itself, with no schema rule attached. It is
+// shared so the physical read-only property has ONE definition: every reader in this
+// package gets mode=ro whatever it then decides about the schema it is looking at.
+func openReadOnlyDB(path string) (*sql.DB, error) {
 	// No MkdirAll and no create: a read that finds nothing to read says so. The
 	// pragmas are deliberately not Open's — journal_mode and synchronous are writes to
 	// the header, and a reader has no business setting either. query_only is belt and
@@ -102,12 +117,7 @@ func OpenReadOnly(path string) (*SQLite, error) {
 		return nil, fmt.Errorf("store: open %q read-only: %w", path, err)
 	}
 	db.SetMaxOpenConns(1)
-
-	if err := requireCurrentSchema(context.Background(), db); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return &SQLite{db: db}, nil
+	return db, nil
 }
 
 // New wraps an already-open *sql.DB (test seam — e.g. an in-memory database) and
@@ -157,7 +167,7 @@ func (s *SQLite) RecoverStale(ctx context.Context) (int, error) {
 // would hand the same job to two workers). The transaction (SQLite's default
 // isolation locks the database for its duration) makes the whole read-modify-write
 // atomic, which is what actually delivers the "exactly one claimant" guarantee.
-func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, maxFailures int) (bool, error) {
+func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, maxFailures int, current DecisionInputs) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("store: claim begin tx: %w", err)
@@ -166,9 +176,13 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 
 	var status string
 	var failCount int
+	// The reason and the recorded inputs are read INSIDE the transaction with the status,
+	// because the re-opening decision is taken from all three together and a second read
+	// outside it would be the read-modify-write race this transaction exists to close.
+	var reason, inputs sql.NullString
 	err = tx.QueryRowContext(ctx,
-		`SELECT status, fail_count FROM jobs WHERE path = ? AND fingerprint = ?`,
-		path, fingerprint).Scan(&status, &failCount)
+		`SELECT status, fail_count, reason, decision_inputs FROM jobs WHERE path = ? AND fingerprint = ?`,
+		path, fingerprint).Scan(&status, &failCount, &reason, &inputs)
 
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -189,7 +203,24 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 	st := Status(status)
 	switch {
 	case st == Done || st == Skipped:
-		return false, nil // permanent terminal state
+		if !reopens(st, reason.String, ParseDecisionInputs(inputs.String), current) {
+			return false, nil // terminal, and its decision still re-derives the same way
+		}
+		// RE-OPENED. The configuration this verdict was taken under has moved, or the row
+		// records nothing to re-derive it from, so the file goes back to the pipeline
+		// exactly as an unseen file does. What that costs is one pass of the guards: a
+		// file that would reach the same verdict reaches it before anything is encoded.
+		//
+		// A DONE row's contribution to the lifetime reclaimed total is carried forward
+		// first, because the claim below clears the sizes it was computed from. That is
+		// the same carry the prune makes for the same reason (see PruneTerminal): the
+		// published total is a sum over live done rows, so a row that stops being one
+		// would take its bytes out of a figure an operator uses to judge whether the tool
+		// was worth running - and it would do so at the next restart, not at the claim.
+		if err := carryReclaimed(ctx, tx, path, fingerprint); err != nil {
+			return false, err
+		}
+		// fall through to claim
 	case st == Indeterminate:
 		// PARKED. Whether the swap was applied is exactly what is unknown, so
 		// re-claiming would mean re-encoding and re-swapping a path that may already
@@ -257,7 +288,7 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL,
 			source_codec = NULL, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
-			swap_cause = NULL, failure_class = NULL
+			swap_cause = NULL, failure_class = NULL, decision_inputs = NULL
 		 WHERE path = ? AND fingerprint = ?`,
 		string(Probing), worker, now(), path, fingerprint); err != nil {
 		return false, fmt.Errorf("store: claim update: %w", err)
@@ -266,6 +297,148 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 		return false, fmt.Errorf("store: claim commit: %w", err)
 	}
 	return true, nil
+}
+
+// reopens decides whether a DONE or SKIPPED row goes back to the pipeline. It is the
+// whole of the re-opening rule, in one place, so Claim reads as the sequence of cases it
+// always was.
+//
+// A `restored-original` row is refused FIRST and without reading anything else. It is a
+// file an operator deliberately put back through the undo window, and re-opening it would
+// feed their rescued bytes to the very gates that passed the encode they rejected. It is
+// written by RecordSkip, which records no inputs, so the inputs rule alone would re-open
+// it on the next scan - this is the check that stops that, and it is one of two (Reopen
+// refuses the same row, so requeue cannot reach it either).
+//
+// Everything else is the inputs rule: a record that still matches holds the file out
+// exactly as it did before this column existed, and anything else - a value that moved, a
+// key this build no longer offers, a row that records nothing at all - is a verdict that
+// cannot be re-derived, so the file is offered to the pipeline and the guards decide it
+// again.
+func reopens(st Status, reason string, recorded, current DecisionInputs) bool {
+	if st == Skipped && reason == GuardRestoredOriginal {
+		return false
+	}
+	return !recorded.StillMatches(current)
+}
+
+// carryReclaimed moves one row's contribution to the lifetime reclaimed total into the
+// durable carry-forward, BEFORE a claim clears the sizes it is computed from. It is a
+// no-op for every row that is not a done row recording both sizes, which is every row
+// but the one case it exists for.
+//
+// The arithmetic is spelled in SQL rather than read-then-written in Go so it is atomic
+// against the claim it rides with, and clamped at zero so a future bug in the
+// strictly-smaller gate can never make a lifetime total run backwards - the same clamp
+// ReclaimedTotal already applies on the way out.
+//
+// It does NOT check that the ledger_totals row was there to carry into, where the prune
+// does. The singleton is seeded by the migration that creates it, so its absence is not a
+// state this build can produce - and the two failures are not comparable: a prune that
+// cannot carry must not delete, which is one pass of bookkeeping declined, while a claim
+// that refused would stop every file in the library entering the pipeline.
+func carryReclaimed(ctx context.Context, tx *sql.Tx, path, fingerprint string) error {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE ledger_totals SET reclaimed_pruned = reclaimed_pruned + (
+			SELECT MAX(COALESCE(SUM(source_bytes - output_bytes), 0), 0) FROM jobs
+			WHERE path = ? AND fingerprint = ? AND status = ?
+			  AND source_bytes IS NOT NULL AND output_bytes IS NOT NULL
+		 ) WHERE id = 1`,
+		path, fingerprint, string(Done)); err != nil {
+		return fmt.Errorf("store: claim carry reclaimed total: %w", err)
+	}
+	return nil
+}
+
+// Reopen is documented on the Store interface.
+func (s *SQLite) Reopen(ctx context.Context, path, fingerprint string, clearFailures bool) (bool, error) {
+	q := `UPDATE jobs SET decision_inputs = NULL, updated_at = ?`
+	if clearFailures {
+		q += `, fail_count = 0`
+	}
+	// The three refusals are in the statement itself, not in the caller. Requeue widens
+	// the set of files the encoder may touch, which in this repository is the single most
+	// destructive thing that can be done, so the rows that must never be re-opened are
+	// refused where the write happens as well as where it is decided.
+	q += ` WHERE path = ? AND fingerprint = ?
+		AND status NOT IN (?, ?)
+		AND NOT (status = ? AND reason = ?)`
+	res, err := s.db.ExecContext(ctx, q, now(), path, fingerprint,
+		string(Indeterminate), string(AppliedDespiteError), string(Skipped), GuardRestoredOriginal)
+	if err != nil {
+		return false, fmt.Errorf("store: reopen: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: reopen rows affected: %w", err)
+	}
+	return n > 0, nil
+}
+
+// SurveyDecisionInputs is documented on the Store interface.
+//
+// It groups by the STORED value rather than decoding every row, so the cost is one index
+// scan and a handful of comparisons - a ledger holding 300,000 rows taken under three
+// configurations answers this in three. That matters because it runs at startup on the
+// same single serialized connection the engine writes every job transition through.
+//
+// A `restored-original` row is left out of all three counts. It records no inputs, so it
+// would otherwise arrive in NotRecorded - and this figure is read as "what the next scan
+// will re-open", which that row never is, under any configuration.
+func (s *SQLite) SurveyDecisionInputs(ctx context.Context, current DecisionInputs) (DecisionInputsSurvey, error) {
+	where, args := surveyedRows(true)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT decision_inputs, COUNT(*) FROM jobs WHERE `+where+` GROUP BY decision_inputs`, args...)
+	if err != nil {
+		return DecisionInputsSurvey{}, fmt.Errorf("store: survey decision inputs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return classifyRecordedInputs(rows, current)
+}
+
+// surveyedRows is the WHERE both surveys count over, and the reason they must agree: the
+// two figures a run announces and the two `validate` prints are the same statement about
+// the same ledger, so one of them reading a wider or narrower row set than the other would
+// be a disagreement an operator has no way to resolve.
+//
+// hasReason is false only for a ledger older than the outcome columns, which cannot hold a
+// restored-original row at all - that guard is many migrations younger than they are - so
+// leaving the clause off such a file excludes nothing that is there.
+func surveyedRows(hasReason bool) (string, []any) {
+	where := `status IN (?, ?)`
+	args := []any{string(Done), string(Skipped)}
+	if hasReason {
+		where += ` AND NOT (status = ? AND reason = ?)`
+		args = append(args, string(Skipped), GuardRestoredOriginal)
+	}
+	return where, args
+}
+
+// classifyRecordedInputs turns (decision_inputs, COUNT(*)) groups into the survey. It is
+// the one place the three-way reading of a stored record lives, so the startup report and
+// `validate` cannot classify the same row differently.
+func classifyRecordedInputs(rows *sql.Rows, current DecisionInputs) (DecisionInputsSurvey, error) {
+	var out DecisionInputsSurvey
+	for rows.Next() {
+		var recorded sql.NullString
+		var n int64
+		if err := rows.Scan(&recorded, &n); err != nil {
+			return DecisionInputsSurvey{}, fmt.Errorf("store: survey decision inputs scan: %w", err)
+		}
+		in := ParseDecisionInputs(recorded.String)
+		switch {
+		case !in.Recorded():
+			out.NotRecorded += n
+		case in.StillMatches(current):
+			out.Matching += n
+		default:
+			out.Moved += n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return DecisionInputsSurvey{}, fmt.Errorf("store: survey decision inputs rows: %w", err)
+	}
+	return out, nil
 }
 
 // Advance records a non-terminal state transition for a job the caller already
@@ -327,7 +500,7 @@ func finishQuery(st Status, o *Outcome, maxFailures int) string {
 		vmaf_pix_fmt = ?, vmaf_chroma = ?, vmaf_chroma_metric = ?,
 		source_codec = ?, source_bytes = ?, output_bytes = ?, encode_ms = ?,
 		guard_attributes = ?, guard_time_resolution = ?, guard_residual_window = ?,
-		swap_cause = ?, failure_class = ?`
+		swap_cause = ?, failure_class = ?, decision_inputs = ?`
 	switch {
 	case st != Failed:
 	case o.FailureClass.Final() && maxFailures > 0:
@@ -359,6 +532,7 @@ func finishArgs(st Status, o *Outcome, path, fingerprint string) []any {
 		nullString(o.SourceCodec), nullInt(o.SourceBytes), nullInt(o.OutputBytes), nullInt(o.EncodeMs),
 		nullString(o.GuardAttributes), nullString(o.GuardTimeResolution),
 		nullString(o.GuardResidualWindow), nullString(o.SwapCause), nullString(class),
+		nullString(o.DecisionInputs.Encode()),
 		path, fingerprint,
 	}
 }
@@ -396,7 +570,7 @@ const outcomeColumns = `reason, encoder, vmaf_mean, vmaf_min, vmaf_model,
 	vmaf_pix_fmt, vmaf_chroma, vmaf_chroma_metric,
 	source_codec, source_bytes, output_bytes, encode_ms,
 	guard_attributes, guard_time_resolution, guard_residual_window, swap_cause,
-	failure_class`
+	failure_class, decision_inputs`
 
 // outcomeScan holds one row's outcome columns on the way out of the driver. Every
 // field is a sql.Null* because every column is nullable: NULL is "not recorded" and
@@ -428,6 +602,11 @@ type outcomeScan struct {
 	// NULL is not surfaced as "not recorded": there is no unclassified failure, so it
 	// resolves to the transient class on the way out (see outcome).
 	failClass sql.NullString
+
+	// What the decision that wrote this row read from the configuration. Nullable, and
+	// here NULL is the state the whole column exists to keep distinguishable: a row
+	// written before it existed recorded nothing, and nothing is not an empty set.
+	inputs sql.NullString
 }
 
 // dest returns the scan destinations in outcomeColumns order.
@@ -437,7 +616,7 @@ func (s *outcomeScan) dest() []any {
 		&s.pixFmt, &s.chroma, &s.chromaMetric,
 		&s.srcCodec, &s.srcBytes, &s.outBytes, &s.encMs,
 		&s.guardAttrs, &s.guardRes, &s.guardWindow, &s.swapCause,
-		&s.failClass,
+		&s.failClass, &s.inputs,
 	}
 }
 
@@ -457,7 +636,8 @@ func (s *outcomeScan) outcome() Outcome {
 		SourceCodec:     s.srcCodec.String,
 		GuardAttributes: s.guardAttrs.String, GuardTimeResolution: s.guardRes.String,
 		GuardResidualWindow: s.guardWindow.String, SwapCause: s.swapCause.String,
-		FailureClass: FailureClass(s.failClass.String).Class(),
+		FailureClass:   FailureClass(s.failClass.String).Class(),
+		DecisionInputs: ParseDecisionInputs(s.inputs.String),
 	}
 	o.VmafMean = nullableFloat(s.mean)
 	o.VmafMin = nullableFloat(s.worst)
@@ -738,7 +918,7 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL,
 			source_codec = NULL, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
-			swap_cause = NULL
+			swap_cause = NULL, decision_inputs = NULL
 		 WHERE jobs.status = ?`,
 		path, fingerprint, string(Skipped), now(), nullString(reason), string(Pending))
 	if err != nil {

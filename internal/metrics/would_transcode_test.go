@@ -89,14 +89,14 @@ func TestMetrics_TheLiveDepthGaugeReportsCandidatesAsThemselves(t *testing.T) {
 
 	// Two recorded decisions and one file genuinely being examined.
 	for _, p := range []string{"/lib/a.mkv", "/lib/b.mkv"} {
-		if ok, err := st.Claim(ctx, p, "1:1", "w0", 3); err != nil || !ok {
+		if ok, err := st.Claim(ctx, p, "1:1", "w0", 3, store.DecisionInputs{}); err != nil || !ok {
 			t.Fatalf("Claim(%s): ok=%v err=%v", p, ok, err)
 		}
 		if err := st.Finish(ctx, p, "1:1", store.WouldTranscode, &store.Outcome{SourceCodec: "h264"}, 3); err != nil {
 			t.Fatalf("Finish(%s): %v", p, err)
 		}
 	}
-	if ok, err := st.Claim(ctx, "/lib/in-hand.mkv", "2:2", "w1", 3); err != nil || !ok {
+	if ok, err := st.Claim(ctx, "/lib/in-hand.mkv", "2:2", "w1", 3, store.DecisionInputs{}); err != nil || !ok {
 		t.Fatalf("Claim(in-hand): ok=%v err=%v", ok, err)
 	}
 
@@ -121,7 +121,7 @@ func TestMetrics_NoNewMetricNameIsPublished(t *testing.T) {
 	ctx := context.Background()
 	// A row in the ledger, so the depth gauge - which reports by omission when there is
 	// nothing in any state - is actually published and can be compared.
-	if ok, err := st.Claim(ctx, "/lib/a.mkv", "1:1", "w0", 3); err != nil || !ok {
+	if ok, err := st.Claim(ctx, "/lib/a.mkv", "1:1", "w0", 3, store.DecisionInputs{}); err != nil || !ok {
 		t.Fatalf("Claim: ok=%v err=%v", ok, err)
 	}
 	if err := st.Finish(ctx, "/lib/a.mkv", "1:1", store.WouldTranscode, &store.Outcome{SourceCodec: "h264"}, 3); err != nil {

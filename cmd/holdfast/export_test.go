@@ -74,7 +74,7 @@ func openFixtureStore(t *testing.T, stateDir string) *store.SQLite {
 func finishRow(t *testing.T, st *store.SQLite, path string, status store.Status, o *store.Outcome) {
 	t.Helper()
 	ctx := context.Background()
-	ok, err := st.Claim(ctx, path, "fp", "w0", 3)
+	ok, err := st.Claim(ctx, path, "fp", "w0", 3, store.DecisionInputs{})
 	if err != nil || !ok {
 		t.Fatalf("claim %s: ok=%v err=%v", path, ok, err)
 	}
@@ -118,7 +118,7 @@ func TestExport_WritesEveryTerminalRowWithItsOutcomeAndKeepsAbsenceAbsent(t *tes
 		SourceBytes: ptrI(1024), OutputBytes: ptrI(1024), EncodeMs: ptrI(0),
 	})
 	// A non-terminal row, which is not history and must not appear.
-	if ok, err := st.Claim(context.Background(), "/lib/inflight.mkv", "fp", "w0", 3); err != nil || !ok {
+	if ok, err := st.Claim(context.Background(), "/lib/inflight.mkv", "fp", "w0", 3, store.DecisionInputs{}); err != nil || !ok {
 		t.Fatalf("claim in-flight: ok=%v err=%v", ok, err)
 	}
 	_ = st.Close()
@@ -260,7 +260,7 @@ func TestExport_AnEmptyLedgerProducesAnEmptyExportAndExitsZero(t *testing.T) {
 	// A real store with rows that are NOT terminal, so "empty export" is a statement
 	// about history rather than about an empty file.
 	st := openFixtureStore(t, stateDir)
-	if ok, err := st.Claim(context.Background(), "/lib/inflight.mkv", "fp", "w0", 3); err != nil || !ok {
+	if ok, err := st.Claim(context.Background(), "/lib/inflight.mkv", "fp", "w0", 3, store.DecisionInputs{}); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	_ = st.Close()
@@ -577,12 +577,13 @@ func bumpSchemaVersion(t *testing.T, dbPath string, version int) {
 
 // olderSchemaVersion is the schema this repository shipped immediately before the NEWEST
 // migration appended its own step: the shape a database written by the previous holdfast
-// has. That newest step is the class of a terminal failure, so the version below and the
+// has. That newest step is what a terminal decision read from the configuration, so the
+// version below and the
 // objects seedOlderLedger removes both track it. It is a literal because cmd/holdfast
 // cannot see the store's unexported version counter - and
 // TestExport_TheDaemonsDoorIsWhatMigratesAndThatIsWhyTheExportDoesNotUseIt keeps the literal
 // honest by asserting store.Open really does move a fixture built from it.
-const olderSchemaVersion = 8
+const olderSchemaVersion = 9
 
 // seedOlderLedger builds a real ledger with rows and then removes exactly what the NEWEST
 // migration added, restoring the previous version stamp. Not a current database wearing an
@@ -608,8 +609,10 @@ func seedOlderLedger(t *testing.T, stateDir string) {
 		t.Fatalf("raw open %s: %v", dbPath, err)
 	}
 	defer func() { _ = db.Close() }()
+	// The index goes first: SQLite refuses to drop a column an index refers to.
 	for _, stmt := range []string{
-		`ALTER TABLE jobs DROP COLUMN failure_class`,
+		`DROP INDEX IF EXISTS idx_jobs_status_inputs`,
+		`ALTER TABLE jobs DROP COLUMN decision_inputs`,
 		fmt.Sprintf(`PRAGMA user_version = %d`, olderSchemaVersion),
 	} {
 		if _, err := db.Exec(stmt); err != nil {

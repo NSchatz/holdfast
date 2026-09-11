@@ -40,7 +40,7 @@ func TestRecordSwapIncident_MovesTheJobRowAndTheRecordTogether(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
 	in := parkedIncident("/lib/tv/movie.mkv")
-	if ok, err := s.Claim(ctx, in.SourcePath, in.SourceFingerprint, "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, in.SourcePath, in.SourceFingerprint, "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("Claim: ok=%v err=%v", ok, err)
 	}
 	if err := s.RecordSwapIncident(ctx, in); err != nil {
@@ -96,7 +96,7 @@ func TestClaim_NeitherNewOutcomeIsEverReClaimed(t *testing.T) {
 			ctx := context.Background()
 			in := parkedIncident("/lib/tv/movie.mkv")
 			in.Outcome = outcome
-			if ok, err := s.Claim(ctx, in.SourcePath, in.SourceFingerprint, "w0", 3); err != nil || !ok {
+			if ok, err := s.Claim(ctx, in.SourcePath, in.SourceFingerprint, "w0", 3, sameConfig); err != nil || !ok {
 				t.Fatalf("Claim: ok=%v err=%v", ok, err)
 			}
 			if err := s.RecordSwapIncident(ctx, in); err != nil {
@@ -104,7 +104,7 @@ func TestClaim_NeitherNewOutcomeIsEverReClaimed(t *testing.T) {
 			}
 			// Every later attempt, in this run or any other.
 			for i := 0; i < 3; i++ {
-				ok, err := s.Claim(ctx, in.SourcePath, in.SourceFingerprint, "w1", 3)
+				ok, err := s.Claim(ctx, in.SourcePath, in.SourceFingerprint, "w1", 3, sameConfig)
 				if err != nil {
 					t.Fatalf("Claim: %v", err)
 				}
@@ -265,7 +265,7 @@ func TestResolveIncident_ReleasesTheJobSoALaterRunTreatsThePathAsNewWork(t *test
 	s := openTest(t)
 	ctx := context.Background()
 	in := parkedIncident("/lib/tv/movie.mkv")
-	if ok, err := s.Claim(ctx, in.SourcePath, in.SourceFingerprint, "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, in.SourcePath, in.SourceFingerprint, "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("Claim: ok=%v err=%v", ok, err)
 	}
 	if err := s.RecordSwapIncident(ctx, in); err != nil {
@@ -286,7 +286,7 @@ func TestResolveIncident_ReleasesTheJobSoALaterRunTreatsThePathAsNewWork(t *test
 		t.Errorf("the jobs row survived the resolution (exists=%v err=%v) - the source could never be reclaimed", exists, err)
 	}
 	// The source path is new work: it claims cleanly.
-	if ok, err := s.Claim(ctx, in.SourcePath, in.SourceFingerprint, "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, in.SourcePath, in.SourceFingerprint, "w0", 3, sameConfig); err != nil || !ok {
 		t.Errorf("a released source path did not claim: ok=%v err=%v", ok, err)
 	}
 	// The durable record of what the operator decided survives all of that.
@@ -426,14 +426,14 @@ func TestAggregates_TheTwoSwapOutcomesAreCountedAsThemselves(t *testing.T) {
 	applied := parkedIncident("/lib/applied.mkv")
 	applied.Outcome = AppliedDespiteError
 	for _, in := range []SwapIncident{parked, applied} {
-		if ok, err := s.Claim(ctx, in.SourcePath, in.SourceFingerprint, "w0", 3); err != nil || !ok {
+		if ok, err := s.Claim(ctx, in.SourcePath, in.SourceFingerprint, "w0", 3, sameConfig); err != nil || !ok {
 			t.Fatalf("Claim(%s): ok=%v err=%v", in.SourcePath, ok, err)
 		}
 		if err := s.RecordSwapIncident(ctx, in); err != nil {
 			t.Fatalf("RecordSwapIncident(%s): %v", in.SourcePath, err)
 		}
 	}
-	if ok, err := s.Claim(ctx, "/lib/ordinary.mkv", "fp1", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/lib/ordinary.mkv", "fp1", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("Claim: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, "/lib/ordinary.mkv", "fp1", Failed, &Outcome{Reason: "encode error"}, 3); err != nil {
@@ -493,7 +493,7 @@ func TestMigrate_TheSwapColumnsLandOnADatabaseThatAlreadyExists(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	ctx := context.Background()
-	if ok, err := s.Claim(ctx, "/lib/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/lib/movie.mkv", "fp1", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("Claim: ok=%v err=%v", ok, err)
 	}
 	if err := s.Close(); err != nil {

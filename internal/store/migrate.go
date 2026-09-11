@@ -327,6 +327,38 @@ ALTER TABLE jobs ADD COLUMN source_codec TEXT;
 ALTER TABLE jobs ADD COLUMN failure_class TEXT;
 `,
 	},
+	{
+		// v10 - the decision inputs a terminal row was taken under.
+		//
+		// One nullable TEXT column holding what the decision that wrote the row actually
+		// READ from the configuration (store.DecisionInputs). It is a column on jobs
+		// rather than a table of its own for the reason the failure class is: its
+		// lifetime IS the row's. It describes THIS decision, Claim clears it when a new
+		// attempt begins, and a successful transcode prunes it with everything else the
+		// attempt recorded.
+		//
+		// NULLABLE with NO DEFAULT, the rule v2 set and every step since has kept, and
+		// here it is the whole point rather than a convention. A row already in the field
+		// was written by a build that recorded no inputs, and it must READ as not
+		// recorded - which the re-opening rule treats as "this verdict cannot be
+		// re-derived", so the row is offered to the pipeline once and the decision it
+		// then reaches records what it read. A DEFAULT - '' or 'none' or anything else -
+		// would claim those rows were taken under a configuration nobody recorded, and
+		// they would then MATCH whatever is current and stay excluded for ever, which is
+		// precisely the silent no-op this column exists to end.
+		//
+		// An index on (status, decision_inputs) serves the survey the startup report and
+		// `validate` read: how many done/skipped rows were taken under a configuration
+		// that has since moved. That question is answered by grouping the DISTINCT
+		// recorded values within those two statuses - a handful of groups over a
+		// 300,000-row ledger - rather than by decoding every row, and the index is what
+		// keeps it off the single serialized connection the engine writes through.
+		name: "decision inputs",
+		sql: `
+ALTER TABLE jobs ADD COLUMN decision_inputs TEXT;
+CREATE INDEX IF NOT EXISTS idx_jobs_status_inputs ON jobs(status, decision_inputs);
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

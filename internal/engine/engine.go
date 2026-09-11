@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
-	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/fsclass"
 	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/probe"
@@ -87,8 +86,11 @@ const (
 	// the undo window. It is NOT mutable: the next scan must not re-encode a file
 	// somebody just rescued, through the very gates that passed the encode they
 	// rejected. Changing the file clears it, because that is a new fingerprint and a
-	// new row.
-	SkipRestoredOriginal = "restored-original"
+	// new row. A configuration change does not clear it either, and neither does a
+	// requeue - which is why it is the one token internal/store also has to know by
+	// name, and why this is defined AS that constant rather than beside it: a wire
+	// format with two spellings is a wire format with a silent fork in it.
+	SkipRestoredOriginal = store.GuardRestoredOriginal
 
 	// FailUnreadable is the one failure whose reason is a token: there is no error to
 	// quote, because the probe simply reported no video stream.
@@ -371,11 +373,7 @@ func New(cfg config.Config, p *probe.Prober, enc Encoder, st store.Store, log *s
 	if log == nil {
 		log = slog.Default()
 	}
-	target := "hevc"
-	if spec, ok := encoder.Lookup(cfg.Encoder); ok {
-		target = spec.TargetCodec
-	}
-	return &Engine{Cfg: cfg, Probe: p, Enc: enc, Store: st, Log: log, targetCodec: target}
+	return &Engine{Cfg: cfg, Probe: p, Enc: enc, Store: st, Log: log, targetCodec: targetCodecFor(cfg)}
 }
 
 // RunOneshot discards orphaned temps from any prior killed run, resets any job left
@@ -947,7 +945,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 				// Emit once, only when the skip was newly recorded, so a live client
 				// (and the metrics/notify observers) see this skip exactly once — not
 				// once per scan for the lifetime of the seed.
-				e.emit(Event{Path: f, Status: store.Skipped, Outcome: because(SkipHardlinked)})
+				e.emit(Event{Path: f, Status: store.Skipped, Outcome: e.because(SkipHardlinked)})
 			}
 			return nil
 		}
@@ -960,12 +958,13 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	}
 
 	// Claim: the resume short-circuit AND the cross-worker mutual-exclusion guard
-	// in one atomic call. done/skipped are permanent; failed is retryable up to
-	// MaxFailures (a transient ENOSPC/OOM must not exclude a file forever); active
-	// (probing/encoding/verifying) means another worker holds it (or it's stale,
-	// awaiting the next RunOneshot's RecoverStale). Any of these => not claimed =>
-	// nothing to do here.
-	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures)
+	// in one atomic call. done/skipped hold the file out for as long as the decision
+	// inputs they recorded still match the configuration handed in here, and are
+	// RE-OPENED when they do not; failed is retryable up to MaxFailures (a transient
+	// ENOSPC/OOM must not exclude a file forever); active (probing/encoding/verifying)
+	// means another worker holds it (or it's stale, awaiting the next RunOneshot's
+	// RecoverStale). Any of these => not claimed => nothing to do here.
+	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures, e.currentInputs())
 	if err != nil {
 		// Fail safe: a store error must never be treated as "done". Log and skip
 		// this pass; the file is retried on the next scan once the store recovers.
@@ -990,7 +989,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// logged reason, never swapped in place.
 	if probe.IsSymlink(f) {
 		e.Log.Info("skip (symlinked source — swap would replace the link, orphaning its target)", "file", f)
-		e.finish(ctx, f, key, store.Skipped, because(SkipSymlink))
+		e.finish(ctx, f, key, store.Skipped, e.because(SkipSymlink))
 		return nil
 	}
 
@@ -1009,18 +1008,18 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	codec := props.Codec()
 	if codec == "" {
 		e.Log.Info("skip (unreadable / no video stream)", "file", f)
-		e.finish(ctx, f, key, store.Failed, because(FailUnreadable))
+		e.finish(ctx, f, key, store.Failed, e.because(FailUnreadable))
 		return nil
 	}
 	if e.isAlreadyTargetCodec(codec) {
 		e.Log.Info("skip (already at target codec)", "file", f, "codec", codec, "target", e.targetCodec)
-		e.finish(ctx, f, key, store.Skipped, because(SkipAlreadyTargetCodec))
+		e.finish(ctx, f, key, store.Skipped, e.because(SkipAlreadyTargetCodec, InputTargetCodec))
 		return nil
 	}
 
 	if br := props.BitrateKbps(); br > 0 && br < e.Cfg.MinBitrateKbps {
 		e.Log.Info("skip (low bitrate)", "file", f, "kbps", br, "min", e.Cfg.MinBitrateKbps)
-		e.finish(ctx, f, key, store.Skipped, because(SkipLowBitrate))
+		e.finish(ctx, f, key, store.Skipped, e.because(SkipLowBitrate, InputMinBitrateKbps))
 		return nil
 	}
 
@@ -1030,7 +1029,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	switch props.FieldOrder() {
 	case "tt", "bb", "tb", "bt":
 		e.Log.Info("skip (interlaced — not deinterlacing)", "file", f)
-		e.finish(ctx, f, key, store.Skipped, because(SkipInterlaced))
+		e.finish(ctx, f, key, store.Skipped, e.because(SkipInterlaced))
 		return nil
 	}
 
@@ -1045,11 +1044,11 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	switch hdr.ClassFrom(props.CodecTag(), props.SideData(), props.Color("color_transfer")) {
 	case hdr.ClassDV:
 		e.Log.Info("skip (Dolby Vision — RPU cannot survive a generic re-encode)", "file", f)
-		e.finish(ctx, f, key, store.Skipped, because(SkipDolbyVision))
+		e.finish(ctx, f, key, store.Skipped, e.because(SkipDolbyVision))
 		return nil
 	case hdr.ClassHDR10Plus:
 		e.Log.Info("skip (HDR10+ dynamic metadata — cannot survive a generic re-encode)", "file", f)
-		e.finish(ctx, f, key, store.Skipped, because(SkipHDR10Plus))
+		e.finish(ctx, f, key, store.Skipped, e.because(SkipHDR10Plus))
 		return nil
 	case hdr.ClassHDR10:
 		// HDR10 static metadata IS carried through the encode — but if the source
@@ -1063,7 +1062,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		}
 		if incomplete(props.FrameSideData()) {
 			e.Log.Info("skip (HDR10 static metadata present but incomplete/unparseable — refusing to re-encode and drop it)", "file", f)
-			e.finish(ctx, f, key, store.Skipped, because(SkipIncompleteHDRMetadata))
+			e.finish(ctx, f, key, store.Skipped, e.because(SkipIncompleteHDRMetadata))
 			return nil
 		}
 	}
@@ -1076,7 +1075,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		srcPixFmt := props.PixFmt()
 		if _, ok := hdr.DerivePixFmt(srcPixFmt); !ok {
 			e.Log.Info("skip (unrecognized/exotic pixel format — refusing to silently subsample)", "file", f, "pix_fmt", srcPixFmt)
-			e.finish(ctx, f, key, store.Skipped, because(SkipExoticPixelFormat))
+			e.finish(ctx, f, key, store.Skipped, e.because(SkipExoticPixelFormat, InputPixelFormat))
 			return nil
 		}
 	}
@@ -1131,7 +1130,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	if final != f {
 		if _, err := os.Lstat(final); err == nil {
 			e.Log.Info("skip (target already exists as a distinct file — refusing to clobber)", "file", f, "target", final)
-			e.finish(ctx, f, key, store.Skipped, because(SkipTargetExists))
+			e.finish(ctx, f, key, store.Skipped, e.because(SkipTargetExists, InputContainerExt))
 			return nil
 		}
 	}
@@ -1160,7 +1159,16 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		if e.hookBeforeDryRunRecord != nil {
 			e.hookBeforeDryRunRecord(f)
 		}
-		out := &store.Outcome{SourceCodec: codec}
+		// The decision inputs a dry run records are the ones the ENCODE it is predicting
+		// would have been taken under, which is what makes the row say what it says: this
+		// file, under this encoder at this crf and preset, is one a real run would
+		// transcode. They change nothing about whether it is re-claimed - a dry-run
+		// decision is always re-claimable (see store.Claim) - so they are here for the
+		// operator reading the row, not for the engine.
+		out := &store.Outcome{
+			SourceCodec:    codec,
+			DecisionInputs: e.inputsRead(InputTargetCodec, InputEncoder, InputCRF, InputPreset),
+		}
 		if st, err := os.Stat(f); err == nil {
 			out.SourceBytes = ptr(st.Size())
 		} else {
@@ -1302,7 +1310,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			e.Log.Info("skip (the original could not be retained, so the swap could not be undone — source untouched)",
 				"file", f, "err", rerr)
 			_ = os.Remove(tmp)
-			e.finish(ctx, f, key, store.Skipped, because(SkipUndoRetentionFailed))
+			e.finish(ctx, f, key, store.Skipped, e.because(SkipUndoRetentionFailed))
 			return nil
 		}
 		retained = r
@@ -1495,9 +1503,15 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// first (Finish alone would be a no-op UPDATE against a nonexistent row and the
 	// done outcome would be silently lost).
 	finalKey := probe.Fingerprint(final)
-	if _, err := e.Store.Claim(ctx, final, finalKey, worker, e.Cfg.MaxFailures); err != nil {
+	if _, err := e.Store.Claim(ctx, final, finalKey, worker, e.Cfg.MaxFailures, e.currentInputs()); err != nil {
 		e.Log.Warn("claim of final key failed (done outcome still applies on disk)", "file", final, "err", err)
 	}
+	// What this encode was taken under: the codec it targeted and the three settings
+	// that decided what came out. It is recorded HERE, on the done row, because that row
+	// is the permanent answer about the replacement - and the moment any of the four
+	// moves, the answer is one this build would no longer give, so the next scan offers
+	// the file back to the guards rather than skipping it for ever.
+	out.DecisionInputs = e.inputsRead(InputTargetCodec, InputEncoder, InputCRF, InputPreset)
 	// Record the terminal Done state in the store WITHOUT emitting (finishStore), then
 	// emit ONE rich Done event carrying the same proof. Emitting exactly once here
 	// (rather than a generic finish emit plus a separate rich one) keeps a metrics
@@ -1554,9 +1568,19 @@ func (e *Engine) finish(ctx context.Context, path, key string, s store.Status, o
 	e.emit(Event{Path: path, Status: s, Outcome: o})
 }
 
-// because builds the one-field Outcome that a guard records: WHICH guard fired. Skips
-// happen before the encoder runs, so there is nothing else to prove about them.
-func because(reason string) *store.Outcome { return &store.Outcome{Reason: reason} }
+// because builds the Outcome a guard records: WHICH guard fired, and the current value
+// of the configuration keys that guard READ to decide it. Skips happen before the encoder
+// runs, so there is nothing else to prove about them.
+//
+// The inputs are what make the verdict re-derivable instead of permanent: a low-bitrate
+// skip records the threshold it compared against, so lowering that threshold offers the
+// file to the pipeline again, while changing a key the guard never read leaves it exactly
+// where it is. A guard that read NO configuration is called with no keys and records the
+// empty set - which is a record, and is why a verdict nothing can move is not re-opened on
+// every scan for ever.
+func (e *Engine) because(reason string, read ...string) *store.Outcome {
+	return &store.Outcome{Reason: reason, DecisionInputs: e.inputsRead(read...)}
+}
 
 // finalVerdictPrefix precedes the gate's own text on a failure no retry can change. It
 // is the operator-facing half of the class: the column says "deterministic" to a

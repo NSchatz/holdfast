@@ -93,14 +93,14 @@ func TestMetrics_QueueDepthReadsStore(t *testing.T) {
 	ctx := context.Background()
 	// Seed: two pending-claimed (encoding) + one done.
 	for _, p := range []string{"/lib/a.mkv", "/lib/b.mkv"} {
-		if ok, err := st.Claim(ctx, p, "1:1", "w0", 3); err != nil || !ok {
+		if ok, err := st.Claim(ctx, p, "1:1", "w0", 3, store.DecisionInputs{}); err != nil || !ok {
 			t.Fatalf("claim %s: %v", p, err)
 		}
 		if err := st.Advance(ctx, p, "1:1", store.Encoding); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if ok, _ := st.Claim(ctx, "/lib/c.mkv", "2:2", "w0", 3); ok {
+	if ok, _ := st.Claim(ctx, "/lib/c.mkv", "2:2", "w0", 3, store.DecisionInputs{}); ok {
 		_ = st.Finish(ctx, "/lib/c.mkv", "2:2", store.Done, nil, 3)
 	}
 

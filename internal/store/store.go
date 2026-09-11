@@ -277,7 +277,28 @@ type Outcome struct {
 	// every other failure, so "the temp and the target are not on the same mounted
 	// filesystem" is never attributed to a swap that failed for some other reason.
 	SwapCause string
+
+	// DecisionInputs is what the decision that wrote this row READ from the
+	// configuration, and it is what lets Claim re-derive the row rather than treat it
+	// as a permanent answer (see DecisionInputs and Claim). Its zero value is NOT
+	// RECORDED, which is what every row written before the column existed carries and
+	// what a failure - a verdict the configuration did not determine - carries too.
+	DecisionInputs DecisionInputs
 }
+
+// GuardRestoredOriginal is the one skip-guard token this package has to know by name.
+//
+// Every other token in Outcome.Reason is opaque here: the store records which guard
+// fired and never acts on it. This one is different because the store is where the
+// action has to happen. A `skipped / restored-original` row is what stands between an
+// operator's rescued bytes and the gates that passed the encode they rejected, so it is
+// NEVER re-opened - not by a configuration change, not by a requeue, not by a row that
+// records no inputs at all - and a rule enforced only in internal/engine would be a rule
+// with one check in front of an irreversible act.
+//
+// internal/engine defines its SkipRestoredOriginal as this constant, so there is exactly
+// one spelling of a token that is a stored wire format.
+const GuardRestoredOriginal = "restored-original"
 
 // SwapCauseCrossFilesystem is the distinct, machine-readable cause for a swap that
 // failed because the temp and the target are not on the same mounted filesystem
@@ -639,16 +660,59 @@ type Store interface {
 
 	// Claim atomically attempts to take ownership of path+fingerprint for worker.
 	// Returns (true, nil) if the caller now owns the job (row moved to probing) and
-	// (false, nil) if it does not: the job is done/skipped (permanent), failed and
-	// already at/over maxFailures (parked), or currently active (held by another
-	// worker, or stale — see RecoverStale). A fresh path+fingerprint with no row
-	// yields a claim.
+	// (false, nil) if it does not: the job is done/skipped and its recorded decision
+	// inputs still hold, failed and already at/over maxFailures (parked), or currently
+	// active (held by another worker, or stale - see RecoverStale). A fresh
+	// path+fingerprint with no row yields a claim.
 	//
-	// A WouldTranscode row DOES yield a claim. It records what a dry run decided about
-	// that scan, not a disposal of the file, so the run that is allowed to transcode must
-	// be able to pick the file up - otherwise turning dry-run off would leave every file
-	// the dry run examined permanently untouched.
-	Claim(ctx context.Context, path, fingerprint, worker string, maxFailures int) (bool, error)
+	// A done or skipped row is terminal only FOR THE CONFIGURATION IT WAS TAKEN UNDER.
+	// current is what that configuration is now - every decision input this build offers,
+	// keyed by the configuration key holding it - and a row whose recorded inputs no
+	// longer match it, or which records none at all, is RE-OPENED: the file is offered to
+	// the pipeline exactly as an unseen file is. Re-opening is not re-encoding; the guards
+	// run again, and a file that reaches the same verdict reaches it in microseconds and
+	// records the current inputs on the way.
+	//
+	// current is a parameter rather than a setting this package holds, for the reason
+	// maxFailures is one on Finish: it is the caller's configuration, the caller is the
+	// only thing that can see it, and a cached copy would answer a question about a
+	// configuration nobody could prove was still in force.
+	//
+	// Three rows are never re-opened however far the configuration has moved, because
+	// what holds each of them out is not a configuration question: Indeterminate,
+	// AppliedDespiteError, and a Skipped row carrying GuardRestoredOriginal.
+	//
+	// A WouldTranscode row DOES yield a claim, and unconditionally. It records what a dry
+	// run decided about that scan, not a disposal of the file, so the run that is allowed
+	// to transcode must be able to pick the file up - otherwise turning dry-run off would
+	// leave every file the dry run examined permanently untouched.
+	Claim(ctx context.Context, path, fingerprint, worker string, maxFailures int, current DecisionInputs) (bool, error)
+
+	// Reopen clears what ONE terminal row recorded about the configuration its decision
+	// was taken under, so the next Claim reads that decision as one it cannot re-derive
+	// and offers the file to the pipeline. It is the store half of `holdfast requeue`:
+	// the lever for the rows a configuration change cannot reason about.
+	//
+	// It re-opens by the SAME mechanism a configuration change does rather than by
+	// deleting the row, and that is load-bearing twice over. A deleted done row takes its
+	// contribution to the lifetime reclaimed total with it, and a deleted failed row
+	// takes the attempt accounting that parked it.
+	//
+	// clearFailures additionally resets the attempt count, which is what re-opens a row
+	// parked at max_failures - the count is the only thing holding it (see Claim).
+	//
+	// It REFUSES the three rows that are never re-opened, in its own WHERE clause and not
+	// on the caller's word: Indeterminate, AppliedDespiteError, and a Skipped row
+	// carrying GuardRestoredOriginal. Reports whether a row actually moved, so a caller
+	// counts what it changed rather than what it asked for.
+	Reopen(ctx context.Context, path, fingerprint string, clearFailures bool) (bool, error)
+
+	// SurveyDecisionInputs reports what the ledger says about the configuration its
+	// terminal decisions were taken under, measured against current: how many done and
+	// skipped rows record inputs that have moved, how many record none at all, and how
+	// many still match. A run announces the first two before its scan so a re-derivation
+	// is stated rather than discovered. A pure read.
+	SurveyDecisionInputs(ctx context.Context, current DecisionInputs) (DecisionInputsSurvey, error)
 
 	// Advance records a non-terminal state transition for a job the caller already
 	// holds (e.g. probing -> encoding -> verifying).
