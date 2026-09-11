@@ -2549,6 +2549,17 @@ func TestSkipVocabularyIsDocumented(t *testing.T) {
 		t.Errorf("SkipMultiVideoStream = %q, want %q - the guard's reason is drawn from the "+
 			"vocabulary, not written as a literal at the call site", got, "multi-video-stream")
 	}
+	// The token that is NOT written as a string literal, named here because it is the
+	// shape a collector loses SILENTLY: SkipRestoredOriginal is declared as
+	// store.GuardRestoredOriginal, so a collector that read only literals dropped it, saw
+	// one token fewer than the package declares, and left `restored-original` unchecked
+	// against the enumeration below while still reporting a pass. A vocabulary check that
+	// narrows without saying so is the defect it exists to catch, inside itself.
+	if got := vocabulary["SkipRestoredOriginal"]; got != store.GuardRestoredOriginal {
+		t.Errorf("SkipRestoredOriginal = %q, want %q - a constant whose value is not a string "+
+			"literal must still be READ, not skipped, or the token it names stops being checked",
+			got, store.GuardRestoredOriginal)
+	}
 
 	row := skippedReasonRow(t, filepath.Join(root, "docs", "api-reference.md"))
 	for name, tok := range vocabulary {
@@ -2560,9 +2571,39 @@ func TestSkipVocabularyIsDocumented(t *testing.T) {
 	}
 }
 
-// skipVocabulary parses every non-test Go file in dir and returns the Skip* string
-// constants it declares, keyed by constant name.
+// skipVocabulary parses every non-test Go file in dir and returns the Skip* constants it
+// declares, keyed by constant name.
+//
+// Every one of them is RESOLVED to its value, and one that cannot be resolved FAILS the
+// test. The distinction matters: a collector that quietly kept only the constants written
+// as a string literal would drop `SkipRestoredOriginal = store.GuardRestoredOriginal`,
+// report one token fewer than the package declares, and go on passing - so the
+// enumeration check above would stop covering a token without anything saying so. A
+// vocabulary that can narrow in silence is not a closed vocabulary.
 func skipVocabulary(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for name, c := range packageConstants(t, dir) {
+		if !strings.HasPrefix(name, "Skip") {
+			continue
+		}
+		out[name] = constStringValue(t, name, c, 0)
+	}
+	return out
+}
+
+// declaredConst is one constant declaration: the expression its value comes from (nil
+// where the declaration carried none), the file it was declared in - whose import block is
+// how a qualified name is resolved - and the package directory that file lives in.
+type declaredConst struct {
+	expr ast.Expr
+	file *ast.File
+	dir  string
+}
+
+// packageConstants parses every non-test Go file in dir and returns each constant it
+// declares, keyed by name.
+func packageConstants(t *testing.T, dir string) map[string]declaredConst {
 	t.Helper()
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
@@ -2571,7 +2612,7 @@ func skipVocabulary(t *testing.T, dir string) map[string]string {
 	if err != nil {
 		t.Fatalf("parse %s: %v", dir, err)
 	}
-	out := map[string]string{}
+	out := map[string]declaredConst{}
 	for _, pkg := range pkgs {
 		for _, file := range pkg.Files {
 			for _, decl := range file.Decls {
@@ -2585,24 +2626,118 @@ func skipVocabulary(t *testing.T, dir string) map[string]string {
 						continue
 					}
 					for i, name := range vs.Names {
-						if !strings.HasPrefix(name.Name, "Skip") || i >= len(vs.Values) {
-							continue
+						c := declaredConst{file: file, dir: dir}
+						if i < len(vs.Values) {
+							c.expr = vs.Values[i]
 						}
-						lit, ok := vs.Values[i].(*ast.BasicLit)
-						if !ok || lit.Kind != token.STRING {
-							continue
-						}
-						v, uerr := strconv.Unquote(lit.Value)
-						if uerr != nil {
-							t.Fatalf("%s: cannot read the value of %s: %v", dir, name.Name, uerr)
-						}
-						out[name.Name] = v
+						out[name.Name] = c
 					}
 				}
 			}
 		}
 	}
 	return out
+}
+
+// constStringValue resolves one constant declaration to its string value: a literal
+// directly, a plain identifier through the same package, and a qualified identifier
+// through the package its file imports it from. Anything else is a FAILURE rather than a
+// skip, which is the whole point - see skipVocabulary.
+//
+// depth bounds the walk so a constant defined in terms of itself reds instead of hanging
+// the suite.
+func constStringValue(t *testing.T, name string, c declaredConst, depth int) string {
+	t.Helper()
+	if depth > 4 {
+		t.Fatalf("%s: still not resolved after %d hops - a constant this test cannot read is a "+
+			"token that would silently stop being checked", name, depth)
+	}
+	switch v := c.expr.(type) {
+	case *ast.BasicLit:
+		if v.Kind != token.STRING {
+			t.Fatalf("%s is declared as a %s literal, not a string - the skip vocabulary is a wire "+
+				"format of strings", name, v.Kind)
+		}
+		s, err := strconv.Unquote(v.Value)
+		if err != nil {
+			t.Fatalf("%s: cannot read the value %s: %v", name, v.Value, err)
+		}
+		return s
+	case *ast.Ident:
+		next, ok := packageConstants(t, c.dir)[v.Name]
+		if !ok {
+			t.Fatalf("%s is declared as %s, which %s does not declare as a constant", name, v.Name, c.dir)
+		}
+		return constStringValue(t, name, next, depth+1)
+	case *ast.SelectorExpr:
+		pkgIdent, ok := v.X.(*ast.Ident)
+		if !ok {
+			t.Fatalf("%s is declared as an expression this test cannot follow", name)
+		}
+		dir := importedPackageDir(t, c.file, pkgIdent.Name)
+		next, ok := packageConstants(t, dir)[v.Sel.Name]
+		if !ok {
+			t.Fatalf("%s is declared as %s.%s, which %s does not declare as a constant",
+				name, pkgIdent.Name, v.Sel.Name, dir)
+		}
+		return constStringValue(t, name, next, depth+1)
+	}
+	t.Fatalf("%s: its value is an expression this test cannot resolve (or it carries none at all), "+
+		"so the token it names would go unchecked against the shipped enumeration", name)
+	return ""
+}
+
+// importedPackageDir maps the package qualifier used in file (the `store` of
+// `store.GuardRestoredOriginal`) to the directory that package's source lives in.
+//
+// It refuses an import from outside this module rather than guessing at a directory for
+// it: the skip vocabulary is this repository's own, and a token defined in a dependency
+// would be a fact about the wire format that no check here could keep honest.
+func importedPackageDir(t *testing.T, file *ast.File, qualifier string) string {
+	t.Helper()
+	root, err := docscheck.RepoRoot(".")
+	if err != nil {
+		t.Fatalf("locate the repository root: %v", err)
+	}
+	mod := modulePath(t, root)
+	for _, imp := range file.Imports {
+		p, uerr := strconv.Unquote(imp.Path.Value)
+		if uerr != nil {
+			continue
+		}
+		local := p[strings.LastIndex(p, "/")+1:]
+		if imp.Name != nil {
+			local = imp.Name.Name
+		}
+		if local != qualifier {
+			continue
+		}
+		rel, inModule := strings.CutPrefix(p, mod+"/")
+		if !inModule {
+			t.Fatalf("the package %q is imported from outside this module (%s), so this test cannot "+
+				"read the constant it declares", p, mod)
+		}
+		return filepath.Join(root, filepath.FromSlash(rel))
+	}
+	t.Fatalf("no import in this file provides the package %q", qualifier)
+	return ""
+}
+
+// modulePath reads this repository's module path out of go.mod, which is what turns an
+// import path into a directory on disk.
+func modulePath(t *testing.T, root string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		t.Fatalf("read go.mod: %v", err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "module "); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	t.Fatalf("%s/go.mod carries no module line", root)
+	return ""
 }
 
 // skippedReasonRow returns the one row of the shipped record reference that enumerates

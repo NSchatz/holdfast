@@ -230,10 +230,14 @@ func (p *Prober) VideoStreams(ctx context.Context, f string) (streams []VideoStr
 	return streams, true
 }
 
-// StreamCount counts streams of the given ffprobe type specifier: "a"=audio,
-// "s"=subtitle, "t"=attachment ("d"=data is intentionally excluded — the encode
-// drops data streams). Returns 0 (never negative) when there are none or the file
+// StreamCount counts streams of the given ffprobe type specifier: "v"=video,
+// "a"=audio, "s"=subtitle, "t"=attachment ("d"=data is intentionally excluded - the
+// encode drops data streams). Returns 0 (never negative) when there are none or the file
 // is unreadable, so a caller's numeric compare is always well-formed.
+//
+// "v" is in that list because the parity gate passes it on every encode: the track this
+// tool exists to re-encode is counted like the ones it carries. An output short a video
+// stream is rejected exactly as one short an audio stream is.
 func (p *Prober) StreamCount(ctx context.Context, f, typ string) int {
 	out, err := exec.CommandContext(ctx, p.FFprobe, "-v", "error",
 		"-select_streams", typ, "-show_entries", "stream=index",

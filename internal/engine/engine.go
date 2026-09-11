@@ -1091,11 +1091,18 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// The probe is the second and last ffprobe a file pays for, and it is taken here
 	// rather than in the eager snapshot so that a file which skipped at one of the cheap
 	// guards above never pays for it at all.
+	//
+	// The outcome records NO decision inputs, because this guard reads no configuration
+	// key: a source's video-stream shape is a property of the file, so no value an
+	// operator edits re-derives the verdict. That is the honest record (see because), and
+	// it is exactly why the token is in SkipGuards - `requeue --guard multi-video-stream`
+	// is then the only lever there is, and a token missing from that list would be a
+	// permanent exclusion with no lever at all.
 	streams, established := props.VideoStreams()
 	if !established || !carriableVideoStreams(streams) {
 		e.Log.Info("skip (a video stream beyond the first that is not an attached picture, or a stream shape the probe could not establish)",
 			"file", f, "video_streams", len(streams), "probe_established", established)
-		e.finish(ctx, f, key, store.Skipped, because(SkipMultiVideoStream))
+		e.finish(ctx, f, key, store.Skipped, e.because(SkipMultiVideoStream))
 		return nil
 	}
 

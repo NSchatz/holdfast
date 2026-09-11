@@ -315,6 +315,57 @@ func TestRequeue_RefusesAGuardTokenThatMatchesNothing(t *testing.T) {
 	}
 }
 
+// TestRequeue_ReopensAMultiVideoStreamRow. The source-SHAPE guard reads no configuration
+// key - what video streams a file carries is a property of the file - so its rows record
+// nothing read and no configuration change will ever offer one back to the pipeline. That
+// makes `requeue --guard multi-video-stream` the ONLY lever over them, and a token absent
+// from SkipGuards is not an inconvenience but a permanent exclusion: requeue answers
+// ErrUnknownGuard for one and the operator has nothing else to reach for. The rule over
+// the whole vocabulary is asserted in internal/docscheck; this is the behaviour.
+func TestRequeue_ReopensAMultiVideoStreamRow(t *testing.T) {
+	ts := requeueStore(t)
+	ctx := context.Background()
+	cfg := baseCfg(ts.root)
+	const path = "/lib/two-angles.mkv"
+
+	// The row exactly as the guard writes it, built by the guard's own helper: the token,
+	// and the empty set of decision inputs that a verdict no key can move records.
+	seedTerminal(t, ts, path, store.Skipped, (&Engine{Cfg: cfg}).because(SkipMultiVideoStream))
+
+	// The precondition that makes this the case requeue exists for: a MOVED configuration
+	// re-opens nothing here, because the row read nothing for a new value to disagree with.
+	moved := cfg
+	moved.MinBitrateKbps = cfg.MinBitrateKbps + 1000
+	moved.CRF = cfg.CRF + 3
+	if ok, err := ts.Claim(ctx, path, "fp", "w0", 3, DecisionInputsFor(moved)); err != nil || ok {
+		t.Fatalf("a moved configuration re-opened the row (ok=%v err=%v), so this row is not the "+
+			"kind requeue is the only lever for and the rest of this test proves nothing", ok, err)
+	}
+
+	res, err := Requeue(ctx, ts, RequeueSelector{Guard: SkipMultiVideoStream}, 3)
+	if err != nil {
+		t.Fatalf("requeue --guard %s: %v - the token an operator reads off the row has to be one "+
+			"this build accepts, or the exclusion is permanent", SkipMultiVideoStream, err)
+	}
+	if len(res.Reopened) != 1 || res.Reopened[0] != path {
+		t.Fatalf("re-opened %v, want exactly %s", res.Reopened, path)
+	}
+	if ok, err := ts.Claim(ctx, path, "fp", "w0", 3, DecisionInputsFor(cfg)); err != nil || !ok {
+		t.Errorf("the re-opened row was not handed to the next claim: ok=%v err=%v", ok, err)
+	}
+
+	// And the refusal is still a refusal: a near-miss of the token is not quietly accepted
+	// as the token, which is what makes the acceptance above mean something.
+	if _, err := Requeue(ctx, requeueStore(t), RequeueSelector{Guard: SkipMultiVideoStream + "s"}, 3); err == nil {
+		t.Error("a guard token this build does not know must be refused by name")
+	} else {
+		var unknown ErrUnknownGuard
+		if !asErr(err, &unknown) {
+			t.Errorf("want an ErrUnknownGuard for a near-miss of the token, got %T: %v", err, err)
+		}
+	}
+}
+
 // TestRequeue_LeavesRestoredOriginalAlone. That row is what stands between an operator's
 // rescued bytes and the gates that passed the encode they rejected, so a requeue that
 // matches it leaves it exactly as it is AND says that it did.

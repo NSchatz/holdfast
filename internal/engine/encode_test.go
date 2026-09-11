@@ -282,6 +282,48 @@ func TestEncode_ExoticPixFmtRefusesToEncode(t *testing.T) {
 	}
 }
 
+// TestEncode_RefusesASourceWhoseVideoStreamShapeIsNotEstablished is the second
+// encoder-side backstop and the same shape as the one above. The engine's source-shape
+// guard skips a file whose video streams ffprobe could not establish; if that guard were
+// ever bypassed - or this EXPORTED encoder called directly, in which case it builds its
+// own snapshot - Encode must refuse rather than encode on a guess about whether one of
+// those streams is artwork that has to be carried unencoded rather than re-encoded.
+//
+// The fake ffprobe refuses exactly the stream-shape question and hands every other one to
+// the real binary, so the encode reaches this backstop with a derived pix_fmt and colour
+// tags in hand: what it refuses is the unknown shape and nothing else.
+func TestEncode_RefusesASourceWhoseVideoStreamShapeIsNotEstablished(t *testing.T) {
+	realFFmpeg, realFFprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, realFFmpeg, src, "3M")
+
+	blind := delegatingFFprobe(t, d, realFFprobe, "stream=index:stream_disposition=attached_pic", "")
+	cfg := baseCfg(d)
+	enc := FFmpegEncoder{FFmpeg: realFFmpeg, Cfg: cfg, Probe: probe.New(realFFmpeg, blind)}
+
+	out := filepath.Join(d, "out.mkv")
+	err := enc.Encode(context.Background(), src, out, nil)
+	if err == nil {
+		t.Fatal("Encode succeeded on a source whose video-stream shape ffprobe could not establish - " +
+			"an unknown shape must fail safe, not default to the common one")
+	}
+	if !strings.Contains(err.Error(), "video streams") {
+		t.Errorf("the refusal does not say what could not be established: %v", err)
+	}
+	if _, statErr := os.Stat(out); statErr == nil {
+		t.Error("Encode wrote an output despite refusing the unestablished stream shape")
+	}
+
+	// Anti-vacuity: the same encoder over the same source with a WORKING probe encodes.
+	// Without it, a refusal caused by anything else about this fixture would read as proof.
+	working := FFmpegEncoder{FFmpeg: realFFmpeg, Cfg: cfg, Probe: probe.New(realFFmpeg, realFFprobe)}
+	control := filepath.Join(d, "control.mkv")
+	if cerr := working.Encode(context.Background(), src, control, nil); cerr != nil {
+		t.Fatalf("the control encode failed, so the refusal above proves nothing: %v", cerr)
+	}
+}
+
 // TestEncode_UnknownEncoderErrors proves Encode refuses an unrecognized
 // Cfg.Encoder rather than silently falling back to any default codec.
 func TestEncode_UnknownEncoderErrors(t *testing.T) {
