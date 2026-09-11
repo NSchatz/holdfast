@@ -669,6 +669,51 @@ func TestHistoryEndpoint_CarriesTheComparisonFormatAndChromaBesideTheScore(t *te
 	}
 }
 
+// TestHistoryEndpoint_CarriesTheScoredStreamBesideTheScore is the payload half of
+// "which stream was compared travels with the score". It is on the wire on exactly the
+// terms vmaf_model and vmaf_pix_fmt are: present as a token when a comparison was made,
+// and the key ABSENT ENTIRELY when it was not.
+//
+// Asserted on the RAW BYTES, for the reason this file already establishes three times: a
+// struct decode erases the difference between "the key was not there" and "the value was
+// empty", and it is precisely that difference a client needs. `v:0` sent on a row whose
+// gate never ran would tell an operator which stream was compared when nothing was.
+func TestHistoryEndpoint_CarriesTheScoredStreamBesideTheScore(t *testing.T) {
+	h := newHarness(t, "")
+	st := h.st
+	ctx := context.Background()
+
+	mean, worst, chroma := 98.4, 96.1, 41.2
+	mustClaim(t, st, "/lib/scored.mkv", "6:6")
+	if err := st.Finish(ctx, "/lib/scored.mkv", "6:6", store.Done, &store.Outcome{
+		Encoder: "cpu", VmafMean: &mean, VmafMin: &worst, VmafModel: "version=vmaf_v0.6.1",
+		VmafPixFmt: "yuv420p10le", VmafChroma: &chroma, VmafChromaMetric: "psnr_cb/psnr_cr min (dB)",
+		VmafStream: "v:0",
+	}, 3); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(h.srv)
+	defer ts.Close()
+	body := getRaw(t, ts.URL+"/api/history")
+
+	if !strings.Contains(body, `"vmaf_stream":"v:0"`) {
+		t.Errorf("history body missing \"vmaf_stream\":\"v:0\" - a score must carry which video "+
+			"stream it was measured on\nbody: %s", body)
+	}
+	// /lib/done.mkv was seeded by newStore with a nil outcome - the shape of every row
+	// written before this fact existed. Its key is OMITTED, exactly as vmaf_model's
+	// already is, so a client never has to decide what an empty value means.
+	if strings.Contains(body, `"vmaf_stream":""`) || strings.Contains(body, `"vmaf_stream":null`) {
+		t.Errorf("an unrecorded scored stream must be OMITTED, not sent as an empty string or a "+
+			"null a client has to interpret\nbody: %s", body)
+	}
+	if n := strings.Count(body, `"vmaf_stream"`); n != 1 {
+		t.Errorf("the scored-stream key appears %d times, want 1 - only the row that recorded a "+
+			"comparison may carry it\nbody: %s", n, body)
+	}
+}
+
 // An in-flight retry must not advertise the PREVIOUS attempt's fidelity score on
 // /api/queue. The queue and history views share one projection, so a stale outcome left
 // on a re-claimed row would be served next to a file that is still encoding — a score

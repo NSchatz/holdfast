@@ -17,6 +17,7 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | `vmaf_mean`, `vmaf_min` | done, and a VMAF-rejected failure | the pooled harmonic mean **and the worst frame** |
 | `vmaf_model` | as above | the libvmaf model that produced them |
 | `vmaf_pix_fmt` | as above | the single pixel format **both streams were converted to** before scoring - chosen and named by holdfast, so a score says which pixels were compared |
+| `vmaf_stream` | as above | **which video stream** of each file was compared, in the specifier every ffprobe read here uses: `v:0`, the first video stream. A source can carry more than one, so this is what lines a score up against the file it was measured on. Absent on a row whose gate never ran - never a fabricated `v:0` |
 | `vmaf_chroma`, `vmaf_chroma_metric` | as above | the worst frame's chroma measurement and what it is (`psnr_cb/psnr_cr min (dB)`) - the only figure on the row that says whether the **colour** survived |
 | `source_codec` | would-transcode | the video codec the SOURCE was in when a dry run decided it - `null` when it was never read |
 | `source_bytes`, `output_bytes` | done | the sizes either side of the swap |
@@ -31,8 +32,8 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 columns existed), because a VMAF of `0.0` is a *destroyed frame*, not a missing measurement, and rendering
 one as the other would be inventing evidence about a swap nobody checked.
 
-**A VMAF score is not interpretable without its model or the format it was measured in**, which is why
-all three travel together. Read `vmaf_mean`/`vmaf_min` with the limits in mind: VMAF is a regression onto
+**A VMAF score is not interpretable without its model, the format it was measured in or the stream it was
+measured on**, which is why they all travel together. Read `vmaf_mean`/`vmaf_min` with the limits in mind: VMAF is a regression onto
 a *subjective* opinion scale under one viewing condition, `vmaf_v0.6.1` is **luma-only** (structurally
 blind to chroma damage - that is what `vmaf_chroma` is for), and the scores are **not comparable across
 different sources**. The number bounds measured perceptual quality against *your* source; it is not a
@@ -44,6 +45,13 @@ measurement as downconverting the output. holdfast converts both streams to one 
 scoring (the richer chroma subsampling of the two, at the deeper of the two bit depths, so nothing is
 averaged or quantised away on the way in) and records it in `vmaf_pix_fmt`. The same source and output
 scored twice are compared in the same format both times.
+
+**The scored stream is a fact too, and it is pinned rather than inferred.** Every ffprobe property read
+selects `v:0` and the decode-integrity check decodes `0:v:0`, so the quality gate names the same stream
+explicitly in its filtergraph and records it in `vmaf_stream`. On a file carrying more than one video
+stream that is what stops the gate measuring a stream the other checks never inspected, and what lets a
+reader of the row say which one it was. It is not configurable, for the same reason the probes' stream is
+not.
 
 An outcome is recorded per *attempt*, not per file: **claiming a job for a retry clears it**, so a file
 that is being re-encoded never advertises the rejected attempt's score while it is in flight.
