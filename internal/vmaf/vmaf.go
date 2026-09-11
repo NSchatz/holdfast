@@ -210,10 +210,13 @@ const ScoredStream = "v:0"
 // ffmpeg and observe what libavfilter did with it, rather than assert against a
 // string this package also produced - a filtergraph is only correct if ffmpeg agrees.
 //
-// It is the SINGLE writer of the graph's two video-stream input specifiers, and both
-// come from ScoredStream. Nothing else in the program composes one: a second place that
-// did would be a second answer to "which stream was measured", while the row the gate
-// writes afterwards would carry this one.
+// It is the SINGLE writer of the SCORING graph's two video-stream input specifiers, and
+// both come from ScoredStream. The startup model preflight (probeModel) is the only other
+// shipped libvmaf graph in this program and it names its inputs from that same constant,
+// so there is ONE answer to "which stream was measured" and it is the one the row the gate
+// writes afterwards carries. A second spelling anywhere in shipped code would be a second
+// answer; TestShippedCode_SpellsEveryVideoStreamLabelThroughScoredStream walks the module
+// and reds on one.
 //
 // The two `format` filters are the whole point of GATE-4's first criterion: they
 // convert BOTH inputs to one named format before libvmaf sees either, so the
@@ -229,11 +232,16 @@ func BuildFilter(req Request, logPath string) string {
 	if sub < 1 {
 		sub = 1
 	}
-	// [0:v:0] = distorted (the freshly-encoded output), [1:v:0] = reference (the source).
-	// Both name ScoredStream explicitly, so the comparison is pinned to the FIRST video
-	// stream - the one every ffprobe read selects and the decode-integrity check decodes.
-	// A bare type specifier would leave "which stream" to be resolved by rules that are
-	// ffmpeg's rather than holdfast's, on a file carrying more than one video stream.
+	// [0:v:0] = distorted (the encoded output), [1:v:0] = reference - stream-guard-allow.
+	// That marker exempts THIS line, which only NAMES the two labels to document the
+	// graph's shape: the format string below COMPOSES both from ScoredStream, and the
+	// marker is what keeps the exemption greppable and line-level, exactly as the rename
+	// guard in scripts/check-pins.sh does it.
+	//
+	// Both labels therefore pin the comparison to the FIRST video stream - the one every
+	// ffprobe read selects and the decode-integrity check decodes. A bare type specifier
+	// would leave "which stream" to be resolved by rules that are ffmpeg's rather than
+	// holdfast's, on a file carrying more than one video stream.
 	//
 	// log_path lives INSIDE the -lavfi filtergraph, where ':' separates option pairs,
 	// so a path with a ':' (or other filtergraph metachar) must be escaped or ffmpeg

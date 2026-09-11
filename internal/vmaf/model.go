@@ -93,12 +93,19 @@ func RequireModel(ctx context.Context, ffmpeg, configured string) error {
 // probeModel runs libvmaf once with the given model over two synthetic frames. The
 // inputs are lavfi `color` sources rather than real media so the check needs no
 // fixture, touches no library file, and costs the same on every host.
+//
+// Its graph names its two video-stream inputs through ScoredStream, the same constant
+// BuildFilter composes the scoring graph from. Nothing changes here by doing so - each
+// synthetic source carries exactly one video stream, so every specifier resolves to it -
+// and that is the point: "which video stream a libvmaf graph looks at" has ONE spelling
+// in this program, so the preflight cannot drift from the gate and a later reader
+// copying this line copies the right answer.
 func probeModel(ctx context.Context, ffmpeg, model string) (string, error) {
 	const src = "color=c=black:s=64x64:r=1:d=0.1"
 	cmd := exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
 		"-f", "lavfi", "-i", src,
 		"-f", "lavfi", "-i", src,
-		"-lavfi", "[0:v][1:v]libvmaf=model="+model+":n_threads=1",
+		"-lavfi", "[0:"+ScoredStream+"][1:"+ScoredStream+"]libvmaf=model="+model+":n_threads=1",
 		"-f", "null", "-")
 	out, err := cmd.CombinedOutput()
 	return string(out), err

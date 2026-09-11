@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -109,34 +111,54 @@ func TestScore(t *testing.T) {
 }
 
 // TestBuildFilter_SelectsThePrimaryVideoStream is the proof that the gate measures the
-// SAME video stream everything else in the program inspects.
+// SAME video stream everything else in the program inspects. It makes two different
+// claims with two different instruments, and it is explicit about which is which,
+// because getting that backwards is how a guard comes to be believed for a reason that
+// is not true.
 //
 // Every ffprobe property read selects `v:0` and the decode-integrity check decodes
-// `0:v:0`. The filtergraph used to select `[0:v]` and `[1:v]`, which names a stream by a
-// convention nothing else here uses - so on a file carrying more than one video stream
-// nothing pinned the measurement to the stream the guards looked at, and the recorded
-// proof could not say which one it was.
+// `0:v:0`. The filtergraph used to name its inputs with a BARE type label (`[0:v]`,
+// `[1:v]`), a convention nothing else here uses - so nothing in holdfast pinned the
+// measurement to the stream the guards looked at, and the recorded proof could not say
+// which one it was.
 //
-// It is a MEASUREMENT and not a string match, which is the rule this package already
-// holds itself to: a filtergraph is only correct if ffmpeg agrees. The fixture carries
-// two video-stream pairs that score ~77 VMAF points apart, so the returned statistics
-// alone say which pair was compared, and the ground-truth figures for each pair are
-// measured through graphs written HERE rather than by the package under test.
+// CLAIM 1, the regression guard: the built graph names the first video stream
+// explicitly, through ScoredStream. What reds this test against the pinned tree's graph
+// is the CONSTANT check and the graph-TEXT check below, NOT the measurement. That is a
+// measured fact, not a shortcut: on this ffmpeg a bare `v` label resolves to the FIRST
+// video stream, identically to `v:0`, so `[0:v]` and `[0:v:0]` select the same pixels
+// and NO fixture can make a measurement tell them apart. Each subtest measures the bare
+// label beside the two explicit ones and reports what it resolved to, so that statement
+// is observed here rather than asserted from prose. The hazard the change closes is
+// therefore a CONTRACT one, and this is the honest statement of it: which stream a bare
+// type label resolves to is ffmpeg's rule to change, not holdfast's to depend on, and
+// this gate deletes an original on the strength of what it measured.
 //
-// It is run TWICE, over MIRRORED fixtures: one whose first video-stream pair is the
-// faithful one and one whose first pair is the destroyed one. That is what makes the
-// measurement decide stream SELECTION rather than merely report a number. A graph that
-// named the second stream would fail both cases in opposite directions, and no graph that
-// picks a pair by how good it looks can satisfy both.
+// CLAIM 2, what the measurement does carry: that the shipped scoring pass really
+// returns the FIRST video-stream pair's statistics on a file carrying more than one
+// video stream - not a pair chosen by the fixture's content, and not one the test read
+// off the graph the package produced. The fixture carries two video-stream pairs that
+// score ~77 VMAF points apart, so the returned statistics alone say which pair was
+// compared, and the ground truth for each pair is measured through graphs written HERE
+// rather than by the package under test. It runs TWICE over MIRRORED fixtures, one whose
+// first pair is the faithful one and one whose first pair is the destroyed one, so a
+// ScoredStream naming any other stream reds BOTH cases in opposite directions and no
+// "pick the better-looking pair" satisfies either.
+//
+// Claim 2 is also why the text check is not left on its own: it would pass on a label
+// real ffmpeg rejects or binds somewhere else, and this package's rule is that a
+// filtergraph is only correct if ffmpeg agrees. The measurement is ffmpeg agreeing -
+// about the spelling that ships, which is the one that has to be right.
 func TestBuildFilter_SelectsThePrimaryVideoStream(t *testing.T) {
 	bin := ffmpegBin()
 	if _, err := exec.LookPath(bin); err != nil {
 		t.Fatalf("::error:: ffmpeg required for the stream-selection proof: %v", err)
 	}
-	// The two conventions this criterion exists to pin together. The graph the gate runs
-	// must name the SAME stream the probes read and the decode check decodes, and it must
-	// name it explicitly rather than leave a bare type specifier to be resolved by rules
-	// that are ffmpeg's and not holdfast's.
+	// CLAIM 1. The two conventions this criterion exists to pin together. The graph the
+	// gate runs must name the SAME stream the probes read and the decode check decodes,
+	// and it must name it EXPLICITLY rather than leave a bare type specifier to be
+	// resolved by rules that are ffmpeg's and not holdfast's. These two checks are what
+	// red against the pinned tree's graph; the measurement below cannot, and says so.
 	if ScoredStream != "v:0" {
 		t.Errorf("ScoredStream = %q, want the probes' own vocabulary %q", ScoredStream, "v:0")
 	}
@@ -171,6 +193,28 @@ func TestBuildFilter_SelectsThePrimaryVideoStream(t *testing.T) {
 				t.Fatalf("the fixture's two video-stream pairs are not far enough apart to identify which "+
 					"was scored (first=%.2f second=%.2f, want a gap of at least %.0f) - re-tune the damage, "+
 					"because nothing below decides anything until they differ", first, second, gap)
+			}
+
+			// What the bare type label the pinned tree used actually resolves to, measured
+			// on THIS fixture rather than taken on trust. It is a measurement of the
+			// INSTRUMENT, not an assertion about this package: no value of it makes the
+			// shipped graph wrong, so it never fails the test - it records which of the two
+			// statements in this test's doc comment is true of the ffmpeg in front of it.
+			bare, bareErr := pairHarmonicMeanErr(bin, dist, ref, "v", dir)
+			switch {
+			case bareErr != nil:
+				t.Logf("instrument: the bare `v` label REFUSED this graph (%v) - the old spelling is "+
+					"observably broken on this build, and a measurement CAN tell the two graphs apart", bareErr)
+			case math.Abs(bare-first) < math.Abs(bare-second):
+				t.Logf("instrument: the bare `v` label measured %.2f, the SAME pair `v:0` names (%.2f, "+
+					"against %.2f for the second) - so [0:v] and [0:v:0] select identical pixels here and "+
+					"NO fixture makes this measurement red against the old graph. The constant check and "+
+					"the graph-text check above are what guard this regression", bare, first, second)
+			default:
+				t.Logf("instrument: the bare `v` label measured %.2f, which is the SECOND pair (%.2f), not "+
+					"the first (%.2f) - this build resolves a bare label to a stream the probes never read, "+
+					"so the hazard this test exists for is LIVE and the doc comment above is stale",
+					bare, second, first)
 			}
 
 			res, err := Score(context.Background(), bin, req(dist, ref))
@@ -233,26 +277,39 @@ func buildTwoVideoStreamPair(t *testing.T, bin, ref, dist string, damaged int) {
 // with itself.
 func pairHarmonicMean(t *testing.T, bin, distorted, reference, spec string) float64 {
 	t.Helper()
-	logPath := filepath.Join(t.TempDir(), "pair-"+strings.ReplaceAll(spec, ":", "-")+".json")
+	got, err := pairHarmonicMeanErr(bin, distorted, reference, spec, t.TempDir())
+	if err != nil {
+		t.Fatalf("measuring the %s pair: %v", spec, err)
+	}
+	return got
+}
+
+// pairHarmonicMeanErr is pairHarmonicMean with the failure RETURNED rather than fatal,
+// so a caller can measure a specifier that this build may legitimately refuse (the bare
+// type label) without turning ffmpeg's opinion of it into a red test.
+func pairHarmonicMeanErr(bin, distorted, reference, spec, dir string) (float64, error) {
+	logPath := filepath.Join(dir, "pair-"+strings.ReplaceAll(spec, ":", "-")+".json")
 	filter := fmt.Sprintf(
 		"[0:%s]format=yuv420p10le[d];[1:%s]format=yuv420p10le[r];"+
 			"[d][r]libvmaf=model=version=vmaf_v0.6.1:log_fmt=json:log_path=%s",
 		spec, spec, escapeFilterValue(logPath))
-	mustFF(t, bin, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
-		"-i", distorted, "-i", reference, "-lavfi", filter, "-f", "null", "-")
-
+	out, err := exec.Command(bin, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+		"-i", distorted, "-i", reference, "-lavfi", filter, "-f", "null", "-").CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("ffmpeg refused the %s graph: %v: %s", spec, err, truncate(strings.TrimSpace(string(out)), 200))
+	}
 	raw, err := os.ReadFile(logPath)
 	if err != nil {
-		t.Fatalf("read the %s pair's vmaf log: %v", spec, err)
+		return 0, fmt.Errorf("read the %s pair's vmaf log: %w", spec, err)
 	}
 	var parsed vmafLog
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		t.Fatalf("parse the %s pair's vmaf log: %v", spec, err)
+		return 0, fmt.Errorf("parse the %s pair's vmaf log: %w", spec, err)
 	}
 	if parsed.PooledMetrics.VMAF.HarmonicMean == nil {
-		t.Fatalf("the %s pair's vmaf log carries no pooled harmonic_mean", spec)
+		return 0, fmt.Errorf("the %s pair's vmaf log carries no pooled harmonic_mean", spec)
 	}
-	return *parsed.PooledMetrics.VMAF.HarmonicMean
+	return *parsed.PooledMetrics.VMAF.HarmonicMean, nil
 }
 
 // TestScore_ExecutesExactlyTheBuiltFilter is AC2's observable: the -lavfi argument the
@@ -281,6 +338,122 @@ func TestScore_ExecutesExactlyTheBuiltFilter(t *testing.T) {
 	want := BuildFilter(r, logPathIn(t, got))
 	if got != want {
 		t.Errorf("the scoring pass executed a filtergraph the builder did not produce.\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// streamLabelAllowMarker exempts a line that NAMES a video-stream input label without
+// composing one - a comment documenting the graph's shape, or a rule prohibiting the
+// bare form. It is the rename guard's idiom (scripts/check-pins.sh `rename-guard-allow`)
+// and it is line-level for the same reason: a file-level exemption is one accidental
+// path match away from exempting everything. Exactly one shipped line carries it.
+const streamLabelAllowMarker = "stream-guard-allow"
+
+// videoStreamLabel matches a filtergraph INPUT LABEL naming a video stream literally -
+// `[0:v]`, `[1:v]`, `[0:v:0]`, `[1:v:1]`. Composed from ScoredStream, a graph never
+// contains one of these as source text, which is what makes a literal hit a second
+// place answering "which video stream was measured".
+var videoStreamLabel = regexp.MustCompile(`\[[0-9]+:v(:[0-9]+)?]`)
+
+// videoStreamLabelsInShippedSource lists every line of SHIPPED (non-test) Go source under root that
+// spells a video-stream input label literally instead of composing it from ScoredStream,
+// skipping any line carrying streamLabelAllowMarker.
+func videoStreamLabelsInShippedSource(root string) ([]string, error) {
+	var offenders []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "testdata":
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for i, line := range strings.Split(string(raw), "\n") {
+			if !videoStreamLabel.MatchString(line) || strings.Contains(line, streamLabelAllowMarker) {
+				continue
+			}
+			offenders = append(offenders,
+				fmt.Sprintf("%s:%d: %s", filepath.ToSlash(path), i+1, strings.TrimSpace(line)))
+		}
+		return nil
+	})
+	return offenders, err
+}
+
+// TestShippedCode_SpellsEveryVideoStreamLabelThroughScoredStream is AC2's absolute half:
+// "with no second place in the program composing a VMAF video-stream input specifier".
+//
+// TestScore_ExecutesExactlyTheBuiltFilter proves the SCORING pass runs the builder's
+// graph. It cannot see a different shipped graph elsewhere - the startup model preflight
+// once hand-wrote `[0:v][1:v]`, drove synthetic single-stream inputs, mis-scored nothing,
+// and was still a second answer to which stream a libvmaf graph looks at: the one a later
+// reader copies into a path that does score. This walks the whole module instead, so the
+// single-spelling property is checked where it is actually claimed rather than at the one
+// call site a test happened to drive.
+func TestShippedCode_SpellsEveryVideoStreamLabelThroughScoredStream(t *testing.T) {
+	offenders, err := videoStreamLabelsInShippedSource(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("walking the module: %v", err)
+	}
+	if len(offenders) > 0 {
+		t.Errorf("shipped code spells a video-stream input label literally instead of composing it "+
+			"from ScoredStream (= %q), so the program carries a second answer to \"which stream was "+
+			"measured\" while the ledger row carries the builder's:\n  %s\n\nCompose it from "+
+			"ScoredStream, or - if the line only NAMES the label to document or prohibit it - mark "+
+			"that line %q.", ScoredStream, strings.Join(offenders, "\n  "), streamLabelAllowMarker)
+	}
+}
+
+// TestVideoStreamLabelScan_BitesAndKnowsWhatToIgnore is the guard above tried against a
+// tree built to defeat it. A walk that reports nothing is indistinguishable from a walk
+// that found nothing, and this repo does not accept that difference on trust anywhere
+// else (check-pins, install-ffmpeg and govulncheck each ship a selftest that proves the
+// guard still bites).
+func TestVideoStreamLabelScan_BitesAndKnowsWhatToIgnore(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, body string) {
+		full := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Four kinds of line, one per rule the guard has to get right.
+	write("internal/bad/bare.go", "package bad\n\nvar g = \"[0:v][1:v]libvmaf=model=x\"\n")
+	write("internal/bad/explicit.go", "package bad\n\nvar g = \"[0:v:0]format=yuv420p[d]\"\n")
+	write("internal/ok/composed.go", "package ok\n\nconst s = \"v:0\"\n\nvar g = \"[0:\" + s + \"]format=x\"\n")
+	write("internal/ok/documented.go", "package ok\n\n// [0:v] is the bare form this refuses - "+
+		streamLabelAllowMarker+"\nvar x = 1\n")
+	write("internal/ok/scan_test.go", "package ok\n\nvar g = \"[0:v][1:v]\"\n")
+	write("node_modules/vendored/x.go", "package vendored\n\nvar g = \"[0:v]\"\n")
+
+	offenders, err := videoStreamLabelsInShippedSource(root)
+	if err != nil {
+		t.Fatalf("walking the synthetic tree: %v", err)
+	}
+	joined := strings.Join(offenders, "\n")
+	for _, want := range []string{"internal/bad/bare.go:3", "internal/bad/explicit.go:3"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the scan did not report %s - it does not bite, so its green says nothing.\nreported:\n%s",
+				want, joined)
+		}
+	}
+	for _, never := range []string{"composed.go", "documented.go", "scan_test.go", "node_modules"} {
+		if strings.Contains(joined, never) {
+			t.Errorf("the scan reported %s, which it must not: composed labels, marked lines, test "+
+				"files and vendored trees are not second answers.\nreported:\n%s", never, joined)
+		}
 	}
 }
 
