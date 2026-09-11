@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/heapmeasure"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/startup"
 	"github.com/NSchatz/holdfast/internal/store"
@@ -757,56 +759,87 @@ func TestScan_ObservedIsTheListingThisScanDrewItsSourcesFrom(t *testing.T) {
 // dropped one directory at a time. That is the cost of not reading them three
 // times, and it is bounded here rather than asserted about.
 //
-// Both baselines below are MEASUREMENTS taken on the build this change replaces
-// (holdfast 82e4757, the same scan bounded by a coverage set with the sweep and
-// the enumeration each listing for themselves), over the identical fixtures,
-// through the identical code below with `eng.SetCoverage(res.Coverage,
-// res.Entries)` replaced by `eng.Coverage = res.Coverage`, in the package's own
-// test binary with nothing else running in it, on the container this repository
-// is developed in (linux/amd64, go1.25.14, GOGC at its default), repeated three
-// times, the WORST of the three recorded:
+// Every figure below is a reading THIS run took, through internal/heapmeasure,
+// and it is only ever compared with another reading the same run took in the
+// same process: live heap after two forced collections, minus a baseline read
+// before the engine existed. Nothing here is compared with a byte count written
+// down on other hardware, because that form was tried here and it graded the
+// machine rather than the change. The same unchanged scan measured 464560 bytes
+// at the peak instant on the hardware the old ceiling was taken on and 528896 on
+// the container this repository is developed in, so the assertion was
+// permanently red for a build that had regressed nothing - and a permanently red
+// assertion reds identically for a clean tree and for a real regression, which
+// is the expensive half. Live heap at an instant moves with the hardware, the
+// allocator's arena layout, the race detector's shadow state, the coverage
+// counters `make check` runs with, and with whatever the test binary has already
+// run: the same fixture measured 399 KiB and 464 KiB at the same instant in two
+// different positions.
+
+// retainedHeapMargin is the ONLY allowance either comparison below makes, and
+// what it absorbs is measurement NOISE and nothing else. The readings of a pair
+// are taken at different points in one process, and between them the allocator
+// may have kept a fresh span, a background goroutine may be holding a buffer,
+// and the race detector's and the coverage counters' own bookkeeping moves with
+// whatever has already run. That is the only thing a pair may legitimately
+// differ by, because everything else about the two readings - hardware, Go
+// build, instrumentation, position - is held identical by construction.
 //
-//	go test ./internal/engine/ -run TestScan_ -v -count=3
-//
-// Both figures are live heap after two forced collections MINUS the same reading
-// taken before the engine existed, so what is measured is what this run HOLDS
-// and not what the test binary happened to be holding already.
+// THE NOISE IT ABSORBS, MEASURED, not estimated and not raised until a run went
+// green. The warmed peak pair has differed by 240, 336, 496 and 528 bytes with
+// no change to the code under test, and the retained-after-return reading by
+// -12016, -5552, -656, -296, -72, 104, 328, 744 and 4624 bytes across the same
+// pair of fixtures. 32 KiB is tens of times the largest of those, and it is a
+// third of what the property it guards costs: a second, redundant copy of one
+// library's carried entries measures ~82 KiB over these fixtures (83304, 84184,
+// 84248 and 84344 bytes), which is why
+// TestScan_PeakRetainedHeapRedsOnADeliberateRegression reds straight through
+// this margin instead of being swallowed by it. It is FIXED and never a function
+// of the source count: a margin that grew with N would pass the very build these
+// cases exist to catch.
+const retainedHeapMargin = 32_768 // 32 KiB
+
+// entryCarriage is what a measured scan does with the entry information its
+// startup walk collected. The walk itself is IDENTICAL in every case - same
+// roots, same platform, same listings, same cost - so a pair of readings taken
+// across two of these differs by the CARRYING and by nothing else.
+type entryCarriage int
+
 const (
-	// The heap a completed scan still retains grew by this much when the same
-	// fixture went from 2000 sources to 8000 on the unchanged build (measured:
-	// -12016, 328 and 744 bytes, and -72 and 4624 under -race). It is
-	// approximately nothing, and that is the point: what a scan retains after it
-	// has returned is fixed by the number of DIRECTORIES, never by the number of
-	// files in them.
-	pinnedRetainedGrowth = 4_624
+	// carryEntries is production (FILESYSTEM-1): the walk's listings are handed
+	// to the engine, and the first scan after that walk reads them instead of
+	// listing every covered directory a second time.
+	carryEntries entryCarriage = iota
 
-	// The heap the scan retains at the instant it holds its complete
-	// enumeration, over 2000 sources on the unchanged build (measured: 463536,
-	// 463776 and 464560 bytes, and 463632 and 463824 under -race). That instant
-	// is the peak of what a pass holds of its own - the whole list of files it is
-	// about to feed to the workers, plus anything it has not released of the
-	// listings it built that list from.
-	pinnedPeakRetained = 464_560
+	// dropEntries is the same walk with its entries NOT carried - the coverage
+	// set alone. It is the build the carrying replaced and it is also what every
+	// scan after the first one already gets, since passListings leaves none
+	// behind; it is the reading the carried one is compared with.
+	dropEntries
 
-	// The margins are FIXED allowances for measurement drift, never functions of
-	// the source count: a margin that grew with N would pass the very build this
-	// is written to catch. Both readings move with what the test binary has
-	// already run - the same fixture measured 399 KiB and 464 KiB at the same
-	// instant in two different positions, which is why the baselines above were
-	// taken from these two tests, in this order, and not from a bespoke harness.
-	retainedGrowthMargin = 32_768 // 32 KiB
-	peakRetainedMargin   = 32_768 // 32 KiB
+	// carryEntriesTwice is the REGRESSION, and nothing in the engine does it:
+	// the walk's entries carried, plus a second, redundant copy of the same
+	// entries held alive beside them across the whole measurement. It exists so
+	// that the comparison can be WATCHED going red.
+	carryEntriesTwice
 )
 
-// retainedHeap is live heap after a forced collection: everything unreachable
-// has gone, so what is left is what is still HELD. Twice, because the first
-// collection can leave finalisable objects for the second.
-func retainedHeap() uint64 {
-	runtime.GC()
-	runtime.GC()
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	return m.HeapAlloc
+// duplicateEntries is the regression itself: a second, redundant copy of the
+// entry information a walk collected, names and all. strings.Clone is
+// load-bearing - a shallow copy of each slice would share every name with the
+// original and duplicate only the entry headers, which is a fraction of what
+// holding a library's entries twice actually costs, and the case would then be
+// grading a smaller regression than the one it claims to drive.
+func duplicateEntries(walked map[string][]startup.Entry) map[string][]startup.Entry {
+	dup := make(map[string][]startup.Entry, len(walked))
+	for dir, ents := range walked {
+		copies := make([]startup.Entry, len(ents))
+		for i, ent := range ents {
+			ent.Name = strings.Clone(ent.Name)
+			copies[i] = ent
+		}
+		dup[strings.Clone(dir)] = copies
+	}
+	return dup
 }
 
 // synthLibrary writes perDir sources into each of dirs directories, with a
@@ -830,87 +863,154 @@ func synthLibrary(t *testing.T, root string, dirs, perDir int) {
 }
 
 // scanEngine builds the engine a `run` builds: a real store, the real startup
-// walk over the same roots, and the coverage set WITH the listings that walk
-// made. The walk's own result stays inside this function, so the measurements
-// below are about what the engine retains and not about what a caller happens
-// to be holding.
+// walk over the same roots, and a coverage set carrying the listings that walk
+// made - or not carrying them, per carry. The walk's own result stays inside
+// this function, so a measurement over the engine it returns is about what the
+// ENGINE retains and not about what a caller happens to be holding.
 //
-// BASELINE: replace the SetCoverage call with `eng.Coverage = res.Coverage` and
-// this is the pinned build's engine, which is how the two constants above were
-// measured.
-func scanEngine(t *testing.T, root string) *Engine {
+// The second return is whatever the carriage asks to be held alive BESIDE the
+// engine. It is nil for both production carriages; only the regression has one,
+// and its caller keeps it reachable until every reading has been taken.
+func scanEngine(t *testing.T, root string, carry entryCarriage) (*Engine, map[string][]startup.Entry) {
 	t.Helper()
 	cfg := baseCfg(root)
 	eng := New(cfg, probe.New("", ""), nil, newTestStore(t, root), discardLogger())
 	res := walkOver(t, root, cfg.VideoExts, newListingCounter())
+
+	// Taken BEFORE SetCoverage, which empties the walk's map by design.
+	var redundant map[string][]startup.Entry
+	if carry == carryEntriesTwice {
+		redundant = duplicateEntries(res.Entries)
+	}
+	if carry == dropEntries {
+		eng.SetCoverage(res.Coverage, nil)
+		return eng, nil
+	}
 	eng.SetCoverage(res.Coverage, res.Entries)
-	return eng
+	return eng, redundant
 }
 
 // scanRetention runs one scan over a synthetic library and reports what the run
-// retains at two instants: once it has returned, and at the point inside it
-// where it holds its complete enumeration. Nothing is fed to a worker - the pass
-// is paused before the first file, so what is measured is the scan's own
-// machinery and never an encode's.
-func scanRetention(t *testing.T, dirs, perDir int) (afterScan, atEnumeration int64) {
+// retains at two instants: at the point inside it where it holds its complete
+// enumeration, and once it has returned. Both readings are taken against ONE
+// baseline, so they are comparable with each other as well as with it. Nothing
+// is fed to a worker - the pass is paused before the first file - so what is
+// measured is the scan's own machinery and never an encode's.
+//
+// A reading it could not take is a FAILURE naming what could not be measured,
+// never a zero: see internal/heapmeasure, which refuses rather than defaulting.
+func scanRetention(t *testing.T, dirs, perDir int, carry entryCarriage) (afterScan, atEnumeration int64) {
 	t.Helper()
 	root := t.TempDir()
 	synthLibrary(t, root, dirs, perDir)
 
-	before := retainedHeap()
-	eng := scanEngine(t, root)
-	var peak uint64
+	base := heapmeasure.Retained()
+	peak := heapmeasure.From("the heap a scan holds at the instant it has its complete enumeration", base)
+	left := heapmeasure.From("the heap a scan still holds once it has returned", base)
+
+	eng, redundant := scanEngine(t, root, carry)
 	eng.Paused = func() bool {
 		// The feed loop asks this before it hands out the first file, so it is
 		// called with the whole enumeration in hand: every source path this pass
 		// will act on, and whatever the pass still holds of the listings it drew
 		// them from.
-		if peak == 0 {
-			peak = retainedHeap()
-		}
+		peak.Sample()
 		return true
 	}
 	if err := eng.RunOneshot(context.Background()); err != nil {
 		t.Fatalf("RunOneshot: %v", err)
 	}
-	after := retainedHeap()
+	left.Sample()
 	runtime.KeepAlive(eng)
-	if peak == 0 {
-		t.Fatal("the scan never reached its feed loop, so nothing was measured")
+	// Held until both readings are taken, which is what makes a redundant copy
+	// part of what this scan RETAINED rather than garbage by the time it counts.
+	runtime.KeepAlive(redundant)
+
+	atEnumeration, err := peak.Peak()
+	if err != nil {
+		t.Fatal(err)
 	}
-	return int64(after) - int64(before), int64(peak) - int64(before)
+	afterScan, err = left.Delta()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return afterScan, atEnumeration
+}
+
+// peakRetainedPair takes BOTH readings of the peak-retained comparison, in this
+// process, in this run and under this binary's instrumentation - `make check`
+// runs the suite with the race detector and atomic coverage counters, both of
+// which perturb heap accounting, so two readings are comparable only when the
+// same instrumented binary took them both. carry is the carriage of the CARRIED
+// side; the other side is always the same walk with its entries dropped.
+//
+// One unmeasured scan runs first. A scan's first pass through a test binary
+// allocates arenas, buffers and per-goroutine state every later pass reuses, so
+// an unwarmed first reading is taken over a colder heap than the second - the
+// same fixture in this package has measured 399 KiB and 464 KiB at the same
+// instant in two different positions. Warming is what makes the pair differ by
+// the carrying rather than by its position in the run.
+func peakRetainedPair(t *testing.T, dirs, perDir int, carry entryCarriage) (carried, notCarried int64) {
+	t.Helper()
+	scanRetention(t, dirs, perDir, dropEntries) // warm-up, deliberately not read
+
+	_, notCarried = scanRetention(t, dirs, perDir, dropEntries)
+	_, carried = scanRetention(t, dirs, perDir, carry)
+
+	t.Logf("peak retained heap, the walk's entries CARRIED: %d bytes over %d sources", carried, dirs*perDir)
+	t.Logf("peak retained heap, the SAME walk's entries NOT carried: %d bytes over %d sources",
+		notCarried, dirs*perDir)
+	t.Logf("margin allowed between the two readings: %d bytes", retainedHeapMargin)
+	return carried, notCarried
+}
+
+// peakRetainedFailure is the comparison itself, and it RETURNS the failure it
+// would report instead of reporting it. That is what lets
+// TestScan_PeakRetainedHeapRedsOnADeliberateRegression assert this comparison
+// still goes red when the property is broken on purpose: a grader nobody has
+// watched fail is not evidence that it can.
+func peakRetainedFailure(carried, notCarried int64) string {
+	if carried <= notCarried+retainedHeapMargin {
+		return ""
+	}
+	return fmt.Sprintf("the scan retains %d bytes where it holds the most with the walk's entries carried, "+
+		"against %d bytes at the same instant over the same fixture with the SAME walk's entries not carried "+
+		"(margin %d): carrying the walk's listings has raised what a pass costs in memory",
+		carried, notCarried, retainedHeapMargin)
 }
 
 // TestScan_RetainsNothingPerSourceAfterTheScanThatConsumedIt. The listings a
 // walk carried are released as the scan consumes them, so once a scan has
 // returned it holds nothing that grew with the number of files it enumerated.
 // Quadrupling the library over the same directories must not move what is left
-// behind by more than the same fixtures moved it on the build this replaces.
+// behind at all, beyond the noise the margin absorbs.
 //
-// The ceiling is deliberately NOT a function of N: a margin that grew with the
-// source count would pass a build that had kept every entry name for ever,
-// which is the failure this exists to catch.
+// The comparison is BETWEEN THE TWO FIXTURES, both measured in this process and
+// this run: the figure that decides is the difference between them, so the
+// hardware, the allocator and the instrumentation cancel out of it. The margin
+// is deliberately NOT a function of N either - one that grew with the source
+// count would pass a build that had kept every entry name for ever, which is the
+// failure this exists to catch.
 //
 // MUTATION (measured): stop releasing each directory's listing as it is
 // consumed AND stop taking them off the engine - `take` without its delete, and
 // Load in place of Swap in passListings - and this reds with a growth of 242512
-// bytes against a ceiling of 37392, because the library's entry names are then
-// still on the engine when the scan that consumed them has returned. Either half
-// alone is enough to release them, so the mutation needs both.
+// bytes, because the library's entry names are then still on the engine when the
+// scan that consumed them has returned. Either half alone is enough to release
+// them, so the mutation needs both.
 func TestScan_RetainsNothingPerSourceAfterTheScanThatConsumedIt(t *testing.T) {
 	const dirs, perDir = 8, 250 // 2000 sources, and 8000 in the second fixture
 
-	afterN, _ := scanRetention(t, dirs, perDir)
-	after4N, _ := scanRetention(t, dirs, perDir*4)
+	afterN, _ := scanRetention(t, dirs, perDir, carryEntries)
+	after4N, _ := scanRetention(t, dirs, perDir*4, carryEntries)
 	growth := after4N - afterN
 	t.Logf("heap retained after the scan returned: %d bytes over %d sources, %d bytes over %d - a growth of %d "+
-		"(the unchanged build grew by %d over the same pair; margin %d)",
-		afterN, dirs*perDir, after4N, dirs*perDir*4, growth, pinnedRetainedGrowth, retainedGrowthMargin)
+		"(margin %d)", afterN, dirs*perDir, after4N, dirs*perDir*4, growth, retainedHeapMargin)
 
-	if ceiling := int64(pinnedRetainedGrowth + retainedGrowthMargin); growth > ceiling {
-		t.Errorf("quadrupling the sources left %d more bytes retained after the scan, and the same pair of "+
-			"fixtures left %d more on the build this replaces (ceiling %d). Something the scan consumed is "+
-			"outliving it, per source", growth, pinnedRetainedGrowth, ceiling)
+	if growth > retainedHeapMargin {
+		t.Errorf("quadrupling the sources left %d more bytes retained after the scan than the same run's own "+
+			"reading over a quarter of them, which is past the %d bytes of measurement noise this comparison "+
+			"allows. Something the scan consumed is outliving it, per source", growth, retainedHeapMargin)
 	}
 }
 
@@ -918,25 +1018,55 @@ func TestScan_RetainsNothingPerSourceAfterTheScanThatConsumedIt(t *testing.T) {
 // not raising what a scan holds AT ITS PEAK, which is the instant it has the
 // whole enumeration in hand. The walk's entries are released directory by
 // directory as they are consumed, so what is held there is the list of sources -
-// the same list, of the same size, as the build that listed the directories a
+// the same list, of the same size, as a scan that listed the directories a
 // second time to build it.
 //
-// MUTATION (measured): the same two-part mutation as above - never release a
-// consumed listing, never take the carried ones off the engine - and this reds
-// at 546344 bytes against a ceiling of 497328, the whole library's entry names
-// alive beside the enumeration they produced.
+// So the property is a COMPARISON and is graded as one: the same walk, measured
+// with its entries carried and with them not carried, in this process and this
+// run. Carrying may not be the more expensive of the two. Nothing here is held
+// against a byte count from another machine; the reason that matters is above
+// retainedHeapMargin, and the proof that this comparison can still go red is
+// TestScan_PeakRetainedHeapRedsOnADeliberateRegression, immediately below.
 func TestScan_PeakRetainedHeapIsNotRaisedByCarryingTheWalksEntries(t *testing.T) {
-	const dirs, perDir = 8, 250 // the identical fixture the baseline was taken over
+	const dirs, perDir = 8, 250 // the identical fixture the sibling above measures
 
-	_, atEnumeration := scanRetention(t, dirs, perDir)
-	ceiling := int64(pinnedPeakRetained + peakRetainedMargin)
-	t.Logf("heap retained at the instant the scan holds its complete enumeration: %d bytes over %d sources "+
-		"(the unchanged build retained %d at the same instant over the same fixture; margin %d)",
-		atEnumeration, dirs*perDir, pinnedPeakRetained, peakRetainedMargin)
+	carried, notCarried := peakRetainedPair(t, dirs, perDir, carryEntries)
+	if failure := peakRetainedFailure(carried, notCarried); failure != "" {
+		t.Error(failure)
+	}
+}
 
-	if atEnumeration > ceiling {
-		t.Errorf("the scan retains %d bytes where it holds the most, against %d on the build this replaces "+
-			"(ceiling %d): carrying the walk's listings has raised what a pass costs in memory", atEnumeration,
-			pinnedPeakRetained, ceiling)
+// TestScan_PeakRetainedHeapRedsOnADeliberateRegression is the anti-vacuity half,
+// and it is the case that makes the one above worth running. A relative
+// comparison with a margin can be made to pass by widening the margin, by
+// measuring the same thing twice, or by losing hold of the regression before the
+// reading is taken - and every one of those failures looks exactly like a green
+// run. So the regression is DRIVEN here, by the committed suite, in the same
+// invocation: the walk's result is made to carry a second, redundant copy of the
+// entries it already carries, and peakRetainedFailure must report a failure over
+// that pair. If it ever does not, this case is red and the route's exit status
+// says the comparison has stopped being able to fail.
+//
+// Nothing in the engine carries entries twice. The copy is held by the harness
+// across both readings, which is what an engine holding a redundant reference
+// would cost and is why the regression is measurable rather than argued.
+func TestScan_PeakRetainedHeapRedsOnADeliberateRegression(t *testing.T) {
+	const dirs, perDir = 8, 250 // the identical fixture the passing case measures
+
+	carried, notCarried := peakRetainedPair(t, dirs, perDir, carryEntriesTwice)
+	failure := peakRetainedFailure(carried, notCarried)
+	if failure == "" {
+		t.Fatalf("a scan made to carry a SECOND, redundant copy of the entries it already carries retained %d "+
+			"bytes at its peak against %d with the same walk's entries not carried, and the comparison "+
+			"reported NO failure. The peak-retained comparison cannot go red, so the case beside this one is "+
+			"not evidence of anything: either the margin is wide enough to swallow a whole duplicate of the "+
+			"library's entry names, or the duplicate is not reachable at the instant the reading is taken",
+			carried, notCarried)
+	}
+	t.Logf("the comparison reported the failure it must: %s", failure)
+	if !strings.Contains(failure, strconv.FormatInt(carried, 10)) ||
+		!strings.Contains(failure, strconv.FormatInt(notCarried, 10)) {
+		t.Errorf("the failure the comparison reported does not name both readings it decided from, so a human "+
+			"reading a red run cannot see what it compared: %s", failure)
 	}
 }
