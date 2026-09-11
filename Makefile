@@ -52,8 +52,25 @@ PLATFORM ?= linux/amd64
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o holdfast ./cmd/holdfast
 
+# The per-package timeout is EXPLICIT, and it is a wall clock rather than a gate: it
+# removes no assertion, skips nothing, and cannot turn a failing test green. Go's default
+# is 10 minutes per test binary, and internal/engine is a suite of real libx265 encodes
+# behind the real verify gate: measured under `-race` on a 56-core container it takes 524s
+# ALONE at the commit before this line was written, and 568s with S0085's swap-metadata
+# fixtures added. That is 87% and 95% of the default budget respectively, before the
+# packages that run beside it (internal/probe, internal/webui, internal/store,
+# cmd/holdfast) have spent a core - and `go test ./...` runs them concurrently, so the
+# contention is what tips it. The package then dies with "panic: test timed out" one
+# second into a test that takes one second, with nothing having failed.
+#
+# A suite whose slowest package sits that close to an arbitrary clock reds for reasons
+# that are not about the code, and every fixture anyone adds to the engine after it
+# inherits the problem. The answer is the clock, not the coverage: deleting a proof to
+# fit a timeout is exactly the trade a data-safety tool must not make.
+TEST_TIMEOUT ?= 30m
+
 test:
-	go test -race -covermode=atomic ./...
+	go test -race -covermode=atomic -timeout $(TEST_TIMEOUT) ./...
 
 fmt:
 	@out="$$(gofmt -l .)"; if [ -n "$$out" ]; then echo "gofmt needs:"; echo "$$out"; exit 1; fi
