@@ -218,6 +218,19 @@ type Outcome struct {
 	VmafChroma       *float64
 	VmafChromaMetric string
 
+	// VmafStream names WHICH video stream of each file the comparison was made against,
+	// in the specifier vocabulary the probes use ("v:0"). It belongs on the row for the
+	// reason VmafPixFmt does: a source can carry more than one video stream, and a score
+	// that does not say which one it looked at cannot be lined up against the guards that
+	// inspected the file. It is a stable token, treated as a wire format the way VmafModel
+	// and VmafChromaMetric are.
+	//
+	// "" is NOT RECORDED, the rule every string here keeps: a row written before this
+	// fact existed, and a job whose VMAF gate never ran, record no stream. It is NULL in
+	// the column and absent on the wire; it is never a fabricated "v:0", which would claim
+	// a comparison nobody made.
+	VmafStream string
+
 	// SourceCodec is the video codec the SOURCE was in when this job was decided, as
 	// ffprobe named it ("h264", "mpeg4", …). It is recorded on a dry-run decision, which
 	// is the row whose whole purpose is to say what a real run WOULD do to that file: an

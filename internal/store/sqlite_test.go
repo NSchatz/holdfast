@@ -626,6 +626,89 @@ func TestFinish_ComparisonFormatAndChromaAreAbsentOnAnUnscoredRow(t *testing.T) 
 	}
 }
 
+// TestFinish_RecordsTheScoredVideoStreamAndNeverInventsOne is the finish-then-read round
+// trip for the one fact the recorded proof was missing: WHICH video stream the comparison
+// was made against.
+//
+// A source can carry more than one video stream, and a score that does not say which one
+// it looked at cannot be lined up against the guards that inspected the file. The token is
+// the probes' own (`v:0`) and is treated as a wire format, exactly as the model and the
+// chroma metric are.
+//
+// The contrast is the point. A constant specifier makes writing `v:0` onto every row very
+// tempting, and that would be a claim about a comparison nobody made - on a skip, on an
+// encode failure, on every row already in an operator's ledger. The column has exactly two
+// states: the stream that was scored, or NULL.
+func TestFinish_RecordsTheScoredVideoStreamAndNeverInventsOne(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	if ok, err := s.Claim(ctx, "/a/scored.mkv", "fp1", "w0", 3, sameConfig); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if err := s.Finish(ctx, "/a/scored.mkv", "fp1", Done, &Outcome{
+		Encoder: "cpu", VmafMean: f64(98.4), VmafMin: f64(96.1), VmafModel: "version=vmaf_v0.6.1",
+		VmafPixFmt: "yuv420p10le", VmafChroma: f64(41.2), VmafChromaMetric: "psnr_cb/psnr_cr min (dB)",
+		VmafStream: "v:0",
+	}, 3); err != nil {
+		t.Fatalf("Finish(scored): %v", err)
+	}
+
+	// A row whose VMAF gate never ran: a guard skipped the file before the encoder.
+	if ok, err := s.Claim(ctx, "/a/unscored.mkv", "fp2", "w0", 3, sameConfig); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if err := s.Finish(ctx, "/a/unscored.mkv", "fp2", Skipped, &Outcome{
+		Reason: "already-target-codec",
+	}, 3); err != nil {
+		t.Fatalf("Finish(unscored): %v", err)
+	}
+
+	rows, err := s.List(ctx, nil, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	byPath := map[string]Outcome{}
+	for _, r := range rows {
+		byPath[r.Path] = r.Outcome
+	}
+
+	if got := byPath["/a/scored.mkv"].VmafStream; got != "v:0" {
+		t.Errorf("a scored row reads back vmaf_stream %q, want %q - the stream the comparison was made "+
+			"against must survive the round trip through the finish query and the outcome scan", got, "v:0")
+	}
+	if got := byPath["/a/unscored.mkv"].VmafStream; got != "" {
+		t.Errorf("an unscored row recorded the scored stream %q - a job whose gate never ran compared no "+
+			"stream, and a fabricated %q would be evidence of a measurement nobody took", got, "v:0")
+	}
+
+	// And the column really is NULL on disk, not an empty string the scan normalises on
+	// the way out - a stored "" would be a second representation of "not recorded" that
+	// every reader would have to know about.
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM jobs WHERE path = ? AND vmaf_stream IS NULL`, "/a/unscored.mkv").Scan(&n); err != nil {
+		t.Fatalf("count vmaf_stream: %v", err)
+	}
+	if n != 1 {
+		t.Error("vmaf_stream is not NULL on the unscored row")
+	}
+
+	// Claiming BEGINS A NEW ATTEMPT and clears the proof, this column with the rest of
+	// them: a job back in flight must not advertise the stream a previous attempt scored.
+	if ok, err := s.Claim(ctx, "/a/scored.mkv", "fp1", "w0", 3, DecisionInputs{}); err != nil || !ok {
+		t.Fatalf("re-claim: ok=%v err=%v", ok, err)
+	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM jobs WHERE path = ? AND vmaf_stream IS NULL`, "/a/scored.mkv").Scan(&n); err != nil {
+		t.Fatalf("count vmaf_stream after claim: %v", err)
+	}
+	if n != 1 {
+		t.Error("a re-claimed row still carries the previous attempt's scored stream - the claim clears " +
+			"every other VMAF column and must clear this one too")
+	}
+}
+
 // A retried job that finally succeeds must not carry the PREVIOUS attempt's failure
 // reason next to its "done". Finish fully defines a row's proof, so the stale reason is
 // cleared rather than merged forward — a "done · reason: simulated encode failure" row

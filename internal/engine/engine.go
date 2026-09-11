@@ -1199,6 +1199,11 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// format is unrecorded does not say which pixels were compared, and a stored
 	// verdict with no chroma figure does not say whether the colour survived.
 	out.VmafPixFmt, out.VmafChroma, out.VmafChromaMetric = proof.PixFmt, proof.ChromaMin, proof.ChromaMetric
+	// And which video stream those pixels came from. A source can carry more than one,
+	// so this is what lines the score up against the guards that inspected the file. An
+	// unmeasured gate carries "" here and the column stays NULL: not recorded, never the
+	// stream this build would have scored had it run.
+	out.VmafStream = proof.Stream
 	if reason != nil {
 		if ctx.Err() != nil {
 			_ = os.Remove(tmp)
@@ -1454,14 +1459,14 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		}
 	}
 
-	// The log line carries the comparison format and the chroma figure beside the
-	// score, because "recorded alongside the score" has to mean everywhere the score
-	// is recorded - a log line that reports a bare 98.4 is one more surface where a
-	// reader cannot say which pixels were compared.
+	// The log line carries the comparison format, the scored stream and the chroma figure
+	// beside the score, because "recorded alongside the score" has to mean everywhere the
+	// score is recorded - a log line that reports a bare 98.4 is one more surface where a
+	// reader cannot say which pixels were compared, or which stream they came from.
 	e.Log.Info("DONE", "file", final, "bytes", newSize, "reclaimed", fi.Size()-newSize,
 		"encode_ms", encodeDur.Milliseconds(),
 		"vmaf", logScore(proof.Mean), "vmaf_min", logScore(proof.Min),
-		"vmaf_pix_fmt", logText(proof.PixFmt),
+		"vmaf_pix_fmt", logText(proof.PixFmt), "vmaf_stream", logText(proof.Stream),
 		"vmaf_chroma", logScore(proof.ChromaMin), "vmaf_chroma_metric", logText(proof.ChromaMetric))
 	// The done row is keyed under the FINAL file's own path+fingerprint (mirroring
 	// the pre-TRANSCODE-5 ledger behaviour) so a resume short-circuits on the new

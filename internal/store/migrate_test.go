@@ -318,7 +318,7 @@ func TestMigrate_FreshDatabaseIsStampedAndComplete(t *testing.T) {
 // to keep in step.
 var headColumns = []string{
 	"reason", "encoder", "vmaf_mean", "vmaf_min", "vmaf_model",
-	"vmaf_pix_fmt", "vmaf_chroma", "vmaf_chroma_metric",
+	"vmaf_pix_fmt", "vmaf_chroma", "vmaf_chroma_metric", "vmaf_stream",
 	"source_codec", "source_bytes", "output_bytes", "encode_ms",
 	"decision_inputs",
 }
@@ -942,6 +942,210 @@ func TestMigrate_APreMigrationDatabaseOnDiskRecordsNoDecisionInputs(t *testing.T
 	}
 }
 
+// ---- the scored video stream --------------------------------------------------
+
+// v10Schema is the schema EXACTLY as it shipped BEFORE the scored-stream column - every
+// step from v1 to v10, in the order they shipped, with the v10 version stamp. Frozen for
+// the same reason v0Schema, v3Schema, v4Schema and v9Schema are, and it is the fixture
+// this phase's migration proof actually needs: a FRESH database gains the new column
+// either way, because the migration list is replayed from nothing, so a fresh-schema test
+// would pass over a migration that did nothing at all to a database that already exists.
+// Do NOT update it when the schema changes.
+const v10Schema = v9Schema + `
+ALTER TABLE jobs ADD COLUMN decision_inputs TEXT;
+CREATE INDEX IF NOT EXISTS idx_jobs_status_inputs ON jobs(status, decision_inputs);
+PRAGMA user_version = 10;
+`
+
+// seedV10 writes a real pre-scored-stream database at path, with rows that CARRY the
+// outcomes the shipped build recorded: a done row with its whole VMAF proof, a skipped row
+// whose gate never ran, and a VMAF-rejected failure. The outcomes matter twice over here -
+// the criterion is that migrating keeps every value while leaving the new column
+// unrecorded, and the mixture of scored and unscored rows is what makes "no backfill"
+// mean something rather than being true of an empty table.
+func seedV10(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open v10 db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if _, err := db.Exec(v10Schema); err != nil {
+		t.Fatalf("create v10 schema: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at,
+			encoder, vmaf_mean, vmaf_min, vmaf_model, vmaf_pix_fmt, vmaf_chroma, vmaf_chroma_metric,
+			source_codec, source_bytes, output_bytes, encode_ms, decision_inputs)
+		 VALUES ('/lib/old-done.mkv', '10:100', 'done', 0, NULL, 1000,
+			'cpu', 97.25, 88.5, 'version=vmaf_v0.6.1', 'yuv420p10le', 41.5, 'psnr_cb/psnr_cr min (dB)',
+			'h264', 5000000, 2000000, 12345, 'crf=20')`); err != nil {
+		t.Fatalf("seed done row: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, reason)
+		 VALUES ('/lib/old-skipped.mkv', '20:200', 'skipped', 0, NULL, 1001, 'already-at-target-codec')`); err != nil {
+		t.Fatalf("seed skipped row: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at,
+			reason, failure_class, encoder, vmaf_mean, vmaf_min, vmaf_model, vmaf_pix_fmt)
+		 VALUES ('/lib/old-rejected.mkv', '30:300', 'failed', 1, NULL, 1002,
+			'VMAF below threshold', 'deterministic', 'cpu', 62.5, 41.0, 'version=vmaf_v0.6.1', 'yuv420p10le')`); err != nil {
+		t.Fatalf("seed rejected row: %v", err)
+	}
+
+	// Sanity: the fixture really is a v10 database that really lacks the new column.
+	// Without this the test could pass against a database that was already migrated,
+	// which would make it vacuous in exactly the way it exists to avoid.
+	var ver int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil {
+		t.Fatalf("read seeded user_version: %v", err)
+	}
+	if ver != 10 {
+		t.Fatalf("seeded database is at version %d, want 10 - it is not a pre-scored-stream database", ver)
+	}
+	if hasColumn(t, db, "vmaf_stream") {
+		t.Fatal("seeded v10 database already has a `vmaf_stream` column - the fixture is wrong")
+	}
+}
+
+// TestMigrate_APreMigrationDatabaseRecordsNoScoredStream is this phase's anti-vacuity
+// proof, and the one the whole column turns on.
+//
+// A jobs.db written by the SHIPPED build must migrate forward in place, keep every row and
+// every value those rows carry, and read as recording NO scored stream. The backfill is
+// the failure to prevent, and here it is unusually tempting: the stream this build scores
+// is a CONSTANT, so writing `v:0` onto every pre-existing row would look like completing
+// the record rather than what it is - a claim about which stream a measurement nobody can
+// re-examine was made against, on rows whose VMAF gate may never have run at all.
+//
+// It also asserts the other half of the criterion: a database ALREADY at the new version
+// opens unchanged, so the step is not re-applied and nothing it wrote moves.
+func TestMigrate_APreMigrationDatabaseRecordsNoScoredStream(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.db")
+	seedV10(t, path)
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on a v10 database must migrate it, not fail: %v", err)
+	}
+
+	if got, want := userVersion(t, path), schemaVersion(); got != want {
+		t.Errorf("user_version after migration = %d, want %d", got, want)
+	}
+	if !hasColumn(t, s.db, "vmaf_stream") {
+		t.Fatal("migrated database has no vmaf_stream column - the migration was a silent no-op")
+	}
+
+	ctx := context.Background()
+	rows, err := s.List(ctx, nil, 0)
+	if err != nil {
+		t.Fatalf("List after migration: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("migration lost rows: got %d, want 3 (%+v)", len(rows), rows)
+	}
+	byPath := make(map[string]Job, len(rows))
+	for _, j := range rows {
+		byPath[j.Path] = j
+	}
+
+	// 1. Every value the v10 rows carried is still there.
+	done := byPath["/lib/old-done.mkv"]
+	if done.Status != Done || done.Outcome.Encoder != "cpu" ||
+		done.Outcome.VmafModel != "version=vmaf_v0.6.1" || done.Outcome.VmafPixFmt != "yuv420p10le" ||
+		done.Outcome.VmafChromaMetric != "psnr_cb/psnr_cr min (dB)" || done.Outcome.SourceCodec != "h264" {
+		t.Errorf("the pre-existing done row was mangled: %+v", done)
+	}
+	if done.Outcome.VmafMean == nil || *done.Outcome.VmafMean != 97.25 ||
+		done.Outcome.VmafMin == nil || *done.Outcome.VmafMin != 88.5 ||
+		done.Outcome.VmafChroma == nil || *done.Outcome.VmafChroma != 41.5 {
+		t.Errorf("the pre-existing measurements were lost: %+v", done.Outcome)
+	}
+	if got := byPath["/lib/old-skipped.mkv"].Outcome.Reason; got != "already-at-target-codec" {
+		t.Errorf("the pre-existing skip reason was lost: %q", got)
+	}
+	if j := byPath["/lib/old-rejected.mkv"]; j.FailCount != 1 || j.Outcome.FailureClass != FailureDeterministic {
+		t.Errorf("the pre-existing failure accounting was lost: %+v", j)
+	}
+
+	// 2. And every pre-existing row reads as recording NO scored stream - including the
+	// done row that carries a full VMAF proof, which is the row a backfill would look
+	// most defensible on.
+	for _, j := range rows {
+		if j.Outcome.VmafStream != "" {
+			t.Errorf("%s was BACKFILLED with the scored stream %q - that is a claim about which "+
+				"stream a comparison nobody can re-examine was made against", j.Path, j.Outcome.VmafStream)
+		}
+	}
+	// Read from SQLite itself, not only through the scan: a stored "" would be a second
+	// representation of "not recorded" that the scan would hide.
+	var recorded int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM jobs WHERE vmaf_stream IS NOT NULL`).Scan(&recorded); err != nil {
+		t.Fatalf("count vmaf_stream: %v", err)
+	}
+	if recorded != 0 {
+		t.Errorf("%d migrated rows carry a non-NULL vmaf_stream - the column is added with NO DEFAULT "+
+			"and nothing backfills it", recorded)
+	}
+
+	// 3. The migrated database is WRITABLE through the new column. Without the ALTER this
+	// fails with "no such column" - which is how the silent-no-op bug surfaces on a live
+	// install: not at startup, but later, on a query.
+	if ok, err := s.Claim(ctx, "/lib/fresh.mkv", "50:500", "w0", 3, sameConfig); err != nil || !ok {
+		t.Fatalf("Claim on a migrated database: ok=%v err=%v", ok, err)
+	}
+	if err := s.Finish(ctx, "/lib/fresh.mkv", "50:500", Done, &Outcome{
+		Encoder: "cpu", VmafMean: f64(98.4), VmafMin: f64(96.1), VmafModel: "version=vmaf_v0.6.1",
+		VmafPixFmt: "yuv420p10le", VmafChroma: f64(41.2), VmafChromaMetric: "psnr_cb/psnr_cr min (dB)",
+		VmafStream: "v:0",
+	}, 3); err != nil {
+		t.Fatalf("Finish on a migrated database: %v", err)
+	}
+	after, err := s.List(ctx, []Status{Done}, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, j := range after {
+		if j.Path == "/lib/fresh.mkv" && j.Outcome.VmafStream != "v:0" {
+			t.Errorf("a row written AFTER the migration lost its scored stream: %+v", j.Outcome)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// 4. Re-opening a database ALREADY at this version changes nothing: the step is not
+	// re-applied, the stamp does not move, and what the rows recorded stands.
+	again, err := Open(path)
+	if err != nil {
+		t.Fatalf("re-Open of an up-to-date database: %v", err)
+	}
+	defer func() { _ = again.Close() }()
+	if got, want := userVersion(t, path), schemaVersion(); got != want {
+		t.Errorf("user_version after re-open = %d, want %d", got, want)
+	}
+	reread, err := again.List(ctx, nil, 0)
+	if err != nil {
+		t.Fatalf("List after re-open: %v", err)
+	}
+	if len(reread) != 4 {
+		t.Errorf("re-opening an up-to-date database changed the row count: got %d, want 4", len(reread))
+	}
+	for _, j := range reread {
+		want := ""
+		if j.Path == "/lib/fresh.mkv" {
+			want = "v:0"
+		}
+		if j.Outcome.VmafStream != want {
+			t.Errorf("re-opening moved %s's scored stream to %q, want %q", j.Path, j.Outcome.VmafStream, want)
+		}
+	}
+}
+
 // TestMigrate_AFailedMigrationRefusesToOpenTheStore. A half-migrated schema must never be
 // run against: the engine would be recording its proof into columns that may or may not
 // be there, and the failure would surface later, on a live install, on a query. So a
@@ -1020,6 +1224,7 @@ func TestMigrations_ShippedTextIsNeverEdited(t *testing.T) {
 		{"source codec", "4f8cf21fb8743b51e8609fef458308f65e4e36782d98213cff15833aacc3b164"},
 		{"failure class", "1401872cf991a88581c43c24470de409ef06683ca3aaa9cfbd728220bed2b53a"},
 		{"decision inputs", "285adec2f24e51f0fdecec3c20a36388fb68b0b9b0da5730774361c82b8a5600"},
+		{"scored video stream", "7008f2ffddfebe1e635bb7be29271994ac7ba8299432aa6c6022ce346a1ab2f2"},
 	}
 	if len(migrations) < len(shipped) {
 		t.Fatalf("migrations has %d entries, fewer than the %d that have shipped - an entry was "+
