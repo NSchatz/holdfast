@@ -13,33 +13,42 @@ four are yours.
 
 ## Where this repository actually stands
 
-**`v0.1.0` is published.** Read this before anything below: several of the steps are already
-done, and the ones that are done are in the irreversible set.
+**`v0.2.0` is the newest published version, and the run that published it reported failure
+over a promotion that landed.** Read this before anything below: several of the steps are
+already done, the ones that are done are in the irreversible set, and the last release
+skipped its final two steps.
 
 | fact | evidence |
 |---|---|
 | the dry run has been dispatched | run `29646149489`, `workflow_dispatch` on `main`, 2026-07-18 13:26Z, green. Its five publishing steps all show `skipped`. |
 | `v0.1.0` has been released | run `29646482337`, tag push, 2026-07-18 13:37Z, green. Every step ran, including the promotion and the release. |
-| the image is published | `ghcr.io/nschatz/holdfast:v0.1.0` at `sha256:302242b66f9c160e69b1e7c37d57925ec593bc7ed0ee9df851af0ec58c7cd4b2`, pulled back and re-smoked on both arches by that run. |
-| `:latest` points at it | the same run promoted `ghcr.io/nschatz/holdfast:latest` onto that digest with `imagetools create`. |
-| a GitHub release exists | tag `v0.1.0`, cut by the workflow token, carrying `holdfast_v0.1.0_linux_amd64.tar.gz`, `holdfast_v0.1.0_linux_arm64.tar.gz` and `SHA256SUMS`. |
+| `v0.2.0` has been released | run `34350141882`, tag push, 2026-09-09 12:17Z. Its `build` job is green; its `publish` job pushed the version tag, re-smoked the pushed artefact on both arches and promoted `:latest` - and then reported FAILURE at `publish/promote-latest` over a promotion that had landed. The run's conclusion is `failure`. |
+| the newest image is published | `ghcr.io/nschatz/holdfast:v0.2.0` at `sha256:cb5125e1e95c93ee05256a37a8878c30349b75bb2ee2918c6e7b0ee9b4a5ec32` - the multi-arch index, `linux/amd64` and `linux/arm64` - pulled back and re-smoked on both arches by that run. `v0.1.0` stays published at `sha256:302242b66f9c160e69b1e7c37d57925ec593bc7ed0ee9df851af0ec58c7cd4b2`. |
+| `:latest` points at it | `ghcr.io/nschatz/holdfast:latest` resolves to `sha256:cb5125e1e95c93ee05256a37a8878c30349b75bb2ee2918c6e7b0ee9b4a5ec32`, the same index digest as `v0.2.0`. The promotion in run `34350141882` therefore LANDED, which is what makes that step's failure false: the `imagetools create` retag took and the step died reading the inspect printed after it. |
+| two steps of that release did not run | `publish/resolve-compose` and `publish/github-release` both show `skipped` on run `34350141882`, because the step before them reported failure. So no run has ever resolved the reference `docker-compose.yml` pins against the registry, and the `v0.2.0` release object was not cut by the workflow. |
+| the example deployment pins the newest version | `docker-compose.yml` pins `ghcr.io/nschatz/holdfast:v0.2.0` by that index digest, so both architectures resolve under it. |
+| a GitHub release exists for each | tag `v0.1.0`, cut by the workflow token, carrying `holdfast_v0.1.0_linux_amd64.tar.gz`, `holdfast_v0.1.0_linux_arm64.tar.gz` and `SHA256SUMS`. tag `v0.2.0`, cut BY HAND because `publish/github-release` was skipped, carrying the `v0.2.0` tarballs and `SHA256SUMS` taken from run `34350141882`'s own `build` job and verified against those checksums - those bytes, never a rebuild. |
 | the repository is public | `NSchatz/holdfast`, `visibility: public`. |
-| the annotated tag is on origin | `refs/tags/v0.1.0` -> `3468562c`, pointing at commit `38fb8b3`. |
+| the annotated tags are on origin | `refs/tags/v0.1.0` -> `3468562c`, pointing at commit `38fb8b3`. `refs/tags/v0.2.0` -> `2b109243`, pointing at commit `f525a9e`. |
 
 Re-derive any of it:
 
 ```sh
 gh run list --workflow=release.yml --limit 10 --json conclusion,event,headBranch,createdAt
+gh run view 34350141882 --json jobs --jq '.jobs[] | {name, steps: [.steps[] | {name, conclusion}]}'
 gh api repos/NSchatz/holdfast/releases --jq '.[] | {tag_name, assets: [.assets[].name]}'
 gh api repos/NSchatz/holdfast --jq '{name:.full_name, visibility:.visibility}'
+docker buildx imagetools inspect ghcr.io/nschatz/holdfast:latest --format '{{.Manifest.Digest}}'
 ```
 
 What this means for the steps below. Steps **1, 3 and 5** are done for good; they are
-one-time acts and they have been taken. Steps **2 and 7** have each run once and run again
-per release. Step **8** has never been done. So the NEXT release is: dispatch the dry run
-(2), pick and choose a HIGHER version (4, 6), push that tag (7), confirm the pull (8).
-`v0.1.0` itself is spent: a released version's contents "MUST NOT be modified"
-(semver.org), and nothing here can un-publish it.
+one-time acts and they have been taken. Steps **2 and 7** have each run twice and run again
+per release. Step **8** has never been done, and run `34350141882` did not do it either -
+the step that resolves the compose reference is one of the two that run skipped. So the NEXT
+release is: dispatch the dry run (2), pick and choose a version HIGHER THAN `v0.2.0` (4, 6),
+push that tag (7), confirm the pull (8). `v0.1.0` and `v0.2.0` are both spent: a released
+version's contents "MUST NOT be modified" (semver.org), and nothing here can un-publish
+either.
 
 ## The irreversible set
 
@@ -56,9 +65,11 @@ in it. That is stronger than a catalogue of publishing commands and it is also t
 version that survived review: deciding what an arbitrary shell script does is undecidable,
 and six attempts to do it were each beaten by ordinary shell.
 
-**Every act below has already been taken**, on 2026-07-18, for `v0.1.0` (see the section
-above). Read the table as the standing description of what each act costs, not as a list of
-decisions still open.
+**Every act below has already been taken**: all of them on 2026-07-18 for `v0.1.0`, and
+every one up to and including `publish/promote-latest` again on 2026-09-09 for `v0.2.0`,
+whose run skipped `publish/resolve-compose` and `publish/github-release` (the release object
+at that tag was cut by hand instead). See the section above. Read the table as the standing
+description of what each act costs, not as a list of decisions still open.
 
 | act | what leaves this machine | can it be undone? |
 |---|---|---|
@@ -154,7 +165,8 @@ that pins the tag a release MOVES: the example deployment pins a version, and `:
 published rather than depended on.
 
 Status: done. The repository is `NSchatz/holdfast` and `docker-compose.yml` pins
-`ghcr.io/nschatz/holdfast:v0.1.0` by digest, which is what `v0.1.0` published under.
+`ghcr.io/nschatz/holdfast:v0.2.0` by digest, which is the multi-arch index `v0.2.0` published
+under.
 
 The window for this closed with the first release. A rename now would not just be
 irreversible, it would strand what is already out: `ghcr.io/nschatz/holdfast:v0.1.0` and
@@ -170,9 +182,10 @@ release it was undone by renaming back.
 
 ## 4. Pick a version nothing has used
 
-`v0.1.0` is taken. An annotated `v0.1.0` is on origin (`3468562c`, pointing at commit
-`38fb8b3`), a green release run stands behind it, and a GitHub release and a published image
-carry that name.
+`v0.1.0` and `v0.2.0` are both taken. An annotated `v0.1.0` is on origin (`3468562c`,
+pointing at commit `38fb8b3`) and an annotated `v0.2.0` is too (`2b109243`, pointing at
+commit `f525a9e`); a release run stands behind each, and a GitHub release and a published
+image carry each name.
 
 **Do not delete and re-create it.** The runbook used to say you could, on the premise that
 nothing had consumed it; that premise is false. Semantic Versioning is explicit that "the
@@ -184,10 +197,10 @@ permanently once anything requests it.
 
 So:
 
-- **Cut the next release at a HIGHER version** (`v0.2.0`). That is the only supported move.
+- **Cut the next release at a HIGHER version** (`v0.3.0`). That is the only supported move.
 - Do not re-push an existing tag. `release.yml` triggers on `push: tags: ["v*"]`, so
-  re-delivering `v0.1.0` would build and publish an image from that stale tree under a name
-  that already means something else.
+  re-delivering `v0.1.0` or `v0.2.0` would build and publish an image from that stale tree
+  under a name that already means something else.
 - If a released version turns out to be broken, supersede it. Deleting it breaks the compose
   file of everyone who pinned it and takes back nothing.
 
@@ -211,7 +224,7 @@ The major version must be zero. `release.yml` refuses anything else before it pu
 and says why. See "Before a major version above zero" below for what would have to be true
 first.
 
-- Format: `v0.MINOR.PATCH`, optionally with a pre-release suffix (`v0.2.0-rc1`).
+- Format: `v0.MINOR.PATCH`, optionally with a pre-release suffix (`v0.3.0-rc1`).
 - A suffixed tag is a pre-release: it publishes the version tag and cuts a pre-release, but
   does NOT become `:latest`. Use one if you want a rehearsal that real users will not pull.
 - Pick a version nothing has used. See step 4.
@@ -221,8 +234,8 @@ Undone by: nothing yet; choosing is free.
 ## 7. Push the tag
 
 ```sh
-git tag -a v0.2.0 -m "v0.2.0"
-git push origin v0.2.0
+git tag -a v0.3.0 -m "v0.3.0"
+git push origin v0.3.0
 ```
 
 That is the whole trigger. There is deliberately no "publish" checkbox: the only thing that
@@ -245,8 +258,12 @@ permission, so nothing else could publish in its place. On the first release
 now on it means `:latest` keeps resolving to the previous release, which is the property
 `make check` asserts by re-deciding every guard with the run marked failed.
 
-Status: done once, for `v0.1.0`, on 2026-07-18 (run `29646482337`). It ran in exactly the
-order above. Doing it again means a higher version, per step 4.
+Status: done twice. For `v0.1.0` on 2026-07-18 (run `29646482337`), which ran in exactly the
+order above. For `v0.2.0` on 2026-09-09 (run `34350141882`), which ran that order as far as
+the promotion and then reported FAILURE at `publish/promote-latest` over a promotion that had
+landed - `:latest` carries the `v0.2.0` index digest - so `publish/resolve-compose` and
+`publish/github-release` were skipped and the `v0.2.0` release object was cut by hand
+afterwards. Doing it again means a higher version, per step 4.
 
 Undone by: nothing. See the table above.
 
@@ -270,8 +287,9 @@ the release if `:latest` does not resolve to the digest the run just gated, and 
 the reference `docker-compose.yml` pins does not resolve at all), so this is confirmation,
 not the only check.
 
-Status: NOT confirmed. `v0.1.0` predates that step, so no run has ever resolved the compose
-reference. A GHCR package carries its OWN visibility, separate from the repository's, and it
+Status: NOT confirmed. `v0.1.0` predates that step, and on `v0.2.0` the step was one of the
+two that run skipped after the promotion reported a failure it had not suffered, so no run has
+ever resolved the compose reference. A GHCR package carries its OWN visibility, separate from the repository's, and it
 is not readable from a plain `gh` token - so whether a stranger with no credentials can pull
 `ghcr.io/nschatz/holdfast` is exactly what this step, and only this step, settles. If
 it 401s or 404s, the package is still private: link it to the repository and set it public
