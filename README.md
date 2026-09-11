@@ -82,10 +82,10 @@ it is not a media server or library manager.
 
 **Distributed or remote processing is a non-goal by design, not a missing feature.** holdfast is one
 process: no server/node split, no remote workers. The no-loss argument rests on an atomic
-same-filesystem `rename(2)` - it either happened or it did not, and the source survives either way. A
-remote worker encoding to its own disk and shipping the result back is a **copy**, not a rename, and
-every gate here would have to be re-argued for that different primitive. To use more of one machine,
-raise `workers` (default 1, deliberately - see **[docs/docker.md](docs/docker.md)**).
+same-filesystem `rename(2)` - it either happened or it did not, so a failure never leaves a partial
+file where the source was. A remote worker encoding to its own disk and shipping the result back is a
+**copy**, not a rename, and every gate here would have to be re-argued for that primitive. To use more
+of one machine, raise `workers` (default 1, deliberately - see **[docs/docker.md](docs/docker.md)**).
 
 ## Quick start
 

@@ -71,9 +71,9 @@ source rather than in a scratch volume.)
 store under `/state` is single-writer: one holdfast process serializes every access to it, and
 that serialization does not reach across processes. A second process pointed at the same
 `state_dir` contends for a store that is neither built nor proven to be shared, so this is not a
-deployment to tune - it is one not to build. Two processes over the same **library** is worse
-again, for the reason two different transcoders must not share one: both write a temp file beside
-the source and both delete sources.
+deployment to tune - it is one not to build. Pointing two processes at the same **library** is
+worse still, for the reason two different transcoders must not share one: both write a temp file
+beside the source and both delete sources.
 
 **Do this instead.** Run one container per `state_dir`. A library that genuinely needs its own
 daemon gets its own container, its own `state_dir` volume and its own `/media` mount - never a
