@@ -763,17 +763,27 @@ func TestScan_ObservedIsTheListingThisScanDrewItsSourcesFrom(t *testing.T) {
 // and it is only ever compared with another reading the same run took in the
 // same process: live heap after two forced collections, minus a baseline read
 // before the engine existed. Nothing here is compared with a byte count written
-// down on other hardware, because that form was tried here and it graded the
-// machine rather than the change. The same unchanged scan measured 464560 bytes
-// at the peak instant on the hardware the old ceiling was taken on and 528896 on
-// the container this repository is developed in, so the assertion was
-// permanently red for a build that had regressed nothing - and a permanently red
-// assertion reds identically for a clean tree and for a real regression, which
-// is the expensive half. Live heap at an instant moves with the hardware, the
-// allocator's arena layout, the race detector's shadow state, the coverage
-// counters `make check` runs with, and with whatever the test binary has already
-// run: the same fixture measured 399 KiB and 464 KiB at the same instant in two
-// different positions.
+// down anywhere else, because that form was tried here and it did not grade the
+// code at all.
+//
+// WHAT AN ABSOLUTE CEILING ACTUALLY GRADED, measured: the same unchanged scan,
+// on one machine, in one afternoon, measured 528896 bytes at the peak instant
+// and 239616 bytes at the same instant with nothing changed but the LENGTH OF
+// THE TEMPORARY DIRECTORY the fixture was built in. The peak holds one path
+// string per source, so 2000 sources under a 132-character temp path cost a
+// quarter of a megabyte more than the same 2000 under a 4-character one. The
+// pinned ceiling of 497328 therefore reported a regression in the first
+// environment and clean in the second, for identical code - and a permanently
+// red assertion reds identically for a clean tree and for a real regression,
+// which is the expensive half. Live heap at an instant also moves with the
+// hardware, the allocator's arena layout, the race detector's shadow state, the
+// coverage counters `make check` runs with, and with whatever the test binary
+// has already run: the same fixture measured 399 KiB and 464 KiB at the same
+// instant in two different positions.
+//
+// A DIFFERENCE between two readings of one process survives all of that. Across
+// that same 289 KiB swing in the absolute figure, the pair below stayed within
+// 4672 bytes of each other and the deliberate regression stayed at 82 KiB.
 
 // retainedHeapMargin is the ONLY allowance either comparison below makes, and
 // what it absorbs is measurement NOISE and nothing else. The readings of a pair
@@ -785,13 +795,15 @@ func TestScan_ObservedIsTheListingThisScanDrewItsSourcesFrom(t *testing.T) {
 // build, instrumentation, position - is held identical by construction.
 //
 // THE NOISE IT ABSORBS, MEASURED, not estimated and not raised until a run went
-// green. The warmed peak pair has differed by 240, 336, 496 and 528 bytes with
-// no change to the code under test, and the retained-after-return reading by
-// -12016, -5552, -656, -296, -72, 104, 328, 744 and 4624 bytes across the same
-// pair of fixtures. 32 KiB is tens of times the largest of those, and it is a
-// third of what the property it guards costs: a second, redundant copy of one
-// library's carried entries measures ~82 KiB over these fixtures (83304, 84184,
-// 84248 and 84344 bytes), which is why
+// green: 32 KiB is the figure this file already carried, twice, before either
+// comparison became a comparison. The warmed peak pair has differed by 240,
+// 336, 496, 528 and -4672 bytes with no change to the code under test, and the
+// retained-after-return reading by -12016, -5552, -656, -528, -296, -72, 104,
+// 328, 744 and 4624 bytes across the same pair of fixtures. 32 KiB is several
+// times the largest of those, and it is a third of what the property it guards
+// costs: a second, redundant copy of one library's carried entries measures ~82
+// KiB over these fixtures (82072, 83304, 84184, 84248 and 84344 bytes, across
+// both temp-path lengths), which is why
 // TestScan_PeakRetainedHeapRedsOnADeliberateRegression reds straight through
 // this margin instead of being swallowed by it. It is FIXED and never a function
 // of the source count: a margin that grew with N would pass the very build these
