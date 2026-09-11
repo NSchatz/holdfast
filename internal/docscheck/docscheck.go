@@ -18,10 +18,10 @@
 // well written, or complete - no mechanical check can, and one that pretended to would
 // either fail good documentation or pass bad. Precisely:
 //
-//   - Three fixed anchors must exist: residual-window-local, residual-window-network
-//     and reverse-proxy-posture. They are FIXED here rather than chosen per-run,
-//     because a check free to pick its own anchor is a check that can be made to pass
-//     by moving the goalposts.
+//   - Four fixed anchors must exist: residual-window-local, residual-window-network,
+//     reverse-proxy-posture and swap-metadata. They are FIXED here rather than chosen
+//     per-run, because a check free to pick its own anchor is a check that can be made to
+//     pass by moving the goalposts.
 //   - A statement is PRESENT only when its anchor exists AND at least one non-blank
 //     line follows it, before the next anchor or heading, that is not itself a heading
 //     or an anchor. An anchor with nothing under it is not a statement.
@@ -34,6 +34,19 @@
 //     owes (see ReverseProxyClauses), and they must be carried by ONE statement: a
 //     document saying one clause here and another clause somewhere else has not said
 //     what a deploying operator has to read in one place.
+//   - The swap-metadata statement owes four clauses under the same one-statement rule
+//     (see SwapMetadataClauses).
+//
+// # Why the swap-metadata anchor exists
+//
+// docs/docker.md has always said what holdfast NEEDS from the filesystem: a `user:` that
+// owns the media, write access to the library directories, a single filesystem per
+// directory. It never said what a swap CHANGES about the file it publishes - and the swap
+// carries the source's mode, carries its ownership only where the process is privileged to,
+// carries its modification time unless preserve_mtime is false, and carries no ACL or
+// xattr at all. Each of those decides whether a deployment's permissions and its library
+// ordering survive a pass, none of them is discoverable from the tool's own output, and
+// the last one is the difference between "my ACLs came back" and "my ACLs are gone".
 //
 // # Why the reverse-proxy anchor exists
 //
@@ -109,21 +122,31 @@ const AnchorReverseProxy = "reverse-proxy-posture"
 // because that is the clause a proxy configuration gets wrong.
 const ReverseProxyRootPathToken = "root-relative"
 
-// ReverseProxyClause is one of the three things the reverse-proxy posture statement
-// must say, and the case-insensitive token that carries it. The token is what is
-// CHECKED; the clause is what a failure message says was missing, so a reader learns
-// what to write rather than which string to paste.
-type ReverseProxyClause struct {
+// AnchorSwapMetadata introduces the swap-metadata statement: what a swap CHANGES about
+// the file it publishes, beside the existing statement of what holdfast NEEDS from the
+// filesystem.
+const AnchorSwapMetadata = "swap-metadata"
+
+// Clause is one of the things an anchored statement must say, and the case-insensitive
+// token that carries it. The token is what is CHECKED; the clause is what a failure
+// message says was missing, so a reader learns what to write rather than which string to
+// paste.
+type Clause struct {
 	Token  string
 	Clause string
 }
+
+// ReverseProxyClause is Clause under the name it had when the reverse-proxy rule was the
+// only rule of this shape. It is an alias rather than a second type so that the two rules
+// share one implementation and one set of failure messages.
+type ReverseProxyClause = Clause
 
 // ReverseProxyClauses is the whole obligation. Each token is the shortest string that
 // carries its clause and could not plausibly be written by accident while meaning
 // something else, and two of the three are identifiers this repository already treats
 // as fixed (`server_auth_token` is a config key; `root-relative` is how the page's own
 // requests are described everywhere else).
-var ReverseProxyClauses = []ReverseProxyClause{
+var ReverseProxyClauses = []Clause{
 	{
 		Token: "the only barrier",
 		Clause: "that the dashboard and the read API are unauthenticated, " +
@@ -138,6 +161,35 @@ var ReverseProxyClauses = []ReverseProxyClause{
 		Token: ReverseProxyRootPathToken,
 		Clause: "that holdfast must be served at the host root, because the page requests " +
 			"its own API and assets with root-relative paths",
+	},
+}
+
+// SwapMetadataClauses is the whole of what the swap-metadata statement owes. Each token is
+// the shortest string that carries its clause and could not plausibly be written by
+// accident while meaning something else, and the mtime clause is carried by an identifier
+// this repository already treats as fixed (`preserve_mtime` is a config key).
+//
+// The last one is the clause a reader is most likely to need and least likely to guess:
+// nothing in holdfast's output says that a POSIX ACL or an SELinux label on the source did
+// not survive the swap, and an operator relying on one has no other way to find out.
+var SwapMetadataClauses = []Clause{
+	{
+		Token:  "carries the source's mode",
+		Clause: "that the replacement carries the source's mode whatever umask holdfast runs under",
+	},
+	{
+		Token: "only where holdfast is privileged",
+		Clause: "that ownership is carried only where holdfast is privileged to carry it, " +
+			"and is otherwise the holdfast uid",
+	},
+	{
+		Token: "preserve_mtime",
+		Clause: "that the modification time is carried from the source unless preserve_mtime " +
+			"is false",
+	},
+	{
+		Token:  "acls and xattrs are not carried",
+		Clause: "that ACLs and xattrs are not carried onto the replacement",
 	},
 }
 
@@ -310,46 +362,56 @@ func Check(files []string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	problems = append(problems, checkReverseProxy(proxy)...)
+	problems = append(problems, checkClauses(proxy, AnchorReverseProxy, "reverse-proxy posture", ReverseProxyClauses)...)
+
+	metadata, err := statements(files, AnchorSwapMetadata)
+	if err != nil {
+		return nil, err
+	}
+	problems = append(problems, checkClauses(metadata, AnchorSwapMetadata, "swap-metadata", SwapMetadataClauses)...)
 
 	return problems, nil
 }
 
-// checkReverseProxy applies the reverse-proxy rule. Every failure it can report says
-// MISSING, because that is what each of them IS: an anchor nobody wrote, an anchor with
-// nothing under it, and a statement that never says one of the three things - a reader
-// who needs that clause finds nothing in all three cases, and a message that called the
-// third "incomplete" would suggest the clause is there in weaker words.
-func checkReverseProxy(sts []Statement) []string {
+// checkClauses applies the multi-clause rule to one anchor: the statement must exist, must
+// have text, and ONE occurrence of it must carry a token for every clause it owes. `what`
+// names the statement in a failure message.
+//
+// Every failure it can report says MISSING, because that is what each of them IS: an
+// anchor nobody wrote, an anchor with nothing under it, and a statement that never says
+// one of the things - a reader who needs that clause finds nothing in all three cases, and
+// a message that called the third "incomplete" would suggest the clause is there in weaker
+// words.
+func checkClauses(sts []Statement, anchor, what string, clauses []Clause) []string {
 	switch {
 	case len(sts) == 0:
 		return []string{fmt.Sprintf(
-			"no shipped document carries the anchor %q - the reverse-proxy posture statement is MISSING", AnchorReverseProxy)}
+			"no shipped document carries the anchor %q - the %s statement is MISSING", anchor, what)}
 	case !anyPresent(sts):
 		return []string{fmt.Sprintf(
 			"%s: the anchor %q is present but nothing follows it - an anchor with no text is not a statement, "+
-				"so the reverse-proxy posture statement is MISSING",
-			sts[0].File, AnchorReverseProxy)}
+				"so the %s statement is MISSING",
+			sts[0].File, anchor, what)}
 	}
 
-	// ONE statement must carry all three clauses. Report against the strongest
-	// near-miss, so a failure names a file to edit rather than saying "nowhere".
-	best := bestReverseProxyStatement(sts)
+	// ONE statement must carry every clause. Report against the strongest near-miss, so a
+	// failure names a file to edit rather than saying "nowhere".
+	best := bestClauseStatement(sts, clauses)
 	var problems []string
-	for _, c := range ReverseProxyClauses {
+	for _, c := range clauses {
 		if !strings.Contains(normalize(best.Text), c.Token) {
 			problems = append(problems, fmt.Sprintf(
-				"%s: the reverse-proxy posture statement never says %q, so the statement that %s is MISSING",
-				best.File, c.Token, c.Clause))
+				"%s: the %s statement never says %q, so the statement that %s is MISSING",
+				best.File, what, c.Token, c.Clause))
 		}
 	}
 	return problems
 }
 
-// bestReverseProxyStatement returns the present statement carrying the most clauses.
+// bestClauseStatement returns the present statement carrying the most of these clauses.
 // A statement carrying all of them makes the check pass; when none does, this is the
 // one closest to being the statement that was owed.
-func bestReverseProxyStatement(sts []Statement) Statement {
+func bestClauseStatement(sts []Statement, clauses []Clause) Statement {
 	best := firstPresent(sts)
 	bestScore := -1
 	for _, s := range sts {
@@ -357,7 +419,7 @@ func bestReverseProxyStatement(sts []Statement) Statement {
 			continue
 		}
 		score := 0
-		for _, c := range ReverseProxyClauses {
+		for _, c := range clauses {
 			if strings.Contains(normalize(s.Text), c.Token) {
 				score++
 			}

@@ -236,6 +236,27 @@ dry_run: false
 # quietly is not kept.
 # undo_window_hours: 0       # 0 = off (default); e.g. 24 keeps an original for a day
 
+# --- what a swap carries from the source ---
+# The replacement is written by ffmpeg under holdfast's own umask and uid:gid, and the
+# rename then publishes it under the source's name. holdfast carries the source's mode,
+# its ownership (only where it is privileged to - a container running as an ordinary
+# `user:` has no CAP_CHOWN, and says so once per run) and its modification time across,
+# so reclaiming disk does not quietly rewrite your library's permissions and its ordering.
+# ACLs and xattrs are NOT carried; docs/docker.md says so in full.
+#
+# preserve_mtime is the one part of that you can turn off, and it DEFAULTS TO ON.
+# Resetting a file's mtime is a real and unrecoverable change to a media server: Plex's and
+# Jellyfin's "Recently Added", and every date-based sort and smart collection built on it,
+# sees a first pass over a library as the entire library arriving at once. Every
+# neighbouring tool (cp -p, rsync -a, mv) preserves the modification time across a
+# replacement, so preserving it is the least-surprising behaviour and RESETTING it is the
+# side effect. Set it to false if you would rather the replacement's mtime say when the
+# bytes were actually written - that is a legitimate meaning, and it is why the key exists.
+#
+# Either way a resume still works: the swap always makes the file smaller, so the
+# size:mtime identity holdfast keys a completed file under moves whatever this is set to.
+# preserve_mtime: true       # true = the replacement keeps the source's modification time
+
 # --- runtime ---
 # state_dir: state           # holds the resumable SQLite job store (jobs.db)
 #

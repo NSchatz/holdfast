@@ -244,6 +244,46 @@ type Engine struct {
 	// lie about a real file.
 	restatFn func(path string) (probe.Attributes, error)
 
+	// --- the four S0085 metadata seams ---------------------------------------------
+	//
+	// The swap carries the SOURCE's mode, ownership and modification time onto the
+	// replacement (see metadata.go). Three of the four syscalls that does cannot fail on
+	// this gate the way they fail in production, and the fourth cannot succeed the way it
+	// succeeds in production, so each is substitutable for exactly one question:
+	//
+	//   - the gate runs as an unprivileged uid with NO CAP_CHOWN, so a real chown(2) to
+	//     another uid is not exercisable here and never will be. A chown to the uid this
+	//     process already IS succeeds, which cannot tell "requested the source's owner"
+	//     from "did nothing at all" - so what the swap REQUESTS is the observable, and
+	//     what the kernel answers (EPERM, the shipped rootless deployment's normal case)
+	//     is the injection.
+	//   - a process that owns a file can always chmod and utimes it, so the failure paths
+	//     that must refuse the swap have to be injected to exist at all.
+	//   - the source's metadata read has to fail while the source is STILL THERE, so the
+	//     fixture can assert it byte-for-byte intact afterwards; deleting the source to
+	//     make the read fail would destroy the thing being asserted.
+	//
+	// Production leaves all four nil and calls the real thing.
+
+	// statMetadataFn, when non-nil, replaces the read of the SOURCE's metadata.
+	statMetadataFn func(path string) (fileMetadata, error)
+
+	// chownFn, when non-nil, replaces os.Chown on the replacement.
+	chownFn func(path string, uid, gid int) error
+
+	// chmodFn, when non-nil, replaces os.Chmod on the replacement.
+	chmodFn func(path string, mode fs.FileMode) error
+
+	// chtimesFn, when non-nil, replaces the modification-time write on the replacement.
+	// It takes the mtime alone: the access time is deliberately left unchanged.
+	chtimesFn func(path string, mtime time.Time) error
+
+	// ownershipNoticeGiven is the once-per-RUN latch behind the unpreserved-ownership
+	// report. RunOneshot clears it before anything is swapped, so the notice is owed once
+	// per run rather than once per process - `serve` scans repeatedly off one Engine, and
+	// an operator who started the daemon last week would otherwise never hear it again.
+	ownershipNoticeGiven atomic.Bool
+
 	// held is the current run's hold-back snapshot, published once by RunOneshot
 	// before any worker starts and only read afterwards. An atomic pointer rather than
 	// a plain field so a second RunOneshot (the serve loop's scan racing an operator's
@@ -390,6 +430,11 @@ func (e *Engine) RunOneshot(ctx context.Context) error {
 	// its two recorded paths - plus every recorded replacement path still carrying a
 	// live exclusion - are withheld from the sweep, from the scan and from the workers.
 	e.held.Store(e.loadHoldBacks(ctx))
+
+	// S0085: the unpreserved-ownership notice is owed once per RUN. Cleared here, before
+	// anything is swapped, so a daemon scanning every scan_interval_sec says it again on
+	// each pass rather than once in the life of the process.
+	e.ownershipNoticeGiven.Store(false)
 
 	// This pass's listings, taken here and used by the sweep and the enumeration
 	// between them, so every covered directory is listed exactly once for the
@@ -1268,6 +1313,38 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		}
 	}
 
+	// Carry the SOURCE's metadata onto the replacement (S0085). The temp was written by
+	// ffmpeg under the daemon's umask and the daemon's uid:gid, and the rename below
+	// publishes it under the source's name - so without this the swap silently rewrites
+	// every touched file's permissions, its owner and its age. See metadata.go for what is
+	// carried, what is not, and why the failure rule is what it is.
+	//
+	// Placement is a constraint and not a preference, and it is the same argument the temp
+	// fsync and the undo retention are both hoisted for. It runs BEFORE the fsync below,
+	// so the attributes the rename publishes are as durable as the bytes it publishes; and
+	// it therefore also runs outside the TRANSCODE-16 re-fingerprint window, whose promise
+	// is that its TOCTOU is the microseconds between that stat and the rename syscall.
+	//
+	// A failure here is a FAILED SWAP, with one narrow exemption absorbed inside
+	// carrySourceMetadata (an ownership change this process is not privileged to make).
+	// Everything else discards the temp and leaves the source byte-for-byte intact: this
+	// runs immediately in front of the only irreversible act the tool performs, and a
+	// metadata set that half-applied and then swapped anyway would publish a file whose
+	// permissions or owner nobody chose with the source already gone.
+	//
+	// The RESIDUAL, stated rather than implied: the source's metadata is read here, and the
+	// re-fingerprint below compares size:mtime only. A concurrent chmod or chown on the
+	// source inside that window moves neither, is not detected, and the replacement is
+	// published with the attributes read a moment earlier. That is the same sub-millisecond
+	// class of race the -16 guard already narrows rather than closes.
+	if step, merr := e.carrySourceMetadata(f, tmp); merr != nil {
+		e.Log.Warn("FAIL (could not "+step+", source untouched)", "file", f, "temp", tmp, "err", merr)
+		_ = os.Remove(tmp)
+		out.Reason = "could not " + step + ": " + merr.Error()
+		e.finish(ctx, f, key, store.Failed, out)
+		return nil
+	}
+
 	// Durability before the swap (TRANSCODE-17). os.Rename is atomic w.r.t. a
 	// concurrent reader, but atomicity is not PERSISTENCE: after Encode returns, the
 	// temp's data blocks may still live only in the page cache, so a POWER LOSS (not a
@@ -1504,11 +1581,25 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		"vmaf_chroma", logScore(proof.ChromaMin), "vmaf_chroma_metric", logText(proof.ChromaMetric))
 	// The done row is keyed under the FINAL file's own path+fingerprint (mirroring
 	// the pre-TRANSCODE-5 ledger behaviour) so a resume short-circuits on the new
-	// file's identity, not the pre-swap source's. The post-swap fingerprint (new
-	// size/mtime) is ALWAYS a fresh key with no existing row — even when
-	// final == f, the rename changed the file's size/mtime in place — so Claim it
-	// first (Finish alone would be a no-op UPDATE against a nonexistent row and the
-	// done outcome would be silently lost).
+	// file's identity, not the pre-swap source's. The post-swap fingerprint is ALWAYS a
+	// fresh key with no existing row, so Claim it first (Finish alone would be a no-op
+	// UPDATE against a nonexistent row and the done outcome would be silently lost).
+	//
+	// WHICH HALF OF THAT IS LOAD-BEARING CHANGED WITH S0085. probe.Fingerprint is
+	// size:mtime, and this used to rest on both halves moving - "even when final == f, the
+	// rename changed the file's size/mtime in place". With preserve_mtime on (the shipped
+	// default) the replacement carries the SOURCE's mtime, so that half does not move at
+	// all and the whole of the guarantee now rests on the SIZE.
+	//
+	// The size is what makes it safe, and it is a gate rather than an expectation: the
+	// verify gate refuses an output that is not strictly smaller than its source
+	// (min_savings_percent, 0 = strictly smaller), so a swap that reached this line
+	// necessarily shrank the file. If that ever stopped holding, this row would key under
+	// the SOURCE's identity, the pre-swap row would be the same row rather than a
+	// superseded one, and the next scan would re-encode the replacement as if it were the
+	// untouched source. TestSwap_PreserveMtimeStillProducesAFreshFingerprint asserts both
+	// halves of that - the mtime did not move, the size did - so this comment cannot
+	// quietly stop being true.
 	finalKey := probe.Fingerprint(final)
 	if _, err := e.Store.Claim(ctx, final, finalKey, worker, e.Cfg.MaxFailures, e.currentInputs()); err != nil {
 		e.Log.Warn("claim of final key failed (done outcome still applies on disk)", "file", final, "err", err)
@@ -1526,9 +1617,10 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	e.finishStore(ctx, final, finalKey, store.Done, out)
 	e.emit(Event{Path: final, Status: store.Done, Worker: worker, Outcome: out})
 	// Prune the superseded pre-swap row (the source's old identity), so the table
-	// doesn't accumulate one dangling row per transcoded file. The swap always
-	// changes the file's size/mtime, so (f,key) is never the same row as the fresh
-	// (final,finalKey) done row just written — but guard it anyway.
+	// doesn't accumulate one dangling row per transcoded file. The swap always changes the
+	// file's SIZE (see the fresh-key argument above - with preserve_mtime on, the mtime is
+	// the source's and the size is the whole of the difference), so (f,key) is never the
+	// same row as the fresh (final,finalKey) done row just written — but guard it anyway.
 	if f != final || key != finalKey {
 		if err := e.Store.Delete(ctx, f, key); err != nil {
 			e.Log.Warn("could not prune superseded job row", "file", f, "err", err)
