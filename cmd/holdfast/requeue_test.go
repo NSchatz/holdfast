@@ -96,7 +96,7 @@ func claimable(t *testing.T, state, path string, in store.DecisionInputs) bool {
 // exist, so it is listed where `resolve` and `restore` are - on the bare invocation and
 // on -h alike, which are two different writers and two different exit codes.
 func TestUsage_ListsRequeueAsACommand(t *testing.T) {
-	code, out, errOut := cli(t, "-h")
+	code, out, _ := cli(t, "-h")
 	if code != 0 {
 		t.Errorf("holdfast -h exited %d, want 0", code)
 	}
@@ -109,7 +109,7 @@ func TestUsage_ListsRequeueAsACommand(t *testing.T) {
 		}
 	}
 
-	code, _, errOut = cli(t)
+	code, _, errOut := cli(t)
 	if code != 2 {
 		t.Errorf("holdfast with no arguments exited %d, want 2", code)
 	}

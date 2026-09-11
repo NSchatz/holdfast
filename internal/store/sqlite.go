@@ -321,6 +321,12 @@ func reopens(st Status, reason string, recorded, current DecisionInputs) bool {
 // against the claim it rides with, and clamped at zero so a future bug in the
 // strictly-smaller gate can never make a lifetime total run backwards - the same clamp
 // ReclaimedTotal already applies on the way out.
+//
+// It does NOT check that the ledger_totals row was there to carry into, where the prune
+// does. The singleton is seeded by the migration that creates it, so its absence is not a
+// state this build can produce - and the two failures are not comparable: a prune that
+// cannot carry must not delete, which is one pass of bookkeeping declined, while a claim
+// that refused would stop every file in the library entering the pipeline.
 func carryReclaimed(ctx context.Context, tx *sql.Tx, path, fingerprint string) error {
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE ledger_totals SET reclaimed_pruned = reclaimed_pruned + (

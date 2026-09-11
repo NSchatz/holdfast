@@ -151,6 +151,9 @@ func decisionInputsReport(ctx context.Context, st store.Store, cfg *config.Confi
 // decisionInputsLines renders the survey as the operator-facing sentences both callers
 // print, so `validate` and a daemon cannot describe the same ledger differently.
 func decisionInputsLines(s store.DecisionInputsSurvey) []string {
+	if s.Reopening() == 0 && s.Matching == 0 {
+		return []string{"the ledger holds no terminal row a configuration change could re-open"}
+	}
 	if s.Reopening() == 0 {
 		return []string{fmt.Sprintf(
 			"every one of the %d terminal row(s) a configuration change could re-open was taken under "+
