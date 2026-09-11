@@ -65,6 +65,33 @@ The library mount must also be a **single filesystem per directory** — the swa
 `rename(2)`, which cannot cross filesystems. (This is why the temp file lives beside the
 source rather than in a scratch volume.)
 
+### One process per `state_dir`
+
+**Running more than one holdfast process against a single `state_dir` is unsupported.** The job
+store under `/state` is single-writer: one holdfast process serializes every access to it, and
+that serialization does not reach across processes. A second process pointed at the same
+`state_dir` contends for a store that is neither built nor proven to be shared, so this is not a
+deployment to tune - it is one not to build. Two processes over the same **library** is worse
+again, for the reason two different transcoders must not share one: both write a temp file beside
+the source and both delete sources.
+
+**Do this instead.** Run one container per `state_dir`. A library that genuinely needs its own
+daemon gets its own container, its own `state_dir` volume and its own `/media` mount - never a
+second process on the first one's state. To use more of one machine, do not start a second
+process: raise `workers`.
+
+```yaml
+workers: 1   # concurrent encode workers inside the one daemon; the default
+```
+
+`workers` is 1 by default on purpose: a CPU libx265 encode already **saturates the available
+cores** by itself, so a second concurrent encode mostly takes cores from the first and the pair
+finishes no sooner. Raising it is an opt-in for a library of many small or low-resolution files,
+or for a hardware encoder - the cases where one encode does not use the whole machine. It buys
+concurrency **inside the one daemon**: holdfast is a single process whatever you set it to, which
+is the point. That is a design decision, not an unbuilt feature, and the README's
+[non-goal](../README.md#non-goals) says why.
+
 ## Timezone
 
 `run_window` is evaluated in **local time**. The image carries the zone database, but a
