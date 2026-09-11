@@ -157,6 +157,22 @@ type Result struct {
 	// most. An empty non-nil slice says what it means: nothing may be
 	// enumerated in this run.
 	Coverage []string
+	// Entries is what each of those listings RETURNED, keyed by the path
+	// Coverage names the directory by, in name order and unfiltered: the walk
+	// already read every entry, so the scan that follows can decide which of
+	// them are sources and which are this tool's own temp files without listing
+	// the directory a second time.
+	//
+	// A directory is here exactly when it is in Coverage. One whose listing
+	// failed, one the walk declined and one it never reached are absent from
+	// both, and a directory that listed EMPTY carries an empty slice rather than
+	// no key at all - the two say different things, and only the first is
+	// evidence that holdfast looked.
+	//
+	// A consumer that finds no key for a directory must list it for itself: this
+	// is what the walk SAW, never a licence to conclude anything about a
+	// directory nobody listed.
+	Entries map[string][]Entry
 	// LocalSet is the complete set of filesystem types this build classifies
 	// local.
 	LocalSet []string
@@ -192,7 +208,7 @@ func Run(c Check) Result {
 		// Coverage starts non-nil and stays non-nil: see Result.Coverage. A
 		// walk that traverses nothing must hand back an EMPTY bound, never the
 		// absent bound that means "walk everything".
-		res:         Result{LocalSet: LocalTypes(), Coverage: []string{}},
+		res:         Result{LocalSet: LocalTypes(), Coverage: []string{}, Entries: map[string][]Entry{}},
 		byResolved:  map[string]int{},
 		byPath:      map[string]int{},
 		entered:     map[Region]regionEntry{},

@@ -166,6 +166,19 @@ probe run. A library of ten files and a library of ten thousand in the same tree
 cost the same here. What makes this expensive is a deep or wide tree, not a big
 one.
 
+That traversal is paid **once**. The walk **keeps the entry names it read** and
+hands them to the scan that follows, so the first scan after a start
+**lists nothing the walk already listed**: a `run` reads your directory tree
+once, where it used to read it three times (the walk, the sweep for orphaned
+temp files, the enumeration of sources). What that costs instead is memory - the
+entry names of one library, held from the end of the walk until that scan uses
+them, and **released directory by directory** as it does.
+
+The scan that reads them sees the library **as the walk saw it**. A file that
+appeared in between is enumerated by the next scan, not that one: every later
+scan in a `serve` process lists for itself, so the wait is until the next scan
+rather than until the next restart.
+
 Two consequences worth knowing:
 
 - On a cold cache over a slow network mount, startup can take a while. That is
