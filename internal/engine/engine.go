@@ -1620,7 +1620,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// doesn't accumulate one dangling row per transcoded file. The swap always changes the
 	// file's SIZE (see the fresh-key argument above - with preserve_mtime on, the mtime is
 	// the source's and the size is the whole of the difference), so (f,key) is never the
-	// same row as the fresh (final,finalKey) done row just written — but guard it anyway.
+	// same row as the fresh (final,finalKey) done row just written - but guard it anyway.
 	if f != final || key != finalKey {
 		if err := e.Store.Delete(ctx, f, key); err != nil {
 			e.Log.Warn("could not prune superseded job row", "file", f, "err", err)
