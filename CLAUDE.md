@@ -104,4 +104,6 @@ tool proves its unhappy paths.
 
 `docs/docker.md` deployment (volumes, permissions, TZ, GPU passthrough, security
 posture) · `docs/migration.md` the cutover from the Bash transcoder and Tdarr ·
-`docs/webui.md` the dashboard reference.
+`docs/webui.md` the dashboard reference · `docs/requeue.md` what a terminal row
+records about the configuration it was decided under, and the lever for the rows a
+configuration change cannot reason about.

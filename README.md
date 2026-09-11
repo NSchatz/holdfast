@@ -114,7 +114,6 @@ holdfast run --config config.yaml   # one scan: re-encode bloated non-HEVC video
 holdfast serve --config config.yaml # HTTP API + web dashboard (scan on demand / on an interval)
 holdfast resolve --config config.yaml  # list (and resolve) any job whose swap outcome is unknown
 holdfast restore --config config.yaml  # what the undo window is holding (see below)
-holdfast requeue --config config.yaml /media/tv/ep.mkv  # offer one answered file back to the pipeline
 holdfast export --config config.yaml --out ledger.ndjson  # the whole ledger, as NDJSON
 ```
 
@@ -166,43 +165,11 @@ does not offer: **[docs/undo.md](docs/undo.md)**.
 
 ### Edit the YAML and the tool obeys (`requeue`)
 
-A finished job leaves a row that holds that file out of the encoder for as long as it exists. That row
-is an **answer computed from configuration**, so it is only an answer for the configuration it was
-computed under: each terminal row records the values the guard that wrote it actually read - the
-threshold a `low-bitrate` skip compared against, the target codec an `already-at-target-codec` skip
-matched, and for a completed encode the target codec plus `encoder`, `crf` and `preset`. A scan
-re-opens a row whose recorded values no longer match, so lowering `min_bitrate_kbps` or moving
-`encoder` to a codec with a different target reaches the files a previous configuration already
-answered instead of silently doing nothing.
-
-Only the values the decision **read** are recorded, never the whole configuration, so editing a
-notification URL or adding a library root re-opens nothing. **Re-opening is not re-encoding:** the
-guards run again, and a file that reaches the same verdict reaches it in microseconds with nothing
-encoded, nothing written beside it and the source untouched. `run`, `serve` and `validate` all report
-how many rows are in that position **before** the scan, so it is announced rather than discovered.
-
-What a configuration change cannot reason about is what `requeue` is for - a file parked at
-`max_failures` (whose recorded reason is an error, not a decision any key determines), or a verdict you
-simply want taken again:
-
-```bash
-holdfast requeue --config config.yaml /media/tv/ep.mkv   # one file
-holdfast requeue --config config.yaml --guard low-bitrate # every row that guard skipped
-holdfast requeue --config config.yaml --failed            # every row parked at max_failures
-```
-
-It prints what it re-opened and the count, and it **refuses** - non-zero, having changed nothing - a
-path or guard that matches no row, a guard token it does not recognise, an invocation with no selector
-at all, and a state directory with no ledger in it. It is a **local** command and deliberately not an
-HTTP endpoint, for the reason `restore` is not one: it changes what the engine will do to a media
-file, and a mutating endpoint opens an authorization question the read-and-control API does not answer.
-
-Three rows are **never** re-opened, by a configuration change or by `requeue`, and it says so when it
-leaves one alone: a job parked `indeterminate` (what happened to that path is exactly what is unknown),
-a swap recorded `applied-despite-error` (the file there **is** the replacement), and a file an operator
-put back through the undo window (re-opening it would feed rescued bytes to the gates that passed the
-encode they rejected). Changing the file itself is the only way one of those re-enters the pipeline,
-because that is a new fingerprint and a new row.
+A terminal row is an **answer computed from configuration**, and only for the configuration it was
+computed under: each records the values the guard that wrote it read, and a scan **re-opens** one whose
+values have moved. So lowering `min_bitrate_kbps` or changing the target codec reaches the files a
+previous configuration answered; an edit to a key no guard read reaches nothing; re-opening is not
+re-encoding; `holdfast requeue` is the LOCAL lever for the rest - **[docs/requeue.md](docs/requeue.md)**.
 
 ### Web API + UI (`serve`)
 

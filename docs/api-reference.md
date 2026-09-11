@@ -54,27 +54,12 @@ Beside the proof, a terminal row records **the configuration values the decision
 read** - and only those. It is what makes a row re-derivable rather than permanent: a scan offers a
 `done` or `skipped` file back to the guards when the values it recorded no longer match the
 configuration in force, so an edit to the YAML reaches the files a previous configuration already
-answered.
+answered. Per-guard table, the re-opening rule, and the `holdfast requeue` lever for the rows a
+configuration change cannot reason about: **[docs/requeue.md](requeue.md)**.
 
-| Row | What it records |
-|---|---|
-| `skipped / low-bitrate` | `min_bitrate_kbps` - the threshold the source was compared against |
-| `skipped / already-at-target-codec` | `target_codec` - what `encoder` resolves to (`cpu` → `hevc`, `svtav1` → `av1`) |
-| `skipped / exotic-pixel-format` | `pixel_format` |
-| `skipped / target-already-exists` | `container_ext` |
-| `done` | `target_codec`, `encoder`, `crf`, `preset` - what the encode was taken under |
-| a guard that read no configuration | nothing, recorded **as** nothing read - a verdict no key can move |
-
-It is **never a digest or a copy of the whole configuration**: that would tie every row to every key,
-so correcting a notification URL would offer an entire library back to the encoder. A row that records
-*nothing at all* - every row written before holdfast recorded this - reads as "cannot be re-derived"
-and is re-opened **once**, after which the decision it reaches records what it read.
-
-These values are internal to the store and are not published on the HTTP surface. What is published is
-the count: `run`, `serve` and `validate` each report how many terminal rows were taken under a
-configuration that has since moved and how many record none at all. `holdfast requeue` is the operator's
-lever for the rows this cannot reason about, and it is **CLI-only** - it changes what the engine will do
-to a media file, which is the same reason `restore` is not an endpoint either. See the README.
+These values are internal to the store and are **not published on the HTTP surface**, and neither is
+requeue: it changes what the engine will do to a media file, which is the same reason `restore` is not
+an endpoint either.
 
 ### `would-transcode`: what a dry run decided
 
