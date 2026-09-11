@@ -132,10 +132,11 @@ type RequeueResult struct {
 	Reopened []string
 	// Protected is every matched row that was left exactly as it was.
 	Protected []ProtectedRow
-	// AttemptsCleared is how many of the re-opened rows were parked on their attempt
-	// count, so re-opening them handed the file back its retries. It is reported
-	// because that is a different act from clearing what a row recorded about the
-	// configuration: the next scan will ENCODE those files if the guards let it.
+	// AttemptsCleared is how many of the re-opened rows were failed rows whose attempt
+	// count was cleared with them. The count is what holds a row parked at
+	// max_failures, so re-opening one means handing the file its attempts back - a
+	// different act from clearing what a row recorded about the configuration, and the
+	// one case where re-opening leads to an encode rather than to a re-decision.
 	AttemptsCleared int
 }
 

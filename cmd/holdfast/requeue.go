@@ -142,7 +142,7 @@ func reportRequeue(ctx context.Context, st store.Store, sel engine.RequeueSelect
 	}
 	fmt.Fprintf(stdout, "re-opened %d row(s); the next scan runs the guards over them again.\n", len(res.Reopened))
 	if res.AttemptsCleared > 0 {
-		fmt.Fprintf(stdout, "%d of them were parked at max_failures and got their attempts back; "+
+		fmt.Fprintf(stdout, "%d of them had failed attempts, and those were cleared with the row; "+
 			"whatever failed those encodes will be attempted again.\n", res.AttemptsCleared)
 	}
 	if len(res.Protected) > 0 {
