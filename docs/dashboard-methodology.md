@@ -238,8 +238,10 @@ score.
 A skipped row names the guard that held the file back, from a closed vocabulary: already
 at the target codec, already efficient (low bitrate), hardlinked (would break a seed),
 interlaced, Dolby Vision or HDR10+ (dynamic metadata a generic re-encode cannot preserve),
-incomplete HDR metadata, an exotic pixel format, a target file that already exists, a
-symlinked source, and a failure to retain the original inside the undo window. An unknown
+incomplete HDR metadata, an exotic pixel format, a second video stream that is not an
+attached picture (every property the encode derives is read from the first), a target file
+that already exists, a symlinked source, and a failure to retain the original inside the
+undo window. An unknown
 token falls back to itself, so a guard added later is never hidden behind a blank.
 
 ## The three states every view shows

@@ -124,13 +124,21 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (vmafProof, s
 		return none, store.FailureDeterministic, fmt.Errorf("size-increase reject (in=%dB out=%dB min_savings=%d%%)", sin, sout, e.Cfg.MinSavingsPercent)
 	}
 
-	// 5. per-type stream-count parity: no audio/subtitle/attachment track dropped.
+	// 5. per-type stream-count parity: no video/audio/subtitle/attachment track dropped.
 	// Size + duration + a clean decode can all pass while a track was silently lost.
-	// The encode maps every stream but data, so a/s/t counts must not fall below the
+	// The encode maps every stream but data, so v/a/s/t counts must not fall below the
 	// source. Data streams are dropped on purpose and never counted. DETERMINISTIC:
 	// which streams this source has, and which of them this build's mapping carries
 	// into this container, is fixed.
-	for _, typ := range []string{"a", "s", "t"} {
+	//
+	// Video is in the loop for the same reason the other three are, and with the most at
+	// stake: the encode maps and re-encodes EVERY video stream, so a source carrying a
+	// second angle or an attached cover picture can come out one stream short while the
+	// size, duration, packet and decode checks all pass - a track dropped in exactly the
+	// place this tool exists to protect. An output whose video streams cannot be counted
+	// at all counts as ZERO here, which is the fail-safe direction: an uncountable answer
+	// rejects and keeps the source instead of swapping on an unknown.
+	for _, typ := range []string{"v", "a", "s", "t"} {
 		cin := e.Probe.StreamCount(ctx, in, typ)
 		cout := e.Probe.StreamCount(ctx, tmp, typ)
 		if cout < cin {

@@ -44,6 +44,10 @@ type VideoProps struct {
 	sideOnce sync.Once
 	frameSD  string // frame-level side data, flat=s=. (== frameSideDataFlat)
 	streamSD string // stream-level side data, flat=s=. (== streamSideDataFlat)
+
+	vsOnce      sync.Once
+	videoStream []VideoStream // the file's video streams, in container order
+	videoStrOK  bool          // whether ffprobe established that list at all
 }
 
 // scalarStreamEntries are every scalar video-stream field a source skip-guard or the
@@ -184,6 +188,20 @@ func (vp *VideoProps) SideData() string {
 func (vp *VideoProps) FrameSideData() string {
 	vp.loadSideData()
 	return vp.frameSD
+}
+
+// VideoStreams returns the source's video streams and whether ffprobe established that
+// list, byte-for-byte the contract of Prober.VideoStreams.
+//
+// Lazy and memoised, like the side data and for the same reason: it is a second ffprobe,
+// and only a file that has already cleared the cheap guards (codec, bitrate, field order,
+// HDR class, pixel format) is ever asked what its stream shape is. A file that skipped at
+// one of those never pays for it.
+func (vp *VideoProps) VideoStreams() (streams []VideoStream, established bool) {
+	vp.vsOnce.Do(func() {
+		vp.videoStream, vp.videoStrOK = vp.p.VideoStreams(vp.ctx, vp.f)
+	})
+	return vp.videoStream, vp.videoStrOK
 }
 
 // normColorValue drops the ffprobe non-values ("unknown"/"reserved"/"N/A"/"") to ""

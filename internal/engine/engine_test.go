@@ -11,21 +11,28 @@ package engine
 // without depending on codec/compression luck; case 5 uses the REAL libx265 path.
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log/slog"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/docscheck"
 	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
@@ -374,6 +381,152 @@ func mkMP4WithSubs(t *testing.T, ffmpeg, path, bitrate string) {
 		"-i", srtPath,
 		"-map", "0:v", "-map", "1:s", "-c:v", "libx264", "-preset", "ultrafast", "-b:v", bitrate,
 		"-pix_fmt", "yuv420p", "-c:s", "mov_text", "--", path)
+}
+
+// ---- multi-video-stream fixture builders (real ffmpeg) -----------------------
+//
+// Both are built at test time from lavfi sources by the pinned ffmpeg, like every
+// other fixture here, and both ASSERT THE SHAPE THEY CLAIM before returning. That
+// assertion is not ceremony: the whole multi-video-stream story is about what a
+// container carries, so a builder that quietly produced a one-stream file would turn
+// every test below green while proving nothing at all.
+
+// mkMP4WithCoverArt writes an MP4 carrying an h264 video track AND embedded artwork -
+// which a container carries as a SECOND VIDEO STREAM with the attached_pic
+// disposition, not as an attachment. That is the shape that makes cover art dangerous
+// here: `-c:v <codec>` applies to it like any other video stream.
+func mkMP4WithCoverArt(t *testing.T, ffmpeg, ffprobe, path, bitrate string) {
+	t.Helper()
+	cover := path + ".cover.jpg"
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=1:size=160x120:rate=10", "-frames:v", "1",
+		"-c:v", "mjpeg", "-pix_fmt", "yuvj420p", "--", cover)
+	defer os.Remove(cover)
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "testsrc2=duration=2:size=320x240:rate=10",
+		"-i", cover,
+		"-map", "0:v", "-map", "1:v",
+		"-c:v:0", "libx264", "-preset", "ultrafast", "-b:v:0", bitrate, "-pix_fmt", "yuv420p",
+		"-c:v:1", "copy", "-disposition:v:1", "attached_pic", "--", path)
+	assertVideoStreamShape(t, ffprobe, path, []bool{false, true})
+}
+
+// mkTwoVideoStreams writes a container carrying TWO genuine moving-picture video
+// streams - a second angle or a bonus reel muxed in - and NEITHER is an attached
+// picture. Different lavfi sources, so the two streams are visibly different content
+// and a mux that silently dropped one could not be mistaken for a mux that kept both.
+func mkTwoVideoStreams(t *testing.T, ffmpeg, ffprobe, path, bitrate string) {
+	t.Helper()
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "testsrc2=duration=2:size=320x240:rate=10",
+		"-f", "lavfi", "-i", "mandelbrot=size=160x120:rate=10",
+		"-map", "0:v", "-map", "1:v", "-t", "2",
+		"-c:v", "libx264", "-preset", "ultrafast", "-b:v", bitrate, "-pix_fmt", "yuv420p", "--", path)
+	assertVideoStreamShape(t, ffprobe, path, []bool{false, false})
+}
+
+// assertVideoStreamShape fails unless path carries exactly the video streams described:
+// one entry per stream in container order, true where that stream is an attached
+// picture. It reads the disposition through ffprobe's `default=nw=1` output rather than
+// through internal/probe, deliberately - a fixture assertion that went through the very
+// parser the tests are keeping honest could be satisfied by a broken parser.
+func assertVideoStreamShape(t *testing.T, ffprobe, path string, want []bool) {
+	t.Helper()
+	out, err := exec.Command(ffprobe, "-v", "error", "-select_streams", "v",
+		"-show_entries", "stream_disposition=attached_pic", "-of", "default=nw=1", "--", path).Output()
+	if err != nil {
+		t.Fatalf("fixture %s: ffprobe could not read it: %v", path, err)
+	}
+	var got []bool
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		_, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
+			continue
+		}
+		got = append(got, v == "1")
+	}
+	if len(got) != len(want) {
+		t.Fatalf("fixture %s carries %d video stream(s) (%v), want %d (%v) - the fixture is not the "+
+			"shape the test is about", path, len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("fixture %s: video stream v:%d attached_pic=%v, want %v", path, i, got[i], want[i])
+		}
+	}
+}
+
+// extractVideoStream copies one video stream out of a container WITHOUT re-encoding it
+// (`-c copy`), and returns its bytes. It is how "the cover art survived" is asked as a
+// question about BYTES rather than about whether a swap happened: a stream that was
+// re-encoded comes out as different bytes, and a stream that was carried comes out as
+// the same ones.
+func extractVideoStream(t *testing.T, ffmpeg, path string, videoIndex int, dst string) []byte {
+	t.Helper()
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", path,
+		"-map", fmt.Sprintf("0:v:%d", videoIndex), "-c", "copy", "-f", "image2", "--", dst)
+	b, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read the extracted stream %s: %v", dst, err)
+	}
+	if len(b) == 0 {
+		t.Fatalf("the stream extracted from %s is empty, so comparing it proves nothing", path)
+	}
+	return b
+}
+
+// dirListing is every entry under dir, relative and sorted - the whole directory, so a
+// "nothing was written and nothing was deleted" assertion can compare the before and
+// after rather than checking for the absence of the files a test happened to think of.
+func dirListing(t *testing.T, dir string) []string {
+	t.Helper()
+	var out []string
+	if err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, rerr := filepath.Rel(dir, p)
+		if rerr != nil {
+			return rerr
+		}
+		out = append(out, rel)
+		return nil
+	}); err != nil {
+		t.Fatalf("walk %s: %v", dir, err)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// delegatingFFprobe writes a fake "ffprobe" that REFUSES one ffprobe question and hands
+// every other one to the real binary. refuseEntries is matched against the
+// -show_entries argument; refusePathSub, when non-empty, narrows the refusal to paths
+// containing it.
+//
+// It exists because "the probe could not establish this" is a real, reachable state of a
+// working installation (a half-installed build, a container whose ffprobe is being
+// replaced under it, a file the demuxer chokes on part-way) and the engine's answer to it
+// is a data-safety decision. Simulating it by pointing the engine at a broken binary
+// would prove nothing, because then NOTHING probes; this refuses exactly one question, so
+// the file still reaches the guard whose behaviour is under test.
+func delegatingFFprobe(t *testing.T, dir, realFFprobe, refuseEntries, refusePathSub string) string {
+	t.Helper()
+	fake := filepath.Join(dir, "fake-ffprobe.sh")
+	script := "#!/bin/sh\n" +
+		"want=0\n" +
+		"for a in \"$@\"; do\n" +
+		"  [ \"$a\" = '" + refuseEntries + "' ] && want=1\n" +
+		"done\n" +
+		"if [ \"$want\" = 1 ]; then\n" +
+		"  case \" $* \" in\n" +
+		"    *'" + refusePathSub + "'*) exit 3 ;;\n" +
+		"  esac\n" +
+		"fi\n" +
+		"exec \"" + realFFprobe + "\" \"$@\"\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake ffprobe: %v", err)
+	}
+	return fake
 }
 
 // mkH264VFR writes a NON-HEVC variable-frame-rate source (frame-selective drop +
@@ -1609,9 +1762,13 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 
 // ---- S0030: live progress, and what it must not cost -------------------------
 
-// The per-job subprocess budget for one done job with the VMAF gate off: 13 ffprobe
-// invocations (the source snapshot plus verifyOutput's codec/duration/packet/stream-count
-// probes) and 2 ffmpeg invocations (the encode and the decode-integrity check).
+// The per-job subprocess budget for one done job with the VMAF gate off: 16 ffprobe
+// invocations and 2 ffmpeg invocations (the encode and the decode-integrity check).
+//
+// The ffprobe side is the source snapshot, the source's stream-shape probe that the
+// multi-video-stream guard reads, and verifyOutput's codec/duration/packet probes plus its
+// per-type stream-count pass - which asks both files about each of FOUR types (v, a, s, t),
+// so the parity loop alone is eight of them.
 //
 // These constants are NOT the evidence for AC12 and must not be read as it — they are a
 // long-run ceiling, so that a per-PR "no worse than last time" cannot ratchet the cost up
@@ -1620,7 +1777,7 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 // fails if these numbers ever stop matching what it measures, so they cannot decay into
 // folklore.
 const (
-	probeBudgetFFprobe = 13
+	probeBudgetFFprobe = 16
 	probeBudgetFFmpeg  = 2
 )
 
@@ -2206,4 +2363,480 @@ func TestFailure_AParkThatCouldNotBeWrittenIsNotAPark(t *testing.T) {
 	if got := failCount(t, ts, "movie.mkv"); got != cfg.MaxFailures {
 		t.Errorf("fail_count = %d after the park was recorded for real, want %d", got, cfg.MaxFailures)
 	}
+}
+
+// ---- the multi-video-stream guard, the cover-art carry, and the vocabulary ----
+
+// TestProcessFile_SkipsAMultiVideoStreamSource is the refusal half of the source-shape
+// guard, and it covers BOTH ways a source can fail it: a real second moving-picture
+// stream, and a probe that could not establish the shape at all.
+//
+// The two belong in one test because they are one decision. Every property the pipeline
+// derives - codec, bitrate, field order, pixel format, colour, HDR class, and both sides
+// of the VMAF comparison - is read from v:0, so a second moving picture would be
+// re-encoded against a description of a different stream and would enter no decision in
+// front of the swap. An answer the probe could not establish is the same position with
+// less information, so it takes the same refusal rather than a guess.
+//
+// Each arm asserts the whole directory is unchanged, not merely that no temp was left:
+// the guard fires BEFORE any encode is started, so nothing was written and nothing was
+// deleted, and a listing taken either side is what says so.
+func TestProcessFile_SkipsAMultiVideoStreamSource(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+
+	t.Run("a second moving-picture stream", func(t *testing.T) {
+		d := t.TempDir()
+		src := filepath.Join(d, "movie.mkv")
+		mkTwoVideoStreams(t, ffmpeg, ffprobe, src, "2M")
+		before, listBefore := md5f(t, src), dirListing(t, d)
+
+		ts := run(t, ffmpeg, ffprobe, d, nil, nil)
+
+		if !ledgerHas(t, ts, store.Skipped, "movie.mkv") {
+			t.Fatalf("a source carrying two moving-picture streams was not skipped")
+		}
+		if got := skipReason(t, ts, "movie.mkv"); got != SkipMultiVideoStream {
+			t.Errorf("skip reason = %q, want %q", got, SkipMultiVideoStream)
+		}
+		if md5f(t, src) != before {
+			t.Error("the source changed under a guard that runs before any encode starts")
+		}
+		if got := dirListing(t, d); !equalStrings(got, listBefore) {
+			t.Errorf("the directory changed: before %v, after %v - the guard must write no temp "+
+				"and delete nothing", listBefore, got)
+		}
+	})
+
+	t.Run("the probe could not establish the stream shape", func(t *testing.T) {
+		d := t.TempDir()
+		src := filepath.Join(d, "movie.mkv")
+		// ONE video stream, so anything that skips this file skipped it for the
+		// indeterminate answer and not for its shape.
+		mkH264(t, ffmpeg, src, "8M")
+		before, listBefore := md5f(t, src), dirListing(t, d)
+
+		fake := delegatingFFprobe(t, t.TempDir(), ffprobe, "stream=index:stream_disposition=attached_pic", "")
+		ts := run(t, ffmpeg, fake, d, nil, nil)
+
+		if !ledgerHas(t, ts, store.Skipped, "movie.mkv") {
+			t.Fatalf("a source whose stream shape could not be established was not skipped")
+		}
+		if got := skipReason(t, ts, "movie.mkv"); got != SkipMultiVideoStream {
+			t.Errorf("skip reason = %q, want %q - an indeterminate probe answer takes the same "+
+				"refusal rather than a guess", got, SkipMultiVideoStream)
+		}
+		if md5f(t, src) != before {
+			t.Error("the source changed on an indeterminate probe answer")
+		}
+		if got := dirListing(t, d); !equalStrings(got, listBefore) {
+			t.Errorf("the directory changed: before %v, after %v", listBefore, got)
+		}
+	})
+
+	// The anti-vacuity control for the arm above: the IDENTICAL single-stream source,
+	// probed by a working ffprobe, transcodes. Without it "an indeterminate answer skips"
+	// would be satisfied by a guard that skipped every file it ever saw.
+	t.Run("the same source with a working probe still transcodes", func(t *testing.T) {
+		d := t.TempDir()
+		src := filepath.Join(d, "movie.mkv")
+		mkH264(t, ffmpeg, src, "8M")
+		ts := run(t, ffmpeg, ffprobe, d, nil, nil)
+		if !ledgerHas(t, ts, store.Done, "movie.mkv") {
+			t.Fatalf("the control source did not transcode, so the indeterminate-probe arm "+
+				"proves nothing: reason=%q", skipReason(t, ts, "movie.mkv"))
+		}
+	})
+}
+
+// TestProcessFile_StreamCopiesAttachedCoverArt is the one criterion in this change that
+// makes a previously-refused class of file ELIGIBLE for the irreversible swap, so it
+// proves the bound rather than asserting it.
+//
+// An MP4 carrying artwork carries it as a video stream, and `-c:v <codec>` applies to it:
+// today that encode mostly fails outright at the mux, and where it succeeds it leaves a
+// one-frame HEVC stream where a JPEG used to be. After this change the file transcodes -
+// so two things have to be true at once, and both are asserted here:
+//
+//  1. The file went through the UNCHANGED FULL VERIFY GATE. Nothing is skipped and
+//     nothing is relaxed for it, so this run turns the VMAF gate ON and measures with
+//     real libvmaf - the costliest gate, the one a shortcut would be most tempted to
+//     drop - and then asserts the recorded row carries what that gate MEASURED. A row
+//     with a mean, a worst frame, a chroma figure, a model and a comparison format on it
+//     is a row whose perceptual gate really ran.
+//  2. The cover art survived as BYTES. The cover stream is extracted from the source
+//     before the run and from the replacement after it, with `-c copy` both times, and
+//     the two byte slices must be equal. A passing swap is not evidence the picture
+//     survived; only the bytes are.
+func TestProcessFile_StreamCopiesAttachedCoverArt(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	side := t.TempDir() // extraction scratch, outside the library root
+	src := filepath.Join(d, "movie.mp4")
+	mkMP4WithCoverArt(t, ffmpeg, ffprobe, src, "8M")
+
+	wantCover := extractVideoStream(t, ffmpeg, src, 1, filepath.Join(side, "source-cover.jpg"))
+
+	ts := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
+		// In-place: an attached picture is an MP4 shape, so the output container is the
+		// source's own rather than the tests' default mkv.
+		c.ContainerExt = "source"
+		// EVERY gate, including the one that costs a second full decode.
+		c.VmafEnable = boolPtr(true)
+		c.MinVmaf, c.VmafMinPool, c.VmafMinChroma = 90, 50, 25
+	})
+
+	if !ledgerHas(t, ts, store.Done, "movie.mp4") {
+		t.Fatalf("the cover-art source did not transcode: reason=%q", skipReason(t, ts, "movie.mp4"))
+	}
+	if got := codecOf(t, ffprobe, src); got != "hevc" {
+		t.Fatalf("the file at the source path is %q, want hevc - no swap happened, so there is "+
+			"nothing to say about what survived it", got)
+	}
+
+	// (1) The whole gate ran: the perceptual measurement is on the row.
+	rows, err := ts.List(context.Background(), []store.Status{store.Done}, 0)
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	var done store.Outcome
+	for _, r := range rows {
+		if r.Path == src {
+			done = r.Outcome
+		}
+	}
+	if done.VmafMean == nil || done.VmafMin == nil || done.VmafChroma == nil {
+		t.Errorf("the done row carries no VMAF measurement (%+v) - the cover-art path must run the "+
+			"UNCHANGED gate, the perceptual one included", done)
+	}
+	if done.VmafModel == "" || done.VmafPixFmt == "" || done.VmafChromaMetric == "" {
+		t.Errorf("the done row is missing the model (%q), the comparison format (%q) or the chroma "+
+			"metric (%q) that a real measurement records", done.VmafModel, done.VmafPixFmt, done.VmafChromaMetric)
+	}
+
+	// The output still carries both streams, and the cover is still an attached picture.
+	assertVideoStreamShape(t, ffprobe, src, []bool{false, true})
+
+	// (2) The cover art survived BYTE FOR BYTE.
+	gotCover := extractVideoStream(t, ffmpeg, src, 1, filepath.Join(side, "output-cover.jpg"))
+	if !bytes.Equal(gotCover, wantCover) {
+		t.Errorf("the cover art changed across the transcode: %d bytes in, %d bytes out - an "+
+			"attached picture must be CARRIED, never re-encoded", len(wantCover), len(gotCover))
+	}
+}
+
+// TestSkipVocabularyIsDocumented makes the guard enumeration a mechanical obligation
+// rather than a habit: every token in the engine's closed skip vocabulary must appear in
+// the shipped enumeration an operator looks a `reason` up in.
+//
+// It reads the vocabulary out of the PACKAGE SOURCE rather than from a list maintained
+// beside it, because a hand-kept list is the thing that goes stale: a token added as a
+// constant and forgotten in the list would ship undocumented and this test would still
+// pass. Parsing the declarations means the only way to add a token is to add a constant,
+// and the only way to add a constant without reding this test is to document it.
+func TestSkipVocabularyIsDocumented(t *testing.T) {
+	root, err := docscheck.RepoRoot(".")
+	if err != nil {
+		t.Fatalf("locate the repository root: %v", err)
+	}
+
+	vocabulary := skipVocabulary(t, filepath.Join(root, "internal", "engine"))
+	// Anti-vacuity: a parse that found nothing would satisfy every loop below.
+	if len(vocabulary) < 10 {
+		t.Fatalf("only %d Skip* constant(s) were parsed out of the engine package (%v) - the "+
+			"vocabulary is not being read, so nothing below is being checked", len(vocabulary), vocabulary)
+	}
+	if got := vocabulary["SkipMultiVideoStream"]; got != "multi-video-stream" {
+		t.Errorf("SkipMultiVideoStream = %q, want %q - the guard's reason is drawn from the "+
+			"vocabulary, not written as a literal at the call site", got, "multi-video-stream")
+	}
+	// The token that is NOT written as a string literal, named here because it is the
+	// shape a collector loses SILENTLY: SkipRestoredOriginal is declared as
+	// store.GuardRestoredOriginal, so a collector that read only literals dropped it, saw
+	// one token fewer than the package declares, and left `restored-original` unchecked
+	// against the enumeration below while still reporting a pass. A vocabulary check that
+	// narrows without saying so is the defect it exists to catch, inside itself.
+	if got := vocabulary["SkipRestoredOriginal"]; got != store.GuardRestoredOriginal {
+		t.Errorf("SkipRestoredOriginal = %q, want %q - a constant whose value is not a string "+
+			"literal must still be READ, not skipped, or the token it names stops being checked",
+			got, store.GuardRestoredOriginal)
+	}
+
+	row := skippedReasonRow(t, filepath.Join(root, "docs", "api-reference.md"))
+	for name, tok := range vocabulary {
+		if !strings.Contains(row, "`"+tok+"`") {
+			t.Errorf("%s = %q is in the engine's skip vocabulary but is NOT named in the guard "+
+				"enumeration in docs/api-reference.md - a token no operator can look up must not ship",
+				name, tok)
+		}
+	}
+}
+
+// skipVocabulary parses every non-test Go file in dir and returns the Skip* constants it
+// declares, keyed by constant name.
+//
+// Every one of them is RESOLVED to its value, and one that cannot be resolved FAILS the
+// test. The distinction matters: a collector that quietly kept only the constants written
+// as a string literal would drop `SkipRestoredOriginal = store.GuardRestoredOriginal`,
+// report one token fewer than the package declares, and go on passing - so the
+// enumeration check above would stop covering a token without anything saying so. A
+// vocabulary that can narrow in silence is not a closed vocabulary.
+func skipVocabulary(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for name, c := range packageConstants(t, dir) {
+		if !strings.HasPrefix(name, "Skip") {
+			continue
+		}
+		out[name] = constStringValue(t, name, c, 0)
+	}
+	return out
+}
+
+// declaredConst is one constant declaration: the expression its value comes from (nil
+// where the declaration carried none), the file it was declared in - whose import block is
+// how a qualified name is resolved - and the package directory that file lives in.
+type declaredConst struct {
+	expr ast.Expr
+	file *ast.File
+	dir  string
+}
+
+// packageConstants parses every non-test Go file in dir and returns each constant it
+// declares, keyed by name.
+func packageConstants(t *testing.T, dir string) map[string]declaredConst {
+	t.Helper()
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v", dir, err)
+	}
+	out := map[string]declaredConst{}
+	for _, pkg := range pkgs {
+		for _, file := range pkg.Files {
+			for _, decl := range file.Decls {
+				gd, ok := decl.(*ast.GenDecl)
+				if !ok || gd.Tok != token.CONST {
+					continue
+				}
+				for _, spec := range gd.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for i, name := range vs.Names {
+						c := declaredConst{file: file, dir: dir}
+						if i < len(vs.Values) {
+							c.expr = vs.Values[i]
+						}
+						out[name.Name] = c
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// constStringValue resolves one constant declaration to its string value: a literal
+// directly, a plain identifier through the same package, and a qualified identifier
+// through the package its file imports it from. Anything else is a FAILURE rather than a
+// skip, which is the whole point - see skipVocabulary.
+//
+// depth bounds the walk so a constant defined in terms of itself reds instead of hanging
+// the suite.
+func constStringValue(t *testing.T, name string, c declaredConst, depth int) string {
+	t.Helper()
+	if depth > 4 {
+		t.Fatalf("%s: still not resolved after %d hops - a constant this test cannot read is a "+
+			"token that would silently stop being checked", name, depth)
+	}
+	switch v := c.expr.(type) {
+	case *ast.BasicLit:
+		if v.Kind != token.STRING {
+			t.Fatalf("%s is declared as a %s literal, not a string - the skip vocabulary is a wire "+
+				"format of strings", name, v.Kind)
+		}
+		s, err := strconv.Unquote(v.Value)
+		if err != nil {
+			t.Fatalf("%s: cannot read the value %s: %v", name, v.Value, err)
+		}
+		return s
+	case *ast.Ident:
+		next, ok := packageConstants(t, c.dir)[v.Name]
+		if !ok {
+			t.Fatalf("%s is declared as %s, which %s does not declare as a constant", name, v.Name, c.dir)
+		}
+		return constStringValue(t, name, next, depth+1)
+	case *ast.SelectorExpr:
+		pkgIdent, ok := v.X.(*ast.Ident)
+		if !ok {
+			t.Fatalf("%s is declared as an expression this test cannot follow", name)
+		}
+		dir := importedPackageDir(t, c.file, pkgIdent.Name)
+		next, ok := packageConstants(t, dir)[v.Sel.Name]
+		if !ok {
+			t.Fatalf("%s is declared as %s.%s, which %s does not declare as a constant",
+				name, pkgIdent.Name, v.Sel.Name, dir)
+		}
+		return constStringValue(t, name, next, depth+1)
+	}
+	t.Fatalf("%s: its value is an expression this test cannot resolve (or it carries none at all), "+
+		"so the token it names would go unchecked against the shipped enumeration", name)
+	return ""
+}
+
+// importedPackageDir maps the package qualifier used in file (the `store` of
+// `store.GuardRestoredOriginal`) to the directory that package's source lives in.
+//
+// It refuses an import from outside this module rather than guessing at a directory for
+// it: the skip vocabulary is this repository's own, and a token defined in a dependency
+// would be a fact about the wire format that no check here could keep honest.
+func importedPackageDir(t *testing.T, file *ast.File, qualifier string) string {
+	t.Helper()
+	root, err := docscheck.RepoRoot(".")
+	if err != nil {
+		t.Fatalf("locate the repository root: %v", err)
+	}
+	mod := modulePath(t, root)
+	for _, imp := range file.Imports {
+		p, uerr := strconv.Unquote(imp.Path.Value)
+		if uerr != nil {
+			continue
+		}
+		local := p[strings.LastIndex(p, "/")+1:]
+		if imp.Name != nil {
+			local = imp.Name.Name
+		}
+		if local != qualifier {
+			continue
+		}
+		rel, inModule := strings.CutPrefix(p, mod+"/")
+		if !inModule {
+			t.Fatalf("the package %q is imported from outside this module (%s), so this test cannot "+
+				"read the constant it declares", p, mod)
+		}
+		return filepath.Join(root, filepath.FromSlash(rel))
+	}
+	t.Fatalf("no import in this file provides the package %q", qualifier)
+	return ""
+}
+
+// modulePath reads this repository's module path out of go.mod, which is what turns an
+// import path into a directory on disk.
+func modulePath(t *testing.T, root string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		t.Fatalf("read go.mod: %v", err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "module "); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	t.Fatalf("%s/go.mod carries no module line", root)
+	return ""
+}
+
+// skippedReasonRow returns the one row of the shipped record reference that enumerates
+// the skip guards. It FAILS rather than returning "" when that row is not there: a
+// missing enumeration must red this test, not silently satisfy every lookup against an
+// empty string.
+func skippedReasonRow(t *testing.T, doc string) string {
+	t.Helper()
+	b, err := os.ReadFile(doc)
+	if err != nil {
+		t.Fatalf("read %s: %v", doc, err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(line, "| `reason` |") && strings.Contains(line, "skipped") {
+			return line
+		}
+	}
+	t.Fatalf("%s carries no skipped-`reason` row - the guard enumeration this gate checks against "+
+		"is gone, so nothing is enumerated", doc)
+	return ""
+}
+
+// TestDecodeOK_FailsWhenAnAdditionalVideoStreamIsDamaged is the decode-integrity gate at
+// its new width. The fixture is built so that the FIRST video stream decodes perfectly
+// and the second does not, which is exactly the file a check reading `0:v:0` reports as
+// clean - the precondition below asserts that, so this test states in its own body what
+// it reds against.
+func TestDecodeOK_FailsWhenAnAdditionalVideoStreamIsDamaged(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	p := func(n string) string { return filepath.Join(d, n) }
+	ctx := context.Background()
+
+	// Two elementary streams, one of which is then damaged in the middle. Damaging an
+	// elementary stream BEFORE the mux is what puts the corruption in a known stream;
+	// flipping bytes in a finished container hits whichever stream they happened to
+	// belong to.
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=2:size=320x240:rate=10", "-c:v", "libx264", "-preset", "ultrafast",
+		"-b:v", "2M", "-bsf:v", "h264_mp4toannexb", "-f", "h264", "--", p("first.h264"))
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "mandelbrot=size=320x240:rate=10", "-t", "2", "-c:v", "libx264", "-preset", "ultrafast",
+		"-b:v", "2M", "-bsf:v", "h264_mp4toannexb", "-f", "h264", "--", p("second.h264"))
+
+	raw, err := os.ReadFile(p("second.h264"))
+	if err != nil {
+		t.Fatalf("read the second elementary stream: %v", err)
+	}
+	if len(raw) < 16384 {
+		t.Fatalf("the second elementary stream is %d bytes - too small to damage its middle", len(raw))
+	}
+	damagedBytes := append([]byte(nil), raw...)
+	for i := len(damagedBytes) / 2; i < len(damagedBytes)/2+4096; i++ {
+		damagedBytes[i] ^= 0xff
+	}
+	if err := os.WriteFile(p("second-damaged.h264"), damagedBytes, 0o644); err != nil {
+		t.Fatalf("write the damaged elementary stream: %v", err)
+	}
+
+	mux := func(second, out string) {
+		ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+			"-i", p("first.h264"), "-i", second, "-map", "0:v", "-map", "1:v", "-c", "copy", "--", out)
+	}
+	mux(p("second-damaged.h264"), p("damaged.mkv"))
+	mux(p("second.h264"), p("clean.mkv"))
+	assertVideoStreamShape(t, ffprobe, p("damaged.mkv"), []bool{false, false})
+	assertVideoStreamShape(t, ffprobe, p("clean.mkv"), []bool{false, false})
+
+	// The precondition, and the whole point: decoding the FIRST stream alone - the check
+	// this gate used to be - reports the damaged file as clean.
+	firstStreamOnly := exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-nostdin", "-v", "error",
+		"-xerror", "-err_detect", "+explode", "-i", p("damaged.mkv"), "-map", "0:v:0", "-f", "null", "-")
+	if err := firstStreamOnly.Run(); err != nil {
+		t.Fatalf("the damaged fixture's FIRST stream does not decode either (%v) - a narrower check "+
+			"would have caught this file, so it proves nothing about decoding every stream", err)
+	}
+
+	pr := probe.New(ffmpeg, ffprobe)
+	if pr.DecodeOK(ctx, p("damaged.mkv")) {
+		t.Error("DecodeOK accepted a file whose SECOND video stream does not decode - the check must " +
+			"decode every video stream the output carries, not the first alone")
+	}
+	// Anti-vacuity: the identically-built file with an undamaged second stream passes, so
+	// the rejection above is attributable to the damage and not to the wider map.
+	if !pr.DecodeOK(ctx, p("clean.mkv")) {
+		t.Error("DecodeOK rejected a two-stream file that is not damaged at all")
+	}
+}
+
+// equalStrings reports whether two string slices hold the same elements in the same
+// order (the directory listings compared above).
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
