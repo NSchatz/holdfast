@@ -28,7 +28,7 @@ func seedTwoTerminalRows(t *testing.T, dbPath string) {
 	}
 	ctx := context.Background()
 	for _, p := range []string{"/lib/a.mkv", "/lib/b.mkv"} {
-		ok, err := st.Claim(ctx, p, "fp", "w0", 3)
+		ok, err := st.Claim(ctx, p, "fp", "w0", 3, sameConfig)
 		if err != nil || !ok {
 			t.Fatalf("seed claim %s: ok=%v err=%v", p, ok, err)
 		}
@@ -75,14 +75,17 @@ func windBackOneSchemaVersion(t *testing.T, path string) int {
 		t.Fatalf("raw open %s: %v", path, err)
 	}
 	defer func() { _ = db.Close() }()
-	// Exactly what the NEWEST migration added, undone. That is v9 (the class of a
-	// terminal failure) and not the step before it: this helper has to track the END of
-	// the migrations slice, because the whole point of it is to produce the database the
-	// PREVIOUS build wrote, and a wind-back that undid a step which is no longer the last
-	// one would leave a database Open migrates by re-running a step it has already run -
-	// which is a duplicate-column error, not an older ledger.
+	// Exactly what the NEWEST migration added, undone. That is v10 (what a terminal
+	// decision read from the configuration) and not the step before it: this helper has
+	// to track the END of the migrations slice, because the whole point of it is to
+	// produce the database the PREVIOUS build wrote, and a wind-back that undid a step
+	// which is no longer the last one would leave a database Open migrates by re-running
+	// a step it has already run - which is a duplicate-column error, not an older ledger.
+	//
+	// The index goes first: SQLite refuses to drop a column an index refers to.
 	for _, stmt := range []string{
-		`ALTER TABLE jobs DROP COLUMN failure_class`,
+		`DROP INDEX IF EXISTS idx_jobs_status_inputs`,
+		`ALTER TABLE jobs DROP COLUMN decision_inputs`,
 		fmt.Sprintf(`PRAGMA user_version = %d`, prev),
 	} {
 		if _, err := db.Exec(stmt); err != nil {

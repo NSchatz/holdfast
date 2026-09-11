@@ -47,7 +47,7 @@ func newStore(t *testing.T) *store.SQLite {
 
 func mustClaim(t *testing.T, st *store.SQLite, path, fp string) {
 	t.Helper()
-	ok, err := st.Claim(context.Background(), path, fp, "w0", 3)
+	ok, err := st.Claim(context.Background(), path, fp, "w0", 3, store.DecisionInputs{})
 	if err != nil || !ok {
 		t.Fatalf("Claim(%s): ok=%v err=%v", path, ok, err)
 	}

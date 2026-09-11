@@ -74,7 +74,7 @@ func openFixtureStore(t *testing.T, stateDir string) *store.SQLite {
 func finishRow(t *testing.T, st *store.SQLite, path string, status store.Status, o *store.Outcome) {
 	t.Helper()
 	ctx := context.Background()
-	ok, err := st.Claim(ctx, path, "fp", "w0", 3)
+	ok, err := st.Claim(ctx, path, "fp", "w0", 3, store.DecisionInputs{})
 	if err != nil || !ok {
 		t.Fatalf("claim %s: ok=%v err=%v", path, ok, err)
 	}
@@ -118,7 +118,7 @@ func TestExport_WritesEveryTerminalRowWithItsOutcomeAndKeepsAbsenceAbsent(t *tes
 		SourceBytes: ptrI(1024), OutputBytes: ptrI(1024), EncodeMs: ptrI(0),
 	})
 	// A non-terminal row, which is not history and must not appear.
-	if ok, err := st.Claim(context.Background(), "/lib/inflight.mkv", "fp", "w0", 3); err != nil || !ok {
+	if ok, err := st.Claim(context.Background(), "/lib/inflight.mkv", "fp", "w0", 3, store.DecisionInputs{}); err != nil || !ok {
 		t.Fatalf("claim in-flight: ok=%v err=%v", ok, err)
 	}
 	_ = st.Close()
@@ -260,7 +260,7 @@ func TestExport_AnEmptyLedgerProducesAnEmptyExportAndExitsZero(t *testing.T) {
 	// A real store with rows that are NOT terminal, so "empty export" is a statement
 	// about history rather than about an empty file.
 	st := openFixtureStore(t, stateDir)
-	if ok, err := st.Claim(context.Background(), "/lib/inflight.mkv", "fp", "w0", 3); err != nil || !ok {
+	if ok, err := st.Claim(context.Background(), "/lib/inflight.mkv", "fp", "w0", 3, store.DecisionInputs{}); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	_ = st.Close()
