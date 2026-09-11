@@ -33,7 +33,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=158
+declared=159
 pass=0; failed=0
 
 repo="$work/repo"
@@ -1482,9 +1482,28 @@ rec="$work/argv.log"
 cat > "$recbin/docker" <<'REC'
 #!/bin/sh
 # Records its argv and succeeds, unless REC_FAIL globs the invocation.
+#
+# An inspect PRINTS NOTHING unless REC_INSPECT_LINES asks for output, so every case that does
+# not ask sees the same silent stub as before. A case that asks gets that many lines followed
+# by REC_INSPECT_TAIL as the last one, which is how a case can decide whether the whole
+# manifest reached the caller's output or only the front of it.
+#
+# The emitter's own exit status is PROPAGATED, and that is the load-bearing half: a reader that
+# closes the pipe early kills it on SIGPIPE, and a stub that swallowed that could not reproduce
+# a caller whose exit status rides on the inspect rather than on the retag.
 printf '%s\n' "docker $*" >> "$REC_LOG"
 case "docker $*" in
   ${REC_FAIL:-__never__}) exit 1 ;;
+esac
+case "docker $*" in
+  *"imagetools inspect"*)
+    [ -n "${REC_INSPECT_LINES:-}" ] || exit 0
+    awk -v n="$REC_INSPECT_LINES" -v tail="${REC_INSPECT_TAIL:-}" 'BEGIN {
+      for (i = 1; i <= n; i++)
+        printf "  Name:        ghcr.io/nschatz/holdfast:latest stub-manifest-entry-%06d\n", i
+      print tail
+    }' || exit $?
+    ;;
 esac
 exit 0
 REC
@@ -1502,13 +1521,18 @@ REC
   changed "$repo/scripts/smoke-image.sh" "the packaging gate replaced by a recorder"
 }
 
-# run_release_script <script> <want-exit> -- runs it under the recording stub. Sets $out.
+# run_release_script <script> <want-exit> -- runs it under the recording stub. Sets $out, and
+# $last_status, which is the status it SAW: a case asserting that a mutation breaks one of the
+# assertions below has to be able to report the code the broken form exited with.
+last_status=0
 run_release_script() {
   local script="$1" want="$2" name="$3" got=0
   : > "$rec"
   out="$( cd "$repo" && PATH="$recbin:$PATH" REC_LOG="$rec" REC_FAIL="${REC_FAIL:-}" \
+          REC_INSPECT_LINES="${REC_INSPECT_LINES:-}" REC_INSPECT_TAIL="${REC_INSPECT_TAIL:-}" \
           IMAGE="${S_IMAGE-}" VERSION="${S_VERSION-}" FLOATING_TAG="${S_FLOATING-}" REF="${S_REF-}" \
           "./scripts/$script" 2>&1 )" || got=$?
+  last_status="$got"
   if [ "$got" -ne "$want" ]; then
     printf '::error::selftest: %s - %s exited %s, wanted %s\n' "$name" "$script" "$got" "$want" >&2
     printf '%s\n' "$out" | sed 's/^/       | /' >&2
@@ -1544,6 +1568,41 @@ else
   printf '  ok: case 63 bites: a promotion pointing at a locally built image is not the gated retag\n'; pass=$((pass + 1))
 fi
 reset
+
+# --- 64a. AN INSPECT FAR LARGER THAN ANY PIPE BUFFER. The promotion's exit status is decided
+#          by the RETAG. The inspect after it is the only human-readable record in the release
+#          log of what the floating reference now carries, and it gates nothing: it decides no
+#          property of the artefact, so nothing about the release may ride on how it is read.
+#          Read it through a consumer that closes the pipe - `head`, `sed q`, any of them - and
+#          under `set -o pipefail` what reaches the step is the status of an inspect killed by
+#          SIGPIPE rather than the status of the retag that landed.
+#
+#          The stub prints nothing unless asked, which is why no case in this file could see
+#          that: every assertion above holds over an inspect with no output at all. So this one
+#          asks for 6000 lines, far past any buffer, ending in a line no other case emits.
+#
+#          Exit 0 alone would not decide it either. A TRUNCATED inspect also exits 0 once the
+#          status comes from the retag, so the assertion is the LAST line being present in the
+#          captured output, plus every line before it, plus the confirmation sentence naming
+#          both references.
+S_IMAGE=ghcr.io/nschatz/holdfast S_VERSION=v0.1.0 S_FLOATING=latest S_REF='' REC_FAIL=''
+REC_INSPECT_LINES=6000
+REC_INSPECT_TAIL='stub-inspect-tail: the last line of the stubbed manifest, emitted by no other case'
+promote_confirms='release-promote: ghcr.io/nschatz/holdfast:latest now resolves to the digest published as ghcr.io/nschatz/holdfast:v0.1.0'
+if run_release_script release-promote.sh 0 "a promotion whose inspect exceeds any pipe buffer" \
+   && grep -qxF -- "$REC_INSPECT_TAIL" <<<"$out" \
+   && [ "$(grep -c -- 'stub-manifest-entry-' <<<"$out")" -eq "$REC_INSPECT_LINES" ] \
+   && grep -qxF -- "$promote_confirms" <<<"$out"; then
+  printf '  ok: a promotion whose inspect exceeds any pipe buffer exits 0, logs the manifest whole and confirms the move\n'; pass=$((pass + 1))
+else
+  printf '::error::selftest: a promotion with a %s-line inspect did not exit 0 with the WHOLE manifest and its confirmation in the log\n' "$REC_INSPECT_LINES" >&2
+  printf '       | saw exit %s, %s of %s manifest lines, last line %s, confirmation %s\n' \
+    "$last_status" "$(grep -c -- 'stub-manifest-entry-' <<<"$out")" "$REC_INSPECT_LINES" \
+    "$(grep -qxF -- "$REC_INSPECT_TAIL" <<<"$out" && echo present || echo MISSING)" \
+    "$(grep -qxF -- "$promote_confirms" <<<"$out" && echo present || echo MISSING)" >&2
+  failed=$((failed + 1))
+fi
+REC_INSPECT_LINES= REC_INSPECT_TAIL=
 
 # --- 65. Its named failure modes, exit code by exit code. Refusing to guess which reference
 #         a release moves is the whole reason FLOATING_TAG is passed in rather than spelled.
