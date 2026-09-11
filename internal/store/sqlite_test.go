@@ -23,10 +23,21 @@ func openTest(t *testing.T) *SQLite {
 	return s
 }
 
+// sameConfig is the configuration every claim in these suites is made under unless the
+// test is about the re-opening rule itself. It is a real record rather than the zero
+// value, so a row seeded with it STILL MATCHES and is held out exactly as a terminal row
+// was before the decision-inputs column existed - which is what keeps the suites that
+// predate it asserting what they were written to assert.
+var sameConfig = InputsRead(map[string]string{"encoder": "cpu", "crf": "22"})
+
+// movedConfig is that same configuration after an operator edited one key a guard reads.
+// A row recorded under sameConfig does not match it.
+var movedConfig = InputsRead(map[string]string{"encoder": "cpu", "crf": "23"})
+
 func TestClaim_FreshKeyClaims(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3)
+	ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3, sameConfig)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -45,10 +56,10 @@ func TestClaim_FreshKeyClaims(t *testing.T) {
 func TestClaim_SecondClaimWhileActiveFails(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("first claim: ok=%v err=%v", ok, err)
 	}
-	ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w1", 3)
+	ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w1", 3, sameConfig)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -57,39 +68,44 @@ func TestClaim_SecondClaimWhileActiveFails(t *testing.T) {
 	}
 }
 
+// A done row holds its file out of the pipeline, and it goes on doing so for as long as
+// the decision it recorded still re-derives. The row therefore RECORDS what it was taken
+// under, which is what a real done row does - a row that recorded nothing is a different
+// case with its own test, because "nothing recorded" is re-opened once on purpose.
 func TestClaim_AfterDoneFails(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
-	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Done, nil, 3); err != nil {
+	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Done, &Outcome{DecisionInputs: sameConfig}, 3); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
-	ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3)
+	ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3, sameConfig)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
 	if ok {
-		t.Fatal("claim after done must fail (permanent)")
+		t.Fatal("claim after done must fail while the configuration it was taken under still holds")
 	}
 }
 
 func TestClaim_AfterSkippedFails(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
-	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Skipped, nil, 3); err != nil {
+	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Skipped,
+		&Outcome{Reason: "low-bitrate", DecisionInputs: sameConfig}, 3); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
-	ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3)
+	ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3, sameConfig)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
 	if ok {
-		t.Fatal("claim after skipped must fail (permanent)")
+		t.Fatal("claim after skipped must fail while the configuration it was taken under still holds")
 	}
 }
 
@@ -98,7 +114,7 @@ func TestClaim_FailedRetriesThenParks(t *testing.T) {
 	ctx := context.Background()
 	const maxFailures = 3
 	for i := 1; i <= maxFailures; i++ {
-		ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", maxFailures)
+		ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", maxFailures, sameConfig)
 		if err != nil {
 			t.Fatalf("claim attempt %d: %v", i, err)
 		}
@@ -117,7 +133,7 @@ func TestClaim_FailedRetriesThenParks(t *testing.T) {
 		}
 	}
 	// Now fail_count == maxFailures: further claims must be parked (false).
-	ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", maxFailures)
+	ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", maxFailures, sameConfig)
 	if err != nil {
 		t.Fatalf("Claim (parked): %v", err)
 	}
@@ -129,7 +145,7 @@ func TestClaim_FailedRetriesThenParks(t *testing.T) {
 func TestAdvance_Transitions(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	for _, st := range []Status{Encoding, Verifying} {
@@ -149,7 +165,7 @@ func TestAdvance_Transitions(t *testing.T) {
 func TestRecoverStale_ResetsActiveJobs(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	if err := s.Advance(ctx, "/a/movie.mkv", "fp1", Encoding); err != nil {
@@ -170,7 +186,7 @@ func TestRecoverStale_ResetsActiveJobs(t *testing.T) {
 		t.Fatalf("after RecoverStale: status=%q exists=%v, want pending/true", st, exists)
 	}
 	// Now re-claimable.
-	ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w1", 3)
+	ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w1", 3, sameConfig)
 	if err != nil {
 		t.Fatalf("Claim after recover: %v", err)
 	}
@@ -182,7 +198,7 @@ func TestRecoverStale_ResetsActiveJobs(t *testing.T) {
 func TestRecoverStale_LeavesTerminalAndPendingAlone(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	if ok, _ := s.Claim(ctx, "/a/done.mkv", "fp1", "w0", 3); !ok {
+	if ok, _ := s.Claim(ctx, "/a/done.mkv", "fp1", "w0", 3, sameConfig); !ok {
 		t.Fatal("claim done.mkv")
 	}
 	if err := s.Finish(ctx, "/a/done.mkv", "fp1", Done, nil, 3); err != nil {
@@ -229,7 +245,7 @@ func TestClaim_ConcurrentSameKeyExactlyOneWins(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w", 3)
+			ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w", 3, sameConfig)
 			if err != nil {
 				t.Errorf("goroutine %d: Claim: %v", i, err)
 				return
@@ -271,7 +287,7 @@ func TestHammer_DifferentKeysNoDatabaseLocked(t *testing.T) {
 				fp := "fp-" + strconv.Itoa(w) + "-" + strconv.Itoa(i)
 				worker := "w" + strconv.Itoa(w)
 
-				ok, err := s.Claim(ctx, path, fp, worker, 3)
+				ok, err := s.Claim(ctx, path, fp, worker, 3, sameConfig)
 				if err != nil {
 					errCh <- err
 					continue
@@ -334,7 +350,7 @@ func withClock(t *testing.T, start int64) *int64 {
 func seed(t *testing.T, s *SQLite, path, fp string, final Status) {
 	t.Helper()
 	ctx := context.Background()
-	ok, err := s.Claim(ctx, path, fp, "w0", 3)
+	ok, err := s.Claim(ctx, path, fp, "w0", 3, sameConfig)
 	if err != nil || !ok {
 		t.Fatalf("seed Claim(%s): ok=%v err=%v", path, ok, err)
 	}
@@ -446,7 +462,7 @@ func i64(v int64) *int64     { return &v }
 func TestFinish_RecordsAndRoundTripsTheOutcome(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	want := &Outcome{
@@ -505,7 +521,7 @@ func TestFinish_RecordsAndRoundTripsTheOutcome(t *testing.T) {
 func TestFinish_NilOutcomeReadsAsNotRecordedNotZero(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Done, nil, 3); err != nil {
@@ -540,7 +556,7 @@ func TestFinish_ComparisonFormatAndChromaAreAbsentOnAnUnscoredRow(t *testing.T) 
 	ctx := context.Background()
 
 	// A scored row: the gate ran, so the format and the chroma pair are recorded.
-	if ok, err := s.Claim(ctx, "/a/scored.mkv", "fp1", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/a/scored.mkv", "fp1", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, "/a/scored.mkv", "fp1", Done, &Outcome{
@@ -552,7 +568,7 @@ func TestFinish_ComparisonFormatAndChromaAreAbsentOnAnUnscoredRow(t *testing.T) 
 
 	// An unscored row: the gate did not run (skipped by a guard before the encoder,
 	// or the VMAF gate disabled). Nothing was compared, so nothing is recorded.
-	if ok, err := s.Claim(ctx, "/a/unscored.mkv", "fp2", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/a/unscored.mkv", "fp2", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, "/a/unscored.mkv", "fp2", Skipped, &Outcome{
@@ -618,14 +634,14 @@ func TestFinish_LaterOutcomeReplacesTheEarlierOne(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
 
-	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Failed, &Outcome{Reason: "encode blew up", Encoder: "cpu"}, 3); err != nil {
 		t.Fatalf("Finish(failed): %v", err)
 	}
 	// Retry (failed is retryable under MaxFailures) and succeed this time.
-	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("re-claim after failure: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Done, &Outcome{
@@ -656,7 +672,7 @@ func TestOutcome_SurvivesAReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if ok, err := s.Claim(ctx, "/a/one.mkv", "fp", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/a/one.mkv", "fp", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, "/a/one.mkv", "fp", Done, &Outcome{
@@ -705,7 +721,7 @@ func TestClaim_RetryClearsThePreviousAttemptsOutcome(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
 
-	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	// A VMAF rejection: the row records why, and what it measured.
@@ -718,7 +734,7 @@ func TestClaim_RetryClearsThePreviousAttemptsOutcome(t *testing.T) {
 	}
 
 	// Retry it (failed is retryable under MaxFailures) and inspect the row MID-FLIGHT.
-	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w1", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w1", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("re-claim: ok=%v err=%v", ok, err)
 	}
 	if err := s.Advance(ctx, "/a/movie.mkv", "fp1", Encoding); err != nil {
@@ -756,7 +772,7 @@ func TestReclaimedTotal_SumsDoneRowsWithBothSizes(t *testing.T) {
 
 	// Two real reclaims: 3 MB and 1.5 MB.
 	done := func(path string, src, out int64) {
-		if ok, err := s.Claim(ctx, path, "fp", "w0", 3); err != nil || !ok {
+		if ok, err := s.Claim(ctx, path, "fp", "w0", 3, sameConfig); err != nil || !ok {
 			t.Fatalf("claim %s: ok=%v err=%v", path, ok, err)
 		}
 		if err := s.Finish(ctx, path, "fp", Done, &Outcome{SourceBytes: i64(src), OutputBytes: i64(out)}, 3); err != nil {
@@ -768,7 +784,7 @@ func TestReclaimedTotal_SumsDoneRowsWithBothSizes(t *testing.T) {
 
 	// A done row with NO sizes (a pre-outcome-columns row) must contribute 0, never be
 	// read as a 0-byte-reclaimed row — and never crash the SUM on a NULL.
-	if ok, err := s.Claim(ctx, "/a/legacy.mkv", "fp", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/a/legacy.mkv", "fp", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("claim legacy: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, "/a/legacy.mkv", "fp", Done, nil, 3); err != nil {
@@ -839,7 +855,7 @@ func TestRecordSkip_InsertsThenIsIdempotent(t *testing.T) {
 func TestRecordSkip_DoesNotClobberARealOutcome(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
-	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	proof := &Outcome{Encoder: "cpu", VmafMean: f64(97.0), VmafMin: f64(90.0),
@@ -914,7 +930,7 @@ const (
 func seedTerminal(t *testing.T, s *SQLite, path string, st Status, o *Outcome) {
 	t.Helper()
 	ctx := context.Background()
-	ok, err := s.Claim(ctx, path, "fp", "w0", 3)
+	ok, err := s.Claim(ctx, path, "fp", "w0", 3, sameConfig)
 	if err != nil || !ok {
 		t.Fatalf("seedTerminal Claim(%s): ok=%v err=%v", path, ok, err)
 	}
@@ -1006,7 +1022,7 @@ func TestAggregates_ComputedOverEveryRowNotTheCappedViews(t *testing.T) {
 	}
 	for i := 0; i < nQueued; i++ {
 		p := "/lib/queued" + strconv.Itoa(i) + ".mkv"
-		if ok, err := s.Claim(ctx, p, "fp", "w0", 3); err != nil || !ok {
+		if ok, err := s.Claim(ctx, p, "fp", "w0", 3, sameConfig); err != nil || !ok {
 			t.Fatalf("Claim(%s): ok=%v err=%v", p, ok, err)
 		}
 	}
@@ -1344,7 +1360,7 @@ func TestHeldByUndoWindow_IsItsOwnFigureBesideTheReclaimedTotal(t *testing.T) {
 
 	// Two swaps, both retained: the ledger reclaims 4.5 MB and the window holds 9 MB.
 	done := func(path string, src, out int64) {
-		if ok, err := s.Claim(ctx, path, "fp", "w0", 3); err != nil || !ok {
+		if ok, err := s.Claim(ctx, path, "fp", "w0", 3, sameConfig); err != nil || !ok {
 			t.Fatalf("claim %s: ok=%v err=%v", path, ok, err)
 		}
 		if err := s.Finish(ctx, path, "fp", Done, &Outcome{SourceBytes: i64(src), OutputBytes: i64(out)}, 3); err != nil {
@@ -1555,7 +1571,7 @@ func TestFailureClass_AnythingOutsideTheVocabularyReadsBackAsRetryable(t *testin
 	ctx := context.Background()
 	const path, fp = "/a/movie.mkv", "fp1"
 
-	if ok, err := s.Claim(ctx, path, fp, "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, path, fp, "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, path, fp, Failed, &Outcome{Reason: "some gate"}, 3); err != nil {
@@ -1619,7 +1635,7 @@ func TestFailureClass_ALegacyFailureRowIsRetryableAndIsNotRewritten(t *testing.T
 
 	// And it is claimed and parked by the attempt count, exactly as it always was.
 	for attempt := 2; attempt <= 3; attempt++ {
-		ok, err := s.Claim(ctx, path, fp, "w0", 3)
+		ok, err := s.Claim(ctx, path, fp, "w0", 3, sameConfig)
 		if err != nil {
 			t.Fatalf("attempt %d: Claim on a legacy row errored: %v", attempt, err)
 		}
@@ -1633,7 +1649,7 @@ func TestFailureClass_ALegacyFailureRowIsRetryableAndIsNotRewritten(t *testing.T
 	if _, fc, _, err := s.Get(ctx, path, fp); err != nil || fc != 3 {
 		t.Fatalf("after two retries fail_count = %d (err=%v), want 3", fc, err)
 	}
-	if ok, err := s.Claim(ctx, path, fp, "w0", 3); err != nil || ok {
+	if ok, err := s.Claim(ctx, path, fp, "w0", 3, sameConfig); err != nil || ok {
 		t.Errorf("a legacy row at the bound was claimed again: ok=%v err=%v", ok, err)
 	}
 }
@@ -1648,7 +1664,7 @@ func TestFinish_ADeterministicFailureSpendsTheBoundInOneWrite(t *testing.T) {
 	ctx := context.Background()
 	const path, fp = "/a/never-smaller.mkv", "fp1"
 
-	if ok, err := s.Claim(ctx, path, fp, "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, path, fp, "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, path, fp, Failed,
@@ -1666,19 +1682,19 @@ func TestFinish_ADeterministicFailureSpendsTheBoundInOneWrite(t *testing.T) {
 	if fc != 3 {
 		t.Errorf("fail_count = %d after ONE deterministic failure, want the bound (3)", fc)
 	}
-	if ok, err := s.Claim(ctx, path, fp, "w0", 3); err != nil || ok {
+	if ok, err := s.Claim(ctx, path, fp, "w0", 3, sameConfig); err != nil || ok {
 		t.Errorf("the parked row was claimed again: ok=%v err=%v", ok, err)
 	}
 	// It is the BOUND that parks it, not the class: raise the bound and the same row is
 	// claimable again, which is what makes the park undoable by the same means as any
 	// other exhausted failure.
-	if ok, err := s.Claim(ctx, path, fp, "w0", 5); err != nil || !ok {
+	if ok, err := s.Claim(ctx, path, fp, "w0", 5, sameConfig); err != nil || !ok {
 		t.Errorf("under a higher bound the same row was still refused (ok=%v err=%v) - something "+
 			"other than the attempt count is holding it", ok, err)
 	}
 	// A bound of 0 or less is no bound at all, and must never be read as one to park at.
 	const other = "/a/unbounded.mkv"
-	if ok, err := s.Claim(ctx, other, fp, "w0", 0); err != nil || !ok {
+	if ok, err := s.Claim(ctx, other, fp, "w0", 0, sameConfig); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, other, fp, Failed,
@@ -1709,7 +1725,7 @@ func TestClaim_TheClassIsNeverItselfAClaimBlocker(t *testing.T) {
 		t.Fatalf("seed a deterministic row below the bound: %v", err)
 	}
 
-	ok, err := s.Claim(ctx, path, fp, "w0", 3)
+	ok, err := s.Claim(ctx, path, fp, "w0", 3, sameConfig)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -1735,7 +1751,7 @@ func TestAggregates_ADeterministicFailureAddsNothingToTheSkipBreakdown(t *testin
 	ctx := context.Background()
 
 	// One real skip, so the breakdown is not vacuously empty.
-	if ok, err := s.Claim(ctx, "/a/thin.mkv", "fp1", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/a/thin.mkv", "fp1", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, "/a/thin.mkv", "fp1", Skipped, &Outcome{Reason: "low-bitrate"}, 3); err != nil {
@@ -1749,7 +1765,7 @@ func TestAggregates_ADeterministicFailureAddsNothingToTheSkipBreakdown(t *testin
 		t.Fatalf("the breakdown counted %d rows before the failure, want 1", before.Counted)
 	}
 
-	if ok, err := s.Claim(ctx, "/a/never-smaller.mkv", "fp2", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/a/never-smaller.mkv", "fp2", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, "/a/never-smaller.mkv", "fp2", Failed,

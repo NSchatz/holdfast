@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -195,7 +196,7 @@ func TestMigrate_V0DatabaseOnDiskGainsTheOutcomeColumns(t *testing.T) {
 	// is not merely cosmetic. (Without the ALTER this would fail with "no such column",
 	// which is exactly how the silent-no-op bug surfaces on a live install: not at
 	// startup, but later, on a query.)
-	if ok, err := s.Claim(ctx, "/lib/fresh.mkv", "50:500", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/lib/fresh.mkv", "50:500", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("Claim on a migrated database: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, "/lib/fresh.mkv", "50:500", Done, &Outcome{
@@ -319,6 +320,7 @@ var headColumns = []string{
 	"reason", "encoder", "vmaf_mean", "vmaf_min", "vmaf_model",
 	"vmaf_pix_fmt", "vmaf_chroma", "vmaf_chroma_metric",
 	"source_codec", "source_bytes", "output_bytes", "encode_ms",
+	"decision_inputs",
 }
 
 // A database from the FUTURE is a startup REFUSAL, not a silent downgrade. Finish writes
@@ -529,7 +531,7 @@ func TestMigrate_PreGate4DatabaseGainsTheNewColumnsUnbackfilled(t *testing.T) {
 	// 3. The migrated database is WRITABLE through the new columns. Without the ALTER
 	// this fails with "no such column" - which is how the silent-no-op bug surfaces on
 	// a live install: not at startup, but later, on a query.
-	if ok, err := s.Claim(ctx, "/lib/fresh.mkv", "50:500", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/lib/fresh.mkv", "50:500", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("Claim on a migrated database: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, "/lib/fresh.mkv", "50:500", Done, &Outcome{
@@ -722,6 +724,279 @@ func TestMigrate_PreUndoDatabaseGainsTheRetentionTableWithNoFabricatedRetentions
 	}
 }
 
+// ---- the decision inputs a terminal row was taken under -----------------------
+
+// v9Schema is the schema EXACTLY as it shipped BEFORE the decision-inputs column - every
+// step from v1 to v9, in the order they shipped, with the v9 version stamp. Frozen for
+// the same reason v0Schema, v3Schema and v4Schema are, and it is the fixture this phase's
+// migration proof actually needs: a FRESH database gains the new column either way,
+// because the migration list is replayed from nothing, so a fresh-schema test would pass
+// over a migration that did nothing at all to a database that already exists. Do NOT
+// update it when the schema changes.
+const v9Schema = v4Schema + `
+CREATE TABLE IF NOT EXISTS retained_originals (
+	source_path         TEXT NOT NULL PRIMARY KEY,
+	swapped_path        TEXT NOT NULL,
+	retained_path       TEXT NOT NULL,
+	source_bytes        INTEGER NOT NULL,
+	swapped_fingerprint TEXT NOT NULL,
+	retained_at         INTEGER NOT NULL,
+	expires_at          INTEGER NOT NULL,
+	restored_at         INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_retained_swapped ON retained_originals(swapped_path);
+CREATE INDEX IF NOT EXISTS idx_retained_expires ON retained_originals(restored_at, expires_at);
+CREATE TABLE IF NOT EXISTS ledger_totals (
+	id               INTEGER PRIMARY KEY CHECK (id = 1),
+	reclaimed_pruned INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO ledger_totals (id, reclaimed_pruned) VALUES (1, 0);
+CREATE INDEX IF NOT EXISTS idx_jobs_status_updated ON jobs(status, updated_at);
+ALTER TABLE jobs ADD COLUMN guard_attributes       TEXT;
+ALTER TABLE jobs ADD COLUMN guard_time_resolution  TEXT;
+ALTER TABLE jobs ADD COLUMN guard_residual_window  TEXT;
+ALTER TABLE jobs ADD COLUMN swap_cause             TEXT;
+CREATE TABLE IF NOT EXISTS swap_incidents (
+	id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+	source_path        TEXT NOT NULL,
+	source_fingerprint TEXT NOT NULL,
+	replacement_path   TEXT NOT NULL,
+	source_attrs       TEXT NOT NULL,
+	replacement_attrs  TEXT NOT NULL,
+	observed_attrs     TEXT,
+	outcome            TEXT NOT NULL,
+	swap_error         TEXT,
+	swap_cause         TEXT,
+	storage_class      TEXT,
+	storage_type       TEXT,
+	created_at         INTEGER NOT NULL,
+	resolution         TEXT,
+	resolved_by        TEXT,
+	resolved_at        INTEGER,
+	observed_source      TEXT,
+	observed_replacement TEXT,
+	disposition_source      TEXT,
+	disposition_replacement TEXT,
+	removal_error      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_incidents_parked ON swap_incidents(outcome, resolution);
+CREATE INDEX IF NOT EXISTS idx_incidents_excluded ON swap_incidents(replacement_path)
+	WHERE disposition_replacement IS NULL OR disposition_replacement = 'retained-excluded';
+ALTER TABLE jobs ADD COLUMN source_codec TEXT;
+ALTER TABLE jobs ADD COLUMN failure_class TEXT;
+PRAGMA user_version = 9;
+`
+
+// seedV9 writes a real pre-decision-inputs database at path: the frozen v9 schema, its
+// version stamp, and rows that CARRY the outcomes the shipped build recorded - a done row
+// with its sizes and its VMAF pair, and two skipped rows carrying the guard tokens whose
+// verdicts this phase makes re-derivable. The outcomes matter: the criterion is that
+// migrating keeps every value while leaving the new column unrecorded, and a fixture of
+// empty rows could not tell those two apart.
+func seedV9(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open v9 db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if _, err := db.Exec(v9Schema); err != nil {
+		t.Fatalf("create v9 schema: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at,
+			encoder, vmaf_mean, vmaf_min, vmaf_model, vmaf_pix_fmt, vmaf_chroma, vmaf_chroma_metric,
+			source_codec, source_bytes, output_bytes, encode_ms)
+		 VALUES ('/lib/old-done.mkv', '10:100', 'done', 0, NULL, 1000,
+			'cpu', 97.25, 88.5, 'version=vmaf_v0.6.1', 'yuv420p10le', 41.5, 'psnr_cb/psnr_cr min (dB)',
+			'h264', 5000000, 2000000, 12345)`); err != nil {
+		t.Fatalf("seed done row: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, reason)
+		 VALUES ('/lib/old-low-bitrate.mkv', '20:200', 'skipped', 0, NULL, 1001, 'low-bitrate')`); err != nil {
+		t.Fatalf("seed low-bitrate row: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, reason)
+		 VALUES ('/lib/old-at-codec.mkv', '30:300', 'skipped', 0, NULL, 1002, 'already-at-target-codec')`); err != nil {
+		t.Fatalf("seed already-at-target-codec row: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, reason, failure_class)
+		 VALUES ('/lib/old-failed.mkv', '40:400', 'failed', 2, NULL, 1003, 'ffmpeg died', 'transient')`); err != nil {
+		t.Fatalf("seed failed row: %v", err)
+	}
+
+	// Sanity: the fixture really is a v9 database that really lacks the new column.
+	// Without this the test could pass against a database that was already migrated,
+	// which would make it vacuous in exactly the way it exists to avoid.
+	var ver int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil {
+		t.Fatalf("read seeded user_version: %v", err)
+	}
+	if ver != 9 {
+		t.Fatalf("seeded database is at version %d, want 9 - it is not a pre-decision-inputs database", ver)
+	}
+	if hasColumn(t, db, "decision_inputs") {
+		t.Fatal("seeded v9 database already has a `decision_inputs` column - the fixture is wrong")
+	}
+}
+
+// TestMigrate_APreMigrationDatabaseOnDiskRecordsNoDecisionInputs is the anti-vacuity
+// proof this phase owes.
+//
+// A jobs.db written by the SHIPPED build must migrate forward in place, keep every row
+// and every value those rows carry, and read as recording NO decision inputs - which is
+// what makes each of them re-openable exactly once, after which the decision they reach
+// records what it read. The alternative - a backfill - would claim those rows were taken
+// under whatever is configured now, and they would then MATCH and stay excluded for ever,
+// which is the silent no-op the whole phase exists to end.
+func TestMigrate_APreMigrationDatabaseOnDiskRecordsNoDecisionInputs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.db")
+	seedV9(t, path)
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on a v9 database must migrate it, not fail: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if got, want := userVersion(t, path), schemaVersion(); got != want {
+		t.Errorf("user_version after migration = %d, want %d", got, want)
+	}
+	if !hasColumn(t, s.db, "decision_inputs") {
+		t.Fatal("migrated database has no decision_inputs column - the migration was a silent no-op")
+	}
+
+	ctx := context.Background()
+	rows, err := s.List(ctx, nil, 0)
+	if err != nil {
+		t.Fatalf("List after migration: %v", err)
+	}
+	if len(rows) != 4 {
+		t.Fatalf("migration lost rows: got %d, want 4 (%+v)", len(rows), rows)
+	}
+	byPath := make(map[string]Job, len(rows))
+	for _, j := range rows {
+		byPath[j.Path] = j
+	}
+
+	// 1. Every value the v9 rows carried is still there.
+	done := byPath["/lib/old-done.mkv"]
+	if done.Status != Done || done.Outcome.Encoder != "cpu" || done.Outcome.VmafModel != "version=vmaf_v0.6.1" ||
+		done.Outcome.VmafPixFmt != "yuv420p10le" || done.Outcome.SourceCodec != "h264" {
+		t.Errorf("the pre-existing done row was mangled: %+v", done)
+	}
+	if done.Outcome.VmafMean == nil || *done.Outcome.VmafMean != 97.25 ||
+		done.Outcome.SourceBytes == nil || *done.Outcome.SourceBytes != 5000000 ||
+		done.Outcome.OutputBytes == nil || *done.Outcome.OutputBytes != 2000000 {
+		t.Errorf("the pre-existing measurements were lost: %+v", done.Outcome)
+	}
+	if got := byPath["/lib/old-low-bitrate.mkv"].Outcome.Reason; got != "low-bitrate" {
+		t.Errorf("the pre-existing skip reason was lost: %q", got)
+	}
+	if j := byPath["/lib/old-failed.mkv"]; j.FailCount != 2 || j.Outcome.FailureClass != FailureTransient {
+		t.Errorf("the pre-existing failure accounting was lost: %+v", j)
+	}
+
+	// 2. And every pre-existing row reads as recording NO inputs - not an empty set,
+	// which would always match, and not a fabricated record of the configuration in
+	// front of this build, which would match too.
+	for _, j := range rows {
+		if j.Outcome.DecisionInputs.Recorded() {
+			t.Errorf("%s was BACKFILLED with decision inputs (%q) - that is a claim about the "+
+				"configuration a decision nobody recorded was taken under",
+				j.Path, j.Outcome.DecisionInputs.Encode())
+		}
+	}
+
+	// 3. Which is exactly what makes them re-openable: a row recording nothing cannot be
+	// re-derived, so Claim offers the file to the pipeline rather than skipping it for
+	// ever. This is the whole point of reading them as unrecorded, so it is asserted
+	// here and not only in the Claim suite.
+	current := InputsRead(map[string]string{"min_bitrate_kbps": "1200"})
+	if ok, err := s.Claim(ctx, "/lib/old-low-bitrate.mkv", "20:200", "w0", 3, current); err != nil || !ok {
+		t.Fatalf("a migrated row recording no inputs must be re-opened: ok=%v err=%v", ok, err)
+	}
+
+	// 4. The migrated database is WRITABLE through the new column. Without the ALTER this
+	// fails with "no such column" - which is how the silent-no-op bug surfaces on a live
+	// install: not at startup, but later, on a query.
+	if err := s.Finish(ctx, "/lib/old-low-bitrate.mkv", "20:200", Skipped,
+		&Outcome{Reason: "low-bitrate", DecisionInputs: current}, 3); err != nil {
+		t.Fatalf("Finish on a migrated database: %v", err)
+	}
+	after, err := s.List(ctx, []Status{Skipped}, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, j := range after {
+		if j.Path != "/lib/old-low-bitrate.mkv" {
+			continue
+		}
+		if got, ok := j.Outcome.DecisionInputs.Value("min_bitrate_kbps"); !ok || got != "1200" {
+			t.Errorf("a row written AFTER the migration lost its decision inputs: %+v", j.Outcome.DecisionInputs)
+		}
+	}
+}
+
+// TestMigrate_AFailedMigrationRefusesToOpenTheStore. A half-migrated schema must never be
+// run against: the engine would be recording its proof into columns that may or may not
+// be there, and the failure would surface later, on a live install, on a query. So a
+// migration that cannot complete is a REFUSAL to open, naming the step that failed, and
+// it leaves the version where it was - the version and the shape move together or not at
+// all.
+func TestMigrate_AFailedMigrationRefusesToOpenTheStore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.db")
+	seedV9(t, path)
+
+	// A step this build cannot apply, driven through the real migrate() that Open calls.
+	// Appended rather than substituted, so every shipped step still runs first and the
+	// failure is genuinely a half-way one.
+	restore := migrations
+	migrations = append(append([]migration{}, migrations...),
+		migration{name: "deliberately broken", sql: `THIS IS NOT SQL;`})
+	t.Cleanup(func() { migrations = restore })
+
+	s, err := Open(path)
+	if err == nil {
+		_ = s.Close()
+		t.Fatal("Open must REFUSE a database whose migration could not complete, not run against a half-migrated schema")
+	}
+	if !strings.Contains(err.Error(), "deliberately broken") {
+		t.Errorf("the refusal must name the step that failed, got: %v", err)
+	}
+
+	// The stamp never escaped the failed step's transaction: the database still claims
+	// the last version it actually has.
+	if got, want := userVersion(t, path), schemaVersion()-1; got != want {
+		t.Errorf("user_version after a failed migration = %d, want %d", got, want)
+	}
+	// And the steps that DID apply are intact, with every row still there - a refusal is
+	// not a rollback of the whole file.
+	if got := columnCount(t, path); got == 0 {
+		t.Fatal("the database is unreadable after a refused open")
+	}
+}
+
+// columnCount reads how many columns jobs has, from SQLite itself, through a handle this
+// test opens directly - the store refused to open, so there is no store to ask.
+func columnCount(t *testing.T, path string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('jobs')`).Scan(&n); err != nil {
+		t.Fatalf("pragma_table_info: %v", err)
+	}
+	return n
+}
+
 // TestMigrations_ShippedTextIsNeverEdited pins the SQL of every migration that has
 // already shipped, by content hash.
 //
@@ -743,6 +1018,8 @@ func TestMigrations_ShippedTextIsNeverEdited(t *testing.T) {
 		{"ledger retention totals", "44635e1577347481b3322bc04f2a1ac54a2560b452b59c1f5e3a9d7cb392d4a5"},
 		{"swap guard record + swap incidents", "1a2162b7e4061ca5a90f53adc9916d85969e05705baf232fc1e5431a13125dbf"},
 		{"source codec", "4f8cf21fb8743b51e8609fef458308f65e4e36782d98213cff15833aacc3b164"},
+		{"failure class", "1401872cf991a88581c43c24470de409ef06683ca3aaa9cfbd728220bed2b53a"},
+		{"decision inputs", "285adec2f24e51f0fdecec3c20a36388fb68b0b9b0da5730774361c82b8a5600"},
 	}
 	if len(migrations) < len(shipped) {
 		t.Fatalf("migrations has %d entries, fewer than the %d that have shipped - an entry was "+

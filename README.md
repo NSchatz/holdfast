@@ -163,6 +163,14 @@ original cannot be retained is **skipped, not swapped**, and a restore refuses r
 file that has changed since the swap. Full reference, including what it costs and what it deliberately
 does not offer: **[docs/undo.md](docs/undo.md)**.
 
+### Edit the YAML and the tool obeys (`requeue`)
+
+A terminal row is an **answer computed from configuration**, and only for the configuration it was
+computed under: each records the values the guard that wrote it read, and a scan **re-opens** one whose
+values have moved. So lowering `min_bitrate_kbps` or changing the target codec reaches the files a
+previous configuration answered; an edit to a key no guard read reaches nothing; re-opening is not
+re-encoding; `holdfast requeue` is the LOCAL lever for the rest - **[docs/requeue.md](docs/requeue.md)**.
+
 ### Web API + UI (`serve`)
 
 `holdfast serve` runs a REST API + [SSE](https://developer.mozilla.org/docs/Web/API/Server-sent_events)

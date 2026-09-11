@@ -70,7 +70,7 @@ func captureLogger(buf *bytes.Buffer) *slog.Logger {
 func seedRow(t *testing.T, ts *testStore, path string, st store.Status, o *store.Outcome) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := ts.Claim(ctx, path, "seed", "w0", 3); err != nil {
+	if _, err := ts.Claim(ctx, path, "seed", "w0", 3, store.DecisionInputs{}); err != nil {
 		t.Fatalf("seed claim %s: %v", path, err)
 	}
 	if err := ts.Finish(ctx, path, "seed", st, o, 3); err != nil {
@@ -85,7 +85,7 @@ func seedRowForRealFile(t *testing.T, ts *testStore, path string, st store.Statu
 	t.Helper()
 	ctx := context.Background()
 	key := probe.Fingerprint(path)
-	ok, err := ts.Claim(ctx, path, key, "w0", 3)
+	ok, err := ts.Claim(ctx, path, key, "w0", 3, store.DecisionInputs{})
 	if err != nil || !ok {
 		t.Fatalf("seed claim %s: ok=%v err=%v", path, ok, err)
 	}
@@ -117,7 +117,7 @@ func TestRetention_ACompletedScanBringsTheLedgerWithinTheRetentionWithNoOperator
 	// churning library accumulates, and the ones a retention is FOR. The scan lists the
 	// directory they name and does not find them, which is what makes them removable.
 	for i := 0; i < 15; i++ {
-		seedRow(t, ts, filepath.Join(root, "gone"+strconv.Itoa(i)+".mkv"), store.Skipped, because(SkipLowBitrate))
+		seedRow(t, ts, filepath.Join(root, "gone"+strconv.Itoa(i)+".mkv"), store.Skipped, &store.Outcome{Reason: SkipLowBitrate})
 	}
 
 	// The ONLY thing called is RunOneshot. No API, no operator, no separate command.
@@ -142,7 +142,7 @@ func TestRetention_DisabledByDefaultTheSameScanKeepsEveryRow(t *testing.T) {
 		t.Fatal("baseCfg enabled retention; the shipped default must be disabled")
 	}
 	for i := 0; i < 15; i++ {
-		seedRow(t, ts, filepath.Join(root, "gone"+strconv.Itoa(i)+".mkv"), store.Skipped, because(SkipLowBitrate))
+		seedRow(t, ts, filepath.Join(root, "gone"+strconv.Itoa(i)+".mkv"), store.Skipped, &store.Outcome{Reason: SkipLowBitrate})
 	}
 	if err := eng.RunOneshot(context.Background()); err != nil {
 		t.Fatalf("RunOneshot: %v", err)
@@ -174,7 +174,7 @@ func parkFile(t *testing.T, ts *testStore, path string, maxFailures int) {
 	ctx := context.Background()
 	key := probe.Fingerprint(path)
 	for i := 0; i < maxFailures; i++ {
-		ok, err := ts.Claim(ctx, path, key, "w0", maxFailures)
+		ok, err := ts.Claim(ctx, path, key, "w0", maxFailures, store.DecisionInputs{})
 		if err != nil {
 			t.Fatalf("park claim %s: %v", path, err)
 		}
@@ -235,28 +235,35 @@ func TestRetention_PruningRowsForFilesStillPresentEncodesNoneOfThemAgain(t *test
 	}
 }
 
-// movedConfig is one library, the terminal rows it already carries, and a configuration the
-// operator has since changed. Both runs get the identical fixture and the identical
-// configuration; history_retention_rows is the only thing that varies, which is what makes
-// the PRUNE the cause of any encode rather than the configuration change.
-type movedConfig struct {
+// liveDecision is one library, the terminal rows it already carries, and a configuration
+// under which the GUARDS would not reach those verdicts again. Both runs get the identical
+// fixture and the identical configuration; history_retention_rows is the only thing that
+// varies, which is what makes the PRUNE the cause of any encode and not anything else.
+//
+// Each row is seeded recording the decision inputs of the configuration in force, because
+// that is what a live decision is: a terminal row is only ever a hold-back for the
+// configuration it was taken under, and one taken under a configuration that has since
+// moved is re-opened by the scan whether a prune happened or not. Holding the inputs
+// steady is what isolates the prune, exactly as holding the configuration steady across
+// the two runs does.
+type liveDecision struct {
 	name  string
 	build func(t *testing.T, ffmpeg, root string) []string
 	row   func(path string) (store.Status, *store.Outcome)
 	cfg   func(c *config.Config)
 }
 
-// movedConfigCases are the configurations under which a pruned verdict does NOT re-derive
-// itself. In each, the recorded row is the only thing holding the file out of the encoder:
-// the guard that produced it does not fire under the configuration now in force.
+// liveDecisionCases are the fixtures in which a pruned verdict does NOT re-derive itself.
+// In each, the recorded row is the only thing holding the file out of the encoder: the
+// guard that would produce it does not fire under the configuration in force.
 //
 // This is why the already-at-target-codec fixture above is not enough on its own. That one
 // is the single configuration in which the guard re-derives the pruned verdict, so it
 // cannot see a prune that deletes a live decision.
-func movedConfigCases() []movedConfig {
-	return []movedConfig{
+func liveDecisionCases() []liveDecision {
+	return []liveDecision{
 		{
-			name: "the operator moved the target codec from hevc to av1",
+			name: "a done row for hevc files the av1 target would transcode",
 			build: func(t *testing.T, ffmpeg, root string) []string {
 				var out []string
 				for i := 0; i < 3; i++ {
@@ -273,7 +280,7 @@ func movedConfigCases() []movedConfig {
 			cfg: func(c *config.Config) { c.Encoder = "svtav1" },
 		},
 		{
-			name: "the operator lowered min_bitrate_kbps",
+			name: "a low-bitrate skip the threshold in force would not make",
 			build: func(t *testing.T, ffmpeg, root string) []string {
 				var out []string
 				for i := 0; i < 3; i++ {
@@ -284,18 +291,18 @@ func movedConfigCases() []movedConfig {
 				return out
 			},
 			row: func(string) (store.Status, *store.Outcome) {
-				return store.Skipped, because(SkipLowBitrate)
+				return store.Skipped, &store.Outcome{Reason: SkipLowBitrate}
 			},
-			// baseCfg already sets MinBitrateKbps: 0 - the threshold the operator has
-			// lowered TO. The rows were recorded under a higher one.
+			// baseCfg already sets MinBitrateKbps: 0, under which the low-bitrate guard
+			// fires for nothing at all - so only the row holds these files back.
 			cfg: func(c *config.Config) { c.MinBitrateKbps = 0 },
 		},
 	}
 }
 
-// movedConfigEncodes builds one case, runs two scans over it at the given retention, and
+// liveDecisionEncodes builds one case, runs two scans over it at the given retention, and
 // returns how many files reached the encoder.
-func movedConfigEncodes(t *testing.T, c movedConfig, retention int) int32 {
+func liveDecisionEncodes(t *testing.T, c liveDecision, retention int) int32 {
 	t.Helper()
 	ffmpeg, ffprobe := tools(t)
 	root := t.TempDir()
@@ -309,6 +316,7 @@ func movedConfigEncodes(t *testing.T, c movedConfig, retention int) int32 {
 	ts := eng.Store.(*testStore)
 	for _, f := range files {
 		st, o := c.row(f)
+		o.DecisionInputs = DecisionInputsFor(eng.Cfg)
 		seedRowForRealFile(t, ts, f, st, o)
 	}
 
@@ -325,16 +333,16 @@ func movedConfigEncodes(t *testing.T, c movedConfig, retention int) int32 {
 	return encodes.Load()
 }
 
-func TestRetention_PruningUnderAMovedConfigurationStillEncodesNothing(t *testing.T) {
-	for _, c := range movedConfigCases() {
+func TestRetention_PruningAVerdictTheGuardsWouldNotReachAgainEncodesNothing(t *testing.T) {
+	for _, c := range liveDecisionCases() {
 		t.Run(c.name, func(t *testing.T) {
 			// The control: retention disabled over the identical fixture. It must encode
-			// nothing, or the case is measuring the configuration change and not the prune.
-			if off := movedConfigEncodes(t, c, 0); off != 0 {
+			// nothing, or the case is measuring something other than the prune.
+			if off := liveDecisionEncodes(t, c, 0); off != 0 {
 				t.Fatalf("the control encoded %d file(s) with retention DISABLED; the fixture is wrong, "+
 					"not the claim", off)
 			}
-			if on := movedConfigEncodes(t, c, 1); on > 0 {
+			if on := liveDecisionEncodes(t, c, 1); on > 0 {
 				t.Errorf("history_retention_rows=1 pruned the terminal rows of files still present in the "+
 					"library and the next scan handed %d of them to the encoder.\n"+
 					"Criterion 6: WHEN retention has pruned rows for files that are still present in the "+
@@ -351,7 +359,7 @@ func TestRetention_PruningUnderAMovedConfigurationStillEncodesNothing(t *testing
 // nothing can break and are not evidence.
 func TestRetention_APruneThatTreatsALiveDecisionAsHistoryIsWhatCausesTheReEncode(t *testing.T) {
 	everyRowSpent := func(string, string, store.Status) bool { return true }
-	for _, c := range movedConfigCases() {
+	for _, c := range liveDecisionCases() {
 		t.Run(c.name, func(t *testing.T) {
 			ffmpeg, ffprobe := tools(t)
 			root := t.TempDir()
@@ -365,6 +373,7 @@ func TestRetention_APruneThatTreatsALiveDecisionAsHistoryIsWhatCausesTheReEncode
 			ts := eng.Store.(*testStore)
 			for _, f := range files {
 				st, o := c.row(f)
+				o.DecisionInputs = DecisionInputsFor(eng.Cfg)
 				seedRowForRealFile(t, ts, f, st, o)
 			}
 			if err := eng.RunOneshot(context.Background()); err != nil {
@@ -444,17 +453,25 @@ func TestRetention_TheBoundIsStillMetOverHistoryTheLibraryHasFinishedWith(t *tes
 	var encodes atomic.Int32
 	eng := buildEngine(t, ffmpeg, ffprobe, root, countingEncoder(&encodes), func(c *config.Config) {
 		c.HistoryRetentionRows = 3
-		c.Encoder = "svtav1" // the moved configuration, so the live rows are load-bearing
+		// An av1 target over hevc sources: the guards would transcode these files, so the
+		// two done rows are the only thing holding them back and pruning one is visible.
+		c.Encoder = "svtav1"
 	})
 	ts := eng.Store.(*testStore)
 	for i := 0; i < 2; i++ {
 		src, dst := int64(4096), int64(1024)
 		seedRowForRealFile(t, ts, filepath.Join(root, "present"+strconv.Itoa(i)+".mkv"),
-			store.Done, &store.Outcome{Encoder: "cpu", SourceBytes: &src, OutputBytes: &dst})
+			store.Done, &store.Outcome{
+				Encoder: "cpu", SourceBytes: &src, OutputBytes: &dst,
+				// Recorded under the configuration in force: a live decision, not one
+				// taken under a configuration that has since moved, which the scan would
+				// re-open on its own and with no prune involved.
+				DecisionInputs: DecisionInputsFor(eng.Cfg),
+			})
 	}
 	// Twenty rows for files that were in this directory and are not any more.
 	for i := 0; i < 20; i++ {
-		seedRow(t, ts, filepath.Join(root, "gone"+strconv.Itoa(i)+".mkv"), store.Skipped, because(SkipLowBitrate))
+		seedRow(t, ts, filepath.Join(root, "gone"+strconv.Itoa(i)+".mkv"), store.Skipped, &store.Outcome{Reason: SkipLowBitrate})
 	}
 
 	if err := eng.RunOneshot(context.Background()); err != nil {
@@ -561,7 +578,7 @@ func TestRetention_APruneFailureIsLoggedAndLeavesEveryRowItDidNotRemoveInPlace(t
 	seeded := make([]string, 0, 9)
 	for i := 0; i < 9; i++ {
 		p := "/lib/history" + strconv.Itoa(i) + ".mkv"
-		seedRow(t, ts, p, store.Skipped, because(SkipLowBitrate))
+		seedRow(t, ts, p, store.Skipped, &store.Outcome{Reason: SkipLowBitrate})
 		seeded = append(seeded, p)
 	}
 

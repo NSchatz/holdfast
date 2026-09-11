@@ -1537,7 +1537,7 @@ func TestCrashRecovery_StaleActiveJobIsReclaimedAndCompleted(t *testing.T) {
 		t.Fatalf("store.Open: %v", err)
 	}
 	key := probe.Fingerprint(src)
-	if ok, err := seedStore.Claim(context.Background(), src, key, "dead-worker", cfg.MaxFailures); err != nil || !ok {
+	if ok, err := seedStore.Claim(context.Background(), src, key, "dead-worker", cfg.MaxFailures, store.DecisionInputs{}); err != nil || !ok {
 		t.Fatalf("seed claim: ok=%v err=%v", ok, err)
 	}
 	if err := seedStore.Advance(context.Background(), src, key, store.Encoding); err != nil {
@@ -2088,7 +2088,7 @@ func TestFailure_AnUnclassifiedFailureIsRetriedNotParked(t *testing.T) {
 	ctx := context.Background()
 	key := probe.Fingerprint(src)
 
-	if ok, err := ts.Claim(ctx, src, key, "w0", cfg.MaxFailures); err != nil || !ok {
+	if ok, err := ts.Claim(ctx, src, key, "w0", cfg.MaxFailures, store.DecisionInputs{}); err != nil || !ok {
 		t.Fatalf("seed claim: ok=%v err=%v", ok, err)
 	}
 	// A rejection this build's classifier says nothing about.

@@ -57,6 +57,7 @@ Commands:
   serve      Run the HTTP API + web UI (scan on demand / on an interval)
   resolve    Report and resolve a job whose swap outcome could not be established
   restore    List what the undo window is holding, or put one original back
+  requeue    Offer a file the engine has already answered back to the pipeline
   export     Write every terminal ledger row to newline-delimited JSON (stdout, or --out)
   validate   Load and validate a config file, then exit
   version    Print version and exit
@@ -65,6 +66,8 @@ Run "holdfast <command> -h" for command flags.
 
   holdfast restore --config config.yaml            # what is retained, and for how long
   holdfast restore --config config.yaml <path>     # put that original back
+  holdfast requeue --config config.yaml <path>     # re-open that file's terminal row
+  holdfast requeue --config config.yaml --failed   # re-open every row parked at max_failures
 `
 
 func dispatch(args []string, stdout, stderr io.Writer) int {
@@ -81,6 +84,8 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 		return cmdResolve(args[1:], stdout, stderr)
 	case "restore":
 		return cmdRestore(args[1:], stdout, stderr)
+	case "requeue":
+		return cmdRequeue(args[1:], stdout, stderr)
 	case "export":
 		return cmdExport(args[1:], stdout, stderr)
 	case "validate":
@@ -141,6 +146,7 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	for _, n := range cfg.Notices() {
 		fmt.Fprintf(stdout, "note: %s\n", n)
 	}
+	reportLedgerAgainstConfig(cfg, stdout)
 	// Valid, but a safety gate is weakened — say so. These are not errors (each is a
 	// legitimate choice), but a config that has quietly lost its worst-frame floor
 	// must not look identical to one that still has it.
@@ -148,6 +154,46 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "warning: %s\n", w)
 	}
 	return 0
+}
+
+// reportLedgerAgainstConfig prints what the ledger says about the configuration it was
+// decided under: how many terminal rows a scan would now re-open, and why.
+//
+// `validate` is the one command that answers "what will this configuration DO", and
+// since a terminal row is only terminal for the configuration it was taken under, the
+// answer is incomplete without it. It is a real widening of what `validate` touches, so
+// two properties are load-bearing and are asserted by their own cases:
+//
+//   - it opens the ledger READ-ONLY, because a validate that migrated an operator's
+//     store as a side effect of describing it would make that file unopenable by the
+//     daemon still running against it (see store.OpenReadOnly);
+//   - a state directory with no ledger in it is not a failure and is not created. A
+//     fresh install has nothing to say here and `validate` must still pass, so this
+//     reports the absence and returns;
+//   - a ledger the PREVIOUS build wrote still yields both figures. That is the
+//     population they matter most for - every row in it records nothing, so the first
+//     scan after an upgrade re-opens the whole terminal set - and reading it needs no
+//     migration, because a schema without the column is a schema under which no row can
+//     have recorded anything (see store.SurveyLedgerDecisionInputs).
+//
+// Nothing here can fail the command. `validate` validates a CONFIGURATION; a ledger that
+// could not be read is reported as unreadable beside a config that is still valid.
+func reportLedgerAgainstConfig(cfg *config.Config, stdout io.Writer) {
+	dbPath := filepath.Join(effectiveStateDir(cfg), "jobs.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		fmt.Fprintf(stdout, "ledger: none at %s yet, so there is nothing to re-open\n", dbPath)
+		return
+	}
+	survey, err := store.SurveyLedgerDecisionInputs(context.Background(), dbPath,
+		engine.DecisionInputsFor(*cfg))
+	if err != nil {
+		fmt.Fprintf(stdout, "ledger: %s could not be read, so what it was decided under cannot be "+
+			"reported here: %v\n", dbPath, err)
+		return
+	}
+	for _, line := range decisionInputsLines(survey) {
+		fmt.Fprintf(stdout, "ledger: %s\n", line)
+	}
 }
 
 // cmdRestore is the operator's half of the undo window (UNDO-6): with no argument it
@@ -185,20 +231,6 @@ func cmdRestore(args []string, stdout, stderr io.Writer) int {
 		return listRetained(context.Background(), undo, cfg, stdout, stderr)
 	}
 	return restoreOne(context.Background(), undo, rest[0], stdout, stderr)
-}
-
-// resolveRestorePath turns what the operator typed into the path the ledger is keyed
-// by. Library roots are absolute (Validate refuses anything else), so every recorded
-// path is too - and an operator standing in their library and typing `ep.mkv` would
-// otherwise get "nothing is retained for that path" about a file that certainly is.
-// An unresolvable path falls back to the input, so the refusal still names something
-// they recognise rather than an error about the current directory.
-func resolveRestorePath(path string) string {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return path
-	}
-	return abs
 }
 
 // listRetained prints what the undo window is holding. Each line states the space that
@@ -249,7 +281,7 @@ func remainingWindow(expiresAt, now int64) string {
 // can trust what it did, and a command that half-restored while reporting a failure
 // would be worse than one that never existed.
 func restoreOne(ctx context.Context, undo *engine.UndoWindow, path string, stdout, stderr io.Writer) int {
-	res, err := undo.Restore(ctx, resolveRestorePath(path))
+	res, err := undo.Restore(ctx, absoluteLedgerPath(path))
 	if err != nil {
 		fmt.Fprintf(stderr, "holdfast: cannot restore %s: %v\n", path, err)
 		return 1
@@ -339,6 +371,28 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 		fmt.Fprintf(stderr, "holdfast: opening job store: %v\n", err)
 		return nil, nil, 1
 	}
+	// What the ledger was decided under, BEFORE anything re-opens: a scan offers every
+	// row whose recorded decision inputs have moved - and every row that records none -
+	// back to the guards, and an operator meeting a burst of activity they did not ask
+	// for is owed the reason in front of it rather than in a log line per file.
+	//
+	// A failure here is reported and survived. It is an announcement about work the scan
+	// is about to do; the scan does that work whether or not it could be counted first,
+	// and refusing to start over an unreadable count would turn a reporting nicety into
+	// an outage.
+	if survey, err := decisionInputsReport(context.Background(), st, cfg); err != nil {
+		log.Warn("could not report what the ledger was decided under (the scan is unaffected)", "err", err)
+	} else {
+		log.Info("ledger against this configuration",
+			"rows_taken_under_a_moved_configuration", survey.Moved,
+			"rows_recording_no_decision_inputs", survey.NotRecorded,
+			"rows_this_scan_reopens", survey.Reopening(),
+			"rows_still_matching", survey.Matching)
+		for _, line := range decisionInputsLines(survey) {
+			log.Info(line)
+		}
+	}
+
 	eng := engine.New(*cfg, prober, enc, st, log)
 	// The startup walk's coverage BOUNDS the run: this scan enumerates sources
 	// from exactly the directories that walk traversed successfully, so a

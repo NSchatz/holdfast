@@ -85,7 +85,7 @@ func seedSkipped(t *testing.T, st *store.SQLite, root string, from, to int) {
 	ctx := context.Background()
 	for i := from; i < to; i++ {
 		p := filepath.Join(root, "history"+strconv.Itoa(i)+".mkv")
-		ok, err := st.Claim(ctx, p, "fp", "w0", 3)
+		ok, err := st.Claim(ctx, p, "fp", "w0", 3, store.DecisionInputs{})
 		if err != nil || !ok {
 			t.Fatalf("seed claim %s: ok=%v err=%v", p, ok, err)
 		}
@@ -229,7 +229,7 @@ func seedOneRowInEveryOtherState(t *testing.T, st *store.SQLite) {
 	ctx := context.Background()
 	claim := func(path string) {
 		t.Helper()
-		ok, err := st.Claim(ctx, path, "fp", "w0", 3)
+		ok, err := st.Claim(ctx, path, "fp", "w0", 3, store.DecisionInputs{})
 		if err != nil || !ok {
 			t.Fatalf("seed claim %s: ok=%v err=%v", path, ok, err)
 		}
