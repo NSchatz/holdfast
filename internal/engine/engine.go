@@ -1319,8 +1319,17 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		// transcode. They change nothing about whether it is re-claimed - a dry-run
 		// decision is always re-claimable (see store.Claim) - so they are here for the
 		// operator reading the row, not for the engine.
+		//
+		// The profile travels on this row like it travels on every other terminal one. A
+		// dry run exists to answer "what would a real run do with this file", and with
+		// encode_profiles configured the honest answer names the profile whose settings
+		// that run would have used - the encoder it would have reached for and the
+		// container it would have written are the profile's, not the top-level ones. ""
+		// says the top-level settings would have run, which is the true answer and not a
+		// missing measurement.
 		out := &store.Outcome{
 			SourceCodec:    codec,
+			Profile:        ts.Profile,
 			Decision:       by,
 			DecisionInputs: e.inputsRead(prof, InputTargetCodec, InputEncoder, InputCRF, InputPreset),
 		}

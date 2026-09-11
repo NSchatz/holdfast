@@ -97,6 +97,9 @@ type vmafProof struct {
 // value, which nothing reads. Every rejection this function does NOT classify explicitly
 // is transient, which is the fail-safe direction: an unrecognised rejection costs CPU,
 // where a wrongly-final one costs a file nobody revisits.
+//
+// # The target codec, and why it is a parameter
+//
 // targetCodec is what THIS JOB's effective encoder produces (targetCodecFor), which is
 // the root's `encoder` unless an encode profile overrode it for this file - so it is
 // passed in rather than derived from prof here: a run can carry more than one target,
