@@ -165,7 +165,7 @@ func (p *Prober) PacketCount(ctx context.Context, f string) (n int, ok bool) {
 // DecodeOK fully decodes EVERY video stream the file carries to null and reports
 // whether they all decode cleanly to the end. `-xerror` exits on the first ERROR;
 // `-err_detect +explode` promotes concealable decode errors (a corrupt frame the HEVC
-// decoder would otherwise silently conceal) to fatal — without it ffmpeg conceals
+// decoder would otherwise silently conceal) to fatal - without it ffmpeg conceals
 // interior corruption and exits 0. It is not a complete corruption detector
 // (random-noise corruption can still decode "clean"); the parity + size + VMAF (later)
 // gates are the complementary layers.
