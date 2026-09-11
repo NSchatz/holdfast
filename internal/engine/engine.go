@@ -1109,8 +1109,15 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		// would have been taken under. They change nothing about whether the row is
 		// re-claimed - a dry-run decision always is - so they are for the operator reading
 		// it, not for the engine.
+		//
+		// The profile travels on this row like it travels on every other terminal one. A dry
+		// run answers "what would a real run do with this file", and with encode_profiles
+		// configured the honest answer names the profile whose settings that run would have
+		// used. "" says the top-level settings would have run, which is the true answer and
+		// not a missing measurement.
 		out := &store.Outcome{
 			SourceCodec:    codec,
+			Profile:        ts.Profile,
 			Decision:       by,
 			DecisionInputs: e.inputsRead(prof, InputTargetCodec, InputEncoder, InputCRF, InputPreset),
 		}

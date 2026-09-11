@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -280,5 +281,50 @@ func TestProfiles_ASkippedJobRecordsTheProfileThatDecidedIt(t *testing.T) {
 	}
 	if out.Profile != "to-av1" {
 		t.Fatalf("the skipped row records profile %q, want to-av1", out.Profile)
+	}
+}
+
+// AC-A10 on the terminal state a dry run produces: `would-transcode` is a terminal
+// row like `done` and `skipped`, so it records which profile supplied the settings
+// the decision was taken under, and "" when the top-level ones did.
+//
+// One run, two sources, so the matched and the unmatched arm are decided by the same
+// configuration and the same pass: an implementation that hard-coded either answer
+// fails one of them. Nothing is encoded on this path, which is the other half of what
+// is asserted here - both files must still be on disk, unchanged, in their original
+// container.
+func TestProfiles_ADryRunDecisionRecordsTheProfileItWouldHaveUsed(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	sub := filepath.Join(d, "4K")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	matched := filepath.Join(sub, "film.mkv")
+	unmatched := filepath.Join(d, "show.mkv")
+	mkH264(t, ffmpeg, matched, "8M")
+	mkH264(t, ffmpeg, unmatched, "8M")
+
+	ts := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
+		c.DryRun = true
+		c.EncodeProfiles = []config.EncodeProfile{
+			{Name: "4k-av1", Match: "**/4K/**", Encoder: strp("svtav1")},
+		}
+	})
+
+	for _, tc := range []struct{ path, profile string }{
+		{matched, "4k-av1"},
+		{unmatched, ""},
+	} {
+		out, status, ok := outcomeFor(t, ts, tc.path)
+		if !ok || status != store.WouldTranscode {
+			t.Fatalf("%s: status = %q (found=%v), want would-transcode", tc.path, status, ok)
+		}
+		if out.Profile != tc.profile {
+			t.Errorf("%s: the dry-run row records profile %q, want %q", tc.path, out.Profile, tc.profile)
+		}
+		if !exists(tc.path) || codecOf(t, ffprobe, tc.path) != "h264" {
+			t.Errorf("%s: a dry run encoded or replaced the source", tc.path)
+		}
 	}
 }

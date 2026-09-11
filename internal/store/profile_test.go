@@ -31,7 +31,7 @@ func TestOutcome_TheProfileThatSuppliedTheSettingsIsOnTheTerminalRow(t *testing.
 		}
 		if err := s.Finish(ctx, tc.path, "fp", tc.status, &Outcome{
 			Encoder: "svtav1", Profile: tc.profile, Reason: "r",
-		}); err != nil {
+		}, 3); err != nil {
 			t.Fatalf("Finish(%s): %v", tc.path, err)
 		}
 	}
@@ -63,7 +63,7 @@ func TestClaim_ARetryClearsThePreviousAttemptsProfile(t *testing.T) {
 	if ok, err := s.Claim(ctx, "/lib/a.mkv", "fp", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("Claim: ok=%v err=%v", ok, err)
 	}
-	if err := s.Finish(ctx, "/lib/a.mkv", "fp", Failed, &Outcome{Profile: "old", Reason: "boom"}); err != nil {
+	if err := s.Finish(ctx, "/lib/a.mkv", "fp", Failed, &Outcome{Profile: "old", Reason: "boom"}, 3); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 	if ok, err := s.Claim(ctx, "/lib/a.mkv", "fp", "w0", 3, sameConfig); err != nil || !ok {
@@ -92,7 +92,7 @@ func TestMigrate_APreProfileDatabaseGainsTheColumnAndReadsAsTopLevel(t *testing.
 	if ok, err := s.Claim(ctx, "/lib/old.mkv", "fp", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("Claim: ok=%v err=%v", ok, err)
 	}
-	if err := s.Finish(ctx, "/lib/old.mkv", "fp", Done, &Outcome{Encoder: "cpu"}); err != nil {
+	if err := s.Finish(ctx, "/lib/old.mkv", "fp", Done, &Outcome{Encoder: "cpu"}, 3); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
 
