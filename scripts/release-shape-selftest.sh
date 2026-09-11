@@ -33,7 +33,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=159
+declared=161
 pass=0; failed=0
 
 repo="$work/repo"
@@ -1602,7 +1602,26 @@ else
     "$(grep -qxF -- "$promote_confirms" <<<"$out" && echo present || echo MISSING)" >&2
   failed=$((failed + 1))
 fi
-REC_INSPECT_LINES= REC_INSPECT_TAIL=
+
+# --- 64b. AND THAT CASE BITES. The mutation puts the inspect back behind a reader that closes
+#          the pipe after twenty lines, which is the defect itself: the promotion's status then
+#          comes from an inspect killed by SIGPIPE instead of from the retag that landed, and
+#          the manifest reaches the log twenty lines deep. Without this case 64a would pass
+#          against any script that exits 0, including one that prints nothing at all.
+sed -i '/^if ! docker buildx imagetools inspect/,/^fi$/c docker buildx imagetools inspect "${image}:${floating}" | head -20' "$repo/scripts/release-promote.sh"
+changed "$repo/scripts/release-promote.sh" "a promotion whose inspect is read through head"
+bit=0
+run_release_script release-promote.sh 0 "a promotion whose inspect is read through head" >/dev/null 2>&1 || bit=1
+if [ "$bit" -eq 1 ] && ! grep -qxF -- "$REC_INSPECT_TAIL" <<<"$out"; then
+  printf '  ok: case 64a bites: an inspect read through `head` exits %s over a retag that landed, and truncates the manifest to %s of %s lines\n' \
+    "$last_status" "$(grep -c -- 'stub-manifest-entry-' <<<"$out")" "$REC_INSPECT_LINES"; pass=$((pass + 1))
+else
+  printf '::error::selftest: case 64a does not bite - an inspect read through `head` exited %s with the last manifest line %s\n' \
+    "$last_status" "$(grep -qxF -- "$REC_INSPECT_TAIL" <<<"$out" && echo present || echo absent)" >&2
+  failed=$((failed + 1))
+fi
+REC_INSPECT_LINES='' REC_INSPECT_TAIL=''
+reset
 
 # --- 65. Its named failure modes, exit code by exit code. Refusing to guess which reference
 #         a release moves is the whole reason FLOATING_TAG is passed in rather than spelled.
@@ -1628,6 +1647,28 @@ else
 fi
 REC_FAIL=
 reset
+
+# --- 66a. THE UNHAPPY PATH DECIDING THE STATUS FROM THE RETAG ALONE CREATES, and the one
+#          loosening it carries: an inspect that FAILS after a retag that took. The retag is
+#          what moved the reference, so the promotion reports success and the release goes on
+#          to the two steps that gate the moved reference - and it SAYS that the manifest could
+#          not be read rather than printing a confirmation over silence. What that reference
+#          actually resolves to is then decided against the registry by the step after this
+#          one (scripts/resolve-compose-image.sh, exit 4 or exit 5), which is the only thing in
+#          the release that can answer it at all.
+S_IMAGE=ghcr.io/nschatz/holdfast S_VERSION=v0.1.0 S_FLOATING=latest S_REF=''
+REC_FAIL='docker buildx imagetools inspect*'
+if run_release_script release-promote.sh 0 "an inspect that fails after a retag that took" \
+   && grep -qE 'could not be inspected' <<<"$out" \
+   && grep -qxF -- "$promote_confirms" <<<"$out" \
+   && recorded "$promote_argv"; then
+  printf '  ok: an inspect that fails after a successful retag still reports success, and says the manifest could not be inspected\n'; pass=$((pass + 1))
+else
+  printf '::error::selftest: a failed inspect after a successful retag did not report success and name what it could not read\n' >&2
+  printf '%s\n' "$out" | sed 's/^/       | /' >&2
+  failed=$((failed + 1))
+fi
+REC_FAIL=
 
 # --- 67. The re-smoke pulls the reference that was PUSHED back out of the registry, for BOTH
 #         architectures, and drives the packaging gate over each. An unqualified `docker
