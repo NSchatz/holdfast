@@ -153,6 +153,15 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 		"-map", "0", "-map", "-0:d?",
 		"-c", "copy", "-c:v", spec.FFmpegCodec,
 	)
+	// An ATTACHED PICTURE is a video stream and `-c:v` above would re-encode it, so each
+	// one is pinned back to copy by its own per-stream option. It must come AFTER the
+	// blanket -c:v, which is what it overrides; `-map 0` preserves stream order, so the
+	// N of an output `v:N` is the N of the source's. A single-video-stream source yields
+	// no such option and therefore byte-identical argv to the encoder that predates this.
+	streams, _ := props.VideoStreams()
+	for _, i := range attachedPictureCopyIndexes(streams) {
+		args = append(args, "-c:v:"+strconv.Itoa(i), "copy")
+	}
 	args = append(args, buildArgs(spec, e.Cfg, pixFmt, colorArgs, x265Color)...)
 	args = append(args, "--", out)
 

@@ -77,7 +77,8 @@ truer than "the only one that checks".
 
 Codec-only, same-content re-encoding (no resolution downscaling); HDR10 **static** metadata is preserved
 but Dolby Vision / HDR10+ dynamic metadata is **detect-and-skipped**; interlaced and exotic-chroma sources
-are **skipped, not converted**. It transcodes files in a library other tools manage (Plex/Jellyfin/*arr) -
+are **skipped, not converted**, and so is a source carrying a second video stream that is not embedded
+artwork (`multi-video-stream` - artwork itself is carried through unencoded). It transcodes files in a library other tools manage (Plex/Jellyfin/*arr) -
 it is not a media server or library manager.
 
 ## Quick start

@@ -57,6 +57,11 @@ type cannedStream struct {
 	formatDuration string // container duration ("" = the container reports none)
 	frameSideData  string // flat=s=. frame side data (verbatim)
 	streamSideData string // flat=s=. stream side data (verbatim)
+	// videoStreams is the VERBATIM `-of csv=p=0` text a real ffprobe prints for the
+	// video-stream/attached-picture query, one `index,attached_pic` row per stream. It is
+	// raw rather than structured on purpose: the thing under test is the PARSE, and a
+	// fixture that handed the parser pre-parsed values would test nothing.
+	videoStreams string
 }
 
 const masteringFlat = `frames.frame.0.side_data_list.side_data.0.side_data_type="Mastering display metadata"
@@ -86,6 +91,34 @@ var scenarios = map[string]cannedStream{
 		codecTag: "avc1", pixFmt: "yuv420p",
 		colorPrimaries: "bt709", colorTransfer: "bt709", colorSpace: "bt709", colorRange: "tv",
 		formatDuration: "6.000000",
+		videoStreams:   "0,0\n",
+	},
+	// An MP4 carrying artwork: the cover is a SECOND video stream with the attached_pic
+	// disposition, which is the shape that makes it dangerous to a blanket -c:v.
+	"cover.mp4": {
+		codecName: "h264", streamBitRate: "8000000", fieldOrder: "progressive",
+		codecTag: "avc1", pixFmt: "yuv420p",
+		colorPrimaries: "bt709", colorTransfer: "bt709", colorSpace: "bt709", colorRange: "tv",
+		formatDuration: "120.000000",
+		videoStreams:   "0,0\n1,1\n",
+	},
+	// Two genuine moving-picture streams: a second angle or a bonus reel muxed in.
+	"twovideo.mkv": {
+		codecName: "h264", streamBitRate: "8000000", fieldOrder: "progressive",
+		codecTag: "avc1", pixFmt: "yuv420p",
+		colorPrimaries: "bt709", colorTransfer: "bt709", colorSpace: "bt709", colorRange: "tv",
+		formatDuration: "120.000000",
+		videoStreams:   "0,0\n2,0\n",
+	},
+	// A row this parser cannot read. ffprobe exiting 0 with output nobody can interpret
+	// is still an answer nobody has, and it must read as "could not establish" rather
+	// than as "no additional stream".
+	"garbled.mkv": {
+		codecName: "h264", streamBitRate: "8000000", fieldOrder: "progressive",
+		codecTag: "avc1", pixFmt: "yuv420p",
+		colorPrimaries: "bt709", colorTransfer: "bt709", colorSpace: "bt709", colorRange: "tv",
+		formatDuration: "120.000000",
+		videoStreams:   "0,0\nN/A,maybe\n",
 	},
 	"hdr10.mkv": {
 		codecName: "hevc", streamBitRate: "20000000", fieldOrder: "progressive",
@@ -203,6 +236,13 @@ func fakeFFprobeMain() {
 		fmt.Print(s.frameSideData)
 	case entries == "stream_side_data_list":
 		fmt.Print(s.streamSideData)
+	case entries == "stream=index:stream_disposition=attached_pic":
+		// The video-stream/attached-picture query. It is answered verbatim rather than
+		// through the key=value machinery below because it is a per-STREAM listing (one
+		// row per stream in csv form), not the single-stream field lookup everything else
+		// here is, and printing it any other way would be a fixture the real ffprobe does
+		// not match.
+		fmt.Print(s.videoStreams)
 	default:
 		for _, section := range strings.Split(entries, ":") {
 			name, fields, ok := strings.Cut(section, "=")
@@ -332,6 +372,93 @@ func TestVideoProps_BitrateContainerFallback(t *testing.T) {
 	vp := p.VideoProps(context.Background(), "/lib/nobr.mkv")
 	if got := vp.BitrateKbps(); got != 6000 {
 		t.Fatalf("BitrateKbps()=%d, want 6000 (6000000 container bit_rate / 1000)", got)
+	}
+}
+
+// TestVideoStreams_ReportsTheShapeOrSaysItCouldNotEstablishIt pins the PARSE the
+// source-shape guard reads, deterministically and without a real ffprobe: which video
+// streams a file carries, which of them are attached pictures, and - the load-bearing
+// half - the difference between "this file carries one video stream" and "I could not
+// find out what this file carries".
+//
+// The distinction is the whole reason the second return value exists. The caller uses
+// this to decide whether a file may be re-encoded and then DELETED, and a shape it could
+// not establish must fail safe rather than fall through to the common answer. A slice
+// that came back empty in both cases would collapse exactly that difference.
+//
+// The real-ffmpeg evidence for the same behaviour - a file really built with a cover
+// picture, really encoded, really swapped - lives in the engine's fixture suite, where
+// the builders and the pinned ffmpeg are. This is the parse, stated in cases a real file
+// cannot be relied on to produce on demand.
+func TestVideoStreams_ReportsTheShapeOrSaysItCouldNotEstablishIt(t *testing.T) {
+	t.Setenv(fakeFFprobeEnv, "1")
+	ctx := context.Background()
+	p := fakeProber()
+
+	cases := []struct {
+		file            string
+		want            []VideoStream
+		wantEstablished bool
+		why             string
+	}{
+		{
+			file: "sdr.mkv", wantEstablished: true,
+			want: []VideoStream{{Index: 0, AttachedPicture: false}},
+			why:  "an ordinary file carries one moving-picture stream",
+		},
+		{
+			file: "cover.mp4", wantEstablished: true,
+			want: []VideoStream{{Index: 0, AttachedPicture: false}, {Index: 1, AttachedPicture: true}},
+			why:  "embedded artwork is a second video stream carrying the attached_pic disposition",
+		},
+		{
+			file: "twovideo.mkv", wantEstablished: true,
+			want: []VideoStream{{Index: 0, AttachedPicture: false}, {Index: 2, AttachedPicture: false}},
+			why: "two moving pictures, and the second sits at container index 2 - the absolute " +
+				"index is not the video-relative one and must not be read as it",
+		},
+		{
+			file: "garbled.mkv", wantEstablished: false, want: nil,
+			why: "a row nobody can interpret leaves the shape unknown, which is not the same as " +
+				"a file with nothing beyond the first stream",
+		},
+		{
+			file: "absent.mkv", wantEstablished: false, want: nil,
+			why: "ffprobe exiting non-zero establishes nothing about what the file carries",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.file, func(t *testing.T) {
+			got, established := p.VideoStreams(ctx, "/lib/"+tc.file)
+			if established != tc.wantEstablished {
+				t.Fatalf("established = %v, want %v - %s", established, tc.wantEstablished, tc.why)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d stream(s) %v, want %d %v - %s", len(got), got, len(tc.want), tc.want, tc.why)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("stream v:%d = %+v, want %+v - %s", i, got[i], tc.want[i], tc.why)
+				}
+			}
+		})
+	}
+
+	// The snapshot and the direct probe must agree, for the same reason every other
+	// accessor is pinned this way: the guards read the snapshot, so a divergence here is a
+	// guard reading a different file from the one the prober describes.
+	for _, name := range []string{"sdr.mkv", "cover.mp4", "twovideo.mkv", "garbled.mkv"} {
+		f := "/lib/" + name
+		gotS, gotOK := p.VideoProps(ctx, f).VideoStreams()
+		wantS, wantOK := p.VideoStreams(ctx, f)
+		if gotOK != wantOK || len(gotS) != len(wantS) {
+			t.Fatalf("%s: snapshot=(%v, %v), prober=(%v, %v)", name, gotS, gotOK, wantS, wantOK)
+		}
+		for i := range wantS {
+			if gotS[i] != wantS[i] {
+				t.Errorf("%s: snapshot stream v:%d = %+v, prober = %+v", name, i, gotS[i], wantS[i])
+			}
+		}
 	}
 }
 
