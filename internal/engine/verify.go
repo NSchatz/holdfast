@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
 	"github.com/NSchatz/holdfast/internal/vmaf"
@@ -68,6 +69,13 @@ type vmafProof struct {
 // score is then thrown away would be re-committing the very defect this phase exists to
 // fix. The proof is the zero value whenever VMAF did not run.
 //
+// prof is the profile of the root the source was enumerated under: every threshold this
+// gate applies - the savings floor and all three VMAF floors - comes from it, and
+// targetCodec is what prof's own `encoder` resolves to, so a film library and a
+// grainy-anime library are each held to the bar their own operator set rather than to one
+// global bar. Nothing about WHAT the gates check moves with the profile; only where each
+// threshold is read from.
+//
 // # The class, and why it is produced HERE
 //
 // Most of what this function refuses is a pure function of three things that do not move
@@ -89,7 +97,7 @@ type vmafProof struct {
 // value, which nothing reads. Every rejection this function does NOT classify explicitly
 // is transient, which is the fail-safe direction: an unrecognised rejection costs CPU,
 // where a wrongly-final one costs a file nobody revisits.
-func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (vmafProof, store.FailureClass, error) {
+func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.Profile, targetCodec string) (vmafProof, store.FailureClass, error) {
 	var none vmafProof
 
 	// 1. exists & non-empty. TRANSIENT: an empty temp is what a full disk, a killed
@@ -102,9 +110,9 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (vmafProof, s
 	// 2. output codec must be the engine's configured target codec (hevc or av1 —
 	// TRANSCODE-6 generalizes this away from a hardcoded "hevc" so a hardware/AV1
 	// encode is held to exactly the same bar as CPU libx265). DETERMINISTIC: the
-	// configured encoder produces the codec it produces.
-	if oc := e.Probe.VideoCodec(ctx, tmp); oc != e.targetCodec {
-		return none, store.FailureDeterministic, fmt.Errorf("output codec is %q, not %s", oc, e.targetCodec)
+	// encoder this root's profile configures produces the codec it produces.
+	if oc := e.Probe.VideoCodec(ctx, tmp); oc != targetCodec {
+		return none, store.FailureDeterministic, fmt.Errorf("output codec is %q, not %s", oc, targetCodec)
 	}
 
 	// 3. length: the encode must not be truncated. lengthParity classifies its own two
@@ -119,9 +127,9 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (vmafProof, s
 	// identical arithmetic on every attempt.
 	sin := probe.FileSize(in)
 	sout := probe.FileSize(tmp)
-	limit := float64(sin) * (1 - float64(e.Cfg.MinSavingsPercent)/100.0)
+	limit := float64(sin) * (1 - float64(prof.MinSavingsPercent)/100.0)
 	if !(sout > 0 && float64(sout) <= limit && sout < sin) {
-		return none, store.FailureDeterministic, fmt.Errorf("size-increase reject (in=%dB out=%dB min_savings=%d%%)", sin, sout, e.Cfg.MinSavingsPercent)
+		return none, store.FailureDeterministic, fmt.Errorf("size-increase reject (in=%dB out=%dB min_savings=%d%%)", sin, sout, prof.MinSavingsPercent)
 	}
 
 	// 5. per-type stream-count parity: no video/audio/subtitle/attachment track dropped.
@@ -159,8 +167,8 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string) (vmafProof, s
 	// proves it still LOOKS like the source. Same resolution (codec-only), so no
 	// scaling. When enabled and libvmaf is unavailable, or the measurement fails, the
 	// encode is REJECTED — never accept an unmeasured output.
-	if e.Cfg.VmafGate() {
-		return e.vmafGate(ctx, tmp, in)
+	if prof.VmafGate() {
+		return e.vmafGate(ctx, tmp, in, prof)
 	}
 	return none, "", nil
 }
@@ -243,8 +251,12 @@ func (e *Engine) lengthParity(ctx context.Context, in, out string) (store.Failur
 // operator who installs a libvmaf-capable build has changed exactly the thing that
 // rejected. The unnameable comparison format is deterministic, because it is decided by
 // the two files' own pixel formats before anything is measured at all.
-func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (vmafProof, store.FailureClass, error) {
-	model := resolveVmafModel(e.Cfg.VmafModel, e.Probe.Height(ctx, distorted))
+//
+// Every floor it applies - the model, the subsample, and all three thresholds - is read
+// off prof, the profile of the root the source was enumerated under, so a root that set a
+// stricter bar is held to its own and not to the top-level one.
+func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof config.Profile) (vmafProof, store.FailureClass, error) {
+	model := resolveVmafModel(prof.VmafModel, e.Probe.Height(ctx, distorted))
 
 	// Name the comparison format BEFORE anything is measured, from the two streams'
 	// own pixel formats. `pixel_format: auto` floors output depth at 10, so an 8-bit
@@ -275,7 +287,7 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (vma
 	res, err := score(ctx, vmaf.Request{
 		Distorted:   distorted,
 		Reference:   reference,
-		Subsample:   e.Cfg.VmafSubsample,
+		Subsample:   prof.VmafSubsample,
 		Model:       model,
 		PixelFormat: pixFmt,
 	})
@@ -292,17 +304,17 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (vma
 		Stream: res.Stream,
 	}
 
-	if res.HarmonicMean < e.Cfg.MinVmaf {
-		return proof, store.FailureDeterministic, fmt.Errorf("VMAF below threshold (harmonic_mean=%.2f < min_vmaf=%.2f)", res.HarmonicMean, e.Cfg.MinVmaf)
+	if res.HarmonicMean < prof.MinVmaf {
+		return proof, store.FailureDeterministic, fmt.Errorf("VMAF below threshold (harmonic_mean=%.2f < min_vmaf=%.2f)", res.HarmonicMean, prof.MinVmaf)
 	}
 	// The worst-frame floor. On by default (vmaf_min_pool=60): a locally-broken
 	// encode is invisible to the mean above and to every structural check, so this
 	// is the only gate standing between it and the deletion of the source.
-	if e.Cfg.VmafMinPool > 0 && res.Min < e.Cfg.VmafMinPool {
+	if prof.VmafMinPool > 0 && res.Min < prof.VmafMinPool {
 		return proof, store.FailureDeterministic, fmt.Errorf(
 			"VMAF worst-frame below floor (min=%.2f < vmaf_min_pool=%.2f) — the encode is locally broken: "+
 				"its average is fine (harmonic_mean=%.2f) but at least one frame collapsed, so the source is kept",
-			res.Min, e.Cfg.VmafMinPool, res.HarmonicMean)
+			res.Min, prof.VmafMinPool, res.HarmonicMean)
 	}
 	// The chroma floor (GATE-4). Everything above this line is LUMA: the VMAF model
 	// extracts luma features only, so an output whose colour planes were flattened,
@@ -313,12 +325,12 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (vma
 	// ~40 dB to ~26 dB. Only this sees it. The reason NAMES the metric and the floor,
 	// because "rejected" without them sends an operator to the logs to find out which
 	// of three gates fired.
-	if e.Cfg.VmafMinChroma > 0 && res.ChromaMin < e.Cfg.VmafMinChroma {
+	if prof.VmafMinChroma > 0 && res.ChromaMin < prof.VmafMinChroma {
 		return proof, store.FailureDeterministic, fmt.Errorf(
 			"chroma below floor (%s=%.2f < vmaf_min_chroma=%.2f) - the encode is damaged in its COLOUR "+
 				"planes: its luma is fine (harmonic_mean=%.2f, worst frame=%.2f) and the VMAF model is "+
 				"luma-only, so nothing else would have seen this; the source is kept",
-			res.ChromaMetric, res.ChromaMin, e.Cfg.VmafMinChroma, res.HarmonicMean, res.Min)
+			res.ChromaMetric, res.ChromaMin, prof.VmafMinChroma, res.HarmonicMean, res.Min)
 	}
 	return proof, "", nil
 }

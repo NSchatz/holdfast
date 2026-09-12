@@ -528,7 +528,13 @@ func (u *UndoWindow) recordRestoreInJobs(ctx context.Context, r store.Retained) 
 		u.Log.Warn("could not prune the done row of the encode a restore removed", "path", r.SwappedPath, "err", err)
 	}
 	key := probe.Fingerprint(r.SourcePath)
-	if _, err := u.Store.RecordSkip(ctx, r.SourcePath, key, SkipRestoredOriginal); err != nil {
+	// No deciding profile is recorded, and that is the honest value rather than an
+	// omission. Every other terminal row names the library profile that JUDGED the file;
+	// this one was not judged by a profile at all - an operator put the original back,
+	// through a command no gate and no knob took part in. Naming the root the file
+	// happens to sit under, and digesting whatever that root's profile currently says,
+	// would attribute this row to a decision nothing made.
+	if _, err := u.Store.RecordSkip(ctx, r.SourcePath, key, SkipRestoredOriginal, store.Decision{}); err != nil {
 		u.Log.Warn("could not record the restore in the job ledger", "path", r.SourcePath, "err", err)
 	}
 }

@@ -105,15 +105,11 @@ type Engine struct {
 	Store store.Store
 	Log   *slog.Logger
 
-	// targetCodec is what ffprobe should report codec_name as for a SUCCESSFUL
-	// output — "hevc" for the cpu/nvenc/qsv/vaapi/amf encoders, "av1" for
-	// svtav1/av1_nvenc. Set in New from encoder.Lookup(cfg.Encoder).TargetCodec,
-	// defaulting "hevc" for an unknown/empty key (Validate rejects an unknown
-	// encoder before the engine is ever built, so this default is a defensive
-	// fallback, not a real code path). Drives the skip-already-target guard
-	// (ProcessFile) and the output-codec check (verifyOutput) — TRANSCODE-6
-	// generalizes both away from a hardcoded "hevc".
-	targetCodec string
+	// roots are the library roots with their RESOLVED profiles, read from Cfg once in
+	// New. A file's profile comes from the root it was enumerated under (rootFor), and
+	// nested roots are refused at validate time, so exactly one root can ever contain a
+	// path and the answer needs no precedence rule.
+	roots []config.Root
 
 	// staticMetadataIncomplete, when non-nil, replaces hdr.StaticMetadataIncomplete
 	// for the HDR10 static-metadata guard. Unexported test seam (mirrors the bash
@@ -330,15 +326,25 @@ func (e *Engine) emit(ev Event) {
 // makes when it coalesces events and drops frames for a slow subscriber.
 const progressEmitInterval = time.Second
 
-// encode runs the configured Encoder over one file, collecting live progress when there
-// is both an Encoder that can report it and an Observer to receive it. Anything else
-// falls straight through to Encode — an Encoder with no progress capability is not a
-// failure, it is a job whose progress is simply never reported, which is a state the
-// reporting surface already has to handle.
-func (e *Engine) encode(ctx context.Context, worker, in, out string, props *probe.VideoProps) error {
-	pe, ok := e.Enc.(ProgressEncoder)
+// encode runs the configured Encoder over one file UNDER prof - the profile of the root
+// the file was enumerated under - collecting live progress when there is both an Encoder
+// that can report it and an Observer to receive it. Anything else falls straight through
+// to Encode — an Encoder with no progress capability is not a failure, it is a job whose
+// progress is simply never reported, which is a state the reporting surface already has
+// to handle.
+//
+// The profile is applied FIRST and to the Encoder itself, through ProfileEncoder, so
+// what runs is an encoder built from that root's knobs rather than one that is told
+// about them afterwards. An Encoder that is not profile-aware (a test's deterministic
+// fake) encodes from whatever it was constructed with, exactly as before.
+func (e *Engine) encode(ctx context.Context, worker, in, out string, props *probe.VideoProps, prof config.Profile) error {
+	enc := e.Enc
+	if pe, ok := enc.(ProfileEncoder); ok {
+		enc = pe.ForProfile(prof)
+	}
+	pe, ok := enc.(ProgressEncoder)
 	if !ok || e.Observer == nil {
-		return e.Enc.Encode(ctx, in, out, props)
+		return enc.Encode(ctx, in, out, props)
 	}
 	return pe.EncodeWithProgress(ctx, in, out, props, e.progressSink(worker, in, sourceDuration(props)))
 }
@@ -413,7 +419,40 @@ func New(cfg config.Config, p *probe.Prober, enc Encoder, st store.Store, log *s
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Engine{Cfg: cfg, Probe: p, Enc: enc, Store: st, Log: log, targetCodec: targetCodecFor(cfg)}
+	return &Engine{Cfg: cfg, Probe: p, Enc: enc, Store: st, Log: log, roots: cfg.RootProfiles()}
+}
+
+// rootFor answers the one question every decision below depends on: which library root
+// was this file enumerated under, and therefore which profile decides it.
+//
+// It is asked ONCE per file, at the top of ProcessFile, and the answer is threaded
+// through the rest of it - so a file cannot be guarded by one root's bitrate floor and
+// encoded at another root's crf.
+//
+// Nested roots are refused by config.Validate, so at most one root can contain a path
+// and this needs no longest-prefix rule for a reader to check. A path under NO
+// configured root - which production never produces, because enumeration only ever walks
+// the roots - falls back to the top-level profile, which is exactly what every file got
+// before profiles existed, and records no root rather than inventing one.
+func (e *Engine) rootFor(path string) (config.Root, bool) {
+	for _, r := range e.roots {
+		if r.Contains(path) {
+			return r, true
+		}
+	}
+	return config.Root{Profile: e.Cfg.TopLevelProfile()}, false
+}
+
+// decidedBy is what a terminal row records about the profile that judged the file: the
+// cleaned root, and a digest of that root's resolved knobs. A file under no configured
+// root records NO root - the digest still describes the profile that actually decided
+// it, and a fabricated root would be worse than an absent one.
+func decidedBy(root config.Root, known bool) store.Decision {
+	d := store.Decision{ProfileDigest: root.Profile.Digest()}
+	if known {
+		d.LibraryRoot = root.Clean
+	}
+	return d
 }
 
 // RunOneshot discards orphaned temps from any prior killed run, resets any job left
@@ -945,6 +984,22 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		return nil
 	}
 
+	// WHICH PROFILE DECIDES THIS FILE, resolved ONCE, here, from the root it was
+	// enumerated under - and threaded through everything below. Every knob that decides
+	// what happens to a source is read off prof from this point on: the hardlink guard,
+	// the bitrate floor, the pixel-format derivation, the output container, the encode's
+	// own argv and every gate in verifyOutput. Resolving it once is what makes that
+	// consistent by construction; re-deriving it at each use would let a file be guarded
+	// by one root's floor and encoded at another root's crf.
+	//
+	// It sits on the DOOR rather than in the scan for the same reason the hold-back
+	// re-checks above do: ProcessFile is exported and is the only way into the
+	// encode/swap pipeline, so the rule belongs where the pipeline begins.
+	root, rooted := e.rootFor(f)
+	prof := root.Profile
+	by := decidedBy(root, rooted)
+	targetCodec := targetCodecFor(prof)
+
 	key := probe.Fingerprint(f)
 
 	// The undo window's own guard is MUTABLE (UNDO-6): a retention that could not be
@@ -977,10 +1032,10 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// reading only the count, would park the very file the window was protecting.
 	// Discounting is proved per link (same inode, live retention record), never
 	// assumed from the count, so a foreign extra link still skips exactly as it did.
-	if e.Cfg.HardlinkSkip() {
+	if prof.HardlinkSkip() {
 		if links := probe.NLink(f); links > 1 && links > 1+e.retainedLinks(ctx, f, key) {
 			e.Log.Info("skip (hardlinked — swap would break a seed and reclaim nothing)", "file", f, "links", links)
-			changed, err := e.Store.RecordSkip(ctx, f, key, SkipHardlinked)
+			changed, err := e.Store.RecordSkip(ctx, f, key, SkipHardlinked, by)
 			if err != nil {
 				// Fail safe: recording the skip is a reporting nicety, never the decision.
 				// If the store hiccups, still skip the file (the point of the guard) — the
@@ -990,7 +1045,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 				// Emit once, only when the skip was newly recorded, so a live client
 				// (and the metrics/notify observers) see this skip exactly once — not
 				// once per scan for the lifetime of the seed.
-				e.emit(Event{Path: f, Status: store.Skipped, Outcome: e.because(SkipHardlinked)})
+				e.emit(Event{Path: f, Status: store.Skipped, Outcome: e.because(SkipHardlinked, by, prof)})
 			}
 			return nil
 		}
@@ -1009,7 +1064,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// ENOSPC/OOM must not exclude a file forever); active (probing/encoding/verifying)
 	// means another worker holds it (or it's stale, awaiting the next RunOneshot's
 	// RecoverStale). Any of these => not claimed => nothing to do here.
-	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures, e.currentInputs())
+	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures, e.inputsFor(prof))
 	if err != nil {
 		// Fail safe: a store error must never be treated as "done". Log and skip
 		// this pass; the file is retried on the next scan once the store recovers.
@@ -1034,7 +1089,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// logged reason, never swapped in place.
 	if probe.IsSymlink(f) {
 		e.Log.Info("skip (symlinked source — swap would replace the link, orphaning its target)", "file", f)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipSymlink))
+		e.finish(ctx, f, key, store.Skipped, e.because(SkipSymlink, by, prof))
 		return nil
 	}
 
@@ -1053,18 +1108,18 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	codec := props.Codec()
 	if codec == "" {
 		e.Log.Info("skip (unreadable / no video stream)", "file", f)
-		e.finish(ctx, f, key, store.Failed, e.because(FailUnreadable))
+		e.finish(ctx, f, key, store.Failed, e.because(FailUnreadable, by, prof))
 		return nil
 	}
-	if e.isAlreadyTargetCodec(codec) {
-		e.Log.Info("skip (already at target codec)", "file", f, "codec", codec, "target", e.targetCodec)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipAlreadyTargetCodec, InputTargetCodec))
+	if isAlreadyTargetCodec(targetCodec, codec) {
+		e.Log.Info("skip (already at target codec)", "file", f, "codec", codec, "target", targetCodec)
+		e.finish(ctx, f, key, store.Skipped, e.because(SkipAlreadyTargetCodec, by, prof, InputTargetCodec))
 		return nil
 	}
 
-	if br := props.BitrateKbps(); br > 0 && br < e.Cfg.MinBitrateKbps {
-		e.Log.Info("skip (low bitrate)", "file", f, "kbps", br, "min", e.Cfg.MinBitrateKbps)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipLowBitrate, InputMinBitrateKbps))
+	if br := props.BitrateKbps(); br > 0 && br < prof.MinBitrateKbps {
+		e.Log.Info("skip (low bitrate)", "file", f, "kbps", br, "min", prof.MinBitrateKbps, "library_root", root.Clean)
+		e.finish(ctx, f, key, store.Skipped, e.because(SkipLowBitrate, by, prof, InputMinBitrateKbps))
 		return nil
 	}
 
@@ -1074,7 +1129,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	switch props.FieldOrder() {
 	case "tt", "bb", "tb", "bt":
 		e.Log.Info("skip (interlaced — not deinterlacing)", "file", f)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipInterlaced))
+		e.finish(ctx, f, key, store.Skipped, e.because(SkipInterlaced, by, prof))
 		return nil
 	}
 
@@ -1089,11 +1144,11 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	switch hdr.ClassFrom(props.CodecTag(), props.SideData(), props.Color("color_transfer")) {
 	case hdr.ClassDV:
 		e.Log.Info("skip (Dolby Vision — RPU cannot survive a generic re-encode)", "file", f)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipDolbyVision))
+		e.finish(ctx, f, key, store.Skipped, e.because(SkipDolbyVision, by, prof))
 		return nil
 	case hdr.ClassHDR10Plus:
 		e.Log.Info("skip (HDR10+ dynamic metadata — cannot survive a generic re-encode)", "file", f)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipHDR10Plus))
+		e.finish(ctx, f, key, store.Skipped, e.because(SkipHDR10Plus, by, prof))
 		return nil
 	case hdr.ClassHDR10:
 		// HDR10 static metadata IS carried through the encode — but if the source
@@ -1107,7 +1162,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		}
 		if incomplete(props.FrameSideData()) {
 			e.Log.Info("skip (HDR10 static metadata present but incomplete/unparseable — refusing to re-encode and drop it)", "file", f)
-			e.finish(ctx, f, key, store.Skipped, e.because(SkipIncompleteHDRMetadata))
+			e.finish(ctx, f, key, store.Skipped, e.because(SkipIncompleteHDRMetadata, by, prof))
 			return nil
 		}
 	}
@@ -1116,11 +1171,11 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// bit-depth at 10; an unrecognized/exotic pix_fmt is SKIPPED rather than
 	// silently subsampled or guessed. A forced (non-"auto") PixelFormat bypasses
 	// derivation entirely (back-compat).
-	if e.Cfg.PixelFormatAuto() {
+	if prof.PixelFormatAuto() {
 		srcPixFmt := props.PixFmt()
 		if _, ok := hdr.DerivePixFmt(srcPixFmt); !ok {
 			e.Log.Info("skip (unrecognized/exotic pixel format — refusing to silently subsample)", "file", f, "pix_fmt", srcPixFmt)
-			e.finish(ctx, f, key, store.Skipped, e.because(SkipExoticPixelFormat, InputPixelFormat))
+			e.finish(ctx, f, key, store.Skipped, e.because(SkipExoticPixelFormat, by, prof, InputPixelFormat))
 			return nil
 		}
 	}
@@ -1147,7 +1202,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	if !established || !carriableVideoStreams(streams) {
 		e.Log.Info("skip (a video stream beyond the first that is not an attached picture, or a stream shape the probe could not establish)",
 			"file", f, "video_streams", len(streams), "probe_established", established)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipMultiVideoStream))
+		e.finish(ctx, f, key, store.Skipped, e.because(SkipMultiVideoStream, by, prof))
 		return nil
 	}
 
@@ -1155,8 +1210,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// extension (in-place transcode) so a stream type that doesn't round-trip
 	// through a different container (e.g. MP4 mov_text into MKV) isn't forced to
 	// change. A forced ContainerExt overrides this.
-	outExt := e.Cfg.ContainerExt
-	if e.Cfg.ContainerMatchesSource() {
+	outExt := prof.ContainerExt
+	if prof.ContainerMatchesSource() {
 		outExt = strings.TrimPrefix(filepath.Ext(f), ".")
 	}
 
@@ -1182,7 +1237,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	if final != f {
 		if _, err := os.Lstat(final); err == nil {
 			e.Log.Info("skip (target already exists as a distinct file — refusing to clobber)", "file", f, "target", final)
-			e.finish(ctx, f, key, store.Skipped, e.because(SkipTargetExists, InputContainerExt))
+			e.finish(ctx, f, key, store.Skipped, e.because(SkipTargetExists, by, prof, InputContainerExt))
 			return nil
 		}
 	}
@@ -1219,7 +1274,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		// operator reading the row, not for the engine.
 		out := &store.Outcome{
 			SourceCodec:    codec,
-			DecisionInputs: e.inputsRead(InputTargetCodec, InputEncoder, InputCRF, InputPreset),
+			Decision:       by,
+			DecisionInputs: e.inputsRead(prof, InputTargetCodec, InputEncoder, InputCRF, InputPreset),
 		}
 		if st, err := os.Stat(f); err == nil {
 			out.SourceBytes = ptr(st.Size())
@@ -1244,10 +1300,11 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	tmp, err := e.pickTempPath(ctx, dir, stem, outExt)
 	if err != nil {
 		e.Log.Warn("FAIL (no free temp path beside the source, source untouched)", "file", f, "err", err)
-		e.finish(ctx, f, key, store.Failed, &store.Outcome{Reason: err.Error()})
+		e.finish(ctx, f, key, store.Failed, &store.Outcome{Reason: err.Error(), Decision: by})
 		return nil
 	}
-	e.Log.Info("transcode", "file", f, "codec", codec, "-> ", e.targetCodec, "worker", worker)
+	e.Log.Info("transcode", "file", f, "codec", codec, "-> ", targetCodec, "worker", worker,
+		"library_root", root.Clean, "crf", prof.CRF, "encoder", prof.Encoder)
 	e.advance(ctx, f, key, store.Encoding)
 
 	// out is the PROOF, accumulated as the pipeline learns each fact (TRANSCODE-13).
@@ -1255,10 +1312,10 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// Observer, so the ledger and the live UI cannot disagree about what happened.
 	// From here on the file has reached the encoder, so the encoder is attributable —
 	// on a failure as much as on a success.
-	out := &store.Outcome{Encoder: e.Cfg.Encoder}
+	out := &store.Outcome{Encoder: prof.Encoder, Decision: by}
 
 	encStart := time.Now()
-	if err := e.encode(ctx, worker, f, tmp, props); err != nil {
+	if err := e.encode(ctx, worker, f, tmp, props, prof); err != nil {
 		if ctx.Err() != nil { // interrupted: discard temp, DON'T finish — leave active for RecoverStale
 			_ = os.Remove(tmp)
 			return ctx.Err()
@@ -1273,7 +1330,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	out.EncodeMs = ptr(encodeDur.Milliseconds())
 
 	e.advance(ctx, f, key, store.Verifying)
-	proof, class, reason := e.verifyOutput(ctx, f, tmp)
+	proof, class, reason := e.verifyOutput(ctx, f, tmp, prof, targetCodec)
 	// Record whatever VMAF measured, on the reject path too: the numbers that rejected
 	// an encode are exactly the ones an operator wants to see, and a rejection whose
 	// score is thrown away is the defect this phase exists to fix.
@@ -1399,7 +1456,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			e.Log.Info("skip (the original could not be retained, so the swap could not be undone — source untouched)",
 				"file", f, "err", rerr)
 			_ = os.Remove(tmp)
-			e.finish(ctx, f, key, store.Skipped, e.because(SkipUndoRetentionFailed))
+			e.finish(ctx, f, key, store.Skipped, e.because(SkipUndoRetentionFailed, by, prof))
 			return nil
 		}
 		retained = r
@@ -1606,7 +1663,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// halves of that - the mtime did not move, the size did - so this comment cannot
 	// quietly stop being true.
 	finalKey := probe.Fingerprint(final)
-	if _, err := e.Store.Claim(ctx, final, finalKey, worker, e.Cfg.MaxFailures, e.currentInputs()); err != nil {
+	if _, err := e.Store.Claim(ctx, final, finalKey, worker, e.Cfg.MaxFailures, e.inputsFor(prof)); err != nil {
 		e.Log.Warn("claim of final key failed (done outcome still applies on disk)", "file", final, "err", err)
 	}
 	// What this encode was taken under: the codec it targeted and the three settings
@@ -1614,7 +1671,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// is the permanent answer about the replacement - and the moment any of the four
 	// moves, the answer is one this build would no longer give, so the next scan offers
 	// the file back to the guards rather than skipping it for ever.
-	out.DecisionInputs = e.inputsRead(InputTargetCodec, InputEncoder, InputCRF, InputPreset)
+	out.DecisionInputs = e.inputsRead(prof, InputTargetCodec, InputEncoder, InputCRF, InputPreset)
 	// Record the terminal Done state in the store WITHOUT emitting (finishStore), then
 	// emit ONE rich Done event carrying the same proof. Emitting exactly once here
 	// (rather than a generic finish emit plus a separate rich one) keeps a metrics
@@ -1672,9 +1729,10 @@ func (e *Engine) finish(ctx context.Context, path, key string, s store.Status, o
 	e.emit(Event{Path: path, Status: s, Outcome: o})
 }
 
-// because builds the Outcome a guard records: WHICH guard fired, and the current value
-// of the configuration keys that guard READ to decide it. Skips happen before the encoder
-// runs, so there is nothing else to prove about them.
+// because builds the Outcome a guard records: WHICH guard fired, WHICH library profile
+// the guard was reading when it fired, and the value that profile gave for each
+// configuration key the guard READ. Skips happen before the encoder runs, so there is
+// nothing else to prove about them.
 //
 // The inputs are what make the verdict re-derivable instead of permanent: a low-bitrate
 // skip records the threshold it compared against, so lowering that threshold offers the
@@ -1682,8 +1740,14 @@ func (e *Engine) finish(ctx context.Context, path, key string, s store.Status, o
 // where it is. A guard that read NO configuration is called with no keys and records the
 // empty set - which is a record, and is why a verdict nothing can move is not re-opened on
 // every scan for ever.
-func (e *Engine) because(reason string, read ...string) *store.Outcome {
-	return &store.Outcome{Reason: reason, DecisionInputs: e.inputsRead(read...)}
+//
+// The threshold it compared against is the one on ITS OWN ROOT, which is why prof is a
+// parameter rather than read off e.Cfg: the same file skips under one root's
+// min_bitrate_kbps and proceeds under another's, and a row recording the top-level value
+// would name a number no guard ever looked at. by carries the same answer in the form a
+// reader of the ledger asks it - which root, and what that root's knobs resolved to.
+func (e *Engine) because(reason string, by store.Decision, prof config.Profile, read ...string) *store.Outcome {
+	return &store.Outcome{Reason: reason, Decision: by, DecisionInputs: e.inputsRead(prof, read...)}
 }
 
 // finalVerdictPrefix precedes the gate's own text on a failure no retry can change. It
@@ -1748,17 +1812,21 @@ func logText(s string) string {
 	return s
 }
 
-// isAlreadyTargetCodec reports whether a source's probed video codec already IS
-// the engine's configured target codec, generalizing the pre-TRANSCODE-6 hardcoded
+// isAlreadyTargetCodec reports whether a source's probed video codec already IS the
+// target codec of the profile deciding it, generalizing the pre-TRANSCODE-6 hardcoded
 // "already HEVC" check: for an hevc target, "hevc" and its legacy ffprobe alias
 // "h265" both count; for an av1 target, "av1" counts. A source already at the
 // target is skipped rather than pointlessly re-encoded.
-func (e *Engine) isAlreadyTargetCodec(codec string) bool {
-	switch e.targetCodec {
+//
+// The target is a parameter rather than engine state because `encoder` is a per-root
+// knob: one root may re-encode to hevc while another re-encodes to av1, and asking about
+// the wrong one would skip every av1 file under an av1 root as already done.
+func isAlreadyTargetCodec(target, codec string) bool {
+	switch target {
 	case "hevc":
 		return codec == "hevc" || codec == "h265"
 	default:
-		return codec == e.targetCodec
+		return codec == target
 	}
 }
 

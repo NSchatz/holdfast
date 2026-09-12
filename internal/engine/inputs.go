@@ -33,48 +33,72 @@ const (
 	InputTargetCodec = "target_codec"
 )
 
-// DecisionInputsFor is every decision input this configuration offers: the one place the
-// value of each key is read, so the value a guard RECORDS and the value a later scan
-// COMPARES it against cannot come from two different readings of the same key.
+// DecisionInputsForProfile is every decision input ONE RESOLVED PROFILE offers: the one
+// place the value of each key is read, so the value a guard RECORDS and the value a later
+// scan COMPARES it against cannot come from two different readings of the same key.
+//
+// The unit is a profile rather than the whole configuration because every key above is a
+// per-root knob: two roots may run different encoders at different CRFs behind one
+// `crf:` at the top level. A row decided under a root's profile has to record what THAT
+// decision read, or the row says it read a value no guard ever looked at - and the
+// re-derivation built on it would re-open a library whose profile never moved while
+// leaving alone the one that did.
+func DecisionInputsForProfile(prof config.Profile) store.DecisionInputs {
+	return store.InputsRead(map[string]string{
+		InputTargetCodec:    targetCodecFor(prof),
+		InputEncoder:        prof.Encoder,
+		InputCRF:            strconv.Itoa(prof.CRF),
+		InputPreset:         prof.Preset,
+		InputPixelFormat:    prof.PixelFormat,
+		InputMinBitrateKbps: strconv.Itoa(prof.MinBitrateKbps),
+		InputContainerExt:   prof.ContainerExt,
+	})
+}
+
+// DecisionInputsFor is the TOP-LEVEL profile's decision inputs: what a root that
+// overrides nothing decides by, and what a configuration with no per-root profile at all
+// decides every file by.
 //
 // It is a package function rather than a method because `holdfast validate` has to
 // answer the same question with no engine, no ffmpeg and no store open for writing.
 func DecisionInputsFor(cfg config.Config) store.DecisionInputs {
-	return store.InputsRead(map[string]string{
-		InputTargetCodec:    targetCodecFor(cfg),
-		InputEncoder:        cfg.Encoder,
-		InputCRF:            strconv.Itoa(cfg.CRF),
-		InputPreset:         cfg.Preset,
-		InputPixelFormat:    cfg.PixelFormat,
-		InputMinBitrateKbps: strconv.Itoa(cfg.MinBitrateKbps),
-		InputContainerExt:   cfg.ContainerExt,
-	})
+	return DecisionInputsForProfile(cfg.TopLevelProfile())
 }
 
-// targetCodecFor resolves the encoder key to the codec a successful output must be in,
-// defaulting to hevc for an unknown or empty key exactly as New does (Validate rejects an
-// unknown encoder long before either is reached, so the default is a fallback and not a
-// live path).
-func targetCodecFor(cfg config.Config) string {
-	if spec, ok := encoder.Lookup(cfg.Encoder); ok {
+// targetCodecFor is what ffprobe should report codec_name as for a SUCCESSFUL output
+// under this profile - "hevc" for the cpu/nvenc/qsv/vaapi/amf encoders, "av1" for
+// svtav1/av1_nvenc. It defaults to "hevc" for an unknown or empty key (Validate rejects
+// an unknown encoder before the engine is ever built, so the default is a fallback and
+// not a live path).
+//
+// It is PER PROFILE because `encoder` is: one root may re-encode to hevc while another
+// re-encodes to av1, and the skip-already-target guard and the output-codec check must
+// each ask about the encoder that root actually uses. Asking about the top-level encoder
+// would skip every av1 file under an av1 root as "already at target" and reject every
+// hevc output under an hevc root.
+func targetCodecFor(prof config.Profile) string {
+	if spec, ok := encoder.Lookup(prof.Encoder); ok {
 		return spec.TargetCodec
 	}
 	return "hevc"
 }
 
-// currentInputs is what this engine's configuration offers right now, handed to every
-// Claim so a terminal row is measured against the configuration in force rather than
-// treated as a permanent answer.
-func (e *Engine) currentInputs() store.DecisionInputs { return DecisionInputsFor(e.Cfg) }
+// inputsFor is what the profile deciding THIS file offers right now, handed to its Claim
+// so a terminal row is measured against the configuration in force for its own root
+// rather than treated as a permanent answer.
+func (e *Engine) inputsFor(prof config.Profile) store.DecisionInputs {
+	return DecisionInputsForProfile(prof)
+}
 
-// inputsRead is the record ONE decision writes: the current value of exactly the keys
-// that decision read, and no others. Called with no keys it records the empty set, which
-// is a record (a verdict no configuration change can move) and not an absence.
+// inputsRead is the record ONE decision writes: the current value, under the profile that
+// decided it, of exactly the keys that decision read, and no others. Called with no keys
+// it records the empty set, which is a record (a verdict no configuration change can
+// move) and not an absence.
 //
-// The values are taken from currentInputs rather than re-read from the config, which is
-// what makes "recorded under" and "still matches" the same reading of the same key.
-func (e *Engine) inputsRead(keys ...string) store.DecisionInputs {
-	current := e.currentInputs()
+// The values are taken from inputsFor rather than re-read from the config, which is what
+// makes "recorded under" and "still matches" the same reading of the same key.
+func (e *Engine) inputsRead(prof config.Profile, keys ...string) store.DecisionInputs {
+	current := e.inputsFor(prof)
 	read := make(map[string]string, len(keys))
 	for _, k := range keys {
 		if v, ok := current.Value(k); ok {

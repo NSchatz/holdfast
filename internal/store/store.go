@@ -297,6 +297,34 @@ type Outcome struct {
 	// RECORDED, which is what every row written before the column existed carries and
 	// what a failure - a verdict the configuration did not determine - carries too.
 	DecisionInputs DecisionInputs
+
+	// Decision names the library profile that decided this file. It is embedded so a
+	// reader asks a row for o.LibraryRoot exactly as it asks for o.Encoder.
+	Decision
+}
+
+// Decision names the library profile a row was decided under: which root's profile
+// supplied the knobs the file was judged by, and what those knobs resolved to.
+//
+// It exists because a library root now carries its own encoder, crf, bitrate floor and
+// VMAF floors, so "what was this file judged by" stopped being answerable from the
+// configuration: the file has several profiles to choose from and the row had none. And
+// it is a TYPE rather than two more strings in an argument list, because two adjacent
+// strings is precisely the call that silently swaps, and a row naming its digest as its
+// root would be worse than one naming neither.
+//
+// LibraryRoot is the CLEANED path of the root the file was enumerated under.
+// ProfileDigest identifies that root's RESOLVED knob values, and it is what keeps the
+// row interpretable after the profile has been edited: the path alone would go on naming
+// a root that now means something else. Rows decided under identical resolved values
+// carry the same digest; any different value carries a different one.
+//
+// "" is NOT RECORDED, the rule every string on an Outcome keeps, and it is what a row
+// written by an earlier build reads as. It is never a fabricated root and never a digest
+// of whatever the configuration happens to say now.
+type Decision struct {
+	LibraryRoot   string
+	ProfileDigest string
 }
 
 // GuardRestoredOriginal is the one skip-guard token this package has to know by name.
@@ -852,7 +880,11 @@ type Store interface {
 	// a row (not on the idempotent re-run where the skipped row already exists), so a
 	// caller emits an event — and a metrics/notify observer counts the skip — exactly
 	// once, not once per scan.
-	RecordSkip(ctx context.Context, path, fingerprint, reason string) (changed bool, err error)
+	//
+	// by is the library profile that decided the skip, recorded on the row for the same
+	// reason Finish records it: a skipped row is a terminal record of a decision, and
+	// the guard that produced this one (skip_hardlinked) is itself per root.
+	RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision) (changed bool, err error)
 
 	// ClearSkip deletes the row for path+fingerprint ONLY when it is a Skipped row
 	// whose reason matches — the re-evaluation half of a MUTABLE guard. The hardlink

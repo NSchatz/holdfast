@@ -27,7 +27,6 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
 
-	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/schedule"
 )
 
@@ -102,9 +101,25 @@ func defaultLayer() map[string]any {
 // Config via koanf's defaults layer (defaultLayer) — the single source of defaults.
 type Config struct {
 	// LibraryRoots are the directory trees the tool scans and re-encodes files
-	// under. It is the ONLY place the tool ever mutates the filesystem, so it is
-	// validated strictly (see Validate).
+	// under, AS CONFIGURED. It is the ONLY place the tool ever mutates the
+	// filesystem, so it is validated strictly (see Validate).
+	//
+	// An entry in the file may be a plain path or a mapping carrying that path plus a
+	// profile (see profile.go); either way this list carries the paths and Roots
+	// carries what each of them resolved to.
 	LibraryRoots []string `yaml:"library_roots"`
+
+	// Roots are the library roots with their RESOLVED per-root profiles, in the order
+	// they were configured. Load always populates it, one entry per LibraryRoots
+	// entry, and it is what Validate, Warnings and the engine read to learn what
+	// decides a file under a given root.
+	//
+	// It is not a config key and is never decoded from one: a profile lives INSIDE a
+	// library_roots entry, so there is nothing at the top level for this field to be
+	// read from. A Config assembled by hand rather than by Load leaves it nil, and
+	// RootProfiles then derives one root per LibraryRoots entry carrying the top-level
+	// values - which is exactly the single-policy behaviour this generalizes.
+	Roots []Root `yaml:"-"`
 
 	// LogLevel controls verbosity: debug|info|warn|error (default info).
 	LogLevel string `yaml:"log_level"`
@@ -422,12 +437,12 @@ func (c *Config) UndoWindow() time.Duration {
 }
 
 // VmafGate reports whether the VMAF gate is enabled, defaulting to true when unset.
-func (c *Config) VmafGate() bool { return c.VmafEnable == nil || *c.VmafEnable }
+func (c *Config) VmafGate() bool { return vmafGate(c.VmafEnable) }
 
 // HardlinkSkip reports whether hard-linked sources are skipped, defaulting to true
 // when unset (nil). Skipping them is the safe default — replacing a hard-linked
 // seed via rename would break the link and reclaim nothing.
-func (c *Config) HardlinkSkip() bool { return c.SkipHardlinked == nil || *c.SkipHardlinked }
+func (c *Config) HardlinkSkip() bool { return hardlinkSkip(c.SkipHardlinked) }
 
 // preserveMtimeKey is the one place the modification-time key is spelled. knownKeys,
 // defaultLayer and the struct tag all read it from here, so a rename cannot leave one of
@@ -443,8 +458,22 @@ func (c *Config) PreserveMtimeEnabled() bool { return c.PreserveMtime == nil || 
 
 // ContainerMatchesSource reports whether ContainerExt is the "match the source"
 // sentinel ("source"/"auto"/"") rather than a forced extension.
-func (c *Config) ContainerMatchesSource() bool {
-	switch c.ContainerExt {
+func (c *Config) ContainerMatchesSource() bool { return containerMatchesSource(c.ContainerExt) }
+
+// PixelFormatAuto reports whether PixelFormat is the "derive per source" sentinel
+// ("auto"/"") rather than a forced pixel format.
+func (c *Config) PixelFormatAuto() bool { return pixelFormatAuto(c.PixelFormat) }
+
+// The four sentinel readings, as free functions, because a top-level value and a
+// resolved per-root profile must read them identically or the same YAML would mean two
+// things depending on which spelling of an entry it was written under.
+
+func vmafGate(p *bool) bool { return p == nil || *p }
+
+func hardlinkSkip(p *bool) bool { return p == nil || *p }
+
+func containerMatchesSource(ext string) bool {
+	switch ext {
 	case "source", "auto", "":
 		return true
 	default:
@@ -452,15 +481,74 @@ func (c *Config) ContainerMatchesSource() bool {
 	}
 }
 
-// PixelFormatAuto reports whether PixelFormat is the "derive per source" sentinel
-// ("auto"/"") rather than a forced pixel format.
-func (c *Config) PixelFormatAuto() bool {
-	switch c.PixelFormat {
+func pixelFormatAuto(format string) bool {
+	switch format {
 	case "auto", "":
 		return true
 	default:
 		return false
 	}
+}
+
+// TopLevelProfile is the profile a root with no overrides of its own resolves to: the
+// top-level value of every overridable knob. It is the middle of the three layers, and
+// the whole of what a flat library_roots list has ever meant.
+//
+// TestProfileKnobSetIsClosedAndSingleSourced proves, field by field, that this copies
+// every knob in profileKnobs from the identically-tagged Config field - so a knob added
+// to Profile and forgotten here is a red test rather than a root that silently inherits
+// a zero.
+func (c *Config) TopLevelProfile() Profile {
+	return Profile{
+		Encoder:           c.Encoder,
+		CRF:               c.CRF,
+		Preset:            c.Preset,
+		PixelFormat:       c.PixelFormat,
+		ContainerExt:      c.ContainerExt,
+		MinBitrateKbps:    c.MinBitrateKbps,
+		MinSavingsPercent: c.MinSavingsPercent,
+		SkipHardlinked:    c.SkipHardlinked,
+		VmafEnable:        c.VmafEnable,
+		MinVmaf:           c.MinVmaf,
+		VmafMinPool:       c.VmafMinPool,
+		VmafMinChroma:     c.VmafMinChroma,
+		VmafSubsample:     c.VmafSubsample,
+		VmafModel:         c.VmafModel,
+	}
+}
+
+// RootProfiles is the resolved roots this configuration decides files with, and it is
+// the ONE reading of that - Validate, Warnings, the startup preflights and the engine
+// all go through it, so none of them can be looking at a different set of profiles than
+// the others.
+//
+// Load populates Roots, so this returns exactly what the inheritance produced. A Config
+// assembled by hand (the engine's own tests, and any caller that builds a struct rather
+// than reading a file) carries none, and one root per LibraryRoots entry is derived from
+// the top-level values instead: the same profile for every root, which is precisely the
+// behaviour of every configuration written before profiles existed.
+func (c *Config) RootProfiles() []Root {
+	if len(c.Roots) > 0 {
+		return c.Roots
+	}
+	top := c.TopLevelProfile()
+	roots := make([]Root, 0, len(c.LibraryRoots))
+	for _, r := range c.LibraryRoots {
+		roots = append(roots, Root{Path: r, Clean: filepath.Clean(r), Profile: top})
+	}
+	return roots
+}
+
+// RootFor returns the root p lies under, and whether there is one. Nested roots are
+// refused at validate time, so at most one root can ever contain a path and the answer
+// needs no precedence rule for a reader to check.
+func (c *Config) RootFor(p string) (Root, bool) {
+	for _, r := range c.RootProfiles() {
+		if r.Contains(p) {
+			return r, true
+		}
+	}
+	return Root{}, false
 }
 
 // ErrNoConfig is returned by Load when the path is empty.
@@ -488,26 +576,38 @@ func Load(path string) (*Config, error) {
 	if err := kf.Load(file.Provider(path), yaml.Parser()); err != nil {
 		return nil, fmt.Errorf("parse config %q: %w", path, err)
 	}
+	// explicitTop is the set of top-level keys the file or the environment actually
+	// carried. The resolved value alone cannot say whether a knob was CHOSEN at the top
+	// level or is simply the built-in default - they are the same value - and `validate`
+	// has to print which layer supplied each of a root's knobs.
+	explicitTop := make(map[string]bool, len(knownKeys))
 	for _, key := range kf.Keys() {
-		top := key
-		if i := strings.IndexByte(key, '.'); i >= 0 {
-			top = key[:i] // a list/nested key like "library_roots.0" -> "library_roots"
-		}
+		top := topLevelKey(key)
 		if !knownKeys[top] {
 			return nil, fmt.Errorf("unknown config key %q in %s (typo?)", top, path)
 		}
+		explicitTop[top] = true
 	}
 	if err := k.Merge(kf); err != nil {
 		return nil, fmt.Errorf("merge config %q: %w", path, err)
 	}
 
 	// 3. environment overrides (HOLDFAST_CRF=20 -> crf). Values arrive as strings;
-	// WeaklyTypedInput (below) coerces them to the field types.
-	err := k.Load(koanfenv.Provider(envPrefix, ".", func(s string) string {
+	// WeaklyTypedInput (below) coerces them to the field types. Loaded into its own
+	// instance first, for the same reason the file is: what it CARRIED has to be
+	// readable, not merely what it left behind.
+	ke := koanf.New(".")
+	err := ke.Load(koanfenv.Provider(envPrefix, ".", func(s string) string {
 		return strings.ToLower(strings.TrimPrefix(s, envPrefix))
 	}), nil)
 	if err != nil {
 		return nil, fmt.Errorf("load env overrides: %w", err)
+	}
+	for _, key := range ke.Keys() {
+		explicitTop[topLevelKey(key)] = true
+	}
+	if err := k.Merge(ke); err != nil {
+		return nil, fmt.Errorf("merge env overrides: %w", err)
 	}
 
 	// history_retention_rows is a COUNT OF ROWS, and the decoder below is deliberately
@@ -519,6 +619,31 @@ func Load(path string) (*Config, error) {
 	// faithfully and is refused by Validate, with the rest of the range checks.)
 	if err := requireWholeRows(k.Get(retentionKey), retentionKey, path); err != nil {
 		return nil, err
+	}
+
+	// The per-root profiles, resolved once, here. library_roots is the one key whose
+	// value is heterogeneous - a list of paths, or of mappings carrying a path plus a
+	// profile, or of both - so it is parsed and resolved BEFORE the struct decode, and
+	// the key is then replaced by the plain list of paths the rest of this build has
+	// always read. Nothing downstream of here has to know an entry could have been a
+	// mapping.
+	entries, err := parseRootEntries(k.Get("library_roots"), path)
+	if err != nil {
+		return nil, err
+	}
+	roots, err := resolveRoots(k, entries, explicitTop, path)
+	if err != nil {
+		return nil, err
+	}
+	k.Delete("library_roots")
+	if len(roots) > 0 {
+		paths := make([]string, 0, len(roots))
+		for _, r := range roots {
+			paths = append(paths, r.Path)
+		}
+		if err := k.Set("library_roots", paths); err != nil {
+			return nil, fmt.Errorf("collecting the library roots of %q: %w", path, err)
+		}
 	}
 
 	var c Config
@@ -540,8 +665,18 @@ func Load(path string) (*Config, error) {
 	// the tool at their library. Case was already normalized at match time; the dot
 	// and surrounding whitespace were not.
 	c.VideoExts = normalizeExts(c.VideoExts)
+	c.Roots = roots
 
 	return &c, nil
+}
+
+// topLevelKey reduces a koanf key to the top-level config key it belongs to: a
+// list/nested key like "library_roots.0" is still the "library_roots" key.
+func topLevelKey(key string) string {
+	if i := strings.IndexByte(key, '.'); i >= 0 {
+		return key[:i]
+	}
+	return key
 }
 
 // retentionKey is the one place the ledger-retention key is spelled. knownKeys,
@@ -638,6 +773,11 @@ func (c *Config) Validate() error {
 		return ""
 	}
 
+	// cleaned and resolved carry each root's two spellings, in configuration order, for
+	// the nesting refusal below. They are collected in this loop rather than recomputed
+	// there so a root is cleaned and symlink-resolved exactly once.
+	cleaned := make([]string, len(c.LibraryRoots))
+	resolved := make([]string, len(c.LibraryRoots))
 	seen := make(map[string]struct{}, len(c.LibraryRoots))
 	for i, root := range c.LibraryRoots {
 		if root == "" {
@@ -647,6 +787,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("library_roots[%d] %q must be an absolute path", i, root)
 		}
 		clean := filepath.Clean(root)
+		cleaned[i] = clean
 		if what := dangerous(clean); what != "" {
 			return fmt.Errorf("library_roots[%d] resolves to %s (%q): refusing", i, what, clean)
 		}
@@ -654,8 +795,9 @@ func (c *Config) Validate() error {
 		// pointing at "/" or $HOME would pass the check above. If the path EXISTS,
 		// re-check its real target. A not-yet-existent root (EvalSymlinks errors)
 		// keeps only the lexical guard — validating before the mount exists is fine.
-		if resolved, rerr := filepath.EvalSymlinks(clean); rerr == nil {
-			rc := filepath.Clean(resolved)
+		if r, rerr := filepath.EvalSymlinks(clean); rerr == nil {
+			rc := filepath.Clean(r)
+			resolved[i] = rc
 			if what := dangerous(rc); what != "" {
 				return fmt.Errorf("library_roots[%d] %q resolves via symlink to %s (%q): refusing", i, clean, what, rc)
 			}
@@ -666,6 +808,35 @@ func (c *Config) Validate() error {
 		seen[clean] = struct{}{}
 	}
 
+	// NESTED ROOTS ARE REFUSED, not resolved.
+	//
+	// Every knob that decides a file is now per root, so a file under two roots would
+	// have two answers to "what CRF, what bitrate floor, what VMAF floor" - and the
+	// wrong answer here ends in the deletion of an original that no re-run undoes. A
+	// longest-prefix rule would settle it, and nobody reviewing a configuration could
+	// see which root won. Refusing makes the resolution unambiguous BY CONSTRUCTION.
+	//
+	// Both spellings are compared. Lexically, on path boundaries, so /a/b nests under
+	// /a and /ab does not; and again on the symlink-resolved paths where both targets
+	// exist, because a root that is a link INTO another root is the same overlap wearing
+	// a different name. It runs alongside the duplicate, absolute-path, dangerous-path
+	// and symlink checks above, never instead of them.
+	for i := range c.LibraryRoots {
+		for j := range c.LibraryRoots {
+			if i == j {
+				continue
+			}
+			if underRoot(cleaned[i], cleaned[j]) {
+				return nestedRootsError(i, cleaned[i], j, cleaned[j], "")
+			}
+			if resolved[i] != "" && resolved[j] != "" && underRoot(resolved[i], resolved[j]) {
+				return nestedRootsError(i, cleaned[i], j, cleaned[j],
+					fmt.Sprintf(" (%q resolves to %q and %q resolves to %q)",
+						cleaned[i], resolved[i], cleaned[j], resolved[j]))
+			}
+		}
+	}
+
 	switch c.LogLevel {
 	case "", "debug", "info", "warn", "error":
 		// ok
@@ -673,17 +844,13 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("log_level %q is not one of debug|info|warn|error", c.LogLevel)
 	}
 
-	// Engine knobs (validated against their effective values).
-	if c.Encoder != "" {
-		if _, ok := encoder.Lookup(c.Encoder); !ok {
-			return fmt.Errorf("encoder %q is not supported (known: %v)", c.Encoder, encoder.Known())
-		}
-	}
-	if c.CRF < 0 || c.CRF > 51 {
-		return fmt.Errorf("crf %d out of range (0-51)", c.CRF)
-	}
-	if c.MinSavingsPercent < 0 || c.MinSavingsPercent >= 100 {
-		return fmt.Errorf("min_savings_percent %d out of range (0-99)", c.MinSavingsPercent)
+	// Engine knobs (validated against their effective values). The overridable ones are
+	// checked HERE against the top level and AGAIN below against every root's resolved
+	// profile - both, deliberately. A top-level value every root happens to override is
+	// still a value the operator wrote and still a refusal; and a value only one root
+	// carries is refused naming that root.
+	if err := c.TopLevelProfile().validate(); err != nil {
+		return err
 	}
 	if c.MaxFailures < 0 {
 		return fmt.Errorf("max_failures %d must be >= 0", c.MaxFailures)
@@ -698,39 +865,6 @@ func (c *Config) Validate() error {
 	}
 	if c.DurationToleranceSec < 0 {
 		return fmt.Errorf("duration_tolerance_sec %g must be >= 0", c.DurationToleranceSec)
-	}
-	if strings.ContainsAny(c.ContainerExt, "./\\") {
-		return fmt.Errorf("container_ext %q must be a bare extension (no dot or slash)", c.ContainerExt)
-	}
-	if c.MinVmaf < 0 || c.MinVmaf > 100 {
-		return fmt.Errorf("min_vmaf %g out of range (0-100)", c.MinVmaf)
-	}
-	if c.VmafMinPool < 0 || c.VmafMinPool > 100 {
-		return fmt.Errorf("vmaf_min_pool %g out of range (0-100)", c.VmafMinPool)
-	}
-	// The chroma floor bounds a PSNR in dB. 0 is the "disabled" sentinel (warned
-	// about, not refused); a negative floor could never reject and would be a silent
-	// no-op, and a value above 100 dB could never be cleared and would reject every
-	// encode there is. Both are configuration the operator did not mean, so both are
-	// refused BY NAME rather than clamped into something plausible.
-	if c.VmafMinChroma < 0 || c.VmafMinChroma > 100 {
-		return fmt.Errorf("vmaf_min_chroma %g out of range (0-100 dB; 0 disables the chroma floor)", c.VmafMinChroma)
-	}
-	if c.VmafSubsample < 0 {
-		// 0 means "use the default" (Load's koanf layer sets 1; the VMAF scorer also
-		// floors <1 to 1) — consistent with the other zero-defaulted knobs. Only a
-		// negative interval is invalid.
-		return fmt.Errorf("vmaf_subsample %d must be >= 0", c.VmafSubsample)
-	}
-	// Fail-safe: an explicitly-enabled VMAF gate with no effective threshold (every
-	// floor 0) is enabled-but-never-rejecting - a silent no-op on a delete-capable
-	// tool. Refuse it. (Checked only when vmaf_enable is EXPLICIT: a nil pointer is
-	// the default-on state, and Load always resolves it to true with min_vmaf=95, so
-	// a real config never trips this by omission.) The chroma floor counts here: a
-	// gate that rejects on chroma alone is a strange configuration but it is not a
-	// no-op, and refusing it would be refusing a gate that does gate.
-	if c.VmafEnable != nil && *c.VmafEnable && c.MinVmaf == 0 && c.VmafMinPool == 0 && c.VmafMinChroma == 0 {
-		return errors.New("vmaf_enable is true but min_vmaf, vmaf_min_pool and vmaf_min_chroma are all 0 - the VMAF gate would never reject; set min_vmaf (e.g. 95) or disable the gate")
 	}
 	// The undo window (UNDO-6). A negative retention is not a shorter window, it is a
 	// window that has already closed for every original it would hold - so it would
@@ -762,7 +896,34 @@ func (c *Config) Validate() error {
 	if c.MaxLoad < 0 {
 		return fmt.Errorf("max_load %g must be >= 0 (0 disables the CPU-load cap)", c.MaxLoad)
 	}
+
+	// Every per-value refusal above, re-run against what each root ACTUALLY resolved to,
+	// naming the root. Without this a profile could carry a crf of 99, an unknown
+	// encoder or a chroma floor of 140 and start, because the top-level values it
+	// overrode were all fine - and the value a file is decided by is this one, not the
+	// one at the top of the file.
+	for _, r := range c.RootProfiles() {
+		if err := r.Profile.validate(); err != nil {
+			return fmt.Errorf("library root %s: %w", r.Clean, err)
+		}
+	}
 	return nil
+}
+
+// errVmafGateNeverRejects is the refusal for an explicitly-enabled VMAF gate with every
+// floor at 0. Shared between the top-level check and the per-profile one so a root that
+// zeroes all three is refused in the same words as a file that does.
+var errVmafGateNeverRejects = errors.New("vmaf_enable is true but min_vmaf, vmaf_min_pool and vmaf_min_chroma are all 0 - the VMAF gate would never reject; set min_vmaf (e.g. 95) or disable the gate")
+
+// nestedRootsError is the refusal for two roots where one contains the other. It names
+// BOTH, with their indexes, because the fix is to remove or move one of them and an
+// operator cannot do that from a message that names only the inner.
+func nestedRootsError(i int, outer string, j int, inner, via string) error {
+	return fmt.Errorf("library_roots[%d] %q is nested inside library_roots[%d] %q%s: refusing. "+
+		"Each root carries its own profile - its own encoder, crf, bitrate floor and VMAF floors - so a "+
+		"file under both has two answers to what may be done to it, and the wrong answer deletes an "+
+		"original. Configure one root covering the tree, or two that do not overlap",
+		j, inner, i, outer, via)
 }
 
 // Notices reports things this configuration MEANS that an operator must be told at
@@ -809,39 +970,23 @@ func (c *Config) Notices() []string {
 // configuration - including a shipped default worth stating - belongs in Notices,
 // because a default configuration that warns is how an operator learns to skip
 // warnings, and the next one will be a real gate they have turned off.
+// A warning is emitted ONCE PER AFFECTED ROOT and NAMES that root, because the gates are
+// now per root: one process may run over a film library with every floor in place and a
+// grainy-anime library with the worst-frame floor turned off, and an unattributed
+// "vmaf_min_pool is 0" would leave an operator unable to tell which of their libraries
+// had lost it. A root whose resolved profile did not weaken a gate contributes no
+// warning about it.
 func (c *Config) Warnings() []string {
+	roots := c.RootProfiles()
+	if len(roots) == 0 {
+		// No roots to attribute a weakened gate to (a Config assembled by hand; Validate
+		// refuses to RUN one). The top-level profile is still what would decide files, so
+		// it is still reported - just with nothing to name.
+		return c.TopLevelProfile().warnings("")
+	}
 	var w []string
-	// The gate off entirely is the operator's call — but it is also the WEAKEST
-	// configuration this tool has, strictly weaker than "gate on, floor off" (which
-	// warns below). Staying silent about the dangerous one while nagging about the
-	// safer one would be exactly backwards.
-	if !c.VmafGate() {
-		return []string{"vmaf_enable is false — there is NO perceptual gate. The structural checks " +
-			"(codec, duration/packet parity, size, stream counts, decode-integrity) all pass on an " +
-			"encode that decodes perfectly and looks terrible, and the source is then deleted. This is " +
-			"the weakest setting available; prefer lowering min_vmaf/vmaf_min_pool over disabling the gate."}
-	}
-	if c.VmafMinPool <= 0 {
-		w = append(w, "vmaf_min_pool is 0 — the worst-frame floor is DISABLED, leaving the pooled "+
-			"harmonic mean as the only VMAF gate. A mean hides local damage: ~1% of frames can collapse "+
-			"to VMAF ~35 while the mean still clears min_vmaf, and the source is then deleted. "+
-			"If honest encodes are being rejected, LOWER the floor (e.g. 45) rather than setting it to 0 — "+
-			"a lower floor still bounds local damage; 0 bounds nothing.")
-	}
-	if c.VmafMinChroma <= 0 {
-		w = append(w, "vmaf_min_chroma is 0 - the chroma floor is DISABLED, so CHROMA DAMAGE IS "+
-			"UNGUARDED. The VMAF model is luma-only and every structural check passes an output whose "+
-			"colour planes have been flattened, shifted or desaturated: it decodes perfectly, carries "+
-			"the right duration, packets and streams, and scores ~99 on VMAF. The source is then deleted. "+
-			"If honest encodes are being rejected, LOWER the floor (e.g. 25) rather than setting it to 0 - "+
-			"a lower floor still bounds chroma damage; 0 bounds nothing.")
-	}
-	if c.VmafSubsample > 1 {
-		w = append(w, fmt.Sprintf("vmaf_subsample is %d — VMAF measures only every %dth frame, so the "+
-			"vmaf_min_pool and vmaf_min_chroma worst-frame floors are a SAMPLE, not a guarantee: a "+
-			"damaged frame that is never sampled is never seen. Use vmaf_subsample: 1 on content you "+
-			"cannot re-acquire.",
-			c.VmafSubsample, c.VmafSubsample))
+	for _, r := range roots {
+		w = append(w, r.Profile.warnings(r.Clean)...)
 	}
 	return w
 }

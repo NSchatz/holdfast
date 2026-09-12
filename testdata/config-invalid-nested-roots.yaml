@@ -1,0 +1,10 @@
+# Invalid via the VALIDATE path: every key is legal and every value is in range, but
+# /mnt/media/anime is nested inside /mnt/media. Each root carries its own encoder, crf,
+# bitrate floor and VMAF floors, so a file under both has two answers to what may be done
+# to it - and the wrong answer deletes an original. Nesting is refused rather than
+# resolved by a precedence rule nobody can review. The CI self-test asserts `holdfast
+# validate` REJECTS this.
+library_roots:
+  - /mnt/media
+  - path: /mnt/media/anime
+    crf: 20

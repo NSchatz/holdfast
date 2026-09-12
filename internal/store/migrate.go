@@ -383,6 +383,29 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status_inputs ON jobs(status, decision_input
 ALTER TABLE jobs ADD COLUMN vmaf_stream TEXT;
 `,
 	},
+	{
+		// v12 - which library profile decided the file.
+		//
+		// A library root now carries its own encoder, crf, bitrate floor and VMAF floors,
+		// so a terminal row no longer says what it was judged by: the configuration has
+		// several answers and the row has none. library_root is the cleaned root the file
+		// was enumerated under, and profile_digest identifies that root's resolved values
+		// - both, because the path alone stops being interpretable the moment the profile
+		// is edited, which is exactly the question this row exists to survive.
+		//
+		// NULLABLE with NO DEFAULT, which is the rule v2 set and every step since has
+		// kept. Every row already in the field was decided by a build that had one global
+		// profile and recorded neither fact, so both must READ AS NOT RECORDED. A DEFAULT
+		// here would attribute those rows to whichever root happens to be configured now,
+		// or stamp them with a digest of a profile that did not exist when they were
+		// written - inventing evidence about swaps that already happened, in the one table
+		// whose whole job is to be evidence.
+		name: "deciding library profile",
+		sql: `
+ALTER TABLE jobs ADD COLUMN library_root   TEXT;
+ALTER TABLE jobs ADD COLUMN profile_digest TEXT;
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the
