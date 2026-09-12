@@ -22,6 +22,93 @@ import (
 func strp(s string) *string { return &s }
 func intp(i int) *int       { return &i }
 
+// AC-A6 where the two layers of profile MEET: an encode profile's overrides are laid
+// over the profile of the ROOT the file was enumerated under, not over the top level.
+//
+// That is the whole of the composition question, and it has exactly one wrong answer
+// that still produces a working encode: overlay the top-level values instead, and a file
+// under a root that sets its own crf is encoded at a quality nobody chose - silently,
+// because the output is a valid file either way. So it is graded on the argv the real
+// FFmpegEncoder assembled (the instrument S0087's own profile tests use) and the
+// load-bearing assertion is the knob the encode profile does NOT mention: crf must be
+// the ROOT's 30, never the top level's 22.
+//
+// Two roots and two fixtures, so neither answer can be hard-coded: the encode profile
+// matches only under one of them, and the file it does not match keeps its root's
+// encoder.
+//
+// MUTATION: build TranscodeIn's base from the top level (c.BaseTranscode of
+// c.TopLevelProfile()) instead of from prof, and the crf assertions red at 22.
+func TestProfiles_AnEncodeProfileOverlaysTheRootsOwnProfile(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	dir, roots := twoRoots(t, "tv", "movies")
+	matched := filepath.Join(roots[0], "ep.mkv")
+	unmatched := filepath.Join(roots[1], "film.mkv")
+	mkH264(t, ffmpeg, matched, "8M")
+	mkH264(t, ffmpeg, unmatched, "8M")
+	_ = dir
+
+	cfg := profileCfg(t, `
+library_roots:
+  - path: `+roots[0]+`
+    crf: 30
+    preset: ultrafast
+  - path: `+roots[1]+`
+    encoder: svtav1
+    crf: 40
+    preset: ultrafast
+encoder: cpu
+crf: 22
+preset: slow
+vmaf_enable: false
+min_bitrate_kbps: 0
+`)
+	// The encode profile overrides the ENCODER and nothing else, for the mkvs under the
+	// first root only. Everything else its jobs encode at must come from that root.
+	cfg.EncodeProfiles = []config.EncodeProfile{
+		{Name: "tv-av1", Match: "**/tv/**", Encoder: strp("svtav1")},
+	}
+
+	ts, log := runProfiles(t, ffmpeg, ffprobe, cfg)
+
+	matchedArgs := log.forSource(t, matched)
+	unmatchedArgs := log.forSource(t, unmatched)
+
+	// The override reached the encoder.
+	if !hasArgPair(matchedArgs, "-c:v", "libsvtav1") {
+		t.Errorf("the matched job was built with the root's encoder, not the encode profile's: %v", matchedArgs)
+	}
+	// And the knob the profile did NOT mention came from its own ROOT, not the top level.
+	if !hasArgPair(matchedArgs, "-crf", "30") {
+		t.Errorf("the matched job was built at a crf that is neither its root's 30 nor the profile's "+
+			"(it mentions none): %v", matchedArgs)
+	}
+	if hasArgPair(matchedArgs, "-crf", "22") {
+		t.Errorf("the matched job was built at the TOP-LEVEL crf, so the encode profile was laid over "+
+			"the top level rather than over the root that decides this file: %v", matchedArgs)
+	}
+	// The unmatched job is the anti-vacuity arm: its root's own encoder still decides it.
+	if !hasArgPair(unmatchedArgs, "-c:v", "libsvtav1") || !hasArgPair(unmatchedArgs, "-crf", "40") {
+		t.Errorf("the unmatched job did not use its own root's profile: %v", unmatchedArgs)
+	}
+
+	// And the row says which encode profile supplied the settings, beside the root that
+	// judged the file - two facts, two fields, neither standing in for the other.
+	out, status, ok := outcomeFor(t, ts, matched)
+	if !ok || status != store.Done {
+		t.Fatalf("the matched job is %q (found=%v), want done", status, ok)
+	}
+	if out.Profile != "tv-av1" {
+		t.Errorf("the row records encode profile %q, want tv-av1", out.Profile)
+	}
+	if out.LibraryRoot != roots[0] {
+		t.Errorf("the row records library root %q, want %s", out.LibraryRoot, roots[0])
+	}
+	if plain, _, ok := outcomeFor(t, ts, unmatched); ok && plain.Profile != "" {
+		t.Errorf("the unmatched job's row records encode profile %q, want none", plain.Profile)
+	}
+}
+
 // outcomeFor returns the recorded Outcome for the file at path, resolved against its
 // CURRENT on-disk fingerprint - which for a done row is the post-swap file's, exactly
 // as the engine keys it.
@@ -386,21 +473,26 @@ func TestProfiles_AHardlinkSkipRecordsTheProfileOnBothArms(t *testing.T) {
 	}
 }
 
-// AC-A10 on the OTHER RecordSkip row: the park a restore writes.
+// AC-A10 on the OTHER RecordSkip row: the park a restore writes, which records NO
+// profile even with one matching the file - and that is the honest value, not the hole
+// F7 named.
 //
 // `holdfast restore` puts the original's bytes back and reconciles the ledger by
 // replacing the swap's done row with a skipped/restored-original one. That row is
-// terminal - it is what holds the rescued file out of the encoder - so it owes the same
-// attribution every other terminal row owes, and it is written through the same writer
-// the hardlink guard uses.
+// terminal, and it is written through the same writer the hardlink guard uses - the
+// writer that could not carry a profile at all, which is what F7 fixed. What each call
+// site then PASSES is what is true of its own row, and no profile supplied the settings
+// of a restore: an operator put the file back through a command no gate and no knob took
+// part in. The same reasoning the library profile already ships with here (see
+// recordRestoreInJobs, and store.Decision{} beside this).
 //
-// The profile is resolved from the configuration in force at the moment of the restore,
-// which is the reading recorded in notes.md: the row describes a file that is waiting to
-// be decided again, not the encode that has just been undone.
+// The matching profile is configured deliberately, because that is the arm that can go
+// wrong: a writer that reached for "whatever matches this path now" would attribute this
+// row to a decision nothing made.
 //
-// MUTATION: pass "" instead of the resolved profile at recordRestoreInJobs' RecordSkip
-// call and this reds.
-func TestProfiles_ARestoredOriginalsParkRowRecordsTheProfile(t *testing.T) {
+// MUTATION: pass u.Cfg.TranscodeIn(...).Profile at recordRestoreInJobs' RecordSkip call
+// and this reds with "bulk".
+func TestProfiles_ARestoredOriginalsParkRowRecordsNoProfile(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
 	root := t.TempDir()
 	src := filepath.Join(root, "film.mkv")
@@ -412,6 +504,12 @@ func TestProfiles_ARestoredOriginalsParkRowRecordsTheProfile(t *testing.T) {
 		t.Fatalf("RunOneshot: %v", err)
 	}
 	r := onlyRetained(t, ts)
+	// The fixture is only a fixture if that profile really decided the encode being
+	// undone: the done row it wrote must name it.
+	if done, _, ok := outcomeFor(t, ts, r.SwappedPath); !ok || done.Profile != "bulk" {
+		t.Fatalf("the swap's own row records profile %q (found=%v), want bulk - nothing here is "+
+			"about a profile and the restore assertion below proves nothing", done.Profile, ok)
+	}
 	if _, err := eng.Restore(context.Background(), r.SourcePath); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
@@ -424,7 +522,13 @@ func TestProfiles_ARestoredOriginalsParkRowRecordsTheProfile(t *testing.T) {
 	if out.Reason != SkipRestoredOriginal {
 		t.Fatalf("the park row's reason = %q, want %q", out.Reason, SkipRestoredOriginal)
 	}
-	if out.Profile != "bulk" {
-		t.Errorf("the restored original's park row records profile %q, want bulk", out.Profile)
+	if out.Profile != "" {
+		t.Errorf("the restored original's park row records profile %q, want none: no profile supplied "+
+			"the settings of a restore, and naming one attributes the row to a decision nothing made",
+			out.Profile)
+	}
+	if out.LibraryRoot != "" || out.ProfileDigest != "" {
+		t.Errorf("the park row attributes a library profile (%q/%q); the same reasoning applies to both",
+			out.LibraryRoot, out.ProfileDigest)
 	}
 }

@@ -441,14 +441,21 @@ func TestConfigExample_CarriesTheNewSettingsAndStillLoads(t *testing.T) {
 	// It still loads and validates, with library_roots pointed at a directory that
 	// exists. That is the half a text check cannot give: an example that documents
 	// the keys and refuses to load is worse than one that documents nothing.
+	// Every configured root is repointed, by PATH rather than by the shape of the list:
+	// an entry may be a plain path or a mapping carrying one, and a root that does not
+	// exist is refused whichever spelling it came in.
 	dir := t.TempDir()
-	root := filepath.Join(dir, "media")
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	pointed := strings.Replace(example, "library_roots:\n  - /mnt/media", "library_roots:\n  - "+root, 1)
-	if pointed == example {
-		t.Fatal("the example's library_roots line is not what this test expects to repoint")
+	pointed := example
+	for _, shipped := range []string{"/mnt/media", "/mnt/anime"} {
+		real := filepath.Join(dir, filepath.Base(shipped))
+		if err := os.MkdirAll(real, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(pointed, shipped) {
+			t.Fatalf("the shipped example no longer configures %s, so this test is repointing a root "+
+				"it does not have", shipped)
+		}
+		pointed = strings.ReplaceAll(pointed, shipped, real)
 	}
 	p := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(p, []byte(pointed), 0o644); err != nil {
