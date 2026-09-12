@@ -392,8 +392,9 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 	// A hardware encoder (nvenc/qsv/vaapi/amf) with no matching device, or an
 	// ffmpeg build missing a codec, must stop before any work rather than let every
 	// file either fail one-by-one or (worse, for some hardware encoders) appear to
-	// "succeed" while writing nothing. Each profile's encoder is always a valid
-	// registry key here (Load defaults it to "cpu"; Validate rejects an unknown one).
+	// "succeed" while writing nothing. Every key here is a valid registry key (Load
+	// defaults the top level to "cpu"; Validate rejects an unknown or empty encoder at
+	// the top level, inside a library profile and inside an encode profile alike).
 	//
 	// EVERY distinct encoder any root resolved to is checked, not just the top-level
 	// one: a root that says `encoder: nvenc` on a host with no NVIDIA device must stop
@@ -402,6 +403,18 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 	for _, e := range distinctBy(cfg, func(p config.Profile) string { return p.Encoder }) {
 		if _, err := encoder.RequireAvailable(context.Background(), ffmpeg, ffprobe, e.key); err != nil {
 			fmt.Fprintf(stderr, "holdfast: %s: %v\n", e.where, err)
+			return nil, nil, 1
+		}
+	}
+	// And every encoder an ENCODE PROFILE can override a root's with, for the same
+	// reason: `encoder: svtav1` inside one is reached by every file its pattern selects,
+	// so a preflight blind to it would deliver the fail-early guarantee for some of an
+	// operator's library and not for the rest. The account names the profile that asked,
+	// because "nvenc is unavailable" sends an operator to a configuration whose top-level
+	// encoder is cpu.
+	for _, e := range cfg.EncodeProfileEncoders() {
+		if _, err := encoder.RequireAvailable(context.Background(), ffmpeg, ffprobe, e.Key); err != nil {
+			fmt.Fprintf(stderr, "holdfast: encode_profiles (%s): %v\n", e.Profile, err)
 			return nil, nil, 1
 		}
 	}

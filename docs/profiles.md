@@ -58,6 +58,17 @@ A profile selects what the encoder **produces**, and nothing else. There is deli
 no per-profile VMAF threshold, undo window or retention setting: a profile must never be
 able to move a gate that decides whether a source is destroyed.
 
+### A profile's encoder is checked before the run starts
+
+Every distinct encoder the configuration can reach - the top-level one, and each
+profile's override - is tested against this host at startup, before anything is
+encoded and before the job store is opened. A hardware encoder with no matching
+device, or an ffmpeg build without the codec, **refuses the run** and the account
+names the profile that asked for it. That is the same loud failure the top-level
+encoder has always had, and it is never a silent fallback to `cpu`: some hardware
+encoders exit 0 while writing nothing, so the alternative is a library's worth of
+files failing one at a time, hours in.
+
 ### The skip decisions move with the profile
 
 A source already in the **top-level** target codec whose matching profile targets a
