@@ -913,7 +913,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	if prof.HardlinkSkip() {
 		if links := probe.NLink(f); links > 1 && links > 1+e.retainedLinks(ctx, f, key) {
 			e.Log.Info("skip (hardlinked — swap would break a seed and reclaim nothing)", "file", f, "links", links)
-			changed, err := e.Store.RecordSkip(ctx, f, key, SkipHardlinked, by)
+			changed, err := e.Store.RecordSkip(ctx, f, key, SkipHardlinked, by, ts.Profile)
 			if err != nil {
 				// Fail safe: recording the skip is a reporting nicety, never the decision,
 				// so a store hiccup still skips the file.

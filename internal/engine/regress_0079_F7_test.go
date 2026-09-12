@@ -44,7 +44,7 @@ func TestRegressS0079F7_AHardlinkSkipRecordsTheProfileOnItsLedgerRow(t *testing.
 	}
 
 	ts := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
-		c.EncodeProfiles = []config.Profile{
+		c.EncodeProfiles = []config.EncodeProfile{
 			{Name: "bulk", Match: "*.mkv", Encoder: strp("svtav1")},
 		}
 	})

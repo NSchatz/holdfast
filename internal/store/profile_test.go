@@ -82,6 +82,72 @@ func TestClaim_ARetryClearsThePreviousAttemptsProfile(t *testing.T) {
 	}
 }
 
+// AC-A10 through the OTHER writer. RecordSkip is how a guard that fires before the
+// claim records its terminal row, and it takes no Outcome - so the profile is its own
+// argument, and this is where the column it writes is graded.
+//
+// Three arms, because the write has three shapes: a fresh INSERT, a pending row
+// CONVERTED by the ON CONFLICT clause, and a profile-free skip whose "" is the true
+// answer rather than a missing one. The fourth case is the idempotence boundary: a row
+// that is already skipped is not rewritten, so the profile recorded is the one that
+// decided the skip when it was first recorded and not whatever a later scan resolved.
+func TestRecordSkip_TheProfileThatDecidedTheSkipIsOnTheRow(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	// A pending row, so the ON CONFLICT limb is exercised rather than the INSERT: a claim
+	// leaves it probing, and RecoverStale is what a restarted daemon does to such a row.
+	if ok, err := s.Claim(ctx, "/lib/converted.mkv", "fp", "w0", 3, sameConfig); err != nil || !ok {
+		t.Fatalf("Claim: ok=%v err=%v", ok, err)
+	}
+	if _, err := s.RecoverStale(ctx); err != nil {
+		t.Fatalf("RecoverStale: %v", err)
+	}
+	if st, _, _, err := s.Get(ctx, "/lib/converted.mkv", "fp"); err != nil || st != Pending {
+		t.Fatalf("the conversion fixture is status=%q err=%v, want pending", st, err)
+	}
+
+	for _, tc := range []struct{ path, profile string }{
+		{"/lib/fresh.mkv", "bulk-tv"},
+		{"/lib/converted.mkv", "4k-av1"},
+		{"/lib/plain.mkv", ""},
+	} {
+		changed, err := s.RecordSkip(ctx, tc.path, "fp", "hardlinked", Decision{}, tc.profile)
+		if err != nil {
+			t.Fatalf("RecordSkip(%s): %v", tc.path, err)
+		}
+		if !changed {
+			t.Fatalf("RecordSkip(%s) recorded nothing, so the row under test does not exist", tc.path)
+		}
+	}
+
+	// A second call over an already-skipped row is the no-op the caller relies on, and it
+	// must not rewrite the attribution either.
+	if changed, err := s.RecordSkip(ctx, "/lib/fresh.mkv", "fp", "hardlinked", Decision{}, "something-else"); err != nil {
+		t.Fatalf("RecordSkip again: %v", err)
+	} else if changed {
+		t.Error("a second RecordSkip over an existing skip reported a change")
+	}
+
+	rows, err := s.List(ctx, []Status{Skipped}, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	got := map[string]string{}
+	for _, r := range rows {
+		got[r.Path] = r.Outcome.Profile
+	}
+	for path, want := range map[string]string{
+		"/lib/fresh.mkv":     "bulk-tv",
+		"/lib/converted.mkv": "4k-av1",
+		"/lib/plain.mkv":     "",
+	} {
+		if have, ok := got[path]; !ok || have != want {
+			t.Errorf("%s recorded profile %q (found=%v), want %q", path, have, ok, want)
+		}
+	}
+}
+
 // The migration's own anti-vacuity arm: a database written before this column
 // existed gains it in place, keeps its rows, and reads every one of them back as
 // "the top-level settings ran" - which for this field is the TRUE answer for an old

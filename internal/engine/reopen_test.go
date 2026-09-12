@@ -377,7 +377,7 @@ func TestRequeue_ReopensAMultiVideoStreamRow(t *testing.T) {
 func TestRequeue_LeavesRestoredOriginalAlone(t *testing.T) {
 	ts := requeueStore(t)
 	ctx := context.Background()
-	if _, err := ts.RecordSkip(ctx, "/lib/rescued.mkv", "fp", SkipRestoredOriginal, store.Decision{}); err != nil {
+	if _, err := ts.RecordSkip(ctx, "/lib/rescued.mkv", "fp", SkipRestoredOriginal, store.Decision{}, ""); err != nil {
 		t.Fatalf("RecordSkip: %v", err)
 	}
 	seedTerminal(t, ts, "/lib/ordinary.mkv", store.Skipped,
