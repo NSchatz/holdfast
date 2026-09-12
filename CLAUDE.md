@@ -16,13 +16,21 @@ git.
 
 ## The invariant that governs every change (do not weaken it)
 
-**Never mutate a source until a replacement passed every gate.** Encode to a
-same-directory temp; the swap is the ONLY filesystem mutation and is an atomic
-same-filesystem `rename()`; it runs only after the output passes: correct codec,
-duration and packet parity, strictly-smaller, per-type stream-count parity, full
-decode-integrity, and VMAF. Any gate failure discards the temp and leaves the
-source byte-for-byte intact. This is the exact fix for Tdarr's documented
-replace-before-verify data loss.
+**Never mutate a source until a replacement passed every gate.** The swap is an
+atomic same-filesystem `rename()` from a path in the SOURCE's own directory, and
+it runs only after the output passes: correct codec, duration and packet parity,
+strictly-smaller, per-type stream-count parity, full decode-integrity, and VMAF.
+Any gate failure discards the encode and leaves the source byte-for-byte intact.
+This is the exact fix for Tdarr's documented replace-before-verify data loss.
+
+Where the encode is WRITTEN is configurable and the swap is not. By default it is
+a temp beside the source and that rename is the only filesystem mutation there is.
+With `scratch_dir` set the encoder writes into the scratch directory, nothing at
+all appears under the source's directory until the gates have accepted, and the
+accepted bytes are then copied into a temp beside the source - proved identical
+to what the gates passed - for the same rename. Never a rename or a move out of
+the scratch directory onto the source or into its directory: one swap shape on
+every mount is what keeps the EXDEV refusal meaning what it says.
 
 Fail-safe rule: ambiguous, malformed or unsupported input SKIPS with a logged
 reason or returns a typed error. Never a confident wrong result, never a silent

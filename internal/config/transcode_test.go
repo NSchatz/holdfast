@@ -300,6 +300,67 @@ func TestEncodeProfiles_AnExplicitZeroOverridesAndAnAbsentKeyDoesNot(t *testing.
 	}
 }
 
+// What the startup capability preflight has to ask about BEYOND the roots. The roots'
+// own encoders are walked separately (they inherit the top level, so that walk covers a
+// configuration with no encode profiles); this is the set that walk cannot see, and the
+// preflight's guarantee - a hardware encoder with no matching device stops the run
+// before any work - is delivered for it or it is delivered for part of a library only.
+//
+// Three properties, and each is a way the preflight could go quietly wrong: a
+// configuration with no encode profiles adds nothing (so it is checked exactly as it was
+// before they existed), a key is listed ONCE however many profiles name it (a preflight
+// paying for a real encode per duplicate is one an operator turns off), and a profile
+// that overrides no encoder contributes nothing.
+func TestEncodeProfileEncoders_IsEveryEncoderAProfileCanOverrideWith(t *testing.T) {
+	t.Run("no encode profiles adds nothing to check", func(t *testing.T) {
+		cfg, err := loadAndValidate(t, "encoder: svtav1\n")
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if got := cfg.EncodeProfileEncoders(); len(got) != 0 {
+			t.Fatalf("EncodeProfileEncoders = %+v, want nothing - the roots' own walk covers the "+
+				"top-level encoder, and checking it twice pays for a real encode twice", got)
+		}
+	})
+
+	t.Run("every distinct profile override, named", func(t *testing.T) {
+		cfg, err := loadAndValidate(t, "encoder: cpu\n"+
+			"encode_profiles:\n"+
+			"  - name: 4k-av1\n"+
+			"    match: '**/4K/**'\n"+
+			"    encoder: svtav1\n"+
+			"  - name: also-av1\n"+
+			"    match: '**/UHD/**'\n"+
+			"    encoder: svtav1\n"+
+			"  - name: hardware\n"+
+			"    match: 'seed-*.mkv'\n"+
+			"    encoder: nvenc\n"+
+			"  - name: crf-only\n"+
+			"    match: 'small-*.mkv'\n"+
+			"    crf: 30\n"+
+			"  - name: back-to-cpu\n"+
+			"    match: 'plain-*.mkv'\n"+
+			"    encoder: cpu\n")
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		want := []EncoderInEffect{
+			{Key: "svtav1", Profile: "4k-av1"},
+			{Key: "nvenc", Profile: "hardware"},
+			{Key: "cpu", Profile: "back-to-cpu"},
+		}
+		got := cfg.EncodeProfileEncoders()
+		if len(got) != len(want) {
+			t.Fatalf("EncodeProfileEncoders = %+v, want %+v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("EncodeProfileEncoders[%d] = %+v, want %+v", i, got[i], want[i])
+			}
+		}
+	})
+}
+
 // The match grammar, asserted directly so the resolution tests above rest on
 // something stated rather than assumed.
 func TestMatchSource_TheGrammarIsWhatTheDocumentationSays(t *testing.T) {

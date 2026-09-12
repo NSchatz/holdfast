@@ -323,6 +323,48 @@ func (c *Config) validateProfiles() error {
 	return nil
 }
 
+// EncoderInEffect is one encoder key an encode profile can override a root's with, and
+// the name of the profile that asks for it.
+//
+// The name travels with the key because the capability preflight's whole value is
+// operator-facing. "nvenc is not available on this host" sends someone to a config whose
+// top-level encoder is `cpu`, and they then have to find which of their profiles asked
+// for it; the name is the answer, and it is free here.
+type EncoderInEffect struct {
+	Key     string
+	Profile string
+}
+
+// EncodeProfileEncoders is every encoder key an ENCODE PROFILE overrides a root's with,
+// in configuration order, deduplicated, each carrying the name of the first profile that
+// asks for it.
+//
+// It exists for the startup capability preflight, and it covers exactly the keys that
+// preflight would otherwise miss: the root profiles' own encoders are walked separately
+// (they inherit the top-level value, so that walk covers a configuration with no encode
+// profiles at all). Validate confirms a key is KNOWN; only a run with ffmpeg in hand can
+// confirm the encoder WORKS on this host, and an encode profile naming one is reached by
+// every file its pattern selects - so a preflight blind to it lets a run start and then
+// fail those files one at a time, hours in, or, for some hardware encoders, appear to
+// succeed while writing nothing.
+//
+// Deduplicated because the check runs a real encode, and several profiles usually share
+// one encoder. Empty when no encode profile overrides the encoder, which is every
+// configuration written before they existed.
+func (c *Config) EncodeProfileEncoders() []EncoderInEffect {
+	var keys []EncoderInEffect
+	seen := map[string]bool{}
+	for i := range c.EncodeProfiles {
+		p := &c.EncodeProfiles[i]
+		if p.Encoder == nil || seen[*p.Encoder] {
+			continue
+		}
+		seen[*p.Encoder] = true
+		keys = append(keys, EncoderInEffect{Key: *p.Encoder, Profile: p.Name})
+	}
+	return keys
+}
+
 // bitrateInEffect reports whether any job this configuration can produce encodes
 // under a target bitrate - the top-level setting, or any profile that overrides it
 // with a positive value. It is what decides whether the startup notice is owed.
