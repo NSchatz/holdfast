@@ -900,7 +900,16 @@ type Store interface {
 	// by is the library profile that decided the skip, recorded on the row for the same
 	// reason Finish records it: a skipped row is a terminal record of a decision, and
 	// the guard that produced this one (skip_hardlinked) is itself per root.
-	RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision) (changed bool, err error)
+	//
+	// profile is the name of the ENCODE profile that supplied the settings this guard was
+	// decided against, "" when nothing matched. A row this writes is TERMINAL, so it owes
+	// that attribution exactly as a row Finish writes does. The two are the only outcome
+	// values this method carries, because they are the only ones that describe the SKIP
+	// rather than an encode that never happened - and profile sits AFTER by rather than
+	// beside reason on purpose: two adjacent strings is precisely the call that silently
+	// swaps, and a row naming its guard as its profile would be worse than one naming
+	// neither.
+	RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision, profile string) (changed bool, err error)
 
 	// ClearSkip deletes the row for path+fingerprint ONLY when it is a Skipped row
 	// whose reason matches — the re-evaluation half of a MUTABLE guard. The hardlink

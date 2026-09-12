@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -326,5 +327,104 @@ func TestProfiles_ADryRunDecisionRecordsTheProfileItWouldHaveUsed(t *testing.T) 
 		if !exists(tc.path) || codecOf(t, ffprobe, tc.path) != "h264" {
 			t.Errorf("%s: a dry run encoded or replaced the source", tc.path)
 		}
+	}
+}
+
+// AC-A10 on the two terminal rows written by store.RecordSkip rather than by Finish -
+// the guards that fire BEFORE the claim, whose rows go in through the one writer that
+// takes no Outcome. The hardlink guard is one of them, and it is graded here on BOTH
+// arms in a single pass so that neither answer can be hard-coded: two hardlinked
+// sources, one matched by a profile and one not, decided by the same configuration.
+//
+// The second link is taken OUTSIDE the library root, so the scan never enumerates it as
+// a source of its own and the only thing it contributes is the link count the guard
+// reads.
+//
+// MUTATION: pass "" instead of ts.Profile at the RecordSkip call in ProcessFile, or set
+// `profile = NULL` in RecordSkip's ON CONFLICT clause, and the matched arm reds.
+func TestProfiles_AHardlinkSkipRecordsTheProfileOnBothArms(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	sub := filepath.Join(d, "4K")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	matched := filepath.Join(sub, "film.mkv")
+	unmatched := filepath.Join(d, "show.mkv")
+	mkH264(t, ffmpeg, matched, "8M")
+	mkH264(t, ffmpeg, unmatched, "8M")
+
+	seeds := t.TempDir()
+	for i, src := range []string{matched, unmatched} {
+		if err := os.Link(src, filepath.Join(seeds, "seed"+strconv.Itoa(i)+".mkv")); err != nil {
+			t.Skipf("this filesystem does not support hard links: %v", err)
+		}
+	}
+
+	ts := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
+		c.EncodeProfiles = []config.EncodeProfile{
+			{Name: "4k-av1", Match: "**/4K/**", Encoder: strp("svtav1")},
+		}
+	})
+
+	for _, tc := range []struct{ path, profile string }{
+		{matched, "4k-av1"},
+		{unmatched, ""},
+	} {
+		out, status, ok := outcomeFor(t, ts, tc.path)
+		if !ok || status != store.Skipped {
+			t.Fatalf("%s: status = %q (found=%v), want skipped - the hardlink guard did not fire and "+
+				"this arm proves nothing", tc.path, status, ok)
+		}
+		if out.Reason != SkipHardlinked {
+			t.Fatalf("%s: skip reason = %q, want %q - a different guard fired", tc.path, out.Reason, SkipHardlinked)
+		}
+		if out.Profile != tc.profile {
+			t.Errorf("%s: the hardlinked skip's ledger row records profile %q, want %q",
+				tc.path, out.Profile, tc.profile)
+		}
+	}
+}
+
+// AC-A10 on the OTHER RecordSkip row: the park a restore writes.
+//
+// `holdfast restore` puts the original's bytes back and reconciles the ledger by
+// replacing the swap's done row with a skipped/restored-original one. That row is
+// terminal - it is what holds the rescued file out of the encoder - so it owes the same
+// attribution every other terminal row owes, and it is written through the same writer
+// the hardlink guard uses.
+//
+// The profile is resolved from the configuration in force at the moment of the restore,
+// which is the reading recorded in notes.md: the row describes a file that is waiting to
+// be decided again, not the encode that has just been undone.
+//
+// MUTATION: pass "" instead of the resolved profile at recordRestoreInJobs' RecordSkip
+// call and this reds.
+func TestProfiles_ARestoredOriginalsParkRowRecordsTheProfile(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	root := t.TempDir()
+	src := filepath.Join(root, "film.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+
+	eng, ts := undoEngine(t, ffmpeg, ffprobe, root, 24, nil)
+	eng.Cfg.EncodeProfiles = []config.EncodeProfile{{Name: "bulk", Match: "*.mkv"}}
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+	r := onlyRetained(t, ts)
+	if _, err := eng.Restore(context.Background(), r.SourcePath); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	out, status, ok := outcomeFor(t, ts, r.SourcePath)
+	if !ok || status != store.Skipped {
+		t.Fatalf("after a restore the ledger holds status=%q (found=%v) for %s, want skipped - without "+
+			"that park row this case asserts nothing", status, ok, r.SourcePath)
+	}
+	if out.Reason != SkipRestoredOriginal {
+		t.Fatalf("the park row's reason = %q, want %q", out.Reason, SkipRestoredOriginal)
+	}
+	if out.Profile != "bulk" {
+		t.Errorf("the restored original's park row records profile %q, want bulk", out.Profile)
 	}
 }

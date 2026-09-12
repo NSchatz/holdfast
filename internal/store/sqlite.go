@@ -935,11 +935,20 @@ func (s *SQLite) DropRetained(ctx context.Context, sourcePath string) error {
 // therefore exactly "did this call newly record the skip", which the caller uses to
 // emit — and count — the skip once, not once per scan. The outcome columns are
 // cleared so a converted row carries no stale proof (the same discipline as Claim).
-func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision) (bool, error) {
+//
+// The library profile and the encode profile are the ONLY outcome columns this write
+// carries values for rather than clearing, and that is the same discipline rather than
+// an exception to it. What the clearing rule excludes is proof about an ENCODE - a score,
+// a size, a duration - which this row has none of. Neither profile is proof: they are
+// what the guard was decided against, resolved at the moment it fired, so they belong to
+// THIS attempt exactly as the reason does. Clearing the encode profile would record
+// "nothing matched this file" on a row a profile decided, which is a false statement and
+// not an absence - for that column NULL and "" say the same thing.
+func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision, profile string) (bool, error) {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, reason,
-			library_root, profile_digest)
-		 VALUES (?, ?, ?, 0, NULL, ?, ?, ?, ?)
+			library_root, profile_digest, profile)
+		 VALUES (?, ?, ?, 0, NULL, ?, ?, ?, ?, ?)
 		 ON CONFLICT(path, fingerprint) DO UPDATE SET
 			status = excluded.status, reason = excluded.reason, worker = NULL, updated_at = excluded.updated_at,
 			library_root = excluded.library_root, profile_digest = excluded.profile_digest,
@@ -947,10 +956,10 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL, vmaf_stream = NULL,
 			source_codec = NULL, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
-			swap_cause = NULL, decision_inputs = NULL, profile = NULL
+			swap_cause = NULL, decision_inputs = NULL, profile = excluded.profile
 		 WHERE jobs.status = ?`,
 		path, fingerprint, string(Skipped), now(), nullString(reason),
-		nullString(by.LibraryRoot), nullString(by.ProfileDigest), string(Pending))
+		nullString(by.LibraryRoot), nullString(by.ProfileDigest), nullString(profile), string(Pending))
 	if err != nil {
 		return false, fmt.Errorf("store: record skip: %w", err)
 	}
