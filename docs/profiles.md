@@ -23,11 +23,30 @@ encode_profiles:
 ```
 
 The **first** profile whose `match` selects a source supplies that job's settings, laid
-over the top-level ones. A later matching profile has no effect on that job; a setting
-the matching profile does not override keeps its top-level value; and a source no
-profile matches is transcoded under the top-level settings - never skipped, never
-failed. With no `encode_profiles` at all, every job resolves to exactly the top-level
-settings.
+over what that file would otherwise be encoded at. A later matching profile has no effect
+on that job; a setting the matching profile does not override keeps the value it
+inherited; and a source no profile matches is transcoded under the settings it inherited
+- never skipped, never failed. With no `encode_profiles` at all, every job resolves to
+exactly what it inherited.
+
+### What it is laid over: four layers, innermost last
+
+1. the built-in default
+2. the top-level configuration (the YAML file, then `HOLDFAST_*`)
+3. the profile of the **library root** the file lives under (a `library_roots` entry
+   spelled as a mapping - see `config.example.yaml`)
+4. the **encode profile** whose pattern selected this file
+
+The last layer to mention a key decides it. So an encode profile is laid over the ROOT's
+resolved values and not over the top level: a root at `crf: 20` whose files match a
+profile that sets only `encoder` encodes at that root's 20, not at the top level's.
+`holdfast validate` prints layers 1 to 3 per root, knob by knob, with the layer each
+value came from.
+
+An encode profile may only change what the encoder PRODUCES. The gates a library root
+carries - the VMAF floors, the savings floor, the bitrate floor, the hardlink guard -
+are never reachable from one, so no pattern over a filename can move a gate that decides
+whether a source is destroyed.
 
 ### What `match` matches
 

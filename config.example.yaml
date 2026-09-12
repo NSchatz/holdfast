@@ -151,11 +151,19 @@ dry_run: false
 
 # --- per-job settings: transcode profiles ---
 # encode_profiles is an ORDERED list. The FIRST profile whose match selects a
-# source supplies that job's settings, laid over the top-level ones above; a later
-# matching profile has NO effect on that job, and any setting a matching profile
-# does not override keeps its top-level value. A source no profile matches is
-# transcoded under the top-level settings - never skipped, never failed. Absent
-# (the default) resolves every job to exactly the top-level settings.
+# source supplies that job's settings, laid over what that file would otherwise be
+# encoded at; a later matching profile has NO effect on that job, and any setting a
+# matching profile does not override keeps the value it inherited. A source no
+# profile matches is transcoded under what it inherited - never skipped, never
+# failed. Absent (the default) leaves every job at exactly that.
+#
+# "What it inherited" is four layers, innermost last: the built-in default, then
+# the top-level keys above, then the profile of the LIBRARY ROOT the file lives
+# under (the mapping form of a library_roots entry, at the top of this file), then
+# the encode profile matched here. The last layer to mention a key decides it - so
+# a root at `crf: 20` whose files match a profile that sets only `encoder` encodes
+# at that root's 20, not at the top level's. `holdfast validate` prints the first
+# three per root, knob by knob, with the layer each value came from.
 #
 # `match` is a glob over the source's path:
 #   - no "/" in the pattern  -> matched against the file's BASENAME (`*.mkv`)
