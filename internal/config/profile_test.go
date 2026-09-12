@@ -538,10 +538,38 @@ func TestValidate_RefusesAProfileKnobThatIsDaemonLevel(t *testing.T) {
 			}
 		})
 	}
+	// The rule is DERIVED FROM knownKeys, not from the frozen list above, and that is what
+	// makes it survive a top-level key this spec never saw. Every accepted top-level key
+	// that is not a profile knob is refused inside an entry, so a later change that adds
+	// one (preserve_mtime is the one that landed while this was in flight) is covered the
+	// moment it is added rather than when somebody remembers to extend a list here.
+	for key := range knownKeys {
+		if isProfileKnob(key) || key == "library_roots" {
+			continue
+		}
+		t.Run("derived/"+key, func(t *testing.T) {
+			_, err := load(t, fmt.Sprintf("library_roots:\n  - path: /mnt/tv\n    %s: 4\n", key))
+			if err == nil {
+				t.Fatalf("Load with %s inside an entry = nil: a top-level key that is not an overridable "+
+					"knob must be refused there, or an operator believes a root has a setting it does not", key)
+			}
+			if !strings.Contains(err.Error(), key) {
+				t.Errorf("the refusal must name %q; got: %v", key, err)
+			}
+		})
+	}
+
 	// Anti-vacuity: the same key at the TOP level is perfectly legal.
 	c := loadYAML(t, "library_roots:\n  - /mnt/tv\nworkers: 4\n")
 	if c.Workers != 4 {
 		t.Errorf("top-level workers = %d, want 4", c.Workers)
+	}
+	// ... including the one that landed alongside this change, which is the case the
+	// derived loop above is really about.
+	c = loadYAML(t, "library_roots:\n  - /mnt/tv\npreserve_mtime: false\n")
+	if c.PreserveMtimeEnabled() {
+		t.Error("top-level preserve_mtime: false did not take effect, so the loop above is refusing a " +
+			"key this build does not actually accept anywhere")
 	}
 }
 
