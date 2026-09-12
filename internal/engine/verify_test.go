@@ -239,6 +239,110 @@ func TestVmafGate_UnmeasurableMetricIsARejection(t *testing.T) {
 	}
 }
 
+// TestVmafGate_TheScoredStreamIsRecordedOnPassAndAbsentWhenNothingWasCompared carries
+// the stream the comparison was made against along the same path the comparison format
+// already travels, and - the half that matters - stops it at the same place.
+//
+// A job whose gate could not compare anything compared no stream, and the row must say so.
+// The temptation here is sharper than it was for the format: the stream is a CONSTANT this
+// build always scores, so writing it unconditionally would look like completing the record
+// while actually claiming a measurement nobody took. Either input having no video stream,
+// ffmpeg refusing the graph, libvmaf missing and a log that came back incomplete all reach
+// the recording site the same way - through an empty proof - and all four are driven here.
+func TestVmafGate_TheScoredStreamIsRecordedOnPassAndAbsentWhenNothingWasCompared(t *testing.T) {
+	// 1. The pass path. A complete measurement records the stream beside the format.
+	measured := vmaf.Result{
+		HarmonicMean: 98.4, Min: 96.1,
+		ChromaMin: 41.2, ChromaMetric: vmaf.ChromaMetricName, PixelFormat: "yuv420p10le",
+		Stream: vmaf.ScoredStream,
+	}
+	got := runGate(t, nil, func(vmaf.Request) (vmaf.Result, error) { return measured, nil })
+	if got.status != store.Done {
+		t.Fatalf("status = %q, want %q - a measurement clearing every floor must pass the gate",
+			got.status, store.Done)
+	}
+	if got.outcome.VmafStream != vmaf.ScoredStream {
+		t.Errorf("a done row records vmaf_stream %q, want %q - which stream was compared is a fact "+
+			"about the measurement, and it travels with the score",
+			got.outcome.VmafStream, vmaf.ScoredStream)
+	}
+
+	// 2. A FLOOR rejection still records it, exactly as it records the format: the
+	// numbers that rejected an encode are the ones an operator most wants to see, and
+	// they are uninterpretable without the stream they were measured on.
+	damaged := vmaf.Result{
+		HarmonicMean: 98.97, Min: 96.86, ChromaMin: 26.21,
+		ChromaMetric: vmaf.ChromaMetricName, PixelFormat: "yuv420p10le", Stream: vmaf.ScoredStream,
+	}
+	got = runGate(t, nil, func(vmaf.Request) (vmaf.Result, error) { return damaged, nil })
+	if got.status != store.Failed {
+		t.Fatalf("status = %q, want %q on a chroma-floor rejection", got.status, store.Failed)
+	}
+	if got.outcome.VmafStream != vmaf.ScoredStream {
+		t.Errorf("a floor-rejected row records vmaf_stream %q, want %q - the proof is carried on the "+
+			"reject path too", got.outcome.VmafStream, vmaf.ScoredStream)
+	}
+
+	// 3. And every way the comparison can fail to happen at all records NO stream.
+	cases := []struct {
+		name string
+		err  error
+		// partial is what the scorer returns ALONGSIDE the error - including, on
+		// purpose, a Stream the engine must not reach in and take.
+		partial vmaf.Result
+	}{
+		{
+			name:    "an input has no video stream",
+			err:     errors.New("vmaf: ffmpeg failed: exit status 1: Stream specifier 'v:0' in filtergraph description matches no streams"),
+			partial: vmaf.Result{Stream: vmaf.ScoredStream},
+		},
+		{
+			name:    "ffmpeg refused the graph",
+			err:     errors.New("vmaf: ffmpeg failed: exit status 1: Error initializing complex filters"),
+			partial: vmaf.Result{Stream: vmaf.ScoredStream},
+		},
+		{
+			name:    "libvmaf unavailable",
+			err:     vmaf.ErrUnavailable,
+			partial: vmaf.Result{},
+		},
+		{
+			name: "the log came back without every pooled statistic",
+			err: errors.New("vmaf: log is missing a pooled statistic (harmonic_mean present=true, " +
+				"min present=true, psnr_cb present=false, psnr_cr present=true)"),
+			partial: vmaf.Result{HarmonicMean: 99.1, Min: 97.0, PixelFormat: "yuv420p10le", Stream: vmaf.ScoredStream},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runGate(t, nil, func(vmaf.Request) (vmaf.Result, error) { return tc.partial, tc.err })
+			if got.status != store.Failed {
+				t.Fatalf("status = %q, want %q - an encode whose quality was never measured must be "+
+					"REJECTED, never reported as a pass", got.status, store.Failed)
+			}
+			if got.md5After != got.md5Before {
+				t.Error("the source changed on a rejection - it must be byte-for-byte intact")
+			}
+			if codecOf(t, envOr("HOLDFAST_FFPROBE", "ffprobe"), got.src) != "h264" {
+				t.Error("the source was swapped for the temp despite a rejection")
+			}
+			if n := nTemp(t, got.dir); n != 0 {
+				t.Errorf("%d temp file(s) left behind after a rejection", n)
+			}
+			if got.outcome.VmafStream != "" {
+				t.Errorf("a row whose gate compared nothing recorded vmaf_stream %q - absent means "+
+					"absent, and a constant specifier is not a measurement", got.outcome.VmafStream)
+			}
+			if got.outcome.VmafMean != nil || got.outcome.VmafMin != nil || got.outcome.VmafChroma != nil {
+				t.Errorf("a row whose gate compared nothing recorded a score: %+v", got.outcome)
+			}
+			if !strings.Contains(got.outcome.Reason, "refusing to accept an unmeasured encode") {
+				t.Errorf("the recorded reason must say the encode was unmeasured; got: %s", got.outcome.Reason)
+			}
+		})
+	}
+}
+
 // TestVerify_RejectsAnOutputMissingAVideoStream is the parity gate at its new width,
 // driven end to end because the criterion is about what happens to the FILES: an encoder
 // that drops a video stream must be rejected, the source must be byte-for-byte intact

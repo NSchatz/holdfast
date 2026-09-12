@@ -36,7 +36,9 @@ import (
 // discipline for the same reason: the format the comparison was made in and the
 // chroma statistic it produced are FACTS ABOUT THE MEASUREMENT, and a score that
 // travels without them cannot be interpreted afterwards - nobody reading a stored
-// 98.4 can say which pixels were compared or whether the colour survived.
+// 98.4 can say which pixels were compared or whether the colour survived. Stream is
+// carried for the same reason and answers the question those two leave open: which of
+// the file's video streams those pixels came from.
 type vmafProof struct {
 	Mean  *float64
 	Min   *float64
@@ -45,6 +47,13 @@ type vmafProof struct {
 	// PixFmt is the pixel format BOTH streams were converted to before scoring, named
 	// by holdfast rather than negotiated by libavfilter. "" means no measurement.
 	PixFmt string
+	// Stream names WHICH video stream of each file was compared, in the specifier
+	// vocabulary the probes use (vmaf.ScoredStream). It is the same class of fact as
+	// PixFmt: on a source carrying more than one video stream a score that does not say
+	// which stream it looked at cannot be lined up against the guards that inspected the
+	// file. "" means no measurement, and is never filled in with a plausible default -
+	// a job whose gate never ran scored no stream.
+	Stream string
 	// ChromaMin is the worst (sub)sampled frame's chroma PSNR in dB, and ChromaMetric
 	// names what that number is. nil/"" means no measurement, never a zero: 0.0 dB is
 	// an obliterated plane, which is the single most important thing this field could
@@ -280,6 +289,7 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string) (vma
 	proof := vmafProof{
 		Mean: &res.HarmonicMean, Min: &res.Min, Model: model,
 		PixFmt: res.PixelFormat, ChromaMin: &res.ChromaMin, ChromaMetric: res.ChromaMetric,
+		Stream: res.Stream,
 	}
 
 	if res.HarmonicMean < e.Cfg.MinVmaf {

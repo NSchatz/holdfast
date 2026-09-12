@@ -285,7 +285,7 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE jobs SET status = ?, worker = ?, updated_at = ?,
 			reason = NULL, encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
-			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL,
+			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL, vmaf_stream = NULL,
 			source_codec = NULL, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
 			swap_cause = NULL, failure_class = NULL, decision_inputs = NULL
@@ -497,7 +497,7 @@ func (s *SQLite) Finish(ctx context.Context, path, fingerprint string, st Status
 func finishQuery(st Status, o *Outcome, maxFailures int) string {
 	q := `UPDATE jobs SET status = ?, updated_at = ?,
 		reason = ?, encoder = ?, vmaf_mean = ?, vmaf_min = ?, vmaf_model = ?,
-		vmaf_pix_fmt = ?, vmaf_chroma = ?, vmaf_chroma_metric = ?,
+		vmaf_pix_fmt = ?, vmaf_chroma = ?, vmaf_chroma_metric = ?, vmaf_stream = ?,
 		source_codec = ?, source_bytes = ?, output_bytes = ?, encode_ms = ?,
 		guard_attributes = ?, guard_time_resolution = ?, guard_residual_window = ?,
 		swap_cause = ?, failure_class = ?, decision_inputs = ?`
@@ -529,6 +529,7 @@ func finishArgs(st Status, o *Outcome, path, fingerprint string) []any {
 		nullString(o.Reason), nullString(o.Encoder),
 		nullFloat(o.VmafMean), nullFloat(o.VmafMin), nullString(o.VmafModel),
 		nullString(o.VmafPixFmt), nullFloat(o.VmafChroma), nullString(o.VmafChromaMetric),
+		nullString(o.VmafStream),
 		nullString(o.SourceCodec), nullInt(o.SourceBytes), nullInt(o.OutputBytes), nullInt(o.EncodeMs),
 		nullString(o.GuardAttributes), nullString(o.GuardTimeResolution),
 		nullString(o.GuardResidualWindow), nullString(o.SwapCause), nullString(class),
@@ -567,7 +568,7 @@ func nullInt(i *int64) any {
 // place, so the SELECT text and the scan destinations cannot drift apart when a
 // column is appended. Its order is the order outcomeScan expects.
 const outcomeColumns = `reason, encoder, vmaf_mean, vmaf_min, vmaf_model,
-	vmaf_pix_fmt, vmaf_chroma, vmaf_chroma_metric,
+	vmaf_pix_fmt, vmaf_chroma, vmaf_chroma_metric, vmaf_stream,
 	source_codec, source_bytes, output_bytes, encode_ms,
 	guard_attributes, guard_time_resolution, guard_residual_window, swap_cause,
 	failure_class, decision_inputs`
@@ -586,6 +587,11 @@ type outcomeScan struct {
 	pixFmt, chromaMetric      sql.NullString
 	mean, worst, chroma       sql.NullFloat64
 	srcBytes, outBytes, encMs sql.NullInt64
+
+	// Which video stream the comparison was made against. Nullable like every other
+	// outcome column: a row written before it existed, and any row whose VMAF gate never
+	// ran, reads as not recorded rather than as the stream this build would have scored.
+	stream sql.NullString
 
 	// The source's own video codec, recorded by a dry-run decision. Nullable like every
 	// other outcome column: a row written before it existed, and any row that never
@@ -613,7 +619,7 @@ type outcomeScan struct {
 func (s *outcomeScan) dest() []any {
 	return []any{
 		&s.reason, &s.encoder, &s.mean, &s.worst, &s.model,
-		&s.pixFmt, &s.chroma, &s.chromaMetric,
+		&s.pixFmt, &s.chroma, &s.chromaMetric, &s.stream,
 		&s.srcCodec, &s.srcBytes, &s.outBytes, &s.encMs,
 		&s.guardAttrs, &s.guardRes, &s.guardWindow, &s.swapCause,
 		&s.failClass, &s.inputs,
@@ -633,6 +639,7 @@ func (s *outcomeScan) outcome() Outcome {
 	o := Outcome{
 		Reason: s.reason.String, Encoder: s.encoder.String, VmafModel: s.model.String,
 		VmafPixFmt: s.pixFmt.String, VmafChromaMetric: s.chromaMetric.String,
+		VmafStream:      s.stream.String,
 		SourceCodec:     s.srcCodec.String,
 		GuardAttributes: s.guardAttrs.String, GuardTimeResolution: s.guardRes.String,
 		GuardResidualWindow: s.guardWindow.String, SwapCause: s.swapCause.String,
@@ -915,7 +922,7 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 		 ON CONFLICT(path, fingerprint) DO UPDATE SET
 			status = excluded.status, reason = excluded.reason, worker = NULL, updated_at = excluded.updated_at,
 			encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
-			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL,
+			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL, vmaf_stream = NULL,
 			source_codec = NULL, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
 			swap_cause = NULL, decision_inputs = NULL

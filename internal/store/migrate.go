@@ -359,6 +359,30 @@ ALTER TABLE jobs ADD COLUMN decision_inputs TEXT;
 CREATE INDEX IF NOT EXISTS idx_jobs_status_inputs ON jobs(status, decision_inputs);
 `,
 	},
+	{
+		// v11 - WHICH video stream the quality gate compared.
+		//
+		// v4 recorded the format both streams were converted to; this records which
+		// streams those were. A source can carry more than one video stream, and until the
+		// filtergraph named its inputs explicitly nothing pinned the comparison to the
+		// stream every ffprobe read selects (`v:0`) and the decode-integrity check decodes
+		// (`0:v:0`). The gate now names it, and the row now says so - the same argument
+		// that put the model and the comparison format here, applied to the one fact about
+		// the measurement they left open.
+		//
+		// NULLABLE with NO DEFAULT, the rule v2 set and every step since has kept, and
+		// there is NO BACKFILL. Every row already in the field was written by a gate that
+		// named no stream, so it must READ as not recorded. A DEFAULT - 'v:0' above all,
+		// because it is the value this build would now write and therefore the tempting
+		// one - would put a stream on rows nobody recorded one for, and on rows whose VMAF
+		// gate never ran at all, in the one table whose whole job is to be evidence.
+		//
+		// No index. Nothing queries BY the stream: every reader has the row in hand.
+		name: "scored video stream",
+		sql: `
+ALTER TABLE jobs ADD COLUMN vmaf_stream TEXT;
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

@@ -121,14 +121,21 @@ function pathParts(path) {
 function vmafFigures(j) {
   if (!isNum(j.vmaf_mean) && !isNum(j.vmaf_min)) return null;
   const model = j.vmaf_model ? String(j.vmaf_model).replace(/^version=/, "") : "unspecified model";
+  // Which video stream the comparison was made on. A source can carry more than one, so
+  // this is part of the scope the score is read under, not decoration. It renders the way
+  // the model does when the row never recorded it - an "unspecified stream" states the
+  // absence, where a fabricated "v:0" would tell a reader which stream was compared on a
+  // row where nothing was.
+  const stream = j.vmaf_stream ? String(j.vmaf_stream) : "unspecified stream";
   return {
     mean: isNum(j.vmaf_mean) ? fmtScore(j.vmaf_mean) : "?",
     worst: isNum(j.vmaf_min) ? fmtScore(j.vmaf_min) : "?",
-    // A SCOPE label, not an explanation (F8), and eleven words: the model, the two
-    // pooled statistics, the blind spot and what the score was measured against. The
-    // paragraphs that state what a VMAF score does and does not license live in
+    // A SCOPE label, not an explanation (F8): the model, the stream it was measured on,
+    // the two pooled statistics, the blind spot and what the score was measured against.
+    // The paragraphs that state what a VMAF score does and does not license live in
     // docs/dashboard-methodology.md, linked once per region.
-    condition: "model " + model + " · harmonic-mean + worst-frame pooling · luma-only · measured vs your source",
+    condition: "model " + model + " · stream " + stream
+      + " · harmonic-mean + worst-frame pooling · luma-only · measured vs your source",
   };
 }
 

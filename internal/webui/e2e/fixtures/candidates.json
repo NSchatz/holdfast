@@ -101,6 +101,7 @@
       "vmaf_min": 96.51533,
       "vmaf_model": "version=vmaf_v0.6.1",
       "vmaf_pix_fmt": "yuv420p10le",
+      "vmaf_stream": "v:0",
       "vmaf_chroma": 44.392002,
       "vmaf_chroma_metric": "psnr_cb/psnr_cr min (dB)",
       "source_codec": null,

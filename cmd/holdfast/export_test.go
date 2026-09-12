@@ -577,13 +577,13 @@ func bumpSchemaVersion(t *testing.T, dbPath string, version int) {
 
 // olderSchemaVersion is the schema this repository shipped immediately before the NEWEST
 // migration appended its own step: the shape a database written by the previous holdfast
-// has. That newest step is what a terminal decision read from the configuration, so the
-// version below and the
+// has. That newest step is which video stream the quality gate compared, so the version
+// below and the
 // objects seedOlderLedger removes both track it. It is a literal because cmd/holdfast
 // cannot see the store's unexported version counter - and
 // TestExport_TheDaemonsDoorIsWhatMigratesAndThatIsWhyTheExportDoesNotUseIt keeps the literal
 // honest by asserting store.Open really does move a fixture built from it.
-const olderSchemaVersion = 9
+const olderSchemaVersion = 10
 
 // seedOlderLedger builds a real ledger with rows and then removes exactly what the NEWEST
 // migration added, restoring the previous version stamp. Not a current database wearing an
@@ -609,10 +609,10 @@ func seedOlderLedger(t *testing.T, stateDir string) {
 		t.Fatalf("raw open %s: %v", dbPath, err)
 	}
 	defer func() { _ = db.Close() }()
-	// The index goes first: SQLite refuses to drop a column an index refers to.
+	// Any index goes first: SQLite refuses to drop a column an index refers to. The
+	// newest step adds none, so there is nothing to drop ahead of the column today.
 	for _, stmt := range []string{
-		`DROP INDEX IF EXISTS idx_jobs_status_inputs`,
-		`ALTER TABLE jobs DROP COLUMN decision_inputs`,
+		`ALTER TABLE jobs DROP COLUMN vmaf_stream`,
 		fmt.Sprintf(`PRAGMA user_version = %d`, olderSchemaVersion),
 	} {
 		if _, err := db.Exec(stmt); err != nil {
