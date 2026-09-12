@@ -386,3 +386,61 @@ func TestScratchSwap_ACopyThatIsNotTheAcceptedBytesRefusesTheSwap(t *testing.T) 
 		}
 	})
 }
+
+// The copy back and the metadata carry, composed - the one region where a scratch
+// directory and S0085's "the replacement carries the source's metadata" meet.
+//
+// The order is a constraint and not a preference. With a scratch_dir configured the
+// file beside the source does not exist until the copy has made it, so a carry taken
+// first would have nothing to carry onto; and the carry writes mode, owner and mtime
+// while the copy writes bytes, so the copy's proof that these ARE the accepted bytes
+// (AC-B5) is not disturbed by running the carry after it.
+//
+// Graded by STATTING THE PUBLISHED FILE under a hostile umask and a modification time no
+// encode could have produced, which is the instrument S0085's own fixtures use: with the
+// umask set, a replacement at the source's mode can only have been given it.
+//
+// MUTATION: move the copy-back block below carrySourceMetadata and the job fails with
+// "could not read the source's metadata" or publishes the encode's own mode and age.
+func TestScratchSwap_TheCopyBesideTheSourceCarriesTheSourcesMetadata(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	root, scratch := scratchDirs(t)
+	src := filepath.Join(root, "film.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+
+	const wantMode = os.FileMode(0o640)
+	if err := os.Chmod(src, wantMode); err != nil {
+		t.Fatalf("chmod the source: %v", err)
+	}
+	wantMtime := aFixedPastTime()
+	setModTime(t, src, wantMtime)
+	wantUID, wantGID := statOwner(t, src)
+	hostileUmask(t)
+
+	eng, ts := buildEngineAndStore(t, ffmpeg, ffprobe, root, nil, func(c *config.Config) {
+		c.ScratchDir = scratch
+		c.PreserveMtime = boolPtr(true)
+	})
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+
+	if _, status, ok := outcomeFor(t, ts, src); !ok || status != store.Done {
+		t.Fatalf("status = %q (found=%v), want done - without a completed swap this asserts nothing", status, ok)
+	}
+	if codecOf(t, ffprobe, src) != "hevc" {
+		t.Fatalf("the source was not replaced by the encode")
+	}
+	if got := modeOf(t, src).Perm(); got != wantMode {
+		t.Errorf("the published replacement is at mode %04o, want the source's %04o", got, wantMode)
+	}
+	if got := mtimeOf(t, src); !got.Equal(wantMtime) {
+		t.Errorf("the published replacement's mtime is %s, want the source's %s", got, wantMtime)
+	}
+	if uid, gid := statOwner(t, src); uid != wantUID || gid != wantGID {
+		t.Errorf("the published replacement is owned by %d:%d, want the source's %d:%d", uid, gid, wantUID, wantGID)
+	}
+	if got := listDir(t, scratch); len(got) != 0 {
+		t.Errorf("the scratch directory holds %v after the job, want nothing", got)
+	}
+}
