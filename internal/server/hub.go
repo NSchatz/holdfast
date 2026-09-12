@@ -66,6 +66,15 @@ type jobDTO struct {
 	Reason string `json:"reason,omitempty"`
 	// Encoder that ran (cpu / svtav1 / nvenc / …).
 	Encoder string `json:"encoder,omitempty"`
+	// Profile is the encode_profiles entry that supplied this job's settings, or
+	// "" for the top-level settings.
+	//
+	// It is deliberately NOT `omitempty`, unlike Encoder beside it. "" is a REAL
+	// value for this field - it says the top-level settings ran - so omitting the
+	// key would leave a consumer unable to tell "this build does not report the
+	// profile" from "no profile was used", which is exactly the distinction an
+	// export exists to preserve. The key is always present; its value says which.
+	Profile string `json:"profile"`
 	// The VMAF pair and the model that produced it. A score is meaningless without its
 	// model, so they travel together or not at all.
 	VmafMean  *float64 `json:"vmaf_mean"`
@@ -176,6 +185,7 @@ func toDTOs(jobs []store.Job) []jobDTO {
 
 			Reason:           j.Outcome.Reason,
 			Encoder:          j.Outcome.Encoder,
+			Profile:          j.Outcome.Profile,
 			VmafMean:         j.Outcome.VmafMean,
 			VmafMin:          j.Outcome.VmafMin,
 			VmafModel:        j.Outcome.VmafModel,

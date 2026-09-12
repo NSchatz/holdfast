@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/NSchatz/holdfast/internal/diskfree"
 )
 
 // System returns a Platform that reads the real host.
@@ -125,6 +127,34 @@ func (s *system) ReadDir(path string) ([]Entry, error) {
 }
 
 func (s *system) Resolve(path string) (string, error) { return filepath.EvalSymlinks(path) }
+
+func (s *system) FreeBytes(path string) (uint64, error) { return diskfree.Bytes(path) }
+
+// ProbeWritable creates and removes one zero-length file, which is the only way
+// to establish what it claims to establish: a directory this process may not
+// write to reports that at open(), not in its mode bits, and the commonest causes
+// - a read-only remount, a full filesystem, an export that squashes the writing
+// uid, an SELinux denial - are each invisible to a stat.
+//
+// The name carries this build's own marker so a probe file glimpsed by anything
+// else is identifiable as holdfast's, and the pid keeps two holdfast processes
+// probing one directory at the same instant from colliding on it. It is removed
+// whether the write succeeded or not, and a removal that FAILS is reported as a
+// failure: "I can create a file here but not remove one" is not a directory this
+// tool may use as a working area, because every working file it left would be
+// permanent.
+func (s *system) ProbeWritable(dir string) error {
+	name := filepath.Join(dir, fmt.Sprintf(".holdfast-scratch-probe.%d", os.Getpid()))
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(name)
+		return err
+	}
+	return os.Remove(name)
+}
 
 // FSType names the filesystem type at path.
 //

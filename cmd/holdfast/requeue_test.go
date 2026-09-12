@@ -285,7 +285,8 @@ func TestRequeue_LeavesTheProtectedRowsAloneAndSaysSo(t *testing.T) {
 	cfgPath, state := ledgerConfig(t, "")
 	in := inForce(t, cfgPath)
 	seedLedger(t, state, func(st *store.SQLite) {
-		if _, err := st.RecordSkip(context.Background(), "/lib/rescued.mkv", "fp", engine.SkipRestoredOriginal, store.Decision{}); err != nil {
+		if _, err := st.RecordSkip(context.Background(), "/lib/rescued.mkv", "fp",
+			engine.SkipRestoredOriginal, store.Decision{}, ""); err != nil {
 			t.Fatalf("RecordSkip: %v", err)
 		}
 		seedTerminalRow(t, st, "/lib/parked.mkv", store.Indeterminate, "the swap did not complete cleanly", in)

@@ -97,6 +97,14 @@ type vmafProof struct {
 // value, which nothing reads. Every rejection this function does NOT classify explicitly
 // is transient, which is the fail-safe direction: an unrecognised rejection costs CPU,
 // where a wrongly-final one costs a file nobody revisits.
+//
+// # The target codec, and why it is a parameter
+//
+// targetCodec is what THIS JOB's effective encoder produces (targetCodecFor), which is
+// the root's `encoder` unless an encode profile overrode it for this file - so it is
+// passed in rather than derived from prof here: a run can carry more than one target,
+// and a check made against any other job's would reject an output that is exactly what
+// this one's own settings asked for.
 func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.Profile, targetCodec string) (vmafProof, store.FailureClass, error) {
 	var none vmafProof
 
@@ -107,10 +115,11 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.P
 		return none, store.FailureTransient, fmt.Errorf("temp missing or empty")
 	}
 
-	// 2. output codec must be the engine's configured target codec (hevc or av1 —
-	// TRANSCODE-6 generalizes this away from a hardcoded "hevc" so a hardware/AV1
-	// encode is held to exactly the same bar as CPU libx265). DETERMINISTIC: the
-	// encoder this root's profile configures produces the codec it produces.
+	// 2. output codec must be the codec THIS JOB's encoder targets (hevc or av1 -
+	// TRANSCODE-6 generalized this away from a hardcoded "hevc" so a hardware/AV1
+	// encode is held to exactly the same bar as CPU libx265; the root's profile and
+	// the encode profiles make it per-job, so two encoders in one run are each held
+	// to their own). DETERMINISTIC: the job's encoder produces the codec it produces.
 	if oc := e.Probe.VideoCodec(ctx, tmp); oc != targetCodec {
 		return none, store.FailureDeterministic, fmt.Errorf("output codec is %q, not %s", oc, targetCodec)
 	}

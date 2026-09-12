@@ -406,6 +406,42 @@ ALTER TABLE jobs ADD COLUMN library_root   TEXT;
 ALTER TABLE jobs ADD COLUMN profile_digest TEXT;
 `,
 	},
+	{
+		// v13 - TRANSCODE-PROFILES: which ENCODE profile supplied a job's settings.
+		//
+		// Not the same fact as v12 above it. That one names the library root a file was
+		// enumerated under and digests the knobs that root resolved to; this one names
+		// the pattern-matched profile, if any, whose overrides were then laid over them.
+		// A row can carry both, one, or neither, and each answers a question the other
+		// cannot: which tree judged this file, and which named set of overrides decided
+		// what its encoder produced.
+		//
+		// One more nullable outcome column, appended rather than folded into v2's set,
+		// for the reason the whole slice exists: a database in the field has already run
+		// v2's text, so editing it would change only what a FRESH database gets and fork
+		// the two shapes apart.
+		//
+		// It is v13 and NOT v8, which is the append-only rule doing the job v6 and v7
+		// record above. This step was written as v8 while the branch was open; the
+		// dry-run decision then shipped source_codec as v8, the failure classifier
+		// failure_class as v9, the re-opening rule decision_inputs as v10, the quality
+		// gate vmaf_stream as v11 and the per-library profiles library_root and
+		// profile_digest as v12, and a database in the field has already run all five of
+		// those texts under those versions. Two different steps claiming one version
+		// would silently fork the schema in two, so this one moves to the end of the
+		// history rather than contesting an ordinal that is already spent. Nothing about
+		// the SQL changes; only where it sits.
+		//
+		// NULL is "no encode profile matched", which is exactly what every row written
+		// before they existed describes - so unlike most columns here, the absence of a
+		// value on an old row is not a measurement nobody took, it is the true answer.
+		// That is why NULL and "" are the same statement for this field and why no
+		// DEFAULT is needed to make the old rows honest.
+		name: "transcode profile column",
+		sql: `
+ALTER TABLE jobs ADD COLUMN profile TEXT;
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

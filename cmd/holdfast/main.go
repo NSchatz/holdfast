@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -139,6 +140,19 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	if cfg == nil {
 		return code
 	}
+	// The configured working location, checked here for the same reason `run` and
+	// `serve` check it before their first encode: a missing, unwritable, overlapping
+	// or short-of-space scratch directory refuses those runs, and an operator asking
+	// `validate` whether their configuration will start is owed that answer rather
+	// than a "config OK" the next `run` contradicts.
+	//
+	// Only the SCRATCH half of the decision runs. `validate` is deliberately cheap -
+	// it loads the configuration and stops, with no ffmpeg lookup, no capability
+	// check and no library walk - and none of the scratch questions needs one.
+	if scratchCode := validateScratch(cfg, stderr); scratchCode != 0 {
+		return scratchCode
+	}
+
 	fmt.Fprintf(stdout, "config OK: %d library root(s)\n", len(cfg.LibraryRoots))
 	printResolvedProfiles(stdout, cfg)
 	// What this configuration MEANS, before what it has weakened. A disabled undo
@@ -221,6 +235,28 @@ func printResolvedProfiles(w io.Writer, cfg *config.Config) {
 			fmt.Fprintf(w, "  %-20s %-24s from %s\n", k.Knob, k.Value, k.Layer)
 		}
 	}
+}
+
+// validateScratch reports the scratch directory's start-or-refuse causes, in exactly
+// the account `run` and `serve` print, and returns a nonzero exit code when it would
+// refuse. With no scratch_dir configured it checks nothing at all and returns 0, so a
+// configuration that predates this item is unchanged.
+func validateScratch(cfg *config.Config, stderr io.Writer) int {
+	if strings.TrimSpace(cfg.ScratchDir) == "" {
+		return 0
+	}
+	res := startup.RunScratchOnly(startup.Check{
+		Roots:            cfg.LibraryRoots,
+		StateDir:         stateDirPath(cfg),
+		ScratchDir:       cfg.ScratchDir,
+		ScratchMinFreeGB: cfg.ScratchMinFreeGB,
+		Platform:         startupPlatform(),
+	})
+	if res.Start {
+		return 0
+	}
+	res.WriteRefusal(stderr)
+	return 1
 }
 
 // cmdRestore is the operator's half of the undo window (UNDO-6): with no argument it
@@ -356,8 +392,9 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 	// A hardware encoder (nvenc/qsv/vaapi/amf) with no matching device, or an
 	// ffmpeg build missing a codec, must stop before any work rather than let every
 	// file either fail one-by-one or (worse, for some hardware encoders) appear to
-	// "succeed" while writing nothing. Each profile's encoder is always a valid
-	// registry key here (Load defaults it to "cpu"; Validate rejects an unknown one).
+	// "succeed" while writing nothing. Every key here is a valid registry key (Load
+	// defaults the top level to "cpu"; Validate rejects an unknown or empty encoder at
+	// the top level, inside a library profile and inside an encode profile alike).
 	//
 	// EVERY distinct encoder any root resolved to is checked, not just the top-level
 	// one: a root that says `encoder: nvenc` on a host with no NVIDIA device must stop
@@ -366,6 +403,18 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 	for _, e := range distinctBy(cfg, func(p config.Profile) string { return p.Encoder }) {
 		if _, err := encoder.RequireAvailable(context.Background(), ffmpeg, ffprobe, e.key); err != nil {
 			fmt.Fprintf(stderr, "holdfast: %s: %v\n", e.where, err)
+			return nil, nil, 1
+		}
+	}
+	// And every encoder an ENCODE PROFILE can override a root's with, for the same
+	// reason: `encoder: svtav1` inside one is reached by every file its pattern selects,
+	// so a preflight blind to it would deliver the fail-early guarantee for some of an
+	// operator's library and not for the rest. The account names the profile that asked,
+	// because "nvenc is unavailable" sends an operator to a configuration whose top-level
+	// encoder is cpu.
+	for _, e := range cfg.EncodeProfileEncoders() {
+		if _, err := encoder.RequireAvailable(context.Background(), ffmpeg, ffprobe, e.Key); err != nil {
+			fmt.Fprintf(stderr, "holdfast: encode_profiles (%s): %v\n", e.Profile, err)
 			return nil, nil, 1
 		}
 	}
@@ -509,7 +558,13 @@ func startupCheck(cfg *config.Config, log *slog.Logger, stderr io.Writer) (start
 		StateDir:     stateDirPath(cfg),
 		Declarations: cfg.AllowNonLocal,
 		IsMediaFile:  func(base string) bool { return engine.IsSourceName(base, cfg.VideoExts) },
-		Platform:     startupPlatform(),
+		// The configured working location, checked in the same decision and before
+		// anything is encoded: a scratch directory that is missing, is not a
+		// directory, is unwritable, is short of the floor or overlaps a library
+		// root refuses the run here rather than failing every file mid-encode.
+		ScratchDir:       cfg.ScratchDir,
+		ScratchMinFreeGB: cfg.ScratchMinFreeGB,
+		Platform:         startupPlatform(),
 	})
 	res.Log(log)
 	if !res.Start {

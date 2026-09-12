@@ -81,14 +81,14 @@ func TestDecide_TheOrderIsTotalAndTheListIsClosed(t *testing.T) {
 		}
 	})
 
-	t.Run("row 5: nothing applies and the run starts", func(t *testing.T) {
+	t.Run("row 6: nothing applies and the run starts", func(t *testing.T) {
 		f := newFS().setType("/", "ext4")
 		f.mkdir("/srv/media")
 		f.mkfile("/srv/media/Film.mkv")
 		f.mkdir("/var/state")
 		res := check(f, []string{"/srv/media"}, "/var/state")
-		if !res.Start || res.Row != 5 {
-			t.Fatalf("row = %d start = %v, want 5/true: %+v", res.Row, res.Start, res.Causes)
+		if !res.Start || res.Row != rowStart {
+			t.Fatalf("row = %d start = %v, want %d/true: %+v", res.Row, res.Start, rowStart, res.Causes)
 		}
 		if len(res.Causes) != 0 {
 			t.Fatalf("a started run carries causes: %+v", res.Causes)

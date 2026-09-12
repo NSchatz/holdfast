@@ -190,6 +190,22 @@ type Outcome struct {
 	// to its encoder as a success is.
 	Encoder string
 
+	// Profile is the name of the encode_profiles entry that supplied this job's
+	// settings, and "" when the top-level settings did - which is every row a
+	// configuration without profiles can produce.
+	//
+	// It is on the row because Encoder alone stops answering "what ran" the moment
+	// profiles exist. Two files in one run can be encoded by two different encoders
+	// at two different quality targets in two different containers, and an operator
+	// auditing a swap after the source is gone needs to know WHICH set of settings
+	// decided it - including for a skip, where the profile is what decided that the
+	// file was already at its target codec.
+	//
+	// "" is a real value here and not a missing measurement: it says the top-level
+	// settings ran. It is stored as NULL like every other empty string in this
+	// struct, and read back as "" - the two are the same statement for this field.
+	Profile string
+
 	// VmafMean and VmafMin are the pooled harmonic-mean and the worst-frame VMAF, and
 	// VmafModel names the libvmaf model that produced them. All are nil/"" when the
 	// VMAF gate did not run (disabled). The model is NOT decoration: a VMAF score
@@ -884,7 +900,16 @@ type Store interface {
 	// by is the library profile that decided the skip, recorded on the row for the same
 	// reason Finish records it: a skipped row is a terminal record of a decision, and
 	// the guard that produced this one (skip_hardlinked) is itself per root.
-	RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision) (changed bool, err error)
+	//
+	// profile is the name of the ENCODE profile that supplied the settings this guard was
+	// decided against, "" when nothing matched. A row this writes is TERMINAL, so it owes
+	// that attribution exactly as a row Finish writes does. The two are the only outcome
+	// values this method carries, because they are the only ones that describe the SKIP
+	// rather than an encode that never happened - and profile sits AFTER by rather than
+	// beside reason on purpose: two adjacent strings is precisely the call that silently
+	// swaps, and a row naming its guard as its profile would be worse than one naming
+	// neither.
+	RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision, profile string) (changed bool, err error)
 
 	// ClearSkip deletes the row for path+fingerprint ONLY when it is a Skipped row
 	// whose reason matches — the re-evaluation half of a MUTABLE guard. The hardlink

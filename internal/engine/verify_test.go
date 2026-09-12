@@ -579,8 +579,12 @@ func TestVerify_EveryRejectionCarriesTheClassOfItsVerdict(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// The target codec is resolved exactly as ProcessFile resolves it, from
+			// the job's own effective settings, so this table keeps asking the gate
+			// the question the engine asks it rather than a run-global one.
 			top := eng.Cfg.TopLevelProfile()
-			_, class, err := eng.verifyOutput(context.Background(), tc.in, tc.tmp, top, targetCodecFor(top))
+			target := targetCodecFor(eng.Cfg.TranscodeIn(top, tc.in).Encoder)
+			_, class, err := eng.verifyOutput(context.Background(), tc.in, tc.tmp, top, target)
 			if err == nil {
 				t.Fatalf("the gate ACCEPTED this pair; the case proves nothing about the class of a rejection")
 			}
@@ -630,7 +634,8 @@ func TestVerify_EveryRejectionCarriesTheClassOfItsVerdict(t *testing.T) {
 				probe.FileSize(good), probe.FileSize(src))
 		}
 		top := eng.Cfg.TopLevelProfile()
-		_, class, err := eng.verifyOutput(context.Background(), src, good, top, targetCodecFor(top))
+		_, class, err := eng.verifyOutput(context.Background(), src, good, top,
+			targetCodecFor(eng.Cfg.TranscodeIn(top, src).Encoder))
 		if err != nil {
 			t.Fatalf("the gate rejected a faithful smaller HEVC encode: %v", err)
 		}

@@ -17,13 +17,31 @@ configuration values **the decision that wrote it actually read**, and no others
 | `skipped / already-at-target-codec` | `target_codec` - what `encoder` resolves to (`cpu` -> `hevc`, `svtav1` -> `av1`) |
 | `skipped / exotic-pixel-format` | `pixel_format` |
 | `skipped / target-already-exists` | `container_ext` |
-| `done` | `target_codec`, `encoder`, `crf`, `preset` - what the encode was taken under |
+| `done` | `target_codec`, `encoder`, `crf`, `preset` - the root's settings the encode was taken under (see the note on encode profiles below) |
 | a guard that read no configuration (interlaced, Dolby Vision, a symlinked source) | nothing, recorded **as** nothing read: a verdict no key can move |
 
 It is **never a digest or a copy of the whole configuration.** That would tie every row to
 every key, so correcting a notification URL or adding a library root would offer an entire
 library back to the encoder - which is not a re-derivation, it is a re-scan of everything,
 and you would learn to distrust it.
+
+Every value above is read from the **library root's** profile - the top-level settings as
+that root resolved them. An [encode profile](profiles.md) laid over them by a pattern match
+is **not** read into the record, and that is a limit worth stating plainly rather than
+discovering:
+
+- the row still says which one ran. A terminal row carries the encode profile's **name**
+  beside its inputs (`profile` in `holdfast export`), so a reader holding the row and the
+  configuration can resolve exactly which settings decided the file;
+- but editing that profile's `encoder`, `crf`, `preset`, `pixel_format`, `container_ext` or
+  `bitrate_kbps` **re-opens nothing**, because no value any row recorded moved.
+
+The reason is that an input's only job is to be compared, and both comparisons ask about a
+root: a claim compares one row against the profile in force for its own root, and the survey
+below compares the **whole ledger** against one value with no file path in hand. A row that
+recorded a value only a pattern match can reach would match neither of them ever again - it
+would be offered back on every scan and counted as moved in every report, for the life of the
+row. `holdfast requeue --guard <token>` is the lever for a profile edit you do want acted on.
 
 A row that records **nothing at all** - every row written before holdfast recorded this -
 reads as "cannot be re-derived" and is re-opened **once**, after which the decision it

@@ -26,9 +26,11 @@ type unsupported struct {
 	mountLookup func(string) (bool, error)
 }
 
-func (unsupported) Inspect(string) (Info, error)    { return Info{}, errUnsupportedPlatform }
-func (unsupported) ReadDir(string) ([]Entry, error) { return nil, errUnsupportedPlatform }
-func (unsupported) Resolve(string) (string, error)  { return "", errUnsupportedPlatform }
+func (unsupported) Inspect(string) (Info, error)     { return Info{}, errUnsupportedPlatform }
+func (unsupported) ReadDir(string) ([]Entry, error)  { return nil, errUnsupportedPlatform }
+func (unsupported) Resolve(string) (string, error)   { return "", errUnsupportedPlatform }
+func (unsupported) FreeBytes(string) (uint64, error) { return 0, errUnsupportedPlatform }
+func (unsupported) ProbeWritable(string) error       { return errUnsupportedPlatform }
 
 func (u unsupported) FSType(path string) (string, error) {
 	if u.typeLookup != nil {

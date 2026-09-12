@@ -1,0 +1,534 @@
+package engine
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/probe"
+	"github.com/NSchatz/holdfast/internal/store"
+)
+
+// The per-job settings half of S0079, driven end to end through RunOneshot over real
+// ffmpeg fixtures - the same discipline the rest of this suite runs under, because a
+// criterion about which settings a JOB was decided under is not proved by asking the
+// resolver what it would say.
+
+func strp(s string) *string { return &s }
+func intp(i int) *int       { return &i }
+
+// AC-A6 where the two layers of profile MEET: an encode profile's overrides are laid
+// over the profile of the ROOT the file was enumerated under, not over the top level.
+//
+// That is the whole of the composition question, and it has exactly one wrong answer
+// that still produces a working encode: overlay the top-level values instead, and a file
+// under a root that sets its own crf is encoded at a quality nobody chose - silently,
+// because the output is a valid file either way. So it is graded on the argv the real
+// FFmpegEncoder assembled (the instrument S0087's own profile tests use) and the
+// load-bearing assertion is the knob the encode profile does NOT mention: crf must be
+// the ROOT's 30, never the top level's 22.
+//
+// Two roots and two fixtures, so neither answer can be hard-coded: the encode profile
+// matches only under one of them, and the file it does not match keeps its root's
+// encoder.
+//
+// MUTATION: build TranscodeIn's base from the top level (c.BaseTranscode of
+// c.TopLevelProfile()) instead of from prof, and the crf assertions red at 22.
+func TestProfiles_AnEncodeProfileOverlaysTheRootsOwnProfile(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	dir, roots := twoRoots(t, "tv", "movies")
+	matched := filepath.Join(roots[0], "ep.mkv")
+	unmatched := filepath.Join(roots[1], "film.mkv")
+	mkH264(t, ffmpeg, matched, "8M")
+	mkH264(t, ffmpeg, unmatched, "8M")
+	_ = dir
+
+	cfg := profileCfg(t, `
+library_roots:
+  - path: `+roots[0]+`
+    crf: 30
+    preset: ultrafast
+  - path: `+roots[1]+`
+    encoder: svtav1
+    crf: 40
+    preset: ultrafast
+encoder: cpu
+crf: 22
+preset: slow
+vmaf_enable: false
+min_bitrate_kbps: 0
+`)
+	// The encode profile overrides the ENCODER and nothing else, for the mkvs under the
+	// first root only. Everything else its jobs encode at must come from that root.
+	cfg.EncodeProfiles = []config.EncodeProfile{
+		{Name: "tv-av1", Match: "**/tv/**", Encoder: strp("svtav1")},
+	}
+
+	ts, log := runProfiles(t, ffmpeg, ffprobe, cfg)
+
+	matchedArgs := log.forSource(t, matched)
+	unmatchedArgs := log.forSource(t, unmatched)
+
+	// The override reached the encoder.
+	if !hasArgPair(matchedArgs, "-c:v", "libsvtav1") {
+		t.Errorf("the matched job was built with the root's encoder, not the encode profile's: %v", matchedArgs)
+	}
+	// And the knob the profile did NOT mention came from its own ROOT, not the top level.
+	if !hasArgPair(matchedArgs, "-crf", "30") {
+		t.Errorf("the matched job was built at a crf that is neither its root's 30 nor the profile's "+
+			"(it mentions none): %v", matchedArgs)
+	}
+	if hasArgPair(matchedArgs, "-crf", "22") {
+		t.Errorf("the matched job was built at the TOP-LEVEL crf, so the encode profile was laid over "+
+			"the top level rather than over the root that decides this file: %v", matchedArgs)
+	}
+	// The unmatched job is the anti-vacuity arm: its root's own encoder still decides it.
+	if !hasArgPair(unmatchedArgs, "-c:v", "libsvtav1") || !hasArgPair(unmatchedArgs, "-crf", "40") {
+		t.Errorf("the unmatched job did not use its own root's profile: %v", unmatchedArgs)
+	}
+
+	// And the row says which encode profile supplied the settings, beside the root that
+	// judged the file - two facts, two fields, neither standing in for the other.
+	out, status, ok := outcomeFor(t, ts, matched)
+	if !ok || status != store.Done {
+		t.Fatalf("the matched job is %q (found=%v), want done", status, ok)
+	}
+	if out.Profile != "tv-av1" {
+		t.Errorf("the row records encode profile %q, want tv-av1", out.Profile)
+	}
+	if out.LibraryRoot != roots[0] {
+		t.Errorf("the row records library root %q, want %s", out.LibraryRoot, roots[0])
+	}
+	if plain, _, ok := outcomeFor(t, ts, unmatched); ok && plain.Profile != "" {
+		t.Errorf("the unmatched job's row records encode profile %q, want none", plain.Profile)
+	}
+}
+
+// outcomeFor returns the recorded Outcome for the file at path, resolved against its
+// CURRENT on-disk fingerprint - which for a done row is the post-swap file's, exactly
+// as the engine keys it.
+func outcomeFor(t *testing.T, ts *testStore, path string) (store.Outcome, store.Status, bool) {
+	t.Helper()
+	rows, err := ts.List(context.Background(), nil, 0)
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	for _, r := range rows {
+		if r.Path == path {
+			return r.Outcome, r.Status, true
+		}
+	}
+	return store.Outcome{}, "", false
+}
+
+// AC-A6: the FIRST matching profile's overrides are used and a later matching
+// profile has no effect; a setting the matching profile does not override keeps its
+// top-level value.
+//
+// The two profiles both match, and they disagree about the encoder - so the codec of
+// the file left on disk IS the answer to which one won. The container extension is
+// the other half: neither profile mentions it, so the top-level `mkv` must still
+// decide, and the source is deliberately an mp4 so that "kept its top-level value"
+// is visible in the filename rather than inferred.
+func TestProfiles_FirstMatchWinsAndAnUnmentionedSettingKeepsItsTopLevelValue(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	sub := filepath.Join(d, "4K")
+	if err := exec.Command("mkdir", "-p", sub).Run(); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(sub, "film.mp4")
+	mkH264(t, ffmpeg, src, "8M")
+
+	ts := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
+		c.ContainerExt = "mkv" // top-level, mentioned by NEITHER profile
+		c.EncodeProfiles = []config.EncodeProfile{
+			{Name: "first", Match: "**/4K/**", Encoder: strp("svtav1"), Preset: strp("fast"), CRF: intp(30)},
+			{Name: "second", Match: "**/4K/**", Encoder: strp("cpu"), CRF: intp(10)},
+		}
+	})
+
+	final := filepath.Join(sub, "film.mkv")
+	if !exists(final) {
+		t.Fatalf("no output at %s - the top-level container_ext did not decide the extension", final)
+	}
+	if exists(src) {
+		t.Fatalf("the source %s survived the swap", src)
+	}
+	if got := codecOf(t, ffprobe, final); got != "av1" {
+		t.Fatalf("output codec = %q, want av1 - the FIRST matching profile did not decide the encoder", got)
+	}
+	out, status, ok := outcomeFor(t, ts, final)
+	if !ok {
+		t.Fatalf("no ledger row for %s", final)
+	}
+	if status != store.Done {
+		t.Fatalf("status = %q, want done", status)
+	}
+	if out.Profile != "first" {
+		t.Fatalf("the row records profile %q, want %q - a later matching profile decided or nothing did", out.Profile, "first")
+	}
+	if out.Encoder != "svtav1" {
+		t.Fatalf("the row records encoder %q, want svtav1", out.Encoder)
+	}
+}
+
+// AC-A7: a source NO profile matches is transcoded under the top-level settings -
+// not skipped, not failed - and its row records an empty profile.
+func TestProfiles_NoMatchTranscodesUnderTheTopLevelSettings(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "film.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+
+	ts := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
+		c.EncodeProfiles = []config.EncodeProfile{
+			{Name: "only-4k", Match: "**/4K/**", Encoder: strp("svtav1")},
+		}
+	})
+
+	if got := codecOf(t, ffprobe, src); got != "hevc" {
+		t.Fatalf("codec = %q, want hevc - the unmatched source was not transcoded under the top-level encoder", got)
+	}
+	out, status, ok := outcomeFor(t, ts, src)
+	if !ok {
+		t.Fatalf("no ledger row for %s", src)
+	}
+	if status != store.Done {
+		t.Fatalf("status = %q, want done - an unmatched source must be transcoded, not skipped or failed", status)
+	}
+	if out.Profile != "" {
+		t.Fatalf("the row records profile %q, want empty", out.Profile)
+	}
+}
+
+// AC-A9, first limb: a source ALREADY in the top-level target codec, whose matching
+// profile targets a DIFFERENT codec, is transcoded rather than skipped.
+//
+// The control arm is what makes it an experiment rather than an assertion: the
+// identical fixture with no profile IS skipped as already-at-target-codec, so the
+// test measures the profile and nothing else.
+func TestProfiles_AlreadyAtTheTopLevelCodecButTheProfileTargetsAnother_IsTranscoded(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+
+	t.Run("control: no profile, so it is skipped", func(t *testing.T) {
+		d := t.TempDir()
+		src := filepath.Join(d, "film.mkv")
+		mkHevc(t, ffmpeg, src, "8M")
+		before := md5f(t, src)
+
+		ts := run(t, ffmpeg, ffprobe, d, nil, nil)
+		if !ledgerHas(t, ts, store.Skipped, "film.mkv") {
+			t.Fatalf("an already-hevc source under an hevc target was not skipped")
+		}
+		if got := skipReason(t, ts, "film.mkv"); got != SkipAlreadyTargetCodec {
+			t.Fatalf("skip reason = %q, want %q", got, SkipAlreadyTargetCodec)
+		}
+		if md5f(t, src) != before {
+			t.Fatalf("the skipped source was modified")
+		}
+	})
+
+	t.Run("a profile targeting av1 transcodes it", func(t *testing.T) {
+		d := t.TempDir()
+		src := filepath.Join(d, "film.mkv")
+		mkHevc(t, ffmpeg, src, "8M")
+
+		ts := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
+			c.MinVmaf = 90
+			c.EncodeProfiles = []config.EncodeProfile{
+				{Name: "to-av1", Match: "*.mkv", Encoder: strp("svtav1"), Preset: strp("fast"), CRF: intp(30)},
+			}
+		})
+
+		if got := skipReason(t, ts, "film.mkv"); got == SkipAlreadyTargetCodec {
+			t.Fatalf("the source was skipped as already-at-target-codec against the RUN's target rather than the JOB's: "+
+				"a job whose profile targets av1 has real work to do on an hevc source (row: %q)", got)
+		}
+		if got := codecOf(t, ffprobe, src); got != "av1" {
+			t.Fatalf("codec = %q, want av1", got)
+		}
+		out, status, ok := outcomeFor(t, ts, src)
+		if !ok || status != store.Done {
+			t.Fatalf("status = %q (found=%v), want done", status, ok)
+		}
+		if out.Profile != "to-av1" {
+			t.Fatalf("the row records profile %q, want to-av1", out.Profile)
+		}
+	})
+}
+
+// AC-A9, second limb: the output-codec acceptance check is decided against the
+// codec THIS JOB's encoder produces.
+//
+// The encoder is faked so the output's codec is chosen by the test rather than by
+// the encoder: it writes a perfectly good, smaller HEVC file for a job whose profile
+// targets av1. Every other gate passes it - it decodes cleanly, carries the right
+// duration and streams, and is smaller - so the ONLY thing that can reject it is the
+// output-codec check, decided against the profile's target.
+func TestProfiles_TheOutputCodecCheckIsDecidedAgainstTheJobsOwnTarget(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+
+	t.Run("an hevc output under an av1 profile is rejected", func(t *testing.T) {
+		d := t.TempDir()
+		src := filepath.Join(d, "film.mkv")
+		mkH264(t, ffmpeg, src, "8M")
+		before := md5f(t, src)
+
+		writesHevc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
+			ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", in,
+				"-c:v", "libx265", "-x265-params", "log-level=error", "-preset", "ultrafast",
+				"-crf", "35", "-pix_fmt", "yuv420p", "--", out)
+			return nil
+		})
+
+		ts := run(t, ffmpeg, ffprobe, d, writesHevc, func(c *config.Config) {
+			c.EncodeProfiles = []config.EncodeProfile{
+				{Name: "to-av1", Match: "*.mkv", Encoder: strp("svtav1")},
+			}
+		})
+
+		out, status, ok := outcomeFor(t, ts, src)
+		if !ok || status != store.Failed {
+			t.Fatalf("status = %q (found=%v), want failed - an hevc output was accepted for a job targeting av1", status, ok)
+		}
+		if !strings.Contains(out.Reason, "output codec") || !strings.Contains(out.Reason, "av1") {
+			t.Fatalf("the failure reason does not name the codec check against av1: %q", out.Reason)
+		}
+		if out.Profile != "to-av1" {
+			t.Fatalf("the failed row records profile %q, want to-av1", out.Profile)
+		}
+		if md5f(t, src) != before {
+			t.Fatalf("the source was modified by a rejected encode")
+		}
+		if n := nTemp(t, d); n != 0 {
+			t.Fatalf("%d temp file(s) left behind after a rejected encode", n)
+		}
+	})
+
+	// The mirror image, and it is the arm that stops the check being a blanket
+	// "reject anything not hevc": the SAME hevc output is ACCEPTED for a job whose
+	// profile targets hevc, in the same run shape.
+	t.Run("the same hevc output under an hevc profile is accepted", func(t *testing.T) {
+		d := t.TempDir()
+		src := filepath.Join(d, "film.mkv")
+		mkH264(t, ffmpeg, src, "8M")
+
+		writesHevc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
+			ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", in,
+				"-c:v", "libx265", "-x265-params", "log-level=error", "-preset", "ultrafast",
+				"-crf", "35", "-pix_fmt", "yuv420p", "--", out)
+			return nil
+		})
+
+		ts := run(t, ffmpeg, ffprobe, d, writesHevc, func(c *config.Config) {
+			c.Encoder = "svtav1" // the RUN's target is av1
+			c.EncodeProfiles = []config.EncodeProfile{
+				{Name: "to-hevc", Match: "*.mkv", Encoder: strp("cpu")}, // the JOB's is hevc
+			}
+		})
+
+		_, status, ok := outcomeFor(t, ts, src)
+		if !ok || status != store.Done {
+			t.Fatalf("status = %q (found=%v), want done - an hevc output was rejected for a job whose profile targets hevc, "+
+				"which means the check read the RUN's target and not the JOB's", status, ok)
+		}
+		if got := codecOf(t, ffprobe, src); got != "hevc" {
+			t.Fatalf("codec = %q, want hevc", got)
+		}
+	})
+}
+
+// AC-A10's engine half: the profile that supplied a job's settings reaches the
+// ledger on a SKIP as well as on a swap. A skip is a terminal state, and which
+// profile decided it is the same question - a source is skipped as
+// already-at-target-codec against its own profile's target codec.
+func TestProfiles_ASkippedJobRecordsTheProfileThatDecidedIt(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "film.mkv")
+	mkAV1(t, ffmpeg, src, "40")
+
+	ts := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
+		c.EncodeProfiles = []config.EncodeProfile{
+			{Name: "to-av1", Match: "*.mkv", Encoder: strp("svtav1")},
+		}
+	})
+
+	out, status, ok := outcomeFor(t, ts, src)
+	if !ok || status != store.Skipped {
+		t.Fatalf("status = %q (found=%v), want skipped", status, ok)
+	}
+	if out.Reason != SkipAlreadyTargetCodec {
+		t.Fatalf("skip reason = %q, want %q", out.Reason, SkipAlreadyTargetCodec)
+	}
+	if out.Profile != "to-av1" {
+		t.Fatalf("the skipped row records profile %q, want to-av1", out.Profile)
+	}
+}
+
+// AC-A10 on the terminal state a dry run produces: `would-transcode` is a terminal
+// row like `done` and `skipped`, so it records which profile supplied the settings
+// the decision was taken under, and "" when the top-level ones did.
+//
+// One run, two sources, so the matched and the unmatched arm are decided by the same
+// configuration and the same pass: an implementation that hard-coded either answer
+// fails one of them. Nothing is encoded on this path, which is the other half of what
+// is asserted here - both files must still be on disk, unchanged, in their original
+// container.
+func TestProfiles_ADryRunDecisionRecordsTheProfileItWouldHaveUsed(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	sub := filepath.Join(d, "4K")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	matched := filepath.Join(sub, "film.mkv")
+	unmatched := filepath.Join(d, "show.mkv")
+	mkH264(t, ffmpeg, matched, "8M")
+	mkH264(t, ffmpeg, unmatched, "8M")
+
+	ts := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
+		c.DryRun = true
+		c.EncodeProfiles = []config.EncodeProfile{
+			{Name: "4k-av1", Match: "**/4K/**", Encoder: strp("svtav1")},
+		}
+	})
+
+	for _, tc := range []struct{ path, profile string }{
+		{matched, "4k-av1"},
+		{unmatched, ""},
+	} {
+		out, status, ok := outcomeFor(t, ts, tc.path)
+		if !ok || status != store.WouldTranscode {
+			t.Fatalf("%s: status = %q (found=%v), want would-transcode", tc.path, status, ok)
+		}
+		if out.Profile != tc.profile {
+			t.Errorf("%s: the dry-run row records profile %q, want %q", tc.path, out.Profile, tc.profile)
+		}
+		if !exists(tc.path) || codecOf(t, ffprobe, tc.path) != "h264" {
+			t.Errorf("%s: a dry run encoded or replaced the source", tc.path)
+		}
+	}
+}
+
+// AC-A10 on the two terminal rows written by store.RecordSkip rather than by Finish -
+// the guards that fire BEFORE the claim, whose rows go in through the one writer that
+// takes no Outcome. The hardlink guard is one of them, and it is graded here on BOTH
+// arms in a single pass so that neither answer can be hard-coded: two hardlinked
+// sources, one matched by a profile and one not, decided by the same configuration.
+//
+// The second link is taken OUTSIDE the library root, so the scan never enumerates it as
+// a source of its own and the only thing it contributes is the link count the guard
+// reads.
+//
+// MUTATION: pass "" instead of ts.Profile at the RecordSkip call in ProcessFile, or set
+// `profile = NULL` in RecordSkip's ON CONFLICT clause, and the matched arm reds.
+func TestProfiles_AHardlinkSkipRecordsTheProfileOnBothArms(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	sub := filepath.Join(d, "4K")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	matched := filepath.Join(sub, "film.mkv")
+	unmatched := filepath.Join(d, "show.mkv")
+	mkH264(t, ffmpeg, matched, "8M")
+	mkH264(t, ffmpeg, unmatched, "8M")
+
+	seeds := t.TempDir()
+	for i, src := range []string{matched, unmatched} {
+		if err := os.Link(src, filepath.Join(seeds, "seed"+strconv.Itoa(i)+".mkv")); err != nil {
+			t.Skipf("this filesystem does not support hard links: %v", err)
+		}
+	}
+
+	ts := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
+		c.EncodeProfiles = []config.EncodeProfile{
+			{Name: "4k-av1", Match: "**/4K/**", Encoder: strp("svtav1")},
+		}
+	})
+
+	for _, tc := range []struct{ path, profile string }{
+		{matched, "4k-av1"},
+		{unmatched, ""},
+	} {
+		out, status, ok := outcomeFor(t, ts, tc.path)
+		if !ok || status != store.Skipped {
+			t.Fatalf("%s: status = %q (found=%v), want skipped - the hardlink guard did not fire and "+
+				"this arm proves nothing", tc.path, status, ok)
+		}
+		if out.Reason != SkipHardlinked {
+			t.Fatalf("%s: skip reason = %q, want %q - a different guard fired", tc.path, out.Reason, SkipHardlinked)
+		}
+		if out.Profile != tc.profile {
+			t.Errorf("%s: the hardlinked skip's ledger row records profile %q, want %q",
+				tc.path, out.Profile, tc.profile)
+		}
+	}
+}
+
+// AC-A10 on the OTHER RecordSkip row: the park a restore writes, which records NO
+// profile even with one matching the file - and that is the honest value, not the hole
+// F7 named.
+//
+// `holdfast restore` puts the original's bytes back and reconciles the ledger by
+// replacing the swap's done row with a skipped/restored-original one. That row is
+// terminal, and it is written through the same writer the hardlink guard uses - the
+// writer that could not carry a profile at all, which is what F7 fixed. What each call
+// site then PASSES is what is true of its own row, and no profile supplied the settings
+// of a restore: an operator put the file back through a command no gate and no knob took
+// part in. The same reasoning the library profile already ships with here (see
+// recordRestoreInJobs, and store.Decision{} beside this).
+//
+// The matching profile is configured deliberately, because that is the arm that can go
+// wrong: a writer that reached for "whatever matches this path now" would attribute this
+// row to a decision nothing made.
+//
+// MUTATION: pass u.Cfg.TranscodeIn(...).Profile at recordRestoreInJobs' RecordSkip call
+// and this reds with "bulk".
+func TestProfiles_ARestoredOriginalsParkRowRecordsNoProfile(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	root := t.TempDir()
+	src := filepath.Join(root, "film.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+
+	eng, ts := undoEngine(t, ffmpeg, ffprobe, root, 24, nil)
+	eng.Cfg.EncodeProfiles = []config.EncodeProfile{{Name: "bulk", Match: "*.mkv"}}
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+	r := onlyRetained(t, ts)
+	// The fixture is only a fixture if that profile really decided the encode being
+	// undone: the done row it wrote must name it.
+	if done, _, ok := outcomeFor(t, ts, r.SwappedPath); !ok || done.Profile != "bulk" {
+		t.Fatalf("the swap's own row records profile %q (found=%v), want bulk - nothing here is "+
+			"about a profile and the restore assertion below proves nothing", done.Profile, ok)
+	}
+	if _, err := eng.Restore(context.Background(), r.SourcePath); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	out, status, ok := outcomeFor(t, ts, r.SourcePath)
+	if !ok || status != store.Skipped {
+		t.Fatalf("after a restore the ledger holds status=%q (found=%v) for %s, want skipped - without "+
+			"that park row this case asserts nothing", status, ok, r.SourcePath)
+	}
+	if out.Reason != SkipRestoredOriginal {
+		t.Fatalf("the park row's reason = %q, want %q", out.Reason, SkipRestoredOriginal)
+	}
+	if out.Profile != "" {
+		t.Errorf("the restored original's park row records profile %q, want none: no profile supplied "+
+			"the settings of a restore, and naming one attributes the row to a decision nothing made",
+			out.Profile)
+	}
+	if out.LibraryRoot != "" || out.ProfileDigest != "" {
+		t.Errorf("the park row attributes a library profile (%q/%q); the same reasoning applies to both",
+			out.LibraryRoot, out.ProfileDigest)
+	}
+}

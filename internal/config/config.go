@@ -54,6 +54,19 @@ var knownKeys = map[string]bool{
 	"server_addr": true, "server_auth_token": true, "scan_interval_sec": true,
 	"metrics_enable": true, "notify_url": true, "run_window": true,
 	"max_load": true, "tautulli_url": true, "tautulli_api_key": true,
+	"bitrate_kbps": true, "encode_profiles": true,
+	"scratch_dir": true, "scratch_min_free_gb": true,
+}
+
+// profileKeys are the keys accepted inside one `encode_profiles` entry. The
+// unknown-key refusal has to bite INSIDE a profile as well as at the top level:
+// `encodr: svtav1` nested in a profile is the same typo with the same consequence
+// (a silent fall back to the top-level encoder), and a check that only looked at
+// the top-level key would never see it.
+var profileKeys = map[string]bool{
+	"name": true, "match": true,
+	"encoder": true, "crf": true, "preset": true,
+	"pixel_format": true, "container_ext": true, "bitrate_kbps": true,
 }
 
 // defaultLayer is the built-in default configuration, loaded as koanf's base layer.
@@ -68,6 +81,9 @@ func defaultLayer() map[string]any {
 		"preset":                 "slow",
 		"pixel_format":           "auto",
 		"container_ext":          "source",
+		"bitrate_kbps":           0,
+		"scratch_dir":            "",
+		"scratch_min_free_gb":    50,
 		"min_bitrate_kbps":       2500,
 		"min_savings_percent":    0,
 		"duration_tolerance_sec": 1.0,
@@ -165,6 +181,66 @@ type Config struct {
 	// behaviour) — the collision guard still applies whenever the effective
 	// extension differs from the source's own.
 	ContainerExt string `yaml:"container_ext"`
+	// BitrateKbps selects TARGET-BITRATE rate control at this many kbps instead of
+	// the quality target. 0 - the DEFAULT, and what an absent key resolves to -
+	// keeps CRF/CQ/QP quality-target encoding, which is this tool's archival
+	// posture and what every existing config gets unchanged.
+	//
+	// A positive value replaces the quality knob for the affected jobs: no -crf,
+	// -cq, -global_quality or -qp is passed at all, because a rate control and a
+	// quality target are two different instructions and passing both leaves which
+	// one wins to the encoder. It is announced at startup as a NOTICE (see
+	// Notices) rather than a warning: nothing about the no-loss gate changes, and
+	// a rejected encode still leaves the source untouched.
+	//
+	// It is a whole number of kbps. A fraction, a word, a boolean, a list or the
+	// key with no value is a startup REFUSAL naming the key and the offending
+	// value (see requireWholeKbps), never a silently truncated bitrate; a negative
+	// value is refused by Validate.
+	BitrateKbps int `yaml:"bitrate_kbps"`
+	// EncodeProfiles is an ORDERED list of named profiles, each with a match
+	// over the source and overrides for the transcode settings above. The FIRST
+	// profile whose match selects a source supplies that job's settings, overlaid
+	// on the top-level ones; a later matching profile has no effect on that job,
+	// and a setting the matching profile does not override keeps its top-level
+	// value. A source no profile matches is transcoded under the top-level
+	// settings - never skipped and never failed. Absent (the default) resolves
+	// every job to exactly the top-level settings.
+	//
+	// A profile selects what the ENCODER PRODUCES and nothing else. There is
+	// deliberately no per-profile VMAF threshold, undo window, retention or any
+	// other safety-gate knob: a profile must never be able to move a gate that
+	// decides whether a source is destroyed.
+	EncodeProfiles []EncodeProfile `yaml:"encode_profiles"`
+	// ScratchDir is the directory the encoder's working file is written to. Empty
+	// - the DEFAULT, and what an absent key resolves to - writes it beside the
+	// source, which is this tool's original behaviour.
+	//
+	// It never changes the SWAP. Whatever this is set to, the file the finalizing
+	// rename reads is a temp in the SOURCE's own directory: an accepted encode is
+	// copied back into that directory, proved to be the bytes the gates accepted,
+	// made durable, and only then handed to the existing atomic same-directory
+	// rename. Nothing is ever renamed or moved out of here onto a source.
+	//
+	// It is classified and reported at startup, and a missing, unwritable,
+	// short-on-space or library-root-overlapping scratch directory REFUSES the run
+	// before anything is encoded (see internal/startup). Storage that is not local
+	// does not refuse here and needs no allow_non_local entry: nothing
+	// irreversible happens in this directory.
+	ScratchDir string `yaml:"scratch_dir"`
+	// ScratchMinFreeGB is the free-space floor, in GiB (2^30 bytes), the scratch
+	// directory's filesystem must clear at STARTUP. Default 50 - roughly one 4K
+	// source and its encode - so the commonest way this feature fails (a cache
+	// device with nothing left on it) is a refusal naming the path and the figures
+	// rather than a library's worth of encodes dying at the write step. 0 disables
+	// the floor.
+	//
+	// It is a floor and NOT a prediction: startup has no per-file size to check
+	// against, so the per-job pre-encode check (which refuses a job whose source is
+	// larger than the free space right then) is what backs it, and a filesystem
+	// that fills from outside holdfast after a run begins produces an ordinary
+	// encode failure, which already leaves the source untouched.
+	ScratchMinFreeGB int `yaml:"scratch_min_free_gb"`
 	// MinBitrateKbps skips sources below this (re-encoding them only bloats). 0
 	// disables the skip (but see the zero-vs-absent note above for YAML).
 	MinBitrateKbps int `yaml:"min_bitrate_kbps"`
@@ -588,6 +664,14 @@ func Load(path string) (*Config, error) {
 		}
 		explicitTop[top] = true
 	}
+	// The unknown-key refusal, one level down. kf.Keys() flattens a list of maps to
+	// `encode_profiles.0.encodr`, and the loop above deliberately only looks at
+	// the token before the first dot - so a typo INSIDE a profile passed the check
+	// that exists to catch typos. The raw list is walked here instead, before
+	// anything is merged or decoded.
+	if err := checkProfileKeys(kf.Get("encode_profiles"), path); err != nil {
+		return nil, err
+	}
 	if err := k.Merge(kf); err != nil {
 		return nil, fmt.Errorf("merge config %q: %w", path, err)
 	}
@@ -646,6 +730,28 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
+	// bitrate_kbps is a WHOLE NUMBER OF KBPS and scratch_min_free_gb a whole number
+	// of gibibytes, and the decoder below would turn `8000.5` into 8000, `"8000"`
+	// into 8000 and `true` into 1 without a word - three bitrates the operator did
+	// not write, on the knob that decides what the encoder aims at. Same discipline
+	// as the retention check above and the unknown-key rejection: loud, never a
+	// silent default. (A NEGATIVE whole number decodes faithfully and is refused by
+	// Validate, with the rest of the range checks.)
+	if err := requireWholeKbps(k.Get(bitrateKey), bitrateKey, "kbps", path); err != nil {
+		return nil, err
+	}
+	if err := requireWholeKbps(k.Get(scratchFloorKey), scratchFloorKey, "gibibytes", path); err != nil {
+		return nil, err
+	}
+	for i, raw := range profileMaps(kf.Get("encode_profiles")) {
+		if v, ok := raw["bitrate_kbps"]; ok {
+			key := fmt.Sprintf("encode_profiles[%d].bitrate_kbps", i)
+			if err := requireWholeKbps(v, key, "kbps", path); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	var c Config
 	if err := k.UnmarshalWithConf("", &c, koanf.UnmarshalConf{
 		Tag: "yaml",
@@ -684,6 +790,61 @@ func topLevelKey(key string) string {
 // leave one of the three behind.
 const retentionKey = "history_retention_rows"
 
+// bitrateKey and scratchFloorKey are the same discipline for the two whole-number
+// keys this phase adds.
+const (
+	bitrateKey      = "bitrate_kbps"
+	scratchFloorKey = "scratch_min_free_gb"
+)
+
+// profileMaps returns the raw `encode_profiles` entries as they were AUTHORED,
+// before the weakly-typed decoder has seen them. Anything that is not a list of
+// maps yields nothing here and is reported by the decoder instead, which is the
+// right division: this function exists to look at the values inside a well-shaped
+// list, not to re-implement the decoder's own type errors.
+func profileMaps(raw any) []map[string]any {
+	list, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(list))
+	for _, item := range list {
+		m, ok := item.(map[string]any)
+		if !ok {
+			return nil
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// checkProfileKeys refuses a key inside a profile that the schema does not define.
+// It is the unknown-key rejection at the one level the top-level loop cannot see,
+// and it fails the same way: naming the profile, the key and the file.
+func checkProfileKeys(raw any, path string) error {
+	for i, m := range profileMaps(raw) {
+		for key := range m {
+			if !profileKeys[key] {
+				return fmt.Errorf("unknown config key %q in encode_profiles[%d] in %s (typo?): "+
+					"a profile accepts name, match, encoder, crf, preset, pixel_format, container_ext, bitrate_kbps",
+					key, i, path)
+			}
+		}
+	}
+	return nil
+}
+
+// requireWholeKbps refuses a value for a whole-number key that is not one, naming
+// the key, the unit and the offending value. It runs against the RAW layered value
+// for the reason requireWholeRows does: the decoder is WeaklyTypedInput and would
+// truncate, coerce or invent a number rather than report one.
+func requireWholeKbps(raw any, key, unit, path string) error {
+	if isWholeNumber(raw) {
+		return nil
+	}
+	return fmt.Errorf("%s must be a whole number of %s: %#v in %s is not one", key, unit, raw, path)
+}
+
 // requireWholeRows refuses a value for a row-count key that is not a whole number of
 // rows, naming the key and the offending value. It runs against the RAW layered value
 // (defaults <- file <- env) rather than the decoded struct field, because the decoder is
@@ -694,34 +855,30 @@ const retentionKey = "history_retention_rows"
 // a genuine whole number are accepted; anything else - a fraction, a word, a boolean, a
 // list, or a key present with no value at all - is a refusal.
 func requireWholeRows(raw any, key, path string) error {
-	switch v := raw.(type) {
-	case int:
+	if isWholeNumber(raw) {
 		return nil
-	case int32:
-		return nil
-	case int64:
-		return nil
-	case uint:
-		return nil
-	case uint32:
-		return nil
-	case uint64:
-		return nil
-	case float32:
-		if float64(v) == math.Trunc(float64(v)) && !math.IsInf(float64(v), 0) {
-			return nil
-		}
-	case float64:
-		if v == math.Trunc(v) && !math.IsInf(v, 0) && !math.IsNaN(v) {
-			return nil
-		}
-	case string:
-		if _, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
-			return nil
-		}
 	}
 	return fmt.Errorf("%s must be a whole number of rows (0 disables retention and keeps every terminal row): "+
 		"%#v in %s is not one", key, raw, path)
+}
+
+// isWholeNumber reports whether a RAW layered value is a genuine whole number. An
+// env override arrives as a string and a YAML integer as an int, so both spellings
+// of a genuine whole number are accepted; anything else - a fraction, a word, a
+// boolean, a list, or a key present with no value at all - is not one.
+func isWholeNumber(raw any) bool {
+	switch v := raw.(type) {
+	case int, int32, int64, uint, uint32, uint64:
+		return true
+	case float32:
+		return float64(v) == math.Trunc(float64(v)) && !math.IsInf(float64(v), 0)
+	case float64:
+		return v == math.Trunc(v) && !math.IsInf(v, 0) && !math.IsNaN(v)
+	case string:
+		_, err := strconv.Atoi(strings.TrimSpace(v))
+		return err == nil
+	}
+	return false
 }
 
 // normalizeExts lowercases each video extension and strips a leading dot and any
@@ -852,6 +1009,22 @@ func (c *Config) Validate() error {
 	if err := c.TopLevelProfile().validate(); err != nil {
 		return err
 	}
+	// The knobs that are NOT per-root, checked once, here. A library root's profile may
+	// not carry any of these - the target bitrate, the encode profiles or the scratch
+	// location - so there is no per-root pass for them to be checked in.
+	//
+	// A negative bitrate has no reading: it is neither "use the quality target" (0)
+	// nor a rate. Refused BY NAME rather than clamped, on a knob whose whole job is
+	// to say what the encoder aims at.
+	if c.BitrateKbps < 0 {
+		return fmt.Errorf("bitrate_kbps %d must be >= 0 (0 keeps the crf/quality target; a positive value is a target bitrate in kbps)", c.BitrateKbps)
+	}
+	if err := c.validateProfiles(); err != nil {
+		return err
+	}
+	if err := c.validateScratch(); err != nil {
+		return err
+	}
 	if c.MaxFailures < 0 {
 		return fmt.Errorf("max_failures %d must be >= 0", c.MaxFailures)
 	}
@@ -926,6 +1099,52 @@ func nestedRootsError(i int, outer string, j int, inner, via string) error {
 		j, inner, i, outer, via)
 }
 
+// validateScratch applies the rules the CONFIGURATION can decide about the scratch
+// directory. Everything that needs the filesystem - does it exist, is it a
+// directory, can this process write in it, is there room, does it overlap a library
+// root - is the startup check's, taken once over the whole set of paths this run
+// would act on (internal/startup), so there is exactly one authority for each
+// question rather than two that can disagree.
+func (c *Config) validateScratch() error {
+	if c.ScratchMinFreeGB < 0 {
+		return fmt.Errorf("scratch_min_free_gb %d must be >= 0 (0 disables the free-space floor)", c.ScratchMinFreeGB)
+	}
+	dir := strings.TrimSpace(c.ScratchDir)
+	if dir == "" {
+		return nil
+	}
+	if !filepath.IsAbs(dir) {
+		return fmt.Errorf("scratch_dir %q must be an absolute path", c.ScratchDir)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return errors.New("cannot determine the home directory (set $HOME) - refusing to validate scratch_dir safely")
+	}
+	clean := filepath.Clean(dir)
+	// holdfast SWEEPS this directory on every start, so the same rule the library
+	// roots get applies: never point a sweeping, delete-capable tool at "/" or at a
+	// home directory, lexically or through a symlink.
+	for _, p := range []string{clean, resolvedOrSelf(clean)} {
+		switch p {
+		case "/":
+			return fmt.Errorf("scratch_dir resolves to the filesystem root (%q): refusing", p)
+		case filepath.Clean(home):
+			return fmt.Errorf("scratch_dir resolves to the home directory (%q): refusing", p)
+		}
+	}
+	return nil
+}
+
+// resolvedOrSelf resolves symbolic links where it can and falls back to the path
+// itself where it cannot (a directory that does not exist yet is the startup
+// check's refusal to report, not this one's).
+func resolvedOrSelf(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return p
+}
+
 // Notices reports things this configuration MEANS that an operator must be told at
 // startup, whether or not they chose them. They are not Warnings: a warning says a
 // safety gate has been weakened from what this tool ships, and a shipped default can
@@ -954,6 +1173,24 @@ func (c *Config) Notices() []string {
 			"`holdfast restore <path>` for that long: it costs no extra space at the moment it is "+
 			"taken (a second hard link to the same data), but the space a swap reclaimed is not "+
 			"returned to the filesystem until the window closes.")
+	}
+	// A target bitrate is not a weakened gate - every no-loss check still runs and a
+	// rejected encode still leaves the source untouched - but it does mean the
+	// quality knob an operator can still see in their config file is not what the
+	// encoder is being told to aim at, which is exactly the kind of thing a config
+	// file lets you believe for months.
+	if c.bitrateInEffect() {
+		n = append(n, "bitrate_kbps is set - the CRF/QUALITY TARGET IS NOT IN USE for the affected jobs: "+
+			"those encodes run under a target-bitrate rate control at the configured kbps, and no crf, cq, "+
+			"global_quality or qp value is passed to the encoder at all. Every no-loss gate is unchanged, and an "+
+			"encode that misses one is still rejected with the source untouched. Set bitrate_kbps to 0 (the default) "+
+			"to go back to the quality target.")
+	}
+	if strings.TrimSpace(c.ScratchDir) != "" {
+		n = append(n, "scratch_dir is set - the encoder writes its working file to "+strings.TrimSpace(c.ScratchDir)+
+			" and the accepted result is COPIED BACK into a temp beside the source before the swap. The swap itself is "+
+			"unchanged: it is still an atomic rename within the source's own directory. The scratch device therefore pays "+
+			"a full write-plus-read cycle per transcode, at video-file sizes.")
 	}
 	return n
 }
