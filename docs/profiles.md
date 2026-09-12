@@ -104,6 +104,12 @@ encoders can run in one scan. `""` is a real value there and not a missing measu
 so the key is always present - see
 [docs/api-reference.md](api-reference.md#the-recorded-outcome---the-proof-a-swap-was-safe).
 
+What a terminal row does **not** record is this profile's own values: the re-derivation
+inputs beside the name are the library root's, so **editing a profile re-opens nothing**
+and `holdfast requeue` is the lever for a change you want acted on. The reason that is a
+decision rather than an oversight is in
+[docs/requeue.md](requeue.md#what-a-row-records).
+
 ## `bitrate_kbps` - a target bitrate instead of a quality target
 
 ```yaml
