@@ -47,6 +47,7 @@ var knownKeys = map[string]bool{
 	"pixel_format": true, "container_ext": true, "min_bitrate_kbps": true,
 	"min_savings_percent": true, "duration_tolerance_sec": true,
 	"max_failures": true, "skip_hardlinked": true, "state_dir": true,
+	preserveMtimeKey:  true,
 	"allow_non_local": true, "history_retention_rows": true, "undo_window_hours": true,
 	"vmaf_enable": true, "min_vmaf": true, "vmaf_min_pool": true,
 	"vmaf_min_chroma": true,
@@ -73,6 +74,7 @@ func defaultLayer() map[string]any {
 		"duration_tolerance_sec": 1.0,
 		"max_failures":           3,
 		"skip_hardlinked":        true,
+		preserveMtimeKey:         true,
 		"state_dir":              "state",
 		"history_retention_rows": 0,
 		"undo_window_hours":      0,
@@ -160,6 +162,29 @@ type Config struct {
 	// SkipHardlinked skips files with >1 hard link (an active seed/dup). A nil
 	// pointer means the default (true); use HardlinkSkip() to read it.
 	SkipHardlinked *bool `yaml:"skip_hardlinked"`
+
+	// PreserveMtime carries the SOURCE's modification time onto the replacement the
+	// swap publishes. A nil pointer means the default (TRUE); use
+	// PreserveMtimeEnabled() to read it.
+	//
+	// It defaults ON because resetting the mtime is a real, visible and unrecoverable
+	// change to somebody's media server: "Recently Added" in Plex and Jellyfin, and
+	// every date-based sort and smart collection built on it, sees a first pass over a
+	// library as the entire library arriving at once. Every neighbouring tool - cp -p,
+	// rsync -a, mv - preserves the modification time across a replacement, so
+	// preserving it is the least-surprising behaviour and RESETTING it is the side
+	// effect. The argument for OFF - that a preserved mtime is a deliberate lie about
+	// when the bytes were written - is why the key exists, not why it defaults.
+	//
+	// Preserving it is SAFE despite probe.Fingerprint being size:mtime. A swap always
+	// changes the SIZE (the verify gate refuses an output that is not strictly
+	// smaller), so the post-swap fingerprint still moves, the terminal done row still
+	// keys under a fresh identity, and a resume still reads the replacement as a new
+	// file rather than as the already-processed source. With this key on, the size is
+	// the whole of that guarantee - which is why the engine asserts it rather than
+	// assuming it.
+	PreserveMtime *bool `yaml:"preserve_mtime"`
+
 	// StateDir holds the job store (jobs.db) + heartbeat (relative paths are
 	// resolved by callers).
 	StateDir string `yaml:"state_dir"`
@@ -403,6 +428,18 @@ func (c *Config) VmafGate() bool { return c.VmafEnable == nil || *c.VmafEnable }
 // when unset (nil). Skipping them is the safe default — replacing a hard-linked
 // seed via rename would break the link and reclaim nothing.
 func (c *Config) HardlinkSkip() bool { return c.SkipHardlinked == nil || *c.SkipHardlinked }
+
+// preserveMtimeKey is the one place the modification-time key is spelled. knownKeys,
+// defaultLayer and the struct tag all read it from here, so a rename cannot leave one of
+// them behind.
+const preserveMtimeKey = "preserve_mtime"
+
+// PreserveMtimeEnabled reports whether the swap carries the source's modification time
+// onto the replacement, defaulting to TRUE when unset (nil). It is the single reading of
+// that default, so the engine, the loader and the documentation cannot disagree about what
+// an absent key means - and a Config built in Go rather than loaded from a file reads as
+// the SHIPPED default rather than as the struct zero.
+func (c *Config) PreserveMtimeEnabled() bool { return c.PreserveMtime == nil || *c.PreserveMtime }
 
 // ContainerMatchesSource reports whether ContainerExt is the "match the source"
 // sentinel ("source"/"auto"/"") rather than a forced extension.

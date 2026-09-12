@@ -65,6 +65,37 @@ The library mount must also be a **single filesystem per directory** — the swa
 `rename(2)`, which cannot cross filesystems. (This is why the temp file lives beside the
 source rather than in a scratch volume.)
 
+<a id="swap-metadata"></a>
+
+**What a swap CHANGES about a replaced file.** Everything above is what holdfast NEEDS from
+your filesystem. This is what it does to the file it publishes - none of it visible unless
+you go looking, and all of it library-wide the first time you point holdfast at a library.
+
+The replacement carries the source's mode. A source at `0640` is replaced by a file at
+`0640`, whatever umask holdfast is running under. The nine permission bits travel, and so do
+setuid, setgid and sticky if the source had them.
+
+Ownership is carried only where holdfast is privileged to carry it. Changing a file's owner
+needs `CAP_CHOWN` or root, and a container running as an ordinary `user:` has neither - so
+on a rootless deployment the replacement is owned by the holdfast uid and gid rather than by
+the source's, holdfast says so once per run, and the swap still happens. Run as a `user:`
+that already owns the media and the question never arises, which is the same advice the
+paragraph above gives for a different reason.
+
+The modification time is carried from the source unless `preserve_mtime` is false. It
+defaults to true, because resetting it makes a first pass over a library look to Plex and
+Jellyfin like the whole library arrived at once: "Recently Added", every date-based sort and
+every smart collection built on one moves with it, and nothing puts it back. Set
+`preserve_mtime: false` if you would rather the replacement's mtime say when the bytes were
+actually written. Either way the file's identity still moves, because a swap always makes
+the file smaller - so a resume reads the replacement as a new file and never as the source
+it already processed.
+
+ACLs and xattrs are not carried. POSIX ACLs, SELinux labels and every other extended
+attribute on the source are left behind: the replacement gets whatever your filesystem gives
+a newly created file, and nothing in holdfast reads or writes them. A library whose access
+depends on POSIX ACLs needs them reapplied after a pass.
+
 ### One process per `state_dir`
 
 **Running more than one holdfast process against a single `state_dir` is unsupported.** The job
