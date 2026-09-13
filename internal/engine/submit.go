@@ -140,6 +140,11 @@ func (s *Submissions) Offer(resolved string) bool {
 // leaving a caller to guess it.
 func (s *Submissions) Cap() int { return cap(s.ch) }
 
+// Pending is how many accepted paths are waiting to be processed. It is what makes "a 202
+// that enqueued nothing" and "a refusal that enqueued something anyway" assertable: the
+// difference between admitting work and doing it is otherwise invisible from outside.
+func (s *Submissions) Pending() int { return len(s.ch) }
+
 // Run drains the queue until ctx is cancelled. It is the serve command's driver and runs
 // in the caller's goroutine, exactly as the hub's does.
 //
