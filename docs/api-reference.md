@@ -150,11 +150,12 @@ asked of a path instead of a directory listing. There is one implementation of t
 `video_exts` entry added, a working-file name form added or a library root added moves both
 routes together.
 
-`retryable` says whether sending that path again, unchanged, could succeed. It is `true`
-only for `submission-queue-full`, because the queue drains and nothing about the path was
-decided. Every other rule is a property of the path and of the configuration, neither of
-which changes because the same request arrives again, so a retry loop around one of those
-is a retry loop that never ends.
+`retryable` says whether sending that path again, unchanged, could succeed. In a **per-path
+result** it is `true` only for `submission-queue-full`, because the queue drains and nothing
+about the path was decided. Every other rule there is a property of the path and of the
+configuration, neither of which changes because the same request arrives again, so a retry
+loop around one of those is a retry loop that never ends. The response also carries a
+`retryable` of its own, for the request as a whole; the table below gives it per status.
 
 **Every status it can answer with:**
 
