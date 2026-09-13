@@ -68,6 +68,18 @@ const (
 	// claim rather than parking the file for ever.
 	SkipUndoRetentionFailed = "undo-retention-failed"
 
+	// SkipOperatorExcluded is the operator's OWN withholding: a path they took out of the
+	// pipeline from the surface that showed them the file, recorded as runtime state this
+	// daemon holds (store.PathExclusion) and never in the configuration file.
+	//
+	// It is a MUTABLE guard, like the hardlink one, and the mutation is the operator
+	// removing the record: the stale row is cleared at the top of the next pass and the
+	// file re-enters the ordinary path. That is what keeps a wrongly recorded withholding
+	// from being a file that silently stops being worked on for ever, and it is why this
+	// token is not in SkipGuards - there is nothing for a requeue to re-open, because
+	// removing the withholding is the lever and the dashboard offers it beside the record.
+	SkipOperatorExcluded = "operator-excluded"
+
 	// SkipRestoredOriginal marks a file an operator has deliberately put back through the
 	// undo window. It is NOT mutable: the next scan must not re-encode a file somebody just
 	// rescued, through the very gates that passed the encode they rejected. Changing the
@@ -863,6 +875,47 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// at all, so a row left over from when it was on would park that file indefinitely.
 	if err := e.Store.ClearSkip(ctx, f, key, SkipUndoRetentionFailed); err != nil {
 		e.Log.Warn("clear stale undo-retention skip failed (continuing)", "file", f, "err", err)
+	}
+
+	// The operator's own withholding, and it runs FIRST among the guards for a reason:
+	// every guard below it is this build deciding something about the file, and this one is
+	// a person deciding it. A row naming a guard that ran after the withholding would
+	// report a verdict nothing reached.
+	//
+	// It is read here, per file, rather than off a snapshot taken when the run began, so a
+	// path withheld while a scan is under way is withheld for the rest of it - which is
+	// exactly the case an operator watching the dashboard creates.
+	//
+	// A store error fails SAFE IN THE WITHHOLDING DIRECTION: a store that cannot say
+	// whether an operator withheld this path is not one this pass may hand the file to, so
+	// the file is left for the next scan. That is the same shape as the claim error below
+	// and the opposite trade from the record-based hold-backs, deliberately - those fall
+	// back on a name and on Claim, and this one has nothing behind it.
+	withheld, err := e.Store.PathIsExcluded(ctx, f)
+	if err != nil {
+		e.Log.Warn("cannot read the withheld paths (skipping this pass, will retry)", "file", f, "err", err)
+		return nil
+	}
+	if withheld {
+		e.Log.Info("skip (an operator withheld this path from the pipeline)", "file", f)
+		changed, err := e.Store.RecordSkip(ctx, f, key, SkipOperatorExcluded, by)
+		if err != nil {
+			// Fail safe: recording the skip is the reporting half, never the decision, so
+			// a store hiccup still withholds the file.
+			e.Log.Warn("record withheld skip failed (still withholding the file)", "file", f, "err", err)
+		} else if changed {
+			// Emitted only when it was newly recorded, so a live client sees it once and
+			// not once per scan for as long as the withholding stands.
+			e.emit(Event{Path: f, Status: store.Skipped, Outcome: e.because(SkipOperatorExcluded, by, prof)})
+		}
+		return nil
+	}
+	// Not (or no longer) withheld: drop the stale row from a previous scan so the file
+	// re-enters the ordinary path. A no-op for a path nobody ever withheld, and the whole
+	// of what makes a withholding REVERSIBLE - which is what keeps a wrongly recorded one
+	// from being a file that silently stops being worked on for ever.
+	if err := e.Store.ClearSkip(ctx, f, key, SkipOperatorExcluded); err != nil {
+		e.Log.Warn("clear stale withheld skip failed (continuing)", "file", f, "err", err)
 	}
 
 	// Hardlink guard. A file with >1 hard link is almost always an *arr import that is also
