@@ -401,8 +401,8 @@ func TestStrayTemp_TheCodecQuestionAsksWhatThisBuildCouldHaveWrittenNotWhatIsCon
 	// The only change: the operator switched encoders. svtav1 is a shipped `encoder:`
 	// value (internal/encoder), so its target codec is av1 rather than hevc.
 	other := buildEngine(t, ffmpeg, ffprobe, dir, nil, func(c *config.Config) { c.Encoder = "svtav1" })
-	otherTarget := targetCodecFor(other.Cfg.TopLevelProfile())
-	sameTarget := targetCodecFor(same.Cfg.TopLevelProfile())
+	otherTarget := targetCodecFor(other.Cfg.TopLevelProfile().Encoder)
+	sameTarget := targetCodecFor(same.Cfg.TopLevelProfile().Encoder)
 	if otherTarget == sameTarget {
 		t.Fatalf("precondition: both engines target %q - the encoder switch did not move the target codec", otherTarget)
 	}

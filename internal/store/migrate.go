@@ -371,6 +371,34 @@ ALTER TABLE retained_originals ADD COLUMN schema_version INTEGER;
 ALTER TABLE swap_incidents     ADD COLUMN schema_version INTEGER;
 `,
 	},
+	{
+		// v14 - TRANSCODE-PROFILES: which ENCODE profile supplied a job's settings.
+		//
+		// Not the same fact as v12. That one names the library root a file was enumerated
+		// under and digests the knobs that root resolved to; this one names the
+		// pattern-matched profile, if any, whose overrides were then laid over them. A row
+		// can carry both, one, or neither, and each answers a question the other cannot:
+		// which tree judged this file, and which named set of overrides decided what its
+		// encoder produced.
+		//
+		// It sits at the END of the history and not at the v8 it was written as. The dry-run
+		// decision, the failure classifier, the re-opening rule, the scored stream, the
+		// per-library profile and the record stamp have all shipped under the ordinals in
+		// between, and a database in the field has already run those texts. Two steps
+		// claiming one version fork the schema in two. Nothing about the SQL changes, only
+		// where it sits.
+		//
+		// NULL is "no encode profile matched", which is the true answer for every row
+		// written before they existed rather than a measurement nobody took. So NULL and ""
+		// are one statement for this field, and no DEFAULT is needed to make an old row
+		// honest.
+		name: "transcode profile column",
+		// One nullable column and no row: ADD COLUMN rewrites no row and creates none.
+		rows: noRowChange,
+		sql: `
+ALTER TABLE jobs ADD COLUMN profile TEXT;
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

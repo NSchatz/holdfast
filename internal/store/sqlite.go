@@ -124,6 +124,41 @@ func OpenReadOnly(path string) (*SQLite, error) {
 	return &SQLite{db: db}, nil
 }
 
+// OpenSnapshot opens an EXISTING ledger for reading and CREATES NOTHING AT ALL, not even
+// the -wal/-shm sidecars every ordinary reader leaves beside a WAL database.
+//
+// That is the one thing OpenReadOnly cannot promise, and it is what a command whose
+// contract is "the state directory is byte-for-byte what it was" needs: `holdfast
+// analyze` reports a census an operator may run before they have ever let this tool
+// touch a file, and a reader that added two files to their state directory would have
+// mutated the very thing it claims not to. SQLite's `immutable=1` is what buys that - it
+// tells SQLite the file cannot change underneath it, so no shared-memory index and no
+// write-ahead log are opened, and locking is skipped entirely.
+//
+// THE COST, which is why this is NOT the default reader: a database a daemon is writing
+// to right now has content in its -wal that this handle does not see, so what comes back
+// is the last CHECKPOINTED state rather than the newest. That is acceptable for exactly
+// one kind of caller - one that reports on the filesystem and reads the ledger only to
+// say which paths a record holds back - and unacceptable for any caller whose answer
+// decides a mutation. `export` and `validate` keep OpenReadOnly for that reason: their
+// job is the record itself, and a record read one checkpoint short is the wrong record.
+func OpenSnapshot(path string) (*SQLite, error) {
+	// Deliberately not openReadOnlyDB's DSN: immutable is the whole point here, and a
+	// shared helper that sometimes sets it would make "did this open create a file?"
+	// a question about an argument rather than about which function was called.
+	dsn := fmt.Sprintf("file:%s?mode=ro&immutable=1&_pragma=query_only(1)", path)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("store: open %q as an unchanging snapshot: %w", path, err)
+	}
+	db.SetMaxOpenConns(1)
+	if err := requireCurrentSchema(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &SQLite{db: db}, nil
+}
+
 // openReadOnlyDB is the read-only handle itself, with no schema rule attached. It is
 // shared so the physical read-only property has ONE definition: every reader in this
 // package gets mode=ro whatever it then decides about the schema it is looking at.
@@ -314,7 +349,7 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 			source_codec = NULL, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
 			swap_cause = NULL, failure_class = NULL, decision_inputs = NULL,
-			library_root = NULL, profile_digest = NULL
+			library_root = NULL, profile_digest = NULL, profile = NULL
 		 WHERE path = ? AND fingerprint = ?`,
 		string(Probing), worker, now(), currentStamp(), path, fingerprint); err != nil {
 		return false, fmt.Errorf("store: claim update: %w", err)
@@ -528,7 +563,7 @@ func finishQuery(st Status, o *Outcome, maxFailures int) string {
 		source_codec = ?, source_bytes = ?, output_bytes = ?, encode_ms = ?,
 		guard_attributes = ?, guard_time_resolution = ?, guard_residual_window = ?,
 		swap_cause = ?, failure_class = ?, decision_inputs = ?,
-		library_root = ?, profile_digest = ?`
+		library_root = ?, profile_digest = ?, profile = ?`
 	switch {
 	case st != Failed:
 	case o.FailureClass.Final() && maxFailures > 0:
@@ -562,7 +597,7 @@ func finishArgs(st Status, o *Outcome, path, fingerprint string) []any {
 		nullString(o.GuardAttributes), nullString(o.GuardTimeResolution),
 		nullString(o.GuardResidualWindow), nullString(o.SwapCause), nullString(class),
 		nullString(o.DecisionInputs.Encode()),
-		nullString(o.LibraryRoot), nullString(o.ProfileDigest),
+		nullString(o.LibraryRoot), nullString(o.ProfileDigest), nullString(o.Profile),
 		path, fingerprint,
 	}
 }
@@ -634,7 +669,7 @@ const outcomeColumns = `reason, encoder, vmaf_mean, vmaf_min, vmaf_model,
 	source_codec, source_bytes, output_bytes, encode_ms,
 	guard_attributes, guard_time_resolution, guard_residual_window, swap_cause,
 	failure_class, decision_inputs,
-	library_root, profile_digest`
+	library_root, profile_digest, profile`
 
 // outcomeScan holds one row's outcome columns on the way out of the driver. Every
 // field is a sql.Null* because every column is nullable: NULL is "not recorded" and
@@ -681,6 +716,11 @@ type outcomeScan struct {
 	// a row written before per-library profiles existed was decided by a build that had
 	// one global profile and recorded neither fact, and must read as not recorded.
 	libraryRoot, profileDigest sql.NullString
+
+	// The ENCODE profile that supplied this job's settings - the pattern-matched
+	// overrides laid over the library profile above, not the library profile itself.
+	// Nullable like the rest, and here NULL and "" say the same thing: none matched.
+	profile sql.NullString
 }
 
 // dest returns the scan destinations in outcomeColumns order.
@@ -691,7 +731,7 @@ func (s *outcomeScan) dest() []any {
 		&s.srcCodec, &s.srcBytes, &s.outBytes, &s.encMs,
 		&s.guardAttrs, &s.guardRes, &s.guardWindow, &s.swapCause,
 		&s.failClass, &s.inputs,
-		&s.libraryRoot, &s.profileDigest,
+		&s.libraryRoot, &s.profileDigest, &s.profile,
 	}
 }
 
@@ -714,6 +754,7 @@ func (s *outcomeScan) outcome() Outcome {
 		GuardResidualWindow: s.guardWindow.String, SwapCause: s.swapCause.String,
 		FailureClass:   FailureClass(s.failClass.String).Class(),
 		DecisionInputs: ParseDecisionInputs(s.inputs.String),
+		Profile:        s.profile.String,
 		Decision: Decision{
 			LibraryRoot:   s.libraryRoot.String,
 			ProfileDigest: s.profileDigest.String,
@@ -987,11 +1028,20 @@ func (s *SQLite) DropRetained(ctx context.Context, sourcePath string) error {
 // therefore exactly "did this call newly record the skip", which the caller uses to
 // emit — and count — the skip once, not once per scan. The outcome columns are
 // cleared so a converted row carries no stale proof (the same discipline as Claim).
-func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision) (bool, error) {
+//
+// The library profile and the encode profile are the ONLY outcome columns this write
+// carries values for rather than clearing, and that is the same discipline rather than
+// an exception to it. What the clearing rule excludes is proof about an ENCODE - a score,
+// a size, a duration - which this row has none of. Neither profile is proof: they are
+// what the guard was decided against, resolved at the moment it fired, so they belong to
+// THIS attempt exactly as the reason does. Clearing the encode profile would record
+// "nothing matched this file" on a row a profile decided, which is a false statement and
+// not an absence - for that column NULL and "" say the same thing.
+func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision, profile string) (bool, error) {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, reason,
-			library_root, profile_digest, schema_version)
-		 VALUES (?, ?, ?, 0, NULL, ?, ?, ?, ?, ?)
+			library_root, profile_digest, schema_version, profile)
+		 VALUES (?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(path, fingerprint) DO UPDATE SET
 			status = excluded.status, reason = excluded.reason, worker = NULL, updated_at = excluded.updated_at,
 			library_root = excluded.library_root, profile_digest = excluded.profile_digest,
@@ -1000,10 +1050,11 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL, vmaf_stream = NULL,
 			source_codec = NULL, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
-			swap_cause = NULL, decision_inputs = NULL
+			swap_cause = NULL, decision_inputs = NULL, profile = excluded.profile
 		 WHERE jobs.status = ?`,
 		path, fingerprint, string(Skipped), now(), nullString(reason),
-		nullString(by.LibraryRoot), nullString(by.ProfileDigest), currentStamp(), string(Pending))
+		nullString(by.LibraryRoot), nullString(by.ProfileDigest), currentStamp(), nullString(profile),
+		string(Pending))
 	if err != nil {
 		return false, fmt.Errorf("store: record skip: %w", err)
 	}

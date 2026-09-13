@@ -874,7 +874,7 @@ func TestReclaimedTotal_SumsDoneRowsWithBothSizes(t *testing.T) {
 		t.Fatalf("finish legacy: %v", err)
 	}
 	// A skipped row is not a reclaim and must not count.
-	if _, err := s.RecordSkip(ctx, "/a/skip.mkv", "fp", "low-bitrate", Decision{}); err != nil {
+	if _, err := s.RecordSkip(ctx, "/a/skip.mkv", "fp", "low-bitrate", Decision{}, ""); err != nil {
 		t.Fatalf("record skip: %v", err)
 	}
 
@@ -907,7 +907,7 @@ func TestRecordSkip_InsertsThenIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 
 	changed, err := s.RecordSkip(ctx, "/a/seed.mkv", "fp", "hardlinked",
-		Decision{LibraryRoot: "/a", ProfileDigest: "0123456789abcdef"})
+		Decision{LibraryRoot: "/a", ProfileDigest: "0123456789abcdef"}, "")
 	if err != nil {
 		t.Fatalf("RecordSkip: %v", err)
 	}
@@ -931,7 +931,7 @@ func TestRecordSkip_InsertsThenIsIdempotent(t *testing.T) {
 
 	// A second call on the already-skipped row is a no-op: changed=false, so the caller
 	// does not re-emit the skip on every scan.
-	changed, err = s.RecordSkip(ctx, "/a/seed.mkv", "fp", "hardlinked", Decision{})
+	changed, err = s.RecordSkip(ctx, "/a/seed.mkv", "fp", "hardlinked", Decision{}, "")
 	if err != nil {
 		t.Fatalf("RecordSkip 2: %v", err)
 	}
@@ -954,7 +954,7 @@ func TestRecordSkip_DoesNotClobberARealOutcome(t *testing.T) {
 		t.Fatalf("finish: %v", err)
 	}
 
-	changed, err := s.RecordSkip(ctx, "/a/movie.mkv", "fp", "hardlinked", Decision{})
+	changed, err := s.RecordSkip(ctx, "/a/movie.mkv", "fp", "hardlinked", Decision{}, "")
 	if err != nil {
 		t.Fatalf("RecordSkip: %v", err)
 	}
@@ -976,10 +976,10 @@ func TestClearSkip_RemovesMatchingSkipOnly(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
 
-	if _, err := s.RecordSkip(ctx, "/a/seed.mkv", "fp", "hardlinked", Decision{}); err != nil {
+	if _, err := s.RecordSkip(ctx, "/a/seed.mkv", "fp", "hardlinked", Decision{}, ""); err != nil {
 		t.Fatalf("record hardlink skip: %v", err)
 	}
-	if _, err := s.RecordSkip(ctx, "/a/small.mkv", "fp", "low-bitrate", Decision{}); err != nil {
+	if _, err := s.RecordSkip(ctx, "/a/small.mkv", "fp", "low-bitrate", Decision{}, ""); err != nil {
 		t.Fatalf("record low-bitrate skip: %v", err)
 	}
 

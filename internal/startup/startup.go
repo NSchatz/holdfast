@@ -73,6 +73,12 @@ type Platform interface {
 	// MountPoint reports whether path is itself the root of a mounted filesystem. It MAY
 	// consult the mount table and reports ErrMountInfoUnavailable when that cannot be read.
 	MountPoint(path string) (bool, error)
+
+	// FreeBytes and ProbeWritable are the SCRATCH DIRECTORY's two questions, asked of no
+	// other path: how much room its filesystem has, and whether this process can create
+	// and remove a file in it. ProbeWritable is the ONE method here that writes anything.
+	FreeBytes(path string) (uint64, error)
+	ProbeWritable(dir string) error
 }
 
 func cleanPath(p string) string { return filepath.Clean(p) }

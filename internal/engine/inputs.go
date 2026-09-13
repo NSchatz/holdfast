@@ -33,6 +33,11 @@ const (
 	InputTargetCodec = "target_codec"
 )
 
+// Every value here is read from ONE LIBRARY ROOT's resolved profile, never from an encode
+// profile laid over it: an input exists to be COMPARED, and both comparisons hold the
+// root's profile as their unit, so a value only a pattern match can reach would re-open its
+// row on every scan for ever. docs/requeue.md carries the cost and the lever.
+
 // DecisionInputsForProfile is every decision input ONE RESOLVED PROFILE offers: the one
 // place the value of each key is read, so the value a guard RECORDS and the value a later
 // scan COMPARES it against cannot come from two different readings of the same key.
@@ -45,7 +50,7 @@ const (
 // leaving alone the one that did.
 func DecisionInputsForProfile(prof config.Profile) store.DecisionInputs {
 	return store.InputsRead(map[string]string{
-		InputTargetCodec:    targetCodecFor(prof),
+		InputTargetCodec:    targetCodecFor(prof.Encoder),
 		InputEncoder:        prof.Encoder,
 		InputCRF:            strconv.Itoa(prof.CRF),
 		InputPreset:         prof.Preset,
@@ -69,9 +74,10 @@ func DecisionInputsFor(cfg config.Config) store.DecisionInputs {
 // under this profile - "hevc" for the cpu/nvenc/qsv/vaapi/amf encoders, "av1" for
 // svtav1/av1_nvenc. It defaults to "hevc" for an unknown or empty key (Validate rejects
 // an unknown encoder before the engine is ever built, so the default is a fallback and
-// not a live path).
-func targetCodecFor(prof config.Profile) string {
-	if spec, ok := encoder.Lookup(prof.Encoder); ok {
+// not a live path). It takes the KEY and not a profile because each job's guard has to ask
+// about the encoder THAT JOB uses, which an encode profile may have overridden.
+func targetCodecFor(key string) string {
+	if spec, ok := encoder.Lookup(key); ok {
 		return spec.TargetCodec
 	}
 	return "hevc"
