@@ -67,6 +67,106 @@ currently digests to what, beside the resolved value of every knob and the layer
 An outcome is recorded per *attempt*, not per file: **claiming a job for a retry clears it**, so a file
 that is being re-encoded never advertises the rejected attempt's score while it is in flight.
 
+### `POST /api/scan` - look at THESE files now
+
+A targeted scan. Give it a list of paths and it examines exactly those files, instead of
+re-examining the library. It is how an *arr import, a Jellyfin plugin or a shell script
+tells holdfast that one file landed, and it is what lets a steady-state deployment run with
+`scan_interval_sec: 0`. The worked Sonarr/Radarr wiring, including what to do when the
+container paths differ, is in [docs/docker.md](docker.md#telling-holdfast-about-one-file-sonarr--radarr).
+
+It is **token-gated**, like `rescan`, `pause` and `resume`: `Authorization: Bearer <the
+value server_auth_token points at>`. With no control token configured it answers **403**
+and the endpoint is off.
+
+It adds **no gate and skips none**. An accepted path is handed to the same pipeline entry
+point a whole-library scan's worker uses, so every guard, the claim, the decision-input
+re-opening rule and the swap discipline apply to it unchanged, and it records the verdict a
+scan would have recorded. It is **not** `requeue`: it clears nothing a terminal row
+recorded and resets no failure count, so a row parked at `max_failures` stays parked and a
+`done` or `skipped` row whose recorded inputs still match still holds its file out. Like
+`restore` and `requeue`, re-opening a row remains a **local command** and is not on this
+surface.
+
+**Request.** A JSON object carrying `paths`, an array of absolute path strings:
+
+```json
+{ "paths": ["/library/tv/Show/Season 01/Show - S01E01.mkv", "/library/film/Film.mkv"] }
+```
+
+**Limits, enforced and refused against:**
+
+| Limit | Value | On breach |
+|---|---|---|
+| paths per request | **256** | **413**, the whole request refused, nothing enqueued |
+| request body size | **262144** bytes (256 KiB) | **413**, the whole request refused, nothing enqueued |
+
+Both are refused **whole**. A partially-accepted oversized request would leave a caller
+unable to tell which half was taken, so there is no such thing here.
+
+**Response.** **202** when at least one path was accepted, and it comes back *before* the
+files have been processed - an HTTP handler is never held open across an encode. Every
+submitted path gets a line, in the order it was submitted:
+
+```json
+{
+  "accepted": 1,
+  "rejected": 2,
+  "results": [
+    { "path": "/library/film/Film.mkv", "accepted": true, "resolved": "/library/film/Film.mkv" },
+    { "path": "/etc/passwd", "accepted": false, "rule": "outside-library-roots",
+      "detail": "/etc/passwd does not lie at or beneath any configured library root (library_roots: /library)" },
+    { "path": "/library/film/notes.txt", "accepted": false, "rule": "not-a-video-extension",
+      "detail": "\"notes.txt\" carries no configured video extension (video_exts: mkv, mp4)" }
+  ]
+}
+```
+
+`resolved` is the path the pipeline will act on. It is **not always the path you sent**: a
+submitted path is resolved (symbolic links followed, `..` resolved away) before it is
+judged, and the root check is answered against the resolved form - so a path that climbs
+out of your library, or a link pointing outside it, is refused rather than acted on.
+
+`rule` is a stable token from a closed set, so a client can key off it:
+
+| `rule` | What it means |
+|---|---|
+| `path-not-absolute` | the path is not anchored; holdfast never resolves a submitted path against a working directory |
+| `unsupported-path-characters` | the path carries a literal tab or newline, which this pipeline does not process |
+| `path-unresolvable` | the real path could not be established - usually a directory on the way to it that holdfast may not read |
+| `not-a-regular-file` | nothing is there, or what is there is a directory, device, socket or named pipe |
+| `outside-library-roots` | the **resolved** path is not at or beneath any configured `library_roots` entry |
+| `retention-area` | the path is inside a `.holdfast-undo` retention area, which holds originals the undo window is keeping |
+| `holdfast-working-file` | a work-in-progress temp, a retained original or a retained replacement - a file holdfast wrote, never a source |
+| `not-a-video-extension` | the extension is not one of the configured `video_exts` |
+| `duplicate-in-request` | the same file was named more than once in one request; it is accepted at most once |
+| `submission-queue-full` | the path passed every rule and could **not** be taken - retry it |
+
+Every one of those except the last two is the rule the **scan's own enumeration** applies,
+asked of a path instead of a directory listing. There is one implementation of them, so a
+`video_exts` entry added, a working-file name form added or a library root added moves both
+routes together.
+
+**Every status it can answer with:**
+
+| Status | When |
+|---|---|
+| **202** | at least one path was accepted and enqueued |
+| **400** | the body was malformed, or **every** submitted path was refused (the per-path report says why for each) |
+| **401** | a control token is configured and the request did not carry it. A proxy identity header is never authorization |
+| **403** | no control token is configured, so the mutating endpoints are disabled outright |
+| **409** | holdfast is paused; nothing was enqueued. `POST /api/resume` first |
+| **413** | more than 256 paths, or a body over 262144 bytes. Nothing was enqueued |
+| **503** | the submission queue could not take the accepted paths. The report names which were not taken |
+
+A malformed body is a **400** and nothing else happens: not valid JSON, not a JSON object,
+no `paths` key, `paths` that is not an array, an empty `paths`, or an entry that is not a
+string. No path is enqueued and no ledger row is written.
+
+**On shutdown**, work already in flight is finished before the job store is closed, and
+submissions still waiting in the queue are discarded - unprocessed, and with no ledger row,
+because nothing looked at those files and a row would be a record of a decision nobody took.
+
 ### The decision inputs a row was taken under
 
 Beside the proof, a terminal row records **the configuration values the decision that wrote it actually
