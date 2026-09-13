@@ -263,7 +263,7 @@ func (e *Engine) strayReplacementHold(ctx context.Context, path string) string {
 
 	// Question 5. It IS something this build could have written; all that is left is
 	// whether it is finished, and only the source beside it can say.
-	if err := e.lengthParity(ctx, src, path); err != nil {
+	if _, err := e.lengthParity(ctx, src, path); err != nil {
 		return "" // a truncated encode: work in progress, and the sweep's to take
 	}
 	return "a finished " + codec + " encode holdfast wrote, the length of the source beside it (" + filepath.Base(src) + ")"
@@ -299,11 +299,18 @@ func readableNow(path string) error {
 // couldThisBuildHaveWrittenIt reports whether codec is one ffprobe would report for an
 // output SOME encoder this build ships could have produced.
 //
-// It is deliberately the whole registry and not e.targetCodec, which is derived from
-// cfg.Encoder: a replacement stranded on disk was written by whichever encoder was
-// configured then, so asking about the current key would make the protection turn on a
-// setting that has nothing to do with the file. "h265" is ffprobe's legacy alias for hevc
-// and is accepted because the question is what the file IS.
+// It is deliberately the whole registry and not one profile's target codec. A target
+// codec is derived from a root profile's `encoder` (targetCodecFor), and a replacement
+// stranded on disk was written by whichever encoder was configured for whichever root it
+// lay under when it was written - so asking about a current key would make AC15i's
+// protection turn on a setting that has nothing to do with the file, in exactly the way
+// the criterion forbids it to turn on a record ("holding it SHALL NOT depend on one,
+// since the write that failed is exactly what denied it"). Per-root profiles make that
+// argument stronger, not weaker: there is now more than one current key to be wrong
+// about.
+//
+// "h265" is ffprobe's legacy alias for hevc and is accepted for the same reason
+// isAlreadyTargetCodec accepts it: the question is what the file IS.
 func couldThisBuildHaveWrittenIt(codec string) bool {
 	for _, target := range encoder.TargetCodecs() {
 		if codec == target || (target == "hevc" && codec == "h265") {

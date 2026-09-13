@@ -85,6 +85,14 @@ type jobDTO struct {
 	VmafPixFmt       string   `json:"vmaf_pix_fmt,omitempty"`
 	VmafChroma       *float64 `json:"vmaf_chroma"`
 	VmafChromaMetric string   `json:"vmaf_chroma_metric,omitempty"`
+	// Which video stream the comparison was made against, in the specifier vocabulary
+	// the probes use ("v:0"). A source can carry more than one video stream, so this is
+	// what lets a client line the score up against the file it was measured on.
+	//
+	// `omitempty`, on exactly the terms vmaf_model and vmaf_pix_fmt are: a row that
+	// recorded no comparison carries no key at all, so a client never has to decide what
+	// an empty string means, and no row is ever served a fabricated "v:0".
+	VmafStream string `json:"vmaf_stream,omitempty"`
 	// SourceCodec is what the source was in when the job was decided - the fact a
 	// would-transcode row exists to carry, beside the size, so an operator can size the
 	// job from the page instead of going and probing the files themselves.
@@ -138,6 +146,22 @@ type jobDTO struct {
 	// SwapCause names a swap failure's cause when it is one holdfast reports
 	// distinctly - today only "cross-filesystem". Absent for every other failure.
 	SwapCause string `json:"swap_cause,omitempty"`
+
+	// Which library profile decided this file: the cleaned path of the root it was
+	// enumerated under, and a digest of that root's resolved overridable knobs.
+	//
+	// Both are POINTERS and deliberately not omitempty, for the reason source_codec is:
+	// they ARE the fact rather than a companion to one, so a row that simply dropped the
+	// key would leave a client deciding for itself whether nothing was recorded or the
+	// field had gone away. An explicit JSON null says which. A row written before
+	// per-library profiles existed carries two nulls - never a fabricated root, and
+	// never a digest of whatever the configuration says now.
+	//
+	// The digest travels WITH the root because the root alone stops being interpretable
+	// the moment its profile is edited: the row would go on naming /mnt/tv while /mnt/tv
+	// now means something else.
+	LibraryRoot   *string `json:"library_root"`
+	ProfileDigest *string `json:"profile_digest"`
 }
 
 func toDTOs(jobs []store.Job) []jobDTO {
@@ -158,6 +182,7 @@ func toDTOs(jobs []store.Job) []jobDTO {
 			VmafPixFmt:       j.Outcome.VmafPixFmt,
 			VmafChroma:       j.Outcome.VmafChroma,
 			VmafChromaMetric: j.Outcome.VmafChromaMetric,
+			VmafStream:       j.Outcome.VmafStream,
 
 			SourceCodec: nullableText(j.Outcome.SourceCodec),
 			SourceBytes: j.Outcome.SourceBytes,
@@ -168,6 +193,9 @@ func toDTOs(jobs []store.Job) []jobDTO {
 			GuardTimeResolution: j.Outcome.GuardTimeResolution,
 			GuardResidualWindow: j.Outcome.GuardResidualWindow,
 			SwapCause:           j.Outcome.SwapCause,
+
+			LibraryRoot:   nullableText(j.Outcome.LibraryRoot),
+			ProfileDigest: nullableText(j.Outcome.ProfileDigest),
 		})
 	}
 	return out

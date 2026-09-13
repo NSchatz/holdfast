@@ -223,6 +223,11 @@ score.
 - **The model is luma-only.** It is structurally blind to chroma damage, which only the
   structural gates (codec, duration and packet parity, stream-count parity, full decode
   integrity, strictly-smaller) catch.
+- **One video stream was compared, and the label says which.** A file can carry more than
+  one; the gate always measures the FIRST (`v:0`), the same stream every property read and
+  the decode-integrity check inspect, so the score lines up with the guards that passed the
+  file. A row that predates this fact, or whose gate never ran, says `unspecified stream`
+  rather than name one nobody recorded.
 - **Scores are never compared across files.** VMAF is not comparable between different
   sources, and this page never puts two files' scores on one scale for that reason. The
   whole-ledger VMAF figures pool per-file scores; they are a summary of this library's
@@ -238,8 +243,10 @@ score.
 A skipped row names the guard that held the file back, from a closed vocabulary: already
 at the target codec, already efficient (low bitrate), hardlinked (would break a seed),
 interlaced, Dolby Vision or HDR10+ (dynamic metadata a generic re-encode cannot preserve),
-incomplete HDR metadata, an exotic pixel format, a target file that already exists, a
-symlinked source, and a failure to retain the original inside the undo window. An unknown
+incomplete HDR metadata, an exotic pixel format, a second video stream that is not an
+attached picture (every property the encode derives is read from the first), a target file
+that already exists, a symlinked source, and a failure to retain the original inside the
+undo window. An unknown
 token falls back to itself, so a guard added later is never hidden behind a blank.
 
 ## The three states every view shows

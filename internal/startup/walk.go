@@ -141,7 +141,14 @@ func (r *checkRun) descend(dir string, info Info, isRoot bool) {
 	r.res.Coverage = append(r.res.Coverage, dir)
 
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
-	for _, e := range entries {
+	// The listing is kept, not merely consumed: this walk is the only pass over
+	// the tree a scan gets for free, and what it read here is what the scan would
+	// otherwise pay a second and a third listing for. It is the SAME slice the
+	// loop below annotates - a link or a subdirectory records what following it
+	// reached - so keeping it costs the walk no second copy of anything.
+	r.res.Entries[dir] = entries
+	for i := range entries {
+		e := entries[i]
 		child := filepath.Join(dir, e.Name)
 
 		if e.IsLink {
@@ -170,11 +177,15 @@ func (r *checkRun) descend(dir string, info Info, isRoot bool) {
 				// operator is told the file is out of bounds and a job row
 				// appears for it - so the report is raised only for a link the
 				// walk would otherwise have entered.
-				if ti, terr := r.c.Platform.Inspect(child); terr == nil && !ti.IsDir {
+				ti, terr := r.c.Platform.Inspect(child)
+				if terr == nil && !ti.IsDir {
 					if r.isMedia(e.Name) {
 						r.regionMedia[info.Region] = true
 					}
 					continue
+				}
+				if terr == nil {
+					entries[i].ResolvesToDir = true
 				}
 				r.notice(NoticeLinkLeavesRoots, child, fmt.Sprintf(
 					"not descended: the resolved target %s is beneath no configured library root", target))
@@ -209,6 +220,7 @@ func (r *checkRun) descend(dir string, info Info, isRoot bool) {
 			}
 			continue
 		}
+		entries[i].ResolvesToDir = true
 		r.considerDirectory(child, ci, info)
 	}
 }

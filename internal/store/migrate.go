@@ -229,6 +229,112 @@ CREATE INDEX IF NOT EXISTS idx_incidents_excluded ON swap_incidents(replacement_
 ALTER TABLE jobs ADD COLUMN source_codec TEXT;
 `,
 	},
+	{
+		// v9 - the class of a terminal failure: whether a re-attempt could differ.
+		//
+		// One nullable TEXT column holding a two-value vocabulary (store.FailureClass).
+		// It is a column on jobs rather than a table of its own because its lifetime IS
+		// the row's: it describes THIS attempt's verdict, Claim clears it when a new
+		// attempt begins, and a successful transcode prunes it with everything else the
+		// attempt recorded.
+		//
+		// NULLABLE with NO DEFAULT, which is the rule v2 set and every step since has
+		// kept - but here the reason is the opposite of the usual one. Elsewhere a
+		// DEFAULT would invent evidence; here NULL is not "unknown" at all, because
+		// there is no unknown class to represent: an absent class READS as transient
+		// (FailureClass.Class), which is the retry direction and the only fail-safe one.
+		// Every failure row already in the field was written by a build that retried
+		// every failure alike, so reading them as transient is not a fallback, it is
+		// exactly what those rows mean. A backfill would be a rewrite of history with
+		// nothing to gain: the read already answers correctly, and no row's behaviour
+		// under Claim changes.
+		//
+		// No index. Nothing queries BY the class: Claim keys on (path, fingerprint) and
+		// decides on fail_count alone, and every other reader has the row in hand.
+		name: "failure class",
+		sql: `
+ALTER TABLE jobs ADD COLUMN failure_class TEXT;
+`,
+	},
+	{
+		// v10 - the decision inputs a terminal row was taken under.
+		//
+		// One nullable TEXT column holding what the decision that wrote the row actually
+		// READ from the configuration (store.DecisionInputs). It is a column on jobs
+		// rather than a table of its own for the reason the failure class is: its
+		// lifetime IS the row's. It describes THIS decision, Claim clears it when a new
+		// attempt begins, and a successful transcode prunes it with everything else the
+		// attempt recorded.
+		//
+		// NULLABLE with NO DEFAULT, the rule v2 set and every step since has kept, and
+		// here it is the whole point rather than a convention. A row already in the field
+		// was written by a build that recorded no inputs, and it must READ as not
+		// recorded - which the re-opening rule treats as "this verdict cannot be
+		// re-derived", so the row is offered to the pipeline once and the decision it
+		// then reaches records what it read. A DEFAULT - '' or 'none' or anything else -
+		// would claim those rows were taken under a configuration nobody recorded, and
+		// they would then MATCH whatever is current and stay excluded for ever, which is
+		// precisely the silent no-op this column exists to end.
+		//
+		// An index on (status, decision_inputs) serves the survey the startup report and
+		// `validate` read: how many done/skipped rows were taken under a configuration
+		// that has since moved. That question is answered by grouping the DISTINCT
+		// recorded values within those two statuses - a handful of groups over a
+		// 300,000-row ledger - rather than by decoding every row, and the index is what
+		// keeps it off the single serialized connection the engine writes through.
+		name: "decision inputs",
+		sql: `
+ALTER TABLE jobs ADD COLUMN decision_inputs TEXT;
+CREATE INDEX IF NOT EXISTS idx_jobs_status_inputs ON jobs(status, decision_inputs);
+`,
+	},
+	{
+		// v11 - WHICH video stream the quality gate compared.
+		//
+		// v4 recorded the format both streams were converted to; this records which
+		// streams those were. A source can carry more than one video stream, and until the
+		// filtergraph named its inputs explicitly nothing pinned the comparison to the
+		// stream every ffprobe read selects (`v:0`) and the decode-integrity check decodes
+		// (`0:v:0`). The gate now names it, and the row now says so - the same argument
+		// that put the model and the comparison format here, applied to the one fact about
+		// the measurement they left open.
+		//
+		// NULLABLE with NO DEFAULT, the rule v2 set and every step since has kept, and
+		// there is NO BACKFILL. Every row already in the field was written by a gate that
+		// named no stream, so it must READ as not recorded. A DEFAULT - 'v:0' above all,
+		// because it is the value this build would now write and therefore the tempting
+		// one - would put a stream on rows nobody recorded one for, and on rows whose VMAF
+		// gate never ran at all, in the one table whose whole job is to be evidence.
+		//
+		// No index. Nothing queries BY the stream: every reader has the row in hand.
+		name: "scored video stream",
+		sql: `
+ALTER TABLE jobs ADD COLUMN vmaf_stream TEXT;
+`,
+	},
+	{
+		// v12 - which library profile decided the file.
+		//
+		// A library root now carries its own encoder, crf, bitrate floor and VMAF floors,
+		// so a terminal row no longer says what it was judged by: the configuration has
+		// several answers and the row has none. library_root is the cleaned root the file
+		// was enumerated under, and profile_digest identifies that root's resolved values
+		// - both, because the path alone stops being interpretable the moment the profile
+		// is edited, which is exactly the question this row exists to survive.
+		//
+		// NULLABLE with NO DEFAULT, which is the rule v2 set and every step since has
+		// kept. Every row already in the field was decided by a build that had one global
+		// profile and recorded neither fact, so both must READ AS NOT RECORDED. A DEFAULT
+		// here would attribute those rows to whichever root happens to be configured now,
+		// or stamp them with a digest of a profile that did not exist when they were
+		// written - inventing evidence about swaps that already happened, in the one table
+		// whose whole job is to be evidence.
+		name: "deciding library profile",
+		sql: `
+ALTER TABLE jobs ADD COLUMN library_root   TEXT;
+ALTER TABLE jobs ADD COLUMN profile_digest TEXT;
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

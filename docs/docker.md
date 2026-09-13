@@ -65,6 +65,64 @@ The library mount must also be a **single filesystem per directory** — the swa
 `rename(2)`, which cannot cross filesystems. (This is why the temp file lives beside the
 source rather than in a scratch volume.)
 
+<a id="swap-metadata"></a>
+
+**What a swap CHANGES about a replaced file.** Everything above is what holdfast NEEDS from
+your filesystem. This is what it does to the file it publishes - none of it visible unless
+you go looking, and all of it library-wide the first time you point holdfast at a library.
+
+The replacement carries the source's mode. A source at `0640` is replaced by a file at
+`0640`, whatever umask holdfast is running under. The nine permission bits travel, and so do
+setuid, setgid and sticky if the source had them.
+
+Ownership is carried only where holdfast is privileged to carry it. Changing a file's owner
+needs `CAP_CHOWN` or root, and a container running as an ordinary `user:` has neither - so
+on a rootless deployment the replacement is owned by the holdfast uid and gid rather than by
+the source's, holdfast says so once per run, and the swap still happens. Run as a `user:`
+that already owns the media and the question never arises, which is the same advice the
+paragraph above gives for a different reason.
+
+The modification time is carried from the source unless `preserve_mtime` is false. It
+defaults to true, because resetting it makes a first pass over a library look to Plex and
+Jellyfin like the whole library arrived at once: "Recently Added", every date-based sort and
+every smart collection built on one moves with it, and nothing puts it back. Set
+`preserve_mtime: false` if you would rather the replacement's mtime say when the bytes were
+actually written. Either way the file's identity still moves, because a swap always makes
+the file smaller - so a resume reads the replacement as a new file and never as the source
+it already processed.
+
+ACLs and xattrs are not carried. POSIX ACLs, SELinux labels and every other extended
+attribute on the source are left behind: the replacement gets whatever your filesystem gives
+a newly created file, and nothing in holdfast reads or writes them. A library whose access
+depends on POSIX ACLs needs them reapplied after a pass.
+
+### One process per `state_dir`
+
+**Running more than one holdfast process against a single `state_dir` is unsupported.** The job
+store under `/state` is single-writer: one holdfast process serializes every access to it, and
+that serialization does not reach across processes. A second process pointed at the same
+`state_dir` contends for a store that is neither built nor proven to be shared, so this is not a
+deployment to tune - it is one not to build. Pointing two processes at the same **library** is
+worse still, for the reason two different transcoders must not share one: both write a temp file
+beside the source and both delete sources.
+
+**Do this instead.** Run one container per `state_dir`. A library that genuinely needs its own
+daemon gets its own container, its own `state_dir` volume and its own `/media` mount - never a
+second process on the first one's state. To use more of one machine, do not start a second
+process: raise `workers`.
+
+```yaml
+workers: 1   # concurrent encode workers inside the one daemon; the default
+```
+
+`workers` is 1 by default on purpose: a CPU libx265 encode already **saturates the available
+cores** by itself, so a second concurrent encode mostly takes cores from the first and the pair
+finishes no sooner. Raising it is an opt-in for a library of many small or low-resolution files,
+or for a hardware encoder - the cases where one encode does not use the whole machine. It buys
+concurrency **inside the one daemon**: holdfast is a single process whatever you set it to, which
+is the point. That is a design decision, not an unbuilt feature, and the README's
+[non-goal](../README.md#non-goals) says why.
+
 ## Timezone
 
 `run_window` is evaluated in **local time**. The image carries the zone database, but a

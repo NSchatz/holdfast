@@ -64,7 +64,11 @@ func (s *SQLite) RecordSwapIncident(ctx context.Context, in SwapIncident) error 
 	// reading the ledger must not have to join to the incident table to learn WHY the
 	// swap did not complete.
 	o.Reason, o.SwapCause = in.SwapError, in.SwapCause
-	if _, err := tx.ExecContext(ctx, finishQuery(in.Outcome),
+	// No attempt bound is passed, and none is needed: this path only ever writes
+	// Indeterminate or AppliedDespiteError (refused otherwise, above), neither of which
+	// touches fail_count at all. A parked swap is parked by its own status - the job is
+	// held until an operator determines it - so the attempt bound has nothing to say here.
+	if _, err := tx.ExecContext(ctx, finishQuery(in.Outcome, o, 0),
 		finishArgs(in.Outcome, o, in.SourcePath, in.SourceFingerprint)...); err != nil {
 		return fmt.Errorf("store: record swap incident job state: %w", err)
 	}

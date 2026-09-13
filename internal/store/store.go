@@ -81,16 +81,96 @@ func (s Status) Active() bool {
 	}
 }
 
-// Outcome is the durable PROOF of a terminal job's result: the facts the engine computed
-// while deciding whether a swap was safe.
+// FailureClass says whether a terminal failure's verdict is a pure function of that
+// job's inputs - the source bytes, the configuration and the pinned ffmpeg build - or
+// whether a later attempt could reach a different one.
+//
+// It is a CLOSED vocabulary of exactly two values and, like the engine's skip tokens,
+// it is a WIRE FORMAT: it is stored on the row, so renaming one changes what an
+// operator's existing rows mean. It is NOT a status and NOT a guard token; a failure
+// carries a class beside its reason, and nothing else does.
+//
+// It is what lets `max_failures` mean what it says. That bound buys re-attempts, and a
+// re-attempt is only worth anything when the next one could come out differently: a
+// size-increase reject on the same file under the same configuration will reject
+// identically on attempt three, after another full encode. So the class decides whether
+// the bound is spent one attempt at a time or all at once (see Finish).
+//
+// Anything outside the vocabulary is TRANSIENT, including the empty value a row written
+// before the class existed carries. That is the fail-safe direction and the direction is
+// not symmetric: the cost of a wrong "transient" is CPU, and the cost of a wrong
+// "deterministic" is a file parked at its first failure that nobody revisits.
+type FailureClass string
+
+// The two failure classes. There is no third, and no "unknown": an unrecognised value
+// resolves to Transient rather than becoming a state of its own (see Class).
+const (
+	// FailureTransient: a later attempt may reach a different verdict. A full disk, an
+	// OOM-killed ffmpeg, a store error, an output that did not decode. Retried under
+	// max_failures exactly as every failure has always been.
+	FailureTransient FailureClass = "transient"
+
+	// FailureDeterministic: the same source, the same configuration and the same
+	// ffmpeg build will produce this same verdict, so the attempts max_failures would
+	// buy are all spent reaching it again.
+	FailureDeterministic FailureClass = "deterministic"
+)
+
+// Class resolves c to a member of the vocabulary. Exactly one value is deterministic;
+// EVERYTHING else - the empty value, a token from a newer build, anything an operator or
+// a repair script put in the column by hand - is transient, because retrying costs CPU
+// and refusing to retry costs a file.
+//
+// It is applied on the way IN and on the way OUT (see Finish and outcomeScan.outcome),
+// so a stored class is always one of the two and a read never hands a caller a value it
+// would have to interpret for itself.
+func (c FailureClass) Class() FailureClass {
+	if c == FailureDeterministic {
+		return FailureDeterministic
+	}
+	return FailureTransient
+}
+
+// Final reports whether c is the class whose verdict no re-attempt can change.
+func (c FailureClass) Final() bool { return c.Class() == FailureDeterministic }
+
+// Outcome is the durable PROOF of a terminal job's result — the facts the engine
+// computed while deciding whether a swap was safe (TRANSCODE-13). Before this phase
+// every one of them was computed and then thrown away, which is precisely why the
+// ledger could not show fidelity, why a "reclaimed" total reset to zero on every
+// restart, and why the API documented a failure `reason` field that did not exist.
+//
+// Absence is REPRESENTABLE, and must stay that way. Every numeric field is a POINTER
+// for one reason: 0 is a legal value for all of them, so a plain zero cannot mean
+// "nobody measured this". A VMAF of 0.0 is a destroyed frame, not a missing
+// measurement. nil means NOT RECORDED, and a reader (the API, the UI) is required to
+// render it as such — never as 0, never as a fabricated score. The string fields use
+// "" for the same purpose, unambiguously: an empty reason/encoder/model carries no
+// meaning of its own.
 type Outcome struct {
-	// Reason is WHY the job reached this status. For Failed it is the error text; for
-	// Skipped it is the name of the GUARD that fired, a stable token from internal/engine
-	// rather than prose, so a UI can key off it. Done leaves it "".
+	// Reason is WHY the job reached this status. For Failed it is the error text (the
+	// encode error, or the gate that rejected the output), and where that verdict is
+	// FINAL it says so in front of that text rather than instead of it: an operator
+	// reading the row learns both that it will not be tried again and what rejected it,
+	// without going to the logs. For Skipped it is the name of the GUARD that fired — a
+	// stable token from internal/engine, not prose, so a UI can key off it. Done needs
+	// no excuse and leaves it "".
 	Reason string
 
-	// Encoder is the encoder key the job actually ran, set on every row that reached the
-	// encoder at all: a failure is as worth attributing to its encoder as a success is.
+	// FailureClass is whether this failure's verdict is a pure function of the job's
+	// inputs (see FailureClass). It is meaningful on a FAILED row and is "not recorded"
+	// on every other status, exactly as the fields below are on a row that never reached
+	// the code that fills them.
+	//
+	// Absence is NOT representable in the way the numeric fields' absence is, and that
+	// is deliberate rather than an oversight: there is no "unclassified" failure to
+	// represent, because a class that could not be established IS the transient one.
+	// A read therefore always yields a member of the vocabulary.
+	FailureClass FailureClass
+
+	// Encoder is the encoder key (cpu / svtav1 / nvenc / …) the job actually ran, set
+	// on every row that reached the encoder at all — a failure is as worth attributing
+	// to its encoder as a success is.
 	Encoder string
 
 	// VmafMean and VmafMin are the pooled harmonic-mean and the worst-frame VMAF, and
@@ -111,6 +191,19 @@ type Outcome struct {
 	VmafPixFmt       string
 	VmafChroma       *float64
 	VmafChromaMetric string
+
+	// VmafStream names WHICH video stream of each file the comparison was made against,
+	// in the specifier vocabulary the probes use ("v:0"). It belongs on the row for the
+	// reason VmafPixFmt does: a source can carry more than one video stream, and a score
+	// that does not say which one it looked at cannot be lined up against the guards that
+	// inspected the file. It is a stable token, treated as a wire format the way VmafModel
+	// and VmafChromaMetric are.
+	//
+	// "" is NOT RECORDED, the rule every string here keeps: a row written before this
+	// fact existed, and a job whose VMAF gate never ran, record no stream. It is NULL in
+	// the column and absent on the wire; it is never a fabricated "v:0", which would claim
+	// a comparison nobody made.
+	VmafStream string
 
 	// SourceCodec is the video codec the SOURCE was in when this job was decided, as
 	// ffprobe named it. It is recorded on a dry-run decision, whose whole purpose is to say
@@ -152,12 +245,62 @@ type Outcome struct {
 	// today only SwapCauseCrossFilesystem. It is "" for every other failure, so that cause
 	// is never attributed to a swap that failed for some other reason.
 	SwapCause string
+
+	// DecisionInputs is what the decision that wrote this row READ from the
+	// configuration, and it is what lets Claim re-derive the row rather than treat it
+	// as a permanent answer (see DecisionInputs and Claim). Its zero value is NOT
+	// RECORDED, which is what every row written before the column existed carries and
+	// what a failure - a verdict the configuration did not determine - carries too.
+	DecisionInputs DecisionInputs
+
+	// Decision names the library profile that decided this file. It is embedded so a
+	// reader asks a row for o.LibraryRoot exactly as it asks for o.Encoder.
+	Decision
 }
 
-// SwapCauseCrossFilesystem is the machine-readable cause for a swap that failed because
-// the temp and the target are not on the same mounted filesystem (rename(2)'s EXDEV). It is
-// a stable token, not prose: treat it as a wire format. holdfast does NOT copy or fall back
-// across filesystems when it sees this; it reports it.
+// Decision names the library profile a row was decided under: which root's profile
+// supplied the knobs the file was judged by, and what those knobs resolved to.
+//
+// It exists because a library root now carries its own encoder, crf, bitrate floor and
+// VMAF floors, so "what was this file judged by" stopped being answerable from the
+// configuration: the file has several profiles to choose from and the row had none. And
+// it is a TYPE rather than two more strings in an argument list, because two adjacent
+// strings is precisely the call that silently swaps, and a row naming its digest as its
+// root would be worse than one naming neither.
+//
+// LibraryRoot is the CLEANED path of the root the file was enumerated under.
+// ProfileDigest identifies that root's RESOLVED knob values, and it is what keeps the
+// row interpretable after the profile has been edited: the path alone would go on naming
+// a root that now means something else. Rows decided under identical resolved values
+// carry the same digest; any different value carries a different one.
+//
+// "" is NOT RECORDED, the rule every string on an Outcome keeps, and it is what a row
+// written by an earlier build reads as. It is never a fabricated root and never a digest
+// of whatever the configuration happens to say now.
+type Decision struct {
+	LibraryRoot   string
+	ProfileDigest string
+}
+
+// GuardRestoredOriginal is the one skip-guard token this package has to know by name.
+//
+// Every other token in Outcome.Reason is opaque here: the store records which guard
+// fired and never acts on it. This one is different because the store is where the
+// action has to happen. A `skipped / restored-original` row is what stands between an
+// operator's rescued bytes and the gates that passed the encode they rejected, so it is
+// NEVER re-opened - not by a configuration change, not by a requeue, not by a row that
+// records no inputs at all - and a rule enforced only in internal/engine would be a rule
+// with one check in front of an irreversible act.
+//
+// internal/engine defines its SkipRestoredOriginal as this constant, so there is exactly
+// one spelling of a token that is a stored wire format.
+const GuardRestoredOriginal = "restored-original"
+
+// SwapCauseCrossFilesystem is the distinct, machine-readable cause for a swap that
+// failed because the temp and the target are not on the same mounted filesystem
+// (rename(2)'s EXDEV: "oldpath and newpath are not on the same mounted filesystem").
+// It is a stable token, not prose - treat it as a wire format. holdfast does NOT copy,
+// move or otherwise fall back across filesystems when it sees this; it reports it.
 const SwapCauseCrossFilesystem = "cross-filesystem"
 
 // The two residual-window CLASS LABELS, deliberately the same identifiers as the anchors
@@ -465,27 +608,87 @@ type Store interface {
 	// in-process call. Call once at startup, before any scan.
 	RecoverStale(ctx context.Context) (int, error)
 
-	// Claim atomically attempts to take ownership of path+fingerprint for worker. It
-	// returns false when the job is done or skipped (permanent), failed at or over
-	// maxFailures (parked), or currently active. A fresh path+fingerprint yields a claim.
+	// Claim atomically attempts to take ownership of path+fingerprint for worker.
+	// Returns (true, nil) if the caller now owns the job (row moved to probing) and
+	// (false, nil) if it does not: the job is done/skipped and its recorded decision
+	// inputs still hold, failed and already at/over maxFailures (parked), or currently
+	// active (held by another worker, or stale - see RecoverStale). A fresh
+	// path+fingerprint with no row yields a claim.
 	//
-	// A WouldTranscode row DOES yield a claim: it records what a dry run decided about that
-	// scan rather than a disposal of the file, so the run that is allowed to transcode must
-	// be able to pick the file up. Otherwise turning dry-run off would leave every file the
-	// dry run examined permanently untouched.
-	Claim(ctx context.Context, path, fingerprint, worker string, maxFailures int) (bool, error)
+	// A done or skipped row is terminal only FOR THE CONFIGURATION IT WAS TAKEN UNDER.
+	// current is what that configuration is now - every decision input this build offers,
+	// keyed by the configuration key holding it - and a row whose recorded inputs no
+	// longer match it, or which records none at all, is RE-OPENED: the file is offered to
+	// the pipeline exactly as an unseen file is. Re-opening is not re-encoding; the guards
+	// run again, and a file that reaches the same verdict reaches it in microseconds and
+	// records the current inputs on the way.
+	//
+	// current is a parameter rather than a setting this package holds, for the reason
+	// maxFailures is one on Finish: it is the caller's configuration, the caller is the
+	// only thing that can see it, and a cached copy would answer a question about a
+	// configuration nobody could prove was still in force.
+	//
+	// Three rows are never re-opened however far the configuration has moved, because
+	// what holds each of them out is not a configuration question: Indeterminate,
+	// AppliedDespiteError, and a Skipped row carrying GuardRestoredOriginal.
+	//
+	// A WouldTranscode row DOES yield a claim, and unconditionally. It records what a dry
+	// run decided about that scan, not a disposal of the file, so the run that is allowed
+	// to transcode must be able to pick the file up - otherwise turning dry-run off would
+	// leave every file the dry run examined permanently untouched.
+	Claim(ctx context.Context, path, fingerprint, worker string, maxFailures int, current DecisionInputs) (bool, error)
+
+	// Reopen clears what ONE terminal row recorded about the configuration its decision
+	// was taken under, so the next Claim reads that decision as one it cannot re-derive
+	// and offers the file to the pipeline. It is the store half of `holdfast requeue`:
+	// the lever for the rows a configuration change cannot reason about.
+	//
+	// It re-opens by the SAME mechanism a configuration change does rather than by
+	// deleting the row, and that is load-bearing twice over. A deleted done row takes its
+	// contribution to the lifetime reclaimed total with it, and a deleted failed row
+	// takes the attempt accounting that parked it.
+	//
+	// clearFailures additionally resets the attempt count, which is what re-opens a row
+	// parked at max_failures - the count is the only thing holding it (see Claim).
+	//
+	// It REFUSES the three rows that are never re-opened, in its own WHERE clause and not
+	// on the caller's word: Indeterminate, AppliedDespiteError, and a Skipped row
+	// carrying GuardRestoredOriginal. Reports whether a row actually moved, so a caller
+	// counts what it changed rather than what it asked for.
+	Reopen(ctx context.Context, path, fingerprint string, clearFailures bool) (bool, error)
+
+	// SurveyDecisionInputs reports what the ledger says about the configuration its
+	// terminal decisions were taken under, measured against current: how many done and
+	// skipped rows record inputs that have moved, how many record none at all, and how
+	// many still match. A run announces the first two before its scan so a re-derivation
+	// is stated rather than discovered. A pure read.
+	SurveyDecisionInputs(ctx context.Context, current DecisionInputs) (DecisionInputsSurvey, error)
 
 	// Advance records a non-terminal state transition for a job the caller already
 	// holds (e.g. probing -> encoding -> verifying).
 	Advance(ctx context.Context, path, fingerprint string, s Status) error
 
-	// Finish records a terminal outcome. Failed increments fail_count; Done and Skipped do
-	// not. o is the proof of that outcome, nil records none, and Finish always writes the
-	// FULL outcome column set, so a nil o or a nil field within it CLEARS the corresponding
-	// column: a row's proof must always describe its CURRENT status, and a file that
-	// failed, was retried and then succeeded must not sit in the ledger as done with the
-	// old failure's reason attached.
-	Finish(ctx context.Context, path, fingerprint string, s Status, o *Outcome) error
+	// Finish records a terminal outcome for path+fingerprint. Failed increments
+	// fail_count (retry accounting); Done/Skipped do not.
+	//
+	// o is the proof of that outcome (TRANSCODE-13); nil records none. Finish always
+	// writes the FULL outcome column set, so a nil o — or a nil field within it —
+	// CLEARS the corresponding column. That is deliberate: a row's proof must always
+	// describe its CURRENT status. A file that failed (reason recorded), was retried,
+	// and then succeeded must not sit in the ledger as "done" with the old failure's
+	// reason still attached to it.
+	//
+	// maxFailures is the attempt bound the caller is running under - the same bound it
+	// passes to Claim, which is why it is a parameter here rather than a setting this
+	// package holds. It governs ONE thing: a Failed row whose class is deterministic
+	// spends the whole bound in this write instead of one attempt of it, because the
+	// verdict is a pure function of inputs that have not moved and the remaining
+	// attempts would each cost a full encode to reach it again. No new status and no
+	// second parking mechanism: the row is an ordinary failed row that Claim then
+	// refuses on the ordinary fail_count >= maxFailures rule, and the count is the only
+	// thing holding it. A transient failure is unaffected, and so is every non-Failed
+	// status; 0 or less means "no bound", under which nothing is parked early.
+	Finish(ctx context.Context, path, fingerprint string, s Status, o *Outcome, maxFailures int) error
 
 	// Delete removes the row for path+fingerprint, a no-op if absent. After a successful
 	// transcode the pre-swap row is deleted, so the table does not accumulate one dangling
@@ -557,13 +760,21 @@ type Store interface {
 	// the snapshot carrying it still ships.
 	Aggregates(ctx context.Context) Aggregates
 
-	// RecordSkip persists a Skipped row carrying reason for a guard that fires BEFORE Claim
-	// - today only the hardlink guard, whose decision stays unclaimed yet must still be
-	// visible as a skip. It INSERTs a fresh skipped row or converts a pending one, and
-	// deliberately does NOT overwrite a row already carrying a terminal outcome, so a real
-	// proof is never clobbered by a mutable guard. changed is true only when it actually
-	// inserted or converted, so a caller emits an event exactly once, not once per scan.
-	RecordSkip(ctx context.Context, path, fingerprint, reason string) (changed bool, err error)
+	// RecordSkip persists a Skipped row carrying reason for a guard that fires BEFORE
+	// Claim — today only the hardlink guard, whose decision must stay unclaimed (it
+	// never enters the encode pipeline) yet must still be visible as a skip in the UI
+	// (TRANSCODE-14: "which guard fired"). It INSERTs a fresh skipped row, or converts
+	// a pending row; it deliberately does NOT overwrite a row that already carries a
+	// terminal outcome (done/failed/another skip), so a real proof is never clobbered
+	// by a mutable guard. Reports changed=true only when it actually inserted/converted
+	// a row (not on the idempotent re-run where the skipped row already exists), so a
+	// caller emits an event — and a metrics/notify observer counts the skip — exactly
+	// once, not once per scan.
+	//
+	// by is the library profile that decided the skip, recorded on the row for the same
+	// reason Finish records it: a skipped row is a terminal record of a decision, and
+	// the guard that produced this one (skip_hardlinked) is itself per root.
+	RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision) (changed bool, err error)
 
 	// ClearSkip deletes the row ONLY when it is a Skipped row whose reason matches: the
 	// re-evaluation half of a MUTABLE guard. The hardlink guard re-checks every scan, since

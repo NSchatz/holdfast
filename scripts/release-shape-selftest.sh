@@ -33,7 +33,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=158
+declared=161
 pass=0; failed=0
 
 repo="$work/repo"
@@ -819,10 +819,14 @@ reset
 #         replaced. The example deployment used to pull `:latest`, so the tag a release MOVES
 #         and the tag a user PULLS were one string and the gate held them equal. P1 severed
 #         them: the compose file pins a version and a digest, `:latest` is published rather
-#         than depended on. So the tag it pins is the one FLOATING_TAG must NOT be - retag
-#         `v0.1.0` and that file's own tag and digest disagree the moment the next release
+#         than depended on. So the tag it pins is the one FLOATING_TAG must NOT be - retag the
+#         version that file pins and its own tag and digest disagree the moment the next release
 #         lands, and an already-released version has been modified.
-in_step "promote :latest" 's|^          FLOATING_TAG: latest$|          FLOATING_TAG: v0.1.0|'
+#
+#         The mutated value has to BE the tag docker-compose.yml currently pins, because that
+#         file is what the gate holds FLOATING_TAG against. Pin and mutation move together: a
+#         stale literal here makes the collision vanish and the case go green over a hole.
+in_step "promote :latest" 's|^          FLOATING_TAG: latest$|          FLOATING_TAG: v0.2.0|'
 changed "$wf" "the floating tag pointed at the version the compose file pins"
 expect 1 "a promotion that retags the version the example deployment pins is red" "PINS"
 reset
@@ -830,7 +834,7 @@ reset
 # --- 48a. The same on the resolution step, which reads the same declared value: it would then
 #          resolve the version tag rather than the reference the promotion moved, and the
 #          comparison against the gated digest becomes one the release cannot fail.
-in_step "must resolve to the gated digest" 's|^          FLOATING_TAG: latest$|          FLOATING_TAG: v0.1.0|'
+in_step "must resolve to the gated digest" 's|^          FLOATING_TAG: latest$|          FLOATING_TAG: v0.2.0|'
 changed "$wf" "the resolution handed the version the compose file pins as the floating tag"
 expect 1 "a resolution handed the pinned version as the floating reference is red" "PINS"
 reset
@@ -1337,8 +1341,12 @@ resolve() {  # resolve <name> <want-exit> <must-mention>
 
 # The reference docker-compose.yml pins resolves to its own digest, as a digest reference
 # does; the gated version and the floating tag are the two labels this run touched.
-pinned_ref='ghcr.io/nschatz/holdfast:v0.1.0@sha256:302242b66f9c160e69b1e7c37d57925ec593bc7ed0ee9df851af0ec58c7cd4b2'
-pinned_digest='sha256:302242b66f9c160e69b1e7c37d57925ec593bc7ed0ee9df851af0ec58c7cd4b2'
+#
+# This pair IS the reference that file pins, and it moves with the pin: the fake registry below
+# has to answer for the reference the one reader reads out of the working tree, or the case that
+# asserts a resolution PASSING reds for a missing entry instead.
+pinned_ref='ghcr.io/nschatz/holdfast:v0.2.0@sha256:cb5125e1e95c93ee05256a37a8878c30349b75bb2ee2918c6e7b0ee9b4a5ec32'
+pinned_digest='sha256:cb5125e1e95c93ee05256a37a8878c30349b75bb2ee2918c6e7b0ee9b4a5ec32'
 registry() {  # registry <line…> - each "<ref> <digest>"
   : > "$digests"
   local l
@@ -1482,9 +1490,28 @@ rec="$work/argv.log"
 cat > "$recbin/docker" <<'REC'
 #!/bin/sh
 # Records its argv and succeeds, unless REC_FAIL globs the invocation.
+#
+# An inspect PRINTS NOTHING unless REC_INSPECT_LINES asks for output, so every case that does
+# not ask sees the same silent stub as before. A case that asks gets that many lines followed
+# by REC_INSPECT_TAIL as the last one, which is how a case can decide whether the whole
+# manifest reached the caller's output or only the front of it.
+#
+# The emitter's own exit status is PROPAGATED, and that is the load-bearing half: a reader that
+# closes the pipe early kills it on SIGPIPE, and a stub that swallowed that could not reproduce
+# a caller whose exit status rides on the inspect rather than on the retag.
 printf '%s\n' "docker $*" >> "$REC_LOG"
 case "docker $*" in
   ${REC_FAIL:-__never__}) exit 1 ;;
+esac
+case "docker $*" in
+  *"imagetools inspect"*)
+    [ -n "${REC_INSPECT_LINES:-}" ] || exit 0
+    awk -v n="$REC_INSPECT_LINES" -v tail="${REC_INSPECT_TAIL:-}" 'BEGIN {
+      for (i = 1; i <= n; i++)
+        printf "  Name:        ghcr.io/nschatz/holdfast:latest stub-manifest-entry-%06d\n", i
+      print tail
+    }' || exit $?
+    ;;
 esac
 exit 0
 REC
@@ -1502,13 +1529,18 @@ REC
   changed "$repo/scripts/smoke-image.sh" "the packaging gate replaced by a recorder"
 }
 
-# run_release_script <script> <want-exit> -- runs it under the recording stub. Sets $out.
+# run_release_script <script> <want-exit> -- runs it under the recording stub. Sets $out, and
+# $last_status, which is the status it SAW: a case asserting that a mutation breaks one of the
+# assertions below has to be able to report the code the broken form exited with.
+last_status=0
 run_release_script() {
   local script="$1" want="$2" name="$3" got=0
   : > "$rec"
   out="$( cd "$repo" && PATH="$recbin:$PATH" REC_LOG="$rec" REC_FAIL="${REC_FAIL:-}" \
+          REC_INSPECT_LINES="${REC_INSPECT_LINES:-}" REC_INSPECT_TAIL="${REC_INSPECT_TAIL:-}" \
           IMAGE="${S_IMAGE-}" VERSION="${S_VERSION-}" FLOATING_TAG="${S_FLOATING-}" REF="${S_REF-}" \
           "./scripts/$script" 2>&1 )" || got=$?
+  last_status="$got"
   if [ "$got" -ne "$want" ]; then
     printf '::error::selftest: %s - %s exited %s, wanted %s\n' "$name" "$script" "$got" "$want" >&2
     printf '%s\n' "$out" | sed 's/^/       | /' >&2
@@ -1545,6 +1577,60 @@ else
 fi
 reset
 
+# --- 64a. AN INSPECT FAR LARGER THAN ANY PIPE BUFFER. The promotion's exit status is decided
+#          by the RETAG. The inspect after it is the only human-readable record in the release
+#          log of what the floating reference now carries, and it gates nothing: it decides no
+#          property of the artefact, so nothing about the release may ride on how it is read.
+#          Read it through a consumer that closes the pipe - `head`, `sed q`, any of them - and
+#          under `set -o pipefail` what reaches the step is the status of an inspect killed by
+#          SIGPIPE rather than the status of the retag that landed.
+#
+#          The stub prints nothing unless asked, which is why no case in this file could see
+#          that: every assertion above holds over an inspect with no output at all. So this one
+#          asks for 6000 lines, far past any buffer, ending in a line no other case emits.
+#
+#          Exit 0 alone would not decide it either. A TRUNCATED inspect also exits 0 once the
+#          status comes from the retag, so the assertion is the LAST line being present in the
+#          captured output, plus every line before it, plus the confirmation sentence naming
+#          both references.
+S_IMAGE=ghcr.io/nschatz/holdfast S_VERSION=v0.1.0 S_FLOATING=latest S_REF='' REC_FAIL=''
+REC_INSPECT_LINES=6000
+REC_INSPECT_TAIL='stub-inspect-tail: the last line of the stubbed manifest, emitted by no other case'
+promote_confirms='release-promote: ghcr.io/nschatz/holdfast:latest now resolves to the digest published as ghcr.io/nschatz/holdfast:v0.1.0'
+if run_release_script release-promote.sh 0 "a promotion whose inspect exceeds any pipe buffer" \
+   && grep -qxF -- "$REC_INSPECT_TAIL" <<<"$out" \
+   && [ "$(grep -c -- 'stub-manifest-entry-' <<<"$out")" -eq "$REC_INSPECT_LINES" ] \
+   && grep -qxF -- "$promote_confirms" <<<"$out"; then
+  printf '  ok: a promotion whose inspect exceeds any pipe buffer exits 0, logs the manifest whole and confirms the move\n'; pass=$((pass + 1))
+else
+  printf '::error::selftest: a promotion with a %s-line inspect did not exit 0 with the WHOLE manifest and its confirmation in the log\n' "$REC_INSPECT_LINES" >&2
+  printf '       | saw exit %s, %s of %s manifest lines, last line %s, confirmation %s\n' \
+    "$last_status" "$(grep -c -- 'stub-manifest-entry-' <<<"$out")" "$REC_INSPECT_LINES" \
+    "$(grep -qxF -- "$REC_INSPECT_TAIL" <<<"$out" && echo present || echo MISSING)" \
+    "$(grep -qxF -- "$promote_confirms" <<<"$out" && echo present || echo MISSING)" >&2
+  failed=$((failed + 1))
+fi
+
+# --- 64b. AND THAT CASE BITES. The mutation puts the inspect back behind a reader that closes
+#          the pipe after twenty lines, which is the defect itself: the promotion's status then
+#          comes from an inspect killed by SIGPIPE instead of from the retag that landed, and
+#          the manifest reaches the log twenty lines deep. Without this case 64a would pass
+#          against any script that exits 0, including one that prints nothing at all.
+sed -i '/^if ! docker buildx imagetools inspect/,/^fi$/c docker buildx imagetools inspect "${image}:${floating}" | head -20' "$repo/scripts/release-promote.sh"
+changed "$repo/scripts/release-promote.sh" "a promotion whose inspect is read through head"
+bit=0
+run_release_script release-promote.sh 0 "a promotion whose inspect is read through head" >/dev/null 2>&1 || bit=1
+if [ "$bit" -eq 1 ] && ! grep -qxF -- "$REC_INSPECT_TAIL" <<<"$out"; then
+  printf '  ok: case 64a bites: an inspect read through `head` exits %s over a retag that landed, and truncates the manifest to %s of %s lines\n' \
+    "$last_status" "$(grep -c -- 'stub-manifest-entry-' <<<"$out")" "$REC_INSPECT_LINES"; pass=$((pass + 1))
+else
+  printf '::error::selftest: case 64a does not bite - an inspect read through `head` exited %s with the last manifest line %s\n' \
+    "$last_status" "$(grep -qxF -- "$REC_INSPECT_TAIL" <<<"$out" && echo present || echo absent)" >&2
+  failed=$((failed + 1))
+fi
+REC_INSPECT_LINES='' REC_INSPECT_TAIL=''
+reset
+
 # --- 65. Its named failure modes, exit code by exit code. Refusing to guess which reference
 #         a release moves is the whole reason FLOATING_TAG is passed in rather than spelled.
 S_IMAGE='' S_VERSION='' S_FLOATING='' REC_FAIL=''
@@ -1569,6 +1655,28 @@ else
 fi
 REC_FAIL=
 reset
+
+# --- 66a. THE UNHAPPY PATH DECIDING THE STATUS FROM THE RETAG ALONE CREATES, and the one
+#          loosening it carries: an inspect that FAILS after a retag that took. The retag is
+#          what moved the reference, so the promotion reports success and the release goes on
+#          to the two steps that gate the moved reference - and it SAYS that the manifest could
+#          not be read rather than printing a confirmation over silence. What that reference
+#          actually resolves to is then decided against the registry by the step after this
+#          one (scripts/resolve-compose-image.sh, exit 4 or exit 5), which is the only thing in
+#          the release that can answer it at all.
+S_IMAGE=ghcr.io/nschatz/holdfast S_VERSION=v0.1.0 S_FLOATING=latest S_REF=''
+REC_FAIL='docker buildx imagetools inspect*'
+if run_release_script release-promote.sh 0 "an inspect that fails after a retag that took" \
+   && grep -qE 'could not be inspected' <<<"$out" \
+   && grep -qxF -- "$promote_confirms" <<<"$out" \
+   && recorded "$promote_argv"; then
+  printf '  ok: an inspect that fails after a successful retag still reports success, and says the manifest could not be inspected\n'; pass=$((pass + 1))
+else
+  printf '::error::selftest: a failed inspect after a successful retag did not report success and name what it could not read\n' >&2
+  printf '%s\n' "$out" | sed 's/^/       | /' >&2
+  failed=$((failed + 1))
+fi
+REC_FAIL=
 
 # --- 67. The re-smoke pulls the reference that was PUSHED back out of the registry, for BOTH
 #         architectures, and drives the packaging gate over each. An unqualified `docker

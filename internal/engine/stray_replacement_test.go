@@ -401,8 +401,10 @@ func TestStrayTemp_TheCodecQuestionAsksWhatThisBuildCouldHaveWrittenNotWhatIsCon
 	// The only change: the operator switched encoders. svtav1 is a shipped `encoder:`
 	// value (internal/encoder), so its target codec is av1 rather than hevc.
 	other := buildEngine(t, ffmpeg, ffprobe, dir, nil, func(c *config.Config) { c.Encoder = "svtav1" })
-	if other.targetCodec == same.targetCodec {
-		t.Fatalf("precondition: both engines target %q - the encoder switch did not move the target codec", other.targetCodec)
+	otherTarget := targetCodecFor(other.Cfg.TopLevelProfile())
+	sameTarget := targetCodecFor(same.Cfg.TopLevelProfile())
+	if otherTarget == sameTarget {
+		t.Fatalf("precondition: both engines target %q - the encoder switch did not move the target codec", otherTarget)
 	}
 	other.held.Store(other.loadHoldBacks(ctx))
 	other.cleanStaleTemps(ctx)
@@ -412,7 +414,7 @@ func TestStrayTemp_TheCodecQuestionAsksWhatThisBuildCouldHaveWrittenNotWhatIsCon
 			"which no record survived to name. The record-free hold's content test is asked against the "+
 			"asking run's target codec, so a config key an operator may change at any time releases a file "+
 			"AC15i says may never be deleted in any later run.",
-			"svtav1", other.targetCodec, stranded)
+			"svtav1", otherTarget, stranded)
 	}
 	if md5f(t, stranded) != md5 {
 		t.Errorf("AC15i: the later run MODIFIED the stranded replacement %s", stranded)

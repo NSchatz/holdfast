@@ -76,6 +76,17 @@ type Result struct {
 	// part of what was measured: an 8-bit source and a 10-bit output score differently
 	// depending on which way the conversion went.
 	PixelFormat string
+
+	// Stream names WHICH video stream of each file the comparison was made against, in
+	// the specifier vocabulary every ffprobe read in this program already uses (see
+	// ScoredStream). It is a fact about the measurement in exactly the sense PixelFormat
+	// and ChromaMetric are: on a source carrying more than one video stream, a score that
+	// does not say which stream it looked at is a score nobody can line up against the
+	// guards that inspected the same file.
+	//
+	// "" is NOT RECORDED and never a fabricated default - a Result no scoring pass
+	// produced names no stream, because no stream was scored.
+	Stream string
 }
 
 // Request is one scoring pass: which files, at what sampling interval, under which model,
@@ -147,29 +158,68 @@ const ChromaMetricName = "psnr_cb/psnr_cr min (dB)"
 // gate needs.
 const chromaFeature = "name=psnr"
 
-// BuildFilter returns the exact -lavfi filtergraph a Score pass runs, writing its JSON log
-// to logPath. It is exported so a test can drive the REAL graph through ffmpeg and observe
-// what libavfilter did with it: a filtergraph is only correct if ffmpeg agrees.
+// ScoredStream is the video stream every comparison is made against, and it is the ONE
+// place in the program that spells it: BuildFilter composes both of the filtergraph's
+// input labels from it, and it is the token recorded beside the score.
 //
-// The two `format` filters convert BOTH inputs to one named format before libvmaf sees
-// either, so the comparison happens in a format holdfast chose and recorded. They must name
-// a format libvmaf itself accepts, or ffmpeg silently auto-inserts a scaler BETWEEN them
-// and libvmaf and the named format is not the one compared after all. ComparisonFormat only
-// produces the planar-YUV 8/10/12-bit formats libvmaf takes directly, and
-// TestScore_NamedFormatIsWhatLibvmafCompares proves ffmpeg inserts nothing.
+// It is `v:0` - the FIRST video stream - because that is the stream the rest of this
+// program inspects. Every ffprobe property read selects `-select_streams v:0` and the
+// decode-integrity check decodes `-map 0:v:0`, so a gate that named its inputs any other
+// way could measure a stream no guard ever looked at on a file carrying more than one
+// video stream, and the recorded proof would not say so.
+//
+// Like ChromaMetricName it is a WIRE FORMAT - it lands in the ledger, the API payload and
+// the completion log - so treat it as a closed vocabulary, changed only with its readers
+// in mind. It is deliberately NOT configurable: the probes fix their stream and so does
+// this, for the same reason.
+const ScoredStream = "v:0"
+
+// BuildFilter returns the exact -lavfi filtergraph a Score pass runs, writing its
+// JSON log to logPath. It is exported so a test can drive the REAL graph through
+// ffmpeg and observe what libavfilter did with it, rather than assert against a
+// string this package also produced - a filtergraph is only correct if ffmpeg agrees.
+//
+// It is the SINGLE writer of the SCORING graph's two video-stream input specifiers, and
+// both come from ScoredStream. The startup model preflight (probeModel) is the only other
+// shipped libvmaf graph in this program and it names its inputs from that same constant,
+// so there is ONE answer to "which stream was measured" and it is the one the row the gate
+// writes afterwards carries. A second spelling anywhere in shipped code would be a second
+// answer; TestShippedCode_SpellsEveryVideoStreamLabelThroughScoredStream walks the module
+// and reds on one.
+//
+// The two `format` filters are the whole point of GATE-4's first criterion: they
+// convert BOTH inputs to one named format before libvmaf sees either, so the
+// comparison happens in a format holdfast chose and recorded, not one libavfilter
+// negotiated and nobody wrote down. They are also load-bearing in a way that is easy
+// to lose: they must name a format libvmaf itself accepts, or ffmpeg silently
+// auto-inserts a scaler BETWEEN them and libvmaf and the named format is not the one
+// compared after all. ComparisonFormat only ever produces the planar-YUV 8/10/12-bit
+// formats libvmaf takes directly, and TestScore_NamedFormatIsWhatLibvmafCompares
+// proves ffmpeg inserts nothing.
 func BuildFilter(req Request, logPath string) string {
 	sub := req.Subsample
 	if sub < 1 {
 		sub = 1
 	}
-	// [0:v] = distorted, [1:v] = reference. log_path lives INSIDE the filtergraph, where
-	// ':' separates option pairs, so a path containing one must be escaped or ffmpeg
-	// mis-parses the filter and the gate fails every encode. The media paths arrive as
-	// separate -i argv and need none of this.
+	// [0:v:0] = distorted (the encoded output), [1:v:0] = reference - stream-guard-allow.
+	// That marker exempts THIS line, which only NAMES the two labels to document the
+	// graph's shape: the format string below COMPOSES both from ScoredStream, and the
+	// marker is what keeps the exemption greppable and line-level, exactly as the rename
+	// guard in scripts/check-pins.sh does it.
+	//
+	// Both labels therefore pin the comparison to the FIRST video stream - the one every
+	// ffprobe read selects and the decode-integrity check decodes. A bare type specifier
+	// would leave "which stream" to be resolved by rules that are ffmpeg's rather than
+	// holdfast's, on a file carrying more than one video stream.
+	//
+	// log_path lives INSIDE the -lavfi filtergraph, where ':' separates option pairs,
+	// so a path with a ':' (or other filtergraph metachar) must be escaped or ffmpeg
+	// mis-parses the filter and the gate fails every encode. The media paths are safe
+	// (separate -i argv); only the filter-embedded log_path needs escaping.
 	return fmt.Sprintf(
-		"[0:v]format=%s[dist];[1:v]format=%s[ref];"+
+		"[0:%s]format=%s[dist];[1:%s]format=%s[ref];"+
 			"[dist][ref]libvmaf=model=%s:feature=%s:log_fmt=json:log_path=%s:n_subsample=%d",
-		req.PixelFormat, req.PixelFormat,
+		ScoredStream, req.PixelFormat, ScoredStream, req.PixelFormat,
 		req.Model, chromaFeature, escapeFilterValue(logPath), sub)
 }
 
@@ -228,6 +278,7 @@ func Score(ctx context.Context, ffmpeg string, req Request) (Result, error) {
 		ChromaMin:    math.Min(*p.PsnrCb.Min, *p.PsnrCr.Min),
 		ChromaMetric: ChromaMetricName,
 		PixelFormat:  req.PixelFormat,
+		Stream:       ScoredStream,
 	}, nil
 }
 

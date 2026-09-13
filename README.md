@@ -76,9 +76,16 @@ truer than "the only one that checks".
 ## Non-goals
 
 Codec-only, same-content re-encoding (no resolution downscaling); HDR10 **static** metadata is preserved
-but Dolby Vision / HDR10+ dynamic metadata is **detect-and-skipped**; interlaced and exotic-chroma sources
-are **skipped, not converted**. It transcodes files in a library other tools manage (Plex/Jellyfin/*arr) -
-it is not a media server or library manager.
+but Dolby Vision / HDR10+ dynamic metadata is **detect-and-skipped**; interlaced, exotic-chroma and
+`multi-video-stream` sources are **skipped, not converted** (embedded artwork is carried through unencoded).
+It transcodes files in a library other tools manage (Plex/Jellyfin/*arr) - not a media server or library manager.
+
+**Distributed or remote processing is a non-goal by design, not a missing feature.** holdfast is one
+process: no server/node split, no remote workers. The no-loss argument rests on an atomic
+same-filesystem `rename(2)` - it either happened or it did not, so a failure never leaves a partial
+file where the source was. A remote worker encoding to its own disk and shipping the result back is a
+**copy**, not a rename, and every gate here would have to be re-argued for that primitive. To use more
+of one machine, raise `workers` (default 1, deliberately - see **[docs/docker.md](docs/docker.md)**).
 
 ## Quick start
 
@@ -162,6 +169,14 @@ first library pass means holding every original it replaced. So the API reports
 original cannot be retained is **skipped, not swapped**, and a restore refuses rather than overwrite a
 file that has changed since the swap. Full reference, including what it costs and what it deliberately
 does not offer: **[docs/undo.md](docs/undo.md)**.
+
+### Edit the YAML and the tool obeys (`requeue`)
+
+A terminal row is an **answer computed from configuration**, and only for the configuration it was
+computed under: each records the values the guard that wrote it read, and a scan **re-opens** one whose
+values have moved. So lowering `min_bitrate_kbps` or changing the target codec reaches the files a
+previous configuration answered; an edit to a key no guard read reaches nothing; re-opening is not
+re-encoding; `holdfast requeue` is the LOCAL lever for the rest - **[docs/requeue.md](docs/requeue.md)**.
 
 ### Web API + UI (`serve`)
 

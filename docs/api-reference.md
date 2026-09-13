@@ -12,11 +12,12 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | Field | On | What it is |
 |---|---|---|
 | `reason` | failed | the error that rejected it (the encode error, or **which gate** refused the output) |
-| `reason` | skipped | **which guard** fired - `already-at-target-codec`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `target-already-exists`, `undo-retention-failed`, `restored-original` |
+| `reason` | skipped | **which guard** fired - `already-at-target-codec`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `multi-video-stream`, `target-already-exists`, `undo-retention-failed`, `restored-original` |
 | `encoder` | any job that reached the encoder | the encoder that ran (`cpu`, `svtav1`, `nvenc`, …) - a skip, or a file with no readable video stream, never gets that far and records none |
 | `vmaf_mean`, `vmaf_min` | done, and a VMAF-rejected failure | the pooled harmonic mean **and the worst frame** |
 | `vmaf_model` | as above | the libvmaf model that produced them |
 | `vmaf_pix_fmt` | as above | the single pixel format **both streams were converted to** before scoring - chosen and named by holdfast, so a score says which pixels were compared |
+| `vmaf_stream` | as above | **which video stream** of each file was compared, in the specifier every ffprobe read here uses: `v:0`, the first video stream. A source can carry more than one, so this is what lines a score up against the file it was measured on. Absent on a row whose gate never ran - never a fabricated `v:0` |
 | `vmaf_chroma`, `vmaf_chroma_metric` | as above | the worst frame's chroma measurement and what it is (`psnr_cb/psnr_cr min (dB)`) - the only figure on the row that says whether the **colour** survived |
 | `source_codec` | would-transcode | the video codec the SOURCE was in when a dry run decided it - `null` when it was never read |
 | `source_bytes`, `output_bytes` | done | the sizes either side of the swap |
@@ -25,14 +26,16 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | `guard_attributes`, `guard_time_resolution` | any job that reached the swap | which source attributes the source-mutation guard compared (`size,mtime`) and the resolution of the timestamp it compared (`1s`) - the granularity that check actually achieved |
 | `guard_residual_window` | as above | which of the two documented residual windows applies to the storage the guard ran against: `residual-window-local` or `residual-window-network`. A **class label**, never a duration - see [docs/filesystem.md](docs/filesystem.md#residual-window-local) |
 | `swap_cause` | a swap failure with a distinct cause | today only `cross-filesystem` - the temp and the target were not on the same mounted filesystem. Absent for every other failure |
+| `library_root` | any row this build decided | the **cleaned path of the library root** whose profile decided the file. `null` when it was not recorded: a row written before per-library profiles existed, or one no profile decided (a `restored-original` skip is an operator's act, not a gate's) |
+| `profile_digest` | as above | a stable identifier for that root's **resolved** overridable knobs. `null` on the same rows `library_root` is null on |
 
 **A `null` means "not recorded", and you must read it that way.** It is never a zero. A numeric field is
 `null` - not `0` - whenever the fact was not measured (VMAF disabled, or a row written before these
 columns existed), because a VMAF of `0.0` is a *destroyed frame*, not a missing measurement, and rendering
 one as the other would be inventing evidence about a swap nobody checked.
 
-**A VMAF score is not interpretable without its model or the format it was measured in**, which is why
-all three travel together. Read `vmaf_mean`/`vmaf_min` with the limits in mind: VMAF is a regression onto
+**A VMAF score is not interpretable without its model, the format it was measured in or the stream it was
+measured on**, which is why they all travel together. Read `vmaf_mean`/`vmaf_min` with the limits in mind: VMAF is a regression onto
 a *subjective* opinion scale under one viewing condition, `vmaf_v0.6.1` is **luma-only** (structurally
 blind to chroma damage - that is what `vmaf_chroma` is for), and the scores are **not comparable across
 different sources**. The number bounds measured perceptual quality against *your* source; it is not a
@@ -45,8 +48,37 @@ scoring (the richer chroma subsampling of the two, at the deeper of the two bit 
 averaged or quantised away on the way in) and records it in `vmaf_pix_fmt`. The same source and output
 scored twice are compared in the same format both times.
 
+**The scored stream is a fact too, and it is pinned rather than inferred.** Every ffprobe property read
+selects `v:0` and the decode-integrity check decodes `0:v:0`, so the quality gate names the same stream
+explicitly in its filtergraph and records it in `vmaf_stream`. On a file carrying more than one video
+stream that is what stops the gate measuring a stream the other checks never inspected, and what lets a
+reader of the row say which one it was. It is not configurable, for the same reason the probes' stream is
+not.
+
+**Which library profile decided the file is part of the record, because it is no longer derivable from
+the configuration.** Each `library_roots` entry may carry its own encoder, crf, bitrate floor and VMAF
+floors, so the file was judged by *one* of several profiles and the configuration cannot say which. The
+row therefore carries both `library_root` and `profile_digest`, and the digest is what makes the pair
+survive an edit: the path alone would go on naming `/mnt/tv` after `/mnt/tv` had been changed to mean
+something else. Two rows decided under identical resolved values carry the same digest; a row decided
+under any different value carries a different one. Run `holdfast validate` to see which of your roots
+currently digests to what, beside the resolved value of every knob and the layer that supplied it.
+
 An outcome is recorded per *attempt*, not per file: **claiming a job for a retry clears it**, so a file
 that is being re-encoded never advertises the rejected attempt's score while it is in flight.
+
+### The decision inputs a row was taken under
+
+Beside the proof, a terminal row records **the configuration values the decision that wrote it actually
+read** - and only those. It is what makes a row re-derivable rather than permanent: a scan offers a
+`done` or `skipped` file back to the guards when the values it recorded no longer match the
+configuration in force, so an edit to the YAML reaches the files a previous configuration already
+answered. Per-guard table, the re-opening rule, and the `holdfast requeue` lever for the rows a
+configuration change cannot reason about: **[docs/requeue.md](requeue.md)**.
+
+These values are internal to the store and are **not published on the HTTP surface**, and neither is
+requeue: it changes what the engine will do to a media file, which is the same reason `restore` is not
+an endpoint either.
 
 ### `would-transcode`: what a dry run decided
 
@@ -234,11 +266,16 @@ What a prune will never do, whatever you set:
   the total once, at startup, so deleting contributing rows shows a correct figure until the next restart.)
 - **It cannot cause a file to be encoded again.** A terminal row is a *decision*, not only a record: it is
   what holds that file out of the encoder on every later scan, and the guards that would re-derive the same
-  verdict run under whatever configuration is current, so a deleted row means a re-encode the moment the
-  configuration it was taken under has moved (a different `encoder` target codec, a lowered
-  `min_bitrate_kbps`, a file parked at `max_failures`). **So a row is only ever removed when the scan
-  listed the directory that file should be in and the file was not there**: gone, or replaced by different
-  content. Retention bounds what your library has *finished with*.
+  verdict run under whatever configuration is current. Deleting it therefore hands the file back with no
+  recorded verdict at all - which is a re-encode outright for a row parked at `max_failures` (the count was
+  the only thing holding it) and for a `skipped / restored-original` row (see below). **So a row is only ever
+  removed when the scan listed the directory that file should be in and the file was not there**: gone, or
+  replaced by different content. Retention bounds what your library has *finished with*.
+
+  A row whose recorded decision inputs have MOVED is re-opened by the scan whether it was pruned or not -
+  that is the point of recording them - but re-opening runs the guards again rather than the encoder, and a
+  file that reaches the same verdict reaches it before anything is encoded. Pruning is what removes the
+  verdict itself; a configuration change only asks for it again.
 - **It cannot take anything the undo window is holding**, and it does not release it either. A retained
   original is a file that is still present, so the `done` row for the swap that produced it is a row the
   prune may not remove - and the retention itself lives in its own table the prune never reads or writes,

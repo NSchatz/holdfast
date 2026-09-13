@@ -117,8 +117,13 @@ replacement of it. Read this before you switch.
 - **Plugins and flows.** Tdarr's plugin/flow system is its whole extensibility model.
   `holdfast` has none. It does exactly one job — re-encode bloated video to a smaller modern
   codec, safely — and it is configured by a YAML file, not by assembling a pipeline.
-- **The Server/Node model.** `holdfast` is single-host. (Distributed worker nodes are a
-  possible later phase, not a shipped feature.)
+- **The Server/Node model.** `holdfast` is single-host and single-process, and distributed
+  worker nodes are a **non-goal** rather than an unbuilt feature: the no-loss guarantee is stated
+  for an atomic same-filesystem rename, and a remote node encoding to its own disk and shipping
+  the result back is a copy, which is a different safety argument from the one this tool makes.
+  Use more of the one machine with `workers` instead (default 1, and
+  [docs/docker.md](docker.md) says why); running a second holdfast process against one
+  `state_dir` is not supported.
 - **Anything that is not codec-only re-encoding.** No downscaling, no remuxing-as-a-feature, no
   audio/subtitle mangling, no library management.
 

@@ -18,6 +18,19 @@
 #
 #   2  IMAGE/VERSION/FLOATING_TAG not supplied - the caller is wrong, not the registry
 #   3  the retag did not take
+#
+# THE RETAG ALONE DECIDES THIS SCRIPT'S EXIT STATUS. The inspect below gates nothing: it
+# decides no property of the artefact, it is the only human-readable record in the release log
+# of what the floating reference now carries, and that is the whole of its job. So its output
+# goes STRAIGHT to this step's stdout, never through a reader that can close the pipe on it -
+# a closed pipe kills the inspect with SIGPIPE, and `pipefail` would then hand the step that
+# status over a retag that landed, failing a release whose promotion worked and skipping the
+# two steps after it, which are the real gates on the moved reference.
+#
+# An inspect that cannot answer is therefore SAID OUT LOUD and is not a verdict. Whether the
+# floating reference resolves to the digest this run gated is decided against the registry by
+# scripts/resolve-compose-image.sh, in the step after this one, which exits 4 if that reference
+# does not resolve and 5 if it resolves to a different digest.
 set -euo pipefail
 
 image="${IMAGE:-}"
@@ -34,5 +47,7 @@ if ! docker buildx imagetools create -t "${image}:${floating}" "${image}:${versi
   exit 3
 fi
 
-docker buildx imagetools inspect "${image}:${floating}" | head -20
+if ! docker buildx imagetools inspect "${image}:${floating}"; then
+  echo "::warning::release-promote: the retag landed, but the manifest of ${image}:${floating} could not be inspected. Whether that reference resolves to the gated digest is left to the step that resolves it against the registry." >&2
+fi
 echo "release-promote: ${image}:${floating} now resolves to the digest published as ${image}:${version}"

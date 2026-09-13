@@ -65,7 +65,7 @@ func retentionUndoEngine(t *testing.T, ffmpeg, ffprobe, root string, hours, rows
 func seedGoneAfter(t *testing.T, ts *testStore, root string, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
-		seedRow(t, ts, filepath.Join(root, "zz-gone"+strconv.Itoa(i)+".mkv"), store.Skipped, because(SkipLowBitrate))
+		seedRow(t, ts, filepath.Join(root, "zz-gone"+strconv.Itoa(i)+".mkv"), store.Skipped, &store.Outcome{Reason: SkipLowBitrate})
 	}
 }
 
@@ -378,7 +378,7 @@ func TestRetentionUndo_TheRetentionAreaIsNeverEvidenceThatAFileIsGone(t *testing
 			ghost := filepath.Join(undoDir, "vanished."+UndoMarker+".mkv")
 			seedRow(t, ts, ghost, store.Done, nil)
 			for i := 0; i < 5; i++ {
-				seedRow(t, ts, filepath.Join(root, "gone"+strconv.Itoa(i)+".mkv"), store.Skipped, because(SkipLowBitrate))
+				seedRow(t, ts, filepath.Join(root, "gone"+strconv.Itoa(i)+".mkv"), store.Skipped, &store.Outcome{Reason: SkipLowBitrate})
 			}
 			if err := eng.RunOneshot(context.Background()); err != nil {
 				t.Fatalf("RunOneshot: %v", err)

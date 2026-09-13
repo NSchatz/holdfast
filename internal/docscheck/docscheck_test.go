@@ -116,7 +116,7 @@ func TestCorpus_IsTheRepositorysShippedDocumentationAndNotOneConvenientFile(t *t
 func TestCheck_TwoBareAnchorsFail(t *testing.T) {
 	dir := writeCorpus(t, map[string]string{
 		"docs.md": "# Limitations\n\n<a id=\"" + AnchorLocal + "\"></a>\n\n<a id=\"" + AnchorNetwork + "\"></a>\n\n" +
-			postureBlock(),
+			postureBlock() + metadataBlock(),
 	})
 	problems := check(t, dir)
 	if len(problems) != 2 {
@@ -132,7 +132,7 @@ func TestCheck_TwoBareAnchorsFail(t *testing.T) {
 // TestCheck_MissingAnchorsFail: the statement is not there at all.
 func TestCheck_MissingAnchorsFail(t *testing.T) {
 	dir := writeCorpus(t, map[string]string{
-		"docs.md": "# Limitations\n\nholdfast re-checks the source before the swap.\n\n" + postureBlock(),
+		"docs.md": "# Limitations\n\nholdfast re-checks the source before the swap.\n\n" + postureBlock() + metadataBlock(),
 	})
 	problems := check(t, dir)
 	if len(problems) != 2 {
@@ -150,7 +150,7 @@ func TestCheck_NetworkStatementWithoutTheTokenFails(t *testing.T) {
 		"docs.md": "# Limitations\n\n" +
 			"<a id=\"" + AnchorLocal + "\"></a>\n\nThe guard compares size and a whole-second mtime.\n\n" +
 			"<a id=\"" + AnchorNetwork + "\"></a>\n\nOn a network filesystem the window is wider and holdfast is slower to notice.\n\n" +
-			postureBlock(),
+			postureBlock() + metadataBlock(),
 	})
 	problems := check(t, dir)
 	if len(problems) != 1 {
@@ -171,7 +171,7 @@ func TestCheck_BothStatementsPresentPass(t *testing.T) {
 		"b.md": "## Windows\n\n" +
 			"<a id=\"" + AnchorLocal + "\"></a>\n\nSize plus a whole-second mtime; a same-size rewrite inside one second is invisible.\n\n" +
 			"<a id=\"" + AnchorNetwork + "\"></a>\n\nWidened by the client's ATTRIBUTE CACHING, which belongs to the client, not to holdfast.\n\n" +
-			"## Another section\n\n" + postureBlock(),
+			"## Another section\n\n" + postureBlock() + metadataBlock(),
 	})
 	if problems := check(t, dir); len(problems) != 0 {
 		t.Fatalf("documentation that satisfies the rule was reported as failing: %v", problems)
@@ -187,7 +187,7 @@ func TestCheck_TheTokenSurvivesAMarkdownLineWrap(t *testing.T) {
 	dir := writeCorpus(t, map[string]string{
 		"b.md": "<a id=\"" + AnchorLocal + "\"></a>\n\nsize and a whole-second mtime\n\n" +
 			"<a id=\"" + AnchorNetwork + "\"></a>\n\nthe same window, widened by the client's attribute\ncache, which is the client's and not holdfast's\n\n" +
-			postureBlock(),
+			postureBlock() + metadataBlock(),
 	})
 	if problems := check(t, dir); len(problems) != 0 {
 		t.Fatalf("a wrapped paragraph was reported as failing: %v", problems)
@@ -199,7 +199,7 @@ func TestCheck_TheTokenSurvivesAMarkdownLineWrap(t *testing.T) {
 func TestCheck_AHeadingImmediatelyAfterAnAnchorIsNotAStatement(t *testing.T) {
 	dir := writeCorpus(t, map[string]string{
 		"b.md": "<a id=\"" + AnchorLocal + "\"></a>\n\n## Local\n\nreal text, but under the heading and after it\n\n" +
-			"<a id=\"" + AnchorNetwork + "\"></a>\n\nattribute cache text\n\n" + postureBlock(),
+			"<a id=\"" + AnchorNetwork + "\"></a>\n\nattribute cache text\n\n" + postureBlock() + metadataBlock(),
 	})
 	problems := check(t, dir)
 	if len(problems) != 1 || !strings.Contains(problems[0], "nothing follows it") {
@@ -219,7 +219,7 @@ func TestCheck_AHeadingImmediatelyAfterAnAnchorIsNotAStatement(t *testing.T) {
 // The anchor is not there at all.
 func TestCheck_ReverseProxyAnchorMissingFails(t *testing.T) {
 	dir := writeCorpus(t, map[string]string{
-		"docs.md": residualWindowBlock() + "\n# Deployment\n\nPut it behind a proxy.\n",
+		"docs.md": residualWindowBlock() + metadataBlock() + "\n# Deployment\n\nPut it behind a proxy.\n",
 	})
 	problems := check(t, dir)
 	if len(problems) != 1 {
@@ -235,7 +235,7 @@ func TestCheck_ReverseProxyAnchorMissingFails(t *testing.T) {
 // on the strength of a bare marker somebody left behind.
 func TestCheck_ReverseProxyAnchorWithNothingUnderItIsReportedMissing(t *testing.T) {
 	dir := writeCorpus(t, map[string]string{
-		"docs.md": residualWindowBlock() + "\n<a id=\"" + AnchorReverseProxy + "\"></a>\n\n## Next section\n\nunrelated\n",
+		"docs.md": residualWindowBlock() + metadataBlock() + "\n<a id=\"" + AnchorReverseProxy + "\"></a>\n\n## Next section\n\nunrelated\n",
 	})
 	problems := check(t, dir)
 	if len(problems) != 1 {
@@ -254,7 +254,7 @@ func TestCheck_ReverseProxyStatementMissingAClauseIsReportedMissing(t *testing.T
 	for _, c := range ReverseProxyClauses {
 		t.Run(c.Token, func(t *testing.T) {
 			dir := writeCorpus(t, map[string]string{
-				"docs.md": residualWindowBlock() + "\n" + postureBlock(c.Token),
+				"docs.md": residualWindowBlock() + metadataBlock() + "\n" + postureBlock(c.Token),
 			})
 			problems := check(t, dir)
 			if len(problems) != 1 {
@@ -276,7 +276,7 @@ func TestCheck_ReverseProxyStatementMissingAClauseIsReportedMissing(t *testing.T
 // documentation stops carrying it.
 func TestCheck_ReverseProxyStatementWithoutTheRootPathTokenFails(t *testing.T) {
 	dir := writeCorpus(t, map[string]string{
-		"docs.md": residualWindowBlock() + "\n" + postureBlock(ReverseProxyRootPathToken),
+		"docs.md": residualWindowBlock() + metadataBlock() + "\n" + postureBlock(ReverseProxyRootPathToken),
 	})
 	problems := check(t, dir)
 	if len(problems) != 1 || !strings.Contains(problems[0], ReverseProxyRootPathToken) {
@@ -290,7 +290,7 @@ func TestCheck_ReverseProxyStatementWithoutTheRootPathTokenFails(t *testing.T) {
 // that summed the clauses across the corpus would call that arrangement complete.
 func TestCheck_ReverseProxyClausesMustBeCarriedByOneStatement(t *testing.T) {
 	dir := writeCorpus(t, map[string]string{
-		"a.md": residualWindowBlock(),
+		"a.md": residualWindowBlock() + metadataBlock(),
 		"b.md": postureBlock("server_auth_token", ReverseProxyRootPathToken),
 		"c.md": "<a id=\"" + AnchorReverseProxy + "\"></a>\n\n" +
 			clauseSentence["server_auth_token"] + "\n\n" + clauseSentence[ReverseProxyRootPathToken] + "\n",
@@ -305,7 +305,7 @@ func TestCheck_ReverseProxyClausesMustBeCarriedByOneStatement(t *testing.T) {
 // passes, so the negatives above are not passing for the trivial reason that nothing can.
 func TestCheck_ReverseProxyStatementWithEveryClausePasses(t *testing.T) {
 	dir := writeCorpus(t, map[string]string{
-		"docs.md": residualWindowBlock() + "\n" + postureBlock(),
+		"docs.md": residualWindowBlock() + metadataBlock() + "\n" + postureBlock(),
 	})
 	if problems := check(t, dir); len(problems) != 0 {
 		t.Fatalf("a posture statement carrying every clause was reported as failing: %v", problems)
@@ -411,6 +411,46 @@ func TestShippedDocumentation_TheCheckBitesOnTheREALTEXT(t *testing.T) {
 				return strings.ReplaceAll(out, "server_auth_token", "REDACTED")
 			},
 			problem: "server_auth_token",
+		},
+		{
+			name:   "the swap-metadata anchor is removed from the shipped text",
+			anchor: AnchorSwapMetadata,
+			mutate: func(s string) string {
+				return strings.Replace(s, `<a id="`+AnchorSwapMetadata+`"></a>`, "", 1)
+			},
+			problem: AnchorSwapMetadata,
+		},
+		{
+			name:   "the shipped swap-metadata statement stops saying the mode is carried",
+			anchor: AnchorSwapMetadata,
+			mutate: func(s string) string {
+				return strings.ReplaceAll(s, "carries the source's mode", "REDACTED")
+			},
+			problem: "carries the source's mode",
+		},
+		{
+			name:   "the shipped swap-metadata statement stops qualifying the ownership",
+			anchor: AnchorSwapMetadata,
+			mutate: func(s string) string {
+				return strings.ReplaceAll(s, "only where holdfast is privileged", "REDACTED")
+			},
+			problem: "only where holdfast is privileged",
+		},
+		{
+			name:   "the shipped swap-metadata statement stops naming the mtime key",
+			anchor: AnchorSwapMetadata,
+			mutate: func(s string) string {
+				return strings.ReplaceAll(s, "preserve_mtime", "REDACTED")
+			},
+			problem: "preserve_mtime",
+		},
+		{
+			name:   "the shipped swap-metadata statement stops excluding ACLs and xattrs",
+			anchor: AnchorSwapMetadata,
+			mutate: func(s string) string {
+				return strings.ReplaceAll(s, "ACLs and xattrs are not carried", "REDACTED")
+			},
+			problem: "acls and xattrs are not carried",
 		},
 	}
 

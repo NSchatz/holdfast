@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -237,6 +239,494 @@ func TestVmafGate_UnmeasurableMetricIsARejection(t *testing.T) {
 	}
 }
 
+// TestVmafGate_TheScoredStreamIsRecordedOnPassAndAbsentWhenNothingWasCompared carries
+// the stream the comparison was made against along the same path the comparison format
+// already travels, and - the half that matters - stops it at the same place.
+//
+// A job whose gate could not compare anything compared no stream, and the row must say so.
+// The temptation here is sharper than it was for the format: the stream is a CONSTANT this
+// build always scores, so writing it unconditionally would look like completing the record
+// while actually claiming a measurement nobody took. Either input having no video stream,
+// ffmpeg refusing the graph, libvmaf missing and a log that came back incomplete all reach
+// the recording site the same way - through an empty proof - and all four are driven here.
+func TestVmafGate_TheScoredStreamIsRecordedOnPassAndAbsentWhenNothingWasCompared(t *testing.T) {
+	// 1. The pass path. A complete measurement records the stream beside the format.
+	measured := vmaf.Result{
+		HarmonicMean: 98.4, Min: 96.1,
+		ChromaMin: 41.2, ChromaMetric: vmaf.ChromaMetricName, PixelFormat: "yuv420p10le",
+		Stream: vmaf.ScoredStream,
+	}
+	got := runGate(t, nil, func(vmaf.Request) (vmaf.Result, error) { return measured, nil })
+	if got.status != store.Done {
+		t.Fatalf("status = %q, want %q - a measurement clearing every floor must pass the gate",
+			got.status, store.Done)
+	}
+	if got.outcome.VmafStream != vmaf.ScoredStream {
+		t.Errorf("a done row records vmaf_stream %q, want %q - which stream was compared is a fact "+
+			"about the measurement, and it travels with the score",
+			got.outcome.VmafStream, vmaf.ScoredStream)
+	}
+
+	// 2. A FLOOR rejection still records it, exactly as it records the format: the
+	// numbers that rejected an encode are the ones an operator most wants to see, and
+	// they are uninterpretable without the stream they were measured on.
+	damaged := vmaf.Result{
+		HarmonicMean: 98.97, Min: 96.86, ChromaMin: 26.21,
+		ChromaMetric: vmaf.ChromaMetricName, PixelFormat: "yuv420p10le", Stream: vmaf.ScoredStream,
+	}
+	got = runGate(t, nil, func(vmaf.Request) (vmaf.Result, error) { return damaged, nil })
+	if got.status != store.Failed {
+		t.Fatalf("status = %q, want %q on a chroma-floor rejection", got.status, store.Failed)
+	}
+	if got.outcome.VmafStream != vmaf.ScoredStream {
+		t.Errorf("a floor-rejected row records vmaf_stream %q, want %q - the proof is carried on the "+
+			"reject path too", got.outcome.VmafStream, vmaf.ScoredStream)
+	}
+
+	// 3. And every way the comparison can fail to happen at all records NO stream.
+	cases := []struct {
+		name string
+		err  error
+		// partial is what the scorer returns ALONGSIDE the error - including, on
+		// purpose, a Stream the engine must not reach in and take.
+		partial vmaf.Result
+	}{
+		{
+			name:    "an input has no video stream",
+			err:     errors.New("vmaf: ffmpeg failed: exit status 1: Stream specifier 'v:0' in filtergraph description matches no streams"),
+			partial: vmaf.Result{Stream: vmaf.ScoredStream},
+		},
+		{
+			name:    "ffmpeg refused the graph",
+			err:     errors.New("vmaf: ffmpeg failed: exit status 1: Error initializing complex filters"),
+			partial: vmaf.Result{Stream: vmaf.ScoredStream},
+		},
+		{
+			name:    "libvmaf unavailable",
+			err:     vmaf.ErrUnavailable,
+			partial: vmaf.Result{},
+		},
+		{
+			name: "the log came back without every pooled statistic",
+			err: errors.New("vmaf: log is missing a pooled statistic (harmonic_mean present=true, " +
+				"min present=true, psnr_cb present=false, psnr_cr present=true)"),
+			partial: vmaf.Result{HarmonicMean: 99.1, Min: 97.0, PixelFormat: "yuv420p10le", Stream: vmaf.ScoredStream},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runGate(t, nil, func(vmaf.Request) (vmaf.Result, error) { return tc.partial, tc.err })
+			if got.status != store.Failed {
+				t.Fatalf("status = %q, want %q - an encode whose quality was never measured must be "+
+					"REJECTED, never reported as a pass", got.status, store.Failed)
+			}
+			if got.md5After != got.md5Before {
+				t.Error("the source changed on a rejection - it must be byte-for-byte intact")
+			}
+			if codecOf(t, envOr("HOLDFAST_FFPROBE", "ffprobe"), got.src) != "h264" {
+				t.Error("the source was swapped for the temp despite a rejection")
+			}
+			if n := nTemp(t, got.dir); n != 0 {
+				t.Errorf("%d temp file(s) left behind after a rejection", n)
+			}
+			if got.outcome.VmafStream != "" {
+				t.Errorf("a row whose gate compared nothing recorded vmaf_stream %q - absent means "+
+					"absent, and a constant specifier is not a measurement", got.outcome.VmafStream)
+			}
+			if got.outcome.VmafMean != nil || got.outcome.VmafMin != nil || got.outcome.VmafChroma != nil {
+				t.Errorf("a row whose gate compared nothing recorded a score: %+v", got.outcome)
+			}
+			if !strings.Contains(got.outcome.Reason, "refusing to accept an unmeasured encode") {
+				t.Errorf("the recorded reason must say the encode was unmeasured; got: %s", got.outcome.Reason)
+			}
+		})
+	}
+}
+
+// TestVerify_RejectsAnOutputMissingAVideoStream is the parity gate at its new width,
+// driven end to end because the criterion is about what happens to the FILES: an encoder
+// that drops a video stream must be rejected, the source must be byte-for-byte intact
+// afterwards and the temp must be gone.
+//
+// The encoder here is a REAL, faithful HEVC encode of the source's first video stream and
+// nothing else - right codec, right duration, smaller - so every gate in front of parity
+// passes it and the rejection is attributable to parity alone. Before video joined the
+// loop this output was accepted and the source was deleted for it.
+func TestVerify_RejectsAnOutputMissingAVideoStream(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mp4")
+	mkMP4WithCoverArt(t, ffmpeg, ffprobe, src, "8M")
+	before := md5f(t, src)
+
+	var encodes int
+	enc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
+		encodes++
+		cmd := exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+			"-i", in, "-map", "0:v:0", "-c:v", "libx265", "-preset", "ultrafast",
+			"-x265-params", "log-level=error", "-pix_fmt", "yuv420p10le", "--", out)
+		if o, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("fixture encode: %v: %s", err, o)
+		}
+		return nil
+	})
+
+	ts := run(t, ffmpeg, ffprobe, d, enc, func(c *config.Config) { c.ContainerExt = "source" })
+
+	if encodes == 0 {
+		t.Fatal("the encoder never ran, so nothing was verified and this proves nothing")
+	}
+	if !ledgerHas(t, ts, store.Failed, "movie.mp4") {
+		t.Fatalf("an output missing a video stream was NOT rejected")
+	}
+	rows, err := ts.List(context.Background(), []store.Status{store.Failed}, 0)
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	var reason string
+	for _, r := range rows {
+		if r.Path == src {
+			reason = r.Outcome.Reason
+		}
+	}
+	if !strings.Contains(reason, "stream-count parity failed (type=v") {
+		t.Errorf("the recorded reason must name the TYPE that was dropped; got: %s", reason)
+	}
+	// The no-loss contract, which is the whole reason the gate exists.
+	if md5f(t, src) != before {
+		t.Error("the source changed after a video-parity rejection - it must be byte-for-byte intact")
+	}
+	if codecOf(t, ffprobe, src) != "h264" {
+		t.Error("the source was swapped for an output that had lost a video stream")
+	}
+	if n := nTemp(t, d); n != 0 {
+		t.Errorf("%d temp file(s) left behind after a video-parity rejection", n)
+	}
+}
+
+// TestVerify_RejectsAnOutputWhoseVideoStreamsCannotBeCounted pins the fail-safe half of
+// the same gate: an output this build cannot COUNT the video streams of counts as zero,
+// which is below any source's count, so it is rejected and the source is kept.
+//
+// The condition is produced by an ffprobe that refuses exactly one question - the stream
+// count - and only for the TEMP, delegating everything else to the real binary. That is
+// deliberate: the temp has to reach gate 5 for this to be about gate 5 at all, so it must
+// still probe as the right codec, the right duration and smaller, and a wholly broken
+// probe would have failed it long before. A half-installed ffprobe, or one being replaced
+// under a running scan, is exactly this shape.
+func TestVerify_RejectsAnOutputWhoseVideoStreamsCannotBeCounted(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+	before := md5f(t, src)
+
+	// "stream=index" with a csv output IS the stream-count probe; the stream-shape probe
+	// the source-shape guard runs asks a different question and still gets its answer.
+	fake := delegatingFFprobe(t, t.TempDir(), ffprobe, "stream=index", TempMarker)
+	ts := run(t, ffmpeg, fake, d, nil, nil)
+
+	if !ledgerHas(t, ts, store.Failed, "movie.mkv") {
+		t.Fatalf("an output whose video streams could not be counted was NOT rejected")
+	}
+	rows, err := ts.List(context.Background(), []store.Status{store.Failed}, 0)
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	var reason string
+	for _, r := range rows {
+		if r.Path == src {
+			reason = r.Outcome.Reason
+		}
+	}
+	if !strings.Contains(reason, "stream-count parity failed (type=v in=1 out=0") {
+		t.Errorf("an uncountable output must be treated as carrying ZERO video streams and "+
+			"rejected on parity; recorded reason was: %s", reason)
+	}
+	if md5f(t, src) != before {
+		t.Error("the source changed on an uncountable-output rejection")
+	}
+	if codecOf(t, ffprobe, src) != "h264" {
+		t.Error("the source was swapped on an answer nothing could count")
+	}
+	if n := nTemp(t, d); n != 0 {
+		t.Errorf("%d temp file(s) left behind after an uncountable-output rejection", n)
+	}
+
+	// Anti-vacuity: the identical source and the identical encode, under a probe that
+	// answers, is SWAPPED. Without this the case above would be satisfied by a gate that
+	// rejected everything.
+	d2 := t.TempDir()
+	src2 := filepath.Join(d2, "movie.mkv")
+	mkH264(t, ffmpeg, src2, "8M")
+	ts2 := run(t, ffmpeg, ffprobe, d2, nil, nil)
+	if !ledgerHas(t, ts2, store.Done, "movie.mkv") {
+		t.Fatalf("the control run did not transcode, so the uncountable case proves nothing")
+	}
+}
+
+// TestVerify_EveryRejectionCarriesTheClassOfItsVerdict drives the gate directly over
+// crafted pairs and asserts, per rejection, WHICH KIND of failure it is: one whose
+// verdict is a pure function of the source, the configuration and the pinned ffmpeg
+// build, or one a later attempt could answer differently.
+//
+// It is driven at the gate rather than through a scan because that is where the class is
+// produced. The engine records what this returns; if the wrong verdict were produced
+// here, a scan-level test would only ever confirm that the recording site faithfully
+// stored the wrong answer.
+//
+// Every case also asserts the ERROR TEXT it expected, which is what stops the table from
+// passing because some OTHER gate rejected the pair first: the gates run in a fixed order
+// and a fixture that failed the codec check would otherwise satisfy a size-increase case.
+func TestVerify_EveryRejectionCarriesTheClassOfItsVerdict(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	dir := t.TempDir()
+	p := func(name string) string { return filepath.Join(dir, name) }
+
+	// The source most cases are measured against: 2s, 240p, h264, small.
+	src := p("src.mkv")
+	mkH264(t, ffmpeg, src, "300k")
+
+	// A source carrying an audio track, and a video-only HEVC re-encode of it: smaller,
+	// right codec, right duration, one track short. Only stream-count parity sees it.
+	srcAudio := p("src-audio.mkv")
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "testsrc2=duration=2:size=320x240:rate=10",
+		"-f", "lavfi", "-i", "sine=frequency=1000:duration=2",
+		"-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "8M",
+		"-pix_fmt", "yuv420p", "-c:a", "aac", "--", srcAudio)
+	outNoAudio := p("out-no-audio.mkv")
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", srcAudio,
+		"-map", "0:v:0", "-c:v", "libx265", "-x265-params", "log-level=error",
+		"-pix_fmt", "yuv420p10le", "--", outNoAudio)
+
+	// A source carrying an attached cover picture as a second VIDEO stream, and an
+	// HEVC re-encode of it that kept only v:0: smaller, right codec, right duration, one
+	// video stream short. Only stream-count parity sees it, and only now that video is in
+	// the loop - the type this tool exists to re-encode was the one type not counted.
+	srcCover := p("src-cover.mp4")
+	mkMP4WithCoverArt(t, ffmpeg, ffprobe, srcCover, "8M")
+	outNoCover := p("out-no-cover.mp4")
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", srcCover,
+		"-map", "0:v:0", "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error",
+		"-pix_fmt", "yuv420p10le", "--", outNoCover)
+
+	// Same duration, right codec, BIGGER than the source (720p lossless against a 240p
+	// source, so it is larger whatever x265 does with the bitrate).
+	outBig := p("out-big.mkv")
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=2:size=1280x720:rate=10",
+		"-c:v", "libx265", "-x265-params", "lossless=1:log-level=error", "-pix_fmt", "yuv420p", "--", outBig)
+	if probe.FileSize(outBig) <= probe.FileSize(src) {
+		t.Fatal("fixture drifted: the 'bigger' output is not bigger, so the size gate is not what would reject it")
+	}
+
+	// Right codec, a quarter of the length: the truncation the duration check exists for.
+	outShort := p("out-short.mkv")
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=0.5:size=320x240:rate=10",
+		"-c:v", "libx265", "-x265-params", "log-level=error", "-pix_fmt", "yuv420p", "--", outShort)
+
+	// The wrong codec entirely.
+	outH264 := p("out-h264.mkv")
+	mkH264(t, ffmpeg, outH264, "100k")
+
+	// A temp that is there and holds nothing.
+	outEmpty := p("out-empty.mkv")
+	if err := os.WriteFile(outEmpty, nil, 0o644); err != nil {
+		t.Fatalf("write the empty temp: %v", err)
+	}
+
+	eng := buildEngine(t, ffmpeg, ffprobe, dir, nil, nil)
+
+	cases := []struct {
+		name     string
+		in, tmp  string
+		wantText string
+		want     store.FailureClass
+		why      string
+	}{
+		{
+			name: "the temp is missing or empty", in: src, tmp: outEmpty,
+			wantText: "temp missing or empty", want: store.FailureTransient,
+			why: "an empty temp is what a full disk or a killed encoder leaves; the next attempt can differ",
+		},
+		{
+			name: "the output is not the target codec", in: src, tmp: outH264,
+			wantText: "output codec is", want: store.FailureDeterministic,
+			why: "the configured encoder produces the codec it produces",
+		},
+		{
+			name: "the output is truncated", in: src, tmp: outShort,
+			wantText: "duration parity failed", want: store.FailureDeterministic,
+			why: "how long this source is, is a property of the file",
+		},
+		{
+			name: "the output is not smaller", in: src, tmp: outBig,
+			wantText: "size-increase reject", want: store.FailureDeterministic,
+			why: "the same source at the same settings compresses to the same size",
+		},
+		{
+			name: "a track was dropped", in: srcAudio, tmp: outNoAudio,
+			wantText: "stream-count parity failed (type=a", want: store.FailureDeterministic,
+			why: "which streams this source has, and which this build maps, is fixed",
+		},
+		{
+			name: "a video stream was dropped", in: srcCover, tmp: outNoCover,
+			wantText: "stream-count parity failed (type=v", want: store.FailureDeterministic,
+			why: "which video streams this source has, and which this build maps, is fixed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			top := eng.Cfg.TopLevelProfile()
+			_, class, err := eng.verifyOutput(context.Background(), tc.in, tc.tmp, top, targetCodecFor(top))
+			if err == nil {
+				t.Fatalf("the gate ACCEPTED this pair; the case proves nothing about the class of a rejection")
+			}
+			if !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("a different gate rejected this pair: got %q, want one containing %q", err, tc.wantText)
+			}
+			if class != tc.want {
+				t.Errorf("class = %q, want %q - %s", class, tc.want, tc.why)
+			}
+		})
+	}
+
+	// Packet-count parity is the length check's OTHER half and only runs when neither
+	// file reports a duration, which no container-carried fixture above can produce. It
+	// is driven at lengthParity, where that verdict is decided.
+	t.Run("the output is truncated and neither file reports a duration", func(t *testing.T) {
+		rawIn, rawOut := p("raw-in.h264"), p("raw-out.h264")
+		ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+			"-i", "testsrc2=duration=2:size=320x240:rate=10", "-c:v", "libx264", "-preset", "ultrafast",
+			"-b:v", "8M", "-bsf:v", "h264_mp4toannexb", "-f", "h264", "--", rawIn)
+		ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+			"-i", "testsrc2=duration=2:size=320x240:rate=10", "-frames:v", "3", "-c:v", "libx264",
+			"-preset", "ultrafast", "-bsf:v", "h264_mp4toannexb", "-f", "h264", "--", rawOut)
+		class, err := eng.lengthParity(context.Background(), rawIn, rawOut)
+		if err == nil {
+			t.Fatal("lengthParity accepted a 3-frame encode of a 20-frame source")
+		}
+		if !strings.Contains(err.Error(), "packet-count parity failed") {
+			t.Fatalf("a different rejection: %v", err)
+		}
+		if class != store.FailureDeterministic {
+			t.Errorf("class = %q, want %q - the source's packet count is a property of the file",
+				class, store.FailureDeterministic)
+		}
+	})
+
+	// The anti-vacuity control. Every case above asserts a REJECTION carries a class, and
+	// all of them would be satisfied by a gate that rejected everything and called it
+	// final. A pair that PASSES must still pass, and must carry no class at all.
+	t.Run("a passing pair is not classified as anything", func(t *testing.T) {
+		good := p("out-good.mkv")
+		ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", src,
+			"-c:v", "libx265", "-x265-params", "log-level=error", "-preset", "ultrafast",
+			"-pix_fmt", "yuv420p10le", "--", good)
+		if probe.FileSize(good) >= probe.FileSize(src) {
+			t.Skipf("the control fixture did not come out smaller (%d >= %d), so it cannot pass the size gate",
+				probe.FileSize(good), probe.FileSize(src))
+		}
+		top := eng.Cfg.TopLevelProfile()
+		_, class, err := eng.verifyOutput(context.Background(), src, good, top, targetCodecFor(top))
+		if err != nil {
+			t.Fatalf("the gate rejected a faithful smaller HEVC encode: %v", err)
+		}
+		if class != "" {
+			t.Errorf("a passing gate produced class %q; the class belongs to a rejection and "+
+				"nothing else reads it", class)
+		}
+	})
+}
+
+// The VMAF gate's rejections split, and the split is the point: the three FLOORS are
+// verdicts about two files that do not change between attempts, while a missing libvmaf
+// or a measurement that failed are conditions of the installation and the run. Driving
+// vmafGate through the score seam pins each without a second real libvmaf pass.
+func TestVmafGate_FloorsAreFinalAndAnUnmeasurableRunIsNot(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+
+	cases := []struct {
+		name     string
+		result   vmaf.Result
+		err      error
+		wantText string
+		want     store.FailureClass
+		why      string
+	}{
+		{
+			name:     "the average is below the threshold",
+			result:   vmaf.Result{HarmonicMean: 80.0, Min: 75.0, ChromaMin: 41.2, ChromaMetric: vmaf.ChromaMetricName, PixelFormat: "yuv420p10le"},
+			wantText: "VMAF below threshold", want: store.FailureDeterministic,
+			why: "the same two files scored by the same model produce the same number",
+		},
+		{
+			name:     "the worst frame is below the floor",
+			result:   vmaf.Result{HarmonicMean: 97.5, Min: 43.0, ChromaMin: 41.2, ChromaMetric: vmaf.ChromaMetricName, PixelFormat: "yuv420p10le"},
+			wantText: "VMAF worst-frame below floor", want: store.FailureDeterministic,
+			why: "the frame that collapsed collapses again on the same encode",
+		},
+		{
+			name:     "the chroma planes are below the floor",
+			result:   vmaf.Result{HarmonicMean: 98.97, Min: 96.86, ChromaMin: 26.21, ChromaMetric: vmaf.ChromaMetricName, PixelFormat: "yuv420p10le"},
+			wantText: "chroma below floor", want: store.FailureDeterministic,
+			why: "the colour damage is in the encode this configuration produces",
+		},
+		{
+			name:     "libvmaf is not in this ffmpeg build",
+			err:      vmaf.ErrUnavailable,
+			wantText: "libvmaf is not available", want: store.FailureTransient,
+			why: "an operator who installs a libvmaf-capable ffmpeg has changed the thing that rejected",
+		},
+		{
+			name:     "the measurement itself failed",
+			err:      errors.New("vmaf: ffmpeg failed: exit status 1"),
+			wantText: "VMAF measurement failed", want: store.FailureTransient,
+			why: "a measurement that fell over says nothing about the encode",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eng := buildEngine(t, ffmpeg, ffprobe, dir, nil, func(c *config.Config) {
+				c.VmafEnable = boolPtr(true)
+				c.MinVmaf, c.VmafMinPool, c.VmafMinChroma = 95, 60, 30
+			})
+			eng.vmafScore = func(context.Context, vmaf.Request) (vmaf.Result, error) {
+				if tc.err != nil {
+					return tc.result, tc.err
+				}
+				return tc.result, nil
+			}
+			_, class, err := eng.vmafGate(context.Background(), src, src, eng.Cfg.TopLevelProfile())
+			if err == nil {
+				t.Fatal("the gate accepted this measurement; the case proves nothing about a rejection")
+			}
+			if !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("a different rejection: got %q, want one containing %q", err, tc.wantText)
+			}
+			if class != tc.want {
+				t.Errorf("class = %q, want %q - %s", class, tc.want, tc.why)
+			}
+		})
+	}
+
+	// The anti-vacuity control: a measurement clearing every floor is not a rejection at
+	// all, so nothing above is satisfied by a gate that refuses everything.
+	eng := buildEngine(t, ffmpeg, ffprobe, dir, nil, func(c *config.Config) {
+		c.VmafEnable = boolPtr(true)
+		c.MinVmaf, c.VmafMinPool, c.VmafMinChroma = 95, 60, 30
+	})
+	eng.vmafScore = func(context.Context, vmaf.Request) (vmaf.Result, error) { return passing(), nil }
+	if _, class, err := eng.vmafGate(context.Background(), src, src, eng.Cfg.TopLevelProfile()); err != nil || class != "" {
+		t.Errorf("a passing measurement produced err=%v class=%q, want no rejection and no class", err, class)
+	}
+}
+
 // The gate NAMES the comparison format before it measures anything, and hands that
 // name to the scorer. This is the engine-side half of the first acceptance criterion
 // - internal/vmaf proves the named format is what libvmaf compares; this proves the
@@ -288,12 +778,19 @@ func TestVmafGate_UnnameableComparisonFormatIsARejection(t *testing.T) {
 		return passing(), nil
 	}
 
-	proof, err := eng.vmafGate(context.Background(), normal, exotic)
+	proof, class, err := eng.vmafGate(context.Background(), normal, exotic, eng.Cfg.TopLevelProfile())
 	if err == nil {
 		t.Fatal("vmafGate accepted a pair whose comparison format cannot be named")
 	}
 	if called {
 		t.Error("the scorer ran for a pair whose comparison format could not be named")
+	}
+	// The pair's own pixel formats decide this, before anything is measured: no retry
+	// under this configuration reaches a different answer.
+	if class != store.FailureDeterministic {
+		t.Errorf("class = %q, want %q - the comparison format is derived from the two "+
+			"files' own pix_fmts, so a re-encode cannot change the verdict",
+			class, store.FailureDeterministic)
 	}
 	if !strings.Contains(err.Error(), "comparison pixel format") || !strings.Contains(err.Error(), "yuv411p") {
 		t.Errorf("the error must say the comparison format could not be named, and name the "+
@@ -305,7 +802,7 @@ func TestVmafGate_UnnameableComparisonFormatIsARejection(t *testing.T) {
 
 	// Anti-vacuity: the SAME gate over a nameable pair reaches the scorer and passes.
 	called = false
-	if _, err := eng.vmafGate(context.Background(), normal, normal); err != nil {
+	if _, _, err := eng.vmafGate(context.Background(), normal, normal, eng.Cfg.TopLevelProfile()); err != nil {
 		t.Fatalf("the nameable-pair control failed (%v) - the case above proves nothing", err)
 	}
 	if !called {

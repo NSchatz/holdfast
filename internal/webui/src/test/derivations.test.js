@@ -174,6 +174,31 @@ test("vmafFigures carries both pooled statistics and the viewing condition", () 
     "a score with no model says the model is unspecified rather than naming one");
 });
 
+test("vmafFigures names the video stream the comparison was made on", () => {
+  // A source can carry more than one video stream, so which one was compared is part of
+  // the scope the score is read under - carried on the same terms as the model.
+  const recorded = d.vmafFigures({
+    vmaf_mean: 98.24, vmaf_min: 91.5, vmaf_model: "version=vmaf_v0.6.1", vmaf_stream: "v:0",
+  });
+  assert.ok(recorded.condition.includes("stream v:0"), recorded.condition);
+  assert.ok(!recorded.condition.includes("unspecified stream"), recorded.condition);
+
+  // A row that recorded no stream says so, exactly as it says the model is unspecified.
+  // The key is OMITTED on the wire for such a row, so undefined is the shape this
+  // actually sees; an explicit null and an empty string are covered too, because a
+  // reader must never be told a stream was compared when none was.
+  for (const unrecorded of [
+    { vmaf_mean: 97, vmaf_min: 90 },
+    { vmaf_mean: 97, vmaf_min: 90, vmaf_stream: null },
+    { vmaf_mean: 97, vmaf_min: 90, vmaf_stream: "" },
+  ]) {
+    const f = d.vmafFigures(unrecorded);
+    assert.ok(f.condition.includes("unspecified stream"), f.condition);
+    assert.ok(!f.condition.includes("stream v:0"),
+      "an unrecorded stream must never be rendered as the stream this build would have scored: " + f.condition);
+  }
+});
+
 test("progressFigure exists for a running encode and for no other state", () => {
   const running = { status: "encoding", progress_fraction: 0.421, progress_seconds: 1200, progress_duration_seconds: 3600 };
   // `fraction` is the clamped measurement the percentage is rounded from. It is carried

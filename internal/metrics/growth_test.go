@@ -85,11 +85,11 @@ func seedSkipped(t *testing.T, st *store.SQLite, root string, from, to int) {
 	ctx := context.Background()
 	for i := from; i < to; i++ {
 		p := filepath.Join(root, "history"+strconv.Itoa(i)+".mkv")
-		ok, err := st.Claim(ctx, p, "fp", "w0", 3)
+		ok, err := st.Claim(ctx, p, "fp", "w0", 3, store.DecisionInputs{})
 		if err != nil || !ok {
 			t.Fatalf("seed claim %s: ok=%v err=%v", p, ok, err)
 		}
-		if err := st.Finish(ctx, p, "fp", store.Skipped, &store.Outcome{Reason: engine.SkipLowBitrate}); err != nil {
+		if err := st.Finish(ctx, p, "fp", store.Skipped, &store.Outcome{Reason: engine.SkipLowBitrate}, 3); err != nil {
 			t.Fatalf("seed finish %s: %v", p, err)
 		}
 	}
@@ -229,7 +229,7 @@ func seedOneRowInEveryOtherState(t *testing.T, st *store.SQLite) {
 	ctx := context.Background()
 	claim := func(path string) {
 		t.Helper()
-		ok, err := st.Claim(ctx, path, "fp", "w0", 3)
+		ok, err := st.Claim(ctx, path, "fp", "w0", 3, store.DecisionInputs{})
 		if err != nil || !ok {
 			t.Fatalf("seed claim %s: ok=%v err=%v", path, ok, err)
 		}
@@ -263,7 +263,7 @@ func seedOneRowInEveryOtherState(t *testing.T, st *store.SQLite) {
 		{"/lib/state-failed.mkv", store.Failed},
 	} {
 		claim(c.path)
-		if err := st.Finish(ctx, c.path, "fp", c.to, &store.Outcome{Encoder: "cpu"}); err != nil {
+		if err := st.Finish(ctx, c.path, "fp", c.to, &store.Outcome{Encoder: "cpu"}, 3); err != nil {
 			t.Fatalf("seed finish %s as %s: %v", c.path, c.to, err)
 		}
 	}
