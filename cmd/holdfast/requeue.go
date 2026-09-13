@@ -160,7 +160,7 @@ func reportRequeue(ctx context.Context, st store.Store, sel engine.RequeueSelect
 // It writes one line per figure through fmt so `validate` can print it, and the caller
 // that has a logger logs it too.
 func decisionInputsReport(ctx context.Context, st store.Store, cfg *config.Config) (store.DecisionInputsSurvey, error) {
-	return st.SurveyDecisionInputs(ctx, engine.DecisionInputsFor(*cfg))
+	return st.SurveyDecisionInputs(ctx, engine.DecisionInputsPerPath(*cfg))
 }
 
 // decisionInputsLines renders the survey as the operator-facing sentences both callers
@@ -180,13 +180,36 @@ func decisionInputsLines(s store.DecisionInputsSurvey) []string {
 		fmt.Sprintf("%d terminal row(s) record no decision inputs at all (written before holdfast recorded them)", s.NotRecorded),
 	}
 	if s.Reopening() == 0 {
-		return append(lines, fmt.Sprintf("so the next scan re-opens none of them: every one of the %d "+
+		lines = append(lines, fmt.Sprintf("so the next scan re-opens none of them: every one of the %d "+
 			"terminal row(s) a configuration change could re-open was taken under the configuration in "+
 			"force", s.Matching))
+	} else {
+		lines = append(lines, fmt.Sprintf("the next scan offers those %d file(s) to the guards again; that is a "+
+			"re-decision, not a re-encode - a file that reaches the same verdict reaches it with nothing "+
+			"encoded", s.Reopening()))
 	}
-	return append(lines, fmt.Sprintf("the next scan offers those %d file(s) to the guards again; that is a "+
-		"re-decision, not a re-encode - a file that reaches the same verdict reaches it with nothing "+
-		"encoded", s.Reopening()))
+	return append(lines, unrootedLine(s)...)
+}
+
+// unrootedLine states the rows the figures above describe least well: the ones lying under
+// no configured library root.
+//
+// A scan walks the configured roots, so it never enumerates those files and never re-opens
+// them however far their recorded inputs have moved - the count above is an upper bound and
+// this is what makes that visible. Their inputs were resolved against the TOP-LEVEL
+// configuration, which is the same fallback the engine makes for a path under no root, so
+// the classification is a real one and not a guess.
+//
+// It is a note and never a failure: nothing about a ledger can fail a run or a `validate`.
+// Nothing is printed when there are none, because a line that says "0" here would put an
+// upgrade-day operator on a hunt for a condition they do not have.
+func unrootedLine(s store.DecisionInputsSurvey) []string {
+	if s.Unrooted == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("%d of those terminal row(s) lie under no configured library root "+
+		"(for example %s), so a scan never enumerates them and never re-opens them; their inputs were "+
+		"resolved against the top-level configuration", s.Unrooted, s.UnrootedExample)}
 }
 
 // absoluteLedgerPath turns what the operator typed into the path the ledger is keyed by.

@@ -342,7 +342,7 @@ func TestSurveyDecisionInputs_CountsWhatTheNextScanWillReopen(t *testing.T) {
 		t.Fatalf("RecordSkip: %v", err)
 	}
 
-	got, err := s.SurveyDecisionInputs(ctx, sameConfig)
+	got, err := s.SurveyDecisionInputs(ctx, everyPath(sameConfig))
 	if err != nil {
 		t.Fatalf("SurveyDecisionInputs: %v", err)
 	}

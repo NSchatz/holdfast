@@ -438,18 +438,24 @@ func (s *SQLite) Reopen(ctx context.Context, path, fingerprint string, clearFail
 
 // SurveyDecisionInputs is documented on the Store interface.
 //
-// It groups by the STORED value rather than decoding every row, so the cost is one index
-// scan and a handful of comparisons - a ledger holding 300,000 rows taken under three
-// configurations answers this in three. That matters because it runs at startup on the
-// same single serialized connection the engine writes every job transition through.
+// It reads a row at a time rather than grouping by the stored value, and it has to: the
+// configuration in force resolves per PATH, so two rows carrying the identical recorded
+// text can be one still-matching row and one moved row. Grouping would answer a question
+// about the ledger that no row was decided by.
 //
-// A `restored-original` row is left out of all three counts. It records no inputs, so it
+// The cost that buys back is bounded on both sides. The scan is over the terminal
+// partition through the same index the group-by used, the decode of each stored value is
+// memoized on its text (a library is decided under a handful of distinct records, not one
+// per row), and the resolver memoizes its own side. What is left is a comparison of a few
+// keys per row, which is microseconds against the encode a re-opened row might cost.
+//
+// A `restored-original` row is left out of all the counts. It records no inputs, so it
 // would otherwise arrive in NotRecorded - and this figure is read as "what the next scan
 // will re-open", which that row never is, under any configuration.
-func (s *SQLite) SurveyDecisionInputs(ctx context.Context, current DecisionInputs) (DecisionInputsSurvey, error) {
+func (s *SQLite) SurveyDecisionInputs(ctx context.Context, current InputsForPath) (DecisionInputsSurvey, error) {
 	where, args := surveyedRows(true)
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT decision_inputs, COUNT(*) FROM jobs WHERE `+where+` GROUP BY decision_inputs`, args...)
+		`SELECT path, decision_inputs FROM jobs WHERE `+where, args...)
 	if err != nil {
 		return DecisionInputsSurvey{}, fmt.Errorf("store: survey decision inputs: %w", err)
 	}
@@ -475,25 +481,45 @@ func surveyedRows(hasReason bool) (string, []any) {
 	return where, args
 }
 
-// classifyRecordedInputs turns (decision_inputs, COUNT(*)) groups into the survey. It is
-// the one place the three-way reading of a stored record lives, so the startup report and
-// `validate` cannot classify the same row differently.
-func classifyRecordedInputs(rows *sql.Rows, current DecisionInputs) (DecisionInputsSurvey, error) {
+// classifyRecordedInputs turns (path, decision_inputs) rows into the survey. It is the one
+// place the three-way reading of a stored record lives, so the startup report and
+// `validate` cannot classify the same row differently - and it is the one place the survey
+// resolves the configuration in force, so neither of them can classify a row differently
+// from the claim that will meet it.
+//
+// A row that recorded NOTHING is classified without resolving anything. It cannot be
+// re-derived whatever the configuration says, so asking for a value would be asking a
+// question whose answer cannot change the count - and it is what keeps this reading
+// identical to the one a ledger with no decision_inputs column at all gets.
+func classifyRecordedInputs(rows *sql.Rows, current InputsForPath) (DecisionInputsSurvey, error) {
 	var out DecisionInputsSurvey
+	parsed := map[string]DecisionInputs{}
 	for rows.Next() {
+		var path string
 		var recorded sql.NullString
-		var n int64
-		if err := rows.Scan(&recorded, &n); err != nil {
+		if err := rows.Scan(&path, &recorded); err != nil {
 			return DecisionInputsSurvey{}, fmt.Errorf("store: survey decision inputs scan: %w", err)
 		}
-		in := ParseDecisionInputs(recorded.String)
-		switch {
-		case !in.Recorded():
-			out.NotRecorded += n
-		case in.StillMatches(current):
-			out.Matching += n
-		default:
-			out.Moved += n
+		in, ok := parsed[recorded.String]
+		if !ok {
+			in = ParseDecisionInputs(recorded.String)
+			parsed[recorded.String] = in
+		}
+		if !in.Recorded() {
+			out.NotRecorded++
+			continue
+		}
+		now, rooted := current(path)
+		if !rooted {
+			out.Unrooted++
+			if out.UnrootedExample == "" || path < out.UnrootedExample {
+				out.UnrootedExample = path
+			}
+		}
+		if in.StillMatches(now) {
+			out.Matching++
+		} else {
+			out.Moved++
 		}
 	}
 	if err := rows.Err(); err != nil {

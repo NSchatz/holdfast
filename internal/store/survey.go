@@ -29,9 +29,15 @@ import (
 // the COLUMNS IT NEEDS rather than on the version stamp, which also means a later schema
 // that keeps the column keeps working here.
 //
+// current resolves the configuration in force for ONE ROW'S OWN PATH, and this read takes
+// the same one the daemon's survey does. `validate` and a run answering the same question
+// differently is the surface half of the defect the per-path rule exists to close, one
+// layer up: the scan would re-open a file the operator had just been told was still
+// matching.
+//
 // A ledger from the FUTURE is still a refusal, the same one both doors give: a shape this
 // build cannot see all of is one whose rows it must not describe.
-func SurveyLedgerDecisionInputs(ctx context.Context, path string, current DecisionInputs) (DecisionInputsSurvey, error) {
+func SurveyLedgerDecisionInputs(ctx context.Context, path string, current InputsForPath) (DecisionInputsSurvey, error) {
 	var out DecisionInputsSurvey
 	db, err := openReadOnlyDB(path)
 	if err != nil {
@@ -51,7 +57,7 @@ func SurveyLedgerDecisionInputs(ctx context.Context, path string, current Decisi
 	if err != nil {
 		return out, err
 	}
-	if !cols["status"] {
+	if !cols["status"] || !cols["path"] {
 		return out, fmt.Errorf("store: survey %q: it holds no jobs table to read", path)
 	}
 	where, args := surveyedRows(cols["reason"])
@@ -70,7 +76,7 @@ func SurveyLedgerDecisionInputs(ctx context.Context, path string, current Decisi
 	}
 
 	rows, err := db.QueryContext(ctx,
-		`SELECT decision_inputs, COUNT(*) FROM jobs WHERE `+where+` GROUP BY decision_inputs`, args...)
+		`SELECT path, decision_inputs FROM jobs WHERE `+where, args...)
 	if err != nil {
 		return out, fmt.Errorf("store: survey %q: %w", path, err)
 	}

@@ -257,7 +257,7 @@ func TestSurveyLedgerDecisionInputs_AnswersForAnOlderLedgerWithoutMigratingIt(t 
 	prev := windBackOneSchemaVersion(t, dbPath)
 	before := fileDigest(t, dbPath)
 
-	got, err := SurveyLedgerDecisionInputs(context.Background(), dbPath, sameConfig)
+	got, err := SurveyLedgerDecisionInputs(context.Background(), dbPath, everyPath(sameConfig))
 	if err != nil {
 		t.Fatalf("SurveyLedgerDecisionInputs over a ledger the previous build wrote: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestSurveyLedgerDecisionInputs_RefusesALedgerFromTheFuture(t *testing.T) {
 	}
 	_ = db.Close()
 
-	if _, err := SurveyLedgerDecisionInputs(context.Background(), dbPath, sameConfig); err == nil {
+	if _, err := SurveyLedgerDecisionInputs(context.Background(), dbPath, everyPath(sameConfig)); err == nil {
 		t.Fatal("the survey described a ledger whose shape this build cannot see all of")
 	} else if !strings.Contains(err.Error(), "9999") {
 		t.Errorf("the refusal does not name the version it read: %v", err)
@@ -301,7 +301,7 @@ func TestSurveyLedgerDecisionInputs_CreatesNothingWhenThereIsNothingToRead(t *te
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "absent", "jobs.db")
 
-	if _, err := SurveyLedgerDecisionInputs(context.Background(), dbPath, sameConfig); err == nil {
+	if _, err := SurveyLedgerDecisionInputs(context.Background(), dbPath, everyPath(sameConfig)); err == nil {
 		t.Fatal("the survey read a ledger that does not exist")
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, "absent")); statErr == nil {

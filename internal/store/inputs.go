@@ -28,6 +28,12 @@ import (
 // configuration" (which always matches) or as a set of empty strings (which never
 // does). The two are distinct states here and stay distinct all the way into the
 // column, where "not recorded" is NULL - see Recorded.
+//
+// Every value in it is resolved FOR ONE PATH, through the whole layering that decided
+// that path, and the comparison is made against the same resolution of the same key for
+// the same path (see InputsForPath). Record and compare being one reading is what keeps a
+// recorded value re-derivable: a value only one side can reach would be a row re-opened on
+// every scan for ever.
 type DecisionInputs struct {
 	read     map[string]string
 	recorded bool
@@ -158,6 +164,25 @@ func ParseDecisionInputs(s string) DecisionInputs {
 	return InputsRead(read)
 }
 
+// InputsForPath resolves what the configuration in force offers for ONE ROW'S OWN PATH:
+// the decision inputs a claim of that path would be measured against right now.
+//
+// The survey takes this rather than one value for the whole ledger because the resolution
+// is per path - a library root decides the gates, and an encode profile whose match
+// selects the path decides what the encoder produces - so a whole-ledger question with one
+// value would answer for a configuration no single row was decided under. The claim path
+// and this one are then the same reading of the same key, which is the only way the count
+// an operator reads and the verdict the scan reaches can agree.
+//
+// rooted is false when the path lies under no configured library root. The answer is still
+// a resolution - the top-level one, which is exactly what the scan itself falls back to for
+// such a path - and the survey counts the row normally and reports the condition beside the
+// counts rather than guessing or failing (see DecisionInputsSurvey.Unrooted).
+//
+// An implementation may memoize and is called row by row from one goroutine; it does not
+// have to be safe for concurrent use.
+type InputsForPath func(path string) (in DecisionInputs, rooted bool)
+
 // DecisionInputsSurvey is what the ledger says about the configuration its terminal
 // decisions were taken under, over the done and skipped rows - the two statuses whose
 // rows a configuration change may re-open.
@@ -170,6 +195,19 @@ type DecisionInputsSurvey struct {
 	Moved       int64
 	NotRecorded int64
 	Matching    int64
+
+	// Unrooted is how many of the rows above lie under no configured library root, and
+	// UnrootedExample is the lexically first of their paths. It is an ANNOTATION and not a
+	// fourth bucket: every unrooted row is also counted in exactly one of the three above,
+	// resolved against the top-level configuration.
+	//
+	// It is reported because those rows are the ones the figures describe least well - a
+	// scan enumerates its library roots, so it never reaches them and never re-opens them,
+	// whatever they record. An operator who moved a root and expected the files under it to
+	// come back is owed that, and every field here is a count rather than a failure: a
+	// report about the ledger must never be able to fail a run.
+	Unrooted        int64
+	UnrootedExample string
 }
 
 // Reopening is how many rows the next scan will re-open.

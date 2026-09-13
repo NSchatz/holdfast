@@ -34,6 +34,15 @@ var sameConfig = InputsRead(map[string]string{"encoder": "cpu", "crf": "22"})
 // A row recorded under sameConfig does not match it.
 var movedConfig = InputsRead(map[string]string{"encoder": "cpu", "crf": "23"})
 
+// everyPath is the resolver a survey case passes when its question is not about paths:
+// every row resolves to in, and every row lies under a configured root. The per-path
+// reading is the engine's to compose (it is the only package that can see a library root
+// or an encode profile), so a case in this package that varies it by path would be
+// asserting a resolution this package does not own.
+func everyPath(in DecisionInputs) InputsForPath {
+	return func(string) (DecisionInputs, bool) { return in, true }
+}
+
 func TestClaim_FreshKeyClaims(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
