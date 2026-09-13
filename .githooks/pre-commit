@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# The pre-commit half of secrets K4: a credential never reaches a commit object.
+#
+# Installed by ONE step, `make install-hooks`, which points core.hooksPath at this
+# directory. That is the whole setup, it is recorded in the clone's own config, and it
+# needs no file copying - so a hook that changes in the repository changes for everyone who
+# has run it, which a copied hook does not.
+#
+# It scans the INDEX, not the worktree (--staged). `git commit` ships the index, so a
+# credential staged and then deleted from the worktree is what would actually land - and
+# a worktree scan would report that tree clean.
+#
+# CI is the second barrier and not a duplicate of this one: `git commit --no-verify`
+# bypasses every hook, and no hook travels with a fork's pull request.
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+status=0
+"$root/scripts/secret-scan.sh" --staged || status=$?
+
+case "$status" in
+  0) exit 0 ;;
+  3)
+    echo "::error::pre-commit: REFUSING THE COMMIT - a staged file carries a credential (named above)." >&2
+    echo "Rotate it at its provider FIRST, then unstage or edit the line. HEAD has not moved and no" >&2
+    echo "commit object was written. See docs/secrets.md." >&2
+    exit 1
+    ;;
+  *)
+    echo "::error::pre-commit: REFUSING THE COMMIT - the secret scan could not run (exit $status)." >&2
+    echo "A check that could not run has not passed, so the commit is refused rather than allowed" >&2
+    echo "through unscanned. Fix the scan, or bypass deliberately with --no-verify and answer for it" >&2
+    echo "in CI, which runs the same scan and cannot be bypassed." >&2
+    exit 1
+    ;;
+esac
