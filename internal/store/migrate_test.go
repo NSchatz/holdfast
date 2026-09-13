@@ -1693,6 +1693,18 @@ func TestOpenReadOnly_AppliesNoStepCountsNothingAndRefusesBothDirections(t *test
 			_ = st.Close()
 			t.Fatal("OpenReadOnly accepted a ledger an earlier build wrote")
 		}
+		// The refusal is DELIBERATE, and the message is how that is observable: a door
+		// that tried to migrate and was merely stopped by the read-only handle would fail
+		// here too, having taken the counts and attempted the step. This one names both
+		// versions and the act that upgrades a ledger instead.
+		msg := err.Error()
+		for _, want := range []string{
+			fmt.Sprint(schemaVersion() - 1), fmt.Sprint(schemaVersion()), "holdfast run",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("the refusal does not name %q: %v", want, msg)
+			}
+		}
 		if after := fileSHA(t, path); after != before {
 			t.Error("a refused read-only open changed the database file")
 		}
