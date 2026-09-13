@@ -32,7 +32,14 @@ record at startup:
 - the state directory (`state_dir`), or - where it does not exist yet - the
   storage it would be created on;
 - every distinct mounted filesystem the startup walk finds beneath a configured
-  library root, at any depth, whether or not a source lies on it.
+  library root, at any depth, whether or not a source lies on it;
+- the working location (`scratch_dir`), when one is configured. It is inspected,
+  classified and reported exactly like the paths above, and it is refused for its
+  own reasons - it does not exist, it is not a directory, it cannot be inspected,
+  it overlaps a library root, the filesystem holding it is already below
+  `scratch_min_free_gb`, or this process cannot create and remove a file in it.
+  What does NOT refuse it is storage that is not local: see
+  [opting in](#opting-in) below and [the scratch directory](scratch.md).
 
 A path is classified `local` only on a **positive** identification against the
 set below. Anything else - a type this build does not recognise, a lookup that
@@ -117,7 +124,8 @@ one, and an unrecognised filesystem counts as not-local for exactly this reason.
 ## Opting in
 
 When a checked path is not local, holdfast refuses to start and prints the exact
-line that would permit it:
+line that would permit it. That is true of every checked path except the
+configured working location, which is covered on its own below:
 
 ```yaml
 allow_non_local:
@@ -143,6 +151,20 @@ One refusal no declaration lifts: a path holdfast **cannot inspect** at all
 permits a run on storage that is not local; it never permits a run on a path
 holdfast cannot look at. A root whose contents are unknown to it would look
 exactly like an empty library, so it refuses instead.
+
+And one checked path the refusal does not reach: the configured **`scratch_dir`**.
+Storage there that holdfast cannot positively identify as local **starts the run**,
+with a startup notice saying so and no declaration required - nor could one be
+written, since a well-formed entry names a library root, the state directory or a
+path beneath a root, and the working location is none of those. The declaration
+exists because the no-loss contract needs local rename semantics **where the
+irreversible act happens**, and no irreversible act happens in the working area: the
+encode's working file is disposable by construction, and the swap still runs beside
+the source on storage the checks above adjudicated. Refusing there would be a gate
+that protects nothing while training you to add declarations. It is reported rather
+than refused, because "the encode is running over NFS" is the answer to a throughput
+complaint you would otherwise chase for a week. [The scratch directory](scratch.md)
+carries the rest of it.
 
 ## What the startup check costs
 
