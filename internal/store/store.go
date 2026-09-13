@@ -617,6 +617,27 @@ type Retained struct {
 	Stamp SchemaStamp
 }
 
+// PathExclusion is one path an operator has WITHHELD from the pipeline: runtime state this
+// daemon holds, recorded in its own store and never in the configuration file.
+//
+// It is an instruction about a PATH rather than a record of a decision about some bytes,
+// which is why it is not a jobs row: a jobs row is keyed (path, fingerprint), so changing
+// the file would silently drop the withholding, and Claim and the prune both remove one.
+//
+// It only ever WITHHOLDS. Recording one takes a file out of the pipeline; removing one puts
+// it back exactly where it was, and neither reaches a media file. That is what makes it
+// reversible, and the reversal is the whole reason it may be recorded from a surface that
+// is not a local command.
+type PathExclusion struct {
+	Path      string
+	CreatedAt int64
+
+	// Stamp is the schema version this record was last written under, carried for the
+	// reason every record here carries one: a reader can tell which build's semantics
+	// filled it rather than inferring that from which fields are empty.
+	Stamp SchemaStamp
+}
+
 // Store is the persistent job ledger. Every method is safe for concurrent use by
 // multiple workers (goroutines) within one process.
 type Store interface {
@@ -871,6 +892,47 @@ type Store interface {
 	// there is nothing left to restore, and a record that promised one would be a promise
 	// the tool cannot keep.
 	DropRetained(ctx context.Context, sourcePath string) error
+
+	// SearchPath returns the rows in statuses whose PATH contains term, newest transition
+	// first and capped at limit, together with how many matched over the WHOLE ledger.
+	//
+	// It is the query List cannot answer. List ships the most recent rows and nothing else,
+	// so "find the row for THIS file" is unanswerable from it the moment a library outgrows
+	// the cap - and that is the ordinary case, not the edge one. This searches every
+	// matching row and reports the count beside the ones it ships, so a caller that took
+	// the cap can say what it capped against.
+	//
+	// The match is a substring of the path, case-insensitively for ASCII, and the term is
+	// taken as TEXT: a `%` or a `_` in it matches those characters and never a wildcard, so
+	// a path is searched for rather than a pattern.
+	//
+	// The total is a RowTotal and carries its OWN failure, the way an aggregate does: a
+	// count that could not be read is STATED as unreadable beside rows that still ship,
+	// never reported as a total of zero. The returned error is the ROWS' failure alone.
+	SearchPath(ctx context.Context, statuses []Status, term string, limit int) ([]Job, RowTotal, error)
+
+	// ExcludePath records that path is WITHHELD from the pipeline, and reports whether the
+	// record is new (recording a path already withheld changes nothing and says so).
+	//
+	// It is idempotent and it is reversible: the only thing it can do is take a file OUT of
+	// the pipeline, and UnexcludePath puts it back. It writes no media file, offers nothing
+	// to the encoder, and never touches the configuration file.
+	ExcludePath(ctx context.Context, path string) (bool, error)
+
+	// UnexcludePath removes a withholding, and reports whether a record actually went. The
+	// path is eligible again on the next scan, exactly as it was before it was withheld:
+	// the engine's guard clears its own stale row when the withholding is gone.
+	UnexcludePath(ctx context.Context, path string) (bool, error)
+
+	// ExcludedPaths returns every withholding in force, oldest first. It is what the
+	// operator's own surface renders: a withholding nobody can see is a file that silently
+	// stopped being worked on.
+	ExcludedPaths(ctx context.Context) ([]PathExclusion, error)
+
+	// PathIsExcluded reports whether path is withheld. It is the engine's own read, asked
+	// per file at the door into the pipeline rather than off a snapshot taken when the run
+	// began: a withholding recorded while a scan is under way holds for the rest of it.
+	PathIsExcluded(ctx context.Context, path string) (bool, error)
 
 	// Close releases the underlying database handle.
 	Close() error

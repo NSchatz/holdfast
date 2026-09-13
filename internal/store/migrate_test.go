@@ -1303,10 +1303,25 @@ func atShippedVersion(t *testing.T, path string, version int) {
 	if ver != version {
 		t.Fatalf("the fixture is at version %d, want %d", ver, version)
 	}
-	if version < len(migrations) && hasColumn(t, db, "schema_version") {
+	// The stamp column arrives AT stampedFromVersion and every version from there on
+	// legitimately has it, so the sanity check is against THAT step and not against the end
+	// of the history: while the stamp happened to be the last step, the two were the same
+	// number, and the first step appended after it turned a correct fixture into a fatal.
+	if version < stampedFromVersion && hasColumn(t, db, "schema_version") {
 		t.Fatalf("a v%d fixture already carries the version stamp - it is not an older database", version)
 	}
 }
+
+// stampedFromVersion is the step that added the per-record version stamp. It is looked up
+// in the history rather than written out, so appending a step cannot move it by accident.
+var stampedFromVersion = func() int {
+	for i, m := range migrations {
+		if strings.Contains(m.sql, "ADD COLUMN schema_version") {
+			return i + 1
+		}
+	}
+	return len(migrations)
+}()
 
 // seededJobRows is how many job records every fixture in this section carries. They are
 // written through the columns v1 gave the table and every version since has kept, so one

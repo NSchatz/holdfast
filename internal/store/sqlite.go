@@ -1026,6 +1026,171 @@ func (s *SQLite) ClearSkip(ctx context.Context, path, fingerprint, reason string
 	return nil
 }
 
+// --- the ledger-wide path search ----------------------------------------------
+
+// likeEscape turns a caller's TERM into the body of a LIKE pattern that matches those
+// characters literally.
+//
+// It is not a nicety: `_` matches any single character in LIKE and is in a large share of
+// real media filenames, so an unescaped search for `the_wire` would also match `the-wire`
+// and `the wire`, and the operator would be told a row exists for a file that does not.
+// The backslash is escaped FIRST, or escaping the wildcards would then escape their own
+// escape character.
+func likeEscape(term string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(term)
+}
+
+// SearchPath is documented on the Store interface.
+//
+// The rows and the total are two separate reads over the same WHERE, for the reason the
+// aggregates are their own reads: a total that cannot be computed must not take the rows
+// with it. The statuses are expanded to a placeholder list exactly as List does, so a
+// Status can never be interpolated into SQL text.
+func (s *SQLite) SearchPath(ctx context.Context, statuses []Status, term string, limit int) ([]Job, RowTotal, error) {
+	where, args := pathSearchWhere(statuses, term)
+	total := s.searchTotal(ctx, statuses, term, where, args)
+
+	q := `SELECT ` + jobColumns + ` FROM jobs WHERE ` + where + ` ORDER BY updated_at DESC, path ASC`
+	rowArgs := args
+	if limit > 0 {
+		q += ` LIMIT ?`
+		rowArgs = append(append([]any{}, args...), limit)
+	}
+	rows, err := s.db.QueryContext(ctx, q, rowArgs...)
+	if err != nil {
+		return nil, total, fmt.Errorf("store: search path: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, total, fmt.Errorf("store: search path scan: %w", err)
+		}
+		out = append(out, j)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, total, fmt.Errorf("store: search path rows: %w", err)
+	}
+	return out, total, nil
+}
+
+// pathSearchWhere is the one clause both halves of the search read through, so the rows
+// and the count can never describe different sets.
+func pathSearchWhere(statuses []Status, term string) (string, []any) {
+	args := make([]any, 0, len(statuses)+1)
+	where := `path LIKE ? ESCAPE '\'`
+	args = append(args, "%"+likeEscape(term)+"%")
+	if len(statuses) > 0 {
+		ph := make([]string, len(statuses))
+		for i, st := range statuses {
+			ph[i] = "?"
+			args = append(args, string(st))
+		}
+		where += ` AND status IN (` + strings.Join(ph, ", ") + `)`
+	}
+	return where, args
+}
+
+// searchTotal counts every matching row in the ledger. It states the SET it counted over,
+// because a figure whose set is unstated is one an operator reads as covering everything
+// they own - and this one deliberately covers more than the response ships.
+func (s *SQLite) searchTotal(ctx context.Context, statuses []Status, term, where string, args []any) RowTotal {
+	cov := Coverage{Set: "every matching row in the ledger"}
+	var n int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM jobs WHERE `+where, args...).Scan(&n); err != nil {
+		return RowTotal{Coverage: cov, Err: fmt.Errorf("store: search total: %w", err)}
+	}
+	return RowTotal{Coverage: cov, Count: n}
+}
+
+// --- withheld paths -------------------------------------------------------------
+
+// exclusionColumns is the projection every reader of a withholding uses, in ONE place, so
+// the SELECT text and the scan destinations cannot drift apart.
+const exclusionColumns = `path, created_at, schema_version`
+
+func scanExclusion(sc interface{ Scan(...any) error }) (PathExclusion, error) {
+	var e PathExclusion
+	var stamp stampScan
+	if err := sc.Scan(&e.Path, &e.CreatedAt, stamp.dest()); err != nil {
+		return PathExclusion{}, err
+	}
+	e.Stamp = stamp.stamp()
+	return e, nil
+}
+
+// ExcludePath is documented on the Store interface. DO NOTHING on conflict rather than an
+// upsert: re-recording a withholding must not move its created_at, which is the only thing
+// that says how long a file has been held out.
+func (s *SQLite) ExcludePath(ctx context.Context, path string) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO path_exclusions (path, created_at, schema_version) VALUES (?, ?, ?)
+		 ON CONFLICT(path) DO NOTHING`,
+		path, now(), currentStamp())
+	if err != nil {
+		return false, fmt.Errorf("store: exclude path: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: exclude path rows affected: %w", err)
+	}
+	return n > 0, nil
+}
+
+// UnexcludePath is documented on the Store interface.
+func (s *SQLite) UnexcludePath(ctx context.Context, path string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM path_exclusions WHERE path = ?`, path)
+	if err != nil {
+		return false, fmt.Errorf("store: unexclude path: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: unexclude path rows affected: %w", err)
+	}
+	return n > 0, nil
+}
+
+// ExcludedPaths is documented on the Store interface.
+func (s *SQLite) ExcludedPaths(ctx context.Context) ([]PathExclusion, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+exclusionColumns+` FROM path_exclusions ORDER BY created_at ASC, path ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("store: excluded paths: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []PathExclusion
+	for rows.Next() {
+		e, err := scanExclusion(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: excluded paths scan: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: excluded paths rows: %w", err)
+	}
+	return out, nil
+}
+
+// PathIsExcluded is documented on the Store interface. A point lookup on the primary key,
+// because the engine asks it once per file per scan.
+func (s *SQLite) PathIsExcluded(ctx context.Context, path string) (bool, error) {
+	var one int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM path_exclusions WHERE path = ? LIMIT 1`, path).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: path is excluded: %w", err)
+	}
+	return true, nil
+}
+
 // Get returns the current status and fail_count for path+fingerprint.
 func (s *SQLite) Get(ctx context.Context, path, fingerprint string) (Status, int, bool, error) {
 	var status string

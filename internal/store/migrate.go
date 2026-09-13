@@ -371,6 +371,36 @@ ALTER TABLE retained_originals ADD COLUMN schema_version INTEGER;
 ALTER TABLE swap_incidents     ADD COLUMN schema_version INTEGER;
 `,
 	},
+	{
+		// v15 - the paths an operator has withheld from the pipeline.
+		//
+		// A SEPARATE TABLE, and the lifetimes force it exactly as they forced the retained
+		// originals: a jobs row is keyed (path, fingerprint), Claim clears its outcome and a
+		// successful transcode prunes it, while a withholding is an instruction about a PATH
+		// and has to outlive every decision anybody takes about the bytes at it.
+		//
+		// It is RUNTIME STATE this daemon holds and nothing else. No configuration key is
+		// added by this step or by anything that reads it: the accepted top-level key set is
+		// closed, a reader of an unknown key refuses to start, and a path-withholding list in
+		// the configuration file is its own feature rather than a profile of one that is not
+		// there. Nothing here ever writes the configuration file.
+		//
+		// The path is the primary key, so recording the same path twice is one row and not
+		// two, and the index is on created_at because the one read that is not a point lookup
+		// is "every withheld path, oldest first".
+		name: "withheld paths",
+		// An empty table and one index. A withholding is recorded by an operator, never by a
+		// migration, and a fabricated one would silently stop work on a file nobody named.
+		rows: noRowChange,
+		sql: `
+CREATE TABLE IF NOT EXISTS path_exclusions (
+	path           TEXT NOT NULL PRIMARY KEY,
+	created_at     INTEGER NOT NULL,
+	schema_version INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_path_exclusions_created ON path_exclusions(created_at);
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the
