@@ -8,7 +8,8 @@ import (
 	"testing"
 )
 
-// The arithmetic, over filesystem shapes no test machine can be made to have.
+// AC-B9 and AC-B15, one layer down: the arithmetic the two refusals' number is made of,
+// over filesystem shapes no test machine can be made to have.
 //
 // Two decisions live in three lines, and both are invisible on the filesystems a test
 // actually runs on: a tmpfs reserves nothing for root, so f_bavail and f_bfree are

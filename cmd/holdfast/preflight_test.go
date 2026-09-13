@@ -9,6 +9,10 @@ import (
 	"testing"
 )
 
+// AC-A6 and AC-A7's unhappy path: the encoder a matching profile selects is the one that
+// has to work on this host, and a run whose profiles reach an encoder this host cannot
+// run must stop before it touches a file rather than fail those files one at a time.
+//
 // The startup capability preflight, once a profile can name its own encoder.
 //
 // The check exists because Validate can only confirm an encoder KEY is known: a

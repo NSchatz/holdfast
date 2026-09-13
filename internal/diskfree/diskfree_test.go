@@ -7,6 +7,10 @@ import (
 	"testing"
 )
 
+// AC-B9 and AC-B15 read this package for the number both refusals compare against: the
+// startup floor against scratch_min_free_gb, and the per-job pre-check against the size
+// of that job's source.
+//
 // The exported surface, over the REAL filesystem this test is running on. Two parts of
 // holdfast refuse work on the strength of this number - the startup floor and the
 // per-job pre-check - and both are graded through a seam, which is the right way to

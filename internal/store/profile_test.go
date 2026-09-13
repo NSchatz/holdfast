@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"path/filepath"
 	"testing"
 )
 
@@ -148,31 +150,99 @@ func TestRecordSkip_TheProfileThatDecidedTheSkipIsOnTheRow(t *testing.T) {
 	}
 }
 
-// The migration's own anti-vacuity arm: a database written before this column
-// existed gains it in place, keeps its rows, and reads every one of them back as
-// "the top-level settings ran" - which for this field is the TRUE answer for an old
-// row rather than a fabricated one.
+// The migration's own anti-vacuity arm: a database written BEFORE this column existed
+// gains it in place, keeps the rows it had, reads its old terminal row back as "the
+// top-level settings ran" - which for this field is the TRUE answer for such a row
+// rather than a fabricated one - and takes a profile on the next row it records.
+//
+// The fixture is a real database at the version before the column shipped, replayed
+// through the production applyMigration by atShippedVersion and opened through the
+// production door, because the question is what happens to a record written at the
+// PREVIOUS version. A fresh store with the field left unset would answer a different
+// question and pass either way.
 func TestMigrate_APreProfileDatabaseGainsTheColumnAndReadsAsTopLevel(t *testing.T) {
-	s := openTest(t)
-	ctx := context.Background()
-	if ok, err := s.Claim(ctx, "/lib/old.mkv", "fp", "w0", 3, sameConfig); err != nil || !ok {
-		t.Fatalf("Claim: ok=%v err=%v", ok, err)
+	path := filepath.Join(t.TempDir(), "jobs.db")
+	atShippedVersion(t, path, profileStepVersion(t)-1)
+	seedOutcomeEncoder(t, path, "/lib/done.mkv", "cpu")
+	before := rowCountOf(t, path, "jobs")
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
 	}
-	if err := s.Finish(ctx, "/lib/old.mkv", "fp", Done, &Outcome{Encoder: "cpu"}, 3); err != nil {
-		t.Fatalf("Finish: %v", err)
+	defer func() { _ = s.Close() }()
+	ctx := context.Background()
+
+	if after := rowCountOf(t, path, "jobs"); after != before {
+		t.Fatalf("the step moved the jobs table from %d rows to %d", before, after)
 	}
 
 	rows, err := s.List(ctx, []Status{Done}, 0)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(rows) != 1 {
-		t.Fatalf("want 1 done row, got %d", len(rows))
+	if len(rows) != 1 || rows[0].Path != "/lib/done.mkv" {
+		t.Fatalf("want the one pre-existing done row, got %+v", rows)
 	}
 	if rows[0].Outcome.Profile != "" {
-		t.Fatalf("a row written with no profile reads back as %q, want the empty string", rows[0].Outcome.Profile)
+		t.Fatalf("a row written before the column existed reads back as %q, want the empty string",
+			rows[0].Outcome.Profile)
 	}
 	if rows[0].Outcome.Encoder != "cpu" {
-		t.Fatalf("the rest of the outcome did not survive: %+v", rows[0].Outcome)
+		t.Fatalf("the rest of that row did not survive the step: %+v", rows[0].Outcome)
+	}
+
+	// The column is LIVE in place and not merely present: the next terminal row this
+	// migrated database records carries the profile that supplied its settings.
+	if ok, err := s.Claim(ctx, "/lib/new.mkv", "fp", "w0", 3, sameConfig); err != nil || !ok {
+		t.Fatalf("Claim: ok=%v err=%v", ok, err)
+	}
+	if err := s.Finish(ctx, "/lib/new.mkv", "fp", Done, &Outcome{Encoder: "svtav1", Profile: "4k-av1"}, 3); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	rows, err = s.List(ctx, []Status{Done}, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	got := map[string]string{}
+	for _, r := range rows {
+		got[r.Path] = r.Outcome.Profile
+	}
+	if got["/lib/new.mkv"] != "4k-av1" || got["/lib/done.mkv"] != "" {
+		t.Fatalf("after the migration the rows record %v, want the new row at 4k-av1 and the old one at \"\"", got)
+	}
+}
+
+// profileStepVersion is the version at which the encode-profile column shipped, found in
+// the history rather than written down a second time: a step appended after it moves this
+// build's version and must not move this one, or the fixture above stops being a database
+// that predates the column.
+func profileStepVersion(t *testing.T) int {
+	t.Helper()
+	for i, m := range migrations {
+		if m.name == "transcode profile column" {
+			return i + 1
+		}
+	}
+	t.Fatal("the history carries no transcode profile column step")
+	return 0
+}
+
+// seedOutcomeEncoder writes an outcome field onto a seeded row THROUGH the file rather
+// than through this package's writers, which at a version this build no longer speaks is
+// the only honest way to put one there.
+func seedOutcomeEncoder(t *testing.T, path, jobPath, encoderKey string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open the fixture: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	res, err := db.Exec(`UPDATE jobs SET encoder = ? WHERE path = ?`, encoderKey, jobPath)
+	if err != nil {
+		t.Fatalf("seed encoder on %s: %v", jobPath, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		t.Fatalf("seeding encoder on %s touched %d row(s) (err=%v), want 1", jobPath, n, err)
 	}
 }
