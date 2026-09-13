@@ -76,13 +76,24 @@ func (s *Server) routes() http.Handler {
 		r.Get("/events", s.handleEvents)
 
 		// Mutating endpoints — token required (and disabled entirely when no token
-		// is configured). These only ever start a scan or toggle pause; none can
-		// touch a file.
+		// is configured). These only ever start a scan, toggle pause, or WITHHOLD a
+		// path from the pipeline; none can touch a file.
+		//
+		// The ledger SEARCH is in here too, and not out of symmetry: the capped read
+		// endpoints ship at most a few hundred rows, so a ledger-wide search returns
+		// per-file rows they have never served. Gating it makes this a control-gated
+		// READ and adds no unauthenticated one.
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireToken)
 			r.Post("/rescan", s.handleRescan)
 			r.Post("/pause", s.handlePause)
 			r.Post("/resume", s.handleResume)
+			r.Get("/search", s.handleLedgerSearch)
+			r.Route("/exclusions", func(r chi.Router) {
+				r.Get("/", s.handleExclusionsList)
+				r.Post("/", s.handleExcludeAdd)
+				r.Delete("/", s.handleExcludeRemove)
+			})
 		})
 	})
 
@@ -293,7 +304,8 @@ func (s *Server) requireToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.token.Empty() {
 			http.Error(w, "control disabled: point server_auth_token at a secret "+
-				"(file:/run/secrets/... or cmd:...) to enable rescan/pause/resume - see docs/secrets.md",
+				"(file:/run/secrets/... or cmd:...) to enable rescan/pause/resume, the ledger search "+
+				"and the withheld paths - see docs/secrets.md",
 				http.StatusForbidden)
 			return
 		}
