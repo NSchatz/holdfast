@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -56,6 +57,7 @@ Usage:
 Commands:
   run        Load config and run one transcode scan over the library roots
   serve      Run the HTTP API + web UI (scan on demand / on an interval)
+  analyze    Census the library roots: file counts, bytes and distributions (reads only)
   resolve    Report and resolve a job whose swap outcome could not be established
   restore    List what the undo window is holding, or put one original back
   requeue    Offer a file the engine has already answered back to the pipeline
@@ -65,6 +67,8 @@ Commands:
 
 Run "holdfast <command> -h" for command flags.
 
+  holdfast analyze --config config.yaml            # what is in the library, without touching it
+  holdfast analyze --config config.yaml --health   # and which of it does not decode
   holdfast restore --config config.yaml            # what is retained, and for how long
   holdfast restore --config config.yaml <path>     # put that original back
   holdfast requeue --config config.yaml <path>     # re-open that file's terminal row
@@ -81,6 +85,8 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 		return cmdRun(args[1:], stdout, stderr)
 	case "serve":
 		return cmdServe(args[1:], stdout, stderr)
+	case "analyze":
+		return cmdAnalyze(args[1:], stdout, stderr)
 	case "resolve":
 		return cmdResolve(args[1:], stdout, stderr)
 	case "restore":
@@ -140,6 +146,19 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	if cfg == nil {
 		return code
 	}
+	// The configured working location, checked here for the same reason `run` and
+	// `serve` check it before their first encode: a missing, unwritable, overlapping
+	// or short-of-space scratch directory refuses those runs, and an operator asking
+	// `validate` whether their configuration will start is owed that answer rather
+	// than a "config OK" the next `run` contradicts.
+	//
+	// Only the SCRATCH half of the decision runs. `validate` is deliberately cheap -
+	// it loads the configuration and stops, with no ffmpeg lookup, no capability
+	// check and no library walk - and none of the scratch questions needs one.
+	if scratchCode := validateScratch(cfg, stderr); scratchCode != 0 {
+		return scratchCode
+	}
+
 	fmt.Fprintf(stdout, "config OK: %d library root(s)\n", len(cfg.LibraryRoots))
 	printResolvedProfiles(stdout, cfg)
 	// What this configuration MEANS, before what it has weakened. A disabled undo
@@ -222,6 +241,28 @@ func printResolvedProfiles(w io.Writer, cfg *config.Config) {
 			fmt.Fprintf(w, "  %-20s %-24s from %s\n", k.Knob, k.Value, k.Layer)
 		}
 	}
+}
+
+// validateScratch reports the scratch directory's start-or-refuse causes, in exactly
+// the account `run` and `serve` print, and returns a nonzero exit code when it would
+// refuse. With no scratch_dir configured it checks nothing at all and returns 0, so a
+// configuration that predates this item is unchanged.
+func validateScratch(cfg *config.Config, stderr io.Writer) int {
+	if strings.TrimSpace(cfg.ScratchDir) == "" {
+		return 0
+	}
+	res := startup.RunScratchOnly(startup.Check{
+		Roots:            cfg.LibraryRoots,
+		StateDir:         stateDirPath(cfg),
+		ScratchDir:       cfg.ScratchDir,
+		ScratchMinFreeGB: cfg.ScratchMinFreeGB,
+		Platform:         startupPlatform(),
+	})
+	if res.Start {
+		return 0
+	}
+	res.WriteRefusal(stderr)
+	return 1
 }
 
 // cmdRestore is the operator's half of the undo window (UNDO-6): with no argument it
@@ -357,8 +398,9 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 	// A hardware encoder (nvenc/qsv/vaapi/amf) with no matching device, or an
 	// ffmpeg build missing a codec, must stop before any work rather than let every
 	// file either fail one-by-one or (worse, for some hardware encoders) appear to
-	// "succeed" while writing nothing. Each profile's encoder is always a valid
-	// registry key here (Load defaults it to "cpu"; Validate rejects an unknown one).
+	// "succeed" while writing nothing. Every key here is a valid registry key (Load
+	// defaults the top level to "cpu"; Validate rejects an unknown or empty encoder at
+	// the top level, inside a library profile and inside an encode profile alike).
 	//
 	// EVERY distinct encoder any root resolved to is checked, not just the top-level
 	// one: a root that says `encoder: nvenc` on a host with no NVIDIA device must stop
@@ -367,6 +409,18 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 	for _, e := range distinctBy(cfg, func(p config.Profile) string { return p.Encoder }) {
 		if _, err := encoder.RequireAvailable(context.Background(), ffmpeg, ffprobe, e.key); err != nil {
 			fmt.Fprintf(stderr, "holdfast: %s: %v\n", e.where, err)
+			return nil, nil, 1
+		}
+	}
+	// And every encoder an ENCODE PROFILE can override a root's with, for the same
+	// reason: `encoder: svtav1` inside one is reached by every file its pattern selects,
+	// so a preflight blind to it would deliver the fail-early guarantee for some of an
+	// operator's library and not for the rest. The account names the profile that asked,
+	// because "nvenc is unavailable" sends an operator to a configuration whose top-level
+	// encoder is cpu.
+	for _, e := range cfg.EncodeProfileEncoders() {
+		if _, err := encoder.RequireAvailable(context.Background(), ffmpeg, ffprobe, e.Key); err != nil {
+			fmt.Fprintf(stderr, "holdfast: encode_profiles (%s): %v\n", e.Profile, err)
 			return nil, nil, 1
 		}
 	}
@@ -507,18 +561,33 @@ func stateDirPath(cfg *config.Config) string {
 // tested on has neither a network mount nor a second real filesystem.
 var startupPlatform = func() startup.Platform { return startup.System(nil, nil) }
 
+// startupDecision is the ONE construction of the start-or-refuse check, and every
+// command that takes it comes through here: `run` and `serve` to obey it, `analyze` to
+// report it and read the Coverage set it produced. One construction, because a second
+// caller assembling its own Check is a second answer waiting to diverge from the
+// decision the mutating path takes.
+func startupDecision(cfg *config.Config) startup.Result {
+	return startup.Run(startup.Check{
+		Roots:        cfg.LibraryRoots,
+		StateDir:     stateDirPath(cfg),
+		Declarations: cfg.AllowNonLocal,
+		IsMediaFile:  func(base string) bool { return engine.IsSourceName(base, cfg.VideoExts) },
+		// The configured working location, checked in the same decision and before
+		// anything is encoded: a scratch directory that is missing, is not a
+		// directory, is unwritable, is short of the floor or overlaps a library
+		// root refuses the run here rather than failing every file mid-encode.
+		ScratchDir:       cfg.ScratchDir,
+		ScratchMinFreeGB: cfg.ScratchMinFreeGB,
+		Platform:         startupPlatform(),
+	})
+}
+
 // startupCheck runs the whole-run start-or-refuse decision and reports it. On a
 // refusal it writes the operator-facing account to stderr - every cause it
 // established, each with the exact declaration that would permit it or, where no
 // declaration could, the remedy - and returns a nonzero exit code.
 func startupCheck(cfg *config.Config, log *slog.Logger, stderr io.Writer) (startup.Result, int) {
-	res := startup.Run(startup.Check{
-		Roots:        cfg.LibraryRoots,
-		StateDir:     stateDirPath(cfg),
-		Declarations: cfg.AllowNonLocal,
-		IsMediaFile:  func(base string) bool { return engine.IsSourceName(base, cfg.VideoExts) },
-		Platform:     startupPlatform(),
-	})
+	res := startupDecision(cfg)
 	res.Log(log)
 	if !res.Start {
 		res.WriteRefusal(stderr)
