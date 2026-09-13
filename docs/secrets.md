@@ -164,7 +164,11 @@ upload tokens, and npm registry auth directives. The forbidden names are `.env`,
 contains - allowing `.env.example`, `.env.sample` and `.env.template` exactly.
 
 Scope is **tracked files only**. An untracked file is not on its way into a commit, and
-`.gitignore` is the control for those.
+`.gitignore` is the control for those. That is why `.gitignore` carries `control-token.txt`
+and `.env`: those are the repo-relative credential files `docs/docker.md` and
+`docker-compose.yml` tell an operator to create, and a hand-made control token is exactly
+the shape the paragraph above says no family can recognise. A credential file this
+repository's own guidance names has to be un-stageable, not merely unmatched.
 
 A finding names the path, the line and the family, and prints at most an 8-byte prefix of
 what it matched. It never prints the whole match: a report is read by humans, pasted into

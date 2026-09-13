@@ -136,7 +136,7 @@ services:
 
     # --- the credential, mounted as a FILE (secrets K1) ---------------------------
     # Uncomment this and the top-level `secrets:` block below, create
-    # ./control-token.txt (mode 0400, and gitignore it), and set
+    # ./control-token.txt (mode 0400; .gitignore already covers it), and set
     #   HOLDFAST_SERVER_AUTH_TOKEN=file:/run/secrets/holdfast_control_token
     # in your .env. The reference is what the variable carries; the credential never
     # leaves the file, so no encoder child can read it out of the environment.

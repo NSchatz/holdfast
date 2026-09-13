@@ -24,6 +24,15 @@ config.yaml
 config.yml
 *.local.yaml
 
+# The credential files docs/docker.md and docker-compose.yml tell an operator to create
+# beside the compose file. The control token is a hand-made string: it carries no vendor
+# prefix, so no family in `make secret-scan` can recognise its CONTENT, and unlike `.env`
+# its NAME is on no forbidden list either. Without this entry the one path this
+# repository's own guidance names is the one path where a credential can be staged and
+# the scanner still calls the tree clean.
+control-token.txt
+.env
+
 # Editor / OS
 .DS_Store
 *.swp

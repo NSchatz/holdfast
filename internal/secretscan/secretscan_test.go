@@ -262,9 +262,10 @@ type missingRead struct{ mem }
 
 func (missingRead) Read(string) ([]byte, error) { return nil, fmt.Errorf("permission denied") }
 
-// A line carrying two families yields one finding, because the outcome - the tree is
-// refused, naming that line - does not depend on enumerating the rest.
-func TestSecretScan_ALineWithTwoFamiliesYieldsOneFinding(t *testing.T) {
+// AC-9: a finding names "the path, the line number and the family" - one finding, not one
+// per family on the line. The outcome AC-9 asks for - the tree refused, that line named -
+// does not depend on enumerating the rest.
+func TestSecretScan_AC9_ALineWithTwoFamiliesYieldsOneFinding(t *testing.T) {
 	f := fixtures()
 	line := f["AWS access key id"] + " " + f["GitHub token"]
 	got := ScanContent("x", []byte(line), Families())
@@ -273,9 +274,10 @@ func TestSecretScan_ALineWithTwoFamiliesYieldsOneFinding(t *testing.T) {
 	}
 }
 
-// An Anthropic key is reported as one, not as the looser OpenAI pattern that also claims
-// its prefix: the family a report names is the one an operator has to go and rotate.
-func TestSecretScan_TheMoreSpecificFamilyClaimsAnOverlappingPrefix(t *testing.T) {
+// AC-9: the family a finding names has to be the right one. An Anthropic key is reported
+// as one, not as the looser OpenAI pattern that also claims its prefix, because the family
+// in the report is what tells an operator which provider to go and rotate at.
+func TestSecretScan_AC9_TheMoreSpecificFamilyClaimsAnOverlappingPrefix(t *testing.T) {
 	got := ScanContent("x", []byte("k = "+fixtures()["Anthropic API key"]), Families())
 	if len(got) != 1 || got[0].Family != "Anthropic API key" {
 		t.Fatalf("got %v, want one Anthropic API key finding", got)

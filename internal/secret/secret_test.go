@@ -468,13 +468,17 @@ func TestSecret_AC4_ResolvingASetStopsAtTheFirstRefusal(t *testing.T) {
 	}
 }
 
-// The resolver's stdout is bounded: a broken resolver that streams must not exhaust memory
-// at startup, and what is kept is still exactly a credential's worth.
+// AC-5: the report "the resolver exited with status N" must only ever describe a resolver
+// that actually exited non-zero. The stdout cap is where that goes wrong silently - a cap
+// implemented as a short write makes io.Copy close the pipe, the resolver dies of SIGPIPE,
+// and a resolver that succeeded is reported under AC-5 as one that failed. So the bound is
+// graded as a BOUND: a resolver that streams must not exhaust memory at startup, and what
+// is kept is still exactly a credential's worth, with no failure manufactured.
 //
 // The fixture writes ~2MB and exits 0 on its own. Deliberately NOT a `yes | head -c`
 // pipeline: `head` closing the pipe kills `yes` with SIGPIPE, the shell reports 141, and the
 // case would then be graded on a resolver failure rather than on the cap.
-func TestSecret_AResolverStdoutIsBounded(t *testing.T) {
+func TestSecret_AC5_AResolverStdoutIsBoundedWithoutManufacturingAFailure(t *testing.T) {
 	ref := script(t, "notify_url",
 		`awk 'BEGIN { for (i = 0; i < 100000; i++) printf "%s", "aaaaaaaaaaaaaaaaaaaa" }'`)
 	v, err := ref.Resolve(context.Background())
@@ -490,9 +494,12 @@ func TestSecret_AResolverStdoutIsBounded(t *testing.T) {
 	}
 }
 
-// A reference renders as itself and never as a value, because it is what every failure
-// path and every log line is allowed to name.
-func TestSecret_ARefRendersAsItselfAndNamesItsKey(t *testing.T) {
+// AC-4: the refusal names "the configuration key and the reference", and AC-5, AC-7 and
+// AC-8 each owe the same naming on their own paths. All four reports are Ref.Key() and
+// Ref.String() underneath, so this grades the substrate: a Ref that rendered its locator
+// wrong, or emptily, would leave every one of those reports naming nothing an operator
+// could act on, while each criterion's own grader still passed on the prose around it.
+func TestSecret_AC4_ARefRendersAsItselfAndNamesItsKey(t *testing.T) {
 	ref := mustRef(t, "tautulli_api_key", "  FILE:/run/secrets/tautulli  ")
 	if got, want := ref.String(), "file:/run/secrets/tautulli"; got != want {
 		t.Errorf("String() = %q, want %q (the kind is normalised, the locator is not)", got, want)
