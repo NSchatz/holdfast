@@ -109,9 +109,10 @@ const noInputsRead = "none"
 // pairs, key-sorted and ";"-joined, or the empty string when nothing was recorded (which
 // nullString then stores as NULL).
 //
-// Sorted, because the value is COMPARED as a whole by the survey the startup report
-// reads (one GROUP BY over distinct values rather than a scan that decodes every row),
-// and a map's iteration order would make two identical records two different strings.
+// Sorted, because the stored text is what a reader COMPARES two records by - an operator
+// reading two rows, and the survey's decode cache, which keys on it so a library decided
+// under a handful of records is decoded a handful of times. A map's iteration order would
+// make two identical records two different strings.
 //
 // Both halves of every pair are escaped. A value here is whatever the operator put in
 // their YAML - a preset name, a container extension - and an unescaped ";" or "=" in one
