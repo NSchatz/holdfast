@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/secret"
 	"github.com/NSchatz/holdfast/internal/store"
 )
 
@@ -251,7 +252,7 @@ func TestCapTotal_AnUnreadableTotalStillReturnsTheRowsAndIsNeverReportedAsZero(t
 	broken := countFailingStore{SQLite: h.st}
 	ctrl := NewController(context.Background(), func(context.Context) error { return nil }, discard())
 	hub := NewHub(broken, ctrl, discard())
-	srv := New(context.Background(), configZero(), broken, ctrl, hub, nil, nil, discard())
+	srv := New(context.Background(), configZero(), secret.Value{}, broken, ctrl, hub, nil, nil, discard())
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 

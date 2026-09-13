@@ -363,22 +363,26 @@ dry_run: false
 # server_addr: 127.0.0.1:8080  # bind address. LOCALHOST by default (fail-safe: the
 #                              #   control surface is not network-exposed unless you
 #                              #   opt in — then front it with a reverse proxy).
-# server_auth_token: ""        # bearer token required for the MUTATING endpoints
-#                              #   (rescan/pause/resume). Empty = those endpoints are
-#                              #   DISABLED (read-only). Prefer the environment
-#                              #   variable HOLDFAST_SERVER_AUTH_TOKEN so no secret
-#                              #   lands in this file.
+# server_auth_token: ""        # A SECRET REFERENCE to the bearer token the MUTATING
+#                              #   endpoints (rescan/pause/resume) require. Empty = those
+#                              #   endpoints are DISABLED (read-only). See THE THREE
+#                              #   SECRET KEYS below: a literal token here, or in
+#                              #   HOLDFAST_SERVER_AUTH_TOKEN, REFUSES TO START.
+#                              #     server_auth_token: file:/run/secrets/holdfast-token
 # scan_interval_sec: 0         # 0 = scan once on startup + on demand (via the API).
 #                              #   >0 = also re-scan every N seconds.
 
 # --- observability + host-fair scheduling (`holdfast serve`) ---
 # metrics_enable: true         # expose Prometheus metrics at /metrics (read-only
 #                              #   instrumentation; best-effort, never affects files)
-# notify_url: ""               # a shoutrrr service URL for best-effort notifications
-#                              #   (per-file failure + per-scan summary), e.g.
-#                              #   ntfy://ntfy.sh/mytopic or a Discord/Gotify URL.
-#                              #   Empty disables. May carry a secret — prefer the env
-#                              #   var HOLDFAST_NOTIFY_URL over this file.
+# notify_url: ""               # A SECRET REFERENCE to a shoutrrr service URL, for
+#                              #   best-effort notifications (per-file failure + per-scan
+#                              #   summary). The WHOLE URL is the secret: a shoutrrr URL
+#                              #   carries its credential in its userinfo, host, path or
+#                              #   query. Empty disables. A literal URL here refuses to
+#                              #   start; put the URL in a file instead:
+#                              #     notify_url: file:/run/secrets/holdfast-notify-url
+#                              #   (that file then holds e.g. ntfy://ntfy.sh/mytopic)
 # run_window: ""               # daily host-fair window "HH:MM-HH:MM" (local time)
 #                              #   during which new work may start; empty = always.
 #                              #   Outside it, serve stops feeding NEW files (an
@@ -388,4 +392,36 @@ dry_run: false
 # tautulli_url: ""             # optional Plex-aware pause: while Tautulli reports an
 # tautulli_api_key: ""         #   active stream, stop feeding new files. Both required
 #                              #   to enable; a Tautulli outage fails OPEN (never halts
-#                              #   transcoding). Prefer env vars for the API key.
+#                              #   transcoding). tautulli_url is an ADDRESS and stays
+#                              #   plain; tautulli_api_key is a SECRET REFERENCE:
+#                              #     tautulli_api_key: file:/run/secrets/tautulli-key
+
+# --- THE THREE SECRET KEYS (secrets K1) ---------------------------------------
+# server_auth_token, notify_url and tautulli_api_key carry a REFERENCE to a credential,
+# never a credential. Two forms, and deliberately no third:
+#
+#   file:/run/secrets/holdfast-token     the file's CONTENTS are the value
+#   cmd:/usr/local/bin/fetch-my-secret   the command's STDOUT is the value
+#
+# A LITERAL credential in any of those three keys - in this file OR in the matching
+# HOLDFAST_* environment variable - REFUSES TO START, naming the key and how to convert
+# it. That is deliberate, and the reason is the encoder: holdfast starts ffmpeg and
+# ffprobe as child processes, and a child inherits its parent's environment, so a
+# credential in holdfast's environment is readable from every encoder invocation's
+# /proc/<pid>/environ. An `env:` reference form would have the same problem, so there
+# is not one.
+#
+# Migrating from a literal in HOLDFAST_SERVER_AUTH_TOKEN? Write the token into a file
+# (mode 0400) and set that same variable to `file:/that/path`. The variable still works -
+# it carries the reference now, which is not a secret.
+#
+# A `cmd:` locator is split on whitespace and run with NO SHELL, so there is nothing to
+# quote and no injection surface; wrap it in a script if you need a pipeline. One trailing
+# newline is stripped from either form. A cmd: resolver has 5s to terminate, and its
+# stderr is discarded unread rather than logged - a resolver that fails after printing the
+# credential is the common shape, and quoting its diagnostic is how the credential gets
+# published.
+#
+# Both are checked AT START: a literal is refused, and every configured reference is
+# resolved before the library is walked. `holdfast validate` checks the shape; it does not
+# reach into a secret store. docs/secrets.md is the whole story.

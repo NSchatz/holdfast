@@ -34,6 +34,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/notify"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/schedule"
+	"github.com/NSchatz/holdfast/internal/secret"
 	"github.com/NSchatz/holdfast/internal/server"
 	"github.com/NSchatz/holdfast/internal/sourceoffer"
 	"github.com/NSchatz/holdfast/internal/startup"
@@ -526,6 +527,30 @@ func startupCheck(cfg *config.Config, log *slog.Logger, stderr io.Writer) (start
 	return res, 0
 }
 
+// resolveSecrets turns every configured secret reference into a value, ONCE, at start
+// (secrets K1, K5). It is the single resolution site: `run` and `serve` both come through
+// here before any scan, encode or swap work, so a reference the resolver cannot produce is
+// a startup refusal naming the key and the reference rather than a failure hours in.
+//
+// The refusal is written to stderr as the resolver's own error, which by construction
+// carries the key, the reference and the resolver's exit status, and never a candidate
+// value or a byte the resolver printed.
+func resolveSecrets(ctx context.Context, cfg *config.Config, stderr io.Writer) (*secret.Set, int) {
+	refs, err := cfg.SecretRefs()
+	if err != nil {
+		// Unreachable through loadConfig (Validate already refused a literal), and kept
+		// because a future caller that skips Validate must not silently resolve nothing.
+		fmt.Fprintf(stderr, "holdfast: invalid config: %v\n", err)
+		return nil, 1
+	}
+	set, err := secret.Resolve(ctx, refs)
+	if err != nil {
+		fmt.Fprintf(stderr, "holdfast: refusing to start: %v\n", err)
+		return nil, 1
+	}
+	return set, 0
+}
+
 func cmdRun(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	cfg, code := loadConfig(fs, args, stderr)
@@ -533,6 +558,15 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 	log := logging.New(cfg.LogLevel)
+
+	// Every configured reference is proved resolvable BEFORE the library is walked or a
+	// single frame is encoded, even though a oneshot run consumes none of the three
+	// itself: a configuration error an operator discovers after a four-hour pass is a
+	// configuration error that was reported too late (secrets K5). The set is discarded
+	// here, so no plaintext outlives this statement in `run`.
+	if _, code := resolveSecrets(context.Background(), cfg, stderr); code != 0 {
+		return code
+	}
 
 	log.Info("holdfast starting",
 		"version", version.Version,
@@ -660,6 +694,15 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		return 1
 	}
 
+	// THE SECRETS, resolved ONCE, here, before the store is opened and before any scan,
+	// encode or swap work (secrets K1, K5). Each resolved value goes to exactly one
+	// consumer below and nowhere else: not into cfg, not into a log line, not into the
+	// environment any ffmpeg child inherits.
+	secrets, code := resolveSecrets(ctx, cfg, stderr)
+	if code != 0 {
+		return code
+	}
+
 	eng, st, code := buildEngine(cfg, log, stderr)
 	if code != 0 {
 		return code
@@ -682,7 +725,7 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		metricsHandler = mx.Handler()
 	}
 
-	notifier := notify.New(cfg.NotifyURL, log)
+	notifier := notify.New(cfg.SecretRef("notify_url"), secrets.Get("notify_url"), log)
 	if notifier.Enabled() {
 		observers = append(observers, notifier.Observe)
 		ctrl.SetScanHooks(notifier.ScanStarted, notifier.ScanFinished)
@@ -693,7 +736,9 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	// only ever DELAYS work. The engine consults it (throttled) between files; Rescan
 	// consults it before starting a scan.
 	window, _ := schedule.ParseWindow(cfg.RunWindow) // already validated
-	sched := schedule.New(window, cfg.MaxLoad, schedule.NewTautulli(cfg.TautulliURL, cfg.TautulliAPIKey), log)
+	tautulli := schedule.NewTautulli(cfg.TautulliURL,
+		cfg.SecretRef("tautulli_api_key"), secrets.Get("tautulli_api_key"))
+	sched := schedule.New(window, cfg.MaxLoad, tautulli, log)
 	ctrl.SetGate(func() (bool, string) { return sched.MayRun(ctx) })
 	eng.Paused = func() bool {
 		if ctrl.Paused() {
@@ -703,7 +748,8 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		return !ok
 	}
 
-	srv := server.New(ctx, *cfg, st, ctrl, hub, webui.HandlerFor(offer), metricsHandler, log)
+	srv := server.New(ctx, *cfg, secrets.Get("server_auth_token"), st, ctrl, hub,
+		webui.HandlerFor(offer), metricsHandler, log)
 	var bg sync.WaitGroup
 	bg.Add(3)
 	go func() { defer bg.Done(); hub.Run(ctx) }()
@@ -716,13 +762,13 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	go func() {
 		log.Info("serve listening",
 			"addr", addr,
-			"control_enabled", cfg.ServerAuthToken != "",
+			"control_enabled", !secrets.Get("server_auth_token").Empty(),
 			"scan_interval_sec", cfg.ScanIntervalSec,
 			"metrics", cfg.MetricsEnable,
 			"notify", notifier.Enabled(),
 			"run_window", window.String(),
 			"max_load", cfg.MaxLoad,
-			"tautulli", cfg.TautulliURL != "" && cfg.TautulliAPIKey != "",
+			"tautulli", tautulli != nil,
 			"version", version.Version,
 		)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

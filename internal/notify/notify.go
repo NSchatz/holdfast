@@ -10,12 +10,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 
 	"github.com/nicholas-fedor/shoutrrr"
 
 	"github.com/NSchatz/holdfast/internal/engine"
+	"github.com/NSchatz/holdfast/internal/secret"
 	"github.com/NSchatz/holdfast/internal/store"
 )
 
@@ -40,8 +40,9 @@ type SendFunc func(url, message string) error
 // Notifier turns engine events into notifications: a message per failed file, and a
 // summary per scan. Safe for concurrent Observe calls (engine workers).
 type Notifier struct {
-	url   string
-	label string // log-safe redaction of url (scheme only — never a credential)
+	url   secret.Value
+	ref   secret.Ref
+	label string // what a log line is allowed to say: the key and its reference
 	log   *slog.Logger
 	send  SendFunc
 
@@ -51,19 +52,17 @@ type Notifier struct {
 	tally tally
 }
 
-// redactURL returns a log-safe label for a shoutrrr service URL: the scheme only.
-// A shoutrrr URL carries its credential in the URL itself — in the userinfo
-// (discord://TOKEN@id), the host (slack://TOKEN-A/…), the path (gotify://host/TOKEN),
-// or the query — so ONLY the scheme is universally safe to log. The raw URL and the
-// shoutrrr error string (which quotes the raw URL) must never reach the logs.
-func redactURL(raw string) string {
-	if i := strings.Index(raw, "://"); i > 0 {
-		return raw[:i] + "://<redacted>"
+// label is what a failure is allowed to name: the configuration key and the REFERENCE it
+// carries. A shoutrrr URL carries its credential in the URL itself - in the userinfo
+// (discord://TOKEN@id), the host (slack://TOKEN-A/...), the path (gotify://host/TOKEN) or
+// the query - so no part of the resolved URL is safe to log, not even its scheme, and the
+// shoutrrr error string (which quotes the raw URL) must never reach the logs either. The
+// reference names the secret without disclosing it, which is the whole point of it.
+func label(ref secret.Ref) string {
+	if !ref.Configured() {
+		return ref.Key()
 	}
-	if raw == "" {
-		return ""
-	}
-	return "<redacted>"
+	return ref.Key() + " (" + ref.String() + ")"
 }
 
 type tally struct {
@@ -76,22 +75,25 @@ type tally struct {
 	reclaimed                          int64
 }
 
-// New builds a Notifier for the given shoutrrr service URL ("" disables it).
-func New(url string, log *slog.Logger) *Notifier {
+// New builds a Notifier for a RESOLVED shoutrrr service URL and the reference it came
+// from (secrets K1). An empty value disables it. The reference is kept for the failure
+// path and the resolved URL is kept nowhere else: it is handed to send and never logged.
+func New(ref secret.Ref, url secret.Value, log *slog.Logger) *Notifier {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &Notifier{
 		url:   url,
-		label: redactURL(url),
+		ref:   ref,
+		label: label(ref),
 		log:   log,
 		send:  func(u, m string) error { return shoutrrr.Send(u, m) },
 		ch:    make(chan string, 64),
 	}
 }
 
-// Enabled reports whether a service URL is configured.
-func (n *Notifier) Enabled() bool { return n.url != "" }
+// Enabled reports whether a service URL was resolved.
+func (n *Notifier) Enabled() bool { return !n.url.Empty() }
 
 // Run drains the outbound queue until ctx is cancelled, sending each message
 // best-effort. Start it once in a goroutine before serving. A no-op sender loop when
@@ -104,12 +106,14 @@ func (n *Notifier) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case msg := <-n.ch:
-			if err := n.send(n.url, msg); err != nil {
+			if err := n.send(n.url.Expose(), msg); err != nil {
 				// Best-effort: a notification failure must never crash or block the
-				// daemon — log and move on. CRUCIAL: never log err (nor n.url) — the
-				// shoutrrr error quotes the raw service URL, which carries the
-				// credential. Log only the scheme-redacted label. See redactURL.
-				n.log.Warn("notification send failed (ignored — check the notify endpoint)", "service", n.label)
+				// daemon - log and move on, and the existing fail-open behaviour is
+				// unchanged. CRUCIAL: never log err (nor the resolved URL) - the
+				// shoutrrr error quotes the raw service URL, which IS the credential.
+				// Log the key and its reference, which name the secret without
+				// disclosing it or any credential-bearing part of the destination.
+				n.log.Warn("notification send failed (ignored - check the notify endpoint)", "key", n.label)
 			}
 		}
 	}

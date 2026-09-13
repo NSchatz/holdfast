@@ -28,6 +28,7 @@ import (
 	"github.com/knadh/koanf/v2"
 
 	"github.com/NSchatz/holdfast/internal/schedule"
+	"github.com/NSchatz/holdfast/internal/secret"
 )
 
 // envPrefix is the prefix for environment overrides: HOLDFAST_CRF=20 sets crf.
@@ -324,12 +325,14 @@ type Config struct {
 	// reverse proxy). An empty value is treated as the default by `serve` (never a
 	// bare ":8080" all-interfaces bind by accident).
 	ServerAddr string `yaml:"server_addr"`
-	// ServerAuthToken is the bearer token required on MUTATING endpoints
-	// (rescan/pause/resume). Empty (default) DISABLES those endpoints entirely —
-	// remote control is off until a token is explicitly set (fail-safe). Read
-	// endpoints and the UI never require it. Prefer supplying it via the
-	// HOLDFAST_SERVER_AUTH_TOKEN environment variable rather than the YAML file so
-	// no secret lands in a committed config.
+	// ServerAuthToken is a SECRET REFERENCE (secrets K1), not a token: it names where
+	// the bearer token required on the MUTATING endpoints (rescan/pause/resume) lives,
+	// and the value is resolved at the point of use and never stored here. Empty
+	// (default) DISABLES those endpoints entirely - remote control is off until a
+	// reference is configured (fail-safe). Read endpoints and the UI never require it.
+	//
+	// A literal token here, or in HOLDFAST_SERVER_AUTH_TOKEN, is a startup REFUSAL. See
+	// SecretRefs and internal/secret for the accepted forms and why there is no env: one.
 	ServerAuthToken string `yaml:"server_auth_token"`
 	// ScanIntervalSec, when > 0, makes `serve` re-scan the library every N seconds
 	// (in addition to an initial scan on startup and manual rescans via the API).
@@ -342,10 +345,10 @@ type Config struct {
 	// MetricsEnable exposes Prometheus metrics at /metrics (default true). Metrics
 	// are read-only instrumentation — best-effort, never affecting file handling.
 	MetricsEnable bool `yaml:"metrics_enable"`
-	// NotifyURL is a shoutrrr service URL (e.g. ntfy/Discord/Gotify) for best-effort
-	// notifications — a message per failed file + a per-scan summary. Empty (default)
-	// disables notifications. May carry a secret; prefer HOLDFAST_NOTIFY_URL over the
-	// YAML file.
+	// NotifyURL is a SECRET REFERENCE (secrets K1) naming where the shoutrrr service URL
+	// lives - a shoutrrr URL carries its credential in its userinfo, host, path or query,
+	// so the whole URL is the secret. Empty (default) disables notifications. A literal
+	// URL here, or in HOLDFAST_NOTIFY_URL, is a startup REFUSAL.
 	NotifyURL string `yaml:"notify_url"`
 	// RunWindow is a daily host-fair window "HH:MM-HH:MM" (local time) during which
 	// new work may start; empty (default) = always. Outside it, `serve` stops feeding
@@ -357,8 +360,52 @@ type Config struct {
 	// TautulliURL + TautulliAPIKey enable an optional Plex-aware pause: while Tautulli
 	// reports an active stream, `serve` stops feeding new files. Both must be set to
 	// enable it (default off). A Tautulli outage fails OPEN (never halts transcoding).
+	//
+	// TautulliURL is NOT a secret and stays a plain address. TautulliAPIKey is a SECRET
+	// REFERENCE (secrets K1): a literal key here, or in HOLDFAST_TAUTULLI_API_KEY, is a
+	// startup REFUSAL.
 	TautulliURL    string `yaml:"tautulli_url"`
 	TautulliAPIKey string `yaml:"tautulli_api_key"`
+}
+
+// SecretBearingKeys is the closed list of configuration keys whose value is a credential,
+// in the order SecretRefs reports them. Every one of them carries a REFERENCE (secrets
+// K1); `tautulli_url` and `server_addr` are addresses, not credentials, and are not here.
+var SecretBearingKeys = []string{"server_auth_token", "notify_url", "tautulli_api_key"}
+
+// SecretRefs parses all three secret-bearing keys into references, and is the ONE place
+// that reading happens: Validate calls it so every subcommand refuses a literal at start,
+// and the start-time resolution in cmd/holdfast calls it so neither can be looking at a
+// different set of keys than the other.
+//
+// It returns the first refusal, which for a pasted credential is a *secret.ErrLiteral
+// naming the key and how to convert it, with no part of the value in the message.
+func (c *Config) SecretRefs() ([]secret.Ref, error) {
+	raw := []string{c.ServerAuthToken, c.NotifyURL, c.TautulliAPIKey}
+	refs := make([]secret.Ref, 0, len(SecretBearingKeys))
+	for i, key := range SecretBearingKeys {
+		r, err := secret.ParseRef(key, raw[i])
+		if err != nil {
+			return nil, err
+		}
+		refs = append(refs, r)
+	}
+	return refs, nil
+}
+
+// SecretRef is one key's reference. It panics on an unknown key rather than returning a
+// zero one, because every caller is naming a constant from SecretBearingKeys.
+func (c *Config) SecretRef(key string) secret.Ref {
+	refs, err := c.SecretRefs()
+	if err != nil {
+		return secret.Ref{}
+	}
+	for _, r := range refs {
+		if r.Key() == key {
+			return r
+		}
+	}
+	panic("config: no secret-bearing key named " + key)
 }
 
 // EffectiveServerAddr returns the bind address `serve` should use, defaulting an
@@ -850,6 +897,15 @@ func (c *Config) Validate() error {
 	}
 	if c.ScanIntervalSec < 0 {
 		return fmt.Errorf("scan_interval_sec %d must be >= 0 (0 = scan once on startup + on demand)", c.ScanIntervalSec)
+	}
+
+	// Every secret-bearing key must carry a REFERENCE, never a credential (secrets K1).
+	// Checked HERE so that every subcommand which loads a config refuses a pasted token
+	// at start, before it can be read out of the file by anything else - and checked by
+	// SHAPE only, because proving a reference RESOLVES means touching a secret store and
+	// that belongs to the run, not to `validate`.
+	if _, err := c.SecretRefs(); err != nil {
+		return err
 	}
 
 	// Host-fair scheduling knobs (TRANSCODE-8).

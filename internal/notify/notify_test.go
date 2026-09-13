@@ -14,16 +14,29 @@ import (
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/engine"
+	"github.com/NSchatz/holdfast/internal/secret"
 	"github.com/NSchatz/holdfast/internal/store"
 )
 
 func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// testRef is the reference a test's notify_url is pretended to have come from. The
+// notifier only ever gets a RESOLVED value plus the reference it was resolved from, so a
+// test supplies both.
+func testRef(t *testing.T) secret.Ref {
+	t.Helper()
+	ref, err := secret.ParseRef("notify_url", "file:/run/secrets/holdfast-notify")
+	if err != nil {
+		t.Fatalf("ParseRef: %v", err)
+	}
+	return ref
+}
+
 // newWithSink builds a Notifier whose send captures messages on a channel.
 func newWithSink(t *testing.T, url string) (*Notifier, chan string) {
 	t.Helper()
 	sink := make(chan string, 16)
-	n := New(url, discard())
+	n := New(testRef(t), secret.NewValue(url), discard())
 	n.send = func(u, msg string) error {
 		if u != url {
 			t.Errorf("send called with url %q, want %q", u, url)
@@ -215,12 +228,16 @@ func (s *syncBuf) String() string {
 	return s.b.String()
 }
 
-// The credential in a shoutrrr URL must NEVER reach the logs — shoutrrr's own error
-// quotes the raw URL, so the notifier must log only a scheme-redacted label.
-func TestNotify_SendFailureNeverLeaksURLCredential(t *testing.T) {
+// AC-8: an outbound notification that fails names the key and its reference and carries
+// neither the resolved value nor any credential-bearing component of the destination -
+// not even its scheme, which in a shoutrrr URL is the only part that never carries one but
+// is also the part that identifies which third party a failure was sent to. shoutrrr's own
+// error quotes the raw URL verbatim, so the notifier must report the REFERENCE instead.
+// The fail-open behaviour is unchanged: the error is swallowed, never propagated.
+func TestNotify_AC8_SendFailureNamesTheReferenceAndNeverTheURL(t *testing.T) {
 	const secretURL = "discord://SUPERSECRETTOKEN@channel12345"
 	buf := &syncBuf{}
-	n := New(secretURL, slog.New(slog.NewTextHandler(buf, nil)))
+	n := New(testRef(t), secret.NewValue(secretURL), slog.New(slog.NewTextHandler(buf, nil)))
 	// Simulate shoutrrr: its error embeds the raw URL verbatim.
 	n.send = func(u, msg string) error {
 		return fmt.Errorf("sending message via service at %q: connection refused", u)
@@ -247,30 +264,39 @@ func TestNotify_SendFailureNeverLeaksURLCredential(t *testing.T) {
 	if strings.Contains(logged, secretURL) {
 		t.Fatalf("raw notify_url leaked into logs:\n%s", logged)
 	}
-	if !strings.Contains(logged, "discord://<redacted>") {
-		t.Fatalf("expected a scheme-redacted service label; got:\n%s", logged)
+	if strings.Contains(logged, "discord") {
+		t.Fatalf("the destination's scheme still names the third party the message went to:\n%s", logged)
+	}
+	if !strings.Contains(logged, "notify_url (file:/run/secrets/holdfast-notify)") {
+		t.Fatalf("expected the key and its reference in the failure line; got:\n%s", logged)
 	}
 }
 
-func TestRedactURL(t *testing.T) {
-	cases := map[string]string{
-		"discord://TOKEN@id":       "discord://<redacted>",
-		"gotify://host/TOKEN":      "gotify://<redacted>",
-		"slack://tokA/tokB/tokC":   "slack://<redacted>",
-		"ntfy://ntfy.sh/topic?x=1": "ntfy://<redacted>",
-		"":                         "",
-		"garbage-no-scheme":        "<redacted>",
+// AC-8: the label a failure is allowed to print is the key plus its reference, and an
+// unconfigured key degrades to the bare key rather than to an empty parenthesis.
+func TestNotify_AC8_LabelIsTheKeyAndItsReferenceOnly(t *testing.T) {
+	ref, err := secret.ParseRef("notify_url", "cmd:/usr/local/bin/fetch-notify-url --json")
+	if err != nil {
+		t.Fatalf("ParseRef: %v", err)
 	}
-	for in, want := range cases {
-		if got := redactURL(in); got != want {
-			t.Errorf("redactURL(%q) = %q, want %q", in, got, want)
-		}
+	if got, want := label(ref), "notify_url (cmd:/usr/local/bin/fetch-notify-url --json)"; got != want {
+		t.Errorf("label = %q, want %q", got, want)
+	}
+	if got, want := label(secret.Ref{}), ""; got != want {
+		t.Errorf("label of an unconfigured ref = %q, want %q", got, want)
+	}
+	unset, err := secret.ParseRef("notify_url", "")
+	if err != nil {
+		t.Fatalf("ParseRef(empty): %v", err)
+	}
+	if got, want := label(unset), "notify_url"; got != want {
+		t.Errorf("label of an unset key = %q, want %q", got, want)
 	}
 }
 
 func TestNotify_SendErrorNeverCrashesAndKeepsGoing(t *testing.T) {
 	var calls atomic.Int32
-	n := New("generic://example", discard())
+	n := New(testRef(t), secret.NewValue("generic://example"), discard())
 	first := make(chan struct{})
 	n.send = func(u, msg string) error {
 		if calls.Add(1) == 1 {
