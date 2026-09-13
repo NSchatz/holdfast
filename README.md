@@ -150,25 +150,17 @@ recognised-local set, the opt-in rules and what the startup traversal costs.
 ### The undo window (`restore`) - off by default
 
 The swap is the one irreversible thing holdfast does, and every gate in front of it is an **estimate**.
-The delete is not. `undo_window_hours` buys a bounded period in which a swap can be walked back:
-
-```yaml
-undo_window_hours: 24     # 0 (the default) = a swap is FINAL, and startup says so
-```
-
-```bash
-holdfast restore --config config.yaml                     # what is held, and for how long
-holdfast restore --config config.yaml /media/tv/ep.mkv    # put that original back
-```
+The delete is not. `undo_window_hours` buys a bounded period in which a swap can be walked back; at its
+default of `0` a swap is **FINAL**, and startup says so.
 
 The original is kept by a second **hard link**, so retention costs **no space at the moment it is
 taken** - but the space a swap reclaimed **does not come back until the window closes**, which for a
-first library pass means holding every original it replaced. So the API reports
-`bytes_held_by_undo_window` **separately** from the reclaimed totals, and a release reports the bytes it
-**actually** returned (removing a name frees the data only when it was the last one). A source whose
-original cannot be retained is **skipped, not swapped**, and a restore refuses rather than overwrite a
-file that has changed since the swap. Full reference, including what it costs and what it deliberately
-does not offer: **[docs/undo.md](docs/undo.md)**.
+first library pass means holding every original it replaced, so the API reports
+`bytes_held_by_undo_window` **separately** from the reclaimed totals. A source whose original cannot be
+retained is **skipped, not swapped**, and a restore refuses rather than overwrite a file that has
+changed since the swap. `holdfast restore` lists what is held and puts an original back; how to turn the
+window on and off, what it costs, when it closes and what it deliberately does not offer:
+**[docs/undo.md](docs/undo.md)**.
 
 ### Edit the YAML and the tool obeys (`requeue`)
 
