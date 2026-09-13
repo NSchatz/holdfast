@@ -14,8 +14,12 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/docscheck"
 	"github.com/NSchatz/holdfast/internal/engine"
+	"github.com/NSchatz/holdfast/internal/startup"
 	"github.com/NSchatz/holdfast/internal/store"
 )
 
@@ -829,5 +833,348 @@ func TestAnalyze_DegradedProbeStillReportsTheFilesystem(t *testing.T) {
 				t.Fatalf("the table does not say the distributions are unavailable:\n%s", out.String())
 			}
 		})
+	}
+}
+
+// censusPlatform is the host as the startup walk reads it, with two failures injected
+// that no permission bit can produce reliably on every machine this suite runs on: a
+// directory whose listing fails, and a directory whose listing returns a name that is
+// not there - which is exactly what a file deleted between the walk and the census
+// looks like from here.
+type censusPlatform struct {
+	startup.Platform
+	unlistable string
+	ghostIn    string
+}
+
+func (p censusPlatform) ReadDir(path string) ([]startup.Entry, error) {
+	if path == p.unlistable {
+		return nil, fs.ErrPermission
+	}
+	ents, err := p.Platform.ReadDir(path)
+	if err == nil && path == p.ghostIn {
+		ents = append(ents, startup.Entry{Name: "vanished.mkv"})
+	}
+	return ents, err
+}
+
+// TestAnalyze_ReportsWhatItCouldNotRead is AC6: the census completes over what it did
+// read, says how many directories it could not read and how many files it could not
+// inspect, and never reports an unread directory's contents as absent.
+func TestAnalyze_ReportsWhatItCouldNotRead(t *testing.T) {
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "media")
+	encodeFixture(t, filepath.Join(lib, "a.mkv"), "libx264", "320x240", "yuv420p")
+	locked := filepath.Join(lib, "locked")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	encodeFixture(t, filepath.Join(locked, "hidden.mkv"), "libx264", "320x240", "yuv420p")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("library_roots:\n  - "+lib+"\nstate_dir: "+
+		filepath.Join(dir, "state")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := startupPlatform
+	startupPlatform = func() startup.Platform {
+		return censusPlatform{Platform: startup.System(fixedType("ext4"), nil), unlistable: locked, ghostIn: lib}
+	}
+	t.Cleanup(func() { startupPlatform = old })
+
+	var out, errOut bytes.Buffer
+	if code := dispatch([]string{"analyze", "--config", cfgPath}, &out, &errOut); code != 0 {
+		t.Fatalf("analyze code = %d, want 0 - a census over what was read is still a census (stderr: %s)",
+			code, errOut.String())
+	}
+	c := analyzeJSON(t, cfgPath)
+	if c.Total.Sources.Files != 1 {
+		t.Fatalf("the census over what it read reports %d source(s), want 1", c.Total.Sources.Files)
+	}
+	if c.Total.Coverage.DirectoriesNotRead < 1 {
+		t.Fatalf("the census does not report the directory it could not read: %+v", c.Total.Coverage)
+	}
+	if c.Total.Coverage.FilesNotInspected != 1 {
+		t.Fatalf("the census reports %d file(s) it could not inspect, want 1", c.Total.Coverage.FilesNotInspected)
+	}
+	if !strings.Contains(c.Total.Coverage.Boundary, "UNKNOWN rather than absent") {
+		t.Fatalf("the census does not say that an unread directory's contents are unknown: %q",
+			c.Total.Coverage.Boundary)
+	}
+	if !strings.Contains(out.String(), "never reported as absent") {
+		t.Fatalf("the table does not say what the coverage boundary costs:\n%s", out.String())
+	}
+	found := false
+	for _, b := range c.Total.Coverage.NotReadWhy {
+		if b.Key == string(startup.NoticeUnreadable) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the census does not say WHY a directory went unread: %+v", c.Total.Coverage.NotReadWhy)
+	}
+}
+
+// TestAnalyze_AnEmptyRootIsACensusNotAnError is AC7a.
+func TestAnalyze_AnEmptyRootIsACensusNotAnError(t *testing.T) {
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "media")
+	if err := os.MkdirAll(filepath.Join(lib, "empty-subdir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeCensusFile(t, filepath.Join(lib, "readme.txt"), "no media here\n")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("library_roots:\n  - "+lib+"\nstate_dir: "+
+		filepath.Join(dir, "state")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	substitute(t, fixedType("ext4"))
+
+	var out, errOut bytes.Buffer
+	if code := dispatch([]string{"analyze", "--config", cfgPath}, &out, &errOut); code != 0 {
+		t.Fatalf("an empty library exited %d, want 0 (stderr: %s)", code, errOut.String())
+	}
+	c := analyzeJSON(t, cfgPath)
+	if c.Total.Sources.Files != 0 || c.Total.Sources.Bytes != 0 {
+		t.Fatalf("an empty library reports %d source(s): %+v", c.Total.Sources.Files, c.Total.Sources)
+	}
+	for _, d := range c.Total.Distributions {
+		if len(d.Buckets) != 0 || d.Excluded != 0 {
+			t.Fatalf("%s over an empty library is not empty: %+v", d.Name, d)
+		}
+		if d.Unavailable != "" {
+			t.Fatalf("%s is marked unavailable, but it was computable and empty: %q", d.Name, d.Unavailable)
+		}
+	}
+}
+
+// TestAnalyze_AMissingRootWritesTheSameRefusal is AC7b: the account is the one the
+// start-or-refuse decision itself writes, word for word - not a second wording of it.
+func TestAnalyze_AMissingRootWritesTheSameRefusal(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "not-there")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("library_roots:\n  - "+missing+"\nstate_dir: "+
+		filepath.Join(dir, "state")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	substitute(t, fixedType("ext4"))
+
+	var out, errOut bytes.Buffer
+	if code := dispatch([]string{"analyze", "--config", cfgPath}, &out, &errOut); code != 1 {
+		t.Fatalf("analyze over a missing root exited %d, want 1", code)
+	}
+	if !strings.Contains(errOut.String(), missing) {
+		t.Fatalf("the refusal does not name the root:\n%s", errOut.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("a refused census still wrote a report to stdout:\n%s", out.String())
+	}
+
+	var runOut, runErr bytes.Buffer
+	dispatch([]string{"run", "--config", cfgPath}, &runOut, &runErr)
+	const marker = "holdfast: refusing to start"
+	i, j := strings.Index(errOut.String(), marker), strings.Index(runErr.String(), marker)
+	if i < 0 || j < 0 {
+		t.Fatalf("one of the two never wrote the refusal account:\nanalyze:\n%s\nrun:\n%s", errOut.String(), runErr.String())
+	}
+	if errOut.String()[i:] != runErr.String()[j:] {
+		t.Fatalf("analyze writes a DIFFERENT account from run:\nanalyze:\n%s\nrun:\n%s",
+			errOut.String()[i:], runErr.String()[j:])
+	}
+}
+
+// TestAnalyze_ReportsTheStorageVerdictAndCensusesAnyway is AC8a, and AC8b beside it:
+// the same configuration that `run` refuses is one `analyze` reports on and proceeds
+// from, and `run` still refuses it exactly as it did.
+func TestAnalyze_ReportsTheStorageVerdictAndCensusesAnyway(t *testing.T) {
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "nas", "media")
+	encodeFixture(t, filepath.Join(lib, "movie.mkv"), "libx264", "320x240", "yuv420p")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("library_roots:\n  - "+lib+"\nstate_dir: "+
+		filepath.Join(dir, "state")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	substitute(t, typesByPrefix(map[string]string{filepath.Join(dir, "nas"): "nfs"}))
+
+	var out, errOut bytes.Buffer
+	if code := dispatch([]string{"analyze", "--config", cfgPath}, &out, &errOut); code != 0 {
+		t.Fatalf("analyze over storage that is not local exited %d, want 0 (stderr: %s)", code, errOut.String())
+	}
+	c := analyzeJSON(t, cfgPath)
+	if c.Storage.WouldStart {
+		t.Fatal("the census reports that a mutating run would start on storage that is not local")
+	}
+	if c.Storage.DecidedAt != rowStorageNotLocal || len(c.Storage.Causes) == 0 {
+		t.Fatalf("the storage verdict is not reported: %+v", c.Storage)
+	}
+	if c.Total.Sources.Files != 1 {
+		t.Fatalf("the census was not produced: %d source(s)", c.Total.Sources.Files)
+	}
+	for _, want := range []string{"nfs", lib, "REFUSE"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("the table does not report %q of the storage verdict:\n%s", want, out.String())
+		}
+	}
+
+	// AC8b: the mutating commands are untouched by any of this.
+	var runOut, runErr bytes.Buffer
+	if code := dispatch([]string{"run", "--config", cfgPath}, &runOut, &runErr); code != 1 {
+		t.Fatalf("run exited %d over storage analyze reported on: the gate moved", code)
+	}
+	if !strings.Contains(runErr.String(), "refusing to start") {
+		t.Fatalf("run no longer refuses:\n%s", runErr.String())
+	}
+}
+
+// TestAnalyze_ConfigErrorsAreTheOnesEveryOtherCommandGives is AC9, graded by comparing
+// analyze against the commands that already take a config: same message, same exit
+// code, and no directory listed or file probed on the way out.
+func TestAnalyze_ConfigErrorsAreTheOnesEveryOtherCommandGives(t *testing.T) {
+	dir := t.TempDir()
+	probes := filepath.Join(dir, "probes.log")
+	t.Setenv("HOLDFAST_FFPROBE", fakeTool(t, dir, "ffprobe", "echo \"$@\" >> "+probes+"\nexit 0\n"))
+
+	unreadable := filepath.Join(dir, "missing.yaml")
+	invalid := filepath.Join(dir, "invalid.yaml")
+	if err := os.WriteFile(invalid, []byte("library_roots: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"no --config at all", nil},
+		{"a config that cannot be loaded", []string{"--config", unreadable}},
+		{"a config that does not validate", []string{"--config", invalid}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var aOut, aErr bytes.Buffer
+			aCode := dispatch(append([]string{"analyze"}, tc.args...), &aOut, &aErr)
+			var vOut, vErr bytes.Buffer
+			vCode := dispatch(append([]string{"validate"}, tc.args...), &vOut, &vErr)
+			if aCode != vCode {
+				t.Fatalf("analyze exits %d where validate exits %d", aCode, vCode)
+			}
+			if aErr.String() != vErr.String() {
+				t.Fatalf("analyze says %q where validate says %q", aErr.String(), vErr.String())
+			}
+			if aCode == 0 {
+				t.Fatal("a broken config exited 0")
+			}
+			if aOut.Len() != 0 {
+				t.Fatalf("analyze wrote a report for a config it refused:\n%s", aOut.String())
+			}
+		})
+	}
+	if _, err := os.Stat(probes); err == nil {
+		body, _ := os.ReadFile(probes)
+		t.Fatalf("a file was probed despite the config failing:\n%s", body)
+	}
+}
+
+// TestAnalyze_IsDiscoverableTheWayEveryCommandIs is AC10a.
+func TestAnalyze_IsDiscoverableTheWayEveryCommandIs(t *testing.T) {
+	var out, errOut bytes.Buffer
+	dispatch(nil, &out, &errOut)
+	if !strings.Contains(errOut.String(), "analyze") {
+		t.Fatalf("`holdfast` with no arguments does not list analyze:\n%s", errOut.String())
+	}
+	line := ""
+	for _, l := range strings.Split(errOut.String(), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "analyze ") {
+			line = l
+		}
+	}
+	if len(strings.Fields(line)) < 3 {
+		t.Fatalf("analyze is listed without a description: %q", line)
+	}
+
+	var hOut, hErr bytes.Buffer
+	if code := dispatch([]string{"analyze", "-h"}, &hOut, &hErr); code != 0 {
+		t.Fatalf("analyze -h exited %d, want 0", code)
+	}
+	help := hOut.String() + hErr.String()
+	for _, flagName := range []string{"-config", "-json", "-health"} {
+		if !strings.Contains(help, flagName) {
+			t.Fatalf("analyze -h does not list %s:\n%s", flagName, help)
+		}
+	}
+	for _, described := range []string{"JSON document", "decode"} {
+		if !strings.Contains(help, described) {
+			t.Fatalf("analyze -h lists a flag without saying what it does (%q):\n%s", described, help)
+		}
+	}
+}
+
+// TestAnalyze_IsInTheReadmeQuickStart is AC10c: the command is discoverable without
+// reading the source, in the block every other command is shown in.
+func TestAnalyze_IsInTheReadmeQuickStart(t *testing.T) {
+	root, err := docscheck.RepoRoot(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(root, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	quick := ""
+	for _, section := range strings.Split(string(body), "\n## ") {
+		if strings.HasPrefix(section, "Quick start") {
+			quick = section
+		}
+	}
+	if quick == "" {
+		t.Fatal("the README has no quick start section")
+	}
+	if !strings.Contains(quick, "holdfast analyze") {
+		t.Fatalf("the quick start does not show `holdfast analyze`:\n%s", quick)
+	}
+	if !strings.Contains(quick, "holdfast run") {
+		t.Fatalf("this test is no longer looking at the block the commands are shown in:\n%s", quick)
+	}
+}
+
+// TestAnalyze_AnInterruptedRunLeavesNothingBehind is the rest of AC1a: a census
+// interrupted in the middle of its probe pass has still written nothing, anywhere, and
+// says so rather than printing a report that looks complete.
+func TestAnalyze_AnInterruptedRunLeavesNothingBehind(t *testing.T) {
+	cfgPath, lib, state := censusLibrary(t, "")
+	want := seedCensusLedger(t, state, "/gone/vanished.mkv")
+	dir := t.TempDir()
+	started := filepath.Join(dir, "started")
+	// A probe that announces itself and then hangs, so the interruption lands INSIDE
+	// the pass rather than at a moment the test guessed at.
+	t.Setenv("HOLDFAST_FFPROBE", fakeTool(t, dir, "ffprobe", "touch "+started+"\nsleep 30\n"))
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	libBefore := treeSnapshot(t, lib)
+	stateBefore := treeSnapshot(t, state)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		for i := 0; i < 600; i++ {
+			if _, err := os.Stat(started); err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		cancel()
+	}()
+	var out, errOut bytes.Buffer
+	code := runAnalyze(ctx, cfg, analyzeOptions{}, &out, &errOut)
+	if code == 0 {
+		t.Fatalf("an interrupted census exited 0:\n%s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "interrupted") {
+		t.Fatalf("an interrupted census does not say so:\n%s", errOut.String())
+	}
+	assertSameTree(t, "the library root", libBefore, treeSnapshot(t, lib))
+	assertSameTree(t, "the state directory", stateBefore, treeSnapshot(t, state))
+	if got := jobRowCount(t, state); got != want {
+		t.Fatalf("the interrupted census left %d row(s) in the ledger, want %d", got, want)
 	}
 }
