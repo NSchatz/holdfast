@@ -160,7 +160,7 @@ the hostname resolves, not after.
 
 The mutating endpoints stay **disabled** until a control token is configured. With no
 `server_auth_token` reference set (or `HOLDFAST_SERVER_AUTH_TOKEN` in the environment),
-`rescan`, `pause` and `resume` answer **403** to every caller - a safe default, not a broken one, and
+`rescan`, `scan`, `pause` and `resume` answer **403** to every caller - a safe default, not a broken one, and
 the dashboard and the read API still work. A proxy identity header (`Remote-User`,
 `Remote-Groups`, `Remote-Email`, `Remote-Name`, any `X-Forwarded-*`) is **never**
 authorization for them: only a matching `Authorization: Bearer` token is, so a proxy that
@@ -195,6 +195,108 @@ That is deliberate: holdfast starts `ffmpeg` as a child process, a child inherit
 parent's environment, and a credential in the environment is readable from every encoder
 invocation's `/proc/<pid>/environ`. The same applies to `notify_url` and
 `tautulli_api_key`. `docs/secrets.md` has the reference forms and the migration.
+
+## Telling holdfast about one file: Sonarr / Radarr
+
+`POST /api/scan` takes a list of paths and looks at exactly those files. The *arr already
+knows when an import finished, which is the hard part, so wiring this up lets you turn the
+periodic scan off entirely (`scan_interval_sec: 0`) and still have every new file examined
+the moment it lands.
+
+It is a **targeted scan**, not a second pipeline. An accepted path goes through the same
+guards, the same claim and the same swap discipline a whole-library scan puts it through,
+and records the same verdict. It re-encodes nothing a scan would have skipped, and it is
+**not** `requeue`: a file a terminal row already answered stays answered.
+
+### The request
+
+```bash
+curl -sS -X POST http://holdfast:8080/api/scan \
+  -H "Authorization: Bearer $(cat /run/secrets/holdfast_control_token)" \
+  -H "Content-Type: application/json" \
+  -d '{"paths": ["/library/tv/Show/Season 01/Show - S01E01.mkv"]}'
+```
+
+The token is the value `server_auth_token` points at - the same one `rescan`, `pause` and
+`resume` take. With no control token configured this answers **403**, like every other
+mutating endpoint.
+
+The answer is **202** with a per-path report, and it comes back immediately: the file is
+queued, not encoded while you wait. Full request and response shapes, every refusal status,
+and the per-request limits are in [docs/api-reference.md](api-reference.md).
+
+### Sonarr / Radarr: `Connect > Custom Script`
+
+This is the route that needs nothing in between, because the *arr hands the script the
+imported file's path in its own environment variable. Add a script to the container the
+*arr runs in, and point `Settings > Connect > + > Custom Script` at it with **On Import**
+and **On Upgrade** ticked:
+
+```bash
+#!/bin/sh
+# Sonarr sets sonarr_episodefile_path; Radarr sets radarr_moviefile_path.
+# On a Test both are empty, which is how this exits 0 without calling anything.
+path="${sonarr_episodefile_path:-$radarr_moviefile_path}"
+[ -n "$path" ] || exit 0
+
+curl -sS --fail-with-body -X POST http://holdfast:8080/api/scan \
+  -H "Authorization: Bearer ${HOLDFAST_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "$(printf '{"paths":["%s"]}' "$path")"
+```
+
+### Sonarr / Radarr: `Connect > Webhook`
+
+The Webhook connection posts **the *arr's own JSON**, which carries the path under
+`episodeFile.path` (Sonarr) or `movieFile.path` (Radarr), inside an envelope with an
+`eventType` and a good deal else. holdfast does not parse it: it reads `{"paths": [...]}`
+and nothing else, deliberately, because a webhook payload shape is a third party's schema
+and this endpoint is not an *arr client. So the Webhook connection reaches holdfast through
+a shim that reshapes the body - anything that speaks HTTP will do:
+
+| Field | Value |
+|---|---|
+| URL | `http://your-shim:9000/sonarr` |
+| Method | `POST` |
+| Username / Password | leave empty - holdfast takes a bearer token, not basic auth |
+
+and the shim forwards, adding the header and picking the one field out:
+
+```bash
+# jq -r '.episodeFile.path // .movieFile.path' turns the *arr envelope into the path,
+# and the body holdfast reads is built from that and nothing else.
+curl -sS -X POST http://holdfast:8080/api/scan \
+  -H "Authorization: Bearer ${HOLDFAST_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -c '{paths: [(.episodeFile.path // .movieFile.path)]}' <<<"$arr_payload")"
+```
+
+If you would rather not run a shim, use the Custom Script route above.
+
+### The paths must be the paths holdfast sees
+
+**This is the one thing that bites.** Sonarr sends the path *it* knows the file by, and
+that is the path inside **Sonarr's** container. holdfast resolves what it is sent against
+its own filesystem and against its own `library_roots`, so `/tv/Show/S01E01.mkv` from
+Sonarr means nothing to a holdfast that mounts the same file at
+`/library/tv/Show/S01E01.mkv`: the submission is **rejected**, under
+`outside-library-roots` or `not-a-regular-file`, and reported as such in the response. It
+is never silently ignored, and it never reaches a file holdfast was not pointed at.
+
+Two ways out, and the first is much better:
+
+- **Mount the library at the same path in both containers.** Give Sonarr, Radarr and
+  holdfast the identical bind (`/library:/library`), so every path any of them produces is
+  a path all of them understand. This is the same advice the *arr documentation gives for
+  hardlinks and atomic moves, so a deployment that already follows it needs nothing here.
+- **Rewrite the prefix in the shim or the script**, if the mounts genuinely cannot be
+  aligned: `path=$(printf '%s' "$path" | sed 's|^/tv/|/library/tv/|')`. Keep the rewrite in
+  one place. holdfast will not guess it for you - guessing a path prefix on a tool that
+  deletes originals is not a trade worth making.
+
+A submitted path is resolved (symbolic links followed, `..` resolved away) **before** it is
+checked against `library_roots`, so a path that climbs out of your library, or a link
+pointing outside it, is refused rather than acted on.
 
 ## GPU passthrough
 

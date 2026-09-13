@@ -817,12 +817,20 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		return !ok
 	}
 
+	// The targeted-scan queue (S0093), beside the controller rather than instead of it.
+	// An accepted path enters the SAME pipeline entry point a scan's worker uses, so
+	// every guard, the claim, the decision-input re-opening rule and the swap discipline
+	// apply to it unchanged; this is a queue and a worker pool, and it decides nothing.
+	subs := eng.NewSubmissions(0, 0)
+
 	srv := server.New(ctx, *cfg, secrets.Get("server_auth_token"), st, ctrl, hub,
 		webui.HandlerFor(offer), metricsHandler, log)
+	srv.SetSubmissions(subs)
 	var bg sync.WaitGroup
-	bg.Add(3)
+	bg.Add(4)
 	go func() { defer bg.Done(); hub.Run(ctx) }()
 	go func() { defer bg.Done(); notifier.Run(ctx) }()
+	go func() { defer bg.Done(); subs.Run(ctx) }()                               // drains POST /api/scan
 	go func() { defer bg.Done(); srv.StartScanLoop(ctx, cfg.ScanIntervalSec) }() // initial scan + optional interval
 
 	addr := cfg.EffectiveServerAddr()
@@ -863,9 +871,11 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	}
 	// Join background goroutines before the deferred st.Close(): ctx is already
 	// cancelled, so the scan loop + hub have stopped and any in-flight scan is
-	// unwinding — wait for the scan goroutine to finish issuing store calls so the
-	// store handle is never closed out from under it.
-	ctrl.Wait()
+	// unwinding - wait for the scan goroutine AND any in-flight targeted submission to
+	// finish issuing store calls so the store handle is never closed out from under
+	// them. srv.Wait joins both; submissions still queued are dropped unprocessed and
+	// unrecorded, because nothing looked at them.
+	srv.Wait()
 	bg.Wait()
 	return 0
 }
