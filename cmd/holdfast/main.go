@@ -871,7 +871,7 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	}
 	// Join background goroutines before the deferred st.Close(): ctx is already
 	// cancelled, so the scan loop + hub have stopped and any in-flight scan is
-	// unwinding — wait for the scan goroutine AND any in-flight targeted submission to
+	// unwinding - wait for the scan goroutine AND any in-flight targeted submission to
 	// finish issuing store calls so the store handle is never closed out from under
 	// them. srv.Wait joins both; submissions still queued are dropped unprocessed and
 	// unrecorded, because nothing looked at them.
