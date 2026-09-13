@@ -285,7 +285,7 @@ func (s *Server) handleResume(w http.ResponseWriter, _ *http.Request) {
 // --- auth --------------------------------------------------------------------
 
 // requireToken gates mutating endpoints. With no token resolved, control is
-// DISABLED (403) — remote control is off until an operator opts in by pointing
+// DISABLED (403) - remote control is off until an operator opts in by pointing
 // server_auth_token at a secret. A resolved token is compared in constant time, and it
 // is never written to a response body, a header or a log: the 401 says "unauthorized"
 // and nothing about what would have been accepted.
