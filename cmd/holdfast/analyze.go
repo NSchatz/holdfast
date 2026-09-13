@@ -302,14 +302,30 @@ var mechanismOrder = []string{
 }
 
 var mechanismDetail = map[string]string{
-	mechExt:       "the extension is not one the configured video_exts lists",
-	mechUndoDir:   "the undo window's retention area, which the enumeration skips whole",
-	mechTemp:      "a work-in-progress temp this tool wrote",
-	mechRetained:  "a replacement this tool retained because its job did not complete cleanly",
-	mechUndoName:  "an original the undo window is holding",
-	mechRecord:    "a path a parked job's record, or a recorded replacement, holds back",
-	mechIrregular: "a symbolic link, device, socket or FIFO - not a regular file, and never a source",
-	mechOther:     "an enumeration hold-back this report does not name individually",
+	mechExt:      "the extension is not one the configured video_exts lists",
+	mechUndoDir:  "the undo window's retention area, which the enumeration skips whole",
+	mechTemp:     "a work-in-progress temp this tool wrote",
+	mechRetained: "a replacement this tool retained because its job did not complete cleanly",
+	mechUndoName: "an original the undo window is holding",
+	mechRecord:   "a path a parked job's record, or a recorded replacement, holds back",
+	mechIrregular: "a symbolic link, device, socket or FIFO: not a regular file, so it is in neither " +
+		"figure. A symbolic link to media IS enumerated by a scan and then skipped by the symlinked-source " +
+		"guard, so it is reported here rather than counted as a source",
+	mechOther: "an enumeration hold-back this report does not name individually",
+}
+
+// notTraversed is exactly the set of startup reports that mean A DIRECTORY WAS NOT
+// LISTED, which is the only kind that bounds a census. The walk's other reports are
+// about declarations and classifications - a root that is present and empty, an opt-in
+// that covers nothing, a reduced guarantee, mount information that could not be read -
+// and counting one of those as a directory nobody read would inflate the one figure an
+// operator uses to decide how much of their library this census actually saw.
+var notTraversed = map[startup.NoticeKind]bool{
+	startup.NoticeUnreadable:      true,
+	startup.NoticeListingFailed:   true,
+	startup.NoticeUnresolvable:    true,
+	startup.NoticeLinkLeavesRoots: true,
+	startup.NoticeRegionWalked:    true,
 }
 
 // censusOverWalk builds the census from the startup walk's own listings. It opens no
@@ -386,6 +402,9 @@ func censusOverWalk(ctx context.Context, cfg *config.Config, res startup.Result)
 	}
 
 	for _, n := range res.Notices {
+		if !notTraversed[n.Kind] {
+			continue // a report about a declaration or a classification, not about a listing
+		}
 		if rc := byRoot(n.Path); rc != nil {
 			rc.notRead[string(n.Kind)]++
 			rc.Coverage.DirectoriesNotRead++
@@ -447,6 +466,13 @@ func (rc *rootCensus) finish() {
 	rc.Coverage.Boundary = "the coverage boundary is the last mechanism between the two figures above, " +
 		"and the only one carrying no file count: a directory the startup walk declined, could not read " +
 		"or never reached yields no file here, and what is inside it is UNKNOWN rather than absent"
+	// A root nothing was read under reports zeros, and a zero that means "nothing was
+	// read" must never be mistaken for the zero that means "nothing is there" - which is
+	// the same distinction the coverage boundary is about, at the scale of a whole root.
+	if rc.Coverage.DirectoriesRead == 0 && rc.Root != "" {
+		rc.Note = "the startup walk traversed NO directory under this root, so every figure below is " +
+			"zero because nothing was read - not because the root holds nothing. The coverage reasons say why."
+	}
 }
 
 // nameMechanism explains why a name is not a source. engine.IsSourceName has already
@@ -640,23 +666,33 @@ func (rc *rootCensus) fillDistributions(reason string) {
 		depth[depthKey(f.props)]++
 	}
 	rc.Distributions = []distribution{
-		newDistribution("video codec", population,
-			"unknown is a file ffprobe did not answer for, or answered for and found no video stream in; "+
-				"it is never guessed at from the name", codec, reason),
-		newDistribution("resolution band", population,
-			"by the coded height of the first video stream; see the declared band set", band, reason),
-		newDistribution("container", population,
-			"from the file's extension, which is what the configuration matches on; never probe-derived, "+
-				"so it survives an ffprobe that cannot answer", container, ""),
-		newDistribution("video bit depth", population,
-			"from the pixel format, parsed by the one parser the encoder uses (internal/hdr.ParsePixFmt); "+
-				"a format outside the recognised planar-YUV set is reported as such and never as a depth",
-			depth, reason),
+		newDistribution(distCodec, population, noteCodec, codec, reason),
+		newDistribution(distBand, population, noteBand, band, reason),
+		newDistribution(distContainer, population, noteContainer, container, ""),
+		newDistribution(distDepth, population, noteDepth, depth, reason),
 	}
 	for i := range rc.Distributions {
 		rc.Distributions[i].reconcile(rc.Sources.Files)
 	}
 }
+
+// The four distributions, named once. Their notes say what an unusual bucket MEANS,
+// which is the difference between a reader trusting a figure and guessing at it.
+const (
+	distCodec     = "video codec"
+	distBand      = "resolution band"
+	distContainer = "container"
+	distDepth     = "video bit depth"
+
+	noteCodec = "unknown is a file ffprobe did not answer for, or answered for and found no video " +
+		"stream in; it is never guessed at from the name"
+	noteBand      = "by the coded height of the first video stream; see the declared band set"
+	noteContainer = "from the file's extension, which is what the configuration matches on; never " +
+		"probe-derived, so it survives an ffprobe that cannot answer"
+	noteDepth = "from the pixel format, parsed by the one parser the encoder uses " +
+		"(internal/hdr.ParsePixFmt); a format outside the recognised planar-YUV set is reported as " +
+		"such and never as a depth"
+)
 
 func newDistribution(name, set, note string, counts map[string]int64, unavailable string) distribution {
 	d := distribution{Name: name, Set: set, Note: note, Unavailable: unavailable}
@@ -795,17 +831,17 @@ func (c *census) totalOfRoots() *rootCensus {
 			t.notRead[k] += n
 		}
 		for _, d := range rc.Distributions {
-			if d.Unavailable != "" && d.Name != "container" {
+			if d.Unavailable != "" && d.Name != distContainer {
 				unavailable = d.Unavailable
 			}
 			switch d.Name {
-			case "video codec":
+			case distCodec:
 				addBuckets(codec, d.Buckets)
-			case "resolution band":
+			case distBand:
 				addBuckets(band, d.Buckets)
-			case "container":
+			case distContainer:
 				addBuckets(container, d.Buckets)
-			case "video bit depth":
+			case distDepth:
 				addBuckets(depth, d.Buckets)
 			}
 		}
@@ -813,10 +849,10 @@ func (c *census) totalOfRoots() *rootCensus {
 	t.finish()
 	population := fmt.Sprintf("the %d source(s) under every configured library root", t.Sources.Files)
 	t.Distributions = []distribution{
-		newDistribution("video codec", population, "", codec, unavailable),
-		newDistribution("resolution band", population, "", band, unavailable),
-		newDistribution("container", population, "", container, ""),
-		newDistribution("video bit depth", population, "", depth, unavailable),
+		newDistribution(distCodec, population, noteCodec, codec, unavailable),
+		newDistribution(distBand, population, noteBand, band, unavailable),
+		newDistribution(distContainer, population, noteContainer, container, ""),
+		newDistribution(distDepth, population, noteDepth, depth, unavailable),
 	}
 	for i := range t.Distributions {
 		t.Distributions[i].reconcile(t.Sources.Files)

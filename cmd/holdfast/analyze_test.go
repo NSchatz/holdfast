@@ -208,21 +208,29 @@ func jobRowCount(t *testing.T, state string) int {
 // and every byte under the state directory and under the library root is the byte that
 // was there when the command started.
 func TestAnalyze_WritesNoJobRows(t *testing.T) {
-	cfgPath, lib, state := censusLibrary(t, "")
-	want := seedCensusLedger(t, state, "/gone/vanished.mkv")
+	for _, args := range [][]string{
+		{"analyze", "--config"},
+		{"analyze", "--health", "--config"},
+		{"analyze", "--json", "--health", "--config"},
+	} {
+		t.Run(strings.Join(args[1:len(args)-1], " "), func(t *testing.T) {
+			cfgPath, lib, state := censusLibrary(t, "")
+			want := seedCensusLedger(t, state, "/gone/vanished.mkv")
 
-	libBefore := treeSnapshot(t, lib)
-	stateBefore := treeSnapshot(t, state)
+			libBefore := treeSnapshot(t, lib)
+			stateBefore := treeSnapshot(t, state)
 
-	var out, errOut bytes.Buffer
-	if code := dispatch([]string{"analyze", "--config", cfgPath}, &out, &errOut); code != 0 {
-		t.Fatalf("analyze code = %d, want 0 (stderr: %s)", code, errOut.String())
-	}
+			var out, errOut bytes.Buffer
+			if code := dispatch(append(args, cfgPath), &out, &errOut); code != 0 {
+				t.Fatalf("analyze code = %d, want 0 (stderr: %s)", code, errOut.String())
+			}
 
-	assertSameTree(t, "the library root", libBefore, treeSnapshot(t, lib))
-	assertSameTree(t, "the state directory", stateBefore, treeSnapshot(t, state))
-	if got := jobRowCount(t, state); got != want {
-		t.Fatalf("the ledger holds %d row(s) after analyze, want the %d it held before", got, want)
+			assertSameTree(t, "the library root", libBefore, treeSnapshot(t, lib))
+			assertSameTree(t, "the state directory", stateBefore, treeSnapshot(t, state))
+			if got := jobRowCount(t, state); got != want {
+				t.Fatalf("the ledger holds %d row(s) after analyze, want the %d it held before", got, want)
+			}
+		})
 	}
 }
 
