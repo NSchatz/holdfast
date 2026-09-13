@@ -38,6 +38,28 @@ type Server struct {
 	metrics http.Handler
 	log     *slog.Logger
 	mux     http.Handler
+
+	// subs is the targeted-scan queue POST /api/scan feeds (S0093). Set once with
+	// SetSubmissions, before serving, the way the Controller's own hooks are; with none
+	// wired the endpoint refuses rather than accepting work nothing will process.
+	subs Submissions
+}
+
+// SetSubmissions wires the targeted-scan queue. Set it once, before serving. The route
+// exists either way - a surface that appeared and disappeared with a wiring detail would
+// be one no test could enumerate - and answers 503 until this is called.
+func (s *Server) SetSubmissions(subs Submissions) { s.subs = subs }
+
+// Wait joins the background work this server started: the scan goroutine and any
+// in-flight targeted submission. Call it during shutdown, after the base ctx is cancelled
+// and BEFORE the store handle is closed, so neither can issue a store call against a
+// closed handle. Submissions still waiting in the queue are dropped unprocessed and
+// unrecorded - nothing looked at them, so there is no decision to record.
+func (s *Server) Wait() {
+	s.ctrl.Wait()
+	if s.subs != nil {
+		s.subs.Wait()
+	}
 }
 
 // New builds the Server and its router. baseCtx bounds long-lived handlers (the SSE
@@ -81,6 +103,10 @@ func (s *Server) routes() http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireToken)
 			r.Post("/rescan", s.handleRescan)
+			// POST /api/scan targets a scan at named files (S0093). It re-opens no row,
+			// restores no original and resolves no parked incident: those stay LOCAL
+			// commands by ratified operator decision.
+			r.Post("/scan", s.handleScan)
 			r.Post("/pause", s.handlePause)
 			r.Post("/resume", s.handleResume)
 		})

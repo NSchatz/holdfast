@@ -222,6 +222,33 @@ type Engine struct {
 	// worker starts and only read afterwards. An atomic pointer rather than a plain field so
 	// a second RunOneshot can never be observed mid-write.
 	held atomic.Pointer[holdBacks]
+
+	// onClaim, when non-nil, is called with a path the instant ProcessFile takes the claim
+	// on it - the ONE signal that says a caller got PAST the door rather than being turned
+	// away at it. The targeted-submission queue (submit.go) reads it to report "this file is
+	// held out by a terminal row" without keeping a second copy of the store's re-opening
+	// rule, which is the rule that decides it.
+	//
+	// Set ONCE, before serving, exactly as Observer is; it is then read from every worker
+	// goroutine and never written again. It runs inline on a worker, so it must be
+	// non-blocking and concurrency-safe - the same contract Observer carries.
+	onClaim func(path string)
+}
+
+// EnsureHoldBacks publishes a hold-back snapshot when none has been published yet, so a
+// route into ProcessFile that is not a scan still reads the two record-based hold-backs.
+//
+// It never REPLACES a live snapshot. RunOneshot publishes one per pass and that pass reads
+// it from end to end, so overwriting it mid-pass would change what the scan in progress
+// holds back - which is exactly what this work may not do. Between scans the snapshot is
+// therefore as fresh as the last pass made it, which is the freshness a file enumerated
+// late in a long pass already gets; and the residue is the one loadHoldBacks already
+// documents, since Claim refuses an indeterminate row outright and a retained replacement
+// is held back by its NAME whatever any record says.
+func (e *Engine) EnsureHoldBacks(ctx context.Context) {
+	if e.held.Load() == nil {
+		e.held.CompareAndSwap(nil, e.loadHoldBacks(ctx))
+	}
 }
 
 // rename performs the swap's rename, routing through the test seam when one is set.
@@ -718,7 +745,7 @@ func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
 			// The retention area holds this tool's own retained originals and nothing
 			// else. Its files are already excluded by name (IsSourceName); skipping the
 			// directory too means no route at all feeds rescued bytes back to the encoder.
-			if filepath.Base(dir) == UndoDirName {
+			if IsRetentionDir(dir) {
 				continue
 			}
 			got, ok := pass.take(dir)
@@ -773,7 +800,7 @@ func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
 				// The retention area is never a source, and is skipped BEFORE being marked
 				// observed: a directory this run declined to list is not evidence about
 				// what is in it.
-				if d.Name() == UndoDirName {
+				if IsRetentionDir(path) {
 					return filepath.SkipDir
 				}
 				observed[path] = true
@@ -912,6 +939,9 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	}
 	if !claimed {
 		return nil
+	}
+	if e.onClaim != nil {
+		e.onClaim(f)
 	}
 	// The claim moved this row to probing: surface it as a live "started" signal carrying
 	// the worker, so the UI shows the file entering the pipeline immediately.
@@ -1641,29 +1671,6 @@ func attachedPictureCopyIndexes(streams []probe.VideoStream) []int {
 // isTempName reports whether a basename is a transcoder work-in-progress temp.
 func isTempName(base string) bool {
 	return strings.Contains(base, "."+TempMarker+".")
-}
-
-// IsSourceName reports whether a file BASENAME is one a scan would enumerate as
-// a source: it carries one of the configured video extensions and is not one of this
-// tool's own working files. Three things are excluded and each is a file holdfast
-// itself wrote, none of which is ever anybody's source even though each is itself a
-// *.mkv (or whatever the source was):
-//
-//   - a work-in-progress temp;
-//   - an original the undo window is holding (UNDO-6). A retention area whose files
-//     were enumerated would hand the encoder the very bytes the undo window is
-//     holding, re-encode them, and swap the result over them - destroying the thing an
-//     operator was given a window to recover;
-//   - a replacement this tool RETAINED (FILESYSTEM-1's record-free hold-back: a file
-//     holdfast wrote is never anybody's source, whether or not a record of it
-//     survived, and where the store could not be written none did).
-//
-// It is the ONE definition of "a media file this run would enumerate", shared by the
-// scan and by the startup walk, which must decide it from the name alone - it opens no
-// file, so the walk's cost is bounded by the directory tree and not by the library.
-func IsSourceName(base string, exts []string) bool {
-	return !isTempName(base) && !isUndoName(base) && !IsRetainedReplacementName(base) &&
-		matchesVideoExt(base, exts)
 }
 
 // pickTempPath returns a free temp path from this build's own construction and clears
