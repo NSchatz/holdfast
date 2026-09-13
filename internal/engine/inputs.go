@@ -70,12 +70,6 @@ func DecisionInputsFor(cfg config.Config) store.DecisionInputs {
 // svtav1/av1_nvenc. It defaults to "hevc" for an unknown or empty key (Validate rejects
 // an unknown encoder before the engine is ever built, so the default is a fallback and
 // not a live path).
-//
-// It is PER PROFILE because `encoder` is: one root may re-encode to hevc while another
-// re-encodes to av1, and the skip-already-target guard and the output-codec check must
-// each ask about the encoder that root actually uses. Asking about the top-level encoder
-// would skip every av1 file under an av1 root as "already at target" and reject every
-// hevc output under an hevc root.
 func targetCodecFor(prof config.Profile) string {
 	if spec, ok := encoder.Lookup(prof.Encoder); ok {
 		return spec.TargetCodec
@@ -83,9 +77,7 @@ func targetCodecFor(prof config.Profile) string {
 	return "hevc"
 }
 
-// inputsFor is what the profile deciding THIS file offers right now, handed to its Claim
-// so a terminal row is measured against the configuration in force for its own root
-// rather than treated as a permanent answer.
+// inputsFor is what the profile deciding THIS file offers right now, handed to its Claim.
 func (e *Engine) inputsFor(prof config.Profile) store.DecisionInputs {
 	return DecisionInputsForProfile(prof)
 }

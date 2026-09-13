@@ -15,9 +15,8 @@ import (
 	"strings"
 )
 
-// ErrMountInfoUnavailable reports that mount information is absent, unreadable or
-// unparseable. It is a classification input, never a coverage or termination one: the walk
-// still visits every directory and terminates, and such a path is `undetermined`, not a guess.
+// ErrMountInfoUnavailable reports mount information absent, unreadable or unparseable. It is a
+// classification input, never a coverage or termination one: the walk still covers and terminates.
 var ErrMountInfoUnavailable = errors.New("mount information is absent, unreadable or unparseable")
 
 // Region identifies the DIRECTORY OF UNDERLYING STORAGE a path exposes: two paths are the
@@ -42,25 +41,20 @@ type Info struct {
 
 type Entry struct {
 	Name string
-	// IsDir is the kind the LISTING itself reports, with no link followed: a
-	// symbolic link is not a directory here, whatever it points at.
+	// IsDir is the kind the LISTING reports, no link followed: a symlink is not a directory.
 	IsDir  bool
 	IsLink bool
 	// ResolvesToDir reports that FOLLOWING this entry reaches a directory. A
 	// Platform leaves it false - a listing does not follow links - and the walk
 	// fills it in from the inspection it already makes of every link and every
-	// subdirectory it meets. False therefore means "not established to be a
-	// directory", which is what a consumer that never followed the link would
-	// have concluded anyway.
+	// subdirectory it meets.
 	ResolvesToDir bool
 }
 
 // Platform is the substitutable view of the host the startup check reads, and the seam the
 // tests need: the gate a test runs on has neither a network mount nor a second real
-// filesystem. Every method reports a missing path as an error satisfying fs.ErrNotExist and
-// a refused look as one satisfying fs.ErrPermission, and the check distinguishes those two
-// from each other and from every other failure, so flattening them moves which row of
-// Decide fires.
+// filesystem. Every method reports a missing path as fs.ErrNotExist and a refused look as
+// fs.ErrPermission, and flattening those two moves which row of Decide fires.
 type Platform interface {
 	// A path that cannot be inspected refuses the run. Links are followed.
 	Inspect(path string) (Info, error)
@@ -77,16 +71,14 @@ type Platform interface {
 	FSType(path string) (string, error)
 
 	// MountPoint reports whether path is itself the root of a mounted filesystem. It MAY
-	// consult the mount table and reports ErrMountInfoUnavailable when that cannot be read,
-	// so absent mount information moves a classification but never coverage or termination.
+	// consult the mount table and reports ErrMountInfoUnavailable when that cannot be read.
 	MountPoint(path string) (bool, error)
 }
 
 func cleanPath(p string) string { return filepath.Clean(p) }
 
 // lexicallyBeneath reports whether path is LEXICALLY beneath root: over the two texts
-// alone, normalised, with no link resolution and no filesystem access at all, root is a
-// proper prefix of path ending at a separator boundary.
+// alone, with no link resolution and no filesystem access at all.
 func lexicallyBeneath(path, root string) bool {
 	p, r := cleanPath(path), cleanPath(root)
 	if p == r {
