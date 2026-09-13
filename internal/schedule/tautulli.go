@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/NSchatz/holdfast/internal/secret"
 )
 
 // Tautulli is a minimal client for the Tautulli (Plex monitoring) API — just enough
@@ -18,38 +21,78 @@ import (
 // during playback. It is entirely optional; New returns nil when unconfigured.
 type Tautulli struct {
 	baseURL string
-	apiKey  string
+	apiKey  secret.Value
+	ref     secret.Ref
 	client  *http.Client
 
 	// get is a seam for tests; production issues the real HTTP GET.
 	get func(ctx context.Context, rawURL string) ([]byte, error)
 }
 
-// NewTautulli builds a client, or returns nil if either the base URL or API key is
-// empty (the feature is off unless the operator supplies both).
-func NewTautulli(baseURL, apiKey string) *Tautulli {
+// NewTautulli builds a client from a base URL and a RESOLVED api key (secrets K1), or
+// returns nil if either is empty (the feature is off unless the operator supplies both).
+// The reference is kept for the failure path: Tautulli takes its api key in the QUERY
+// STRING, so the request URL is credential-bearing and no error may quote it.
+func NewTautulli(baseURL string, ref secret.Ref, apiKey secret.Value) *Tautulli {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	apiKey = strings.TrimSpace(apiKey)
-	if baseURL == "" || apiKey == "" {
+	if baseURL == "" || apiKey.Empty() {
 		return nil
 	}
 	t := &Tautulli{
 		baseURL: baseURL,
 		apiKey:  apiKey,
+		ref:     ref,
 		client:  &http.Client{Timeout: 5 * time.Second},
 	}
 	t.get = t.httpGet
 	return t
 }
 
+// sanitize replaces a transport error with one that names the configuration key and its
+// reference instead. net/http wraps every failure in a *url.Error carrying the REQUEST
+// URL, and that URL carries `apikey=<the credential>` - so the ordinary "log the error"
+// on the fail-open path printed the api key on every Tautulli outage. The failure the
+// operator needs to see is "the Tautulli call failed", and the key that decides it is the
+// reference; neither needs the destination's query string.
+func (t *Tautulli) sanitize(err error) error {
+	if err == nil {
+		return nil
+	}
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("tautulli: the %s request to %s failed: %s (tautulli_api_key is %s; "+
+			"neither the key nor the request URL is reported, because the URL carries the key)",
+			ue.Op, t.baseURL, unwrapMessage(ue), label(t.ref))
+	}
+	return err
+}
+
+// unwrapMessage is the innermost cause of a *url.Error, which is the part that says WHAT
+// went wrong (connection refused, i/o timeout, no such host) without the URL the outer
+// error prepends.
+func unwrapMessage(ue *url.Error) string {
+	if inner := errors.Unwrap(ue); inner != nil {
+		return inner.Error()
+	}
+	return "request failed"
+}
+
+// label names a secret-bearing key and the reference it carries, never its value.
+func label(ref secret.Ref) string {
+	if !ref.Configured() {
+		return "not configured"
+	}
+	return ref.String()
+}
+
 func (t *Tautulli) httpGet(ctx context.Context, rawURL string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, t.sanitize(err)
 	}
 	resp, err := t.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, t.sanitize(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
@@ -79,7 +122,7 @@ type activityResponse struct {
 // Streaming reports whether Tautulli currently sees at least one active stream.
 func (t *Tautulli) Streaming(ctx context.Context) (bool, error) {
 	q := url.Values{}
-	q.Set("apikey", t.apiKey)
+	q.Set("apikey", t.apiKey.Expose())
 	q.Set("cmd", "get_activity")
 	body, err := t.get(ctx, t.baseURL+"/api/v2?"+q.Encode())
 	if err != nil {

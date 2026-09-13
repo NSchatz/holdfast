@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"testing"
 	"time"
+
+	"github.com/NSchatz/holdfast/internal/secret"
 )
 
 func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -114,7 +116,7 @@ func TestMayRun_LoadCap(t *testing.T) {
 
 func TestMayRun_TautulliStreamingBlocksButOutageFailsOpen(t *testing.T) {
 	// Streaming → refuse.
-	taut := &Tautulli{baseURL: "x", apiKey: "y"}
+	taut := &Tautulli{baseURL: "x", apiKey: secret.NewValue("y")}
 	taut.get = func(ctx context.Context, u string) ([]byte, error) {
 		return []byte(`{"response":{"result":"success","data":{"stream_count":"2"}}}`), nil
 	}
@@ -161,7 +163,7 @@ func TestTautulli_StreamCountShapesAreTolerated(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			taut := &Tautulli{baseURL: "x", apiKey: "y"}
+			taut := &Tautulli{baseURL: "x", apiKey: secret.NewValue("y")}
 			taut.get = func(ctx context.Context, u string) ([]byte, error) {
 				return []byte(c.body), nil
 			}
@@ -177,7 +179,7 @@ func TestTautulli_StreamCountShapesAreTolerated(t *testing.T) {
 
 	// A genuine Tautulli-reported failure (result != success) is still a real error —
 	// leniency about the count must not swallow an actual API error.
-	taut := &Tautulli{baseURL: "x", apiKey: "y"}
+	taut := &Tautulli{baseURL: "x", apiKey: secret.NewValue("y")}
 	taut.get = func(ctx context.Context, u string) ([]byte, error) {
 		return []byte(`{"response":{"result":"error","message":"bad apikey"}}`), nil
 	}
@@ -187,13 +189,17 @@ func TestTautulli_StreamCountShapesAreTolerated(t *testing.T) {
 }
 
 func TestTautulli_NewRequiresBoth(t *testing.T) {
-	if NewTautulli("", "key") != nil {
+	ref, err := secret.ParseRef("tautulli_api_key", "file:/run/secrets/tautulli")
+	if err != nil {
+		t.Fatalf("ParseRef: %v", err)
+	}
+	if NewTautulli("", ref, secret.NewValue("key")) != nil {
 		t.Error("empty base URL must yield nil")
 	}
-	if NewTautulli("http://host", "") != nil {
-		t.Error("empty api key must yield nil")
+	if NewTautulli("http://host", secret.Ref{}, secret.Value{}) != nil {
+		t.Error("an unresolved api key must yield nil")
 	}
-	if NewTautulli("http://host/", "key") == nil {
+	if NewTautulli("http://host/", ref, secret.NewValue("key")) == nil {
 		t.Error("both provided must yield a client")
 	}
 }

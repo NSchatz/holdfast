@@ -18,6 +18,7 @@ import (
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/engine"
+	"github.com/NSchatz/holdfast/internal/secret"
 	"github.com/NSchatz/holdfast/internal/store"
 )
 
@@ -87,8 +88,8 @@ func newHarness(t *testing.T, token string) *harness {
 	h.ctrl = NewController(ctx, scan, discard())
 	h.hub = NewHub(st, h.ctrl, discard())
 	h.ctrl.SetOnChange(h.hub.Trigger)
-	cfg := config.Config{ServerAuthToken: token}
-	h.srv = New(ctx, cfg, st, h.ctrl, h.hub, nil, nil, discard())
+	cfg := config.Config{}
+	h.srv = New(ctx, cfg, secret.NewValue(token), st, h.ctrl, h.hub, nil, nil, discard())
 	return h
 }
 
@@ -1334,7 +1335,7 @@ func TestSnapshot_OneUnreadableAggregateStillShipsEverythingElse(t *testing.T) {
 	defer cancel()
 	ctrl := NewController(ctx, func(context.Context) error { return nil }, discard())
 	hub := NewHub(broken, ctrl, discard())
-	srv := New(ctx, config.Config{}, broken, ctrl, hub, nil, nil, discard())
+	srv := New(ctx, config.Config{}, secret.Value{}, broken, ctrl, hub, nil, nil, discard())
 
 	snap := snapshotOf(t, hub)
 	if snap.Summary[string(store.Done)] != 1 || len(snap.Queue) != 1 || len(snap.History) != 1 {
