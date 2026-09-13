@@ -250,6 +250,44 @@ graded in the browser against a document deliberately mutated to defeat it:
   `--border` (4.15:1 on the page, 3.82:1 on a card face) draws every boundary a reader has
   to find; `--line` remains for decorative separators, where the floor does not apply.
 
+## Two questions about one library, and the one thing the page may DO
+
+The page answers two different questions about which files it is showing, and it is
+careful to say which is which, because a surface that ran them together would re-commit
+the error the cap notices exist to prevent.
+
+**Filtering** covers the rows the page already holds. It hides the non-matching ones in
+both capped tables and asks the server nothing at all - there is nothing to ask, because
+those rows are already on the screen.
+
+**Searching the ledger** covers every terminal row the ledger holds, including the ones
+older than a capped table can reach. It is a request (`GET /api/search?path=TERM`) and it
+is token-gated, which is the one place this page's authorization line moved: the capped
+reads are unauthenticated and ship a few hundred rows, so a ledger-wide search serves
+per-file rows they never have. Making it a CONTROL-gated read adds no unauthenticated one.
+Its results are drawn in their own region under their own heading, never merged into
+either table, with the match count over the whole ledger beside them; a search that was
+refused says the search is unavailable and why, which is a different answer from "nothing
+matched" and is rendered as one.
+
+**Withholding a path** is the only thing this surface may DO to what the engine will
+process, and the only direction it can go is OUT. Every terminal row carries the control,
+and a withheld path is runtime state the daemon holds in its own store: nothing writes
+`config.yaml`, and there is no configuration key for it. The paths in force are rendered
+as their own card, each with the control that removes it, because a withholding nobody can
+undo from the surface that made it is a file that silently stopped being worked on. The
+engine's guard is mutable for the same reason: removing the record clears the skip row on
+the next pass and the path is eligible again.
+
+**Re-opening a decision is NOT here.** A terminal row holds its file out of the encoder for
+as long as it exists, and `holdfast requeue` is what re-opens one - a LOCAL command by a
+ratified decision, because it changes what the engine will do to a media file. So the page
+NAMES it, with the file's own path in it, on the row's own surface. The three rows nothing
+re-opens (a parked `indeterminate` job, a swap recorded `applied-despite-error`, and a
+`skipped / restored-original` row) say why instead: an empty cell there would read as a row
+nobody had thought about, and a disabled control carrying no explanation is the dead end
+this whole surface exists to end. `docs/requeue.md` is the reference.
+
 The value-to-geometry arithmetic behind the drawings (`readBuckets`, `bucketProportions`,
 `spreadPositions`) lives in `js/20-derive.js` with the rest of the derivations, so it is
 exercised input by input in node. Nothing in the browser computes a STATISTIC: the server

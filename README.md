@@ -190,6 +190,10 @@ invariant is entirely unaffected.
 | `POST /api/rescan` | token | start a library scan (409 if paused / scanning / outside the run window) |
 | `POST /api/pause` | token | stop feeding **new** files (in-flight encodes finish safely) |
 | `POST /api/resume` | token | clear the pause flag |
+| `GET /api/search?path=TERM` | token | terminal rows whose path contains TERM, over the **whole ledger** rather than the capped view, with the match count. Token-gated because it serves per-file rows the capped reads never have |
+| `GET /api/exclusions` | token | the paths this daemon is **withholding** from the pipeline - runtime state it holds, never a configuration key |
+| `POST /api/exclusions` | token | withhold one path. It only ever takes a file OUT; nothing here writes `config.yaml` |
+| `DELETE /api/exclusions` | token | stop withholding one path, after which it is eligible again on the next scan |
 
 Fail-safes: the server **binds `127.0.0.1` by default**, and that bind is the whole of what
 protects the read endpoints and the dashboard - they carry no authentication of their own, so
