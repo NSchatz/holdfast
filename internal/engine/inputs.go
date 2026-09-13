@@ -33,20 +33,10 @@ const (
 	InputTargetCodec = "target_codec"
 )
 
-// Every value here is read from ONE LIBRARY ROOT's resolved profile, and never from the
-// encode profile a pattern may then lay over it. An input's only job is to be COMPARED,
-// and it is compared where the root's profile is the unit: by Claim, against the profile
-// in force for that root, and by the survey the startup report and `validate` print,
-// which asks one whole-ledger question with one value. Record a value only a pattern
-// match can reach and the row never matches its own configuration again - re-opened on
-// every scan for ever, which is the exact pathology DecisionInputs exists to end.
-//
-// The encode profile is not lost: a terminal row also carries its NAME (the profile
-// column, and see because), so a reader holding the row and the configuration can
-// resolve what this job's guard actually compared against. What it costs is narrower and
-// worth stating: editing an ENCODE profile's encoder does not re-open the rows its own
-// guards skipped, because no input those rows recorded moved. `holdfast requeue --guard
-// already-at-target-codec` is the lever for that.
+// Every value here is read from ONE LIBRARY ROOT's resolved profile, never from an encode
+// profile laid over it: an input exists to be COMPARED, and both comparisons hold the
+// root's profile as their unit, so a value only a pattern match can reach would re-open its
+// row on every scan for ever. docs/requeue.md carries the cost and the lever.
 
 // DecisionInputsForProfile is every decision input ONE RESOLVED PROFILE offers: the one
 // place the value of each key is read, so the value a guard RECORDS and the value a later
@@ -84,13 +74,8 @@ func DecisionInputsFor(cfg config.Config) store.DecisionInputs {
 // under this profile - "hevc" for the cpu/nvenc/qsv/vaapi/amf encoders, "av1" for
 // svtav1/av1_nvenc. It defaults to "hevc" for an unknown or empty key (Validate rejects
 // an unknown encoder before the engine is ever built, so the default is a fallback and
-// not a live path).
-//
-// It takes the KEY rather than a profile because two resolutions of `encoder` have to ask
-// it: one root may re-encode to hevc while another re-encodes to av1, and an encode profile
-// may override either for the files its pattern selects. The skip-already-target guard and
-// the output-codec check each ask about the encoder THAT JOB uses - a run-global one would
-// skip every av1 file under an av1 root as "already at target".
+// not a live path). It takes the KEY and not a profile because each job's guard has to ask
+// about the encoder THAT JOB uses, which an encode profile may have overridden.
 func targetCodecFor(key string) string {
 	if spec, ok := encoder.Lookup(key); ok {
 		return spec.TargetCodec

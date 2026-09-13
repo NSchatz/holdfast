@@ -74,25 +74,10 @@ type Platform interface {
 	// consult the mount table and reports ErrMountInfoUnavailable when that cannot be read.
 	MountPoint(path string) (bool, error)
 
-	// FreeBytes reports the space available to this process on the filesystem
-	// holding path. It is read for the SCRATCH DIRECTORY alone - no library root
-	// and no state directory is ever refused for want of space here - and a
-	// lookup that fails is a refusal, never a guessed number, because both
-	// directions of a guess are wrong: zero refuses a device that is fine and a
-	// large number clears one that is full.
+	// FreeBytes and ProbeWritable are the SCRATCH DIRECTORY's two questions, asked of no
+	// other path: how much room its filesystem has, and whether this process can create
+	// and remove a file in it. ProbeWritable is the ONE method here that writes anything.
 	FreeBytes(path string) (uint64, error)
-
-	// ProbeWritable establishes that this process can CREATE AND REMOVE a file in
-	// dir, and returns the reason it cannot.
-	//
-	// It is the ONE method on this interface that writes anything, and it writes
-	// only in the scratch directory - never under a library root, never in or
-	// under the state directory. A mode check would not answer the question: a
-	// read-only mount, a full filesystem, an NFS export squashing the writing
-	// uid and an SELinux denial are all decided at open() and none of them is
-	// visible in the permission bits. It creates one zero-length file under a
-	// name this build constructs and removes it again, so a directory it was
-	// asked about is left exactly as it was found.
 	ProbeWritable(dir string) error
 }
 
