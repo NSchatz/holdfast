@@ -113,11 +113,13 @@ submitted path gets a line, in the order it was submitted:
 {
   "accepted": 1,
   "rejected": 2,
+  "retryable": false,
   "results": [
-    { "path": "/library/film/Film.mkv", "accepted": true, "resolved": "/library/film/Film.mkv" },
-    { "path": "/etc/passwd", "accepted": false, "rule": "outside-library-roots",
+    { "path": "/library/film/Film.mkv", "accepted": true, "resolved": "/library/film/Film.mkv",
+      "retryable": false },
+    { "path": "/etc/passwd", "accepted": false, "rule": "outside-library-roots", "retryable": false,
       "detail": "/etc/passwd does not lie at or beneath any configured library root (library_roots: /library)" },
-    { "path": "/library/film/notes.txt", "accepted": false, "rule": "not-a-video-extension",
+    { "path": "/library/film/notes.txt", "accepted": false, "rule": "not-a-video-extension", "retryable": false,
       "detail": "\"notes.txt\" carries no configured video extension (video_exts: mkv, mp4)" }
   ]
 }
@@ -148,21 +150,62 @@ asked of a path instead of a directory listing. There is one implementation of t
 `video_exts` entry added, a working-file name form added or a library root added moves both
 routes together.
 
+`retryable` says whether sending that path again, unchanged, could succeed. It is `true`
+only for `submission-queue-full`, because the queue drains and nothing about the path was
+decided. Every other rule is a property of the path and of the configuration, neither of
+which changes because the same request arrives again, so a retry loop around one of those
+is a retry loop that never ends.
+
 **Every status it can answer with:**
 
-| Status | When |
-|---|---|
-| **202** | at least one path was accepted and enqueued |
-| **400** | the body was malformed, or **every** submitted path was refused (the per-path report says why for each) |
-| **401** | a control token is configured and the request did not carry it. A proxy identity header is never authorization |
-| **403** | no control token is configured, so the mutating endpoints are disabled outright |
-| **409** | holdfast is paused; nothing was enqueued. `POST /api/resume` first |
-| **413** | more than 256 paths, or a body over 262144 bytes. Nothing was enqueued |
-| **503** | the submission queue could not take the accepted paths. The report names which were not taken |
+| Status | `rule` | `retryable` | When |
+|---|---|---|---|
+| **202** | - | `false` | at least one path was accepted and enqueued |
+| **400** | `malformed-body` | `false` | the body was not a readable `{"paths": [...]}` object |
+| **400** | - | `false` | **every** submitted path was refused; the per-path report says why for each |
+| **400** | `unreadable-body` | `false` | the body could not be read off the connection |
+| **401** | - | `false` | a control token is configured and the request did not carry it. A proxy identity header is never authorization |
+| **403** | - | `false` | no control token is configured, so the mutating endpoints are disabled outright |
+| **409** | `paused` | `true` | holdfast is paused; nothing was enqueued. `POST /api/resume` first |
+| **413** | `too-many-paths` | `false` | more than 256 paths. Nothing was enqueued - split the request |
+| **413** | `body-too-large` | `false` | a body over 262144 bytes. Nothing was enqueued - split the request |
+| **503** | `submission-queue-full` | `true` | the queue could not take the accepted paths. The report names which were not taken |
+| **503** | `targeted-scanning-not-wired` | `false` | no submission queue is wired behind the route. Not reachable in the daemon |
 
-A malformed body is a **400** and nothing else happens: not valid JSON, not a JSON object,
-no `paths` key, `paths` that is not an array, an empty `paths`, or an entry that is not a
-string. No path is enqueued and no ledger row is written.
+**Whole-request refusals answer in the same envelope**, so a client reads one shape and
+branches on `rule` and `retryable` rather than parsing an English sentence. `results` is
+empty, because no path was reached:
+
+```json
+{
+  "accepted": 0,
+  "rejected": 0,
+  "rule": "too-many-paths",
+  "retryable": false,
+  "error": "request names 300 paths, more than the maximum this endpoint accepts in one request (256); the whole request was refused and nothing was enqueued - split it",
+  "results": []
+}
+```
+
+A malformed body is a **400** carrying `rule: "malformed-body"` and nothing else happens:
+not valid JSON, not a JSON object, no `paths` key, `paths` that is not an array, an empty
+`paths`, or an entry that is not a string. No path is enqueued and no ledger row is written.
+
+**401 and 403 are answered by the shared token gate** in front of every mutating endpoint,
+not by this one, so they carry that gate's body rather than this envelope.
+
+**What the 202 cannot tell you** is what was *decided* about the file, because it comes
+back before anything looked at it. Two outcomes are therefore reported in the **log**
+rather than in the response: a submission whose file a terminal row still holds out says
+so by name (nothing was re-encoded and the row was left exactly as it was - see
+[docs/requeue.md](requeue.md) for the lever), and a submission whose file a record holds
+back - a parked incident's source or replacement - is logged as not processed, with the
+reason. Neither writes a ledger row, because neither is a decision anybody took.
+
+**Hold-backs are read when the file is processed**, not when the daemon started. A swap
+that parks an incident records two paths that must not be touched again, and the next
+submission naming either of them is refused - even in a deployment running with
+`scan_interval_sec: 0`, where no later library scan ever happens.
 
 **On shutdown**, work already in flight is finished before the job store is closed, and
 submissions still waiting in the queue are discarded - unprocessed, and with no ledger row,
