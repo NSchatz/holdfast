@@ -150,15 +150,20 @@ const (
 // must never be held open across an encode - so the body reports what was ACCEPTED, never
 // what was decided about the file.
 //
+// Every answer goes out in the scanResponse envelope, carrying a stable rule token and a
+// retryable flag, so a caller branches on those rather than on prose. 401 and 403 are the
+// exception and are not this function's: the shared token gate in front of every mutating
+// endpoint answers them, and its shape is that gate's business.
+//
 // The statuses, all of them:
 //
 //	202  at least one path was accepted and enqueued
 //	400  the body was malformed, or every submitted path was refused
 //	401  a control token is configured and the request did not carry it
 //	403  no control token is configured, so control is disabled outright
-//	409  the controller is paused
+//	409  the controller is paused (retryable)
 //	413  the request named more than MaxScanPaths paths, or carried a body over MaxScanBodyBytes
-//	503  the queue could not take the accepted paths
+//	503  the queue could not take the accepted paths (retryable), or no queue is wired
 func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	if s.subs == nil {
 		// Not reachable in the daemon: runServer wires the queue before the listener
