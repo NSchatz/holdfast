@@ -67,6 +67,22 @@ func (r SubmissionResult) HeldByTerminalRow() bool { return r.Before.Terminal() 
 // rather than a path that vanished.
 const DefaultSubmissionQueue = 1024
 
+// MaxSubmissionResults bounds the report Results returns. The report is a TAIL, not a
+// journal: this endpoint exists for a deployment where every import fires a webhook and the
+// process is long-lived, so a slice appended to once per processed file and never trimmed
+// would grow for the life of that process. The ledger is what keeps the durable record of
+// every file - each processed submission writes the row a scan would have written - and
+// this is the recent window over what the QUEUE saw, which is a different and much smaller
+// question. The oldest entry is dropped when a newer one arrives.
+const MaxSubmissionResults = 1024
+
+// claimKey identifies ONE worker's claim on ONE path. The engine's claim hook is
+// engine-wide, so a note keyed on the path alone cannot say whose claim it was: a scan
+// worker claiming the same file between a submission's arm and its own refused claim would
+// be read as the submission getting through, and two workers holding one path in
+// succession would each read the other's note. The pair is unambiguous.
+type claimKey struct{ worker, path string }
+
 // Submissions is the targeted-scan queue: eligibility, a bounded channel, and a small
 // pool that drains it through ProcessFile.
 type Submissions struct {
@@ -84,7 +100,7 @@ type Submissions struct {
 	once sync.Once
 
 	mu      sync.Mutex
-	claims  map[string]bool
+	claims  map[claimKey]bool
 	results []SubmissionResult
 }
 
@@ -106,7 +122,7 @@ func (e *Engine) NewSubmissions(workers, capacity int) *Submissions {
 		el:      e.Eligibility(),
 		ch:      make(chan string, capacity),
 		workers: workers,
-		claims:  map[string]bool{},
+		claims:  map[claimKey]bool{},
 	}
 	e.onClaim = s.noteClaim
 	return s
@@ -155,9 +171,11 @@ func (s *Submissions) Pending() int { return len(s.ch) }
 // would be a record of a decision nobody took.
 func (s *Submissions) Run(ctx context.Context) {
 	s.once.Do(func() {
-		// The two record-based hold-backs, published if nothing has published them yet.
-		// A submission must read them exactly as a scan's worker does - ProcessFile asks
-		// for them on the door - and RunOneshot is the only other thing that publishes.
+		// Report what is already parked, once, as the pool comes up. This is NOT the gate
+		// the submissions are judged by: ProcessFile asks holdBacksInForce per file, so a
+		// hold-back recorded at any point after this line still holds. It is here because
+		// a daemon running with scan_interval_sec: 0 never takes a pass, and a pass is
+		// otherwise the only thing that tells an operator what is waiting on them.
 		s.eng.EnsureHoldBacks(ctx)
 		for i := 0; i < s.workers; i++ {
 			s.wg.Add(1)
@@ -195,9 +213,9 @@ func (s *Submissions) drain(ctx context.Context, worker string) {
 // same contract Controller.Wait carries for the scan.
 func (s *Submissions) Wait() { s.wg.Wait() }
 
-// Results is every processed submission, oldest first. It is the submission's own report
-// of what it reached, which is the only place that fact is available: the endpoint has
-// answered long before.
+// Results is the most recent MaxSubmissionResults processed submissions, oldest first. It
+// is the submission's own report of what it reached, which is the only place that fact is
+// available: the endpoint has answered long before.
 func (s *Submissions) Results() []SubmissionResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -216,33 +234,49 @@ func (s *Submissions) process(ctx context.Context, worker, path string) {
 	if err != nil || !exists {
 		before = ""
 	}
-	s.arm(path)
+	key := claimKey{worker: worker, path: path}
+	s.arm(key)
 	perr := s.eng.ProcessFile(ctx, worker, path)
 	if perr != nil {
 		s.eng.Log.Warn("targeted submission ended with an error", "file", path, "err", perr)
 	}
 	s.mu.Lock()
-	claimed := s.claims[path]
-	delete(s.claims, path)
-	s.results = append(s.results, SubmissionResult{
-		Path: path, Before: before, Claimed: claimed, Err: perr,
-	})
+	claimed := s.claims[key]
+	delete(s.claims, key)
+	res := SubmissionResult{Path: path, Before: before, Claimed: claimed, Err: perr}
+	s.results = append(s.results, res)
+	// The report is a tail: drop from the front so the slice is bounded for the life of a
+	// process that never scans and is fed by every import (MaxSubmissionResults).
+	if over := len(s.results) - MaxSubmissionResults; over > 0 {
+		s.results = append(s.results[:0], s.results[over:]...)
+	}
 	s.mu.Unlock()
+
+	// Say it out loud. An operator whose *arr fired a webhook at a file a terminal row
+	// still holds out learns nothing from a queue report nothing in the daemon reads, and
+	// "holdfast did not touch the file I just told it about" is precisely the outcome that
+	// otherwise looks like the endpoint silently failing.
+	if res.HeldByTerminalRow() {
+		s.eng.Log.Info("targeted submission reached a file its recorded outcome still holds out - nothing was "+
+			"re-encoded and the row was left exactly as it was; the row is re-opened by a configuration change "+
+			"it can reason about, or by the local `holdfast requeue` (see docs/requeue.md)",
+			"file", path, "recorded", string(res.Before))
+	}
 }
 
-// arm clears any earlier claim note for a path, so a second submission of the same file
-// reads its OWN claim rather than the previous one's.
-func (s *Submissions) arm(path string) {
+// arm clears any earlier claim note for this worker and path, so a worker that processes
+// the same file twice reads its OWN claim rather than the previous one's.
+func (s *Submissions) arm(key claimKey) {
 	s.mu.Lock()
-	delete(s.claims, path)
+	delete(s.claims, key)
 	s.mu.Unlock()
 }
 
 // noteClaim is the claim observer. It runs on a worker goroutine (a scan's as well as a
-// submission's, since the engine has one of these) and must stay cheap: it records a
-// path and returns.
-func (s *Submissions) noteClaim(path string) {
+// submission's, since the engine has one of these) and must stay cheap: it records the
+// worker's claim on a path and returns.
+func (s *Submissions) noteClaim(worker, path string) {
 	s.mu.Lock()
-	s.claims[path] = true
+	s.claims[claimKey{worker: worker, path: path}] = true
 	s.mu.Unlock()
 }

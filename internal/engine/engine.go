@@ -235,32 +235,79 @@ type Engine struct {
 	// a second RunOneshot can never be observed mid-write.
 	held atomic.Pointer[holdBacks]
 
-	// onClaim, when non-nil, is called with a path the instant ProcessFile takes the claim
-	// on it - the ONE signal that says a caller got PAST the door rather than being turned
-	// away at it. The targeted-submission queue (submit.go) reads it to report "this file is
-	// held out by a terminal row" without keeping a second copy of the store's re-opening
-	// rule, which is the rule that decides it.
+	// passes counts the scan passes IN FLIGHT. RunOneshot raises it the instant after it
+	// publishes this pass's snapshot and lowers it when the pass returns, so it answers one
+	// question and only one: is there a scan whose snapshot a decision taken right now has
+	// to agree with? holdBacksInForce is the only reader.
+	passes atomic.Int64
+
+	// onClaim, when non-nil, is called with the WORKER and the path the instant ProcessFile
+	// takes the claim on it - the ONE signal that says a caller got PAST the door rather
+	// than being turned away at it. The targeted-submission queue (submit.go) reads it to
+	// report "this file is held out by a terminal row" without keeping a second copy of the
+	// store's re-opening rule, which is the rule that decides it.
+	//
+	// The worker is carried because the hook is ENGINE-wide: a scan's workers call it too,
+	// and two workers may hold the same path in succession. A note keyed on the path alone
+	// cannot say WHOSE claim it was, so a reader of it would attribute one caller's claim to
+	// another. The pair is unambiguous - one worker is inside ProcessFile for one file at a
+	// time - and the scan's worker names (w0, w1, ...) are disjoint from the queue's.
 	//
 	// Set ONCE, before serving, exactly as Observer is; it is then read from every worker
 	// goroutine and never written again. It runs inline on a worker, so it must be
 	// non-blocking and concurrency-safe - the same contract Observer carries.
-	onClaim func(path string)
+	onClaim func(worker, path string)
 }
 
-// EnsureHoldBacks publishes a hold-back snapshot when none has been published yet, so a
-// route into ProcessFile that is not a scan still reads the two record-based hold-backs.
+// EnsureHoldBacks publishes a hold-back snapshot when none has been published yet, so the
+// record-based hold-backs are READ AND REPORTED at the start of a daemon that may never
+// take a scan pass at all (scan_interval_sec: 0), and so the pass-scoped readers below -
+// the temp sweep and the two temp-path constructions - have a snapshot rather than nil.
+// It is the once-per-process PARKED report, which loadHoldBacks writes as it builds one.
 //
 // It never REPLACES a live snapshot. RunOneshot publishes one per pass and that pass reads
 // it from end to end, so overwriting it mid-pass would change what the scan in progress
-// holds back - which is exactly what this work may not do. Between scans the snapshot is
-// therefore as fresh as the last pass made it, which is the freshness a file enumerated
-// late in a long pass already gets; and the residue is the one loadHoldBacks already
-// documents, since Claim refuses an indeterminate row outright and a retained replacement
-// is held back by its NAME whatever any record says.
+// holds back - which is exactly what this work may not do.
+//
+// IT IS NOT THE GATE, and must not be mistaken for one: a snapshot published once is
+// frozen, and a hold-back recorded after it was taken is not in it. What decides whether a
+// file may be processed is holdBacksInForce, asked on the door for every file, and that is
+// where the freshness lives.
 func (e *Engine) EnsureHoldBacks(ctx context.Context) {
 	if e.held.Load() == nil {
 		e.held.CompareAndSwap(nil, e.loadHoldBacks(ctx))
 	}
+}
+
+// holdBacksInForce returns the record-based hold-backs a file being processed AT THIS
+// MOMENT must be judged against. It is the door's own question (ProcessFile), and it has
+// exactly two answers because there are exactly two situations to be consistent with.
+//
+// WHILE A SCAN PASS IS IN FLIGHT the answer is that pass's snapshot. A pass publishes one
+// before it walks anything and reads it from end to end, so every file it enumerates and
+// every file it processes is judged against the same set; a file arriving mid-pass from
+// any other route is then judged against that same set too, and the two routes reach the
+// same verdict on the same file at the same moment, which is what they are required to do.
+// Re-reading here instead would give a submission a stricter answer than the scan's own
+// worker gets on the file beside it, and replacing the snapshot would change what the scan
+// in progress holds back half way through. Neither is this endpoint's to do.
+//
+// WHILE NO PASS IS IN FLIGHT there is no scan to agree with, and the last snapshot any
+// pass published is as old as whatever published it. A daemon running with
+// scan_interval_sec: 0 - the deployment the targeted-scan endpoint exists to enable - takes
+// no further pass at all, so a hold-back recorded after startup would be invisible for the
+// life of the process: a swap that parks an incident records two paths that must not be
+// touched again, and a submission would walk straight past both of them. So the hold-backs
+// are READ FROM THE STORE here, which is the same read a scan starting at this instant
+// would make, and the answer is as fresh as that scan's.
+//
+// It reads quietly. The per-incident PARKED report is owed once per pass, not once per
+// file, so this route asks readHoldBacks and leaves the reporting to whoever opened a pass.
+func (e *Engine) holdBacksInForce(ctx context.Context) *holdBacks {
+	if e.passes.Load() > 0 {
+		return e.held.Load()
+	}
+	return e.readHoldBacks(ctx)
 }
 
 // rename performs the swap's rename, routing through the test seam when one is set.
@@ -280,9 +327,14 @@ func (e *Engine) restat(path string) (probe.Attributes, error) {
 	return probe.StatAttributes(path)
 }
 
-// heldBack reports whether a path is one of this run's two record-based hold-backs, and
-// why. It is deliberately separate from the record-free name check, so a caller that needs
-// both asks for both and it is always obvious which rule fired.
+// heldBack reports whether a path is one of the PUBLISHED snapshot's two record-based
+// hold-backs, and why. It is deliberately separate from the record-free name check, so a
+// caller that needs both asks for both and it is always obvious which rule fired.
+//
+// Its callers are the pass-scoped ones - the enumeration, the temp sweep and the two
+// temp-path constructions - which run inside a pass that published the snapshot, or beside
+// a file whose record-free hold (strayReplacementHold) is asked of the store in the same
+// breath. The DOOR does not use it: what may be processed is decided by holdBacksInForce.
 func (e *Engine) heldBack(p string) (string, bool) { return e.held.Load().held(p) }
 
 // emit delivers ev to the Observer if one is set. It must stay cheap and non-blocking: it
@@ -431,6 +483,15 @@ func (e *Engine) RunOneshot(ctx context.Context) error {
 	// its two recorded paths - plus every recorded replacement path still carrying a
 	// live exclusion - are withheld from the sweep, from the scan and from the workers.
 	e.held.Store(e.loadHoldBacks(ctx))
+
+	// The pass is IN FLIGHT from here - after its snapshot is published, never before, so
+	// there is no instant at which a caller is told to agree with a pass that has not
+	// published one yet - until this function returns. While it is up, every route into
+	// ProcessFile is judged against the snapshot above rather than against a fresh read, so
+	// a targeted submission arriving mid-pass reaches exactly the verdict this pass's own
+	// worker reaches on the file beside it (holdBacksInForce).
+	e.passes.Add(1)
+	defer e.passes.Add(-1)
 
 	// S0085: the unpreserved-ownership notice is owed once per RUN, so a daemon scanning
 	// every scan_interval_sec says it again on each pass.
@@ -875,10 +936,18 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 
 	// Hold-backs, re-checked here rather than trusted to the scan: ProcessFile is exported
 	// and is the only door into the encode/swap pipeline, so the rule belongs on the door.
+	//
+	// The record-based half is asked of the hold-backs IN FORCE at this moment, never of a
+	// snapshot somebody published earlier. A recorded replacement path is not always a name
+	// this build can recognise - the applied-despite-error branch records where the
+	// replacement WAS, and retainReplacement records the path it could not move the file
+	// off - so the record is the only thing holding those files back, and a caller that is
+	// not a scan pass (a targeted submission, in a daemon that may never scan at all) would
+	// otherwise be judged against hold-backs taken when the process started.
 	if IsRetainedReplacementName(filepath.Base(f)) {
 		return nil
 	}
-	if why, ok := e.heldBack(f); ok {
+	if why, ok := e.holdBacksInForce(ctx).held(f); ok {
 		e.Log.Info("not processing (held back)", "file", f, "why", why)
 		return nil
 	}
@@ -975,7 +1044,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		return nil
 	}
 	if e.onClaim != nil {
-		e.onClaim(f)
+		e.onClaim(worker, f)
 	}
 	// The claim moved this row to probing: surface it as a live "started" signal carrying
 	// the worker, so the UI shows the file entering the pipeline immediately.
