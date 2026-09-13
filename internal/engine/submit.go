@@ -264,19 +264,28 @@ func (s *Submissions) process(ctx context.Context, worker, path string) {
 	}
 }
 
-// arm clears any earlier claim note for this worker and path, so a worker that processes
-// the same file twice reads its OWN claim rather than the previous one's.
+// arm registers this worker's interest in a path before it knocks on the door, with the
+// answer not-yet-claimed, and clears anything an earlier pass over the same pair left. It is
+// what makes the observer's note attributable AND bounded: only an armed pair is ever
+// recorded, and process deletes its own pair when it has read it, so the map holds at most
+// one entry per worker currently inside ProcessFile.
 func (s *Submissions) arm(key claimKey) {
 	s.mu.Lock()
-	delete(s.claims, key)
+	s.claims[key] = false
 	s.mu.Unlock()
 }
 
-// noteClaim is the claim observer. It runs on a worker goroutine (a scan's as well as a
-// submission's, since the engine has one of these) and must stay cheap: it records the
-// worker's claim on a path and returns.
+// noteClaim is the claim observer. It runs on a worker goroutine and must stay cheap.
+//
+// The engine has ONE of these, so a scan's workers call it too. An unarmed pair is
+// therefore dropped rather than recorded: this queue has nothing to say about a file a scan
+// claimed, and a map that grew an entry for every file the library ever processed would be
+// a leak whose only reader is this queue's own report.
 func (s *Submissions) noteClaim(worker, path string) {
+	key := claimKey{worker: worker, path: path}
 	s.mu.Lock()
-	s.claims[claimKey{worker: worker, path: path}] = true
+	if _, armed := s.claims[key]; armed {
+		s.claims[key] = true
+	}
 	s.mu.Unlock()
 }
