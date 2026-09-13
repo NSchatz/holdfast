@@ -34,40 +34,22 @@ const (
 )
 
 // EVERY VALUE HERE IS RESOLVED FOR ONE PATH, through the whole layering the decision that
-// read it used for that path: the built-in default, then the top level, then the profile of
-// the library root the file lives under, then the encode profile whose match selects it.
-// The keys an encode profile can move are therefore read from the job's effective settings
-// (config.Transcode) and the gates it can never reach are read from the root's own profile,
-// which is where each of them is decided.
-//
-// Two properties hold this together and neither may be traded for the other:
-//
-//   - SYMMETRY. Record and compare are one resolution, of one key, for one path, through
-//     DecisionInputsForJob. A row written under a configuration therefore matches under
-//     that configuration - and a recorded value that nothing could resolve again would be
-//     a row re-opened on every scan for ever, on a library-sized ledger a re-encode of
-//     everything, each accepted encode deleting its source.
-//   - MINIMALITY. Only the keys a decision actually read are recorded, never a digest of
-//     the configuration. An edit that moves no key a row read honours that row, whatever
-//     else it changed - a notification URL, an added library root, an encode profile whose
-//     match does not select that path, or a key on the profile that does select it but
-//     that this row's guard never looked at.
-//
-// docs/requeue.md states the same rule for an operator.
+// read it used: the default, the top level, the library root's profile, then the encode
+// profile whose match selects the path. Record and compare go through DecisionInputsForJob
+// so they are one resolution of one key for one path - a recorded value the comparison
+// could not reach again would be a row re-opened on every scan for ever, which on a library
+// is a re-encode of everything and every accepted encode deletes its source. docs/requeue.md
+// states the rule for an operator.
 
 // DecisionInputsForJob is every decision input ONE JOB offers: the one place the value of
 // each key is read, so the value a guard RECORDS and the value a later scan COMPARES it
 // against cannot come from two different readings of the same key.
 //
-// ts is that job's effective encode settings - the root's profile with the matching encode
-// profile's overrides laid over it - and it supplies every key an encode profile can move.
-// prof is the library root's own profile and supplies the ones it cannot: min_bitrate_kbps
-// is a gate that decides whether a source may be destroyed, no encode profile carries it,
-// and the guard that reads it reads the root's value (see Engine.ProcessFile).
-//
-// target_codec is what ts.Encoder RESOLVES to, because that is what the guard compares
-// against: a job whose profile targets av1 is decided against av1 while its neighbour under
-// the inherited settings is decided against hevc, in the same run.
+// ts is that job's effective encode settings and supplies every key an encode profile can
+// move, target_codec included (what ts.Encoder RESOLVES to, which is what the guard compares
+// against). prof is the library root's own profile and supplies the ones an encode profile
+// cannot reach: min_bitrate_kbps is a gate deciding whether a source may be destroyed, and
+// the guard that reads it reads the root's value (see Engine.ProcessFile).
 func DecisionInputsForJob(prof config.Profile, ts config.Transcode) store.DecisionInputs {
 	return store.InputsRead(map[string]string{
 		InputTargetCodec:    targetCodecFor(ts.Encoder),
@@ -104,18 +86,13 @@ func DecisionInputsFor(cfg config.Config) store.DecisionInputs {
 }
 
 // DecisionInputsPerPath is how the ledger survey behind the startup report and `validate`
-// asks the read-set question: once per row, about that row's own path.
-//
-// It is what overturns the survey's old shape. That read compared the whole ledger against
-// one value with no file path in hand, so no encode profile could move either side of the
-// comparison and a row decided under one was counted as still matching for ever. A ledger
-// row carries its own path, so the survey can resolve exactly as a claim does - and it must,
-// or the counts an operator reads describe a rule the scan does not apply.
+// asks the read-set question: once per row, about that row's own path. The read it replaces
+// compared the whole ledger against one value with no path in hand, so no encode profile
+// could move either side and a row decided under one was counted as still matching for ever.
 //
 // The resolution is memoized on (library root, encode profile), which is the whole of what
-// it depends on: two files under one root that the same profile selects resolve to the same
-// record, so a 300,000-row ledger costs a handful of resolutions and one match per row. The
-// closure is stateful and is called row by row from the survey's single goroutine.
+// it depends on, so a 300,000-row ledger costs a handful of resolutions and one match per
+// row. The closure is stateful and is called row by row from the survey's one goroutine.
 func DecisionInputsPerPath(cfg config.Config) store.InputsForPath {
 	roots := cfg.RootProfiles()
 	top := cfg.TopLevelProfile()

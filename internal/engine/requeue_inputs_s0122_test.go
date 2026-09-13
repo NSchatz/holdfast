@@ -350,7 +350,7 @@ func TestRequeueInputs_TheThreeRowsNothingReopensSurviveAnyConfigurationChange(t
 			"1 means a held-out row was handed to the encoder", n)
 	}
 	if r := rowFor(t, ts, ordinary); r.Status == store.Skipped && r.Outcome.Reason == SkipAlreadyTargetCodec {
-		t.Errorf("the ordinary codec skip was not re-opened by a configuration that moved its target "+
+		t.Errorf("the ordinary codec skip was not re-opened by a configuration that moved its target " +
 			"codec, so the three rows above were not tested against a change that reaches anything")
 	}
 }
