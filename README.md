@@ -147,6 +147,14 @@ anything in user space (FUSE) are all treated as not-local, because a false warn
 configuration and a false clear costs a film. **[docs/filesystem.md](docs/filesystem.md)** has the
 recognised-local set, the opt-in rules and what the startup traversal costs.
 
+### Per-job settings, and where the encode works
+
+`encode_profiles` overrides the top-level encode settings per job (ordered; the first profile whose
+`match` glob selects a source wins), `bitrate_kbps` swaps the quality target for a target-bitrate rate
+control, and neither is reachable from a flag: **[docs/profiles.md](docs/profiles.md)**. `scratch_dir`
+moves the encode's **working file** elsewhere and nothing else - the accepted result is still copied
+back beside the source and finalized by the same atomic rename: **[docs/scratch.md](docs/scratch.md)**.
+
 ### The undo window (`restore`) - off by default
 
 The swap is the one irreversible thing holdfast does, and every gate in front of it is an **estimate**.

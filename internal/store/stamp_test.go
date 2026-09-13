@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -88,7 +89,9 @@ func assertStampedNow(t *testing.T, what string, stamp SchemaStamp) {
 // which is the population the rule is for: everything already in the field.
 func TestStamp_ARecordWrittenBeforeTheStampReadsAsUnstampedAndIsLeftThatWay(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "jobs.db")
-	atShippedVersion(t, path, schemaVersion()-1)
+	// The version before the STAMP shipped, not this build's minus one: a step appended
+	// after the stamp would otherwise leave this reading a database that already has it.
+	atShippedVersion(t, path, stampStepVersion(t)-1)
 
 	s, err := Open(path)
 	if err != nil {
@@ -149,7 +152,8 @@ func TestStamp_AnUnrecognisedStampReadsAsUnrecognisedAndTheRecordStillReads(t *t
 		write any
 		raw   string
 	}{
-		{name: "a version past the end of this build's history", write: schemaVersion() + 1, raw: "14"},
+		{name: "a version past the end of this build's history", write: schemaVersion() + 1,
+			raw: strconv.Itoa(schemaVersion() + 1)},
 		{name: "zero, which names no step", write: 0, raw: "0"},
 		{name: "a negative number", write: -3, raw: "-3"},
 		{name: "text, which is not a version at all", write: "banana", raw: "banana"},

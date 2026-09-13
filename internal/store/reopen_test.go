@@ -240,7 +240,7 @@ func TestClaim_NeverReopensARestoredOriginalRowOnAConfigChange(t *testing.T) {
 	ctx := context.Background()
 
 	// Through the real writer: `holdfast restore` records the skip this way.
-	if _, err := s.RecordSkip(ctx, "/lib/rescued.mkv", "10:100", GuardRestoredOriginal, Decision{}); err != nil {
+	if _, err := s.RecordSkip(ctx, "/lib/rescued.mkv", "10:100", GuardRestoredOriginal, Decision{}, ""); err != nil {
 		t.Fatalf("RecordSkip: %v", err)
 	}
 	rows, err := s.List(ctx, []Status{Skipped}, 0)
@@ -338,7 +338,7 @@ func TestSurveyDecisionInputs_CountsWhatTheNextScanWillReopen(t *testing.T) {
 	// Neither of these is ever re-opened, so neither is counted: a failed row is not a
 	// configuration question, and a restored-original row is refused outright.
 	terminalRow(t, s, "/lib/failed.mkv", "50:500", Failed, "ffmpeg died", DecisionInputs{})
-	if _, err := s.RecordSkip(ctx, "/lib/rescued.mkv", "60:600", GuardRestoredOriginal, Decision{}); err != nil {
+	if _, err := s.RecordSkip(ctx, "/lib/rescued.mkv", "60:600", GuardRestoredOriginal, Decision{}, ""); err != nil {
 		t.Fatalf("RecordSkip: %v", err)
 	}
 

@@ -1303,9 +1303,30 @@ func atShippedVersion(t *testing.T, path string, version int) {
 	if ver != version {
 		t.Fatalf("the fixture is at version %d, want %d", ver, version)
 	}
-	if version < len(migrations) && hasColumn(t, db, "schema_version") {
-		t.Fatalf("a v%d fixture already carries the version stamp - it is not an older database", version)
+	if version < len(migrations) && hasColumn(t, db, newestStepColumn) {
+		t.Fatalf("a v%d fixture already carries %q, which the newest step adds - it is not an older database",
+			version, newestStepColumn)
 	}
+}
+
+// newestStepColumn is the column the LAST migration adds to the jobs table. It is what
+// makes a fixture below this build's version recognisably an OLDER database rather than
+// this one wearing an older number, and it tracks the END of the migrations slice: a step
+// appended after it moves this, exactly as it moves the wind-back fixtures.
+const newestStepColumn = "profile"
+
+// stampStepVersion is the version at which the record stamp shipped, found in the history
+// rather than written down a second time. It is not the newest version once a step is
+// appended after it, and a test about the stamp has to keep meaning the stamp.
+func stampStepVersion(t *testing.T) int {
+	t.Helper()
+	for i, m := range migrations {
+		if m.name == "record version stamp" {
+			return i + 1
+		}
+	}
+	t.Fatal("the history carries no record version stamp step")
+	return 0
 }
 
 // seededJobRows is how many job records every fixture in this section carries. They are
@@ -1462,7 +1483,7 @@ func TestMigrate_AStepMatchingItsDeclarationCommitsAndAdvancesTheStampedVersion(
 			step.Version, step.Name, schemaVersion(), last.name)
 	}
 	// Committed, not merely attempted: the shape the step adds is there afterwards.
-	if !hasColumn(t, s.db, "schema_version") {
+	if !hasColumn(t, s.db, newestStepColumn) {
 		t.Error("the step was reported applied and its column is not there")
 	}
 }
@@ -1755,7 +1776,11 @@ func fileSHA(t *testing.T, path string) string {
 // been deleted, in the tables whose whole job is to be evidence.
 func TestMigrate_TheVersionStampStepMovesNoRowAndStampsNothingThatAlreadyExisted(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "jobs.db")
-	atShippedVersion(t, path, schemaVersion()-1)
+	// The version before the STAMP shipped, which stops being this build's minus one the
+	// moment a step is appended after it. The steps from there up all run; the row-count
+	// assertion below is asked of the stamp step, and the no-backfill one of the result.
+	stamp := stampStepVersion(t)
+	atShippedVersion(t, path, stamp-1)
 	recordTables := []string{"jobs", "retained_originals", "swap_incidents"}
 	before := make(map[string]int64, len(recordTables))
 	for _, table := range recordTables {
@@ -1769,10 +1794,15 @@ func TestMigrate_TheVersionStampStepMovesNoRowAndStampsNothingThatAlreadyExisted
 	defer func() { _ = s.Close() }()
 
 	report := s.MigrationReport()
-	if len(report) != 1 {
-		t.Fatalf("one step was outstanding and %d were reported", len(report))
+	if got, want := len(report), schemaVersion()-(stamp-1); got != want {
+		t.Fatalf("%d step(s) were outstanding and %d were reported", want, got)
 	}
-	for _, counted := range report[0].Tables {
+	stampStep := report[0]
+	if stampStep.Version != stamp {
+		t.Fatalf("the first outstanding step is v%d (%s), want the stamp at v%d",
+			stampStep.Version, stampStep.Name, stamp)
+	}
+	for _, counted := range stampStep.Tables {
 		if counted.Changed() != 0 {
 			t.Errorf("the stamp step moved %s by %+d rows", counted.Table, counted.Changed())
 		}
