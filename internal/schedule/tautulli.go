@@ -104,9 +104,9 @@ func label(ref secret.Ref) string {
 	return ref.String()
 }
 
-// httpGet returns its causes bare; Streaming sanitizes them. Naming the key here as well
-// would report it twice on the paths that already reach sanitize, and leave any path added
-// later to remember on its own.
+// httpGet returns its causes bare; Streaming sanitizes them. Naming the key branch by
+// branch here instead would double-name the ones that also reach sanitize, and would leave
+// every branch added later to remember on its own.
 func (t *Tautulli) httpGet(ctx context.Context, rawURL string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
