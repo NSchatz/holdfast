@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
+	"strings"
 )
 
 // Schema versioning (TRANSCODE-13).
@@ -31,7 +33,28 @@ import (
 type migration struct {
 	name string
 	sql  string
+
+	// rows is what this step DECLARES it means to do to the row counts. It is metadata
+	// BESIDE the step and never part of it: the sql above is what a database in the field
+	// has already run, and it is pinned by content hash, so a declaration can be added to
+	// a shipped step without touching a byte of what that step does.
+	rows rowChanges
 }
+
+// rowChanges is a step's declared per-table row-count intent: the change it means to
+// cause in a table's row count, keyed by table name. A table the map does not name is
+// declared UNCHANGED, and a declaration that names nothing says no table's count moves.
+//
+// A table that does not exist at one of the two moments holds no rows and counts zero
+// there, so a step that creates a table and seeds a row into it declares +1, while a step
+// that creates only empty tables, adds columns or builds indexes declares nothing.
+type rowChanges map[string]int64
+
+// noRowChange is the declaration of a step that moves no row at all: it creates or alters
+// a shape and leaves every table's count exactly where it was. It is spelled out beside
+// every such step rather than left off, so a step carrying NO declaration is a step
+// somebody forgot rather than a step that meant zero - which the migration tests assert.
+var noRowChange = rowChanges{}
 
 // migrations is APPEND-ONLY, and its order IS the schema history. Never edit,
 // reorder, or delete an entry that has shipped: a database in the field has already
@@ -50,6 +73,10 @@ var migrations = []migration{
 		// This is the one migration allowed to be shaped by that history; every future
 		// one starts from a known version.
 		name: "jobs table",
+		// Nothing is inserted, and the create is a no-op on the pre-versioning database
+		// that already has the table, so the count is the same on both of the two shapes
+		// this one step meets.
+		rows: noRowChange,
 		sql: `
 CREATE TABLE IF NOT EXISTS jobs (
 	path        TEXT NOT NULL,
@@ -74,6 +101,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 		// with a fabricated perfect-looking outcome — inventing evidence about swaps
 		// nobody measured, in the one table whose entire job is to be evidence.
 		name: "outcome columns",
+		rows: noRowChange,
 		sql: `
 ALTER TABLE jobs ADD COLUMN reason       TEXT;
 ALTER TABLE jobs ADD COLUMN encoder      TEXT;
@@ -102,6 +130,7 @@ ALTER TABLE jobs ADD COLUMN encode_ms    INTEGER;
 		// a little write amplification per job transition - a few microseconds against
 		// an encode measured in minutes.
 		name: "aggregate indexes",
+		rows: noRowChange,
 		sql: `
 CREATE INDEX IF NOT EXISTS idx_jobs_status_reason ON jobs(status, reason);
 CREATE INDEX IF NOT EXISTS idx_jobs_outcome ON jobs(status, source_bytes, output_bytes, encode_ms, vmaf_mean, vmaf_min);
@@ -127,6 +156,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_outcome ON jobs(status, source_bytes, output
 		// about swaps that already happened, in the one table whose whole job is to be
 		// evidence. 0.0 is legal for vmaf_chroma too - it is an obliterated plane.
 		name: "comparison format and chroma columns",
+		rows: noRowChange,
 		sql: `
 ALTER TABLE jobs ADD COLUMN vmaf_pix_fmt       TEXT;
 ALTER TABLE jobs ADD COLUMN vmaf_chroma        REAL;
@@ -157,6 +187,9 @@ ALTER TABLE jobs ADD COLUMN vmaf_chroma_metric TEXT;
 		// DELETED outright - so "is there anything to restore for this path" is exactly
 		// "a row exists with restored_at IS NULL", with no third state to get wrong.
 		name: "retained originals",
+		// An empty table and two indexes: a retention is written by a swap, never by a
+		// migration, and a fabricated one would be a second link to bytes nobody kept.
+		rows: noRowChange,
 		sql: `
 CREATE TABLE IF NOT EXISTS retained_originals (
 	source_path         TEXT NOT NULL PRIMARY KEY,
@@ -201,6 +234,13 @@ CREATE INDEX IF NOT EXISTS idx_retained_expires ON retained_originals(restored_a
 		// rather than a sort of the operator's entire library: the prune orders terminal
 		// rows by updated_at, on the same serialized connection the engine writes through.
 		name: "ledger retention totals",
+		// THE ONE SHIPPED STEP THAT MOVES A ROW COUNT, and it moves it by exactly one.
+		// The INSERT OR IGNORE seeds the singleton counter into the table this same step
+		// creates, so ledger_totals goes from absent (no rows) to holding its one row on
+		// every database this step runs against - a fresh file and a v5 ledger alike.
+		// Declaring a flat zero here would make the guard refuse a legitimate first open,
+		// which for a daemon is total.
+		rows: rowChanges{"ledger_totals": 1},
 		sql: `
 CREATE TABLE IF NOT EXISTS ledger_totals (
 	id               INTEGER PRIMARY KEY CHECK (id = 1),
@@ -246,6 +286,11 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status_updated ON jobs(status, updated_at);
 		// replacement paths must not be enumerated. Partial, so it indexes only the
 		// rows that can still exclude something.
 		name: "swap guard record + swap incidents",
+		// Four columns, an empty table and two indexes. The AUTOINCREMENT key brings
+		// SQLite's own sqlite_sequence table into existence with it, and that table gains
+		// a row on the first INSERT into swap_incidents rather than here, so it too is
+		// declared unchanged.
+		rows: noRowChange,
 		sql: `
 ALTER TABLE jobs ADD COLUMN guard_attributes       TEXT;
 ALTER TABLE jobs ADD COLUMN guard_time_resolution  TEXT;
@@ -296,6 +341,7 @@ CREATE INDEX IF NOT EXISTS idx_incidents_excluded ON swap_incidents(replacement_
 		// including rows about sources that have since been deleted, in the one table whose
 		// whole job is to be evidence.
 		name: "source codec",
+		rows: noRowChange,
 		sql: `
 ALTER TABLE jobs ADD COLUMN source_codec TEXT;
 `,
@@ -323,6 +369,7 @@ ALTER TABLE jobs ADD COLUMN source_codec TEXT;
 		// No index. Nothing queries BY the class: Claim keys on (path, fingerprint) and
 		// decides on fail_count alone, and every other reader has the row in hand.
 		name: "failure class",
+		rows: noRowChange,
 		sql: `
 ALTER TABLE jobs ADD COLUMN failure_class TEXT;
 `,
@@ -354,6 +401,7 @@ ALTER TABLE jobs ADD COLUMN failure_class TEXT;
 		// 300,000-row ledger - rather than by decoding every row, and the index is what
 		// keeps it off the single serialized connection the engine writes through.
 		name: "decision inputs",
+		rows: noRowChange,
 		sql: `
 ALTER TABLE jobs ADD COLUMN decision_inputs TEXT;
 CREATE INDEX IF NOT EXISTS idx_jobs_status_inputs ON jobs(status, decision_inputs);
@@ -379,6 +427,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status_inputs ON jobs(status, decision_input
 		//
 		// No index. Nothing queries BY the stream: every reader has the row in hand.
 		name: "scored video stream",
+		rows: noRowChange,
 		sql: `
 ALTER TABLE jobs ADD COLUMN vmaf_stream TEXT;
 `,
@@ -401,9 +450,40 @@ ALTER TABLE jobs ADD COLUMN vmaf_stream TEXT;
 		// written - inventing evidence about swaps that already happened, in the one table
 		// whose whole job is to be evidence.
 		name: "deciding library profile",
+		rows: noRowChange,
 		sql: `
 ALTER TABLE jobs ADD COLUMN library_root   TEXT;
 ALTER TABLE jobs ADD COLUMN profile_digest TEXT;
+`,
+	},
+	{
+		// v13 - the schema version each record was written under.
+		//
+		// Until this column a reader holding a row could not tell which build's semantics
+		// filled it. It inferred the answer from ABSENT FIELDS, one column at a time - no
+		// chroma means pre-GATE-4, no profile digest means pre-profiles - which is a guess
+		// built on a coincidence, because every one of those columns is also legitimately
+		// empty on a row the current build wrote. The stamp answers it outright, in the
+		// three tables that hold a record: the job ledger, the retained originals an undo
+		// window can put back, and the swap incidents.
+		//
+		// NULLABLE with NO DEFAULT, which is the rule v2 set and every step since has kept,
+		// and here it is the whole point. There is NO BACKFILL: every record already in the
+		// field was written by a build that stamped nothing, and it must READ as written
+		// before the stamp existed. A DEFAULT - this build's version above all, because it
+		// is the value the writer would now put there and therefore the tempting one -
+		// would claim that this build wrote rows it never saw, in the tables whose whole
+		// job is to be evidence about files that have since been deleted.
+		//
+		// No index. Nothing queries BY the stamp: every reader has the record in hand.
+		name: "record version stamp",
+		// Three columns and no row: an ALTER TABLE ADD COLUMN rewrites no row and creates
+		// none, so every table's count is what it was.
+		rows: noRowChange,
+		sql: `
+ALTER TABLE jobs               ADD COLUMN schema_version INTEGER;
+ALTER TABLE retained_originals ADD COLUMN schema_version INTEGER;
+ALTER TABLE swap_incidents     ADD COLUMN schema_version INTEGER;
 `,
 	},
 }
@@ -421,10 +501,14 @@ func schemaVersion() int { return len(migrations) }
 // the phase requires — a half-migrated database must never be run against, because
 // the engine would then be recording the proof of its swaps into columns that may or
 // may not exist.
-func migrate(ctx context.Context, db *sql.DB) error {
+//
+// It RETURNS what it did: one record per step it applied, carrying the version that step
+// stamped and every table's row count on either side of it. An up-to-date database
+// returns none, which is the honest report of a migration that ran nothing.
+func migrate(ctx context.Context, db *sql.DB) ([]MigrationStep, error) {
 	have, err := readSchemaVersion(ctx, db)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	want := schemaVersion()
 
@@ -435,15 +519,22 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	// operator rolls the binary forward (or the database back) and loses nothing
 	// meanwhile.
 	if have > want {
-		return errSchemaFromTheFuture(have, want)
+		return nil, errSchemaFromTheFuture(have, want)
 	}
 
+	var applied []MigrationStep
 	for i := have; i < want; i++ {
-		if err := applyMigration(ctx, db, i+1, migrations[i]); err != nil {
-			return fmt.Errorf("store: migration %d (%s): %w", i+1, migrations[i].name, err)
+		rec, err := applyMigration(ctx, db, i+1, migrations[i])
+		if err != nil {
+			return nil, fmt.Errorf("store: migration %d (%s): %w", i+1, migrations[i].name, err)
+		}
+		// A nil record is a step another writer had already applied while this one waited
+		// for the lock. It moved nothing here, so there is nothing to report about it.
+		if rec != nil {
+			applied = append(applied, *rec)
 		}
 	}
-	return nil
+	return applied, nil
 }
 
 // readSchemaVersion reads the stamp SQLite keeps in the database header. It is the one
@@ -511,18 +602,26 @@ func requireCurrentSchema(ctx context.Context, db *sql.DB) error {
 // busy handler CAN wait on it, so the second process simply blocks until the first has
 // migrated and then finds nothing left to do. Migrating is not the place to introduce a
 // startup failure the old (idempotent, lock-free) schema init did not have.
-func applyMigration(ctx context.Context, db *sql.DB, version int, m migration) error {
+//
+// The ROW COUNTS ride in that same transaction, before and after the step, and so does
+// the comparison against what the step declared. A count taken outside it would be a
+// count of a database another writer could have moved in between, and a comparison made
+// after the commit could only report a loss it had already made permanent. Inside, a step
+// that moved a row it never declared is rolled back with the version it would have
+// stamped, and the open is refused - which for a ledger whose terminal rows decide
+// whether a source file may be deleted is the only safe direction.
+func applyMigration(ctx context.Context, db *sql.DB, version int, m migration) (*MigrationStep, error) {
 	// A dedicated connection: BEGIN/COMMIT are statements here rather than
 	// database/sql's tx API (which offers no way to ask for IMMEDIATE), so they must
 	// all land on the same connection.
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("connect: %w", err)
+		return nil, fmt.Errorf("connect: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
 
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return fmt.Errorf("begin immediate: %w", err)
+		return nil, fmt.Errorf("begin immediate: %w", err)
 	}
 	// Roll back on any failure below. Uses a background context deliberately: if ctx is
 	// what failed (cancelled), a rollback on ctx would fail too and leak the write lock
@@ -539,27 +638,188 @@ func applyMigration(ctx context.Context, db *sql.DB, version int, m migration) e
 	var cur int
 	if err := conn.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&cur); err != nil {
 		rollback()
-		return fmt.Errorf("re-read user_version: %w", err)
+		return nil, fmt.Errorf("re-read user_version: %w", err)
 	}
 	if cur >= version {
 		rollback() // nothing to do; another process applied it while we waited
-		return nil
+		return nil, nil
 	}
 
+	before, err := tableRowCounts(ctx, conn)
+	if err != nil {
+		rollback()
+		return nil, err
+	}
 	if _, err := conn.ExecContext(ctx, m.sql); err != nil {
 		rollback()
-		return err
+		return nil, err
 	}
+	after, err := tableRowCounts(ctx, conn)
+	if err != nil {
+		rollback()
+		return nil, err
+	}
+	rec, err := checkRowChanges(version, m, before, after)
+	if err != nil {
+		rollback()
+		return nil, err
+	}
+
 	// PRAGMA takes no bound parameters, so the version is formatted into the text. It
 	// is an int derived from len(migrations) — never anything a caller supplies — so
 	// there is no injection surface here, only an API limitation.
 	if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, version)); err != nil {
 		rollback()
-		return fmt.Errorf("stamp user_version: %w", err)
+		return nil, fmt.Errorf("stamp user_version: %w", err)
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		rollback()
-		return fmt.Errorf("commit: %w", err)
+		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return nil
+	return rec, nil
+}
+
+// TableRows is one table's row count immediately before and immediately after one
+// migration step. A table that does not exist at one of those two moments holds no rows
+// and counts zero there, which is what makes a created table and a dropped one
+// comparable against a declaration in the same arithmetic as an altered one.
+type TableRows struct {
+	Table  string
+	Before int64
+	After  int64
+}
+
+// Changed is how far this table's row count moved across the step.
+func (t TableRows) Changed() int64 { return t.After - t.Before }
+
+// MigrationStep is the record of one step an open APPLIED: which step it was, the version
+// it stamped, and every table's row count on either side of it, table-sorted.
+//
+// It exists because a migration that dropped or duplicated rows used to commit in
+// silence and stamp a version claiming all was well. The counts are taken whether or not
+// anything is wrong with them, so the record an operator reads after a clean upgrade is
+// the same record that would have shown them the loss.
+type MigrationStep struct {
+	Version int
+	Name    string
+	Tables  []TableRows
+}
+
+// UndeclaredRowChangeError is the refusal a step earns by moving a table's row count by
+// something it never declared. It is exported because the process that opened the store
+// reports it distinctly from every other reason an open can fail: this one says the
+// ledger was about to lose or gain evidence, and the step was rolled back rather than
+// committed.
+type UndeclaredRowChangeError struct {
+	Version  int
+	Step     string
+	Table    string
+	Declared int64
+	Observed int64
+	Before   int64
+	After    int64
+}
+
+func (e *UndeclaredRowChangeError) Error() string {
+	return fmt.Sprintf("table %q went from %d row(s) to %d row(s), a change of %+d, "+
+		"where the step declares %+d - the step has been rolled back and the store will not open. "+
+		"A step that moves rows it did not declare may have dropped or duplicated ledger "+
+		"evidence, and a terminal row is what says a source file was already handled",
+		e.Table, e.Before, e.After, e.Observed, e.Declared)
+}
+
+// checkRowChanges compares what the step DID to what it DECLARED, and returns the step's
+// record when the two agree.
+//
+// Every table either side knows about is judged, and so is every table the declaration
+// names: a table created by the step, a table it dropped, and a declaration naming a
+// table that is not there are all row-count changes somebody has to have meant, and the
+// first two are precisely the shapes a union of only the surviving tables would miss.
+func checkRowChanges(version int, m migration, before, after map[string]int64) (*MigrationStep, error) {
+	rec := &MigrationStep{Version: version, Name: m.name}
+	for _, table := range judgedTables(before, after, m.rows) {
+		t := TableRows{Table: table, Before: before[table], After: after[table]}
+		declared := m.rows[table]
+		if t.Changed() != declared {
+			return nil, &UndeclaredRowChangeError{
+				Version: version, Step: m.name, Table: table,
+				Declared: declared, Observed: t.Changed(),
+				Before: t.Before, After: t.After,
+			}
+		}
+		// A table named ONLY by the declaration is not part of the record: it holds no
+		// rows at either moment, so there is nothing about it to record.
+		if _, wasThere := before[table]; wasThere {
+			rec.Tables = append(rec.Tables, t)
+			continue
+		}
+		if _, isThere := after[table]; isThere {
+			rec.Tables = append(rec.Tables, t)
+		}
+	}
+	return rec, nil
+}
+
+// judgedTables is the sorted union of the tables present before the step, present after
+// it, and named by its declaration. Sorted so one step reads the same way on every run.
+func judgedTables(before, after map[string]int64, declared rowChanges) []string {
+	seen := make(map[string]struct{}, len(before)+len(after)+len(declared))
+	for _, m := range []map[string]int64{before, after, declared} {
+		for name := range m {
+			seen[name] = struct{}{}
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// tableRowCounts counts the rows in every table the database holds, THROUGH conn, so the
+// count is taken inside whatever transaction that connection is running - which is the
+// only way a before-count and an after-count can bracket a step rather than bracket a
+// step plus whatever else happened meanwhile.
+//
+// Every table means every table, SQLite's own sqlite_sequence and sqlite_stat1 included:
+// a count that quietly skipped a table would be a count that could not notice a row
+// appearing in it. Names come from sqlite_master, never from a caller, and an identifier
+// takes no bound parameter, so each is quoted (with any embedded quote doubled) rather
+// than bound.
+func tableRowCounts(ctx context.Context, conn *sql.Conn) (map[string]int64, error) {
+	rows, err := conn.QueryContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list tables: %w", err)
+	}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan table name: %w", err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("list tables: %w", err)
+	}
+	// Closed before the counts run: these share one connection, and a cursor still open
+	// on it is a query the next statement would be interleaved with.
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("list tables: %w", err)
+	}
+
+	counts := make(map[string]int64, len(names))
+	for _, name := range names {
+		var n int64
+		quoted := `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+quoted).Scan(&n); err != nil {
+			return nil, fmt.Errorf("count rows in %q: %w", name, err)
+		}
+		counts[name] = n
+	}
+	return counts, nil
 }

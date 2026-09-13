@@ -274,7 +274,7 @@ func TestApplyMigration_IsANoOpWhenAlreadyApplied(t *testing.T) {
 	// as a racing process would. Without the in-transaction re-read, migration 2's
 	// `ALTER TABLE ... ADD COLUMN reason` fails with "duplicate column name".
 	for i, m := range migrations {
-		if err := applyMigration(ctx, s.db, i+1, m); err != nil {
+		if _, err := applyMigration(ctx, s.db, i+1, m); err != nil {
 			t.Fatalf("re-applying migration %d (%s) must be a no-op, got: %v", i+1, m.name, err)
 		}
 	}
@@ -370,8 +370,8 @@ func TestApplyMigration_FailureLeavesVersionUnchanged(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
-	bad := migration{name: "deliberately broken", sql: `THIS IS NOT SQL;`}
-	if err := applyMigration(context.Background(), db, 1, bad); err == nil {
+	bad := migration{name: "deliberately broken", sql: `THIS IS NOT SQL;`, rows: noRowChange}
+	if _, err := applyMigration(context.Background(), db, 1, bad); err == nil {
 		t.Fatal("a broken migration must return an error")
 	}
 	var v int
@@ -719,6 +719,12 @@ func TestMigrate_PreUndoDatabaseGainsTheRetentionTableWithNoFabricatedRetentions
 	if err != nil || !ok {
 		t.Fatalf("GetRetained after Retain: ok=%v err=%v", ok, err)
 	}
+	// A record this build writes names the schema version that wrote it; everything the
+	// caller supplied must still round-trip unchanged beside it.
+	if v, stamped := got.Stamp.Version(); !stamped || v != schemaVersion() {
+		t.Errorf("a retention written after the migration does not name the version that wrote it: %s", got.Stamp)
+	}
+	got.Stamp = SchemaStamp{}
 	if got != r {
 		t.Errorf("a retention written AFTER the migration did not round-trip:\n  got  %+v\n  want %+v", got, r)
 	}

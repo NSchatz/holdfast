@@ -372,6 +372,13 @@ type Job struct {
 	// all zero/nil on a non-terminal row, and on a terminal row written before this
 	// phase existed — "not recorded", which a reader must show as such.
 	Outcome Outcome
+
+	// Stamp is the schema version this row was last written under. A row written before
+	// the stamp existed carries none and reads as such rather than as a version; see
+	// SchemaStamp for what an unrecognised one means. It is deliberately NOT part of the
+	// published API or export shape: it says what a reader is holding, which is a
+	// question about the record rather than about the job.
+	Stamp SchemaStamp
 }
 
 // Coverage states the SET a published figure was computed over. It travels WITH the
@@ -587,6 +594,11 @@ type SwapIncident struct {
 	// removal that fails must never leave a record claiming a deletion that did not
 	// happen.
 	RemovalError string
+
+	// Stamp is the schema version this incident was last written under. It matters most
+	// here: an incident outlives the job that created it, so it is the record most likely
+	// to be read by a build that is not the one which wrote it.
+	Stamp SchemaStamp
 }
 
 // Parked reports whether this incident is a parked job: recorded indeterminate, with
@@ -688,6 +700,11 @@ type Retained struct {
 	RetainedAt         int64
 	ExpiresAt          int64
 	RestoredAt         *int64
+
+	// Stamp is the schema version this retention was last written under, carried for the
+	// reason every record carries one: a reader holding it can tell which build's
+	// semantics filled it rather than inferring that from which fields are empty.
+	Stamp SchemaStamp
 }
 
 // Store is the persistent job ledger. Every method is safe for concurrent use by
