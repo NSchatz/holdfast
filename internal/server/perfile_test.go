@@ -647,6 +647,32 @@ func TestPerFileActions_OfferNothingToTheEncoder(t *testing.T) {
 	ctx := context.Background()
 	seedTerminalRows(t, h.st, h.root, 3)
 
+	// A PARKED file, in the library, alongside the rest. It is the sharpest shape this
+	// criterion has: what holds a parked file out of the encoder is its ATTEMPT COUNT and
+	// nothing else, so a withholding recorded over its row and then removed would hand it
+	// straight back - a surface re-opening a decision, which is the authorization line
+	// `requeue` stays a local command to keep. Recorded through the same claim-then-finish
+	// pair a real run writes, so it is the accounting that parks it and not a hand-set
+	// column.
+	parked := filepath.Join(h.root, "parked.mkv")
+	if err := os.WriteFile(parked, []byte("media bytes for parked.mkv"), 0o644); err != nil {
+		t.Fatalf("writing the parked fixture: %v", err)
+	}
+	const parkedBound = 3
+	for i := 0; i < parkedBound; i++ {
+		ok, err := h.st.Claim(ctx, parked, "9:9", "seed", parkedBound, store.DecisionInputs{})
+		if err != nil || !ok {
+			t.Fatalf("parking %s: attempt %d claimed=%v err=%v", parked, i+1, ok, err)
+		}
+		if err := h.st.Finish(ctx, parked, "9:9", store.Failed,
+			&store.Outcome{Reason: "a simulated failure"}, parkedBound); err != nil {
+			t.Fatalf("parking %s: %v", parked, err)
+		}
+	}
+	if ok, err := h.st.Claim(ctx, parked, "9:9", "seed", parkedBound, store.DecisionInputs{}); err != nil || ok {
+		t.Fatalf("the parked fixture is still claimable, so the case below proves nothing: claimed=%v err=%v", ok, err)
+	}
+
 	filesBefore := fsSnapshot(t, h.root)
 	eligibleBefore := eligible(t, h.st, h.root)
 	ledgerBefore := ledgerSnapshot(t, h.st)
@@ -654,7 +680,14 @@ func TestPerFileActions_OfferNothingToTheEncoder(t *testing.T) {
 		t.Fatal("the fixture holds no files, so nothing below is a claim about anything")
 	}
 
-	for _, a := range everyPerFileAction(h.root) {
+	// Every action the surface exposes, plus the add-and-remove over the PARKED path that
+	// would re-open it if a withholding could clobber a row.
+	actions := append(everyPerFileAction(h.root), []struct{ what, method, path, body string }{
+		{"withholding a parked path", http.MethodPost, "/api/exclusions", pathBody(parked)},
+		{"releasing a parked path", http.MethodDelete, "/api/exclusions", pathBody(parked)},
+	}...)
+
+	for _, a := range actions {
 		code, body := do(t, ts, a.method, a.path, "secret", a.body)
 		if code >= 500 {
 			t.Fatalf("%s answered %d: %s", a.what, code, body)
@@ -682,6 +715,14 @@ func TestPerFileActions_OfferNothingToTheEncoder(t *testing.T) {
 			t.Fatalf("%s moved the ledger, which is how a file is handed back to the encoder without touching it:\n%v\n%v",
 				a.what, ledgerBefore, got)
 		}
+	}
+
+	// The parked row is still parked, asked of the store's own answer rather than inferred
+	// from the snapshot above: after a withholding was recorded over it and removed again,
+	// the attempt count that holds it out is the count it had, and the engine still refuses
+	// to claim it.
+	if ok, err := h.st.Claim(ctx, parked, "9:9", "seed", parkedBound, store.DecisionInputs{}); err != nil || ok {
+		t.Errorf("the parked path became claimable after a withholding was recorded over it and removed: claimed=%v err=%v", ok, err)
 	}
 
 	// And the surface really did DO something, or every assertion above is vacuous.
