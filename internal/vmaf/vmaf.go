@@ -4,16 +4,9 @@
 // source. A codec-only transcode keeps the resolution identical, so it applies with no
 // scaling.
 //
-// Three pooled statistics come back and the gate needs ALL of them (see Result): the
-// harmonic mean bounds average LUMA quality, the min bounds LOCAL luma quality, and the
-// chroma min bounds damage in the colour planes the VMAF model is structurally blind to. A
-// mean alone averages a destroyed segment away, and luma alone misses a transcode that
-// leaves every luma sample intact and still ruins the colour.
-//
-// Every comparison is made in ONE pixel format holdfast NAMES (see ComparisonFormat) and
-// reports back with the score. Upconverting the reference and downconverting the distorted
-// stream are not the same measurement, so a score whose format was never recorded is a
-// number whose meaning nobody can state afterwards.
+// Three pooled statistics come back and the gate needs ALL of them (see Result): a mean
+// alone averages a destroyed segment away, and luma alone misses a transcode that leaves
+// every luma sample intact and still ruins the colour.
 //
 // libvmaf's filter takes the DISTORTED stream as its first input and the REFERENCE as its
 // second; getting this backwards inverts the meaning, so it is fixed here.
@@ -54,38 +47,29 @@ type Result struct {
 	// check and the pooled mean; only this catches it.
 	Min float64
 
-	// ChromaMin is the worst single (sub)sampled frame's PSNR over the CHROMA planes, in
-	// dB: the WORSE of Cb and Cr on the worst frame each of them had, and the statistic
-	// the chroma floor is enforced against.
-	//
-	// PSNR over Cb and Cr is the metric because it is computed over the chroma planes and
-	// nothing else, so a value that falls can only mean chroma changed. CIEDE2000
-	// (libvmaf's other colour-aware feature) mixes lightness back in through Lab, so a low
-	// score there would not tell an operator WHICH thing moved. The two planes are
-	// combined by taking the worse, and it is the raw min over frames, for the reason Min
-	// is: an average would let a destroyed Cr hide behind an intact Cb, and a mean over
-	// frames hides a locally-broken segment.
+	// ChromaMin is the worst single (sub)sampled frame's PSNR over the CHROMA planes, in dB:
+	// the WORSE of Cb and Cr on the worst frame each of them had, and the statistic the
+	// chroma floor is enforced against. PSNR over Cb and Cr is the metric because it is
+	// computed over those planes and nothing else, so a value that falls can only mean chroma
+	// changed; CIEDE2000, libvmaf's other colour-aware feature, mixes lightness back in
+	// through Lab and would not say WHICH thing moved. It is the raw min for the reason Min
+	// is: an average lets a destroyed Cr hide behind an intact Cb.
 	ChromaMin float64
 	// ChromaMetric names what ChromaMin is a measurement of, and travels WITH the value
-	// everywhere it is recorded: a bare number with no metric attached is not
-	// interpretable.
+	// everywhere it is recorded: a bare number with no metric attached is not interpretable.
 	ChromaMetric string
 
-	// PixelFormat is the single pixel format BOTH streams were converted to before they
-	// were compared, named by holdfast and never left to libavfilter's negotiation. It is
-	// part of what was measured: an 8-bit source and a 10-bit output score differently
-	// depending on which way the conversion went.
+	// PixelFormat is the single pixel format BOTH streams were converted to before they were
+	// compared, named by holdfast and never left to libavfilter's negotiation. It is part of
+	// what was measured: an 8-bit source and a 10-bit output score differently depending on
+	// which way the conversion went.
 	PixelFormat string
 
-	// Stream names WHICH video stream of each file the comparison was made against, in
-	// the specifier vocabulary every ffprobe read in this program already uses (see
-	// ScoredStream). It is a fact about the measurement in exactly the sense PixelFormat
-	// and ChromaMetric are: on a source carrying more than one video stream, a score that
-	// does not say which stream it looked at is a score nobody can line up against the
-	// guards that inspected the same file.
-	//
-	// "" is NOT RECORDED and never a fabricated default - a Result no scoring pass
-	// produced names no stream, because no stream was scored.
+	// Stream names WHICH video stream of each file the comparison was made against, in the
+	// specifier vocabulary every ffprobe read in this program already uses (see ScoredStream).
+	// On a source carrying more than one video stream, a score that does not say which stream
+	// it looked at cannot be lined up against the guards that inspected the same file. "" is
+	// NOT RECORDED and never a fabricated default.
 	Stream string
 }
 
@@ -158,43 +142,31 @@ const ChromaMetricName = "psnr_cb/psnr_cr min (dB)"
 // gate needs.
 const chromaFeature = "name=psnr"
 
-// ScoredStream is the video stream every comparison is made against, and it is the ONE
-// place in the program that spells it: BuildFilter composes both of the filtergraph's
-// input labels from it, and it is the token recorded beside the score.
+// ScoredStream is the video stream every comparison is made against, and the ONE place in the
+// program that spells it: BuildFilter composes both filtergraph input labels from it, and it
+// is the token recorded beside the score.
 //
-// It is `v:0` - the FIRST video stream - because that is the stream the rest of this
-// program inspects. Every ffprobe property read selects `-select_streams v:0` and the
-// decode-integrity check decodes `-map 0:v:0`, so a gate that named its inputs any other
-// way could measure a stream no guard ever looked at on a file carrying more than one
-// video stream, and the recorded proof would not say so.
-//
-// Like ChromaMetricName it is a WIRE FORMAT - it lands in the ledger, the API payload and
-// the completion log - so treat it as a closed vocabulary, changed only with its readers
-// in mind. It is deliberately NOT configurable: the probes fix their stream and so does
-// this, for the same reason.
+// It is `v:0`, the FIRST video stream, because that is the stream the rest of this program
+// inspects: every ffprobe property read selects `-select_streams v:0` and the decode-integrity
+// check decodes `-map 0:v:0`, so any other spelling could measure a stream no guard looked at.
+// Like ChromaMetricName it is a WIRE FORMAT and deliberately NOT configurable.
 const ScoredStream = "v:0"
 
-// BuildFilter returns the exact -lavfi filtergraph a Score pass runs, writing its
-// JSON log to logPath. It is exported so a test can drive the REAL graph through
-// ffmpeg and observe what libavfilter did with it, rather than assert against a
-// string this package also produced - a filtergraph is only correct if ffmpeg agrees.
+// BuildFilter returns the exact -lavfi filtergraph a Score pass runs, writing its JSON log to
+// logPath. It is exported so a test can drive the REAL graph through ffmpeg and observe what
+// libavfilter did with it: a filtergraph is only correct if ffmpeg agrees.
 //
-// It is the SINGLE writer of the SCORING graph's two video-stream input specifiers, and
-// both come from ScoredStream. The startup model preflight (probeModel) is the only other
-// shipped libvmaf graph in this program and it names its inputs from that same constant,
-// so there is ONE answer to "which stream was measured" and it is the one the row the gate
-// writes afterwards carries. A second spelling anywhere in shipped code would be a second
-// answer; TestShippedCode_SpellsEveryVideoStreamLabelThroughScoredStream walks the module
-// and reds on one.
+// It is the SINGLE writer of the SCORING graph's two video-stream input specifiers, both from
+// ScoredStream, and the startup model preflight (probeModel) names its inputs from that same
+// constant, so there is ONE answer to "which stream was measured".
+// TestShippedCode_SpellsEveryVideoStreamLabelThroughScoredStream walks the module and reds on
+// a second spelling.
 //
-// The two `format` filters are the whole point of GATE-4's first criterion: they
-// convert BOTH inputs to one named format before libvmaf sees either, so the
-// comparison happens in a format holdfast chose and recorded, not one libavfilter
-// negotiated and nobody wrote down. They are also load-bearing in a way that is easy
-// to lose: they must name a format libvmaf itself accepts, or ffmpeg silently
-// auto-inserts a scaler BETWEEN them and libvmaf and the named format is not the one
-// compared after all. ComparisonFormat only ever produces the planar-YUV 8/10/12-bit
-// formats libvmaf takes directly, and TestScore_NamedFormatIsWhatLibvmafCompares
+// The two `format` filters are the whole point of GATE-4's first criterion: they convert BOTH
+// inputs to one named format before libvmaf sees either. They must name a format libvmaf itself
+// accepts, or ffmpeg silently auto-inserts a scaler BETWEEN them and libvmaf and the named
+// format is not the one compared after all. ComparisonFormat only ever produces the planar-YUV
+// 8/10/12-bit formats libvmaf takes directly, and TestScore_NamedFormatIsWhatLibvmafCompares
 // proves ffmpeg inserts nothing.
 func BuildFilter(req Request, logPath string) string {
 	sub := req.Subsample
@@ -202,20 +174,13 @@ func BuildFilter(req Request, logPath string) string {
 		sub = 1
 	}
 	// [0:v:0] = distorted (the encoded output), [1:v:0] = reference - stream-guard-allow.
-	// That marker exempts THIS line, which only NAMES the two labels to document the
-	// graph's shape: the format string below COMPOSES both from ScoredStream, and the
-	// marker is what keeps the exemption greppable and line-level, exactly as the rename
-	// guard in scripts/check-pins.sh does it.
+	// That marker exempts THIS line, which only NAMES the two labels to document the graph's
+	// shape: the format string below COMPOSES both from ScoredStream, so the comparison is
+	// pinned to the first video stream rather than left to ffmpeg's resolution rules.
 	//
-	// Both labels therefore pin the comparison to the FIRST video stream - the one every
-	// ffprobe read selects and the decode-integrity check decodes. A bare type specifier
-	// would leave "which stream" to be resolved by rules that are ffmpeg's rather than
-	// holdfast's, on a file carrying more than one video stream.
-	//
-	// log_path lives INSIDE the -lavfi filtergraph, where ':' separates option pairs,
-	// so a path with a ':' (or other filtergraph metachar) must be escaped or ffmpeg
-	// mis-parses the filter and the gate fails every encode. The media paths are safe
-	// (separate -i argv); only the filter-embedded log_path needs escaping.
+	// log_path lives INSIDE the -lavfi filtergraph, where ':' separates option pairs, so a
+	// path with a ':' (or other filtergraph metachar) must be escaped or ffmpeg mis-parses the
+	// filter and the gate fails every encode. The media paths are safe (separate -i argv).
 	return fmt.Sprintf(
 		"[0:%s]format=%s[dist];[1:%s]format=%s[ref];"+
 			"[dist][ref]libvmaf=model=%s:feature=%s:log_fmt=json:log_path=%s:n_subsample=%d",
