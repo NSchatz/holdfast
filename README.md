@@ -117,6 +117,7 @@ Bash transcoder.
 ```bash
 cp config.example.yaml config.yaml   # then edit library_roots
 holdfast validate --config config.yaml
+holdfast analyze --config config.yaml  # what is in the library, reading only (--health: what is broken)
 holdfast run --config config.yaml   # one scan: re-encode bloated non-HEVC video, safely
 holdfast serve --config config.yaml # HTTP API + web dashboard (scan on demand / on an interval)
 holdfast resolve --config config.yaml  # list (and resolve) any job whose swap outcome is unknown

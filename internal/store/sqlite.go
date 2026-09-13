@@ -124,6 +124,41 @@ func OpenReadOnly(path string) (*SQLite, error) {
 	return &SQLite{db: db}, nil
 }
 
+// OpenSnapshot opens an EXISTING ledger for reading and CREATES NOTHING AT ALL, not even
+// the -wal/-shm sidecars every ordinary reader leaves beside a WAL database.
+//
+// That is the one thing OpenReadOnly cannot promise, and it is what a command whose
+// contract is "the state directory is byte-for-byte what it was" needs: `holdfast
+// analyze` reports a census an operator may run before they have ever let this tool
+// touch a file, and a reader that added two files to their state directory would have
+// mutated the very thing it claims not to. SQLite's `immutable=1` is what buys that - it
+// tells SQLite the file cannot change underneath it, so no shared-memory index and no
+// write-ahead log are opened, and locking is skipped entirely.
+//
+// THE COST, which is why this is NOT the default reader: a database a daemon is writing
+// to right now has content in its -wal that this handle does not see, so what comes back
+// is the last CHECKPOINTED state rather than the newest. That is acceptable for exactly
+// one kind of caller - one that reports on the filesystem and reads the ledger only to
+// say which paths a record holds back - and unacceptable for any caller whose answer
+// decides a mutation. `export` and `validate` keep OpenReadOnly for that reason: their
+// job is the record itself, and a record read one checkpoint short is the wrong record.
+func OpenSnapshot(path string) (*SQLite, error) {
+	// Deliberately not openReadOnlyDB's DSN: immutable is the whole point here, and a
+	// shared helper that sometimes sets it would make "did this open create a file?"
+	// a question about an argument rather than about which function was called.
+	dsn := fmt.Sprintf("file:%s?mode=ro&immutable=1&_pragma=query_only(1)", path)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("store: open %q as an unchanging snapshot: %w", path, err)
+	}
+	db.SetMaxOpenConns(1)
+	if err := requireCurrentSchema(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &SQLite{db: db}, nil
+}
+
 // openReadOnlyDB is the read-only handle itself, with no schema rule attached. It is
 // shared so the physical read-only property has ONE definition: every reader in this
 // package gets mode=ro whatever it then decides about the schema it is looking at.

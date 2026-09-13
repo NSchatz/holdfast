@@ -57,6 +57,7 @@ Usage:
 Commands:
   run        Load config and run one transcode scan over the library roots
   serve      Run the HTTP API + web UI (scan on demand / on an interval)
+  analyze    Census the library roots: file counts, bytes and distributions (reads only)
   resolve    Report and resolve a job whose swap outcome could not be established
   restore    List what the undo window is holding, or put one original back
   requeue    Offer a file the engine has already answered back to the pipeline
@@ -66,6 +67,8 @@ Commands:
 
 Run "holdfast <command> -h" for command flags.
 
+  holdfast analyze --config config.yaml            # what is in the library, without touching it
+  holdfast analyze --config config.yaml --health   # and which of it does not decode
   holdfast restore --config config.yaml            # what is retained, and for how long
   holdfast restore --config config.yaml <path>     # put that original back
   holdfast requeue --config config.yaml <path>     # re-open that file's terminal row
@@ -82,6 +85,8 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 		return cmdRun(args[1:], stdout, stderr)
 	case "serve":
 		return cmdServe(args[1:], stdout, stderr)
+	case "analyze":
+		return cmdAnalyze(args[1:], stdout, stderr)
 	case "resolve":
 		return cmdResolve(args[1:], stdout, stderr)
 	case "restore":
@@ -556,12 +561,13 @@ func stateDirPath(cfg *config.Config) string {
 // tested on has neither a network mount nor a second real filesystem.
 var startupPlatform = func() startup.Platform { return startup.System(nil, nil) }
 
-// startupCheck runs the whole-run start-or-refuse decision and reports it. On a
-// refusal it writes the operator-facing account to stderr - every cause it
-// established, each with the exact declaration that would permit it or, where no
-// declaration could, the remedy - and returns a nonzero exit code.
-func startupCheck(cfg *config.Config, log *slog.Logger, stderr io.Writer) (startup.Result, int) {
-	res := startup.Run(startup.Check{
+// startupDecision is the ONE construction of the start-or-refuse check, and every
+// command that takes it comes through here: `run` and `serve` to obey it, `analyze` to
+// report it and read the Coverage set it produced. One construction, because a second
+// caller assembling its own Check is a second answer waiting to diverge from the
+// decision the mutating path takes.
+func startupDecision(cfg *config.Config) startup.Result {
+	return startup.Run(startup.Check{
 		Roots:        cfg.LibraryRoots,
 		StateDir:     stateDirPath(cfg),
 		Declarations: cfg.AllowNonLocal,
@@ -574,6 +580,14 @@ func startupCheck(cfg *config.Config, log *slog.Logger, stderr io.Writer) (start
 		ScratchMinFreeGB: cfg.ScratchMinFreeGB,
 		Platform:         startupPlatform(),
 	})
+}
+
+// startupCheck runs the whole-run start-or-refuse decision and reports it. On a
+// refusal it writes the operator-facing account to stderr - every cause it
+// established, each with the exact declaration that would permit it or, where no
+// declaration could, the remedy - and returns a nonzero exit code.
+func startupCheck(cfg *config.Config, log *slog.Logger, stderr io.Writer) (startup.Result, int) {
+	res := startupDecision(cfg)
 	res.Log(log)
 	if !res.Start {
 		res.WriteRefusal(stderr)
