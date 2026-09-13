@@ -48,23 +48,42 @@ func NewTautulli(baseURL string, ref secret.Ref, apiKey secret.Value) *Tautulli 
 	return t
 }
 
-// sanitize replaces a transport error with one that names the configuration key and its
-// reference instead. net/http wraps every failure in a *url.Error carrying the REQUEST
-// URL, and that URL carries `apikey=<the credential>` - so the ordinary "log the error"
-// on the fail-open path printed the api key on every Tautulli outage. The failure the
-// operator needs to see is "the Tautulli call failed", and the key that decides it is the
-// reference; neither needs the destination's query string.
+// sanitize is the ONE exit every failure of this client takes, so no branch of it can
+// report a failure without naming the configuration key, and none can report the request.
+// net/http wraps a transport failure in a *url.Error carrying the REQUEST URL, and that
+// URL carries `apikey=<the credential>` - so the ordinary "log the error" on the fail-open
+// path printed the api key on every Tautulli outage. An error STATUS is the same failure
+// from the other side: an HTTP 401 from Tautulli MEANS this key is wrong, so the report an
+// operator reads has to say which key and which reference to go and fix.
 func (t *Tautulli) sanitize(err error) error {
 	if err == nil {
 		return nil
 	}
+	cause := err.Error()
 	var ue *url.Error
 	if errors.As(err, &ue) {
-		return fmt.Errorf("tautulli: the %s request to %s failed: %s (tautulli_api_key is %s; "+
-			"neither the key nor the request URL is reported, because the URL carries the key)",
-			ue.Op, t.baseURL, unwrapMessage(ue), label(t.ref))
+		cause = ue.Op + ": " + unwrapMessage(ue)
 	}
-	return err
+	return fmt.Errorf("tautulli: the activity check against %s failed: %s (tautulli_api_key "+
+		"is %s; neither the key nor the request URL is reported, because the URL carries the key)",
+		t.destination(), cause, label(t.ref))
+}
+
+// destination is the most of the configured Tautulli URL a failure may name: scheme, host
+// and path, with any userinfo, query and fragment dropped. tautulli_url is not itself a
+// secret-bearing key, but an operator may have put basic-auth credentials in it, and the
+// query is where this client puts the api key - so the whole of both is withheld rather
+// than trusted to be credential-free. A URL too malformed to parse is named by its
+// configuration key alone, since its unparsed text is the part under suspicion.
+func (t *Tautulli) destination() string {
+	u, err := url.Parse(t.baseURL)
+	if err != nil {
+		return "the configured tautulli_url"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
 }
 
 // unwrapMessage is the innermost cause of a *url.Error, which is the part that says WHAT
@@ -85,18 +104,21 @@ func label(ref secret.Ref) string {
 	return ref.String()
 }
 
+// httpGet returns its causes bare; Streaming sanitizes them. Naming the key here as well
+// would report it twice on the paths that already reach sanitize, and leave any path added
+// later to remember on its own.
 func (t *Tautulli) httpGet(ctx context.Context, rawURL string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, t.sanitize(err)
+		return nil, err
 	}
 	resp, err := t.client.Do(req)
 	if err != nil {
-		return nil, t.sanitize(err)
+		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("tautulli returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("it answered HTTP %d", resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 }
@@ -119,8 +141,18 @@ type activityResponse struct {
 	} `json:"response"`
 }
 
-// Streaming reports whether Tautulli currently sees at least one active stream.
+// Streaming reports whether Tautulli currently sees at least one active stream. It is the
+// client's only caller-facing entry point, which is why it is where sanitize sits.
 func (t *Tautulli) Streaming(ctx context.Context) (bool, error) {
+	streaming, err := t.streaming(ctx)
+	if err != nil {
+		return false, t.sanitize(err)
+	}
+	return streaming, nil
+}
+
+// streaming returns its causes bare, for sanitize to name.
+func (t *Tautulli) streaming(ctx context.Context) (bool, error) {
 	q := url.Values{}
 	q.Set("apikey", t.apiKey.Expose())
 	q.Set("cmd", "get_activity")
@@ -130,10 +162,10 @@ func (t *Tautulli) Streaming(ctx context.Context) (bool, error) {
 	}
 	var ar activityResponse
 	if err := json.Unmarshal(body, &ar); err != nil {
-		return false, fmt.Errorf("tautulli: parse activity: %w", err)
+		return false, fmt.Errorf("its activity payload did not parse: %w", err)
 	}
 	if ar.Response.Result != "" && ar.Response.Result != "success" {
-		return false, fmt.Errorf("tautulli: result %q", ar.Response.Result)
+		return false, fmt.Errorf("it answered result %q", ar.Response.Result)
 	}
 	return streamCount(ar.Response.Data.StreamCount) > 0, nil
 }
