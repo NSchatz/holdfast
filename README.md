@@ -203,8 +203,10 @@ Fail-safes: the server **binds `127.0.0.1` by default**, and that bind is the wh
 protects the read endpoints and the dashboard - they carry no authentication of their own, so
 a reverse proxy in front of them is the only barrier there is (the reverse-proxy posture is in
 [docs/docker.md](docs/docker.md), and it is worth reading before you give holdfast a hostname);
-the mutating endpoints require a bearer token (`server_auth_token`, best set via
-`HOLDFAST_SERVER_AUTH_TOKEN`) and are **disabled entirely when no token is set**; pause only ever
+the mutating endpoints require a bearer token, reached **by reference**
+(`server_auth_token: file:/run/secrets/holdfast-token` - a literal token there, or in
+`HOLDFAST_SERVER_AUTH_TOKEN`, refuses to start; see [docs/secrets.md](docs/secrets.md)) and
+are **disabled entirely when no token is configured**; pause only ever
 *delays* work - it never interrupts an encode or the atomic swap. **Known limitation:** single-token auth
 (no per-user accounts); the queue/history views are capped at the most recent rows, not the whole ledger -
 but they now say what they were capped *against*, and `holdfast export` gives you the whole thing.

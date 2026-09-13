@@ -159,8 +159,8 @@ forward auth (Authelia, oauth2-proxy, whatever your proxy calls it) on the route
 the hostname resolves, not after.
 
 The mutating endpoints stay **disabled** until a control token is configured. With no
-`server_auth_token` set (or `HOLDFAST_SERVER_AUTH_TOKEN` in the environment), `rescan`,
-`pause` and `resume` answer **403** to every caller - a safe default, not a broken one, and
+`server_auth_token` reference set (or `HOLDFAST_SERVER_AUTH_TOKEN` in the environment),
+`rescan`, `pause` and `resume` answer **403** to every caller - a safe default, not a broken one, and
 the dashboard and the read API still work. A proxy identity header (`Remote-User`,
 `Remote-Groups`, `Remote-Email`, `Remote-Name`, any `X-Forwarded-*`) is **never**
 authorization for them: only a matching `Authorization: Bearer` token is, so a proxy that
@@ -174,8 +174,27 @@ router that strips or rewrites a path prefix breaks it silently: the document lo
 every request under it 404s. Pass the Host header through, and put no prefix strip and no
 path rewrite on this route.
 
-Set the control token via the environment (`.env`), never in `config.yaml`: an env var
-beats the file, so an empty env var would override a token set there.
+The control token is reached **by reference** and never written anywhere as a literal. Mount
+the token as a file and point the key at it:
+
+```yaml
+services:
+  holdfast:
+    environment:
+      - HOLDFAST_SERVER_AUTH_TOKEN=file:/run/secrets/holdfast_control_token
+    secrets:
+      - holdfast_control_token
+
+secrets:
+  holdfast_control_token:
+    file: ./control-token.txt      # gitignored; mode 0400
+```
+
+A literal token in `config.yaml` **or** in `HOLDFAST_SERVER_AUTH_TOKEN` refuses to start.
+That is deliberate: holdfast starts `ffmpeg` as a child process, a child inherits its
+parent's environment, and a credential in the environment is readable from every encoder
+invocation's `/proc/<pid>/environ`. The same applies to `notify_url` and
+`tautulli_api_key`. `docs/secrets.md` has the reference forms and the migration.
 
 ## GPU passthrough
 

@@ -45,14 +45,22 @@ services:
       # `run_window` is evaluated in LOCAL time. Without this the container is UTC and
       # your "encode overnight" window silently runs at the wrong hours.
       - TZ=Etc/UTC
-      # The bearer token for the MUTATING endpoints (rescan/pause/resume). Put it in a
-      # .env file next to this one; leave it unset and those endpoints stay DISABLED
-      # (the read-only API and the dashboard still work).
+      # A SECRET REFERENCE to the bearer token for the MUTATING endpoints
+      # (rescan/pause/resume), never the token itself. Leave it unset and those endpoints
+      # stay DISABLED (the read-only API and the dashboard still work).
+      #
+      # A LITERAL token here refuses to start. holdfast runs ffmpeg as a child process and a
+      # child inherits its parent's environment, so a token in this variable is readable from
+      # every encoder invocation's /proc/<pid>/environ. What goes here is a reference:
+      #
+      #   HOLDFAST_SERVER_AUTH_TOKEN=file:/run/secrets/holdfast_control_token
+      #
+      # which is what the `secrets:` block below mounts. See docs/secrets.md.
       #
       # This is the PASS-THROUGH form (a bare name, no `=`) on purpose. Writing
       # `HOLDFAST_SERVER_AUTH_TOKEN=${HOLDFAST_SERVER_AUTH_TOKEN:-}` would always SET
       # the variable — to "" when you have no .env — and an env var BEATS the YAML file,
-      # so it would silently wipe a token you had configured in config.yaml and leave
+      # so it would silently wipe a reference you had configured in config.yaml and leave
       # rescan/pause/resume returning 403 for no visible reason. The bare form passes the
       # variable only when it is actually set, so config.yaml keeps working.
       - HOLDFAST_SERVER_AUTH_TOKEN
@@ -125,3 +133,16 @@ services:
     # this host, holdfast fails loud at startup and exits non-zero. That check really
     # encodes a clip and probes the result — a hardware encoder can exit 0 while
     # writing nothing when no device is present.
+
+    # --- the credential, mounted as a FILE (secrets K1) ---------------------------
+    # Uncomment this and the top-level `secrets:` block below, create
+    # ./control-token.txt (mode 0400, and gitignore it), and set
+    #   HOLDFAST_SERVER_AUTH_TOKEN=file:/run/secrets/holdfast_control_token
+    # in your .env. The reference is what the variable carries; the credential never
+    # leaves the file, so no encoder child can read it out of the environment.
+    # secrets:
+    #   - holdfast_control_token
+
+# secrets:
+#   holdfast_control_token:
+#     file: ./control-token.txt

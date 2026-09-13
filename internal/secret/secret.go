@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -47,6 +48,11 @@ const ResolverTimeout = 5 * time.Second
 // maxResolverOutput caps what a resolver may write to stdout. A credential is small; an
 // unbounded read lets a broken resolver exhaust memory at startup.
 const maxResolverOutput = 64 << 10
+
+// waitDelay bounds how long we wait for a killed resolver's pipes to close before
+// abandoning its output. It is not a second timeout: ResolverTimeout is the bound, and
+// this only covers the window between the kill and the kernel reaping the group.
+const waitDelay = time.Second
 
 // Redacted is what a Value renders as through every formatting route there is.
 const Redacted = "<redacted>"
@@ -259,6 +265,25 @@ func (r Ref) resolveCmd(ctx context.Context) (Value, error) {
 	cmd.Stderr = nil
 	cmd.Stdin = nil
 
+	// THE BOUND IS ENFORCED ON THE WHOLE PROCESS GROUP, not on the resolver alone, and
+	// that is what makes it a bound at all. A realistic resolver is a wrapper - a shell
+	// script around `vault`, an agent client - so killing only the direct child leaves a
+	// GRANDCHILD alive holding the credential and holding the stdout pipe open, and Wait
+	// then blocks on that pipe for as long as the grandchild lives. Measured: with the
+	// default single-process kill, a resolver whose script ran `sleep 300` made this
+	// function return after 300 seconds against a 5-second bound.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return nil // it exited on its own between the deadline and the signal
+		}
+		return err
+	}
+	// The backstop for a process the kernel will not reap promptly (an uninterruptible
+	// read against a wedged secret store): give up on its output rather than on the bound.
+	cmd.WaitDelay = waitDelay
+
 	runErr := cmd.Run()
 
 	if errors.Is(tctx.Err(), context.DeadlineExceeded) {
@@ -319,17 +344,27 @@ type capped struct {
 	n int
 }
 
+// Write reports the WHOLE offered length as written even when it kept less, which is what
+// makes this a cap rather than a kill. Returning the truncated count is a short write:
+// io.Copy - which is what exec runs against a non-file Stdout - treats that as
+// io.ErrShortWrite, stops copying and closes the pipe, and the resolver then dies of
+// SIGPIPE and is reported as having exited 141. Measured, before this comment existed: a
+// resolver that streamed 2MB came back as a FAILED resolver instead of a capped value.
 func (c *capped) Write(p []byte) (int, error) {
+	offered := len(p)
 	room := maxResolverOutput - c.n
 	if room <= 0 {
-		return len(p), nil
+		return offered, nil
 	}
 	if len(p) > room {
 		p = p[:room]
 	}
 	n, err := c.w.Write(p)
 	c.n += n
-	return len(p), err
+	if err != nil {
+		return n, err
+	}
+	return offered, nil
 }
 
 // trimOneNewline strips one trailing newline (and a preceding CR). A secret written by

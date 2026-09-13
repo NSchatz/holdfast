@@ -61,6 +61,9 @@ and only with a `rename-guard-allow` marker.
 - `internal/config` - koanf layered config: defaults, then YAML, then `HOLDFAST_*`.
 - `internal/docscheck` - a mechanical check, on the ordinary test step, that the
   docs still describe the build.
+- `internal/secret` - the credential wrapper: a reference is parsed, resolved once at
+  start, and handed to exactly one consumer. `internal/secretscan` + `scripts/secret-scan`
+  - the repository's own secret scanner, behind `scripts/secret-scan.sh`.
 - `internal/logging`, `internal/version` - logger construction, build stamping.
 - `Dockerfile`, `.github/workflows/ci.yml` - the multi-arch distroless image and
   the gate.
@@ -91,8 +94,18 @@ tool proves its unhappy paths.
 ## Conventions
 
 - Small, testable functions; fail safe; match Go idiom and the existing layout.
-- No secrets, ever. Synthetic `config.example.yaml` only; real `config.yaml` is
-  gitignored.
+- No secrets, ever, and it is MECHANICAL now: `make secret-scan` refuses a tracked
+  file carrying an issued credential or named like a credential store, and
+  `make install-hooks` (the one setup step) puts it on the pre-commit path. Both
+  `secret-scan` and its self-test ride `make check`. Synthetic
+  `config.example.yaml` only; real `config.yaml` is gitignored.
+- A credential is reached BY REFERENCE. `server_auth_token`, `notify_url` and
+  `tautulli_api_key` carry `file:<path>` or `cmd:<argv>`, never a value, and a literal
+  in the file or in `HOLDFAST_*` refuses to start - a credential in holdfast's
+  environment is inherited by every `ffmpeg` child. A resolved value is a
+  `secret.Value`, which renders as `<redacted>` through `fmt`, `slog`, JSON and text;
+  `Expose()` is the only route to the plaintext, so grep for it to find every site
+  that reads one. `docs/secrets.md` is the reference.
 - Commit as `Noah Schatz <noah.lane.schatz@gmail.com>`; no `Co-Authored-By` and
   no AI co-author trailer.
 - Conventional Commits.
@@ -102,6 +115,8 @@ tool proves its unhappy paths.
 
 ## References
 
+`docs/secrets.md` the reference forms, the resolver contract and its documented timeout
+bound, and the scanner's ruleset, exit codes and one setup step ·
 `docs/docker.md` deployment (volumes, permissions, TZ, GPU passthrough, security
 posture) · `docs/migration.md` the cutover from the Bash transcoder and Tdarr ·
 `docs/webui.md` the dashboard reference · `docs/requeue.md` what a terminal row

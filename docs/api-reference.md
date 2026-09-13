@@ -369,9 +369,13 @@ what upgrades it.
   decided.
 - **Notifications** (`notify_url`, [shoutrrr](https://shoutrrr.nickfedor.com/)): one service URL fans out to
   ntfy/Discord/Gotify/… - a message per failed file and a per-scan summary. Sends run off the engine's path,
-  and a send failure is logged, never crashing the daemon or altering files. Empty URL disables it.
+  and a send failure is logged, never crashing the daemon or altering files. An unconfigured key disables it.
+  The key carries a **reference** (`notify_url: file:/run/secrets/holdfast-notify-url`), not a URL: the whole
+  URL is a credential, and a failure names the key and its reference rather than any part of the destination.
+  See [docs/secrets.md](secrets.md).
 - **Host-fair scheduling**: a daily `run_window` (`HH:MM-HH:MM`), a per-core `max_load` cap, and an optional
-  Tautulli-aware pause (`tautulli_url` + `tautulli_api_key`) that holds off while someone is streaming.
+  Tautulli-aware pause (`tautulli_url` plus a `tautulli_api_key` **reference**) that holds off while someone
+  is streaming.
   Scheduling only ever **delays** new work - it never interrupts an in-flight encode or bypasses a gate, and
   a Tautulli outage **fails open** (never halts transcoding). **Known limitation:** Plex-aware pause needs an
   operator-supplied Tautulli endpoint; otherwise the run-window + load cap are the fairness mechanism.
