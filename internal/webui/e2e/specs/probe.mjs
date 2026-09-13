@@ -219,6 +219,21 @@ function views() {
   return out;
 }
 
+// SNAPSHOT_VIEWS are the views a SNAPSHOT fills. Every claim of the form "before its first
+// snapshot every view is loading", "a snapshot carrying no rows leaves every view empty",
+// "a payload that cannot be read leaves every view saying so" is a claim about THESE, and
+// about nothing else: each of those triggers is a fact about the snapshot.
+//
+// The ledger search's results view is deliberately not one of them. It is filled by a
+// SEARCH an operator asks for, so a snapshot carrying no rows leaves it exactly where it
+// was, and requiring it to answer a question about the snapshot would be requiring the page
+// to describe work it is not doing. Its own three states are driven by real searches.
+const SNAPSHOT_VIEWS = ["counts", "queue", "aggs", "history"];
+
+function snapshotViews() {
+  return views().filter(function (v) { return SNAPSHOT_VIEWS.indexOf(v.view) >= 0; });
+}
+
 // LABEL_SELECTOR is the page's explanatory and scope labels: every element whose job is
 // to say what a region, a figure or a control IS. It deliberately excludes the two kinds
 // of long text that are not labels: a failure reason, which is the server's own error
@@ -534,7 +549,8 @@ function rendered() {
 
 return {
   tokens: tokens, textRuns: textRuns, pointerTargets: pointerTargets,
-  focusables: focusables, focused: focused, views: views, labels: labels,
+  focusables: focusables, focused: focused, views: views, snapshotViews: snapshotViews,
+  labels: labels,
   mainParagraphs: mainParagraphs, doclinks: doclinks, layout: layout,
   fonts: fonts, shadows: shadows, motion: motion, painted: painted,
   figures: figures, elapsedValues: elapsedValues, controls: controls,

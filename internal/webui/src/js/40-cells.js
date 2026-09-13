@@ -87,6 +87,34 @@ function resultCell(td, j) {
   }
 }
 
+// The remedy cell: what an operator can DO about this terminal row.
+//
+// Two things, and they are different in kind. The first is the LOCAL COMMAND that re-opens
+// the decision, named in full with the file's own path, because `requeue` changes what the
+// engine will do to a media file and is a local command by a ratified decision - so the
+// page names it rather than offering a control that cannot exist. A row nothing re-opens
+// says why instead: an empty cell there would read as a row nobody had thought about, and
+// a disabled control carrying no explanation is the dead end this surface exists to end.
+//
+// The second is the WITHHOLDING, which is the one thing this surface may do itself: it
+// takes the path out of the pipeline and nothing else. The control carries the path on
+// itself, and the click is handled once for the whole table rather than per row, so
+// building a row still assigns no behaviour.
+function remedyCell(td, j) {
+  const cmd = requeueCommand(j);
+  if (cmd) {
+    td.appendChild(mk("code", "cmd", cmd));
+  } else {
+    const why = requeueRefusal(j);
+    if (why) td.appendChild(mk("div", "cond", why));
+  }
+  if (!j || typeof j.path !== "string" || j.path === "") return;
+  const b = mk("button", "hold", "Withhold");
+  b.type = "button";
+  b.dataset.hold = j.path;
+  td.appendChild(b);
+}
+
 // The progress cell for a queue row: the derivation's figure, or the page's ONE absence
 // phrase (F3). A row that is not encoding has no measurement of a fraction, and a running
 // encode whose encoder has reported nothing usable has none either - to a reader those
