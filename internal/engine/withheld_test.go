@@ -79,7 +79,7 @@ func TestExcludedPathIsWithheldWithItsOwnReason(t *testing.T) {
 		t.Fatalf("RunOneshot: %v", err)
 	}
 
-	row, ok := withheldRowFor(t, ts,withheld)
+	row, ok := withheldRowFor(t, ts, withheld)
 	if !ok {
 		t.Fatalf("the withheld path left NO row at all. A file that silently stops being worked on, "+
 			"with nothing on the ledger saying why, is the dead end this whole surface exists to end: %q", withheld)
@@ -108,7 +108,7 @@ func TestExcludedPathIsWithheldWithItsOwnReason(t *testing.T) {
 	// The withholding is per path. The file beside it went the ordinary way, which here
 	// means it reached the probe and was recorded unreadable - the point being only that
 	// the run happened and the guard did not swallow the library.
-	if other, ok := withheldRowFor(t, ts,eligible); !ok {
+	if other, ok := withheldRowFor(t, ts, eligible); !ok {
 		t.Errorf("the file beside the withheld one left no row, so the withholding took more than the path it named")
 	} else if other.Outcome.Reason == SkipOperatorExcluded {
 		t.Errorf("a path nobody withheld was recorded as withheld: %q", eligible)
@@ -118,7 +118,7 @@ func TestExcludedPathIsWithheldWithItsOwnReason(t *testing.T) {
 	if err := eng.RunOneshot(ctx); err != nil {
 		t.Fatalf("RunOneshot (second pass): %v", err)
 	}
-	row, ok = withheldRowFor(t, ts,withheld)
+	row, ok = withheldRowFor(t, ts, withheld)
 	if !ok || row.Status != store.Skipped || row.Outcome.Reason != SkipOperatorExcluded {
 		t.Errorf("after a second scan the withheld path reads status=%q reason=%q (exists=%v), "+
 			"want a skipped row naming the withholding", row.Status, row.Outcome.Reason, ok)
@@ -146,7 +146,7 @@ func TestExcludedPathIsEligibleAgainOnceTheWithholdingIsRemoved(t *testing.T) {
 	if err := eng.RunOneshot(ctx); err != nil {
 		t.Fatalf("RunOneshot: %v", err)
 	}
-	if row, ok := withheldRowFor(t, ts,p); !ok || row.Outcome.Reason != SkipOperatorExcluded {
+	if row, ok := withheldRowFor(t, ts, p); !ok || row.Outcome.Reason != SkipOperatorExcluded {
 		t.Fatalf("the fixture is wrong: the path was not withheld (exists=%v reason=%q), so removing "+
 			"the withholding proves nothing", ok, row.Outcome.Reason)
 	}
@@ -157,7 +157,7 @@ func TestExcludedPathIsEligibleAgainOnceTheWithholdingIsRemoved(t *testing.T) {
 	if err := eng.RunOneshot(ctx); err != nil {
 		t.Fatalf("RunOneshot (after the withholding was removed): %v", err)
 	}
-	row, ok := withheldRowFor(t, ts,p)
+	row, ok := withheldRowFor(t, ts, p)
 	if !ok {
 		t.Fatalf("the path left no row at all after the withholding was removed")
 	}
