@@ -273,14 +273,26 @@ func validateSegments(pat []string) error {
 	return nil
 }
 
-// validateEncoderKey refuses an encoder key this build does not ship. It is spelled
-// here rather than inline so an encode profile cannot reach the engine carrying a key
-// the library profile's own check (Profile.validate) would have refused.
+// validateEncoderKey refuses an encoder key this build does not ship, the empty
+// string included. It is spelled here rather than inline so an encode profile cannot
+// reach the engine carrying a key the library profile's own check (Profile.validate)
+// would have refused.
+//
+// The empty string is refused HERE and accepted by Profile.validate, and the two are
+// not in disagreement: they are asked about different shapes. A library Profile's
+// Encoder is a plain string, so "" is the only spelling it has for "this root does not
+// override the top-level encoder" - it means INHERIT. An encode profile's override is a
+// POINTER, so "not mentioned" is already spelled nil, and `encoder: ""` is a value the
+// operator wrote and TranscodeIn copies into the job's effective settings, where
+// encoder.Lookup refuses it as `unknown encoder ""` hours later at the first file. An
+// unknown encoder is refused at LOAD, by AC-A8, so that `holdfast validate` answers for
+// the same configurations `holdfast run` will start on.
 func validateEncoderKey(key string) error {
-	if key == "" {
-		return nil
-	}
 	if _, ok := encoder.Lookup(key); !ok {
+		if key == "" {
+			return fmt.Errorf("encoder %q is not an encoder this build ships (known: %v); "+
+				"omit the key to inherit the encoder the library root resolved", key, encoder.Known())
+		}
 		return fmt.Errorf("encoder %q is not supported (known: %v)", key, encoder.Known())
 	}
 	return nil

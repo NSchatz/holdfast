@@ -191,6 +191,15 @@ func TestEncodeProfiles_RefuseEveryMalformedProfileByName(t *testing.T) {
 			names: []string{"p", "notacodec"},
 		},
 		{
+			// The empty string is an encoder this build does not ship, and on an
+			// override that is a POINTER it cannot mean "inherit": absent is nil.
+			// Accepting it would let `holdfast validate` report OK for a
+			// configuration whose every matching file fails at encode time.
+			name:  "an encoder spelled as the empty string",
+			body:  "encode_profiles:\n  - name: p\n    encoder: ''\n",
+			names: []string{"encode_profiles[0]", "p", `encoder ""`},
+		},
+		{
 			name:  "a crf above the range",
 			body:  "encode_profiles:\n  - name: p\n    crf: 52\n",
 			names: []string{"p", "crf", "52"},
@@ -251,8 +260,8 @@ func TestEncodeProfiles_RefuseEveryMalformedProfileByName(t *testing.T) {
 	}
 
 	// The control arm: a well-formed profile carrying every key is ACCEPTED, so the
-	// eleven refusals above are about what is wrong with each one and not about the
-	// list existing at all.
+	// refusals above are about what is wrong with each one and not about the list
+	// existing at all.
 	t.Run("a well-formed profile is accepted", func(t *testing.T) {
 		cfg, err := loadAndValidate(t, "encode_profiles:\n"+
 			"  - name: everything\n"+
