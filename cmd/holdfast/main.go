@@ -416,9 +416,16 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 	// defaulting lives in ONE function so `export` reads the database `run` wrote.
 	st, err := store.Open(filepath.Join(effectiveStateDir(cfg), "jobs.db"))
 	if err != nil {
+		// A step rolled back for moving rows it never declared is recorded before the
+		// message: the daemon is not starting, and the counts are the finding.
+		reportMigrationRefusal(log, err)
 		fmt.Fprintf(stderr, "holdfast: opening job store: %v\n", err)
 		return nil, nil, 1
 	}
+	// What this open DID to the ledger's shape, step by step, with every table's row count
+	// on either side of each step. It is emitted before anything reads the ledger, because
+	// it is the one moment the shape under that evidence moves.
+	reportMigrations(log, st.MigrationReport())
 	// What the ledger was decided under, BEFORE anything re-opens: a scan offers every
 	// row whose recorded decision inputs have moved - and every row that records none -
 	// back to the guards, and an operator meeting a burst of activity they did not ask
