@@ -17,7 +17,26 @@ import (
 // file. It implements Store.
 type SQLite struct {
 	db *sql.DB
+
+	// applied is what the open that produced this handle did to the database: one record
+	// per migration step it ran. It is written once, here, and read through
+	// MigrationReport.
+	applied []MigrationStep
 }
+
+// MigrationReport is what the open this handle came from ACTUALLY DID to the database:
+// one record per step it applied, in the order it applied them, each carrying the version
+// that step stamped and every table's row count immediately before and immediately after
+// it.
+//
+// It is returned to whoever opened the store, rather than logged inside the package,
+// because a migration is the one moment this ledger's shape changes underneath the
+// evidence an operator audits after their originals have been deleted - so the process
+// that opened it decides how that is reported, exactly as it does for a prune.
+//
+// It is EMPTY for a store that was already at this build's schema version, and empty for
+// one opened read-only: that door applies no step, so it counts nothing.
+func (s *SQLite) MigrationReport() []MigrationStep { return s.applied }
 
 var _ Store = (*SQLite)(nil)
 
@@ -56,10 +75,12 @@ func Open(path string) (*SQLite, error) {
 	db.SetMaxOpenConns(1)
 
 	s := &SQLite{db: db}
-	if err := migrate(context.Background(), db); err != nil {
+	applied, err := migrate(context.Background(), db)
+	if err != nil {
 		_ = db.Close()
 		return nil, err
 	}
+	s.applied = applied
 	return s, nil
 }
 
@@ -125,9 +146,11 @@ func openReadOnlyDB(path string) (*sql.DB, error) {
 // pragmas it wants (Open sets MaxOpenConns(1); New leaves db as given).
 func New(db *sql.DB) (*SQLite, error) {
 	s := &SQLite{db: db}
-	if err := migrate(context.Background(), db); err != nil {
+	applied, err := migrate(context.Background(), db)
+	if err != nil {
 		return nil, err
 	}
+	s.applied = applied
 	return s, nil
 }
 
@@ -144,8 +167,9 @@ var now = func() int64 { return time.Now().Unix() }
 // (the swap is the only mutation and runs strictly after verify).
 func (s *SQLite) RecoverStale(ctx context.Context) (int, error) {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE jobs SET status = ?, worker = NULL, updated_at = ? WHERE status IN (?, ?, ?)`,
-		string(Pending), now(), string(Probing), string(Encoding), string(Verifying))
+		`UPDATE jobs SET status = ?, worker = NULL, updated_at = ?, schema_version = ?
+		 WHERE status IN (?, ?, ?)`,
+		string(Pending), now(), currentStamp(), string(Probing), string(Encoding), string(Verifying))
 	if err != nil {
 		return 0, fmt.Errorf("store: recover stale: %w", err)
 	}
@@ -188,8 +212,9 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 	case errors.Is(err, sql.ErrNoRows):
 		// Never seen before: claim it fresh.
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at) VALUES (?, ?, ?, 0, ?, ?)`,
-			path, fingerprint, string(Probing), worker, now()); err != nil {
+			`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, schema_version)
+			 VALUES (?, ?, ?, 0, ?, ?, ?)`,
+			path, fingerprint, string(Probing), worker, now(), currentStamp()); err != nil {
 			return false, fmt.Errorf("store: claim insert: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
@@ -283,7 +308,7 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 	// therefore restores a parked deterministic one by the same act, with no second
 	// block to clear.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE jobs SET status = ?, worker = ?, updated_at = ?,
+		`UPDATE jobs SET status = ?, worker = ?, updated_at = ?, schema_version = ?,
 			reason = NULL, encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
 			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL, vmaf_stream = NULL,
 			source_codec = NULL, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
@@ -291,7 +316,7 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 			swap_cause = NULL, failure_class = NULL, decision_inputs = NULL,
 			library_root = NULL, profile_digest = NULL
 		 WHERE path = ? AND fingerprint = ?`,
-		string(Probing), worker, now(), path, fingerprint); err != nil {
+		string(Probing), worker, now(), currentStamp(), path, fingerprint); err != nil {
 		return false, fmt.Errorf("store: claim update: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -353,7 +378,7 @@ func carryReclaimed(ctx context.Context, tx *sql.Tx, path, fingerprint string) e
 
 // Reopen is documented on the Store interface.
 func (s *SQLite) Reopen(ctx context.Context, path, fingerprint string, clearFailures bool) (bool, error) {
-	q := `UPDATE jobs SET decision_inputs = NULL, updated_at = ?`
+	q := `UPDATE jobs SET decision_inputs = NULL, updated_at = ?, schema_version = ?`
 	if clearFailures {
 		q += `, fail_count = 0`
 	}
@@ -364,7 +389,7 @@ func (s *SQLite) Reopen(ctx context.Context, path, fingerprint string, clearFail
 	q += ` WHERE path = ? AND fingerprint = ?
 		AND status NOT IN (?, ?)
 		AND NOT (status = ? AND reason = ?)`
-	res, err := s.db.ExecContext(ctx, q, now(), path, fingerprint,
+	res, err := s.db.ExecContext(ctx, q, now(), currentStamp(), path, fingerprint,
 		string(Indeterminate), string(AppliedDespiteError), string(Skipped), GuardRestoredOriginal)
 	if err != nil {
 		return false, fmt.Errorf("store: reopen: %w", err)
@@ -446,8 +471,9 @@ func classifyRecordedInputs(rows *sql.Rows, current DecisionInputs) (DecisionInp
 // holds.
 func (s *SQLite) Advance(ctx context.Context, path, fingerprint string, st Status) error {
 	if _, err := s.db.ExecContext(ctx,
-		`UPDATE jobs SET status = ?, updated_at = ? WHERE path = ? AND fingerprint = ?`,
-		string(st), now(), path, fingerprint); err != nil {
+		`UPDATE jobs SET status = ?, updated_at = ?, schema_version = ?
+		 WHERE path = ? AND fingerprint = ?`,
+		string(st), now(), currentStamp(), path, fingerprint); err != nil {
 		return fmt.Errorf("store: advance: %w", err)
 	}
 	return nil
@@ -496,7 +522,7 @@ func (s *SQLite) Finish(ctx context.Context, path, fingerprint string, st Status
 // argument list has to stay fixed; it is an int the caller passed, never text, so there
 // is no injection surface - the same reasoning applyMigration's PRAGMA already rests on.
 func finishQuery(st Status, o *Outcome, maxFailures int) string {
-	q := `UPDATE jobs SET status = ?, updated_at = ?,
+	q := `UPDATE jobs SET status = ?, updated_at = ?, schema_version = ?,
 		reason = ?, encoder = ?, vmaf_mean = ?, vmaf_min = ?, vmaf_model = ?,
 		vmaf_pix_fmt = ?, vmaf_chroma = ?, vmaf_chroma_metric = ?, vmaf_stream = ?,
 		source_codec = ?, source_bytes = ?, output_bytes = ?, encode_ms = ?,
@@ -527,7 +553,7 @@ func finishArgs(st Status, o *Outcome, path, fingerprint string) []any {
 		class = string(o.FailureClass.Class())
 	}
 	return []any{
-		string(st), now(),
+		string(st), now(), currentStamp(),
 		nullString(o.Reason), nullString(o.Encoder),
 		nullFloat(o.VmafMean), nullFloat(o.VmafMin), nullString(o.VmafModel),
 		nullString(o.VmafPixFmt), nullFloat(o.VmafChroma), nullString(o.VmafChromaMetric),
@@ -565,6 +591,39 @@ func nullInt(i *int64) any {
 		return nil
 	}
 	return *i
+}
+
+// jobColumns is the projection every reader of a WHOLE job row uses, and scanJob below
+// is the only thing that reads it. The two exist together: a hand-written column list
+// beside a hand-written scan is the shape that silently mis-binds the next time a column
+// is appended, and the export's promise (never a narrower row than the API publishes)
+// rests on both readers projecting the same thing.
+const jobColumns = `path, fingerprint, status, fail_count, worker, updated_at, schema_version,
+	` + outcomeColumns
+
+// scanJob reads one row in jobColumns order.
+//
+// worker is NULL for a pending or recovered row, every outcome column is nullable
+// ("not recorded" must never scan into a bare 0 or "" that a reader would take for a
+// measurement), and the version stamp is read through stampScan, which tolerates whatever
+// is in the column rather than failing the whole record over it.
+func scanJob(sc interface{ Scan(...any) error }) (Job, error) {
+	var j Job
+	var status string
+	var worker sql.NullString
+	var stamp stampScan
+	var oc outcomeScan
+	dest := append([]any{
+		&j.Path, &j.Fingerprint, &status, &j.FailCount, &worker, &j.UpdatedAt, stamp.dest(),
+	}, oc.dest()...)
+	if err := sc.Scan(dest...); err != nil {
+		return Job{}, err
+	}
+	j.Status = Status(status)
+	j.Worker = worker.String
+	j.Stamp = stamp.stamp()
+	j.Outcome = oc.outcome()
+	return j, nil
 }
 
 // outcomeColumns is the column list every reader of the outcome projects, in ONE
@@ -699,8 +758,7 @@ func (s *SQLite) Delete(ctx context.Context, path, fingerprint string) error {
 // interpolated into SQL text (the values are a closed internal vocabulary anyway,
 // but parameterizing keeps the read injection-proof by construction).
 func (s *SQLite) List(ctx context.Context, statuses []Status, limit int) ([]Job, error) {
-	q := `SELECT path, fingerprint, status, fail_count, worker, updated_at,
-		` + outcomeColumns + `
+	q := `SELECT ` + jobColumns + `
 		FROM jobs`
 	args := make([]any, 0, len(statuses)+1)
 	if len(statuses) > 0 {
@@ -726,19 +784,10 @@ func (s *SQLite) List(ctx context.Context, statuses []Status, limit int) ([]Job,
 
 	var out []Job
 	for rows.Next() {
-		var j Job
-		var status string
-		var worker sql.NullString // worker is NULL for a pending/recovered row
-		// Every outcome column is nullable: NULL is "not recorded" and must not be
-		// scanned into a bare 0/"" that a reader would mistake for a measurement.
-		var oc outcomeScan
-		dest := append([]any{&j.Path, &j.Fingerprint, &status, &j.FailCount, &worker, &j.UpdatedAt}, oc.dest()...)
-		if err := rows.Scan(dest...); err != nil {
+		j, err := scanJob(rows)
+		if err != nil {
 			return nil, fmt.Errorf("store: list scan: %w", err)
 		}
-		j.Status = Status(status)
-		j.Worker = worker.String
-		j.Outcome = oc.outcome()
 		out = append(out, j)
 	}
 	if err := rows.Err(); err != nil {
@@ -823,19 +872,25 @@ func (s *SQLite) HeldByUndoWindow(ctx context.Context) (int64, error) {
 // retainedColumns is the column list every reader of a retention projects, in ONE
 // place so the SELECT text and the scan destinations cannot drift apart.
 const retainedColumns = `source_path, swapped_path, retained_path, source_bytes,
-	swapped_fingerprint, retained_at, expires_at, restored_at`
+	swapped_fingerprint, retained_at, expires_at, restored_at, schema_version`
 
 // scanRetained reads one row in retainedColumns order. restored_at is the only
 // nullable column: NULL means "not restored", which is a state and not a missing
 // measurement, so it maps to a nil pointer exactly as the outcome columns do.
+//
+// The version stamp is read here rather than left to the callers for the same reason the
+// column list is a constant: a retention read through one path and not the other would be
+// a record whose stamp depends on which reader you asked.
 func scanRetained(sc interface{ Scan(...any) error }) (Retained, error) {
 	var r Retained
 	var restoredAt sql.NullInt64
+	var stamp stampScan
 	if err := sc.Scan(&r.SourcePath, &r.SwappedPath, &r.RetainedPath, &r.SourceBytes,
-		&r.SwappedFingerprint, &r.RetainedAt, &r.ExpiresAt, &restoredAt); err != nil {
+		&r.SwappedFingerprint, &r.RetainedAt, &r.ExpiresAt, &restoredAt, stamp.dest()); err != nil {
 		return Retained{}, err
 	}
 	r.RestoredAt = nullableInt(restoredAt)
+	r.Stamp = stamp.stamp()
 	return r, nil
 }
 
@@ -845,8 +900,9 @@ func scanRetained(sc interface{ Scan(...any) error }) (Retained, error) {
 func (s *SQLite) Retain(ctx context.Context, r Retained) error {
 	if _, err := s.db.ExecContext(ctx,
 		`INSERT INTO retained_originals
-			(source_path, swapped_path, retained_path, source_bytes, swapped_fingerprint, retained_at, expires_at, restored_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+			(source_path, swapped_path, retained_path, source_bytes, swapped_fingerprint, retained_at, expires_at, restored_at,
+			 schema_version)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
 		 ON CONFLICT(source_path) DO UPDATE SET
 			swapped_path = excluded.swapped_path,
 			retained_path = excluded.retained_path,
@@ -854,9 +910,10 @@ func (s *SQLite) Retain(ctx context.Context, r Retained) error {
 			swapped_fingerprint = excluded.swapped_fingerprint,
 			retained_at = excluded.retained_at,
 			expires_at = excluded.expires_at,
-			restored_at = NULL`,
+			restored_at = NULL,
+			schema_version = excluded.schema_version`,
 		r.SourcePath, r.SwappedPath, r.RetainedPath, r.SourceBytes,
-		r.SwappedFingerprint, r.RetainedAt, r.ExpiresAt); err != nil {
+		r.SwappedFingerprint, r.RetainedAt, r.ExpiresAt, currentStamp()); err != nil {
 		return fmt.Errorf("store: retain: %w", err)
 	}
 	return nil
@@ -906,7 +963,8 @@ func (s *SQLite) ListRetained(ctx context.Context) ([]Retained, error) {
 // MarkRestored is documented on the Store interface.
 func (s *SQLite) MarkRestored(ctx context.Context, sourcePath string, at int64) error {
 	if _, err := s.db.ExecContext(ctx,
-		`UPDATE retained_originals SET restored_at = ? WHERE source_path = ?`, at, sourcePath); err != nil {
+		`UPDATE retained_originals SET restored_at = ?, schema_version = ? WHERE source_path = ?`,
+		at, currentStamp(), sourcePath); err != nil {
 		return fmt.Errorf("store: mark restored: %w", err)
 	}
 	return nil
@@ -932,11 +990,12 @@ func (s *SQLite) DropRetained(ctx context.Context, sourcePath string) error {
 func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision) (bool, error) {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, reason,
-			library_root, profile_digest)
-		 VALUES (?, ?, ?, 0, NULL, ?, ?, ?, ?)
+			library_root, profile_digest, schema_version)
+		 VALUES (?, ?, ?, 0, NULL, ?, ?, ?, ?, ?)
 		 ON CONFLICT(path, fingerprint) DO UPDATE SET
 			status = excluded.status, reason = excluded.reason, worker = NULL, updated_at = excluded.updated_at,
 			library_root = excluded.library_root, profile_digest = excluded.profile_digest,
+			schema_version = excluded.schema_version,
 			encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
 			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL, vmaf_stream = NULL,
 			source_codec = NULL, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
@@ -944,7 +1003,7 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 			swap_cause = NULL, decision_inputs = NULL
 		 WHERE jobs.status = ?`,
 		path, fingerprint, string(Skipped), now(), nullString(reason),
-		nullString(by.LibraryRoot), nullString(by.ProfileDigest), string(Pending))
+		nullString(by.LibraryRoot), nullString(by.ProfileDigest), currentStamp(), string(Pending))
 	if err != nil {
 		return false, fmt.Errorf("store: record skip: %w", err)
 	}

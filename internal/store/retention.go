@@ -366,8 +366,7 @@ func coverageFor(statuses []Status) Coverage {
 // shape a consumer expects.
 func (s *SQLite) EachTerminal(ctx context.Context, fn func(Job) error) error {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT path, fingerprint, status, fail_count, worker, updated_at,
-			`+outcomeColumns+`
+		`SELECT `+jobColumns+`
 		 FROM jobs WHERE status IN (?, ?, ?)
 		 ORDER BY updated_at ASC, path ASC`,
 		string(Done), string(Skipped), string(Failed))
@@ -377,21 +376,14 @@ func (s *SQLite) EachTerminal(ctx context.Context, fn func(Job) error) error {
 	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
-		var j Job
-		var status string
-		var worker sql.NullString
 		// The SAME projection List reads through, so the export can never carry a
 		// narrower row than the API publishes - which is the promise its format is
 		// stated as, and one that a hand-written column list here would quietly break
 		// the next time a column is appended.
-		var oc outcomeScan
-		dest := append([]any{&j.Path, &j.Fingerprint, &status, &j.FailCount, &worker, &j.UpdatedAt}, oc.dest()...)
-		if err := rows.Scan(dest...); err != nil {
+		j, err := scanJob(rows)
+		if err != nil {
 			return fmt.Errorf("store: each terminal scan: %w", err)
 		}
-		j.Status = Status(status)
-		j.Worker = worker.String
-		j.Outcome = oc.outcome()
 		if err := fn(j); err != nil {
 			return err
 		}

@@ -349,9 +349,36 @@ at all. **A migration failure is a refusal to start**, never a silent downgrade 
 a database written by a *newer* holdfast is likewise refused rather than opened and quietly written
 through a schema that cannot see all of its columns.
 
+**Every step asserts its row counts.** Each step declares what it means to do to each table's row count,
+and the migration counts every table before and after the step, inside the same transaction that applies
+it and stamps the version. A step whose observed change is anything other than what it declared is
+**rolled back and the store does not open**, with an error naming the step, the table, the change it
+declared and the change it made. Only one shipped step declares any change at all (the one that seeds the
+singleton retention-totals row); every other step declares none, because adding a column or an index moves
+no row. Under `run` and `serve` each applied step is also logged as a structured record - the step, the
+version it stamps, and each table's count before and after - at `info` when it applied and at `error` only
+for a step refused this way.
+
 Migrating is the **daemon's** job, not a reader's: `holdfast export` opens the store read-only and refuses
 a version mismatch in **either** direction rather than repairing one, so reading the ledger can never be
-what upgrades it.
+what upgrades it. A read-only open applies no step, takes no count and writes nothing to the database file.
+
+**Each record names the schema version that wrote it.** A job ledger row, a retained original and a swap
+incident each carry the version in force when the store last wrote them, so a reader holding a record can
+tell which build's semantics filled it instead of inferring that from which fields are empty. The column is
+nullable with no default and **nothing is backfilled**, which gives a reader three states to keep apart:
+
+- a record carrying **no stamp** was written before the stamp existed. It is presented as exactly that and
+  never as a schema version - naming one would be inventing evidence about which build wrote it - and every
+  other field of it reads as it always did;
+- a record whose stamp is a version in this build's history names that version;
+- a record whose stamp is **anything else** - a number past the end of this build's history, a zero or
+  negative, or a value that is not a whole number at all - is reported as *unrecognised* and never as this
+  build's version. The rest of the record still reads: one unreadable field must not cost the evidence in
+  every other one.
+
+The stamp is a property of the record rather than of the job, and it is **not published**: no `/api`
+response and no `holdfast export` line carries it, and the shapes documented above are unchanged.
 
 ### Observability & host-fair scheduling (`serve`)
 
