@@ -182,22 +182,16 @@ type Config struct {
 	// swap publishes. A nil pointer means the default (TRUE); use
 	// PreserveMtimeEnabled() to read it.
 	//
-	// It defaults ON because resetting the mtime is a real, visible and unrecoverable
-	// change to somebody's media server: "Recently Added" in Plex and Jellyfin, and
-	// every date-based sort and smart collection built on it, sees a first pass over a
-	// library as the entire library arriving at once. Every neighbouring tool - cp -p,
-	// rsync -a, mv - preserves the modification time across a replacement, so
-	// preserving it is the least-surprising behaviour and RESETTING it is the side
-	// effect. The argument for OFF - that a preserved mtime is a deliberate lie about
-	// when the bytes were written - is why the key exists, not why it defaults.
+	// It defaults ON because every neighbouring tool - cp -p, rsync -a, mv - preserves the
+	// modification time across a replacement, so RESETTING it is the side effect (see
+	// engine/metadata.go for what that costs a media server). The argument for OFF, that a
+	// preserved mtime lies about when the bytes were written, is why the key exists.
 	//
 	// Preserving it is SAFE despite probe.Fingerprint being size:mtime. A swap always
-	// changes the SIZE (the verify gate refuses an output that is not strictly
-	// smaller), so the post-swap fingerprint still moves, the terminal done row still
-	// keys under a fresh identity, and a resume still reads the replacement as a new
-	// file rather than as the already-processed source. With this key on, the size is
-	// the whole of that guarantee - which is why the engine asserts it rather than
-	// assuming it.
+	// changes the SIZE (the verify gate refuses an output that is not strictly smaller), so
+	// the post-swap fingerprint still moves and a resume still reads the replacement as a
+	// new file. With this key on the size is the whole of that guarantee, which is why the
+	// engine asserts it rather than assuming it.
 	PreserveMtime *bool `yaml:"preserve_mtime"`
 
 	// StateDir holds the job store (jobs.db) + heartbeat (relative paths are
@@ -208,22 +202,16 @@ type Config struct {
 	// (done/skipped/failed) the job store retains. 0 - the DEFAULT, and what an absent
 	// key resolves to - disables retention entirely and keeps every row.
 	//
-	// It ships DISABLED and must stay that way. A prune is the one IRREVERSIBLE act in
-	// this package's blast radius: it deletes audit history, and no re-run recreates it.
-	// A later scan re-derives the file's CURRENT state instead, so a pruned `done` row
-	// for a file still on disk comes back as a `skipped` row carrying the
-	// already-at-target-codec guard - a weaker record of the same swap. A default that
-	// silently deleted those rows would be this tool's cardinal sin with the ledger
-	// instead of with the library.
+	// It ships DISABLED and must stay that way. A prune is the one IRREVERSIBLE act in this
+	// package's blast radius: it deletes audit history and no re-run recreates it, since a
+	// later scan re-derives only the file's CURRENT state.
 	//
 	// The prune it enables cannot lower the published lifetime reclaimed total (a pruned
-	// row's contribution is carried forward durably before the row is removed) and cannot
-	// cause a file to be encoded again: a terminal row is what holds that file out of the
-	// encoder, so a row is only ever removed when the scan LISTED the directory its file
-	// should be in and the file was not there. The ledger can therefore sit above this
-	// bound - on a library that is not churning, above it permanently.
-	// A negative value, or a value that is not a whole number of rows, is a startup
-	// REFUSAL naming the key and the offending value - never a silent default.
+	// row's contribution is carried forward durably first) and cannot cause a file to be
+	// encoded again: a terminal row is what holds that file out of the encoder, so a row is
+	// only ever removed when the scan LISTED the directory its file should be in and the
+	// file was not there. The ledger can therefore sit above this bound permanently. A
+	// negative value, or one that is not a whole number of rows, is a startup REFUSAL.
 	HistoryRetentionRows int `yaml:"history_retention_rows"`
 
 	// UndoWindowHours is how many hours a swapped-out original is kept retrievable
@@ -231,35 +219,27 @@ type Config struct {
 	// which a swap is final the microsecond it happens; `validate` and startup both
 	// say so out loud.
 	//
-	// While the window is open the original is held by a SECOND HARD LINK to the same
-	// data, so retention costs no additional space at the moment it is taken - but the
-	// space the swap reclaimed is NOT returned to the filesystem until the window
-	// closes and the link is released. A library-wide first pass therefore holds every
-	// original it replaced for this many hours, which is the real cost of the setting:
-	// the reclaimed figure and the held figure are reported separately for exactly
-	// that reason.
+	// While the window is open the original is held by a SECOND HARD LINK to the same data,
+	// so retention costs no space at the moment it is taken - but the space the swap
+	// reclaimed is NOT returned until the window closes and the link is released. That is
+	// the real cost of the setting, and why the reclaimed figure and the held figure are
+	// reported separately.
 	//
 	// A source whose original cannot be retained is SKIPPED rather than swapped: the
-	// window's promise is that a swap can be walked back, and a swap that cannot be is
-	// not one this tool takes while the operator has asked for the window.
+	// window's promise is that a swap can be walked back.
 	UndoWindowHours int `yaml:"undo_window_hours"`
 
-	// AllowNonLocal opts specific paths in to running on storage holdfast could
-	// not positively identify as local (FILESYSTEM-1). holdfast's no-loss
-	// contract is stated for a local filesystem - an atomic same-filesystem
-	// rename whose failure means it did not happen, a stat that can see a
-	// concurrent rewrite, a SQLite WAL that works at all - and at startup it
-	// checks it has one, refusing a run whose library roots, state directory or
-	// any filesystem mounted beneath a root is NOT local unless the operator has
-	// said so here.
+	// AllowNonLocal opts specific paths in to running on storage holdfast could not
+	// positively identify as local (FILESYSTEM-1). The no-loss contract is stated for a
+	// local filesystem (see internal/startup), and a run whose library roots, state
+	// directory or any filesystem mounted beneath a root is NOT local is refused unless the
+	// operator has said so here.
 	//
-	// It is per PATH and never a global switch: each entry names one path and
-	// covers that path alone, so opting the state directory in does not quietly
-	// opt a NAS mount inside the library in too. Each entry must name a
-	// configured library root, the state directory, or a path spelled beneath a
-	// configured library root AS CONFIGURED; anything else is a refusal, never a
-	// silently ignored line. It never permits a path holdfast cannot INSPECT:
-	// that is a refusal whatever is declared here.
+	// It is per PATH and never a global switch, so opting the state directory in does not
+	// quietly opt a NAS mount inside the library in too. Each entry must name a configured
+	// library root, the state directory, or a path spelled beneath a configured library root
+	// AS CONFIGURED; anything else is a refusal, never a silently ignored line. It never
+	// permits a path holdfast cannot INSPECT.
 	AllowNonLocal []string `yaml:"allow_non_local"`
 
 	// --- VMAF perceptual-quality gate (TRANSCODE-4) ---
@@ -280,56 +260,39 @@ type Config struct {
 	// VmafMinPool is the worst-frame floor: an encode is rejected when its worst
 	// (sub)sampled frame VMAF (libvmaf's `min` pool) falls below it. Default 60.
 	//
-	// This is the gate that catches a locally-broken encode — a short segment
-	// destroyed inside an otherwise-clean file, which every structural check passes
-	// (it decodes cleanly and carries the right duration, packets and streams) and
-	// which the pooled mean averages away.
+	// This is the gate that catches a locally-broken encode: a short destroyed segment
+	// inside an otherwise-clean file, which every structural check passes and which the
+	// pooled mean averages away.
 	//
-	// It is the raw minimum, deliberately, and NOT a low-percentile (1st-pct /
-	// worst-5%) statistic. A percentile tolerates a FRACTION of frames — but a
-	// segment small enough to sneak past the mean gate is by construction a small
-	// fraction of frames, so a percentile floor tolerates exactly the damage the
-	// mean already tolerates, and its blind spot GROWS with runtime (1% of a 2-hour
-	// film is ~72 seconds). The raw min is the only candidate whose guarantee does
-	// not decay with duration.
+	// It is the raw minimum, deliberately, and NOT a low-percentile statistic. A percentile
+	// tolerates a FRACTION of frames, but a segment small enough to sneak past the mean gate
+	// is by construction a small fraction, so a percentile floor tolerates exactly the
+	// damage the mean already does, and its blind spot GROWS with runtime. That is measured,
+	// not argued: vmaf.TestPoolingStatistic_OnlyRawMinSeesSubOnePercentDamage destroys 1 of
+	// 240 frames and shows the harmonic mean (~99) and the 1st percentile (~98) both blind
+	// while the raw min reads ~43, and it reds if the reasoning stops holding.
 	//
-	// That is measured, not argued: vmaf.TestPoolingStatistic_OnlyRawMinSeesSubOne-
-	// PercentDamage builds an encode with 1 of 240 frames destroyed and shows the
-	// harmonic mean (~99) and the 1st percentile (~98) are BOTH blind to it while
-	// the raw min reads ~43. That test reds if this reasoning ever stops holding.
-	//
-	// 0 disables the floor, restoring the mean-only gate and its blind spot.
-	// `validate` warns when you do. The floor only ever REJECTS (the source is
-	// kept), so the failure it can cause is a wasted encode, never a lost original.
+	// 0 disables the floor, restoring the mean-only gate and its blind spot; `validate`
+	// warns when you do. The floor only ever REJECTS, so it can cost a wasted encode and
+	// never an original.
 	VmafMinPool float64 `yaml:"vmaf_min_pool"`
 	// VmafMinChroma is the CHROMA floor, in dB: an encode is rejected when the worst
 	// (sub)sampled frame's PSNR over the chroma planes - the worse of Cb and Cr -
 	// falls below it. Default 30.
 	//
-	// It exists because the VMAF model above is LUMA-ONLY and therefore structurally
-	// blind to chroma damage, and so is every structural gate: an output whose colour
-	// planes have been flattened, shifted or desaturated decodes perfectly, carries
-	// the right duration, packets and streams, and scores as well on VMAF as a
-	// faithful encode does. Before this floor existed the source was then deleted.
-	// Measured on real libvmaf: a 15% desaturation of the chroma planes leaves the
-	// pooled harmonic mean at ~99 and the worst frame at ~97 - clear of BOTH luma
-	// floors at their shipped defaults - while chroma PSNR falls to ~26 dB from the
-	// ~40 dB a faithful encode of the same source records.
+	// It exists because the VMAF model above is LUMA-ONLY, and so is every structural gate:
+	// an output whose colour planes have been flattened or desaturated decodes perfectly and
+	// scores as well on VMAF as a faithful encode. Before this floor existed the source was
+	// then deleted. Measured on real libvmaf, a 15% desaturation leaves the pooled harmonic
+	// mean at ~99 and the worst frame at ~97, clear of BOTH luma floors, while chroma PSNR
+	// falls to ~26 dB from the ~40 dB a faithful encode records.
 	//
-	// It is PSNR over Cb and Cr rather than a colour-difference metric because PSNR
-	// over those planes is computed over the chroma planes and nothing else, so a
-	// value that falls can only mean chroma changed. And it is the raw min over
-	// frames for the same reason VmafMinPool is: a mean hides a locally-broken
-	// segment.
+	// The default of 30 dB sits in that measured gap, and the metric and the raw-min pooling
+	// are chosen for the reasons vmaf.Result gives. Rejecting a good encode costs a wasted
+	// encode and keeps the source; accepting a bad one deletes an original.
 	//
-	// The default of 30 dB sits in a measured gap. Honest encodes at the shipped
-	// crf that still clear the luma gate bottom out around 40 dB (10 dB of
-	// headroom), while the weakest chroma-only damage that evades the luma gate
-	// reads ~26 dB. Rejecting a good encode costs a wasted encode and keeps the
-	// source; accepting a bad one deletes an original.
-	//
-	// 0 disables the floor, leaving chroma damage UNGUARDED. `validate` warns when
-	// you do. Range 0-100 (dB); libvmaf caps PSNR well below 100 in practice.
+	// 0 disables the floor, leaving chroma damage UNGUARDED; `validate` warns when you do.
+	// Range 0-100 (dB); libvmaf caps PSNR well below 100 in practice.
 	VmafMinChroma float64 `yaml:"vmaf_min_chroma"`
 	// VmafSubsample is the frame-sampling interval for VMAF (>=1; 1 = every frame;
 	// higher is cheaper but less precise). VMAF is a second full decode, so large

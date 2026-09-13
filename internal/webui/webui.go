@@ -1,8 +1,8 @@
-// Package webui serves the holdfast web UI. The UI is a single self-contained
-// HTML page (vanilla JS, inline CSS, no external/CDN assets) embedded into the
-// binary via go:embed, so `holdfast serve` ships one binary with the dashboard
-// baked in. The page is a READ-AND-CONTROL view over the API — it holds no state of
-// its own; the YAML config and the SQLite store remain the sources of truth.
+// Package webui serves the holdfast web UI: one self-contained HTML page (vanilla JS,
+// inline CSS, no external assets) embedded via go:embed, so `holdfast serve` ships one
+// binary with the dashboard baked in. The page is a READ-AND-CONTROL view over the API
+// and holds no state of its own; the YAML config and the SQLite store remain the
+// sources of truth.
 package webui
 
 import (
@@ -20,31 +20,26 @@ var indexHTML []byte
 
 // offerMarker is the ONE placeholder in index.html that the resolved source offer
 // replaces, once, when the handler is constructed. The offer is rendered SERVER-SIDE
-// and baked into the document that goes on the wire, rather than fetched by the
-// page's own JavaScript, for three reasons that are each a requirement rather than a
-// preference: the offer must survive every API endpoint failing (it is in the static
-// bytes, so no request can remove it), the page must keep its no-HTML-string-sink
-// render idiom (nothing assigns a string to an HTML sink), and the response
-// Content-Security-Policy must not be relaxed to let it in.
+// into the document that goes on the wire rather than fetched by the page's own
+// JavaScript, and each reason is a requirement: the offer must survive every API
+// endpoint failing, the page must keep its no-HTML-string-sink render idiom, and the
+// response Content-Security-Policy must not be relaxed to let it in.
 const offerMarker = "<!--holdfast:source-offer-->"
 
 // DocPath is the repository-relative path of the document the dashboard's methodology
-// prose lives in (frontend clause F8: "Explanation lives in docs. Scope labels on the
-// surface stay short ... The paragraphs explaining methodology live in the repo's own
-// docs, linked once per region"). It is a constant so the page, the link check inside
-// `make check` and the document itself cannot drift apart.
+// prose lives in: explanation lives in docs, and the surface keeps its scope labels
+// short. It is a constant so the page, the link check inside `make check` and the
+// document itself cannot drift apart.
 const DocPath = "docs/dashboard-methodology.md"
 
 // docLinks is one entry per REGION of the page: the marker in the shell, the fragment of
 // DocPath that region's methodology lives under, and the link text a reader sees.
 //
 // The href is built from the SOURCE URL THIS BINARY WAS BUILT WITH, the same value the
-// AGPL section 13 offer names, so the link always points at the tree that produced the
-// running binary: a fork that sets SOURCE_URL to its own repository gets doc links into
-// its own repository, with no patching of embedded HTML, exactly as the offer does. That
-// is also what makes the link checkable: the path component after the tree is a path in
-// THIS repository, and a test inside `make check` fails if it names a document that is
-// not committed here or an anchor that document does not carry.
+// AGPL section 13 offer names, so a fork that sets SOURCE_URL gets doc links into its own
+// repository with no patching of embedded HTML. That is also what makes the link
+// checkable: the path after the tree is a path in THIS repository, and a test inside
+// `make check` fails on a document that is not committed here or an anchor it lacks.
 var docLinks = []struct {
 	Marker   string
 	Fragment string
@@ -54,14 +49,11 @@ var docLinks = []struct {
 	{"<!--holdfast:doc-history-->", "what-it-has-done-to-your-library", "How the ledger figures are computed"},
 }
 
-// docMark is the glyph a documentation link is rendered as: an information mark, drawn
-// inline. Like every other graphic on this surface it is DRAWN and not fetched - the
-// served policy is `default-src 'none'` and `img-src` falls back to it, so a referenced
-// image would be a broken page rather than a heavier one.
-//
-// It is aria-hidden, and the link carries its own accessible name instead. A glyph is not
-// a name: an icon-only link with nothing but a picture inside it is a link that announces
-// itself as "link" and nothing more.
+// docMark is the glyph a documentation link is rendered as. Like every other graphic on
+// this surface it is DRAWN inline and not fetched: the served policy is
+// `default-src 'none'` and `img-src` falls back to it, so a referenced image would be a
+// broken page rather than a heavier one. It is aria-hidden and the link carries its own
+// accessible name, because an icon-only link announces itself as "link" and nothing more.
 const docMark = `<svg class="docmark" viewBox="0 0 24 24" width="16" height="16" ` +
 	`aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" ` +
 	`stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle>` +
@@ -69,15 +61,12 @@ const docMark = `<svg class="docmark" viewBox="0 0 24 24" width="16" height="16"
 
 // docLinkHTML renders one region's documentation link. Every value that reaches the
 // document is escaped, exactly as the offer's is, so a source URL can appear ONLY as the
-// link's target: it can introduce no element, no attribute and no script, which is what
-// lets the page keep its tight Content-Security-Policy and its no-HTML-string-sink render
-// idiom unchanged.
+// link's target: it introduces no element, no attribute and no script, which is what lets
+// the page keep its tight Content-Security-Policy and its render idiom unchanged.
 //
-// The link is a MARK rather than a sentence. What it is for is carried by its accessible
-// name and its tooltip, both of which are the same words the link used to render, so no
-// reader loses the sentence - it stops competing with the scope line beside it for the
-// space directly under a region heading, which is the one place on this page a reader is
-// trying to find out what the region IS.
+// The link is a MARK rather than a sentence, and its accessible name and tooltip carry
+// the same words the sentence did, so nothing competes with the scope line for the space
+// under a region heading.
 func docLinkHTML(base, fragment, text string) string {
 	href := html.EscapeString(strings.TrimSuffix(base, "/") + "/blob/main/" + DocPath + "#" + fragment)
 	label := html.EscapeString(text)
@@ -85,15 +74,12 @@ func docLinkHTML(base, fragment, text string) string {
 		`" title="` + label + `">` + docMark + `</a></p>`
 }
 
-// csp is the response Content-Security-Policy, byte for byte. A tight CSP: the page
-// is fully self-contained, so nothing but its own inline script/style is ever allowed
-// to load — defence in depth for a tool that may sit on a home LAN.
-// `require-trusted-types-for 'script'` enforces Trusted Types (TRANSCODE-15): the page
-// renders rows as DOM nodes and never assigns a string to an HTML sink, so this turns
-// that discipline into a browser-enforced guarantee — a regression that string-builds
-// from an attacker-influencable media path would throw, not silently reintroduce a
-// sink. The source offer (LICENSE-3) is rendered into the served document server-side
-// and needs no relaxation of any directive here.
+// csp is the response Content-Security-Policy, byte for byte. The page is fully
+// self-contained, so nothing but its own inline script and style is ever allowed to
+// load. `require-trusted-types-for 'script'` enforces Trusted Types (TRANSCODE-15): the
+// page renders rows as DOM nodes and never assigns a string to an HTML sink, so a
+// regression that string-builds from an attacker-influencable media path throws rather
+// than silently reintroducing a sink.
 const csp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; require-trusted-types-for 'script'"
 
 // render returns the served document for one resolved offer: the embedded page with
@@ -106,15 +92,11 @@ func render(o sourceoffer.Offer) []byte {
 	return doc
 }
 
-// Handler returns an http.Handler that serves the embedded dashboard at "/" (and
-// only "/": any other path under the catch-all 404s rather than serving the app
-// shell for, say, a stray asset request). It is mounted behind chi's "/*" route.
-//
-// The source URL this binary was built with is validated here as well as at startup,
-// and the same accept test does both - so a handler built in process with a rejected
-// value REFUSES rather than serving an offer that names one. In the daemon the
-// refusal has already happened: cmd/holdfast resolves the offer before it creates any
-// listener, and hands the resolved value to HandlerFor.
+// Handler returns an http.Handler that serves the embedded dashboard at "/" and only
+// "/": any other path under the catch-all 404s rather than serving the app shell for a
+// stray asset request. The source URL this binary was built with is validated here as
+// well as at startup, by the same accept test, so a handler built in process with a
+// rejected value REFUSES rather than serving an offer that names one.
 func Handler() http.Handler {
 	o, err := sourceoffer.Resolve()
 	if err != nil {
@@ -139,11 +121,10 @@ func HandlerFor(o sourceoffer.Offer) http.Handler {
 	})
 }
 
-// refusingHandler serves nothing at the root when the build's source URL was
-// rejected. It is a refusal, never a fall back to the upstream URL: a page that
-// quietly named upstream as the source of a modified binary would be a worse failure
-// than no page. The body states why and names the rejected value, and is deliberately
-// not an offer - it carries no link, no licence name and no identity.
+// refusingHandler serves nothing at the root when the build's source URL was rejected.
+// It never falls back to the upstream URL: a page quietly naming upstream as the source
+// of a modified binary is a worse failure than no page. The body says why and names the
+// rejected value, and is deliberately not an offer.
 func refusingHandler(err error) http.Handler {
 	msg := "holdfast refuses to serve the dashboard: " + err.Error() + "\n"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

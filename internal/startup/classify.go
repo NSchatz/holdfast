@@ -24,19 +24,13 @@ const (
 	// build does not recognise. Undetermined is NOT local, and refuses the run
 	// exactly as a detected network filesystem does.
 	Undetermined Class = "undetermined"
-	// Unclassified is the ZERO Class: a checked path that carries no storage
-	// classification at all, because there is no storage there to classify.
-	// Exactly one thing has none - a configured library root that DOES NOT
-	// EXIST. That path is reported as missing, distinctly from permission
-	// denial and distinctly from an undetermined type, and it is NEVER
-	// classified `undetermined`: a lookup that failed because the path is not
-	// there says nothing about storage, and reporting it under the same word as
-	// a type holdfast could not determine tells the operator to go looking for a
-	// filesystem problem that does not exist.
-	//
-	// It is not a fourth classification: a classification is exactly one of the
-	// three above, and this is the absence of one. It is not local either, so
-	// nothing that reads IsLocal has to know about it.
+	// Unclassified is the ZERO Class: a checked path with no storage classification,
+	// because there is no storage there to classify. Exactly one thing has none - a
+	// configured library root that DOES NOT EXIST - and it is reported as missing,
+	// distinctly from permission denial and NEVER as `undetermined`: a lookup that
+	// failed because the path is not there says nothing about storage, and that word
+	// would send the operator after a filesystem problem that does not exist. It is
+	// the absence of a classification rather than a fourth one, and not local.
 	Unclassified Class = ""
 )
 
@@ -45,28 +39,23 @@ const (
 func (c Class) IsLocal() bool { return c == Local }
 
 // The set of filesystem types THIS BUILD classifies `local` lives in ONE place,
-// `internal/fsclass`, and this package READS it rather than declaring a second
-// one. It has to: the startup check and the swap-time / guard-time lookups the
-// engine makes for itself are two consumers of the same question, and two sets
-// that could drift would mean a run that started because startup called a path
-// local and then parked every swap on it, or the reverse. The set is reported at
-// startup and restated in the shipped documentation, held in agreement by a test
-// the aggregate check target runs.
+// `internal/fsclass`, and this package READS it rather than declaring a second. It has
+// to: the startup check and the swap-time lookups the engine makes for itself are two
+// consumers of one question, and two sets that could drift would mean a run that started
+// because startup called a path local and then parked every swap on it, or the reverse.
 //
-// A type qualifies only if, for EVERY file on storage of that type, the storage
-// is attached to the host holdfast runs on and no other host can modify that
-// file through it. That is what the no-loss contract rests on: an atomic
-// same-filesystem rename whose failure means it did not happen, a stat that can
-// see a concurrent rewrite, and a SQLite WAL that works at all.
-//
-// Deliberately absent: any union or overlay filesystem, any in-memory filesystem
-// and anything in user space (FUSE), because the name of such a type does not by
-// itself say what storage is underneath it (fsclass.NotLocalByConstruction).
+// A type qualifies only if, for EVERY file on storage of that type, the storage is
+// attached to the host holdfast runs on and no other host can modify that file through
+// it. That is what an atomic same-filesystem rename whose failure means it did not
+// happen, a stat that can see a concurrent rewrite, and a working SQLite WAL all rest
+// on. Any union, overlay, in-memory or user-space (FUSE) type is deliberately absent:
+// its name does not by itself say what storage is underneath
+// (fsclass.NotLocalByConstruction).
 
-// LocalTypes returns the complete set of filesystem types this build classifies
-// `local`, sorted. Startup prints it and the shipped documentation states it, so
-// two builds recognising different sets are distinguishable from what each
-// prints without anyone reading source or rebuilding.
+// LocalTypes returns the complete set of filesystem types this build classifies `local`,
+// sorted. Startup prints it and the shipped documentation states it, held in agreement
+// by a test the aggregate check target runs, so two builds recognising different sets
+// are distinguishable without anyone reading source.
 func LocalTypes() []string { return fsclass.RecognisedLocalTypes() }
 
 // classification is the outcome of classifying one path.
@@ -77,17 +66,15 @@ type classification struct {
 	Denied bool   // the lookup failed because the process may not inspect the path
 }
 
-// classify turns one filesystem-type lookup into a classification. The lookup's
-// FAILURE modes are as load-bearing as its answers, so each is kept distinct:
+// classify turns one filesystem-type lookup into a classification. The lookup's FAILURE
+// modes are as load-bearing as its answers, so each stays distinct:
 //
-//   - the process may not inspect the path: `undetermined` FOR REPORTING, with
-//     Denied set, because the run is decided by the permission row and not by
-//     this one, and no opt-in can lift it;
-//   - mount information absent, unreadable or unparseable: `undetermined` for
-//     every path whose type it would have settled;
-//   - any other failure, no type at all, or a type this build does not
-//     recognise: `undetermined` with that reason, and never the name of a
-//     filesystem it did not detect.
+//   - the process may not inspect the path: `undetermined` FOR REPORTING, with Denied
+//     set, because the permission row decides the run and no opt-in lifts it;
+//   - mount information absent, unreadable or unparseable: `undetermined` for every
+//     path whose type it would have settled;
+//   - any other failure, no type at all, or a type this build does not recognise:
+//     `undetermined` with that reason, never the name of a filesystem it did not detect.
 func classify(typeName string, err error) classification {
 	if err != nil {
 		switch {
