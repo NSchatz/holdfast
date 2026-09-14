@@ -21,8 +21,12 @@ import (
 )
 
 // Server is the HTTP surface: chi router + read endpoints + SSE + token-gated
-// controls + the embedded UI. It holds no media handles — every mutating action
-// routes through the Controller (scan/pause), which cannot touch a file.
+// controls + the embedded UI. Two independent bearer tokens gate it: the control token
+// (`server_auth_token`) on the mutating endpoints, and the read token
+// (`server_read_token`) on the reads under /api when it is configured. The dashboard page
+// and /metrics are gated by neither, for the reasons given at their routes. It holds no
+// media handles — every mutating action routes through the Controller (scan/pause), which
+// cannot touch a file.
 type Server struct {
 	baseCtx context.Context
 	cfg     config.Config
@@ -30,14 +34,18 @@ type Server struct {
 	// from cfg, because cfg carries the REFERENCE and never the credential: a Config is
 	// printed by `validate`, logged at startup and copied by value all over this
 	// package, and a plaintext token inside it would ride along on every one of those.
-	token   secret.Value
-	store   store.Store
-	ctrl    *Controller
-	hub     *Hub
-	ui      http.Handler
-	metrics http.Handler
-	log     *slog.Logger
-	mux     http.Handler
+	token secret.Value
+	// readToken is the RESOLVED read token (`server_read_token`), held here for exactly
+	// the reason the control token is: cfg carries the REFERENCE and never the credential.
+	// Empty leaves the read endpoints OPEN, which is every existing install's behaviour.
+	readToken secret.Value
+	store     store.Store
+	ctrl      *Controller
+	hub       *Hub
+	ui        http.Handler
+	metrics   http.Handler
+	log       *slog.Logger
+	mux       http.Handler
 
 	// subs is the targeted-scan queue POST /api/scan feeds (S0093). Set once with
 	// SetSubmissions, before serving, the way the Controller's own hooks are; with none
@@ -71,14 +79,16 @@ func (s *Server) Wait() {
 //
 // token is the control token RESOLVED from cfg's `server_auth_token` reference; an empty
 // one leaves the mutating endpoints disabled, exactly as an unconfigured key does.
-func New(baseCtx context.Context, cfg config.Config, token secret.Value, st store.Store, ctrl *Controller, hub *Hub, ui, metrics http.Handler, log *slog.Logger) *Server {
+// readToken is the read token RESOLVED from cfg's `server_read_token` reference; an empty
+// one leaves the read endpoints OPEN, which is what every install before this key did.
+func New(baseCtx context.Context, cfg config.Config, token, readToken secret.Value, st store.Store, ctrl *Controller, hub *Hub, ui, metrics http.Handler, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
-	s := &Server{baseCtx: baseCtx, cfg: cfg, token: token, store: st, ctrl: ctrl, hub: hub, ui: ui, metrics: metrics, log: log}
+	s := &Server{baseCtx: baseCtx, cfg: cfg, token: token, readToken: readToken, store: st, ctrl: ctrl, hub: hub, ui: ui, metrics: metrics, log: log}
 	s.mux = s.routes()
 	return s
 }
@@ -91,11 +101,21 @@ func (s *Server) routes() http.Handler {
 	r.Use(middleware.Recoverer) // a panicking handler must never crash the daemon
 
 	r.Route("/api", func(r chi.Router) {
-		// Read endpoints — open (protected by the localhost-default bind, not a token).
-		r.Get("/summary", s.handleSummary)
-		r.Get("/queue", s.handleQueue)
-		r.Get("/history", s.handleHistory)
-		r.Get("/events", s.handleEvents)
+		// Read endpoints - gated on `server_read_token` while it is set, and OPEN while
+		// it is not (protected then by the localhost-default bind, and by nothing else).
+		//
+		// The gate is on THIS group and never on the /api route itself, because the
+		// mutating group's own refusals must not change shape: with control disabled it
+		// answers 403 naming server_auth_token, and a read gate in front of the whole
+		// route would turn that into a 401 about a different key for an operator who has
+		// not configured either.
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireReadToken)
+			r.Get("/summary", s.handleSummary)
+			r.Get("/queue", s.handleQueue)
+			r.Get("/history", s.handleHistory)
+			r.Get("/events", s.handleEvents)
+		})
 
 		// Mutating endpoints — token required (and disabled entirely when no token
 		// is configured). These only ever start a scan, toggle pause, or WITHHOLD a
@@ -123,12 +143,23 @@ func (s *Server) routes() http.Handler {
 		})
 	})
 
-	// Prometheus metrics (TRANSCODE-8), when enabled.
+	// Prometheus metrics (TRANSCODE-8), when enabled. DELIBERATELY NOT GATED, by
+	// server_read_token or by anything else: its reachability is governed by
+	// metrics_enable alone. The exposition carries counters, a byte total and two
+	// histograms labelled only by outcome and by state, so it names no file - and a
+	// scrape credential is the one thing a Prometheus deployment most often cannot
+	// supply, so gating this would break every existing scrape on upgrade to buy nothing.
+	// The premise is asserted in internal/metrics: no library path reaches the exposition.
 	if s.metrics != nil {
 		r.Handle("/metrics", s.metrics)
 	}
 
-	// The embedded UI at the root.
+	// The embedded UI at the root, and DELIBERATELY NOT GATED either. A browser sends no
+	// Authorization header on a navigation, so gating the page on a bearer token would
+	// serve a login-less 401 to every operator who opened it; the page needs a cookie set
+	// from a login form, which is its own piece of work. With a read token set the page is
+	// therefore still served and its own /api requests are refused - the page loads and
+	// its data does not - which is what Notices() states at startup.
 	if s.ui != nil {
 		r.Handle("/*", s.ui)
 	} else {
@@ -337,6 +368,49 @@ func (s *Server) requireToken(next http.Handler) http.Handler {
 		}
 		got := bearerToken(r.Header.Get("Authorization"))
 		if subtle.ConstantTimeCompare([]byte(got), []byte(s.token.Expose())) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="holdfast"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requireReadToken gates the read endpoints under /api on `server_read_token`. With no
+// read token resolved it is a pass-through: the read surface is OPEN, which is the
+// shipped default and every existing install's behaviour, and a key that gated on upgrade
+// would lock out every client that never sent a credential.
+//
+// With one resolved, a request must present EITHER the read token OR the control token.
+// The control token is accepted here because one Authorization header cannot carry two
+// values, so an operator holding the more privileged credential would otherwise be locked
+// out of the less privileged surface. The reverse never holds: requireToken compares
+// against the control token alone, so a read token buys no mutation.
+//
+// Both comparisons are constant time and BOTH ARE ALWAYS RUN - the results are combined
+// with a bitwise OR rather than `||`, because a short circuit would make the response
+// time say which of the two credentials was presented. Neither value reaches a response
+// body, a header or a log: the 401 says "unauthorized" and nothing about what would have
+// been accepted, and it names no media path, which is the whole reason this gate exists.
+//
+// It is MIDDLEWARE, so /api/events is refused before handleEvents runs at all: no
+// snapshot, no heartbeat and no path is written to an unauthenticated stream.
+func (s *Server) requireReadToken(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.readToken.Empty() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		presented := []byte(bearerToken(r.Header.Get("Authorization")))
+		ok := subtle.ConstantTimeCompare(presented, []byte(s.readToken.Expose()))
+		// The control token is only a credential when one is configured. Without this
+		// guard an EMPTY control token would compare equal to an absent Authorization
+		// header, and a daemon with the controls disabled would serve its read API to
+		// anyone who sent no credential at all - the exact hole this gate closes.
+		if !s.token.Empty() {
+			ok |= subtle.ConstantTimeCompare(presented, []byte(s.token.Expose()))
+		}
+		if ok != 1 {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="holdfast"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
