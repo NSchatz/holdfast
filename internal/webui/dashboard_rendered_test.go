@@ -147,12 +147,14 @@ func collapseSpace(s string) string { return strings.Join(strings.Fields(s), " "
 // sweep correctly FAILS on it, and with the delay the sweep PASSES and reports the
 // harmless mutation as caught.
 // Repair: a sweep that asks whether a subject was hidden must first have SEEN the page.
-// Both loops now require the render, and the one hiding mutation that legitimately
-// prevents it - the aggregate host removed from the markup, where there is nothing for
-// the page to fill - DECLARES the exemption on the case itself (hidingMutation's
-// allowsUnrendered) rather than being recognised by its name. A permission that is granted
-// by a substring of a map key is a permission a rename hands to another case in silence,
-// which is this same cause wearing its third set of clothes.
+// Both loops now require the render, of every case, with NO exemption. There was one for a
+// while - the mutation that deletes the aggregate host, on the reasoning that it leaves the
+// page nothing to fill - first granted by a substring of the case's NAME, which is a
+// permission a rename hands to another case in silence, and then as a declared field on the
+// case. Measurement retired it: on that mutation the page renders and reports 0 of 6
+// aggregate cards, so the permission was never exercised by the only case that held it, and
+// an unexercised permission is just a row of the sweep a slow machine could satisfy. This
+// cause's third set of clothes was the exemption itself.
 //
 // CAUSE 4 - THE FIXTURE SERVER'S PORT WAS DECIDED BY WHAT ELSE WAS ON THE MACHINE.
 // Mechanism: the Playwright project bound a fixed 127.0.0.1:8931 and correctly refuses to
@@ -1686,18 +1688,22 @@ const aggHostMarkup = `<div class="aggs" id="aggregates" data-view="aggs">
 // --- B15 / A2: every rendered grader FAILS when its subject is hidden ------------
 
 // hidingMutation is one counterexample per way a subject can be in the served bytes and
-// still never reach a reader, together with the ONE exemption the sweep grants.
+// still never reach a reader. There is no exemption field on it, and that is the point:
+// cause 3's repair is "the page must have RENDERED before a mutation counts as caught",
+// and the sweep grants that to every case without exception, so no permission exists for a
+// rename or a new case to inherit.
 //
-// allowsUnrendered is a field rather than a test on the name because the sweep's whole
-// repair for cause 3 is "the page must have RENDERED before a mutation counts as caught",
-// and an exemption keyed to how a map key is spelled is an exemption a rename can hand to
-// any other case silently. Declared here, the sweep's own rule stays readable: exactly the
-// cases that say so may be satisfied by a page that never rendered, and every other case
-// must have been looked at.
+// It used to carry one, for the mutation that DELETES the aggregate host, on the reasoning
+// that there would be nothing left for the page to fill. Measured rather than reasoned: on
+// that mutation the page renders (ready=true) and reports 0 of 6 aggregate cards, in 2 of 2
+// renders taken while the rest of this suite was loading the host - so the permission was
+// never exercised by the one case that held it, and an unexercised permission is only a
+// place for a future unrendered page to pass unlooked-at. If a page change ever does stop
+// that document rendering, this sweep now says so loudly instead of going green having seen
+// nothing.
 type hidingMutation struct {
-	name             string
-	mutate           func([]byte) []byte
-	allowsUnrendered bool
+	name   string
+	mutate func([]byte) []byte
 }
 
 // hidingMutations is one counterexample per way a subject can be in the served bytes and
@@ -1721,11 +1727,11 @@ func hidingMutations() []hidingMutation {
 		{name: "an opaque overlay painted over the page", mutate: css("body::after { content:''; position:fixed; inset:0; background:#000; z-index:9999; }")},
 		{name: "a hidden attribute on the table bodies", mutate: domReplace(`<tbody id="queue" data-view="queue">`, `<tbody id="queue" data-view="queue" hidden>`, `<tbody id="history" data-view="history">`, `<tbody id="history" data-view="history" hidden>`)},
 		{name: "a hidden attribute on the aggregate host", mutate: domReplace(`<div class="aggs" id="aggregates" data-view="aggs">`, `<div class="aggs" id="aggregates" data-view="aggs" hidden>`)},
-		// The one exemption, and the reason it is one: this mutation deletes the host the
-		// aggregate cards are written INTO, so there is nothing for the page to fill and
-		// its absence is itself the counterexample. Every other case leaves a page that
-		// can render, so a verdict from one that did not is a verdict about the machine.
-		{name: "the aggregate host removed from the markup", mutate: domReplace(aggHostMarkup, ``), allowsUnrendered: true},
+		// This one deletes the host the aggregate cards are written INTO. The page still
+		// renders - renderAggregates returns early on a missing host rather than throwing -
+		// and the sweep catches it by the cards that are then absent, so it is held to the
+		// same "must have been looked at" rule as every case above it.
+		{name: "the aggregate host removed from the markup", mutate: domReplace(aggHostMarkup, ``)},
 	}
 }
 
@@ -1756,10 +1762,10 @@ func TestRendered_EveryDashboardGraderFailsAgainstEveryHidingMutation(t *testing
 		// The page has to RENDER for the mutation to have been caught. A verdict from a
 		// page that never rendered reports every subject missing, so this case would
 		// "catch" a mutation by never having seen the page - and which way it went would
-		// then depend on how busy the machine was. The exemption is declared on the case
-		// (allowsUnrendered), never inferred from how the case is spelled.
+		// then depend on how busy the machine was. Every mutation here, with no exception:
+		// an exception is a row of this sweep that a slow machine can satisfy.
 		v, log := renderDashboard(t, bin, dashOpts{snapshot: fixtureSnapshot(), mutate: m.mutate})
-		if !v.Ready && !m.allowsUnrendered {
+		if !v.Ready {
 			t.Fatalf("%s: the page did not render at all, so this mutation was not caught - it was never looked at "+
 				"(connection state %q)\nbrowser output:\n%s", m.name, v.ConnText, log)
 		}
