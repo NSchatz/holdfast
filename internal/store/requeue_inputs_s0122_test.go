@@ -294,8 +294,9 @@ func bulkTerminalRows(t *testing.T, s *SQLite, n int, in DecisionInputs) {
 	}
 }
 
-// TestRequeueInputs_TheSurveyCostPerTerminalRowIsMeasured measures what the per-path rule
-// costs the survey, because nothing else in this change does.
+// TestRequeueInputs_TheSurveyCostPerTerminalRowIsMeasured asserts [AC-7]'s "every row's path
+// is resolved" at scale and measures what the per-path rule costs the survey, because nothing
+// else in this change does.
 //
 // The read went from one GROUP BY over idx_jobs_status_inputs to a row-by-row walk needing
 // path and reason, so that index no longer covers it - and this read runs at startup on the
