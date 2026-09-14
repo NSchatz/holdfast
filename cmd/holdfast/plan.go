@@ -392,14 +392,15 @@ func buildPlan(ctx context.Context, cfg *config.Config, res startup.Result, pass
 // holding none, and a total that quietly assumed otherwise would be the confident wrong
 // answer this repository's fail-safe rule exists to forbid.
 func planCoverageOf(cfg *config.Config, res startup.Result) planCoverage {
-	roots := make([]string, 0, len(cfg.LibraryRoots))
-	for _, r := range cfg.LibraryRoots {
-		roots = append(roots, filepath.Clean(r))
-	}
+	// "Does this path lie under a configured root" is config.Root.Contains and nothing of this
+	// command's own: it is the same question the engine answers when it decides which root's
+	// profile judges a file, and a second spelling of it here would be one more place for this
+	// report to drift from the pass it describes. The list is resolved ONCE, outside the loops,
+	// because a library is up to 300,000 entries and this is asked of every one of them.
+	roots := cfg.RootProfiles()
 	under := func(path string) bool {
-		for _, root := range roots {
-			if path == root || len(path) > len(root) && path[:len(root)] == root &&
-				path[len(root)] == filepath.Separator {
+		for _, r := range roots {
+			if r.Contains(path) {
 				return true
 			}
 		}
