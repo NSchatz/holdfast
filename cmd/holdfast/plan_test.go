@@ -1160,7 +1160,13 @@ func TestPlan_HelpListsFlagsAndExitCodes(t *testing.T) {
 func TestPlan_EmitsProgressWhileItRuns(t *testing.T) {
 	cfgPath, _, _ := planLibrary(t, "")
 
+	// The clause binds the SHIPPED command, so the interval this build ships is asserted
+	// first. Without this the case would prove only that a reporter it configured itself
+	// works, and would stay green over a build that reports every hour or not at all.
 	was := planProgressEvery
+	if was <= 0 || was > 30*time.Second {
+		t.Fatalf("plan ships a progress interval of %s; cli L4 binds it to at most thirty seconds", was)
+	}
 	planProgressEvery = 5 * time.Millisecond
 	t.Cleanup(func() { planProgressEvery = was })
 

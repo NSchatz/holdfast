@@ -11,10 +11,10 @@ import (
 
 // The read-only pass `holdfast plan` reports from.
 //
-// WHAT IT IS. One walk of the covered library, the daemon's OWN enumeration over it, and
-// the daemon's own source-side guard chain over what that enumeration found - with every
-// write taken out. No claim, no row, no encode, no temp, no file created, renamed or
-// removed anywhere, including inside the state directory.
+// WHAT IT IS. One walk of the covered library, the daemon's OWN enumeration over it, the
+// daemon's own outright refusals (Declined) and the daemon's own source-side guard chain
+// over what is left - with every write taken out. No claim, no row, no encode, no temp, no
+// file created, renamed or removed anywhere, including inside the state directory.
 //
 // WHY IT LIVES HERE rather than in the command that prints it. What `plan` reports is what
 // a run WOULD do, and a report that derived that from rules of its own would be a second
@@ -86,7 +86,8 @@ type PlanDeclined struct {
 // PlanPass is what one read-only pass found: every covered file with its verdict, and how
 // many probe snapshots that cost.
 type PlanPass struct {
-	// Files is every file the enumeration covered, in the enumeration's own order.
+	// Files is every file the enumeration covered and the pipeline did not decline, in the
+	// enumeration's own order. It is the set a daemon pass covers, file for file.
 	Files []PlanFile
 	// Declined is every enumerated path the pipeline refuses outright. They are reported
 	// rather than dropped: a path missing from a report about a library reads as a path
