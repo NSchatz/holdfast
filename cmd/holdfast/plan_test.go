@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -694,15 +695,31 @@ func tabNamedSource(t *testing.T, lib string) string {
 	return tabbed
 }
 
+// socketNamedSource puts a unix socket INODE under a configured video extension: an entry
+// that is neither a regular file nor a symbolic link. A scan enumerates an entry by NAME, so
+// this is the case where a report carrying its own rule about what KIND of entry counts
+// drifts from the enumeration every other reader shares. mknod(2) lets an unprivileged caller
+// make one, and a socket is used rather than a FIFO because opening a FIFO with no writer
+// blocks.
+func socketNamedSource(t *testing.T, lib string) string {
+	t.Helper()
+	sock := filepath.Join(lib, "stream.mkv")
+	if err := syscall.Mknod(sock, syscall.S_IFSOCK|0o600, 0); err != nil {
+		t.Skipf("this filesystem will not hold a unix socket inode: %v", err)
+	}
+	return sock
+}
+
 // TestPlan_CoverageEqualsDaemonPass is AC-10: plan reports exactly the set of files the
 // daemon's own scanning pass covers - same root membership, same extension handling, same
 // treatment of everything the configuration holds back - rather than a coverage rule of its
 // own.
 //
-// It is graded as an EQUALITY against a real daemon pass over THREE libraries, and the two
+// It is graded as an EQUALITY against a real daemon pass over FIVE libraries, and the four
 // beyond the first are the ones that can tell a shared decision from two copies of it: a path
-// the pipeline declines outright before it claims or probes anything, and a symbolic link
-// carrying a source name, which a scan enumerates and then skips at a named guard.
+// the pipeline declines outright before it claims or probes anything, a symbolic link carrying
+// a source name, which a scan enumerates and then skips at a named guard, a symbolic link onto
+// nothing, and an entry that is neither a regular file nor a link.
 func TestPlan_CoverageEqualsDaemonPass(t *testing.T) {
 	t.Run("the library a scan covers", func(t *testing.T) {
 		cfgPath, lib, _ := planLibrary(t, "")
@@ -808,16 +825,38 @@ func TestPlan_CoverageEqualsDaemonPass(t *testing.T) {
 			t.Fatalf("the dangling link names rule %q, want %q", got, engine.RuleNotARegularFile)
 		}
 	})
+
+	// An entry that is neither a regular file NOR a symbolic link - a socket, a FIFO, a device
+	// node - carrying a source name. Membership is decided by NAME, so a scan enumerates it and
+	// the daemon's door finds something there to act on: it claims it, probes it, and leaves a
+	// terminal row. plan covers it for exactly that reason, as one it could not account for
+	// rather than one a guard decided.
+	t.Run("an entry that is neither a regular file nor a link", func(t *testing.T) {
+		cfgPath, lib, _ := planLibrary(t, "")
+		sock := socketNamedSource(t, lib)
+
+		pass, planned := planEqualsDaemonPass(t, cfgPath)
+		if !planned[sock] {
+			t.Fatalf("plan does not cover %q, which the daemon pass enumerates and records a row for", sock)
+		}
+		for _, f := range pass.Files {
+			if f.Path == sock && !f.Unreadable {
+				t.Fatalf("plan accounts for %q under guard %q; the probe can answer nothing about a "+
+					"socket, so it is a file this plan could not account for", sock, f.Guard)
+			}
+		}
+	})
 }
 
 // TestPlan_AgreesWithAnalyzeCoverage is AC-11. The build DOES contain `analyze`, so this
 // grades for real rather than skipping: both commands run over the same library with the
 // same configuration and must report the identical covered file set, and neither may name a
 // file the other accounts for differently.
-// It is graded over THREE libraries for the same reason AC-10 is: a single fixture on which
-// the two commands happen to agree cannot tell a shared decision from two copies of one, and
-// the two cases below are precisely where two copies would drift - a symbolic link carrying a
-// source name, and a path the pipeline declines outright.
+// It is graded over FIVE libraries for the same reason AC-10 is: a single fixture on which the
+// two commands happen to agree cannot tell a shared decision from two copies of one, and the
+// cases below are precisely where two copies drift - a symbolic link carrying a source name, a
+// path the pipeline declines outright, a symbolic link onto nothing, and an entry that is
+// neither a regular file nor a link.
 func TestPlan_AgreesWithAnalyzeCoverage(t *testing.T) {
 	if !buildHasAnalyze() {
 		// Kept rather than omitted (testing T2). It cannot fire in this build, where
@@ -915,6 +954,30 @@ func TestPlan_AgreesWithAnalyzeCoverage(t *testing.T) {
 		}
 		if irregular != 1 {
 			t.Fatalf("analyze withheld %d entry(ies) under %q, want the dangling link", irregular, mechIrregular)
+		}
+	})
+
+	// An entry that is neither a regular file NOR a symbolic link, carrying a source name. A
+	// scan enumerates it by name like any other entry and a run records a terminal row for it,
+	// so it is a source in both reports or in neither: a rule of the census's own about what
+	// KIND of entry counts is exactly where two copies of one membership rule drift apart.
+	t.Run("an entry that is neither a regular file nor a link", func(t *testing.T) {
+		cfgPath, lib, _ := planLibrary(t, "")
+		sock := socketNamedSource(t, lib)
+		c, p := planAndAnalyzeAgree(t, cfgPath)
+		if want := int64(len(planSources(lib)) + 1); p.Total.Covered.Files != want {
+			t.Fatalf("both agree on %d file(s), want the library's %d sources plus %s",
+				p.Total.Covered.Files, len(planSources(lib)), sock)
+		}
+		var irregular int64
+		for _, m := range c.Total.Withheld {
+			if m.Name == mechIrregular {
+				irregular = m.Files
+			}
+		}
+		if irregular != 0 {
+			t.Fatalf("analyze withheld %d entry(ies) under %q; a run acts on this one, so no report "+
+				"may hold it back", irregular, mechIrregular)
 		}
 	})
 }

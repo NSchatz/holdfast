@@ -310,10 +310,12 @@ var mechanismDetail = map[string]string{
 	mechRetained: "a replacement this tool retained because its job did not complete cleanly",
 	mechUndoName: "an original the undo window is holding",
 	mechRecord:   "a path a parked job's record, or a recorded replacement, holds back",
-	mechIrregular: "a device, socket or FIFO, or a symbolic link onto a directory or onto nothing at " +
-		"all: not an entry a run ever acts on, so it is in neither figure. A symbolic link with a FILE " +
-		"at the other end is not here - a scan enumerates one by name, so it is counted as a source and " +
-		"then skipped by the symlinked-source guard when a run reaches it",
+	mechIrregular: "a symbolic link onto a directory, or onto nothing at all: there is no file at the " +
+		"other end, so a run claims, probes and records nothing about it and it is in neither figure. " +
+		"What is NOT here is any entry a run does act on, whatever kind of entry it is - a symbolic link " +
+		"with a file at the other end, a device, a socket, a FIFO - because a scan enumerates an entry by " +
+		"name, so one carrying a configured video extension is counted as a source and then answered by " +
+		"the guard chain, or by the probe, when a run reaches it",
 	mechDeclined: "a path this pipeline refuses outright - one carrying a literal tab or newline. A " +
 		"run claims, probes and records nothing about it, so calling it a source would name a file " +
 		"nothing will ever touch",
@@ -336,7 +338,8 @@ var notTraversed = map[startup.NoticeKind]bool{
 
 // censusOverWalk builds the census from the startup walk's own listings. It opens no
 // media file and lists no directory: every entry it counts was read by the walk that
-// had already happened, and the only per-file syscall is the stat that gives a size.
+// had already happened, and the only per-entry syscalls are the stat that gives a size
+// and the one engine.DeclinedPath takes to answer what is at the other end.
 func censusOverWalk(ctx context.Context, cfg *config.Config, res startup.Result) *census {
 	c := &census{
 		Command: "holdfast analyze",
@@ -383,20 +386,21 @@ func censusOverWalk(ctx context.Context, cfg *config.Config, res startup.Result)
 				continue // a directory is covered in its own right, or was not descended
 			}
 			size := info.Size()
-			// WHICH ENTRIES A SCAN LOOKS AT. A regular file, and one irregular kind: a
-			// SYMBOLIC LINK with a file at the other end. A scan enumerates such a link by
-			// name like any other entry and then skips it at the symlinked-source guard, so
-			// counting it here as an irregular entry would make this census and `holdfast
-			// plan` report different source sets for the same library. Whether there is a
-			// file at the other end is engine.DeclinedPath's question, which is the daemon's
-			// own, so a dangling link, a link onto a directory, a device, a socket and a FIFO
-			// are all in neither figure. A link contributes its OWN size, never its target's,
-			// which is counted once already for the file at the other end.
-			if !info.Mode().IsRegular() {
-				if _, _, declined := engine.DeclinedPath(p); !ent.IsLink || declined {
-					rc.withhold(mechIrregular, size)
-					continue
-				}
+			// WHICH ENTRIES A SCAN LOOKS AT, and it is not this census's business to decide.
+			// The enumeration decides an entry by NAME and excludes a directory by either
+			// spelling; it never asks what KIND of inode is there, so neither does this. The
+			// one question left is engine.DeclinedPath - the daemon's own, asked here exactly
+			// where the read-only plan pass asks it - and only its "there is no file at the
+			// other end" answer keeps an entry out of the figure below. A device, a socket or
+			// a FIFO under a source name is therefore a source here, because it is one a run
+			// enumerates, claims and records a terminal row for; a rule of this census's own
+			// that excluded it would make this report and `holdfast plan` name different
+			// source sets for the same library. A link contributes its OWN size, never its
+			// target's, which is counted once already for the file at the other end.
+			rule, _, declined := engine.DeclinedPath(p)
+			if declined && rule == engine.RuleNotARegularFile {
+				rc.withhold(mechIrregular, size)
+				continue
 			}
 			rc.Found.Files++
 			rc.Found.Bytes += size
@@ -410,8 +414,11 @@ func censusOverWalk(ctx context.Context, cfg *config.Config, res startup.Result)
 			}
 			// A path the pipeline refuses OUTRIGHT is not a source, whatever its name: the
 			// daemon declines it before it claims, probes or records anything, and so does
-			// the read-only plan pass.
-			if _, _, yes := engine.Declined(p); yes {
+			// the read-only plan pass. The only refusal that reaches here is the one about
+			// the path's CHARACTERS - a path that is there and will never be acted on - and
+			// it is named as itself rather than folded in above, because that is the rule
+			// token `holdfast plan` publishes for the same path.
+			if declined {
 				rc.withhold(mechDeclined, size)
 				continue
 			}
@@ -445,7 +452,8 @@ func newRootCensus(root, label string, covered int) *rootCensus {
 	return &rootCensus{
 		Root: root,
 		Found: figure{Set: "every entry a scan's enumeration looks at, in the directories the startup " +
-			"walk covered under " + label + ": a regular file, or a symbolic link onto one"},
+			"walk covered under " + label + ": any entry with a file at the other end, whatever kind of " +
+			"entry it is, and not a directory by either spelling"},
 		Sources: figure{Set: "the subset of those files the configuration in force would consider a source, " +
 			"under " + label},
 		withheld: map[string]*mechanism{},
