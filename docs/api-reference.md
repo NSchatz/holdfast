@@ -9,23 +9,28 @@ per-field reference `README.md` points at rather than restates.
 
 | Method & path | Auth | Purpose |
 |---|---|---|
-| `GET /` | - | the embedded dashboard |
-| `GET /api/summary` | - | counts per status + bytes reclaimed (**lifetime** and this-run) + `bytes_held_by_undo_window` (space a retained original still holds, never folded into either reclaimed figure; `null` = unreadable) + paused/scanning + the **whole-ledger aggregates** (see below) |
-| `GET /api/queue` | - | pending + active jobs, capped, with `queue_total` - see *The total behind a cap* |
-| `GET /api/history?limit=N` | - | recent terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, capped, with `history_total` - see below |
-| `GET /api/events` | - | SSE: a fresh snapshot on every state change |
-| `GET /metrics` | - | Prometheus metrics (when `metrics_enable`, default on) |
-| `POST /api/rescan` | token | start a library scan (409 if paused / scanning / outside the run window) |
-| `POST /api/pause` | token | stop feeding **new** files (in-flight encodes finish safely) |
-| `POST /api/resume` | token | clear the pause flag |
-| `GET /api/search?path=TERM` | token | terminal rows whose path contains TERM, over the **whole ledger** rather than the capped view, with the match count. Token-gated because it serves per-file rows the capped reads never have |
-| `GET /api/exclusions` | token | the paths this daemon is **withholding** from the pipeline - runtime state it holds, never a configuration key |
-| `POST /api/exclusions` | token | withhold one path. It only ever takes a file OUT; nothing here writes `config.yaml` |
-| `DELETE /api/exclusions` | token | stop withholding one path, after which it is eligible again on the next scan |
+| `GET /` | - | the embedded dashboard. Never gated: a browser sends no `Bearer` header on a navigation |
+| `GET /api/summary` | read | counts per status + bytes reclaimed (**lifetime** and this-run) + `bytes_held_by_undo_window` (space a retained original still holds, never folded into either reclaimed figure; `null` = unreadable) + paused/scanning + the **whole-ledger aggregates** (see below) |
+| `GET /api/queue` | read | pending + active jobs, capped, with `queue_total` - see *The total behind a cap* |
+| `GET /api/history?limit=N` | read | recent terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, capped, with `history_total` - see below |
+| `GET /api/events` | read | SSE: a fresh snapshot on every state change |
+| `GET /metrics` | - | Prometheus metrics (when `metrics_enable`, default on). Never gated: it names no file |
+| `POST /api/rescan` | control | start a library scan (409 if paused / scanning / outside the run window) |
+| `POST /api/pause` | control | stop feeding **new** files (in-flight encodes finish safely) |
+| `POST /api/resume` | control | clear the pause flag |
+| `GET /api/search?path=TERM` | control | terminal rows whose path contains TERM, over the **whole ledger** rather than the capped view, with the match count. In the control group because it serves per-file rows the capped reads never have |
+| `GET /api/exclusions` | control | the paths this daemon is **withholding** from the pipeline - runtime state it holds, never a configuration key |
+| `POST /api/exclusions` | control | withhold one path. It only ever takes a file OUT; nothing here writes `config.yaml` |
+| `DELETE /api/exclusions` | control | stop withholding one path, after which it is eligible again on the next scan |
 
-`POST /api/scan` has a section of its own below. The token-guarded endpoints are disabled
-entirely until a control token is configured, and the read surface carries no authentication
-of its own: the posture that follows from that is in
+**read** = required only while `server_read_token` is set, which it is not by default;
+**control** = always required, and the endpoint answers 403 until `server_auth_token` is
+configured. The control token is accepted on a read; a read token is never accepted for a
+mutation.
+
+`POST /api/scan` has a section of its own below. The control-guarded endpoints are disabled
+entirely until a control token is configured, and the read surface is open until
+`server_read_token` is set: the posture that follows from that is in
 [docs/docker.md](docker.md#reverse-proxy-posture).
 
 ### The recorded outcome - the proof a swap was safe
