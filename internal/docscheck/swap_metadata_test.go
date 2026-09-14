@@ -54,7 +54,7 @@ func metadataBlock(omit ...string) string {
 // The anchor is not there at all.
 func TestCheck_SwapMetadataAnchorMissingFails(t *testing.T) {
 	dir := writeCorpus(t, map[string]string{
-		"docs.md": residualWindowBlock() + postureBlock() + agreeingBlocks() + "\n# Volumes\n\nMount your library at /media.\n",
+		"docs.md": residualWindowBlock() + postureBlock() + agreeingBlocks() + nonGoalBlock() + "\n# Volumes\n\nMount your library at /media.\n",
 	})
 	problems := check(t, dir)
 	if len(problems) != 1 {
@@ -68,7 +68,7 @@ func TestCheck_SwapMetadataAnchorMissingFails(t *testing.T) {
 // The anchor is present with nothing under it. An anchor with no text is not a statement.
 func TestCheck_SwapMetadataAnchorWithNothingUnderItIsReportedMissing(t *testing.T) {
 	dir := writeCorpus(t, map[string]string{
-		"docs.md": residualWindowBlock() + postureBlock() + agreeingBlocks() +
+		"docs.md": residualWindowBlock() + postureBlock() + agreeingBlocks() + nonGoalBlock() +
 			"\n<a id=\"" + AnchorSwapMetadata + "\"></a>\n\n## Next section\n\nunrelated\n",
 	})
 	problems := check(t, dir)
@@ -87,7 +87,7 @@ func TestCheck_SwapMetadataStatementMissingAClauseIsReportedMissing(t *testing.T
 	for _, c := range SwapMetadataClauses {
 		t.Run(c.Token, func(t *testing.T) {
 			dir := writeCorpus(t, map[string]string{
-				"docs.md": residualWindowBlock() + postureBlock() + agreeingBlocks() + "\n" + metadataBlock(c.Token),
+				"docs.md": residualWindowBlock() + postureBlock() + agreeingBlocks() + nonGoalBlock() + "\n" + metadataBlock(c.Token),
 			})
 			problems := check(t, dir)
 			if len(problems) != 1 {
@@ -108,7 +108,7 @@ func TestCheck_SwapMetadataStatementMissingAClauseIsReportedMissing(t *testing.T
 // place, what a swap does to their files.
 func TestCheck_SwapMetadataClausesMustBeCarriedByOneStatement(t *testing.T) {
 	dir := writeCorpus(t, map[string]string{
-		"a.md": residualWindowBlock() + postureBlock() + agreeingBlocks(),
+		"a.md": residualWindowBlock() + postureBlock() + agreeingBlocks() + nonGoalBlock(),
 		"b.md": metadataBlock("preserve_mtime", "acls and xattrs are not carried"),
 		"c.md": "<a id=\"" + AnchorSwapMetadata + "\"></a>\n\n" +
 			metadataSentence["preserve_mtime"] + "\n\n" + metadataSentence["acls and xattrs are not carried"] + "\n",
@@ -123,7 +123,7 @@ func TestCheck_SwapMetadataClausesMustBeCarriedByOneStatement(t *testing.T) {
 // the trivial reason that nothing can.
 func TestCheck_SwapMetadataStatementWithEveryClausePasses(t *testing.T) {
 	dir := writeCorpus(t, map[string]string{
-		"docs.md": residualWindowBlock() + postureBlock() + agreeingBlocks() + "\n" + metadataBlock(),
+		"docs.md": residualWindowBlock() + postureBlock() + agreeingBlocks() + nonGoalBlock() + "\n" + metadataBlock(),
 	})
 	if problems := check(t, dir); len(problems) != 0 {
 		t.Fatalf("a metadata statement carrying every clause was reported as failing: %v", problems)
