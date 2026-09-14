@@ -24,8 +24,16 @@ reproducible from git, not hidden in a UI database.
 
 ## Why another transcoder?
 
-Tdarr is capable but **closed-source** and **UI/DB-configured** (state can be lost on a container rebuild),
-and it historically **replaced the original file before/regardless of its health check** - a documented
+*Every claim about another tool in this section and its subsection was checked **as of September 2026**,
+against that project's own licence text or its own project page. Other tools move, and this one is
+allowed to be out of date about them: re-check before you choose.*
+
+Tdarr is capable, but it is **licensed under an
+[EULA](https://github.com/HaveAGitGat/Tdarr/blob/master/LICENSE.md)**: the licence is provided in three
+tiers - Personal Free, Personal Subscription, and Business Subscription & Trial - and it prohibits
+redistribution, reverse engineering, or any unauthorized use of the software without explicit permission
+from Tdarr. It is also **UI/DB-configured** (state can be lost on a container rebuild), and it
+historically **replaced the original file before/regardless of its health check** - a documented
 data-loss class ([#355](https://github.com/HaveAGitGat/Tdarr/issues/355),
 [#511](https://github.com/HaveAGitGat/Tdarr/issues/511),
 [#683](https://github.com/HaveAGitGat/Tdarr/issues/683)). `holdfast` takes the useful capability surface
@@ -54,31 +62,79 @@ and fixes the trust gaps:
 - **The quality gate bounds the worst frame, not just the average.** An average hides local damage -
   Netflix says so outright - so a short destroyed segment inside an otherwise-clean encode passes a
   mean-only gate, and passes every structural check too (it decodes fine and carries the right duration,
-  packets and streams). Both floors are **on by default**. An output that cannot be *measured* is
+  packets and streams). All three floors are **on by default**. An output that cannot be *measured* is
   rejected, not assumed good.
 - **Config-as-code.** YAML, validated, in git - not clickops that vanishes on rebuild.
 - **Open source** (AGPL-3.0).
 
 ### We are not the only tool that verifies before it replaces
 
-[**Alchemist**](https://github.com/bybrooklyn/alchemist) (AGPL-3.0, Rust) works the same axis: it validates
-output quality before promoting the result, keeps your originals untouched until the new file passes, and
-ships its own *Migrate from Tdarr* guide. If you are choosing between us, choose on the difference, not on
-a claim of uniqueness we would not be able to defend.
+[**Alchemist**](https://github.com/bybrooklyn/alchemist) (AGPL-3.0, Rust) works the same axis: it
+"never overwrites anything until the new file passes its quality checks", and it ships its own
+*Migrate from Tdarr* guide. If you are choosing between us, choose on the difference, not on a claim of
+uniqueness we would not be able to defend - and the difference does not run one way.
 
-**The difference is where the default sits.** Alchemist's VMAF scoring is **opt-in**. `holdfast`'s gate is
-**default-on, layered, and fails closed**: structural parity (codec, duration, packets, per-type stream
-counts, strictly-smaller) *and* full decode-integrity *and* VMAF - both its average **and** its worst
-frame. An output that cannot be **measured** is **rejected**, never assumed good; an ffmpeg without libvmaf
-stops the tool rather than quietly downgrading the gate. That is the whole claim, and it is narrower and
+**Where Alchemist is ahead.** Seven capabilities it has and holdfast does not, two of them capabilities
+holdfast only half has, said plainly rather than left out:
+
+- **Per-library profiles**, giving movies, TV and home videos different behaviour per library. holdfast
+  half has this and no further: a library root or a path glob overrides the encode settings and the
+  gates, and that is the whole of it ([docs/profiles.md](docs/profiles.md)).
+- **Audio stream rules** - commentary stripping, language filtering, default-track retention. holdfast
+  has none of it, by design: audio, subtitles and attachments are stream-copied untouched.
+- **Sonarr/Radarr webhook intake**, through a narrowed webhook token with optional container path
+  translations. holdfast has no webhook receiver at all; an *arr calls the generic scan endpoint behind
+  the one control token ([docs/api-reference.md](docs/api-reference.md)).
+- **A Jellyfin integration** - a narrowed plugin token for enqueue, completion events, job details and
+  library refresh. holdfast ships nothing of the kind.
+- **Named API tokens with access classes** - read-only, webhook, plugin, full access. holdfast has one
+  bearer token at one access level, which is the known limitation recorded further down this page.
+- **An off-peak scheduler with a priority queue.** holdfast half has this: there is a daily `run_window`
+  and a per-core load cap, and there is no priority queue - work is taken in the order the scan finds
+  it and nothing jumps the line.
+- **Automatic hardware selection with CPU fallback** across NVIDIA, Intel, AMD and Apple. holdfast will
+  not guess: `encoder:` is configured, and a hardware encoder with no usable device stops the run
+  rather than quietly falling back to CPU.
+
+**Two more tools work this ground.** Both are described here from their own project pages and from
+nothing else - no ranking, no popularity, no weight class - because no source this project could obtain
+carries one, and an unsourced comparative is the defect this section was rewritten to remove.
+
+[**FileFlows**](https://fileflows.com/) designs, schedules and runs automated file-processing pipelines
+from a single server up to a distributed cluster, offloading tasks to multiple nodes, and transcodes to
+AV1, HEVC or H.264 with hardware acceleration, VMAF-optimized encoding and Dolby Vision support. Its own
+site offers a free tier and carries a pricing page, so "free" there names a tier and not the product.
+
+[**Unmanic**](https://github.com/Unmanic/unmanic) (GPL-3.0, Python, plugin-based, with a web UI) calls
+itself a library optimiser: it converts a library into a single uniform format, manages file movements
+based on timestamps, and runs custom commands against a file based on its size. It monitors files and
+directories, so a modified or newly added file is tested against its configured presets again.
+
+<a id="differentiator-gate"></a>
+
+**The difference is where the default sits, and it is a claim about holdfast alone.** holdfast's verify
+gate is **default-on**, **layered** and **fails closed**. Layered means every layer runs rather than the
+first one that answers: structural parity (codec, duration, packets, per-type stream counts,
+strictly-smaller), then full decode-integrity, then three VMAF floors - the mean (`min_vmaf`), the worst
+frame (`vmaf_min_pool`) and chroma (`vmaf_min_chroma`, which the luma-only VMAF model cannot see at
+all). Fails closed means an output that cannot be measured is rejected rather than assumed good: an
+ffmpeg without libvmaf stops the tool instead of quietly downgrading the gate, and a score that could
+not be produced is never read as a score that passed. That is the whole claim, and it is narrower and
 truer than "the only one that checks".
 
 ## Non-goals
 
-Codec-only, same-content re-encoding (no resolution downscaling); HDR10 **static** metadata is preserved
-but Dolby Vision / HDR10+ dynamic metadata is **detect-and-skipped**; interlaced, exotic-chroma and
-`multi-video-stream` sources are **skipped, not converted** (embedded artwork is carried through unencoded).
-It transcodes files in a library other tools manage - not a media server.
+Four boundaries, and they are boundaries rather than a backlog: **no distributed or remote
+processing**; **not a media server and not a library manager**; **interlaced sources are skipped, not
+converted**; and **HDR10 static metadata is preserved while Dolby Vision and HDR10+ dynamic metadata
+are detect-and-skipped**. Each one is stated in full here, in this section, so a reader deciding
+whether this tool fits their library never has to assemble it from four places.
+
+Codec-only, same-content re-encoding (no resolution downscaling): **interlaced**, exotic-chroma and
+`multi-video-stream` sources are **skipped, not converted**; HDR10 **static** metadata is preserved
+while Dolby Vision and HDR10+ **dynamic** metadata is **detect-and-skipped** rather than guessed at;
+and embedded artwork is carried through unencoded. It transcodes files in a library other tools
+manage - not a media server.
 
 **Distributed or remote processing is a non-goal by design, not a missing feature.** holdfast is one
 process: no server/node split, no remote workers. The no-loss argument rests on an atomic
