@@ -36,6 +36,9 @@ type plan struct {
 	Coverage planCoverage   `json:"coverage"`
 	Profiles []*planGroup   `json:"profiles"`
 	Total    *planGroup     `json:"total"`
+	// Declined is every enumerated path the pipeline refuses outright, which is in no
+	// figure above because a run claims, probes and records nothing about one either.
+	Declined planDeclinedPaths `json:"declined"`
 	// Probes is how many probe snapshots this invocation took, which is what makes "one
 	// invocation is one pass over the library" a figure a reader can check rather than a
 	// claim they have to take.
@@ -50,6 +53,25 @@ type planCoverage struct {
 	DirectoriesNotRead int64    `json:"directories_not_read"`
 	NotReadWhy         []bucket `json:"not_read_reasons,omitempty"`
 	Boundary           string   `json:"boundary"`
+}
+
+// planDeclinedPaths is every enumerated path the pipeline refuses OUTRIGHT, with the rule
+// that refused each. They are in NO figure of this report, deliberately and for the reason
+// that makes the report worth reading: the daemon claims, probes and records nothing about
+// such a path, so counting one among the files a run would transcode would promise
+// something no run will do. They are published rather than dropped, because a path silently
+// missing from a report about a library reads as a path that is not there.
+type planDeclinedPaths struct {
+	Files int64          `json:"files"`
+	Paths []planDeclined `json:"paths,omitempty"`
+	Note  string         `json:"note"`
+}
+
+// planDeclined is one such path and the rule that refused it.
+type planDeclined struct {
+	Path   string `json:"path"`
+	Rule   string `json:"rule"`
+	Detail string `json:"detail"`
 }
 
 // planGroup is one resolved encode profile's whole plan: what is eligible under it, what
@@ -285,6 +307,12 @@ func (p *plan) writeReport(w io.Writer) {
 	}
 	if p.Total != nil {
 		p.Total.writeReport(w, "every resolved profile, combined")
+	}
+
+	fmt.Fprintf(w, "\ndeclined  %8d path(s) this pipeline refuses outright\n", p.Declined.Files)
+	fmt.Fprintf(w, "          %s\n", wrapAt(p.Declined.Note, 88, "          "))
+	for _, d := range p.Declined.Paths {
+		fmt.Fprintf(w, "    %s\n      %s: %s\n", d.Path, d.Rule, d.Detail)
 	}
 
 	fmt.Fprintf(w, "\nprobe snapshots taken this invocation: %d. One invocation is one pass over the library.\n",

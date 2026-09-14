@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/engine"
@@ -651,104 +652,236 @@ func TestPlan_ProbesEachCoveredFileAtMostOnce(t *testing.T) {
 	}
 }
 
-// TestPlan_CoverageEqualsDaemonPass is AC-10: plan reports exactly the set of files the
-// daemon's own scanning pass covers - same root membership, same extension handling, same
-// treatment of everything the configuration holds back - rather than a coverage rule of its
-// own.
-//
-// It is graded as an EQUALITY against a real daemon pass: the dry run's terminal rows are
-// the set that pass covered, and the plan pass's files are the set this command covers.
-func TestPlan_CoverageEqualsDaemonPass(t *testing.T) {
-	cfgPath, lib, _ := planLibrary(t, "")
-
+// plannedSet is the set of files one read-only pass covered, and the pass itself.
+func plannedSet(t *testing.T, cfgPath string) (*engine.PlanPass, map[string]bool) {
+	t.Helper()
 	pass := planPassOver(t, cfgPath)
 	planned := map[string]bool{}
 	for _, f := range pass.Files {
 		planned[f.Path] = true
 	}
+	return pass, planned
+}
 
-	decided := daemonPassPaths(t, cfgPath)
+// planEqualsDaemonPass is AC-10's equality, over whatever library cfgPath describes: the dry
+// run's terminal rows are the set that pass covered, and the plan pass's files are the set
+// plan covers. It is a helper so the criterion can be graded over SEVERAL libraries, which is
+// the only way an equality about coverage can be trusted - one fixture proves it holds where
+// the two agree, never that it holds where they could differ.
+func planEqualsDaemonPass(t *testing.T, cfgPath string) (*engine.PlanPass, map[string]bool) {
+	t.Helper()
+	pass, planned := plannedSet(t, cfgPath)
 	covered := map[string]bool{}
-	for p := range decided {
+	for p := range daemonPassPaths(t, cfgPath) {
 		covered[p] = true
 	}
-
 	if !sameSet(planned, covered) {
 		t.Fatalf("plan covers a different set of files than the daemon pass does:\n  plan:   %v\n  daemon: %v",
 			sortedSet(planned), sortedSet(covered))
 	}
-	// And it is the right set, so the equality is not two commands agreeing on nothing.
-	if !sameSet(planned, setOf(planSources(lib))) {
-		t.Fatalf("the covered set is not the library's sources:\n  covered: %v", sortedSet(planned))
-	}
+	return pass, planned
+}
 
-	// The published report does not lose any of them on the way out.
-	p := planJSON(t, cfgPath)
-	if p.Total.Covered.Files != int64(len(planned)) {
-		t.Fatalf("the report publishes %d covered file(s) over a pass that covered %d",
-			p.Total.Covered.Files, len(planned))
+// tabNamedSource writes a real, probeable source whose NAME carries a literal tab, which is a
+// path the pipeline declines outright. It skips where the filesystem will not hold one.
+func tabNamedSource(t *testing.T, lib string) string {
+	t.Helper()
+	tabbed := filepath.Join(lib, "two\tnames.mkv")
+	encodeFixture(t, tabbed, "libx264", "256x144", "yuv420p")
+	if _, err := os.Stat(tabbed); err != nil {
+		t.Skipf("this filesystem will not hold a tab in a file name: %v", err)
 	}
-	if p.Total.Covered.Files != p.Total.Eligible.Files+p.Total.Skipped+p.Total.Unaccounted.Files {
-		t.Fatalf("the covered figure does not account for itself: %d != %d + %d + %d",
-			p.Total.Covered.Files, p.Total.Eligible.Files, p.Total.Skipped, p.Total.Unaccounted.Files)
-	}
+	return tabbed
+}
+
+// TestPlan_CoverageEqualsDaemonPass is AC-10: plan reports exactly the set of files the
+// daemon's own scanning pass covers - same root membership, same extension handling, same
+// treatment of everything the configuration holds back - rather than a coverage rule of its
+// own.
+//
+// It is graded as an EQUALITY against a real daemon pass over THREE libraries, and the two
+// beyond the first are the ones that can tell a shared decision from two copies of it: a path
+// the pipeline declines outright before it claims or probes anything, and a symbolic link
+// carrying a source name, which a scan enumerates and then skips at a named guard.
+func TestPlan_CoverageEqualsDaemonPass(t *testing.T) {
+	t.Run("the library a scan covers", func(t *testing.T) {
+		cfgPath, lib, _ := planLibrary(t, "")
+		_, planned := planEqualsDaemonPass(t, cfgPath)
+		// And it is the right set, so the equality is not two commands agreeing on nothing.
+		if !sameSet(planned, setOf(planSources(lib))) {
+			t.Fatalf("the covered set is not the library's sources:\n  covered: %v", sortedSet(planned))
+		}
+
+		// The published report does not lose any of them on the way out.
+		p := planJSON(t, cfgPath)
+		if p.Total.Covered.Files != int64(len(planned)) {
+			t.Fatalf("the report publishes %d covered file(s) over a pass that covered %d",
+				p.Total.Covered.Files, len(planned))
+		}
+		if p.Total.Covered.Files != p.Total.Eligible.Files+p.Total.Skipped+p.Total.Unaccounted.Files {
+			t.Fatalf("the covered figure does not account for itself: %d != %d + %d + %d",
+				p.Total.Covered.Files, p.Total.Eligible.Files, p.Total.Skipped, p.Total.Unaccounted.Files)
+		}
+	})
+
+	// ProcessFile declines a path carrying a literal tab or newline before it claims, probes
+	// or records anything, so a run never touches one. A plan that counted it among the files
+	// a run would transcode would be promising something no run will do, which is the exact
+	// shape of confident wrong result this repository's fail-safe rule forbids.
+	t.Run("a path the pipeline declines outright", func(t *testing.T) {
+		cfgPath, lib, _ := planLibrary(t, "")
+		tabbed := tabNamedSource(t, lib)
+
+		_, planned := planEqualsDaemonPass(t, cfgPath)
+		if planned[tabbed] {
+			t.Fatalf("plan covers %q, which the daemon pass declines without recording anything", tabbed)
+		}
+
+		// It is reported with its reason rather than dropped, in both forms: a path silently
+		// missing from a report about a library reads as a path that is not there.
+		p := planJSON(t, cfgPath)
+		if p.Total.Eligible.Files != 2 {
+			t.Fatalf("plan reports %d eligible file(s) over a library whose daemon pass would transcode 2",
+				p.Total.Eligible.Files)
+		}
+		if p.Declined.Files != 1 || len(p.Declined.Paths) != 1 || p.Declined.Paths[0].Path != tabbed {
+			t.Fatalf("the declined path is not published: %+v", p.Declined)
+		}
+		if got := p.Declined.Paths[0].Rule; got != engine.RuleUnsupportedCharacters {
+			t.Fatalf("the declined path names rule %q, want %q", got, engine.RuleUnsupportedCharacters)
+		}
+		if p.Declined.Paths[0].Detail == "" || p.Declined.Note == "" {
+			t.Fatalf("a declined path is published with no reason: %+v", p.Declined)
+		}
+		if rep := planReport(t, cfgPath); !strings.Contains(rep, tabbed) ||
+			!strings.Contains(rep, engine.RuleUnsupportedCharacters) {
+			t.Fatalf("the written report never names the declined path or its rule:\n%s", rep)
+		}
+	})
+
+	// A symbolic link carrying a source name IS enumerated by a scan - membership is decided
+	// by NAME - and is then stopped at the symlinked-source guard with a terminal row to show
+	// for it. So plan covers it too, under that same guard.
+	t.Run("a symbolic link carrying a source name", func(t *testing.T) {
+		cfgPath, lib, _ := planLibrary(t, "")
+		linked := filepath.Join(lib, "linked.mkv")
+		if err := os.Symlink(filepath.Join(lib, "movie.mkv"), linked); err != nil {
+			t.Fatal(err)
+		}
+
+		pass, planned := planEqualsDaemonPass(t, cfgPath)
+		if !planned[linked] {
+			t.Fatalf("plan does not cover %q, which the daemon pass enumerates and records a skip for", linked)
+		}
+		for _, f := range pass.Files {
+			if f.Path == linked && f.Guard != engine.SkipSymlink {
+				t.Fatalf("plan reports %q under guard %q, want %q", linked, f.Guard, engine.SkipSymlink)
+			}
+		}
+	})
 }
 
 // TestPlan_AgreesWithAnalyzeCoverage is AC-11. The build DOES contain `analyze`, so this
 // grades for real rather than skipping: both commands run over the same library with the
 // same configuration and must report the identical covered file set, and neither may name a
 // file the other accounts for differently.
+// It is graded over THREE libraries for the same reason AC-10 is: a single fixture on which
+// the two commands happen to agree cannot tell a shared decision from two copies of one, and
+// the two cases below are precisely where two copies would drift - a symbolic link carrying a
+// source name, and a path the pipeline declines outright.
 func TestPlan_AgreesWithAnalyzeCoverage(t *testing.T) {
 	if !buildHasAnalyze() {
 		// Kept rather than omitted (testing T2). It cannot fire in this build, where
 		// `analyze` is in dispatch; it exists so a build without the census says so.
 		t.Skip("this build has no analyze command, so there is no second reading to agree with")
 	}
-	cfgPath, lib, _ := planLibrary(t, "")
 
+	t.Run("the library a scan covers", func(t *testing.T) {
+		cfgPath, lib, _ := planLibrary(t, "")
+		c, p := planAndAnalyzeAgree(t, cfgPath)
+		if p.Total.Covered.Files != int64(len(planSources(lib))) {
+			t.Fatalf("both agree on %d file(s), which is not the library's %d sources",
+				p.Total.Covered.Files, len(planSources(lib)))
+		}
+
+		// The per-file reason agrees too: every file analyze withheld, and the mechanism it
+		// named, is a file plan does not cover at all.
+		_, planned := plannedSet(t, cfgPath)
+		withheld := map[string]bool{
+			filepath.Join(lib, "notes.txt"):                                 true,
+			filepath.Join(lib, "cover.jpg"):                                 true,
+			filepath.Join(lib, "movie."+engine.TempMarker+".mkv"):           true,
+			filepath.Join(lib, "show", "ep1."+engine.RetainedMarker+".mkv"): true,
+		}
+		for path := range withheld {
+			if planned[path] {
+				t.Fatalf("plan covers %s, which analyze accounts for as withheld", path)
+			}
+		}
+		var named int64
+		for _, m := range c.Total.Withheld {
+			if m.Name != mechIrregular {
+				named += m.Files
+			}
+		}
+		if named == 0 {
+			t.Fatal("analyze named no withholding mechanism, so there was nothing to agree about")
+		}
+	})
+
+	// A symbolic link carrying a source name: a scan enumerates it and then skips it at the
+	// symlinked-source guard, so the census counts it as a source and plan covers it. Both
+	// count the LINK's own bytes; the target's are counted once already, for the file itself.
+	t.Run("a symbolic link carrying a source name", func(t *testing.T) {
+		cfgPath, lib, _ := planLibrary(t, "")
+		if err := os.Symlink(filepath.Join(lib, "movie.mkv"), filepath.Join(lib, "linked.mkv")); err != nil {
+			t.Fatal(err)
+		}
+		_, p := planAndAnalyzeAgree(t, cfgPath)
+		if want := int64(len(planSources(lib)) + 1); p.Total.Covered.Files != want {
+			t.Fatalf("both agree on %d file(s), want the library's %d sources plus the link",
+				p.Total.Covered.Files, want)
+		}
+	})
+
+	// A path the pipeline declines outright is in neither report's source set: the daemon
+	// claims, probes and records nothing about one, so naming it a source in either would
+	// name a file nothing will ever touch.
+	t.Run("a path the pipeline declines outright", func(t *testing.T) {
+		cfgPath, lib, _ := planLibrary(t, "")
+		tabbed := tabNamedSource(t, lib)
+		c, p := planAndAnalyzeAgree(t, cfgPath)
+		if p.Total.Covered.Files != int64(len(planSources(lib))) {
+			t.Fatalf("both agree on %d file(s), which is not the library's %d sources - the extra is %q",
+				p.Total.Covered.Files, len(planSources(lib)), tabbed)
+		}
+		var declined int64
+		for _, m := range c.Total.Withheld {
+			if m.Name == mechDeclined {
+				declined = m.Files
+			}
+		}
+		if declined != 1 {
+			t.Fatalf("analyze withheld %d path(s) under %q, want 1", declined, mechDeclined)
+		}
+	})
+}
+
+// planAndAnalyzeAgree is AC-11's equality over whatever library cfgPath describes: an
+// identical covered file set, by count and by bytes, from both commands.
+func planAndAnalyzeAgree(t *testing.T, cfgPath string) (census, *plan) {
+	t.Helper()
 	c := analyzeJSON(t, cfgPath)
 	p := planJSON(t, cfgPath)
-
 	if p.Total.Covered.Files != c.Total.Sources.Files {
-		t.Fatalf("plan covers %d file(s), analyze counts %d source(s)",
-			p.Total.Covered.Files, c.Total.Sources.Files)
+		t.Fatalf("plan covers %d file(s), analyze counts %d source(s) over the same library with the "+
+			"same configuration", p.Total.Covered.Files, c.Total.Sources.Files)
 	}
 	if p.Total.Covered.Bytes != c.Total.Sources.Bytes {
 		t.Fatalf("plan covers %d byte(s), analyze counts %d",
 			p.Total.Covered.Bytes, c.Total.Sources.Bytes)
 	}
-	if p.Total.Covered.Files != int64(len(planSources(lib))) {
-		t.Fatalf("both agree on %d file(s), which is not the library's %d sources",
-			p.Total.Covered.Files, len(planSources(lib)))
-	}
-
-	// The per-file reason agrees too: every file analyze withheld, and the mechanism it
-	// named, is a file plan does not cover at all.
-	pass := planPassOver(t, cfgPath)
-	planned := map[string]bool{}
-	for _, f := range pass.Files {
-		planned[f.Path] = true
-	}
-	withheld := map[string]bool{
-		filepath.Join(lib, "notes.txt"):                                 true,
-		filepath.Join(lib, "cover.jpg"):                                 true,
-		filepath.Join(lib, "movie."+engine.TempMarker+".mkv"):           true,
-		filepath.Join(lib, "show", "ep1."+engine.RetainedMarker+".mkv"): true,
-	}
-	for path := range withheld {
-		if planned[path] {
-			t.Fatalf("plan covers %s, which analyze accounts for as withheld", path)
-		}
-	}
-	var named int64
-	for _, m := range c.Total.Withheld {
-		if m.Name != mechIrregular {
-			named += m.Files
-		}
-	}
-	if named == 0 {
-		t.Fatal("analyze named no withholding mechanism, so there was nothing to agree about")
-	}
+	return c, p
 }
 
 // buildHasAnalyze reports whether this build carries the census command, which is what
@@ -1013,6 +1146,44 @@ func TestPlan_HelpListsFlagsAndExitCodes(t *testing.T) {
 	}
 	if !strings.Contains(topOut.String(), "\n  plan ") {
 		t.Fatalf("the top-level usage does not list plan among its commands:\n%s", topOut.String())
+	}
+}
+
+// TestPlan_EmitsProgressWhileItRuns is `cli` L4: a command that can exceed thirty seconds
+// emits progress to stderr at least that often. A plan takes one probe snapshot per covered
+// file, so a real library is minutes to hours of ffprobe, and a silent command is one a
+// supervisor kills and retries.
+//
+// It is graded the way the clause says to grade it - emission during a SLOWED run - with the
+// interval shortened and every snapshot delayed, so what is asserted is the reporter rather
+// than how long these fixtures happen to take.
+func TestPlan_EmitsProgressWhileItRuns(t *testing.T) {
+	cfgPath, _, _ := planLibrary(t, "")
+
+	was := planProgressEvery
+	planProgressEvery = 5 * time.Millisecond
+	t.Cleanup(func() { planProgressEvery = was })
+
+	planSnapshotWrap = func(real func(context.Context, string) *probe.VideoProps) func(context.Context, string) *probe.VideoProps {
+		return func(ctx context.Context, path string) *probe.VideoProps {
+			time.Sleep(40 * time.Millisecond)
+			return real(ctx, path)
+		}
+	}
+	t.Cleanup(func() { planSnapshotWrap = nil })
+
+	var out, errOut bytes.Buffer
+	if code := dispatch([]string{"plan", "--json", "--config", cfgPath}, &out, &errOut); code != 0 {
+		t.Fatalf("plan --json code = %d, want 0 (stderr: %s)", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "probed so far") {
+		t.Fatalf("a slowed plan never said it was still running:\n%s", errOut.String())
+	}
+	// L2 holds while it does so: progress is narration, and stdout still carries the one
+	// document and nothing else.
+	var p plan
+	if err := json.Unmarshal(out.Bytes(), &p); err != nil {
+		t.Fatalf("the plan document does not parse whole: %v\n%s", err, out.String())
 	}
 }
 

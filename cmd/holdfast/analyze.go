@@ -294,11 +294,13 @@ const (
 	mechUndoName  = engine.UndoMarker
 	mechRecord    = "parked-job record hold-back"
 	mechIrregular = "not a regular file"
+	mechDeclined  = engine.RuleUnsupportedCharacters
 	mechOther     = "another enumeration hold-back"
 )
 
 var mechanismOrder = []string{
-	mechExt, mechUndoDir, mechTemp, mechRetained, mechUndoName, mechRecord, mechIrregular, mechOther,
+	mechExt, mechUndoDir, mechTemp, mechRetained, mechUndoName, mechRecord, mechIrregular,
+	mechDeclined, mechOther,
 }
 
 var mechanismDetail = map[string]string{
@@ -308,9 +310,13 @@ var mechanismDetail = map[string]string{
 	mechRetained: "a replacement this tool retained because its job did not complete cleanly",
 	mechUndoName: "an original the undo window is holding",
 	mechRecord:   "a path a parked job's record, or a recorded replacement, holds back",
-	mechIrregular: "a symbolic link, device, socket or FIFO: not a regular file, so it is in neither " +
-		"figure. A symbolic link to media IS enumerated by a scan and then skipped by the symlinked-source " +
-		"guard, so it is reported here rather than counted as a source",
+	mechIrregular: "a device, socket or FIFO, or a symbolic link onto a directory: not an entry a " +
+		"scan's enumeration looks at, so it is in neither figure. A symbolic link to a FILE is not " +
+		"here - a scan enumerates one by name, so it is counted as a source and then skipped by the " +
+		"symlinked-source guard when a run reaches it",
+	mechDeclined: "a path this pipeline refuses outright - one carrying a literal tab or newline. A " +
+		"run claims, probes and records nothing about it, so calling it a source would name a file " +
+		"nothing will ever touch",
 	mechOther: "an enumeration hold-back this report does not name individually",
 }
 
@@ -377,7 +383,15 @@ func censusOverWalk(ctx context.Context, cfg *config.Config, res startup.Result)
 				continue // a directory is covered in its own right, or was not descended
 			}
 			size := info.Size()
-			if !info.Mode().IsRegular() {
+			// WHICH ENTRIES A SCAN LOOKS AT, asked exactly as the enumeration asks it: a
+			// regular file, or a symbolic link that does not resolve to a directory. A link
+			// onto a FILE is enumerated by name like any other entry and is then skipped at
+			// the symlinked-source guard, so counting it here as an irregular entry would
+			// make this census and `holdfast plan` report different source sets for the same
+			// library. A device, a socket, a FIFO and a link onto a directory are in neither
+			// figure, and its own size is what a link contributes - never its target's, which
+			// is counted once already for the file at the other end.
+			if !info.Mode().IsRegular() && !(ent.IsLink && !ent.ResolvesToDir) {
 				rc.withhold(mechIrregular, size)
 				continue
 			}
@@ -389,6 +403,13 @@ func censusOverWalk(ctx context.Context, cfg *config.Config, res startup.Result)
 			}
 			if !engine.IsSourceName(ent.Name, cfg.VideoExts) {
 				rc.withhold(nameMechanism(ent.Name, cfg.VideoExts), size)
+				continue
+			}
+			// A path the pipeline refuses OUTRIGHT is not a source, whatever its name: the
+			// daemon declines it before it claims, probes or records anything, and so does
+			// the read-only plan pass.
+			if _, _, yes := engine.Declined(p); yes {
+				rc.withhold(mechDeclined, size)
 				continue
 			}
 			if _, held := c.heldBack[censusResolvedForm(p)]; held {
@@ -420,8 +441,8 @@ func censusOverWalk(ctx context.Context, cfg *config.Config, res startup.Result)
 func newRootCensus(root, label string, covered int) *rootCensus {
 	return &rootCensus{
 		Root: root,
-		Found: figure{Set: "every regular file in the directories the startup walk covered under " +
-			label},
+		Found: figure{Set: "every entry a scan's enumeration looks at, in the directories the startup " +
+			"walk covered under " + label + ": a regular file, or a symbolic link onto one"},
 		Sources: figure{Set: "the subset of those files the configuration in force would consider a source, " +
 			"under " + label},
 		withheld: map[string]*mechanism{},
@@ -454,7 +475,8 @@ func (rc *rootCensus) withhold(name string, size int64) {
 // held nothing back from one this build does not have - and the whole point of AC4's
 // account is that the set of reasons the two figures differ is stated, not inferred.
 func (rc *rootCensus) finish() {
-	rc.WithheldTotal.Set = "every regular file the mechanisms below keep out of the source set, under " + rc.Root
+	rc.WithheldTotal.Set = "every entry in the figure above that the mechanisms below keep out of the " +
+		"source set, under " + rc.Root
 	for _, name := range mechanismOrder {
 		m, ok := rc.withheld[name]
 		if !ok {

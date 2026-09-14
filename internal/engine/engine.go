@@ -927,9 +927,11 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		return nil
 	}
 
-	// A path containing a literal tab or newline is pathological: skip it, unrecorded.
-	// A row keyed on such a path would be legal SQL and worth nothing.
-	if strings.ContainsAny(f, "\t\n") {
+	// A path this pipeline declines OUTRIGHT: skip it, unrecorded, before anything is
+	// claimed or probed. The question is asked through Declined, which is the one function
+	// every door asks, so the read-only plan pass refuses the same paths this does rather
+	// than publishing one as a file a run would transcode.
+	if _, _, yes := Declined(f); yes {
 		e.Log.Info("skip (path contains a tab/newline — unsupported)", "file", f)
 		return nil
 	}

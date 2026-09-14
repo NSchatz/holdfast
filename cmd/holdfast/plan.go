@@ -10,7 +10,9 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/engine"
@@ -57,6 +59,10 @@ Flags:
   --config   path to the YAML config file (required)
   --json     write the whole plan as one JSON document to stdout, and nothing else to
              stdout; every human message and every error goes to stderr
+
+A plan takes one probe snapshot per covered file, so a large library takes a while. Every
+thirty seconds an unfinished run reports on stderr how many files it has probed so far, so a
+slow walk is distinguishable from a dead process.
 
 Exit codes:
   0  a report was produced. A REFUSED projection is still a report, so 0 is the ordinary
@@ -125,7 +131,20 @@ func runPlan(ctx context.Context, cfg *config.Config, opt planOptions, stdout, s
 		defer func() { _ = ledger.Close() }()
 	}
 
-	pass := eng.Plan(ctx, engine.PlanOptions{Ledger: planLedgerReader(ledger), Snapshot: planSnapshot(eng)})
+	// A plan takes one probe snapshot per covered file, so a real library is minutes to hours
+	// of ffprobe, and a command that says nothing for that long is one a supervisor kills and
+	// retries (cli L4). The count is the live one the pass is keeping as it goes.
+	var probed atomic.Int64
+	snapshot := planSnapshot(eng)
+	stop := planProgress(stderr, &probed)
+	pass := eng.Plan(ctx, engine.PlanOptions{
+		Ledger: planLedgerReader(ledger),
+		Snapshot: func(ctx context.Context, path string) *probe.VideoProps {
+			probed.Add(1)
+			return snapshot(ctx, path)
+		},
+	})
+	stop()
 	if ctx.Err() != nil {
 		fmt.Fprintln(stderr, "holdfast: interrupted - no plan was made, and nothing was written")
 		return 1
@@ -142,6 +161,40 @@ func runPlan(ctx context.Context, cfg *config.Config, opt planOptions, stdout, s
 	}
 	p.writeReport(stdout)
 	return 0
+}
+
+// planProgressEvery is how often a pass that has not finished says so on stderr (cli L4). A
+// test sets a short interval rather than sleeping through this one.
+var planProgressEvery = 30 * time.Second
+
+// planProgress says on stderr how far the pass has got, every planProgressEvery, until the
+// function it returns is called - which waits for the reporter to stop, so nothing is written
+// after the caller has moved on to the document. A zero interval turns it off.
+//
+// It reports PROBE SNAPSHOTS because that is what a plan spends its time on, and it names
+// them as such rather than as a percentage: the pass does not know how many files it will
+// cover until it has covered them, and a progress figure that implied otherwise would be the
+// one kind of number this command is written not to publish.
+func planProgress(w io.Writer, probed *atomic.Int64) func() {
+	if planProgressEvery <= 0 {
+		return func() {}
+	}
+	done, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		tick := time.NewTicker(planProgressEvery)
+		defer tick.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick.C:
+				fmt.Fprintf(w, "holdfast plan: still reading the library - %d file(s) probed so far\n",
+					probed.Load())
+			}
+		}
+	}()
+	return func() { close(done); <-stopped }
 }
 
 // planEngine builds the read-only pass: the prober it probes with, the ledger it reads
@@ -241,6 +294,13 @@ func buildPlan(ctx context.Context, cfg *config.Config, res startup.Result, pass
 			"file it decided, and plan records none.",
 	}
 	p.Coverage = planCoverageOf(cfg, res)
+	p.Declined = planDeclinedPaths{Note: "paths the pipeline refuses outright. A run claims, probes " +
+		"and records NOTHING about one, so they are in no figure above: counting one among the files " +
+		"a run would transcode would promise something no run will do."}
+	for _, d := range pass.Declined {
+		p.Declined.Files++
+		p.Declined.Paths = append(p.Declined.Paths, planDeclined{Path: d.Path, Rule: d.Rule, Detail: d.Detail})
+	}
 
 	// One group per distinct resolved profile, in configuration order, each naming the roots
 	// that produced it - which is the same reading `validate` prints.

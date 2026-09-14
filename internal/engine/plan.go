@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"io/fs"
 	"os"
 
 	"github.com/NSchatz/holdfast/internal/probe"
@@ -74,11 +75,23 @@ type PlanFile struct {
 // probe answered.
 func (f PlanFile) Eligible() bool { return f.Guard == "" && !f.Unreadable }
 
+// PlanDeclined is one enumerated path the pipeline refuses OUTRIGHT (Declined): a run
+// claims, probes and records nothing about it, so it is in no figure of the plan either.
+type PlanDeclined struct {
+	Path   string
+	Rule   string
+	Detail string
+}
+
 // PlanPass is what one read-only pass found: every covered file with its verdict, and how
 // many probe snapshots that cost.
 type PlanPass struct {
 	// Files is every file the enumeration covered, in the enumeration's own order.
 	Files []PlanFile
+	// Declined is every enumerated path the pipeline refuses outright. They are reported
+	// rather than dropped: a path missing from a report about a library reads as a path
+	// that is not there.
+	Declined []PlanDeclined
 	// Probes is how many probe snapshots the pass took. It is reported rather than assumed
 	// because "one invocation is one pass over the library" is a property an operator is
 	// owed evidence of, on a tool that may be pointed at a library of 300,000 files.
@@ -121,6 +134,12 @@ func (e *Engine) Plan(ctx context.Context, opt PlanOptions) *PlanPass {
 		if ctx.Err() != nil {
 			return pass
 		}
+		// Asked where ProcessFile asks it - before the hardlink guard and before anything is
+		// probed - so no guard of this pass can answer for a path a run never reaches.
+		if rule, detail, yes := Declined(f); yes {
+			pass.Declined = append(pass.Declined, PlanDeclined{Path: f, Rule: rule, Detail: detail})
+			continue
+		}
 		pass.Files = append(pass.Files, e.planFile(ctx, f, opt.Ledger, snapshot, &pass.Probes))
 	}
 	return pass
@@ -142,19 +161,21 @@ func (e *Engine) planFile(ctx context.Context, f string, ledger LedgerReader,
 		EncodeProfile: ts.Profile,
 	}
 
-	// The size the eligible-bytes figure is built from, read here and only here. A stat
-	// that fails is a file this plan cannot account for: it is reported with its reason
-	// rather than counted as zero bytes, which would be a number about the operator's
-	// library that nobody established.
-	fi, err := os.Stat(f)
+	// The size the eligible-bytes figure is built from, read here and only here, and read of
+	// the ENTRY rather than of whatever it points at: a symbolic link carrying a source name
+	// is a file a scan enumerates and then skips, and its bytes are the link's own. Counting
+	// its target's bytes would publish the same bytes twice in the one report an operator
+	// plans disk by. A stat that fails is a file this plan cannot account for: it is reported
+	// with its reason rather than counted as zero bytes.
+	fi, err := os.Lstat(f)
 	if err != nil {
 		pf.Unreadable = true
 		pf.Detail = errText(err)
 		return pf
 	}
-	if fi.IsDir() {
-		// The enumeration already declines a directory under a source name; anything that
-		// became one since the walk is not a file this plan may count.
+	if fi.IsDir() || (fi.Mode()&fs.ModeSymlink != 0 && isDirectory(f)) {
+		// The enumeration already declines a directory under a source name by either
+		// spelling; anything that became one since the walk is not a file this plan counts.
 		pf.Unreadable = true
 		pf.Detail = "a directory, not a regular file"
 		return pf
