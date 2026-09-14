@@ -1697,7 +1697,7 @@ func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, ts
 	streams, established := props.VideoStreams()
 	if !established || !carriableVideoStreams(streams) {
 		return props, sourceVerdict{guard: SkipMultiVideoStream, codec: codec,
-			log: "skip (a video stream beyond the first that is not an attached picture, or a stream shape the probe could not establish)",
+			log:     "skip (a video stream beyond the first that is not an attached picture, or a stream shape the probe could not establish)",
 			logArgs: []any{"video_streams", len(streams), "probe_established", established}}
 	}
 

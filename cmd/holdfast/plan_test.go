@@ -269,11 +269,17 @@ func TestPlan_ReportsEligibleSkippedAndBytes(t *testing.T) {
 // under the state directory and under the library root is the byte that was there when the
 // command started.
 func TestPlan_WritesNoJobRows(t *testing.T) {
-	for _, args := range [][]string{
-		{"plan", "--config"},
-		{"plan", "--json", "--config"},
+	// The names are spelled out rather than derived from the arguments: an empty name makes
+	// Go call the subtest "#00", which puts a '#' into its temp directory - and a '#' in a
+	// path is exactly what internal/store's own URI regression is about.
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"the report", []string{"plan", "--config"}},
+		{"the json document", []string{"plan", "--json", "--config"}},
 	} {
-		t.Run(strings.Join(args[1:len(args)-1], " "), func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			cfgPath, lib, state := planLibrary(t, "")
 			want := seedCensusLedger(t, state, "/gone/vanished.mkv")
 
@@ -281,7 +287,7 @@ func TestPlan_WritesNoJobRows(t *testing.T) {
 			stateBefore := treeSnapshot(t, state)
 
 			var out, errOut bytes.Buffer
-			if code := dispatch(append(args, cfgPath), &out, &errOut); code != 0 {
+			if code := dispatch(append(tc.args, cfgPath), &out, &errOut); code != 0 {
 				t.Fatalf("plan code = %d, want 0 (stderr: %s)", code, errOut.String())
 			}
 
@@ -781,13 +787,17 @@ func TestPlan_NoPerFileEstimateOrScoreProjection(t *testing.T) {
 		}
 		// No line names one of the library's files AND an estimate or a saving: a
 		// library-scale ratio printed against one file reads as a measurement of that file.
+		//
+		// The path is REMOVED before the rest of the line is read, because a path is not a
+		// figure: a temp directory is named after the test that made it, so a grader that
+		// searched the whole line would fire on this test's own directory name.
 		for _, line := range strings.Split(got, "\n") {
-			low := strings.ToLower(line)
-			if !strings.Contains(low, "estimat") && !strings.Contains(low, "saving") {
-				continue
-			}
 			for _, src := range planSources(lib) {
-				if strings.Contains(line, src) {
+				if !strings.Contains(line, src) {
+					continue
+				}
+				rest := strings.ToLower(strings.ReplaceAll(line, src, " "))
+				if strings.Contains(rest, "estimat") || strings.Contains(rest, "saving") {
 					t.Fatalf("%s carries a per-file estimate: %q", what, line)
 				}
 			}

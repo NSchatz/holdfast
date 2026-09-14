@@ -40,6 +40,27 @@ func (s *SQLite) MigrationReport() []MigrationStep { return s.applied }
 
 var _ Store = (*SQLite)(nil)
 
+// uriPath renders a filesystem path for the `file:` DSN every door in this package opens
+// through. It is NOT cosmetic and it is not a driver quirk: the DSN is a URI, and in a URI
+// a '#' opens a fragment and a '?' opens a query, so a path containing either is silently
+// TRUNCATED at it.
+//
+// What that costs without this: `state_dir: /srv/media#2` opens `/srv/media`, creates
+// nothing at the path the operator wrote, and two installs whose state directories differ
+// only after the '#' share ONE ledger - each reading the other's rows as its own. On a tool
+// that deletes originals, the ledger is the record of what was retained and what was
+// removed, so a handle that silently resolves somewhere else is a data-safety fault rather
+// than an inconvenience.
+//
+// SQLite's own rule for a URI filename is that '?' and '#' are percent-encoded; '%' has to
+// be encoded FIRST, or an operator's literal "%23" would come back as '#'. strings.Replacer
+// makes one pass and never rescans what it wrote, which is exactly that ordering.
+func uriPath(path string) string {
+	return uriPathEscaper.Replace(path)
+}
+
+var uriPathEscaper = strings.NewReplacer("%", "%25", "#", "%23", "?", "%3F")
+
 // Open creates the parent directory (if needed), opens (creating on first use) a
 // WAL-mode SQLite database at path, and initializes the schema. dsn enables WAL +
 // a busy timeout + foreign keys.
@@ -67,7 +88,7 @@ func Open(path string) (*SQLite, error) {
 	// run, which is always safe. Default (FULL) fsyncs every single commit, which
 	// under concurrent workers serializes on disk latency badly enough to make the
 	// worker pool pointless.
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)", path)
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)", uriPath(path))
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %q: %w", path, err)
@@ -146,7 +167,7 @@ func OpenSnapshot(path string) (*SQLite, error) {
 	// Deliberately not openReadOnlyDB's DSN: immutable is the whole point here, and a
 	// shared helper that sometimes sets it would make "did this open create a file?"
 	// a question about an argument rather than about which function was called.
-	dsn := fmt.Sprintf("file:%s?mode=ro&immutable=1&_pragma=query_only(1)", path)
+	dsn := fmt.Sprintf("file:%s?mode=ro&immutable=1&_pragma=query_only(1)", uriPath(path))
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %q as an unchanging snapshot: %w", path, err)
@@ -167,7 +188,7 @@ func openReadOnlyDB(path string) (*sql.DB, error) {
 	// pragmas are deliberately not Open's — journal_mode and synchronous are writes to
 	// the header, and a reader has no business setting either. query_only is belt and
 	// braces beside mode=ro, and it costs nothing.
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)", path)
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)", uriPath(path))
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %q read-only: %w", path, err)
