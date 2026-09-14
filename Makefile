@@ -52,8 +52,18 @@ PLATFORM ?= linux/amd64
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o holdfast ./cmd/holdfast
 
+# The timeout is DECLARED, not defaulted (S0069). go test's default is 10 minutes per
+# package binary, and internal/webui now spends minutes on purpose: its latency graders
+# hold a reading back two full minutes each to prove a verdict does not move with elapsed
+# time, and the Playwright half executes here too on any machine where that project is
+# installed - which is what `docs/webui.md` tells a developer to do. Run those together
+# under -race and the package passes 10 minutes, whereupon this gate reports a panic about
+# how long the measurement took rather than anything about the code. That is the exact
+# defect S0069 exists to remove, one level up. 30m is the limit this gate declares, beside
+# the 20m webui-check declares and the 30m webui-repeat-check declares; it is a limit, not
+# a target, and nothing here is graded against elapsed time.
 test:
-	go test -race -covermode=atomic ./...
+	go test -race -covermode=atomic -timeout 30m ./...
 
 fmt:
 	@out="$$(gofmt -l .)"; if [ -n "$$out" ]; then echo "gofmt needs:"; echo "$$out"; exit 1; fi
