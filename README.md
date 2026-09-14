@@ -148,6 +148,29 @@ anything in user space (FUSE) are all treated as not-local, because a false warn
 configuration and a false clear costs a film. **[docs/filesystem.md](docs/filesystem.md)** has the
 recognised-local set, the opt-in rules and what the startup traversal costs.
 
+### Before you let it near the library (`plan`, and `dry_run`)
+
+<a id="plan-versus-dry-run"></a>
+`dry_run` is a full daemon pass that probes, guards and **records a terminal row per file it decided**
+without encoding anything - a record of what THAT RUN decided, written into the ledger. `holdfast plan`
+is a read that walks the configured coverage set, runs every skip guard and reports what a run would
+do - **claiming nothing and writing nothing**, not a job row, not a ledger row, not a byte anywhere. So
+`dry_run is a full daemon pass` and `plan is a read`: neither is an alias for the other, and a caller
+invoking one never gets the other's observable effect.
+
+```
+holdfast plan --config config.yaml            # eligible files, eligible bytes, and which guard skipped the rest
+holdfast plan --config config.yaml --json     # the same plan as one JSON document on stdout
+```
+
+The reclaim figure is an **estimate and says so wherever it appears**, derived from the size ratios of
+encodes **this install has already completed** and published with the sample size and the spread it came
+from. On an install that has never completed one, it is **refused outright with the reason** rather than
+emitted as a zero or borrowed from somebody else's average - and a refused projection still exits `0`,
+because the report was produced. There is deliberately no per-file estimated saving and no predicted
+VMAF: a library-scale ratio printed against one file reads as a measurement of that file, and nothing
+here has looked inside it.
+
 ### Per-job settings, and where the encode works
 
 `encode_profiles` overrides the top-level encode settings per job (ordered; the first profile whose
