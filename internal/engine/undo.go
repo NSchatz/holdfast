@@ -250,6 +250,14 @@ func (u *UndoWindow) record(ctx context.Context, sourcePath, swappedPath, retain
 // tool can PROVE are its own (same inode, live record) means a foreign link still
 // skips exactly as it did before.
 func (u *UndoWindow) heldLinks(ctx context.Context, f string, fingerprint string) uint64 {
+	return heldLinksIn(ctx, f, fingerprint, u.Store, u.Log)
+}
+
+// heldLinksIn is heldLinks over whatever can READ the retention records, which is the
+// whole of what the count needs. The undo window asks it through the engine's own store;
+// the read-only plan pass asks it through a handle that cannot write, and a caller with no
+// ledger at all (a fresh install) passes nil and gets the name-based proof alone.
+func heldLinksIn(ctx context.Context, f, fingerprint string, r LedgerReader, log *slog.Logger) uint64 {
 	seen := make(map[string]bool, 2)
 	var n uint64
 	count := func(path string) {
@@ -270,12 +278,17 @@ func (u *UndoWindow) heldLinks(ctx context.Context, f string, fingerprint string
 	// literally another name for this inode.
 	count(retainedPathFor(f, fingerprint))
 
-	rows, err := u.Store.ListRetained(ctx)
+	if r == nil {
+		// No ledger to ask: discount only what the name proved, which is the same
+		// fail-safe direction an unreadable one takes.
+		return n
+	}
+	rows, err := r.ListRetained(ctx)
 	if err != nil {
 		// Fail safe: with the ledger unreadable, discount only what the name proved.
 		// Anything else is treated as foreign, which is the pre-undo-window behaviour
 		// and never a swap this tool could not undo.
-		u.Log.Warn("could not read the retained originals (treating every unproven extra link as foreign)", "file", f, "err", err)
+		log.Warn("could not read the retained originals (treating every unproven extra link as foreign)", "file", f, "err", err)
 		return n
 	}
 	for _, r := range rows {

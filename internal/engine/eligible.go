@@ -44,9 +44,9 @@ const (
 	// directory is refused for the same reason config.Validate refuses a relative root.
 	RuleNotAbsolute = "path-not-absolute"
 
-	// RuleUnsupportedCharacters is a path carrying a literal tab or newline. ProcessFile
-	// already declines such a path unrecorded; refusing it at the door is what stops a
-	// submission being accepted and then silently doing nothing.
+	// RuleUnsupportedCharacters is a path carrying a literal tab or newline. Declined is
+	// where that rule lives; refusing it at the door is what stops a submission being
+	// accepted and then silently doing nothing.
 	RuleUnsupportedCharacters = "unsupported-path-characters"
 
 	// RuleUnresolvable is a path whose real form could not be established - most often a
@@ -80,6 +80,46 @@ const (
 	// video_exts, which is the same test the scan's enumeration applies.
 	RuleNotAVideoFile = "not-a-video-extension"
 )
+
+// Declined is the whole of what this pipeline refuses OUTRIGHT: a path it will not claim,
+// probe, encode or record anything about, whatever is at the other end of it. It answers
+// with the rule token and the detail an operator reads, or false.
+//
+// It is ONE function and every door asks it - ProcessFile before it claims, the read-only
+// plan pass before it counts, and Judge before it admits a submission - because a refusal
+// the daemon takes and a report does not is exactly how a plan comes to publish a file as
+// one a run would transcode when no run ever will. A refusal added HERE reaches all three
+// with no second edit.
+func Declined(p string) (rule, detail string, yes bool) {
+	if strings.ContainsAny(p, "\t\n") {
+		return RuleUnsupportedCharacters, "the path carries a literal tab or newline; such a path " +
+			"is not processed, and a job row keyed on it would be legal SQL and worth nothing", true
+	}
+	return "", "", false
+}
+
+// DeclinedPath is BOTH questions ProcessFile asks of an ENUMERATED path before it claims
+// anything: Declined above, and whether there is a file at the other end that a run would
+// act on at all. It reads the filesystem and writes nothing.
+//
+// The stat FOLLOWS the link, exactly as ProcessFile's own does, so a dangling symbolic link
+// and a directory by either spelling both answer yes here - and each is a path the daemon
+// returns from having claimed nothing, probed nothing and recorded nothing. A report about
+// what a run would do must not count one, which is why the read-only plan pass and the
+// census ask this rather than a rule of their own.
+func DeclinedPath(p string) (rule, detail string, yes bool) {
+	if rule, detail, yes := Declined(p); yes {
+		return rule, detail, true
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		return RuleNotARegularFile, fmt.Sprintf("%s is not a file this run can act on: %v", p, err), true
+	}
+	if fi.IsDir() {
+		return RuleNotARegularFile, fmt.Sprintf("%s is a directory, not a regular file", p), true
+	}
+	return "", "", false
+}
 
 // Ineligible is the ONE rule a path broke, and what was seen. Rule is the token; Detail
 // is for the human reading the report, and carries the resolved path whenever resolution
@@ -201,9 +241,8 @@ func InRetentionArea(p string) bool {
 // applies, asked of a path instead of a listing entry; the guards, the claim and the swap
 // discipline are all still ahead, on ProcessFile.
 func (el Eligibility) Judge(p string) (string, *Ineligible) {
-	if strings.ContainsAny(p, "\t\n") {
-		return "", &Ineligible{Rule: RuleUnsupportedCharacters, Detail: fmt.Sprintf(
-			"%q carries a literal tab or newline; such a path is not processed", p)}
+	if rule, detail, yes := Declined(p); yes {
+		return "", &Ineligible{Rule: rule, Detail: fmt.Sprintf("%q: %s", p, detail)}
 	}
 	if !filepath.IsAbs(p) {
 		return "", &Ineligible{Rule: RuleNotAbsolute, Detail: fmt.Sprintf(

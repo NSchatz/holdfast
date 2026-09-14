@@ -274,6 +274,33 @@ var SwapMetadataClauses = []Clause{
 	},
 }
 
+// AnchorPlanVersusDryRun introduces the statement separating the two things holdfast can be
+// asked for without encoding: a dry run and a plan.
+//
+// It exists because they are the pair an operator confuses, and confusing them costs in both
+// directions. Someone who reads `plan` as a dry run expects a record of what was decided and
+// finds an empty ledger; someone who reads `dry_run` as a plan expects to have written
+// nothing and finds a terminal row per file. Neither is discoverable from the tool's output
+// - each looks like a report - so the difference is written down, and it is checked here for
+// the same reason the residual-window statements are: a documentation obligation nothing
+// enforces is one that quietly lapses the first time a command grows.
+const AnchorPlanVersusDryRun = "plan-versus-dry-run"
+
+// PlanVersusDryRunClauses is the whole obligation, and it is deliberately the two sentences
+// the conductor ruling this pair was settled by uses: one saying what `dry_run` IS, one
+// saying what `plan` is. Each token is the shortest string that carries its clause and could
+// not plausibly be written by accident while meaning something else.
+var PlanVersusDryRunClauses = []Clause{
+	{
+		Token:  "dry_run is a full daemon pass",
+		Clause: "dry_run is a full daemon pass that records a terminal row per file it decided",
+	},
+	{
+		Token:  "plan is a read",
+		Clause: "plan is a read that walks and projects, claiming nothing and writing nothing",
+	},
+}
+
 // AnchorNonGoalLibraryManager introduces the library-manager non-goal: the capabilities
 // holdfast excludes permanently, the reason the exclusion is structural rather than a
 // scope preference, and what an operator should reach for instead.
@@ -749,6 +776,28 @@ func Check(files []string) ([]string, error) {
 	}
 
 	return problems, nil
+}
+
+// CheckPlanVersusDryRun applies the plan-versus-dry-run rule to ONE file, and returns one
+// problem per line, empty when that file satisfies it.
+//
+// It is deliberately not part of Check. Check's rule is "the statement exists somewhere in
+// what the repository ships", which is right for a fact that reads best beside whatever it
+// belongs to. This pair is different: it is what a reader meets when they first ask how to
+// look before they leap, and the first document they open is the README - so the obligation
+// is about THAT file, and a rule that could be satisfied by a sentence in docs/ would not be
+// the obligation that was owed.
+func CheckPlanVersusDryRun(path string) ([]string, error) {
+	st, err := findStatement(path, AnchorPlanVersusDryRun)
+	if err != nil {
+		return nil, err
+	}
+	if st.File == "" {
+		return []string{fmt.Sprintf("%s carries no %q anchor - the statement separating a plan from a "+
+			"dry run is MISSING from the document a reader opens first", path, AnchorPlanVersusDryRun)}, nil
+	}
+	return checkClauses([]Statement{st}, AnchorPlanVersusDryRun, "plan-versus-dry-run",
+		PlanVersusDryRunClauses), nil
 }
 
 // CheckRepo applies every rule this package owns to a repository rooted at root: the

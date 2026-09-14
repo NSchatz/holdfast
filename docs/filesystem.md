@@ -58,6 +58,32 @@ against your `allow_non_local` entries and therefore will not start on. Each
 refuses the run with its own cause and its own remedy, so you are never sent
 looking for a storage problem that is not there.
 
+### Your `state_dir` path is taken literally
+
+The job ledger is opened through a SQLite `file:` DSN, which is a **URI**, and
+three characters mean something in one: `#` opens a fragment, `?` opens a query,
+and `%` introduces an escape. holdfast now percent-encodes all three before
+building that DSN, so `jobs.db` is created and opened at exactly the path you
+configured, whatever it contains.
+
+**Upgrade note, and it is the only case where the ledger moves.** Builds before
+this one passed the path through unescaped, so a `state_dir` carrying one of
+those characters resolved somewhere else: `/srv/state#2` opened `/srv/state`
+(truncated at the `#`), and `/srv/a%41b` opened `/srv/aAb` (the escape decoded).
+If your `state_dir` contains a `#`, a `?` or a `%`, the first run of this build
+opens a **different, empty** ledger at the real path and the old one is left
+where it is - taking the undo window's retention records and the record-based
+hold-backs with it. Nothing in your library is touched by that: the ledger is the
+record of what holdfast did, not a claim on any file. Move the old database into
+place before starting if you want that history back:
+
+```sh
+mv '/srv/state/jobs.db' '/srv/state#2/jobs.db'   # old resolved path -> the configured one
+```
+
+A `state_dir` with none of those three characters in it is unaffected, which is
+every path this project has ever shipped an example of.
+
 ## Filesystem types this build classifies local
 
 A type is on this list only if, for every file on storage of that type, the

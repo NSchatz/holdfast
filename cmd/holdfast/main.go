@@ -58,6 +58,7 @@ Commands:
   run        Load config and run one transcode scan over the library roots
   serve      Run the HTTP API + web UI (scan on demand / on an interval)
   analyze    Census the library roots: file counts, bytes and distributions (reads only)
+  plan       Report what this configuration would do to the library and what it would save
   resolve    Report and resolve a job whose swap outcome could not be established
   restore    List what the undo window is holding, or put one original back
   requeue    Offer a file the engine has already answered back to the pipeline
@@ -69,6 +70,8 @@ Run "holdfast <command> -h" for command flags.
 
   holdfast analyze --config config.yaml            # what is in the library, without touching it
   holdfast analyze --config config.yaml --health   # and which of it does not decode
+  holdfast plan --config config.yaml               # what a run would do, and what it would save
+  holdfast plan --config config.yaml --json        # the same plan as one JSON document
   holdfast restore --config config.yaml            # what is retained, and for how long
   holdfast restore --config config.yaml <path>     # put that original back
   holdfast requeue --config config.yaml <path>     # re-open that file's terminal row
@@ -87,6 +90,8 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 		return cmdServe(args[1:], stdout, stderr)
 	case "analyze":
 		return cmdAnalyze(args[1:], stdout, stderr)
+	case "plan":
+		return cmdPlan(args[1:], stdout, stderr)
 	case "resolve":
 		return cmdResolve(args[1:], stdout, stderr)
 	case "restore":
