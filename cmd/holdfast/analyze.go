@@ -452,8 +452,8 @@ func newRootCensus(root, label string, covered int) *rootCensus {
 	return &rootCensus{
 		Root: root,
 		Found: figure{Set: "every entry a scan's enumeration looks at, in the directories the startup " +
-			"walk covered under " + label + ": any entry with a file at the other end, whatever kind of " +
-			"entry it is, and not a directory by either spelling"},
+			"walk covered under " + label + ": any entry that is not a directory by either spelling and " +
+			"is not a symbolic link onto nothing, whatever kind of entry it is"},
 		Sources: figure{Set: "the subset of those files the configuration in force would consider a source, " +
 			"under " + label},
 		withheld: map[string]*mechanism{},
