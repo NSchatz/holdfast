@@ -38,6 +38,7 @@ internal/webui/
     driver.mjs              the one engine driver, for the Go graders that operate a browser
     specs/probe.mjs         the measuring script, which decides nothing
     specs/graders.mjs       the predicates, which measure nothing
+    specs/craft.spec.mjs    interface-craft C3 and C5, driven in both themes at both widths
     specs/candidates.mjs    the same split for what a DRY RUN decided: one reading, then
                             the predicates over it, plus the fixture's expectations
     specs/*.spec.mjs        the cases, and mutations.spec.mjs which defeats every grader
@@ -130,9 +131,13 @@ Those three are the whole reason there is a browser in this gate, so they are th
 `make webui-graders-selftest` DEFEATS on purpose - one palette wearing both preferences, a
 control whose label is detached so the engine names it by its placeholder, a control taken
 out of the tab order - against a mutated COPY of the tree, requiring each grader to red and
-to say what it saw, and failing if any defeat did not execute. It is not part of `make
-check` (mutations must not touch the tree `check` grades); CI runs it beside the gate. The
-count of cases is `declared=` in that script, its single writer, which the run prints.
+to say what it saw, and failing if any defeat did not execute. The same script then defeats
+what sits under all three, the browser RESOLUTION: a pin naming a path no process can
+execute is driven in both modes, and the two have to answer differently and name the engine
+either way - a failure under required mode, a skip that says so where `check` is simply
+running on a machine with no browser. It is not part of `make check` (mutations must not
+touch the tree `check` grades); CI runs it beside the gate. The count of cases is
+`declared=` in that script, its single writer, which the run prints.
 
 The layering is the point, and it is why every grader can be proved: `probe.mjs` MEASURES
 and decides nothing, `graders.mjs` DECIDES and measures nothing, the spec files drive the
@@ -202,6 +207,23 @@ the specs that read the page as the project presents it.
 
 ## What the graders will not let you change quietly
 
+- **Hierarchy, interface-craft C3.** Within a region, a figure differs from the text that
+  names it in at least two of rendered size, rendered weight and rendered colour, and the
+  text a reader can see is painted at three or more distinct sizes. Both are read off the
+  ENGINE after the whole cascade, so flattening a figure onto its label with a later rule
+  is caught even though every declaration already in the stylesheet is untouched - which is
+  exactly the counterexample that proves it. A region rendering no figure at all is named
+  as UNMEASURED rather than counted as a pass, and a run that found no figure in any region
+  FAILS: a subject query that matches nothing is the cheapest way for a grader like this to
+  be green for ever.
+- **Density, interface-craft C5.** Every container the engine paints ENCLOSING chrome on -
+  a border on all four sides, or a shadow - holds at least three facts a reader can read
+  off it. A single painted edge is a rule between two things rather than a box around one,
+  and a landmark, a control, a drawing and a leaf are each reported and then set aside with
+  their reason rather than dropped from the reading. So a box may not be drawn around one
+  labelled figure: give the group the boundary and make the items rows in it, which is what
+  the counts and the two byte figures are. A run that found no bordered container FAILS,
+  for the same reason the hierarchy one does.
 - The served Content Security Policy. It is asserted byte for byte AND by a rule about
   policies: no `unsafe-eval`, no host, scheme, nonce or hash source, no `img-src`, no
   default Trusted Types policy, no directive outside the served set. The rule is proved

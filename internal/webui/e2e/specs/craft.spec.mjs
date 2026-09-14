@@ -36,6 +36,10 @@ function craftProblems(s) {
   ];
 }
 
+// Criteria: AC-1 (two channels of three), AC-2 (three painted sizes), AC-3 (three facts per
+// bordered container), AC-5 (every theme at every width, and a world that measured nothing
+// is a failure), AC-6 (no figure or no container found is a failure), AC-7 (a region with
+// no figure is named as unmeasured).
 test("hierarchy and density hold in every theme at every width, and every world measured something", async ({ browser, baseURL }, testInfo) => {
   const problems = [];
   const measured = [];
@@ -84,6 +88,10 @@ test("hierarchy and density hold in every theme at every width, and every world 
 // The empty snapshot. The page has nothing to list and still renders its counts, its
 // controls and its states, so both clauses are still decided over what it DOES render -
 // and nothing it reports may be caused by the rows that are not there.
+//
+// Criteria: AC-8 (both clauses decided under a snapshot with nothing to list, and no
+// problem caused solely by the absence of rows), AC-7 (the region that renders no figure
+// under this snapshot is named rather than counted as a pass).
 test("hierarchy and density are decided under a snapshot with nothing to list", async ({ browser, baseURL }, testInfo) => {
   const { ctx, page } = await open(browser, {
     url: pageURL(baseURL, "empty"), theme: "dark", width: 1280, height: 900,

@@ -130,8 +130,8 @@ const TABLE = [
     mutation: mutate.css(`* { transition: none !important; animation: none !important; }`),
   },
   {
-    // interface-craft C3, and the case that decides whether these graders read the page or
-    // its source. The rule is APPENDED: every declaration the document already carries is
+    // interface-craft C3 (AC-4), and the case that decides whether these graders read the
+    // page or its source. The rule is APPENDED: every declaration the document carries is
     // untouched, so the stylesheet still says the count is --fs-3xl at weight 700 in its
     // own colour and the source reads exactly as it did. Only what the engine PAINTS
     // changes - the figure comes out at its label's size, its label's weight and its
@@ -142,15 +142,16 @@ const TABLE = [
     says: /differs from its label .* in 0 of the three channels/,
   },
   {
-    // interface-craft C5, and the same trick on the other clause: the card keeps its border
-    // and every declaration that draws it, and the engine is left painting one of the facts
-    // that border was earning.
+    // interface-craft C5 (AC-4), the same trick on the other clause: the card keeps its
+    // border and every declaration that draws it, and the engine is left painting one of
+    // the facts that border was earning.
     name: "a bordered card left painting one of its facts, with the source untouched",
     defeats: "a bordered or raised container earns its chrome",
     mutation: mutate.css(`#aggregates .agg .agg-v, #aggregates .agg .agg-cov, #aggregates .agg .agg-ex { display: none !important; }`),
     says: /draws a border on all four sides and holds 1 fact/,
   },
   {
+    // interface-craft C3's second half (AC-10).
     name: "the painted type scale collapsed onto one size",
     defeats: "the painted type scale carries three sizes",
     mutation: mutate.css(`body, body * { font-size: 14px !important; }`),
@@ -185,6 +186,9 @@ for (const c of TABLE) {
 }
 
 // AC-10's other half, and the one a green run cannot tell you: that every grader HAS a
+// counterexample - a run in which one of them did not execute has to fail, and the only
+// way to say that of a case that was never written is to check the mapping itself.
+//
 // counterexample. A predicate added to convGraders() with no case above would be run on
 // every pull request, would report nothing, and nothing would ever have asked it whether
 // it could report at all - which is the exact shape of the vacuous grader this file exists
