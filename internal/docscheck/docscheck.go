@@ -18,11 +18,11 @@
 // whether the prose is true, or well written, or complete - no mechanical check can, and
 // one that pretended to would either fail good documentation or pass bad. Precisely:
 //
-//   - Eight fixed anchors must exist: residual-window-local, residual-window-network,
-//     reverse-proxy-posture, swap-metadata, non-goal-library-manager, swap-invariant,
-//     vmaf-pooling and null-is-not-zero. They are FIXED here rather than chosen per-run,
-//     because a check free to pick its own anchor is a check that can be made to pass by
-//     moving the goalposts.
+//   - Nine fixed anchors must exist: residual-window-local, residual-window-network,
+//     reverse-proxy-posture, swap-metadata, non-goal-library-manager, differentiator-gate,
+//     swap-invariant, vmaf-pooling and null-is-not-zero. They are FIXED here rather than
+//     chosen per-run, because a check free to pick its own anchor is a check that can be
+//     made to pass by moving the goalposts.
 //   - A statement is PRESENT only when its anchor exists AND at least one non-blank
 //     line follows it, before the next anchor or heading, that is not itself a heading
 //     or an anchor. An anchor with nothing under it is not a statement.
@@ -39,6 +39,11 @@
 //     (see SwapMetadataClauses).
 //   - The library-manager non-goal owes eight clauses under that rule, six of them naming
 //     one excluded capability each (see NonGoalLibraryManagerClauses).
+//   - The differentiator statement owes nine clauses under that rule (see
+//     DifferentiatorClauses) AND is the one anchor checked for what it must NOT say: a
+//     uniqueness assertion inside it fails the gate, with two written-out allowances for
+//     the strings this repository already carries that contain a guarded phrase while
+//     disowning it. See "Why the differentiator anchor exists" below.
 //   - The three anchors in AgreeingRules owe their clauses at EVERY occurrence rather
 //     than at one: see "Existence, and agreement" below.
 //   - A repository-relative link in CLAUDE.md or README.md must resolve to a path in the
@@ -48,10 +53,11 @@
 //
 // # Existence, and agreement
 //
-// The five anchors outside AgreeingRules are satisfied by ANY occurrence: the obligation is
+// The six anchors outside AgreeingRules are satisfied by ANY occurrence: the obligation is
 // that the statement exists in what the repository ships, so a second document carrying a
 // shorter restatement is not an error, and the rule reports a problem only when NO
-// occurrence satisfies it.
+// occurrence satisfies it. (The differentiator anchor's CLAUSES follow that rule; its
+// widening guard does not, and checkNoWidening says why.)
 //
 // That is the right rule for an obligation about the corpus and the wrong one for an
 // argument the documents restate. Under it a second copy may quietly drop a clause while
@@ -85,6 +91,22 @@
 // ratified rather than merely observed, each excluded capability is named on its own so a
 // reader learns which of their problems this tool does not solve, and the statement says
 // what to use for that work instead.
+//
+// # Why the differentiator anchor exists
+//
+// The README asks a reader to choose this tool over four others, and the whole of what it
+// offers them to choose on is one claim: the verify gate is on by default, it is layered,
+// it fails closed, and an output that could not be measured is rejected rather than assumed
+// good. That claim is narrow, it is true, and it is the kind of sentence that does not stay
+// either. It drifts upward one edit at a time - a floor dropped from the list because the
+// sentence ran long, a "the only tool that" added because it reads better - and the version
+// that survives the drift is the one a reader doing five minutes of research can disprove.
+//
+// Nothing else in this repository catches that. The fixture suite proves the gate behaves;
+// no test has ever read what the README CLAIMS the gate does. So the claim is anchored, its
+// clauses are enumerated, and it is the one statement here checked in both directions: it
+// reds when a clause goes missing, and it reds when a uniqueness assertion appears. The
+// second direction is the one this anchor was actually added for.
 //
 // # Why the reverse-proxy anchor exists
 //
@@ -311,6 +333,100 @@ var NonGoalLibraryManagerClauses = []Clause{
 		Clause: "what an operator should reach for instead, named rather than gestured at, so the " +
 			"boundary reads as a recommendation and not as a refusal",
 	},
+}
+
+// AnchorDifferentiator introduces the one claim holdfast's competitive framing rests on:
+// what its verify gate does that a reader is being asked to choose it for. It is anchored
+// for a reason the other anchors are not - not because the statement could be DELETED, but
+// because it could be WIDENED. A competitive claim drifts upward one edit at a time, and
+// the version that survives the drift is the one nothing can defend.
+const AnchorDifferentiator = "differentiator-gate"
+
+// DifferentiatorClauses is the whole of what the differentiator statement owes. It is a
+// claim about holdfast and about nothing else: no clause here mentions another tool, and no
+// competitor shipping a feature can turn this red. That is deliberate. A gate that froze a
+// competitor's feature set would red on somebody else's release notes, which is a build
+// nobody can fix.
+//
+// Five of the nine tokens are identifiers this repository already treats as fixed
+// (`min_vmaf`, `vmaf_min_pool`, `vmaf_min_chroma`), or phrases the gate's own prose uses
+// everywhere else. The three VMAF floors are three clauses rather than one because that is
+// how a claim like this is quietly narrowed: a statement that names the mean and the worst
+// frame and forgets chroma reads as complete, and chroma is the floor that catches the
+// damage the luma-only model is structurally blind to.
+var DifferentiatorClauses = []Clause{
+	{
+		Token:  "default-on",
+		Clause: "the gate is on by DEFAULT, not a mode somebody has to find and enable",
+	},
+	{
+		Token:  "layered",
+		Also:   []string{"every layer runs"},
+		Clause: "the gate is layered and every layer runs, rather than the first one that answers",
+	},
+	{
+		Token:  "fails closed",
+		Clause: "the gate FAILS CLOSED",
+	},
+	{
+		Token:  "structural parity",
+		Clause: "the structural-parity layer is one of them",
+	},
+	{
+		Token:  "full decode-integrity",
+		Clause: "the full decode-integrity layer is one of them",
+	},
+	{
+		Token:  "min_vmaf",
+		Clause: "the VMAF mean floor (min_vmaf) is one of them",
+	},
+	{
+		Token:  "vmaf_min_pool",
+		Clause: "the VMAF worst-frame floor (vmaf_min_pool) is one of them",
+	},
+	{
+		Token: "vmaf_min_chroma",
+		Clause: "the VMAF chroma floor (vmaf_min_chroma) is one of them, which is the floor a " +
+			"statement naming only the mean and the worst frame drops while still reading as complete",
+	},
+	{
+		Token:  "cannot be measured is rejected",
+		Also:   []string{"assumed good"},
+		Clause: "an output that cannot be MEASURED is rejected rather than assumed good",
+	},
+}
+
+// DifferentiatorUniqueness is the widening guard, and it is the half of this rule that has
+// no precedent in this package: every other rule fails on what a statement STOPS saying,
+// and this one also fails on what it STARTS saying.
+//
+// The phrases are the ones an honest narrow claim turns into over a few edits. They are
+// matched case-insensitively inside the anchored statement and nowhere else - the guard is
+// about the claim this repository makes for itself under its own anchor, not about every
+// sentence in the corpus that happens to contain the word "only".
+var DifferentiatorUniqueness = []string{
+	"the only tool",
+	"the only transcoder",
+	"the only one that",
+	"no other tool",
+	"uniquely",
+	"the only project",
+	"the only self-hosted",
+	"nothing else does",
+}
+
+// DifferentiatorUniquenessAllowed are the strings that CONTAIN a guarded phrase without
+// asserting it, and the reason this guard can be shipped at all.
+//
+// Both of them are the repository disowning the claim rather than making it - the section
+// heading says holdfast is NOT the only tool that verifies, and the closing disclaimer says
+// the narrow claim is truer than the wide one. A guard that failed on those two would be
+// satisfiable by deleting the sentences that make the claim honest, which is the exact
+// outcome it exists to prevent. So they are allowances, written out in full: a paraphrase
+// that keeps the guarded phrase and drops the disavowal is not covered, and reds.
+var DifferentiatorUniquenessAllowed = []string{
+	"We are not the only tool that verifies before it replaces",
+	`narrower and truer than "the only one that checks"`,
 }
 
 // The three anchors under the AGREEMENT rule. Each introduces an argument the repository
@@ -550,7 +666,7 @@ func findStatement(path, anchor string) (Statement, error) {
 // the documentation satisfies them. Two rules, and which one an anchor is held to is
 // fixed by AgreeingRules rather than chosen per run.
 //
-// For the five anchors outside AgreeingRules an anchor appearing in more than one file is not an
+// For the six anchors outside AgreeingRules an anchor appearing in more than one file is not an
 // error: the check wants the statement to EXIST in what the repository ships, so ANY
 // occurrence that satisfies the rule satisfies the criterion, and the problem is only
 // reported when NONE does. The message then names the strongest near-miss, so a failure
@@ -615,6 +731,14 @@ func Check(files []string) ([]string, error) {
 	}
 	problems = append(problems, checkClauses(
 		nonGoal, AnchorNonGoalLibraryManager, "library-manager non-goal", NonGoalLibraryManagerClauses)...)
+
+	differentiator, err := statements(files, AnchorDifferentiator)
+	if err != nil {
+		return nil, err
+	}
+	problems = append(problems, checkClauses(
+		differentiator, AnchorDifferentiator, "differentiator", DifferentiatorClauses)...)
+	problems = append(problems, checkNoWidening(differentiator, "differentiator")...)
 
 	for _, r := range AgreeingRules {
 		sts, err := statements(files, r.Anchor)
@@ -711,6 +835,45 @@ func checkClausesEveryOccurrence(sts []Statement, anchor, what string, clauses [
 					"MISSING from it - every occurrence of %q carries every clause it owes or the "+
 					"shipped documents disagree with each other",
 				s.File, what, missingToken(text, c), c.Clause, anchor))
+		}
+	}
+	return problems
+}
+
+// checkNoWidening is the guard against a claim growing. Every other rule in this package
+// asks whether a statement still SAYS enough; this one asks whether it has started saying
+// too much, and it is applied to EVERY occurrence rather than to the best one.
+//
+// Every occurrence, because the alternative is a hole with a shape: under the
+// any-occurrence rule a second document could carry the anchor, assert the wide claim, and
+// hide behind the narrow copy that keeps the clause check green. A widening guard with a
+// second copy as its exit is not a guard.
+//
+// The allowances are removed from the text BEFORE the phrases are looked for, so a
+// statement that disowns the claim in the repository's own words passes and one that
+// paraphrases the disavowal away does not. Removal, rather than "the phrase appears in an
+// allowed sentence", because removal is decidable from the text alone: no sentence
+// splitter, no judgement about what a clause is attached to.
+func checkNoWidening(sts []Statement, what string) []string {
+	var problems []string
+	for _, s := range sts {
+		if !s.Present() {
+			continue
+		}
+		text := normalize(s.Text)
+		for _, allowed := range DifferentiatorUniquenessAllowed {
+			text = strings.ReplaceAll(text, normalize(allowed), " ")
+		}
+		for _, phrase := range DifferentiatorUniqueness {
+			if !strings.Contains(text, normalize(phrase)) {
+				continue
+			}
+			problems = append(problems, fmt.Sprintf(
+				"%s: the %s statement asserts %q, which is a uniqueness claim this project cannot "+
+					"defend - the claim it can defend is about what holdfast's own gate does, and a "+
+					"claim about every other tool in the field is one nobody here has checked. Say the "+
+					"narrow thing, or add the disavowal to DifferentiatorUniquenessAllowed and say why",
+				s.File, what, phrase))
 		}
 	}
 	return problems

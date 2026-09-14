@@ -82,7 +82,7 @@ func agreeingBlocks() string {
 // TestShippedDocumentation_AC1_SatisfiesEveryRuleTheGateOwns.
 func TestCheck_AC1_EveryNewAnchorIntroducesAStatement(t *testing.T) {
 	dir := writeCorpus(t, map[string]string{
-		"docs.md": residualWindowBlock() + postureBlock() + metadataBlock() + nonGoalBlock() + agreeingBlocks(),
+		"docs.md": residualWindowBlock() + postureBlock() + metadataBlock() + nonGoalBlock() + differentiatorBlock() + agreeingBlocks(),
 	})
 	if problems := check(t, dir); len(problems) != 0 {
 		t.Fatalf("a corpus carrying all three statements in full was reported as failing: %v", problems)
@@ -103,7 +103,7 @@ func TestCheck_AC5_AnchorWithNothingUnderItIsReportedMissing(t *testing.T) {
 				}
 			}
 			dir := writeCorpus(t, map[string]string{
-				"docs.md": residualWindowBlock() + postureBlock() + metadataBlock() + nonGoalBlock() + others +
+				"docs.md": residualWindowBlock() + postureBlock() + metadataBlock() + nonGoalBlock() + differentiatorBlock() + others +
 					"<a id=\"" + r.Anchor + "\"></a>\n\n## Next section\n\nunrelated\n",
 			})
 			problems := check(t, dir)
@@ -130,7 +130,7 @@ func TestCheck_AC6_AnchorMissingFromEveryDocumentIsNamed(t *testing.T) {
 				}
 			}
 			dir := writeCorpus(t, map[string]string{
-				"docs.md": residualWindowBlock() + postureBlock() + metadataBlock() + nonGoalBlock() + others,
+				"docs.md": residualWindowBlock() + postureBlock() + metadataBlock() + nonGoalBlock() + differentiatorBlock() + others,
 			})
 			problems := check(t, dir)
 			if len(problems) != 1 {
@@ -153,7 +153,7 @@ func TestCheck_AC7_ASecondOccurrenceThatDropsAClauseFails(t *testing.T) {
 		for _, c := range r.Clauses {
 			t.Run(r.Anchor+"/"+c.Token, func(t *testing.T) {
 				dir := writeCorpus(t, map[string]string{
-					"a.md": residualWindowBlock() + postureBlock() + metadataBlock() + nonGoalBlock() + agreeingBlocks(),
+					"a.md": residualWindowBlock() + postureBlock() + metadataBlock() + nonGoalBlock() + differentiatorBlock() + agreeingBlocks(),
 					"b.md": ruleBlock(r, c.Token),
 				})
 				problems := check(t, dir)
@@ -177,7 +177,7 @@ func TestCheck_AC7_ASecondOccurrenceThatDropsAClauseFails(t *testing.T) {
 // restating an argument impossible rather than making it honest.
 func TestCheck_AC7_AFaithfulSecondCopyPasses(t *testing.T) {
 	dir := writeCorpus(t, map[string]string{
-		"a.md": residualWindowBlock() + postureBlock() + metadataBlock() + nonGoalBlock() + agreeingBlocks(),
+		"a.md": residualWindowBlock() + postureBlock() + metadataBlock() + nonGoalBlock() + differentiatorBlock() + agreeingBlocks(),
 		"b.md": agreeingBlocks(),
 	})
 	if problems := check(t, dir); len(problems) != 0 {
@@ -201,7 +201,7 @@ func TestCheck_AC8_TheOlderAnchorsKeepTheAnyOccurrenceRule(t *testing.T) {
 	for anchor, second := range weak {
 		t.Run(anchor, func(t *testing.T) {
 			dir := writeCorpus(t, map[string]string{
-				"a.md": residualWindowBlock() + postureBlock() + metadataBlock() + nonGoalBlock() + agreeingBlocks(),
+				"a.md": residualWindowBlock() + postureBlock() + metadataBlock() + nonGoalBlock() + differentiatorBlock() + agreeingBlocks(),
 				"b.md": second,
 			})
 			if problems := check(t, dir); len(problems) != 0 {
