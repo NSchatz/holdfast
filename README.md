@@ -25,8 +25,7 @@ reproducible from git, not hidden in a UI database.
 ## Why another transcoder?
 
 *Every claim about another tool in this section and its subsection was checked **as of September 2026**,
-against that project's own licence text or its own project page. Other tools move, and this one is
-allowed to be out of date about them: re-check before you choose.*
+against that project's own licence text or project page. Other tools move: re-check before you choose.*
 
 Tdarr is capable, but it is **licensed under an
 [EULA](https://github.com/HaveAGitGat/Tdarr/blob/master/LICENSE.md)**: the licence is provided in three
@@ -78,27 +77,25 @@ uniqueness we would not be able to defend - and the difference does not run one 
 holdfast only half has, said plainly rather than left out:
 
 - **Per-library profiles**, giving movies, TV and home videos different behaviour per library. holdfast
-  half has this and no further: a library root or a path glob overrides the encode settings and the
-  gates, and that is the whole of it ([docs/profiles.md](docs/profiles.md)).
+  half has this: a library root or a path glob overrides the encode settings and the gates, and no
+  more ([docs/profiles.md](docs/profiles.md)).
 - **Audio stream rules** - commentary stripping, language filtering, default-track retention. holdfast
-  has none of it, by design: audio, subtitles and attachments are stream-copied untouched.
+  has none, by design: audio, subtitles and attachments are stream-copied untouched.
 - **Sonarr/Radarr webhook intake**, through a narrowed webhook token with optional container path
   translations. holdfast has no webhook receiver at all; an *arr calls the generic scan endpoint behind
   the one control token ([docs/api-reference.md](docs/api-reference.md)).
 - **A Jellyfin integration** - a narrowed plugin token for enqueue, completion events, job details and
   library refresh. holdfast ships nothing of the kind.
 - **Named API tokens with access classes** - read-only, webhook, plugin, full access. holdfast has one
-  bearer token at one access level, which is the known limitation recorded further down this page.
-- **An off-peak scheduler with a priority queue.** holdfast half has this: there is a daily `run_window`
-  and a per-core load cap, and there is no priority queue - work is taken in the order the scan finds
-  it and nothing jumps the line.
+  bearer token at one access level, the known limitation recorded further down this page.
+- **An off-peak scheduler with a priority queue.** holdfast half has this: a daily `run_window` and a
+  per-core load cap, and no priority queue - work is taken in the order the scan finds it.
 - **Automatic hardware selection with CPU fallback** across NVIDIA, Intel, AMD and Apple. holdfast will
   not guess: `encoder:` is configured, and a hardware encoder with no usable device stops the run
   rather than quietly falling back to CPU.
 
-**Two more tools work this ground.** Both are described here from their own project pages and from
-nothing else - no ranking, no popularity, no weight class - because no source this project could obtain
-carries one, and an unsourced comparative is the defect this section was rewritten to remove.
+**Two more tools work this ground.** Both are described from their own project pages and nothing else -
+no ranking, no popularity, no weight class, because no source this project could obtain carries one.
 
 [**FileFlows**](https://fileflows.com/) designs, schedules and runs automated file-processing pipelines
 from a single server up to a distributed cluster, offloading tasks to multiple nodes, and transcodes to
@@ -127,8 +124,7 @@ truer than "the only one that checks".
 Four boundaries, and they are boundaries rather than a backlog: **no distributed or remote
 processing**; **not a media server and not a library manager**; **interlaced sources are skipped, not
 converted**; and **HDR10 static metadata is preserved while Dolby Vision and HDR10+ dynamic metadata
-are detect-and-skipped**. Each one is stated in full here, in this section, so a reader deciding
-whether this tool fits their library never has to assemble it from four places.
+are detect-and-skipped**. Each is stated in full below, in this one section.
 
 Codec-only, same-content re-encoding (no resolution downscaling): **interlaced**, exotic-chroma and
 `multi-video-stream` sources are **skipped, not converted**; HDR10 **static** metadata is preserved
