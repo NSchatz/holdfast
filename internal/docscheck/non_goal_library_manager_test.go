@@ -62,7 +62,7 @@ func nonGoalBlock(omit ...string) string {
 // satisfiedExceptNonGoal is every other rule's statement, so a test about this rule reports
 // this rule and nothing else.
 func satisfiedExceptNonGoal() string {
-	return residualWindowBlock() + postureBlock() + metadataBlock() + agreeingBlocks()
+	return residualWindowBlock() + postureBlock() + metadataBlock() + agreeingBlocks() + differentiatorBlock()
 }
 
 // TestCheck_AC1_NonGoalStatementWithEveryClausePasses is AC-1 over a MINIMAL corpus: a
@@ -175,7 +175,7 @@ func TestCheck_AC5_NonGoalAnchorFollowedByAHeadingIsReportedMissing(t *testing.T
 // any of it exists, which is the failure a marker somebody left behind actually looks like.
 func TestCheck_AC5_NonGoalAnchorFollowedByAnotherAnchorIsReportedMissing(t *testing.T) {
 	dir := writeCorpus(t, map[string]string{
-		"docs.md": residualWindowBlock() + postureBlock() + metadataBlock() +
+		"docs.md": residualWindowBlock() + postureBlock() + metadataBlock() + differentiatorBlock() +
 			"\n<a id=\"" + AnchorNonGoalLibraryManager + "\"></a>\n" + agreeingBlocks(),
 	})
 	problems := check(t, dir)
