@@ -908,8 +908,23 @@ func (e *Engine) offered(path string) bool {
 // before Claim but its RecordSkip/ClearSkip is a report-only write that never claims the
 // file, so it cannot let two workers encode one source.
 func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
+	// Both of the questions this door asks about the PATH itself, answered by the one
+	// function the read-only plan pass and the census ask too (DeclinedPath), so a refusal
+	// added there reaches the daemon and every report that predicts it with no second edit.
+	// The order below is unchanged: a path with no file at the other end returns as silently
+	// as it always did (a dangling link is met every pass and must not narrate every pass),
+	// and the character rule is still said out loud below the hold-backs.
+	rule, _, declined := DeclinedPath(f)
+	if declined && rule != RuleUnsupportedCharacters {
+		return nil
+	}
+
+	// The source's PRE-ENCODE size, which the terminal row records and the undo window
+	// measures its retention by. A second stat deliberately: the question above answers
+	// whether this path may be processed at all, and only this caller wants a number about
+	// the file. A file that went away between the two returns here, as it always did.
 	fi, err := os.Stat(f)
-	if err != nil || fi.IsDir() {
+	if err != nil {
 		return nil
 	}
 
@@ -927,11 +942,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		return nil
 	}
 
-	// A path this pipeline declines OUTRIGHT: skip it, unrecorded, before anything is
-	// claimed or probed. The question is asked through Declined, which is the one function
-	// every door asks, so the read-only plan pass refuses the same paths this does rather
-	// than publishing one as a file a run would transcode.
-	if _, _, yes := Declined(f); yes {
+	// The half of that answer this daemon says out loud, in the place it has always said it.
+	if declined {
 		e.Log.Info("skip (path contains a tab/newline — unsupported)", "file", f)
 		return nil
 	}

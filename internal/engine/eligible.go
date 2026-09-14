@@ -98,6 +98,29 @@ func Declined(p string) (rule, detail string, yes bool) {
 	return "", "", false
 }
 
+// DeclinedPath is BOTH questions ProcessFile asks of an ENUMERATED path before it claims
+// anything: Declined above, and whether there is a file at the other end that a run would
+// act on at all. It reads the filesystem and writes nothing.
+//
+// The stat FOLLOWS the link, exactly as ProcessFile's own does, so a dangling symbolic link
+// and a directory by either spelling both answer yes here - and each is a path the daemon
+// returns from having claimed nothing, probed nothing and recorded nothing. A report about
+// what a run would do must not count one, which is why the read-only plan pass and the
+// census ask this rather than a rule of their own.
+func DeclinedPath(p string) (rule, detail string, yes bool) {
+	if rule, detail, yes := Declined(p); yes {
+		return rule, detail, true
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		return RuleNotARegularFile, fmt.Sprintf("%s is not a file this run can act on: %v", p, err), true
+	}
+	if fi.IsDir() {
+		return RuleNotARegularFile, fmt.Sprintf("%s is a directory, not a regular file", p), true
+	}
+	return "", "", false
+}
+
 // Ineligible is the ONE rule a path broke, and what was seen. Rule is the token; Detail
 // is for the human reading the report, and carries the resolved path whenever resolution
 // moved it, because "the path you sent is not the path that was judged" is the single

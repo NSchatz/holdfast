@@ -310,10 +310,10 @@ var mechanismDetail = map[string]string{
 	mechRetained: "a replacement this tool retained because its job did not complete cleanly",
 	mechUndoName: "an original the undo window is holding",
 	mechRecord:   "a path a parked job's record, or a recorded replacement, holds back",
-	mechIrregular: "a device, socket or FIFO, or a symbolic link onto a directory: not an entry a " +
-		"scan's enumeration looks at, so it is in neither figure. A symbolic link to a FILE is not " +
-		"here - a scan enumerates one by name, so it is counted as a source and then skipped by the " +
-		"symlinked-source guard when a run reaches it",
+	mechIrregular: "a device, socket or FIFO, or a symbolic link onto a directory or onto nothing at " +
+		"all: not an entry a run ever acts on, so it is in neither figure. A symbolic link with a FILE " +
+		"at the other end is not here - a scan enumerates one by name, so it is counted as a source and " +
+		"then skipped by the symlinked-source guard when a run reaches it",
 	mechDeclined: "a path this pipeline refuses outright - one carrying a literal tab or newline. A " +
 		"run claims, probes and records nothing about it, so calling it a source would name a file " +
 		"nothing will ever touch",
@@ -383,17 +383,20 @@ func censusOverWalk(ctx context.Context, cfg *config.Config, res startup.Result)
 				continue // a directory is covered in its own right, or was not descended
 			}
 			size := info.Size()
-			// WHICH ENTRIES A SCAN LOOKS AT, asked exactly as the enumeration asks it: a
-			// regular file, or a symbolic link that does not resolve to a directory. A link
-			// onto a FILE is enumerated by name like any other entry and is then skipped at
-			// the symlinked-source guard, so counting it here as an irregular entry would
-			// make this census and `holdfast plan` report different source sets for the same
-			// library. A device, a socket, a FIFO and a link onto a directory are in neither
-			// figure, and its own size is what a link contributes - never its target's, which
-			// is counted once already for the file at the other end.
-			if !info.Mode().IsRegular() && !(ent.IsLink && !ent.ResolvesToDir) {
-				rc.withhold(mechIrregular, size)
-				continue
+			// WHICH ENTRIES A SCAN LOOKS AT. A regular file, and one irregular kind: a
+			// SYMBOLIC LINK with a file at the other end. A scan enumerates such a link by
+			// name like any other entry and then skips it at the symlinked-source guard, so
+			// counting it here as an irregular entry would make this census and `holdfast
+			// plan` report different source sets for the same library. Whether there is a
+			// file at the other end is engine.DeclinedPath's question, which is the daemon's
+			// own, so a dangling link, a link onto a directory, a device, a socket and a FIFO
+			// are all in neither figure. A link contributes its OWN size, never its target's,
+			// which is counted once already for the file at the other end.
+			if !info.Mode().IsRegular() {
+				if _, _, declined := engine.DeclinedPath(p); !ent.IsLink || declined {
+					rc.withhold(mechIrregular, size)
+					continue
+				}
 			}
 			rc.Found.Files++
 			rc.Found.Bytes += size

@@ -779,6 +779,35 @@ func TestPlan_CoverageEqualsDaemonPass(t *testing.T) {
 			}
 		}
 	})
+
+	// A symbolic link with NOTHING at the other end is the same case from the other side: a
+	// scan enumerates it by name just as it enumerates a live one, and the daemon's door then
+	// finds no file to act on and returns without claiming, probing or recording anything.
+	t.Run("a symbolic link onto nothing", func(t *testing.T) {
+		cfgPath, lib, _ := planLibrary(t, "")
+		dangling := filepath.Join(lib, "dangling.mkv")
+		if err := os.Symlink(filepath.Join(lib, "nowhere.mkv"), dangling); err != nil {
+			t.Fatal(err)
+		}
+
+		_, planned := planEqualsDaemonPass(t, cfgPath)
+		if planned[dangling] {
+			t.Fatalf("plan covers %q, which has no file at the other end and which the daemon pass "+
+				"declines without recording anything", dangling)
+		}
+
+		p := planJSON(t, cfgPath)
+		if p.Total.Covered.Files != int64(len(planSources(lib))) {
+			t.Fatalf("plan covers %d file(s) over a library of %d sources plus one dangling link",
+				p.Total.Covered.Files, len(planSources(lib)))
+		}
+		if p.Declined.Files != 1 || len(p.Declined.Paths) != 1 || p.Declined.Paths[0].Path != dangling {
+			t.Fatalf("the dangling link is not published as declined: %+v", p.Declined)
+		}
+		if got := p.Declined.Paths[0].Rule; got != engine.RuleNotARegularFile {
+			t.Fatalf("the dangling link names rule %q, want %q", got, engine.RuleNotARegularFile)
+		}
+	})
 }
 
 // TestPlan_AgreesWithAnalyzeCoverage is AC-11. The build DOES contain `analyze`, so this
@@ -863,6 +892,29 @@ func TestPlan_AgreesWithAnalyzeCoverage(t *testing.T) {
 		}
 		if declined != 1 {
 			t.Fatalf("analyze withheld %d path(s) under %q, want 1", declined, mechDeclined)
+		}
+	})
+
+	// A symbolic link onto NOTHING is in neither source set: a scan enumerates it by name,
+	// and the daemon's door then finds no file to act on.
+	t.Run("a symbolic link onto nothing", func(t *testing.T) {
+		cfgPath, lib, _ := planLibrary(t, "")
+		if err := os.Symlink(filepath.Join(lib, "nowhere.mkv"), filepath.Join(lib, "dangling.mkv")); err != nil {
+			t.Fatal(err)
+		}
+		c, p := planAndAnalyzeAgree(t, cfgPath)
+		if p.Total.Covered.Files != int64(len(planSources(lib))) {
+			t.Fatalf("both agree on %d file(s), which is not the library's %d sources - the extra is "+
+				"a link with nothing at the other end", p.Total.Covered.Files, len(planSources(lib)))
+		}
+		var irregular int64
+		for _, m := range c.Total.Withheld {
+			if m.Name == mechIrregular {
+				irregular = m.Files
+			}
+		}
+		if irregular != 1 {
+			t.Fatalf("analyze withheld %d entry(ies) under %q, want the dangling link", irregular, mechIrregular)
 		}
 	})
 }

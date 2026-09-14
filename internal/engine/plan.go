@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"io/fs"
 	"os"
 
 	"github.com/NSchatz/holdfast/internal/probe"
@@ -89,9 +88,8 @@ type PlanPass struct {
 	// Files is every file the enumeration covered and the pipeline did not decline, in the
 	// enumeration's own order. It is the set a daemon pass covers, file for file.
 	Files []PlanFile
-	// Declined is every enumerated path the pipeline refuses outright. They are reported
-	// rather than dropped: a path missing from a report about a library reads as a path
-	// that is not there.
+	// Declined is every enumerated path the pipeline refuses outright, reported rather than
+	// dropped: a path missing from a report about a library reads as one that is not there.
 	Declined []PlanDeclined
 	// Probes is how many probe snapshots the pass took. It is reported rather than assumed
 	// because "one invocation is one pass over the library" is a property an operator is
@@ -116,9 +114,10 @@ type PlanOptions struct {
 // daemon does before its first scan: that walk is the one traversal this costs, and the
 // enumeration reads its listings rather than making a second set of its own.
 //
-// A file that cannot be stat'd is reported as unreadable WITH ITS REASON and the pass
-// continues, because a walk that stopped at the first permission denial would report a
-// confident total for a library it had only partly seen.
+// A path the pipeline declines outright is DECLINED with its reason, and a covered file it
+// cannot read or probe is UNACCOUNTED FOR with its reason. Both are published and neither is
+// in any figure: a walk that stopped at the first permission denial, or that quietly dropped
+// what it met, would report a confident total for a library it had only partly seen.
 func (e *Engine) Plan(ctx context.Context, opt PlanOptions) *PlanPass {
 	snapshot := opt.Snapshot
 	if snapshot == nil {
@@ -135,9 +134,9 @@ func (e *Engine) Plan(ctx context.Context, opt PlanOptions) *PlanPass {
 		if ctx.Err() != nil {
 			return pass
 		}
-		// Asked where ProcessFile asks it - before the hardlink guard and before anything is
-		// probed - so no guard of this pass can answer for a path a run never reaches.
-		if rule, detail, yes := Declined(f); yes {
+		// Asked where ProcessFile asks it, before the hardlink guard and before anything is
+		// probed, so no guard of this pass answers for a path a run never reaches.
+		if rule, detail, yes := DeclinedPath(f); yes {
 			pass.Declined = append(pass.Declined, PlanDeclined{Path: f, Rule: rule, Detail: detail})
 			continue
 		}
@@ -162,23 +161,16 @@ func (e *Engine) planFile(ctx context.Context, f string, ledger LedgerReader,
 		EncodeProfile: ts.Profile,
 	}
 
-	// The size the eligible-bytes figure is built from, read here and only here, and read of
-	// the ENTRY rather than of whatever it points at: a symbolic link carrying a source name
-	// is a file a scan enumerates and then skips, and its bytes are the link's own. Counting
-	// its target's bytes would publish the same bytes twice in the one report an operator
-	// plans disk by. A stat that fails is a file this plan cannot account for: it is reported
-	// with its reason rather than counted as zero bytes.
+	// The size the eligible-bytes figure is built from, read of the ENTRY rather than of
+	// whatever it points at: a symbolic link carrying a source name is enumerated and then
+	// skipped, and its bytes are the link's own - counting its target's would publish the
+	// same bytes twice in the one report an operator plans disk by. DeclinedPath established
+	// that a file IS here, so a failure now happened since, and is reported rather than
+	// counted as zero.
 	fi, err := os.Lstat(f)
 	if err != nil {
 		pf.Unreadable = true
 		pf.Detail = errText(err)
-		return pf
-	}
-	if fi.IsDir() || (fi.Mode()&fs.ModeSymlink != 0 && isDirectory(f)) {
-		// The enumeration already declines a directory under a source name by either
-		// spelling; anything that became one since the walk is not a file this plan counts.
-		pf.Unreadable = true
-		pf.Detail = "a directory, not a regular file"
 		return pf
 	}
 	pf.Bytes = fi.Size()
