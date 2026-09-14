@@ -229,8 +229,9 @@ function behind(el, doc, win) {
 // contrastSubjects is every graphical element on this page a reader has to tell apart
 // from what is drawn behind or beside it in order to read the figure it presents: the
 // bars of a distribution, the scale and ticks of a spread, a status dot, the edge of a
-// badge, of a count chip and of a figure card. Each is reported with the colour it is
-// PAINTED in, the colour it is painted ON, and the ratio between them.
+// badge, of the band the counts sit in, of the band the byte figures sit in, and of a
+// figure card. Each is reported with the colour it is PAINTED in, the colour it is
+// painted ON, and the ratio between them.
 //
 // Table-row rules and section separators are deliberately not here. They divide the page
 // but carry no figure, and WCAG 2.2's non-text floor is scoped to what must be perceived
@@ -254,7 +255,8 @@ function contrastSubjects(doc, win) {
   addAll(".agg .fig .tick", "stroke", "spread tick");
   addAll("td.st .dot", "backgroundColor", "status dot");
   addAll(".badges .badge", "borderTopColor", "badge edge");
-  addAll("#chips .chip", "borderTopColor", "count chip edge");
+  addAll("#chips", "borderTopColor", "count band edge");
+  addAll(".stats", "borderTopColor", "byte figures band edge");
   addAll("#aggregates .agg", "borderTopColor", "figure card edge");
   return out;
 }

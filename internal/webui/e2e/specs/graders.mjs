@@ -371,6 +371,103 @@ export function zeroLike(v) {
   return t.startsWith("0.0") || t.startsWith("0%") || t.startsWith("0 ");
 }
 
+// --- interface-craft C3 and C5 ------------------------------------------------------------
+//
+// Both are decided from what the ENGINE painted and from nothing else. That is the whole
+// point of them: a rule appended to the page's stylesheet can flatten a figure onto its
+// label, or leave a bordered card showing one of its facts, without touching a single
+// declaration the source carries - and a grader that matched HTML or CSS text would report
+// the page as it was written rather than as it is drawn.
+//
+// Neither may pass by measuring nothing. A subject query that matches nothing is the
+// cheapest wrong outcome a grader like this has, so finding no figure and finding no
+// bordered container are both FAILURES here, named as such.
+
+// CHANNELS is clause C3's three, in the order a failure names them.
+const CHANNELS = [
+  { name: "size", of: (x) => x.size, show: (v) => `${v}px` },
+  { name: "weight", of: (x) => x.weight, show: (v) => String(v) },
+  { name: "colour", of: (x) => x.color, show: (v) => String(v) },
+];
+
+// Clause C3's first half: within a region, a figure differs from the text that names it in
+// at least two of rendered size, rendered weight and rendered colour. A region that renders
+// no figure at all is UNMEASURED - it is reported by the case that ran this, and no problem
+// is raised against it - because a region with nothing to show is not a region with a flat
+// hierarchy.
+export function gradeFigureStandsApartFromItsLabel(s) {
+  const h = s.hierarchy;
+  if (!h || !h.regions || h.regions.length === 0) {
+    return ["interface-craft C3 (AC-6): the page rendered no region at all, so the hierarchy clause was decided over nothing"];
+  }
+  const out = [];
+  let measured = 0;
+  for (const region of h.regions) {
+    for (const f of region.figures) {
+      if (!f.label) {
+        out.push(`interface-craft C3 (AC-1): ${region.what} paints the figure ${f.what} ("${f.text}") and nothing on the screen names it, so there is no label for it to stand apart from`);
+        continue;
+      }
+      measured++;
+      const differ = CHANNELS.filter((c) => c.of(f) !== c.of(f.label));
+      if (differ.length >= 2) continue;
+      const said = CHANNELS.map((c) => `${c.name} ${c.show(c.of(f))} against ${c.show(c.of(f.label))}`).join(", ");
+      out.push(`interface-craft C3 (AC-1): in ${region.what} the figure ${f.what} ("${f.text}") differs from its label ${f.label.what} ("${f.label.text}", ${f.label.how}) in ${differ.length} of the three channels (${said}); the clause asks for two`);
+    }
+  }
+  if (measured === 0 && out.length === 0) {
+    out.push(`interface-craft C3 (AC-6): no region on this page carried a primary figure, so this grader measured nothing and could not have failed. Regions seen: ${h.regions.map((r) => `${r.what} (${r.runs} runs of text)`).join(", ")}`);
+  }
+  return out;
+}
+
+// Clause C3's second half: the text a reader can SEE is painted at three or more distinct
+// sizes. Measured from what the engine computed for each run, so a scale declared in the
+// token file and never applied does not count towards it.
+export function gradeTypeScaleCarriesThreeSizes(s) {
+  const sizes = (s.hierarchy && s.hierarchy.sizes) || [];
+  if (sizes.length >= 3) return [];
+  return [`interface-craft C3 (AC-2): the page paints its visible text at ${sizes.length} distinct size(s) (${sizes.join(", ")}px); the clause asks for at least three`];
+}
+
+// craftContainers is clause C5's subject, decided from the reading rather than chosen by
+// name. A container is an element the engine paints ENCLOSING chrome on - a border on all
+// four sides, or a shadow - that holds something:
+//
+//   four sides, not one, because a single painted edge is a RULE between two things and
+//   not a box drawn around one. The separator under a heading and the line under a table
+//   row are exactly that, and C4 is the clause that governs them;
+//   a LANDMARK is a region of the page, and how one region is separated from the next is
+//   C4's subject too, not C5's;
+//   a CONTROL is operated rather than read, and its edge is the affordance that says so,
+//   which is how it earns it;
+//   a DRAWING carries no fact - this page's own rule is that every value a mark encodes is
+//   also rendered as text in the same container;
+//   and an element with no element child of its own is a leaf, not a container. A badge or
+//   a status pill holding one word is not a box around a group.
+export function craftContainers(chromedElements) {
+  return (chromedElements || []).filter((c) =>
+    (c.sides.length === 4 || c.shadow !== "") &&
+    !c.landmark && !c.control && !c.graphic && c.elementChildren > 0);
+}
+
+// Clause C5: every bordered or raised container holds at least three facts - three things a
+// reader can read off it, rendered as visible text inside it.
+export function gradeContainerEarnsItsChrome(s) {
+  const subjects = craftContainers(s.chromed);
+  if (subjects.length === 0) {
+    const seen = (s.chromed || []).length;
+    return [`interface-craft C5 (AC-6): the page rendered no bordered or raised container at all, so this grader measured nothing and could not have failed. ${seen} element(s) painted a border or a shadow, and every one of them was a landmark, a control, a drawing or a leaf`];
+  }
+  const out = [];
+  for (const c of subjects) {
+    if (c.facts.length >= 3) continue;
+    const chrome = c.sides.length === 4 ? "a border on all four sides" : `a shadow (${c.shadow})`;
+    out.push(`interface-craft C5 (AC-3): ${c.what} draws ${chrome} and holds ${c.facts.length} fact(s) [${c.facts.join(" | ")}]; a container that does not carry three facts has not earned its chrome`);
+  }
+  return out;
+}
+
 // Every predicate this project decides on a LIVE page, by name. The mutation spec drives
 // each one against a document built to defeat it.
 export function convGraders() {
@@ -385,5 +482,8 @@ export function convGraders() {
     { name: "only a raised surface computes a shadow", probe: gradeDepthScale },
     { name: "every painted value came from the token file", probe: gradePaintedValuesComeFromTokens },
     { name: "the page computes motion at all", probe: gradeMotionExists },
+    { name: "a figure stands apart from the text that names it", probe: gradeFigureStandsApartFromItsLabel },
+    { name: "the painted type scale carries three sizes", probe: gradeTypeScaleCarriesThreeSizes },
+    { name: "a bordered or raised container earns its chrome", probe: gradeContainerEarnsItsChrome },
   ];
 }

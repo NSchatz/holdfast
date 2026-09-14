@@ -96,24 +96,34 @@
      together. They are never summed and never nested: the reclaimed figure is space the
      ledger says came back, and the held figure is space that has NOT come back yet, so a
      page showing only the first tells an operator a disk is free when it is not. */
-  .stats { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin: 0 0 var(--sp-4); }
-  .stat { display: flex; flex-direction: column; gap: var(--sp-1); margin: 0;
+  /* The BAND is the bordered container and the two figures are entries in it, which is
+     what clause C5 asks of repeated items: a box drawn around one labelled figure is a
+     card carrying a single fact, and nine or two of them are the clutter the clause
+     refuses. One boundary for the pair, drawn once in --border, and the figures inside it
+     are told apart by the space between them and by the flag the held one carries. */
+  .stats { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin: 0 0 var(--sp-4);
     background: var(--panel); border: var(--bw-hair) solid var(--border);
-    border-radius: var(--radius-md); padding: var(--sp-3) var(--sp-4);
+    border-radius: var(--radius-md); padding: var(--sp-3) var(--sp-4); }
+  .stat { display: flex; flex-direction: column; gap: var(--sp-1); margin: 0;
     min-width: var(--w-stat-min); flex: 1 1 var(--w-stat-min); }
   .stat b { font-size: var(--fs-4xl); line-height: var(--lh-tight); font-weight: 700; }
   /* The held figure is not a gain, so it is not painted as one. It takes the page's
      neutral foreground and its own leading rule; only the reclaimed figure is --ok. */
   .stat.held b { color: var(--fg); }
-  /* The flag is a THICKER left border, and a thicker border eats the padding behind it -
-     which started this card's text three pixels right of its neighbour's. The padding
-     gives back exactly what the border took, so the two cards begin on one line. */
-  .stat.held { border-left: var(--bw-flag) solid var(--warn);
-    padding-left: calc(var(--sp-4) - var(--bw-flag) + var(--bw-hair)); }
+  /* The flag is a thicker rule down the left of the held figure, and the text is inset off
+     it by the same step the band's own padding uses, so the flag reads as a mark against
+     that figure rather than as an edge its digits are resting on. */
+  .stat.held { border-left: var(--bw-flag) solid var(--warn); padding-left: var(--sp-3); }
   .stat .stat-k { font-size: var(--fs-xs); color: var(--muted); }
 
+  /* The counts are entries in one bordered band for the same reason the two byte figures
+     are: a chip carries a count and the state word naming it, and a box drawn round each
+     of nine of those is nine containers holding one fact apiece. The band is the
+     container; the chips are rows in it. */
   .chips { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-4);
-    align-items: stretch; }
+    align-items: stretch;
+    background: var(--panel); border: var(--bw-hair) solid var(--border);
+    border-radius: var(--radius-md); padding: var(--sp-3); }
   /* The counts are two different questions - what is in hand, and what is finished - and
      the page drew them as one undifferentiated row of nine. The boundary is a rule before
      the first terminal chip, so the grouping costs no wrapper element and #chips keeps the
@@ -122,13 +132,11 @@
      The arithmetic is the whole of it, and it was wrong twice. A separator sits BETWEEN two
      things, so the space either side of it has to be the same: the row's own gap (--sp-2)
      plus this margin is the whole space, and the rule is drawn at half of it. --sp-4 makes
-     that 8 + 16 = 24, and 12 either side. It used to be --sp-5, which made the space 28 and
-     put the rule 16 from one chip and 12 from the other.
+     that 8 + 16 = 24, and 12 either side.
 
      And it has to be as TALL as the things it divides. An absolutely positioned box is laid
-     out against its ancestor's PADDING box, so `top: 0; bottom: 0` stopped inside the
-     chip's own border and drew a rule two pixels short of the chips either side of it -
-     visibly floating, once you have seen it. The inset is negative by exactly that border. */
+     out against its ancestor's PADDING box, which for a chip that draws no border of its
+     own is its border box, so the rule spans the chip exactly. */
   .chip.inflight + .chip.terminal { margin-left: var(--sp-4); }
   /* The row wrapped between the two groups, so there is nothing to divide and the rule is
      not drawn: it would otherwise hang in the margin beside the first chip of the new line.
@@ -140,11 +148,10 @@
   .chip.inflight + .chip.terminal.linestart::before { content: none; }
   .chip.inflight + .chip.terminal::before {
     content: ""; position: absolute; left: calc(-1 * var(--sp-3));
-    top: calc(-1 * var(--bw-hair)); bottom: calc(-1 * var(--bw-hair));
+    top: 0; bottom: 0;
     border-left: var(--bw-hair) solid var(--border);
   }
-  .chip { position: relative; background: var(--panel);
-    border: var(--bw-hair) solid var(--border);
+  .chip { position: relative;
     border-radius: var(--radius-md); padding: var(--sp-2) var(--sp-3);
     min-width: var(--w-chip-min); }
   .chip .n { font-size: var(--fs-3xl); font-weight: 700; }
@@ -332,7 +339,12 @@
   .buckets { display: grid;
     grid-template-columns: max-content minmax(var(--w-track-min), 1fr) max-content;
     align-items: center; gap: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); }
-  .buckets .bk { overflow-wrap: anywhere; }
+  /* The bucket's key NAMES its count, so it is painted the way every other label on this
+     page is: the muted foreground, against a count in the page's own. Weight alone put the
+     two a single channel apart, which clause C3 refuses - a figure a reader picks out of
+     its label by one property is a figure that disappears the moment that property is
+     needed for something else. */
+  .buckets .bk { overflow-wrap: anywhere; color: var(--muted); }
   .buckets .bc { font-weight: 600; }
   /* The spread's text equivalent: minimum, mean and maximum, in the left-to-right
      order the ticks above them are drawn. Lower case deliberately - what a reader

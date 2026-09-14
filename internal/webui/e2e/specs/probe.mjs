@@ -527,6 +527,199 @@ function connText() {
   return c ? visText(c) : "";
 }
 
+// --- interface-craft C3 and C5: what the page PAINTED, per region and per container ------
+//
+// Everything below reports readings and nothing below decides: the two channel counts and
+// the three-fact floor are in graders.mjs, so both can be run against a document built to
+// defeat them. Each reading is the engine's own - the computed size, weight and colour
+// AFTER the whole cascade, the box the layout actually produced, and the text innerText
+// says a reader can see - which is why a later rule that changes only what is painted is
+// caught here while every declaration in the source stays exactly as it was written.
+
+// onScreen is isRendered plus the one thing it does not cover: a box the engine CLIPS out
+// of sight. The screen-reader summary is a 1px box under an inset clip path - present
+// in the document, announced by assistive technology, and never painted for a reader - so
+// counting its text would put a size in the page's type scale nobody sees and a fact in a
+// container nobody can read. The test is the engine's own geometry, not a class name.
+function onScreen(el) {
+  if (!isRendered(el)) return false;
+  for (let n = el; n; n = n.parentElement) {
+    if (getComputedStyle(n).clipPath === "none") continue;
+    const r = n.getBoundingClientRect();
+    if (r.width <= 2 || r.height <= 2) return false;
+  }
+  return true;
+}
+
+// FIGURE_TOKEN is one token of a value: a number, optionally carrying a unit. A run of
+// text is read as a FIGURE when every token in it is one of these, which is what keeps a
+// path, a codec string or a sentence with a version number in it out of the set while
+// "12.3 MB", "2m 17s", "99.3" and "0" are all in.
+const FIGURE_TOKEN = /^[+-]?\d[\d,]*(?:\.\d+)?(?:%|[A-Za-z]{1,3})?$/;
+
+function isFigureText(t) {
+  const parts = String(t).split(/[\s→>]+/).filter(function (p) { return p !== ""; });
+  if (parts.length === 0) return false;
+  return parts.every(function (p) { return FIGURE_TOKEN.test(p); });
+}
+
+// channelsOf is one subject's three channels, read off the engine after the cascade.
+function channelsOf(cs) {
+  return { size: parseFloat(cs.fontSize) || 0,
+    weight: parseInt(cs.fontWeight, 10) || 400, color: cs.color };
+}
+
+function runsOnScreen(root) {
+  const out = [];
+  for (const el of root.querySelectorAll("*")) {
+    const t = ownText(el);
+    if (t === "") continue;
+    if (!onScreen(el)) continue;
+    const ch = channelsOf(getComputedStyle(el));
+    out.push({ el: el, what: where(el), text: t, figure: isFigureText(t),
+      size: ch.size, weight: ch.weight, color: ch.color,
+      rect: el.getBoundingClientRect() });
+  }
+  return out;
+}
+
+// columnLabelOf answers a data cell's label the way a TABLE means it: the column header.
+// At full width that header is a rendered <th>; below the width where the row stacks into
+// a card the header row is gone and the engine draws the column's name as the cell's own
+// generated content, so the reading follows it there rather than losing the label the
+// moment the layout changes. Both answers come from the engine - one a laid-out element,
+// the other a computed pseudo-element - and neither is a copy of the column's name kept
+// here.
+function columnLabelOf(el) {
+  const cell = el.closest("td");
+  if (!cell) return null;
+  const table = cell.closest("table");
+  const head = table && table.tHead && table.tHead.rows[0];
+  const th = head ? head.cells[cell.cellIndex] : null;
+  if (th && onScreen(th)) {
+    const ch = channelsOf(getComputedStyle(th));
+    return { what: where(th), text: visText(th), how: "column header",
+      size: ch.size, weight: ch.weight, color: ch.color };
+  }
+  const before = getComputedStyle(cell, "::before");
+  if (before && before.content && before.content !== "none" && before.content !== "normal") {
+    const ch = channelsOf(before);
+    return { what: where(cell) + "::before", how: "the column name drawn on the stacked cell",
+      text: before.content.replace(/^"|"$/g, ""),
+      size: ch.size, weight: ch.weight, color: ch.color };
+  }
+  return null;
+}
+
+function depthOf(el) {
+  let d = 0;
+  for (let n = el; n; n = n.parentElement) d++;
+  return d;
+}
+
+function commonAncestor(a, b) {
+  for (let n = a; n; n = n.parentElement) if (n.contains(b)) return n;
+  return null;
+}
+
+// namingRunFor is the label of a figure that is not in a table: the run of text the page
+// puts NEAREST it, where nearest is decided in the order a reader resolves it - the text
+// sharing the figure's own smallest box first (deepest common ancestor), then the text on
+// the figure's own rendered line, then the text closest to it in the document. Nothing
+// here consults a class name, so a figure that moves keeps whatever names it.
+function namingRunFor(fig, runs, region, order) {
+  let best = null, bestKey = null;
+  for (const c of runs) {
+    if (c.figure || c.el === fig.el) continue;
+    if (!region.contains(c.el)) continue;
+    const a = commonAncestor(fig.el, c.el);
+    if (!a) continue;
+    const sameLine = !(c.rect.bottom <= fig.rect.top + 0.5 || c.rect.top >= fig.rect.bottom - 0.5);
+    const key = [depthOf(a), sameLine ? 1 : 0, -Math.abs(order.get(c.el) - order.get(fig.el))];
+    if (bestKey === null || key[0] > bestKey[0] ||
+        (key[0] === bestKey[0] && (key[1] > bestKey[1] || (key[1] === bestKey[1] && key[2] > bestKey[2])))) {
+      best = c; bestKey = key;
+    }
+  }
+  if (!best) return null;
+  return { what: best.what, text: best.text, how: "the nearest text naming it",
+    size: best.size, weight: best.weight, color: best.color };
+}
+
+// hierarchy is clause C3's reading: every region the page renders, and within each one
+// every figure it paints beside the text that names that figure, both sides carrying the
+// three channels the clause counts, plus the whole page's painted type scale.
+function hierarchy() {
+  const runs = runsOnScreen(document.body);
+  const all = Array.prototype.slice.call(document.body.querySelectorAll("*"));
+  const order = new Map();
+  for (let i = 0; i < all.length; i++) order.set(all[i], i);
+
+  const sizes = [];
+  for (const r of runs) if (sizes.indexOf(r.size) < 0) sizes.push(r.size);
+
+  const regions = [];
+  for (const region of document.querySelectorAll("main section")) {
+    const heading = region.querySelector("h1, h2, h3, h4, h5, h6");
+    const figures = [];
+    for (const r of runs) {
+      if (!r.figure || !region.contains(r.el)) continue;
+      const label = columnLabelOf(r.el) || namingRunFor(r, runs, region, order);
+      figures.push({ what: r.what, text: r.text.slice(0, 60),
+        size: r.size, weight: r.weight, color: r.color, label: label });
+    }
+    regions.push({ what: where(region), shown: onScreen(region),
+      heading: heading ? visText(heading) : "",
+      runs: runs.filter(function (r) { return region.contains(r.el); }).length,
+      figures: figures });
+  }
+  return { regions: regions, sizes: sizes.sort(function (a, b) { return a - b; }) };
+}
+
+// chromed is clause C5's reading: every element the engine paints CHROME on, with the
+// facts it holds and with the four properties the grader decides a container by. Nothing
+// is dropped here - a landmark, a control and a drawing are all reported and marked, so
+// the exemption is made where it can be read and argued with rather than hidden inside
+// the measurement.
+const CRAFT_LANDMARK = "header, footer, main, nav, aside, section, [role=banner], " +
+  "[role=contentinfo], [role=main], [role=navigation], [role=region], [role=complementary]";
+const CRAFT_CONTROL = "a[href], button, input, select, textarea, [role=button], [role=link], [tabindex]";
+const CRAFT_GRAPHIC = "svg, img, canvas, video, iframe, object, picture";
+
+function paintedSides(cs) {
+  const out = [];
+  for (const side of ["Top", "Right", "Bottom", "Left"]) {
+    const style = cs["border" + side + "Style"];
+    if (style === "none" || style === "hidden") continue;
+    if ((parseFloat(cs["border" + side + "Width"]) || 0) <= 0) continue;
+    const c = parseColor(cs["border" + side + "Color"]);
+    if (!c || c.a <= 0.01) continue;
+    out.push(side.toLowerCase());
+  }
+  return out;
+}
+
+function chromed() {
+  const out = [];
+  for (const el of document.querySelectorAll("body, body *")) {
+    if (!onScreen(el)) continue;
+    const cs = getComputedStyle(el);
+    const sides = paintedSides(cs);
+    const shadow = cs.boxShadow && cs.boxShadow !== "none" ? cs.boxShadow : "";
+    if (sides.length === 0 && shadow === "") continue;
+    const facts = [];
+    for (const r of runsOnScreen(el)) facts.push(r.text.slice(0, 40));
+    const own = ownText(el);
+    if (own !== "") facts.unshift(own.slice(0, 40));
+    let children = 0;
+    for (const kid of el.children) if (onScreen(kid)) children++;
+    out.push({ what: where(el), sides: sides, shadow: shadow,
+      landmark: el.matches(CRAFT_LANDMARK), control: el.matches(CRAFT_CONTROL),
+      graphic: el.matches(CRAFT_GRAPHIC), elementChildren: children, facts: facts });
+  }
+  return out;
+}
+
 function rendered() {
   const sr = document.getElementById("sr-status");
   return !!sr && sr.textContent.trim() !== "";
@@ -538,6 +731,7 @@ return {
   mainParagraphs: mainParagraphs, doclinks: doclinks, layout: layout,
   fonts: fonts, shadows: shadows, motion: motion, painted: painted,
   figures: figures, elapsedValues: elapsedValues, controls: controls,
+  hierarchy: hierarchy, chromed: chromed,
   connText: connText, rendered: rendered,
   bodyText: function () { return document.body.innerText; },
   bodyTextWithoutTheLiveClock: bodyTextWithoutTheLiveClock,

@@ -71,7 +71,7 @@ const WORKERS = Number(process.env.HOLDFAST_E2E_WORKERS || 0) ||
 
 // The specs that set up their own theme, viewport and preference. They run once, under the
 // `engine` project, and are ignored by the per-theme ones.
-const PAGE_DRIVEN = /(conventions|a11y|states|motion|policy|mutations|inert|docs|alignment)\.spec\.mjs$/;
+const PAGE_DRIVEN = /(conventions|a11y|states|motion|policy|mutations|inert|docs|alignment|craft)\.spec\.mjs$/;
 
 export default defineConfig({
   testDir: "./specs",
@@ -105,7 +105,7 @@ export default defineConfig({
   projects: [
     {
       name: "engine",
-      testMatch: /(conventions|a11y|states|motion|policy|mutations|inert|docs|alignment)\.spec\.mjs$/,
+      testMatch: PAGE_DRIVEN,
       use: { ...devices["Desktop Chrome"] },
     },
     { name: "dark-wide",   testIgnore: PAGE_DRIVEN, use: { ...devices["Desktop Chrome"], colorScheme: "dark",  viewport: { width: 1440, height: 1000 } } },

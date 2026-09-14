@@ -113,6 +113,8 @@ export async function collect(page) {
     shadows: __hf.shadows(),
     motion: __hf.motion(),
     painted: __hf.painted(),
+    hierarchy: __hf.hierarchy(),
+    chromed: __hf.chromed(),
     figures: __hf.figures(),
     controls: __hf.controls(),
     stable: __hf.bodyTextWithoutTheLiveClock(),
