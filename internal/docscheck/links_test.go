@@ -18,7 +18,7 @@ import (
 // satisfied is a corpus that passes every anchor rule, so a test about a link reports the
 // link and nothing else.
 func satisfied() string {
-	return residualWindowBlock() + postureBlock() + metadataBlock() + agreeingBlocks()
+	return satisfiedExceptNonGoal() + nonGoalBlock()
 }
 
 // checkRepo runs the WHOLE gate over a fixture root, which is what `make check` runs.

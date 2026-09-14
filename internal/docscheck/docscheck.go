@@ -18,11 +18,11 @@
 // whether the prose is true, or well written, or complete - no mechanical check can, and
 // one that pretended to would either fail good documentation or pass bad. Precisely:
 //
-//   - Seven fixed anchors must exist: residual-window-local, residual-window-network,
-//     reverse-proxy-posture, swap-metadata, swap-invariant, vmaf-pooling and
-//     null-is-not-zero. They are FIXED here rather than chosen per-run, because a check
-//     free to pick its own anchor is a check that can be made to pass by moving the
-//     goalposts.
+//   - Eight fixed anchors must exist: residual-window-local, residual-window-network,
+//     reverse-proxy-posture, swap-metadata, non-goal-library-manager, swap-invariant,
+//     vmaf-pooling and null-is-not-zero. They are FIXED here rather than chosen per-run,
+//     because a check free to pick its own anchor is a check that can be made to pass by
+//     moving the goalposts.
 //   - A statement is PRESENT only when its anchor exists AND at least one non-blank
 //     line follows it, before the next anchor or heading, that is not itself a heading
 //     or an anchor. An anchor with nothing under it is not a statement.
@@ -37,6 +37,8 @@
 //     what a deploying operator has to read in one place.
 //   - The swap-metadata statement owes four clauses under the same one-statement rule
 //     (see SwapMetadataClauses).
+//   - The library-manager non-goal owes eight clauses under that rule, six of them naming
+//     one excluded capability each (see NonGoalLibraryManagerClauses).
 //   - The three anchors in AgreeingRules owe their clauses at EVERY occurrence rather
 //     than at one: see "Existence, and agreement" below.
 //   - A repository-relative link in CLAUDE.md or README.md must resolve to a path in the
@@ -46,10 +48,10 @@
 //
 // # Existence, and agreement
 //
-// The four older anchors are satisfied by ANY occurrence: the obligation is that the
-// statement exists in what the repository ships, so a second document carrying a shorter
-// restatement is not an error, and the rule reports a problem only when NO occurrence
-// satisfies it.
+// The five anchors outside AgreeingRules are satisfied by ANY occurrence: the obligation is
+// that the statement exists in what the repository ships, so a second document carrying a
+// shorter restatement is not an error, and the rule reports a problem only when NO
+// occurrence satisfies it.
 //
 // That is the right rule for an obligation about the corpus and the wrong one for an
 // argument the documents restate. Under it a second copy may quietly drop a clause while
@@ -70,6 +72,19 @@
 // xattr at all. Each of those decides whether a deployment's permissions and its library
 // ordering survive a pass, none of them is discoverable from the tool's own output, and
 // the last one is the difference between "my ACLs came back" and "my ACLs are gone".
+//
+// # Why the non-goal-library-manager anchor exists
+//
+// holdfast runs inside a library somebody else's tool manages, and the two are easy to
+// confuse: both walk the same directories and both write to them. The difference is what
+// can be PROVED. Every gate here is one judgement made by comparing two video files, and a
+// rename, a move, a folder layout, a metadata fetch and a duplicate deletion are all
+// filesystem mutations that judgement cannot reach - they are right or wrong for reasons no
+// decoder can see. Shipping them would mean shipping mutations with nothing to gate them,
+// in the same binary whose whole claim is that it gates what it does. So the boundary is
+// ratified rather than merely observed, each excluded capability is named on its own so a
+// reader learns which of their problems this tool does not solve, and the statement says
+// what to use for that work instead.
 //
 // # Why the reverse-proxy anchor exists
 //
@@ -237,6 +252,67 @@ var SwapMetadataClauses = []Clause{
 	},
 }
 
+// AnchorNonGoalLibraryManager introduces the library-manager non-goal: the capabilities
+// holdfast excludes permanently, the reason the exclusion is structural rather than a
+// scope preference, and what an operator should reach for instead.
+const AnchorNonGoalLibraryManager = "non-goal-library-manager"
+
+// NonGoalLibraryManagerClauses is the whole of what the library-manager non-goal owes, and
+// it is the longest table here because the obligation is to name each excluded capability
+// SEPARATELY. "holdfast is not a library manager" names the category, and a reader deciding
+// whether this tool solves their problem cannot tell from a category which of their
+// problems it leaves alone - so each capability is its own clause and a statement that
+// drops one is a statement that quietly re-opens it.
+//
+// The last two clauses are the ones that make the boundary durable rather than decorative.
+// The REASON clause carries why the line is where it is: a filesystem mutation of this kind
+// cannot be judged by comparing two video files, which is the only judgement this project
+// makes, so the verify gate everything else rests on has nothing to say about it. A reason
+// survives a future contributor's enthusiasm where a preference does not. The INSTEAD
+// clause carries the other half: a boundary that names what to use for the excluded work
+// reads as a recommendation, and one that does not reads as a refusal.
+var NonGoalLibraryManagerClauses = []Clause{
+	{
+		Token:  "renaming to a scheme",
+		Clause: "no file is renamed to a naming scheme",
+	},
+	{
+		Token:  "moving between folders",
+		Clause: "no file is moved between folders",
+	},
+	{
+		Token:  "folder organisation",
+		Clause: "no folder layout is organised",
+	},
+	{
+		Token:  "metadata fetch",
+		Clause: "no metadata is fetched for anything in the library",
+	},
+	{
+		Token:  "duplicate detection",
+		Clause: "duplicates are not detected",
+	},
+	{
+		Token: "no deletion",
+		Also:  []string{"whose verified replacement passed"},
+		Clause: "nothing is deleted but a source whose verified replacement passed, which is the " +
+			"one deletion the swap already owns",
+	},
+	{
+		Token: "filesystem mutation",
+		Also:  []string{"verify gate", "comparing two video files"},
+		Clause: "every excluded capability is a filesystem mutation whose correctness cannot be " +
+			"established by comparing two video files, so the verify gate this project is built " +
+			"on has nothing to say about it",
+	},
+	{
+		Token: "instead",
+		Also:  []string{"plex"},
+		Clause: "what an operator should reach for instead, named rather than gestured at, so the " +
+			"boundary reads as a recommendation and not as a refusal",
+	},
+}
+
 // The three anchors under the AGREEMENT rule. Each introduces an argument the repository
 // states in one place and points at from everywhere else, and each is checked at EVERY
 // occurrence rather than at the best one - see AgreeingRules.
@@ -340,7 +416,7 @@ type Rule struct {
 }
 
 // AgreeingRules are the anchors held to the AGREEMENT rule, and the list is the whole of
-// what that rule applies to. The four older anchors are deliberately NOT here: they keep
+// what that rule applies to. The other five anchors are deliberately NOT here: they keep
 // the any-occurrence-satisfies rule they were written under, so this file adds a check
 // and removes none. See Check for what the difference buys.
 var AgreeingRules = []Rule{
@@ -474,7 +550,7 @@ func findStatement(path, anchor string) (Statement, error) {
 // the documentation satisfies them. Two rules, and which one an anchor is held to is
 // fixed by AgreeingRules rather than chosen per run.
 //
-// For the four ORIGINAL anchors an anchor appearing in more than one file is not an
+// For the five anchors outside AgreeingRules an anchor appearing in more than one file is not an
 // error: the check wants the statement to EXIST in what the repository ships, so ANY
 // occurrence that satisfies the rule satisfies the criterion, and the problem is only
 // reported when NONE does. The message then names the strongest near-miss, so a failure
@@ -532,6 +608,13 @@ func Check(files []string) ([]string, error) {
 		return nil, err
 	}
 	problems = append(problems, checkClauses(metadata, AnchorSwapMetadata, "swap-metadata", SwapMetadataClauses)...)
+
+	nonGoal, err := statements(files, AnchorNonGoalLibraryManager)
+	if err != nil {
+		return nil, err
+	}
+	problems = append(problems, checkClauses(
+		nonGoal, AnchorNonGoalLibraryManager, "library-manager non-goal", NonGoalLibraryManagerClauses)...)
 
 	for _, r := range AgreeingRules {
 		sts, err := statements(files, r.Anchor)

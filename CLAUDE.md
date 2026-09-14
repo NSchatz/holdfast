@@ -70,7 +70,12 @@ reasoning lives in the document, not in this file.
   shoutrrr notifications.
 - `internal/config` - koanf layered config: defaults, then YAML, then `HOLDFAST_*`.
 - `internal/docscheck` - a mechanical check, on the ordinary test step, that the
-  docs still describe the build.
+  docs still describe the build. Its anchors are FIXED constants in the package,
+  because a check free to pick its own anchor can be made to pass by moving the
+  goalposts, and each owes a named clause table. A statement anywhere in the
+  Markdown corpus satisfies its anchor, so which document carries one is free and
+  adding an OBLIGATION means editing the package: a constant, a clause table, a
+  block in `Check`, and tests.
 - `internal/secret` - the credential wrapper: a reference is parsed, resolved once at
   start, and handed to exactly one consumer. `internal/secretscan` + `scripts/secret-scan`
   - the repository's own secret scanner, behind `scripts/secret-scan.sh`.

@@ -78,7 +78,7 @@ truer than "the only one that checks".
 Codec-only, same-content re-encoding (no resolution downscaling); HDR10 **static** metadata is preserved
 but Dolby Vision / HDR10+ dynamic metadata is **detect-and-skipped**; interlaced, exotic-chroma and
 `multi-video-stream` sources are **skipped, not converted** (embedded artwork is carried through unencoded).
-It transcodes files in a library other tools manage (Plex/Jellyfin/*arr) - not a media server or library manager.
+It transcodes files in a library other tools manage - not a media server.
 
 **Distributed or remote processing is a non-goal by design, not a missing feature.** holdfast is one
 process: no server/node split, no remote workers. The no-loss argument rests on an atomic
@@ -86,6 +86,19 @@ same-filesystem `rename(2)` - it either happened or it did not, so a failure nev
 file where the source was. A remote worker encoding to its own disk and shipping the result back is a
 **copy**, not a rename, and every gate here would have to be re-argued for that primitive. To use more
 of one machine, raise `workers` (default 1, deliberately - see **[docs/docker.md](docs/docker.md)**).
+
+<a id="non-goal-library-manager"></a>
+
+**Library management is a permanent non-goal.** No renaming to a scheme, no moving between folders, no folder
+organisation, no metadata fetch, no duplicate detection, no deletion of anything but a source whose verified
+replacement passed: these are filesystem mutations the verify gate cannot cover, so use the tools that manage the library instead.
+
+Every gate in this tool is one judgement made by comparing two video files, and not one of those operations
+can be judged that way. Whether a file belongs in another folder, or under another name, or is a duplicate
+worth losing, is a question about a library's conventions, and no decoder can answer it. Shipping them would
+mean shipping mutations with nothing to gate them, in the same binary that offers a gate for everything else
+it does. Plex, Jellyfin and the *arr tools are where that work belongs: point holdfast at the library they
+manage, and leave the managing to them.
 
 ## Quick start
 
