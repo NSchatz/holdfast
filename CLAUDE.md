@@ -43,6 +43,18 @@ underscore forms are pre-rename identifiers and must not exist;
 prove it still bites. A line may quote a banned identifier only to prohibit it,
 and only with a `rename-guard-allow` marker.
 
+## Design rationale
+
+One argument, one home, each anchored and each named here by its rule only - the
+reasoning lives in the document, not in this file.
+
+- **No source is mutated until a replacement has passed every gate** -
+  [`docs/design/swap.md`](docs/design/swap.md#swap-invariant).
+- **The quality gate bounds the worst frame, not only the average** -
+  [`docs/design/quality-gate.md`](docs/design/quality-gate.md#vmaf-pooling).
+- **An unreadable figure is reported as null, never as a zero** -
+  [`docs/design/ledger-totals.md`](docs/design/ledger-totals.md#null-is-not-zero).
+
 ## Layout
 
 - `cmd/holdfast` - the CLI: `run` (oneshot engine), `serve` (same engine behind
