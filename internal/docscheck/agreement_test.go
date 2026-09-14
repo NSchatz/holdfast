@@ -76,18 +76,6 @@ func agreeingBlocks() string {
 	return out
 }
 
-// ruleFor is the rule an anchor names.
-func ruleFor(t *testing.T, anchor string) Rule {
-	t.Helper()
-	for _, r := range AgreeingRules {
-		if r.Anchor == anchor {
-			return r
-		}
-	}
-	t.Fatalf("no agreeing rule carries the anchor %q", anchor)
-	return Rule{}
-}
-
 // TestCheck_AC1_EveryNewAnchorIntroducesAStatement is AC-1 over a minimal corpus: the
 // three anchors satisfy the gate when each introduces real text, so every negative below
 // is not passing for the trivial reason that nothing can. AC-1 over the SHIPPED corpus is
