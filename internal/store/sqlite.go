@@ -487,10 +487,13 @@ func surveyedRows(hasReason bool) (string, []any) {
 // resolves the configuration in force, so neither of them can classify a row differently
 // from the claim that will meet it.
 //
-// A row that recorded NOTHING is classified without resolving anything. It cannot be
-// re-derived whatever the configuration says, so asking for a value would be asking a
-// question whose answer cannot change the count - and it is what keeps this reading
-// identical to the one a ledger with no decision_inputs column at all gets.
+// EVERY row's path is resolved, whatever that row recorded. What a record says and where
+// its file is are two questions: a row that recorded nothing is re-opened once by the rule,
+// and a row under no configured library root is never enumerated by a scan, so a row that is
+// both is a re-open that will never happen. Saying so needs the annotation taken for that
+// row too - and that row is not an edge, it is every row of a ledger an earlier build wrote,
+// which is the population these figures are read for. The row's own classification is
+// untouched by the resolution: not recorded stays not recorded.
 func classifyRecordedInputs(rows *sql.Rows, current InputsForPath) (DecisionInputsSurvey, error) {
 	var out DecisionInputsSurvey
 	parsed := map[string]DecisionInputs{}
@@ -505,10 +508,6 @@ func classifyRecordedInputs(rows *sql.Rows, current InputsForPath) (DecisionInpu
 			in = ParseDecisionInputs(recorded.String)
 			parsed[recorded.String] = in
 		}
-		if !in.Recorded() {
-			out.NotRecorded++
-			continue
-		}
 		now, rooted := current(path)
 		if !rooted {
 			out.Unrooted++
@@ -516,9 +515,12 @@ func classifyRecordedInputs(rows *sql.Rows, current InputsForPath) (DecisionInpu
 				out.UnrootedExample = path
 			}
 		}
-		if in.StillMatches(now) {
+		switch {
+		case !in.Recorded():
+			out.NotRecorded++
+		case in.StillMatches(now):
 			out.Matching++
-		} else {
+		default:
 			out.Moved++
 		}
 	}

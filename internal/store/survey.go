@@ -62,21 +62,19 @@ func SurveyLedgerDecisionInputs(ctx context.Context, path string, current Inputs
 	}
 	where, args := surveyedRows(cols["reason"])
 
-	if !cols["decision_inputs"] {
-		// COUNTED, not decoded. There is no column to decode, and that absence is the
-		// answer rather than an obstacle to it: every terminal row in this file was
-		// written by a build that recorded nothing, so every one of them reads as not
-		// recorded and the next scan will offer all of them to the guards again.
-		var n int64
-		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE `+where, args...).Scan(&n); err != nil {
-			return out, fmt.Errorf("store: survey %q: counting terminal rows: %w", path, err)
-		}
-		out.NotRecorded = n
-		return out, nil
+	// The column selected: the real one where the schema has it, a literal NULL where it
+	// does not. That absence is the answer rather than an obstacle to it - every terminal
+	// row in such a file was written by a build that recorded nothing, which is exactly what
+	// a NULL decodes to - and routing both shapes through one classifier is what stops the
+	// older ledger being described by a rule the newer one is not. It is also why the unrooted
+	// annotation reaches the rows that need it most: they are all in this file.
+	column := "decision_inputs"
+	if !cols[column] {
+		column = "NULL"
 	}
 
 	rows, err := db.QueryContext(ctx,
-		`SELECT path, decision_inputs FROM jobs WHERE `+where, args...)
+		`SELECT path, `+column+` FROM jobs WHERE `+where, args...)
 	if err != nil {
 		return out, fmt.Errorf("store: survey %q: %w", path, err)
 	}

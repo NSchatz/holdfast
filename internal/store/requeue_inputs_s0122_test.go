@@ -236,3 +236,37 @@ func TestRequeueInputs_ARowUnderNoConfiguredRootIsCountedAndNamed(t *testing.T) 
 			"and not a fourth bucket), counted, and named by the lexically first of its paths", got, want)
 	}
 }
+
+// TestRequeueInputs_AnUnrootedRowIsNamedWhateverTheRowRecorded grades [AC-7] over the ledger
+// shape that cannot hold a recorded input at all: a schema predating the column. Every row in
+// such a file records nothing, so an annotation taken only for rows that recorded something
+// would be silent across a whole ledger - and that ledger is the one an upgrade meets, which
+// is when the figures are read.
+//
+// The row's classification is unchanged by being named: both rows are still NotRecorded and
+// still owed their single re-open. What the annotation adds is that the scan walks roots, so
+// one of those two re-opens will never happen.
+func TestRequeueInputs_AnUnrootedRowIsNamedWhateverTheRowRecorded(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "jobs.db")
+	seedTwoTerminalRows(t, dbPath)
+	windBackBeforeDecisionInputs(t, dbPath)
+
+	rooted := func(path string) (DecisionInputs, bool) {
+		return sameConfig, path == "/lib/b.mkv"
+	}
+	got, err := SurveyLedgerDecisionInputs(context.Background(), dbPath, rooted)
+	if err != nil {
+		t.Fatalf("SurveyLedgerDecisionInputs over a ledger written before the column existed: %v", err)
+	}
+	if want := (DecisionInputsSurvey{NotRecorded: 2, Unrooted: 1, UnrootedExample: "/lib/a.mkv"}); got != want {
+		t.Errorf("surveyed %+v, want %+v - a row recording nothing is a row whose path still has "+
+			"to be resolved, or the condition is reported for no row of this ledger at all", got, want)
+	}
+	// Anti-vacuity: the same file, resolved by a configuration that roots every path, reports
+	// the condition for none of them. A count that could not go to zero would grade nothing.
+	if got, err := SurveyLedgerDecisionInputs(context.Background(), dbPath, everyPath(sameConfig)); err != nil {
+		t.Fatalf("SurveyLedgerDecisionInputs: %v", err)
+	} else if want := (DecisionInputsSurvey{NotRecorded: 2}); got != want {
+		t.Errorf("surveyed %+v, want %+v - every path is under a configured root here", got, want)
+	}
+}
