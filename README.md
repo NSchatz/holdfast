@@ -188,17 +188,8 @@ truth and the SQLite store stays the source of job state. The API can only **rea
 scan, and pause/resume the feeding of new files** - it never touches a media file, so the data-safety
 invariant is entirely unaffected.
 
-| Method & path | Auth | Purpose |
-|---|---|---|
-| `GET /` | - | the embedded dashboard |
-| `GET /api/summary` | - | counts per status + bytes reclaimed (**lifetime** and this-run) + `bytes_held_by_undo_window` (space a retained original still holds, never folded into either reclaimed figure; `null` = unreadable) + paused/scanning + the **whole-ledger aggregates** (see below) |
-| `GET /api/queue` | - | pending + active jobs, capped, with `queue_total` - see *The total behind a cap* |
-| `GET /api/history?limit=N` | - | recent terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, capped, with `history_total` - see below |
-| `GET /api/events` | - | SSE: a fresh snapshot on every state change |
-| `GET /metrics` | - | Prometheus metrics (when `metrics_enable`, default on) |
-| `POST /api/rescan` | token | start a library scan (409 if paused / scanning / outside the run window) |
-| `POST /api/pause` | token | stop feeding **new** files (in-flight encodes finish safely) |
-| `POST /api/resume` | token | clear the pause flag |
+Every endpoint, what it answers and which of them need the token:
+**[`docs/api-reference.md`](docs/api-reference.md)**.
 
 Fail-safes: the server **binds `127.0.0.1` by default**, and that bind is the whole of what
 protects the read endpoints and the dashboard - they carry no authentication of their own, so
@@ -211,36 +202,6 @@ are **disabled entirely when no token is configured**; pause only ever
 *delays* work - it never interrupts an encode or the atomic swap. **Known limitation:** single-token auth
 (no per-user accounts); the queue/history views are capped at the most recent rows, not the whole ledger -
 but they now say what they were capped *against*, and `holdfast export` gives you the whole thing.
-
-### The total behind a cap
-
-`GET /api/queue` returns at most **500** rows and `GET /api/history` at most **200**. A truncated view that
-says nothing about what it truncated reads as the whole ledger, and a client cannot work it out for itself
-(the summary counts answer a different question - rows *per status*, not the rows a response selected). So
-every capped response carries the total it capped against, counted in the server over **every matching row
-in the `jobs` table**:
-
-| Response | Field |
-|---|---|
-| `GET /api/queue` | `queue_total` |
-| `GET /api/history?limit=N` | `history_total` |
-| the SSE snapshot | both |
-
-```json
-"history_total": {
-  "available": true, "unavailable": "",
-  "covers": "every row in the ledger with status done, skipped, failed",
-  "cap": 200, "count": 41237
-}
-```
-
-- **`count`** is the number of matching rows in the ledger, **never the number of rows returned**. Asking
-  for fewer rows than the cap (`?limit=5`) reports the *same* `count`; only `cap` moves with the request.
-- **`available`** is `false` when the total could not be read, and `count` is then an explicit **`null`**,
-  never `0` - a zero would claim the ledger is empty beside rows the caller can see. The rows still ship:
-  one unreadable figure never costs an operator the records.
-- The dashboard renders that total in each table's cap notice, and when the total is unavailable it says so
-  **and shows no figure in its place**.
 
 ### The record, and what to read for it
 
