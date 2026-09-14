@@ -51,21 +51,24 @@ func postureBlock(omit ...string) string {
 	return block
 }
 
-// TestShippedDocumentation_CarriesBothResidualWindowStatements is the check itself, over
-// the repository's own corpus. It is the test that fails `make check` when the
-// documentation loses either statement - which is the whole of the criterion.
-func TestShippedDocumentation_CarriesBothResidualWindowStatements(t *testing.T) {
+// TestShippedDocumentation_AC1_SatisfiesEveryRuleTheGateOwns is the check itself, over the
+// repository's own corpus and through CheckRepo, which is every rule this package owns:
+// the anchored statements, the resolvable links and the orphaned design documents. It is
+// the test that fails `make check` when the documentation loses one of them - which is the
+// whole of the criterion, and the reason the link and orphan rules are graded here rather
+// than only against fixtures.
+func TestShippedDocumentation_AC1_SatisfiesEveryRuleTheGateOwns(t *testing.T) {
 	root := repoRoot(t)
 	files, err := Corpus(root)
 	if err != nil {
 		t.Fatalf("Corpus(%s): %v", root, err)
 	}
-	problems, err := Check(files)
+	problems, err := CheckRepo(root, files)
 	if err != nil {
-		t.Fatalf("Check: %v", err)
+		t.Fatalf("CheckRepo: %v", err)
 	}
 	if len(problems) > 0 {
-		t.Fatalf("the shipped documentation does not satisfy the residual-window obligation:\n  %s",
+		t.Fatalf("the shipped documentation does not satisfy the documentation gate:\n  %s",
 			strings.Join(problems, "\n  "))
 	}
 }

@@ -91,7 +91,7 @@ func ruleFor(t *testing.T, anchor string) Rule {
 // TestCheck_AC1_EveryNewAnchorIntroducesAStatement is AC-1 over a minimal corpus: the
 // three anchors satisfy the gate when each introduces real text, so every negative below
 // is not passing for the trivial reason that nothing can. AC-1 over the SHIPPED corpus is
-// TestShippedDocumentation_CarriesBothResidualWindowStatements.
+// TestShippedDocumentation_AC1_SatisfiesEveryRuleTheGateOwns.
 func TestCheck_AC1_EveryNewAnchorIntroducesAStatement(t *testing.T) {
 	dir := writeCorpus(t, map[string]string{
 		"docs.md": residualWindowBlock() + postureBlock() + metadataBlock() + agreeingBlocks(),
