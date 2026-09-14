@@ -14,14 +14,15 @@
 //
 // # What it checks, and what it deliberately does not
 //
-// It checks PRESENCE and one token. It does not judge whether the prose is true, or
-// well written, or complete - no mechanical check can, and one that pretended to would
-// either fail good documentation or pass bad. Precisely:
+// It checks PRESENCE, tokens, and two things about where a file IS. It does not judge
+// whether the prose is true, or well written, or complete - no mechanical check can, and
+// one that pretended to would either fail good documentation or pass bad. Precisely:
 //
-//   - Four fixed anchors must exist: residual-window-local, residual-window-network,
-//     reverse-proxy-posture and swap-metadata. They are FIXED here rather than chosen
-//     per-run, because a check free to pick its own anchor is a check that can be made to
-//     pass by moving the goalposts.
+//   - Seven fixed anchors must exist: residual-window-local, residual-window-network,
+//     reverse-proxy-posture, swap-metadata, swap-invariant, vmaf-pooling and
+//     null-is-not-zero. They are FIXED here rather than chosen per-run, because a check
+//     free to pick its own anchor is a check that can be made to pass by moving the
+//     goalposts.
 //   - A statement is PRESENT only when its anchor exists AND at least one non-blank
 //     line follows it, before the next anchor or heading, that is not itself a heading
 //     or an anchor. An anchor with nothing under it is not a statement.
@@ -36,6 +37,28 @@
 //     what a deploying operator has to read in one place.
 //   - The swap-metadata statement owes four clauses under the same one-statement rule
 //     (see SwapMetadataClauses).
+//   - The three anchors in AgreeingRules owe their clauses at EVERY occurrence rather
+//     than at one: see "Existence, and agreement" below.
+//   - A repository-relative link in CLAUDE.md or README.md must resolve to a path in the
+//     tree, and a document under docs/design/ must be linked from CLAUDE.md. Those two
+//     read the TREE as well as the text, so they take a root and live under CheckRepo
+//     rather than Check.
+//
+// # Existence, and agreement
+//
+// The four older anchors are satisfied by ANY occurrence: the obligation is that the
+// statement exists in what the repository ships, so a second document carrying a shorter
+// restatement is not an error, and the rule reports a problem only when NO occurrence
+// satisfies it.
+//
+// That is the right rule for an obligation about the corpus and the wrong one for an
+// argument the documents restate. Under it a second copy may quietly drop a clause while
+// the strong copy keeps the gate green, and a reader who lands on the weak copy is missing
+// the clause with nothing to tell them so. So for the three anchors in AgreeingRules every
+// occurrence must carry every clause, and a copy that does not is named along with the
+// clause it does not carry. Faithful repetition still passes - the rule is about what each
+// occurrence SAYS, never about how many there are - and which document carries an anchor is
+// still not this package's business.
 //
 // # Why the swap-metadata anchor exists
 //
@@ -79,15 +102,22 @@
 //     filenames would lose the first time somebody wrote docs/nfs.md and put the
 //     statement there instead.
 //
-// At the time of writing that walk finds five files: README.md, CLAUDE.md,
-// docs/docker.md, docs/filesystem.md and docs/migration.md. Which of them carries the
-// anchors is not fixed and is not this package's business - the obligation is about the
-// TEXT the repository ships, so a statement anywhere in the corpus satisfies it and a
-// statement outside the corpus satisfies nothing however it is anchored. (Today the two
-// residual-window statements are in docs/filesystem.md, beside the rest of what the
-// storage a library sits on costs, and the reverse-proxy posture statement is in
-// docs/docker.md beside the rest of the control surface; that is a choice about where
-// the prose reads best, not a narrowing of the set this package checks.)
+// Which file carries an anchor is not fixed and is not this package's business - the
+// obligation is about the TEXT the repository ships, so a statement anywhere in the corpus
+// satisfies it and a statement outside the corpus satisfies nothing however it is
+// anchored. (Today the two residual-window statements are in docs/filesystem.md, beside
+// the rest of what the storage a library sits on costs, the reverse-proxy posture and
+// swap-metadata statements are in docs/docker.md beside the rest of the control surface,
+// and the three agreeing statements are one per document under docs/design/; that is a
+// choice about where the prose reads best, not a narrowing of the set this package
+// checks.)
+//
+// For an anchor in AgreeingRules "anywhere in the corpus" is still where it may be
+// written, and it is no longer the whole rule: a SECOND occurrence is checked too, so
+// carrying an anchor in more than one file is an error when those occurrences say
+// different things. The two rules under docs/design/ are the only place this package
+// takes an interest in a path at all, and neither says which document an anchor belongs
+// in.
 package docscheck
 
 import (
