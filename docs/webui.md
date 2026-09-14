@@ -58,6 +58,22 @@ a build, and no build step depends on it being regenerated:
 | `make webui-stale` | fail if the committed document is not what the sources generate. Part of `make check` |
 | `make webui-check` | the dashboard's three suites in REQUIRED mode (see below) |
 | `make webui-graders-selftest` | defeat each engine-only question on purpose and require the graders to red. NOT part of `make check`; CI runs it |
+| `make check-design-record` | hold `docs/design-record.md` to the token file and scan the identity sources for the C2 blocklist. Part of `make check`; needs no browser and no node |
+| `make check-design-record-selftest` | defeat that check once per failure mode and once per blocklist entry. NOT part of `make check`; CI runs it |
+
+## The identity the surface is built to
+
+[`docs/design-record.md`](design-record.md) is this repository's design record: the
+display face, the text face, the accent, the radius signature and the shadow signature,
+each naming the token in `internal/webui/src/tokens.css` that carries it and one sentence
+saying why that value. The token file is the one writer of a VALUE and the record the one
+writer of a REASON, and `make check-design-record` fails if the two disagree, so the record
+cannot drift away from the surface it describes.
+
+The same check scans the stylesheet, the template and the generated document for the
+defaults an unspecified interface converges on, and allows one only where the record names
+it with its reason. A change to a face, to the accent, or to a corner or shadow value
+belongs in the record in the same commit.
 
 The generator is **Go and the standard library only**. There is no JavaScript runtime, no
 bundler, no registry package, no lockfile and no network in the build path, so `make
