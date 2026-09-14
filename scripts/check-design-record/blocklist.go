@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -234,21 +235,18 @@ func normalizeFamily(f string) string {
 	return strings.ToLower(normalizeSpace(f))
 }
 
-var gradientFns = []string{
-	"linear-gradient(", "radial-gradient(", "conic-gradient(",
-	"repeating-linear-gradient(", "repeating-radial-gradient(", "repeating-conic-gradient(",
-}
+// reGradient matches every gradient function, EVERY time it appears in a value: a
+// declaration that draws two gradients has to be decided twice, and one written as
+// `repeating-linear-gradient` must be found once rather than once per spelling that is a
+// substring of it.
+var reGradient = regexp.MustCompile(`(?:repeating-)?(?:linear|radial|conic)-gradient\(`)
 
 func detectPurpleToBlue(s *source, cat map[string]string) []hit {
 	var out []hit
 	for _, d := range s.decls {
 		low := strings.ToLower(d.value)
-		for _, fn := range gradientFns {
-			at := strings.Index(low, fn)
-			if at < 0 {
-				continue
-			}
-			args := low[at+len(fn)-1:]
+		for _, m := range reGradient.FindAllStringIndex(low, -1) {
+			args := low[m[1]-1:]
 			args = args[:skipParens(args, 0, len(args))]
 			var purple, blue []string
 			for _, tok := range colourTokens(args) {
@@ -296,7 +294,7 @@ func colourTokens(args string) []string {
 // resolveVar follows `var(--x)` into the declared tokens, because a gradient's stops are
 // normally token references rather than literals in a repository that has a token file.
 func resolveVar(tok string, cat map[string]string, depth int) string {
-	if depth > 4 || !strings.HasPrefix(strings.ToLower(tok), "var(") {
+	if depth > 4 || !strings.HasPrefix(strings.ToLower(tok), "var(") || !strings.HasSuffix(tok, ")") {
 		return tok
 	}
 	inner := tok[len("var(") : len(tok)-1]
