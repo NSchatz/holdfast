@@ -97,8 +97,8 @@ Every gate in this tool is one judgement made by comparing two video files, and 
 can be judged that way. Whether a file belongs in another folder, or under another name, or is a duplicate
 worth losing, is a question about a library's conventions, and no decoder can answer it. Shipping them would
 mean shipping mutations with nothing to gate them, in the same binary that offers a gate for everything else
-it does. Plex, Jellyfin and the *arr tools already do that work well: point holdfast at the library they
-manage and leave the managing to them.
+it does. Plex, Jellyfin and the *arr tools are where that work belongs: point holdfast at the library they
+manage, and leave the managing to them.
 
 ## Quick start
 
