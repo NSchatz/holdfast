@@ -1025,125 +1025,25 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// the worker, so the UI shows the file entering the pipeline immediately.
 	e.emit(Event{Path: f, Status: store.Probing, Worker: worker})
 
-	// Symlink guard (TRANSCODE-16). A symlink has nlink == 1 and slips past the hardlink
-	// guard, and config.Validate refuses a symlinked ROOT but not a symlinked file within
-	// the tree. The swap would replace the LINK itself with a regular file, orphaning the
-	// real target and changing what the library entry means. Resolving and transcoding the
-	// target is a deliberate non-goal, so a symlinked source is SKIPPED.
-	if probe.IsSymlink(f) {
-		e.Log.Info("skip (symlinked source — swap would replace the link, orphaning its target)", "file", f)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipSymlink, by, prof, ts))
-		return nil
-	}
-
-	// One probe snapshot of the source, shared by every skip guard below AND handed to the
-	// encoder (TRANSCODE-PERF), in place of the ~15 separate ffprobe/ffmpeg processes a
-	// single encode-bound file used to spawn. Reading every guard off one snapshot is more
-	// self-consistent than re-probing a file mid-pipeline. The costly whole-file checks are
-	// NOT here: they run in verifyOutput against the encoded temp.
-	props := e.Probe.VideoProps(ctx, f)
-
-	codec := props.Codec()
-	if codec == "" {
-		e.Log.Info("skip (unreadable / no video stream)", "file", f)
-		e.finish(ctx, f, key, store.Failed, e.because(FailUnreadable, by, prof, ts))
-		return nil
-	}
-	if isAlreadyTargetCodec(targetCodec, codec) {
-		e.Log.Info("skip (already at target codec)", "file", f, "codec", codec,
-			"target", targetCodec, "library_root", root.Clean, "encode_profile", ts.Profile)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipAlreadyTargetCodec, by, prof, ts, InputTargetCodec))
-		return nil
-	}
-
-	// The bitrate floor is the ROOT's and not this job's: an encode profile may change
-	// what the encoder produces and may not move a gate that decides whether a source is
-	// destroyed. Same for every threshold below.
-	if br := props.BitrateKbps(); br > 0 && br < prof.MinBitrateKbps {
-		e.Log.Info("skip (low bitrate)", "file", f, "kbps", br, "min", prof.MinBitrateKbps, "library_root", root.Clean)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipLowBitrate, by, prof, ts, InputMinBitrateKbps))
-		return nil
-	}
-
-	// Interlace guard. This tool never deinterlaces — re-encoding an interlaced
-	// source with a progressive-assuming pipeline bakes in combing artifacts
-	// permanently. Progressive or unknown field_order proceeds.
-	switch props.FieldOrder() {
-	case "tt", "bb", "tb", "bt":
-		e.Log.Info("skip (interlaced — not deinterlacing)", "file", f)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipInterlaced, by, prof, ts))
-		return nil
-	}
-
-	// HDR/DV guard (TRANSCODE-3). A generic libx265 re-encode cannot preserve a Dolby Vision
-	// RPU or HDR10+ dynamic metadata and would SILENTLY strip it, a permanent,
-	// invisible-until-viewed loss, so detect and SKIP. HDR10 STATIC metadata IS carried
-	// through the encode (hdr.DeriveColorArgs). Probed only here, on an encode-bound file,
-	// so the cost falls on the minority actually re-encoded.
-	switch hdr.ClassFrom(props.CodecTag(), props.SideData(), props.Color("color_transfer")) {
-	case hdr.ClassDV:
-		e.Log.Info("skip (Dolby Vision — RPU cannot survive a generic re-encode)", "file", f)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipDolbyVision, by, prof, ts))
-		return nil
-	case hdr.ClassHDR10Plus:
-		e.Log.Info("skip (HDR10+ dynamic metadata — cannot survive a generic re-encode)", "file", f)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipHDR10Plus, by, prof, ts))
-		return nil
-	case hdr.ClassHDR10:
-		// HDR10 static metadata IS carried through the encode, but a mastering-display or
-		// content-light block this build cannot fully parse would be silently dropped.
-		// Fail safe: SKIP rather than blind-encode.
-		incomplete := e.staticMetadataIncomplete
-		if incomplete == nil {
-			incomplete = hdr.StaticMetadataIncomplete
+	// Every source-side guard, in one call, off one probe snapshot and writing nothing.
+	// What each of them decides is unchanged; what changed is that the read-only plan pass
+	// asks the same chain rather than carrying a second copy of it (see guardSource).
+	props, v := e.guardSource(ctx, f, root, ts, targetCodec, e.Probe.VideoProps)
+	if v.stopped() {
+		e.Log.Info(v.log, append([]any{"file", f}, v.logArgs...)...)
+		status := store.Skipped
+		if v.failed {
+			status = store.Failed
 		}
-		if incomplete(props.FrameSideData()) {
-			e.Log.Info("skip (HDR10 static metadata present but incomplete/unparseable — refusing to re-encode and drop it)", "file", f)
-			e.finish(ctx, f, key, store.Skipped, e.because(SkipIncompleteHDRMetadata, by, prof, ts))
-			return nil
-		}
-	}
-
-	// Chroma/bit-depth guard. Preserve the source's chroma subsampling and floor bit-depth
-	// at 10; an exotic pix_fmt is SKIPPED rather than silently subsampled or guessed. A
-	// forced (non-"auto") PixelFormat bypasses derivation entirely.
-	if ts.PixelFormatAuto() {
-		srcPixFmt := props.PixFmt()
-		if _, ok := hdr.DerivePixFmt(srcPixFmt); !ok {
-			e.Log.Info("skip (unrecognized/exotic pixel format — refusing to silently subsample)", "file", f, "pix_fmt", srcPixFmt)
-			e.finish(ctx, f, key, store.Skipped, e.because(SkipExoticPixelFormat, by, prof, ts, InputPixelFormat))
-			return nil
-		}
-	}
-
-	// Source-shape guard. Everything above reads v:0 and only v:0, so a source carrying a
-	// SECOND moving-picture stream is one this pipeline cannot honestly claim to preserve:
-	// the encode would re-encode it off the first stream's properties and no gate in front
-	// of the swap ever looked at it. An ATTACHED PICTURE is the one exception, because it is
-	// carried through unencoded (attachedPictureCopyIndexes). The probe is the second and
-	// last ffprobe a file pays for, taken here rather than in the eager snapshot so a file
-	// that skipped at a cheap guard above never pays for it.
-	//
-	// The outcome records NO decision inputs, because this guard reads no configuration key:
-	// a source's stream shape is a property of the file, so no value an operator edits
-	// re-derives the verdict. That is why the token is in SkipGuards - `requeue --guard
-	// multi-video-stream` is then the only lever, and a token missing from that list would
-	// be a permanent exclusion with no lever at all.
-	streams, established := props.VideoStreams()
-	if !established || !carriableVideoStreams(streams) {
-		e.Log.Info("skip (a video stream beyond the first that is not an attached picture, or a stream shape the probe could not establish)",
-			"file", f, "video_streams", len(streams), "probe_established", established)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipMultiVideoStream, by, prof, ts))
+		e.finish(ctx, f, key, status, e.because(v.guard, by, prof, ts, v.inputs...))
 		return nil
 	}
 
-	// Output container: "source"/"auto" (default) matches the SOURCE file's own extension,
-	// so a stream type that does not round-trip through a different container (MP4 mov_text
-	// into MKV) is not forced to change. A forced ContainerExt overrides this.
-	outExt := ts.ContainerExt
-	if ts.ContainerMatchesSource() {
-		outExt = strings.TrimPrefix(filepath.Ext(f), ".")
-	}
+	codec := v.codec
+	outExt := v.outExt
+	// final is where the swap publishes, chosen by the same guard chain that just refused
+	// to clobber anything already there.
+	final := v.target
 
 	dir := filepath.Dir(f)
 	base := filepath.Base(f)
@@ -1153,18 +1053,6 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// tracking it in the Engine: every failure path below removes tmp directly, and a
 	// ctx-cancel leaves it orphaned for cleanStaleTemps to sweep on the next startup. The
 	// path is the build's own construction (see swap.go).
-	final := filepath.Join(dir, stem+"."+outExt)
-
-	// Collision guard. When the container ext changes, final is a DIFFERENT path than the
-	// source, and a distinct file already there would be silently overwritten before the
-	// source was deleted: two files destroyed. Refuse.
-	if final != f {
-		if _, err := os.Lstat(final); err == nil {
-			e.Log.Info("skip (target already exists as a distinct file — refusing to clobber)", "file", f, "target", final)
-			e.finish(ctx, f, key, store.Skipped, e.because(SkipTargetExists, by, prof, ts, InputContainerExt))
-			return nil
-		}
-	}
 
 	if e.Cfg.DryRun {
 		// A DRY RUN'S DECISION IS RECORDED: the file passed every guard, so a run with
@@ -1654,6 +1542,189 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		}
 	}
 	return nil
+}
+
+// sourceVerdict is what the source-side guards concluded about one file: the guard that
+// stopped it, or none, plus the three things a caller past the guards needs from the same
+// probe snapshot they were answered from.
+//
+// It carries its own LOG LINE because a caller switching on the token to decide what to say
+// would put the wording of a skip beside the thing that COUNTS it rather than beside the
+// guard that decided it, and the two would drift the first time a guard learned a reason.
+type sourceVerdict struct {
+	// guard is the Skip*/Fail* token, empty when every guard passed.
+	guard string
+	// failed marks the one verdict that is a FAILURE rather than a skip: a source the probe
+	// reported no video stream for.
+	failed bool
+	// inputs are the configuration keys this verdict READ, recorded on the terminal row so
+	// a later configuration change can re-derive it.
+	inputs []string
+	// log and logArgs are what the daemon says when this guard fires. The caller supplies
+	// the file, which every one of them names first.
+	log     string
+	logArgs []any
+
+	// codec is the source codec the snapshot read, and outExt/target are what the swap would
+	// publish. All three come off the same snapshot the guards read, so nothing past them
+	// re-derives one.
+	codec  string
+	outExt string
+	target string
+}
+
+// stopped reports whether a guard refused the file.
+func (v sourceVerdict) stopped() bool { return v.guard != "" }
+
+// guardSource runs every source-side skip guard, in the order the pipeline has always run
+// them, off ONE probe snapshot, and WRITES NOTHING. ProcessFile turns what comes back into a
+// terminal row; the read-only plan pass counts it. Both therefore ask the same guards the
+// same question in the same order, and a guard added here reaches both with no second edit -
+// which is what stops a report about what a run would do from drifting from the run.
+//
+// snapshot takes the file's probe snapshot. It is a parameter rather than e.Probe.VideoProps
+// so a caller can COUNT the snapshots one pass takes, which is the property "one invocation
+// is one pass over the library" is graded by; the daemon hands in the prober's own.
+//
+// The returned snapshot is nil exactly when the guards stopped the file before one was taken
+// (the symlink guard), which is why that guard is where it is: a symbolic link never pays for
+// an ffprobe.
+func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, ts config.Transcode,
+	targetCodec string, snapshot func(context.Context, string) *probe.VideoProps) (*probe.VideoProps, sourceVerdict) {
+	// The bitrate floor and every threshold below are the ROOT's and not this job's: an
+	// encode profile may change what the encoder produces and may not move a gate that
+	// decides whether a source is destroyed.
+	prof := root.Profile
+
+	// Symlink guard (TRANSCODE-16). A symlink has nlink == 1 and slips past the hardlink
+	// guard, and config.Validate refuses a symlinked ROOT but not a symlinked file within
+	// the tree. The swap would replace the LINK itself with a regular file, orphaning the
+	// real target and changing what the library entry means. Resolving and transcoding the
+	// target is a deliberate non-goal, so a symlinked source is SKIPPED.
+	if probe.IsSymlink(f) {
+		return nil, sourceVerdict{guard: SkipSymlink,
+			log: "skip (symlinked source — swap would replace the link, orphaning its target)"}
+	}
+
+	// One probe snapshot of the source, shared by every skip guard below AND handed to the
+	// encoder (TRANSCODE-PERF), in place of the ~15 separate ffprobe/ffmpeg processes a
+	// single encode-bound file used to spawn. Reading every guard off one snapshot is more
+	// self-consistent than re-probing a file mid-pipeline. The costly whole-file checks are
+	// NOT here: they run in verifyOutput against the encoded temp.
+	props := snapshot(ctx, f)
+
+	codec := props.Codec()
+	if codec == "" {
+		return props, sourceVerdict{guard: FailUnreadable, failed: true,
+			log: "skip (unreadable / no video stream)"}
+	}
+	if isAlreadyTargetCodec(targetCodec, codec) {
+		return props, sourceVerdict{guard: SkipAlreadyTargetCodec, codec: codec,
+			inputs: []string{InputTargetCodec},
+			log:    "skip (already at target codec)",
+			logArgs: []any{"codec", codec, "target", targetCodec,
+				"library_root", root.Clean, "encode_profile", ts.Profile}}
+	}
+
+	if br := props.BitrateKbps(); br > 0 && br < prof.MinBitrateKbps {
+		return props, sourceVerdict{guard: SkipLowBitrate, codec: codec,
+			inputs:  []string{InputMinBitrateKbps},
+			log:     "skip (low bitrate)",
+			logArgs: []any{"kbps", br, "min", prof.MinBitrateKbps, "library_root", root.Clean}}
+	}
+
+	// Interlace guard. This tool never deinterlaces — re-encoding an interlaced
+	// source with a progressive-assuming pipeline bakes in combing artifacts
+	// permanently. Progressive or unknown field_order proceeds.
+	switch props.FieldOrder() {
+	case "tt", "bb", "tb", "bt":
+		return props, sourceVerdict{guard: SkipInterlaced, codec: codec,
+			log: "skip (interlaced — not deinterlacing)"}
+	}
+
+	// HDR/DV guard (TRANSCODE-3). A generic libx265 re-encode cannot preserve a Dolby Vision
+	// RPU or HDR10+ dynamic metadata and would SILENTLY strip it, a permanent,
+	// invisible-until-viewed loss, so detect and SKIP. HDR10 STATIC metadata IS carried
+	// through the encode (hdr.DeriveColorArgs). Probed only here, on an encode-bound file,
+	// so the cost falls on the minority actually re-encoded.
+	switch hdr.ClassFrom(props.CodecTag(), props.SideData(), props.Color("color_transfer")) {
+	case hdr.ClassDV:
+		return props, sourceVerdict{guard: SkipDolbyVision, codec: codec,
+			log: "skip (Dolby Vision — RPU cannot survive a generic re-encode)"}
+	case hdr.ClassHDR10Plus:
+		return props, sourceVerdict{guard: SkipHDR10Plus, codec: codec,
+			log: "skip (HDR10+ dynamic metadata — cannot survive a generic re-encode)"}
+	case hdr.ClassHDR10:
+		// HDR10 static metadata IS carried through the encode, but a mastering-display or
+		// content-light block this build cannot fully parse would be silently dropped.
+		// Fail safe: SKIP rather than blind-encode.
+		incomplete := e.staticMetadataIncomplete
+		if incomplete == nil {
+			incomplete = hdr.StaticMetadataIncomplete
+		}
+		if incomplete(props.FrameSideData()) {
+			return props, sourceVerdict{guard: SkipIncompleteHDRMetadata, codec: codec,
+				log: "skip (HDR10 static metadata present but incomplete/unparseable — refusing to re-encode and drop it)"}
+		}
+	}
+
+	// Chroma/bit-depth guard. Preserve the source's chroma subsampling and floor bit-depth
+	// at 10; an exotic pix_fmt is SKIPPED rather than silently subsampled or guessed. A
+	// forced (non-"auto") PixelFormat bypasses derivation entirely.
+	if ts.PixelFormatAuto() {
+		srcPixFmt := props.PixFmt()
+		if _, ok := hdr.DerivePixFmt(srcPixFmt); !ok {
+			return props, sourceVerdict{guard: SkipExoticPixelFormat, codec: codec,
+				inputs:  []string{InputPixelFormat},
+				log:     "skip (unrecognized/exotic pixel format — refusing to silently subsample)",
+				logArgs: []any{"pix_fmt", srcPixFmt}}
+		}
+	}
+
+	// Source-shape guard. Everything above reads v:0 and only v:0, so a source carrying a
+	// SECOND moving-picture stream is one this pipeline cannot honestly claim to preserve:
+	// the encode would re-encode it off the first stream's properties and no gate in front
+	// of the swap ever looked at it. An ATTACHED PICTURE is the one exception, because it is
+	// carried through unencoded (attachedPictureCopyIndexes). The probe is the second and
+	// last ffprobe a file pays for, taken here rather than in the eager snapshot so a file
+	// that skipped at a cheap guard above never pays for it.
+	//
+	// The outcome records NO decision inputs, because this guard reads no configuration key:
+	// a source's stream shape is a property of the file, so no value an operator edits
+	// re-derives the verdict. That is why the token is in SkipGuards - `requeue --guard
+	// multi-video-stream` is then the only lever, and a token missing from that list would
+	// be a permanent exclusion with no lever at all.
+	streams, established := props.VideoStreams()
+	if !established || !carriableVideoStreams(streams) {
+		return props, sourceVerdict{guard: SkipMultiVideoStream, codec: codec,
+			log: "skip (a video stream beyond the first that is not an attached picture, or a stream shape the probe could not establish)",
+			logArgs: []any{"video_streams", len(streams), "probe_established", established}}
+	}
+
+	// Output container: "source"/"auto" (default) matches the SOURCE file's own extension,
+	// so a stream type that does not round-trip through a different container (MP4 mov_text
+	// into MKV) is not forced to change. A forced ContainerExt overrides this.
+	outExt := ts.ContainerExt
+	if ts.ContainerMatchesSource() {
+		outExt = strings.TrimPrefix(filepath.Ext(f), ".")
+	}
+	base := filepath.Base(f)
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	final := filepath.Join(filepath.Dir(f), stem+"."+outExt)
+
+	// Collision guard. When the container ext changes, final is a DIFFERENT path than the
+	// source, and a distinct file already there would be silently overwritten before the
+	// source was deleted: two files destroyed. Refuse.
+	if final != f {
+		if _, err := os.Lstat(final); err == nil {
+			return props, sourceVerdict{guard: SkipTargetExists, codec: codec,
+				inputs:  []string{InputContainerExt},
+				log:     "skip (target already exists as a distinct file — refusing to clobber)",
+				logArgs: []any{"target", final}}
+		}
+	}
+
+	return props, sourceVerdict{codec: codec, outExt: outExt, target: final}
 }
 
 // advance is a small logged wrapper around Store.Advance — a store error here is

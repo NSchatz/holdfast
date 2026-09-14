@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -849,11 +850,22 @@ func (e *Engine) loadHoldBacks(ctx context.Context) *holdBacks {
 // leaves the reporting where it belongs. A store FAILURE is still reported here, on both
 // halves, because that changes which guarantee is standing on what and is rare.
 func (e *Engine) readHoldBacks(ctx context.Context) *holdBacks {
-	h := &holdBacks{paths: map[string]string{}}
+	return holdBacksFrom(ctx, e.Store, e.Log)
+}
 
-	parked, err := e.Store.ParkedIncidents(ctx)
+// holdBacksFrom is that same pair of reads over whatever can READ the two records. The
+// daemon asks it through its own store; a read-only pass asks it through a handle that
+// cannot write, and a caller with no ledger at all passes nil and gets the empty set - which
+// is the true answer for a fresh install, where no record exists to hold anything back.
+func holdBacksFrom(ctx context.Context, r LedgerReader, log *slog.Logger) *holdBacks {
+	h := &holdBacks{paths: map[string]string{}}
+	if r == nil {
+		return h
+	}
+
+	parked, err := r.ParkedIncidents(ctx)
 	if err != nil {
-		e.Log.Error("could not read parked jobs - CONTINUING WITHOUT the record-based hold-back on parked paths, which is the one AC15c names; a retained replacement is still held back by its NAME, and a parked source is still refused by Claim unless its bytes have changed since it was parked",
+		log.Error("could not read parked jobs - CONTINUING WITHOUT the record-based hold-back on parked paths, which is the one AC15c names; a retained replacement is still held back by its NAME, and a parked source is still refused by Claim unless its bytes have changed since it was parked",
 			"err", err)
 	}
 	h.parked = parked
@@ -862,9 +874,9 @@ func (e *Engine) readHoldBacks(ctx context.Context) *holdBacks {
 		h.paths[resolvedForm(in.ReplacementPath)] = "parked job " + strconv.FormatInt(in.ID, 10)
 	}
 
-	excluded, err := e.Store.ExcludedReplacementPaths(ctx)
+	excluded, err := r.ExcludedReplacementPaths(ctx)
 	if err != nil {
-		e.Log.Error("could not read recorded replacement paths - CONTINUING WITHOUT the record-based exclusion AC15d carries; every retained replacement is still held back by its NAME, which is what that name exists for",
+		log.Error("could not read recorded replacement paths - CONTINUING WITHOUT the record-based exclusion AC15d carries; every retained replacement is still held back by its NAME, which is what that name exists for",
 			"err", err)
 	}
 	for _, p := range excluded {
