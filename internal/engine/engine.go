@@ -1008,7 +1008,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// recorded still match what is handed in here and are RE-OPENED when they do not; failed
 	// is retryable up to MaxFailures, since a transient ENOSPC must not exclude a file for
 	// ever; active means another worker holds it, or it is stale and awaits RecoverStale.
-	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures, e.inputsFor(prof))
+	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures, e.inputsFor(prof, ts))
 	if err != nil {
 		// Fail safe: a store error must never be treated as "done". Log and skip
 		// this pass; the file is retried on the next scan once the store recovers.
@@ -1193,7 +1193,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			SourceCodec:    codec,
 			Profile:        ts.Profile,
 			Decision:       by,
-			DecisionInputs: e.inputsRead(prof, InputTargetCodec, InputEncoder, InputCRF, InputPreset),
+			DecisionInputs: e.inputsRead(prof, ts, InputTargetCodec, InputEncoder, InputCRF, InputPreset),
 		}
 		if st, err := os.Stat(f); err == nil {
 			out.SourceBytes = ptr(st.Size())
@@ -1620,7 +1620,15 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// halves of that - the mtime did not move, the size did - so this comment cannot
 	// quietly stop being true.
 	finalKey := probe.Fingerprint(final)
-	if _, err := e.Store.Claim(ctx, final, finalKey, worker, e.Cfg.MaxFailures, e.inputsFor(prof)); err != nil {
+	// The row this writes is keyed under the REPLACEMENT's path, so its inputs are resolved
+	// for that path and not for the source's. Symmetry is the whole of the reason: the next
+	// scan meets the file at `final` and compares against `final`'s resolution, and where
+	// the container ext moved (film.mkv -> film.mp4) an encode profile matching `*.mkv` no
+	// longer selects it. A row recording the source's resolution would then be a row nothing
+	// can re-derive - re-opened on every scan for ever, which on a library is a re-encode of
+	// everything, each accepted encode deleting its source.
+	tsFinal := e.Cfg.TranscodeIn(prof, final)
+	if _, err := e.Store.Claim(ctx, final, finalKey, worker, e.Cfg.MaxFailures, e.inputsFor(prof, tsFinal)); err != nil {
 		e.Log.Warn("claim of final key failed (done outcome still applies on disk)", "file", final, "err", err)
 	}
 	// What this encode was taken under: the codec it targeted and the three settings
@@ -1628,7 +1636,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// is the permanent answer about the replacement - and the moment any of the four
 	// moves, the answer is one this build would no longer give, so the next scan offers
 	// the file back to the guards rather than skipping it for ever.
-	out.DecisionInputs = e.inputsRead(prof, InputTargetCodec, InputEncoder, InputCRF, InputPreset)
+	out.DecisionInputs = e.inputsRead(prof, tsFinal, InputTargetCodec, InputEncoder, InputCRF, InputPreset)
 	// Record the terminal Done state in the store WITHOUT emitting (finishStore), then
 	// emit ONE rich Done event carrying the same proof. Emitting exactly once here
 	// (rather than a generic finish emit plus a separate rich one) keeps a metrics
@@ -1705,19 +1713,18 @@ func (e *Engine) finish(ctx context.Context, path, key string, s store.Status, o
 // would name a number no guard ever looked at. by carries the same answer in the form a
 // reader of the ledger asks it - which root, and what that root's knobs resolved to.
 //
-// ts is there for a DIFFERENT question and the two are deliberately not merged. An input
-// is compared against the configuration in force to decide whether to re-open the row,
-// so it has to be read where that comparison reads it - the root's profile, which is the
-// unit Claim and the ledger survey both ask about. The encode profile's name is the
-// ATTRIBUTION the ledger owes beside it: which named set of overrides supplied the
-// settings this guard was decided against, "" when the root's own values stood, which is
-// every row a configuration without encode_profiles can produce.
+// ts answers the other half, and it answers it for BOTH questions the row holds. It is the
+// ATTRIBUTION a reader asks - which named set of overrides supplied the settings this guard
+// was decided against, "" when the root's own values stood - and it is where every input an
+// encode profile can move is READ, because that is where the guard that read it read it.
+// The two are one reading on purpose: an input exists to be compared, and a row recording a
+// value the layering for its own path never produces is a row nothing can re-derive.
 func (e *Engine) because(reason string, by store.Decision, prof config.Profile, ts config.Transcode, read ...string) *store.Outcome {
 	return &store.Outcome{
 		Reason:         reason,
 		Decision:       by,
 		Profile:        ts.Profile,
-		DecisionInputs: e.inputsRead(prof, read...),
+		DecisionInputs: e.inputsRead(prof, ts, read...),
 	}
 }
 

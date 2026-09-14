@@ -17,7 +17,7 @@ configuration values **the decision that wrote it actually read**, and no others
 | `skipped / already-at-target-codec` | `target_codec` - what `encoder` resolves to (`cpu` -> `hevc`, `svtav1` -> `av1`) |
 | `skipped / exotic-pixel-format` | `pixel_format` |
 | `skipped / target-already-exists` | `container_ext` |
-| `done` | `target_codec`, `encoder`, `crf`, `preset` - the root's settings the encode was taken under (see the note on encode profiles below) |
+| `done` | `target_codec`, `encoder`, `crf`, `preset` - the settings the encode was taken under, resolved for the **replacement's** path |
 | a guard that read no configuration (interlaced, Dolby Vision, a symlinked source) | nothing, recorded **as** nothing read: a verdict no key can move |
 
 It is **never a digest or a copy of the whole configuration.** That would tie every row to
@@ -25,23 +25,44 @@ every key, so correcting a notification URL or adding a library root would offer
 library back to the encoder - which is not a re-derivation, it is a re-scan of everything,
 and you would learn to distrust it.
 
-Every value above is read from the **library root's** profile - the top-level settings as
-that root resolved them. An [encode profile](profiles.md) laid over them by a pattern match
-is **not** read into the record, and that is a limit worth stating plainly rather than
-discovering:
+**The rule, in one sentence: a terminal row is stale when, and only when, a key that row
+recorded resolves to a different value under the configuration now in force FOR THAT ROW'S
+OWN PATH.** Each value is resolved through the whole layering that decided that path -
+the built-in default, then the top level, then the profile of the library root the file
+lives under, then the [encode profile](profiles.md) whose match selects it - and a later
+scan resolves the same keys the same way for the same path before it compares. So an
+encode profile is a first-class decision input:
 
-- the row still says which one ran. A terminal row carries the encode profile's **name**
-  beside its inputs (`profile` in `holdfast export`), so a reader holding the row and the
+- the row says which one ran. A terminal row carries the encode profile's **name** beside
+  its inputs (`profile` in `holdfast export`), so a reader holding the row and the
   configuration can resolve exactly which settings decided the file;
-- but editing that profile's `encoder`, `crf`, `preset`, `pixel_format`, `container_ext` or
-  `bitrate_kbps` **re-opens nothing**, because no value any row recorded moved.
+- and editing that profile's `encoder`, `crf`, `preset`, `pixel_format` or `container_ext`
+  offers back exactly the files whose recorded values it moved - the ones the profile
+  selects, and only where the row's own guard read the key you changed. Editing a
+  profile's `crf` does not disturb a file skipped `already-at-target-codec`: that guard
+  read the target codec and nothing else.
 
-The reason is that an input's only job is to be compared, and both comparisons ask about a
-root: a claim compares one row against the profile in force for its own root, and the survey
-below compares the **whole ledger** against one value with no file path in hand. A row that
-recorded a value only a pattern match can reach would match neither of them ever again - it
-would be offered back on every scan and counted as moved in every report, for the life of the
-row. `holdfast requeue --guard <token>` is the lever for a profile edit you do want acted on.
+`bitrate_kbps` is the sixth key an encode profile can set, and no row records it, so editing
+it offers no file back. It is the rate the encoder is *told to aim at*, never a value a guard
+compares a source against; the threshold a guard does read is `min_bitrate_kbps`, which an
+encode profile cannot set at all - a gate deciding whether a source may be destroyed stays on
+the library root's profile, where the guard that reads it reads it.
+
+A `done` row is keyed on the file the swap produced, so its values are the ones the
+**replacement's** path resolves to. That matters in one corner: where an encode profile
+moves `container_ext`, `film.mkv` becomes `film.mp4` and a profile matching `*.mkv` no
+longer selects the row's path, so the row records the library root's settings beside that
+profile's name - the name says which profile ran, the values say what the path in front of
+you resolves to now. Recording the source's resolution instead would record a value later
+scans could never resolve again, which is a row offered back for ever.
+
+Two properties keep that safe, and neither is traded for the other. **Record and compare
+are one resolution**, of one key, for one path, so a row written under a configuration
+matches under that configuration - a recorded value the comparison could not reach again
+would be a row offered back on every scan for the life of the row. And **only the keys a
+decision actually read are recorded**, so an edit that moves none of them changes nothing
+about that row, whatever else it changed. `holdfast requeue --guard <token>` is still the
+lever for a verdict no key can re-derive.
 
 A row that records **nothing at all** - every row written before holdfast recorded this -
 reads as "cannot be re-derived" and is re-opened **once**, after which the decision it
@@ -68,11 +89,27 @@ a validate that migrated your store as a side effect of describing it would leav
 unopenable by the daemon still running against it. With no ledger yet, `validate` says so and
 still passes.
 
+Both counts are taken **per row, against that row's own path**, which is the same reading
+the scan will apply to it - a figure measured against one configuration for the whole
+ledger would describe a rule the scan does not use. A row whose path lies under **no
+configured library root** is reported separately and named: the scan walks the configured
+roots, so it never reaches that file and never re-opens it, whatever the row records.
+Neither condition can fail a run or a `validate`; a ledger that could not be read at all
+is reported beside a configuration that is still valid.
+
 A ledger an **earlier holdfast** wrote is reported too, and that is the upgrade you most
 want the figures for: no row in it records anything, so the first scan under the new build
 re-opens every terminal row it holds. Reading it needs no migration - a schema with no column
 for the inputs is one in which no row can have recorded any - so `validate` counts those rows
 and still leaves the file exactly as the running daemon left it.
+
+The ledger a build **just before this one** wrote reads differently, and its figure is worth
+expecting. Those rows do record inputs, but they record what the library root resolved,
+because that build resolved each key for the root and stopped there. So for a file an encode profile
+overrides, the recorded value and the value now in force for that path differ, the row
+counts as **moved**, and the first scan after the upgrade offers it back **once**: the guards
+run again, the decision they reach records the profile-resolved values, and the scan after
+that leaves it alone. That is the defect this rule exists to fix, showing up as a number.
 
 ## `holdfast requeue`
 

@@ -21,7 +21,8 @@ import (
 // the whole configuration. A digest would tie every row to every key, so correcting a
 // notification URL would re-open a library's worth of files that no guard would decide
 // differently - which is not a re-derivation, it is a re-scan of everything, and an
-// operator would learn to distrust it.
+// operator would learn to distrust it. Each value is resolved FOR ONE PATH and compared
+// against that same resolution (see InputsForPath).
 //
 // Absence is REPRESENTABLE and is not an empty set. A row written before the column
 // existed recorded nothing, and "nothing recorded" must never read as "read no
@@ -103,9 +104,9 @@ const noInputsRead = "none"
 // pairs, key-sorted and ";"-joined, or the empty string when nothing was recorded (which
 // nullString then stores as NULL).
 //
-// Sorted, because the value is COMPARED as a whole by the survey the startup report
-// reads (one GROUP BY over distinct values rather than a scan that decodes every row),
-// and a map's iteration order would make two identical records two different strings.
+// Sorted, because the stored text is what a reader compares two records by, and what the
+// survey's decode cache keys on. A map's iteration order would make two identical records
+// two different strings.
 //
 // Both halves of every pair are escaped. A value here is whatever the operator put in
 // their YAML - a preset name, a container extension - and an unescaped ";" or "=" in one
@@ -158,6 +159,13 @@ func ParseDecisionInputs(s string) DecisionInputs {
 	return InputsRead(read)
 }
 
+// InputsForPath resolves what the configuration in force offers for ONE ROW'S OWN PATH: the
+// decision inputs a claim of that path would be measured against right now. One value for the
+// whole ledger would describe a rule the scan does not apply, since a root decides the gates
+// and an encode profile whose match selects the path decides what the encoder produces. rooted
+// is false when no configured root contains the path; the answer is then the top-level one.
+type InputsForPath func(path string) (in DecisionInputs, rooted bool)
+
 // DecisionInputsSurvey is what the ledger says about the configuration its terminal
 // decisions were taken under, over the done and skipped rows - the two statuses whose
 // rows a configuration change may re-open.
@@ -170,6 +178,14 @@ type DecisionInputsSurvey struct {
 	Moved       int64
 	NotRecorded int64
 	Matching    int64
+
+	// Unrooted is how many of the rows above lie under no configured library root, and
+	// UnrootedExample is the lexically first of their paths. It is an ANNOTATION, not a fourth
+	// bucket: each is also counted in one of the three above, against the top-level resolution.
+	// Reported because a scan walks its roots, so it never reaches those files and never
+	// re-opens them; NAMED because a count with no path in it names no file an operator has.
+	Unrooted        int64
+	UnrootedExample string
 }
 
 // Reopening is how many rows the next scan will re-open.

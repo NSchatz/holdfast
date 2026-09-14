@@ -299,9 +299,8 @@ ALTER TABLE jobs ADD COLUMN failure_class TEXT;
 		// ever, precisely the silent no-op this column exists to end.
 		//
 		// The index on (status, decision_inputs) serves the survey the startup report and
-		// `validate` read, by grouping the DISTINCT recorded values within those two statuses
-		// rather than decoding every row of a 300,000-row ledger on the engine's own
-		// serialized connection.
+		// `validate` read: it bounds that read to the two terminal statuses rather than
+		// letting it walk a 300,000-row ledger on the engine's own serialized connection.
 		name: "decision inputs",
 		rows: noRowChange,
 		sql: `
