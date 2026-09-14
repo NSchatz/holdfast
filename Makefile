@@ -48,6 +48,7 @@ PLATFORM ?= linux/amd64
         find-browser find-browser-selftest \
         release-shape release-shape-selftest \
         webui-gen webui-stale webui-check webui-graders-selftest \
+        check-design-record check-design-record-selftest \
         secret-scan secret-scan-selftest install-hooks \
         tidy clean image image-smoke compose-check
 
@@ -195,6 +196,31 @@ webui-check:
 webui-graders-selftest:
 	./scripts/webui-graders-selftest.sh
 
+# --- the design record (S0123) ------------------------------------------------
+# interface-craft C1 and C2, held by a machine. C1 asks this repository to declare its
+# display face, text face, accent, radius signature and shadow signature with one sentence
+# each; C2 names the defaults an unspecified interface converges on and allows one only
+# where the record names it with its reason. docs/design-record.md is that record, and this
+# holds it to internal/webui/src/tokens.css - the token file is the one writer of a VALUE,
+# the record the one writer of a REASON - and then scans the dashboard's stylesheet,
+# template and generated sources for every blocklist entry.
+#
+# It is in `check:` rather than beside the dashboard graders because every question it asks
+# is about what a file DECLARES: no browser, no node, no network. What the page SHOWS is
+# C3 to C7 and belongs to the engine, in the dashboard job.
+check-design-record:
+	go run ./scripts/check-design-record
+
+# Proves check-design-record still BITES. Every failure mode it has - an absent, unreadable
+# or unparseable record, an empty identity-source set, a value that disagrees with its
+# token, an exception bought without a reason - and every blocklist entry in turn is
+# defeated on purpose against a mutated COPY of the tree, each defeat is required to be red
+# and to name what it saw, and the run fails if any defeat did not execute. Deliberately NOT
+# part of `check`: the mutations belong in their own target, and `check` must never rewrite
+# the tree it is grading. A guard nobody tries to defeat is a guard nobody knows works.
+check-design-record-selftest:
+	./scripts/check-design-record-selftest.sh
+
 # The prose ceiling on Go source, and the ranked table it is decided from. Counting is
 # by TOKENS - the Go parser decides what a comment is - and the ceiling, the warn band
 # and the exemption list all live in internal/commentdensity, never here: a threshold
@@ -233,7 +259,7 @@ install-hooks:
 	@echo "pre-commit secret scan installed (core.hooksPath = .githooks). Undo: git config --unset core.hooksPath"
 
 # THE gate. CI and the release workflow both run exactly this.
-check: check-pins check-pins-selftest install-ffmpeg-selftest find-browser-selftest release-shape webui-stale comment-density secret-scan secret-scan-selftest fmt vet build test staticcheck govulncheck govulncheck-selftest
+check: check-pins check-pins-selftest install-ffmpeg-selftest find-browser-selftest release-shape webui-stale check-design-record comment-density secret-scan secret-scan-selftest fmt vet build test staticcheck govulncheck govulncheck-selftest
 
 # Asks UPSTREAM whether the pinned ffmpeg release is still served. Deliberately NOT part
 # of `check`: the PR gate must not red because a third party had a bad afternoon. CI runs
