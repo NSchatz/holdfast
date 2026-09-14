@@ -208,8 +208,8 @@ func (ph *planPhase) line() string {
 // function it returns is called - which waits for the reporter to stop, so nothing is written
 // after the caller has moved on to the document. A zero interval turns it off.
 //
-// The stop function is idempotent, which is what lets every early return defer it and the two
-// paths that write their own message to stderr call it first.
+// The stop function is idempotent, which is what lets the walk's refusal path close it before
+// writing its own account to stderr while every return still defers it.
 func planProgress(w io.Writer, ph *planPhase) func() {
 	if planProgressEvery <= 0 {
 		return func() {}
