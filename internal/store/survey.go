@@ -25,7 +25,8 @@ import (
 //
 // Those reconcile because the counts do not need the column. A jobs table WITHOUT
 // decision_inputs is by construction a ledger in which no row records any, so "0 moved, N
-// recording none" is a statement the row counts alone support. The read therefore turns on
+// recording none" is a statement the rows alone support; only the unrooted annotation beside
+// them needs a path, and the jobs table always has one. The read therefore turns on
 // the COLUMNS IT NEEDS rather than on the version stamp, which also means a later schema
 // that keeps the column keeps working here.
 //

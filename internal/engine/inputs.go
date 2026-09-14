@@ -90,9 +90,12 @@ func DecisionInputsFor(cfg config.Config) store.DecisionInputs {
 // compared the whole ledger against one value with no path in hand, so no encode profile
 // could move either side and a row decided under one was counted as still matching for ever.
 //
-// The resolution is memoized on (library root, encode profile), which is the whole of what
-// it depends on, so a 300,000-row ledger costs a handful of resolutions and one match per
-// row. The closure is stateful and is called row by row from the survey's one goroutine.
+// The resolution is memoized on (library root, encode profile NAME), which is the whole of
+// what it depends on, so a 300,000-row ledger costs a handful of resolutions and one match
+// per row. The name identifies the profile only because Config.validateProfiles refuses an
+// empty or duplicated one; a Config that has never been through Validate (which the engine's
+// own tests assemble freely) can therefore collapse two same-named profiles into one cached
+// resolution. The closure is stateful and is called row by row from the survey's one goroutine.
 func DecisionInputsPerPath(cfg config.Config) store.InputsForPath {
 	roots := cfg.RootProfiles()
 	top := cfg.TopLevelProfile()

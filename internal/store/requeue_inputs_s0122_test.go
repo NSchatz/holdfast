@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // S0122 - what the read-set rule does to a ledger an EARLIER BUILD wrote.
@@ -268,5 +269,81 @@ func TestRequeueInputs_AnUnrootedRowIsNamedWhateverTheRowRecorded(t *testing.T) 
 		t.Fatalf("SurveyLedgerDecisionInputs: %v", err)
 	} else if want := (DecisionInputsSurvey{NotRecorded: 2}); got != want {
 		t.Errorf("surveyed %+v, want %+v - every path is under a configured root here", got, want)
+	}
+}
+
+// bulkTerminalRows stands a large ledger up in ONE statement, generating the rows inside
+// SQLite rather than handing them over one Exec at a time. Seeding is not what is being
+// measured, and a Claim and a Finish per row would cost the gate several times what the
+// measurement itself does.
+func bulkTerminalRows(t *testing.T, s *SQLite, n int, in DecisionInputs) {
+	t.Helper()
+	if _, err := s.db.Exec(`INSERT INTO jobs
+		(path, fingerprint, status, fail_count, updated_at, reason, decision_inputs, schema_version)
+		WITH RECURSIVE seq(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM seq WHERE i + 1 < ?)
+		SELECT '/lib/f' || i || '.mkv', 'fp', ?, 0, ?, ?, ?, ? FROM seq`,
+		n, string(Skipped), now(), "already-at-target-codec", in.Encode(), currentStamp()); err != nil {
+		t.Fatalf("seed %d terminal rows: %v", n, err)
+	}
+	var got int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM jobs`).Scan(&got); err != nil {
+		t.Fatalf("count seeded rows: %v", err)
+	}
+	if got != n {
+		t.Fatalf("seeded %d row(s), want %d", got, n)
+	}
+}
+
+// TestRequeueInputs_TheSurveyCostPerTerminalRowIsMeasured measures what the per-path rule
+// costs the survey, because nothing else in this change does.
+//
+// The read went from one GROUP BY over idx_jobs_status_inputs to a row-by-row walk needing
+// path and reason, so that index no longer covers it - and this read runs at startup on the
+// same serialized connection the engine writes every job transition through.
+//
+// It is measured PER ROW and extrapolated to the 300,000-row ledger migration v10 names,
+// rather than seeding that ledger: the cost is linear in the terminal rows, and standing
+// 300,000 of them up costs the gate two minutes to learn a figure 20,000 give. Both numbers
+// are inflated several times over by `-race`, which the gate runs; the figure an operator's
+// build produces is the one this case prints without it.
+//
+// Timed and LOGGED, never asserted, for the reason TestAggregates_ComputedOverEveryRowNotThe
+// CappedViews gives: a threshold here is a clock-dependent flake, and a flaky test is one
+// somebody deletes later without knowing what it was for. What IS asserted is the property
+// the cost buys - one resolution offered per row, none skipped - which is the fix this file's
+// other cases grade, restated at a scale where an accidental early return would show up.
+func TestRequeueInputs_TheSurveyCostPerTerminalRowIsMeasured(t *testing.T) {
+	const (
+		rows  = 20_000
+		named = 300_000 // the ledger size migration v10's comment reasons about
+	)
+	s := openTest(t)
+	bulkTerminalRows(t, s, rows, sameConfig)
+
+	// Every path resolves, which is the expensive arm: the engine's resolver memoizes on
+	// (library root, encode profile) and answers a rooted path with a map hit and a match.
+	calls := 0
+	perPath := func(string) (DecisionInputs, bool) {
+		calls++
+		return sameConfig, true
+	}
+
+	started := time.Now()
+	got, err := s.SurveyDecisionInputs(context.Background(), perPath)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("SurveyDecisionInputs over %d rows: %v", rows, err)
+	}
+	perRow := elapsed / time.Duration(rows)
+	t.Logf("the per-path survey walked %d terminal rows in %v (%v per row, so about %v for the "+
+		"%d-row ledger), resolving %d path(s)", rows, elapsed, perRow, perRow*named, named, calls)
+
+	if want := (DecisionInputsSurvey{Matching: rows}); got != want {
+		t.Fatalf("surveyed %+v, want %+v - the fixture is not the ledger this case measures", got, want)
+	}
+	if calls != rows {
+		t.Errorf("the survey resolved %d path(s) over %d row(s): every terminal row's path is "+
+			"resolved, whatever that row recorded, or the unrooted condition goes unreported for "+
+			"the rows most likely to have it", calls, rows)
 	}
 }
