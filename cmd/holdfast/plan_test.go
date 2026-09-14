@@ -18,6 +18,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/engine"
 	"github.com/NSchatz/holdfast/internal/logging"
 	"github.com/NSchatz/holdfast/internal/probe"
+	"github.com/NSchatz/holdfast/internal/startup"
 	"github.com/NSchatz/holdfast/internal/store"
 )
 
@@ -1270,11 +1271,12 @@ func TestPlan_HelpListsFlagsAndExitCodes(t *testing.T) {
 // supervisor kills and retries.
 //
 // It is graded the way the clause says to grade it - emission during a SLOWED run - with the
-// interval shortened and every snapshot delayed, so what is asserted is the reporter rather
-// than how long these fixtures happen to take.
+// interval shortened and the phase delayed, so what is asserted is the reporter rather than
+// how long these fixtures happen to take. The clause binds the COMMAND, so BOTH phases a plan
+// spends time in are graded: the walk that establishes coverage, and the probe pass over what
+// it found. The walk is the one with no count of its own, which is why it is the one that
+// would go silent.
 func TestPlan_EmitsProgressWhileItRuns(t *testing.T) {
-	cfgPath, _, _ := planLibrary(t, "")
-
 	// The clause binds the SHIPPED command, so the interval this build ships is asserted
 	// first. Without this the case would prove only that a reporter it configured itself
 	// works, and would stay green over a build that reports every hour or not at all.
@@ -1285,27 +1287,53 @@ func TestPlan_EmitsProgressWhileItRuns(t *testing.T) {
 	planProgressEvery = 5 * time.Millisecond
 	t.Cleanup(func() { planProgressEvery = was })
 
-	planSnapshotWrap = func(real func(context.Context, string) *probe.VideoProps) func(context.Context, string) *probe.VideoProps {
-		return func(ctx context.Context, path string) *probe.VideoProps {
-			time.Sleep(40 * time.Millisecond)
-			return real(ctx, path)
+	t.Run("the probe pass", func(t *testing.T) {
+		cfgPath, _, _ := planLibrary(t, "")
+		planSnapshotWrap = func(real func(context.Context, string) *probe.VideoProps) func(context.Context, string) *probe.VideoProps {
+			return func(ctx context.Context, path string) *probe.VideoProps {
+				time.Sleep(40 * time.Millisecond)
+				return real(ctx, path)
+			}
 		}
-	}
-	t.Cleanup(func() { planSnapshotWrap = nil })
+		t.Cleanup(func() { planSnapshotWrap = nil })
+		errOut := planSaysItIsStillRunning(t, cfgPath)
+		if !strings.Contains(errOut, "probed so far") {
+			t.Fatalf("a slowed probe pass never said it was still running:\n%s", errOut)
+		}
+	})
 
+	// The walk runs BEFORE a single file is probed, and on a library of the scale this command
+	// is written for it is the part that can cross thirty seconds on its own. A reporter
+	// started after it would leave exactly that stretch silent.
+	t.Run("the library walk before it", func(t *testing.T) {
+		cfgPath, _, _ := planLibrary(t, "")
+		real := planWalk
+		planWalk = func(cfg *config.Config) startup.Result {
+			time.Sleep(60 * time.Millisecond)
+			return real(cfg)
+		}
+		t.Cleanup(func() { planWalk = real })
+		errOut := planSaysItIsStillRunning(t, cfgPath)
+		if !strings.Contains(errOut, "still walking the library") {
+			t.Fatalf("a slowed walk never said it was still running:\n%s", errOut)
+		}
+	})
+}
+
+// planSaysItIsStillRunning runs the slowed command and returns its stderr, having asserted the
+// half of L4 that is the same in both phases: L2 holds while progress is emitted, so stdout
+// still carries the one whole document and nothing else.
+func planSaysItIsStillRunning(t *testing.T, cfgPath string) string {
+	t.Helper()
 	var out, errOut bytes.Buffer
 	if code := dispatch([]string{"plan", "--json", "--config", cfgPath}, &out, &errOut); code != 0 {
 		t.Fatalf("plan --json code = %d, want 0 (stderr: %s)", code, errOut.String())
 	}
-	if !strings.Contains(errOut.String(), "probed so far") {
-		t.Fatalf("a slowed plan never said it was still running:\n%s", errOut.String())
-	}
-	// L2 holds while it does so: progress is narration, and stdout still carries the one
-	// document and nothing else.
 	var p plan
 	if err := json.Unmarshal(out.Bytes(), &p); err != nil {
 		t.Fatalf("the plan document does not parse whole: %v\n%s", err, out.String())
 	}
+	return errOut.String()
 }
 
 // --- small set helpers, so a failure prints the difference rather than two lengths ------

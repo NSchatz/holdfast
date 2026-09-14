@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -60,9 +61,10 @@ Flags:
   --json     write the whole plan as one JSON document to stdout, and nothing else to
              stdout; every human message and every error goes to stderr
 
-A plan takes one probe snapshot per covered file, so a large library takes a while. Every
-thirty seconds an unfinished run reports on stderr how many files it has probed so far, so a
-slow walk is distinguishable from a dead process.
+A plan walks the whole covered library and then takes one probe snapshot per covered file, so
+a large library takes a while. Every thirty seconds an unfinished run reports on stderr which
+of the two it is still doing, and how many files it has probed so far, so a slow library is
+distinguishable from a dead process.
 
 Exit codes:
   0  a report was produced. A REFUSED projection is still a report, so 0 is the ordinary
@@ -112,13 +114,24 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 // runPlan is the command without the signal wiring, so a test can cancel it in the middle
 // and assert that an interrupted run left the same nothing behind a completed one does.
 func runPlan(ctx context.Context, cfg *config.Config, opt planOptions, stdout, stderr io.Writer) int {
+	// A plan walks the whole covered library and then takes one probe snapshot per covered
+	// file, so a real one is minutes to hours and a command that says nothing for that long is
+	// one a supervisor kills and retries (cli L4). The clause binds the COMMAND, so the
+	// reporter starts HERE, before the walk: the walk is the phase with nothing of its own to
+	// count, which is exactly why it would be the phase that went silent.
+	ph := &planPhase{}
+	ph.walking.Store(true)
+	stop := planProgress(stderr, ph)
+	defer stop()
+
 	// The start-or-refuse decision, TAKEN and then reported rather than obeyed - exactly as
 	// `analyze` takes it, and through the same one construction, so a plan is bounded by the
 	// same walk a run would be bounded by. Storage that is not positively local is a verdict
 	// printed beside the plan rather than a reason to refuse, because this mutates nothing;
 	// every other cause is a plan that cannot be made.
-	res := startupDecision(cfg)
+	res := planWalk(cfg)
 	if !res.Start && res.Row != rowStorageNotLocal {
+		stop()
 		res.WriteRefusal(stderr)
 		return 1
 	}
@@ -131,16 +144,14 @@ func runPlan(ctx context.Context, cfg *config.Config, opt planOptions, stdout, s
 		defer func() { _ = ledger.Close() }()
 	}
 
-	// A plan takes one probe snapshot per covered file, so a real library is minutes to hours
-	// of ffprobe, and a command that says nothing for that long is one a supervisor kills and
-	// retries (cli L4). The count is the live one the pass is keeping as it goes.
-	var probed atomic.Int64
+	// The probe pass, which is the phase with a live count: from here the reporter says how
+	// many files it has read rather than that it is still establishing what to read.
+	ph.walking.Store(false)
 	snapshot := planSnapshot(eng)
-	stop := planProgress(stderr, &probed)
 	pass := eng.Plan(ctx, engine.PlanOptions{
 		Ledger: planLedgerReader(ledger),
 		Snapshot: func(ctx context.Context, path string) *probe.VideoProps {
-			probed.Add(1)
+			ph.probed.Add(1)
 			return snapshot(ctx, path)
 		},
 	})
@@ -163,19 +174,43 @@ func runPlan(ctx context.Context, cfg *config.Config, opt planOptions, stdout, s
 	return 0
 }
 
-// planProgressEvery is how often a pass that has not finished says so on stderr (cli L4). A
-// test sets a short interval rather than sleeping through this one.
+// planProgressEvery is how often a command that has not finished says so on stderr (cli L4).
+// A test sets a short interval rather than sleeping through this one.
 var planProgressEvery = 30 * time.Second
 
-// planProgress says on stderr how far the pass has got, every planProgressEvery, until the
+// planWalk is the library walk this command is bounded by, indirected for the same reason
+// planSnapshotWrap is: L4's grading route is emission during a SLOWED run, and the walk is
+// the phase with no count of its own to slow. Production is startupDecision itself.
+var planWalk = startupDecision
+
+// planPhase is what the command is doing while the reporter is running. There are two phases
+// and only the second has anything to count, so the phase is carried rather than inferred
+// from a zero - "no file probed yet" and "nothing left to probe" are the same number and
+// opposite news.
+type planPhase struct {
+	walking atomic.Bool
+	probed  atomic.Int64
+}
+
+// line is what an operator reads. It reports PROBE SNAPSHOTS once there are any, because that
+// is what a plan spends its time on, and it names them as such rather than as a percentage:
+// the pass does not know how many files it will cover until it has covered them, and a
+// progress figure that implied otherwise would be the one kind of number this command is
+// written not to publish.
+func (ph *planPhase) line() string {
+	if ph.walking.Load() {
+		return "holdfast plan: still walking the library to establish what it covers - nothing is probed yet"
+	}
+	return fmt.Sprintf("holdfast plan: still reading the library - %d file(s) probed so far", ph.probed.Load())
+}
+
+// planProgress says on stderr how far the command has got, every planProgressEvery, until the
 // function it returns is called - which waits for the reporter to stop, so nothing is written
 // after the caller has moved on to the document. A zero interval turns it off.
 //
-// It reports PROBE SNAPSHOTS because that is what a plan spends its time on, and it names
-// them as such rather than as a percentage: the pass does not know how many files it will
-// cover until it has covered them, and a progress figure that implied otherwise would be the
-// one kind of number this command is written not to publish.
-func planProgress(w io.Writer, probed *atomic.Int64) func() {
+// The stop function is idempotent, which is what lets every early return defer it and the two
+// paths that write their own message to stderr call it first.
+func planProgress(w io.Writer, ph *planPhase) func() {
 	if planProgressEvery <= 0 {
 		return func() {}
 	}
@@ -189,12 +224,12 @@ func planProgress(w io.Writer, probed *atomic.Int64) func() {
 			case <-done:
 				return
 			case <-tick.C:
-				fmt.Fprintf(w, "holdfast plan: still reading the library - %d file(s) probed so far\n",
-					probed.Load())
+				fmt.Fprintln(w, ph.line())
 			}
 		}
 	}()
-	return func() { close(done); <-stopped }
+	var once sync.Once
+	return func() { once.Do(func() { close(done); <-stopped }) }
 }
 
 // planEngine builds the read-only pass: the prober it probes with, the ledger it reads
