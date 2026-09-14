@@ -25,7 +25,7 @@ import (
 // (`server_auth_token`) on the mutating endpoints, and the read token
 // (`server_read_token`) on the reads under /api when it is configured. The dashboard page
 // and /metrics are gated by neither, for the reasons given at their routes. It holds no
-// media handles — every mutating action routes through the Controller (scan/pause), which
+// media handles - every mutating action routes through the Controller (scan/pause), which
 // cannot touch a file.
 type Server struct {
 	baseCtx context.Context
