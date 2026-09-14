@@ -14,14 +14,15 @@
 //
 // # What it checks, and what it deliberately does not
 //
-// It checks PRESENCE and one token. It does not judge whether the prose is true, or
-// well written, or complete - no mechanical check can, and one that pretended to would
-// either fail good documentation or pass bad. Precisely:
+// It checks PRESENCE, tokens, and two things about where a file IS. It does not judge
+// whether the prose is true, or well written, or complete - no mechanical check can, and
+// one that pretended to would either fail good documentation or pass bad. Precisely:
 //
-//   - Four fixed anchors must exist: residual-window-local, residual-window-network,
-//     reverse-proxy-posture and swap-metadata. They are FIXED here rather than chosen
-//     per-run, because a check free to pick its own anchor is a check that can be made to
-//     pass by moving the goalposts.
+//   - Seven fixed anchors must exist: residual-window-local, residual-window-network,
+//     reverse-proxy-posture, swap-metadata, swap-invariant, vmaf-pooling and
+//     null-is-not-zero. They are FIXED here rather than chosen per-run, because a check
+//     free to pick its own anchor is a check that can be made to pass by moving the
+//     goalposts.
 //   - A statement is PRESENT only when its anchor exists AND at least one non-blank
 //     line follows it, before the next anchor or heading, that is not itself a heading
 //     or an anchor. An anchor with nothing under it is not a statement.
@@ -36,6 +37,28 @@
 //     what a deploying operator has to read in one place.
 //   - The swap-metadata statement owes four clauses under the same one-statement rule
 //     (see SwapMetadataClauses).
+//   - The three anchors in AgreeingRules owe their clauses at EVERY occurrence rather
+//     than at one: see "Existence, and agreement" below.
+//   - A repository-relative link in CLAUDE.md or README.md must resolve to a path in the
+//     tree, and a document under docs/design/ must be linked from CLAUDE.md. Those two
+//     read the TREE as well as the text, so they take a root and live under CheckRepo
+//     rather than Check.
+//
+// # Existence, and agreement
+//
+// The four older anchors are satisfied by ANY occurrence: the obligation is that the
+// statement exists in what the repository ships, so a second document carrying a shorter
+// restatement is not an error, and the rule reports a problem only when NO occurrence
+// satisfies it.
+//
+// That is the right rule for an obligation about the corpus and the wrong one for an
+// argument the documents restate. Under it a second copy may quietly drop a clause while
+// the strong copy keeps the gate green, and a reader who lands on the weak copy is missing
+// the clause with nothing to tell them so. So for the three anchors in AgreeingRules every
+// occurrence must carry every clause, and a copy that does not is named along with the
+// clause it does not carry. Faithful repetition still passes - the rule is about what each
+// occurrence SAYS, never about how many there are - and which document carries an anchor is
+// still not this package's business.
 //
 // # Why the swap-metadata anchor exists
 //
@@ -79,19 +102,27 @@
 //     filenames would lose the first time somebody wrote docs/nfs.md and put the
 //     statement there instead.
 //
-// At the time of writing that walk finds five files: README.md, CLAUDE.md,
-// docs/docker.md, docs/filesystem.md and docs/migration.md. Which of them carries the
-// anchors is not fixed and is not this package's business - the obligation is about the
-// TEXT the repository ships, so a statement anywhere in the corpus satisfies it and a
-// statement outside the corpus satisfies nothing however it is anchored. (Today the two
-// residual-window statements are in docs/filesystem.md, beside the rest of what the
-// storage a library sits on costs, and the reverse-proxy posture statement is in
-// docs/docker.md beside the rest of the control surface; that is a choice about where
-// the prose reads best, not a narrowing of the set this package checks.)
+// Which file carries an anchor is not fixed and is not this package's business - the
+// obligation is about the TEXT the repository ships, so a statement anywhere in the corpus
+// satisfies it and a statement outside the corpus satisfies nothing however it is
+// anchored. (Today the two residual-window statements are in docs/filesystem.md, beside
+// the rest of what the storage a library sits on costs, the reverse-proxy posture and
+// swap-metadata statements are in docs/docker.md beside the rest of the control surface,
+// and the three agreeing statements are one per document under docs/design/; that is a
+// choice about where the prose reads best, not a narrowing of the set this package
+// checks.)
+//
+// For an anchor in AgreeingRules "anywhere in the corpus" is still where it may be
+// written, and it is no longer the whole rule: a SECOND occurrence is checked too, so
+// carrying an anchor in more than one file is an error when those occurrences say
+// different things. The two rules under docs/design/ are the only place this package
+// takes an interest in a path at all, and neither says which document an anchor belongs
+// in.
 package docscheck
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -131,9 +162,18 @@ const AnchorSwapMetadata = "swap-metadata"
 // token that carries it. The token is what is CHECKED; the clause is what a failure
 // message says was missing, so a reader learns what to write rather than which string to
 // paste.
+//
+// Also carries the REST of the tokens one clause owes, for a clause that is compound in
+// the criterion that defines it - "the encode goes to a same-directory temp and the swap
+// is the only filesystem mutation, an atomic same-filesystem rename" is one obligation
+// with three halves, and a single token for it would grade whichever half was picked and
+// let the others be dropped in silence. Every token in Token plus Also must be carried,
+// by the same statement, for the clause to count as said. Empty for a clause one token
+// carries whole, which is every clause of the four rules that predate it.
 type Clause struct {
 	Token  string
 	Clause string
+	Also   []string
 }
 
 // ReverseProxyClause is Clause under the name it had when the reverse-proxy rule was the
@@ -195,6 +235,118 @@ var SwapMetadataClauses = []Clause{
 		Token:  "acls and xattrs are not carried",
 		Clause: "ACLs and xattrs are not carried onto the replacement",
 	},
+}
+
+// The three anchors under the AGREEMENT rule. Each introduces an argument the repository
+// states in one place and points at from everywhere else, and each is checked at EVERY
+// occurrence rather than at the best one - see AgreeingRules.
+const (
+	AnchorSwapInvariant = "swap-invariant"
+	AnchorVmafPooling   = "vmaf-pooling"
+	AnchorNullIsNotZero = "null-is-not-zero"
+)
+
+// SwapInvariantClauses is the whole of what the swap-invariant statement owes: the
+// promise itself, the shape of the only mutation that keeps it, what a refusal leaves
+// behind, and the half of the promise that a crash rather than a gate decides.
+//
+// The durability clause is the one a reader is least likely to supply for themselves. An
+// atomic rename is atomic for a concurrent READER and says nothing about a power loss an
+// instant later, so a statement that stops at "atomic" has described a weaker property
+// than the one holdfast implements, and the kept-source failure mode - the single place
+// where holdfast declines to finish a swap it has already proved - would go unwritten.
+var SwapInvariantClauses = []Clause{
+	{
+		Token:  "no source is mutated until a replacement has passed every gate",
+		Clause: "no source is mutated until a replacement has passed every gate",
+	},
+	{
+		Token: "same-directory temp",
+		Also:  []string{"the only filesystem mutation", "atomic same-filesystem rename"},
+		Clause: "the encode goes to a same-directory temp and the swap is the only filesystem " +
+			"mutation there is, an atomic same-filesystem rename",
+	},
+	{
+		Token:  "leaves the source byte-for-byte intact",
+		Also:   []string{"discards the temp"},
+		Clause: "any gate failure discards the temp and leaves the source byte-for-byte intact",
+	},
+	{
+		Token: "durable rather than merely atomic",
+		Also:  []string{"fsyncs the parent directory", "the source is kept"},
+		Clause: "the rename is made durable rather than merely atomic, the parent directory " +
+			"being fsynced after it and the source KEPT when that fsync fails",
+	},
+}
+
+// VmafPoolingClauses is the whole of what the vmaf-pooling statement owes. Three of its
+// four clauses are carried by identifiers this repository already treats as fixed
+// (min_vmaf, vmaf_min_pool and vmaf_min_chroma are config keys), which is what makes the
+// "all three floors, all on by default" clause checkable at all: a statement that names
+// two floors and forgets the third reads as complete.
+var VmafPoolingClauses = []Clause{
+	{
+		Token: "bounds the worst frame",
+		Also:  []string{"an average hides local damage"},
+		Clause: "the gate bounds the worst frame and not only the average, because an average " +
+			"hides local damage",
+	},
+	{
+		Token: "min_vmaf",
+		Also:  []string{"vmaf_min_pool", "vmaf_min_chroma", "all on by default"},
+		Clause: "the mean floor (min_vmaf), the worst-frame pool floor (vmaf_min_pool) and the " +
+			"chroma floor (vmaf_min_chroma) are all on by default and all named",
+	},
+	{
+		Token: "luma-only vmaf model cannot see colour",
+		Also:  []string{"the chroma floor is separate"},
+		Clause: "the luma-only VMAF model cannot see colour at all, which is why the chroma " +
+			"floor is separate",
+	},
+	{
+		Token:  "cannot be measured is rejected",
+		Also:   []string{"assumed good"},
+		Clause: "an output that cannot be MEASURED is rejected rather than assumed good",
+	},
+}
+
+// NullIsNotZeroClauses is the whole of what the null-is-not-zero statement owes. The
+// middle clause is the reason the rule exists rather than a restatement of it: a zero is
+// not a cautious answer but a confident wrong one, and nothing in a response tells a
+// client that this zero was never read.
+var NullIsNotZeroClauses = []Clause{
+	{
+		Token:  "explicit null",
+		Also:   []string{"never as 0"},
+		Clause: "an unreadable figure is reported as an explicit null and never as 0",
+	},
+	{
+		Token:  "a zero would claim the ledger is empty",
+		Clause: "a zero would claim the ledger is empty beside rows the caller can already see",
+	},
+	{
+		Token:  "the rows still ship",
+		Also:   []string{"never costs an operator the records"},
+		Clause: "the rows still ship, so one unreadable figure never costs an operator the records",
+	},
+}
+
+// Rule is one anchored obligation: the anchor, the name a failure message calls the
+// statement, and the clauses it owes.
+type Rule struct {
+	Anchor  string
+	What    string
+	Clauses []Clause
+}
+
+// AgreeingRules are the anchors held to the AGREEMENT rule, and the list is the whole of
+// what that rule applies to. The four older anchors are deliberately NOT here: they keep
+// the any-occurrence-satisfies rule they were written under, so this file adds a check
+// and removes none. See Check for what the difference buys.
+var AgreeingRules = []Rule{
+	{AnchorSwapInvariant, "swap-invariant", SwapInvariantClauses},
+	{AnchorVmafPooling, "VMAF pooling", VmafPoolingClauses},
+	{AnchorNullIsNotZero, "null-is-not-zero", NullIsNotZeroClauses},
 }
 
 // NetworkToken is the case-insensitive substring the NETWORK statement must carry. It
@@ -318,14 +470,21 @@ func findStatement(path, anchor string) (Statement, error) {
 	return st, nil
 }
 
-// Check applies the whole rule to a corpus and returns one problem per line, empty when
-// the documentation satisfies it.
+// Check applies the anchor rules to a corpus and returns one problem per line, empty when
+// the documentation satisfies them. Two rules, and which one an anchor is held to is
+// fixed by AgreeingRules rather than chosen per run.
 //
-// An anchor appearing in more than one file is not an error: the check wants the
-// statement to EXIST in what the repository ships, so ANY occurrence that satisfies the
-// rule satisfies the criterion, and the problem is only reported when NONE does. The
-// message then names the strongest near-miss, so a failure points at a file rather than
-// saying "nowhere".
+// For the four ORIGINAL anchors an anchor appearing in more than one file is not an
+// error: the check wants the statement to EXIST in what the repository ships, so ANY
+// occurrence that satisfies the rule satisfies the criterion, and the problem is only
+// reported when NONE does. The message then names the strongest near-miss, so a failure
+// points at a file rather than saying "nowhere".
+//
+// For the three anchors in AgreeingRules EVERY occurrence must carry every clause. That
+// is the difference between enforcing that an argument is written down somewhere and
+// enforcing that the documents AGREE about it: under the any-occurrence rule a second
+// copy may quietly drop a clause, and a reader who lands on that copy is missing the
+// clause with nothing to tell them so.
 func Check(files []string) ([]string, error) {
 	var problems []string
 
@@ -374,7 +533,39 @@ func Check(files []string) ([]string, error) {
 	}
 	problems = append(problems, checkClauses(metadata, AnchorSwapMetadata, "swap-metadata", SwapMetadataClauses)...)
 
+	for _, r := range AgreeingRules {
+		sts, err := statements(files, r.Anchor)
+		if err != nil {
+			return nil, err
+		}
+		problems = append(problems, checkClausesEveryOccurrence(sts, r.Anchor, r.What, r.Clauses)...)
+	}
+
 	return problems, nil
+}
+
+// CheckRepo applies every rule this package owns to a repository rooted at root: the
+// anchor rules of Check, plus the two that need to resolve a PATH and so cannot be
+// decided from the corpus text alone.
+//
+// It takes the root explicitly for the same reason Corpus does. A link is
+// repository-relative, and a check that guessed its own root would resolve the same link
+// against a different tree depending on who invoked it - which is the failure mode where
+// a gate reports green over links it never resolved.
+func CheckRepo(root string, files []string) ([]string, error) {
+	problems, err := Check(files)
+	if err != nil {
+		return nil, err
+	}
+	dead, err := CheckLinks(root, files)
+	if err != nil {
+		return nil, err
+	}
+	orphans, err := CheckDesignDocs(root, files)
+	if err != nil {
+		return nil, err
+	}
+	return append(append(problems, dead...), orphans...), nil
 }
 
 // checkClauses applies the multi-clause rule to one anchor: the statement must exist, must
@@ -389,13 +580,9 @@ func Check(files []string) ([]string, error) {
 func checkClauses(sts []Statement, anchor, what string, clauses []Clause) []string {
 	switch {
 	case len(sts) == 0:
-		return []string{fmt.Sprintf(
-			"no shipped document carries the anchor %q - the %s statement is MISSING", anchor, what)}
+		return []string{noSuchAnchor(anchor, what)}
 	case !anyPresent(sts):
-		return []string{fmt.Sprintf(
-			"%s: the anchor %q is present but nothing follows it - an anchor with no text is not a statement, "+
-				"so the %s statement is MISSING",
-			sts[0].File, anchor, what)}
+		return []string{bareAnchor(sts[0].File, anchor, what)}
 	}
 
 	// ONE statement must carry every clause. Report against the strongest near-miss, so a
@@ -403,13 +590,79 @@ func checkClauses(sts []Statement, anchor, what string, clauses []Clause) []stri
 	best := bestClauseStatement(sts, clauses)
 	var problems []string
 	for _, c := range clauses {
-		if !strings.Contains(normalize(best.Text), c.Token) {
+		if !carries(normalize(best.Text), c) {
 			problems = append(problems, fmt.Sprintf(
 				"%s: the %s statement never says %q, so the statement that %s is MISSING",
-				best.File, what, c.Token, c.Clause))
+				best.File, what, missingToken(normalize(best.Text), c), c.Clause))
 		}
 	}
 	return problems
+}
+
+// checkClausesEveryOccurrence is the AGREEMENT rule: the statement must exist, and EVERY
+// occurrence of it must carry every clause it owes. It is the same obligation
+// checkClauses applies, asked of each occurrence rather than of the best one, so a second
+// copy that drops a clause is a failure naming that copy rather than a near-miss the
+// stronger copy hides.
+//
+// A duplicate that merely repeats the statement faithfully passes: the rule is about what
+// each occurrence SAYS, never about how many there are. Which document carries an anchor
+// is still not this package's business.
+func checkClausesEveryOccurrence(sts []Statement, anchor, what string, clauses []Clause) []string {
+	if len(sts) == 0 {
+		return []string{noSuchAnchor(anchor, what)}
+	}
+	var problems []string
+	for _, s := range sts {
+		if !s.Present() {
+			problems = append(problems, bareAnchor(s.File, anchor, what))
+			continue
+		}
+		text := normalize(s.Text)
+		for _, c := range clauses {
+			if carries(text, c) {
+				continue
+			}
+			problems = append(problems, fmt.Sprintf(
+				"%s: this occurrence of the %s statement never says %q, so the statement that %s is "+
+					"MISSING from it - every occurrence of %q carries every clause it owes or the "+
+					"shipped documents disagree with each other",
+				s.File, what, missingToken(text, c), c.Clause, anchor))
+		}
+	}
+	return problems
+}
+
+// noSuchAnchor and bareAnchor are the two ways a statement can be absent rather than
+// incomplete, worded identically for both rules: a reader who needs the clause finds
+// nothing in either case, and a gate that described the same absence two ways would read
+// as two different problems.
+func noSuchAnchor(anchor, what string) string {
+	return fmt.Sprintf("no shipped document carries the anchor %q - the %s statement is MISSING", anchor, what)
+}
+
+func bareAnchor(file, anchor, what string) string {
+	return fmt.Sprintf(
+		"%s: the anchor %q is present but nothing follows it - an anchor with no text is not a statement, "+
+			"so the %s statement is MISSING",
+		file, anchor, what)
+}
+
+// carries reports whether normalised text carries every token one clause owes.
+func carries(text string, c Clause) bool {
+	return missingToken(text, c) == ""
+}
+
+// missingToken is the first token of a clause the text does not carry, "" when it carries
+// them all. It is what a failure message names, so a compound clause points at the half
+// that is actually absent rather than at the whole obligation.
+func missingToken(text string, c Clause) string {
+	for _, t := range append([]string{c.Token}, c.Also...) {
+		if !strings.Contains(text, t) {
+			return t
+		}
+	}
+	return ""
 }
 
 // bestClauseStatement returns the present statement carrying the most of these clauses.
@@ -424,7 +677,7 @@ func bestClauseStatement(sts []Statement, clauses []Clause) Statement {
 		}
 		score := 0
 		for _, c := range clauses {
-			if strings.Contains(normalize(s.Text), c.Token) {
+			if carries(normalize(s.Text), c) {
 				score++
 			}
 		}
@@ -487,4 +740,144 @@ func firstPresent(sts []Statement) Statement {
 		}
 	}
 	return sts[0]
+}
+
+// --- the two rules that resolve a PATH ----------------------------------------
+//
+// Everything above decides its answer from the TEXT of the corpus. These two decide it
+// from the text AND the tree, which is why they take a root and why they are not part of
+// Check: a link and an orphan are both claims about where a file IS.
+
+// LinkedDocs are the documents whose repository-relative links are resolved. They are the
+// two a reader arrives at without being sent - the front door and the agent's brief - so
+// a dead link in one of them is a reader who never reaches the document that was written
+// for them. Every other document is reached THROUGH these.
+var LinkedDocs = []string{"CLAUDE.md", "README.md"}
+
+// IndexDoc is the document a design document has to be reachable from.
+const IndexDoc = "CLAUDE.md"
+
+// DesignDir holds one document per argument. A document here that nothing links to is the
+// specific failure a consolidation can cause: the argument was moved out of the file that
+// used to carry it, into a file no reader is ever sent to.
+const DesignDir = "docs/design"
+
+// linkRe matches an inline Markdown link or image and captures its target. Reference-style
+// links are not matched because this repository writes none; a link shape nothing in the
+// corpus uses would be a rule with no fixture behind it.
+var linkRe = regexp.MustCompile(`!?\[[^\]]*\]\(([^)]+)\)`)
+
+// repoLinks returns every REPOSITORY-RELATIVE link target in a file, with any title and
+// any #fragment stripped.
+//
+// Absolute http:, https: and mailto: targets are dropped rather than checked. `make
+// check` runs on every pull request and must not depend on a third party being up: a gate
+// that reds because somebody else had a bad afternoon is a gate the author cannot fix, and
+// the same argument keeps the ffmpeg liveness probe out of it.
+//
+// The fragment goes before resolution because a fragment names a place INSIDE a document,
+// never a file: docs/design/swap.md#swap-invariant is a link to docs/design/swap.md, and
+// resolving the whole string would report every anchored cross-reference in the repository
+// as dead.
+func repoLinks(path string) ([]string, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, m := range linkRe.FindAllStringSubmatch(string(body), -1) {
+		t := strings.TrimSpace(m[1])
+		if i := strings.IndexAny(t, " \t"); i >= 0 {
+			t = t[:i] // [text](path "title")
+		}
+		t = strings.Trim(t, "<>")
+		low := strings.ToLower(t)
+		if strings.HasPrefix(low, "http:") || strings.HasPrefix(low, "https:") || strings.HasPrefix(low, "mailto:") {
+			continue
+		}
+		if i := strings.Index(t, "#"); i >= 0 {
+			t = t[:i]
+		}
+		if t = strings.TrimSpace(t); t == "" {
+			continue // a bare #fragment names no file
+		}
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+// resolve turns one link target into a path on disk. A target is relative to the document
+// that carries it, which is what a Markdown reader does with it; a leading slash is read
+// from the repository root.
+func resolve(root, file, target string) string {
+	if strings.HasPrefix(target, "/") {
+		return filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(target, "/")))
+	}
+	return filepath.Join(filepath.Dir(file), filepath.FromSlash(target))
+}
+
+// rel is a path as a document would write it: relative to the repository root, with
+// forward slashes whatever the host uses.
+func rel(root, path string) string {
+	r, err := filepath.Rel(root, path)
+	if err != nil {
+		return path
+	}
+	return filepath.ToSlash(r)
+}
+
+// CheckLinks reports every repository-relative link in LinkedDocs whose target is not in
+// the tree.
+func CheckLinks(root string, files []string) ([]string, error) {
+	linked := map[string]bool{}
+	for _, d := range LinkedDocs {
+		linked[d] = true
+	}
+	var problems []string
+	for _, f := range files {
+		name := rel(root, f)
+		if !linked[name] {
+			continue
+		}
+		targets, err := repoLinks(f)
+		if err != nil {
+			return nil, err
+		}
+		for _, t := range targets {
+			if _, err := os.Stat(resolve(root, f, t)); err != nil {
+				problems = append(problems, fmt.Sprintf(
+					"%s: the link to %q names a path that is not in the tree - a reader following it gets nothing",
+					name, t))
+			}
+		}
+	}
+	return problems, nil
+}
+
+// CheckDesignDocs reports every document under DesignDir that no line in IndexDoc links
+// to. An IndexDoc that does not exist links to nothing, so every design document is
+// orphaned by it, which is the honest answer rather than a vacuous pass.
+func CheckDesignDocs(root string, files []string) ([]string, error) {
+	index := filepath.Join(root, IndexDoc)
+	targets, err := repoLinks(index)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	linked := map[string]bool{}
+	for _, t := range targets {
+		linked[rel(root, resolve(root, index, t))] = true
+	}
+
+	var problems []string
+	for _, f := range files {
+		name := rel(root, f)
+		if !strings.HasPrefix(name, DesignDir+"/") || linked[name] {
+			continue
+		}
+		problems = append(problems, fmt.Sprintf(
+			"%s: no line in %s links to it - a rationale document nothing points at is one a reader never reaches, "+
+				"which is exactly how moving an argument out of the file that used to carry it loses it",
+			name, IndexDoc))
+	}
+	return problems, nil
 }

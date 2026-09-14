@@ -20,17 +20,7 @@ git.
 atomic same-filesystem `rename()` from a path in the SOURCE's own directory, and
 it runs only after the output passes: correct codec, duration and packet parity,
 strictly-smaller, per-type stream-count parity, full decode-integrity, and VMAF.
-Any gate failure discards the encode and leaves the source byte-for-byte intact.
-This is the exact fix for Tdarr's documented replace-before-verify data loss.
-
-Where the encode is WRITTEN is configurable and the swap is not. By default it is
-a temp beside the source and that rename is the only filesystem mutation there is.
-With `scratch_dir` set the encoder writes into the scratch directory, nothing at
-all appears under the source's directory until the gates have accepted, and the
-accepted bytes are then copied into a temp beside the source - proved identical
-to what the gates passed - for the same rename. Never a rename or a move out of
-the scratch directory onto the source or into its directory: one swap shape on
-every mount is what keeps the EXDEV refusal meaning what it says.
+Where the encode is WRITTEN is configurable and the swap is not.
 
 Fail-safe rule: ambiguous, malformed or unsupported input SKIPS with a logged
 reason or returns a typed error. Never a confident wrong result, never a silent
@@ -42,6 +32,18 @@ underscore forms are pre-rename identifiers and must not exist;
 `scripts/check-pins.sh` fails on any that reappear and is mutation-tested to
 prove it still bites. A line may quote a banned identifier only to prohibit it,
 and only with a `rename-guard-allow` marker.
+
+## Design rationale
+
+One argument, one home, each anchored and each named here by its rule only - the
+reasoning lives in the document, not in this file.
+
+- **No source is mutated until a replacement has passed every gate** -
+  [`docs/design/swap.md`](docs/design/swap.md#swap-invariant).
+- **The quality gate bounds the worst frame, not only the average** -
+  [`docs/design/quality-gate.md`](docs/design/quality-gate.md#vmaf-pooling).
+- **An unreadable figure is reported as null, never as a zero** -
+  [`docs/design/ledger-totals.md`](docs/design/ledger-totals.md#null-is-not-zero).
 
 ## Layout
 
