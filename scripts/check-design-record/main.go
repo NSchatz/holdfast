@@ -28,6 +28,16 @@
 // graded by the engine, in the dashboard job. `make check-design-record-selftest` defeats
 // every failure mode above and every blocklist entry in turn, against a mutated COPY of
 // the tree. A guard nobody tries to defeat is a guard nobody knows works.
+//
+// WHAT IT DOES NOT DECIDE, said out loud rather than implied. It reads SOURCE TEXT, which
+// is what C2 prescribes in those words, so it decides what a file says and never what the
+// cascade resolved, what the engine substituted for a face it could not find, or what a
+// reader saw. It matches names, so a face reached through a CSS escape sequence, a
+// runtime-assembled class or a stylesheet fetched at load time is outside it - the page
+// fetches nothing at load time and is generated from committed sources, which is what
+// makes that bound acceptable here rather than merely convenient. And it never reads the
+// design record's prose: a reason has to BE there and be a sentence, and whether it is a
+// GOOD reason is a question for the human reading the diff.
 package main
 
 import (
