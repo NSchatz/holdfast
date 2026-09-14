@@ -21,6 +21,13 @@ import {
   craftContainers,
 } from "./graders.mjs";
 
+// REPORT marks a line printed for a READER OF THE GATE rather than for the runner: a
+// reading a criterion requires to be NAMED even when nothing failed, which is what an
+// unmeasured region is. The Go wrapper swallows the runner's output on success, so it
+// lifts every line carrying this marker back out where `go test -v` - and so
+// `make webui-check` - shows it. Its other reader is `internal/webui/e2e_test.go`.
+const REPORT = "e2e-report: ";
+
 // The four worlds: each colour-scheme preference the engine can be put in, at the phone
 // width F9 names and at a desktop width.
 const WORLDS = [];
@@ -68,9 +75,9 @@ test("hierarchy and density hold in every theme at every width, and every world 
   }
 
   for (const m of measured) {
-    console.log(`craft: ${m.world} measured ${m.figures} figure(s), ${m.containers} bordered or raised container(s), ${m.sizes} painted text size(s)`);
+    console.log(`${REPORT}craft: ${m.world} measured ${m.figures} figure(s), ${m.containers} bordered or raised container(s), ${m.sizes} painted text size(s)`);
   }
-  for (const line of unmeasured) console.log(`craft: ${line}`);
+  for (const line of unmeasured) console.log(`${REPORT}craft: ${line}`);
   testInfo.annotations.push({ type: "craft", description: JSON.stringify({ measured, unmeasured }) });
 
   expect(problems, problems.join("\n")).toEqual([]);
@@ -106,7 +113,7 @@ test("hierarchy and density are decided under a snapshot with nothing to list", 
   const withFigures = s.hierarchy.regions.filter((r) => r.figures.length > 0);
   const without = s.hierarchy.regions.filter((r) => r.figures.length === 0);
   for (const r of without) {
-    console.log(`craft: [empty snapshot] ${r.what} ("${r.heading}") rendered no figure: UNMEASURED for interface-craft C3`);
+    console.log(`${REPORT}craft: [empty snapshot] ${r.what} ("${r.heading}") rendered no figure: UNMEASURED for interface-craft C3`);
   }
   testInfo.annotations.push({ type: "craft", description: JSON.stringify({
     regions: s.hierarchy.regions.map((r) => ({ what: r.what, figures: r.figures.length })),
