@@ -1,16 +1,17 @@
 # Secrets: a credential is reached by reference
 
-holdfast reads three credential-bearing configuration keys, and none of them holds a
+holdfast reads four credential-bearing configuration keys, and none of them holds a
 credential. Each holds a **reference** - the name of a secret and the kind of place it
 lives - and the value is resolved at the point of use. That is the whole design, and it
 exists because a secret an agent or an operator *read* is a secret in a transcript,
 whether or not it ever reached a file.
 
-The three keys:
+The four keys:
 
 | key | what the credential is | what happens when it is absent |
 |---|---|---|
-| `server_auth_token` | the bearer token the MUTATING API endpoints require | `rescan`, `pause`, `resume` answer 403: remote control is off |
+| `server_auth_token` | the bearer token the MUTATING API endpoints require | `rescan`, `scan`, `pause`, `resume` answer 403: remote control is off |
+| `server_read_token` | the bearer token the READ endpoints under `/api` require | those four endpoints are OPEN, which is the shipped default. They carry the full path of every file holdfast has seen, so on a non-loopback bind that is the whole library served without a credential, and holdfast says so at startup. It does not gate the dashboard page |
 | `notify_url` | a shoutrrr service URL, which carries its credential in its own userinfo, host, path or query | notifications are off |
 | `tautulli_api_key` | the Tautulli API key | the Plex-aware pause is off |
 
@@ -93,7 +94,7 @@ At **start**, before the library is walked and before a single frame is encoded:
 
 `holdfast validate` performs step 1 and not step 2: proving that a reference *resolves*
 means reaching into a secret store, which belongs to a run rather than to a configuration
-check. `run` and `serve` both do both - `run` consumes none of the three keys itself, and
+check. `run` and `serve` both do both - `run` consumes none of the four keys itself, and
 still resolves them, because a configuration error an operator finds after a four-hour pass
 was reported too late.
 

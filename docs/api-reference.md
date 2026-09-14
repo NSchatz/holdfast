@@ -107,7 +107,8 @@ container paths differ, is in [docs/docker.md](docker.md#telling-holdfast-about-
 
 It is **token-gated**, like `rescan`, `pause` and `resume`: `Authorization: Bearer <the
 value server_auth_token points at>`. With no control token configured it answers **403**
-and the endpoint is off.
+and the endpoint is off. A `server_read_token` buys nothing here: the read token authorises
+reads and never a mutation, and presenting it on this endpoint is a **401**.
 
 It adds **no gate and skips none**. An accepted path is handed to the same pipeline entry
 point a whole-library scan's worker uses, so every guard, the claim, the decision-input
@@ -586,7 +587,12 @@ response and no `holdfast export` line carries it, and the shapes documented abo
 
 ### Observability & host-fair scheduling (`serve`)
 
-- **Prometheus** (`/metrics`, default on): `holdfast_files_total{outcome}`, `holdfast_bytes_reclaimed_total`,
+- **Prometheus** (`/metrics`, default on): whether it is reachable is governed by `metrics_enable` and by
+  nothing else - `server_read_token` does not gate it, and neither does `server_auth_token`. The exposition
+  carries counters, a byte total, two histograms and a gauge, labelled only by outcome and by state, so it
+  **names no file**; a scrape credential is also the one thing a Prometheus deployment most often cannot
+  supply. That premise is a test, so a later metric that labelled a series by path would fail the build.
+  The series are `holdfast_files_total{outcome}`, `holdfast_bytes_reclaimed_total`,
   `holdfast_encode_duration_seconds`, `holdfast_vmaf_score` (perceptual-quality distribution), and a
   `holdfast_queue_depth{state}` gauge read live from the store. Metrics are read-only instrumentation -
   best-effort, never affecting file handling.

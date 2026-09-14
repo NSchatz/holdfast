@@ -114,10 +114,11 @@ tool proves its unhappy paths.
   `make install-hooks` (the one setup step) puts it on the pre-commit path. Both
   `secret-scan` and its self-test ride `make check`. Synthetic
   `config.example.yaml` only; real `config.yaml` is gitignored.
-- A credential is reached BY REFERENCE. `server_auth_token`, `notify_url` and
-  `tautulli_api_key` carry `file:<path>` or `cmd:<argv>`, never a value, and a literal
-  in the file or in `HOLDFAST_*` refuses to start - a credential in holdfast's
-  environment is inherited by every `ffmpeg` child. A resolved value is a
+- A credential is reached BY REFERENCE. `server_auth_token`, `server_read_token`,
+  `notify_url` and `tautulli_api_key` carry `file:<path>` or `cmd:<argv>`, never a value,
+  and a literal in the file or in `HOLDFAST_*` refuses to start - a credential in
+  holdfast's environment is inherited by every `ffmpeg` child. `config.SecretBearingKeys`
+  is the closed list; a new credential-bearing key joins it or it is not one. A resolved value is a
   `secret.Value`, which renders as `<redacted>` through `fmt`, `slog`, JSON and text;
   `Expose()` is the only route to the plaintext, so grep for it to find every site
   that reads one. `docs/secrets.md` is the reference.

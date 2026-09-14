@@ -474,10 +474,33 @@ dry_run: false
 #                              #   opt in — then front it with a reverse proxy).
 # server_auth_token: ""        # A SECRET REFERENCE to the bearer token the MUTATING
 #                              #   endpoints (rescan/pause/resume) require. Empty = those
-#                              #   endpoints are DISABLED (read-only). See THE THREE
+#                              #   endpoints are DISABLED (read-only). See THE FOUR
 #                              #   SECRET KEYS below: a literal token here, or in
 #                              #   HOLDFAST_SERVER_AUTH_TOKEN, REFUSES TO START.
 #                              #     server_auth_token: file:/run/secrets/holdfast-token
+# server_read_token: ""        # A SECRET REFERENCE to the bearer token the READ endpoints
+#                              #   (/api/summary, /api/queue, /api/history, /api/events)
+#                              #   require. EMPTY IS THE DEFAULT AND MEANS THE READ SURFACE
+#                              #   IS OPEN: those four answer any caller, and they carry the
+#                              #   full path of every file holdfast has seen, so on a
+#                              #   non-loopback server_addr that is your whole library
+#                              #   served without a credential. Set it and they need
+#                              #   `Authorization: Bearer <the resolved value>`; the
+#                              #   server_auth_token is accepted there too, because one
+#                              #   Authorization header cannot carry two values. A read
+#                              #   token is NEVER accepted for a mutation.
+#                              #   IT DOES NOT GATE THE DASHBOARD PAGE. The page at / and
+#                              #   its assets are still served with no credential when this
+#                              #   is set - a browser sends no Bearer header on a navigation
+#                              #   - so the page loads and its data does not until a browser
+#                              #   login exists. Keep a reverse proxy's own authentication
+#                              #   in front of the page. /metrics is not gated either.
+#                              #   PREFER THE ENVIRONMENT VARIABLE, so no secret lands in
+#                              #   this file: set HOLDFAST_SERVER_READ_TOKEN to the
+#                              #   reference and leave the key out of the YAML entirely.
+#                              #     HOLDFAST_SERVER_READ_TOKEN=file:/run/secrets/read-token
+#                              #   A literal token here, or in that variable, REFUSES TO
+#                              #   START (see THE FOUR SECRET KEYS below).
 # scan_interval_sec: 0         # 0 = scan once on startup + on demand (via the API).
 #                              #   >0 = also re-scan every N seconds.
 
@@ -505,14 +528,14 @@ dry_run: false
 #                              #   plain; tautulli_api_key is a SECRET REFERENCE:
 #                              #     tautulli_api_key: file:/run/secrets/tautulli-key
 
-# --- THE THREE SECRET KEYS (secrets K1) ---------------------------------------
-# server_auth_token, notify_url and tautulli_api_key carry a REFERENCE to a credential,
-# never a credential. Two forms, and deliberately no third:
+# --- THE FOUR SECRET KEYS (secrets K1) ----------------------------------------
+# server_auth_token, server_read_token, notify_url and tautulli_api_key carry a REFERENCE
+# to a credential, never a credential. Two forms, and deliberately no third:
 #
 #   file:/run/secrets/holdfast-token     the file's CONTENTS are the value
 #   cmd:/usr/local/bin/fetch-my-secret   the command's STDOUT is the value
 #
-# A LITERAL credential in any of those three keys - in this file OR in the matching
+# A LITERAL credential in any of those four keys - in this file OR in the matching
 # HOLDFAST_* environment variable - REFUSES TO START, naming the key and how to convert
 # it. That is deliberate, and the reason is the encoder: holdfast starts ffmpeg and
 # ffprobe as child processes, and a child inherits its parent's environment, so a
