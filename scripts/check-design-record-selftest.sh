@@ -149,7 +149,7 @@ expect() {
 #    answers is decided by reading stdout, so something mechanical has to read it.
 # =========================================================================================
 reset
-expect 0 "the tree as it stands passes, and names every identity source it read" \
+expect 0 "AC-3, AC-4: the tree as it stands passes, and names every identity source it read" \
   'read [1-9][0-9]* file\(s\), of which [1-9][0-9]* identity source\(s\)' \
   'identity source.*internal/webui/src/tokens\.css \([0-9]+ bytes' \
   'identity source.*internal/webui/src/dashboard\.css \([0-9]+ bytes' \
@@ -165,17 +165,17 @@ expect 0 "the tree as it stands passes, and names every identity source it read"
 # =========================================================================================
 reset
 rm -f "$repo/$record"
-expect 1 "an ABSENT record is named as absent, not read as empty" 'IS ABSENT'
+expect 1 "AC-10: an ABSENT record is named as absent, not read as empty" 'IS ABSENT'
 
 reset
 chmod 000 "$repo/$record"
-expect 1 "an UNREADABLE record is named as unreadable" 'CANNOT BE READ'
+expect 1 "AC-10: an UNREADABLE record is named as unreadable" 'CANNOT BE READ'
 chmod u+rw "$repo/$record"
 
 reset
 sed -i 's/^## Identity$/## Identiy/' "$repo/$record"
 changed "$record" "a record that does not parse"
-expect 1 "a record that DOES NOT PARSE says so, and does not pass" 'DOES NOT PARSE'
+expect 1 "AC-10: a record that DOES NOT PARSE says so, and does not pass" 'DOES NOT PARSE'
 
 # =========================================================================================
 # 5 to 9. THE FIVE IDENTITY VALUES (AC-9, and AC-1's reason sentence). Each branch names
@@ -184,7 +184,7 @@ expect 1 "a record that DOES NOT PARSE says so, and does not pass" 'DOES NOT PAR
 reset
 drop_block "accent"
 changed "$record" "a missing identity value"
-expect 1 "a MISSING identity value is named" 'declares NO "accent"'
+expect 1 "AC-9: a MISSING identity value is named" 'declares NO "accent"'
 
 reset
 put_identity_block "accent" <<'BLOCK'
@@ -193,7 +193,7 @@ value: `#0f5aa8`
 why: a value that names no token at all, which is held to nothing.
 BLOCK
 changed "$record" "an identity value naming no token"
-expect 1 "an identity value that NAMES NO TOKEN is named" '"accent" .*NAMES NO TOKEN'
+expect 1 "AC-9: an identity value that NAMES NO TOKEN is named" '"accent" .*NAMES NO TOKEN'
 
 reset
 put_identity_block "accent" <<'BLOCK'
@@ -203,7 +203,7 @@ value: `#0f5aa8`
 why: a value naming a token the token file has never heard of.
 BLOCK
 changed "$record" "an identity value naming an undeclared token"
-expect 1 "an identity value naming a token the token file DOES NOT DECLARE is named" \
+expect 1 "AC-9: an identity value naming a token the token file DOES NOT DECLARE is named" \
   '"accent" names the token .*DOES NOT DECLARE'
 
 reset
@@ -214,7 +214,7 @@ value: `#ff00ff`
 why: a value that has drifted away from the token it names.
 BLOCK
 changed "$record" "an identity value disagreeing with its token"
-expect 1 "an identity value that DISAGREES with the token it names is named" \
+expect 1 "AC-9: an identity value that DISAGREES with the token it names is named" \
   '"accent" DISAGREES WITH THE TOKEN IT NAMES' '#ff00ff'
 
 reset
@@ -225,7 +225,7 @@ value: `#0f5aa8`
 why:
 BLOCK
 changed "$record" "an identity value with no reason"
-expect 1 "an identity value with NO REASON SENTENCE is named" '"accent" .*carries NO REASON SENTENCE'
+expect 1 "AC-1: an identity value with NO REASON SENTENCE is named" '"accent" .*carries NO REASON SENTENCE'
 
 # =========================================================================================
 # 10. THE VACUOUS PASS (AC-5). A scan that read no file has not passed, and the printed
@@ -234,7 +234,7 @@ expect 1 "an identity value with NO REASON SENTENCE is named" '"accent" .*carrie
 reset
 rm -f "$repo/internal/webui/src/tokens.css" "$repo/internal/webui/src/dashboard.css" \
       "$repo/internal/webui/src/index.html.tmpl" "$repo/internal/webui/index.html"
-expect 1 "an EMPTY identity-source set is a failure, and the printed count says 0" \
+expect 1 "AC-5: an EMPTY identity-source set is a failure, and the printed count says 0" \
   'NO IDENTITY SOURCE COULD BE READ' 'of which 0 identity source\(s\)'
 
 # =========================================================================================
@@ -245,7 +245,7 @@ expect 1 "an EMPTY identity-source set is a failure, and the printed count says 
 reset
 append_rule '.sd-unexcepted { font-family: Inter, sans-serif; }'
 changed "$sheet" "an unexcepted blocklist entry"
-expect 1 "an UNEXCEPTED entry names the entry, the file and the line" \
+expect 1 "AC-6: an UNEXCEPTED entry names the entry, the file and the line" \
   'IS NOT EXCEPTED' "$sheet:[0-9]+" 'inter'
 
 reset
@@ -253,20 +253,20 @@ append_rule '.sd-excepted { font-family: Inter, sans-serif; }'
 append_exception "inter" 'why: the fixture this self-test writes, which is a reason sentence.'
 changed "$sheet" "an excepted blocklist entry"
 changed "$record" "an excepted blocklist entry"
-expect 0 "an entry the record EXCEPTS WITH ITS REASON is allowed" \
+expect 0 "AC-7: an entry the record EXCEPTS WITH ITS REASON is allowed" \
   'allowed by the design record' 'design record ok'
 
 reset
 append_rule '.sd-reasonless { font-family: Inter, sans-serif; }'
 append_exception "inter" 'why: nope'
 changed "$record" "an exception with no reason"
-expect 1 "an exception bought with NO REASON SENTENCE grants nothing" \
+expect 1 "AC-8: an exception bought with NO REASON SENTENCE grants nothing" \
   'EXCEPTS .inter. WITH NO REASON SENTENCE'
 
 reset
 append_exception "not-a-blocklist-entry" 'why: an exception for something that is not on the list.'
 changed "$record" "an exception naming nothing"
-expect 1 "an exception naming something that is NOT A BLOCKLIST ENTRY is refused" \
+expect 1 "AC-7 (the same clause read the other way): an exception naming something that is NOT A BLOCKLIST ENTRY is refused" \
   'NOT A BLOCKLIST ENTRY'
 
 # =========================================================================================
@@ -295,7 +295,7 @@ while IFS='|' read -r id kind payload; do
       exit 1
       ;;
   esac
-  expect 1 "the entry '$id' is found, and the hit names where it is" \
+  expect 1 "AC-11: the entry '$id' is found, and the hit names where it is" \
     "\`$id\` IS NOT EXCEPTED" 'internal/webui[^ ]*:[0-9]+'
 done <<'ENTRIES'
 inter|css|.sd-x { font-family: Inter, sans-serif; }
