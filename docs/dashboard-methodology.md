@@ -66,10 +66,16 @@ What the two blocks of the region cover, in full:
 feeding of new files and never interrupts an in-flight encode or swap. `idle` /
 `scanning` is whether a scan pass is walking the library.
 
-The seven count chips are the server's own `GROUP BY status` over the jobs table. A
-status the server does not name has no row in that state, so a `0` chip is a measured
-zero and is rendered as one. A summary that is not readable at all is a different fact,
-and the view says it could not be read rather than drawing seven zeroes nobody counted.
+The count chips are the server's own `GROUP BY status` over the jobs table - one per
+status the page's vocabulary declares. A status the server does not name has no row in
+that state, so a `0` chip is a measured zero and is rendered as one. A summary that is not
+readable at all is a different fact, and the view says it could not be read rather than
+drawing a row of zeroes nobody counted.
+
+The chips are drawn in two groups, divided by a rule: work IN HAND on the left (pending,
+probing, encoding, verifying) and work that is FINISHED on the right. `would-transcode` is
+in the second group - a dry run's decision is complete for that scan and nothing is
+examining that file - and what it counts is described under the other region below.
 
 `reclaimed this run` is the in-process counter for this daemon's lifetime. The lifetime
 figure in the other region is the durable one.
@@ -178,6 +184,35 @@ The size cell is the source size, the output size and the percentage reclaimed. 
 strictly-smaller gate precludes an output larger than its source, and the figure is
 clamped at zero anyway so a future bug there can never render a nonsensical negative.
 
+### `would-transcode`: what a dry run decided, and what it is not
+
+A `would-transcode` row counts a DECISION a dry run took, never a transcode that happened.
+`dry_run: true` makes holdfast walk the library and apply every guard while encoding
+nothing, swapping nothing and deleting nothing; a file that passes every guard is a file a
+run with `dry_run: false` would transcode, and that conclusion is now recorded as its own
+terminal outcome rather than thrown away. It is counted in the outcome distribution, it
+appears in `holdfast_files_total{outcome="would-transcode"}` and in the live
+`holdfast_queue_depth{state="would-transcode"}` gauge, and it is shown on this page beside
+the skipped and the actually-reclaimed counts.
+
+Three things follow from "a decision, not a transcode", and each is visible on the page:
+
+- **Its row carries the SOURCE's codec and the SOURCE's size, and no output figure.**
+  Nothing has encoded that file, so there is no output size, no percentage reclaimed and
+  no VMAF - those cells read "not recorded", as they do on any row that recorded none.
+- **The total beside the candidate rows is TOTAL SOURCE BYTES, and nothing else.** It is
+  labelled as the size of what is under consideration, it states the number of candidate
+  rows shown that it was taken over, and it counts and reports any row it had to leave out
+  for want of a recorded size. It is deliberately NOT a projected saving, a projected
+  output size or a projected reclaim: nobody has encoded these files, so no honest figure
+  exists for what they would give back, and a guess presented beside measured figures
+  would be read as one of them. When no file was decided that way the figure is absent
+  entirely rather than reading `0 B`, which would be a claim about files nobody looked at.
+- **A recorded decision does not exclude the file from a later run.** It is terminal for
+  that scan and re-claimable afterwards, so turning `dry_run` off and running again
+  transcodes exactly the files this list named. The count is the answer to "what would
+  this do?", not a record that anything was done.
+
 ### What a VMAF score on this page licenses, and what it does not
 
 VMAF is a perceptual estimate under one viewing condition. Each score on this page was
@@ -188,6 +223,11 @@ score.
 - **The model is luma-only.** It is structurally blind to chroma damage, which only the
   structural gates (codec, duration and packet parity, stream-count parity, full decode
   integrity, strictly-smaller) catch.
+- **One video stream was compared, and the label says which.** A file can carry more than
+  one; the gate always measures the FIRST (`v:0`), the same stream every property read and
+  the decode-integrity check inspect, so the score lines up with the guards that passed the
+  file. A row that predates this fact, or whose gate never ran, says `unspecified stream`
+  rather than name one nobody recorded.
 - **Scores are never compared across files.** VMAF is not comparable between different
   sources, and this page never puts two files' scores on one scale for that reason. The
   whole-ledger VMAF figures pool per-file scores; they are a summary of this library's
@@ -203,8 +243,10 @@ score.
 A skipped row names the guard that held the file back, from a closed vocabulary: already
 at the target codec, already efficient (low bitrate), hardlinked (would break a seed),
 interlaced, Dolby Vision or HDR10+ (dynamic metadata a generic re-encode cannot preserve),
-incomplete HDR metadata, an exotic pixel format, a target file that already exists, a
-symlinked source, and a failure to retain the original inside the undo window. An unknown
+incomplete HDR metadata, an exotic pixel format, a second video stream that is not an
+attached picture (every property the encode derives is read from the first), a target file
+that already exists, a symlinked source, and a failure to retain the original inside the
+undo window. An unknown
 token falls back to itself, so a guard added later is never hidden behind a blank.
 
 ## The three states every view shows

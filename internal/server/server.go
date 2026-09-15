@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/secret"
 	"github.com/NSchatz/holdfast/internal/sourceoffer"
 	"github.com/NSchatz/holdfast/internal/store"
 )
@@ -25,6 +26,11 @@ import (
 type Server struct {
 	baseCtx context.Context
 	cfg     config.Config
+	// token is the RESOLVED control token (secrets K1). It is held here and not read
+	// from cfg, because cfg carries the REFERENCE and never the credential: a Config is
+	// printed by `validate`, logged at startup and copied by value all over this
+	// package, and a plaintext token inside it would ride along on every one of those.
+	token   secret.Value
 	store   store.Store
 	ctrl    *Controller
 	hub     *Hub
@@ -32,6 +38,28 @@ type Server struct {
 	metrics http.Handler
 	log     *slog.Logger
 	mux     http.Handler
+
+	// subs is the targeted-scan queue POST /api/scan feeds (S0093). Set once with
+	// SetSubmissions, before serving, the way the Controller's own hooks are; with none
+	// wired the endpoint refuses rather than accepting work nothing will process.
+	subs Submissions
+}
+
+// SetSubmissions wires the targeted-scan queue. Set it once, before serving. The route
+// exists either way - a surface that appeared and disappeared with a wiring detail would
+// be one no test could enumerate - and answers 503 until this is called.
+func (s *Server) SetSubmissions(subs Submissions) { s.subs = subs }
+
+// Wait joins the background work this server started: the scan goroutine and any
+// in-flight targeted submission. Call it during shutdown, after the base ctx is cancelled
+// and BEFORE the store handle is closed, so neither can issue a store call against a
+// closed handle. Submissions still waiting in the queue are dropped unprocessed and
+// unrecorded - nothing looked at them, so there is no decision to record.
+func (s *Server) Wait() {
+	s.ctrl.Wait()
+	if s.subs != nil {
+		s.subs.Wait()
+	}
 }
 
 // New builds the Server and its router. baseCtx bounds long-lived handlers (the SSE
@@ -40,14 +68,17 @@ type Server struct {
 // (served at "/"); pass nil to serve a minimal API-only page. metrics is the
 // Prometheus /metrics handler (TRANSCODE-8); pass nil to omit the route. The caller
 // starts hub.Run and listens on cfg.EffectiveServerAddr() with s as the handler.
-func New(baseCtx context.Context, cfg config.Config, st store.Store, ctrl *Controller, hub *Hub, ui, metrics http.Handler, log *slog.Logger) *Server {
+//
+// token is the control token RESOLVED from cfg's `server_auth_token` reference; an empty
+// one leaves the mutating endpoints disabled, exactly as an unconfigured key does.
+func New(baseCtx context.Context, cfg config.Config, token secret.Value, st store.Store, ctrl *Controller, hub *Hub, ui, metrics http.Handler, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
-	s := &Server{baseCtx: baseCtx, cfg: cfg, store: st, ctrl: ctrl, hub: hub, ui: ui, metrics: metrics, log: log}
+	s := &Server{baseCtx: baseCtx, cfg: cfg, token: token, store: st, ctrl: ctrl, hub: hub, ui: ui, metrics: metrics, log: log}
 	s.mux = s.routes()
 	return s
 }
@@ -67,13 +98,28 @@ func (s *Server) routes() http.Handler {
 		r.Get("/events", s.handleEvents)
 
 		// Mutating endpoints — token required (and disabled entirely when no token
-		// is configured). These only ever start a scan or toggle pause; none can
-		// touch a file.
+		// is configured). These only ever start a scan, toggle pause, or WITHHOLD a
+		// path from the pipeline; none can touch a file.
+		//
+		// The ledger SEARCH is in here too, and not out of symmetry: the capped read
+		// endpoints ship at most a few hundred rows, so a ledger-wide search returns
+		// per-file rows they have never served. Gating it makes this a control-gated
+		// READ and adds no unauthenticated one.
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireToken)
 			r.Post("/rescan", s.handleRescan)
+			// POST /api/scan targets a scan at named files (S0093). It re-opens no row,
+			// restores no original and resolves no parked incident: those stay LOCAL
+			// commands by ratified operator decision.
+			r.Post("/scan", s.handleScan)
 			r.Post("/pause", s.handlePause)
 			r.Post("/resume", s.handleResume)
+			r.Get("/search", s.handleLedgerSearch)
+			r.Route("/exclusions", func(r chi.Router) {
+				r.Get("/", s.handleExclusionsList)
+				r.Post("/", s.handleExcludeAdd)
+				r.Delete("/", s.handleExcludeRemove)
+			})
 		})
 	})
 
@@ -275,18 +321,22 @@ func (s *Server) handleResume(w http.ResponseWriter, _ *http.Request) {
 
 // --- auth --------------------------------------------------------------------
 
-// requireToken gates mutating endpoints. With no token configured, control is
-// DISABLED (403) — remote control is off until an operator opts in by setting one.
-// A configured token is compared in constant time.
+// requireToken gates mutating endpoints. With no token resolved, control is
+// DISABLED (403) - remote control is off until an operator opts in by pointing
+// server_auth_token at a secret. A resolved token is compared in constant time, and it
+// is never written to a response body, a header or a log: the 401 says "unauthorized"
+// and nothing about what would have been accepted.
 func (s *Server) requireToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := s.cfg.ServerAuthToken
-		if token == "" {
-			http.Error(w, "control disabled: set server_auth_token (or HOLDFAST_SERVER_AUTH_TOKEN) to enable rescan/pause/resume", http.StatusForbidden)
+		if s.token.Empty() {
+			http.Error(w, "control disabled: point server_auth_token at a secret "+
+				"(file:/run/secrets/... or cmd:...) to enable rescan/pause/resume, the ledger search "+
+				"and the withheld paths - see docs/secrets.md",
+				http.StatusForbidden)
 			return
 		}
 		got := bearerToken(r.Header.Get("Authorization"))
-		if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+		if subtle.ConstantTimeCompare([]byte(got), []byte(s.token.Expose())) != 1 {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="holdfast"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return

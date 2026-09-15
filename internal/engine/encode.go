@@ -32,6 +32,21 @@ type Encoder interface {
 	Encode(ctx context.Context, in, out string, props *probe.VideoProps) error
 }
 
+// ProfileEncoder is an Encoder whose output depends on the LIBRARY PROFILE deciding the
+// file rather than on one global configuration. The engine hands it the resolved profile
+// of the root the file was enumerated under and encodes with what comes back.
+//
+// It is a separate, optional interface rather than a parameter on Encode because an
+// Encoder that has no per-root behaviour has nothing to do with a profile: a test's
+// deterministic fake writes the bytes it was told to write, and forcing every one of
+// them to accept and ignore a profile would say the opposite. ForProfile must return an
+// Encoder equivalent to the receiver in every respect but the profile's knobs, and must
+// not mutate the receiver - the engine's workers share one Encoder across goroutines.
+type ProfileEncoder interface {
+	Encoder
+	ForProfile(prof config.Profile) Encoder
+}
+
 // EncoderFunc adapts a plain function to Encoder (used by tests).
 type EncoderFunc func(ctx context.Context, in, out string, props *probe.VideoProps) error
 
@@ -61,12 +76,46 @@ type FFmpegEncoder struct {
 	Cfg    config.Config
 	Probe  *probe.Prober
 
+	// Prof is the LIBRARY PROFILE this encoder builds an encode from - the resolved
+	// knobs of the root the file was enumerated under. The engine sets it per file
+	// through ForProfile; nil means "the top-level values of Cfg", which is what an
+	// encoder constructed directly (and every configuration written before profiles
+	// existed) encodes at.
+	Prof *config.Profile
+
 	// newProgressPipe, when non-nil, replaces os.Pipe when opening the channel ffmpeg
 	// writes -progress reports to. Unexported test seam (the engine tests are in this
 	// package): returning an error from it is how a test drives the "progress collection
 	// could not be started at all" path, which must degrade to exactly the encode this
 	// package performed before progress existed. Production leaves it nil.
 	newProgressPipe func() (r *os.File, w *os.File, err error)
+
+	// argvObserver, when non-nil, receives the full ffmpeg argv immediately before the
+	// subprocess starts. Unexported test seam (the engine tests are in this package),
+	// nil in production, and it exists for one question no output file can answer:
+	// WHICH PROFILE built this encode. Two roots at different CRFs both produce a valid
+	// hevc file of the same source, so the argv is the only place the difference is
+	// visible - and it is the real argv the production encoder assembled, not a
+	// re-derivation of it.
+	argvObserver func(args []string)
+}
+
+// ForProfile returns this encoder built from prof's knobs. The receiver is a VALUE, so
+// the copy is the whole of the isolation the engine's workers need: several files under
+// several roots encode concurrently and none of them can see another's profile.
+func (e FFmpegEncoder) ForProfile(prof config.Profile) Encoder {
+	e.Prof = &prof
+	return e
+}
+
+// profile is the knobs this encoder builds an encode from: the library profile the
+// engine handed it, or - for an encoder constructed without one - the top-level values
+// of the configuration it was built with.
+func (e FFmpegEncoder) profile() config.Profile {
+	if e.Prof != nil {
+		return *e.Prof
+	}
+	return e.Cfg.TopLevelProfile()
 }
 
 // Encode runs ffmpeg. It returns an error if the configured encoder is unknown, if
@@ -91,9 +140,19 @@ func (e FFmpegEncoder) Encode(ctx context.Context, in, out string, props *probe.
 // pipe cannot be opened at all, the -progress option is simply not passed and the encode
 // runs precisely as it did before this existed.
 func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, props *probe.VideoProps, sink ProgressSink) error {
-	spec, ok := encoder.Lookup(e.Cfg.Encoder)
+	// THIS JOB's settings: the profile of the root the engine handed this encoder,
+	// overlaid with the first encode profile whose pattern matches the SOURCE path
+	// (TRANSCODE-PROFILES). It is a pure function of the configuration, that profile
+	// and the path, so the engine - which needs the same answer for the
+	// already-at-target-codec skip, the output container and the output-codec
+	// acceptance check - resolves it independently from the same three inputs and
+	// cannot disagree with what is built here. `in` is always the source: the encoder
+	// READS the source and WRITES the working file, wherever scratch_dir puts the
+	// latter.
+	ts := e.Cfg.TranscodeIn(e.profile(), in)
+	spec, ok := encoder.Lookup(ts.Encoder)
 	if !ok {
-		return fmt.Errorf("unknown encoder %q (known: %v)", e.Cfg.Encoder, encoder.Known())
+		return fmt.Errorf("unknown encoder %q (known: %v)", ts.Encoder, encoder.Known())
 	}
 	if e.Probe == nil {
 		return fmt.Errorf("FFmpegEncoder.Probe is nil (required to derive colour/pixel-format args from the source)")
@@ -106,8 +165,8 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 		props = e.Probe.VideoProps(ctx, in)
 	}
 
-	pixFmt := e.Cfg.PixelFormat
-	if e.Cfg.PixelFormatAuto() {
+	pixFmt := ts.PixelFormat
+	if ts.PixelFormatAuto() {
 		derived, ok := hdr.DerivePixFmt(props.PixFmt())
 		if !ok {
 			// The engine's pix_fmt guard runs before Encode and should already have
@@ -153,8 +212,34 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 		"-map", "0", "-map", "-0:d?",
 		"-c", "copy", "-c:v", spec.FFmpegCodec,
 	)
-	args = append(args, buildArgs(spec, e.Cfg, pixFmt, colorArgs, x265Color)...)
+	// An ATTACHED PICTURE is a video stream and `-c:v` above would re-encode it, so each
+	// one is pinned back to copy by its own per-stream option. It must come AFTER the
+	// blanket -c:v, which is what it overrides; `-map 0` preserves stream order, so the
+	// N of an output `v:N` is the N of the source's. A single-video-stream source yields
+	// no such option and therefore byte-identical argv to the encoder that predates this.
+	//
+	// Whether ffprobe ESTABLISHED that shape is not dropped. An encoder that could not
+	// find out what video streams its source carries cannot know whether one of them is
+	// artwork that must be pinned back to copy, and an unknown shape has to fail safe
+	// rather than default to the common one - the same posture the engine's own
+	// source-shape guard takes, and the same one the pixel-format derivation above takes
+	// for the same class of unknown. Through the engine this is unreachable: that guard
+	// skipped the file already and hands this call the snapshot it read. It is the
+	// backstop for a direct caller of this exported type, which builds its own.
+	streams, established := props.VideoStreams()
+	if !established {
+		return fmt.Errorf("cannot establish the video streams of %q (ffprobe did not answer): "+
+			"refusing to encode without knowing whether one of them is an attached picture", in)
+	}
+	for _, i := range attachedPictureCopyIndexes(streams) {
+		args = append(args, "-c:v:"+strconv.Itoa(i), "copy")
+	}
+	args = append(args, buildArgs(spec, ts, pixFmt, colorArgs, x265Color)...)
 	args = append(args, "--", out)
+
+	if e.argvObserver != nil {
+		e.argvObserver(args)
+	}
 
 	cmd := exec.CommandContext(ctx, e.FFmpeg, args...)
 	// exec.Cmd.CombinedOutput is exactly this: one buffer behind both streams, then
@@ -258,48 +343,123 @@ func closeProgressPipe(r, w *os.File) {
 //     ever running unless a real device is present; the arg shape is reasonable
 //     but not battle-tested.
 //   - hevc_amf: -rc cqp -qp_i <CRF> -qp_p <CRF>.
-func buildArgs(spec encoder.Spec, cfg config.Config, pixFmt string, colorArgs []string, x265Color string) []string {
+//
+// A job whose effective settings carry a positive BitrateKbps takes the
+// TARGET-BITRATE shape instead, per family (see bitrateArgs). The quality knob is
+// then not passed AT ALL - no -crf, -cq, -global_quality, -qp or -qp_i/-qp_p, and
+// no -rc cqp - because a rate control and a quality target are two different
+// instructions and passing both leaves which one wins to the encoder's own
+// precedence rules rather than to the operator. Everything else is unchanged: the
+// pixel format, the colour tags, -fps_mode passthrough and the libx265 preset and
+// x265Color block are the same on both paths, so a bitrate-targeted encode carries
+// exactly the same source fidelity as a quality-targeted one.
+func buildArgs(spec encoder.Spec, ts config.Transcode, pixFmt string, colorArgs []string, x265Color string) []string {
 	args := []string{"-pix_fmt", pixFmt}
 	args = append(args, colorArgs...)
 	args = append(args, "-fps_mode", "passthrough") // a VFR source is not forced to CFR
 
+	if ts.TargetsBitrate() {
+		return append(args, bitrateArgs(spec, ts, x265Color)...)
+	}
+
 	switch spec.Key {
 	case "cpu":
 		args = append(args,
-			"-preset", cfg.Preset,
-			"-crf", strconv.Itoa(cfg.CRF),
+			"-preset", ts.Preset,
+			"-crf", strconv.Itoa(ts.CRF),
 			"-x265-params", "log-level=error"+x265Color,
 		)
 	case "svtav1":
 		args = append(args,
-			"-preset", strconv.Itoa(svtav1Preset(cfg.Preset)),
-			"-crf", strconv.Itoa(cfg.CRF),
+			"-preset", strconv.Itoa(svtav1Preset(ts.Preset)),
+			"-crf", strconv.Itoa(ts.CRF),
 		)
 	case "nvenc", "av1_nvenc":
 		args = append(args,
 			"-rc", "vbr",
-			"-cq", strconv.Itoa(cfg.CRF),
+			"-cq", strconv.Itoa(ts.CRF),
 			"-b:v", "0",
 			"-preset", "p5",
 		)
 	case "qsv":
-		args = append(args, "-global_quality", strconv.Itoa(cfg.CRF))
+		args = append(args, "-global_quality", strconv.Itoa(ts.CRF))
 	case "vaapi":
 		// -vaapi_device itself is emitted by Encode (a global option that must
 		// precede -i — see Encode's doc comment on the vaapi special case); here we
 		// only add the encode-side args that come after -c:v.
 		args = append(args,
 			"-vf", "format=nv12,hwupload",
-			"-qp", strconv.Itoa(cfg.CRF),
+			"-qp", strconv.Itoa(ts.CRF),
 		)
 	case "amf":
 		args = append(args,
 			"-rc", "cqp",
-			"-qp_i", strconv.Itoa(cfg.CRF),
-			"-qp_p", strconv.Itoa(cfg.CRF),
+			"-qp_i", strconv.Itoa(ts.CRF),
+			"-qp_p", strconv.Itoa(ts.CRF),
 		)
 	}
 	return args
+}
+
+// bitrateArgs is the TARGET-BITRATE half of buildArgs: everything after the
+// universal pixel-format/colour/fps block, for a job whose effective settings carry
+// a positive BitrateKbps.
+//
+// `-b:v <n>k` is the target in every family - it is ffmpeg's own codec-independent
+// bitrate option - and what varies is only the rate-control MODE each family needs
+// told, because several of them default to a constant-quality mode that would
+// otherwise ignore the target:
+//
+//   - libx265 (cpu): -b:v alone selects libx265's ABR mode. -preset and the
+//     -x265-params HDR10 block stay exactly as they are on the quality path.
+//   - libsvtav1 (svtav1): -b:v alone selects SVT-AV1's VBR mode; the numeric
+//     preset stays.
+//   - hevc_nvenc/av1_nvenc: -rc vbr with a real -b:v. The quality path passes
+//     `-cq <CRF> -b:v 0`, which is NVENC's constant-quality spelling; here the
+//     -cq is dropped entirely and the 0 replaced by the target.
+//   - hevc_qsv: -b:v alone. -global_quality is what selects ICQ and is dropped.
+//   - hevc_vaapi: the hwupload filter chain is unchanged; -qp is dropped and the
+//     target passed. Untestable in this environment (no VAAPI device), exactly as
+//     the quality path is.
+//   - hevc_amf: -rc vbr_peak with the target, in place of -rc cqp and the two QP
+//     values. AMF's cqp is a fixed-quantiser mode that ignores -b:v outright.
+func bitrateArgs(spec encoder.Spec, ts config.Transcode, x265Color string) []string {
+	rate := strconv.Itoa(ts.BitrateKbps) + "k"
+	switch spec.Key {
+	case "cpu":
+		return []string{
+			"-preset", ts.Preset,
+			"-b:v", rate,
+			"-x265-params", "log-level=error" + x265Color,
+		}
+	case "svtav1":
+		return []string{
+			"-preset", strconv.Itoa(svtav1Preset(ts.Preset)),
+			"-b:v", rate,
+		}
+	case "nvenc", "av1_nvenc":
+		return []string{
+			"-rc", "vbr",
+			"-b:v", rate,
+			"-preset", "p5",
+		}
+	case "qsv":
+		return []string{"-b:v", rate}
+	case "vaapi":
+		return []string{
+			"-vf", "format=nv12,hwupload",
+			"-b:v", rate,
+		}
+	case "amf":
+		return []string{
+			"-rc", "vbr_peak",
+			"-b:v", rate,
+		}
+	}
+	// A Spec this build ships but this function does not name would silently lose
+	// the operator's target, so it gets the codec-independent option and nothing
+	// else rather than the quality knob it did not ask for.
+	return []string{"-b:v", rate}
 }
 
 // svtav1Preset maps the config Preset word to SVT-AV1's numeric 0-13 preset scale

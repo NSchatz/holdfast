@@ -250,6 +250,14 @@ func (u *UndoWindow) record(ctx context.Context, sourcePath, swappedPath, retain
 // tool can PROVE are its own (same inode, live record) means a foreign link still
 // skips exactly as it did before.
 func (u *UndoWindow) heldLinks(ctx context.Context, f string, fingerprint string) uint64 {
+	return heldLinksIn(ctx, f, fingerprint, u.Store, u.Log)
+}
+
+// heldLinksIn is heldLinks over whatever can READ the retention records, which is the
+// whole of what the count needs. The undo window asks it through the engine's own store;
+// the read-only plan pass asks it through a handle that cannot write, and a caller with no
+// ledger at all (a fresh install) passes nil and gets the name-based proof alone.
+func heldLinksIn(ctx context.Context, f, fingerprint string, r LedgerReader, log *slog.Logger) uint64 {
 	seen := make(map[string]bool, 2)
 	var n uint64
 	count := func(path string) {
@@ -270,12 +278,17 @@ func (u *UndoWindow) heldLinks(ctx context.Context, f string, fingerprint string
 	// literally another name for this inode.
 	count(retainedPathFor(f, fingerprint))
 
-	rows, err := u.Store.ListRetained(ctx)
+	if r == nil {
+		// No ledger to ask: discount only what the name proved, which is the same
+		// fail-safe direction an unreadable one takes.
+		return n
+	}
+	rows, err := r.ListRetained(ctx)
 	if err != nil {
 		// Fail safe: with the ledger unreadable, discount only what the name proved.
 		// Anything else is treated as foreign, which is the pre-undo-window behaviour
 		// and never a swap this tool could not undo.
-		u.Log.Warn("could not read the retained originals (treating every unproven extra link as foreign)", "file", f, "err", err)
+		log.Warn("could not read the retained originals (treating every unproven extra link as foreign)", "file", f, "err", err)
 		return n
 	}
 	for _, r := range rows {
@@ -528,7 +541,18 @@ func (u *UndoWindow) recordRestoreInJobs(ctx context.Context, r store.Retained) 
 		u.Log.Warn("could not prune the done row of the encode a restore removed", "path", r.SwappedPath, "err", err)
 	}
 	key := probe.Fingerprint(r.SourcePath)
-	if _, err := u.Store.RecordSkip(ctx, r.SourcePath, key, SkipRestoredOriginal); err != nil {
+	// NEITHER profile is recorded, and that is the honest value rather than an omission.
+	// Every other terminal row names the library profile that JUDGED the file and the
+	// encode profile that SUPPLIED ITS SETTINGS; this one was judged by no profile and
+	// encoded under no settings - an operator put the original back, through a command no
+	// gate and no knob took part in. Naming the root the file happens to sit under, or the
+	// encode profile whose pattern happens to match its name, would attribute this row to
+	// a decision nothing made.
+	//
+	// The writer CAN carry both now (that is the fix the hardlink guard needed, where a
+	// profile really did decide the row and the event the guard emits says so). What each
+	// call site passes is what is true of its own row.
+	if _, err := u.Store.RecordSkip(ctx, r.SourcePath, key, SkipRestoredOriginal, store.Decision{}, ""); err != nil {
 		u.Log.Warn("could not record the restore in the job ledger", "path", r.SourcePath, "err", err)
 	}
 }

@@ -681,7 +681,7 @@ func TestSwap_IndistinguishablePreSwapRecordsAreIndeterminate(t *testing.T) {
 	// The same record for both files: a re-stat returning it identifies nothing.
 	same := probe.Attributes{SizeBytes: 100, MTimeUnix: 1700000000}
 	key := probe.Fingerprint(f.src)
-	if _, err := f.ts.Claim(context.Background(), f.src, key, "w0", 3); err != nil {
+	if _, err := f.ts.Claim(context.Background(), f.src, key, "w0", 3, store.DecisionInputs{}); err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
 	f.eng.fsLookup = lookups("ext4") // local, and still not untouched

@@ -174,6 +174,31 @@ test("vmafFigures carries both pooled statistics and the viewing condition", () 
     "a score with no model says the model is unspecified rather than naming one");
 });
 
+test("vmafFigures names the video stream the comparison was made on", () => {
+  // A source can carry more than one video stream, so which one was compared is part of
+  // the scope the score is read under - carried on the same terms as the model.
+  const recorded = d.vmafFigures({
+    vmaf_mean: 98.24, vmaf_min: 91.5, vmaf_model: "version=vmaf_v0.6.1", vmaf_stream: "v:0",
+  });
+  assert.ok(recorded.condition.includes("stream v:0"), recorded.condition);
+  assert.ok(!recorded.condition.includes("unspecified stream"), recorded.condition);
+
+  // A row that recorded no stream says so, exactly as it says the model is unspecified.
+  // The key is OMITTED on the wire for such a row, so undefined is the shape this
+  // actually sees; an explicit null and an empty string are covered too, because a
+  // reader must never be told a stream was compared when none was.
+  for (const unrecorded of [
+    { vmaf_mean: 97, vmaf_min: 90 },
+    { vmaf_mean: 97, vmaf_min: 90, vmaf_stream: null },
+    { vmaf_mean: 97, vmaf_min: 90, vmaf_stream: "" },
+  ]) {
+    const f = d.vmafFigures(unrecorded);
+    assert.ok(f.condition.includes("unspecified stream"), f.condition);
+    assert.ok(!f.condition.includes("stream v:0"),
+      "an unrecorded stream must never be rendered as the stream this build would have scored: " + f.condition);
+  }
+});
+
 test("progressFigure exists for a running encode and for no other state", () => {
   const running = { status: "encoding", progress_fraction: 0.421, progress_seconds: 1200, progress_duration_seconds: 3600 };
   // `fraction` is the clamped measurement the percentage is rounded from. It is carried
@@ -271,9 +296,9 @@ test("an unreadable total does not claim the view is capped, which it cannot kno
 test("announceText is a short count summary a screen reader can hear on every snapshot", () => {
   assert.equal(
     d.announceText({ pending: 4, probing: 1, encoding: 2, verifying: 1, done: 9, skipped: 3, failed: 2 }),
-    "9 done, 3 skipped, 2 failed, 0 parked awaiting a determination, 0 applied despite an error; 4 active, 4 pending.");
+    "9 done, 3 skipped, 2 failed, 0 would be transcoded, 0 parked awaiting a determination, 0 applied despite an error; 4 active, 4 pending.");
   assert.equal(d.announceText({}),
-    "0 done, 0 skipped, 0 failed, 0 parked awaiting a determination, 0 applied despite an error; 0 active, 0 pending.");
+    "0 done, 0 skipped, 0 failed, 0 would be transcoded, 0 parked awaiting a determination, 0 applied despite an error; 0 active, 0 pending.");
 });
 
 // A parked job is counted SEPARATELY and named for what it is (FILESYSTEM-1, AC15j). It is
@@ -284,10 +309,12 @@ test("announceText is a short count summary a screen reader can hear on every sn
 test("announceText counts a parked job as parked, never as a failure", () => {
   assert.equal(
     d.announceText({ done: 1, skipped: 0, failed: 2, indeterminate: 3, pending: 0 }),
-    "1 done, 0 skipped, 2 failed, 3 parked awaiting a determination, 0 applied despite an error; 0 active, 0 pending.");
+    "1 done, 0 skipped, 2 failed, 0 would be transcoded, 3 parked awaiting a determination, 0 applied despite an error; 0 active, 0 pending.");
   // The two counts move independently: parked jobs do not inflate the failure count.
-  assert.ok(d.announceText({ failed: 0, indeterminate: 5 }).includes("0 failed, 5 parked"));
-  assert.ok(d.announceText({ failed: 5, indeterminate: 0 }).includes("5 failed, 0 parked"));
+  assert.ok(d.announceText({ failed: 0, indeterminate: 5 }).includes("0 failed,"));
+  assert.ok(d.announceText({ failed: 0, indeterminate: 5 }).includes("5 parked"));
+  assert.ok(d.announceText({ failed: 5, indeterminate: 0 }).includes("5 failed,"));
+  assert.ok(d.announceText({ failed: 5, indeterminate: 0 }).includes("0 parked"));
 });
 
 // The OTHER FILESYSTEM-1 outcome, and the same fault caught by omission rather than by
@@ -298,19 +325,134 @@ test("announceText counts a parked job as parked, never as a failure", () => {
 test("announceText speaks applied-despite-error too, as itself", () => {
   assert.equal(
     d.announceText({ done: 1, failed: 0, indeterminate: 0, "applied-despite-error": 4 }),
-    "1 done, 0 skipped, 0 failed, 0 parked awaiting a determination, 4 applied despite an error; 0 active, 0 pending.");
+    "1 done, 0 skipped, 0 failed, 0 would be transcoded, 0 parked awaiting a determination, 4 applied despite an error; 0 active, 0 pending.");
   // Never folded into a success, and never into a failure.
   assert.ok(d.announceText({ done: 0, "applied-despite-error": 7 }).includes("0 done"));
   assert.ok(d.announceText({ failed: 0, "applied-despite-error": 7 }).includes("0 failed"));
   assert.ok(d.announceText({ "applied-despite-error": 7 }).includes("7 applied despite an error"));
   // And every status the served document declares is either spoken or deliberately
   // rolled into "active": a new outcome must not be able to go silent again.
-  const spoken = d.announceText({ done: 1, skipped: 1, failed: 1, indeterminate: 1, "applied-despite-error": 1 });
-  for (const s of ["done", "skipped", "failed", "indeterminate", "applied-despite-error"]) {
+  const spoken = d.announceText({ done: 1, skipped: 1, failed: 1, "would-transcode": 1, indeterminate: 1, "applied-despite-error": 1 });
+  for (const s of ["done", "skipped", "failed", "would-transcode", "indeterminate", "applied-despite-error"]) {
     assert.ok(/1 /.test(spoken.split(",").find((p) => p.includes(s === "indeterminate" ? "parked" :
-      s === "applied-despite-error" ? "applied despite" : s)) || ""),
+      s === "applied-despite-error" ? "applied despite" :
+      s === "would-transcode" ? "would be transcoded" : s)) || ""),
       "the summary does not count " + s + ": " + spoken);
   }
+});
+
+// A DRY RUN's decisions are spoken as their own named figure. The fault this catches is
+// the one both FILESYSTEM-1 outcomes caught before it, in both of its forms: folded into
+// another count, or left out altogether so a sighted reader sees a chip counting them
+// while a listener hears nothing at all.
+test("announceText speaks the would-transcode count as its own named figure", () => {
+  assert.equal(
+    d.announceText({ done: 2, skipped: 1, failed: 0, "would-transcode": 5 }),
+    "2 done, 1 skipped, 0 failed, 5 would be transcoded, 0 parked awaiting a determination, 0 applied despite an error; 0 active, 0 pending.");
+  // Never folded into a success, never into a skip, never into a failure - and the three
+  // move independently of it.
+  assert.ok(d.announceText({ done: 0, "would-transcode": 9 }).includes("0 done"));
+  assert.ok(d.announceText({ skipped: 0, "would-transcode": 9 }).includes("0 skipped"));
+  assert.ok(d.announceText({ failed: 0, "would-transcode": 9 }).includes("0 failed"));
+  assert.ok(d.announceText({ "would-transcode": 9 }).includes("9 would be transcoded"));
+  // And it is a real zero when no file was decided that way, not a silence.
+  assert.ok(d.announceText({ done: 3 }).includes("0 would be transcoded"));
+});
+
+// --- what a dry run's decision shows on a row, and what the candidates add up to ---
+
+test("codecText renders a recorded codec and states every absence", () => {
+  assert.equal(d.codecText("h264"), "h264");
+  assert.equal(d.codecText("  mpeg4  "), "mpeg4");
+  // Absent, null, empty, blank or not a string: NOT RECORDED, never a blank cell a reader
+  // could take for "no video stream".
+  for (const v of [undefined, null, "", "   ", 0, 42, NaN, {}, [], true]) {
+    assert.equal(d.codecText(v), NR, "codecText(" + JSON.stringify(v) + ") fabricated a codec");
+  }
+});
+
+test("sourceSizeText is the size of the file that was decided, or nothing", () => {
+  assert.equal(d.sourceSizeText({ source_bytes: 4194304 }), "4.0 MB");
+  assert.equal(d.sourceSizeText({ source_bytes: 0 }), "0 B"); // a measured zero IS a size
+  for (const v of ABSENT) {
+    refusesFabrication("sourceSizeText", d.sourceSizeText({ source_bytes: v }));
+  }
+  assert.equal(d.sourceSizeText({ source_bytes: null }), NR);
+  assert.equal(d.sourceSizeText({}), NR);
+  assert.equal(d.sourceSizeText(null), NR);
+});
+
+test("candidateTotal adds up SOURCE bytes over the candidate rows and nothing else", () => {
+  const rows = [
+    { status: "would-transcode", source_bytes: 1000, source_codec: "h264" },
+    { status: "would-transcode", source_bytes: 2000, source_codec: "mpeg4" },
+    // Every other status contributes nothing: this is a total over the candidates.
+    { status: "done", source_bytes: 999999, output_bytes: 1 },
+    { status: "skipped", source_bytes: 888888 },
+  ];
+  assert.deepEqual(shape(d.candidateTotal(rows)), { counted: 2, excluded: 0, bytes: 3000 });
+  assert.equal(d.candidateCoverageText(d.candidateTotal(rows)), "over 2 candidate rows shown");
+  assert.equal(d.candidateExclusionText(d.candidateTotal(rows)), "");
+});
+
+test("candidateTotal excludes a row with no recorded size, counts it, and says so", () => {
+  const rows = [
+    { status: "would-transcode", source_bytes: 4096 },
+    { status: "would-transcode", source_bytes: null },
+    { status: "would-transcode" },
+    { status: "would-transcode", source_bytes: "1024" },
+    { status: "would-transcode", source_bytes: -1 },
+    { status: "would-transcode", source_bytes: NaN },
+    { status: "would-transcode", source_bytes: Infinity },
+  ];
+  const t = d.candidateTotal(rows);
+  assert.deepEqual(shape(t), { counted: 1, excluded: 6, bytes: 4096 });
+  assert.equal(d.candidateExclusionText(t), "6 rows excluded: no recorded size");
+  // One row reads in the singular, because a figure that says "1 rows" is a figure nobody
+  // proof-read.
+  assert.equal(d.candidateExclusionText({ counted: 1, excluded: 1 }), "1 row excluded: no recorded size");
+  assert.equal(d.candidateCoverageText({ counted: 1, excluded: 0 }), "over 1 candidate row shown");
+});
+
+test("candidateTotal is null when no row was decided that way, and never a zero", () => {
+  // No candidate rows at all: there is NO figure, because a total of 0 B beside an empty
+  // candidate list reads as "these files are worth nothing" about files nobody looked at.
+  assert.equal(d.candidateTotal([]), null);
+  assert.equal(d.candidateTotal([{ status: "done", source_bytes: 5 }]), null);
+  assert.equal(d.candidateTotal(null), null);
+  assert.equal(d.candidateTotal(undefined), null);
+  assert.equal(d.candidateTotal("rows"), null);
+  assert.equal(d.candidateTotal([null, 7, "x"]), null);
+  // Candidate rows that recorded NO size are a different fact: the figure is absent
+  // (rendered as the page's absence phrase) while the rows are still counted and stated.
+  const t = d.candidateTotal([{ status: "would-transcode" }, { status: "would-transcode" }]);
+  assert.deepEqual(shape(t), { counted: 0, excluded: 2, bytes: null });
+  assert.equal(d.candidateCoverageText(t), "over 2 candidate rows shown");
+  assert.equal(d.candidateExclusionText(t), "2 rows excluded: no recorded size");
+});
+
+test("the candidate figures name no saving, output size or reclaim", () => {
+  // AC17's refusal, at the derivation: nobody has encoded these files, so no honest
+  // number exists for what they would give back. Nothing here may even be phrased as one.
+  const t = d.candidateTotal([
+    { status: "would-transcode", source_bytes: 1000 },
+    { status: "would-transcode" },
+  ]);
+  const text = [d.candidateCoverageText(t), d.candidateExclusionText(t)].join(" ").toLowerCase();
+  for (const word of ["saving", "save", "reclaim", "projected", "estimate", "smaller", "output"]) {
+    assert.ok(!text.includes(word), "a candidate figure's own words carry \"" + word + "\": " + text);
+  }
+  // And the total is the source bytes, not a difference: two 1000-byte sources total 2000.
+  assert.equal(d.candidateTotal([
+    { status: "would-transcode", source_bytes: 1000 },
+    { status: "would-transcode", source_bytes: 1000 },
+  ]).bytes, 2000);
+});
+
+test("the candidate status is the one the page's own vocabulary declares", () => {
+  assert.ok(d.STATUSES.includes(d.CANDIDATE_STATUS), "the vocabulary does not carry the candidate status");
+  assert.ok(!d.IN_FLIGHT.includes(d.CANDIDATE_STATUS),
+    "a recorded decision is grouped with the work in hand; nothing is examining that file");
 });
 
 test("an aggregate states the set it covers and the rows it excluded", () => {
@@ -514,4 +656,63 @@ test("spreadPositions places the mean on the scale its own ends define", () => {
     assert.equal(d.spreadPositions(0, v, 10), null, "mean " + String(v));
     assert.equal(d.spreadPositions(0, 5, v), null, "max " + String(v));
   }
+});
+
+// --- what an operator can DO about one terminal row ---------------------------------
+
+test("requeueCommand names the command with the row's own path, and nothing for the three nothing re-opens", () => {
+  // The rows a requeue re-opens. Each gets the WHOLE command, path included: a command an
+  // operator has to assemble themselves is one they will assemble wrongly.
+  for (const status of ["done", "skipped", "failed", "would-transcode"]) {
+    assert.equal(d.requeueCommand({ status: status, path: "/media/films/a.mkv" }),
+      "holdfast requeue /media/films/a.mkv", status);
+    assert.equal(d.requeueRefusal({ status: status, path: "/media/films/a.mkv" }), "", status);
+  }
+  // The three nothing re-opens. Each says why instead of showing a reader nothing.
+  for (const j of [
+    { status: "indeterminate", path: "/media/films/a.mkv" },
+    { status: "applied-despite-error", path: "/media/films/a.mkv" },
+    { status: "skipped", reason: "restored-original", path: "/media/films/a.mkv" },
+  ]) {
+    assert.equal(d.requeueCommand(j), "", JSON.stringify(j));
+    assert.ok(d.requeueRefusal(j).length > 0, "no reason given for " + JSON.stringify(j));
+  }
+  // A row that is still work in hand has no remedy at all: nothing is holding the file out.
+  for (const status of d.IN_FLIGHT) {
+    assert.equal(d.requeueCommand({ status: status, path: "/media/films/a.mkv" }), "", status);
+    assert.equal(d.requeueRefusal({ status: status, path: "/media/films/a.mkv" }), "", status);
+  }
+  // And nothing is fabricated out of an absent row, or out of a path that is not one. A
+  // path the server sent is whatever it sent - the page does not judge its shape - so the
+  // refusal here is exactly "absent or empty", and every non-string absence is one.
+  for (const v of ABSENT) {
+    assert.equal(d.requeueCommand(v), "", "row " + String(v));
+    assert.equal(d.requeueRefusal(v), "", "row " + String(v));
+    if (typeof v === "string") continue;
+    assert.equal(d.requeueCommand({ status: "done", path: v }), "", "path " + String(v));
+  }
+  assert.equal(d.requeueCommand({ status: "done", path: "" }), "");
+  // A status this build does not know is not a terminal row it can claim a remedy for.
+  assert.equal(d.requeueCommand({ status: "banana", path: "/media/films/a.mkv" }), "");
+});
+
+test("searchCountText states the count over the ledger and says when it could not be read", () => {
+  const total = (count) => ({ available: true, unavailable: "", covers: "every matching row in the ledger", cap: 200, count: count });
+  assert.equal(d.searchCountText(1, total(1)), "1 matching row.");
+  assert.equal(d.searchCountText(3, total(3)), "3 matching rows.");
+  assert.equal(d.searchCountText(0, total(0)), "0 matching rows.");
+  // More matched than were shipped: the page says both figures, so a reader knows the
+  // region is not the whole answer.
+  assert.equal(d.searchCountText(200, total(4096)), "Showing 200 of 4,096 matching rows.");
+  // A count that could not be read is said IN WORDS with no number in its place: a figure
+  // beside "matched" is read as the total whatever the sentence around it says.
+  const unreadable = d.searchCountText(2, { available: false, unavailable: "x", covers: "", cap: 200, count: null });
+  assert.ok(unreadable.includes("could not be read"), unreadable);
+  assert.ok(!/[0-9]/.test(unreadable), "the unreadable answer carries a digit: " + unreadable);
+  for (const v of ABSENT) {
+    const out = d.searchCountText(2, v);
+    refusesFabrication("searchCountText(2, " + String(v) + ")", out);
+    assert.ok(!/^[0-9]/.test(out), "an unreadable total produced a figure: " + out);
+  }
+  assert.equal(d.searchCountText(undefined, total(3)), "");
 });

@@ -19,6 +19,31 @@ function capNote(id, shown, total) {
   el.hidden = text === "";
 }
 
+// candidateNote is the total SOURCE BYTES the rendered candidates account for, the set it
+// was taken over, and the rows it had to leave out.
+//
+// The whole block goes when there is no candidate row to total, which is the F3 answer
+// rather than a tidiness: a "0 B under consideration" beside an empty candidate list reads
+// as "these files are worth nothing", and nobody has looked at any files. The exclusion
+// line goes when there is nothing to exclude, exactly as an aggregate card's does.
+//
+// There is deliberately no projected saving here and none in the rows. Nothing has encoded
+// these files, so no honest figure exists for what they would give back; a projection
+// would be read as a measurement, which is the overclaim this whole surface refuses.
+function candidateNote(rows) {
+  const host = $("cand");
+  if (!host) return;
+  const t = candidateTotal(rows);
+  host.hidden = !t;
+  if (!t) return;
+  bytesInto("cand-bytes", t.bytes);
+  $("cand-cov").textContent = candidateCoverageText(t);
+  const ex = $("cand-ex");
+  const exText = candidateExclusionText(t);
+  ex.textContent = exText;
+  ex.hidden = exText === "";
+}
+
 // Client-side path filter over the rows already loaded (which are themselves capped -
 // see capNote). Hides non-matching rows in both tables; empty term shows all.
 function applyFilter() {
@@ -29,6 +54,76 @@ function applyFilter() {
       tr.hidden = term !== "" && !(tr.dataset.path || "").includes(term);
     }
   }
+}
+
+// --- the ledger search's own region -------------------------------------------------
+
+// showFound reveals the search region and puts its results view into one of the three
+// states, or clears the state when it has rows of its own to show.
+//
+// The region is ABSENT until a search has been made, which is why the shell ships this
+// view with no state element in it: before anybody asks a question there is nothing to be
+// loading, nothing to be empty of and nothing that could not be read, and a results table
+// standing there in one of those states would be the page answering a question nobody put.
+function showFound(state) {
+  const host = $("found");
+  if (!host) return;
+  host.hidden = false;
+  setViewState("search", state);
+}
+
+// renderSearchResults draws what one ledger search found: the rows in their own region,
+// never merged into either capped table, and the count over the WHOLE ledger beside them.
+function renderSearchResults(payload) {
+  const body = $("search-results");
+  if (!body) return;
+  const rows = (payload && Array.isArray(payload.results)) ? payload.results : [];
+  const headers = headersOf("search-results");
+  syncRows(body, rows, (j) => searchRow(j, headers));
+  const note = $("found-count");
+  if (note) note.textContent = searchCountText(rows.length, payload ? payload.total : null);
+  showFound(rows.length ? null : "empty");
+}
+
+// searchRefused is what the page shows when the search was REFUSED rather than answered.
+// It is deliberately not the empty state: "nothing matched" and "nobody was allowed to
+// ask" are different facts, and a page that rendered an empty result set for the second
+// would tell an operator their file is not in the ledger when nothing looked.
+function searchRefused(why) {
+  const body = $("search-results");
+  if (body) syncRows(body, [], (j) => searchRow(j, null));
+  const note = $("found-count");
+  if (note) note.textContent = why;
+  showFound("unreadable");
+}
+
+// --- the paths this daemon is withholding ---------------------------------------------
+
+// renderHeld draws every withholding in force, each with the control that removes it.
+//
+// The region is absent while there is nothing to say - no withheld path and no refusal to
+// report - and present the moment either exists, which is what carries the one sentence
+// about where these records live to a reader who is looking at one.
+function renderHeld(list, message) {
+  const host = $("held");
+  const ul = $("held-list");
+  const msg = $("held-msg");
+  if (!host || !ul || !msg) return;
+  const rows = Array.isArray(list) ? list : [];
+  ul.replaceChildren();
+  for (const e of rows) {
+    const path = (e && typeof e.path === "string") ? e.path : "";
+    if (!path) continue;
+    const li = tplNode("tpl-held-row");
+    li.querySelector(".heldpath").textContent = path;
+    const b = li.querySelector(".heldgo");
+    b.textContent = "Stop withholding";
+    b.dataset.release = path;
+    ul.appendChild(li);
+  }
+  msg.textContent = message || "";
+  msg.hidden = !message;
+  host.hidden = ul.children.length === 0 && !message;
 }
 
 // markChipGroupBreak decides whether the group boundary is drawn at all.
@@ -142,6 +237,8 @@ function render(snap) {
   const hheaders = headersOf("history");
   syncRows(hbody, h, (j) => histRow(j, hheaders));
   setViewState("history", h.length ? null : "empty");
+  // What the candidates add up to, over the rows just rendered.
+  candidateNote(h);
 
   // Honest row-cap notices. The total is the one the SERVER reported for each table -
   // counted over every matching row in the ledger - and never one this page derived from

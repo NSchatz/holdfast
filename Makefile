@@ -43,10 +43,13 @@ IMAGE    ?= holdfast:dev
 PLATFORM ?= linux/amd64
 
 .PHONY: build test check fmt vet staticcheck govulncheck govulncheck-selftest \
+        comment-density \
         check-pins check-pins-selftest install-ffmpeg-selftest check-pin-live \
         find-browser find-browser-selftest \
         release-shape release-shape-selftest \
         webui-gen webui-stale webui-check webui-repeat-check webui-graders-selftest \
+        check-design-record check-design-record-selftest \
+        secret-scan secret-scan-selftest install-hooks \
         tidy clean image image-smoke compose-check
 
 build:
@@ -206,8 +209,70 @@ webui-repeat-check:
 webui-graders-selftest:
 	./scripts/webui-graders-selftest.sh
 
+# --- the design record (S0123) ------------------------------------------------
+# interface-craft C1 and C2, held by a machine. C1 asks this repository to declare its
+# display face, text face, accent, radius signature and shadow signature with one sentence
+# each; C2 names the defaults an unspecified interface converges on and allows one only
+# where the record names it with its reason. docs/design-record.md is that record, and this
+# holds it to internal/webui/src/tokens.css - the token file is the one writer of a VALUE,
+# the record the one writer of a REASON - and then scans the dashboard's stylesheet,
+# template and generated sources for every blocklist entry.
+#
+# It is in `check:` rather than beside the dashboard graders because every question it asks
+# is about what a file DECLARES: no browser, no node, no network. What the page SHOWS is
+# C3 to C7 and belongs to the engine, in the dashboard job.
+check-design-record:
+	go run ./scripts/check-design-record
+
+# Proves check-design-record still BITES. Every failure mode it has - an absent, unreadable
+# or unparseable record, an empty identity-source set, a value that disagrees with its
+# token, an exception bought without a reason - and every blocklist entry in turn is
+# defeated on purpose against a mutated COPY of the tree, each defeat is required to be red
+# and to name what it saw, and the run fails if any defeat did not execute. Deliberately NOT
+# part of `check`: the mutations belong in their own target, and `check` must never rewrite
+# the tree it is grading. A guard nobody tries to defeat is a guard nobody knows works.
+check-design-record-selftest:
+	./scripts/check-design-record-selftest.sh
+
+# The prose ceiling on Go source, and the ranked table it is decided from. Counting is
+# by TOKENS - the Go parser decides what a comment is - and the ceiling, the warn band
+# and the exemption list all live in internal/commentdensity, never here: a threshold
+# written in two places is a threshold that drifts. docs/comment-density.md carries the
+# measurement it was derived from.
+comment-density:
+	go run ./scripts/comment-density-gate
+
+# --- secrets (S0132) ----------------------------------------------------------
+# The secret scanner (secrets K4). scripts/secret-scan.sh is the ONE invocation - this
+# target, the pre-commit hook and the self-test all go through it - because `go run` does
+# not propagate an exit code, and the scanner's whole interface is that "found a
+# credential" (3) and "could not run" (4) are different answers.
+#
+# High-signal vendor prefixes and forbidden filenames only: no entropy heuristic, so it
+# catches an ISSUED token and not a password typed into a config file. docs/secrets.md
+# states the trade; nothing may read a clean run as coverage of what it does not look for.
+secret-scan:
+	./scripts/secret-scan.sh
+
+# Proves the secret scanner still BITES, and proves the pre-commit path refuses a real
+# commit. Every family, every forbidden name, every exit code and the hook itself are
+# defeated on purpose against a THROWAWAY CLONE, so the mutations never touch the tree
+# `check` is grading. The fixtures are COMPOSED at runtime and never committed: a fixture
+# that sat in the scanned tree would make `make secret-scan` red by construction, and the
+# only way out of that would be an allowlist that grows until the scanner stops scanning.
+# A guard nobody tries to defeat is a guard nobody knows works.
+secret-scan-selftest:
+	./scripts/secret-scan-selftest.sh
+
+# THE ONE SETUP STEP a clone performs to get the pre-commit scan. It points
+# core.hooksPath at the committed hooks directory, so there is nothing to copy and a hook
+# that changes in the repository changes for everyone who has run this.
+install-hooks:
+	@git config core.hooksPath .githooks
+	@echo "pre-commit secret scan installed (core.hooksPath = .githooks). Undo: git config --unset core.hooksPath"
+
 # THE gate. CI and the release workflow both run exactly this.
-check: check-pins check-pins-selftest install-ffmpeg-selftest find-browser-selftest release-shape webui-stale fmt vet build test staticcheck govulncheck govulncheck-selftest
+check: check-pins check-pins-selftest install-ffmpeg-selftest find-browser-selftest release-shape webui-stale check-design-record comment-density secret-scan secret-scan-selftest fmt vet build test staticcheck govulncheck govulncheck-selftest
 
 # Asks UPSTREAM whether the pinned ffmpeg release is still served. Deliberately NOT part
 # of `check`: the PR gate must not red because a third party had a bad afternoon. CI runs

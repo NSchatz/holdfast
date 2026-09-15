@@ -198,6 +198,49 @@
     border-style: dashed; border-color: var(--disabled); cursor: not-allowed; }
   #msg { font-size: var(--fs-sm); color: var(--muted); min-height: var(--sp-5); }
   #msg.err { color: var(--bad); }
+  /* The search control's own status line, in the same roles #msg carries: what the
+     request did, and --bad when it did nothing. */
+  #search-msg { font-size: var(--fs-sm); color: var(--muted); min-height: var(--sp-5); }
+  #search-msg.err { color: var(--bad); }
+
+  /* The ledger search's results, drawn as their OWN region. It is bordered and titled so
+     nothing in it can be read as a row of the capped tables: those answer "what has
+     happened lately", this answers "where is THIS file", and a surface that ran the two
+     together would re-commit the error the cap notices exist to prevent. */
+  .found { margin: 0 0 var(--sp-6); }
+  .found > h3 { margin-top: var(--sp-4); }
+  #found-count { font-size: var(--fs-xs); color: var(--fg);
+    border-left: var(--bw-flag) solid var(--accent);
+    padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-sm);
+    margin: 0 0 var(--sp-2); }
+
+  /* The paths this daemon is withholding. Drawn as a card, because the list IS the
+     record: an operator reading it has to be able to see at a glance everything that is
+     currently being held out, and every entry carries the control that stops holding it. */
+  .held { background: var(--panel); border: var(--bw-hair) solid var(--border);
+    border-left: var(--bw-flag) solid var(--warn);
+    border-radius: var(--radius-md);
+    padding: var(--sp-3) var(--sp-4);
+    padding-left: calc(var(--sp-4) - var(--bw-flag) + var(--bw-hair));
+    margin: 0 0 var(--sp-6); }
+  .held > h3 { margin-top: 0; }
+  .held .scope { margin-bottom: var(--sp-2); }
+  #held-list { list-style: none; margin: 0; padding: 0;
+    display: flex; flex-direction: column; gap: var(--sp-2); }
+  #held-list li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+  #held-list .heldpath { font-family: var(--font-mono); font-size: var(--fs-xs);
+    overflow-wrap: anywhere; flex: 1 1 var(--w-chip-min); }
+  #held-msg { font-size: var(--fs-xs); color: var(--bad); margin: var(--sp-2) 0 0; }
+
+  /* The remedy cell. The command is monospace because it is meant to be copied, and it
+     wraps rather than running under the next column: a truncated command is one somebody
+     retypes wrongly. */
+  td.remedy { white-space: normal; }
+  td.remedy .cmd { display: block; font-family: var(--font-mono); font-size: var(--fs-xs);
+    color: var(--fg); overflow-wrap: anywhere; margin-bottom: var(--sp-1); }
+  td.remedy .cond { margin-bottom: var(--sp-1); }
+  td.remedy button, #held-list button { font-size: var(--fs-xs);
+    padding: var(--sp-1) var(--sp-2); }
 
   /* The page's two regions. The h2 is the region; the h3s inside it are its blocks. */
   /* The space above this rule is the padding PLUS the half-leading a line box carries
@@ -268,6 +311,27 @@
   .note.cap { color: var(--fg); border-left: var(--bw-flag) solid var(--warn);
     padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-sm);
     font-size: var(--fs-xs); margin: 0 0 var(--sp-2); }
+
+  /* What a DRY RUN decided, totalled. It is drawn as its own small card rather than as a
+     line of the reclaimed band above it, because those two figures are space that CAME
+     BACK and this one is space that is merely under consideration - a reader who met the
+     three together would add them up. The flag is --accent and not --ok for the same
+     reason: nothing here has been reclaimed. */
+  .cand { background: var(--panel); border: var(--bw-hair) solid var(--border);
+    border-left: var(--bw-flag) solid var(--accent);
+    border-radius: var(--radius-md);
+    padding: var(--sp-3) var(--sp-4);
+    padding-left: calc(var(--sp-4) - var(--bw-flag) + var(--bw-hair));
+    margin: 0 0 var(--sp-3); }
+  .cand .note { margin: 0; }
+  .cand .cand-v { display: flex; flex-direction: column; gap: var(--sp-1); }
+  .cand .cand-v b { font-size: var(--fs-2xl); line-height: var(--lh-tight); font-weight: 700;
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .cand .cand-k { font-size: var(--fs-xs); color: var(--muted); }
+  /* The set the total was taken over and the rows it left out, in the same roles an
+     aggregate card gives them: stated beside the figure, never implied. */
+  .cand .cand-cov, .cand .cand-ex { font-size: var(--fs-xs); color: var(--muted);
+    margin-top: var(--sp-1); }
 
   /* Whole-ledger figures. Each card carries its number, its drawing, the set that
      number is over, and the rows it had to leave out; ".out" is the unavailable
@@ -372,13 +436,16 @@
   .queue .q-prog { width: 20%; }
   .queue .q-worker { width: 14%; }
 
-  .hist .c-file { width: 21%; }
-  .hist .c-result { width: 14%; }
-  .hist .c-size { width: 16%; }
-  .hist .c-vmaf { width: 22%; }
-  .hist .c-enc { width: 8%; }
-  .hist .c-dur { width: 9%; }
-  .hist .c-upd { width: 10%; }
+  .hist .c-file { width: 18%; }
+  .hist .c-result { width: 12%; }
+  .hist .c-size { width: 14%; }
+  .hist .c-vmaf { width: 19%; }
+  .hist .c-enc { width: 7%; }
+  .hist .c-dur { width: 8%; }
+  .hist .c-upd { width: 9%; }
+  /* What an operator can DO about the row. It is the widest of the small columns
+     because it carries a command with a path in it. */
+  .hist .c-remedy { width: 13%; }
   /* A fixed-layout column does not grow for a header that will not break, it lets the
      header run into the next column. These wrap instead. */
   table.hist th { white-space: normal; }
@@ -408,6 +475,12 @@
      filled disc, the square and the diamond with no colour vision at all. */
   .st-indeterminate .dot { background: none; border: var(--bw-flag) solid var(--bad); }
   .st-applied-despite-error .dot { background: var(--bad); border: var(--bw-flag) solid var(--warn); }
+  /* A dry run's recorded decision is terminal too, so it takes a shape of its own: a
+     HOLLOW SQUARE - the outline of the filled square `failed` draws, for a file nothing
+     has done anything to yet. It stays apart from all five other marks with no colour
+     vision at all, and the state is spelled out beside it as it is on every other row. */
+  .st-would-transcode .dot { background: none; border: var(--bw-flag) solid var(--accent);
+    border-radius: 0; }
   .st-encoding .dot, .st-probing .dot, .st-verifying .dot, .st-pending .dot { background: var(--accent); }
   .reason { color: var(--muted); font-size: var(--fs-xs); }
   .reason.fail { color: var(--bad); word-break: break-word; }
@@ -419,6 +492,15 @@
   .size .arrow { color: var(--muted); margin: 0 var(--sp-1); }
   .size .pct { display: block; color: var(--ok); font-weight: 600; margin-top: var(--sp-1);
     white-space: normal; }
+  /* A candidate row's size is the SOURCE's, named as that. It is deliberately NOT painted
+     --ok: green on this page means space that came back, and nothing has come back from a
+     file nothing has encoded. */
+  .size .srcsize { color: var(--fg); }
+  .size .srck { display: block; color: var(--muted); font-size: var(--fs-xs);
+    margin-top: var(--sp-1); white-space: normal; }
+  /* The source codec on a candidate row. It sits in the result cell under the state, in
+     the same footnote role the VMAF condition line takes on a done row. */
+  .st .cond .codec { color: var(--fg); font-family: var(--font-mono); }
   .vmaf .pair { white-space: normal; }
   .vmaf .mean { font-weight: 700; font-size: var(--fs-md); }
   .vmaf .worst { color: var(--fg); font-weight: 600; }

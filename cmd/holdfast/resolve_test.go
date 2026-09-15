@@ -68,7 +68,7 @@ func newParkedFixture(t *testing.T) *parkedFixture {
 func (f *parkedFixture) park(t *testing.T) int64 {
 	t.Helper()
 	ctx := context.Background()
-	if ok, err := f.st.Claim(ctx, f.source, "31:1700000000", "w0", 3); err != nil || !ok {
+	if ok, err := f.st.Claim(ctx, f.source, "31:1700000000", "w0", 3, store.DecisionInputs{}); err != nil || !ok {
 		t.Fatalf("Claim: ok=%v err=%v", ok, err)
 	}
 	if err := f.st.RecordSwapIncident(ctx, store.SwapIncident{

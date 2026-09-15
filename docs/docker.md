@@ -65,6 +65,64 @@ The library mount must also be a **single filesystem per directory** — the swa
 `rename(2)`, which cannot cross filesystems. (This is why the temp file lives beside the
 source rather than in a scratch volume.)
 
+<a id="swap-metadata"></a>
+
+**What a swap CHANGES about a replaced file.** Everything above is what holdfast NEEDS from
+your filesystem. This is what it does to the file it publishes - none of it visible unless
+you go looking, and all of it library-wide the first time you point holdfast at a library.
+
+The replacement carries the source's mode. A source at `0640` is replaced by a file at
+`0640`, whatever umask holdfast is running under. The nine permission bits travel, and so do
+setuid, setgid and sticky if the source had them.
+
+Ownership is carried only where holdfast is privileged to carry it. Changing a file's owner
+needs `CAP_CHOWN` or root, and a container running as an ordinary `user:` has neither - so
+on a rootless deployment the replacement is owned by the holdfast uid and gid rather than by
+the source's, holdfast says so once per run, and the swap still happens. Run as a `user:`
+that already owns the media and the question never arises, which is the same advice the
+paragraph above gives for a different reason.
+
+The modification time is carried from the source unless `preserve_mtime` is false. It
+defaults to true, because resetting it makes a first pass over a library look to Plex and
+Jellyfin like the whole library arrived at once: "Recently Added", every date-based sort and
+every smart collection built on one moves with it, and nothing puts it back. Set
+`preserve_mtime: false` if you would rather the replacement's mtime say when the bytes were
+actually written. Either way the file's identity still moves, because a swap always makes
+the file smaller - so a resume reads the replacement as a new file and never as the source
+it already processed.
+
+ACLs and xattrs are not carried. POSIX ACLs, SELinux labels and every other extended
+attribute on the source are left behind: the replacement gets whatever your filesystem gives
+a newly created file, and nothing in holdfast reads or writes them. A library whose access
+depends on POSIX ACLs needs them reapplied after a pass.
+
+### One process per `state_dir`
+
+**Running more than one holdfast process against a single `state_dir` is unsupported.** The job
+store under `/state` is single-writer: one holdfast process serializes every access to it, and
+that serialization does not reach across processes. A second process pointed at the same
+`state_dir` contends for a store that is neither built nor proven to be shared, so this is not a
+deployment to tune - it is one not to build. Pointing two processes at the same **library** is
+worse still, for the reason two different transcoders must not share one: both write a temp file
+beside the source and both delete sources.
+
+**Do this instead.** Run one container per `state_dir`. A library that genuinely needs its own
+daemon gets its own container, its own `state_dir` volume and its own `/media` mount - never a
+second process on the first one's state. To use more of one machine, do not start a second
+process: raise `workers`.
+
+```yaml
+workers: 1   # concurrent encode workers inside the one daemon; the default
+```
+
+`workers` is 1 by default on purpose: a CPU libx265 encode already **saturates the available
+cores** by itself, so a second concurrent encode mostly takes cores from the first and the pair
+finishes no sooner. Raising it is an opt-in for a library of many small or low-resolution files,
+or for a hardware encoder - the cases where one encode does not use the whole machine. It buys
+concurrency **inside the one daemon**: holdfast is a single process whatever you set it to, which
+is the point. That is a design decision, not an unbuilt feature, and the README's
+[non-goal](../README.md#non-goals) says why.
+
 ## Timezone
 
 `run_window` is evaluated in **local time**. The image carries the zone database, but a
@@ -83,13 +141,167 @@ ports:
   - "127.0.0.1:8080:8080"   # loopback ONLY
 ```
 
-That is the shipped default, and it is the one to keep unless you have set
-`HOLDFAST_SERVER_AUTH_TOKEN` **and** put a TLS-terminating reverse proxy in front. Without a
-token the mutating endpoints (`rescan` / `pause` / `resume`) are **disabled entirely**, which
-is a safe default, not a broken one — the dashboard and the read API still work.
+That is the shipped default. It is loopback-only for THAT deployment, and it is the one to
+keep until putting holdfast behind a reverse proxy is a decision you have actually made.
+Publishing the port more widely, or letting a proxy reach the container over a shared
+container network, IS that decision: it removes the only protection the read surface has.
 
-Set the token via the environment (`.env`), never in `config.yaml`: an env var beats the file,
-so an empty env var would override a token set there.
+<a id="reverse-proxy-posture"></a>
+
+**Reverse-proxy posture.** Read this before you give holdfast a hostname.
+
+The dashboard and the read API (`/api/summary`, `/api/queue`, `/api/history`,
+`/api/events`) are **unauthenticated**. Nothing in this daemon checks a credential for
+them; on the shipped defaults they are protected by the loopback bind and by nothing else.
+Put a proxy in front and that bind protects nothing, so the proxy's own authentication
+becomes **the only barrier** in front of every media path in your library. Configure
+forward auth (Authelia, oauth2-proxy, whatever your proxy calls it) on the route before
+the hostname resolves, not after.
+
+The token-gated group stays **disabled** until a control token is configured. With no
+`server_auth_token` reference set (or `HOLDFAST_SERVER_AUTH_TOKEN` in the environment),
+`rescan`, `scan`, `pause`, `resume`, the ledger search (`/api/search`) and the withheld
+paths (`/api/exclusions`) answer **403** to every caller - a safe default, not a broken
+one, and the dashboard and the read API still work. The ledger search is in that group and
+not among the unauthenticated reads for a reason worth stating: the capped reads ship at
+most a few hundred rows, so a search over the whole ledger serves per-file rows they have
+never served, and gating it keeps this a control-gated read rather than a new
+unauthenticated one. A proxy identity header (`Remote-User`,
+`Remote-Groups`, `Remote-Email`, `Remote-Name`, any `X-Forwarded-*`) is **never**
+authorization for them: only a matching `Authorization: Bearer` token is, so a proxy that
+can be talked into forging one of those headers gains nothing by it. Enabling the controls
+is a decision separate from putting a proxy in front, and it is the one that gives a stolen
+bearer token something to buy.
+
+Serve holdfast at the **host root**, on a hostname of its own. The page asks for its own
+API and its own assets with **root-relative** paths (`/api/events`, `/api/rescan`), so a
+router that strips or rewrites a path prefix breaks it silently: the document loads and
+every request under it 404s. Pass the Host header through, and put no prefix strip and no
+path rewrite on this route.
+
+The control token is reached **by reference** and never written anywhere as a literal. Mount
+the token as a file and point the key at it:
+
+```yaml
+services:
+  holdfast:
+    environment:
+      - HOLDFAST_SERVER_AUTH_TOKEN=file:/run/secrets/holdfast_control_token
+    secrets:
+      - holdfast_control_token
+
+secrets:
+  holdfast_control_token:
+    file: ./control-token.txt      # gitignored; mode 0400
+```
+
+A literal token in `config.yaml` **or** in `HOLDFAST_SERVER_AUTH_TOKEN` refuses to start.
+That is deliberate: holdfast starts `ffmpeg` as a child process, a child inherits its
+parent's environment, and a credential in the environment is readable from every encoder
+invocation's `/proc/<pid>/environ`. The same applies to `notify_url` and
+`tautulli_api_key`. `docs/secrets.md` has the reference forms and the migration.
+
+## Telling holdfast about one file: Sonarr / Radarr
+
+`POST /api/scan` takes a list of paths and looks at exactly those files. The *arr already
+knows when an import finished, which is the hard part, so wiring this up lets you turn the
+periodic scan off entirely (`scan_interval_sec: 0`) and still have every new file examined
+the moment it lands.
+
+It is a **targeted scan**, not a second pipeline. An accepted path goes through the same
+guards, the same claim and the same swap discipline a whole-library scan puts it through,
+and records the same verdict. It re-encodes nothing a scan would have skipped, and it is
+**not** `requeue`: a file a terminal row already answered stays answered.
+
+### The request
+
+```bash
+curl -sS -X POST http://holdfast:8080/api/scan \
+  -H "Authorization: Bearer $(cat /run/secrets/holdfast_control_token)" \
+  -H "Content-Type: application/json" \
+  -d '{"paths": ["/library/tv/Show/Season 01/Show - S01E01.mkv"]}'
+```
+
+The token is the value `server_auth_token` points at - the same one `rescan`, `pause` and
+`resume` take. With no control token configured this answers **403**, like every other
+mutating endpoint.
+
+The answer is **202** with a per-path report, and it comes back immediately: the file is
+queued, not encoded while you wait. Full request and response shapes, every refusal status,
+and the per-request limits are in [docs/api-reference.md](api-reference.md).
+
+### Sonarr / Radarr: `Connect > Custom Script`
+
+This is the route that needs nothing in between, because the *arr hands the script the
+imported file's path in its own environment variable. Add a script to the container the
+*arr runs in, and point `Settings > Connect > + > Custom Script` at it with **On Import**
+and **On Upgrade** ticked:
+
+```bash
+#!/bin/sh
+# Sonarr sets sonarr_episodefile_path; Radarr sets radarr_moviefile_path.
+# On a Test both are empty, which is how this exits 0 without calling anything.
+path="${sonarr_episodefile_path:-$radarr_moviefile_path}"
+[ -n "$path" ] || exit 0
+
+curl -sS --fail-with-body -X POST http://holdfast:8080/api/scan \
+  -H "Authorization: Bearer ${HOLDFAST_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "$(printf '{"paths":["%s"]}' "$path")"
+```
+
+### Sonarr / Radarr: `Connect > Webhook`
+
+The Webhook connection posts **the *arr's own JSON**, which carries the path under
+`episodeFile.path` (Sonarr) or `movieFile.path` (Radarr), inside an envelope with an
+`eventType` and a good deal else. holdfast does not parse it: it reads `{"paths": [...]}`
+and nothing else, deliberately, because a webhook payload shape is a third party's schema
+and this endpoint is not an *arr client. So the Webhook connection reaches holdfast through
+a shim that reshapes the body - anything that speaks HTTP will do:
+
+| Field | Value |
+|---|---|
+| URL | `http://your-shim:9000/sonarr` |
+| Method | `POST` |
+| Username / Password | leave empty - holdfast takes a bearer token, not basic auth |
+
+and the shim forwards, adding the header and picking the one field out:
+
+```bash
+# jq -r '.episodeFile.path // .movieFile.path' turns the *arr envelope into the path,
+# and the body holdfast reads is built from that and nothing else.
+curl -sS -X POST http://holdfast:8080/api/scan \
+  -H "Authorization: Bearer ${HOLDFAST_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -c '{paths: [(.episodeFile.path // .movieFile.path)]}' <<<"$arr_payload")"
+```
+
+If you would rather not run a shim, use the Custom Script route above.
+
+### The paths must be the paths holdfast sees
+
+**This is the one thing that bites.** Sonarr sends the path *it* knows the file by, and
+that is the path inside **Sonarr's** container. holdfast resolves what it is sent against
+its own filesystem and against its own `library_roots`, so `/tv/Show/S01E01.mkv` from
+Sonarr means nothing to a holdfast that mounts the same file at
+`/library/tv/Show/S01E01.mkv`: the submission is **rejected**, under
+`outside-library-roots` or `not-a-regular-file`, and reported as such in the response. It
+is never silently ignored, and it never reaches a file holdfast was not pointed at.
+
+Two ways out, and the first is much better:
+
+- **Mount the library at the same path in both containers.** Give Sonarr, Radarr and
+  holdfast the identical bind (`/library:/library`), so every path any of them produces is
+  a path all of them understand. This is the same advice the *arr documentation gives for
+  hardlinks and atomic moves, so a deployment that already follows it needs nothing here.
+- **Rewrite the prefix in the shim or the script**, if the mounts genuinely cannot be
+  aligned: `path=$(printf '%s' "$path" | sed 's|^/tv/|/library/tv/|')`. Keep the rewrite in
+  one place. holdfast will not guess it for you - guessing a path prefix on a tool that
+  deletes originals is not a trade worth making.
+
+A submitted path is resolved (symbolic links followed, `..` resolved away) **before** it is
+checked against `library_roots`, so a path that climbs out of your library, or a link
+pointing outside it, is refused rather than acted on.
 
 ## GPU passthrough
 

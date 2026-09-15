@@ -27,8 +27,8 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
 
-	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/schedule"
+	"github.com/NSchatz/holdfast/internal/secret"
 )
 
 // envPrefix is the prefix for environment overrides: HOLDFAST_CRF=20 sets crf.
@@ -47,6 +47,7 @@ var knownKeys = map[string]bool{
 	"pixel_format": true, "container_ext": true, "min_bitrate_kbps": true,
 	"min_savings_percent": true, "duration_tolerance_sec": true,
 	"max_failures": true, "skip_hardlinked": true, "state_dir": true,
+	preserveMtimeKey:  true,
 	"allow_non_local": true, "history_retention_rows": true, "undo_window_hours": true,
 	"vmaf_enable": true, "min_vmaf": true, "vmaf_min_pool": true,
 	"vmaf_min_chroma": true,
@@ -54,6 +55,19 @@ var knownKeys = map[string]bool{
 	"server_addr": true, "server_auth_token": true, "scan_interval_sec": true,
 	"metrics_enable": true, "notify_url": true, "run_window": true,
 	"max_load": true, "tautulli_url": true, "tautulli_api_key": true,
+	"bitrate_kbps": true, "encode_profiles": true,
+	"scratch_dir": true, "scratch_min_free_gb": true,
+}
+
+// profileKeys are the keys accepted inside one `encode_profiles` entry. The
+// unknown-key refusal has to bite INSIDE a profile as well as at the top level:
+// `encodr: svtav1` nested in a profile is the same typo with the same consequence
+// (a silent fall back to the top-level encoder), and a check that only looked at
+// the top-level key would never see it.
+var profileKeys = map[string]bool{
+	"name": true, "match": true,
+	"encoder": true, "crf": true, "preset": true,
+	"pixel_format": true, "container_ext": true, "bitrate_kbps": true,
 }
 
 // defaultLayer is the built-in default configuration, loaded as koanf's base layer.
@@ -68,11 +82,15 @@ func defaultLayer() map[string]any {
 		"preset":                 "slow",
 		"pixel_format":           "auto",
 		"container_ext":          "source",
+		"bitrate_kbps":           0,
+		"scratch_dir":            "",
+		"scratch_min_free_gb":    50,
 		"min_bitrate_kbps":       2500,
 		"min_savings_percent":    0,
 		"duration_tolerance_sec": 1.0,
 		"max_failures":           3,
 		"skip_hardlinked":        true,
+		preserveMtimeKey:         true,
 		"state_dir":              "state",
 		"history_retention_rows": 0,
 		"undo_window_hours":      0,
@@ -100,9 +118,25 @@ func defaultLayer() map[string]any {
 // Config via koanf's defaults layer (defaultLayer) — the single source of defaults.
 type Config struct {
 	// LibraryRoots are the directory trees the tool scans and re-encodes files
-	// under. It is the ONLY place the tool ever mutates the filesystem, so it is
-	// validated strictly (see Validate).
+	// under, AS CONFIGURED. It is the ONLY place the tool ever mutates the
+	// filesystem, so it is validated strictly (see Validate).
+	//
+	// An entry in the file may be a plain path or a mapping carrying that path plus a
+	// profile (see profile.go); either way this list carries the paths and Roots
+	// carries what each of them resolved to.
 	LibraryRoots []string `yaml:"library_roots"`
+
+	// Roots are the library roots with their RESOLVED per-root profiles, in the order
+	// they were configured. Load always populates it, one entry per LibraryRoots
+	// entry, and it is what Validate, Warnings and the engine read to learn what
+	// decides a file under a given root.
+	//
+	// It is not a config key and is never decoded from one: a profile lives INSIDE a
+	// library_roots entry, so there is nothing at the top level for this field to be
+	// read from. A Config assembled by hand rather than by Load leaves it nil, and
+	// RootProfiles then derives one root per LibraryRoots entry carrying the top-level
+	// values - which is exactly the single-policy behaviour this generalizes.
+	Roots []Root `yaml:"-"`
 
 	// LogLevel controls verbosity: debug|info|warn|error (default info).
 	LogLevel string `yaml:"log_level"`
@@ -148,6 +182,66 @@ type Config struct {
 	// behaviour) — the collision guard still applies whenever the effective
 	// extension differs from the source's own.
 	ContainerExt string `yaml:"container_ext"`
+	// BitrateKbps selects TARGET-BITRATE rate control at this many kbps instead of
+	// the quality target. 0 - the DEFAULT, and what an absent key resolves to -
+	// keeps CRF/CQ/QP quality-target encoding, which is this tool's archival
+	// posture and what every existing config gets unchanged.
+	//
+	// A positive value replaces the quality knob for the affected jobs: no -crf,
+	// -cq, -global_quality or -qp is passed at all, because a rate control and a
+	// quality target are two different instructions and passing both leaves which
+	// one wins to the encoder. It is announced at startup as a NOTICE (see
+	// Notices) rather than a warning: nothing about the no-loss gate changes, and
+	// a rejected encode still leaves the source untouched.
+	//
+	// It is a whole number of kbps. A fraction, a word, a boolean, a list or the
+	// key with no value is a startup REFUSAL naming the key and the offending
+	// value (see requireWholeKbps), never a silently truncated bitrate; a negative
+	// value is refused by Validate.
+	BitrateKbps int `yaml:"bitrate_kbps"`
+	// EncodeProfiles is an ORDERED list of named profiles, each with a match
+	// over the source and overrides for the transcode settings above. The FIRST
+	// profile whose match selects a source supplies that job's settings, overlaid
+	// on the top-level ones; a later matching profile has no effect on that job,
+	// and a setting the matching profile does not override keeps its top-level
+	// value. A source no profile matches is transcoded under the top-level
+	// settings - never skipped and never failed. Absent (the default) resolves
+	// every job to exactly the top-level settings.
+	//
+	// A profile selects what the ENCODER PRODUCES and nothing else. There is
+	// deliberately no per-profile VMAF threshold, undo window, retention or any
+	// other safety-gate knob: a profile must never be able to move a gate that
+	// decides whether a source is destroyed.
+	EncodeProfiles []EncodeProfile `yaml:"encode_profiles"`
+	// ScratchDir is the directory the encoder's working file is written to. Empty
+	// - the DEFAULT, and what an absent key resolves to - writes it beside the
+	// source, which is this tool's original behaviour.
+	//
+	// It never changes the SWAP. Whatever this is set to, the file the finalizing
+	// rename reads is a temp in the SOURCE's own directory: an accepted encode is
+	// copied back into that directory, proved to be the bytes the gates accepted,
+	// made durable, and only then handed to the existing atomic same-directory
+	// rename. Nothing is ever renamed or moved out of here onto a source.
+	//
+	// It is classified and reported at startup, and a missing, unwritable,
+	// short-on-space or library-root-overlapping scratch directory REFUSES the run
+	// before anything is encoded (see internal/startup). Storage that is not local
+	// does not refuse here and needs no allow_non_local entry: nothing
+	// irreversible happens in this directory.
+	ScratchDir string `yaml:"scratch_dir"`
+	// ScratchMinFreeGB is the free-space floor, in GiB (2^30 bytes), the scratch
+	// directory's filesystem must clear at STARTUP. Default 50 - roughly one 4K
+	// source and its encode - so the commonest way this feature fails (a cache
+	// device with nothing left on it) is a refusal naming the path and the figures
+	// rather than a library's worth of encodes dying at the write step. 0 disables
+	// the floor.
+	//
+	// It is a floor and NOT a prediction: startup has no per-file size to check
+	// against, so the per-job pre-encode check (which refuses a job whose source is
+	// larger than the free space right then) is what backs it, and a filesystem
+	// that fills from outside holdfast after a run begins produces an ordinary
+	// encode failure, which already leaves the source untouched.
+	ScratchMinFreeGB int `yaml:"scratch_min_free_gb"`
 	// MinBitrateKbps skips sources below this (re-encoding them only bloats). 0
 	// disables the skip (but see the zero-vs-absent note above for YAML).
 	MinBitrateKbps int `yaml:"min_bitrate_kbps"`
@@ -160,6 +254,23 @@ type Config struct {
 	// SkipHardlinked skips files with >1 hard link (an active seed/dup). A nil
 	// pointer means the default (true); use HardlinkSkip() to read it.
 	SkipHardlinked *bool `yaml:"skip_hardlinked"`
+
+	// PreserveMtime carries the SOURCE's modification time onto the replacement the
+	// swap publishes. A nil pointer means the default (TRUE); use
+	// PreserveMtimeEnabled() to read it.
+	//
+	// It defaults ON because every neighbouring tool - cp -p, rsync -a, mv - preserves the
+	// modification time across a replacement, so RESETTING it is the side effect (see
+	// engine/metadata.go for what that costs a media server). The argument for OFF, that a
+	// preserved mtime lies about when the bytes were written, is why the key exists.
+	//
+	// Preserving it is SAFE despite probe.Fingerprint being size:mtime. A swap always
+	// changes the SIZE (the verify gate refuses an output that is not strictly smaller), so
+	// the post-swap fingerprint still moves and a resume still reads the replacement as a
+	// new file. With this key on the size is the whole of that guarantee, which is why the
+	// engine asserts it rather than assuming it.
+	PreserveMtime *bool `yaml:"preserve_mtime"`
+
 	// StateDir holds the job store (jobs.db) + heartbeat (relative paths are
 	// resolved by callers).
 	StateDir string `yaml:"state_dir"`
@@ -168,22 +279,16 @@ type Config struct {
 	// (done/skipped/failed) the job store retains. 0 - the DEFAULT, and what an absent
 	// key resolves to - disables retention entirely and keeps every row.
 	//
-	// It ships DISABLED and must stay that way. A prune is the one IRREVERSIBLE act in
-	// this package's blast radius: it deletes audit history, and no re-run recreates it.
-	// A later scan re-derives the file's CURRENT state instead, so a pruned `done` row
-	// for a file still on disk comes back as a `skipped` row carrying the
-	// already-at-target-codec guard - a weaker record of the same swap. A default that
-	// silently deleted those rows would be this tool's cardinal sin with the ledger
-	// instead of with the library.
+	// It ships DISABLED and must stay that way. A prune is the one IRREVERSIBLE act in this
+	// package's blast radius: it deletes audit history and no re-run recreates it, since a
+	// later scan re-derives only the file's CURRENT state.
 	//
 	// The prune it enables cannot lower the published lifetime reclaimed total (a pruned
-	// row's contribution is carried forward durably before the row is removed) and cannot
-	// cause a file to be encoded again: a terminal row is what holds that file out of the
-	// encoder, so a row is only ever removed when the scan LISTED the directory its file
-	// should be in and the file was not there. The ledger can therefore sit above this
-	// bound - on a library that is not churning, above it permanently.
-	// A negative value, or a value that is not a whole number of rows, is a startup
-	// REFUSAL naming the key and the offending value - never a silent default.
+	// row's contribution is carried forward durably first) and cannot cause a file to be
+	// encoded again: a terminal row is what holds that file out of the encoder, so a row is
+	// only ever removed when the scan LISTED the directory its file should be in and the
+	// file was not there. The ledger can therefore sit above this bound permanently. A
+	// negative value, or one that is not a whole number of rows, is a startup REFUSAL.
 	HistoryRetentionRows int `yaml:"history_retention_rows"`
 
 	// UndoWindowHours is how many hours a swapped-out original is kept retrievable
@@ -191,35 +296,27 @@ type Config struct {
 	// which a swap is final the microsecond it happens; `validate` and startup both
 	// say so out loud.
 	//
-	// While the window is open the original is held by a SECOND HARD LINK to the same
-	// data, so retention costs no additional space at the moment it is taken - but the
-	// space the swap reclaimed is NOT returned to the filesystem until the window
-	// closes and the link is released. A library-wide first pass therefore holds every
-	// original it replaced for this many hours, which is the real cost of the setting:
-	// the reclaimed figure and the held figure are reported separately for exactly
-	// that reason.
+	// While the window is open the original is held by a SECOND HARD LINK to the same data,
+	// so retention costs no space at the moment it is taken - but the space the swap
+	// reclaimed is NOT returned until the window closes and the link is released. That is
+	// the real cost of the setting, and why the reclaimed figure and the held figure are
+	// reported separately.
 	//
 	// A source whose original cannot be retained is SKIPPED rather than swapped: the
-	// window's promise is that a swap can be walked back, and a swap that cannot be is
-	// not one this tool takes while the operator has asked for the window.
+	// window's promise is that a swap can be walked back.
 	UndoWindowHours int `yaml:"undo_window_hours"`
 
-	// AllowNonLocal opts specific paths in to running on storage holdfast could
-	// not positively identify as local (FILESYSTEM-1). holdfast's no-loss
-	// contract is stated for a local filesystem - an atomic same-filesystem
-	// rename whose failure means it did not happen, a stat that can see a
-	// concurrent rewrite, a SQLite WAL that works at all - and at startup it
-	// checks it has one, refusing a run whose library roots, state directory or
-	// any filesystem mounted beneath a root is NOT local unless the operator has
-	// said so here.
+	// AllowNonLocal opts specific paths in to running on storage holdfast could not
+	// positively identify as local (FILESYSTEM-1). The no-loss contract is stated for a
+	// local filesystem (see internal/startup), and a run whose library roots, state
+	// directory or any filesystem mounted beneath a root is NOT local is refused unless the
+	// operator has said so here.
 	//
-	// It is per PATH and never a global switch: each entry names one path and
-	// covers that path alone, so opting the state directory in does not quietly
-	// opt a NAS mount inside the library in too. Each entry must name a
-	// configured library root, the state directory, or a path spelled beneath a
-	// configured library root AS CONFIGURED; anything else is a refusal, never a
-	// silently ignored line. It never permits a path holdfast cannot INSPECT:
-	// that is a refusal whatever is declared here.
+	// It is per PATH and never a global switch, so opting the state directory in does not
+	// quietly opt a NAS mount inside the library in too. Each entry must name a configured
+	// library root, the state directory, or a path spelled beneath a configured library root
+	// AS CONFIGURED; anything else is a refusal, never a silently ignored line. It never
+	// permits a path holdfast cannot INSPECT.
 	AllowNonLocal []string `yaml:"allow_non_local"`
 
 	// --- VMAF perceptual-quality gate (TRANSCODE-4) ---
@@ -240,56 +337,39 @@ type Config struct {
 	// VmafMinPool is the worst-frame floor: an encode is rejected when its worst
 	// (sub)sampled frame VMAF (libvmaf's `min` pool) falls below it. Default 60.
 	//
-	// This is the gate that catches a locally-broken encode — a short segment
-	// destroyed inside an otherwise-clean file, which every structural check passes
-	// (it decodes cleanly and carries the right duration, packets and streams) and
-	// which the pooled mean averages away.
+	// This is the gate that catches a locally-broken encode: a short destroyed segment
+	// inside an otherwise-clean file, which every structural check passes and which the
+	// pooled mean averages away.
 	//
-	// It is the raw minimum, deliberately, and NOT a low-percentile (1st-pct /
-	// worst-5%) statistic. A percentile tolerates a FRACTION of frames — but a
-	// segment small enough to sneak past the mean gate is by construction a small
-	// fraction of frames, so a percentile floor tolerates exactly the damage the
-	// mean already tolerates, and its blind spot GROWS with runtime (1% of a 2-hour
-	// film is ~72 seconds). The raw min is the only candidate whose guarantee does
-	// not decay with duration.
+	// It is the raw minimum, deliberately, and NOT a low-percentile statistic. A percentile
+	// tolerates a FRACTION of frames, but a segment small enough to sneak past the mean gate
+	// is by construction a small fraction, so a percentile floor tolerates exactly the
+	// damage the mean already does, and its blind spot GROWS with runtime. That is measured,
+	// not argued: vmaf.TestPoolingStatistic_OnlyRawMinSeesSubOnePercentDamage destroys 1 of
+	// 240 frames and shows the harmonic mean (~99) and the 1st percentile (~98) both blind
+	// while the raw min reads ~43, and it reds if the reasoning stops holding.
 	//
-	// That is measured, not argued: vmaf.TestPoolingStatistic_OnlyRawMinSeesSubOne-
-	// PercentDamage builds an encode with 1 of 240 frames destroyed and shows the
-	// harmonic mean (~99) and the 1st percentile (~98) are BOTH blind to it while
-	// the raw min reads ~43. That test reds if this reasoning ever stops holding.
-	//
-	// 0 disables the floor, restoring the mean-only gate and its blind spot.
-	// `validate` warns when you do. The floor only ever REJECTS (the source is
-	// kept), so the failure it can cause is a wasted encode, never a lost original.
+	// 0 disables the floor, restoring the mean-only gate and its blind spot; `validate`
+	// warns when you do. The floor only ever REJECTS, so it can cost a wasted encode and
+	// never an original.
 	VmafMinPool float64 `yaml:"vmaf_min_pool"`
 	// VmafMinChroma is the CHROMA floor, in dB: an encode is rejected when the worst
 	// (sub)sampled frame's PSNR over the chroma planes - the worse of Cb and Cr -
 	// falls below it. Default 30.
 	//
-	// It exists because the VMAF model above is LUMA-ONLY and therefore structurally
-	// blind to chroma damage, and so is every structural gate: an output whose colour
-	// planes have been flattened, shifted or desaturated decodes perfectly, carries
-	// the right duration, packets and streams, and scores as well on VMAF as a
-	// faithful encode does. Before this floor existed the source was then deleted.
-	// Measured on real libvmaf: a 15% desaturation of the chroma planes leaves the
-	// pooled harmonic mean at ~99 and the worst frame at ~97 - clear of BOTH luma
-	// floors at their shipped defaults - while chroma PSNR falls to ~26 dB from the
-	// ~40 dB a faithful encode of the same source records.
+	// It exists because the VMAF model above is LUMA-ONLY, and so is every structural gate:
+	// an output whose colour planes have been flattened or desaturated decodes perfectly and
+	// scores as well on VMAF as a faithful encode. Before this floor existed the source was
+	// then deleted. Measured on real libvmaf, a 15% desaturation leaves the pooled harmonic
+	// mean at ~99 and the worst frame at ~97, clear of BOTH luma floors, while chroma PSNR
+	// falls to ~26 dB from the ~40 dB a faithful encode records.
 	//
-	// It is PSNR over Cb and Cr rather than a colour-difference metric because PSNR
-	// over those planes is computed over the chroma planes and nothing else, so a
-	// value that falls can only mean chroma changed. And it is the raw min over
-	// frames for the same reason VmafMinPool is: a mean hides a locally-broken
-	// segment.
+	// The default of 30 dB sits in that measured gap, and the metric and the raw-min pooling
+	// are chosen for the reasons vmaf.Result gives. Rejecting a good encode costs a wasted
+	// encode and keeps the source; accepting a bad one deletes an original.
 	//
-	// The default of 30 dB sits in a measured gap. Honest encodes at the shipped
-	// crf that still clear the luma gate bottom out around 40 dB (10 dB of
-	// headroom), while the weakest chroma-only damage that evades the luma gate
-	// reads ~26 dB. Rejecting a good encode costs a wasted encode and keeps the
-	// source; accepting a bad one deletes an original.
-	//
-	// 0 disables the floor, leaving chroma damage UNGUARDED. `validate` warns when
-	// you do. Range 0-100 (dB); libvmaf caps PSNR well below 100 in practice.
+	// 0 disables the floor, leaving chroma damage UNGUARDED; `validate` warns when you do.
+	// Range 0-100 (dB); libvmaf caps PSNR well below 100 in practice.
 	VmafMinChroma float64 `yaml:"vmaf_min_chroma"`
 	// VmafSubsample is the frame-sampling interval for VMAF (>=1; 1 = every frame;
 	// higher is cheaper but less precise). VMAF is a second full decode, so large
@@ -321,12 +401,14 @@ type Config struct {
 	// reverse proxy). An empty value is treated as the default by `serve` (never a
 	// bare ":8080" all-interfaces bind by accident).
 	ServerAddr string `yaml:"server_addr"`
-	// ServerAuthToken is the bearer token required on MUTATING endpoints
-	// (rescan/pause/resume). Empty (default) DISABLES those endpoints entirely —
-	// remote control is off until a token is explicitly set (fail-safe). Read
-	// endpoints and the UI never require it. Prefer supplying it via the
-	// HOLDFAST_SERVER_AUTH_TOKEN environment variable rather than the YAML file so
-	// no secret lands in a committed config.
+	// ServerAuthToken is a SECRET REFERENCE (secrets K1), not a token: it names where
+	// the bearer token required on the MUTATING endpoints (rescan/pause/resume) lives,
+	// and the value is resolved at the point of use and never stored here. Empty
+	// (default) DISABLES those endpoints entirely - remote control is off until a
+	// reference is configured (fail-safe). Read endpoints and the UI never require it.
+	//
+	// A literal token here, or in HOLDFAST_SERVER_AUTH_TOKEN, is a startup REFUSAL. See
+	// SecretRefs and internal/secret for the accepted forms and why there is no env: one.
 	ServerAuthToken string `yaml:"server_auth_token"`
 	// ScanIntervalSec, when > 0, makes `serve` re-scan the library every N seconds
 	// (in addition to an initial scan on startup and manual rescans via the API).
@@ -339,10 +421,10 @@ type Config struct {
 	// MetricsEnable exposes Prometheus metrics at /metrics (default true). Metrics
 	// are read-only instrumentation — best-effort, never affecting file handling.
 	MetricsEnable bool `yaml:"metrics_enable"`
-	// NotifyURL is a shoutrrr service URL (e.g. ntfy/Discord/Gotify) for best-effort
-	// notifications — a message per failed file + a per-scan summary. Empty (default)
-	// disables notifications. May carry a secret; prefer HOLDFAST_NOTIFY_URL over the
-	// YAML file.
+	// NotifyURL is a SECRET REFERENCE (secrets K1) naming where the shoutrrr service URL
+	// lives - a shoutrrr URL carries its credential in its userinfo, host, path or query,
+	// so the whole URL is the secret. Empty (default) disables notifications. A literal
+	// URL here, or in HOLDFAST_NOTIFY_URL, is a startup REFUSAL.
 	NotifyURL string `yaml:"notify_url"`
 	// RunWindow is a daily host-fair window "HH:MM-HH:MM" (local time) during which
 	// new work may start; empty (default) = always. Outside it, `serve` stops feeding
@@ -354,8 +436,52 @@ type Config struct {
 	// TautulliURL + TautulliAPIKey enable an optional Plex-aware pause: while Tautulli
 	// reports an active stream, `serve` stops feeding new files. Both must be set to
 	// enable it (default off). A Tautulli outage fails OPEN (never halts transcoding).
+	//
+	// TautulliURL is NOT a secret and stays a plain address. TautulliAPIKey is a SECRET
+	// REFERENCE (secrets K1): a literal key here, or in HOLDFAST_TAUTULLI_API_KEY, is a
+	// startup REFUSAL.
 	TautulliURL    string `yaml:"tautulli_url"`
 	TautulliAPIKey string `yaml:"tautulli_api_key"`
+}
+
+// SecretBearingKeys is the closed list of configuration keys whose value is a credential,
+// in the order SecretRefs reports them. Every one of them carries a REFERENCE (secrets
+// K1); `tautulli_url` and `server_addr` are addresses, not credentials, and are not here.
+var SecretBearingKeys = []string{"server_auth_token", "notify_url", "tautulli_api_key"}
+
+// SecretRefs parses all three secret-bearing keys into references, and is the ONE place
+// that reading happens: Validate calls it so every subcommand refuses a literal at start,
+// and the start-time resolution in cmd/holdfast calls it so neither can be looking at a
+// different set of keys than the other.
+//
+// It returns the first refusal, which for a pasted credential is a *secret.ErrLiteral
+// naming the key and how to convert it, with no part of the value in the message.
+func (c *Config) SecretRefs() ([]secret.Ref, error) {
+	raw := []string{c.ServerAuthToken, c.NotifyURL, c.TautulliAPIKey}
+	refs := make([]secret.Ref, 0, len(SecretBearingKeys))
+	for i, key := range SecretBearingKeys {
+		r, err := secret.ParseRef(key, raw[i])
+		if err != nil {
+			return nil, err
+		}
+		refs = append(refs, r)
+	}
+	return refs, nil
+}
+
+// SecretRef is one key's reference. It panics on an unknown key rather than returning a
+// zero one, because every caller is naming a constant from SecretBearingKeys.
+func (c *Config) SecretRef(key string) secret.Ref {
+	refs, err := c.SecretRefs()
+	if err != nil {
+		return secret.Ref{}
+	}
+	for _, r := range refs {
+		if r.Key() == key {
+			return r
+		}
+	}
+	panic("config: no secret-bearing key named " + key)
 }
 
 // EffectiveServerAddr returns the bind address `serve` should use, defaulting an
@@ -397,17 +523,43 @@ func (c *Config) UndoWindow() time.Duration {
 }
 
 // VmafGate reports whether the VMAF gate is enabled, defaulting to true when unset.
-func (c *Config) VmafGate() bool { return c.VmafEnable == nil || *c.VmafEnable }
+func (c *Config) VmafGate() bool { return vmafGate(c.VmafEnable) }
 
 // HardlinkSkip reports whether hard-linked sources are skipped, defaulting to true
 // when unset (nil). Skipping them is the safe default — replacing a hard-linked
 // seed via rename would break the link and reclaim nothing.
-func (c *Config) HardlinkSkip() bool { return c.SkipHardlinked == nil || *c.SkipHardlinked }
+func (c *Config) HardlinkSkip() bool { return hardlinkSkip(c.SkipHardlinked) }
+
+// preserveMtimeKey is the one place the modification-time key is spelled. knownKeys,
+// defaultLayer and the struct tag all read it from here, so a rename cannot leave one of
+// them behind.
+const preserveMtimeKey = "preserve_mtime"
+
+// PreserveMtimeEnabled reports whether the swap carries the source's modification time
+// onto the replacement, defaulting to TRUE when unset (nil). It is the single reading of
+// that default, so the engine, the loader and the documentation cannot disagree about what
+// an absent key means - and a Config built in Go rather than loaded from a file reads as
+// the SHIPPED default rather than as the struct zero.
+func (c *Config) PreserveMtimeEnabled() bool { return c.PreserveMtime == nil || *c.PreserveMtime }
 
 // ContainerMatchesSource reports whether ContainerExt is the "match the source"
 // sentinel ("source"/"auto"/"") rather than a forced extension.
-func (c *Config) ContainerMatchesSource() bool {
-	switch c.ContainerExt {
+func (c *Config) ContainerMatchesSource() bool { return containerMatchesSource(c.ContainerExt) }
+
+// PixelFormatAuto reports whether PixelFormat is the "derive per source" sentinel
+// ("auto"/"") rather than a forced pixel format.
+func (c *Config) PixelFormatAuto() bool { return pixelFormatAuto(c.PixelFormat) }
+
+// The four sentinel readings, as free functions, because a top-level value and a
+// resolved per-root profile must read them identically or the same YAML would mean two
+// things depending on which spelling of an entry it was written under.
+
+func vmafGate(p *bool) bool { return p == nil || *p }
+
+func hardlinkSkip(p *bool) bool { return p == nil || *p }
+
+func containerMatchesSource(ext string) bool {
+	switch ext {
 	case "source", "auto", "":
 		return true
 	default:
@@ -415,15 +567,74 @@ func (c *Config) ContainerMatchesSource() bool {
 	}
 }
 
-// PixelFormatAuto reports whether PixelFormat is the "derive per source" sentinel
-// ("auto"/"") rather than a forced pixel format.
-func (c *Config) PixelFormatAuto() bool {
-	switch c.PixelFormat {
+func pixelFormatAuto(format string) bool {
+	switch format {
 	case "auto", "":
 		return true
 	default:
 		return false
 	}
+}
+
+// TopLevelProfile is the profile a root with no overrides of its own resolves to: the
+// top-level value of every overridable knob. It is the middle of the three layers, and
+// the whole of what a flat library_roots list has ever meant.
+//
+// TestProfileKnobSetIsClosedAndSingleSourced proves, field by field, that this copies
+// every knob in profileKnobs from the identically-tagged Config field - so a knob added
+// to Profile and forgotten here is a red test rather than a root that silently inherits
+// a zero.
+func (c *Config) TopLevelProfile() Profile {
+	return Profile{
+		Encoder:           c.Encoder,
+		CRF:               c.CRF,
+		Preset:            c.Preset,
+		PixelFormat:       c.PixelFormat,
+		ContainerExt:      c.ContainerExt,
+		MinBitrateKbps:    c.MinBitrateKbps,
+		MinSavingsPercent: c.MinSavingsPercent,
+		SkipHardlinked:    c.SkipHardlinked,
+		VmafEnable:        c.VmafEnable,
+		MinVmaf:           c.MinVmaf,
+		VmafMinPool:       c.VmafMinPool,
+		VmafMinChroma:     c.VmafMinChroma,
+		VmafSubsample:     c.VmafSubsample,
+		VmafModel:         c.VmafModel,
+	}
+}
+
+// RootProfiles is the resolved roots this configuration decides files with, and it is
+// the ONE reading of that - Validate, Warnings, the startup preflights and the engine
+// all go through it, so none of them can be looking at a different set of profiles than
+// the others.
+//
+// Load populates Roots, so this returns exactly what the inheritance produced. A Config
+// assembled by hand (the engine's own tests, and any caller that builds a struct rather
+// than reading a file) carries none, and one root per LibraryRoots entry is derived from
+// the top-level values instead: the same profile for every root, which is precisely the
+// behaviour of every configuration written before profiles existed.
+func (c *Config) RootProfiles() []Root {
+	if len(c.Roots) > 0 {
+		return c.Roots
+	}
+	top := c.TopLevelProfile()
+	roots := make([]Root, 0, len(c.LibraryRoots))
+	for _, r := range c.LibraryRoots {
+		roots = append(roots, Root{Path: r, Clean: filepath.Clean(r), Profile: top})
+	}
+	return roots
+}
+
+// RootFor returns the root p lies under, and whether there is one. Nested roots are
+// refused at validate time, so at most one root can ever contain a path and the answer
+// needs no precedence rule for a reader to check.
+func (c *Config) RootFor(p string) (Root, bool) {
+	for _, r := range c.RootProfiles() {
+		if r.Contains(p) {
+			return r, true
+		}
+	}
+	return Root{}, false
 }
 
 // ErrNoConfig is returned by Load when the path is empty.
@@ -451,26 +662,46 @@ func Load(path string) (*Config, error) {
 	if err := kf.Load(file.Provider(path), yaml.Parser()); err != nil {
 		return nil, fmt.Errorf("parse config %q: %w", path, err)
 	}
+	// explicitTop is the set of top-level keys the file or the environment actually
+	// carried. The resolved value alone cannot say whether a knob was CHOSEN at the top
+	// level or is simply the built-in default - they are the same value - and `validate`
+	// has to print which layer supplied each of a root's knobs.
+	explicitTop := make(map[string]bool, len(knownKeys))
 	for _, key := range kf.Keys() {
-		top := key
-		if i := strings.IndexByte(key, '.'); i >= 0 {
-			top = key[:i] // a list/nested key like "library_roots.0" -> "library_roots"
-		}
+		top := topLevelKey(key)
 		if !knownKeys[top] {
 			return nil, fmt.Errorf("unknown config key %q in %s (typo?)", top, path)
 		}
+		explicitTop[top] = true
+	}
+	// The unknown-key refusal, one level down. kf.Keys() flattens a list of maps to
+	// `encode_profiles.0.encodr`, and the loop above deliberately only looks at
+	// the token before the first dot - so a typo INSIDE a profile passed the check
+	// that exists to catch typos. The raw list is walked here instead, before
+	// anything is merged or decoded.
+	if err := checkProfileKeys(kf.Get("encode_profiles"), path); err != nil {
+		return nil, err
 	}
 	if err := k.Merge(kf); err != nil {
 		return nil, fmt.Errorf("merge config %q: %w", path, err)
 	}
 
 	// 3. environment overrides (HOLDFAST_CRF=20 -> crf). Values arrive as strings;
-	// WeaklyTypedInput (below) coerces them to the field types.
-	err := k.Load(koanfenv.Provider(envPrefix, ".", func(s string) string {
+	// WeaklyTypedInput (below) coerces them to the field types. Loaded into its own
+	// instance first, for the same reason the file is: what it CARRIED has to be
+	// readable, not merely what it left behind.
+	ke := koanf.New(".")
+	err := ke.Load(koanfenv.Provider(envPrefix, ".", func(s string) string {
 		return strings.ToLower(strings.TrimPrefix(s, envPrefix))
 	}), nil)
 	if err != nil {
 		return nil, fmt.Errorf("load env overrides: %w", err)
+	}
+	for _, key := range ke.Keys() {
+		explicitTop[topLevelKey(key)] = true
+	}
+	if err := k.Merge(ke); err != nil {
+		return nil, fmt.Errorf("merge env overrides: %w", err)
 	}
 
 	// history_retention_rows is a COUNT OF ROWS, and the decoder below is deliberately
@@ -482,6 +713,53 @@ func Load(path string) (*Config, error) {
 	// faithfully and is refused by Validate, with the rest of the range checks.)
 	if err := requireWholeRows(k.Get(retentionKey), retentionKey, path); err != nil {
 		return nil, err
+	}
+
+	// The per-root profiles, resolved once, here. library_roots is the one key whose
+	// value is heterogeneous - a list of paths, or of mappings carrying a path plus a
+	// profile, or of both - so it is parsed and resolved BEFORE the struct decode, and
+	// the key is then replaced by the plain list of paths the rest of this build has
+	// always read. Nothing downstream of here has to know an entry could have been a
+	// mapping.
+	entries, err := parseRootEntries(k.Get("library_roots"), path)
+	if err != nil {
+		return nil, err
+	}
+	roots, err := resolveRoots(k, entries, explicitTop, path)
+	if err != nil {
+		return nil, err
+	}
+	k.Delete("library_roots")
+	if len(roots) > 0 {
+		paths := make([]string, 0, len(roots))
+		for _, r := range roots {
+			paths = append(paths, r.Path)
+		}
+		if err := k.Set("library_roots", paths); err != nil {
+			return nil, fmt.Errorf("collecting the library roots of %q: %w", path, err)
+		}
+	}
+
+	// bitrate_kbps is a WHOLE NUMBER OF KBPS and scratch_min_free_gb a whole number
+	// of gibibytes, and the decoder below would turn `8000.5` into 8000, `"8000"`
+	// into 8000 and `true` into 1 without a word - three bitrates the operator did
+	// not write, on the knob that decides what the encoder aims at. Same discipline
+	// as the retention check above and the unknown-key rejection: loud, never a
+	// silent default. (A NEGATIVE whole number decodes faithfully and is refused by
+	// Validate, with the rest of the range checks.)
+	if err := requireWholeKbps(k.Get(bitrateKey), bitrateKey, "kbps", path); err != nil {
+		return nil, err
+	}
+	if err := requireWholeKbps(k.Get(scratchFloorKey), scratchFloorKey, "gibibytes", path); err != nil {
+		return nil, err
+	}
+	for i, raw := range profileMaps(kf.Get("encode_profiles")) {
+		if v, ok := raw["bitrate_kbps"]; ok {
+			key := fmt.Sprintf("encode_profiles[%d].bitrate_kbps", i)
+			if err := requireWholeKbps(v, key, "kbps", path); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	var c Config
@@ -503,14 +781,79 @@ func Load(path string) (*Config, error) {
 	// the tool at their library. Case was already normalized at match time; the dot
 	// and surrounding whitespace were not.
 	c.VideoExts = normalizeExts(c.VideoExts)
+	c.Roots = roots
 
 	return &c, nil
+}
+
+// topLevelKey reduces a koanf key to the top-level config key it belongs to: a
+// list/nested key like "library_roots.0" is still the "library_roots" key.
+func topLevelKey(key string) string {
+	if i := strings.IndexByte(key, '.'); i >= 0 {
+		return key[:i]
+	}
+	return key
 }
 
 // retentionKey is the one place the ledger-retention key is spelled. knownKeys,
 // defaultLayer and the whole-number refusal all read it from here, so a rename cannot
 // leave one of the three behind.
 const retentionKey = "history_retention_rows"
+
+// bitrateKey and scratchFloorKey are the same discipline for the two whole-number
+// keys this phase adds.
+const (
+	bitrateKey      = "bitrate_kbps"
+	scratchFloorKey = "scratch_min_free_gb"
+)
+
+// profileMaps returns the raw `encode_profiles` entries as they were AUTHORED,
+// before the weakly-typed decoder has seen them. Anything that is not a list of
+// maps yields nothing here and is reported by the decoder instead, which is the
+// right division: this function exists to look at the values inside a well-shaped
+// list, not to re-implement the decoder's own type errors.
+func profileMaps(raw any) []map[string]any {
+	list, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(list))
+	for _, item := range list {
+		m, ok := item.(map[string]any)
+		if !ok {
+			return nil
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// checkProfileKeys refuses a key inside a profile that the schema does not define.
+// It is the unknown-key rejection at the one level the top-level loop cannot see,
+// and it fails the same way: naming the profile, the key and the file.
+func checkProfileKeys(raw any, path string) error {
+	for i, m := range profileMaps(raw) {
+		for key := range m {
+			if !profileKeys[key] {
+				return fmt.Errorf("unknown config key %q in encode_profiles[%d] in %s (typo?): "+
+					"a profile accepts name, match, encoder, crf, preset, pixel_format, container_ext, bitrate_kbps",
+					key, i, path)
+			}
+		}
+	}
+	return nil
+}
+
+// requireWholeKbps refuses a value for a whole-number key that is not one, naming
+// the key, the unit and the offending value. It runs against the RAW layered value
+// for the reason requireWholeRows does: the decoder is WeaklyTypedInput and would
+// truncate, coerce or invent a number rather than report one.
+func requireWholeKbps(raw any, key, unit, path string) error {
+	if isWholeNumber(raw) {
+		return nil
+	}
+	return fmt.Errorf("%s must be a whole number of %s: %#v in %s is not one", key, unit, raw, path)
+}
 
 // requireWholeRows refuses a value for a row-count key that is not a whole number of
 // rows, naming the key and the offending value. It runs against the RAW layered value
@@ -522,34 +865,30 @@ const retentionKey = "history_retention_rows"
 // a genuine whole number are accepted; anything else - a fraction, a word, a boolean, a
 // list, or a key present with no value at all - is a refusal.
 func requireWholeRows(raw any, key, path string) error {
-	switch v := raw.(type) {
-	case int:
+	if isWholeNumber(raw) {
 		return nil
-	case int32:
-		return nil
-	case int64:
-		return nil
-	case uint:
-		return nil
-	case uint32:
-		return nil
-	case uint64:
-		return nil
-	case float32:
-		if float64(v) == math.Trunc(float64(v)) && !math.IsInf(float64(v), 0) {
-			return nil
-		}
-	case float64:
-		if v == math.Trunc(v) && !math.IsInf(v, 0) && !math.IsNaN(v) {
-			return nil
-		}
-	case string:
-		if _, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
-			return nil
-		}
 	}
 	return fmt.Errorf("%s must be a whole number of rows (0 disables retention and keeps every terminal row): "+
 		"%#v in %s is not one", key, raw, path)
+}
+
+// isWholeNumber reports whether a RAW layered value is a genuine whole number. An
+// env override arrives as a string and a YAML integer as an int, so both spellings
+// of a genuine whole number are accepted; anything else - a fraction, a word, a
+// boolean, a list, or a key present with no value at all - is not one.
+func isWholeNumber(raw any) bool {
+	switch v := raw.(type) {
+	case int, int32, int64, uint, uint32, uint64:
+		return true
+	case float32:
+		return float64(v) == math.Trunc(float64(v)) && !math.IsInf(float64(v), 0)
+	case float64:
+		return v == math.Trunc(v) && !math.IsInf(v, 0) && !math.IsNaN(v)
+	case string:
+		_, err := strconv.Atoi(strings.TrimSpace(v))
+		return err == nil
+	}
+	return false
 }
 
 // normalizeExts lowercases each video extension and strips a leading dot and any
@@ -601,6 +940,11 @@ func (c *Config) Validate() error {
 		return ""
 	}
 
+	// cleaned and resolved carry each root's two spellings, in configuration order, for
+	// the nesting refusal below. They are collected in this loop rather than recomputed
+	// there so a root is cleaned and symlink-resolved exactly once.
+	cleaned := make([]string, len(c.LibraryRoots))
+	resolved := make([]string, len(c.LibraryRoots))
 	seen := make(map[string]struct{}, len(c.LibraryRoots))
 	for i, root := range c.LibraryRoots {
 		if root == "" {
@@ -610,6 +954,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("library_roots[%d] %q must be an absolute path", i, root)
 		}
 		clean := filepath.Clean(root)
+		cleaned[i] = clean
 		if what := dangerous(clean); what != "" {
 			return fmt.Errorf("library_roots[%d] resolves to %s (%q): refusing", i, what, clean)
 		}
@@ -617,8 +962,9 @@ func (c *Config) Validate() error {
 		// pointing at "/" or $HOME would pass the check above. If the path EXISTS,
 		// re-check its real target. A not-yet-existent root (EvalSymlinks errors)
 		// keeps only the lexical guard — validating before the mount exists is fine.
-		if resolved, rerr := filepath.EvalSymlinks(clean); rerr == nil {
-			rc := filepath.Clean(resolved)
+		if r, rerr := filepath.EvalSymlinks(clean); rerr == nil {
+			rc := filepath.Clean(r)
+			resolved[i] = rc
 			if what := dangerous(rc); what != "" {
 				return fmt.Errorf("library_roots[%d] %q resolves via symlink to %s (%q): refusing", i, clean, what, rc)
 			}
@@ -629,6 +975,35 @@ func (c *Config) Validate() error {
 		seen[clean] = struct{}{}
 	}
 
+	// NESTED ROOTS ARE REFUSED, not resolved.
+	//
+	// Every knob that decides a file is now per root, so a file under two roots would
+	// have two answers to "what CRF, what bitrate floor, what VMAF floor" - and the
+	// wrong answer here ends in the deletion of an original that no re-run undoes. A
+	// longest-prefix rule would settle it, and nobody reviewing a configuration could
+	// see which root won. Refusing makes the resolution unambiguous BY CONSTRUCTION.
+	//
+	// Both spellings are compared. Lexically, on path boundaries, so /a/b nests under
+	// /a and /ab does not; and again on the symlink-resolved paths where both targets
+	// exist, because a root that is a link INTO another root is the same overlap wearing
+	// a different name. It runs alongside the duplicate, absolute-path, dangerous-path
+	// and symlink checks above, never instead of them.
+	for i := range c.LibraryRoots {
+		for j := range c.LibraryRoots {
+			if i == j {
+				continue
+			}
+			if underRoot(cleaned[i], cleaned[j]) {
+				return nestedRootsError(i, cleaned[i], j, cleaned[j], "")
+			}
+			if resolved[i] != "" && resolved[j] != "" && underRoot(resolved[i], resolved[j]) {
+				return nestedRootsError(i, cleaned[i], j, cleaned[j],
+					fmt.Sprintf(" (%q resolves to %q and %q resolves to %q)",
+						cleaned[i], resolved[i], cleaned[j], resolved[j]))
+			}
+		}
+	}
+
 	switch c.LogLevel {
 	case "", "debug", "info", "warn", "error":
 		// ok
@@ -636,17 +1011,29 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("log_level %q is not one of debug|info|warn|error", c.LogLevel)
 	}
 
-	// Engine knobs (validated against their effective values).
-	if c.Encoder != "" {
-		if _, ok := encoder.Lookup(c.Encoder); !ok {
-			return fmt.Errorf("encoder %q is not supported (known: %v)", c.Encoder, encoder.Known())
-		}
+	// Engine knobs (validated against their effective values). The overridable ones are
+	// checked HERE against the top level and AGAIN below against every root's resolved
+	// profile - both, deliberately. A top-level value every root happens to override is
+	// still a value the operator wrote and still a refusal; and a value only one root
+	// carries is refused naming that root.
+	if err := c.TopLevelProfile().validate(); err != nil {
+		return err
 	}
-	if c.CRF < 0 || c.CRF > 51 {
-		return fmt.Errorf("crf %d out of range (0-51)", c.CRF)
+	// The knobs that are NOT per-root, checked once, here. A library root's profile may
+	// not carry any of these - the target bitrate, the encode profiles or the scratch
+	// location - so there is no per-root pass for them to be checked in.
+	//
+	// A negative bitrate has no reading: it is neither "use the quality target" (0)
+	// nor a rate. Refused BY NAME rather than clamped, on a knob whose whole job is
+	// to say what the encoder aims at.
+	if c.BitrateKbps < 0 {
+		return fmt.Errorf("bitrate_kbps %d must be >= 0 (0 keeps the crf/quality target; a positive value is a target bitrate in kbps)", c.BitrateKbps)
 	}
-	if c.MinSavingsPercent < 0 || c.MinSavingsPercent >= 100 {
-		return fmt.Errorf("min_savings_percent %d out of range (0-99)", c.MinSavingsPercent)
+	if err := c.validateProfiles(); err != nil {
+		return err
+	}
+	if err := c.validateScratch(); err != nil {
+		return err
 	}
 	if c.MaxFailures < 0 {
 		return fmt.Errorf("max_failures %d must be >= 0", c.MaxFailures)
@@ -661,39 +1048,6 @@ func (c *Config) Validate() error {
 	}
 	if c.DurationToleranceSec < 0 {
 		return fmt.Errorf("duration_tolerance_sec %g must be >= 0", c.DurationToleranceSec)
-	}
-	if strings.ContainsAny(c.ContainerExt, "./\\") {
-		return fmt.Errorf("container_ext %q must be a bare extension (no dot or slash)", c.ContainerExt)
-	}
-	if c.MinVmaf < 0 || c.MinVmaf > 100 {
-		return fmt.Errorf("min_vmaf %g out of range (0-100)", c.MinVmaf)
-	}
-	if c.VmafMinPool < 0 || c.VmafMinPool > 100 {
-		return fmt.Errorf("vmaf_min_pool %g out of range (0-100)", c.VmafMinPool)
-	}
-	// The chroma floor bounds a PSNR in dB. 0 is the "disabled" sentinel (warned
-	// about, not refused); a negative floor could never reject and would be a silent
-	// no-op, and a value above 100 dB could never be cleared and would reject every
-	// encode there is. Both are configuration the operator did not mean, so both are
-	// refused BY NAME rather than clamped into something plausible.
-	if c.VmafMinChroma < 0 || c.VmafMinChroma > 100 {
-		return fmt.Errorf("vmaf_min_chroma %g out of range (0-100 dB; 0 disables the chroma floor)", c.VmafMinChroma)
-	}
-	if c.VmafSubsample < 0 {
-		// 0 means "use the default" (Load's koanf layer sets 1; the VMAF scorer also
-		// floors <1 to 1) — consistent with the other zero-defaulted knobs. Only a
-		// negative interval is invalid.
-		return fmt.Errorf("vmaf_subsample %d must be >= 0", c.VmafSubsample)
-	}
-	// Fail-safe: an explicitly-enabled VMAF gate with no effective threshold (every
-	// floor 0) is enabled-but-never-rejecting - a silent no-op on a delete-capable
-	// tool. Refuse it. (Checked only when vmaf_enable is EXPLICIT: a nil pointer is
-	// the default-on state, and Load always resolves it to true with min_vmaf=95, so
-	// a real config never trips this by omission.) The chroma floor counts here: a
-	// gate that rejects on chroma alone is a strange configuration but it is not a
-	// no-op, and refusing it would be refusing a gate that does gate.
-	if c.VmafEnable != nil && *c.VmafEnable && c.MinVmaf == 0 && c.VmafMinPool == 0 && c.VmafMinChroma == 0 {
-		return errors.New("vmaf_enable is true but min_vmaf, vmaf_min_pool and vmaf_min_chroma are all 0 - the VMAF gate would never reject; set min_vmaf (e.g. 95) or disable the gate")
 	}
 	// The undo window (UNDO-6). A negative retention is not a shorter window, it is a
 	// window that has already closed for every original it would hold - so it would
@@ -718,6 +1072,15 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("scan_interval_sec %d must be >= 0 (0 = scan once on startup + on demand)", c.ScanIntervalSec)
 	}
 
+	// Every secret-bearing key must carry a REFERENCE, never a credential (secrets K1).
+	// Checked HERE so that every subcommand which loads a config refuses a pasted token
+	// at start, before it can be read out of the file by anything else - and checked by
+	// SHAPE only, because proving a reference RESOLVES means touching a secret store and
+	// that belongs to the run, not to `validate`.
+	if _, err := c.SecretRefs(); err != nil {
+		return err
+	}
+
 	// Host-fair scheduling knobs (TRANSCODE-8).
 	if _, err := schedule.ParseWindow(c.RunWindow); err != nil {
 		return err
@@ -725,7 +1088,80 @@ func (c *Config) Validate() error {
 	if c.MaxLoad < 0 {
 		return fmt.Errorf("max_load %g must be >= 0 (0 disables the CPU-load cap)", c.MaxLoad)
 	}
+
+	// Every per-value refusal above, re-run against what each root ACTUALLY resolved to,
+	// naming the root. Without this a profile could carry a crf of 99, an unknown
+	// encoder or a chroma floor of 140 and start, because the top-level values it
+	// overrode were all fine - and the value a file is decided by is this one, not the
+	// one at the top of the file.
+	for _, r := range c.RootProfiles() {
+		if err := r.Profile.validate(); err != nil {
+			return fmt.Errorf("library root %s: %w", r.Clean, err)
+		}
+	}
 	return nil
+}
+
+// errVmafGateNeverRejects is the refusal for an explicitly-enabled VMAF gate with every
+// floor at 0. Shared between the top-level check and the per-profile one so a root that
+// zeroes all three is refused in the same words as a file that does.
+var errVmafGateNeverRejects = errors.New("vmaf_enable is true but min_vmaf, vmaf_min_pool and vmaf_min_chroma are all 0 - the VMAF gate would never reject; set min_vmaf (e.g. 95) or disable the gate")
+
+// nestedRootsError is the refusal for two roots where one contains the other. It names
+// BOTH, with their indexes, because the fix is to remove or move one of them and an
+// operator cannot do that from a message that names only the inner.
+func nestedRootsError(i int, outer string, j int, inner, via string) error {
+	return fmt.Errorf("library_roots[%d] %q is nested inside library_roots[%d] %q%s: refusing. "+
+		"Each root carries its own profile - its own encoder, crf, bitrate floor and VMAF floors - so a "+
+		"file under both has two answers to what may be done to it, and the wrong answer deletes an "+
+		"original. Configure one root covering the tree, or two that do not overlap",
+		j, inner, i, outer, via)
+}
+
+// validateScratch applies the rules the CONFIGURATION can decide about the scratch
+// directory. Everything that needs the filesystem - does it exist, is it a
+// directory, can this process write in it, is there room, does it overlap a library
+// root - is the startup check's, taken once over the whole set of paths this run
+// would act on (internal/startup), so there is exactly one authority for each
+// question rather than two that can disagree.
+func (c *Config) validateScratch() error {
+	if c.ScratchMinFreeGB < 0 {
+		return fmt.Errorf("scratch_min_free_gb %d must be >= 0 (0 disables the free-space floor)", c.ScratchMinFreeGB)
+	}
+	dir := strings.TrimSpace(c.ScratchDir)
+	if dir == "" {
+		return nil
+	}
+	if !filepath.IsAbs(dir) {
+		return fmt.Errorf("scratch_dir %q must be an absolute path", c.ScratchDir)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return errors.New("cannot determine the home directory (set $HOME) - refusing to validate scratch_dir safely")
+	}
+	clean := filepath.Clean(dir)
+	// holdfast SWEEPS this directory on every start, so the same rule the library
+	// roots get applies: never point a sweeping, delete-capable tool at "/" or at a
+	// home directory, lexically or through a symlink.
+	for _, p := range []string{clean, resolvedOrSelf(clean)} {
+		switch p {
+		case "/":
+			return fmt.Errorf("scratch_dir resolves to the filesystem root (%q): refusing", p)
+		case filepath.Clean(home):
+			return fmt.Errorf("scratch_dir resolves to the home directory (%q): refusing", p)
+		}
+	}
+	return nil
+}
+
+// resolvedOrSelf resolves symbolic links where it can and falls back to the path
+// itself where it cannot (a directory that does not exist yet is the startup
+// check's refusal to report, not this one's).
+func resolvedOrSelf(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return p
 }
 
 // Notices reports things this configuration MEANS that an operator must be told at
@@ -757,6 +1193,24 @@ func (c *Config) Notices() []string {
 			"taken (a second hard link to the same data), but the space a swap reclaimed is not "+
 			"returned to the filesystem until the window closes.")
 	}
+	// A target bitrate is not a weakened gate - every no-loss check still runs and a
+	// rejected encode still leaves the source untouched - but it does mean the
+	// quality knob an operator can still see in their config file is not what the
+	// encoder is being told to aim at, which is exactly the kind of thing a config
+	// file lets you believe for months.
+	if c.bitrateInEffect() {
+		n = append(n, "bitrate_kbps is set - the CRF/QUALITY TARGET IS NOT IN USE for the affected jobs: "+
+			"those encodes run under a target-bitrate rate control at the configured kbps, and no crf, cq, "+
+			"global_quality or qp value is passed to the encoder at all. Every no-loss gate is unchanged, and an "+
+			"encode that misses one is still rejected with the source untouched. Set bitrate_kbps to 0 (the default) "+
+			"to go back to the quality target.")
+	}
+	if strings.TrimSpace(c.ScratchDir) != "" {
+		n = append(n, "scratch_dir is set - the encoder writes its working file to "+strings.TrimSpace(c.ScratchDir)+
+			" and the accepted result is COPIED BACK into a temp beside the source before the swap. The swap itself is "+
+			"unchanged: it is still an atomic rename within the source's own directory. The scratch device therefore pays "+
+			"a full write-plus-read cycle per transcode, at video-file sizes.")
+	}
 	return n
 }
 
@@ -772,39 +1226,23 @@ func (c *Config) Notices() []string {
 // configuration - including a shipped default worth stating - belongs in Notices,
 // because a default configuration that warns is how an operator learns to skip
 // warnings, and the next one will be a real gate they have turned off.
+// A warning is emitted ONCE PER AFFECTED ROOT and NAMES that root, because the gates are
+// now per root: one process may run over a film library with every floor in place and a
+// grainy-anime library with the worst-frame floor turned off, and an unattributed
+// "vmaf_min_pool is 0" would leave an operator unable to tell which of their libraries
+// had lost it. A root whose resolved profile did not weaken a gate contributes no
+// warning about it.
 func (c *Config) Warnings() []string {
+	roots := c.RootProfiles()
+	if len(roots) == 0 {
+		// No roots to attribute a weakened gate to (a Config assembled by hand; Validate
+		// refuses to RUN one). The top-level profile is still what would decide files, so
+		// it is still reported - just with nothing to name.
+		return c.TopLevelProfile().warnings("")
+	}
 	var w []string
-	// The gate off entirely is the operator's call — but it is also the WEAKEST
-	// configuration this tool has, strictly weaker than "gate on, floor off" (which
-	// warns below). Staying silent about the dangerous one while nagging about the
-	// safer one would be exactly backwards.
-	if !c.VmafGate() {
-		return []string{"vmaf_enable is false — there is NO perceptual gate. The structural checks " +
-			"(codec, duration/packet parity, size, stream counts, decode-integrity) all pass on an " +
-			"encode that decodes perfectly and looks terrible, and the source is then deleted. This is " +
-			"the weakest setting available; prefer lowering min_vmaf/vmaf_min_pool over disabling the gate."}
-	}
-	if c.VmafMinPool <= 0 {
-		w = append(w, "vmaf_min_pool is 0 — the worst-frame floor is DISABLED, leaving the pooled "+
-			"harmonic mean as the only VMAF gate. A mean hides local damage: ~1% of frames can collapse "+
-			"to VMAF ~35 while the mean still clears min_vmaf, and the source is then deleted. "+
-			"If honest encodes are being rejected, LOWER the floor (e.g. 45) rather than setting it to 0 — "+
-			"a lower floor still bounds local damage; 0 bounds nothing.")
-	}
-	if c.VmafMinChroma <= 0 {
-		w = append(w, "vmaf_min_chroma is 0 - the chroma floor is DISABLED, so CHROMA DAMAGE IS "+
-			"UNGUARDED. The VMAF model is luma-only and every structural check passes an output whose "+
-			"colour planes have been flattened, shifted or desaturated: it decodes perfectly, carries "+
-			"the right duration, packets and streams, and scores ~99 on VMAF. The source is then deleted. "+
-			"If honest encodes are being rejected, LOWER the floor (e.g. 25) rather than setting it to 0 - "+
-			"a lower floor still bounds chroma damage; 0 bounds nothing.")
-	}
-	if c.VmafSubsample > 1 {
-		w = append(w, fmt.Sprintf("vmaf_subsample is %d — VMAF measures only every %dth frame, so the "+
-			"vmaf_min_pool and vmaf_min_chroma worst-frame floors are a SAMPLE, not a guarantee: a "+
-			"damaged frame that is never sampled is never seen. Use vmaf_subsample: 1 on content you "+
-			"cannot re-acquire.",
-			c.VmafSubsample, c.VmafSubsample))
+	for _, r := range roots {
+		w = append(w, r.Profile.warnings(r.Clean)...)
 	}
 	return w
 }

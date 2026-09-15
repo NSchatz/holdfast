@@ -31,8 +31,14 @@ var activeAndPending = []store.Status{store.Pending, store.Probing, store.Encodi
 // IT IS IN. Leaving them out would have made a parked job - the one job on the whole
 // dashboard that is actually waiting for a human - the only job that never appears
 // anywhere, which is the same failure as reporting it as a success.
+//
+// A dry run's recorded decision is here too, and the split it lands on is a partition of
+// the whole vocabulary, so it goes in exactly one side. It is the terminal one: the
+// decision is complete for that scan, and the operator reading it is comparing candidates
+// against the skipped and the actually-reclaimed counts - which is this view. Serving it
+// in the queue would say a worker is still examining a file nothing is examining.
 var terminal = []store.Status{
-	store.Done, store.Skipped, store.Failed,
+	store.Done, store.Skipped, store.Failed, store.WouldTranscode,
 	store.Indeterminate, store.AppliedDespiteError,
 }
 
@@ -60,6 +66,15 @@ type jobDTO struct {
 	Reason string `json:"reason,omitempty"`
 	// Encoder that ran (cpu / svtav1 / nvenc / …).
 	Encoder string `json:"encoder,omitempty"`
+	// Profile is the encode_profiles entry that supplied this job's settings, or
+	// "" for the top-level settings.
+	//
+	// It is deliberately NOT `omitempty`, unlike Encoder beside it. "" is a REAL
+	// value for this field - it says the top-level settings ran - so omitting the
+	// key would leave a consumer unable to tell "this build does not report the
+	// profile" from "no profile was used", which is exactly the distinction an
+	// export exists to preserve. The key is always present; its value says which.
+	Profile string `json:"profile"`
 	// The VMAF pair and the model that produced it. A score is meaningless without its
 	// model, so they travel together or not at all.
 	VmafMean  *float64 `json:"vmaf_mean"`
@@ -79,7 +94,29 @@ type jobDTO struct {
 	VmafPixFmt       string   `json:"vmaf_pix_fmt,omitempty"`
 	VmafChroma       *float64 `json:"vmaf_chroma"`
 	VmafChromaMetric string   `json:"vmaf_chroma_metric,omitempty"`
-	// The sizes either side of the swap, and how long the encode took.
+	// Which video stream the comparison was made against, in the specifier vocabulary
+	// the probes use ("v:0"). A source can carry more than one video stream, so this is
+	// what lets a client line the score up against the file it was measured on.
+	//
+	// `omitempty`, on exactly the terms vmaf_model and vmaf_pix_fmt are: a row that
+	// recorded no comparison carries no key at all, so a client never has to decide what
+	// an empty string means, and no row is ever served a fabricated "v:0".
+	VmafStream string `json:"vmaf_stream,omitempty"`
+	// SourceCodec is what the source was in when the job was decided - the fact a
+	// would-transcode row exists to carry, beside the size, so an operator can size the
+	// job from the page instead of going and probing the files themselves.
+	//
+	// It is a POINTER and deliberately not omitempty, unlike the other strings here. Those
+	// travel with a measurement whose absence the reader can already see (a row with no
+	// vmaf_mean has no model either), while this one IS the fact: a candidate row that
+	// simply dropped the key would leave a client deciding for itself whether the codec
+	// was unrecorded or the field had gone away. An explicit JSON null says which, and
+	// says it apart from a real empty string exactly as source_bytes' null is apart from
+	// a real 0.
+	SourceCodec *string `json:"source_codec"`
+	// The sizes either side of the swap, and how long the encode took. On a
+	// would-transcode row source_bytes is the size of the file that was decided and
+	// output_bytes is null - nothing has encoded it, so there is no output to have a size.
 	SourceBytes *int64 `json:"source_bytes"`
 	OutputBytes *int64 `json:"output_bytes"`
 	EncodeMs    *int64 `json:"encode_ms"`
@@ -118,6 +155,22 @@ type jobDTO struct {
 	// SwapCause names a swap failure's cause when it is one holdfast reports
 	// distinctly - today only "cross-filesystem". Absent for every other failure.
 	SwapCause string `json:"swap_cause,omitempty"`
+
+	// Which library profile decided this file: the cleaned path of the root it was
+	// enumerated under, and a digest of that root's resolved overridable knobs.
+	//
+	// Both are POINTERS and deliberately not omitempty, for the reason source_codec is:
+	// they ARE the fact rather than a companion to one, so a row that simply dropped the
+	// key would leave a client deciding for itself whether nothing was recorded or the
+	// field had gone away. An explicit JSON null says which. A row written before
+	// per-library profiles existed carries two nulls - never a fabricated root, and
+	// never a digest of whatever the configuration says now.
+	//
+	// The digest travels WITH the root because the root alone stops being interpretable
+	// the moment its profile is edited: the row would go on naming /mnt/tv while /mnt/tv
+	// now means something else.
+	LibraryRoot   *string `json:"library_root"`
+	ProfileDigest *string `json:"profile_digest"`
 }
 
 func toDTOs(jobs []store.Job) []jobDTO {
@@ -132,13 +185,16 @@ func toDTOs(jobs []store.Job) []jobDTO {
 
 			Reason:           j.Outcome.Reason,
 			Encoder:          j.Outcome.Encoder,
+			Profile:          j.Outcome.Profile,
 			VmafMean:         j.Outcome.VmafMean,
 			VmafMin:          j.Outcome.VmafMin,
 			VmafModel:        j.Outcome.VmafModel,
 			VmafPixFmt:       j.Outcome.VmafPixFmt,
 			VmafChroma:       j.Outcome.VmafChroma,
 			VmafChromaMetric: j.Outcome.VmafChromaMetric,
+			VmafStream:       j.Outcome.VmafStream,
 
+			SourceCodec: nullableText(j.Outcome.SourceCodec),
 			SourceBytes: j.Outcome.SourceBytes,
 			OutputBytes: j.Outcome.OutputBytes,
 			EncodeMs:    j.Outcome.EncodeMs,
@@ -147,9 +203,24 @@ func toDTOs(jobs []store.Job) []jobDTO {
 			GuardTimeResolution: j.Outcome.GuardTimeResolution,
 			GuardResidualWindow: j.Outcome.GuardResidualWindow,
 			SwapCause:           j.Outcome.SwapCause,
+
+			LibraryRoot:   nullableText(j.Outcome.LibraryRoot),
+			ProfileDigest: nullableText(j.Outcome.ProfileDigest),
 		})
 	}
 	return out
+}
+
+// nullableText carries the store's "" = NOT RECORDED onto the wire as an explicit JSON
+// null. The store uses "" because an empty reason, encoder or codec carries no meaning of
+// its own; a CLIENT should not have to know that convention, and a field that is the fact
+// rather than a companion to one must be able to say "nobody recorded this" in a way that
+// is not also a legal value.
+func nullableText(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // HistoryRowJSON marshals one ledger row into EXACTLY the object /api/history publishes

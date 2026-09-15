@@ -18,6 +18,7 @@ import (
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/engine"
+	"github.com/NSchatz/holdfast/internal/secret"
 	"github.com/NSchatz/holdfast/internal/store"
 )
 
@@ -39,7 +40,7 @@ func newStore(t *testing.T) *store.SQLite {
 		t.Fatal(err)
 	}
 	mustClaim(t, st, "/lib/done.mkv", "2:2")
-	if err := st.Finish(ctx, "/lib/done.mkv", "2:2", store.Done, nil); err != nil {
+	if err := st.Finish(ctx, "/lib/done.mkv", "2:2", store.Done, nil, 3); err != nil {
 		t.Fatal(err)
 	}
 	return st
@@ -47,7 +48,7 @@ func newStore(t *testing.T) *store.SQLite {
 
 func mustClaim(t *testing.T, st *store.SQLite, path, fp string) {
 	t.Helper()
-	ok, err := st.Claim(context.Background(), path, fp, "w0", 3)
+	ok, err := st.Claim(context.Background(), path, fp, "w0", 3, store.DecisionInputs{})
 	if err != nil || !ok {
 		t.Fatalf("Claim(%s): ok=%v err=%v", path, ok, err)
 	}
@@ -87,8 +88,8 @@ func newHarness(t *testing.T, token string) *harness {
 	h.ctrl = NewController(ctx, scan, discard())
 	h.hub = NewHub(st, h.ctrl, discard())
 	h.ctrl.SetOnChange(h.hub.Trigger)
-	cfg := config.Config{ServerAuthToken: token}
-	h.srv = New(ctx, cfg, st, h.ctrl, h.hub, nil, nil, discard())
+	cfg := config.Config{}
+	h.srv = New(ctx, cfg, secret.NewValue(token), st, h.ctrl, h.hub, nil, nil, discard())
 	return h
 }
 
@@ -280,7 +281,7 @@ func TestHub_ReclaimedLifetimeIsBaselinePlusSession(t *testing.T) {
 	mustClaim(t, st, "/lib/old.mkv", "9:9")
 	src, out := int64(5_000_000), int64(2_000_000)
 	if err := st.Finish(ctx, "/lib/old.mkv", "9:9", store.Done,
-		&store.Outcome{SourceBytes: &src, OutputBytes: &out}); err != nil {
+		&store.Outcome{SourceBytes: &src, OutputBytes: &out}, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -426,12 +427,12 @@ func TestHistoryEndpoint_ReturnsAReasonForFailedAndSkipped(t *testing.T) {
 
 	mustClaim(t, st, "/lib/broke.mkv", "3:3")
 	if err := st.Finish(ctx, "/lib/broke.mkv", "3:3", store.Failed,
-		&store.Outcome{Reason: "decode-integrity check failed (output does not fully decode)", Encoder: "cpu"}); err != nil {
+		&store.Outcome{Reason: "decode-integrity check failed (output does not fully decode)", Encoder: "cpu"}, 3); err != nil {
 		t.Fatal(err)
 	}
 	mustClaim(t, st, "/lib/thin.mkv", "4:4")
 	if err := st.Finish(ctx, "/lib/thin.mkv", "4:4", store.Skipped,
-		&store.Outcome{Reason: engine.SkipLowBitrate}); err != nil {
+		&store.Outcome{Reason: engine.SkipLowBitrate}, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -582,7 +583,7 @@ func TestHistoryEndpoint_UnrecordedOutcomeIsNullNotZero(t *testing.T) {
 	if err := st.Finish(ctx, "/lib/proved.mkv", "5:5", store.Done, &store.Outcome{
 		Encoder: "cpu", VmafMean: &mean, VmafMin: &min, VmafModel: "version=vmaf_v0.6.1",
 		SourceBytes: &src, OutputBytes: &out, EncodeMs: &ms,
-	}); err != nil {
+	}, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -634,7 +635,7 @@ func TestHistoryEndpoint_CarriesTheComparisonFormatAndChromaBesideTheScore(t *te
 	if err := st.Finish(ctx, "/lib/scored.mkv", "6:6", store.Done, &store.Outcome{
 		Encoder: "cpu", VmafMean: &mean, VmafMin: &worst, VmafModel: "version=vmaf_v0.6.1",
 		VmafPixFmt: "yuv420p10le", VmafChroma: &chroma, VmafChromaMetric: "psnr_cb/psnr_cr min (dB)",
-	}); err != nil {
+	}, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -669,6 +670,51 @@ func TestHistoryEndpoint_CarriesTheComparisonFormatAndChromaBesideTheScore(t *te
 	}
 }
 
+// TestHistoryEndpoint_CarriesTheScoredStreamBesideTheScore is the payload half of
+// "which stream was compared travels with the score". It is on the wire on exactly the
+// terms vmaf_model and vmaf_pix_fmt are: present as a token when a comparison was made,
+// and the key ABSENT ENTIRELY when it was not.
+//
+// Asserted on the RAW BYTES, for the reason this file already establishes three times: a
+// struct decode erases the difference between "the key was not there" and "the value was
+// empty", and it is precisely that difference a client needs. `v:0` sent on a row whose
+// gate never ran would tell an operator which stream was compared when nothing was.
+func TestHistoryEndpoint_CarriesTheScoredStreamBesideTheScore(t *testing.T) {
+	h := newHarness(t, "")
+	st := h.st
+	ctx := context.Background()
+
+	mean, worst, chroma := 98.4, 96.1, 41.2
+	mustClaim(t, st, "/lib/scored.mkv", "6:6")
+	if err := st.Finish(ctx, "/lib/scored.mkv", "6:6", store.Done, &store.Outcome{
+		Encoder: "cpu", VmafMean: &mean, VmafMin: &worst, VmafModel: "version=vmaf_v0.6.1",
+		VmafPixFmt: "yuv420p10le", VmafChroma: &chroma, VmafChromaMetric: "psnr_cb/psnr_cr min (dB)",
+		VmafStream: "v:0",
+	}, 3); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(h.srv)
+	defer ts.Close()
+	body := getRaw(t, ts.URL+"/api/history")
+
+	if !strings.Contains(body, `"vmaf_stream":"v:0"`) {
+		t.Errorf("history body missing \"vmaf_stream\":\"v:0\" - a score must carry which video "+
+			"stream it was measured on\nbody: %s", body)
+	}
+	// /lib/done.mkv was seeded by newStore with a nil outcome - the shape of every row
+	// written before this fact existed. Its key is OMITTED, exactly as vmaf_model's
+	// already is, so a client never has to decide what an empty value means.
+	if strings.Contains(body, `"vmaf_stream":""`) || strings.Contains(body, `"vmaf_stream":null`) {
+		t.Errorf("an unrecorded scored stream must be OMITTED, not sent as an empty string or a "+
+			"null a client has to interpret\nbody: %s", body)
+	}
+	if n := strings.Count(body, `"vmaf_stream"`); n != 1 {
+		t.Errorf("the scored-stream key appears %d times, want 1 - only the row that recorded a "+
+			"comparison may carry it\nbody: %s", n, body)
+	}
+}
+
 // An in-flight retry must not advertise the PREVIOUS attempt's fidelity score on
 // /api/queue. The queue and history views share one projection, so a stale outcome left
 // on a re-claimed row would be served next to a file that is still encoding — a score
@@ -682,7 +728,7 @@ func TestQueueEndpoint_InFlightRetryCarriesNoStaleProof(t *testing.T) {
 	mustClaim(t, st, "/lib/retry.mkv", "7:7")
 	if err := st.Finish(ctx, "/lib/retry.mkv", "7:7", store.Failed, &store.Outcome{
 		Reason: "VMAF worst-frame below floor", Encoder: "cpu", VmafMean: &mean, VmafMin: &min,
-	}); err != nil {
+	}, 3); err != nil {
 		t.Fatal(err)
 	}
 	// Retry: claim it again and put it in flight.
@@ -749,14 +795,14 @@ func seedOverCap(t *testing.T, st *store.SQLite) (done, skipped, queued int) {
 		if err := st.Finish(ctx, p, "d:d", store.Done, &store.Outcome{
 			Encoder: "cpu", VmafMean: &mean, VmafMin: &worst, VmafModel: "version=vmaf_v0.6.1",
 			SourceBytes: &src, OutputBytes: &out, EncodeMs: &ms,
-		}); err != nil {
+		}, 3); err != nil {
 			t.Fatalf("seed done: %v", err)
 		}
 	}
 	for i := 0; i < skipped; i++ {
 		p := "/lib/over/skip" + strconv.Itoa(i) + ".mkv"
 		mustClaim(t, st, p, "s:s")
-		if err := st.Finish(ctx, p, "s:s", store.Skipped, &store.Outcome{Reason: engine.SkipLowBitrate}); err != nil {
+		if err := st.Finish(ctx, p, "s:s", store.Skipped, &store.Outcome{Reason: engine.SkipLowBitrate}, 3); err != nil {
 			t.Fatalf("seed skipped: %v", err)
 		}
 	}
@@ -966,7 +1012,7 @@ func TestSnapshot_TerminalJobStopsReportingProgress(t *testing.T) {
 
 	// The engine finishes the job: the store row goes terminal and a terminal event is
 	// emitted, exactly as ProcessFile does.
-	if err := h.st.Finish(context.Background(), "/lib/active.mkv", "1:1", store.Done, nil); err != nil {
+	if err := h.st.Finish(context.Background(), "/lib/active.mkv", "1:1", store.Done, nil, 3); err != nil {
 		t.Fatal(err)
 	}
 	h.hub.Observe(engine.Event{Path: "/lib/active.mkv", Status: store.Done})
@@ -1058,7 +1104,7 @@ func TestSnapshot_NoActiveJobsPublishNoLiveProgress(t *testing.T) {
 	h.hub.Observe(progressEvent("/lib/gone.mp4", 10, &dur))
 
 	// Everything finishes; the queue empties.
-	if err := h.st.Finish(ctx, "/lib/active.mkv", "1:1", store.Done, nil); err != nil {
+	if err := h.st.Finish(ctx, "/lib/active.mkv", "1:1", store.Done, nil, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1250,7 +1296,7 @@ func TestSnapshot_AnAggregateWithNoDataIsNullNotZero(t *testing.T) {
 	// A done row with NO recorded outcome: the shape of every row written before the
 	// outcome columns existed.
 	mustClaim(t, st, "/lib/unmeasured.mkv", "1:1")
-	if err := st.Finish(ctx, "/lib/unmeasured.mkv", "1:1", store.Done, nil); err != nil {
+	if err := st.Finish(ctx, "/lib/unmeasured.mkv", "1:1", store.Done, nil, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1289,7 +1335,7 @@ func TestSnapshot_OneUnreadableAggregateStillShipsEverythingElse(t *testing.T) {
 	defer cancel()
 	ctrl := NewController(ctx, func(context.Context) error { return nil }, discard())
 	hub := NewHub(broken, ctrl, discard())
-	srv := New(ctx, config.Config{}, broken, ctrl, hub, nil, nil, discard())
+	srv := New(ctx, config.Config{}, secret.Value{}, broken, ctrl, hub, nil, nil, discard())
 
 	snap := snapshotOf(t, hub)
 	if snap.Summary[string(store.Done)] != 1 || len(snap.Queue) != 1 || len(snap.History) != 1 {
@@ -1364,7 +1410,7 @@ func TestSnapshot_AggregatesAddNoAuthorizationAndNoPerFileDatum(t *testing.T) {
 	mustClaim(t, h.st, "/lib/a-very-distinctive-path.mkv", "9:9")
 	src, out := int64(9_000_000), int64(3_000_000)
 	if err := h.st.Finish(ctx, "/lib/a-very-distinctive-path.mkv", "9:9", store.Done,
-		&store.Outcome{Encoder: "cpu", SourceBytes: &src, OutputBytes: &out}); err != nil {
+		&store.Outcome{Encoder: "cpu", SourceBytes: &src, OutputBytes: &out}, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1445,4 +1491,328 @@ func getRaw(t *testing.T, url string) string {
 		t.Fatalf("read %s: %v", url, err)
 	}
 	return string(b)
+}
+
+// --- the authorization posture behind a reverse proxy ------------------------
+//
+// The read endpoints and the dashboard are "protected by the localhost-default bind,
+// not a token". The moment a reverse proxy fronts this daemon that bind protects
+// nothing and the proxy is the only barrier, and the whole safety argument for such a
+// deployment rests on ONE property of this package: a proxy-supplied identity header is
+// never authorization for a mutating endpoint. Only a matching bearer token is.
+//
+// The property holds. These tests LOCK it, so a later refactor that reads Remote-User
+// "because the proxy already authenticated the request" reds here rather than shipping a
+// control surface a forgeable header can start a scan on.
+
+// identityHeaderSet is one shape a forward-auth proxy is known to add.
+type identityHeaderSet struct {
+	name    string
+	headers map[string]string
+}
+
+// allProxyIdentityHeaders is the Authelia Remote-* set plus the X-Forwarded-*
+// equivalents, as one request would carry them.
+var allProxyIdentityHeaders = map[string]string{
+	"Remote-User":        "noah",
+	"Remote-Groups":      "admins,media",
+	"Remote-Email":       "noah@example.invalid",
+	"Remote-Name":        "Noah Schatz",
+	"X-Forwarded-User":   "noah",
+	"X-Forwarded-Email":  "noah@example.invalid",
+	"X-Forwarded-Proto":  "https",
+	"X-Forwarded-Host":   "holdfast.example.invalid",
+	"X-Forwarded-For":    "192.168.0.10",
+	"X-Forwarded-Method": "POST",
+}
+
+// proxyIdentityHeaderSets is every combination asserted: all of them at once, and each
+// identity header on its own. A surface that honoured ONE of these and not the others
+// would be no better than one that honoured all of them, so each is asserted rather
+// than sampled.
+func proxyIdentityHeaderSets() []identityHeaderSet {
+	sets := []identityHeaderSet{{name: "every proxy identity header at once", headers: allProxyIdentityHeaders}}
+	for _, h := range []string{
+		"Remote-User", "Remote-Groups", "Remote-Email", "Remote-Name",
+		"X-Forwarded-User", "X-Forwarded-Email",
+	} {
+		sets = append(sets, identityHeaderSet{name: h + " alone", headers: map[string]string{h: allProxyIdentityHeaders[h]}})
+	}
+	return sets
+}
+
+var mutatingEndpoints = []string{"/api/rescan", "/api/pause", "/api/resume"}
+
+// assertNothingChanged proves a refusal was a refusal: no scan started, and the pause
+// flag is exactly where it was. A 403 that had already kicked a scan would be a refusal
+// in the status line only.
+func assertNothingChanged(t *testing.T, h *harness, wasPaused bool) {
+	t.Helper()
+	select {
+	case <-h.scanStarted:
+		t.Fatal("a refused request started a scan")
+	case <-time.After(150 * time.Millisecond):
+	}
+	if h.ctrl.Scanning() {
+		t.Fatal("a refused request left the controller scanning")
+	}
+	if h.ctrl.Paused() != wasPaused {
+		t.Fatalf("a refused request changed the pause state: paused=%v, want %v", h.ctrl.Paused(), wasPaused)
+	}
+}
+
+// With NO control token configured the mutating endpoints are disabled outright: 403 to
+// every caller, however the request is dressed. That is the posture a proxied deployment
+// ships with the token unset - the proxy authenticates a surface whose controls are
+// already off.
+func TestProxyIdentityHeaders_NoTokenConfigured_403AndNothingChanged(t *testing.T) {
+	for _, set := range proxyIdentityHeaderSets() {
+		for _, ep := range mutatingEndpoints {
+			t.Run(set.name+" "+ep, func(t *testing.T) {
+				h := newHarness(t, "") // no control token configured
+				ts := httptest.NewServer(h.srv)
+				defer ts.Close()
+				wasPaused := h.ctrl.Paused()
+
+				code, body := postWithHeaders(t, ts.URL+ep, set.headers)
+				if code != http.StatusForbidden {
+					t.Fatalf("POST %s with %s: code %d, want 403 (body %q)", ep, set.name, code, body)
+				}
+				assertNothingChanged(t, h, wasPaused)
+			})
+		}
+	}
+}
+
+// With a control token CONFIGURED, a proxy identity header is still no substitute for
+// it: no Authorization header means 401, whatever the proxy claims about who the caller
+// is.
+func TestProxyIdentityHeaders_TokenConfigured_401AndNothingChanged(t *testing.T) {
+	for _, set := range proxyIdentityHeaderSets() {
+		for _, ep := range mutatingEndpoints {
+			t.Run(set.name+" "+ep, func(t *testing.T) {
+				h := newHarness(t, "a-real-control-token")
+				ts := httptest.NewServer(h.srv)
+				defer ts.Close()
+				wasPaused := h.ctrl.Paused()
+
+				code, body := postWithHeaders(t, ts.URL+ep, set.headers)
+				if code != http.StatusUnauthorized {
+					t.Fatalf("POST %s with %s: code %d, want 401 (body %q)", ep, set.name, code, body)
+				}
+				assertNothingChanged(t, h, wasPaused)
+			})
+		}
+	}
+}
+
+// A bearer token that does not match is 401 whether or not proxy identity headers
+// accompany it: the headers must not upgrade a wrong token into a right one, and must
+// not weaken the comparison either.
+func TestWrongBearer_Is401_WithAndWithoutProxyIdentityHeaders(t *testing.T) {
+	for _, withHeaders := range []bool{false, true} {
+		for _, ep := range mutatingEndpoints {
+			name := ep + " bare"
+			if withHeaders {
+				name = ep + " with proxy identity headers"
+			}
+			t.Run(name, func(t *testing.T) {
+				h := newHarness(t, "a-real-control-token")
+				ts := httptest.NewServer(h.srv)
+				defer ts.Close()
+				wasPaused := h.ctrl.Paused()
+
+				headers := map[string]string{"Authorization": "Bearer not-the-token"}
+				if withHeaders {
+					for k, v := range allProxyIdentityHeaders {
+						headers[k] = v
+					}
+				}
+				code, body := postWithHeaders(t, ts.URL+ep, headers)
+				if code != http.StatusUnauthorized {
+					t.Fatalf("POST %s with a wrong bearer: code %d, want 401 (body %q)", ep, code, body)
+				}
+				assertNothingChanged(t, h, wasPaused)
+			})
+		}
+	}
+}
+
+// The read endpoints are UNAUTHENTICATED BY DESIGN, and this asserts it rather than
+// leaving it assumed. A deployment behind a proxy claims the proxy is the ONLY barrier
+// in front of the dashboard and the read API; that claim is only true if these really do
+// answer a credential-less request. If this ever starts failing because holdfast grew
+// read authentication of its own, that deployment's statement needs rewriting - which is
+// exactly why it is asserted here.
+func TestReadEndpoints_AnswerWithNoCredentialsOfAnyKind(t *testing.T) {
+	h := newHarness(t, "a-real-control-token") // even WITH control enabled
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.hub.Run(ctx)
+	ts := httptest.NewServer(h.srv)
+	defer ts.Close()
+
+	for _, ep := range []string{"/api/summary", "/api/queue", "/api/history", "/api/events"} {
+		t.Run(ep, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+ep, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("GET %s: %v", ep, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("GET %s with no credentials: status %d, want 200", ep, resp.StatusCode)
+			}
+			if ch := resp.Header.Get("WWW-Authenticate"); ch != "" {
+				t.Fatalf("GET %s challenged for credentials: %q", ep, ch)
+			}
+		})
+	}
+}
+
+// A proxy in the path makes a dropped SSE connection ordinary rather than exceptional:
+// an idle timeout, a dynamic-config hot reload, a restarted proxy. EventSource
+// reconnects by itself, and the page comes back CORRECT without a reload only if the
+// new connection's first message is a FULL snapshot rather than a delta whose base the
+// client missed.
+func TestSSE_AReconnectGetsAFullSnapshotAsItsFirstMessage(t *testing.T) {
+	h := newHarness(t, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.hub.Run(ctx)
+	ts := httptest.NewServer(h.srv)
+	defer ts.Close()
+
+	open := func() *http.Response {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/api/events", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET /api/events: %v", err)
+		}
+		return resp
+	}
+
+	// First connection: read its snapshot, then DROP it mid-stream.
+	first := open()
+	if ev, _ := readSSEFrame(t, first.Body, 2*time.Second); ev != "snapshot" {
+		t.Fatalf("first connection's first event = %q, want snapshot", ev)
+	}
+	_ = first.Body.Close()
+
+	// Something happens while the client is away, so a client replaying only deltas
+	// from its reconnect point would be wrong rather than merely stale.
+	mustClaim(t, h.st, "/lib/arrived-while-away.mkv", "9:9")
+
+	second := open()
+	defer func() { _ = second.Body.Close() }()
+	ev, data := readSSEFrame(t, second.Body, 2*time.Second)
+	if ev != "snapshot" {
+		t.Fatalf("reconnect's first event = %q, want snapshot", ev)
+	}
+	var snap snapshot
+	if err := json.Unmarshal([]byte(data), &snap); err != nil {
+		t.Fatalf("reconnect's first frame is not snapshot JSON: %v (%q)", err, data)
+	}
+	// FULL, not a delta: summary, queue and history are all there, and the row that
+	// arrived while the client was disconnected is in it.
+	if snap.Summary[string(store.Done)] != 1 {
+		t.Fatalf("reconnect snapshot lost the terminal rows: %+v", snap.Summary)
+	}
+	if len(snap.History) != 1 {
+		t.Fatalf("reconnect snapshot carries %d history rows, want the full history", len(snap.History))
+	}
+	sawNewRow := false
+	for _, j := range snap.Queue {
+		if j.Path == "/lib/arrived-while-away.mkv" {
+			sawNewRow = true
+		}
+	}
+	if !sawNewRow {
+		t.Fatalf("the row that arrived during the disconnect is missing from the reconnect snapshot: %+v", snap.Queue)
+	}
+	if len(snap.Queue) < 2 {
+		t.Fatalf("reconnect snapshot carries %d queue rows, want the whole queue", len(snap.Queue))
+	}
+}
+
+// subscriberCount reads the hub's live subscriber set. In-package on purpose: a leaked
+// subscription is invisible from the wire - the symptom is a hub holding a channel
+// nobody drains.
+func subscriberCount(h *Hub) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.subs)
+}
+
+// A proxy makes cancelled requests routine: a client that navigates away, a health probe
+// that gives up, a proxy that times its upstream out during a reload. If the request
+// dies between Subscribe and the first write, the subscription must go with it -
+// otherwise every such probe leaves a channel in the hub nobody drains.
+func TestSSE_ARequestCancelledBeforeTheFirstEventLeaksNoSubscriber(t *testing.T) {
+	h := newHarness(t, "")
+	hubCtx, cancelHub := context.WithCancel(context.Background())
+	defer cancelHub()
+	go h.hub.Run(hubCtx)
+
+	if n := subscriberCount(h.hub); n != 0 {
+		t.Fatalf("hub starts with %d subscribers, want 0", n)
+	}
+
+	// Cancelled BEFORE the handler runs, so no event can have been written yet.
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	cancelReq()
+	req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(reqCtx)
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { h.srv.ServeHTTP(rec, req); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the SSE handler did not return on a request cancelled before the first event")
+	}
+
+	if body := rec.Body.String(); strings.Contains(body, "event: snapshot") {
+		t.Fatalf("a snapshot was written for a request cancelled before the first event: %q", body)
+	}
+	if n := subscriberCount(h.hub); n != 0 {
+		t.Fatalf("the cancelled request left %d subscriber(s) in the hub", n)
+	}
+
+	// And the hub still publishes: a later event reaches a live subscriber promptly, so
+	// nothing the cancelled request left behind blocks a publisher.
+	ch, unsub := h.hub.Subscribe()
+	defer unsub()
+	h.hub.Trigger()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a later publisher never reached a live subscriber after a cancelled request")
+	}
+}
+
+// postWithHeaders POSTs with an arbitrary header set (proxy identity headers, a bearer
+// token, or both) and returns the status and body.
+func postWithHeaders(t *testing.T, url string, headers map[string]string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		t.Fatalf("new request %s: %v", url, err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
 }

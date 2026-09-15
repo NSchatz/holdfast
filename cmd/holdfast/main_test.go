@@ -110,9 +110,16 @@ func TestServeSmoke(t *testing.T) {
 	if err := os.MkdirAll(lib, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// The control token is reached BY REFERENCE (secrets K1): a literal here is a startup
+	// refusal, so the smoke test writes the token into a file and points the key at it,
+	// which is the shape a real deployment uses.
+	tokenFile := filepath.Join(dir, "token")
+	if err := os.WriteFile(tokenFile, []byte("tok\n"), 0o400); err != nil {
+		t.Fatal(err)
+	}
 	cfgPath := filepath.Join(dir, "config.yaml")
 	body := "library_roots:\n  - " + lib + "\nstate_dir: " + filepath.Join(dir, "state") +
-		"\nserver_addr: " + addr + "\nserver_auth_token: tok\n"
+		"\nserver_addr: " + addr + "\nserver_auth_token: file:" + tokenFile + "\n"
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

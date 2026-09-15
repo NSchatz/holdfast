@@ -1,18 +1,18 @@
 # holdfast
 
-**A config-as-code, data-safe, self-hosted media transcoder — an open-source [Tdarr](https://tdarr.io) replacement.**
+**A config-as-code, data-safe, self-hosted media transcoder - an open-source [Tdarr](https://tdarr.io) replacement.**
 
-![The holdfast web dashboard: live queue, per-status summary, reclaimed-space totals, whole-ledger figures, and history with each swap's proof of safety — served from the single binary by `holdfast serve`.](docs/dashboard.png)
+![The holdfast web dashboard: live queue, per-status summary, reclaimed-space totals, whole-ledger figures, and history with each swap's proof of safety - served from the single binary by `holdfast serve`.](docs/dashboard.png)
 
 `holdfast` watches a media library, re-encodes bloated non-HEVC/non-AV1 video to a smaller modern codec
-to reclaim disk space, and — the whole point — **never destroys a source until a replacement is provably
+to reclaim disk space, and - the whole point - **never destroys a source until a replacement is provably
 faithful**. It is configured entirely by **YAML** (config-as-code), so what it does is reviewable and
 reproducible from git, not hidden in a UI database.
 
 > **Status: `v0.1.0` released (2026-07-18); major version zero, so anything MAY change.** This repository was built phase by
 > phase from a mature, battle-tested Bash predecessor (see _Provenance_). **The data-safety core
-> (`TRANSCODE-1`)** is the heart of it: `holdfast run` performs one oneshot scan of the library roots —
-> skip guards → same-directory temp encode → the full verify gate → atomic swap → delete — proven by a
+> (`TRANSCODE-1`)** is the heart of it: `holdfast run` performs one oneshot scan of the library roots -
+> skip guards → same-directory temp encode → the full verify gate → atomic swap → delete - proven by a
 > real-ffmpeg fixture suite that reds on the specific regression. Built on top of it: colour/HDR
 > preservation (`TRANSCODE-3`), the VMAF perceptual gate (`TRANSCODE-4`), a persistent crash-safe queue +
 > worker pool (`TRANSCODE-5`), hardware/AV1 encoders (`TRANSCODE-6`), the REST/SSE API + embedded web UI
@@ -24,8 +24,16 @@ reproducible from git, not hidden in a UI database.
 
 ## Why another transcoder?
 
-Tdarr is capable but **closed-source** and **UI/DB-configured** (state can be lost on a container rebuild),
-and it historically **replaced the original file before/regardless of its health check** — a documented
+*Every claim about another tool here, and in [docs/comparison.md](docs/comparison.md), was checked **as
+of September 2026** against that project's own licence text or project page. Other tools move: re-check
+before you choose.*
+
+Tdarr is capable, but it is **licensed under an
+[EULA](https://github.com/HaveAGitGat/Tdarr/blob/master/LICENSE.md)**: the licence is provided in three
+tiers - Personal Free, Personal Subscription, and Business Subscription & Trial - and it prohibits
+redistribution, reverse engineering, or any unauthorized use of the software without explicit permission
+from Tdarr. It is also **UI/DB-configured** (state can be lost on a container rebuild), and it
+historically **replaced the original file before/regardless of its health check** - a documented
 data-loss class ([#355](https://github.com/HaveAGitGat/Tdarr/issues/355),
 [#511](https://github.com/HaveAGitGat/Tdarr/issues/511),
 [#683](https://github.com/HaveAGitGat/Tdarr/issues/683)). `holdfast` takes the useful capability surface
@@ -40,50 +48,70 @@ and fixes the trust gaps:
   ffmpeg negotiated. Any failure leaves the source byte-for-byte untouched.
 - **The source can't be swapped out from under a running encode.** The source's `size:mtime` is
   re-checked immediately before the swap: if something else (Plex, an *arr, you) rewrote or replaced it
-  while the encode ran — hours, on a real film — the swap is **refused** rather than atomically
+  while the encode ran - hours, on a real film - the swap is **refused** rather than atomically
   overwriting the newer content with a re-encode of the stale bytes. A **symlinked** source is
   **skipped**, never replaced in place (which would orphan the real file it points at).
 - **The swap is made durable, not just atomic.** A `rename` is atomic for a concurrent reader, but
-  POSIX does not make it *persistent* until the containing directory is `fsync`'d — a power loss an
+  POSIX does not make it *persistent* until the containing directory is `fsync`'d - a power loss an
   instant after `rename()` returns can otherwise lose it, and in the container-changing case the
   source was already removed, leaving the entry pointing at nothing. holdfast `fsync`s the encode
   **before** the rename and the parent directory **after** it (the POSIX durable-rename recipe); if
   that directory `fsync` fails the source is **kept**, never removed under an unproven rename. True
   power-loss survival is filesystem- and hardware-dependent (and untestable in CI without a power-cut
-  harness) — this is the portable discipline, documented as such, not an absolute guarantee.
-- **The quality gate bounds the worst frame, not just the average.** An average hides local damage —
-  Netflix says so outright — so a short destroyed segment inside an otherwise-clean encode passes a
+  harness) - this is the portable discipline, documented as such, not an absolute guarantee.
+- **The quality gate bounds the worst frame, not just the average.** An average hides local damage -
+  Netflix says so outright - so a short destroyed segment inside an otherwise-clean encode passes a
   mean-only gate, and passes every structural check too (it decodes fine and carries the right duration,
-  packets and streams). Both floors are **on by default**. An output that cannot be *measured* is
+  packets and streams). All three floors are **on by default**. An output that cannot be *measured* is
   rejected, not assumed good.
-- **Config-as-code.** YAML, validated, in git — not clickops that vanishes on rebuild.
+- **Config-as-code.** YAML, validated, in git - not clickops that vanishes on rebuild.
 - **Open source** (AGPL-3.0).
 
 ### We are not the only tool that verifies before it replaces
 
-[**Alchemist**](https://github.com/bybrooklyn/alchemist) (AGPL-3.0, Rust) works the same axis: it validates
-output quality before promoting the result, keeps your originals untouched until the new file passes, and
-ships its own *Migrate from Tdarr* guide. If you are choosing between us, choose on the difference, not on
-a claim of uniqueness we would not be able to defend.
-
-**The difference is where the default sits.** Alchemist's VMAF scoring is **opt-in**. `holdfast`'s gate is
-**default-on, layered, and fails closed**: structural parity (codec, duration, packets, per-type stream
-counts, strictly-smaller) *and* full decode-integrity *and* VMAF — both its average **and** its worst
-frame. An output that cannot be **measured** is **rejected**, never assumed good; an ffmpeg without libvmaf
-stops the tool rather than quietly downgrading the gate. That is the whole claim, and it is narrower and
-truer than "the only one that checks".
+We are not, and the field is described rather than dismissed: **Alchemist** works the same axis and is
+ahead of holdfast on seven capabilities, **FileFlows** and **Unmanic** work this ground too, and the one
+claim holdfast makes for itself is narrow - its verify gate is default-on, layered and fails closed.
+**[docs/comparison.md](docs/comparison.md)** has all of it, each claim checked against that project's
+own licence text or project page.
 
 ## Non-goals
 
-Codec-only, same-content re-encoding (no resolution downscaling); HDR10 **static** metadata is preserved
-but Dolby Vision / HDR10+ dynamic metadata is **detect-and-skipped**; interlaced and exotic-chroma sources
-are **skipped, not converted**. It transcodes files in a library other tools manage (Plex/Jellyfin/*arr) —
-it is not a media server or library manager.
+Four boundaries, and they are boundaries rather than a backlog: **no distributed or remote
+processing**; **not a media server and not a library manager**; **interlaced sources are skipped, not
+converted**; and **HDR10 static metadata is preserved while Dolby Vision and HDR10+ dynamic metadata
+are detect-and-skipped**. Each is stated in full below, in this one section.
+
+Codec-only, same-content re-encoding (no resolution downscaling): **interlaced**, exotic-chroma and
+`multi-video-stream` sources are **skipped, not converted**; HDR10 **static** metadata is preserved
+while Dolby Vision and HDR10+ **dynamic** metadata is **detect-and-skipped** rather than guessed at;
+and embedded artwork is carried through unencoded. It transcodes files in a library other tools
+manage - not a media server.
+
+**Distributed or remote processing is a non-goal by design, not a missing feature.** holdfast is one
+process: no server/node split, no remote workers. The no-loss argument rests on an atomic
+same-filesystem `rename(2)` - it either happened or it did not, so a failure never leaves a partial
+file where the source was. A remote worker encoding to its own disk and shipping the result back is a
+**copy**, not a rename, and every gate here would have to be re-argued for that primitive. To use more
+of one machine, raise `workers` (default 1, deliberately - see **[docs/docker.md](docs/docker.md)**).
+
+<a id="non-goal-library-manager"></a>
+
+**Library management is a permanent non-goal.** No renaming to a scheme, no moving between folders, no folder
+organisation, no metadata fetch, no duplicate detection, no deletion of anything but a source whose verified
+replacement passed: these are filesystem mutations the verify gate cannot cover, so use the tools that manage the library instead.
+
+Every gate in this tool is one judgement made by comparing two video files, and not one of those operations
+can be judged that way. Whether a file belongs in another folder, or under another name, or is a duplicate
+worth losing, is a question about a library's conventions, and no decoder can answer it. Shipping them would
+mean shipping mutations with nothing to gate them, in the same binary that offers a gate for everything else
+it does. Plex, Jellyfin and the *arr tools are where that work belongs: point holdfast at the library they
+manage, and leave the managing to them.
 
 ## Quick start
 
 **Docker (the supported path).** The image bundles a pinned, checksum-verified ffmpeg with libx265,
-libsvtav1 and **libvmaf** — the perceptual gate needs it, and an output that cannot be measured is
+libsvtav1 and **libvmaf** - the perceptual gate needs it, and an output that cannot be measured is
 rejected rather than accepted, so the right ffmpeg is not a convenience:
 
 ```bash
@@ -92,17 +120,17 @@ cp config.example.yaml config.yaml             # then edit the three container k
 docker compose config -q && docker compose up -d
 ```
 
-A container config differs from a bare-metal one in exactly three places — miss the third and the
+A container config differs from a bare-metal one in exactly three places - miss the third and the
 dashboard is unreachable from the host (the API would be bound to the *container's* loopback):
 
 ```yaml
 library_roots: [/media]     # the CONTAINER path your library is mounted at
-state_dir: /state           # the mounted volume — it must survive restarts
+state_dir: /state           # the mounted volume - it must survive restarts
 server_addr: 0.0.0.0:8080   # compose publishes it on 127.0.0.1 only
 ```
 
 See **[docs/docker.md](docs/docker.md)** for volumes, permissions, timezone, GPU passthrough and the
-security posture — and **[docs/migration.md](docs/migration.md)** if you are coming from Tdarr or from the
+security posture - and **[docs/migration.md](docs/migration.md)** if you are coming from Tdarr or from the
 Bash transcoder.
 
 **From source:**
@@ -110,6 +138,7 @@ Bash transcoder.
 ```bash
 cp config.example.yaml config.yaml   # then edit library_roots
 holdfast validate --config config.yaml
+holdfast analyze --config config.yaml  # what is in the library, reading only (--health: what is broken)
 holdfast run --config config.yaml   # one scan: re-encode bloated non-HEVC video, safely
 holdfast serve --config config.yaml # HTTP API + web dashboard (scan on demand / on an interval)
 holdfast resolve --config config.yaml  # list (and resolve) any job whose swap outcome is unknown
@@ -119,7 +148,7 @@ holdfast export --config config.yaml --out ledger.ndjson  # the whole ledger, as
 
 `run`/`serve` need `ffmpeg` and `ffprobe` on `PATH` (or set `HOLDFAST_FFMPEG` / `HOLDFAST_FFPROBE`); they
 exit non-zero if they are missing rather than silently doing nothing. Use a build with **libx265** and
-**libvmaf** — a distro ffmpeg typically lacks the latter, which is why the image exists.
+**libvmaf** - a distro ffmpeg typically lacks the latter, which is why the image exists.
 
 ### The filesystem check at startup
 
@@ -140,390 +169,101 @@ anything in user space (FUSE) are all treated as not-local, because a false warn
 configuration and a false clear costs a film. **[docs/filesystem.md](docs/filesystem.md)** has the
 recognised-local set, the opt-in rules and what the startup traversal costs.
 
-### The undo window (`restore`) — off by default
+### Before you let it near the library (`plan`, and `dry_run`)
+
+<a id="plan-versus-dry-run"></a>
+`dry_run` is a full daemon pass that probes, guards and **records a terminal row per file it decided**
+without encoding anything - a record of what THAT RUN decided, written into the ledger. `holdfast plan`
+is a read that walks the configured coverage set, runs every skip guard and reports what a run would
+do - **claiming nothing and writing nothing**, not a job row, not a ledger row, not a byte anywhere. So
+`dry_run is a full daemon pass` and `plan is a read`: neither is an alias for the other, and a caller
+invoking one never gets the other's observable effect.
+
+```
+holdfast plan --config config.yaml            # eligible files, eligible bytes, and which guard skipped the rest
+holdfast plan --config config.yaml --json     # the same plan as one JSON document on stdout
+```
+
+The reclaim figure is an **estimate and says so wherever it appears**, derived from the size ratios of
+encodes **this install has already completed** and published with the sample size and the spread it came
+from. On an install that has never completed one, it is **refused outright with the reason** rather than
+emitted as a zero or borrowed from somebody else's average - and a refused projection still exits `0`,
+because the report was produced. There is deliberately no per-file estimated saving and no predicted
+VMAF: a library-scale ratio printed against one file reads as a measurement of that file, and nothing
+here has looked inside it.
+
+### Per-job settings, and where the encode works
+
+`encode_profiles` overrides the top-level encode settings per job (ordered; the first profile whose
+`match` glob selects a source wins), `bitrate_kbps` swaps the quality target for a target-bitrate rate
+control, and neither is reachable from a flag: **[docs/profiles.md](docs/profiles.md)**. `scratch_dir`
+moves the encode's **working file** elsewhere and nothing else - the accepted result is still copied
+back beside the source and finalized by the same atomic rename: **[docs/scratch.md](docs/scratch.md)**.
+
+### The undo window (`restore`) - off by default
 
 The swap is the one irreversible thing holdfast does, and every gate in front of it is an **estimate**.
-The delete is not. `undo_window_hours` buys a bounded period in which a swap can be walked back:
-
-```yaml
-undo_window_hours: 24     # 0 (the default) = a swap is FINAL, and startup says so
-```
-
-```bash
-holdfast restore --config config.yaml                     # what is held, and for how long
-holdfast restore --config config.yaml /media/tv/ep.mkv    # put that original back
-```
+The delete is not. `undo_window_hours` buys a bounded period in which a swap can be walked back; at its
+default of `0` a swap is **FINAL**, and startup says so.
 
 The original is kept by a second **hard link**, so retention costs **no space at the moment it is
-taken** — but the space a swap reclaimed **does not come back until the window closes**, which for a
-first library pass means holding every original it replaced. So the API reports
-`bytes_held_by_undo_window` **separately** from the reclaimed totals, and a release reports the bytes it
-**actually** returned (removing a name frees the data only when it was the last one). A source whose
-original cannot be retained is **skipped, not swapped**, and a restore refuses rather than overwrite a
-file that has changed since the swap. Full reference, including what it costs and what it deliberately
-does not offer: **[docs/undo.md](docs/undo.md)**.
+taken** - but the space a swap reclaimed **does not come back until the window closes**, which for a
+first library pass means holding every original it replaced, so the API reports
+`bytes_held_by_undo_window` **separately** from the reclaimed totals. A source whose original cannot be
+retained is **skipped, not swapped**, and a restore refuses rather than overwrite a file that has
+changed since the swap. `holdfast restore` lists what is held and puts an original back; how to turn the
+window on and off, what it costs, when it closes and what it deliberately does not offer:
+**[docs/undo.md](docs/undo.md)**.
+
+### Edit the YAML and the tool obeys (`requeue`)
+
+A terminal row is an **answer computed from configuration**, and only for the configuration it was
+computed under: each records the values the guard that wrote it read, and a scan **re-opens** one whose
+values have moved. So lowering `min_bitrate_kbps` or changing the target codec reaches the files a
+previous configuration answered; an edit to a key no guard read reaches nothing; re-opening is not
+re-encoding; `holdfast requeue` is the LOCAL lever for the rest - **[docs/requeue.md](docs/requeue.md)**.
 
 ### Web API + UI (`serve`)
 
 `holdfast serve` runs a REST API + [SSE](https://developer.mozilla.org/docs/Web/API/Server-sent_events)
-live stream and an **embedded web dashboard** (baked into the single binary — no assets to deploy). It is
+live stream and an **embedded web dashboard** (baked into the single binary - no assets to deploy). It is
 a **read-and-control** surface on top of the config-as-code engine: the YAML file stays the source of
 truth and the SQLite store stays the source of job state. The API can only **read the store, start a
-scan, and pause/resume the feeding of new files** — it never touches a media file, so the data-safety
+scan, and pause/resume the feeding of new files** - it never touches a media file, so the data-safety
 invariant is entirely unaffected.
 
-| Method & path | Auth | Purpose |
-|---|---|---|
-| `GET /` | — | the embedded dashboard |
-| `GET /api/summary` | — | counts per status + bytes reclaimed (**lifetime** and this-run) + `bytes_held_by_undo_window` (space a retained original still holds, never folded into either reclaimed figure; `null` = unreadable) + paused/scanning + the **whole-ledger aggregates** (see below) |
-| `GET /api/queue` | — | pending + active jobs, capped, with `queue_total` — see *The total behind a cap* |
-| `GET /api/history?limit=N` | — | recent terminal jobs (done/skipped/failed, plus `indeterminate` and `applied-despite-error`) with their recorded outcome, capped, with `history_total` — see below |
-| `GET /api/events` | — | SSE: a fresh snapshot on every state change |
-| `GET /metrics` | — | Prometheus metrics (when `metrics_enable`, default on) |
-| `POST /api/rescan` | token | start a library scan (409 if paused / scanning / outside the run window) |
-| `POST /api/pause` | token | stop feeding **new** files (in-flight encodes finish safely) |
-| `POST /api/resume` | token | clear the pause flag |
+Every endpoint, what it answers and which of them need the token:
+**[`docs/api-reference.md`](docs/api-reference.md)**.
 
-Fail-safes: the server **binds `127.0.0.1` by default** (front it with a reverse proxy for real
-multi-user); the mutating endpoints require a bearer token (`server_auth_token`, best set via
-`HOLDFAST_SERVER_AUTH_TOKEN`) and are **disabled entirely when no token is set**; pause only ever
-*delays* work — it never interrupts an encode or the atomic swap. **Known limitation:** single-token auth
-(no per-user accounts); the queue/history views are capped at the most recent rows, not the whole ledger —
+Fail-safes: the server **binds `127.0.0.1` by default**, and that bind is the whole of what
+protects the read endpoints and the dashboard - they carry no authentication of their own, so
+a reverse proxy in front of them is the only barrier there is (the reverse-proxy posture is in
+[docs/docker.md](docs/docker.md), and it is worth reading before you give holdfast a hostname);
+the mutating endpoints require a bearer token, reached **by reference**
+(`server_auth_token: file:/run/secrets/holdfast-token` - a literal token there, or in
+`HOLDFAST_SERVER_AUTH_TOKEN`, refuses to start; see [docs/secrets.md](docs/secrets.md)) and
+are **disabled entirely when no token is configured**; pause only ever
+*delays* work - it never interrupts an encode or the atomic swap. **Known limitation:** single-token auth
+(no per-user accounts); the queue/history views are capped at the most recent rows, not the whole ledger -
 but they now say what they were capped *against*, and `holdfast export` gives you the whole thing.
 
-### The total behind a cap
+### The record, and what to read for it
 
-`GET /api/queue` returns at most **500** rows and `GET /api/history` at most **200**. A truncated view that
-says nothing about what it truncated reads as the whole ledger, and a client cannot work it out for itself
-(the summary counts answer a different question — rows *per status*, not the rows a response selected). So
-every capped response carries the total it capped against, counted in the server over **every matching row
-in the `jobs` table**:
+A terminal job carries the evidence the engine used to decide, so a swap can be
+audited after the fact instead of trusted: which gate refused an output, which
+guard skipped a file, which encoder ran, the VMAF mean AND worst frame, the model
+and pixel format both streams were converted to before scoring, and the chroma
+measurement that says whether the COLOUR survived.
 
-| Response | Field |
-|---|---|
-| `GET /api/queue` | `queue_total` |
-| `GET /api/history?limit=N` | `history_total` |
-| the SSE snapshot | both |
+An in-flight job reports how far it has got. The whole-ledger figures say what
+they are computed over and mark what they cannot cover. The ledger can be bounded
+(`history_retention_rows`, off by default) and exported (`holdfast export`).
+`serve` also carries the observability and host-fair scheduling surfaces.
 
-```json
-"history_total": {
-  "available": true, "unavailable": "",
-  "covers": "every row in the ledger with status done, skipped, failed",
-  "cap": 200, "count": 41237
-}
-```
+Every field, every figure and the exact semantics: **[`docs/api-reference.md`](docs/api-reference.md)**.
+The dashboard's own methodology is in
+[`docs/dashboard-methodology.md`](docs/dashboard-methodology.md).
 
-- **`count`** is the number of matching rows in the ledger, **never the number of rows returned**. Asking
-  for fewer rows than the cap (`?limit=5`) reports the *same* `count`; only `cap` moves with the request.
-- **`available`** is `false` when the total could not be read, and `count` is then an explicit **`null`**,
-  never `0` — a zero would claim the ledger is empty beside rows the caller can see. The rows still ship:
-  one unreadable figure never costs an operator the records.
-- The dashboard renders that total in each table's cap notice, and when the total is unavailable it says so
-  **and shows no figure in its place**.
-
-### The recorded outcome — the proof a swap was safe
-
-A terminal job carries the evidence the engine used to decide, so you can audit a swap after the fact
-instead of trusting it. Every terminal row in `/api/history` (and in the SSE snapshot) reports:
-
-| Field | On | What it is |
-|---|---|---|
-| `reason` | failed | the error that rejected it (the encode error, or **which gate** refused the output) |
-| `reason` | skipped | **which guard** fired — `already-at-target-codec`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `target-already-exists`, `undo-retention-failed`, `restored-original` |
-| `encoder` | any job that reached the encoder | the encoder that ran (`cpu`, `svtav1`, `nvenc`, …) — a skip, or a file with no readable video stream, never gets that far and records none |
-| `vmaf_mean`, `vmaf_min` | done, and a VMAF-rejected failure | the pooled harmonic mean **and the worst frame** |
-| `vmaf_model` | as above | the libvmaf model that produced them |
-| `vmaf_pix_fmt` | as above | the single pixel format **both streams were converted to** before scoring - chosen and named by holdfast, so a score says which pixels were compared |
-| `vmaf_chroma`, `vmaf_chroma_metric` | as above | the worst frame's chroma measurement and what it is (`psnr_cb/psnr_cr min (dB)`) - the only figure on the row that says whether the **colour** survived |
-| `source_bytes`, `output_bytes` | done | the sizes either side of the swap |
-| `encode_ms` | done, and a failure after the encode ran | wall-clock encode time |
-| `guard_attributes`, `guard_time_resolution` | any job that reached the swap | which source attributes the source-mutation guard compared (`size,mtime`) and the resolution of the timestamp it compared (`1s`) - the granularity that check actually achieved |
-| `guard_residual_window` | as above | which of the two documented residual windows applies to the storage the guard ran against: `residual-window-local` or `residual-window-network`. A **class label**, never a duration - see [docs/filesystem.md](docs/filesystem.md#residual-window-local) |
-| `swap_cause` | a swap failure with a distinct cause | today only `cross-filesystem` - the temp and the target were not on the same mounted filesystem. Absent for every other failure |
-
-**A `null` means "not recorded", and you must read it that way.** It is never a zero. A numeric field is
-`null` — not `0` — whenever the fact was not measured (VMAF disabled, or a row written before these
-columns existed), because a VMAF of `0.0` is a *destroyed frame*, not a missing measurement, and rendering
-one as the other would be inventing evidence about a swap nobody checked.
-
-**A VMAF score is not interpretable without its model or the format it was measured in**, which is why
-all three travel together. Read `vmaf_mean`/`vmaf_min` with the limits in mind: VMAF is a regression onto
-a *subjective* opinion scale under one viewing condition, `vmaf_v0.6.1` is **luma-only** (structurally
-blind to chroma damage - that is what `vmaf_chroma` is for), and the scores are **not comparable across
-different sources**. The number bounds measured perceptual quality against *your* source; it is not a
-proof of fidelity.
-
-**The comparison format is a fact, not a guess.** `pixel_format: auto` floors output bit depth at 10, so
-an 8-bit source and its replacement routinely disagree - and upconverting the source is not the same
-measurement as downconverting the output. holdfast converts both streams to one named format before
-scoring (the richer chroma subsampling of the two, at the deeper of the two bit depths, so nothing is
-averaged or quantised away on the way in) and records it in `vmaf_pix_fmt`. The same source and output
-scored twice are compared in the same format both times.
-
-An outcome is recorded per *attempt*, not per file: **claiming a job for a retry clears it**, so a file
-that is being re-encoded never advertises the rejected attempt's score while it is in flight.
-
-The **dashboard renders all of this per file** — size before → after and percent reclaimed, the encoder,
-the encode duration, and the VMAF pair shown with its model, its pooling and its luma-only blind spot — so
-the proof is on the page, not only in the JSON. A skipped row names its guard; a failed row shows its
-reason; a fact that was never recorded reads "not recorded", never `0`.
-
-### An in-flight job — how far it has got
-
-A terminal row says what happened; an **active** row says what is happening. Every job in `/api/queue`
-(and in the SSE snapshot's `queue`) carries `updated_at`, the timestamp of its last transition, and the
-snapshot carries `now`, the server's clock when the frame was built — together those are how the
-dashboard shows **how long a file has been in the state it is in**, recomputed from the timestamp on
-every tick rather than counted up in the page.
-
-An **encoding** row additionally carries what the encoder itself reports, read from ffmpeg's documented
-`-progress` stream rather than estimated from elapsed time:
-
-| Field | What it is |
-|---|---|
-| `progress_seconds` | the encoder's position in the source timeline |
-| `progress_duration_seconds` | the source duration that position is measured against |
-| `progress_fraction` | the two divided, in `[0,1]` |
-
-**Only** an encoding row. A figure here is a measurement taken by the encoder, so it is live exactly
-while that encoder is running: the moment a job moves on — to `verifying`, or back to `pending` after a
-crash, or to a terminal state — all three fields go back to `null`, because the process that produced the
-figure has exited and nothing is measuring the verify phase. A carried-over percentage frozen beside a
-state it does not describe is the one thing this surface must never show.
-
-The same `null` rule applies, and it bites harder here: an encoder that has not reported yet, and a
-source whose container reports no duration, are both **unrecorded**, and a `0` would read as "0% encoded"
-— a figure nobody measured. The dashboard shows those as *unknown*. Progress is **not persisted**: it is
-state about a running process, so after a restart an in-flight job simply has none reported yet, and a
-finished row never carries one. There is deliberately **no ETA** — every figure here is measured, and a
-predicted finish time is not.
-
-The reclaimed figure is a **durable lifetime total** (`bytes_reclaimed_lifetime`): a one-time baseline
-summed from the recorded `source_bytes`/`output_bytes` on every done row, plus this process's reclaims — so
-it survives a restart rather than resetting to zero. `bytes_reclaimed_session` is kept alongside it as the
-honest this-run number.
-
-**Known limitations.** Rows written before these columns existed carry no outcome and read as "not
-recorded" — a measurement never taken cannot be reconstructed, and such a row also contributes nothing to
-the lifetime total (never counted as a zero-reclaim). Queue/history views are still capped at the most
-recent rows, not the whole ledger — each now reports the total it was capped against (see *The total behind
-a cap*), the aggregate figures below are over the whole table, and `holdfast export` writes all of it.
-
-### Whole-ledger figures
-
-The queue and history views ship at most a few hundred rows, so any statistic derived from that payload
-would describe the most recent files while looking exactly like a statistic about your library. Every
-published figure is therefore computed **in the server, over every matching row in the `jobs` table**, and
-rides both `GET /api/summary` and the SSE snapshot under `aggregates`:
-
-| Figure | What it is |
-|---|---|
-| `outcomes` | how many rows reached each terminal status (done / skipped / failed) |
-| `skips_by_guard` | every skipped row broken down by **which guard** skipped it |
-| `size_ratio` | replacement size as a fraction of the original (0.35 = 35% of the original), low / mean / high |
-| `encode_ms` | recorded encode wall-clock time, low / mean / high |
-| `vmaf_mean`, `vmaf_min` | the spread of the two pooled VMAF statistics across files |
-
-Each one carries the same envelope, and every part of it is load-bearing:
-
-- **`covers`** names the SET the figure is over, and **`window`** is `""` unless the figure is bounded, in
-  which case it names the bound. A number whose set is unstated gets read as covering everything you own.
-- **`counted`** is how many rows contributed a value; **`excluded`** is how many matching rows recorded
-  none. An unrecorded value is **excluded and reported**, never read as `0`: a VMAF of `0.0` is a destroyed
-  frame, and an absent size would invent a 100% reclaim.
-- **`min` / `mean` / `max`** are `null` (never `0`) when `counted` is 0. A figure nothing contributed to is
-  "no data", not an average of zero. They are deliberately **not** a median or a percentile: those SQL
-  functions are gated on the SQLite version AND a build flag, and a query that resolves on one build and
-  fails on another is a runtime failure on somebody else's machine.
-- **`available`** is `false` when the figure could not be read at all, with a fixed `unavailable`
-  statement. One unreadable figure never suppresses the rest: the summary, the queue rows and the history
-  rows still ship, the SSE broadcast still fires, and the dashboard draws that one card as unavailable
-  while the rest of the page renders.
-
-The dashboard shows all of it under **Across the whole ledger**, each figure beside the set it covers and
-the count of rows it had to leave out.
-
-#### When holdfast cannot tell what the swap did (`indeterminate`) - and how you get out of it
-
-The swap is an atomic `rename(2)`, and on a **local** filesystem a failed rename means the source is
-still there. On a network one it does not: `rename(2)` says outright that "on NFS filesystems, you can
-not assume that if the operation failed, the file was not renamed" - a retransmitted request can report
-a failure for an operation the server already performed. So after *every* failed swap holdfast re-stats
-the source path and decides between four outcomes, and only one of them may say the source is untouched:
-
-| Outcome | What it means |
-|---|---|
-| `failed` | the swap failed AND the re-stat confirmed the source untouched - which requires the storage to be **positively identified as local**, because a client attribute cache populated before the swap returns the pre-swap answer either way |
-| `applied-despite-error` | the rename returned an error but the re-stat established that it **took effect**: the file at the source path is the replacement. Nothing is re-attempted, nothing is deleted, and a later run treats that path normally (the ordinary already-at-target-codec guard skips it) |
-| `indeterminate` | holdfast **cannot establish** what happened. The job is **parked**: both files are kept, and nothing encodes, swaps, deletes or re-queues either path - in this run or any later one - until you say what happened |
-
-An unrecognised filesystem counts as **not local**: a false warning costs you a look, a false clear costs
-you a film. The set this build recognises as local is the **same one** the startup check prints and
-[docs/filesystem.md](docs/filesystem.md#filesystem-types-this-build-classifies-local) states - there is
-exactly one such set in the binary, read by the startup check and by the swap-time and guard-time
-lookups alike. NFS and SMB/CIFS are known to be network-backed; anything in neither set is
-undetermined, and therefore not local.
-
-A parked job is reported at the start of every run, naming both files, and:
-
-```bash
-holdfast resolve --config config.yaml            # list every parked job
-holdfast resolve --config config.yaml --id 3     # report one: both paths, and what is at each RIGHT NOW
-holdfast resolve --config config.yaml --id 3 \
-    --determination swap-was-applied \
-    --replacement delete                         # record what happened, and dispose of the replacement
-```
-
-The report is never conditional on observing either file: a recorded path with nothing at it, or one
-that cannot be inspected, is reported as exactly that and the job is still resolvable. The record is
-made **durable before** anything is removed, so a store failure costs you a repeated instruction and
-never an unrecorded deletion - and a replacement holdfast kept is never handed back to enumeration as if
-it were a source. Files holdfast retained this way are named `*.__holdfast-replacement__.*` and are left
-alone by every later run, whether or not a record of them survived.
-
-Moving a replacement to that name is itself a write into the media directory, and the failure that
-strands a replacement is often the same failure that denies the write - a library that has gone
-read-only refuses the swap, the move to the held-back name and the record in the job store alike. So a
-replacement can end up left at its `*.__transcoding__.*` working path with nothing recorded about it.
-holdfast still will not touch it. The stale-temp sweep that reclaims a killed run's half-written encodes
-**examines** each one rather than assuming it is disposable: a file at that path whose content is a
-finished encode at the target codec, the length of the source beside it, is kept, reported at every
-subsequent run, and stepped around when a fresh encode of the same source picks its own working path.
-Removing it is your call, not the tool's. A genuinely half-written encode is shorter than its source and
-is still swept, exactly as before.
-
-When `container_ext` makes the output's extension differ from the source's, the swap's target is a
-**different path** from the source, so a rename that took effect while reporting an error leaves the
-replacement *there* rather than at the source path. holdfast follows the file: a parked job records where
-it actually is and retains it under the held-back name, and where the source is instead established
-untouched the recorded reason names the second file, so a duplicate is never something you have to
-notice for yourself (the next scan's collision guard reconciles it).
-
-### Bounding the ledger — `history_retention_rows` (off by default)
-
-The `jobs` table only grows: one terminal row per file holdfast has finished with, for the life of the
-install. At library scale that record becomes unbounded, so there is a bound — and it **ships disabled**.
-
-```yaml
-history_retention_rows: 0     # the DEFAULT, and what an absent key means: keep every row
-# history_retention_rows: 50000   # keep at most 50,000 terminal rows; prune the oldest beyond it
-```
-
-With a value `n > 0`, holdfast brings the terminal rows back within `n` **after each scan completes** — no
-operator action, no API call, no separate command. A negative or fractional value is a **startup refusal**
-naming the key and the value, before the job store is opened.
-
-**A prune cannot be undone, and that is why the default is 0.** Those rows are the record of what holdfast
-did to your library *after it deleted your originals*. Nothing recreates them: a later scan re-derives the
-file's **current** state instead, so a pruned `done` row for a file still on disk comes back as
-`skipped / already-at-target-codec` — proof that the file is at the target codec, not proof that holdfast
-put it there. **Export before you bound it** if the record matters to you.
-
-What a prune will never do, whatever you set:
-
-- **It cannot lower the lifetime reclaimed total.** A removed row's contribution to
-  `bytes_reclaimed_lifetime` is carried forward durably, in the same transaction that deletes the row, so
-  the figure is identical either side of a prune — on the running server *and* after the restart that
-  re-reads it from the database. (That second half is where a naive prune fails silently: the server reads
-  the total once, at startup, so deleting contributing rows shows a correct figure until the next restart.)
-- **It cannot cause a file to be encoded again.** A terminal row is a *decision*, not only a record: it is
-  what holds that file out of the encoder on every later scan, and the guards that would re-derive the same
-  verdict run under whatever configuration is current, so a deleted row means a re-encode the moment the
-  configuration it was taken under has moved (a different `encoder` target codec, a lowered
-  `min_bitrate_kbps`, a file parked at `max_failures`). **So a row is only ever removed when the scan
-  listed the directory that file should be in and the file was not there**: gone, or replaced by different
-  content. Retention bounds what your library has *finished with*.
-- **It cannot take anything the undo window is holding**, and it does not release it either. A retained
-  original is a file that is still present, so the `done` row for the swap that produced it is a row the
-  prune may not remove — and the retention itself lives in its own table the prune never reads or writes,
-  so `holdfast restore` works exactly the same either side of a pass. That also holds for the row a
-  restore leaves behind: putting an original back writes a `skipped / restored-original` row, and that row
-  is the only thing standing between the rescued bytes and the same gates that passed the encode you just
-  rejected, so retention keeps it for as long as the file is there. The two figures stay separate too — a
-  prune returns no space, so `bytes_held_by_undo_window` does not move across one.
-- **It never touches a media file.** The store records job state and nothing else.
-
-**What that costs you, plainly.** A library that is not churning has one terminal row per file and every
-one of them is load-bearing, so **its ledger is bounded by the library and not by `history_retention_rows`,
-and a prune pass may remove nothing at all**. The ledger can therefore sit above the bound; the retention
-pass logs how many rows it kept, and splits them into the files that are still in the library and the
-directories this run could not list. If your `jobs.db` is large because your library is large, this key is
-not the tool for it: that is one row per file you own, and deleting it would cost you a second lossy
-generation of the file it describes.
-
-**Known limitations.** The bound is a **row count** only — there is no age-based or per-status policy. It
-does not shrink `jobs.db` on disk: pruning bounds the rows, and SQLite reuses the freed pages (there is no
-`VACUUM`). Non-terminal rows are never pruned — they are work, not history. Rows under a directory the run
-could not list are kept, deliberately and indefinitely: an unmounted subtree looks exactly like a library
-you emptied, and pruning on that absence would re-encode the lot when it came back. With retention enabled,
-each pass stats the files behind the terminal rows it examines, which is one extra stat per row on top of
-the scan that just ran. And with retention disabled (the default) the table's growth is visible through the
-metrics that already exist: `holdfast_queue_depth{state}` is read from the store on every scrape, over every
-status including the terminal ones.
-
-### Taking the record elsewhere — `holdfast export`
-
-```bash
-holdfast export --config config.yaml                        # newline-delimited JSON on stdout
-holdfast export --config config.yaml --out ledger.ndjson    # or to a file
-```
-
-Every terminal row, oldest first, one JSON object per line, using **the same field names `/api/history`
-publishes for a row** — the export calls that same projection, so the two cannot drift. It is a local,
-operator-run read of your own store: no listener, no port, no network surface, and it never writes to the
-store it reads.
-
-**"Never writes" is enforced, not promised.** The ledger is opened `mode=ro`, so SQLite itself refuses
-every write, and — unlike starting the daemon — the export **does not migrate**. That matters most in the
-one situation you would reach for it: around an upgrade. A read that quietly bumped the schema would leave
-your ledger unopenable by the holdfast still running against it, because a database from the *future* is a
-refusal (see *Schema versioning*). So the rows, the schema and its version are exactly as the export found
-them. Upgrading the store stays a deliberate act — `holdfast run` or `holdfast serve`.
-
-**A `null` means "not recorded" here exactly as it does in the API.** An unmeasured VMAF, size or duration
-is an explicit `null` and never a `0`, because a VMAF of `0.0` is a *destroyed frame* and a size of `0`
-would invent a 100% reclaim. A *measured* zero exports as `0`, and the two stay distinguishable.
-
-Failure is loud and leaves nothing behind. `--out` **refuses to overwrite an existing file** (the export it
-would replace may be the only copy of rows a prune has since removed); a destination that cannot be created
-or written exits non-zero naming that path with no partial file left; and a job store that is missing,
-unreadable, or **at any schema version but this build's** — written by a newer holdfast, or by an older one
-this command will not migrate on its way past — exits non-zero naming the store path and writes no export.
-An empty ledger is an empty export and **exit 0** — distinguishable from every one of those.
-
-**Known limitations.** The store must be at this build's schema version: export from an older ledger by
-starting holdfast once (which migrates it) and exporting after, or by using the holdfast that wrote it.
-SQLite needs to create its WAL index beside the database to read it, so the *directory* has to be
-writable — exporting straight from a read-only copy of `state_dir` will not work. And it is the **job**
-ledger only: what the undo window is currently holding is separate state with a lifetime of hours, not a
-record of what holdfast did, and `holdfast restore` with no argument is what prints it.
-
-#### Schema versioning
-
-The job store (`<state_dir>/jobs.db`) carries a schema version in SQLite's `PRAGMA user_version` and is
-migrated forward on startup, in a transaction per step, so the version and the shape move together or not
-at all. **A migration failure is a refusal to start**, never a silent downgrade to a partial schema — and
-a database written by a *newer* holdfast is likewise refused rather than opened and quietly written
-through a schema that cannot see all of its columns.
-
-Migrating is the **daemon's** job, not a reader's: `holdfast export` opens the store read-only and refuses
-a version mismatch in **either** direction rather than repairing one, so reading the ledger can never be
-what upgrades it.
-
-### Observability & host-fair scheduling (`serve`)
-
-- **Prometheus** (`/metrics`, default on): `holdfast_files_total{outcome}`, `holdfast_bytes_reclaimed_total`,
-  `holdfast_encode_duration_seconds`, `holdfast_vmaf_score` (perceptual-quality distribution), and a
-  `holdfast_queue_depth{state}` gauge read live from the store. Metrics are read-only instrumentation —
-  best-effort, never affecting file handling.
-- **Notifications** (`notify_url`, [shoutrrr](https://shoutrrr.nickfedor.com/)): one service URL fans out to
-  ntfy/Discord/Gotify/… — a message per failed file and a per-scan summary. Sends run off the engine's path,
-  and a send failure is logged, never crashing the daemon or altering files. Empty URL disables it.
-- **Host-fair scheduling**: a daily `run_window` (`HH:MM-HH:MM`), a per-core `max_load` cap, and an optional
-  Tautulli-aware pause (`tautulli_url` + `tautulli_api_key`) that holds off while someone is streaming.
-  Scheduling only ever **delays** new work — it never interrupts an in-flight encode or bypasses a gate, and
-  a Tautulli outage **fails open** (never halts transcoding). **Known limitation:** Plex-aware pause needs an
-  operator-supplied Tautulli endpoint; otherwise the run-window + load cap are the fairness mechanism.
 
 ## Build
 
@@ -532,12 +272,12 @@ Requires Go 1.25+.
 ```bash
 make build        # -> ./holdfast
 make test         # go test -race ./...
-make check        # THE gate — see the `check:` target in the Makefile for what it runs.
+make check        # THE gate - see the `check:` target in the Makefile for what it runs.
                   # CI and the release workflow run this same target, not a copy of it.
 
 make image        # build the container image (docker buildx)
 make image-smoke  # build it, then drive a REAL encode inside it and assert the no-loss
-                  # contract held. This — not "it built" — is the packaging gate CI runs.
+                  # contract held. This - not "it built" - is the packaging gate CI runs.
 ```
 
 The Go test suite drives **real ffmpeg**: it fails loudly if `ffmpeg`/`ffprobe` (or `libvmaf`) are

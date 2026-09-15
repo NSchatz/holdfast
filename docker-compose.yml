@@ -26,7 +26,7 @@ services:
     # The NAME half is held against this repository's own release by
     # scripts/release-shape-gate, and the reference is resolved against the registry by
     # scripts/resolve-compose-image.sh on every release: docs/release.md, step 8.
-    image: ghcr.io/nschatz/holdfast:v0.1.0@sha256:302242b66f9c160e69b1e7c37d57925ec593bc7ed0ee9df851af0ec58c7cd4b2
+    image: ghcr.io/nschatz/holdfast:v0.2.0@sha256:cb5125e1e95c93ee05256a37a8878c30349b75bb2ee2918c6e7b0ee9b4a5ec32
     # Build it yourself instead of pulling (or if the GHCR package is not readable
     # without credentials - see docs/release.md, step 8):
     # build:
@@ -45,14 +45,22 @@ services:
       # `run_window` is evaluated in LOCAL time. Without this the container is UTC and
       # your "encode overnight" window silently runs at the wrong hours.
       - TZ=Etc/UTC
-      # The bearer token for the MUTATING endpoints (rescan/pause/resume). Put it in a
-      # .env file next to this one; leave it unset and those endpoints stay DISABLED
-      # (the read-only API and the dashboard still work).
+      # A SECRET REFERENCE to the bearer token for the MUTATING endpoints
+      # (rescan/pause/resume), never the token itself. Leave it unset and those endpoints
+      # stay DISABLED (the read-only API and the dashboard still work).
+      #
+      # A LITERAL token here refuses to start. holdfast runs ffmpeg as a child process and a
+      # child inherits its parent's environment, so a token in this variable is readable from
+      # every encoder invocation's /proc/<pid>/environ. What goes here is a reference:
+      #
+      #   HOLDFAST_SERVER_AUTH_TOKEN=file:/run/secrets/holdfast_control_token
+      #
+      # which is what the `secrets:` block below mounts. See docs/secrets.md.
       #
       # This is the PASS-THROUGH form (a bare name, no `=`) on purpose. Writing
       # `HOLDFAST_SERVER_AUTH_TOKEN=${HOLDFAST_SERVER_AUTH_TOKEN:-}` would always SET
       # the variable — to "" when you have no .env — and an env var BEATS the YAML file,
-      # so it would silently wipe a token you had configured in config.yaml and leave
+      # so it would silently wipe a reference you had configured in config.yaml and leave
       # rescan/pause/resume returning 403 for no visible reason. The bare form passes the
       # variable only when it is actually set, so config.yaml keeps working.
       - HOLDFAST_SERVER_AUTH_TOKEN
@@ -69,8 +77,12 @@ services:
       # what `library_roots` says in config.yaml.
       - /srv/media:/media
 
-    # The control surface is HTTP. Publish it on LOOPBACK ONLY unless you have set an
-    # auth token and put it behind a reverse proxy with TLS. (config.yaml must say
+    # The control surface is HTTP, and its READ half carries no authentication of its
+    # own, so where this port is published is what decides who can reach it. LOOPBACK
+    # ONLY is the posture of THIS example deployment, not a property of the daemon: put
+    # holdfast behind a reverse proxy and that proxy's own authentication becomes the
+    # only barrier in front of the dashboard and the read API. Read the reverse-proxy
+    # posture in docs/docker.md before you give it a hostname. (config.yaml must say
     # `server_addr: 0.0.0.0:8080` for the container to accept the forwarded connection
     # at all — 127.0.0.1 inside a container namespace is not reachable from the host.)
     ports:
@@ -121,3 +133,16 @@ services:
     # this host, holdfast fails loud at startup and exits non-zero. That check really
     # encodes a clip and probes the result — a hardware encoder can exit 0 while
     # writing nothing when no device is present.
+
+    # --- the credential, mounted as a FILE (secrets K1) ---------------------------
+    # Uncomment this and the top-level `secrets:` block below, create
+    # ./control-token.txt (mode 0400; .gitignore already covers it), and set
+    #   HOLDFAST_SERVER_AUTH_TOKEN=file:/run/secrets/holdfast_control_token
+    # in your .env. The reference is what the variable carries; the credential never
+    # leaves the file, so no encoder child can read it out of the environment.
+    # secrets:
+    #   - holdfast_control_token
+
+# secrets:
+#   holdfast_control_token:
+#     file: ./control-token.txt

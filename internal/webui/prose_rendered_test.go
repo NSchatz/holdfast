@@ -53,6 +53,10 @@ type copyExclusion struct {
 var pageCopyExclusions = []copyExclusion{
 	{"#conn", "1: the rendered connection state"},
 	{"#msg", "1: the refusal message a rejected control action produces"},
+	{"#search-msg", "1: the refusal message a rejected ledger search produces"},
+	{"#found-count", "1: how many rows a ledger search matched"},
+	{"#held-list", "1: the withheld paths the daemon reported"},
+	{"#held-msg", "1: the refusal message a rejected withholding produces"},
 	{"#sr-status", "1: the per-status counts, announced"},
 	{".badge", "1: whether this holdfast is running or paused, and whether a scan is under way"},
 	{".reclaimed", "1: the reclaimed figures"},
@@ -1090,12 +1094,22 @@ func TestRendered_NoAccessibleNameOrDescriptionHidesTheCopyThePageLost(t *testin
 // It is read off the RUNNING document, not the source: the vocabulary object comes back
 // from the page's own execution context and the shipped text from what the engine laid
 // out, so a page whose script never ran fails here rather than passing on its markup.
-func gradeShippedLoadingWords(p proseReading) []string {
+// `shipped` names the views the shell puts on screen ALREADY IN THEIR LOADING STATE. A
+// view whose states are driven by something other than the snapshot is not one of them and
+// is not graded here - it is graded by whatever drives it (see shellViews).
+func gradeShippedLoadingWords(p proseReading, shipped []string) []string {
 	if len(p.Vocabulary) == 0 {
 		return []string{"the rendered page exposes no view-state vocabulary at all, so nothing could be compared"}
 	}
+	want := map[string]bool{}
+	for _, name := range shipped {
+		want[name] = true
+	}
 	var out []string
 	for _, v := range p.Views {
+		if !want[v.View] {
+			continue
+		}
 		if v.State != "loading" {
 			out = append(out, fmt.Sprintf("the %s view is in the %q state before any snapshot arrived, want loading", v.View, v.State))
 			continue
@@ -1116,10 +1130,10 @@ func gradeShippedLoadingWords(p proseReading) []string {
 func TestRendered_TheShellShipsTheWordsTheViewVocabularyHolds(t *testing.T) {
 	b := proseBrowser(t)
 	p := renderProse(t, b, proseOpts{noSnapshot: true}).prose
-	if len(p.Views) != len(dataViews) {
-		t.Fatalf("the rendered page carries %d views, want %d", len(p.Views), len(dataViews))
+	if len(p.Views) != len(shellViews()) {
+		t.Fatalf("the rendered page carries %d views, want %d", len(p.Views), len(shellViews()))
 	}
-	for _, f := range gradeShippedLoadingWords(p) {
+	for _, f := range gradeShippedLoadingWords(p, dataViews) {
 		t.Error(f)
 	}
 	// And it BITES: the shell says something the vocabulary does not (AC17).
@@ -1127,7 +1141,7 @@ func TestRendered_TheShellShipsTheWordsTheViewVocabularyHolds(t *testing.T) {
 		noSnapshot: true,
 		mutate:     injectInto(t, `<td class="empty" colspan="5">Loading the work in hand.</td>`, `<td class="empty" colspan="5">Loading.</td>`),
 	}).prose
-	if probs := gradeShippedLoadingWords(drifted); probs == nil {
+	if probs := gradeShippedLoadingWords(drifted, dataViews); probs == nil {
 		t.Error("the check passed a shell whose shipped words are not the ones the vocabulary holds")
 	}
 }

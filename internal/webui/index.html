@@ -451,6 +451,49 @@
     border-style: dashed; border-color: var(--disabled); cursor: not-allowed; }
   #msg { font-size: var(--fs-sm); color: var(--muted); min-height: var(--sp-5); }
   #msg.err { color: var(--bad); }
+  /* The search control's own status line, in the same roles #msg carries: what the
+     request did, and --bad when it did nothing. */
+  #search-msg { font-size: var(--fs-sm); color: var(--muted); min-height: var(--sp-5); }
+  #search-msg.err { color: var(--bad); }
+
+  /* The ledger search's results, drawn as their OWN region. It is bordered and titled so
+     nothing in it can be read as a row of the capped tables: those answer "what has
+     happened lately", this answers "where is THIS file", and a surface that ran the two
+     together would re-commit the error the cap notices exist to prevent. */
+  .found { margin: 0 0 var(--sp-6); }
+  .found > h3 { margin-top: var(--sp-4); }
+  #found-count { font-size: var(--fs-xs); color: var(--fg);
+    border-left: var(--bw-flag) solid var(--accent);
+    padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-sm);
+    margin: 0 0 var(--sp-2); }
+
+  /* The paths this daemon is withholding. Drawn as a card, because the list IS the
+     record: an operator reading it has to be able to see at a glance everything that is
+     currently being held out, and every entry carries the control that stops holding it. */
+  .held { background: var(--panel); border: var(--bw-hair) solid var(--border);
+    border-left: var(--bw-flag) solid var(--warn);
+    border-radius: var(--radius-md);
+    padding: var(--sp-3) var(--sp-4);
+    padding-left: calc(var(--sp-4) - var(--bw-flag) + var(--bw-hair));
+    margin: 0 0 var(--sp-6); }
+  .held > h3 { margin-top: 0; }
+  .held .scope { margin-bottom: var(--sp-2); }
+  #held-list { list-style: none; margin: 0; padding: 0;
+    display: flex; flex-direction: column; gap: var(--sp-2); }
+  #held-list li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+  #held-list .heldpath { font-family: var(--font-mono); font-size: var(--fs-xs);
+    overflow-wrap: anywhere; flex: 1 1 var(--w-chip-min); }
+  #held-msg { font-size: var(--fs-xs); color: var(--bad); margin: var(--sp-2) 0 0; }
+
+  /* The remedy cell. The command is monospace because it is meant to be copied, and it
+     wraps rather than running under the next column: a truncated command is one somebody
+     retypes wrongly. */
+  td.remedy { white-space: normal; }
+  td.remedy .cmd { display: block; font-family: var(--font-mono); font-size: var(--fs-xs);
+    color: var(--fg); overflow-wrap: anywhere; margin-bottom: var(--sp-1); }
+  td.remedy .cond { margin-bottom: var(--sp-1); }
+  td.remedy button, #held-list button { font-size: var(--fs-xs);
+    padding: var(--sp-1) var(--sp-2); }
 
   /* The page's two regions. The h2 is the region; the h3s inside it are its blocks. */
   /* The space above this rule is the padding PLUS the half-leading a line box carries
@@ -521,6 +564,27 @@
   .note.cap { color: var(--fg); border-left: var(--bw-flag) solid var(--warn);
     padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-sm);
     font-size: var(--fs-xs); margin: 0 0 var(--sp-2); }
+
+  /* What a DRY RUN decided, totalled. It is drawn as its own small card rather than as a
+     line of the reclaimed band above it, because those two figures are space that CAME
+     BACK and this one is space that is merely under consideration - a reader who met the
+     three together would add them up. The flag is --accent and not --ok for the same
+     reason: nothing here has been reclaimed. */
+  .cand { background: var(--panel); border: var(--bw-hair) solid var(--border);
+    border-left: var(--bw-flag) solid var(--accent);
+    border-radius: var(--radius-md);
+    padding: var(--sp-3) var(--sp-4);
+    padding-left: calc(var(--sp-4) - var(--bw-flag) + var(--bw-hair));
+    margin: 0 0 var(--sp-3); }
+  .cand .note { margin: 0; }
+  .cand .cand-v { display: flex; flex-direction: column; gap: var(--sp-1); }
+  .cand .cand-v b { font-size: var(--fs-2xl); line-height: var(--lh-tight); font-weight: 700;
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .cand .cand-k { font-size: var(--fs-xs); color: var(--muted); }
+  /* The set the total was taken over and the rows it left out, in the same roles an
+     aggregate card gives them: stated beside the figure, never implied. */
+  .cand .cand-cov, .cand .cand-ex { font-size: var(--fs-xs); color: var(--muted);
+    margin-top: var(--sp-1); }
 
   /* Whole-ledger figures. Each card carries its number, its drawing, the set that
      number is over, and the rows it had to leave out; ".out" is the unavailable
@@ -625,13 +689,16 @@
   .queue .q-prog { width: 20%; }
   .queue .q-worker { width: 14%; }
 
-  .hist .c-file { width: 21%; }
-  .hist .c-result { width: 14%; }
-  .hist .c-size { width: 16%; }
-  .hist .c-vmaf { width: 22%; }
-  .hist .c-enc { width: 8%; }
-  .hist .c-dur { width: 9%; }
-  .hist .c-upd { width: 10%; }
+  .hist .c-file { width: 18%; }
+  .hist .c-result { width: 12%; }
+  .hist .c-size { width: 14%; }
+  .hist .c-vmaf { width: 19%; }
+  .hist .c-enc { width: 7%; }
+  .hist .c-dur { width: 8%; }
+  .hist .c-upd { width: 9%; }
+  /* What an operator can DO about the row. It is the widest of the small columns
+     because it carries a command with a path in it. */
+  .hist .c-remedy { width: 13%; }
   /* A fixed-layout column does not grow for a header that will not break, it lets the
      header run into the next column. These wrap instead. */
   table.hist th { white-space: normal; }
@@ -661,6 +728,12 @@
      filled disc, the square and the diamond with no colour vision at all. */
   .st-indeterminate .dot { background: none; border: var(--bw-flag) solid var(--bad); }
   .st-applied-despite-error .dot { background: var(--bad); border: var(--bw-flag) solid var(--warn); }
+  /* A dry run's recorded decision is terminal too, so it takes a shape of its own: a
+     HOLLOW SQUARE - the outline of the filled square `failed` draws, for a file nothing
+     has done anything to yet. It stays apart from all five other marks with no colour
+     vision at all, and the state is spelled out beside it as it is on every other row. */
+  .st-would-transcode .dot { background: none; border: var(--bw-flag) solid var(--accent);
+    border-radius: 0; }
   .st-encoding .dot, .st-probing .dot, .st-verifying .dot, .st-pending .dot { background: var(--accent); }
   .reason { color: var(--muted); font-size: var(--fs-xs); }
   .reason.fail { color: var(--bad); word-break: break-word; }
@@ -672,6 +745,15 @@
   .size .arrow { color: var(--muted); margin: 0 var(--sp-1); }
   .size .pct { display: block; color: var(--ok); font-weight: 600; margin-top: var(--sp-1);
     white-space: normal; }
+  /* A candidate row's size is the SOURCE's, named as that. It is deliberately NOT painted
+     --ok: green on this page means space that came back, and nothing has come back from a
+     file nothing has encoded. */
+  .size .srcsize { color: var(--fg); }
+  .size .srck { display: block; color: var(--muted); font-size: var(--fs-xs);
+    margin-top: var(--sp-1); white-space: normal; }
+  /* The source codec on a candidate row. It sits in the result cell under the state, in
+     the same footnote role the VMAF condition line takes on a done row. */
+  .st .cond .codec { color: var(--fg); font-family: var(--font-mono); }
   .vmaf .pair { white-space: normal; }
   .vmaf .mean { font-weight: 700; font-size: var(--fs-md); }
   .vmaf .worst { color: var(--fg); font-weight: 600; }
@@ -839,9 +921,54 @@
       <span id="msg" role="status" aria-live="polite"></span>
     </div>
 
-    <div class="controls">
-      <label for="filter" class="lbl">Filter</label>
-      <input id="filter" type="search" placeholder="filter queue and history by path" autocomplete="off">
+    <!-- Two controls, two DIFFERENT QUESTIONS, and the page has to say which is which:
+         filtering a capped view and searching the ledger are not the same act, and a
+         surface that ran them together would re-commit the error the cap notices exist to
+         prevent. The distinction is carried by the two LABELS, because a label is what a
+         reader meets at the control itself and what the engine computes each control's
+         accessible name from - so the two are told apart by a screen reader as well. -->
+    <div class="controls find">
+      <label for="filter" class="lbl">Filter the rows on screen</label>
+      <input id="filter" type="search" placeholder="hide rows whose path does not match" autocomplete="off">
+      <label for="ledger-search" class="lbl">Search the whole ledger</label>
+      <input id="ledger-search" type="search" placeholder="find a finished file the tables cannot reach" autocomplete="off">
+      <button id="search-go">Search</button>
+      <span id="search-msg" role="status" aria-live="polite"></span>
+    </div>
+
+    <!-- The ledger search's own results, in their own region under their own heading, so
+         nothing found here is ever read as a row of the capped tables below. It is absent
+         until a search has been made: a results table standing empty before anybody asked
+         a question is a page answering one nobody put. -->
+    <div class="found" id="found" hidden>
+      <h3 id="h-found">Ledger search results</h3>
+      <p class="note" id="found-count"></p>
+      <div class="tablewrap">
+        <table class="hist" aria-labelledby="h-found">
+          <colgroup>
+            <col class="c-file"><col class="c-result"><col class="c-size"><col class="c-vmaf">
+            <col class="c-enc"><col class="c-dur"><col class="c-upd"><col class="c-remedy">
+          </colgroup>
+          <thead><tr>
+            <th>File</th><th>Result</th><th>Size</th><th>VMAF</th><th>Encoder</th><th>Encode time</th><th>Updated</th><th>Remedy</th>
+          </tr></thead>
+          <tbody id="search-results" data-view="search"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- What this daemon is currently holding out of the pipeline, and the one sentence
+         that says where those records LIVE. It is absent while nothing is withheld, and
+         present - sentence and all - the moment a withheld path is rendered, because a
+         reader who takes one for configuration will go looking for it in a file that does
+         not mention it. Every entry carries its own removal, since a withholding nobody
+         can undo from the surface that made it is a file that silently stopped being
+         worked on. -->
+    <div class="held" id="held" hidden>
+      <h3 id="h-held">Paths this daemon is withholding</h3>
+      <p class="scope" id="held-scope">Runtime state; config.yaml untouched.</p>
+      <ul id="held-list"></ul>
+      <p class="note" id="held-msg"></p>
     </div>
 
     <h3 id="h-queue">Queue and active</h3>
@@ -886,18 +1013,29 @@
 
     <h3 id="h-hist">Recent history</h3>
     <p class="scope">Each swap, with its proof of safety.</p>
+    <!-- What a DRY RUN decided, added up. It is the total SOURCE bytes the candidate rows
+         account for and nothing else: nobody has encoded these files, so there is no
+         honest figure for what they would give back, and a projected saving here would be
+         read as a measurement. The block is absent entirely when no row was decided that
+         way - a "0 B" beside an empty candidate list would be a claim about files nobody
+         has looked at. -->
+    <div class="cand" id="cand" hidden>
+      <p class="note cand-v"><b id="cand-bytes">not recorded</b><span class="cand-k">under consideration</span></p>
+      <p class="note cand-cov" id="cand-cov"></p>
+      <p class="note cand-ex" id="cand-ex" hidden></p>
+    </div>
     <p class="note cap" id="hist-cap" hidden></p>
     <div class="tablewrap">
       <table class="hist" aria-labelledby="h-hist">
         <colgroup>
           <col class="c-file"><col class="c-result"><col class="c-size"><col class="c-vmaf">
-          <col class="c-enc"><col class="c-dur"><col class="c-upd">
+          <col class="c-enc"><col class="c-dur"><col class="c-upd"><col class="c-remedy">
         </colgroup>
         <thead><tr>
-          <th>File</th><th>Result</th><th>Size</th><th>VMAF</th><th>Encoder</th><th>Encode time</th><th>Updated</th>
+          <th>File</th><th>Result</th><th>Size</th><th>VMAF</th><th>Encoder</th><th>Encode time</th><th>Updated</th><th>Remedy</th>
         </tr></thead>
         <tbody id="history" data-view="history">
-          <tr data-state="loading"><td class="empty" colspan="7">Loading finished swaps.</td></tr>
+          <tr data-state="loading"><td class="empty" colspan="8">Loading finished swaps.</td></tr>
         </tbody>
       </table>
     </div>
@@ -940,7 +1078,16 @@
     <td class="enc"></td>
     <td class="dur"></td>
     <td class="upd"></td>
+    <td class="remedy"></td>
   </tr>
+</template>
+<!-- One withheld path: what is being held out, and the control that stops holding it.
+     A row, not a bare line: the removal belongs beside the record it undoes. -->
+<template id="tpl-held-row">
+  <li>
+    <span class="heldpath"></span>
+    <button class="heldgo" type="button"></button>
+  </li>
 </template>
 <!-- The figure shells. Every graphic on this page is an inline vector drawing whose SHAPE
      is markup written here and whose only variable is a geometry attribute the renderer
@@ -978,7 +1125,16 @@
 // established must show as the state it is in: rendering it as done would be a lie and
 // rendering it as failed would be the more dangerous lie, because "failed" on this
 // dashboard has always meant "and your source is fine".
-const STATUSES = ["pending","probing","encoding","verifying","done","skipped","failed","indeterminate","applied-despite-error"];
+// "would-transcode" is a DRY RUN's recorded decision: the file passed every guard, so a
+// run allowed to transcode would take it. It is a state of the FINISHED group and not of
+// the work in hand - the decision is taken and nothing is examining that file - which is
+// also where an operator reads it, beside the skipped and the actually-reclaimed counts.
+// Before it existed those files sat under `probing` and the page reported a dry run as
+// having concluded nothing at all.
+const STATUSES = ["pending","probing","encoding","verifying","done","skipped","failed","would-transcode","indeterminate","applied-despite-error"];
+// The one status whose rows carry a source codec and a source size and no output at all,
+// named once here so the cells, the total and the graders read the same constant.
+const CANDIDATE_STATUS = "would-transcode";
 // The one state a progress figure can exist in. Progress is measured BY the encoder
 // against the source duration, so it is defined while the encoder runs and at no other
 // time: a probing row has not started one and a verifying row's encoder has exited. Those
@@ -1030,11 +1186,22 @@ const VIEW_STATES = {
     empty: "No swap finished yet.",
     unreadable: "Finished swaps are unreadable.",
   },
+  // The ledger search's own results. Its three states are driven by a SEARCH rather than
+  // by a snapshot, which is why the shell ships this view with no state element at all and
+  // the whole region absent: before anybody has asked a question there is nothing to be
+  // loading, nothing to be empty of, and nothing that could not be read. The empty wording
+  // says NO ROW MATCHED and never "no such file" - the search covers the ledger, and the
+  // ledger is not the library.
+  search: {
+    loading: "Searching every recorded row.",
+    empty: "No recorded row matches that term.",
+    unreadable: "That search could not be answered.",
+  },
 };
 
 // The column count of each table, so a state row spans the whole table rather than
 // sitting in the first column.
-const VIEW_COLUMNS = { queue: 5, history: 7 };
+const VIEW_COLUMNS = { queue: 5, history: 8, search: 8 };
 
 // Human labels for the closed vocabulary of skip guards (internal/engine's Skip*
 // constants). An unknown token falls back to itself, so a new guard is never hidden.
@@ -1049,7 +1216,24 @@ const GUARD_LABELS = {
   "exotic-pixel-format": "exotic pixel format",
   "target-already-exists": "target file already exists",
   "symlinked-source": "symlinked source (would replace the link)",
+  "operator-excluded": "withheld by an operator",
 };
+
+// The terminal rows `holdfast requeue` will not re-open, by the status alone. Both are
+// FILESYSTEM-1 outcomes and neither is a configuration question: for an indeterminate job
+// whether the swap was applied is exactly what is unknown, and for one applied despite an
+// error the rename took effect, so the file at that path IS the replacement.
+const NEVER_REOPENED = ["indeterminate", "applied-despite-error"];
+
+// The one skip guard requeue also leaves alone, named by its stored token. An operator
+// deliberately put those bytes back through the undo window, and re-opening the row would
+// feed their rescued file to the very gates that passed the encode they rejected.
+const NO_REQUEUE_GUARD = "restored-original";
+
+// The command an operator runs to re-open a decision. It is a LOCAL command by a ratified
+// decision and never an endpoint - it changes what the engine will do to a media file -
+// so the page names it rather than offering a control that cannot exist.
+const REQUEUE_COMMAND = "holdfast requeue";
 // --- internal/webui/src/js/20-derive.js ---
 // The dashboard's VALUE DERIVATIONS. Every function here maps wire data to the value a
 // cell shows, and NONE of them touches the DOM - that is what makes them exercisable in
@@ -1174,14 +1358,21 @@ function pathParts(path) {
 function vmafFigures(j) {
   if (!isNum(j.vmaf_mean) && !isNum(j.vmaf_min)) return null;
   const model = j.vmaf_model ? String(j.vmaf_model).replace(/^version=/, "") : "unspecified model";
+  // Which video stream the comparison was made on. A source can carry more than one, so
+  // this is part of the scope the score is read under, not decoration. It renders the way
+  // the model does when the row never recorded it - an "unspecified stream" states the
+  // absence, where a fabricated "v:0" would tell a reader which stream was compared on a
+  // row where nothing was.
+  const stream = j.vmaf_stream ? String(j.vmaf_stream) : "unspecified stream";
   return {
     mean: isNum(j.vmaf_mean) ? fmtScore(j.vmaf_mean) : "?",
     worst: isNum(j.vmaf_min) ? fmtScore(j.vmaf_min) : "?",
-    // A SCOPE label, not an explanation (F8), and eleven words: the model, the two
-    // pooled statistics, the blind spot and what the score was measured against. The
-    // paragraphs that state what a VMAF score does and does not license live in
+    // A SCOPE label, not an explanation (F8): the model, the stream it was measured on,
+    // the two pooled statistics, the blind spot and what the score was measured against.
+    // The paragraphs that state what a VMAF score does and does not license live in
     // docs/dashboard-methodology.md, linked once per region.
-    condition: "model " + model + " · harmonic-mean + worst-frame pooling · luma-only · measured vs your source",
+    condition: "model " + model + " · stream " + stream
+      + " · harmonic-mean + worst-frame pooling · luma-only · measured vs your source",
   };
 }
 
@@ -1206,6 +1397,75 @@ function progressFigure(j) {
   return out;
 }
 
+// --- what a DRY RUN's recorded decision shows ----------------------------------
+//
+// A candidate row is the one row on this page with a source and no output: nothing has
+// encoded that file, so there is no output size, no saving and no ratio, and inventing one
+// would be the same overclaim as rendering an unmeasured VMAF as 0.0. What it does carry
+// is the two facts an operator sizing the job needs - what the source is IN, and how big
+// it is - and both must read as absent when they were never recorded.
+
+// codecText is the source codec a candidate row shows. Absent, null, empty, whitespace or
+// not a string at all is NOT RECORDED: the wire carries an explicit null when the codec
+// was never read, and a blank cell would leave a reader to decide for themselves whether
+// that meant "no codec" or "nobody looked".
+function codecText(v) {
+  return (typeof v === "string" && v.trim() !== "") ? v.trim() : NOT_RECORDED;
+}
+
+// sourceSizeText is the size of the file a candidate row describes. fmtBytes already
+// answers NOT_RECORDED for an absent, null, non-numeric, non-finite or negative value, so
+// this is the same rule under the name the cell reads it by.
+function sourceSizeText(j) {
+  return fmtBytes(j && j.source_bytes);
+}
+
+// candidateTotal is the total SOURCE BYTES the rendered candidates account for, with the
+// rows it had to leave out.
+//
+// It is a total of SOURCE bytes and nothing else. No projected saving, no projected output
+// size, no projected reclaim: nobody has encoded these files, so no honest number exists
+// for what they would give back, and a figure that guessed would be read as a measurement.
+//
+// null means THERE ARE NO CANDIDATE ROWS, and the page then shows no figure at all rather
+// than a zero - a total of 0 B beside an empty candidate list reads as "these files are
+// worth nothing", which is a claim about files nobody has looked at.
+//
+// A row whose size was never recorded is EXCLUDED and COUNTED, never folded in as a zero,
+// and the count is what the page states beside the figure. bytes is null when no row
+// contributed one, which the figure renders as the page's own absence phrase.
+function candidateTotal(rows) {
+  if (!Array.isArray(rows)) return null;
+  let counted = 0, excluded = 0, bytes = 0;
+  for (const j of rows) {
+    if (!j || typeof j !== "object" || j.status !== CANDIDATE_STATUS) continue;
+    if (isNum(j.source_bytes) && j.source_bytes >= 0) {
+      counted++;
+      bytes += j.source_bytes;
+    } else {
+      excluded++;
+    }
+  }
+  if (counted + excluded === 0) return null;
+  return { counted: counted, excluded: excluded, bytes: counted > 0 ? bytes : null };
+}
+
+// The SET the total was taken over, stated beside it (clause F4). It says SHOWN, because
+// that is what it is: the terminal view is capped by the server, so this is a total over
+// the candidate rows this response carried and never a claim about the whole ledger.
+function candidateCoverageText(t) {
+  const n = t ? t.counted + t.excluded : 0;
+  return "over " + n.toLocaleString() + " candidate row" + (n === 1 ? "" : "s") + " shown";
+}
+
+// The rows the total had to leave out for want of a recorded size, counted and reported.
+// "" when none, exactly as an aggregate card's exclusion line behaves.
+function candidateExclusionText(t) {
+  const n = (t && isNum(t.excluded)) ? t.excluded : 0;
+  if (n <= 0) return "";
+  return n.toLocaleString() + " row" + (n === 1 ? "" : "s") + " excluded: no recorded size";
+}
+
 // Human label for one skip guard. An unknown token falls back to itself, so a new guard
 // is never hidden behind a blank. The lookup is an OWN-property lookup deliberately: a
 // bucket key arriving off the wire is attacker-influencable text, and a plain `obj[k]`
@@ -1213,6 +1473,65 @@ function progressFigure(j) {
 // put a function body on the screen where a guard name belongs.
 function guardLabel(k) {
   return Object.prototype.hasOwnProperty.call(GUARD_LABELS, k) ? GUARD_LABELS[k] : k;
+}
+
+// --- what an operator can DO about one terminal row --------------------------------
+
+// isTerminalRow reports whether a row's attempt is over. It is the partition 10-constants
+// already declares - every status, minus the ones that are work in hand - so a status
+// added to the vocabulary lands on one side of it without a second list to remember.
+function isTerminalRow(j) {
+  return !!j && typeof j.status === "string" &&
+    STATUSES.indexOf(j.status) >= 0 && IN_FLIGHT.indexOf(j.status) < 0;
+}
+
+// requeueCommand is the command that re-opens THIS row's decision, or "" when nothing
+// re-opens it.
+//
+// A terminal row holds its file out of the encoder for as long as it exists, so "what do
+// I do about this" has exactly one answer for most of them and no answer at all for three
+// - and the page has to tell those apart, because a control offered against a row nothing
+// can re-open is the dead end this surface exists to end. The three are the two statuses
+// no re-opening reaches and the one guard that records an operator's own rescue.
+//
+// It returns the command WITH the path, because a command an operator has to assemble
+// themselves is a command they will assemble wrongly at two in the morning.
+function requeueCommand(j) {
+  if (!isTerminalRow(j)) return "";
+  if (NEVER_REOPENED.indexOf(j.status) >= 0) return "";
+  if (j.status === "skipped" && j.reason === NO_REQUEUE_GUARD) return "";
+  if (typeof j.path !== "string" || j.path === "") return "";
+  return REQUEUE_COMMAND + " " + j.path;
+}
+
+// requeueRefusal is why a row nothing re-opens is not offered the command, in words. It
+// is the other half of requeueCommand and exists for the same reason: a row that showed
+// nothing at all would read as a row nobody had thought about.
+function requeueRefusal(j) {
+  if (!isTerminalRow(j)) return "";
+  if (j.status === "indeterminate") return "parked: run holdfast resolve to record what happened";
+  if (j.status === "applied-despite-error") return "the replacement is already in place";
+  if (j.status === "skipped" && j.reason === NO_REQUEUE_GUARD) return "an operator restored this original";
+  return "";
+}
+
+// searchCountText states what a ledger search found, over the WHOLE ledger and not over
+// what it shipped, and says when the two differ.
+//
+// A count that could not be read is said so IN WORDS AND WITH NO NUMBER IN ITS PLACE,
+// the same rule the capped-table notices keep: a figure beside the word "matched" is read
+// as the total whatever the sentence around it says.
+function searchCountText(shown, total) {
+  if (!isNum(shown)) return "";
+  if (!total || typeof total !== "object" || Array.isArray(total) ||
+      total.available !== true || !isNum(total.count) || total.count < 0) {
+    return "How many rows matched could not be read.";
+  }
+  const n = Number(total.count);
+  if (n > shown) {
+    return "Showing " + shown.toLocaleString() + " of " + n.toLocaleString() + " matching rows.";
+  }
+  return n.toLocaleString() + " matching row" + (n === 1 ? "" : "s") + ".";
 }
 
 // Surface the API's silent row caps: it ships at most a fixed number of queue / history
@@ -1268,8 +1587,15 @@ function announceText(sum) {
   // that is not established. Leaving applied-despite-error OUT is the same fault by
   // omission - a sighted user sees a chip counting them and a listener heard nothing at
   // all - so it is spoken beside the others, and neither is spoken as a success.
+  // A dry run's decisions are spoken as their OWN named figure. Folding them into skipped
+  // would say the files do not qualify, which is the opposite of what the row records;
+  // folding them into done would claim transcodes that never happened; and leaving them
+  // out is the fault by omission - a sighted reader sees a chip counting them and a
+  // listener hears nothing, on the one page an operator uses to decide whether to let
+  // this tool start deleting things.
   return n("done") + " done, " + n("skipped") + " skipped, "
-    + n("failed") + " failed, " + n("indeterminate") + " parked awaiting a determination, "
+    + n("failed") + " failed, " + n(CANDIDATE_STATUS) + " would be transcoded, "
+    + n("indeterminate") + " parked awaiting a determination, "
     + n("applied-despite-error") + " applied despite an error; "
     + active + " active, " + n("pending") + " pending.";
 }
@@ -1410,6 +1736,17 @@ function pathCell(td, path) {
 // The size cell: before → after with the percent reclaimed. Only meaningful on a done
 // row that recorded both sizes.
 function sizeCell(td, j) {
+  // A CANDIDATE row has a source and no output: nothing has encoded that file. So the cell
+  // is the SOURCE's own size, named as that, and never a before-and-after - and there is
+  // no percentage, because a share of a saving nobody has measured is not a figure this
+  // page is allowed to draw.
+  if (j && j.status === CANDIDATE_STATUS) {
+    const size = sourceSizeText(j);
+    if (size === NOT_RECORDED) { td.appendChild(nrNode()); return; }
+    td.appendChild(mk("span", "srcsize", size));
+    td.appendChild(mk("span", "srck", "source"));
+    return;
+  }
   const f = sizeFigures(j);
   if (!f) { td.appendChild(nrNode()); return; }
   td.appendChild(mk("span", "before", f.before));
@@ -1456,7 +1793,46 @@ function resultCell(td, j) {
     td.appendChild(mk("div", "reason fail", j.reason ? j.reason : "reason not recorded"));
     td.appendChild(mk("div", "cond",
       "the rename took effect despite the error - the file at that path is the replacement"));
+  } else if (j.status === CANDIDATE_STATUS) {
+    // The source's CODEC, on the row, as selectable text. It is the other half of what an
+    // operator sizing a dry run needs - the size beside it says how much, this says what
+    // of - and a candidate list that omitted it would send them off to probe the files
+    // themselves. A codec nobody read renders as the page's one absence phrase, never as
+    // a blank a reader could take for "no video".
+    const codec = mk("div", "cond");
+    codec.appendChild(document.createTextNode("source codec: "));
+    const value = codecText(j.source_codec);
+    codec.appendChild(value === NOT_RECORDED ? nrNode() : mk("span", "codec", value));
+    td.appendChild(codec);
   }
+}
+
+// The remedy cell: what an operator can DO about this terminal row.
+//
+// Two things, and they are different in kind. The first is the LOCAL COMMAND that re-opens
+// the decision, named in full with the file's own path, because `requeue` changes what the
+// engine will do to a media file and is a local command by a ratified decision - so the
+// page names it rather than offering a control that cannot exist. A row nothing re-opens
+// says why instead: an empty cell there would read as a row nobody had thought about, and
+// a disabled control carrying no explanation is the dead end this surface exists to end.
+//
+// The second is the WITHHOLDING, which is the one thing this surface may do itself: it
+// takes the path out of the pipeline and nothing else. The control carries the path on
+// itself, and the click is handled once for the whole table rather than per row, so
+// building a row still assigns no behaviour.
+function remedyCell(td, j) {
+  const cmd = requeueCommand(j);
+  if (cmd) {
+    td.appendChild(mk("code", "cmd", cmd));
+  } else {
+    const why = requeueRefusal(j);
+    if (why) td.appendChild(mk("div", "cond", why));
+  }
+  if (!j || typeof j.path !== "string" || j.path === "") return;
+  const b = mk("button", "hold", "Withhold");
+  b.type = "button";
+  b.dataset.hold = j.path;
+  td.appendChild(b);
 }
 
 // The progress cell for a queue row: the derivation's figure, or the page's ONE absence
@@ -1612,7 +1988,7 @@ function queueRow(j, headers) {
   return stamp(tr, "q:" + (j.path || ""), j);
 }
 
-function histRow(j, headers) {
+function histRow(j, headers, keyPrefix) {
   const tr = $("tpl-hist-row").content.cloneNode(true).firstElementChild;
   tr.dataset.path = (j.path || "").toLowerCase();
   pathCell(tr.querySelector(".path"), j.path);
@@ -1633,9 +2009,17 @@ function histRow(j, headers) {
   const upd = tr.querySelector(".upd");
   if (isNum(j.updated_at) && j.updated_at > 0) upd.textContent = fmtTime(j.updated_at);
   else upd.appendChild(nrNode());
+  remedyCell(tr.querySelector(".remedy"), j);
   if (headers) labelCells(tr, headers);
-  return stamp(tr, "h:" + (j.path || ""), j);
+  return stamp(tr, (keyPrefix || "h:") + (j.path || ""), j);
 }
+
+// A ledger search result is a terminal row and is rendered as one: same shell, same cells,
+// same remedy. A second projection of one row would be a second thing to keep in step, and
+// the row a search found is not a different fact from the row the history view holds - it
+// is the same row, reached by a different question. Only the KEY differs, so a path that
+// appears in both tables does not collide in the reconciler.
+function searchRow(j, headers) { return histRow(j, headers, "s:"); }
 // --- internal/webui/src/js/55-states.js ---
 // The three states every view owes (clause F7): what it shows while LOADING, what it
 // shows when there is NOTHING to show, and what it shows when the data CANNOT BE READ.
@@ -1920,6 +2304,31 @@ function capNote(id, shown, total) {
   el.hidden = text === "";
 }
 
+// candidateNote is the total SOURCE BYTES the rendered candidates account for, the set it
+// was taken over, and the rows it had to leave out.
+//
+// The whole block goes when there is no candidate row to total, which is the F3 answer
+// rather than a tidiness: a "0 B under consideration" beside an empty candidate list reads
+// as "these files are worth nothing", and nobody has looked at any files. The exclusion
+// line goes when there is nothing to exclude, exactly as an aggregate card's does.
+//
+// There is deliberately no projected saving here and none in the rows. Nothing has encoded
+// these files, so no honest figure exists for what they would give back; a projection
+// would be read as a measurement, which is the overclaim this whole surface refuses.
+function candidateNote(rows) {
+  const host = $("cand");
+  if (!host) return;
+  const t = candidateTotal(rows);
+  host.hidden = !t;
+  if (!t) return;
+  bytesInto("cand-bytes", t.bytes);
+  $("cand-cov").textContent = candidateCoverageText(t);
+  const ex = $("cand-ex");
+  const exText = candidateExclusionText(t);
+  ex.textContent = exText;
+  ex.hidden = exText === "";
+}
+
 // Client-side path filter over the rows already loaded (which are themselves capped -
 // see capNote). Hides non-matching rows in both tables; empty term shows all.
 function applyFilter() {
@@ -1930,6 +2339,76 @@ function applyFilter() {
       tr.hidden = term !== "" && !(tr.dataset.path || "").includes(term);
     }
   }
+}
+
+// --- the ledger search's own region -------------------------------------------------
+
+// showFound reveals the search region and puts its results view into one of the three
+// states, or clears the state when it has rows of its own to show.
+//
+// The region is ABSENT until a search has been made, which is why the shell ships this
+// view with no state element in it: before anybody asks a question there is nothing to be
+// loading, nothing to be empty of and nothing that could not be read, and a results table
+// standing there in one of those states would be the page answering a question nobody put.
+function showFound(state) {
+  const host = $("found");
+  if (!host) return;
+  host.hidden = false;
+  setViewState("search", state);
+}
+
+// renderSearchResults draws what one ledger search found: the rows in their own region,
+// never merged into either capped table, and the count over the WHOLE ledger beside them.
+function renderSearchResults(payload) {
+  const body = $("search-results");
+  if (!body) return;
+  const rows = (payload && Array.isArray(payload.results)) ? payload.results : [];
+  const headers = headersOf("search-results");
+  syncRows(body, rows, (j) => searchRow(j, headers));
+  const note = $("found-count");
+  if (note) note.textContent = searchCountText(rows.length, payload ? payload.total : null);
+  showFound(rows.length ? null : "empty");
+}
+
+// searchRefused is what the page shows when the search was REFUSED rather than answered.
+// It is deliberately not the empty state: "nothing matched" and "nobody was allowed to
+// ask" are different facts, and a page that rendered an empty result set for the second
+// would tell an operator their file is not in the ledger when nothing looked.
+function searchRefused(why) {
+  const body = $("search-results");
+  if (body) syncRows(body, [], (j) => searchRow(j, null));
+  const note = $("found-count");
+  if (note) note.textContent = why;
+  showFound("unreadable");
+}
+
+// --- the paths this daemon is withholding ---------------------------------------------
+
+// renderHeld draws every withholding in force, each with the control that removes it.
+//
+// The region is absent while there is nothing to say - no withheld path and no refusal to
+// report - and present the moment either exists, which is what carries the one sentence
+// about where these records live to a reader who is looking at one.
+function renderHeld(list, message) {
+  const host = $("held");
+  const ul = $("held-list");
+  const msg = $("held-msg");
+  if (!host || !ul || !msg) return;
+  const rows = Array.isArray(list) ? list : [];
+  ul.replaceChildren();
+  for (const e of rows) {
+    const path = (e && typeof e.path === "string") ? e.path : "";
+    if (!path) continue;
+    const li = tplNode("tpl-held-row");
+    li.querySelector(".heldpath").textContent = path;
+    const b = li.querySelector(".heldgo");
+    b.textContent = "Stop withholding";
+    b.dataset.release = path;
+    ul.appendChild(li);
+  }
+  msg.textContent = message || "";
+  msg.hidden = !message;
+  host.hidden = ul.children.length === 0 && !message;
 }
 
 // markChipGroupBreak decides whether the group boundary is drawn at all.
@@ -2043,6 +2522,8 @@ function render(snap) {
   const hheaders = headersOf("history");
   syncRows(hbody, h, (j) => histRow(j, hheaders));
   setViewState("history", h.length ? null : "empty");
+  // What the candidates add up to, over the rows just rendered.
+  candidateNote(h);
 
   // Honest row-cap notices. The total is the one the SERVER reported for each table -
   // counted over every matching row in the ledger - and never one this page derived from
@@ -2137,6 +2618,116 @@ async function control(path) {
 $("rescan").addEventListener("click", () => control("/api/rescan"));
 $("pause").addEventListener("click", () => control("/api/pause"));
 $("resume").addEventListener("click", () => control("/api/resume"));
+
+// --- the ledger search, and the paths this daemon is withholding ---------------------
+//
+// Both reach endpoints inside the same token-gated group the controls above use, and for
+// the same reason the search is there at all: the capped reads ship a few hundred rows, so
+// a ledger-wide search and a list of withheld paths serve per-file facts they never have.
+//
+// Every refusal below says, in words, that NOTHING CHANGED, and none of them renders
+// anything a reader could take for a result. The rest of the page is untouched and every
+// other control stays operable: a refused action costs nothing but itself.
+
+function bearer() {
+  return tokenInput.value ? { "Authorization": "Bearer " + tokenInput.value } : {};
+}
+
+// refusalText turns one response status into the reason a reader is owed. It is a
+// function of the STATUS and never of the body, because the body of a refusal is the
+// server's prose and the page has its own account to give.
+function refusalText(status) {
+  if (status === 403) return "Unavailable: control is disabled on this server.";
+  if (status === 401) return "Unavailable: the control token was refused.";
+  if (status === 400) return "Unavailable: the request was refused as malformed.";
+  return "Unavailable: the server returned " + status + ".";
+}
+
+async function runLedgerSearch() {
+  const term = $("ledger-search").value.trim();
+  const msg = $("search-msg");
+  msg.className = "";
+  if (term === "") {
+    msg.textContent = "Type part of a path to search for.";
+    return;
+  }
+  msg.textContent = "searching";
+  showFound("loading");
+  try {
+    const res = await fetch("/api/search?path=" + encodeURIComponent(term), { headers: bearer() });
+    if (!res.ok) {
+      msg.className = "err";
+      msg.textContent = "refused: nothing was searched.";
+      searchRefused(refusalText(res.status));
+      return;
+    }
+    let body;
+    try { body = await res.json(); }
+    catch (_) {
+      msg.className = "err"; msg.textContent = "refused: the answer could not be read.";
+      searchRefused("Unavailable: the answer could not be read.");
+      return;
+    }
+    msg.textContent = "";
+    renderSearchResults(body);
+  } catch (err) {
+    msg.className = "err";
+    msg.textContent = "refused: nothing was searched.";
+    searchRefused("Unavailable: the request did not reach the server.");
+  }
+}
+$("search-go").addEventListener("click", runLedgerSearch);
+$("ledger-search").addEventListener("keydown", (e) => { if (e.key === "Enter") runLedgerSearch(); });
+
+// refreshHeld reads the withholdings in force. It is the ONE reader of that list, so the
+// record an operator created and the record they can remove are always the same one.
+async function refreshHeld(message) {
+  if (!tokenInput.value) { renderHeld([], message); return; }
+  try {
+    const res = await fetch("/api/exclusions", { headers: bearer() });
+    if (!res.ok) { renderHeld([], message || refusalText(res.status)); return; }
+    const body = await res.json();
+    renderHeld(body && body.exclusions, message);
+  } catch (err) {
+    renderHeld([], message || "Unavailable: the request did not reach the server.");
+  }
+}
+
+// holdAction records or removes one withholding and then RE-READS the list, so what is on
+// screen is what the daemon holds rather than what the page assumed it would hold.
+async function holdAction(method, path) {
+  try {
+    const res = await fetch("/api/exclusions", {
+      method: method,
+      headers: Object.assign({ "Content-Type": "application/json" }, bearer()),
+      body: JSON.stringify({ path: path }),
+    });
+    if (!res.ok) {
+      // NOTHING CHANGED, said in words, with no part of the page rearranged as if it had.
+      await refreshHeld("Nothing changed. " + refusalText(res.status));
+      return;
+    }
+    await refreshHeld("");
+  } catch (err) {
+    await refreshHeld("Nothing changed. The request did not reach the server.");
+  }
+}
+
+// One listener for the whole document rather than one per control: rows are rebuilt on
+// every snapshot, and a listener attached while a row is built would be a listener the
+// next snapshot throws away. The path travels on the control itself.
+document.addEventListener("click", (e) => {
+  const t = e.target;
+  if (!t || !t.dataset) return;
+  if (t.dataset.hold) { holdAction("POST", t.dataset.hold); return; }
+  if (t.dataset.release) { holdAction("DELETE", t.dataset.release); }
+});
+
+// The list is read once at load when a token is already stored, and again whenever the
+// operator changes it: the page cannot read it without one, and an empty list and an
+// unasked question are different facts.
+tokenInput.addEventListener("change", () => refreshHeld(""));
+refreshHeld("");
 </script>
 </body>
 </html>

@@ -44,13 +44,13 @@ func (s *SQLite) RecordSwapIncident(ctx context.Context, in SwapIncident) error 
 			source_path, source_fingerprint, replacement_path,
 			source_attrs, replacement_attrs, observed_attrs,
 			outcome, swap_error, swap_cause, storage_class, storage_type, created_at,
-			disposition_replacement)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			disposition_replacement, schema_version)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.SourcePath, in.SourceFingerprint, in.ReplacementPath,
 		in.SourceAttrs, in.ReplacementAttrs, nullString(in.ObservedAttrs),
 		string(in.Outcome), nullString(in.SwapError), nullString(in.SwapCause),
 		nullString(in.StorageClass), nullString(in.StorageType), now(),
-		nullString(string(initialReplacementDisposition(in.Outcome))),
+		nullString(string(initialReplacementDisposition(in.Outcome))), currentStamp(),
 	); err != nil {
 		return fmt.Errorf("store: record swap incident insert: %w", err)
 	}
@@ -64,7 +64,11 @@ func (s *SQLite) RecordSwapIncident(ctx context.Context, in SwapIncident) error 
 	// reading the ledger must not have to join to the incident table to learn WHY the
 	// swap did not complete.
 	o.Reason, o.SwapCause = in.SwapError, in.SwapCause
-	if _, err := tx.ExecContext(ctx, finishQuery(in.Outcome),
+	// No attempt bound is passed, and none is needed: this path only ever writes
+	// Indeterminate or AppliedDespiteError (refused otherwise, above), neither of which
+	// touches fail_count at all. A parked swap is parked by its own status - the job is
+	// held until an operator determines it - so the attempt bound has nothing to say here.
+	if _, err := tx.ExecContext(ctx, finishQuery(in.Outcome, o, 0),
 		finishArgs(in.Outcome, o, in.SourcePath, in.SourceFingerprint)...); err != nil {
 		return fmt.Errorf("store: record swap incident job state: %w", err)
 	}
@@ -96,7 +100,7 @@ const incidentColumns = `id, source_path, source_fingerprint, replacement_path,
 	source_attrs, replacement_attrs, observed_attrs,
 	outcome, swap_error, swap_cause, storage_class, storage_type, created_at,
 	resolution, resolved_by, resolved_at, observed_source, observed_replacement,
-	disposition_source, disposition_replacement, removal_error`
+	disposition_source, disposition_replacement, removal_error, schema_version`
 
 func scanIncident(sc interface{ Scan(...any) error }) (SwapIncident, error) {
 	var in SwapIncident
@@ -104,13 +108,15 @@ func scanIncident(sc interface{ Scan(...any) error }) (SwapIncident, error) {
 	var resolution, resolvedBy, obsSrc, obsRepl, dispSrc, dispRepl, removalErr sql.NullString
 	var resolvedAt sql.NullInt64
 	var outcome string
+	var stamp stampScan
 	if err := sc.Scan(&in.ID, &in.SourcePath, &in.SourceFingerprint, &in.ReplacementPath,
 		&in.SourceAttrs, &in.ReplacementAttrs, &observed,
 		&outcome, &swapErr, &swapCause, &storageClass, &storageType, &in.CreatedAt,
 		&resolution, &resolvedBy, &resolvedAt, &obsSrc, &obsRepl,
-		&dispSrc, &dispRepl, &removalErr); err != nil {
+		&dispSrc, &dispRepl, &removalErr, stamp.dest()); err != nil {
 		return SwapIncident{}, err
 	}
+	in.Stamp = stamp.stamp()
 	in.ObservedAttrs = observed.String
 	in.Outcome = Status(outcome)
 	in.SwapError, in.SwapCause = swapErr.String, swapCause.String
@@ -244,12 +250,13 @@ func (s *SQLite) ResolveIncident(ctx context.Context, id int64, r Resolution) er
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE swap_incidents SET resolution = ?, resolved_by = ?, resolved_at = ?,
 			observed_source = ?, observed_replacement = ?,
-			disposition_source = ?, disposition_replacement = ?, removal_error = ?
+			disposition_source = ?, disposition_replacement = ?, removal_error = ?,
+			schema_version = ?
 		 WHERE id = ?`,
 		string(r.Determination), nullString(r.By), now(),
 		nullString(r.ObservedSource), nullString(r.ObservedReplacement),
 		string(r.DispositionSource), string(r.DispositionReplacement),
-		nullString(r.RemovalError), id); err != nil {
+		nullString(r.RemovalError), currentStamp(), id); err != nil {
 		return fmt.Errorf("store: resolve incident update: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -268,8 +275,9 @@ func (s *SQLite) AmendReplacementDisposition(ctx context.Context, id int64, d Di
 		return fmt.Errorf("store: amend replacement disposition: %q is not a legal replacement disposition", d)
 	}
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE swap_incidents SET disposition_replacement = ?, removal_error = ? WHERE id = ?`,
-		string(d), nullString(removalErr), id)
+		`UPDATE swap_incidents SET disposition_replacement = ?, removal_error = ?, schema_version = ?
+		 WHERE id = ?`,
+		string(d), nullString(removalErr), currentStamp(), id)
 	if err != nil {
 		return fmt.Errorf("store: amend replacement disposition: %w", err)
 	}

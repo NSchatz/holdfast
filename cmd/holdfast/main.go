@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/notify"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/schedule"
+	"github.com/NSchatz/holdfast/internal/secret"
 	"github.com/NSchatz/holdfast/internal/server"
 	"github.com/NSchatz/holdfast/internal/sourceoffer"
 	"github.com/NSchatz/holdfast/internal/startup"
@@ -55,16 +57,25 @@ Usage:
 Commands:
   run        Load config and run one transcode scan over the library roots
   serve      Run the HTTP API + web UI (scan on demand / on an interval)
+  analyze    Census the library roots: file counts, bytes and distributions (reads only)
+  plan       Report what this configuration would do to the library and what it would save
   resolve    Report and resolve a job whose swap outcome could not be established
   restore    List what the undo window is holding, or put one original back
+  requeue    Offer a file the engine has already answered back to the pipeline
   export     Write every terminal ledger row to newline-delimited JSON (stdout, or --out)
   validate   Load and validate a config file, then exit
   version    Print version and exit
 
 Run "holdfast <command> -h" for command flags.
 
+  holdfast analyze --config config.yaml            # what is in the library, without touching it
+  holdfast analyze --config config.yaml --health   # and which of it does not decode
+  holdfast plan --config config.yaml               # what a run would do, and what it would save
+  holdfast plan --config config.yaml --json        # the same plan as one JSON document
   holdfast restore --config config.yaml            # what is retained, and for how long
   holdfast restore --config config.yaml <path>     # put that original back
+  holdfast requeue --config config.yaml <path>     # re-open that file's terminal row
+  holdfast requeue --config config.yaml --failed   # re-open every row parked at max_failures
 `
 
 func dispatch(args []string, stdout, stderr io.Writer) int {
@@ -77,10 +88,16 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 		return cmdRun(args[1:], stdout, stderr)
 	case "serve":
 		return cmdServe(args[1:], stdout, stderr)
+	case "analyze":
+		return cmdAnalyze(args[1:], stdout, stderr)
+	case "plan":
+		return cmdPlan(args[1:], stdout, stderr)
 	case "resolve":
 		return cmdResolve(args[1:], stdout, stderr)
 	case "restore":
 		return cmdRestore(args[1:], stdout, stderr)
+	case "requeue":
+		return cmdRequeue(args[1:], stdout, stderr)
 	case "export":
 		return cmdExport(args[1:], stdout, stderr)
 	case "validate":
@@ -134,13 +151,28 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	if cfg == nil {
 		return code
 	}
+	// The configured working location, checked here for the same reason `run` and
+	// `serve` check it before their first encode: a missing, unwritable, overlapping
+	// or short-of-space scratch directory refuses those runs, and an operator asking
+	// `validate` whether their configuration will start is owed that answer rather
+	// than a "config OK" the next `run` contradicts.
+	//
+	// Only the SCRATCH half of the decision runs. `validate` is deliberately cheap -
+	// it loads the configuration and stops, with no ffmpeg lookup, no capability
+	// check and no library walk - and none of the scratch questions needs one.
+	if scratchCode := validateScratch(cfg, stderr); scratchCode != 0 {
+		return scratchCode
+	}
+
 	fmt.Fprintf(stdout, "config OK: %d library root(s)\n", len(cfg.LibraryRoots))
+	printResolvedProfiles(stdout, cfg)
 	// What this configuration MEANS, before what it has weakened. A disabled undo
 	// window is the shipped default and not a weakened gate, but it is the setting in
 	// which a swap is final - so it is stated here rather than silently absorbed.
 	for _, n := range cfg.Notices() {
 		fmt.Fprintf(stdout, "note: %s\n", n)
 	}
+	reportLedgerAgainstConfig(cfg, stdout)
 	// Valid, but a safety gate is weakened — say so. These are not errors (each is a
 	// legitimate choice), but a config that has quietly lost its worst-frame floor
 	// must not look identical to one that still has it.
@@ -148,6 +180,141 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "warning: %s\n", w)
 	}
 	return 0
+}
+
+// reportLedgerAgainstConfig prints what the ledger says about the configuration it was
+// decided under: how many terminal rows a scan would now re-open, and why.
+//
+// `validate` is the one command that answers "what will this configuration DO", and
+// since a terminal row is only terminal for the configuration it was taken under, the
+// answer is incomplete without it. It is a real widening of what `validate` touches, so
+// two properties are load-bearing and are asserted by their own cases:
+//
+//   - it opens the ledger READ-ONLY, because a validate that migrated an operator's
+//     store as a side effect of describing it would make that file unopenable by the
+//     daemon still running against it (see store.OpenReadOnly);
+//   - a state directory with no ledger in it is not a failure and is not created. A
+//     fresh install has nothing to say here and `validate` must still pass, so this
+//     reports the absence and returns;
+//   - a ledger the PREVIOUS build wrote still yields both figures. That is the
+//     population they matter most for - every row in it records nothing, so the first
+//     scan after an upgrade re-opens the whole terminal set - and reading it needs no
+//     migration, because a schema without the column is a schema under which no row can
+//     have recorded anything (see store.SurveyLedgerDecisionInputs).
+//
+// Nothing here can fail the command. `validate` validates a CONFIGURATION; a ledger that
+// could not be read is reported as unreadable beside a config that is still valid.
+func reportLedgerAgainstConfig(cfg *config.Config, stdout io.Writer) {
+	dbPath := filepath.Join(effectiveStateDir(cfg), "jobs.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		fmt.Fprintf(stdout, "ledger: none at %s yet, so there is nothing to re-open\n", dbPath)
+		return
+	}
+	survey, err := store.SurveyLedgerDecisionInputs(context.Background(), dbPath,
+		engine.DecisionInputsPerPath(*cfg))
+	if err != nil {
+		fmt.Fprintf(stdout, "ledger: %s could not be read, so what it was decided under cannot be "+
+			"reported here: %v\n", dbPath, err)
+		return
+	}
+	for _, line := range decisionInputsLines(survey) {
+		fmt.Fprintf(stdout, "ledger: %s\n", line)
+	}
+}
+
+// logLedgerAgainstConfig is the daemon's half of the same report `validate` prints: what
+// the ledger was decided under, logged before the scan re-opens anything.
+//
+// Every condition it can meet is DEGRADED-AND-CONTINUING, so every one of them is a `warn`
+// and none is an `error`. An error means a human must act, and there is nothing for one to
+// act on here: the scan does its work whether or not it could be counted first, and a run
+// that logged at error over a count would train its reader to ignore the level.
+//
+// The two warns are different states and are kept apart:
+//
+//   - the ledger could not be READ at all. The dependency is named (the file), what was
+//     tried is named (reading what its terminal rows were decided under), and what happens
+//     next is stated (the scan runs unaffected), because a stack trace alone leaves a reader
+//     to guess whether the run is still safe.
+//   - some rows lie under NO CONFIGURED LIBRARY ROOT. Those files are never enumerated, so
+//     they are never re-opened whatever they record, and the count above is an upper bound.
+//     The example path is carried so an operator can see which tree it is - usually a root
+//     that was renamed or removed - rather than being told a number about files they cannot
+//     find.
+func logLedgerAgainstConfig(log *slog.Logger, dbPath string, survey store.DecisionInputsSurvey, err error) {
+	if err != nil {
+		log.Warn("the ledger could not be read, so what it was decided under is not reported",
+			"ledger", dbPath,
+			"tried", "counting the terminal rows the next scan will re-open",
+			"next", "the scan runs unaffected",
+			"err", err)
+		return
+	}
+	log.Info("ledger against this configuration",
+		"rows_taken_under_a_moved_configuration", survey.Moved,
+		"rows_recording_no_decision_inputs", survey.NotRecorded,
+		"rows_this_scan_reopens", survey.Reopening(),
+		"rows_still_matching", survey.Matching,
+		"rows_under_no_configured_library_root", survey.Unrooted)
+	for _, line := range decisionInputsLines(survey) {
+		log.Info(line)
+	}
+	if survey.Unrooted > 0 {
+		log.Warn("some terminal rows lie under no configured library root, so the scan never reaches them",
+			"ledger", dbPath,
+			"rows", survey.Unrooted,
+			"example", survey.UnrootedExample,
+			"tried", "resolving each row's path to a configured library root",
+			"next", "the scan runs unaffected and never enumerates those paths")
+	}
+}
+
+// printResolvedProfiles prints, for each configured root, the effective value of every
+// overridable knob and WHICH LAYER supplied it.
+//
+// It prints what the inheritance PRODUCED, never the file as written, and that is the
+// whole point of it. A knob may be a built-in default, a top-level choice or that root's
+// own profile, and the resolved value is identical in all three cases - so reading the
+// YAML back cannot tell an operator what a root will actually do to their files. Only
+// this can, and it matters most on the knobs whose wrong value ends in a deleted
+// original.
+//
+// The digest is printed beside the root because it is what a terminal row records: an
+// operator holding a job's `profile_digest` can run `validate` and see which of their
+// roots decided it, even after they have edited the others.
+func printResolvedProfiles(w io.Writer, cfg *config.Config) {
+	for _, r := range cfg.RootProfiles() {
+		fmt.Fprintf(w, "\nlibrary root %s (profile %s)", r.Clean, r.Profile.Digest())
+		if r.Path != r.Clean {
+			fmt.Fprintf(w, " [configured as %s]", r.Path)
+		}
+		fmt.Fprintln(w)
+		for _, k := range r.Effective() {
+			fmt.Fprintf(w, "  %-20s %-24s from %s\n", k.Knob, k.Value, k.Layer)
+		}
+	}
+}
+
+// validateScratch reports the scratch directory's start-or-refuse causes, in exactly
+// the account `run` and `serve` print, and returns a nonzero exit code when it would
+// refuse. With no scratch_dir configured it checks nothing at all and returns 0, so a
+// configuration that predates this item is unchanged.
+func validateScratch(cfg *config.Config, stderr io.Writer) int {
+	if strings.TrimSpace(cfg.ScratchDir) == "" {
+		return 0
+	}
+	res := startup.RunScratchOnly(startup.Check{
+		Roots:            cfg.LibraryRoots,
+		StateDir:         stateDirPath(cfg),
+		ScratchDir:       cfg.ScratchDir,
+		ScratchMinFreeGB: cfg.ScratchMinFreeGB,
+		Platform:         startupPlatform(),
+	})
+	if res.Start {
+		return 0
+	}
+	res.WriteRefusal(stderr)
+	return 1
 }
 
 // cmdRestore is the operator's half of the undo window (UNDO-6): with no argument it
@@ -185,20 +352,6 @@ func cmdRestore(args []string, stdout, stderr io.Writer) int {
 		return listRetained(context.Background(), undo, cfg, stdout, stderr)
 	}
 	return restoreOne(context.Background(), undo, rest[0], stdout, stderr)
-}
-
-// resolveRestorePath turns what the operator typed into the path the ledger is keyed
-// by. Library roots are absolute (Validate refuses anything else), so every recorded
-// path is too - and an operator standing in their library and typing `ep.mkv` would
-// otherwise get "nothing is retained for that path" about a file that certainly is.
-// An unresolvable path falls back to the input, so the refusal still names something
-// they recognise rather than an error about the current directory.
-func resolveRestorePath(path string) string {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return path
-	}
-	return abs
 }
 
 // listRetained prints what the undo window is holding. Each line states the space that
@@ -249,7 +402,7 @@ func remainingWindow(expiresAt, now int64) string {
 // can trust what it did, and a command that half-restored while reporting a failure
 // would be worse than one that never existed.
 func restoreOne(ctx context.Context, undo *engine.UndoWindow, path string, stdout, stderr io.Writer) int {
-	res, err := undo.Restore(ctx, resolveRestorePath(path))
+	res, err := undo.Restore(ctx, absoluteLedgerPath(path))
 	if err != nil {
 		fmt.Fprintf(stderr, "holdfast: cannot restore %s: %v\n", path, err)
 		return 1
@@ -297,11 +450,31 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 	// A hardware encoder (nvenc/qsv/vaapi/amf) with no matching device, or an
 	// ffmpeg build missing a codec, must stop before any work rather than let every
 	// file either fail one-by-one or (worse, for some hardware encoders) appear to
-	// "succeed" while writing nothing. cfg.Encoder is always a valid registry key
-	// here (Load defaults it to "cpu"; Validate rejects an unknown/empty encoder).
-	if _, err := encoder.RequireAvailable(context.Background(), ffmpeg, ffprobe, cfg.Encoder); err != nil {
-		fmt.Fprintf(stderr, "holdfast: %v\n", err)
-		return nil, nil, 1
+	// "succeed" while writing nothing. Every key here is a valid registry key (Load
+	// defaults the top level to "cpu"; Validate rejects an unknown or empty encoder at
+	// the top level, inside a library profile and inside an encode profile alike).
+	//
+	// EVERY distinct encoder any root resolved to is checked, not just the top-level
+	// one: a root that says `encoder: nvenc` on a host with no NVIDIA device must stop
+	// the run here, exactly as a top-level nvenc does. Distinct, because the check runs
+	// a real encode and several roots usually share one encoder.
+	for _, e := range distinctBy(cfg, func(p config.Profile) string { return p.Encoder }) {
+		if _, err := encoder.RequireAvailable(context.Background(), ffmpeg, ffprobe, e.key); err != nil {
+			fmt.Fprintf(stderr, "holdfast: %s: %v\n", e.where, err)
+			return nil, nil, 1
+		}
+	}
+	// And every encoder an ENCODE PROFILE can override a root's with, for the same
+	// reason: `encoder: svtav1` inside one is reached by every file its pattern selects,
+	// so a preflight blind to it would deliver the fail-early guarantee for some of an
+	// operator's library and not for the rest. The account names the profile that asked,
+	// because "nvenc is unavailable" sends an operator to a configuration whose top-level
+	// encoder is cpu.
+	for _, e := range cfg.EncodeProfileEncoders() {
+		if _, err := encoder.RequireAvailable(context.Background(), ffmpeg, ffprobe, e.Key); err != nil {
+			fmt.Fprintf(stderr, "holdfast: encode_profiles (%s): %v\n", e.Profile, err)
+			return nil, nil, 1
+		}
 	}
 
 	// VMAF model preflight (GATE-4), in the same band and for the same reason as the
@@ -322,9 +495,23 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 	// Placement is load-bearing and asserted by a test: BEFORE store.Open, so a
 	// refused run leaves no jobs.db behind, and long before anything is encoded or
 	// swapped.
-	if cfg.VmafGate() {
-		if err := vmaf.RequireModel(context.Background(), ffmpeg, cfg.VmafModel); err != nil {
-			fmt.Fprintf(stderr, "holdfast: %v\n", err)
+	//
+	// Per resolved profile, for the same reason the encoder check is: `vmaf_model` is a
+	// per-root knob, so a typo in one root's model is hours of encoding followed by a
+	// rejection per file under that root - and a root whose gate is OFF asks libvmaf for
+	// nothing, so refusing the run over its model would be refusing a configuration that
+	// cannot fail.
+	for _, m := range distinctBy(cfg, func(p config.Profile) string {
+		if !p.VmafGate() {
+			return ""
+		}
+		return p.VmafModel
+	}) {
+		if m.key == "" {
+			continue
+		}
+		if err := vmaf.RequireModel(context.Background(), ffmpeg, m.key); err != nil {
+			fmt.Fprintf(stderr, "holdfast: %s: %v\n", m.where, err)
 			return nil, nil, 1
 		}
 	}
@@ -336,16 +523,65 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 	// defaulting lives in ONE function so `export` reads the database `run` wrote.
 	st, err := store.Open(filepath.Join(effectiveStateDir(cfg), "jobs.db"))
 	if err != nil {
+		// A step rolled back for moving rows it never declared is recorded before the
+		// message: the daemon is not starting, and the counts are the finding.
+		reportMigrationRefusal(log, err)
 		fmt.Fprintf(stderr, "holdfast: opening job store: %v\n", err)
 		return nil, nil, 1
 	}
+	// What this open DID to the ledger's shape, step by step, with every table's row count
+	// on either side of each step. It is emitted before anything reads the ledger, because
+	// it is the one moment the shape under that evidence moves.
+	reportMigrations(log, st.MigrationReport())
+	// What the ledger was decided under, BEFORE anything re-opens: a scan offers every
+	// row whose recorded decision inputs have moved - and every row that records none -
+	// back to the guards, and an operator meeting a burst of activity they did not ask
+	// for is owed the reason in front of it rather than in a log line per file.
+	//
+	// A failure here is reported and survived. It is an announcement about work the scan
+	// is about to do; the scan does that work whether or not it could be counted first,
+	// and refusing to start over an unreadable count would turn a reporting nicety into
+	// an outage.
+	survey, surveyErr := decisionInputsReport(context.Background(), st, cfg)
+	logLedgerAgainstConfig(log, filepath.Join(effectiveStateDir(cfg), "jobs.db"), survey, surveyErr)
+
 	eng := engine.New(*cfg, prober, enc, st, log)
 	// The startup walk's coverage BOUNDS the run: this scan enumerates sources
 	// from exactly the directories that walk traversed successfully, so a
 	// subtree it declined, could not read or failed to traverse yields no file
-	// and no swap can happen under it.
-	eng.Coverage = res.Coverage
+	// and no swap can happen under it. Its listings come across with it, so the
+	// first scan reads the entries that walk already read rather than paying for
+	// the same directories twice more.
+	eng.SetCoverage(res.Coverage, res.Entries)
 	return eng, st, 0
+}
+
+// profileUse is one distinct value a capability preflight has to check, and the roots
+// that asked for it - so a refusal names the library an operator has to go and edit
+// rather than only the value that failed.
+type profileUse struct {
+	key   string
+	where string
+}
+
+// distinctBy collects the distinct values key returns across every resolved root, in
+// configuration order, each carrying the roots that produced it.
+//
+// Distinct, because a preflight is expensive - the encoder check runs a real encode -
+// and a library with twelve roots on one encoder must not pay for twelve of them.
+func distinctBy(cfg *config.Config, key func(config.Profile) string) []profileUse {
+	var out []profileUse
+	at := map[string]int{}
+	for _, r := range cfg.RootProfiles() {
+		k := key(r.Profile)
+		if i, seen := at[k]; seen {
+			out[i].where += ", " + r.Clean
+			continue
+		}
+		at[k] = len(out)
+		out = append(out, profileUse{key: k, where: "library root " + r.Clean})
+	}
+	return out
 }
 
 // stateDirPath is the absolute path the configuration interpretation produces
@@ -367,24 +603,63 @@ func stateDirPath(cfg *config.Config) string {
 // tested on has neither a network mount nor a second real filesystem.
 var startupPlatform = func() startup.Platform { return startup.System(nil, nil) }
 
+// startupDecision is the ONE construction of the start-or-refuse check, and every
+// command that takes it comes through here: `run` and `serve` to obey it, `analyze` to
+// report it and read the Coverage set it produced. One construction, because a second
+// caller assembling its own Check is a second answer waiting to diverge from the
+// decision the mutating path takes.
+func startupDecision(cfg *config.Config) startup.Result {
+	return startup.Run(startup.Check{
+		Roots:        cfg.LibraryRoots,
+		StateDir:     stateDirPath(cfg),
+		Declarations: cfg.AllowNonLocal,
+		IsMediaFile:  func(base string) bool { return engine.IsSourceName(base, cfg.VideoExts) },
+		// The configured working location, checked in the same decision and before
+		// anything is encoded: a scratch directory that is missing, is not a
+		// directory, is unwritable, is short of the floor or overlaps a library
+		// root refuses the run here rather than failing every file mid-encode.
+		ScratchDir:       cfg.ScratchDir,
+		ScratchMinFreeGB: cfg.ScratchMinFreeGB,
+		Platform:         startupPlatform(),
+	})
+}
+
 // startupCheck runs the whole-run start-or-refuse decision and reports it. On a
 // refusal it writes the operator-facing account to stderr - every cause it
 // established, each with the exact declaration that would permit it or, where no
 // declaration could, the remedy - and returns a nonzero exit code.
 func startupCheck(cfg *config.Config, log *slog.Logger, stderr io.Writer) (startup.Result, int) {
-	res := startup.Run(startup.Check{
-		Roots:        cfg.LibraryRoots,
-		StateDir:     stateDirPath(cfg),
-		Declarations: cfg.AllowNonLocal,
-		IsMediaFile:  func(base string) bool { return engine.IsSourceName(base, cfg.VideoExts) },
-		Platform:     startupPlatform(),
-	})
+	res := startupDecision(cfg)
 	res.Log(log)
 	if !res.Start {
 		res.WriteRefusal(stderr)
 		return res, 1
 	}
 	return res, 0
+}
+
+// resolveSecrets turns every configured secret reference into a value, ONCE, at start
+// (secrets K1, K5). It is the single resolution site: `run` and `serve` both come through
+// here before any scan, encode or swap work, so a reference the resolver cannot produce is
+// a startup refusal naming the key and the reference rather than a failure hours in.
+//
+// The refusal is written to stderr as the resolver's own error, which by construction
+// carries the key, the reference and the resolver's exit status, and never a candidate
+// value or a byte the resolver printed.
+func resolveSecrets(ctx context.Context, cfg *config.Config, stderr io.Writer) (*secret.Set, int) {
+	refs, err := cfg.SecretRefs()
+	if err != nil {
+		// Unreachable through loadConfig (Validate already refused a literal), and kept
+		// because a future caller that skips Validate must not silently resolve nothing.
+		fmt.Fprintf(stderr, "holdfast: invalid config: %v\n", err)
+		return nil, 1
+	}
+	set, err := secret.Resolve(ctx, refs)
+	if err != nil {
+		fmt.Fprintf(stderr, "holdfast: refusing to start: %v\n", err)
+		return nil, 1
+	}
+	return set, 0
 }
 
 func cmdRun(args []string, stdout, stderr io.Writer) int {
@@ -395,12 +670,22 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	}
 	log := logging.New(cfg.LogLevel)
 
+	// Every configured reference is proved resolvable BEFORE the library is walked or a
+	// single frame is encoded, even though a oneshot run consumes none of the three
+	// itself: a configuration error an operator discovers after a four-hour pass is a
+	// configuration error that was reported too late (secrets K5). The set is discarded
+	// here, so no plaintext outlives this statement in `run`.
+	if _, code := resolveSecrets(context.Background(), cfg, stderr); code != 0 {
+		return code
+	}
+
 	log.Info("holdfast starting",
 		"version", version.Version,
 		"library_roots", cfg.LibraryRoots,
 		"encoder", cfg.Encoder, "crf", cfg.CRF, "preset", cfg.Preset,
 		"dry_run", cfg.DryRun,
 	)
+	logResolvedProfiles(cfg, log)
 	logConfigWarnings(cfg, log)
 
 	eng, st, code := buildEngine(cfg, log, stderr)
@@ -439,6 +724,7 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 	log := logging.New(cfg.LogLevel)
+	logResolvedProfiles(cfg, log)
 	logConfigWarnings(cfg, log)
 
 	// One context for the whole daemon: SIGINT/SIGTERM cancels it, which stops the
@@ -465,6 +751,23 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 //
 // WARN puts it on exactly the footing of the safety warnings below, which is the
 // right one: at `log_level: error` both go quiet, and `docs/undo.md` says so.
+// logResolvedProfiles states, at startup, what each root actually resolved to. The
+// "holdfast starting" line beside it carries the TOP-LEVEL values, and with per-library
+// profiles those are no longer what any particular file is judged by - so a run that
+// only announced them would report a crf and an encoder that may govern no root at all.
+// The digest is the one a terminal row records, so a log and a ledger row can be matched
+// up afterwards.
+func logResolvedProfiles(cfg *config.Config, log *slog.Logger) {
+	for _, r := range cfg.RootProfiles() {
+		log.Info("library root resolved",
+			"library_root", r.Clean, "profile_digest", r.Profile.Digest(),
+			"encoder", r.Profile.Encoder, "crf", r.Profile.CRF, "preset", r.Profile.Preset,
+			"min_bitrate_kbps", r.Profile.MinBitrateKbps,
+			"vmaf_enable", r.Profile.VmafGate(), "min_vmaf", r.Profile.MinVmaf,
+			"vmaf_min_pool", r.Profile.VmafMinPool, "vmaf_min_chroma", r.Profile.VmafMinChroma)
+	}
+}
+
 func logConfigWarnings(cfg *config.Config, log *slog.Logger) {
 	for _, n := range cfg.Notices() {
 		log.Warn(n)
@@ -502,6 +805,15 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		return 1
 	}
 
+	// THE SECRETS, resolved ONCE, here, before the store is opened and before any scan,
+	// encode or swap work (secrets K1, K5). Each resolved value goes to exactly one
+	// consumer below and nowhere else: not into cfg, not into a log line, not into the
+	// environment any ffmpeg child inherits.
+	secrets, code := resolveSecrets(ctx, cfg, stderr)
+	if code != 0 {
+		return code
+	}
+
 	eng, st, code := buildEngine(cfg, log, stderr)
 	if code != 0 {
 		return code
@@ -524,7 +836,7 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		metricsHandler = mx.Handler()
 	}
 
-	notifier := notify.New(cfg.NotifyURL, log)
+	notifier := notify.New(cfg.SecretRef("notify_url"), secrets.Get("notify_url"), log)
 	if notifier.Enabled() {
 		observers = append(observers, notifier.Observe)
 		ctrl.SetScanHooks(notifier.ScanStarted, notifier.ScanFinished)
@@ -535,7 +847,9 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	// only ever DELAYS work. The engine consults it (throttled) between files; Rescan
 	// consults it before starting a scan.
 	window, _ := schedule.ParseWindow(cfg.RunWindow) // already validated
-	sched := schedule.New(window, cfg.MaxLoad, schedule.NewTautulli(cfg.TautulliURL, cfg.TautulliAPIKey), log)
+	tautulli := schedule.NewTautulli(cfg.TautulliURL,
+		cfg.SecretRef("tautulli_api_key"), secrets.Get("tautulli_api_key"))
+	sched := schedule.New(window, cfg.MaxLoad, tautulli, log)
 	ctrl.SetGate(func() (bool, string) { return sched.MayRun(ctx) })
 	eng.Paused = func() bool {
 		if ctrl.Paused() {
@@ -545,11 +859,20 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		return !ok
 	}
 
-	srv := server.New(ctx, *cfg, st, ctrl, hub, webui.HandlerFor(offer), metricsHandler, log)
+	// The targeted-scan queue (S0093), beside the controller rather than instead of it.
+	// An accepted path enters the SAME pipeline entry point a scan's worker uses, so
+	// every guard, the claim, the decision-input re-opening rule and the swap discipline
+	// apply to it unchanged; this is a queue and a worker pool, and it decides nothing.
+	subs := eng.NewSubmissions(0, 0)
+
+	srv := server.New(ctx, *cfg, secrets.Get("server_auth_token"), st, ctrl, hub,
+		webui.HandlerFor(offer), metricsHandler, log)
+	srv.SetSubmissions(subs)
 	var bg sync.WaitGroup
-	bg.Add(3)
+	bg.Add(4)
 	go func() { defer bg.Done(); hub.Run(ctx) }()
 	go func() { defer bg.Done(); notifier.Run(ctx) }()
+	go func() { defer bg.Done(); subs.Run(ctx) }()                               // drains POST /api/scan
 	go func() { defer bg.Done(); srv.StartScanLoop(ctx, cfg.ScanIntervalSec) }() // initial scan + optional interval
 
 	addr := cfg.EffectiveServerAddr()
@@ -558,13 +881,13 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	go func() {
 		log.Info("serve listening",
 			"addr", addr,
-			"control_enabled", cfg.ServerAuthToken != "",
+			"control_enabled", !secrets.Get("server_auth_token").Empty(),
 			"scan_interval_sec", cfg.ScanIntervalSec,
 			"metrics", cfg.MetricsEnable,
 			"notify", notifier.Enabled(),
 			"run_window", window.String(),
 			"max_load", cfg.MaxLoad,
-			"tautulli", cfg.TautulliURL != "" && cfg.TautulliAPIKey != "",
+			"tautulli", tautulli != nil,
 			"version", version.Version,
 		)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -590,9 +913,11 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	}
 	// Join background goroutines before the deferred st.Close(): ctx is already
 	// cancelled, so the scan loop + hub have stopped and any in-flight scan is
-	// unwinding — wait for the scan goroutine to finish issuing store calls so the
-	// store handle is never closed out from under it.
-	ctrl.Wait()
+	// unwinding - wait for the scan goroutine AND any in-flight targeted submission to
+	// finish issuing store calls so the store handle is never closed out from under
+	// them. srv.Wait joins both; submissions still queued are dropped unprocessed and
+	// unrecorded, because nothing looked at them.
+	srv.Wait()
 	bg.Wait()
 	return 0
 }

@@ -28,11 +28,11 @@ func seedTwoTerminalRows(t *testing.T, dbPath string) {
 	}
 	ctx := context.Background()
 	for _, p := range []string{"/lib/a.mkv", "/lib/b.mkv"} {
-		ok, err := st.Claim(ctx, p, "fp", "w0", 3)
+		ok, err := st.Claim(ctx, p, "fp", "w0", 3, sameConfig)
 		if err != nil || !ok {
 			t.Fatalf("seed claim %s: ok=%v err=%v", p, ok, err)
 		}
-		if err := st.Finish(ctx, p, "fp", Skipped, &Outcome{Reason: "already-at-target-codec"}); err != nil {
+		if err := st.Finish(ctx, p, "fp", Skipped, &Outcome{Reason: "already-at-target-codec"}, 3); err != nil {
 			t.Fatalf("seed finish %s: %v", p, err)
 		}
 	}
@@ -75,20 +75,18 @@ func windBackOneSchemaVersion(t *testing.T, path string) int {
 		t.Fatalf("raw open %s: %v", path, err)
 	}
 	defer func() { _ = db.Close() }()
-	// Exactly what the NEWEST migration added, undone. That is v7 (FILESYSTEM-1's swap
-	// guard record and swap_incidents) and not v6 (LEDGER-5's ledger_totals): this helper
-	// has to track the end of the migrations slice, because the whole point of it is to
-	// produce the database the PREVIOUS build wrote, and a wind-back that undid a step
-	// which is no longer the last one would leave a database Open migrates by re-running
-	// a step it has already run - which is a duplicate-column error, not an older ledger.
+	// Exactly what the NEWEST migration added, undone. That is the encode profile that
+	// supplied a job's settings and not the step before it (the schema version each record
+	// was written under): this helper has to track the END of the migrations slice, because
+	// the whole point of it is to produce the database the PREVIOUS build wrote, and a
+	// wind-back that undid a step which is no longer the last one would leave a database
+	// Open migrates by re-running a step it has already run - which is a duplicate-column
+	// error, not an older ledger.
+	//
+	// Any index goes first: SQLite refuses to drop a column an index refers to. The
+	// newest step adds none, so there is nothing to drop ahead of the column today.
 	for _, stmt := range []string{
-		`DROP TABLE IF EXISTS swap_incidents`,
-		`DROP INDEX IF EXISTS idx_incidents_parked`,
-		`DROP INDEX IF EXISTS idx_incidents_excluded`,
-		`ALTER TABLE jobs DROP COLUMN guard_attributes`,
-		`ALTER TABLE jobs DROP COLUMN guard_time_resolution`,
-		`ALTER TABLE jobs DROP COLUMN guard_residual_window`,
-		`ALTER TABLE jobs DROP COLUMN swap_cause`,
+		`ALTER TABLE jobs DROP COLUMN profile`,
 		fmt.Sprintf(`PRAGMA user_version = %d`, prev),
 	} {
 		if _, err := db.Exec(stmt); err != nil {
@@ -123,7 +121,7 @@ func TestOpenReadOnly_ReadsEveryRowAndRefusesEveryWrite(t *testing.T) {
 
 	// The refusal is the DRIVER's, not a rule in Go above it: mode=ro means no future
 	// caller can quietly reintroduce a write on this path.
-	if err := st.Finish(ctx, "/lib/a.mkv", "fp", Done, &Outcome{Encoder: "cpu"}); err == nil {
+	if err := st.Finish(ctx, "/lib/a.mkv", "fp", Done, &Outcome{Encoder: "cpu"}, 3); err == nil {
 		t.Error("a read-only handle accepted a write; `never writes to the store it reads` must be enforced, not promised")
 	}
 	if _, err := st.PruneTerminal(ctx, 1, 3, everyRowSpent); err == nil {
@@ -245,6 +243,69 @@ func TestOpenReadOnly_CreatesNothingWhenThereIsNothingToRead(t *testing.T) {
 	if _, statErr := os.Stat(dbPath); statErr == nil {
 		t.Error("a read created an empty database - which would tell an operator who mistyped state_dir " +
 			"that they had transcoded nothing")
+	}
+}
+
+// SurveyLedgerDecisionInputs is the read `validate` goes through, and it is deliberately
+// NOT OpenReadOnly's rule: a ledger behind this build is the one population the two counts
+// matter most for, so it is answered rather than refused. What it must still never do is
+// migrate the file, and a ledger from the future is still a refusal.
+func TestSurveyLedgerDecisionInputs_AnswersForAnOlderLedgerWithoutMigratingIt(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "jobs.db")
+	seedTwoTerminalRows(t, dbPath)
+	prev := windBackOneSchemaVersion(t, dbPath)
+	before := fileDigest(t, dbPath)
+
+	got, err := SurveyLedgerDecisionInputs(context.Background(), dbPath, everyPath(sameConfig))
+	if err != nil {
+		t.Fatalf("SurveyLedgerDecisionInputs over a ledger the previous build wrote: %v", err)
+	}
+	// The fixture's rows were seeded recording the configuration in force, and the
+	// wind-back took the column with them: under that schema NO row can record anything,
+	// which is the whole reason the count needs no migration to be true.
+	want := DecisionInputsSurvey{NotRecorded: 2}
+	if got != want {
+		t.Errorf("surveyed %+v, want %+v", got, want)
+	}
+	if v := rawUserVersion(t, dbPath); v != prev {
+		t.Errorf("the survey migrated the ledger it was reading: user_version is now %d, was %d", v, prev)
+	}
+	if after := fileDigest(t, dbPath); after != before {
+		t.Error("the survey changed the ledger it was reading")
+	}
+}
+
+func TestSurveyLedgerDecisionInputs_RefusesALedgerFromTheFuture(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "jobs.db")
+	seedTwoTerminalRows(t, dbPath)
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 9999`); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	_ = db.Close()
+
+	if _, err := SurveyLedgerDecisionInputs(context.Background(), dbPath, everyPath(sameConfig)); err == nil {
+		t.Fatal("the survey described a ledger whose shape this build cannot see all of")
+	} else if !strings.Contains(err.Error(), "9999") {
+		t.Errorf("the refusal does not name the version it read: %v", err)
+	}
+}
+
+func TestSurveyLedgerDecisionInputs_CreatesNothingWhenThereIsNothingToRead(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "absent", "jobs.db")
+
+	if _, err := SurveyLedgerDecisionInputs(context.Background(), dbPath, everyPath(sameConfig)); err == nil {
+		t.Fatal("the survey read a ledger that does not exist")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "absent")); statErr == nil {
+		t.Error("the survey created the state directory it was asked to read from")
 	}
 }
 

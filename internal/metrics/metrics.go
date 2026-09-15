@@ -34,7 +34,7 @@ func New(st store.Store) *Metrics {
 		reg: prometheus.NewRegistry(),
 		filesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "holdfast_files_total",
-			Help: "Total files reaching a terminal outcome, by outcome (done|skipped|failed|indeterminate|applied-despite-error).",
+			Help: "Total files reaching a terminal outcome, by outcome (done|skipped|failed|would-transcode|indeterminate|applied-despite-error). would-transcode counts DECISIONS a dry run took, never transcodes that happened.",
 		}, []string{"outcome"}),
 		bytesReclaimed: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "holdfast_bytes_reclaimed_total",
@@ -56,8 +56,15 @@ func New(st store.Store) *Metrics {
 	// done or failed: an alert on "a job holdfast could not establish the outcome of"
 	// is exactly the alert an operator wants, and it is unbuildable if the count is
 	// hidden inside another label.
+	//
+	// A dry run's decision is pre-created for exactly that reason: an alert on "how many
+	// files would this tool transcode" has to be buildable BEFORE the first dry run, and a
+	// series that appears only once something has happened cannot be alerted on until it
+	// is too late to be useful. Note this is a new LABEL VALUE on an existing counter and
+	// not a new metric name - the published name set is frozen and stays frozen.
 	for _, o := range []string{
 		string(store.Done), string(store.Skipped), string(store.Failed),
+		string(store.WouldTranscode),
 		string(store.Indeterminate), string(store.AppliedDespiteError),
 	} {
 		m.filesTotal.WithLabelValues(o)
@@ -96,6 +103,13 @@ func (m *Metrics) Observe(ev engine.Event) {
 		}
 	case store.Skipped:
 		m.filesTotal.WithLabelValues(string(store.Skipped)).Inc()
+	case store.WouldTranscode:
+		// A DECISION a dry run took, counted as itself. It is not folded into skipped -
+		// that would say the file does not qualify, when the whole point of the row is
+		// that it does - and not into done, which would claim a transcode that never
+		// happened. Nothing was encoded, so no reclaimed bytes, no encode duration and no
+		// VMAF ride with it.
+		m.filesTotal.WithLabelValues(string(store.WouldTranscode)).Inc()
 	case store.Failed:
 		m.filesTotal.WithLabelValues(string(store.Failed)).Inc()
 	case store.Indeterminate:
@@ -124,7 +138,7 @@ func newQueueCollector(st store.Store) *queueCollector {
 		st: st,
 		desc: prometheus.NewDesc(
 			"holdfast_queue_depth",
-			"Current number of jobs in each status (pending/probing/encoding/verifying/done/skipped/failed).",
+			"Current number of jobs in each status (pending/probing/encoding/verifying/done/skipped/failed/would-transcode/indeterminate/applied-despite-error), read from the store at scrape time.",
 			[]string{"state"}, nil),
 	}
 }

@@ -162,23 +162,82 @@ func (p *Prober) PacketCount(ctx context.Context, f string) (n int, ok bool) {
 	return v, true
 }
 
-// DecodeOK fully decodes the primary video stream to null and reports whether it
-// decodes cleanly to the end. `-xerror` exits on the first ERROR; `-err_detect
-// +explode` promotes concealable decode errors (a corrupt frame the HEVC decoder
-// would otherwise silently conceal) to fatal — without it ffmpeg conceals interior
-// corruption and exits 0. It is not a complete corruption detector (random-noise
-// corruption can still decode "clean"); the parity + size + VMAF (later) gates are
-// the complementary layers.
+// DecodeOK fully decodes EVERY video stream the file carries to null and reports
+// whether they all decode cleanly to the end. `-xerror` exits on the first ERROR;
+// `-err_detect +explode` promotes concealable decode errors (a corrupt frame the HEVC
+// decoder would otherwise silently conceal) to fatal - without it ffmpeg conceals
+// interior corruption and exits 0. It is not a complete corruption detector
+// (random-noise corruption can still decode "clean"); the parity + size + VMAF (later)
+// gates are the complementary layers.
+//
+// `-map 0:v` is every video stream, not `0:v:0`. An output can carry more than one -
+// a second angle, an attached cover picture - and a check that decoded only the first
+// would report a clean file while a later stream was unreadable, which is precisely the
+// silent loss this gate stands in front of. A file with no video stream at all fails the
+// map and is reported as not decoding, exactly as the single-stream form did.
 func (p *Prober) DecodeOK(ctx context.Context, f string) bool {
 	cmd := exec.CommandContext(ctx, p.FFmpeg, "-hide_banner", "-nostdin", "-v", "error",
-		"-xerror", "-err_detect", "+explode", "-i", f, "-map", "0:v:0", "-f", "null", "-")
+		"-xerror", "-err_detect", "+explode", "-i", f, "-map", "0:v", "-f", "null", "-")
 	return cmd.Run() == nil
 }
 
-// StreamCount counts streams of the given ffprobe type specifier: "a"=audio,
-// "s"=subtitle, "t"=attachment ("d"=data is intentionally excluded — the encode
-// drops data streams). Returns 0 (never negative) when there are none or the file
+// VideoStream is one of a file's video streams as the source-shape guard needs to see
+// it: where it sits in the container, and whether it is an ATTACHED PICTURE (cover art
+// carried as a one-frame video stream) rather than a moving picture.
+type VideoStream struct {
+	// Index is the stream's absolute index in the container.
+	Index int
+	// AttachedPicture is the stream's attached_pic disposition.
+	AttachedPicture bool
+}
+
+// VideoStreams returns the file's video streams in container order AND reports whether
+// ffprobe ESTABLISHED that answer at all.
+//
+// The two results are separate for the same reason VideoCodecAnswered splits its own:
+// a caller deciding whether a file may be re-encoded and then DELETED has to tell "this
+// file carries one video stream" from "I could not find out what this file carries", and
+// a slice that is empty or short in both cases collapses them. established is false
+// whenever ffprobe could not be run, was cancelled, exited non-zero, or printed a row
+// this parser cannot read - every one of which leaves the shape of the file unknown, and
+// an unknown shape must fail safe rather than default to the common one.
+//
+// The position in the returned slice is the VIDEO-RELATIVE index (the N of `v:N`), which
+// is what an ffmpeg per-stream option is addressed by; Index is the absolute container
+// index, which is what an operator reading a probe sees.
+func (p *Prober) VideoStreams(ctx context.Context, f string) (streams []VideoStream, established bool) {
+	out, err := exec.CommandContext(ctx, p.FFprobe, "-v", "error", "-select_streams", "v",
+		"-show_entries", "stream=index:stream_disposition=attached_pic",
+		"-of", "csv=p=0", "--", f).Output()
+	if err != nil || ctx.Err() != nil {
+		return nil, false
+	}
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		idx, disp, ok := strings.Cut(line, ",")
+		if !ok || !intRe.MatchString(idx) || (disp != "0" && disp != "1") {
+			return nil, false
+		}
+		n, cerr := strconv.Atoi(idx)
+		if cerr != nil {
+			return nil, false
+		}
+		streams = append(streams, VideoStream{Index: n, AttachedPicture: disp == "1"})
+	}
+	return streams, true
+}
+
+// StreamCount counts streams of the given ffprobe type specifier: "v"=video,
+// "a"=audio, "s"=subtitle, "t"=attachment ("d"=data is intentionally excluded - the
+// encode drops data streams). Returns 0 (never negative) when there are none or the file
 // is unreadable, so a caller's numeric compare is always well-formed.
+//
+// "v" is in that list because the parity gate passes it on every encode: the track this
+// tool exists to re-encode is counted like the ones it carries. An output short a video
+// stream is rejected exactly as one short an audio stream is.
 func (p *Prober) StreamCount(ctx context.Context, f, typ string) int {
 	out, err := exec.CommandContext(ctx, p.FFprobe, "-v", "error",
 		"-select_streams", typ, "-show_entries", "stream=index",

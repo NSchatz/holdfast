@@ -53,12 +53,19 @@ func (s *SQLite) Aggregates(ctx context.Context) Aggregates {
 // counted as "failed" would tell an operator the source is fine - which is precisely
 // what nobody knows - and leaving it out of the set entirely would make the one job
 // waiting for a human the only one this figure never sees.
+//
+// A dry run's decision is counted here for the same reason and against the same failure:
+// leaving would-transcode out of the declared set would leave an operator reading an
+// outcomes breakdown that reports a dry run as having concluded nothing, which is the
+// exact misreading the state exists to end. The SET is declared with it, because a set
+// that names four of five statuses is a figure whose scope is wrong rather than unstated.
 func (s *SQLite) outcomeCounts(ctx context.Context) Breakdown {
 	b := Breakdown{Coverage: Coverage{
-		Set: "every terminal row in the ledger (done, skipped, failed, indeterminate, applied-despite-error)"}}
+		Set: "every terminal row in the ledger (done, skipped, failed, would-transcode, indeterminate, applied-despite-error)"}}
 	buckets, absent, err := s.groupCount(ctx,
-		`SELECT status, COUNT(*) FROM jobs WHERE status IN (?, ?, ?, ?, ?) GROUP BY status`,
-		string(Done), string(Skipped), string(Failed), string(Indeterminate), string(AppliedDespiteError))
+		`SELECT status, COUNT(*) FROM jobs WHERE status IN (?, ?, ?, ?, ?, ?) GROUP BY status`,
+		string(Done), string(Skipped), string(Failed), string(WouldTranscode),
+		string(Indeterminate), string(AppliedDespiteError))
 	if err != nil {
 		b.Err = fmt.Errorf("store: aggregate outcome counts: %w", err)
 		return b
@@ -103,6 +110,77 @@ func (s *SQLite) sizeRatio(ctx context.Context) Spread {
 		`CASE WHEN source_bytes IS NOT NULL AND output_bytes IS NOT NULL AND source_bytes > 0
 			THEN CAST(output_bytes AS REAL) / CAST(source_bytes AS REAL) END`,
 		string(Done))
+}
+
+// SizeRatios is the size-ratio spread over this install's OWN completed encodes: the
+// whole-ledger figure, and the same figure per DECIDING PROFILE.
+//
+// WHY THE SECOND FIGURE EXISTS. A ratio is a property of what an encoder was asked to
+// produce, so one taken over rows decided at crf 20 says nothing about a root configured at
+// crf 28. A single library-wide number laid over roots that would be encoded differently
+// would be a figure whose population is wrong rather than unstated - the exact failure the
+// Coverage convention at the top of this file exists to stop - so a caller that reports per
+// profile gets a sample per profile and may refuse the ones with no history at all.
+//
+// The key is profile_digest, which is what a terminal row records about the resolved values
+// that judged its file, so a caller holding a configuration's digests can look each one up
+// without interpreting a path. A row that recorded NO digest (every row written before the
+// column existed) groups under the empty key: it contributed a real encode, so it belongs in
+// the whole-ledger figure, and it cannot be attributed to a profile nobody recorded.
+func (s *SQLite) SizeRatios(ctx context.Context) (total Spread, byProfile map[string]Spread) {
+	return s.sizeRatio(ctx), s.sizeRatioByProfile(ctx)
+}
+
+// sizeRatioByProfile is sizeRatio's arithmetic, grouped. It runs the same expression over
+// the same population in one query, so no profile's figure can disagree with the total by
+// being computed a second way.
+func (s *SQLite) sizeRatioByProfile(ctx context.Context) map[string]Spread {
+	out := map[string]Spread{}
+	q := `SELECT digest, COUNT(v), MIN(v), AVG(v), MAX(v), COUNT(*) FROM
+		(SELECT COALESCE(profile_digest, '') AS digest,
+			CASE WHEN source_bytes IS NOT NULL AND output_bytes IS NOT NULL AND source_bytes > 0
+				THEN CAST(output_bytes AS REAL) / CAST(source_bytes AS REAL) END AS v
+		 FROM jobs WHERE status = ?)
+		GROUP BY digest`
+
+	rows, err := s.db.QueryContext(ctx, q, string(Done))
+	if err != nil {
+		out[""] = Spread{Err: fmt.Errorf("store: aggregate size ratio per profile: %w", err)}
+		return out
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var digest string
+		var counted, matching int64
+		var lo, mean, hi sql.NullFloat64
+		if err := rows.Scan(&digest, &counted, &lo, &mean, &hi, &matching); err != nil {
+			out[""] = Spread{Err: fmt.Errorf("store: aggregate size ratio per profile scan: %w", err)}
+			return out
+		}
+		sp := Spread{
+			Coverage: Coverage{Set: "every done row in the ledger decided under this profile"},
+			Counted:  counted,
+			Excluded: matching - counted,
+		}
+		if lo.Valid {
+			v := lo.Float64
+			sp.Min = &v
+		}
+		if mean.Valid {
+			v := mean.Float64
+			sp.Mean = &v
+		}
+		if hi.Valid {
+			v := hi.Float64
+			sp.Max = &v
+		}
+		out[digest] = sp
+	}
+	if err := rows.Err(); err != nil {
+		out[""] = Spread{Err: fmt.Errorf("store: aggregate size ratio per profile: %w", err)}
+	}
+	return out
 }
 
 // encodeDuration is the spread of recorded encode wall-clock time, in milliseconds,

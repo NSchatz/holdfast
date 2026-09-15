@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -195,13 +198,13 @@ func TestMigrate_V0DatabaseOnDiskGainsTheOutcomeColumns(t *testing.T) {
 	// is not merely cosmetic. (Without the ALTER this would fail with "no such column",
 	// which is exactly how the silent-no-op bug surfaces on a live install: not at
 	// startup, but later, on a query.)
-	if ok, err := s.Claim(ctx, "/lib/fresh.mkv", "50:500", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/lib/fresh.mkv", "50:500", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("Claim on a migrated database: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, "/lib/fresh.mkv", "50:500", Done, &Outcome{
 		Encoder: "cpu", VmafMean: f64(97.0), VmafMin: f64(90.0), VmafModel: "version=vmaf_v0.6.1",
 		SourceBytes: i64(1000), OutputBytes: i64(400), EncodeMs: i64(999),
-	}); err != nil {
+	}, 3); err != nil {
 		t.Fatalf("Finish on a migrated database: %v", err)
 	}
 	got, err := s.List(ctx, []Status{Done}, 0)
@@ -273,7 +276,7 @@ func TestApplyMigration_IsANoOpWhenAlreadyApplied(t *testing.T) {
 	// as a racing process would. Without the in-transaction re-read, migration 2's
 	// `ALTER TABLE ... ADD COLUMN reason` fails with "duplicate column name".
 	for i, m := range migrations {
-		if err := applyMigration(ctx, s.db, i+1, m); err != nil {
+		if _, err := applyMigration(ctx, s.db, i+1, m); err != nil {
 			t.Fatalf("re-applying migration %d (%s) must be a no-op, got: %v", i+1, m.name, err)
 		}
 	}
@@ -317,8 +320,9 @@ func TestMigrate_FreshDatabaseIsStampedAndComplete(t *testing.T) {
 // to keep in step.
 var headColumns = []string{
 	"reason", "encoder", "vmaf_mean", "vmaf_min", "vmaf_model",
-	"vmaf_pix_fmt", "vmaf_chroma", "vmaf_chroma_metric",
-	"source_bytes", "output_bytes", "encode_ms",
+	"vmaf_pix_fmt", "vmaf_chroma", "vmaf_chroma_metric", "vmaf_stream",
+	"source_codec", "source_bytes", "output_bytes", "encode_ms",
+	"decision_inputs",
 }
 
 // A database from the FUTURE is a startup REFUSAL, not a silent downgrade. Finish writes
@@ -368,8 +372,8 @@ func TestApplyMigration_FailureLeavesVersionUnchanged(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
-	bad := migration{name: "deliberately broken", sql: `THIS IS NOT SQL;`}
-	if err := applyMigration(context.Background(), db, 1, bad); err == nil {
+	bad := migration{name: "deliberately broken", sql: `THIS IS NOT SQL;`, rows: noRowChange}
+	if _, err := applyMigration(context.Background(), db, 1, bad); err == nil {
 		t.Fatal("a broken migration must return an error")
 	}
 	var v int
@@ -529,13 +533,13 @@ func TestMigrate_PreGate4DatabaseGainsTheNewColumnsUnbackfilled(t *testing.T) {
 	// 3. The migrated database is WRITABLE through the new columns. Without the ALTER
 	// this fails with "no such column" - which is how the silent-no-op bug surfaces on
 	// a live install: not at startup, but later, on a query.
-	if ok, err := s.Claim(ctx, "/lib/fresh.mkv", "50:500", "w0", 3); err != nil || !ok {
+	if ok, err := s.Claim(ctx, "/lib/fresh.mkv", "50:500", "w0", 3, sameConfig); err != nil || !ok {
 		t.Fatalf("Claim on a migrated database: ok=%v err=%v", ok, err)
 	}
 	if err := s.Finish(ctx, "/lib/fresh.mkv", "50:500", Done, &Outcome{
 		Encoder: "cpu", VmafMean: f64(98.4), VmafMin: f64(96.1), VmafModel: "version=vmaf_v0.6.1",
 		VmafPixFmt: "yuv420p10le", VmafChroma: f64(41.2), VmafChromaMetric: "psnr_cb/psnr_cr min (dB)",
-	}); err != nil {
+	}, 3); err != nil {
 		t.Fatalf("Finish on a migrated database: %v", err)
 	}
 	after, err := s.List(ctx, []Status{Done}, 0)
@@ -717,9 +721,492 @@ func TestMigrate_PreUndoDatabaseGainsTheRetentionTableWithNoFabricatedRetentions
 	if err != nil || !ok {
 		t.Fatalf("GetRetained after Retain: ok=%v err=%v", ok, err)
 	}
+	// A record this build writes names the schema version that wrote it; everything the
+	// caller supplied must still round-trip unchanged beside it.
+	if v, stamped := got.Stamp.Version(); !stamped || v != schemaVersion() {
+		t.Errorf("a retention written after the migration does not name the version that wrote it: %s", got.Stamp)
+	}
+	got.Stamp = SchemaStamp{}
 	if got != r {
 		t.Errorf("a retention written AFTER the migration did not round-trip:\n  got  %+v\n  want %+v", got, r)
 	}
+}
+
+// ---- the decision inputs a terminal row was taken under -----------------------
+
+// v9Schema is the schema EXACTLY as it shipped BEFORE the decision-inputs column - every
+// step from v1 to v9, in the order they shipped, with the v9 version stamp. Frozen for
+// the same reason v0Schema, v3Schema and v4Schema are, and it is the fixture this phase's
+// migration proof actually needs: a FRESH database gains the new column either way,
+// because the migration list is replayed from nothing, so a fresh-schema test would pass
+// over a migration that did nothing at all to a database that already exists. Do NOT
+// update it when the schema changes.
+const v9Schema = v4Schema + `
+CREATE TABLE IF NOT EXISTS retained_originals (
+	source_path         TEXT NOT NULL PRIMARY KEY,
+	swapped_path        TEXT NOT NULL,
+	retained_path       TEXT NOT NULL,
+	source_bytes        INTEGER NOT NULL,
+	swapped_fingerprint TEXT NOT NULL,
+	retained_at         INTEGER NOT NULL,
+	expires_at          INTEGER NOT NULL,
+	restored_at         INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_retained_swapped ON retained_originals(swapped_path);
+CREATE INDEX IF NOT EXISTS idx_retained_expires ON retained_originals(restored_at, expires_at);
+CREATE TABLE IF NOT EXISTS ledger_totals (
+	id               INTEGER PRIMARY KEY CHECK (id = 1),
+	reclaimed_pruned INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO ledger_totals (id, reclaimed_pruned) VALUES (1, 0);
+CREATE INDEX IF NOT EXISTS idx_jobs_status_updated ON jobs(status, updated_at);
+ALTER TABLE jobs ADD COLUMN guard_attributes       TEXT;
+ALTER TABLE jobs ADD COLUMN guard_time_resolution  TEXT;
+ALTER TABLE jobs ADD COLUMN guard_residual_window  TEXT;
+ALTER TABLE jobs ADD COLUMN swap_cause             TEXT;
+CREATE TABLE IF NOT EXISTS swap_incidents (
+	id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+	source_path        TEXT NOT NULL,
+	source_fingerprint TEXT NOT NULL,
+	replacement_path   TEXT NOT NULL,
+	source_attrs       TEXT NOT NULL,
+	replacement_attrs  TEXT NOT NULL,
+	observed_attrs     TEXT,
+	outcome            TEXT NOT NULL,
+	swap_error         TEXT,
+	swap_cause         TEXT,
+	storage_class      TEXT,
+	storage_type       TEXT,
+	created_at         INTEGER NOT NULL,
+	resolution         TEXT,
+	resolved_by        TEXT,
+	resolved_at        INTEGER,
+	observed_source      TEXT,
+	observed_replacement TEXT,
+	disposition_source      TEXT,
+	disposition_replacement TEXT,
+	removal_error      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_incidents_parked ON swap_incidents(outcome, resolution);
+CREATE INDEX IF NOT EXISTS idx_incidents_excluded ON swap_incidents(replacement_path)
+	WHERE disposition_replacement IS NULL OR disposition_replacement = 'retained-excluded';
+ALTER TABLE jobs ADD COLUMN source_codec TEXT;
+ALTER TABLE jobs ADD COLUMN failure_class TEXT;
+PRAGMA user_version = 9;
+`
+
+// seedV9 writes a real pre-decision-inputs database at path: the frozen v9 schema, its
+// version stamp, and rows that CARRY the outcomes the shipped build recorded - a done row
+// with its sizes and its VMAF pair, and two skipped rows carrying the guard tokens whose
+// verdicts this phase makes re-derivable. The outcomes matter: the criterion is that
+// migrating keeps every value while leaving the new column unrecorded, and a fixture of
+// empty rows could not tell those two apart.
+func seedV9(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open v9 db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if _, err := db.Exec(v9Schema); err != nil {
+		t.Fatalf("create v9 schema: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at,
+			encoder, vmaf_mean, vmaf_min, vmaf_model, vmaf_pix_fmt, vmaf_chroma, vmaf_chroma_metric,
+			source_codec, source_bytes, output_bytes, encode_ms)
+		 VALUES ('/lib/old-done.mkv', '10:100', 'done', 0, NULL, 1000,
+			'cpu', 97.25, 88.5, 'version=vmaf_v0.6.1', 'yuv420p10le', 41.5, 'psnr_cb/psnr_cr min (dB)',
+			'h264', 5000000, 2000000, 12345)`); err != nil {
+		t.Fatalf("seed done row: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, reason)
+		 VALUES ('/lib/old-low-bitrate.mkv', '20:200', 'skipped', 0, NULL, 1001, 'low-bitrate')`); err != nil {
+		t.Fatalf("seed low-bitrate row: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, reason)
+		 VALUES ('/lib/old-at-codec.mkv', '30:300', 'skipped', 0, NULL, 1002, 'already-at-target-codec')`); err != nil {
+		t.Fatalf("seed already-at-target-codec row: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, reason, failure_class)
+		 VALUES ('/lib/old-failed.mkv', '40:400', 'failed', 2, NULL, 1003, 'ffmpeg died', 'transient')`); err != nil {
+		t.Fatalf("seed failed row: %v", err)
+	}
+
+	// Sanity: the fixture really is a v9 database that really lacks the new column.
+	// Without this the test could pass against a database that was already migrated,
+	// which would make it vacuous in exactly the way it exists to avoid.
+	var ver int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil {
+		t.Fatalf("read seeded user_version: %v", err)
+	}
+	if ver != 9 {
+		t.Fatalf("seeded database is at version %d, want 9 - it is not a pre-decision-inputs database", ver)
+	}
+	if hasColumn(t, db, "decision_inputs") {
+		t.Fatal("seeded v9 database already has a `decision_inputs` column - the fixture is wrong")
+	}
+}
+
+// TestMigrate_APreMigrationDatabaseOnDiskRecordsNoDecisionInputs is the anti-vacuity
+// proof this phase owes.
+//
+// A jobs.db written by the SHIPPED build must migrate forward in place, keep every row
+// and every value those rows carry, and read as recording NO decision inputs - which is
+// what makes each of them re-openable exactly once, after which the decision they reach
+// records what it read. The alternative - a backfill - would claim those rows were taken
+// under whatever is configured now, and they would then MATCH and stay excluded for ever,
+// which is the silent no-op the whole phase exists to end.
+func TestMigrate_APreMigrationDatabaseOnDiskRecordsNoDecisionInputs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.db")
+	seedV9(t, path)
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on a v9 database must migrate it, not fail: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if got, want := userVersion(t, path), schemaVersion(); got != want {
+		t.Errorf("user_version after migration = %d, want %d", got, want)
+	}
+	if !hasColumn(t, s.db, "decision_inputs") {
+		t.Fatal("migrated database has no decision_inputs column - the migration was a silent no-op")
+	}
+
+	ctx := context.Background()
+	rows, err := s.List(ctx, nil, 0)
+	if err != nil {
+		t.Fatalf("List after migration: %v", err)
+	}
+	if len(rows) != 4 {
+		t.Fatalf("migration lost rows: got %d, want 4 (%+v)", len(rows), rows)
+	}
+	byPath := make(map[string]Job, len(rows))
+	for _, j := range rows {
+		byPath[j.Path] = j
+	}
+
+	// 1. Every value the v9 rows carried is still there.
+	done := byPath["/lib/old-done.mkv"]
+	if done.Status != Done || done.Outcome.Encoder != "cpu" || done.Outcome.VmafModel != "version=vmaf_v0.6.1" ||
+		done.Outcome.VmafPixFmt != "yuv420p10le" || done.Outcome.SourceCodec != "h264" {
+		t.Errorf("the pre-existing done row was mangled: %+v", done)
+	}
+	if done.Outcome.VmafMean == nil || *done.Outcome.VmafMean != 97.25 ||
+		done.Outcome.SourceBytes == nil || *done.Outcome.SourceBytes != 5000000 ||
+		done.Outcome.OutputBytes == nil || *done.Outcome.OutputBytes != 2000000 {
+		t.Errorf("the pre-existing measurements were lost: %+v", done.Outcome)
+	}
+	if got := byPath["/lib/old-low-bitrate.mkv"].Outcome.Reason; got != "low-bitrate" {
+		t.Errorf("the pre-existing skip reason was lost: %q", got)
+	}
+	if j := byPath["/lib/old-failed.mkv"]; j.FailCount != 2 || j.Outcome.FailureClass != FailureTransient {
+		t.Errorf("the pre-existing failure accounting was lost: %+v", j)
+	}
+
+	// 2. And every pre-existing row reads as recording NO inputs - not an empty set,
+	// which would always match, and not a fabricated record of the configuration in
+	// front of this build, which would match too.
+	for _, j := range rows {
+		if j.Outcome.DecisionInputs.Recorded() {
+			t.Errorf("%s was BACKFILLED with decision inputs (%q) - that is a claim about the "+
+				"configuration a decision nobody recorded was taken under",
+				j.Path, j.Outcome.DecisionInputs.Encode())
+		}
+	}
+
+	// 3. Which is exactly what makes them re-openable: a row recording nothing cannot be
+	// re-derived, so Claim offers the file to the pipeline rather than skipping it for
+	// ever. This is the whole point of reading them as unrecorded, so it is asserted
+	// here and not only in the Claim suite.
+	current := InputsRead(map[string]string{"min_bitrate_kbps": "1200"})
+	if ok, err := s.Claim(ctx, "/lib/old-low-bitrate.mkv", "20:200", "w0", 3, current); err != nil || !ok {
+		t.Fatalf("a migrated row recording no inputs must be re-opened: ok=%v err=%v", ok, err)
+	}
+
+	// 4. The migrated database is WRITABLE through the new column. Without the ALTER this
+	// fails with "no such column" - which is how the silent-no-op bug surfaces on a live
+	// install: not at startup, but later, on a query.
+	if err := s.Finish(ctx, "/lib/old-low-bitrate.mkv", "20:200", Skipped,
+		&Outcome{Reason: "low-bitrate", DecisionInputs: current}, 3); err != nil {
+		t.Fatalf("Finish on a migrated database: %v", err)
+	}
+	after, err := s.List(ctx, []Status{Skipped}, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, j := range after {
+		if j.Path != "/lib/old-low-bitrate.mkv" {
+			continue
+		}
+		if got, ok := j.Outcome.DecisionInputs.Value("min_bitrate_kbps"); !ok || got != "1200" {
+			t.Errorf("a row written AFTER the migration lost its decision inputs: %+v", j.Outcome.DecisionInputs)
+		}
+	}
+}
+
+// ---- the scored video stream --------------------------------------------------
+
+// v10Schema is the schema EXACTLY as it shipped BEFORE the scored-stream column - every
+// step from v1 to v10, in the order they shipped, with the v10 version stamp. Frozen for
+// the same reason v0Schema, v3Schema, v4Schema and v9Schema are, and it is the fixture
+// this phase's migration proof actually needs: a FRESH database gains the new column
+// either way, because the migration list is replayed from nothing, so a fresh-schema test
+// would pass over a migration that did nothing at all to a database that already exists.
+// Do NOT update it when the schema changes.
+const v10Schema = v9Schema + `
+ALTER TABLE jobs ADD COLUMN decision_inputs TEXT;
+CREATE INDEX IF NOT EXISTS idx_jobs_status_inputs ON jobs(status, decision_inputs);
+PRAGMA user_version = 10;
+`
+
+// seedV10 writes a real pre-scored-stream database at path, with rows that CARRY the
+// outcomes the shipped build recorded: a done row with its whole VMAF proof, a skipped row
+// whose gate never ran, and a VMAF-rejected failure. The outcomes matter twice over here -
+// the criterion is that migrating keeps every value while leaving the new column
+// unrecorded, and the mixture of scored and unscored rows is what makes "no backfill"
+// mean something rather than being true of an empty table.
+func seedV10(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open v10 db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if _, err := db.Exec(v10Schema); err != nil {
+		t.Fatalf("create v10 schema: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at,
+			encoder, vmaf_mean, vmaf_min, vmaf_model, vmaf_pix_fmt, vmaf_chroma, vmaf_chroma_metric,
+			source_codec, source_bytes, output_bytes, encode_ms, decision_inputs)
+		 VALUES ('/lib/old-done.mkv', '10:100', 'done', 0, NULL, 1000,
+			'cpu', 97.25, 88.5, 'version=vmaf_v0.6.1', 'yuv420p10le', 41.5, 'psnr_cb/psnr_cr min (dB)',
+			'h264', 5000000, 2000000, 12345, 'crf=20')`); err != nil {
+		t.Fatalf("seed done row: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, reason)
+		 VALUES ('/lib/old-skipped.mkv', '20:200', 'skipped', 0, NULL, 1001, 'already-at-target-codec')`); err != nil {
+		t.Fatalf("seed skipped row: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at,
+			reason, failure_class, encoder, vmaf_mean, vmaf_min, vmaf_model, vmaf_pix_fmt)
+		 VALUES ('/lib/old-rejected.mkv', '30:300', 'failed', 1, NULL, 1002,
+			'VMAF below threshold', 'deterministic', 'cpu', 62.5, 41.0, 'version=vmaf_v0.6.1', 'yuv420p10le')`); err != nil {
+		t.Fatalf("seed rejected row: %v", err)
+	}
+
+	// Sanity: the fixture really is a v10 database that really lacks the new column.
+	// Without this the test could pass against a database that was already migrated,
+	// which would make it vacuous in exactly the way it exists to avoid.
+	var ver int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil {
+		t.Fatalf("read seeded user_version: %v", err)
+	}
+	if ver != 10 {
+		t.Fatalf("seeded database is at version %d, want 10 - it is not a pre-scored-stream database", ver)
+	}
+	if hasColumn(t, db, "vmaf_stream") {
+		t.Fatal("seeded v10 database already has a `vmaf_stream` column - the fixture is wrong")
+	}
+}
+
+// TestMigrate_APreMigrationDatabaseRecordsNoScoredStream is this phase's anti-vacuity
+// proof, and the one the whole column turns on.
+//
+// A jobs.db written by the SHIPPED build must migrate forward in place, keep every row and
+// every value those rows carry, and read as recording NO scored stream. The backfill is
+// the failure to prevent, and here it is unusually tempting: the stream this build scores
+// is a CONSTANT, so writing `v:0` onto every pre-existing row would look like completing
+// the record rather than what it is - a claim about which stream a measurement nobody can
+// re-examine was made against, on rows whose VMAF gate may never have run at all.
+//
+// It also asserts the other half of the criterion: a database ALREADY at the new version
+// opens unchanged, so the step is not re-applied and nothing it wrote moves.
+func TestMigrate_APreMigrationDatabaseRecordsNoScoredStream(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.db")
+	seedV10(t, path)
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on a v10 database must migrate it, not fail: %v", err)
+	}
+
+	if got, want := userVersion(t, path), schemaVersion(); got != want {
+		t.Errorf("user_version after migration = %d, want %d", got, want)
+	}
+	if !hasColumn(t, s.db, "vmaf_stream") {
+		t.Fatal("migrated database has no vmaf_stream column - the migration was a silent no-op")
+	}
+
+	ctx := context.Background()
+	rows, err := s.List(ctx, nil, 0)
+	if err != nil {
+		t.Fatalf("List after migration: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("migration lost rows: got %d, want 3 (%+v)", len(rows), rows)
+	}
+	byPath := make(map[string]Job, len(rows))
+	for _, j := range rows {
+		byPath[j.Path] = j
+	}
+
+	// 1. Every value the v10 rows carried is still there.
+	done := byPath["/lib/old-done.mkv"]
+	if done.Status != Done || done.Outcome.Encoder != "cpu" ||
+		done.Outcome.VmafModel != "version=vmaf_v0.6.1" || done.Outcome.VmafPixFmt != "yuv420p10le" ||
+		done.Outcome.VmafChromaMetric != "psnr_cb/psnr_cr min (dB)" || done.Outcome.SourceCodec != "h264" {
+		t.Errorf("the pre-existing done row was mangled: %+v", done)
+	}
+	if done.Outcome.VmafMean == nil || *done.Outcome.VmafMean != 97.25 ||
+		done.Outcome.VmafMin == nil || *done.Outcome.VmafMin != 88.5 ||
+		done.Outcome.VmafChroma == nil || *done.Outcome.VmafChroma != 41.5 {
+		t.Errorf("the pre-existing measurements were lost: %+v", done.Outcome)
+	}
+	if got := byPath["/lib/old-skipped.mkv"].Outcome.Reason; got != "already-at-target-codec" {
+		t.Errorf("the pre-existing skip reason was lost: %q", got)
+	}
+	if j := byPath["/lib/old-rejected.mkv"]; j.FailCount != 1 || j.Outcome.FailureClass != FailureDeterministic {
+		t.Errorf("the pre-existing failure accounting was lost: %+v", j)
+	}
+
+	// 2. And every pre-existing row reads as recording NO scored stream - including the
+	// done row that carries a full VMAF proof, which is the row a backfill would look
+	// most defensible on.
+	for _, j := range rows {
+		if j.Outcome.VmafStream != "" {
+			t.Errorf("%s was BACKFILLED with the scored stream %q - that is a claim about which "+
+				"stream a comparison nobody can re-examine was made against", j.Path, j.Outcome.VmafStream)
+		}
+	}
+	// Read from SQLite itself, not only through the scan: a stored "" would be a second
+	// representation of "not recorded" that the scan would hide.
+	var recorded int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM jobs WHERE vmaf_stream IS NOT NULL`).Scan(&recorded); err != nil {
+		t.Fatalf("count vmaf_stream: %v", err)
+	}
+	if recorded != 0 {
+		t.Errorf("%d migrated rows carry a non-NULL vmaf_stream - the column is added with NO DEFAULT "+
+			"and nothing backfills it", recorded)
+	}
+
+	// 3. The migrated database is WRITABLE through the new column. Without the ALTER this
+	// fails with "no such column" - which is how the silent-no-op bug surfaces on a live
+	// install: not at startup, but later, on a query.
+	if ok, err := s.Claim(ctx, "/lib/fresh.mkv", "50:500", "w0", 3, sameConfig); err != nil || !ok {
+		t.Fatalf("Claim on a migrated database: ok=%v err=%v", ok, err)
+	}
+	if err := s.Finish(ctx, "/lib/fresh.mkv", "50:500", Done, &Outcome{
+		Encoder: "cpu", VmafMean: f64(98.4), VmafMin: f64(96.1), VmafModel: "version=vmaf_v0.6.1",
+		VmafPixFmt: "yuv420p10le", VmafChroma: f64(41.2), VmafChromaMetric: "psnr_cb/psnr_cr min (dB)",
+		VmafStream: "v:0",
+	}, 3); err != nil {
+		t.Fatalf("Finish on a migrated database: %v", err)
+	}
+	after, err := s.List(ctx, []Status{Done}, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, j := range after {
+		if j.Path == "/lib/fresh.mkv" && j.Outcome.VmafStream != "v:0" {
+			t.Errorf("a row written AFTER the migration lost its scored stream: %+v", j.Outcome)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// 4. Re-opening a database ALREADY at this version changes nothing: the step is not
+	// re-applied, the stamp does not move, and what the rows recorded stands.
+	again, err := Open(path)
+	if err != nil {
+		t.Fatalf("re-Open of an up-to-date database: %v", err)
+	}
+	defer func() { _ = again.Close() }()
+	if got, want := userVersion(t, path), schemaVersion(); got != want {
+		t.Errorf("user_version after re-open = %d, want %d", got, want)
+	}
+	reread, err := again.List(ctx, nil, 0)
+	if err != nil {
+		t.Fatalf("List after re-open: %v", err)
+	}
+	if len(reread) != 4 {
+		t.Errorf("re-opening an up-to-date database changed the row count: got %d, want 4", len(reread))
+	}
+	for _, j := range reread {
+		want := ""
+		if j.Path == "/lib/fresh.mkv" {
+			want = "v:0"
+		}
+		if j.Outcome.VmafStream != want {
+			t.Errorf("re-opening moved %s's scored stream to %q, want %q", j.Path, j.Outcome.VmafStream, want)
+		}
+	}
+}
+
+// TestMigrate_AFailedMigrationRefusesToOpenTheStore. A half-migrated schema must never be
+// run against: the engine would be recording its proof into columns that may or may not
+// be there, and the failure would surface later, on a live install, on a query. So a
+// migration that cannot complete is a REFUSAL to open, naming the step that failed, and
+// it leaves the version where it was - the version and the shape move together or not at
+// all.
+func TestMigrate_AFailedMigrationRefusesToOpenTheStore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.db")
+	seedV9(t, path)
+
+	// A step this build cannot apply, driven through the real migrate() that Open calls.
+	// Appended rather than substituted, so every shipped step still runs first and the
+	// failure is genuinely a half-way one.
+	restore := migrations
+	migrations = append(append([]migration{}, migrations...),
+		migration{name: "deliberately broken", sql: `THIS IS NOT SQL;`})
+	t.Cleanup(func() { migrations = restore })
+
+	s, err := Open(path)
+	if err == nil {
+		_ = s.Close()
+		t.Fatal("Open must REFUSE a database whose migration could not complete, not run against a half-migrated schema")
+	}
+	if !strings.Contains(err.Error(), "deliberately broken") {
+		t.Errorf("the refusal must name the step that failed, got: %v", err)
+	}
+
+	// The stamp never escaped the failed step's transaction: the database still claims
+	// the last version it actually has.
+	if got, want := userVersion(t, path), schemaVersion()-1; got != want {
+		t.Errorf("user_version after a failed migration = %d, want %d", got, want)
+	}
+	// And the steps that DID apply are intact, with every row still there - a refusal is
+	// not a rollback of the whole file.
+	if got := columnCount(t, path); got == 0 {
+		t.Fatal("the database is unreadable after a refused open")
+	}
+}
+
+// columnCount reads how many columns jobs has, from SQLite itself, through a handle this
+// test opens directly - the store refused to open, so there is no store to ask.
+func columnCount(t *testing.T, path string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('jobs')`).Scan(&n); err != nil {
+		t.Fatalf("pragma_table_info: %v", err)
+	}
+	return n
 }
 
 // TestMigrations_ShippedTextIsNeverEdited pins the SQL of every migration that has
@@ -740,6 +1227,14 @@ func TestMigrations_ShippedTextIsNeverEdited(t *testing.T) {
 		{"aggregate indexes", "f37a79b51a174ce3fa9eee7dd10780f75c8d6cb0eaa70277cdbc54be65d29188"},
 		{"comparison format and chroma columns", "78f72aa49e83685be32c26550f09f4190203719480a5e262c24ef3dd483b1522"},
 		{"retained originals", "27b4e3a4954ff0b060797b229f1d0ec6f60c7c4a08b0fb571c479a7ab88c25b7"},
+		{"ledger retention totals", "44635e1577347481b3322bc04f2a1ac54a2560b452b59c1f5e3a9d7cb392d4a5"},
+		{"swap guard record + swap incidents", "1a2162b7e4061ca5a90f53adc9916d85969e05705baf232fc1e5431a13125dbf"},
+		{"source codec", "4f8cf21fb8743b51e8609fef458308f65e4e36782d98213cff15833aacc3b164"},
+		{"failure class", "1401872cf991a88581c43c24470de409ef06683ca3aaa9cfbd728220bed2b53a"},
+		{"decision inputs", "285adec2f24e51f0fdecec3c20a36388fb68b0b9b0da5730774361c82b8a5600"},
+		{"scored video stream", "7008f2ffddfebe1e635bb7be29271994ac7ba8299432aa6c6022ce346a1ab2f2"},
+		{"deciding library profile", "e00b0e0b2b03c8a227374129473c3eab001985ac7058901aed5769e9df29a3ea"},
+		{"record version stamp", "e45ec375c0800d37ea3ce46599d13304f4307ddca2f0e43200dcb3aa72814a0e"},
 	}
 	if len(migrations) < len(shipped) {
 		t.Fatalf("migrations has %d entries, fewer than the %d that have shipped - an entry was "+
@@ -760,4 +1255,629 @@ func TestMigrations_ShippedTextIsNeverEdited(t *testing.T) {
 				"new migration instead.", i+1, got.name, h, want.sha256)
 		}
 	}
+}
+
+// ---- the row-count assertion, and the version stamp each record carries -------
+//
+// What these cover is the silent defect the tests above were written against, one turn
+// further on. A step used to be able to drop or duplicate rows and COMMIT, stamping a
+// version that says all is well, because nothing counted. In this ledger a terminal row
+// is what says a file was already handled once its source has been deleted, so a lost row
+// is a wrong destructive verdict on a real library and no re-run undoes it.
+
+// atShippedVersion builds a real database at one schema version that HAS SHIPPED, with
+// records in every table that version holds.
+//
+// It replays the first `version` steps through the production applyMigration rather than
+// restating their text, and that is faithful precisely BECAUSE the text is frozen:
+// TestMigrations_ShippedTextIsNeverEdited pins every shipped step by content hash, so the
+// first N steps are the shape the build that shipped version N actually wrote. Version 0
+// is the exception and has its own frozen fixture: it predates the history entirely and
+// was never a step at all.
+func atShippedVersion(t *testing.T, path string, version int) {
+	t.Helper()
+	if version == 0 {
+		seedV0(t, path)
+		return
+	}
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open a v%d db: %v", version, err)
+	}
+	defer func() { _ = db.Close() }()
+
+	for i := 0; i < version; i++ {
+		if _, err := applyMigration(context.Background(), db, i+1, migrations[i]); err != nil {
+			t.Fatalf("building a v%d database: step %d (%s): %v", version, i+1, migrations[i].name, err)
+		}
+	}
+	seedRecordsAt(t, db, version)
+
+	// Sanity, for the reason every fixture above carries one: a database that was already
+	// at this build's version would make the test vacuous in exactly the way it exists to
+	// avoid.
+	var ver int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil {
+		t.Fatalf("read seeded user_version: %v", err)
+	}
+	if ver != version {
+		t.Fatalf("the fixture is at version %d, want %d", ver, version)
+	}
+	// A fixture below this build's version must be recognisably an OLDER database rather
+	// than this one wearing an older number, and what says so is the shape the NEWEST step
+	// adds. That shape is now a whole TABLE rather than another column on jobs, so the
+	// question is asked of sqlite_master.
+	if version < len(migrations) && hasTable(t, db, newestStepTable) {
+		t.Fatalf("a v%d fixture already carries the %s table, which the newest step creates - it is not an older database",
+			version, newestStepTable)
+	}
+	// The stamp column arrives AT stampedFromVersion and every version from there on
+	// legitimately has it, so this sanity check is against THAT step and not against the end
+	// of the history: while the stamp happened to be the last step, the two were the same
+	// number, and the first step appended after it turned a correct fixture into a fatal.
+	if version < stampedFromVersion && hasColumn(t, db, "schema_version") {
+		t.Fatalf("a v%d fixture already carries the version stamp - it is not an older database", version)
+	}
+}
+
+// newestStepTable is the table the LAST migration creates. It tracks the END of the
+// migrations slice exactly as the column it replaced did: a step appended after this one
+// moves it, along with the wind-back fixtures.
+const newestStepTable = "path_exclusions"
+
+// stampedFromVersion is the step that added the per-record version stamp. It is looked up
+// in the history rather than written out, so appending a step cannot move it by accident.
+var stampedFromVersion = func() int {
+	for i, m := range migrations {
+		if strings.Contains(m.sql, "ADD COLUMN schema_version") {
+			return i + 1
+		}
+	}
+	return len(migrations)
+}()
+
+// stampStepVersion is the version at which the record stamp shipped, found in the history
+// rather than written down a second time. It is not the newest version once a step is
+// appended after it, and a test about the stamp has to keep meaning the stamp.
+func stampStepVersion(t *testing.T) int {
+	t.Helper()
+	for i, m := range migrations {
+		if m.name == "record version stamp" {
+			return i + 1
+		}
+	}
+	t.Fatal("the history carries no record version stamp step")
+	return 0
+}
+
+// seededJobRows is how many job records every fixture in this section carries. They are
+// written through the columns v1 gave the table and every version since has kept, so one
+// seed works at every shipped version.
+const seededJobRows = 4
+
+// seedRecordsAt writes records into every record table the version has: the job ledger
+// from v1, the retained originals from v5, the swap incidents from v7. A version with no
+// such table gets no such record, which is what a database at that version looks like.
+func seedRecordsAt(t *testing.T, db *sql.DB, version int) {
+	t.Helper()
+	for _, r := range []struct {
+		path, fp, status string
+		failCount        int
+		updatedAt        int64
+	}{
+		{"/lib/done.mkv", "10:100", "done", 0, 1000},
+		{"/lib/skipped.mkv", "20:200", "skipped", 0, 1001},
+		{"/lib/failed.mkv", "30:300", "failed", 2, 1002},
+		{"/lib/pending.mkv", "40:400", "pending", 0, 1003},
+	} {
+		if _, err := db.Exec(
+			`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at) VALUES (?, ?, ?, ?, NULL, ?)`,
+			r.path, r.fp, r.status, r.failCount, r.updatedAt); err != nil {
+			t.Fatalf("seed job row %s: %v", r.path, err)
+		}
+	}
+	if version >= 5 {
+		if _, err := db.Exec(
+			`INSERT INTO retained_originals
+				(source_path, swapped_path, retained_path, source_bytes, swapped_fingerprint, retained_at, expires_at, restored_at)
+			 VALUES ('/lib/kept.mkv', '/lib/kept.mkv', '/lib/.holdfast-undo/kept', 8888, '7:7', 2000, 9000, NULL)`); err != nil {
+			t.Fatalf("seed retention: %v", err)
+		}
+	}
+	if version >= 7 {
+		if _, err := db.Exec(
+			`INSERT INTO swap_incidents
+				(source_path, source_fingerprint, replacement_path, source_attrs, replacement_attrs,
+				 outcome, created_at)
+			 VALUES ('/lib/parked.mkv', '50:500', '/lib/parked.hevc.mkv', '50:500', '12:120', 'indeterminate', 3000)`); err != nil {
+			t.Fatalf("seed incident: %v", err)
+		}
+	}
+}
+
+// rowCountOf reads one table's row count straight off the file, with no store code in
+// between: an assertion about what a migration did to the rows must not be answered by
+// the same projection the migration might have broken.
+func rowCountOf(t *testing.T, path, table string) int64 {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var n int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM "` + table + `"`).Scan(&n); err != nil {
+		t.Fatalf("count %s: %v", table, err)
+	}
+	return n
+}
+
+// countedIn returns what one step's record says about one table, and whether the record
+// mentions that table at all.
+func countedIn(step MigrationStep, table string) (TableRows, bool) {
+	for _, counted := range step.Tables {
+		if counted.Table == table {
+			return counted, true
+		}
+	}
+	return TableRows{}, false
+}
+
+// [AC-1] Applying a step records every table's row count immediately before it and
+// immediately after it, and the record reaches the caller that opened the store.
+//
+// Driven from a database that predates schema versioning, so every step in the history
+// runs and the counts are taken over a table that ALREADY HAS ROWS - which is the only
+// shape in which a count can be wrong in the direction that matters.
+func TestMigrate_RecordsEveryTablesRowCountOnEitherSideOfEveryStepItApplies(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.db")
+	atShippedVersion(t, path, 0)
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	report := s.MigrationReport()
+	if len(report) != schemaVersion() {
+		t.Fatalf("the open applied %d step(s) and reported %d - a step that reports nothing is a "+
+			"step whose counts nobody can check", schemaVersion(), len(report))
+	}
+	for i, step := range report {
+		if step.Version != i+1 || step.Name != migrations[i].name {
+			t.Fatalf("record %d names step %d (%s), want step %d (%s)",
+				i, step.Version, step.Name, i+1, migrations[i].name)
+		}
+		// The jobs table held four records before the first step and holds them still:
+		// every step in the shipped history declares no change to it, and the record has
+		// to SAY the count rather than merely not complain.
+		jobs, ok := countedIn(step, "jobs")
+		if !ok {
+			t.Errorf("step %d (%s) recorded no count for jobs", step.Version, step.Name)
+			continue
+		}
+		if jobs.Before != seededJobRows || jobs.After != seededJobRows {
+			t.Errorf("step %d (%s) recorded jobs at %d rows before and %d after, want %d either side",
+				step.Version, step.Name, jobs.Before, jobs.After, seededJobRows)
+		}
+	}
+
+	// A table the step CREATES is counted too, on both sides: absent is zero rows, which
+	// is what makes a created table comparable against a declaration at all.
+	totals, ok := countedIn(report[5], "ledger_totals")
+	if !ok {
+		t.Fatalf("step 6 (%s) recorded no count for the table it creates", report[5].Name)
+	}
+	if totals.Before != 0 || totals.After != 1 {
+		t.Errorf("step 6 recorded ledger_totals at %d before and %d after, want 0 then 1",
+			totals.Before, totals.After)
+	}
+}
+
+// [AC-2] A step whose observed per-table change is the change it declared commits: the
+// stamped version advances and the step is reported as applied.
+//
+// From the version immediately before this build's, so exactly one step is outstanding and
+// the assertions are about THAT step rather than about a history of them.
+func TestMigrate_AStepMatchingItsDeclarationCommitsAndAdvancesTheStampedVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.db")
+	atShippedVersion(t, path, schemaVersion()-1)
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if got, want := userVersion(t, path), schemaVersion(); got != want {
+		t.Errorf("user_version after the step = %d, want %d", got, want)
+	}
+	report := s.MigrationReport()
+	if len(report) != 1 {
+		t.Fatalf("one step was outstanding and %d were reported: %+v", len(report), report)
+	}
+	step := report[0]
+	last := migrations[len(migrations)-1]
+	if step.Version != schemaVersion() || step.Name != last.name {
+		t.Errorf("the applied step is reported as %d (%s), want %d (%s)",
+			step.Version, step.Name, schemaVersion(), last.name)
+	}
+	// Committed, not merely attempted: the shape the step adds is there afterwards.
+	if !hasTable(t, s.db, newestStepTable) {
+		t.Errorf("the step was reported applied and the %s table is not there", newestStepTable)
+	}
+}
+
+// [AC-3] A step that moves a table's row count by anything it did not declare is rolled
+// back - the database keeps the version and the rows it had before the step - and the open
+// is REFUSED with an error naming the step, the table, the declared change and the
+// observed one.
+//
+// Both directions are driven. A deletion is the failure the guard exists for: a terminal
+// row is what says a file was already handled once its source is gone. An insertion is the
+// same defect from the other side, and it is how a duplicated row would arrive.
+func TestMigrate_AnUndeclaredRowCountChangeRollsTheStepBackAndRefusesTheOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		sql      string
+		observed int64
+		names    []string
+	}{
+		{
+			name:     "a step that deletes a row it never declared",
+			sql:      `DELETE FROM jobs WHERE path = '/lib/done.mkv';`,
+			observed: -1,
+			names:    []string{"-1", "+0", `"jobs"`},
+		},
+		{
+			name:     "a step that inserts a row it never declared",
+			sql:      `INSERT INTO jobs (path, fingerprint, status, fail_count, updated_at) VALUES ('/lib/ghost.mkv', '0:0', 'done', 0, 1);`,
+			observed: 1,
+			names:    []string{"+1", "+0", `"jobs"`},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "jobs.db")
+			atShippedVersion(t, path, schemaVersion())
+			at := schemaVersion()
+
+			// Appended rather than substituted, so every shipped step still runs first and
+			// the refusal is genuinely about this one.
+			restore := migrations
+			migrations = append(append([]migration{}, migrations...),
+				migration{name: "deliberately undeclared", rows: noRowChange, sql: tc.sql})
+			t.Cleanup(func() { migrations = restore })
+
+			s, err := Open(path)
+			if err == nil {
+				_ = s.Close()
+				t.Fatal("Open accepted a step that moved rows it never declared")
+			}
+			var refused *UndeclaredRowChangeError
+			if !errors.As(err, &refused) {
+				t.Fatalf("the refusal is not an undeclared-row-change error: %v", err)
+			}
+			if refused.Table != "jobs" || refused.Declared != 0 || refused.Observed != tc.observed {
+				t.Errorf("the refusal reports table %q declared %+d observed %+d, want jobs declared +0 observed %+d",
+					refused.Table, refused.Declared, refused.Observed, tc.observed)
+			}
+			msg := err.Error()
+			for _, want := range append(tc.names, "deliberately undeclared") {
+				if !strings.Contains(msg, want) {
+					t.Errorf("the refusal does not name %s: %v", want, msg)
+				}
+			}
+
+			// Rolled back: the version and the rows are what they were before the step.
+			if got := userVersion(t, path); got != at {
+				t.Errorf("user_version after a refused step = %d, want %d", got, at)
+			}
+			if got := rowCountOf(t, path, "jobs"); got != seededJobRows {
+				t.Errorf("jobs holds %d row(s) after a refused step, want %d - the step was not rolled back",
+					got, seededJobRows)
+			}
+		})
+	}
+}
+
+// [AC-4] Every schema version that has ever shipped, and a database written before schema
+// versioning existed, migrates to this build's version with every step applying, no step
+// moving a row it did not declare, and every record readable with its values intact.
+//
+// The FRESH database is a case in its own right and not a formality. One shipped step
+// seeds a singleton totals row, so it moves a count on a database that has none - and a
+// flat zero declared there would make this guard refuse a legitimate first open, which for
+// a daemon is total. Only a fresh open exercises it.
+func TestMigrate_EveryShippedVersionMigratesCleanWithEveryRecordIntact(t *testing.T) {
+	for version := 0; version < schemaVersion(); version++ {
+		t.Run(fmt.Sprintf("from v%d", version), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "jobs.db")
+			atShippedVersion(t, path, version)
+
+			s, err := Open(path)
+			if err != nil {
+				t.Fatalf("opening a v%d database must migrate it, not fail: %v", version, err)
+			}
+			defer func() { _ = s.Close() }()
+
+			if got, want := userVersion(t, path), schemaVersion(); got != want {
+				t.Errorf("a migrated v%d database is at user_version %d, want %d", version, got, want)
+			}
+			if got, want := len(s.MigrationReport()), schemaVersion()-version; got != want {
+				t.Errorf("%d step(s) were outstanding from v%d and %d were reported", want, version, got)
+			}
+
+			ctx := context.Background()
+			rows, err := s.List(ctx, nil, 0)
+			if err != nil {
+				t.Fatalf("List after migration: %v", err)
+			}
+			if len(rows) != seededJobRows {
+				t.Fatalf("a migrated v%d database holds %d job record(s), want %d", version, len(rows), seededJobRows)
+			}
+			byPath := make(map[string]Job, len(rows))
+			for _, j := range rows {
+				byPath[j.Path] = j
+			}
+			if j := byPath["/lib/failed.mkv"]; j.Status != Failed || j.FailCount != 2 ||
+				j.Fingerprint != "30:300" || j.UpdatedAt != 1002 {
+				t.Errorf("a record written at v%d came back mangled: %+v", version, j)
+			}
+			if j := byPath["/lib/done.mkv"]; j.Status != Done || j.Fingerprint != "10:100" {
+				t.Errorf("a done record written at v%d came back mangled: %+v", version, j)
+			}
+			if version >= 5 {
+				r, ok, err := s.GetRetained(ctx, "/lib/kept.mkv")
+				if err != nil || !ok {
+					t.Fatalf("the retention written at v%d did not survive: ok=%v err=%v", version, ok, err)
+				}
+				if r.SourceBytes != 8888 || r.RetainedPath != "/lib/.holdfast-undo/kept" || r.RestoredAt != nil {
+					t.Errorf("the retention written at v%d came back mangled: %+v", version, r)
+				}
+			}
+			if version >= 7 {
+				parked, err := s.ParkedIncidents(ctx)
+				if err != nil {
+					t.Fatalf("ParkedIncidents: %v", err)
+				}
+				if len(parked) != 1 || parked[0].SourcePath != "/lib/parked.mkv" ||
+					parked[0].ReplacementPath != "/lib/parked.hevc.mkv" {
+					t.Errorf("the incident written at v%d came back as %+v", version, parked)
+				}
+			}
+		})
+	}
+
+	t.Run("from a fresh database", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "jobs.db")
+		s, err := Open(path)
+		if err != nil {
+			t.Fatalf("a fresh database must open: %v", err)
+		}
+		defer func() { _ = s.Close() }()
+
+		if got, want := userVersion(t, path), schemaVersion(); got != want {
+			t.Errorf("a fresh database is at user_version %d, want %d", got, want)
+		}
+		report := s.MigrationReport()
+		if len(report) != schemaVersion() {
+			t.Fatalf("a fresh database applied %d step(s) and reported %d", schemaVersion(), len(report))
+		}
+		// The one shipped step that moves a count, on the one database where it moves it.
+		totals, ok := countedIn(report[5], "ledger_totals")
+		if !ok || totals.Before != 0 || totals.After != 1 {
+			t.Errorf("the totals step recorded %+v (present=%v) on a fresh database, want 0 rows then 1",
+				totals, ok)
+		}
+		if got := rowCountOf(t, path, "ledger_totals"); got != 1 {
+			t.Errorf("a fresh database holds %d totals row(s), want the one singleton", got)
+		}
+	})
+}
+
+// [AC-2][AC-5] Every step in the history declares a row-count intent BESIDE it, including
+// every step that has already shipped, and declaring it changed no step's text.
+//
+// A MISSING declaration is what this asserts against, not a zero one: the two are the same
+// map at runtime, so a step nobody thought about would otherwise be indistinguishable from
+// a step that meant no change. The text is pinned by TestMigrations_ShippedTextIsNeverEdited,
+// which is the other half of the claim: a declaration rides beside a shipped step without
+// touching a byte of it.
+func TestMigrations_EveryStepDeclaresItsRowIntentBesideIt(t *testing.T) {
+	for i, m := range migrations {
+		if m.rows == nil {
+			t.Errorf("migration %d (%s) declares no row-count intent - a step that changes no "+
+				"row must SAY so (noRowChange), so a forgotten declaration cannot look like a "+
+				"considered one", i+1, m.name)
+		}
+	}
+}
+
+// [AC-6] The read-only door applies no step, takes no row count, writes nothing to the
+// database file, and refuses a version mismatch in BOTH directions.
+//
+// The empty report is what "took no count" is observable as: counts are taken only inside
+// the transaction that applies a step, and that report is the only place they are kept, so
+// a door reporting none ran neither.
+func TestOpenReadOnly_AppliesNoStepCountsNothingAndRefusesBothDirections(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("at this build's version it reads and changes nothing", func(t *testing.T) {
+		path := filepath.Join(dir, "current.db")
+		atShippedVersion(t, path, schemaVersion())
+		before, beforeVersion := fileSHA(t, path), userVersion(t, path)
+
+		st, err := OpenReadOnly(path)
+		if err != nil {
+			t.Fatalf("OpenReadOnly: %v", err)
+		}
+		defer func() { _ = st.Close() }()
+
+		if report := st.MigrationReport(); len(report) != 0 {
+			t.Errorf("a read-only open applied %d step(s): %+v", len(report), report)
+		}
+		if after := fileSHA(t, path); after != before {
+			t.Errorf("a read-only open changed the database file:\n  before %s\n  after  %s", before, after)
+		}
+		if after := userVersion(t, path); after != beforeVersion {
+			t.Errorf("a read-only open moved the schema version from %d to %d", beforeVersion, after)
+		}
+	})
+
+	t.Run("behind this build it refuses rather than migrating", func(t *testing.T) {
+		path := filepath.Join(dir, "older.db")
+		atShippedVersion(t, path, schemaVersion()-1)
+		before := fileSHA(t, path)
+
+		st, err := OpenReadOnly(path)
+		if err == nil {
+			_ = st.Close()
+			t.Fatal("OpenReadOnly accepted a ledger an earlier build wrote")
+		}
+		// The refusal is DELIBERATE, and the message is how that is observable: a door
+		// that tried to migrate and was merely stopped by the read-only handle would fail
+		// here too, having taken the counts and attempted the step. This one names both
+		// versions and the act that upgrades a ledger instead.
+		msg := err.Error()
+		for _, want := range []string{
+			fmt.Sprint(schemaVersion() - 1), fmt.Sprint(schemaVersion()), "holdfast run",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("the refusal does not name %q: %v", want, msg)
+			}
+		}
+		if after := fileSHA(t, path); after != before {
+			t.Error("a refused read-only open changed the database file")
+		}
+		if got, want := userVersion(t, path), schemaVersion()-1; got != want {
+			t.Errorf("a refused read-only open left the store at user_version %d, want %d", got, want)
+		}
+	})
+
+	t.Run("ahead of this build it refuses too", func(t *testing.T) {
+		path := filepath.Join(dir, "newer.db")
+		atShippedVersion(t, path, schemaVersion())
+		db, err := sql.Open("sqlite", "file:"+path)
+		if err != nil {
+			t.Fatalf("raw open: %v", err)
+		}
+		if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion()+1)); err != nil {
+			t.Fatalf("stamp a future version: %v", err)
+		}
+		_ = db.Close()
+
+		st, err := OpenReadOnly(path)
+		if err == nil {
+			_ = st.Close()
+			t.Fatal("OpenReadOnly accepted a ledger from the future")
+		}
+		if got, want := userVersion(t, path), schemaVersion()+1; got != want {
+			t.Errorf("a refused read-only open left the store at user_version %d, want %d", got, want)
+		}
+	})
+}
+
+// fileSHA is the whole database file, hashed. A read that changed one byte of it fails the
+// comparison whatever that byte was.
+func fileSHA(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(b))
+}
+
+// [AC-10] The step that introduces the version stamp changes no table's row count and
+// leaves every record that already existed carrying no stamp.
+//
+// This is the no-backfill rule with teeth. Stamping the records already in the ledger
+// would claim that this build wrote records it never saw, about files that may since have
+// been deleted, in the tables whose whole job is to be evidence.
+func TestMigrate_TheVersionStampStepMovesNoRowAndStampsNothingThatAlreadyExisted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.db")
+	// The version before the STAMP shipped, which stops being this build's minus one the
+	// moment a step is appended after it. The steps from there up all run; the row-count
+	// assertion below is asked of the stamp step, and the no-backfill one of the result.
+	stamp := stampStepVersion(t)
+	atShippedVersion(t, path, stamp-1)
+	recordTables := []string{"jobs", "retained_originals", "swap_incidents"}
+	before := make(map[string]int64, len(recordTables))
+	for _, table := range recordTables {
+		before[table] = rowCountOf(t, path, table)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	report := s.MigrationReport()
+	if got, want := len(report), schemaVersion()-(stamp-1); got != want {
+		t.Fatalf("%d step(s) were outstanding and %d were reported", want, got)
+	}
+	stampStep := report[0]
+	if stampStep.Version != stamp {
+		t.Fatalf("the first outstanding step is v%d (%s), want the stamp at v%d",
+			stampStep.Version, stampStep.Name, stamp)
+	}
+	for _, counted := range stampStep.Tables {
+		if counted.Changed() != 0 {
+			t.Errorf("the stamp step moved %s by %+d rows", counted.Table, counted.Changed())
+		}
+	}
+	for _, table := range recordTables {
+		if got := rowCountOf(t, path, table); got != before[table] {
+			t.Errorf("%s holds %d row(s) after the stamp step, want %d", table, got, before[table])
+		}
+	}
+
+	ctx := context.Background()
+	rows, err := s.List(ctx, nil, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, j := range rows {
+		if j.Stamp.Recorded() {
+			t.Errorf("%s existed before the stamp step and now reads as written under %s", j.Path, j.Stamp)
+		}
+	}
+	if r, ok, err := s.GetRetained(ctx, "/lib/kept.mkv"); err != nil || !ok {
+		t.Fatalf("GetRetained: ok=%v err=%v", ok, err)
+	} else if r.Stamp.Recorded() {
+		t.Errorf("a retention that existed before the stamp step now reads as written under %s", r.Stamp)
+	}
+	parked, err := s.ParkedIncidents(ctx)
+	if err != nil || len(parked) != 1 {
+		t.Fatalf("ParkedIncidents: %d incident(s), err=%v", len(parked), err)
+	}
+	if parked[0].Stamp.Recorded() {
+		t.Errorf("an incident that existed before the stamp step now reads as written under %s", parked[0].Stamp)
+	}
+
+	// And the column itself is untouched on every pre-existing row, asked of SQLite rather
+	// than of the projection that just answered.
+	for _, table := range recordTables {
+		if got := stampedRows(t, path, table); got != 0 {
+			t.Errorf("%d row(s) in %s carry a stamp after the migration, want none backfilled", got, table)
+		}
+	}
+}
+
+// stampedRows counts the rows in a table whose version stamp is not NULL, read straight off
+// the file.
+func stampedRows(t *testing.T, path, table string) int64 {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var n int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM "` + table + `" WHERE schema_version IS NOT NULL`).Scan(&n); err != nil {
+		t.Fatalf("count stamped rows in %s: %v", table, err)
+	}
+	return n
 }

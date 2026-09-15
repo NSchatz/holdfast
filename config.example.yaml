@@ -16,13 +16,50 @@
 # Directory trees to scan and re-encode files under. This is the ONLY place holdfast
 # ever mutates the filesystem, so it is validated strictly: each root must be absolute
 # and must not be "/" or your home directory.
+#
+# AN ENTRY IS EITHER A PATH OR A PATH WITH A PROFILE. Write a bare path and that root
+# uses every setting below. Write a mapping with `path` plus any of the per-library
+# knobs and that root uses those instead, for those knobs only - everything it does not
+# name it inherits.
+#
+# The inheritance is three layers, innermost last:
+#   built-in default  <-  this file's top level (then HOLDFAST_*)  <-  the entry itself
+# A knob PRESENT in an entry wins even when its value is zero (`crf: 0` means 0); a knob
+# ABSENT from it inherits. `holdfast validate` prints what each root actually resolved
+# to, and which layer supplied each value, so you never have to work it out from here.
+#
+# A root may override ONLY these: encoder, crf, preset, pixel_format, container_ext,
+# min_bitrate_kbps, min_savings_percent, skip_hardlinked, vmaf_enable, min_vmaf,
+# vmaf_min_pool, vmaf_min_chroma, vmaf_subsample, vmaf_model. Anything else inside an
+# entry refuses to start: workers, state_dir, server_*, undo_window_hours,
+# history_retention_rows, run_window, max_load and the notification keys describe the
+# PROCESS, not a library, and stay at the top level.
+#
+# NO ROOT MAY CONTAIN ANOTHER. Nesting is refused rather than resolved by a precedence
+# rule, because a file under two roots would have two answers to what may be done to it.
 library_roots:
+  # A plain path: this root, every setting below.
   - /mnt/media
+  # The same list, with a root that decides its own. A 22 that is right for a film is
+  # wasteful on a 22-minute sitcom, and grain and dark scenes are where an honest encode
+  # dips lowest - so this one encodes a little harder and accepts a lower worst frame,
+  # while inheriting the encoder, the preset and everything else from the top level.
+  - path: /mnt/anime
+    crf: 20
+    vmaf_min_pool: 45
 
 # Log verbosity: debug | info | warn | error  (default: info)
 log_level: info
 
-# When true, report intended actions without changing any file.
+# When true, report intended actions without changing any file: every guard runs, and
+# nothing is encoded, swapped or deleted. A file that passes every guard is RECORDED as
+# `would-transcode` - a terminal outcome that says what a real run would do to it,
+# carrying that file's source codec and source size - so the dashboard, /api/history and
+# holdfast_files_total{outcome="would-transcode"} answer "which files would this
+# transcode?" instead of leaving them looking like work still in progress.
+#
+# It is a decision about a scan, not a disposal of the file: turning this back off and
+# running again transcodes exactly the files that list named.
 dry_run: false
 
 # --- what to scan ---
@@ -97,6 +134,68 @@ dry_run: false
 #                         # still applies whenever the effective extension differs
 #                         # from the source's own.
 
+# bitrate_kbps: 0        # 0 (the DEFAULT) keeps the crf/quality target above,
+#                         # which is this tool's archival posture. A positive value
+#                         # switches the affected jobs to a TARGET-BITRATE rate
+#                         # control at that many kbps, and then NO quality target is
+#                         # passed to the encoder at all - no -crf, -cq,
+#                         # -global_quality or -qp - because a rate control and a
+#                         # quality target are two different instructions and
+#                         # passing both leaves which one wins to the encoder.
+#                         # It is announced at startup as a NOTICE, not a warning:
+#                         # every no-loss gate still runs, and an encode that misses
+#                         # one is still rejected with the source untouched.
+#                         # Must be a whole number of kbps; 8000.5, "8000" with a
+#                         # unit, true or a list is a startup REFUSAL naming the
+#                         # key and the value, never a silently truncated bitrate.
+
+# --- per-job settings: transcode profiles ---
+# encode_profiles is an ORDERED list. The FIRST profile whose match selects a
+# source supplies that job's settings, laid over what that file would otherwise be
+# encoded at; a later matching profile has NO effect on that job, and any setting a
+# matching profile does not override keeps the value it inherited. A source no
+# profile matches is transcoded under what it inherited - never skipped, never
+# failed. Absent (the default) leaves every job at exactly that.
+#
+# "What it inherited" is four layers, innermost last: the built-in default, then
+# the top-level keys above, then the profile of the LIBRARY ROOT the file lives
+# under (the mapping form of a library_roots entry, at the top of this file), then
+# the encode profile matched here. The last layer to mention a key decides it - so
+# a root at `crf: 20` whose files match a profile that sets only `encoder` encodes
+# at that root's 20, not at the top level's. `holdfast validate` prints the first
+# three per root, knob by knob, with the layer each value came from.
+#
+# `match` is a glob over the source's path:
+#   - no "/" in the pattern  -> matched against the file's BASENAME (`*.mkv`)
+#   - a "/" in the pattern   -> matched against the WHOLE path, segment by
+#                               segment. `*`, `?` and `[...]` do not cross a
+#                               separator; `**` matches zero or more whole
+#                               segments (`**/4K/**`).
+#   - an EMPTY match         -> selects every source (the catch-all; only ever
+#                               reached by what no earlier profile matched).
+#
+# A profile accepts exactly: name, match, encoder, crf, preset, pixel_format,
+# container_ext, bitrate_kbps. Any other key is a startup REFUSAL naming the
+# profile and the key - a typo inside a profile is caught, not silently ignored.
+# The name is recorded on every terminal ledger row the profile decided, and on
+# the `holdfast export` NDJSON row, so "what ran" stays answerable.
+#
+# A profile selects what the ENCODER PRODUCES and nothing else. There is
+# deliberately no per-profile VMAF threshold, undo window or retention setting: a
+# profile must never be able to move a gate that decides whether a source is
+# destroyed.
+#
+# encode_profiles:
+#   - name: 4k-av1
+#     match: "**/4K/**"    # everything under any directory named 4K
+#     encoder: svtav1
+#     crf: 32
+#     container_ext: mkv
+#   - name: bulk-tv
+#     match: "**/TV/**/*.mkv"
+#     bitrate_kbps: 3000   # this profile's jobs run at a target bitrate; the
+#                           # rest of the library keeps the crf above
+
 # --- HDR / colour + source-property fidelity (TRANSCODE-3; not separately
 # configurable — always on) ---
 # SKIPPED, never silently converted:
@@ -118,8 +217,24 @@ dry_run: false
 # min_bitrate_kbps: 2500     # skip sources below this — re-encoding them only bloats
 # min_savings_percent: 0     # accept only if output <= input*(1-this/100); 0 = strictly smaller
 # duration_tolerance_sec: 1  # reject if output duration drifts more than this
-# max_failures: 3            # retry a failing file this many times before parking it
+# max_failures: 3            # attempts to spend on a failure that MAY come out differently
 # skip_hardlinked: true      # skip files with >1 hard link (an active seed/dup)
+#
+# max_failures BOUNDS THE RETRIES THAT ARE WORTH SOMETHING, and only those. It governs a
+# failure a later attempt could answer differently - a full disk, an OOM-killed encoder, a
+# store error - and such a file is retried up to this many times before it is parked.
+#
+# A failure this configuration makes FINAL is not retried at all: it parks the file at its
+# FIRST occurrence. Most of what the gate rejects is a pure function of the source bytes,
+# these settings and the pinned ffmpeg build - an output that came out bigger than its
+# source, one that is not the target codec, a truncated encode, a dropped track, a VMAF or
+# chroma floor - so attempts two and three would each pay a full encode (hours, on a
+# feature-length source at preset slow) to reach the identical rejection. The row says so:
+# its reason names the gate that rejected the file AND states that the verdict is final.
+#
+# Final means final UNDER THIS CONFIGURATION, never "this file is hopeless". Change what
+# the verdict depends on - min_savings_percent, the encoder, crf/preset, a VMAF floor - and
+# it is a different question, to be asked again.
 
 # --- VMAF perceptual-quality gate (the last no-loss layer) ---
 # After the structural checks pass, VMAF compares the output against the source and
@@ -212,8 +327,76 @@ dry_run: false
 # quietly is not kept.
 # undo_window_hours: 0       # 0 = off (default); e.g. 24 keeps an original for a day
 
+# --- what a swap carries from the source ---
+# The replacement is written by ffmpeg under holdfast's own umask and uid:gid, and the
+# rename then publishes it under the source's name. holdfast carries the source's mode,
+# its ownership (only where it is privileged to - a container running as an ordinary
+# `user:` has no CAP_CHOWN, and says so once per run) and its modification time across,
+# so reclaiming disk does not quietly rewrite your library's permissions and its ordering.
+# ACLs and xattrs are NOT carried; docs/docker.md says so in full.
+#
+# preserve_mtime is the one part of that you can turn off, and it DEFAULTS TO ON.
+# Resetting a file's mtime is a real and unrecoverable change to a media server: Plex's and
+# Jellyfin's "Recently Added", and every date-based sort and smart collection built on it,
+# sees a first pass over a library as the entire library arriving at once. Every
+# neighbouring tool (cp -p, rsync -a, mv) preserves the modification time across a
+# replacement, so preserving it is the least-surprising behaviour and RESETTING it is the
+# side effect. Set it to false if you would rather the replacement's mtime say when the
+# bytes were actually written - that is a legitimate meaning, and it is why the key exists.
+#
+# Either way a resume still works: the swap always makes the file smaller, so the
+# size:mtime identity holdfast keys a completed file under moves whatever this is set to.
+# preserve_mtime: true       # true = the replacement keeps the source's modification time
+
 # --- runtime ---
 # state_dir: state           # holds the resumable SQLite job store (jobs.db)
+#
+# --- the scratch directory: where the encode's working file lives ---
+# Full reference, including what this honestly buys and what it costs:
+# docs/scratch.md.
+#
+# scratch_dir: ""            # "" (the DEFAULT, and what an absent key means) writes
+#                            # each encode's working file BESIDE THE SOURCE, which is
+#                            # the behaviour this tool has always had. An absolute
+#                            # path moves the WORKING FILE there - and only the
+#                            # working file.
+#                            #
+#                            # IT DOES NOT MOVE THE SWAP. Once the acceptance gates
+#                            # have accepted, the result is copied into a temp beside
+#                            # the source, re-read off disk and proved byte-for-byte
+#                            # to be the bytes the gates passed, made durable, and
+#                            # handed to the SAME atomic same-directory rename as
+#                            # ever. Nothing is renamed or moved out of here onto a
+#                            # source, on any mount.
+#                            #
+#                            # What it buys is the SHAPE of the I/O: seek thrash
+#                            # avoided on a spinning disk, parity read-modify-write
+#                            # churn avoided on unRAID/SnapRAID/RAIDZ, failed and
+#                            # aborted transcodes kept off the array entirely, and a
+#                            # better write pattern over NFS/SMB. What it costs is a
+#                            # full write-plus-read cycle on the scratch device - on
+#                            # an SSD, write endurance spent at video-file sizes. It
+#                            # does NOT change how many bytes the source's drive
+#                            # handles: that drive is read once and written once
+#                            # either way.
+#                            #
+#                            # Refused at STARTUP, before anything is encoded, if it
+#                            # does not exist, is not a directory, cannot be
+#                            # inspected or written to, is short of the floor below,
+#                            # or overlaps a library root (either way round, after
+#                            # symlink resolution). Storage here that is not local is
+#                            # REPORTED and does not refuse: nothing irreversible
+#                            # happens in this directory, so no allow_non_local entry
+#                            # is required or possible for it.
+#
+# scratch_min_free_gb: 50    # the free-space floor, in GiB, the scratch filesystem
+#                            # must clear at startup. 0 disables the floor. It is a
+#                            # floor and NOT a prediction - startup has no per-file
+#                            # size to check against - so each job also re-checks,
+#                            # immediately before it encodes, that its source will
+#                            # fit, and fails THAT job (naming the path, the free
+#                            # space and the source size, source untouched) if it
+#                            # will not. Ignored entirely when scratch_dir is unset.
 #
 # history_retention_rows: 0  # THE LEDGER'S SIZE BOUND, AND IT SHIPS DISABLED.
 #                            #   0 (the default, and what an absent key means) keeps EVERY
@@ -289,22 +472,26 @@ dry_run: false
 # server_addr: 127.0.0.1:8080  # bind address. LOCALHOST by default (fail-safe: the
 #                              #   control surface is not network-exposed unless you
 #                              #   opt in — then front it with a reverse proxy).
-# server_auth_token: ""        # bearer token required for the MUTATING endpoints
-#                              #   (rescan/pause/resume). Empty = those endpoints are
-#                              #   DISABLED (read-only). Prefer the environment
-#                              #   variable HOLDFAST_SERVER_AUTH_TOKEN so no secret
-#                              #   lands in this file.
+# server_auth_token: ""        # A SECRET REFERENCE to the bearer token the MUTATING
+#                              #   endpoints (rescan/pause/resume) require. Empty = those
+#                              #   endpoints are DISABLED (read-only). See THE THREE
+#                              #   SECRET KEYS below: a literal token here, or in
+#                              #   HOLDFAST_SERVER_AUTH_TOKEN, REFUSES TO START.
+#                              #     server_auth_token: file:/run/secrets/holdfast-token
 # scan_interval_sec: 0         # 0 = scan once on startup + on demand (via the API).
 #                              #   >0 = also re-scan every N seconds.
 
 # --- observability + host-fair scheduling (`holdfast serve`) ---
 # metrics_enable: true         # expose Prometheus metrics at /metrics (read-only
 #                              #   instrumentation; best-effort, never affects files)
-# notify_url: ""               # a shoutrrr service URL for best-effort notifications
-#                              #   (per-file failure + per-scan summary), e.g.
-#                              #   ntfy://ntfy.sh/mytopic or a Discord/Gotify URL.
-#                              #   Empty disables. May carry a secret — prefer the env
-#                              #   var HOLDFAST_NOTIFY_URL over this file.
+# notify_url: ""               # A SECRET REFERENCE to a shoutrrr service URL, for
+#                              #   best-effort notifications (per-file failure + per-scan
+#                              #   summary). The WHOLE URL is the secret: a shoutrrr URL
+#                              #   carries its credential in its userinfo, host, path or
+#                              #   query. Empty disables. A literal URL here refuses to
+#                              #   start; put the URL in a file instead:
+#                              #     notify_url: file:/run/secrets/holdfast-notify-url
+#                              #   (that file then holds e.g. ntfy://ntfy.sh/mytopic)
 # run_window: ""               # daily host-fair window "HH:MM-HH:MM" (local time)
 #                              #   during which new work may start; empty = always.
 #                              #   Outside it, serve stops feeding NEW files (an
@@ -314,4 +501,36 @@ dry_run: false
 # tautulli_url: ""             # optional Plex-aware pause: while Tautulli reports an
 # tautulli_api_key: ""         #   active stream, stop feeding new files. Both required
 #                              #   to enable; a Tautulli outage fails OPEN (never halts
-#                              #   transcoding). Prefer env vars for the API key.
+#                              #   transcoding). tautulli_url is an ADDRESS and stays
+#                              #   plain; tautulli_api_key is a SECRET REFERENCE:
+#                              #     tautulli_api_key: file:/run/secrets/tautulli-key
+
+# --- THE THREE SECRET KEYS (secrets K1) ---------------------------------------
+# server_auth_token, notify_url and tautulli_api_key carry a REFERENCE to a credential,
+# never a credential. Two forms, and deliberately no third:
+#
+#   file:/run/secrets/holdfast-token     the file's CONTENTS are the value
+#   cmd:/usr/local/bin/fetch-my-secret   the command's STDOUT is the value
+#
+# A LITERAL credential in any of those three keys - in this file OR in the matching
+# HOLDFAST_* environment variable - REFUSES TO START, naming the key and how to convert
+# it. That is deliberate, and the reason is the encoder: holdfast starts ffmpeg and
+# ffprobe as child processes, and a child inherits its parent's environment, so a
+# credential in holdfast's environment is readable from every encoder invocation's
+# /proc/<pid>/environ. An `env:` reference form would have the same problem, so there
+# is not one.
+#
+# Migrating from a literal in HOLDFAST_SERVER_AUTH_TOKEN? Write the token into a file
+# (mode 0400) and set that same variable to `file:/that/path`. The variable still works -
+# it carries the reference now, which is not a secret.
+#
+# A `cmd:` locator is split on whitespace and run with NO SHELL, so there is nothing to
+# quote and no injection surface; wrap it in a script if you need a pipeline. One trailing
+# newline is stripped from either form. A cmd: resolver has 5s to terminate, and its
+# stderr is discarded unread rather than logged - a resolver that fails after printing the
+# credential is the common shape, and quoting its diagnostic is how the credential gets
+# published.
+#
+# Both are checked AT START: a literal is refused, and every configured reference is
+# resolved before the library is walked. `holdfast validate` checks the shape; it does not
+# reach into a secret store. docs/secrets.md is the whole story.

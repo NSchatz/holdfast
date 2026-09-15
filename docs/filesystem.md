@@ -32,7 +32,14 @@ record at startup:
 - the state directory (`state_dir`), or - where it does not exist yet - the
   storage it would be created on;
 - every distinct mounted filesystem the startup walk finds beneath a configured
-  library root, at any depth, whether or not a source lies on it.
+  library root, at any depth, whether or not a source lies on it;
+- the working location (`scratch_dir`), when one is configured. It is inspected,
+  classified and reported exactly like the paths above, and it is refused for its
+  own reasons - it does not exist, it is not a directory, it cannot be inspected,
+  it overlaps a library root, the filesystem holding it is already below
+  `scratch_min_free_gb`, or this process cannot create and remove a file in it.
+  What does NOT refuse it is storage that is not local: see
+  [opting in](#opting-in) below and [the scratch directory](scratch.md).
 
 A path is classified `local` only on a **positive** identification against the
 set below. Anything else - a type this build does not recognise, a lookup that
@@ -50,6 +57,32 @@ path whose **resolved form cannot be established**, which holdfast cannot compar
 against your `allow_non_local` entries and therefore will not start on. Each
 refuses the run with its own cause and its own remedy, so you are never sent
 looking for a storage problem that is not there.
+
+### Your `state_dir` path is taken literally
+
+The job ledger is opened through a SQLite `file:` DSN, which is a **URI**, and
+three characters mean something in one: `#` opens a fragment, `?` opens a query,
+and `%` introduces an escape. holdfast now percent-encodes all three before
+building that DSN, so `jobs.db` is created and opened at exactly the path you
+configured, whatever it contains.
+
+**Upgrade note, and it is the only case where the ledger moves.** Builds before
+this one passed the path through unescaped, so a `state_dir` carrying one of
+those characters resolved somewhere else: `/srv/state#2` opened `/srv/state`
+(truncated at the `#`), and `/srv/a%41b` opened `/srv/aAb` (the escape decoded).
+If your `state_dir` contains a `#`, a `?` or a `%`, the first run of this build
+opens a **different, empty** ledger at the real path and the old one is left
+where it is - taking the undo window's retention records and the record-based
+hold-backs with it. Nothing in your library is touched by that: the ledger is the
+record of what holdfast did, not a claim on any file. Move the old database into
+place before starting if you want that history back:
+
+```sh
+mv '/srv/state/jobs.db' '/srv/state#2/jobs.db'   # old resolved path -> the configured one
+```
+
+A `state_dir` with none of those three characters in it is unaffected, which is
+every path this project has ever shipped an example of.
 
 ## Filesystem types this build classifies local
 
@@ -117,7 +150,8 @@ one, and an unrecognised filesystem counts as not-local for exactly this reason.
 ## Opting in
 
 When a checked path is not local, holdfast refuses to start and prints the exact
-line that would permit it:
+line that would permit it. That is true of every checked path except the
+configured working location, which is covered on its own below:
 
 ```yaml
 allow_non_local:
@@ -144,6 +178,20 @@ permits a run on storage that is not local; it never permits a run on a path
 holdfast cannot look at. A root whose contents are unknown to it would look
 exactly like an empty library, so it refuses instead.
 
+And one checked path the refusal does not reach: the configured **`scratch_dir`**.
+Storage there that holdfast cannot positively identify as local **starts the run**,
+with a startup notice saying so and no declaration required - nor could one be
+written, since a well-formed entry names a library root, the state directory or a
+path beneath a root, and the working location is none of those. The declaration
+exists because the no-loss contract needs local rename semantics **where the
+irreversible act happens**, and no irreversible act happens in the working area: the
+encode's working file is disposable by construction, and the swap still runs beside
+the source on storage the checks above adjudicated. Refusing there would be a gate
+that protects nothing while training you to add declarations. It is reported rather
+than refused, because "the encode is running over NFS" is the answer to a throughput
+complaint you would otherwise chase for a week. [The scratch directory](scratch.md)
+carries the rest of it.
+
 ## What the startup check costs
 
 The check is not free and it is not lazy, so here is the bill.
@@ -165,6 +213,19 @@ files: **no media file is opened** by this check, not one byte read, not one
 probe run. A library of ten files and a library of ten thousand in the same tree
 cost the same here. What makes this expensive is a deep or wide tree, not a big
 one.
+
+That traversal is paid **once**. The walk **keeps the entry names it read** and
+hands them to the scan that follows, so the first scan after a start
+**lists nothing the walk already listed**: a `run` reads your directory tree
+once, where it used to read it three times (the walk, the sweep for orphaned
+temp files, the enumeration of sources). What that costs instead is memory - the
+entry names of one library, held from the end of the walk until that scan uses
+them, and **released directory by directory** as it does.
+
+The scan that reads them sees the library **as the walk saw it**. A file that
+appeared in between is enumerated by the next scan, not that one: every later
+scan in a `serve` process lists for itself, so the wait is until the next scan
+rather than until the next restart.
 
 Two consequences worth knowing:
 

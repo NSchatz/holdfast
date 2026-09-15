@@ -4,52 +4,71 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
+	"strings"
 )
 
-// Schema versioning (TRANSCODE-13).
+// Schema versioning.
 //
-// Why this exists at all. The pre-TRANSCODE-13 schema was a bare
-// `CREATE TABLE IF NOT EXISTS jobs (...)` run on every Open, with no version stamp
-// anywhere. That is not a schema — it is a schema for a database that never changes.
-// `IF NOT EXISTS` matches on the table's NAME, not its SHAPE, so the moment anyone
-// adds a column to that statement it becomes a **silent no-op against every database
-// that already exists**: the file keeps its old columns, Open reports success, the
-// process comes up believing the column is there, and it dies on the first query that
-// names it. The failure is not at the migration, it is later, on a live install, on a
-// query — the worst possible place.
+// `CREATE TABLE IF NOT EXISTS` matches on a table's NAME, not its SHAPE, so adding a column
+// to such a statement is a silent no-op against every database that already exists: the
+// file keeps its old columns, Open reports success, and the process dies on the first query
+// that names the new one. The failure lands later, on a live install, on a query, which is
+// the worst possible place.
 //
-// So the columns TRANSCODE-13 needs cannot be added until there is a real migration
-// mechanism, and the mechanism has to go in NOW, while the only jobs.db in the world
-// is a developer's. That is the whole ordering argument for this phase.
-//
-// The mechanism is SQLite's `PRAGMA user_version` — a 32-bit integer SQLite stores in
-// the database header and otherwise ignores entirely, which is exactly what a schema
-// version wants to be. `migrations` below is the schema's history; the version is its
-// length; a database is migrated by running the entries it has not run yet.
+// The mechanism is SQLite's `PRAGMA user_version`, a 32-bit integer SQLite stores in the
+// database header and otherwise ignores entirely. `migrations` below is the schema's
+// history, the version is its length, and a database is migrated by running the entries it
+// has not run yet.
 
 // migration is one forward step in the schema's history.
 type migration struct {
 	name string
 	sql  string
+
+	// rows is what this step DECLARES it means to do to the row counts. It is metadata
+	// BESIDE the step and never part of it: the sql above is what a database in the field
+	// has already run, and it is pinned by content hash, so a declaration can be added to
+	// a shipped step without touching a byte of what that step does.
+	rows rowChanges
 }
 
-// migrations is APPEND-ONLY, and its order IS the schema history. Never edit,
-// reorder, or delete an entry that has shipped: a database in the field has already
-// run the old text, so rewriting it changes only what a FRESH database gets — which
-// silently forks the two shapes apart and gives you a bug that reproduces on exactly
-// one of them. To change the schema, append a new entry.
+// rowChanges is a step's declared per-table row-count intent, keyed by table name. A table
+// the map does not name is declared UNCHANGED, and a table absent from the database at one
+// of the two moments holds no rows and counts zero there - so a step that creates a table
+// and seeds a row into it declares +1, and one that creates empty tables, adds columns or
+// builds indexes declares nothing.
+type rowChanges map[string]int64
+
+// noRowChange is the declaration of a step that moves no row. It is spelled out beside
+// every such step rather than left off, so a step carrying NO declaration is a step
+// somebody forgot rather than one that meant zero.
+var noRowChange = rowChanges{}
+
+// migrations is APPEND-ONLY, and its order IS the schema history. Never edit, reorder or
+// delete an entry that has shipped: a database in the field has already run the old text,
+// so rewriting it changes only what a FRESH database gets, which forks the two shapes apart
+// silently and gives you a bug that reproduces on exactly one of them. To change the
+// schema, append. A step written while another branch was open moves to the END of the
+// history rather than contesting an ordinal that is already spent.
+//
+// Every column added here is NULLABLE with NO DEFAULT. NULL means "not recorded" and has to
+// stay distinguishable from a recorded zero, because 0 is a legal value for all of them: a
+// VMAF of 0.0 is a destroyed frame, not a missing measurement. A DEFAULT would backfill
+// every pre-existing row with a fabricated outcome, inventing evidence about swaps nobody
+// measured, in the one table whose entire job is to be evidence.
 var migrations = []migration{
 	{
-		// v1 — the original TRANSCODE-5 schema, exactly as it shipped.
-		//
-		// `IF NOT EXISTS` here is load-bearing, not laziness. A database created before
-		// versioning existed already HAS this table and still reports user_version = 0,
-		// so it is indistinguishable from a fresh file by the version alone. v1 must
-		// therefore be a no-op on the former and a real create on the latter — after
-		// which both are at v1 with the identical shape and continue into v2 together.
-		// This is the one migration allowed to be shaped by that history; every future
-		// one starts from a known version.
+		// v1 - the original schema, exactly as it shipped. `IF NOT EXISTS` here is
+		// load-bearing: a database created before versioning existed already HAS this table
+		// and still reports user_version = 0, so v1 must be a no-op on it and a real create
+		// on a fresh file, after which both are at v1 with the identical shape. It is the
+		// one migration shaped by that history; every future one starts from a known version.
 		name: "jobs table",
+		// Nothing is inserted, and the create is a no-op on the pre-versioning database
+		// that already has the table, so the count is the same on both of the two shapes
+		// this one step meets.
+		rows: noRowChange,
 		sql: `
 CREATE TABLE IF NOT EXISTS jobs (
 	path        TEXT NOT NULL,
@@ -64,16 +83,10 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 `,
 	},
 	{
-		// v2 — TRANSCODE-13: the outcome columns. The engine computed every one of
-		// these while deciding the swap was safe, and then threw all of them away.
-		//
-		// Every column is NULLABLE with NO DEFAULT, deliberately. NULL means "not
-		// recorded" and has to stay distinguishable from a recorded zero, because 0 is
-		// a legal value for all of them: a VMAF of 0.0 is a destroyed frame, not a
-		// missing measurement. A `DEFAULT 0` here would backfill every pre-existing row
-		// with a fabricated perfect-looking outcome — inventing evidence about swaps
-		// nobody measured, in the one table whose entire job is to be evidence.
+		// v2 - the outcome columns. The engine computed every one of these while deciding
+		// the swap was safe, and then threw all of them away.
 		name: "outcome columns",
+		rows: noRowChange,
 		sql: `
 ALTER TABLE jobs ADD COLUMN reason       TEXT;
 ALTER TABLE jobs ADD COLUMN encoder      TEXT;
@@ -86,47 +99,32 @@ ALTER TABLE jobs ADD COLUMN encode_ms    INTEGER;
 `,
 	},
 	{
-		// v3 - DASH-7: the indexes the whole-ledger aggregates read through.
+		// v3 - the indexes the whole-ledger aggregates read through. The published figures
+		// are computed over EVERY matching row and recomputed on the snapshot path, which
+		// shares one serialized connection with the engine's writes, so a full table scan of
+		// a 300,000-row ledger on every snapshot would be paid for in encode throughput.
 		//
-		// The published figures are computed over EVERY matching row rather than over
-		// the few hundred the queue/history views ship, and they are recomputed on the
-		// snapshot path - which shares one serialized connection with the engine's
-		// writes. An aggregate that costs a full table scan of a 300,000-row ledger on
-		// every snapshot would therefore be paid for in encode throughput, and "the
-		// dashboard slowed the transcoder down" is not a trade this tool gets to make.
-		//
-		// idx_jobs_status_reason serves the skip breakdown (GROUP BY reason within the
-		// skipped rows) and the terminal counts. idx_jobs_outcome carries the four
-		// numeric columns the done-row spreads read, so each of those is an index-only
-		// scan of the done partition instead of a walk over the whole table. Both cost
-		// a little write amplification per job transition - a few microseconds against
+		// idx_jobs_status_reason serves the skip breakdown and the terminal counts;
+		// idx_jobs_outcome carries the four numeric columns the done-row spreads read, so
+		// each is an index-only scan of the done partition instead of a walk over the whole
+		// table. Both cost a little write amplification per transition, microseconds against
 		// an encode measured in minutes.
 		name: "aggregate indexes",
+		rows: noRowChange,
 		sql: `
 CREATE INDEX IF NOT EXISTS idx_jobs_status_reason ON jobs(status, reason);
 CREATE INDEX IF NOT EXISTS idx_jobs_outcome ON jobs(status, source_bytes, output_bytes, encode_ms, vmaf_mean, vmaf_min);
 `,
 	},
 	{
-		// v4 - GATE-4: what the quality gate actually compared, and what it found in
-		// the colour planes.
-		//
-		// vmaf_pix_fmt is the single format both streams were converted to before
-		// scoring. Until this phase nothing recorded it and nothing chose it: the two
-		// inputs disagree on the default path (pixel_format: auto floors output depth
-		// at 10, so an 8-bit source meets a 10-bit output) and libavfilter negotiated
-		// the conversion unobserved. vmaf_chroma + vmaf_chroma_metric are the chroma
-		// measurement and the name of the metric that produced it, which have to
-		// travel together: a bare dB figure with no metric attached is not something
-		// an operator can act on, exactly as vmaf_model established for the score.
-		//
-		// NULLABLE with NO DEFAULT, as v2 established. Every row written before this
-		// migration was scored by a gate that measured none of these things, and it
-		// must READ as not recorded rather than be backfilled with a value that would
-		// claim a chroma measurement nobody took. A DEFAULT here would invent evidence
-		// about swaps that already happened, in the one table whose whole job is to be
-		// evidence. 0.0 is legal for vmaf_chroma too - it is an obliterated plane.
+		// v4 - what the quality gate actually compared, and what it found in the colour
+		// planes. vmaf_pix_fmt is the single format both streams were converted to before
+		// scoring, which until this step nothing recorded and nothing chose. vmaf_chroma and
+		// vmaf_chroma_metric are the chroma measurement and the name of the metric that
+		// produced it, and they travel together because a bare dB figure with no metric
+		// attached is not something an operator can act on.
 		name: "comparison format and chroma columns",
+		rows: noRowChange,
 		sql: `
 ALTER TABLE jobs ADD COLUMN vmaf_pix_fmt       TEXT;
 ALTER TABLE jobs ADD COLUMN vmaf_chroma        REAL;
@@ -134,29 +132,25 @@ ALTER TABLE jobs ADD COLUMN vmaf_chroma_metric TEXT;
 `,
 	},
 	{
-		// v5 - UNDO-6: the retained originals the undo window can put back.
+		// v5 - the retained originals the undo window can put back.
 		//
-		// A SEPARATE TABLE rather than columns on jobs, and that is forced by the
-		// lifetimes. A jobs row is keyed (path, fingerprint) and the swap DELETES the
-		// pre-swap row (ProcessFile prunes it once the done row lands under the final
-		// file's new key), so a retention recorded on that row would be pruned by the
-		// very swap it exists to undo. The retention outlives the row: it is keyed by
-		// the library PATH, which is the thing an operator asks to restore.
+		// A SEPARATE TABLE rather than columns on jobs, forced by the lifetimes: a jobs row
+		// is keyed (path, fingerprint) and the swap DELETES the pre-swap row, so a retention
+		// recorded there would be pruned by the very swap it exists to undo. This is keyed by
+		// the library PATH, which is what an operator asks to restore.
 		//
-		// source_path is where the original goes BACK; swapped_path is what the swap
-		// produced (the same path for an in-place rename, a different one when the
-		// container extension changed). Both are recorded because a restore has to put
-		// one back and remove the other, and deriving either from the other after the
-		// fact would be guessing at configuration that may since have changed.
-		//
-		// swapped_fingerprint is the size:mtime of the file the swap left at
-		// swapped_path, taken immediately after the swap. It is what makes a restore
-		// refuse to overwrite content that is not what this tool put there.
-		//
-		// restored_at is NULL until an operator restores, and a released retention is
-		// DELETED outright - so "is there anything to restore for this path" is exactly
-		// "a row exists with restored_at IS NULL", with no third state to get wrong.
+		// source_path is where the original goes BACK and swapped_path is what the swap
+		// produced; both are recorded because a restore puts one back and removes the other,
+		// and deriving either from the other would be guessing at configuration that may
+		// since have changed. swapped_fingerprint is the size:mtime of what the swap left,
+		// taken immediately after it, and is what makes a restore refuse to overwrite content
+		// this tool did not put there. restored_at is NULL until an operator restores and a
+		// released retention is DELETED outright, so "is there anything to restore for this
+		// path" is exactly "a row exists with restored_at IS NULL", with no third state.
 		name: "retained originals",
+		// An empty table and two indexes: a retention is written by a swap, never by a
+		// migration, and a fabricated one would be a second link to bytes nobody kept.
+		rows: noRowChange,
 		sql: `
 CREATE TABLE IF NOT EXISTS retained_originals (
 	source_path         TEXT NOT NULL PRIMARY KEY,
@@ -173,34 +167,31 @@ CREATE INDEX IF NOT EXISTS idx_retained_expires ON retained_originals(restored_a
 `,
 	},
 	{
-		// v6 - LEDGER-5: the durable carry-forward a prune needs, and the index it reads
-		// the oldest rows through.
+		// v6 - the durable carry-forward a prune needs, and the index it reads the oldest
+		// rows through.
 		//
-		// It is v6 and NOT v4 or v5, which is the whole of what this slice's append-only
-		// rule is for. GATE-4's columns shipped as v4 and UNDO-6's retained_originals as
-		// v5 while this branch was open; a database in the field has already run both
-		// texts under those versions. Two different steps claiming one version would
-		// silently fork the schema in two - so this one moves to the end of the history
-		// rather than contesting an ordinal that is already spent.
-		//
-		// ledger_totals carries the ONE fact a pruned row would otherwise take with it.
-		// The published lifetime reclaimed total is a SUM over the done rows that recorded
-		// both sizes, so deleting such a row lowers it - not immediately (the server reads
-		// the baseline once, at startup) but at the next restart, which is precisely how a
-		// wrong total ships unnoticed. Prune therefore ADDS the rows' contribution here, in
+		// ledger_totals carries the ONE fact a pruned row would otherwise take with it. The
+		// published lifetime reclaimed total is a SUM over the done rows that recorded both
+		// sizes, so deleting such a row lowers it - not immediately, since the server reads
+		// the baseline once at startup, but at the next restart, which is precisely how a
+		// wrong total ships unnoticed. Prune therefore ADDS the rows' contribution here in
 		// the same transaction that deletes them, and ReclaimedTotal reads live rows plus
-		// this. The row can only ever grow, so the total can never run backwards.
+		// this, so the total can never run backwards.
 		//
-		// One row, enforced by the CHECK: this is a singleton counter, not a table of
-		// them, and a second row would silently split the total in two. INSERT OR IGNORE
-		// seeds it so every later UPDATE has something to update - and re-running the
-		// migration (which cannot happen, but the whole mechanism is built on it being
-		// safe if it did) changes nothing.
+		// One row, enforced by the CHECK: a second would silently split the total in two.
+		// INSERT OR IGNORE seeds it so every later UPDATE has something to update.
 		//
-		// idx_jobs_status_updated is what makes "the oldest terminal rows" an index scan
-		// rather than a sort of the operator's entire library: the prune orders terminal
-		// rows by updated_at, on the same serialized connection the engine writes through.
+		// idx_jobs_status_updated makes "the oldest terminal rows" an index scan rather than
+		// a sort of the operator's entire library, on the same serialized connection the
+		// engine writes through.
 		name: "ledger retention totals",
+		// THE ONE SHIPPED STEP THAT MOVES A ROW COUNT, and it moves it by exactly one.
+		// The INSERT OR IGNORE seeds the singleton counter into the table this same step
+		// creates, so ledger_totals goes from absent (no rows) to holding its one row on
+		// every database this step runs against - a fresh file and a v5 ledger alike.
+		// Declaring a flat zero here would make the guard refuse a legitimate first open,
+		// which for a daemon is total.
+		rows: rowChanges{"ledger_totals": 1},
 		sql: `
 CREATE TABLE IF NOT EXISTS ledger_totals (
 	id               INTEGER PRIMARY KEY CHECK (id = 1),
@@ -211,41 +202,32 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status_updated ON jobs(status, updated_at);
 `,
 	},
 	{
-		// v7 - FILESYSTEM-1 (the swap half): the source-mutation guard's achieved
-		// granularity, and the durable record of a swap that did not complete cleanly.
+		// v7 - the source-mutation guard's achieved granularity, and the durable record of
+		// a swap that did not complete cleanly. Two independent additions, in one step
+		// because they ship together.
 		//
-		// It is v7 and NOT v4, which is this slice's append-only rule doing exactly the
-		// job LEDGER-5 records above it. This step was written as v4 while the branch was
-		// open; GATE-4 then shipped v4, UNDO-6 v5 and LEDGER-5 v6, and a database in the
-		// field has already run all three of those texts under those versions. Two
-		// different steps claiming one version would silently fork the schema in two, so
-		// this one moves to the end of the history rather than contesting an ordinal that
-		// is already spent. Nothing about the SQL changes; only where it sits.
-		//
-		// Two independent additions, in one step because they ship together.
-		//
-		// (1) Four more nullable outcome columns on jobs. Three record what the
-		// source-mutation guard actually did for that job (which attributes it
-		// compared, the resolution of the timestamp it compared, and WHICH residual
-		// window applies to the storage it ran against). The fourth names the CAUSE of
-		// a swap failure when the cause is one holdfast reports distinctly. NULL is
-		// "not recorded" here exactly as it is for every other outcome column: a job
-		// that never reached the guard has no window, and a fabricated one would be a
+		// (1) Four more outcome columns on jobs. Three record what the guard actually did
+		// for that job: which attributes it compared, the resolution of the timestamp it
+		// compared, and WHICH residual window applies to the storage it ran against. The
+		// fourth names the CAUSE of a swap failure when holdfast reports it distinctly. A
+		// job that never reached the guard has no window, and a fabricated one would be a
 		// claim about a check that never ran.
 		//
-		// (2) A SEPARATE swap_incidents table. It is not more columns on jobs, and the
-		// reason is lifecycle, not tidiness: Claim CLEARS the outcome columns (it
-		// begins a new attempt) and a successful transcode PRUNES the pre-swap row, so
-		// a fact carried there is a fact with an expiry date. The record that a
-		// replacement holdfast wrote is still sitting in a library root has to outlive
-		// both of those, because the FILE does. Its own table, keyed by its own id and
-		// referring to the job by (source_path, source_fingerprint), is what gives it
-		// that lifetime.
+		// (2) A SEPARATE swap_incidents table, for lifecycle rather than tidiness: Claim
+		// CLEARS the outcome columns and a successful transcode PRUNES the pre-swap row, so
+		// a fact carried there has an expiry date. The record that a replacement holdfast
+		// wrote is still sitting in a library root has to outlive both, because the FILE
+		// does.
 		//
 		// The partial index is the read the scan makes on every run: which recorded
-		// replacement paths must not be enumerated. Partial, so it indexes only the
-		// rows that can still exclude something.
+		// replacement paths must not be enumerated. Partial, so it indexes only the rows
+		// that can still exclude something.
 		name: "swap guard record + swap incidents",
+		// Four columns, an empty table and two indexes. The AUTOINCREMENT key brings
+		// SQLite's own sqlite_sequence table into existence with it, and that table gains
+		// a row on the first INSERT into swap_incidents rather than here, so it too is
+		// declared unchanged.
+		rows: noRowChange,
 		sql: `
 ALTER TABLE jobs ADD COLUMN guard_attributes       TEXT;
 ALTER TABLE jobs ADD COLUMN guard_time_resolution  TEXT;
@@ -280,6 +262,172 @@ CREATE INDEX IF NOT EXISTS idx_incidents_excluded ON swap_incidents(replacement_
 	WHERE disposition_replacement IS NULL OR disposition_replacement = 'retained-excluded';
 `,
 	},
+	{
+		// v8 - the source codec a dry-run decision records: the one fact the outcome columns
+		// did not already carry. The size is source_bytes, which v2 added and which means
+		// the same thing on this row as on a done row.
+		name: "source codec",
+		rows: noRowChange,
+		sql: `
+ALTER TABLE jobs ADD COLUMN source_codec TEXT;
+`,
+	},
+	{
+		// v9 - the class of a terminal failure: whether a re-attempt could differ. One
+		// nullable TEXT column holding a two-value vocabulary (store.FailureClass), on jobs
+		// rather than in a table of its own because its lifetime IS the row's.
+		//
+		// Here NULL is not "unknown": an absent class READS as transient
+		// (FailureClass.Class), the retry direction and the only fail-safe one, and every
+		// failure row already in the field was written by a build that retried every failure
+		// alike. No backfill is owed, and no index: nothing queries BY the class.
+		name: "failure class",
+		rows: noRowChange,
+		sql: `
+ALTER TABLE jobs ADD COLUMN failure_class TEXT;
+`,
+	},
+	{
+		// v10 - the decision inputs a terminal row was taken under: one nullable TEXT column
+		// holding what the decision that wrote the row actually READ from the configuration
+		// (store.DecisionInputs), on jobs for the reason the failure class is.
+		//
+		// A row already in the field recorded no inputs and must READ as not recorded, which
+		// the re-opening rule treats as "this verdict cannot be re-derived": the row is
+		// offered to the pipeline once and the decision it then reaches records what it read.
+		// A DEFAULT would make those rows MATCH whatever is current and stay excluded for
+		// ever, precisely the silent no-op this column exists to end.
+		//
+		// The index on (status, decision_inputs) serves the survey the startup report and
+		// `validate` read: it bounds that read to the two terminal statuses rather than
+		// letting it walk a 300,000-row ledger on the engine's own serialized connection.
+		name: "decision inputs",
+		rows: noRowChange,
+		sql: `
+ALTER TABLE jobs ADD COLUMN decision_inputs TEXT;
+CREATE INDEX IF NOT EXISTS idx_jobs_status_inputs ON jobs(status, decision_inputs);
+`,
+	},
+	{
+		// v11 - WHICH video stream the quality gate compared. v4 recorded the format both
+		// streams were converted to; this records which streams those were, on a source that
+		// can carry more than one.
+		//
+		// NO BACKFILL, and 'v:0' is the tempting default precisely because it is what this
+		// build would now write: it would put a stream on rows nobody recorded one for, and
+		// on rows whose VMAF gate never ran at all. No index either.
+		name: "scored video stream",
+		rows: noRowChange,
+		sql: `
+ALTER TABLE jobs ADD COLUMN vmaf_stream TEXT;
+`,
+	},
+	{
+		// v12 - which library profile decided the file. A library root now carries its own
+		// encoder, crf, bitrate floor and VMAF floors, so the configuration has several
+		// answers and the row has none. library_root is the cleaned root the file was
+		// enumerated under and profile_digest identifies that root's resolved values; both,
+		// because the path alone stops being interpretable the moment the profile is edited.
+		//
+		// Rows already in the field were decided by a build with one global profile and must
+		// READ AS NOT RECORDED: a DEFAULT would attribute them to whichever root happens to
+		// be configured now, or to a digest of a profile that did not exist when they were
+		// written.
+		name: "deciding library profile",
+		rows: noRowChange,
+		sql: `
+ALTER TABLE jobs ADD COLUMN library_root   TEXT;
+ALTER TABLE jobs ADD COLUMN profile_digest TEXT;
+`,
+	},
+	{
+		// v13 - the schema version each record was written under.
+		//
+		// Until this column a reader holding a row could not tell which build's semantics
+		// filled it. It inferred the answer from ABSENT FIELDS, one column at a time - no
+		// chroma means pre-GATE-4, no profile digest means pre-profiles - which is a guess
+		// built on a coincidence, because every one of those columns is also legitimately
+		// empty on a row the current build wrote. The stamp answers it outright, in the
+		// three tables that hold a record: the job ledger, the retained originals an undo
+		// window can put back, and the swap incidents.
+		//
+		// NULLABLE with NO DEFAULT, which is the rule v2 set and every step since has kept,
+		// and here it is the whole point. There is NO BACKFILL: every record already in the
+		// field was written by a build that stamped nothing, and it must READ as written
+		// before the stamp existed. A DEFAULT - this build's version above all, because it
+		// is the value the writer would now put there and therefore the tempting one -
+		// would claim that this build wrote rows it never saw, in the tables whose whole
+		// job is to be evidence about files that have since been deleted.
+		//
+		// No index. Nothing queries BY the stamp: every reader has the record in hand.
+		name: "record version stamp",
+		// Three columns and no row: an ALTER TABLE ADD COLUMN rewrites no row and creates
+		// none, so every table's count is what it was.
+		rows: noRowChange,
+		sql: `
+ALTER TABLE jobs               ADD COLUMN schema_version INTEGER;
+ALTER TABLE retained_originals ADD COLUMN schema_version INTEGER;
+ALTER TABLE swap_incidents     ADD COLUMN schema_version INTEGER;
+`,
+	},
+	{
+		// v14 - TRANSCODE-PROFILES: which ENCODE profile supplied a job's settings.
+		//
+		// Not the same fact as v12. That one names the library root a file was enumerated
+		// under and digests the knobs that root resolved to; this one names the
+		// pattern-matched profile, if any, whose overrides were then laid over them. A row
+		// can carry both, one, or neither, and each answers a question the other cannot:
+		// which tree judged this file, and which named set of overrides decided what its
+		// encoder produced.
+		//
+		// It sits at the END of the history and not at the v8 it was written as. The dry-run
+		// decision, the failure classifier, the re-opening rule, the scored stream, the
+		// per-library profile and the record stamp have all shipped under the ordinals in
+		// between, and a database in the field has already run those texts. Two steps
+		// claiming one version fork the schema in two. Nothing about the SQL changes, only
+		// where it sits.
+		//
+		// NULL is "no encode profile matched", which is the true answer for every row
+		// written before they existed rather than a measurement nobody took. So NULL and ""
+		// are one statement for this field, and no DEFAULT is needed to make an old row
+		// honest.
+		name: "transcode profile column",
+		// One nullable column and no row: ADD COLUMN rewrites no row and creates none.
+		rows: noRowChange,
+		sql: `
+ALTER TABLE jobs ADD COLUMN profile TEXT;
+`,
+	},
+	{
+		// v15 - the paths an operator has withheld from the pipeline.
+		//
+		// A SEPARATE TABLE, and the lifetimes force it exactly as they forced the retained
+		// originals: a jobs row is keyed (path, fingerprint), Claim clears its outcome and a
+		// successful transcode prunes it, while a withholding is an instruction about a PATH
+		// and has to outlive every decision anybody takes about the bytes at it.
+		//
+		// It is RUNTIME STATE this daemon holds and nothing else. No configuration key is
+		// added by this step or by anything that reads it: the accepted top-level key set is
+		// closed, a reader of an unknown key refuses to start, and a path-withholding list in
+		// the configuration file is its own feature rather than a profile of one that is not
+		// there. Nothing here ever writes the configuration file.
+		//
+		// The path is the primary key, so recording the same path twice is one row and not
+		// two, and the index is on created_at because the one read that is not a point lookup
+		// is "every withheld path, oldest first".
+		name: "withheld paths",
+		// An empty table and one index. A withholding is recorded by an operator, never by a
+		// migration, and a fabricated one would silently stop work on a file nobody named.
+		rows: noRowChange,
+		sql: `
+CREATE TABLE IF NOT EXISTS path_exclusions (
+	path           TEXT NOT NULL PRIMARY KEY,
+	created_at     INTEGER NOT NULL,
+	schema_version INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_path_exclusions_created ON path_exclusions(created_at);
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the
@@ -295,10 +443,14 @@ func schemaVersion() int { return len(migrations) }
 // the phase requires — a half-migrated database must never be run against, because
 // the engine would then be recording the proof of its swaps into columns that may or
 // may not exist.
-func migrate(ctx context.Context, db *sql.DB) error {
+//
+// It RETURNS what it did: one record per step it applied, carrying the version that step
+// stamped and every table's row count on either side of it. An up-to-date database
+// returns none, which is the honest report of a migration that ran nothing.
+func migrate(ctx context.Context, db *sql.DB) ([]MigrationStep, error) {
 	have, err := readSchemaVersion(ctx, db)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	want := schemaVersion()
 
@@ -309,15 +461,22 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	// operator rolls the binary forward (or the database back) and loses nothing
 	// meanwhile.
 	if have > want {
-		return errSchemaFromTheFuture(have, want)
+		return nil, errSchemaFromTheFuture(have, want)
 	}
 
+	var applied []MigrationStep
 	for i := have; i < want; i++ {
-		if err := applyMigration(ctx, db, i+1, migrations[i]); err != nil {
-			return fmt.Errorf("store: migration %d (%s): %w", i+1, migrations[i].name, err)
+		rec, err := applyMigration(ctx, db, i+1, migrations[i])
+		if err != nil {
+			return nil, fmt.Errorf("store: migration %d (%s): %w", i+1, migrations[i].name, err)
+		}
+		// A nil record is a step another writer had already applied while this one waited
+		// for the lock. It moved nothing here, so there is nothing to report about it.
+		if rec != nil {
+			applied = append(applied, *rec)
 		}
 	}
-	return nil
+	return applied, nil
 }
 
 // readSchemaVersion reads the stamp SQLite keeps in the database header. It is the one
@@ -385,18 +544,26 @@ func requireCurrentSchema(ctx context.Context, db *sql.DB) error {
 // busy handler CAN wait on it, so the second process simply blocks until the first has
 // migrated and then finds nothing left to do. Migrating is not the place to introduce a
 // startup failure the old (idempotent, lock-free) schema init did not have.
-func applyMigration(ctx context.Context, db *sql.DB, version int, m migration) error {
+//
+// The ROW COUNTS ride in that same transaction, before and after the step, and so does
+// the comparison against what the step declared. A count taken outside it would be a
+// count of a database another writer could have moved in between, and a comparison made
+// after the commit could only report a loss it had already made permanent. Inside, a step
+// that moved a row it never declared is rolled back with the version it would have
+// stamped, and the open is refused - which for a ledger whose terminal rows decide
+// whether a source file may be deleted is the only safe direction.
+func applyMigration(ctx context.Context, db *sql.DB, version int, m migration) (*MigrationStep, error) {
 	// A dedicated connection: BEGIN/COMMIT are statements here rather than
 	// database/sql's tx API (which offers no way to ask for IMMEDIATE), so they must
 	// all land on the same connection.
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("connect: %w", err)
+		return nil, fmt.Errorf("connect: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
 
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return fmt.Errorf("begin immediate: %w", err)
+		return nil, fmt.Errorf("begin immediate: %w", err)
 	}
 	// Roll back on any failure below. Uses a background context deliberately: if ctx is
 	// what failed (cancelled), a rollback on ctx would fail too and leak the write lock
@@ -413,27 +580,188 @@ func applyMigration(ctx context.Context, db *sql.DB, version int, m migration) e
 	var cur int
 	if err := conn.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&cur); err != nil {
 		rollback()
-		return fmt.Errorf("re-read user_version: %w", err)
+		return nil, fmt.Errorf("re-read user_version: %w", err)
 	}
 	if cur >= version {
 		rollback() // nothing to do; another process applied it while we waited
-		return nil
+		return nil, nil
 	}
 
+	before, err := tableRowCounts(ctx, conn)
+	if err != nil {
+		rollback()
+		return nil, err
+	}
 	if _, err := conn.ExecContext(ctx, m.sql); err != nil {
 		rollback()
-		return err
+		return nil, err
 	}
+	after, err := tableRowCounts(ctx, conn)
+	if err != nil {
+		rollback()
+		return nil, err
+	}
+	rec, err := checkRowChanges(version, m, before, after)
+	if err != nil {
+		rollback()
+		return nil, err
+	}
+
 	// PRAGMA takes no bound parameters, so the version is formatted into the text. It
 	// is an int derived from len(migrations) — never anything a caller supplies — so
 	// there is no injection surface here, only an API limitation.
 	if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, version)); err != nil {
 		rollback()
-		return fmt.Errorf("stamp user_version: %w", err)
+		return nil, fmt.Errorf("stamp user_version: %w", err)
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		rollback()
-		return fmt.Errorf("commit: %w", err)
+		return nil, fmt.Errorf("commit: %w", err)
 	}
-	return nil
+	return rec, nil
+}
+
+// TableRows is one table's row count immediately before and immediately after one
+// migration step. A table that does not exist at one of those two moments holds no rows
+// and counts zero there, which is what makes a created table and a dropped one
+// comparable against a declaration in the same arithmetic as an altered one.
+type TableRows struct {
+	Table  string
+	Before int64
+	After  int64
+}
+
+// Changed is how far this table's row count moved across the step.
+func (t TableRows) Changed() int64 { return t.After - t.Before }
+
+// MigrationStep is the record of one step an open APPLIED: which step it was, the version
+// it stamped, and every table's row count on either side of it, table-sorted.
+//
+// It exists because a migration that dropped or duplicated rows used to commit in
+// silence and stamp a version claiming all was well. The counts are taken whether or not
+// anything is wrong with them, so the record an operator reads after a clean upgrade is
+// the same record that would have shown them the loss.
+type MigrationStep struct {
+	Version int
+	Name    string
+	Tables  []TableRows
+}
+
+// UndeclaredRowChangeError is the refusal a step earns by moving a table's row count by
+// something it never declared. It is exported because the process that opened the store
+// reports it distinctly from every other reason an open can fail: this one says the
+// ledger was about to lose or gain evidence, and the step was rolled back rather than
+// committed.
+type UndeclaredRowChangeError struct {
+	Version  int
+	Step     string
+	Table    string
+	Declared int64
+	Observed int64
+	Before   int64
+	After    int64
+}
+
+func (e *UndeclaredRowChangeError) Error() string {
+	return fmt.Sprintf("table %q went from %d row(s) to %d row(s), a change of %+d, "+
+		"where the step declares %+d - the step has been rolled back and the store will not open. "+
+		"A step that moves rows it did not declare may have dropped or duplicated ledger "+
+		"evidence, and a terminal row is what says a source file was already handled",
+		e.Table, e.Before, e.After, e.Observed, e.Declared)
+}
+
+// checkRowChanges compares what the step DID to what it DECLARED, and returns the step's
+// record when the two agree.
+//
+// Every table either side knows about is judged, and so is every table the declaration
+// names: a table created by the step, a table it dropped, and a declaration naming a
+// table that is not there are all row-count changes somebody has to have meant, and the
+// first two are precisely the shapes a union of only the surviving tables would miss.
+func checkRowChanges(version int, m migration, before, after map[string]int64) (*MigrationStep, error) {
+	rec := &MigrationStep{Version: version, Name: m.name}
+	for _, table := range judgedTables(before, after, m.rows) {
+		t := TableRows{Table: table, Before: before[table], After: after[table]}
+		declared := m.rows[table]
+		if t.Changed() != declared {
+			return nil, &UndeclaredRowChangeError{
+				Version: version, Step: m.name, Table: table,
+				Declared: declared, Observed: t.Changed(),
+				Before: t.Before, After: t.After,
+			}
+		}
+		// A table named ONLY by the declaration is not part of the record: it holds no
+		// rows at either moment, so there is nothing about it to record.
+		if _, wasThere := before[table]; wasThere {
+			rec.Tables = append(rec.Tables, t)
+			continue
+		}
+		if _, isThere := after[table]; isThere {
+			rec.Tables = append(rec.Tables, t)
+		}
+	}
+	return rec, nil
+}
+
+// judgedTables is the sorted union of the tables present before the step, present after
+// it, and named by its declaration. Sorted so one step reads the same way on every run.
+func judgedTables(before, after map[string]int64, declared rowChanges) []string {
+	seen := make(map[string]struct{}, len(before)+len(after)+len(declared))
+	for _, m := range []map[string]int64{before, after, declared} {
+		for name := range m {
+			seen[name] = struct{}{}
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// tableRowCounts counts the rows in every table the database holds, THROUGH conn, so the
+// count is taken inside whatever transaction that connection is running - which is the
+// only way a before-count and an after-count can bracket a step rather than bracket a
+// step plus whatever else happened meanwhile.
+//
+// Every table means every table, SQLite's own sqlite_sequence and sqlite_stat1 included:
+// a count that quietly skipped a table would be a count that could not notice a row
+// appearing in it. Names come from sqlite_master, never from a caller, and an identifier
+// takes no bound parameter, so each is quoted (with any embedded quote doubled) rather
+// than bound.
+func tableRowCounts(ctx context.Context, conn *sql.Conn) (map[string]int64, error) {
+	rows, err := conn.QueryContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list tables: %w", err)
+	}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan table name: %w", err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("list tables: %w", err)
+	}
+	// Closed before the counts run: these share one connection, and a cursor still open
+	// on it is a query the next statement would be interleaved with.
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("list tables: %w", err)
+	}
+
+	counts := make(map[string]int64, len(names))
+	for _, name := range names {
+		var n int64
+		quoted := `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+quoted).Scan(&n); err != nil {
+			return nil, fmt.Errorf("count rows in %q: %w", name, err)
+		}
+		counts[name] = n
+	}
+	return counts, nil
 }
