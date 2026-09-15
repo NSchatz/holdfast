@@ -57,34 +57,49 @@
   header h1 .mono { color: var(--accent); }
   .grow { flex: 1 1 auto; }
   /* The connection state, which is the one thing on this page that says whether anything
-     else on it is still true. It is a pill with a dot AND the state in words: the dot is
-     a second reading of the word beside it and never the only one. */
+     else on it is still true. It is a dot AND the state in words: the dot is a second
+     reading of the word beside it and never the only one.
+
+     It draws NO box. Clause C5 refuses a bordered container that does not carry three
+     facts, and this one carries a single word; the box was one card for one fact. What
+     tells a reader the state is the word, the colour it is set in and the dot repeating
+     that colour, which is three readings of the same thing and none of them an edge. */
   #conn {
     display: inline-flex; align-items: center; gap: var(--sp-2);
     font-size: var(--fs-xs); color: var(--muted);
-    border: var(--bw-hair) solid var(--border); border-radius: var(--radius-pill);
     padding: var(--sp-1) var(--sp-3); min-height: var(--size-tap);
-    transition: color var(--motion-fast) linear, border-color var(--motion-fast) linear;
+    transition: color var(--motion-fast) linear;
   }
   #conn::before {
     content: ""; width: var(--sp-2); height: var(--sp-2);
     border-radius: var(--radius-pill); background: currentColor; flex: none;
   }
-  #conn.live { color: var(--ok); border-color: var(--ok); }
-  #conn.down { color: var(--bad); border-color: var(--bad); }
+  #conn.live { color: var(--ok); }
+  #conn.down { color: var(--bad); }
 
   main { padding: var(--sp-5); max-width: var(--w-main-max); margin: 0 auto; }
 
   .badges { display: flex; gap: var(--sp-3); flex-wrap: wrap; align-items: center;
     margin-bottom: var(--sp-4); }
+  /* A badge is ONE state word, so it draws no box: clause C5 refuses chrome round a single
+     fact, and an edge round each of two badges was two of them. A RESTING badge is the word
+     itself - it had a --panel fill left under that edge, which is 1.07:1 against the page
+     and so a boundary no reader can perceive: chrome that says nothing. The state that asks
+     for attention paints a fill, and that fill is the one treatment here a reader has to be
+     able to tell from what is behind it, so it is the one the contrast grader measures.
+
+     The fill does not TRANSITION, deliberately, and the word and the weight change with it
+     so nothing is carried by a fade. A colour read while it is interpolating belongs to no
+     token and sits at no recorded ratio, and the rendered graders take their reading the
+     instant the page has rendered. */
   .badge {
     font-size: var(--fs-xs); padding: var(--sp-1) var(--sp-2);
-    border-radius: var(--radius-pill); border: var(--bw-hair) solid var(--border);
-    color: var(--muted); background: var(--panel);
-    transition: background-color var(--motion-fast) linear, color var(--motion-fast) linear;
+    border-radius: var(--radius-pill);
+    color: var(--muted);
+    transition: color var(--motion-fast) linear;
   }
-  .badge.on { color: var(--bg); background: var(--warn); border-color: var(--warn); font-weight: 600; }
-  .badge.scan.on { background: var(--accent); border-color: var(--accent); }
+  .badge.on { color: var(--bg); background: var(--warn); font-weight: 600; }
+  .badge.scan.on { background: var(--accent); }
   .reclaimed { font-size: var(--fs-sm); color: var(--muted); }
   .reclaimed b { color: var(--ok); font-size: var(--fs-md); }
   /* The run's own reclaimed figure sits beside the two state badges, and it is the only

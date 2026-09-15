@@ -198,13 +198,17 @@ expect 1 "the tab-order grader reds when a control cannot be reached by keyboard
 
 reset
 
-# --- 4 and 5. AN ENGINE THAT CANNOT BE RESOLVED. Every grader that reads what the page
-#        SHOWS is worth what this resolution is worth, so it is defeated with a pin that
-#        names a path no process can execute. Under REQUIRED mode that has to be a failure
-#        naming the engine it tried, with nothing reporting itself skipped; under the
-#        ordinary mode `make check` runs in, the same tree and the same pin have to answer
-#        with a skip that names the engine, which is what keeps the gate green on a machine
-#        with no browser. One mode passing where the other fails is the whole claim.
+# --- 4 and 5. AN ENGINE THAT CANNOT BE RESOLVED. These two grade AC-9 of
+#        S0125-holdfast-hierarchy-density-graders: "IF no browser engine can be resolved ...
+#        THEN THE SYSTEM SHALL fail the required-mode run with a message naming the engine
+#        it tried and what it saw, and SHALL NOT report either clause as passed or as
+#        skipped." Every grader that reads what the page SHOWS is worth what this resolution
+#        is worth, so it is defeated with a pin that names a path no process can execute.
+#        Under REQUIRED mode that has to be a failure naming the engine it tried, with
+#        nothing reporting itself skipped; under the ordinary mode `make check` runs in, the
+#        same tree and the same pin have to answer with a skip that names the engine, which
+#        is what keeps the gate green on a machine with no browser. One mode passing where
+#        the other fails is the whole claim.
 NO_ENGINE="$work/not-an-engine"
 : >"$NO_ENGINE"   # present, readable, and not executable: unresolvable, not absent
 ENGINE_CASE='TestPlaywright_TheRenderedGradersRunInARealEngine'
@@ -239,11 +243,11 @@ engine_case() {  # engine_case <name> <want-exit> <must-mention-regex> <must-not
 }
 
 run_without_an_engine 1
-engine_case "an unresolvable engine FAILS the required-mode run and names what it tried" \
+engine_case "AC-9: an unresolvable engine FAILS the required-mode run and names what it tried" \
   1 "not-an-engine" 'SKIP'
 
 run_without_an_engine ""
-engine_case "the same unresolvable engine SKIPS outside required mode and names what it tried" \
+engine_case "AC-9: the same unresolvable engine SKIPS outside required mode and names what it tried" \
   0 "not-an-engine" ''
 
 echo

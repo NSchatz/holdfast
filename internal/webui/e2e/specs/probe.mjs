@@ -551,16 +551,25 @@ function onScreen(el) {
   return true;
 }
 
-// FIGURE_TOKEN is one token of a value: a number, optionally carrying a unit. A run of
-// text is read as a FIGURE when every token in it is one of these, which is what keeps a
-// path, a codec string or a sentence with a version number in it out of the set while
-// "12.3 MB", "2m 17s", "99.3" and "0" are all in.
+// FIGURE_TOKEN is one token of a value: a number, optionally carrying its unit against it
+// ("17s", "25%", "99.3", "0"). FIGURE_UNIT is that unit written as a token of its OWN,
+// which is the shape this page's LARGEST figures are painted in: fmtBytes renders
+// "12.3 MB" and fmtDur renders "725 ms", both a number, a space and a unit.
+//
+// A run of text is read as a FIGURE when every token in it is a value, or when it is
+// exactly a value and the unit naming it. The second form is bounded at two tokens on
+// purpose: it admits "12.3 MB" and "725 ms" while a longer run carrying a word between
+// numbers stays out - "1h 0m of 1h 0m" is the progress cell's own explanatory text, which
+// LABELS a figure and is not one. The same bound is what keeps a path, a codec string and
+// a sentence with a version number in it out of the set.
 const FIGURE_TOKEN = /^[+-]?\d[\d,]*(?:\.\d+)?(?:%|[A-Za-z]{1,3})?$/;
+const FIGURE_UNIT = /^(?:%|[A-Za-z]{1,3})$/;
 
 function isFigureText(t) {
   const parts = String(t).split(/[\s→>]+/).filter(function (p) { return p !== ""; });
   if (parts.length === 0) return false;
-  return parts.every(function (p) { return FIGURE_TOKEN.test(p); });
+  if (parts.every(function (p) { return FIGURE_TOKEN.test(p); })) return true;
+  return parts.length === 2 && FIGURE_TOKEN.test(parts[0]) && FIGURE_UNIT.test(parts[1]);
 }
 
 // channelsOf is one subject's three channels, read off the engine after the cascade.

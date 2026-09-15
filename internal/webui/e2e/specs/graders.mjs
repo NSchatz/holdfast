@@ -441,14 +441,17 @@ export function gradeTypeScaleCarriesThreeSizes(s) {
 //   C4's subject too, not C5's;
 //   a CONTROL is operated rather than read, and its edge is the affordance that says so,
 //   which is how it earns it;
-//   a DRAWING carries no fact - this page's own rule is that every value a mark encodes is
-//   also rendered as text in the same container;
-//   and an element with no element child of its own is a leaf, not a container. A badge or
-//   a status pill holding one word is not a box around a group.
+//   and a DRAWING carries no fact - this page's own rule is that every value a mark encodes
+//   is also rendered as text in the same container.
+//
+// A LEAF is NOT excluded, and that is the case the clause is most about: a badge or a
+// status pill that paints a box round one word IS "one card per fact", which C5 refuses by
+// name. An exclusion for it would remove precisely the worst violations from the subject
+// set and leave the grader unable to report the thing it exists to report.
 export function craftContainers(chromedElements) {
   return (chromedElements || []).filter((c) =>
     (c.sides.length === 4 || c.shadow !== "") &&
-    !c.landmark && !c.control && !c.graphic && c.elementChildren > 0);
+    !c.landmark && !c.control && !c.graphic);
 }
 
 // Clause C5: every bordered or raised container holds at least three facts - three things a
@@ -457,7 +460,7 @@ export function gradeContainerEarnsItsChrome(s) {
   const subjects = craftContainers(s.chromed);
   if (subjects.length === 0) {
     const seen = (s.chromed || []).length;
-    return [`interface-craft C5 (AC-6): the page rendered no bordered or raised container at all, so this grader measured nothing and could not have failed. ${seen} element(s) painted a border or a shadow, and every one of them was a landmark, a control, a drawing or a leaf`];
+    return [`interface-craft C5 (AC-6): the page rendered no bordered or raised container at all, so this grader measured nothing and could not have failed. ${seen} element(s) painted a border or a shadow, and every one of them was a landmark, a control, a drawing or an element carrying a single painted edge`];
   }
   const out = [];
   for (const c of subjects) {

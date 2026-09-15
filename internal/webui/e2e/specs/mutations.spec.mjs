@@ -151,6 +151,36 @@ const TABLE = [
     says: /draws a border on all four sides and holds 1 fact/,
   },
   {
+    // interface-craft C3 (AC-1, AC-4, AC-10) over the figure written as NUMBER SPACE UNIT.
+    //
+    // The case above flattens a bare count, which any reading of "figure" finds. This one
+    // flattens the two largest figures on the page - the byte figures, which fmtBytes
+    // renders as "12.3 MB" - and it is here because a subject query that counts a figure
+    // only when every token of it starts with a digit drops exactly those, silently: the
+    // region renders thirty other figures, so nothing reports itself unmeasured either.
+    // A counterexample proves a predicate can go red; this one proves its SUBJECT QUERY
+    // still finds the figure the clause is most about.
+    name: "a byte figure written as number-space-unit flattened onto its own label",
+    defeats: "a figure stands apart from the text that names it",
+    mutation: mutate.css(`.stats .stat b { font-size: var(--fs-xs) !important; font-weight: 400 !important; color: var(--muted) !important; }`),
+    says: /b#reclaimed-lifetime \("[\d.,]+ [A-Za-z]{1,3}"\) differs from its label .* in 0 of the three channels/,
+  },
+  {
+    // interface-craft C5 (AC-3, AC-4, AC-10) over a LEAF, which is the case the clause
+    // names in its own words: "One card per fact is refused."
+    //
+    // The rule draws a border on all four sides AND a shadow round an element holding one
+    // run of text and no element child of its own, so neither half of AC-3's disjunction
+    // nor any reading about a single painted edge can excuse it. A subject query that
+    // required a container to hold an element child would drop every one of these, which
+    // is to say it would drop precisely the worst violations of the clause.
+    name: "a box drawn round each count, one card for one fact",
+    defeats: "a bordered or raised container earns its chrome",
+    mutation: mutate.css(`#chips .chip .n { border: var(--bw-flag) solid var(--border) !important;
+      box-shadow: var(--shadow-raised) !important; border-radius: var(--radius-sm) !important; }`),
+    says: /div\.n draws a border on all four sides and holds 1 fact/,
+  },
+  {
     // interface-craft C3's second half (AC-10).
     name: "the painted type scale collapsed onto one size",
     defeats: "the painted type scale carries three sizes",

@@ -212,18 +212,26 @@ the specs that read the page as the project presents it.
   text a reader can see is painted at three or more distinct sizes. Both are read off the
   ENGINE after the whole cascade, so flattening a figure onto its label with a later rule
   is caught even though every declaration already in the stylesheet is untouched - which is
-  exactly the counterexample that proves it. A region rendering no figure at all is named
-  as UNMEASURED rather than counted as a pass, and a run that found no figure in any region
-  FAILS: a subject query that matches nothing is the cheapest way for a grader like this to
-  be green for ever.
+  exactly the counterexample that proves it. A figure is any run of text made of values,
+  and a value written as a number, a space and its unit - which is what `fmtBytes` and
+  `fmtDur` produce, and what the two largest figures on this page are - counts as one; a
+  counterexample flattens `#reclaimed-lifetime` in particular, so a token rule that stopped
+  seeing "12.3 MB" would red the suite rather than quietly shrink what is graded. A region
+  rendering no figure at all is named as UNMEASURED rather than counted as a pass, and a
+  run that found no figure in any region FAILS: a subject query that matches nothing is the
+  cheapest way for a grader like this to be green for ever.
 - **Density, interface-craft C5.** Every container the engine paints ENCLOSING chrome on -
   a border on all four sides, or a shadow - holds at least three facts a reader can read
-  off it. A single painted edge is a rule between two things rather than a box around one,
-  and a landmark, a control, a drawing and a leaf are each reported and then set aside with
-  their reason rather than dropped from the reading. So a box may not be drawn around one
-  labelled figure: give the group the boundary and make the items rows in it, which is what
-  the counts and the two byte figures are. A run that found no bordered container FAILS,
-  for the same reason the hierarchy one does.
+  off it, and that includes an element holding a single run of text with no child of its
+  own: a box drawn round one word is "one card per fact", which is the case the clause
+  refuses by name. A single painted edge is a rule between two things rather than a box
+  around one, and a landmark, a control and a drawing are each reported and then set aside
+  with their reason rather than dropped from the reading. So a box may not be drawn around
+  one labelled figure or one state word: give the group the boundary and make the items
+  rows in it, which is what the counts and the two byte figures are, or let the thing say
+  what it says in words and colour, which is what the connection state and the two badges
+  do. A run that found no bordered container FAILS, for the same reason the hierarchy one
+  does.
 - The served Content Security Policy. It is asserted byte for byte AND by a rule about
   policies: no `unsafe-eval`, no host, scheme, nonce or hash source, no `img-src`, no
   default Trusted Types policy, no directive outside the served set. The rule is proved
