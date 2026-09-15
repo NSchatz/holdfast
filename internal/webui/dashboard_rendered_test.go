@@ -74,11 +74,13 @@ func collapseSpace(s string) string { return strings.Join(strings.Fields(s), " "
 // faithful. So the causes are named here, with the mechanism and the repair, because the
 // next reader has this file and does not have the session that found them.
 //
-// Every cause below was reproduced deliberately, on the unchanged tree at pin
+// Causes 1 to 4 were each reproduced deliberately, on the unchanged tree at pin
 // f525a9e6, before anything was changed. None was found by staring at the code and none
 // is a guess about what run 34236997921 hit: each is stated with the perturbation that
 // flipped a verdict, and the first two this file's own graders can now reproduce on
-// demand, which is the point.
+// demand, which is the point. CAUSE 5 is different and says so where it stands: this
+// work's own repair carried one in, and it was caught by running the determinism
+// criterion's command rather than by review.
 //
 // CAUSE 1 - THE ROW-AGE WINDOWS WERE A WALL CLOCK.
 // Mechanism: the page renders a queue row's in-state age as its own clock now, less that
@@ -168,6 +170,41 @@ func collapseSpace(s string) string { return strings.Join(strings.Fields(s), " "
 // published into the environment (the config module is re-evaluated in every worker). The
 // no-adoption rule is not weakened, it is made unreachable: there is no listener to adopt,
 // and the fixture server is still compiled and started from THIS tree.
+//
+// CAUSE 5 - A COUNT READ AFTER A FIXED PAUSE, IN A GRADER THIS WORK ITSELF ADDED.
+// Not at the pin, and that is the point of recording it rather than quietly fixing it:
+// the repair for causes 1 to 4 brought this one in, and it was caught by running the
+// determinism criterion's own command five times against an unchanged tree (impl gate
+// ordinal 2, finding F7). A determinism fix that puts a new clock into a determinism
+// grader is exactly what a later reader needs to know can happen here.
+// Mechanism: the single-reading grader's anti-vacuity half mutates the probe page into
+// retrying its reading and then asks the test server how many readings it counted.
+// runProbe returned on the FIRST posted verdict, slept a fixed 250ms so that a console
+// message raised during the render would not be truncated out of the browser's log,
+// killed the browser - and the count was read after that. So "a harness that reads twice
+// is counted as reading twice" held exactly when a browser setTimeout at 30ms plus one
+// local HTTP POST completed inside 250ms of REAL TIME: a tolerance of the same kind as
+// cause 1's row-age windows, wearing the clothes of a grace that exists for something
+// else entirely. Reproduced twice. Naturally, red on 1 of 5 repetitions of TestRendered_
+// against an unchanged tree while other suites shared the host, green on the other four
+// and green again in isolation. And deliberately, by narrowing only that grace to 40ms -
+// still well clear of the counterexample's own 30ms timer - which changed no assertion,
+// no counterexample and no page, and turned the grader red on demand.
+// Repair: the count is a PROPERTY that is waited for, never a race against a pause. A
+// render DECLARES how many readings its probe takes (serveOpts.expectPosts: 1 for every
+// grader, 2 for this one counterexample), and runProbe waits for that many on the SAME
+// timer it already waits for the verdict on - ONE deadline for the whole render, the
+// same shape as cause 2's repair - and REPORTS the count it actually saw if they do not
+// arrive, so the caller's own assertion is still what decides and a reading that never
+// comes is a finding rather than a hang. The 250ms grace keeps its one remaining job,
+// the browser's log, and decides nothing. The counterexample's retry moved from 30ms to
+// 1500ms, several times that grace, so the grace CANNOT be what observes it; and
+// probeServer.postsAtSettle records the count as the grace ended, so the case reds if
+// that ever reaches 2. The relationship is asserted, not described.
+// TestRenderHarness_ADeclaredReadingIsWaitedForRatherThanCaughtByAPause grades the
+// waiting on its own - no browser, real POSTs through the real /verdict handler - in
+// both directions: a reading that lands seconds after the first is still counted, and
+// one that never comes is reported as the count seen.
 //
 // WHAT WAS RULED OUT, so nobody re-runs the experiment. The ten DASH-9 properties
 // themselves - order, drawings shown, bucket text, spread text, bar proportion, spread

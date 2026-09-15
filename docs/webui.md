@@ -198,13 +198,19 @@ in-page readiness budget of fifteen seconds sitting under a ninety-second deadli
 both are gone rather than widened. Two more made a verdict depend on the machine without
 depending on a clock: a mutation sweep an unrendered page could satisfy, which went green
 having looked at nothing, and a fixture server on a fixed port, which made a run's fate a
-question about what else was listening on the host. The diagnosis of record, with each
-mechanism, how it was reproduced and what replaced it, is at the head of
+question about what else was listening on the host. A fifth was carried in by that repair
+and found by running the determinism criterion's own command: the count that proves the
+single-reading check can fail was read after a fixed 250ms grace, so it held exactly when a
+browser timer and a local POST fitted inside that grace. It is recorded with the other four
+rather than quietly fixed, because a determinism fix putting a new clock into a determinism
+grader is the thing a later reader most needs to know can happen here. The diagnosis of
+record, with each mechanism, how it was reproduced and what replaced it, is at the head of
 `internal/webui/dashboard_rendered_test.go`. What holds it now: a grader that holds the
 reading back two full minutes and requires every DASH-9 property to return the verdict it
 returns with none, a grader that holds the SNAPSHOT back past any budget this harness
 carries, a mutated document that must still fail its graders after that same delay, a
-single-reading count the test server keeps rather than the page, and
+single-reading count the test server keeps rather than the page and WAITS FOR under the
+deadline the render already holds rather than reading after a pause, and
 `make webui-repeat-check` as the cheap repeated disconfirmation beside them.
 
 The row ages are the reading that replaced a wall clock, so what replaced it is worth
