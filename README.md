@@ -24,8 +24,16 @@ reproducible from git, not hidden in a UI database.
 
 ## Why another transcoder?
 
-Tdarr is capable but **closed-source** and **UI/DB-configured** (state can be lost on a container rebuild),
-and it historically **replaced the original file before/regardless of its health check** - a documented
+*Every claim about another tool here, and in [docs/comparison.md](docs/comparison.md), was checked **as
+of September 2026** against that project's own licence text or project page. Other tools move: re-check
+before you choose.*
+
+Tdarr is capable, but it is **licensed under an
+[EULA](https://github.com/HaveAGitGat/Tdarr/blob/master/LICENSE.md)**: the licence is provided in three
+tiers - Personal Free, Personal Subscription, and Business Subscription & Trial - and it prohibits
+redistribution, reverse engineering, or any unauthorized use of the software without explicit permission
+from Tdarr. It is also **UI/DB-configured** (state can be lost on a container rebuild), and it
+historically **replaced the original file before/regardless of its health check** - a documented
 data-loss class ([#355](https://github.com/HaveAGitGat/Tdarr/issues/355),
 [#511](https://github.com/HaveAGitGat/Tdarr/issues/511),
 [#683](https://github.com/HaveAGitGat/Tdarr/issues/683)). `holdfast` takes the useful capability surface
@@ -54,31 +62,31 @@ and fixes the trust gaps:
 - **The quality gate bounds the worst frame, not just the average.** An average hides local damage -
   Netflix says so outright - so a short destroyed segment inside an otherwise-clean encode passes a
   mean-only gate, and passes every structural check too (it decodes fine and carries the right duration,
-  packets and streams). Both floors are **on by default**. An output that cannot be *measured* is
+  packets and streams). All three floors are **on by default**. An output that cannot be *measured* is
   rejected, not assumed good.
 - **Config-as-code.** YAML, validated, in git - not clickops that vanishes on rebuild.
 - **Open source** (AGPL-3.0).
 
 ### We are not the only tool that verifies before it replaces
 
-[**Alchemist**](https://github.com/bybrooklyn/alchemist) (AGPL-3.0, Rust) works the same axis: it validates
-output quality before promoting the result, keeps your originals untouched until the new file passes, and
-ships its own *Migrate from Tdarr* guide. If you are choosing between us, choose on the difference, not on
-a claim of uniqueness we would not be able to defend.
-
-**The difference is where the default sits.** Alchemist's VMAF scoring is **opt-in**. `holdfast`'s gate is
-**default-on, layered, and fails closed**: structural parity (codec, duration, packets, per-type stream
-counts, strictly-smaller) *and* full decode-integrity *and* VMAF - both its average **and** its worst
-frame. An output that cannot be **measured** is **rejected**, never assumed good; an ffmpeg without libvmaf
-stops the tool rather than quietly downgrading the gate. That is the whole claim, and it is narrower and
-truer than "the only one that checks".
+We are not, and the field is described rather than dismissed: **Alchemist** works the same axis and is
+ahead of holdfast on seven capabilities, **FileFlows** and **Unmanic** work this ground too, and the one
+claim holdfast makes for itself is narrow - its verify gate is default-on, layered and fails closed.
+**[docs/comparison.md](docs/comparison.md)** has all of it, each claim checked against that project's
+own licence text or project page.
 
 ## Non-goals
 
-Codec-only, same-content re-encoding (no resolution downscaling); HDR10 **static** metadata is preserved
-but Dolby Vision / HDR10+ dynamic metadata is **detect-and-skipped**; interlaced, exotic-chroma and
-`multi-video-stream` sources are **skipped, not converted** (embedded artwork is carried through unencoded).
-It transcodes files in a library other tools manage (Plex/Jellyfin/*arr) - not a media server or library manager.
+Four boundaries, and they are boundaries rather than a backlog: **no distributed or remote
+processing**; **not a media server and not a library manager**; **interlaced sources are skipped, not
+converted**; and **HDR10 static metadata is preserved while Dolby Vision and HDR10+ dynamic metadata
+are detect-and-skipped**. Each is stated in full below, in this one section.
+
+Codec-only, same-content re-encoding (no resolution downscaling): **interlaced**, exotic-chroma and
+`multi-video-stream` sources are **skipped, not converted**; HDR10 **static** metadata is preserved
+while Dolby Vision and HDR10+ **dynamic** metadata is **detect-and-skipped** rather than guessed at;
+and embedded artwork is carried through unencoded. It transcodes files in a library other tools
+manage - not a media server.
 
 **Distributed or remote processing is a non-goal by design, not a missing feature.** holdfast is one
 process: no server/node split, no remote workers. The no-loss argument rests on an atomic
@@ -86,6 +94,19 @@ same-filesystem `rename(2)` - it either happened or it did not, so a failure nev
 file where the source was. A remote worker encoding to its own disk and shipping the result back is a
 **copy**, not a rename, and every gate here would have to be re-argued for that primitive. To use more
 of one machine, raise `workers` (default 1, deliberately - see **[docs/docker.md](docs/docker.md)**).
+
+<a id="non-goal-library-manager"></a>
+
+**Library management is a permanent non-goal.** No renaming to a scheme, no moving between folders, no folder
+organisation, no metadata fetch, no duplicate detection, no deletion of anything but a source whose verified
+replacement passed: these are filesystem mutations the verify gate cannot cover, so use the tools that manage the library instead.
+
+Every gate in this tool is one judgement made by comparing two video files, and not one of those operations
+can be judged that way. Whether a file belongs in another folder, or under another name, or is a duplicate
+worth losing, is a question about a library's conventions, and no decoder can answer it. Shipping them would
+mean shipping mutations with nothing to gate them, in the same binary that offers a gate for everything else
+it does. Plex, Jellyfin and the *arr tools are where that work belongs: point holdfast at the library they
+manage, and leave the managing to them.
 
 ## Quick start
 
@@ -148,6 +169,29 @@ anything in user space (FUSE) are all treated as not-local, because a false warn
 configuration and a false clear costs a film. **[docs/filesystem.md](docs/filesystem.md)** has the
 recognised-local set, the opt-in rules and what the startup traversal costs.
 
+### Before you let it near the library (`plan`, and `dry_run`)
+
+<a id="plan-versus-dry-run"></a>
+`dry_run` is a full daemon pass that probes, guards and **records a terminal row per file it decided**
+without encoding anything - a record of what THAT RUN decided, written into the ledger. `holdfast plan`
+is a read that walks the configured coverage set, runs every skip guard and reports what a run would
+do - **claiming nothing and writing nothing**, not a job row, not a ledger row, not a byte anywhere. So
+`dry_run is a full daemon pass` and `plan is a read`: neither is an alias for the other, and a caller
+invoking one never gets the other's observable effect.
+
+```
+holdfast plan --config config.yaml            # eligible files, eligible bytes, and which guard skipped the rest
+holdfast plan --config config.yaml --json     # the same plan as one JSON document on stdout
+```
+
+The reclaim figure is an **estimate and says so wherever it appears**, derived from the size ratios of
+encodes **this install has already completed** and published with the sample size and the spread it came
+from. On an install that has never completed one, it is **refused outright with the reason** rather than
+emitted as a zero or borrowed from somebody else's average - and a refused projection still exits `0`,
+because the report was produced. There is deliberately no per-file estimated saving and no predicted
+VMAF: a library-scale ratio printed against one file reads as a measurement of that file, and nothing
+here has looked inside it.
+
 ### Per-job settings, and where the encode works
 
 `encode_profiles` overrides the top-level encode settings per job (ordered; the first profile whose
@@ -188,21 +232,8 @@ truth and the SQLite store stays the source of job state. The API can only **rea
 scan, and pause/resume the feeding of new files** - it never touches a media file, so the data-safety
 invariant is entirely unaffected.
 
-| Method & path | Auth | Purpose |
-|---|---|---|
-| `GET /` | - | the embedded dashboard |
-| `GET /api/summary` | - | counts per status + bytes reclaimed (**lifetime** and this-run) + `bytes_held_by_undo_window` (space a retained original still holds, never folded into either reclaimed figure; `null` = unreadable) + paused/scanning + the **whole-ledger aggregates** (see below) |
-| `GET /api/queue` | - | pending + active jobs, capped, with `queue_total` - see *The total behind a cap* |
-| `GET /api/history?limit=N` | - | recent terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, capped, with `history_total` - see below |
-| `GET /api/events` | - | SSE: a fresh snapshot on every state change |
-| `GET /metrics` | - | Prometheus metrics (when `metrics_enable`, default on) |
-| `POST /api/rescan` | token | start a library scan (409 if paused / scanning / outside the run window) |
-| `POST /api/pause` | token | stop feeding **new** files (in-flight encodes finish safely) |
-| `POST /api/resume` | token | clear the pause flag |
-| `GET /api/search?path=TERM` | token | terminal rows whose path contains TERM, over the **whole ledger** rather than the capped view, with the match count. Token-gated because it serves per-file rows the capped reads never have |
-| `GET /api/exclusions` | token | the paths this daemon is **withholding** from the pipeline - runtime state it holds, never a configuration key |
-| `POST /api/exclusions` | token | withhold one path. It only ever takes a file OUT; nothing here writes `config.yaml` |
-| `DELETE /api/exclusions` | token | stop withholding one path, after which it is eligible again on the next scan |
+Every endpoint, what it answers and which of them need the token:
+**[`docs/api-reference.md`](docs/api-reference.md)**.
 
 Fail-safes: the server **binds `127.0.0.1` by default**, and that bind is the whole of what
 protects the read endpoints and the dashboard - they carry no authentication of their own, so
@@ -215,36 +246,6 @@ are **disabled entirely when no token is configured**; pause only ever
 *delays* work - it never interrupts an encode or the atomic swap. **Known limitation:** single-token auth
 (no per-user accounts); the queue/history views are capped at the most recent rows, not the whole ledger -
 but they now say what they were capped *against*, and `holdfast export` gives you the whole thing.
-
-### The total behind a cap
-
-`GET /api/queue` returns at most **500** rows and `GET /api/history` at most **200**. A truncated view that
-says nothing about what it truncated reads as the whole ledger, and a client cannot work it out for itself
-(the summary counts answer a different question - rows *per status*, not the rows a response selected). So
-every capped response carries the total it capped against, counted in the server over **every matching row
-in the `jobs` table**:
-
-| Response | Field |
-|---|---|
-| `GET /api/queue` | `queue_total` |
-| `GET /api/history?limit=N` | `history_total` |
-| the SSE snapshot | both |
-
-```json
-"history_total": {
-  "available": true, "unavailable": "",
-  "covers": "every row in the ledger with status done, skipped, failed",
-  "cap": 200, "count": 41237
-}
-```
-
-- **`count`** is the number of matching rows in the ledger, **never the number of rows returned**. Asking
-  for fewer rows than the cap (`?limit=5`) reports the *same* `count`; only `cap` moves with the request.
-- **`available`** is `false` when the total could not be read, and `count` is then an explicit **`null`**,
-  never `0` - a zero would claim the ledger is empty beside rows the caller can see. The rows still ship:
-  one unreadable figure never costs an operator the records.
-- The dashboard renders that total in each table's cap notice, and when the total is unavailable it says so
-  **and shows no figure in its place**.
 
 ### The record, and what to read for it
 

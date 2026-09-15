@@ -40,6 +40,27 @@ func (s *SQLite) MigrationReport() []MigrationStep { return s.applied }
 
 var _ Store = (*SQLite)(nil)
 
+// uriPath renders a filesystem path for the `file:` DSN every door in this package opens
+// through. It is NOT cosmetic and it is not a driver quirk: the DSN is a URI, and in a URI
+// a '#' opens a fragment and a '?' opens a query, so a path containing either is silently
+// TRUNCATED at it.
+//
+// What that costs without this: `state_dir: /srv/media#2` opens `/srv/media`, creates
+// nothing at the path the operator wrote, and two installs whose state directories differ
+// only after the '#' share ONE ledger - each reading the other's rows as its own. On a tool
+// that deletes originals, the ledger is the record of what was retained and what was
+// removed, so a handle that silently resolves somewhere else is a data-safety fault rather
+// than an inconvenience.
+//
+// SQLite's own rule for a URI filename is that '?' and '#' are percent-encoded; '%' has to
+// be encoded FIRST, or an operator's literal "%23" would come back as '#'. strings.Replacer
+// makes one pass and never rescans what it wrote, which is exactly that ordering.
+func uriPath(path string) string {
+	return uriPathEscaper.Replace(path)
+}
+
+var uriPathEscaper = strings.NewReplacer("%", "%25", "#", "%23", "?", "%3F")
+
 // Open creates the parent directory (if needed), opens (creating on first use) a
 // WAL-mode SQLite database at path, and initializes the schema. dsn enables WAL +
 // a busy timeout + foreign keys.
@@ -67,7 +88,7 @@ func Open(path string) (*SQLite, error) {
 	// run, which is always safe. Default (FULL) fsyncs every single commit, which
 	// under concurrent workers serializes on disk latency badly enough to make the
 	// worker pool pointless.
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)", path)
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)", uriPath(path))
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %q: %w", path, err)
@@ -146,7 +167,7 @@ func OpenSnapshot(path string) (*SQLite, error) {
 	// Deliberately not openReadOnlyDB's DSN: immutable is the whole point here, and a
 	// shared helper that sometimes sets it would make "did this open create a file?"
 	// a question about an argument rather than about which function was called.
-	dsn := fmt.Sprintf("file:%s?mode=ro&immutable=1&_pragma=query_only(1)", path)
+	dsn := fmt.Sprintf("file:%s?mode=ro&immutable=1&_pragma=query_only(1)", uriPath(path))
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %q as an unchanging snapshot: %w", path, err)
@@ -167,7 +188,7 @@ func openReadOnlyDB(path string) (*sql.DB, error) {
 	// pragmas are deliberately not Open's — journal_mode and synchronous are writes to
 	// the header, and a reader has no business setting either. query_only is belt and
 	// braces beside mode=ro, and it costs nothing.
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)", path)
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)", uriPath(path))
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %q read-only: %w", path, err)
@@ -438,18 +459,24 @@ func (s *SQLite) Reopen(ctx context.Context, path, fingerprint string, clearFail
 
 // SurveyDecisionInputs is documented on the Store interface.
 //
-// It groups by the STORED value rather than decoding every row, so the cost is one index
-// scan and a handful of comparisons - a ledger holding 300,000 rows taken under three
-// configurations answers this in three. That matters because it runs at startup on the
-// same single serialized connection the engine writes every job transition through.
+// It reads a row at a time rather than grouping by the stored value, and it has to: the
+// configuration in force resolves per PATH, so two rows carrying the identical recorded
+// text can be one still-matching row and one moved row. Grouping would answer a question
+// about the ledger that no row was decided by.
 //
-// A `restored-original` row is left out of all three counts. It records no inputs, so it
+// The cost that buys back is bounded on both sides. The scan is over the terminal
+// partition through the same index the group-by used, the decode of each stored value is
+// memoized on its text (a library is decided under a handful of distinct records, not one
+// per row), and the resolver memoizes its own side. What is left is a comparison of a few
+// keys per row, which is microseconds against the encode a re-opened row might cost.
+//
+// A `restored-original` row is left out of all the counts. It records no inputs, so it
 // would otherwise arrive in NotRecorded - and this figure is read as "what the next scan
 // will re-open", which that row never is, under any configuration.
-func (s *SQLite) SurveyDecisionInputs(ctx context.Context, current DecisionInputs) (DecisionInputsSurvey, error) {
+func (s *SQLite) SurveyDecisionInputs(ctx context.Context, current InputsForPath) (DecisionInputsSurvey, error) {
 	where, args := surveyedRows(true)
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT decision_inputs, COUNT(*) FROM jobs WHERE `+where+` GROUP BY decision_inputs`, args...)
+		`SELECT path, decision_inputs FROM jobs WHERE `+where, args...)
 	if err != nil {
 		return DecisionInputsSurvey{}, fmt.Errorf("store: survey decision inputs: %w", err)
 	}
@@ -475,25 +502,47 @@ func surveyedRows(hasReason bool) (string, []any) {
 	return where, args
 }
 
-// classifyRecordedInputs turns (decision_inputs, COUNT(*)) groups into the survey. It is
-// the one place the three-way reading of a stored record lives, so the startup report and
-// `validate` cannot classify the same row differently.
-func classifyRecordedInputs(rows *sql.Rows, current DecisionInputs) (DecisionInputsSurvey, error) {
+// classifyRecordedInputs turns (path, decision_inputs) rows into the survey. It is the one
+// place the three-way reading of a stored record lives, so the startup report and
+// `validate` cannot classify the same row differently - and it is the one place the survey
+// resolves the configuration in force, so neither of them can classify a row differently
+// from the claim that will meet it.
+//
+// EVERY row's path is resolved, whatever that row recorded. What a record says and where
+// its file is are two questions: a row that recorded nothing is re-opened once by the rule,
+// and a row under no configured library root is never enumerated by a scan, so a row that is
+// both is a re-open that will never happen. Saying so needs the annotation taken for that
+// row too - and that row is not an edge, it is every row of a ledger an earlier build wrote,
+// which is the population these figures are read for. The row's own classification is
+// untouched by the resolution: not recorded stays not recorded.
+func classifyRecordedInputs(rows *sql.Rows, current InputsForPath) (DecisionInputsSurvey, error) {
 	var out DecisionInputsSurvey
+	parsed := map[string]DecisionInputs{}
 	for rows.Next() {
+		var path string
 		var recorded sql.NullString
-		var n int64
-		if err := rows.Scan(&recorded, &n); err != nil {
+		if err := rows.Scan(&path, &recorded); err != nil {
 			return DecisionInputsSurvey{}, fmt.Errorf("store: survey decision inputs scan: %w", err)
 		}
-		in := ParseDecisionInputs(recorded.String)
+		in, ok := parsed[recorded.String]
+		if !ok {
+			in = ParseDecisionInputs(recorded.String)
+			parsed[recorded.String] = in
+		}
+		now, rooted := current(path)
+		if !rooted {
+			out.Unrooted++
+			if out.UnrootedExample == "" || path < out.UnrootedExample {
+				out.UnrootedExample = path
+			}
+		}
 		switch {
 		case !in.Recorded():
-			out.NotRecorded += n
-		case in.StillMatches(current):
-			out.Matching += n
+			out.NotRecorded++
+		case in.StillMatches(now):
+			out.Matching++
 		default:
-			out.Moved += n
+			out.Moved++
 		}
 	}
 	if err := rows.Err(); err != nil {

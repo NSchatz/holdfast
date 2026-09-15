@@ -25,13 +25,20 @@ import (
 //
 // Those reconcile because the counts do not need the column. A jobs table WITHOUT
 // decision_inputs is by construction a ledger in which no row records any, so "0 moved, N
-// recording none" is a statement the row counts alone support. The read therefore turns on
+// recording none" is a statement the rows alone support; only the unrooted annotation beside
+// them needs a path, and the jobs table always has one. The read therefore turns on
 // the COLUMNS IT NEEDS rather than on the version stamp, which also means a later schema
 // that keeps the column keeps working here.
 //
+// current resolves the configuration in force for ONE ROW'S OWN PATH, and this read takes
+// the same one the daemon's survey does. `validate` and a run answering the same question
+// differently is the surface half of the defect the per-path rule exists to close, one
+// layer up: the scan would re-open a file the operator had just been told was still
+// matching.
+//
 // A ledger from the FUTURE is still a refusal, the same one both doors give: a shape this
 // build cannot see all of is one whose rows it must not describe.
-func SurveyLedgerDecisionInputs(ctx context.Context, path string, current DecisionInputs) (DecisionInputsSurvey, error) {
+func SurveyLedgerDecisionInputs(ctx context.Context, path string, current InputsForPath) (DecisionInputsSurvey, error) {
 	var out DecisionInputsSurvey
 	db, err := openReadOnlyDB(path)
 	if err != nil {
@@ -51,26 +58,24 @@ func SurveyLedgerDecisionInputs(ctx context.Context, path string, current Decisi
 	if err != nil {
 		return out, err
 	}
-	if !cols["status"] {
+	if !cols["status"] || !cols["path"] {
 		return out, fmt.Errorf("store: survey %q: it holds no jobs table to read", path)
 	}
 	where, args := surveyedRows(cols["reason"])
 
-	if !cols["decision_inputs"] {
-		// COUNTED, not decoded. There is no column to decode, and that absence is the
-		// answer rather than an obstacle to it: every terminal row in this file was
-		// written by a build that recorded nothing, so every one of them reads as not
-		// recorded and the next scan will offer all of them to the guards again.
-		var n int64
-		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE `+where, args...).Scan(&n); err != nil {
-			return out, fmt.Errorf("store: survey %q: counting terminal rows: %w", path, err)
-		}
-		out.NotRecorded = n
-		return out, nil
+	// The column selected: the real one where the schema has it, a literal NULL where it
+	// does not. That absence is the answer rather than an obstacle to it - every terminal
+	// row in such a file was written by a build that recorded nothing, which is exactly what
+	// a NULL decodes to - and routing both shapes through one classifier is what stops the
+	// older ledger being described by a rule the newer one is not. It is also why the unrooted
+	// annotation reaches the rows that need it most: they are all in this file.
+	column := "decision_inputs"
+	if !cols[column] {
+		column = "NULL"
 	}
 
 	rows, err := db.QueryContext(ctx,
-		`SELECT decision_inputs, COUNT(*) FROM jobs WHERE `+where+` GROUP BY decision_inputs`, args...)
+		`SELECT path, `+column+` FROM jobs WHERE `+where, args...)
 	if err != nil {
 		return out, fmt.Errorf("store: survey %q: %w", path, err)
 	}

@@ -670,10 +670,11 @@ type Store interface {
 	// path+fingerprint with no row yields a claim.
 	//
 	// A done or skipped row is terminal only FOR THE CONFIGURATION IT WAS TAKEN UNDER.
-	// current is what that configuration is now - every decision input this build offers,
-	// keyed by the configuration key holding it - and a row whose recorded inputs no
-	// longer match it, or which records none at all, is RE-OPENED: the file is offered to
-	// the pipeline exactly as an unseen file is. Re-opening is not re-encoding; the guards
+	// current is what that configuration is now FOR THIS PATH - every decision input this
+	// build offers, keyed by the configuration key holding it, each resolved through the
+	// whole layering that decides this path - and a row whose recorded inputs no longer
+	// match it, or which records none at all, is RE-OPENED: the file is offered to the
+	// pipeline exactly as an unseen file is. Re-opening is not re-encoding; the guards
 	// run again, and a file that reaches the same verdict reaches it in microseconds and
 	// records the current inputs on the way.
 	//
@@ -716,7 +717,12 @@ type Store interface {
 	// skipped rows record inputs that have moved, how many record none at all, and how
 	// many still match. A run announces the first two before its scan so a re-derivation
 	// is stated rather than discovered. A pure read.
-	SurveyDecisionInputs(ctx context.Context, current DecisionInputs) (DecisionInputsSurvey, error)
+	//
+	// current is asked PER ROW, about that row's own path, because that is how a claim
+	// asks it: the same file's inputs resolve differently under two library roots, and
+	// again under an encode profile whose match selects it. A survey measuring the whole
+	// ledger against one value would report a count no scan will act on.
+	SurveyDecisionInputs(ctx context.Context, current InputsForPath) (DecisionInputsSurvey, error)
 
 	// Advance records a non-terminal state transition for a job the caller already
 	// holds (e.g. probing -> encoding -> verifying).

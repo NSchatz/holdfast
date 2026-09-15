@@ -104,11 +104,12 @@ encoders can run in one scan. `""` is a real value there and not a missing measu
 so the key is always present - see
 [docs/api-reference.md](api-reference.md#the-recorded-outcome---the-proof-a-swap-was-safe).
 
-What a terminal row does **not** record is this profile's own values: the re-derivation
-inputs beside the name are the library root's, so **editing a profile re-opens nothing**
-and `holdfast requeue` is the lever for a change you want acted on. The reason that is a
-decision rather than an oversight is in
-[docs/requeue.md](requeue.md#what-a-row-records).
+The re-derivation inputs beside the name are **this job's own settings**, resolved for that
+file's path through the profile that selected it. So a terminal row is stale when, and only
+when, a key that row recorded resolves to a different value under the configuration now in
+force for the same path: editing a profile offers back the files whose recorded values it
+moved, and leaves alone every row whose guard never read the key you changed. The rule and
+what it costs are in [docs/requeue.md](requeue.md#what-a-row-records).
 
 ## `bitrate_kbps` - a target bitrate instead of a quality target
 

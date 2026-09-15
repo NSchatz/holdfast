@@ -58,6 +58,7 @@ Commands:
   run        Load config and run one transcode scan over the library roots
   serve      Run the HTTP API + web UI (scan on demand / on an interval)
   analyze    Census the library roots: file counts, bytes and distributions (reads only)
+  plan       Report what this configuration would do to the library and what it would save
   resolve    Report and resolve a job whose swap outcome could not be established
   restore    List what the undo window is holding, or put one original back
   requeue    Offer a file the engine has already answered back to the pipeline
@@ -69,6 +70,8 @@ Run "holdfast <command> -h" for command flags.
 
   holdfast analyze --config config.yaml            # what is in the library, without touching it
   holdfast analyze --config config.yaml --health   # and which of it does not decode
+  holdfast plan --config config.yaml               # what a run would do, and what it would save
+  holdfast plan --config config.yaml --json        # the same plan as one JSON document
   holdfast restore --config config.yaml            # what is retained, and for how long
   holdfast restore --config config.yaml <path>     # put that original back
   holdfast requeue --config config.yaml <path>     # re-open that file's terminal row
@@ -87,6 +90,8 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 		return cmdServe(args[1:], stdout, stderr)
 	case "analyze":
 		return cmdAnalyze(args[1:], stdout, stderr)
+	case "plan":
+		return cmdPlan(args[1:], stdout, stderr)
 	case "resolve":
 		return cmdResolve(args[1:], stdout, stderr)
 	case "restore":
@@ -206,7 +211,7 @@ func reportLedgerAgainstConfig(cfg *config.Config, stdout io.Writer) {
 		return
 	}
 	survey, err := store.SurveyLedgerDecisionInputs(context.Background(), dbPath,
-		engine.DecisionInputsFor(*cfg))
+		engine.DecisionInputsPerPath(*cfg))
 	if err != nil {
 		fmt.Fprintf(stdout, "ledger: %s could not be read, so what it was decided under cannot be "+
 			"reported here: %v\n", dbPath, err)
@@ -214,6 +219,53 @@ func reportLedgerAgainstConfig(cfg *config.Config, stdout io.Writer) {
 	}
 	for _, line := range decisionInputsLines(survey) {
 		fmt.Fprintf(stdout, "ledger: %s\n", line)
+	}
+}
+
+// logLedgerAgainstConfig is the daemon's half of the same report `validate` prints: what
+// the ledger was decided under, logged before the scan re-opens anything.
+//
+// Every condition it can meet is DEGRADED-AND-CONTINUING, so every one of them is a `warn`
+// and none is an `error`. An error means a human must act, and there is nothing for one to
+// act on here: the scan does its work whether or not it could be counted first, and a run
+// that logged at error over a count would train its reader to ignore the level.
+//
+// The two warns are different states and are kept apart:
+//
+//   - the ledger could not be READ at all. The dependency is named (the file), what was
+//     tried is named (reading what its terminal rows were decided under), and what happens
+//     next is stated (the scan runs unaffected), because a stack trace alone leaves a reader
+//     to guess whether the run is still safe.
+//   - some rows lie under NO CONFIGURED LIBRARY ROOT. Those files are never enumerated, so
+//     they are never re-opened whatever they record, and the count above is an upper bound.
+//     The example path is carried so an operator can see which tree it is - usually a root
+//     that was renamed or removed - rather than being told a number about files they cannot
+//     find.
+func logLedgerAgainstConfig(log *slog.Logger, dbPath string, survey store.DecisionInputsSurvey, err error) {
+	if err != nil {
+		log.Warn("the ledger could not be read, so what it was decided under is not reported",
+			"ledger", dbPath,
+			"tried", "counting the terminal rows the next scan will re-open",
+			"next", "the scan runs unaffected",
+			"err", err)
+		return
+	}
+	log.Info("ledger against this configuration",
+		"rows_taken_under_a_moved_configuration", survey.Moved,
+		"rows_recording_no_decision_inputs", survey.NotRecorded,
+		"rows_this_scan_reopens", survey.Reopening(),
+		"rows_still_matching", survey.Matching,
+		"rows_under_no_configured_library_root", survey.Unrooted)
+	for _, line := range decisionInputsLines(survey) {
+		log.Info(line)
+	}
+	if survey.Unrooted > 0 {
+		log.Warn("some terminal rows lie under no configured library root, so the scan never reaches them",
+			"ledger", dbPath,
+			"rows", survey.Unrooted,
+			"example", survey.UnrootedExample,
+			"tried", "resolving each row's path to a configured library root",
+			"next", "the scan runs unaffected and never enumerates those paths")
 	}
 }
 
@@ -490,18 +542,8 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 	// is about to do; the scan does that work whether or not it could be counted first,
 	// and refusing to start over an unreadable count would turn a reporting nicety into
 	// an outage.
-	if survey, err := decisionInputsReport(context.Background(), st, cfg); err != nil {
-		log.Warn("could not report what the ledger was decided under (the scan is unaffected)", "err", err)
-	} else {
-		log.Info("ledger against this configuration",
-			"rows_taken_under_a_moved_configuration", survey.Moved,
-			"rows_recording_no_decision_inputs", survey.NotRecorded,
-			"rows_this_scan_reopens", survey.Reopening(),
-			"rows_still_matching", survey.Matching)
-		for _, line := range decisionInputsLines(survey) {
-			log.Info(line)
-		}
-	}
+	survey, surveyErr := decisionInputsReport(context.Background(), st, cfg)
+	logLedgerAgainstConfig(log, filepath.Join(effectiveStateDir(cfg), "jobs.db"), survey, surveyErr)
 
 	eng := engine.New(*cfg, prober, enc, st, log)
 	// The startup walk's coverage BOUNDS the run: this scan enumerates sources
@@ -817,12 +859,20 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		return !ok
 	}
 
+	// The targeted-scan queue (S0093), beside the controller rather than instead of it.
+	// An accepted path enters the SAME pipeline entry point a scan's worker uses, so
+	// every guard, the claim, the decision-input re-opening rule and the swap discipline
+	// apply to it unchanged; this is a queue and a worker pool, and it decides nothing.
+	subs := eng.NewSubmissions(0, 0)
+
 	srv := server.New(ctx, *cfg, secrets.Get("server_auth_token"), st, ctrl, hub,
 		webui.HandlerFor(offer), metricsHandler, log)
+	srv.SetSubmissions(subs)
 	var bg sync.WaitGroup
-	bg.Add(3)
+	bg.Add(4)
 	go func() { defer bg.Done(); hub.Run(ctx) }()
 	go func() { defer bg.Done(); notifier.Run(ctx) }()
+	go func() { defer bg.Done(); subs.Run(ctx) }()                               // drains POST /api/scan
 	go func() { defer bg.Done(); srv.StartScanLoop(ctx, cfg.ScanIntervalSec) }() // initial scan + optional interval
 
 	addr := cfg.EffectiveServerAddr()
@@ -863,9 +913,11 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	}
 	// Join background goroutines before the deferred st.Close(): ctx is already
 	// cancelled, so the scan loop + hub have stopped and any in-flight scan is
-	// unwinding — wait for the scan goroutine to finish issuing store calls so the
-	// store handle is never closed out from under it.
-	ctrl.Wait()
+	// unwinding - wait for the scan goroutine AND any in-flight targeted submission to
+	// finish issuing store calls so the store handle is never closed out from under
+	// them. srv.Wait joins both; submissions still queued are dropped unprocessed and
+	// unrecorded, because nothing looked at them.
+	srv.Wait()
 	bg.Wait()
 	return 0
 }

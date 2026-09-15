@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -827,15 +828,8 @@ func (h *holdBacks) held(p string) (string, bool) {
 //     have not moved and NOT one that was rewritten since it was parked - which is the
 //     residue, and the log names it rather than implying AC15c is fully enforced.
 func (e *Engine) loadHoldBacks(ctx context.Context) *holdBacks {
-	h := &holdBacks{paths: map[string]string{}}
-
-	parked, err := e.Store.ParkedIncidents(ctx)
-	if err != nil {
-		e.Log.Error("could not read parked jobs - CONTINUING WITHOUT the record-based hold-back on parked paths, which is the one AC15c names; a retained replacement is still held back by its NAME, and a parked source is still refused by Claim unless its bytes have changed since it was parked",
-			"err", err)
-	}
-	h.parked = parked
-	for _, in := range parked {
+	h := e.readHoldBacks(ctx)
+	for _, in := range h.parked {
 		// AC15c: report it, naming both files. The key is the recorded pair of PATHS
 		// and not a fingerprint - whether the bytes at the source path still match the
 		// recorded attributes is the very thing that is unknown.
@@ -845,13 +839,44 @@ func (e *Engine) loadHoldBacks(ctx context.Context) *holdBacks {
 			"replacement_pre_swap_attributes", in.ReplacementAttrs,
 			"recorded", in.SwapError,
 			"resolve_with", fmt.Sprintf("holdfast resolve --id %d", in.ID))
+	}
+	return h
+}
+
+// readHoldBacks builds the snapshot loadHoldBacks reports on, and is the same two store
+// reads without the per-incident PARKED report. The report is owed ONCE per pass - a pass
+// is where an operator is told what is waiting on them - so a caller that needs the
+// hold-backs per FILE rather than per pass (holdBacksInForce, on the door) asks this and
+// leaves the reporting where it belongs. A store FAILURE is still reported here, on both
+// halves, because that changes which guarantee is standing on what and is rare.
+func (e *Engine) readHoldBacks(ctx context.Context) *holdBacks {
+	return holdBacksFrom(ctx, e.Store, e.Log)
+}
+
+// holdBacksFrom is that same pair of reads over whatever can READ the two records. The
+// daemon asks it through its own store; a read-only pass asks it through a handle that
+// cannot write, and a caller with no ledger at all passes nil and gets the empty set - which
+// is the true answer for a fresh install, where no record exists to hold anything back.
+func holdBacksFrom(ctx context.Context, r LedgerReader, log *slog.Logger) *holdBacks {
+	h := &holdBacks{paths: map[string]string{}}
+	if r == nil {
+		return h
+	}
+
+	parked, err := r.ParkedIncidents(ctx)
+	if err != nil {
+		log.Error("could not read parked jobs - CONTINUING WITHOUT the record-based hold-back on parked paths, which is the one AC15c names; a retained replacement is still held back by its NAME, and a parked source is still refused by Claim unless its bytes have changed since it was parked",
+			"err", err)
+	}
+	h.parked = parked
+	for _, in := range parked {
 		h.paths[resolvedForm(in.SourcePath)] = "parked job " + strconv.FormatInt(in.ID, 10)
 		h.paths[resolvedForm(in.ReplacementPath)] = "parked job " + strconv.FormatInt(in.ID, 10)
 	}
 
-	excluded, err := e.Store.ExcludedReplacementPaths(ctx)
+	excluded, err := r.ExcludedReplacementPaths(ctx)
 	if err != nil {
-		e.Log.Error("could not read recorded replacement paths - CONTINUING WITHOUT the record-based exclusion AC15d carries; every retained replacement is still held back by its NAME, which is what that name exists for",
+		log.Error("could not read recorded replacement paths - CONTINUING WITHOUT the record-based exclusion AC15d carries; every retained replacement is still held back by its NAME, which is what that name exists for",
 			"err", err)
 	}
 	for _, p := range excluded {

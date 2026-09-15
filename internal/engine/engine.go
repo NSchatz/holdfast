@@ -246,6 +246,63 @@ type Engine struct {
 	// worker starts and only read afterwards. An atomic pointer rather than a plain field so
 	// a second RunOneshot can never be observed mid-write.
 	held atomic.Pointer[holdBacks]
+
+	// passes counts the scan passes IN FLIGHT, raised by RunOneshot just after it publishes
+	// this pass's snapshot and lowered when the pass returns. It answers one question: is
+	// there a scan whose snapshot a decision taken now must agree with? See holdBacksInForce,
+	// its only reader.
+	passes atomic.Int64
+
+	// onClaim, when non-nil, is called with the WORKER and the path the instant ProcessFile
+	// takes the claim on it - the ONE signal that says a caller got PAST the door rather
+	// than being turned away at it. The targeted-submission queue (submit.go) reads it to
+	// report "this file is held out by a terminal row" without keeping a second copy of the
+	// store's re-opening rule, which is the rule that decides it.
+	//
+	// The worker is carried because the hook is ENGINE-wide: a scan's workers call it too,
+	// and a note keyed on the path alone cannot say WHOSE claim it was, so a reader would
+	// attribute one caller's claim to another.
+	//
+	// Set ONCE, before serving, exactly as Observer is; it is then read from every worker
+	// goroutine and never written again. It runs inline on a worker, so it must be
+	// non-blocking and concurrency-safe - the same contract Observer carries.
+	onClaim func(worker, path string)
+}
+
+// EnsureHoldBacks publishes a snapshot when none has been published yet: the
+// once-per-process PARKED report (loadHoldBacks writes it as it builds one) for a daemon
+// that may never take a pass, and a non-nil snapshot for the pass-scoped readers. It never
+// REPLACES a live one, because a pass reads its own end to end.
+//
+// IT IS NOT THE GATE. A snapshot published once is frozen, and a hold-back recorded after
+// it was taken is not in it. What decides whether a file may be processed is
+// holdBacksInForce, asked on the door per file, and that is where the freshness lives.
+func (e *Engine) EnsureHoldBacks(ctx context.Context) {
+	if e.held.Load() == nil {
+		e.held.CompareAndSwap(nil, e.loadHoldBacks(ctx))
+	}
+}
+
+// holdBacksInForce returns the record-based hold-backs a file being processed AT THIS
+// MOMENT must be judged against. It is the door's question, and it has two answers because
+// there are two situations to be consistent with.
+//
+// WHILE A PASS IS IN FLIGHT, that pass's snapshot: it is published before the pass walks
+// anything and read end to end, so a file arriving mid-pass by any route reaches the verdict
+// that pass's own worker reaches on the file beside it. Re-reading here would make a
+// submission stricter than the scan it must agree with, and REPLACING the snapshot would
+// change what a scan already in progress holds back.
+//
+// WHILE NONE IS, the store. The last snapshot anybody published is then as old as whatever
+// published it, and with scan_interval_sec: 0 no further pass happens at all - so a swap
+// that parks an incident after startup records two paths a submission would walk straight
+// past for the life of the process. This read is the one a scan starting now would make,
+// and it reads QUIETLY: the PARKED report is owed once per pass, not once per file.
+func (e *Engine) holdBacksInForce(ctx context.Context) *holdBacks {
+	if e.passes.Load() > 0 {
+		return e.held.Load()
+	}
+	return e.readHoldBacks(ctx)
 }
 
 // rename performs the swap's rename, routing through the test seam when one is set.
@@ -265,9 +322,13 @@ func (e *Engine) restat(path string) (probe.Attributes, error) {
 	return probe.StatAttributes(path)
 }
 
-// heldBack reports whether a path is one of this run's two record-based hold-backs, and
-// why. It is deliberately separate from the record-free name check, so a caller that needs
-// both asks for both and it is always obvious which rule fired.
+// heldBack reports whether a path is one of the PUBLISHED snapshot's two record-based
+// hold-backs, and why. It is deliberately separate from the record-free name check, so a
+// caller that needs both asks for both and it is always obvious which rule fired.
+//
+// Its callers are the pass-scoped ones - the enumeration, the temp sweep, the two temp-path
+// constructions - which run inside a pass, or beside strayReplacementHold's own live
+// per-path question. The DOOR uses holdBacksInForce instead.
 func (e *Engine) heldBack(p string) (string, bool) { return e.held.Load().held(p) }
 
 // emit delivers ev to the Observer if one is set. It must stay cheap and non-blocking: it
@@ -416,6 +477,12 @@ func (e *Engine) RunOneshot(ctx context.Context) error {
 	// its two recorded paths - plus every recorded replacement path still carrying a
 	// live exclusion - are withheld from the sweep, from the scan and from the workers.
 	e.held.Store(e.loadHoldBacks(ctx))
+
+	// IN FLIGHT from here - after the snapshot above is published, never before - until this
+	// returns, so every route into ProcessFile meanwhile is judged against that snapshot
+	// rather than a fresh read (holdBacksInForce).
+	e.passes.Add(1)
+	defer e.passes.Add(-1)
 
 	// S0085: the unpreserved-ownership notice is owed once per RUN, so a daemon scanning
 	// every scan_interval_sec says it again on each pass.
@@ -749,7 +816,7 @@ func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
 			// The retention area holds this tool's own retained originals and nothing
 			// else. Its files are already excluded by name (IsSourceName); skipping the
 			// directory too means no route at all feeds rescued bytes back to the encoder.
-			if filepath.Base(dir) == UndoDirName {
+			if IsRetentionDir(dir) {
 				continue
 			}
 			got, ok := pass.take(dir)
@@ -804,7 +871,7 @@ func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
 				// The retention area is never a source, and is skipped BEFORE being marked
 				// observed: a directory this run declined to list is not evidence about
 				// what is in it.
-				if d.Name() == UndoDirName {
+				if IsRetentionDir(path) {
 					return filepath.SkipDir
 				}
 				observed[path] = true
@@ -853,24 +920,42 @@ func (e *Engine) offered(path string) bool {
 // before Claim but its RecordSkip/ClearSkip is a report-only write that never claims the
 // file, so it cannot let two workers encode one source.
 func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
+	// Both of the questions this door asks about the PATH itself, answered by the one
+	// function the read-only plan pass and the census ask too (DeclinedPath), so a refusal
+	// added there reaches the daemon and every report that predicts it with no second edit.
+	// The order below is unchanged: a path with no file at the other end returns as silently
+	// as it always did (a dangling link is met every pass and must not narrate every pass),
+	// and the character rule is still said out loud below the hold-backs.
+	rule, _, declined := DeclinedPath(f)
+	if declined && rule != RuleUnsupportedCharacters {
+		return nil
+	}
+
+	// The source's PRE-ENCODE size, which the terminal row records and the undo window
+	// measures its retention by. A second stat deliberately: the question above answers
+	// whether this path may be processed at all, and only this caller wants a number about
+	// the file. A file that went away between the two returns here, as it always did.
 	fi, err := os.Stat(f)
-	if err != nil || fi.IsDir() {
+	if err != nil {
 		return nil
 	}
 
 	// Hold-backs, re-checked here rather than trusted to the scan: ProcessFile is exported
 	// and is the only door into the encode/swap pipeline, so the rule belongs on the door.
+	// The record-based half asks for the hold-backs IN FORCE, never a snapshot published
+	// earlier: a recorded replacement path is not always a name this build recognises (see
+	// swap.go's applied-despite-error branch and retainReplacement), so for those files the
+	// record is the only thing holding them.
 	if IsRetainedReplacementName(filepath.Base(f)) {
 		return nil
 	}
-	if why, ok := e.heldBack(f); ok {
+	if why, ok := e.holdBacksInForce(ctx).held(f); ok {
 		e.Log.Info("not processing (held back)", "file", f, "why", why)
 		return nil
 	}
 
-	// A path containing a literal tab or newline is pathological: skip it, unrecorded.
-	// A row keyed on such a path would be legal SQL and worth nothing.
-	if strings.ContainsAny(f, "\t\n") {
+	// The half of that answer this daemon says out loud, in the place it has always said it.
+	if declined {
 		e.Log.Info("skip (path contains a tab/newline — unsupported)", "file", f)
 		return nil
 	}
@@ -990,7 +1075,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// recorded still match what is handed in here and are RE-OPENED when they do not; failed
 	// is retryable up to MaxFailures, since a transient ENOSPC must not exclude a file for
 	// ever; active means another worker holds it, or it is stale and awaits RecoverStale.
-	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures, e.inputsFor(prof))
+	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures, e.inputsFor(prof, ts))
 	if err != nil {
 		// Fail safe: a store error must never be treated as "done". Log and skip
 		// this pass; the file is retried on the next scan once the store recovers.
@@ -1000,129 +1085,32 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	if !claimed {
 		return nil
 	}
+	if e.onClaim != nil {
+		e.onClaim(worker, f)
+	}
 	// The claim moved this row to probing: surface it as a live "started" signal carrying
 	// the worker, so the UI shows the file entering the pipeline immediately.
 	e.emit(Event{Path: f, Status: store.Probing, Worker: worker})
 
-	// Symlink guard (TRANSCODE-16). A symlink has nlink == 1 and slips past the hardlink
-	// guard, and config.Validate refuses a symlinked ROOT but not a symlinked file within
-	// the tree. The swap would replace the LINK itself with a regular file, orphaning the
-	// real target and changing what the library entry means. Resolving and transcoding the
-	// target is a deliberate non-goal, so a symlinked source is SKIPPED.
-	if probe.IsSymlink(f) {
-		e.Log.Info("skip (symlinked source — swap would replace the link, orphaning its target)", "file", f)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipSymlink, by, prof, ts))
-		return nil
-	}
-
-	// One probe snapshot of the source, shared by every skip guard below AND handed to the
-	// encoder (TRANSCODE-PERF), in place of the ~15 separate ffprobe/ffmpeg processes a
-	// single encode-bound file used to spawn. Reading every guard off one snapshot is more
-	// self-consistent than re-probing a file mid-pipeline. The costly whole-file checks are
-	// NOT here: they run in verifyOutput against the encoded temp.
-	props := e.Probe.VideoProps(ctx, f)
-
-	codec := props.Codec()
-	if codec == "" {
-		e.Log.Info("skip (unreadable / no video stream)", "file", f)
-		e.finish(ctx, f, key, store.Failed, e.because(FailUnreadable, by, prof, ts))
-		return nil
-	}
-	if isAlreadyTargetCodec(targetCodec, codec) {
-		e.Log.Info("skip (already at target codec)", "file", f, "codec", codec,
-			"target", targetCodec, "library_root", root.Clean, "encode_profile", ts.Profile)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipAlreadyTargetCodec, by, prof, ts, InputTargetCodec))
-		return nil
-	}
-
-	// The bitrate floor is the ROOT's and not this job's: an encode profile may change
-	// what the encoder produces and may not move a gate that decides whether a source is
-	// destroyed. Same for every threshold below.
-	if br := props.BitrateKbps(); br > 0 && br < prof.MinBitrateKbps {
-		e.Log.Info("skip (low bitrate)", "file", f, "kbps", br, "min", prof.MinBitrateKbps, "library_root", root.Clean)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipLowBitrate, by, prof, ts, InputMinBitrateKbps))
-		return nil
-	}
-
-	// Interlace guard. This tool never deinterlaces — re-encoding an interlaced
-	// source with a progressive-assuming pipeline bakes in combing artifacts
-	// permanently. Progressive or unknown field_order proceeds.
-	switch props.FieldOrder() {
-	case "tt", "bb", "tb", "bt":
-		e.Log.Info("skip (interlaced — not deinterlacing)", "file", f)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipInterlaced, by, prof, ts))
-		return nil
-	}
-
-	// HDR/DV guard (TRANSCODE-3). A generic libx265 re-encode cannot preserve a Dolby Vision
-	// RPU or HDR10+ dynamic metadata and would SILENTLY strip it, a permanent,
-	// invisible-until-viewed loss, so detect and SKIP. HDR10 STATIC metadata IS carried
-	// through the encode (hdr.DeriveColorArgs). Probed only here, on an encode-bound file,
-	// so the cost falls on the minority actually re-encoded.
-	switch hdr.ClassFrom(props.CodecTag(), props.SideData(), props.Color("color_transfer")) {
-	case hdr.ClassDV:
-		e.Log.Info("skip (Dolby Vision — RPU cannot survive a generic re-encode)", "file", f)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipDolbyVision, by, prof, ts))
-		return nil
-	case hdr.ClassHDR10Plus:
-		e.Log.Info("skip (HDR10+ dynamic metadata — cannot survive a generic re-encode)", "file", f)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipHDR10Plus, by, prof, ts))
-		return nil
-	case hdr.ClassHDR10:
-		// HDR10 static metadata IS carried through the encode, but a mastering-display or
-		// content-light block this build cannot fully parse would be silently dropped.
-		// Fail safe: SKIP rather than blind-encode.
-		incomplete := e.staticMetadataIncomplete
-		if incomplete == nil {
-			incomplete = hdr.StaticMetadataIncomplete
+	// Every source-side guard, in one call, off one probe snapshot and writing nothing.
+	// What each of them decides is unchanged; what changed is that the read-only plan pass
+	// asks the same chain rather than carrying a second copy of it (see guardSource).
+	props, v := e.guardSource(ctx, f, root, ts, targetCodec, e.Probe.VideoProps)
+	if v.stopped() {
+		e.Log.Info(v.log, append([]any{"file", f}, v.logArgs...)...)
+		status := store.Skipped
+		if v.failed {
+			status = store.Failed
 		}
-		if incomplete(props.FrameSideData()) {
-			e.Log.Info("skip (HDR10 static metadata present but incomplete/unparseable — refusing to re-encode and drop it)", "file", f)
-			e.finish(ctx, f, key, store.Skipped, e.because(SkipIncompleteHDRMetadata, by, prof, ts))
-			return nil
-		}
-	}
-
-	// Chroma/bit-depth guard. Preserve the source's chroma subsampling and floor bit-depth
-	// at 10; an exotic pix_fmt is SKIPPED rather than silently subsampled or guessed. A
-	// forced (non-"auto") PixelFormat bypasses derivation entirely.
-	if ts.PixelFormatAuto() {
-		srcPixFmt := props.PixFmt()
-		if _, ok := hdr.DerivePixFmt(srcPixFmt); !ok {
-			e.Log.Info("skip (unrecognized/exotic pixel format — refusing to silently subsample)", "file", f, "pix_fmt", srcPixFmt)
-			e.finish(ctx, f, key, store.Skipped, e.because(SkipExoticPixelFormat, by, prof, ts, InputPixelFormat))
-			return nil
-		}
-	}
-
-	// Source-shape guard. Everything above reads v:0 and only v:0, so a source carrying a
-	// SECOND moving-picture stream is one this pipeline cannot honestly claim to preserve:
-	// the encode would re-encode it off the first stream's properties and no gate in front
-	// of the swap ever looked at it. An ATTACHED PICTURE is the one exception, because it is
-	// carried through unencoded (attachedPictureCopyIndexes). The probe is the second and
-	// last ffprobe a file pays for, taken here rather than in the eager snapshot so a file
-	// that skipped at a cheap guard above never pays for it.
-	//
-	// The outcome records NO decision inputs, because this guard reads no configuration key:
-	// a source's stream shape is a property of the file, so no value an operator edits
-	// re-derives the verdict. That is why the token is in SkipGuards - `requeue --guard
-	// multi-video-stream` is then the only lever, and a token missing from that list would
-	// be a permanent exclusion with no lever at all.
-	streams, established := props.VideoStreams()
-	if !established || !carriableVideoStreams(streams) {
-		e.Log.Info("skip (a video stream beyond the first that is not an attached picture, or a stream shape the probe could not establish)",
-			"file", f, "video_streams", len(streams), "probe_established", established)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipMultiVideoStream, by, prof, ts))
+		e.finish(ctx, f, key, status, e.because(v.guard, by, prof, ts, v.inputs...))
 		return nil
 	}
 
-	// Output container: "source"/"auto" (default) matches the SOURCE file's own extension,
-	// so a stream type that does not round-trip through a different container (MP4 mov_text
-	// into MKV) is not forced to change. A forced ContainerExt overrides this.
-	outExt := ts.ContainerExt
-	if ts.ContainerMatchesSource() {
-		outExt = strings.TrimPrefix(filepath.Ext(f), ".")
-	}
+	codec := v.codec
+	outExt := v.outExt
+	// final is where the swap publishes, chosen by the same guard chain that just refused
+	// to clobber anything already there.
+	final := v.target
 
 	dir := filepath.Dir(f)
 	base := filepath.Base(f)
@@ -1132,18 +1120,6 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// tracking it in the Engine: every failure path below removes tmp directly, and a
 	// ctx-cancel leaves it orphaned for cleanStaleTemps to sweep on the next startup. The
 	// path is the build's own construction (see swap.go).
-	final := filepath.Join(dir, stem+"."+outExt)
-
-	// Collision guard. When the container ext changes, final is a DIFFERENT path than the
-	// source, and a distinct file already there would be silently overwritten before the
-	// source was deleted: two files destroyed. Refuse.
-	if final != f {
-		if _, err := os.Lstat(final); err == nil {
-			e.Log.Info("skip (target already exists as a distinct file — refusing to clobber)", "file", f, "target", final)
-			e.finish(ctx, f, key, store.Skipped, e.because(SkipTargetExists, by, prof, ts, InputContainerExt))
-			return nil
-		}
-	}
 
 	if e.Cfg.DryRun {
 		// A DRY RUN'S DECISION IS RECORDED: the file passed every guard, so a run with
@@ -1172,7 +1148,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			SourceCodec:    codec,
 			Profile:        ts.Profile,
 			Decision:       by,
-			DecisionInputs: e.inputsRead(prof, InputTargetCodec, InputEncoder, InputCRF, InputPreset),
+			DecisionInputs: e.inputsRead(prof, ts, InputTargetCodec, InputEncoder, InputCRF, InputPreset),
 		}
 		if st, err := os.Stat(f); err == nil {
 			out.SourceBytes = ptr(st.Size())
@@ -1599,7 +1575,15 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// halves of that - the mtime did not move, the size did - so this comment cannot
 	// quietly stop being true.
 	finalKey := probe.Fingerprint(final)
-	if _, err := e.Store.Claim(ctx, final, finalKey, worker, e.Cfg.MaxFailures, e.inputsFor(prof)); err != nil {
+	// The row this writes is keyed under the REPLACEMENT's path, so its inputs are resolved
+	// for that path and not for the source's. Symmetry is the whole of the reason: the next
+	// scan meets the file at `final` and compares against `final`'s resolution, and where
+	// the container ext moved (film.mkv -> film.mp4) an encode profile matching `*.mkv` no
+	// longer selects it. A row recording the source's resolution would then be a row nothing
+	// can re-derive - re-opened on every scan for ever, which on a library is a re-encode of
+	// everything, each accepted encode deleting its source.
+	tsFinal := e.Cfg.TranscodeIn(prof, final)
+	if _, err := e.Store.Claim(ctx, final, finalKey, worker, e.Cfg.MaxFailures, e.inputsFor(prof, tsFinal)); err != nil {
 		e.Log.Warn("claim of final key failed (done outcome still applies on disk)", "file", final, "err", err)
 	}
 	// What this encode was taken under: the codec it targeted and the three settings
@@ -1607,7 +1591,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// is the permanent answer about the replacement - and the moment any of the four
 	// moves, the answer is one this build would no longer give, so the next scan offers
 	// the file back to the guards rather than skipping it for ever.
-	out.DecisionInputs = e.inputsRead(prof, InputTargetCodec, InputEncoder, InputCRF, InputPreset)
+	out.DecisionInputs = e.inputsRead(prof, tsFinal, InputTargetCodec, InputEncoder, InputCRF, InputPreset)
 	// Record the terminal Done state in the store WITHOUT emitting (finishStore), then
 	// emit ONE rich Done event carrying the same proof. Emitting exactly once here
 	// (rather than a generic finish emit plus a separate rich one) keeps a metrics
@@ -1625,6 +1609,189 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		}
 	}
 	return nil
+}
+
+// sourceVerdict is what the source-side guards concluded about one file: the guard that
+// stopped it, or none, plus the three things a caller past the guards needs from the same
+// probe snapshot they were answered from.
+//
+// It carries its own LOG LINE because a caller switching on the token to decide what to say
+// would put the wording of a skip beside the thing that COUNTS it rather than beside the
+// guard that decided it, and the two would drift the first time a guard learned a reason.
+type sourceVerdict struct {
+	// guard is the Skip*/Fail* token, empty when every guard passed.
+	guard string
+	// failed marks the one verdict that is a FAILURE rather than a skip: a source the probe
+	// reported no video stream for.
+	failed bool
+	// inputs are the configuration keys this verdict READ, recorded on the terminal row so
+	// a later configuration change can re-derive it.
+	inputs []string
+	// log and logArgs are what the daemon says when this guard fires. The caller supplies
+	// the file, which every one of them names first.
+	log     string
+	logArgs []any
+
+	// codec is the source codec the snapshot read, and outExt/target are what the swap would
+	// publish. All three come off the same snapshot the guards read, so nothing past them
+	// re-derives one.
+	codec  string
+	outExt string
+	target string
+}
+
+// stopped reports whether a guard refused the file.
+func (v sourceVerdict) stopped() bool { return v.guard != "" }
+
+// guardSource runs every source-side skip guard, in the order the pipeline has always run
+// them, off ONE probe snapshot, and WRITES NOTHING. ProcessFile turns what comes back into a
+// terminal row; the read-only plan pass counts it. Both therefore ask the same guards the
+// same question in the same order, and a guard added here reaches both with no second edit -
+// which is what stops a report about what a run would do from drifting from the run.
+//
+// snapshot takes the file's probe snapshot. It is a parameter rather than e.Probe.VideoProps
+// so a caller can COUNT the snapshots one pass takes, which is the property "one invocation
+// is one pass over the library" is graded by; the daemon hands in the prober's own.
+//
+// The returned snapshot is nil exactly when the guards stopped the file before one was taken
+// (the symlink guard), which is why that guard is where it is: a symbolic link never pays for
+// an ffprobe.
+func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, ts config.Transcode,
+	targetCodec string, snapshot func(context.Context, string) *probe.VideoProps) (*probe.VideoProps, sourceVerdict) {
+	// The bitrate floor and every threshold below are the ROOT's and not this job's: an
+	// encode profile may change what the encoder produces and may not move a gate that
+	// decides whether a source is destroyed.
+	prof := root.Profile
+
+	// Symlink guard (TRANSCODE-16). A symlink has nlink == 1 and slips past the hardlink
+	// guard, and config.Validate refuses a symlinked ROOT but not a symlinked file within
+	// the tree. The swap would replace the LINK itself with a regular file, orphaning the
+	// real target and changing what the library entry means. Resolving and transcoding the
+	// target is a deliberate non-goal, so a symlinked source is SKIPPED.
+	if probe.IsSymlink(f) {
+		return nil, sourceVerdict{guard: SkipSymlink,
+			log: "skip (symlinked source — swap would replace the link, orphaning its target)"}
+	}
+
+	// One probe snapshot of the source, shared by every skip guard below AND handed to the
+	// encoder (TRANSCODE-PERF), in place of the ~15 separate ffprobe/ffmpeg processes a
+	// single encode-bound file used to spawn. Reading every guard off one snapshot is more
+	// self-consistent than re-probing a file mid-pipeline. The costly whole-file checks are
+	// NOT here: they run in verifyOutput against the encoded temp.
+	props := snapshot(ctx, f)
+
+	codec := props.Codec()
+	if codec == "" {
+		return props, sourceVerdict{guard: FailUnreadable, failed: true,
+			log: "skip (unreadable / no video stream)"}
+	}
+	if isAlreadyTargetCodec(targetCodec, codec) {
+		return props, sourceVerdict{guard: SkipAlreadyTargetCodec, codec: codec,
+			inputs: []string{InputTargetCodec},
+			log:    "skip (already at target codec)",
+			logArgs: []any{"codec", codec, "target", targetCodec,
+				"library_root", root.Clean, "encode_profile", ts.Profile}}
+	}
+
+	if br := props.BitrateKbps(); br > 0 && br < prof.MinBitrateKbps {
+		return props, sourceVerdict{guard: SkipLowBitrate, codec: codec,
+			inputs:  []string{InputMinBitrateKbps},
+			log:     "skip (low bitrate)",
+			logArgs: []any{"kbps", br, "min", prof.MinBitrateKbps, "library_root", root.Clean}}
+	}
+
+	// Interlace guard. This tool never deinterlaces — re-encoding an interlaced
+	// source with a progressive-assuming pipeline bakes in combing artifacts
+	// permanently. Progressive or unknown field_order proceeds.
+	switch props.FieldOrder() {
+	case "tt", "bb", "tb", "bt":
+		return props, sourceVerdict{guard: SkipInterlaced, codec: codec,
+			log: "skip (interlaced — not deinterlacing)"}
+	}
+
+	// HDR/DV guard (TRANSCODE-3). A generic libx265 re-encode cannot preserve a Dolby Vision
+	// RPU or HDR10+ dynamic metadata and would SILENTLY strip it, a permanent,
+	// invisible-until-viewed loss, so detect and SKIP. HDR10 STATIC metadata IS carried
+	// through the encode (hdr.DeriveColorArgs). Probed only here, on an encode-bound file,
+	// so the cost falls on the minority actually re-encoded.
+	switch hdr.ClassFrom(props.CodecTag(), props.SideData(), props.Color("color_transfer")) {
+	case hdr.ClassDV:
+		return props, sourceVerdict{guard: SkipDolbyVision, codec: codec,
+			log: "skip (Dolby Vision — RPU cannot survive a generic re-encode)"}
+	case hdr.ClassHDR10Plus:
+		return props, sourceVerdict{guard: SkipHDR10Plus, codec: codec,
+			log: "skip (HDR10+ dynamic metadata — cannot survive a generic re-encode)"}
+	case hdr.ClassHDR10:
+		// HDR10 static metadata IS carried through the encode, but a mastering-display or
+		// content-light block this build cannot fully parse would be silently dropped.
+		// Fail safe: SKIP rather than blind-encode.
+		incomplete := e.staticMetadataIncomplete
+		if incomplete == nil {
+			incomplete = hdr.StaticMetadataIncomplete
+		}
+		if incomplete(props.FrameSideData()) {
+			return props, sourceVerdict{guard: SkipIncompleteHDRMetadata, codec: codec,
+				log: "skip (HDR10 static metadata present but incomplete/unparseable — refusing to re-encode and drop it)"}
+		}
+	}
+
+	// Chroma/bit-depth guard. Preserve the source's chroma subsampling and floor bit-depth
+	// at 10; an exotic pix_fmt is SKIPPED rather than silently subsampled or guessed. A
+	// forced (non-"auto") PixelFormat bypasses derivation entirely.
+	if ts.PixelFormatAuto() {
+		srcPixFmt := props.PixFmt()
+		if _, ok := hdr.DerivePixFmt(srcPixFmt); !ok {
+			return props, sourceVerdict{guard: SkipExoticPixelFormat, codec: codec,
+				inputs:  []string{InputPixelFormat},
+				log:     "skip (unrecognized/exotic pixel format — refusing to silently subsample)",
+				logArgs: []any{"pix_fmt", srcPixFmt}}
+		}
+	}
+
+	// Source-shape guard. Everything above reads v:0 and only v:0, so a source carrying a
+	// SECOND moving-picture stream is one this pipeline cannot honestly claim to preserve:
+	// the encode would re-encode it off the first stream's properties and no gate in front
+	// of the swap ever looked at it. An ATTACHED PICTURE is the one exception, because it is
+	// carried through unencoded (attachedPictureCopyIndexes). The probe is the second and
+	// last ffprobe a file pays for, taken here rather than in the eager snapshot so a file
+	// that skipped at a cheap guard above never pays for it.
+	//
+	// The outcome records NO decision inputs, because this guard reads no configuration key:
+	// a source's stream shape is a property of the file, so no value an operator edits
+	// re-derives the verdict. That is why the token is in SkipGuards - `requeue --guard
+	// multi-video-stream` is then the only lever, and a token missing from that list would
+	// be a permanent exclusion with no lever at all.
+	streams, established := props.VideoStreams()
+	if !established || !carriableVideoStreams(streams) {
+		return props, sourceVerdict{guard: SkipMultiVideoStream, codec: codec,
+			log:     "skip (a video stream beyond the first that is not an attached picture, or a stream shape the probe could not establish)",
+			logArgs: []any{"video_streams", len(streams), "probe_established", established}}
+	}
+
+	// Output container: "source"/"auto" (default) matches the SOURCE file's own extension,
+	// so a stream type that does not round-trip through a different container (MP4 mov_text
+	// into MKV) is not forced to change. A forced ContainerExt overrides this.
+	outExt := ts.ContainerExt
+	if ts.ContainerMatchesSource() {
+		outExt = strings.TrimPrefix(filepath.Ext(f), ".")
+	}
+	base := filepath.Base(f)
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	final := filepath.Join(filepath.Dir(f), stem+"."+outExt)
+
+	// Collision guard. When the container ext changes, final is a DIFFERENT path than the
+	// source, and a distinct file already there would be silently overwritten before the
+	// source was deleted: two files destroyed. Refuse.
+	if final != f {
+		if _, err := os.Lstat(final); err == nil {
+			return props, sourceVerdict{guard: SkipTargetExists, codec: codec,
+				inputs:  []string{InputContainerExt},
+				log:     "skip (target already exists as a distinct file — refusing to clobber)",
+				logArgs: []any{"target", final}}
+		}
+	}
+
+	return props, sourceVerdict{codec: codec, outExt: outExt, target: final}
 }
 
 // advance is a small logged wrapper around Store.Advance — a store error here is
@@ -1684,19 +1851,18 @@ func (e *Engine) finish(ctx context.Context, path, key string, s store.Status, o
 // would name a number no guard ever looked at. by carries the same answer in the form a
 // reader of the ledger asks it - which root, and what that root's knobs resolved to.
 //
-// ts is there for a DIFFERENT question and the two are deliberately not merged. An input
-// is compared against the configuration in force to decide whether to re-open the row,
-// so it has to be read where that comparison reads it - the root's profile, which is the
-// unit Claim and the ledger survey both ask about. The encode profile's name is the
-// ATTRIBUTION the ledger owes beside it: which named set of overrides supplied the
-// settings this guard was decided against, "" when the root's own values stood, which is
-// every row a configuration without encode_profiles can produce.
+// ts answers the other half, and it answers it for BOTH questions the row holds. It is the
+// ATTRIBUTION a reader asks - which named set of overrides supplied the settings this guard
+// was decided against, "" when the root's own values stood - and it is where every input an
+// encode profile can move is READ, because that is where the guard that read it read it.
+// The two are one reading on purpose: an input exists to be compared, and a row recording a
+// value the layering for its own path never produces is a row nothing can re-derive.
 func (e *Engine) because(reason string, by store.Decision, prof config.Profile, ts config.Transcode, read ...string) *store.Outcome {
 	return &store.Outcome{
 		Reason:         reason,
 		Decision:       by,
 		Profile:        ts.Profile,
-		DecisionInputs: e.inputsRead(prof, read...),
+		DecisionInputs: e.inputsRead(prof, ts, read...),
 	}
 }
 
@@ -1839,29 +2005,6 @@ func attachedPictureCopyIndexes(streams []probe.VideoStream) []int {
 // isTempName reports whether a basename is a transcoder work-in-progress temp.
 func isTempName(base string) bool {
 	return strings.Contains(base, "."+TempMarker+".")
-}
-
-// IsSourceName reports whether a file BASENAME is one a scan would enumerate as
-// a source: it carries one of the configured video extensions and is not one of this
-// tool's own working files. Three things are excluded and each is a file holdfast
-// itself wrote, none of which is ever anybody's source even though each is itself a
-// *.mkv (or whatever the source was):
-//
-//   - a work-in-progress temp;
-//   - an original the undo window is holding (UNDO-6). A retention area whose files
-//     were enumerated would hand the encoder the very bytes the undo window is
-//     holding, re-encode them, and swap the result over them - destroying the thing an
-//     operator was given a window to recover;
-//   - a replacement this tool RETAINED (FILESYSTEM-1's record-free hold-back: a file
-//     holdfast wrote is never anybody's source, whether or not a record of it
-//     survived, and where the store could not be written none did).
-//
-// It is the ONE definition of "a media file this run would enumerate", shared by the
-// scan and by the startup walk, which must decide it from the name alone - it opens no
-// file, so the walk's cost is bounded by the directory tree and not by the library.
-func IsSourceName(base string, exts []string) bool {
-	return !isTempName(base) && !isUndoName(base) && !IsRetainedReplacementName(base) &&
-		matchesVideoExt(base, exts)
 }
 
 // pickTempPath returns a free temp path from this build's own construction and clears

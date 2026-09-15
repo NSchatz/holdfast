@@ -1,8 +1,32 @@
 # API and record reference
 
-What every field on a job row means, what the whole-ledger figures are computed
-over, how the ledger is bounded, how to take the record elsewhere, and the
-observability and scheduling surfaces. Moved out of `README.md`, unchanged.
+Every endpoint the daemon answers, what every field on a job row means, what the
+whole-ledger figures are computed over, how the ledger is bounded, how to take the
+record elsewhere, and the observability and scheduling surfaces. This is the
+per-field reference `README.md` points at rather than restates.
+
+### The HTTP surface
+
+| Method & path | Auth | Purpose |
+|---|---|---|
+| `GET /` | - | the embedded dashboard |
+| `GET /api/summary` | - | counts per status + bytes reclaimed (**lifetime** and this-run) + `bytes_held_by_undo_window` (space a retained original still holds, never folded into either reclaimed figure; `null` = unreadable) + paused/scanning + the **whole-ledger aggregates** (see below) |
+| `GET /api/queue` | - | pending + active jobs, capped, with `queue_total` - see *The total behind a cap* |
+| `GET /api/history?limit=N` | - | recent terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, capped, with `history_total` - see below |
+| `GET /api/events` | - | SSE: a fresh snapshot on every state change |
+| `GET /metrics` | - | Prometheus metrics (when `metrics_enable`, default on) |
+| `POST /api/rescan` | token | start a library scan (409 if paused / scanning / outside the run window) |
+| `POST /api/pause` | token | stop feeding **new** files (in-flight encodes finish safely) |
+| `POST /api/resume` | token | clear the pause flag |
+| `GET /api/search?path=TERM` | token | terminal rows whose path contains TERM, over the **whole ledger** rather than the capped view, with the match count. Token-gated because it serves per-file rows the capped reads never have |
+| `GET /api/exclusions` | token | the paths this daemon is **withholding** from the pipeline - runtime state it holds, never a configuration key |
+| `POST /api/exclusions` | token | withhold one path. It only ever takes a file OUT; nothing here writes `config.yaml` |
+| `DELETE /api/exclusions` | token | stop withholding one path, after which it is eligible again on the next scan |
+
+`POST /api/scan` has a section of its own below. The token-guarded endpoints are disabled
+entirely until a control token is configured, and the read surface carries no authentication
+of its own: the posture that follows from that is in
+[docs/docker.md](docker.md#reverse-proxy-posture).
 
 ### The recorded outcome - the proof a swap was safe
 
@@ -67,6 +91,150 @@ currently digests to what, beside the resolved value of every knob and the layer
 
 An outcome is recorded per *attempt*, not per file: **claiming a job for a retry clears it**, so a file
 that is being re-encoded never advertises the rejected attempt's score while it is in flight.
+
+### `POST /api/scan` - look at THESE files now
+
+A targeted scan. Give it a list of paths and it examines exactly those files, instead of
+re-examining the library. It is how an *arr import, a Jellyfin plugin or a shell script
+tells holdfast that one file landed, and it is what lets a steady-state deployment run with
+`scan_interval_sec: 0`. The worked Sonarr/Radarr wiring, including what to do when the
+container paths differ, is in [docs/docker.md](docker.md#telling-holdfast-about-one-file-sonarr--radarr).
+
+It is **token-gated**, like `rescan`, `pause` and `resume`: `Authorization: Bearer <the
+value server_auth_token points at>`. With no control token configured it answers **403**
+and the endpoint is off.
+
+It adds **no gate and skips none**. An accepted path is handed to the same pipeline entry
+point a whole-library scan's worker uses, so every guard, the claim, the decision-input
+re-opening rule and the swap discipline apply to it unchanged, and it records the verdict a
+scan would have recorded. It is **not** `requeue`: it clears nothing a terminal row
+recorded and resets no failure count, so a row parked at `max_failures` stays parked and a
+`done` or `skipped` row whose recorded inputs still match still holds its file out. Like
+`restore` and `requeue`, re-opening a row remains a **local command** and is not on this
+surface.
+
+**Request.** A JSON object carrying `paths`, an array of absolute path strings:
+
+```json
+{ "paths": ["/library/tv/Show/Season 01/Show - S01E01.mkv", "/library/film/Film.mkv"] }
+```
+
+**Limits, enforced and refused against:**
+
+| Limit | Value | On breach |
+|---|---|---|
+| paths per request | **256** | **413**, the whole request refused, nothing enqueued |
+| request body size | **262144** bytes (256 KiB) | **413**, the whole request refused, nothing enqueued |
+
+Both are refused **whole**. A partially-accepted oversized request would leave a caller
+unable to tell which half was taken, so there is no such thing here.
+
+**Response.** **202** when at least one path was accepted, and it comes back *before* the
+files have been processed - an HTTP handler is never held open across an encode. Every
+submitted path gets a line, in the order it was submitted:
+
+```json
+{
+  "accepted": 1,
+  "rejected": 2,
+  "retryable": false,
+  "results": [
+    { "path": "/library/film/Film.mkv", "accepted": true, "resolved": "/library/film/Film.mkv",
+      "retryable": false },
+    { "path": "/etc/passwd", "accepted": false, "rule": "outside-library-roots", "retryable": false,
+      "detail": "/etc/passwd does not lie at or beneath any configured library root (library_roots: /library)" },
+    { "path": "/library/film/notes.txt", "accepted": false, "rule": "not-a-video-extension", "retryable": false,
+      "detail": "\"notes.txt\" carries no configured video extension (video_exts: mkv, mp4)" }
+  ]
+}
+```
+
+`resolved` is the path the pipeline will act on. It is **not always the path you sent**: a
+submitted path is resolved (symbolic links followed, `..` resolved away) before it is
+judged, and the root check is answered against the resolved form - so a path that climbs
+out of your library, or a link pointing outside it, is refused rather than acted on.
+
+`rule` is a stable token from a closed set, so a client can key off it:
+
+| `rule` | What it means |
+|---|---|
+| `path-not-absolute` | the path is not anchored; holdfast never resolves a submitted path against a working directory |
+| `unsupported-path-characters` | the path carries a literal tab or newline, which this pipeline does not process |
+| `path-unresolvable` | the real path could not be established - usually a directory on the way to it that holdfast may not read |
+| `not-a-regular-file` | nothing is there, or what is there is a directory, device, socket or named pipe |
+| `outside-library-roots` | the **resolved** path is not at or beneath any configured `library_roots` entry |
+| `retention-area` | the path is inside a `.holdfast-undo` retention area, which holds originals the undo window is keeping |
+| `holdfast-working-file` | a work-in-progress temp, a retained original or a retained replacement - a file holdfast wrote, never a source |
+| `not-a-video-extension` | the extension is not one of the configured `video_exts` |
+| `duplicate-in-request` | the same file was named more than once in one request; it is accepted at most once |
+| `submission-queue-full` | the path passed every rule and could **not** be taken - retry it |
+
+Every one of those except the last two is the rule the **scan's own enumeration** applies,
+asked of a path instead of a directory listing. There is one implementation of them, so a
+`video_exts` entry added, a working-file name form added or a library root added moves both
+routes together.
+
+`retryable` says whether sending that path again, unchanged, could succeed. In a **per-path
+result** it is `true` only for `submission-queue-full`, because the queue drains and nothing
+about the path was decided. Every other rule there is a property of the path and of the
+configuration, neither of which changes because the same request arrives again, so a retry
+loop around one of those is a retry loop that never ends. The response also carries a
+`retryable` of its own, for the request as a whole; the table below gives it per status.
+
+**Every status it can answer with:**
+
+| Status | `rule` | `retryable` | When |
+|---|---|---|---|
+| **202** | - | `false` | at least one path was accepted and enqueued |
+| **400** | `malformed-body` | `false` | the body was not a readable `{"paths": [...]}` object |
+| **400** | - | `false` | **every** submitted path was refused; the per-path report says why for each |
+| **400** | `unreadable-body` | `false` | the body could not be read off the connection |
+| **401** | - | `false` | a control token is configured and the request did not carry it. A proxy identity header is never authorization |
+| **403** | - | `false` | no control token is configured, so the mutating endpoints are disabled outright |
+| **409** | `paused` | `true` | holdfast is paused; nothing was enqueued. `POST /api/resume` first |
+| **413** | `too-many-paths` | `false` | more than 256 paths. Nothing was enqueued - split the request |
+| **413** | `body-too-large` | `false` | a body over 262144 bytes. Nothing was enqueued - split the request |
+| **503** | `submission-queue-full` | `true` | the queue could not take the accepted paths. The report names which were not taken |
+| **503** | `targeted-scanning-not-wired` | `false` | no submission queue is wired behind the route. Not reachable in the daemon |
+
+**Whole-request refusals answer in the same envelope**, so a client reads one shape and
+branches on `rule` and `retryable` rather than parsing an English sentence. `results` is
+empty, because no path was reached:
+
+```json
+{
+  "accepted": 0,
+  "rejected": 0,
+  "rule": "too-many-paths",
+  "retryable": false,
+  "error": "request names 300 paths, more than the maximum this endpoint accepts in one request (256); the whole request was refused and nothing was enqueued - split it",
+  "results": []
+}
+```
+
+A malformed body is a **400** carrying `rule: "malformed-body"` and nothing else happens:
+not valid JSON, not a JSON object, no `paths` key, `paths` that is not an array, an empty
+`paths`, or an entry that is not a string. No path is enqueued and no ledger row is written.
+
+**401 and 403 are answered by the shared token gate** in front of every mutating endpoint,
+not by this one, so they carry that gate's body rather than this envelope.
+
+**What the 202 cannot tell you** is what was *decided* about the file, because it comes
+back before anything looked at it. Two outcomes are therefore reported in the **log**
+rather than in the response: a submission whose file a terminal row still holds out says
+so by name (nothing was re-encoded and the row was left exactly as it was - see
+[docs/requeue.md](requeue.md) for the lever), and a submission whose file a record holds
+back - a parked incident's source or replacement - is logged as not processed, with the
+reason. Neither writes a ledger row, because neither is a decision anybody took.
+
+**Hold-backs are read when the file is processed**, not when the daemon started. A swap
+that parks an incident records two paths that must not be touched again, and the next
+submission naming either of them is refused - even in a deployment running with
+`scan_interval_sec: 0`, where no later library scan ever happens.
+
+**On shutdown**, work already in flight is finished before the job store is closed, and
+submissions still waiting in the queue are discarded - unprocessed, and with no ledger row,
+because nothing looked at those files and a row would be a record of a decision nobody took.
 
 ### The decision inputs a row was taken under
 
@@ -181,6 +349,36 @@ Each one carries the same envelope, and every part of it is load-bearing:
 
 The dashboard shows all of it under **Across the whole ledger**, each figure beside the set it covers and
 the count of rows it had to leave out.
+
+### The total behind a cap
+
+`GET /api/queue` returns at most **500** rows and `GET /api/history` at most **200**. A truncated view that
+says nothing about what it truncated reads as the whole ledger, and a client cannot work it out for itself
+(the summary counts answer a different question - rows *per status*, not the rows a response selected). So
+every capped response carries the total it capped against, counted in the server over **every matching row
+in the `jobs` table**:
+
+| Response | Field |
+|---|---|
+| `GET /api/queue` | `queue_total` |
+| `GET /api/history?limit=N` | `history_total` |
+| the SSE snapshot | both |
+
+```json
+"history_total": {
+  "available": true, "unavailable": "",
+  "covers": "every row in the ledger with status done, skipped, failed",
+  "cap": 200, "count": 41237
+}
+```
+
+- **`count`** is the number of matching rows in the ledger, **never the number of rows returned**. Asking
+  for fewer rows than the cap (`?limit=5`) reports the *same* `count`; only `cap` moves with the request.
+- **`available`** is `false` when the total could not be read, and `count` is then an explicit **`null`**,
+  never `0`. Why it is never a zero, and why the rows ship anyway:
+  [docs/design/ledger-totals.md](design/ledger-totals.md#null-is-not-zero).
+- The dashboard renders that total in each table's cap notice, and when the total is unavailable it says so
+  **and shows no figure in its place**.
 
 #### When holdfast cannot tell what the swap did (`indeterminate`) - and how you get out of it
 
