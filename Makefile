@@ -48,6 +48,7 @@ PLATFORM ?= linux/amd64
         find-browser find-browser-selftest \
         release-shape release-shape-selftest \
         webui-gen webui-stale webui-check webui-repeat-check webui-graders-selftest \
+        webui-shots \
         check-design-record check-design-record-selftest \
         secret-scan secret-scan-selftest install-hooks \
         tidy clean image image-smoke compose-check
@@ -208,6 +209,21 @@ webui-repeat-check:
 # tries to defeat is a guard nobody knows works.
 webui-graders-selftest:
 	./scripts/webui-graders-selftest.sh
+
+# The RENDERED EVIDENCE, for the craft clauses no assertion reaches. It photographs each
+# view internal/webui/e2e/shots.mjs names, in both colour schemes at 360 and at desktop
+# width, from the same engine and the same served document the graders read - the fixture
+# server it starts mounts the real webui.HandlerFor.
+#
+# It is a target rather than a note in a document because the evidence has to be
+# REPRODUCIBLE: a picture taken by a command nobody can re-run is a picture nobody can
+# check, and the previous route was a script each session wrote for itself. It decides
+# nothing and is deliberately outside `check` - it writes files, and a gate never does.
+#
+#   make webui-shots OUT=/path/to/shots
+webui-shots: OUT ?= ./shots
+webui-shots:
+	@./scripts/webui-shots.sh "$(OUT)"
 
 # --- the design record (S0123) ------------------------------------------------
 # interface-craft C1 and C2, held by a machine. C1 asks this repository to declare its

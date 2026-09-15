@@ -129,6 +129,64 @@ const TABLE = [
     defeats: "the page computes motion at all",
     mutation: mutate.css(`* { transition: none !important; animation: none !important; }`),
   },
+  {
+    // interface-craft C3 (AC-4), and the case that decides whether these graders read the
+    // page or its source. The rule is APPENDED: every declaration the document carries is
+    // untouched, so the stylesheet still says the count is --fs-3xl at weight 700 in its
+    // own colour and the source reads exactly as it did. Only what the engine PAINTS
+    // changes - the figure comes out at its label's size, its label's weight and its
+    // label's colour - and a grader that matched HTML or CSS text would pass it.
+    name: "a count flattened onto its own label by a later rule, with the source untouched",
+    defeats: "a figure stands apart from the text that names it",
+    mutation: mutate.css(`#chips .chip .n { font-size: var(--fs-xs) !important; font-weight: 400 !important; color: var(--muted) !important; }`),
+    says: /differs from its label .* in 0 of the three channels/,
+  },
+  {
+    // interface-craft C5 (AC-4), the same trick on the other clause: the card keeps its
+    // border and every declaration that draws it, and the engine is left painting one of
+    // the facts that border was earning.
+    name: "a bordered card left painting one of its facts, with the source untouched",
+    defeats: "a bordered or raised container earns its chrome",
+    mutation: mutate.css(`#aggregates .agg .agg-v, #aggregates .agg .agg-cov, #aggregates .agg .agg-ex { display: none !important; }`),
+    says: /draws a border on all four of its own sides and holds 1 fact/,
+  },
+  {
+    // interface-craft C3 (AC-1, AC-4, AC-10) over the figure written as NUMBER SPACE UNIT.
+    //
+    // The case above flattens a bare count, which any reading of "figure" finds. This one
+    // flattens the two largest figures on the page - the byte figures, which fmtBytes
+    // renders as "12.3 MB" - and it is here because a subject query that counts a figure
+    // only when every token of it starts with a digit drops exactly those, silently: the
+    // region renders thirty other figures, so nothing reports itself unmeasured either.
+    // A counterexample proves a predicate can go red; this one proves its SUBJECT QUERY
+    // still finds the figure the clause is most about.
+    name: "a byte figure written as number-space-unit flattened onto its own label",
+    defeats: "a figure stands apart from the text that names it",
+    mutation: mutate.css(`.stats .stat b { font-size: var(--fs-xs) !important; font-weight: 400 !important; color: var(--muted) !important; }`),
+    says: /b#reclaimed-lifetime \("[\d.,]+ [A-Za-z]{1,3}"\) differs from its label .* in 0 of the three channels/,
+  },
+  {
+    // interface-craft C5 (AC-3, AC-4, AC-10) over a LEAF, which is the case the clause
+    // names in its own words: "One card per fact is refused."
+    //
+    // The rule draws a border on all four sides AND a shadow round an element holding one
+    // run of text and no element child of its own, so neither half of AC-3's disjunction
+    // nor any reading about a single painted edge can excuse it. A subject query that
+    // required a container to hold an element child would drop every one of these, which
+    // is to say it would drop precisely the worst violations of the clause.
+    name: "a box drawn round each count, one card for one fact",
+    defeats: "a bordered or raised container earns its chrome",
+    mutation: mutate.css(`#chips .chip .n { border: var(--bw-flag) solid var(--border) !important;
+      box-shadow: var(--shadow-raised) !important; border-radius: var(--radius-sm) !important; }`),
+    says: /div\.n draws a border on all four of its own sides and holds 1 fact/,
+  },
+  {
+    // interface-craft C3's second half (AC-10).
+    name: "the painted type scale collapsed onto one size",
+    defeats: "the painted type scale carries three sizes",
+    mutation: mutate.css(`body, body * { font-size: 14px !important; }`),
+    says: /paints its visible text at 1 distinct size/,
+  },
 ];
 
 for (const c of TABLE) {
@@ -148,8 +206,35 @@ for (const c of TABLE) {
     expect(g, `the mutation "${c.name}" names a grader that does not exist: "${c.defeats}"`).toBeTruthy();
     const probs = g.probe(s);
     expect(probs.length, `the grader "${c.defeats}" PASSED a document mutated to defeat it (${c.name})`).toBeGreaterThan(0);
+    // Red is not enough on its own: a grader that reds for somebody else's reason - a
+    // reading it never took, a subject it never found - is as useless as one that passes.
+    // Where a case declares what the report must SAY, that is checked too.
+    if (c.says) {
+      expect(probs.join("\n"), `the grader "${c.defeats}" went red against ${c.name}, but for the WRONG REASON: nothing it reported matched ${c.says}`).toMatch(c.says);
+    }
   });
 }
+
+// AC-10's other half, and the one a green run cannot tell you: that every grader HAS a
+// counterexample - a run in which one of them did not execute has to fail, and the only
+// way to say that of a case that was never written is to check the mapping itself.
+//
+// counterexample. A predicate added to convGraders() with no case above would be run on
+// every pull request, would report nothing, and nothing would ever have asked it whether
+// it could report at all - which is the exact shape of the vacuous grader this file exists
+// to refuse. The mapping is checked both ways, so a case naming a grader that no longer
+// exists is a failure rather than a case that quietly stopped executing.
+test("every grader is defeated by at least one counterexample, and every counterexample names a grader", () => {
+  const graders = convGraders().map((g) => g.name);
+  const defeated = new Set(TABLE.map((c) => c.defeats));
+  expect(graders.filter((n) => !defeated.has(n)),
+    "these graders are run against the shipped page and have no counterexample, so nothing proves they can fail at all"
+  ).toEqual([]);
+  expect([...defeated].filter((n) => !graders.includes(n)),
+    "these counterexamples name a grader that is no longer in convGraders(), so they defeat nothing"
+  ).toEqual([]);
+  expect(graders.length, "convGraders() is empty, so this asserted nothing").toBeGreaterThan(10);
+});
 
 // --- the graders that decide from MORE than one reading ---------------------------------
 //

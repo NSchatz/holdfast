@@ -416,9 +416,16 @@ function behind(el, doc, win) {
 
 // contrastSubjects is every graphical element on this page a reader has to tell apart
 // from what is drawn behind or beside it in order to read the figure it presents: the
-// bars of a distribution, the scale and ticks of a spread, a status dot, the edge of a
-// badge, of a count chip and of a figure card. Each is reported with the colour it is
-// PAINTED in, the colour it is painted ON, and the ratio between them.
+// bars of a distribution, the scale and ticks of a spread, a status dot, the fill of a
+// badge that is on, and the edge of the band the counts sit in, of the band the byte
+// figures sit in, and of a figure card. Each is reported with the colour it is PAINTED
+// in, the colour it is painted ON, and the ratio between them.
+//
+// The badge is measured by its FILL rather than by an edge because that is what it paints
+// and what carries its meaning: clause C5 took the box off a badge holding one fact, and a
+// subject reading a border no rule draws would be a reading that passes whatever the page
+// does. A RESTING badge is not here for the same reason a table-row rule is not: it draws
+// no surface of its own at all now, and says what it says in words.
 //
 // Table-row rules and section separators are deliberately not here. They divide the page
 // but carry no figure, and WCAG 2.2's non-text floor is scoped to what must be perceived
@@ -441,8 +448,9 @@ function contrastSubjects(doc, win) {
   addAll(".agg .fig .axis", "stroke", "spread scale");
   addAll(".agg .fig .tick", "stroke", "spread tick");
   addAll("td.st .dot", "backgroundColor", "status dot");
-  addAll(".badges .badge", "borderTopColor", "badge edge");
-  addAll("#chips .chip", "borderTopColor", "count chip edge");
+  addAll(".badges .badge.on", "backgroundColor", "badge fill");
+  addAll("#chips", "borderTopColor", "count band edge");
+  addAll(".stats", "borderTopColor", "byte figures band edge");
   addAll("#aggregates .agg", "borderTopColor", "figure card edge");
   return out;
 }

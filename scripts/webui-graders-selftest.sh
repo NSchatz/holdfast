@@ -21,6 +21,14 @@
 # cases. Without it, "the graders red" would be equally true of graders that red on
 # everything, which decide nothing at all.
 #
+# Cases 4 and 5 defeat the thing UNDER all of them: the engine itself. Every grader in this
+# repository that reads what a page SHOWS is worth exactly what the browser resolution is
+# worth, so an unresolvable engine is driven here for real, in both modes, and the two are
+# required to answer DIFFERENTLY and to name the engine either way - a failure under
+# required mode, a skip that says so on a machine that simply has no browser. Whether the
+# engine a resolution DID accept can render is scripts/find-browser-selftest.sh's subject,
+# and it is defeated there.
+#
 # Deliberately NOT part of `make check`: the mutations belong in their own target, and
 # `check` must never rewrite - or in this case re-render - the tree it is grading. CI runs
 # it beside the dashboard gate. A guard nobody tries to defeat is a guard nobody knows works.
@@ -30,7 +38,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::webui-graders selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=4
+declared=6
 pass=0; failed=0
 
 repo="$work/repo"
@@ -115,10 +123,22 @@ changed() {  # changed <case-name>
 # built from another tree would serve the unmutated page while the case reported on the
 # mutated one, which is a green over a defeated grader. CI=1 is set for its other effect:
 # a `.only` left in a spec is refused rather than quietly narrowing what ran.
-port=8940
+#
+# The port is one the OPERATING SYSTEM says nothing is listening on, asked for per case, and
+# not a number counted up from a constant. A fixed base makes every run's verdict a fact
+# about the machine: anything holding 8941 - a killed run's orphaned fixture server, a second
+# worktree grading in parallel - fails this script at start-up with "port already in use",
+# and the report it prints is "the shipped page passes a grader it should have defeated",
+# which is a lie about the page. That is the same defect S0069 took out of
+# playwright.config.mjs, answered here the same way and for the same reason; the rule it was
+# protecting is untouched, because a port nothing is on cannot be adopted.
+freeport() {
+  "$node" -e 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>{process.stdout.write(String(s.address().port));s.close();});'
+}
+port=""
 out=""; status=0
 run_graders() {  # run_graders <case-title-regex>
-  port=$((port + 1))
+  port="$(freeport)"
   set +e
   out="$(cd "$e2e" && CI=1 NO_COLOR=1 PATH="$goroot/bin:$PATH" \
     HOLDFAST_BROWSER="$browser" HOLDFAST_E2E_PORT="$port" \
@@ -189,6 +209,58 @@ expect 1 "the tab-order grader reds when a control cannot be reached by keyboard
   "$FOCUS" 'tabbing reached|reading order puts' '1 failed'
 
 reset
+
+# --- 4 and 5. AN ENGINE THAT CANNOT BE RESOLVED. These two grade AC-9 of
+#        S0125-holdfast-hierarchy-density-graders: "IF no browser engine can be resolved ...
+#        THEN THE SYSTEM SHALL fail the required-mode run with a message naming the engine
+#        it tried and what it saw, and SHALL NOT report either clause as passed or as
+#        skipped." Every grader that reads what the page SHOWS is worth what this resolution
+#        is worth, so it is defeated with a pin that names a path no process can execute.
+#        Under REQUIRED mode that has to be a failure naming the engine it tried, with
+#        nothing reporting itself skipped; under the ordinary mode `make check` runs in, the
+#        same tree and the same pin have to answer with a skip that names the engine, which
+#        is what keeps the gate green on a machine with no browser. One mode passing where
+#        the other fails is the whole claim.
+NO_ENGINE="$work/not-an-engine"
+: >"$NO_ENGINE"   # present, readable, and not executable: unresolvable, not absent
+ENGINE_CASE='TestPlaywright_TheRenderedGradersRunInARealEngine'
+
+run_without_an_engine() {  # run_without_an_engine <required-mode value>
+  set +e
+  out="$(cd "$repo" && NO_COLOR=1 PATH="$goroot/bin:$PATH" \
+    HOLDFAST_BROWSER="$NO_ENGINE" HOLDFAST_WEBUI_REQUIRED="$1" \
+    "$goroot/bin/go" test -v -count=1 -run "$ENGINE_CASE" ./internal/webui/ 2>&1)"
+  status=$?
+  set -e
+}
+
+engine_case() {  # engine_case <name> <want-exit> <must-mention-regex> <must-not-match-regex>
+  local name="$1" want="$2" want_msg="$3" forbid="$4"
+  if [ "$status" -ne "$want" ]; then
+    printf '::error::webui-graders selftest: %s - go test exited %s, wanted %s\n' "$name" "$status" "$want" >&2
+    printf '%s\n' "$out" | sed 's/^/       | /' >&2
+    failed=$((failed + 1)); return
+  fi
+  if ! grep -qE -- "$want_msg" <<<"$out"; then
+    printf '::error::webui-graders selftest: %s - exited %s (correct) but for the WRONG REASON: nothing matched /%s/\n' "$name" "$status" "$want_msg" >&2
+    printf '%s\n' "$out" | sed 's/^/       | /' >&2
+    failed=$((failed + 1)); return
+  fi
+  if [ -n "$forbid" ] && grep -qE -- "$forbid" <<<"$out"; then
+    printf '::error::webui-graders selftest: %s - the output matched /%s/, which it must not\n' "$name" "$forbid" >&2
+    printf '%s\n' "$out" | sed 's/^/       | /' >&2
+    failed=$((failed + 1)); return
+  fi
+  printf '  ok: %s\n' "$name"; pass=$((pass + 1))
+}
+
+run_without_an_engine 1
+engine_case "AC-9: an unresolvable engine FAILS the required-mode run and names what it tried" \
+  1 "not-an-engine" 'SKIP'
+
+run_without_an_engine ""
+engine_case "AC-9: the same unresolvable engine SKIPS outside required mode and names what it tried" \
+  0 "not-an-engine" ''
 
 echo
 # Report against the number of cases DECLARED, not the number that ran: "$pass/$pass" is

@@ -87,6 +87,13 @@ func TestPlaywright_TheRenderedGradersRunInARealEngine(t *testing.T) {
 		t.Fatalf("the dashboard's Playwright graders failed (%v):\n%s", runErr, out)
 	}
 
+	// The readings a criterion requires to be NAMED even when nothing failed - which is
+	// what a region a grader could not find a subject in is. The runner prints them to
+	// stdout, which this wrapper otherwise swallows on success, so a reader of the gate
+	// would never see them. Lifted back out here, where `go test -v` shows them and so
+	// does `make webui-check`.
+	reportLines(t, out)
+
 	passed, failed, skipped := playwrightCounts(t, report)
 	if failed != 0 {
 		t.Fatalf("the Playwright graders reported %d failures:\n%s", failed, out)
@@ -107,6 +114,21 @@ func TestPlaywright_TheRenderedGradersRunInARealEngine(t *testing.T) {
 			"so something did not run:\n%s", passed, out)
 	}
 	t.Logf("playwright ran %d rendered cases across every theme and width project", passed)
+}
+
+// reportMarker is the prefix a spec puts on a line meant for a reader of the GATE rather
+// than for the runner. Its other writer is internal/webui/e2e/specs/craft.spec.mjs, where
+// the same constant says the same thing; a marker is cheaper than teaching this wrapper
+// which specs report what.
+const reportMarker = "e2e-report: "
+
+func reportLines(t *testing.T, out []byte) {
+	t.Helper()
+	for _, line := range strings.Split(string(out), "\n") {
+		if i := strings.Index(line, reportMarker); i >= 0 {
+			t.Log(strings.TrimSpace(line[i+len(reportMarker):]))
+		}
+	}
 }
 
 // goRuntime locates the Go toolchain the fixture server is started with. The suite's

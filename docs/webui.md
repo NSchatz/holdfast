@@ -38,6 +38,7 @@ internal/webui/
     driver.mjs              the one engine driver, for the Go graders that operate a browser
     specs/probe.mjs         the measuring script, which decides nothing
     specs/graders.mjs       the predicates, which measure nothing
+    specs/craft.spec.mjs    interface-craft C3 and C5, driven in both themes at both widths
     specs/candidates.mjs    the same split for what a DRY RUN decided: one reading, then
                             the predicates over it, plus the fixture's expectations
     specs/*.spec.mjs        the cases, and mutations.spec.mjs which defeats every grader
@@ -131,9 +132,13 @@ Those three are the whole reason there is a browser in this gate, so they are th
 `make webui-graders-selftest` DEFEATS on purpose - one palette wearing both preferences, a
 control whose label is detached so the engine names it by its placeholder, a control taken
 out of the tab order - against a mutated COPY of the tree, requiring each grader to red and
-to say what it saw, and failing if any defeat did not execute. It is not part of `make
-check` (mutations must not touch the tree `check` grades); CI runs it beside the gate. The
-count of cases is `declared=` in that script, its single writer, which the run prints.
+to say what it saw, and failing if any defeat did not execute. The same script then defeats
+what sits under all three, the browser RESOLUTION: a pin naming a path no process can
+execute is driven in both modes, and the two have to answer differently and name the engine
+either way - a failure under required mode, a skip that says so where `check` is simply
+running on a machine with no browser. It is not part of `make check` (mutations must not
+touch the tree `check` grades); CI runs it beside the gate. The count of cases is
+`declared=` in that script, its single writer, which the run prints.
 
 The layering is the point, and it is why every grader can be proved: `probe.mjs` MEASURES
 and decides nothing, `graders.mjs` DECIDES and measures nothing, the spec files drive the
@@ -274,6 +279,41 @@ separate target: a grader that no longer depends on a clock beats a loop that sa
 
 ## What the graders will not let you change quietly
 
+- **Hierarchy, interface-craft C3.** Within a region, a figure differs from the text that
+  names it in at least two of rendered size, rendered weight and rendered colour, and the
+  text a reader can see is painted at three or more distinct sizes. Both are read off the
+  ENGINE after the whole cascade, so flattening a figure onto its label with a later rule
+  is caught even though every declaration already in the stylesheet is untouched - which is
+  exactly the counterexample that proves it. A figure is any run of text made of values,
+  and a value written as a number, a space and its unit - which is what `fmtBytes` and
+  `fmtDur` produce, and what the two largest figures on this page are - counts as one; a
+  counterexample flattens `#reclaimed-lifetime` in particular, so a token rule that stopped
+  seeing "12.3 MB" would red the suite rather than quietly shrink what is graded. A region
+  rendering no figure at all is named as UNMEASURED rather than counted as a pass, and a
+  run that found no figure in any region FAILS: a subject query that matches nothing is the
+  cheapest way for a grader like this to be green for ever.
+- **Density, interface-craft C5.** Every container the engine paints ENCLOSING chrome on -
+  a border on ALL FOUR of its own sides, or a shadow - holds at least three facts a reader
+  can read off it, and that includes an element holding a single run of text with no child
+  of its own: a box drawn round one word is "one card per fact", which is the case the
+  clause refuses by name. A single painted edge is a rule between two things rather than a
+  box around one, and a landmark, a control and a drawing are each reported and then set
+  aside with their reason rather than dropped from the reading. So an element may not draw
+  a box on its own four sides around one labelled figure or one state word: give the group
+  the boundary and make the items rows in it, which is what the counts and the two byte
+  figures are, or let the thing say what it says in words and colour, which is what the
+  connection state and the two badges do. A run that found no bordered container FAILS,
+  for the same reason the hierarchy one does.
+
+  **What this does NOT catch yet, said out loud rather than implied.** The subject query
+  counts the edges an element paints ITSELF. A box a reader sees closed because its fourth
+  edge belongs to its NEIGHBOUR is three edges to the engine and is outside the query: the
+  two control bars sit flush, the lower one paints right, bottom and left and takes the
+  bottom corners of the radius, and the bar above supplies the top edge with its own
+  `border-bottom`. Leaving one edge to a neighbour is therefore enough to escape this
+  grader today. That case is filed as its own item, carrying the finding and a repro that
+  fails against the served page in both themes at both widths; until it lands, this bullet
+  promises the four-own-edges and shadow cases and nothing wider.
 - The served Content Security Policy. It is asserted byte for byte AND by a rule about
   policies: no `unsafe-eval`, no host, scheme, nonce or hash source, no `img-src`, no
   default Trusted Types policy, no directive outside the served set. The rule is proved
