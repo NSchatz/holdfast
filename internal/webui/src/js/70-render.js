@@ -56,6 +56,76 @@ function applyFilter() {
   }
 }
 
+// --- the ledger search's own region -------------------------------------------------
+
+// showFound reveals the search region and puts its results view into one of the three
+// states, or clears the state when it has rows of its own to show.
+//
+// The region is ABSENT until a search has been made, which is why the shell ships this
+// view with no state element in it: before anybody asks a question there is nothing to be
+// loading, nothing to be empty of and nothing that could not be read, and a results table
+// standing there in one of those states would be the page answering a question nobody put.
+function showFound(state) {
+  const host = $("found");
+  if (!host) return;
+  host.hidden = false;
+  setViewState("search", state);
+}
+
+// renderSearchResults draws what one ledger search found: the rows in their own region,
+// never merged into either capped table, and the count over the WHOLE ledger beside them.
+function renderSearchResults(payload) {
+  const body = $("search-results");
+  if (!body) return;
+  const rows = (payload && Array.isArray(payload.results)) ? payload.results : [];
+  const headers = headersOf("search-results");
+  syncRows(body, rows, (j) => searchRow(j, headers));
+  const note = $("found-count");
+  if (note) note.textContent = searchCountText(rows.length, payload ? payload.total : null);
+  showFound(rows.length ? null : "empty");
+}
+
+// searchRefused is what the page shows when the search was REFUSED rather than answered.
+// It is deliberately not the empty state: "nothing matched" and "nobody was allowed to
+// ask" are different facts, and a page that rendered an empty result set for the second
+// would tell an operator their file is not in the ledger when nothing looked.
+function searchRefused(why) {
+  const body = $("search-results");
+  if (body) syncRows(body, [], (j) => searchRow(j, null));
+  const note = $("found-count");
+  if (note) note.textContent = why;
+  showFound("unreadable");
+}
+
+// --- the paths this daemon is withholding ---------------------------------------------
+
+// renderHeld draws every withholding in force, each with the control that removes it.
+//
+// The region is absent while there is nothing to say - no withheld path and no refusal to
+// report - and present the moment either exists, which is what carries the one sentence
+// about where these records live to a reader who is looking at one.
+function renderHeld(list, message) {
+  const host = $("held");
+  const ul = $("held-list");
+  const msg = $("held-msg");
+  if (!host || !ul || !msg) return;
+  const rows = Array.isArray(list) ? list : [];
+  ul.replaceChildren();
+  for (const e of rows) {
+    const path = (e && typeof e.path === "string") ? e.path : "";
+    if (!path) continue;
+    const li = tplNode("tpl-held-row");
+    li.querySelector(".heldpath").textContent = path;
+    const b = li.querySelector(".heldgo");
+    b.textContent = "Stop withholding";
+    b.dataset.release = path;
+    ul.appendChild(li);
+  }
+  msg.textContent = message || "";
+  msg.hidden = !message;
+  host.hidden = ul.children.length === 0 && !message;
+}
+
 // markChipGroupBreak decides whether the group boundary is drawn at all.
 //
 // The boundary between work IN HAND and work FINISHED is a rule to the left of the first

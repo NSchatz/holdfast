@@ -11,6 +11,7 @@
 // projects below take `HOLDFAST_BROWSER` or the chromium on PATH instead, exactly as the
 // repository's own graders have always located one.
 import { defineConfig, devices } from "@playwright/test";
+import { execFileSync } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import { cpus } from "node:os";
 import { join } from "node:path";
@@ -55,7 +56,47 @@ function browserPath() {
   );
 }
 
-const PORT = Number(process.env.HOLDFAST_E2E_PORT || 8931);
+// freePort asks the operating system for a port nothing is listening on, by binding one
+// and handing it straight back. It is a child process because there is no synchronous
+// bind in node and this value has to exist before defineConfig returns.
+//
+// Why a fresh port per run rather than the fixed 8931 this used to carry (S0069). The
+// fixed port made every run's verdict depend on what else was on the machine: a killed
+// run leaves a fixture server listening, and from then on EVERY later run on that host
+// fails at start-up with "port already in use" until somebody finds the process and kills
+// it by hand - and two worktrees grading in parallel, which is this repository's normal
+// operating mode, collide with each other for the same reason. Both are the failure this
+// suite exists to stop reporting: a verdict about the machine rather than about the page.
+//
+// The rule the fixed port was protecting is NOT weakened by this and is the reason the
+// answer is a fresh port rather than reuseExistingServer. A run must never ADOPT a server
+// it did not start: that server was compiled from a tree nobody can name, so the graders
+// would report on a document this checkout did not produce, and a green run would mean
+// nothing. Choosing a port nothing is on makes adoption impossible rather than merely
+// refused - there is no listener to adopt - while still compiling and starting the
+// fixture server from THIS tree, exactly as before.
+//
+// HOLDFAST_E2E_PORT still pins one, for hand iteration against a known address.
+function freePort() {
+  const out = execFileSync(process.execPath, ["-e",
+    "const s=require('node:net').createServer();" +
+    "s.listen(0,'127.0.0.1',()=>{process.stdout.write(String(s.address().port));s.close();});"],
+    { encoding: "utf8", timeout: 20_000 });
+  const port = Number(out.trim());
+  if (!Number.isInteger(port) || port <= 0) {
+    throw new Error(`could not obtain a free port for the fixture server (the probe printed ${JSON.stringify(out)})`);
+  }
+  return port;
+}
+
+// Chosen ONCE and published into the environment, because this config module is loaded
+// again in every worker process: a port picked per load would give each worker a different
+// baseURL and only the one that started the server would reach it. The workers are spawned
+// after this module has been evaluated in the parent, so they inherit the choice.
+if (!process.env.HOLDFAST_E2E_PORT) {
+  process.env.HOLDFAST_E2E_PORT = String(freePort());
+}
+const PORT = Number(process.env.HOLDFAST_E2E_PORT);
 
 // How many engines run at once, and why it is CAPPED rather than left to the runner.
 //
@@ -116,12 +157,14 @@ export default defineConfig({
   // grade the document `holdfast serve` produces. So a run starts its own and never adopts
   // one that is already listening: an adopted server is a binary built from a tree nobody
   // can name, and the graders would report on a page this checkout did not produce. That
-  // was not hypothetical - a killed run left one on this port and every later run silently
-  // graded against it, including one that came back green over a defect since fixed.
+  // was not hypothetical - a killed run left one on a fixed port and every later run
+  // silently graded against it, including one that came back green over a defect since
+  // fixed.
   //
-  // A port already in use is therefore a LOUD failure rather than a quiet adoption. Hand
-  // iteration against a server you started yourself is the one case where adopting is what
-  // you meant, and it says so.
+  // Adoption is now impossible rather than refused: the port is one nothing was listening
+  // on when this run started (see freePort). A port already in use is still a LOUD failure
+  // and never a quiet adoption. Hand iteration against a server you started yourself is
+  // the one case where adopting is what you meant, and it says so.
   webServer: {
     command: `go run ./fixtureserver -addr 127.0.0.1:${PORT} -fixtures ./fixtures`,
     url: `http://127.0.0.1:${PORT}/`,

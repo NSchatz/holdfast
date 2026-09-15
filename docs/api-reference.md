@@ -18,6 +18,10 @@ per-field reference `README.md` points at rather than restates.
 | `POST /api/rescan` | token | start a library scan (409 if paused / scanning / outside the run window) |
 | `POST /api/pause` | token | stop feeding **new** files (in-flight encodes finish safely) |
 | `POST /api/resume` | token | clear the pause flag |
+| `GET /api/search?path=TERM` | token | terminal rows whose path contains TERM, over the **whole ledger** rather than the capped view, with the match count. Token-gated because it serves per-file rows the capped reads never have |
+| `GET /api/exclusions` | token | the paths this daemon is **withholding** from the pipeline - runtime state it holds, never a configuration key |
+| `POST /api/exclusions` | token | withhold one path. It only ever takes a file OUT; nothing here writes `config.yaml` |
+| `DELETE /api/exclusions` | token | stop withholding one path, after which it is eligible again on the next scan |
 
 `POST /api/scan` has a section of its own below. The token-guarded endpoints are disabled
 entirely until a control token is configured, and the read surface carries no authentication
@@ -32,7 +36,7 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | Field | On | What it is |
 |---|---|---|
 | `reason` | failed | the error that rejected it (the encode error, or **which gate** refused the output) |
-| `reason` | skipped | **which guard** fired - `already-at-target-codec`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `multi-video-stream`, `target-already-exists`, `undo-retention-failed`, `restored-original` |
+| `reason` | skipped | **which guard** fired - `already-at-target-codec`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `multi-video-stream`, `target-already-exists`, `undo-retention-failed`, `restored-original`, `operator-excluded` |
 | `encoder` | any job that reached the encoder | the encoder that ran (`cpu`, `svtav1`, `nvenc`, …) - a skip, or a file with no readable video stream, never gets that far and records none |
 | `profile` | every terminal row | the `encode_profiles` entry that supplied this job's settings, `""` for the top-level ones. `encoder` alone stops answering "what ran" once two encoders can run in one scan, and a **skip** carries it too - the profile is what decided the file was already at its target codec. `""` is a **real value**, not a missing measurement, so the key is always present |
 | `vmaf_mean`, `vmaf_min` | done, and a VMAF-rejected failure | the pooled harmonic mean **and the worst frame** |

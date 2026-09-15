@@ -263,7 +263,7 @@ test("the three-state grader fails against a view stuck on loading", async ({ br
   const { ctx, page } = await open(browser, {
     url: pageURL(baseURL, "empty"), theme: "light", mutation,
     waitFor: (p) => p.waitForFunction(() => {
-      const v = window.__hf.views();
+      const v = window.__hf.snapshotViews();
       return v.length === 4 && v.some((x) => x.view === "queue" && x.state === "loading");
     }, null, { timeout: 15000 }),
   });
@@ -322,7 +322,7 @@ test("the server-error grader fails against a hidden source offer", async ({ bro
   const { ctx, page, violations } = await open(browser, {
     url: pageURL(baseURL, "no-stream"), theme: "light", mutation,
     waitFor: (p) => p.waitForFunction(
-      () => window.__hf.views().length === 4 && window.__hf.views().every((v) => v.state === "unreadable"),
+      () => window.__hf.snapshotViews().length === 4 && window.__hf.snapshotViews().every((v) => v.state === "unreadable"),
       null, { timeout: 15000 }),
   });
   const probs = gradeServerErrorStillRendersTheOfferAndTheControls(await collect(page), violations);

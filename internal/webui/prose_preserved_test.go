@@ -515,6 +515,22 @@ func TestRendered_AnUnrecordedFieldStillRendersTheAbsencePhraseAndIsNotPageCopy(
 // demanding the page lie about what it has.
 var dataViews = []string{"counts", "queue", "aggs", "history"}
 
+// searchView is the ledger search's own results view. It is NOT one of dataViews above,
+// and the reason is the criterion's own triggers: every one of them is a fact about the
+// SNAPSHOT - it has not arrived, it carries no rows, it cannot be read - and none of them
+// says anything about this view, which is filled by a SEARCH an operator asks for. A
+// snapshot carrying no rows leaves it exactly where it was. Its three states are driven by
+// real searches and graded in TestRendered_LedgerSearchOwesThreeStates.
+const searchView = "search"
+
+// shellViews is every [data-view] host the shell ships. The first four are shipped ALREADY
+// IN THEIR LOADING STATE, because a snapshot fills them and a view has to say what it is
+// doing before a byte of one arrives. The search view is shipped with NO state element and
+// its whole region absent: before anybody has asked a question there is nothing to be
+// loading, and a view that said "loading" while nobody had asked would be the page
+// describing work it is not doing.
+func shellViews() []string { return append(append([]string{}, dataViews...), searchView) }
+
 // noFigureSnapshot is a snapshot whose ledger has rows but whose aggregate set is empty,
 // which is what leaves the whole-ledger view with nothing of its own to show.
 func noFigureSnapshot() []byte {

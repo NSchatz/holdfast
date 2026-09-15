@@ -158,10 +158,15 @@ becomes **the only barrier** in front of every media path in your library. Confi
 forward auth (Authelia, oauth2-proxy, whatever your proxy calls it) on the route before
 the hostname resolves, not after.
 
-The mutating endpoints stay **disabled** until a control token is configured. With no
+The token-gated group stays **disabled** until a control token is configured. With no
 `server_auth_token` reference set (or `HOLDFAST_SERVER_AUTH_TOKEN` in the environment),
-`rescan`, `scan`, `pause` and `resume` answer **403** to every caller - a safe default, not a broken one, and
-the dashboard and the read API still work. A proxy identity header (`Remote-User`,
+`rescan`, `scan`, `pause`, `resume`, the ledger search (`/api/search`) and the withheld
+paths (`/api/exclusions`) answer **403** to every caller - a safe default, not a broken
+one, and the dashboard and the read API still work. The ledger search is in that group and
+not among the unauthenticated reads for a reason worth stating: the capped reads ship at
+most a few hundred rows, so a search over the whole ledger serves per-file rows they have
+never served, and gating it keeps this a control-gated read rather than a new
+unauthenticated one. A proxy identity header (`Remote-User`,
 `Remote-Groups`, `Remote-Email`, `Remote-Name`, any `X-Forwarded-*`) is **never**
 authorization for them: only a matching `Authorization: Bearer` token is, so a proxy that
 can be talked into forging one of those headers gains nothing by it. Enabling the controls

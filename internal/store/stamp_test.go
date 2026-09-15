@@ -152,6 +152,9 @@ func TestStamp_AnUnrecognisedStampReadsAsUnrecognisedAndTheRecordStillReads(t *t
 		write any
 		raw   string
 	}{
+		// Derived from the history rather than written out, because the two are the same
+		// number: a literal here agrees with the history on the day it is typed and
+		// disagrees with it the first time a step is appended.
 		{name: "a version past the end of this build's history", write: schemaVersion() + 1,
 			raw: strconv.Itoa(schemaVersion() + 1)},
 		{name: "zero, which names no step", write: 0, raw: "0"},

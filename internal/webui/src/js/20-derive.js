@@ -238,6 +238,65 @@ function guardLabel(k) {
   return Object.prototype.hasOwnProperty.call(GUARD_LABELS, k) ? GUARD_LABELS[k] : k;
 }
 
+// --- what an operator can DO about one terminal row --------------------------------
+
+// isTerminalRow reports whether a row's attempt is over. It is the partition 10-constants
+// already declares - every status, minus the ones that are work in hand - so a status
+// added to the vocabulary lands on one side of it without a second list to remember.
+function isTerminalRow(j) {
+  return !!j && typeof j.status === "string" &&
+    STATUSES.indexOf(j.status) >= 0 && IN_FLIGHT.indexOf(j.status) < 0;
+}
+
+// requeueCommand is the command that re-opens THIS row's decision, or "" when nothing
+// re-opens it.
+//
+// A terminal row holds its file out of the encoder for as long as it exists, so "what do
+// I do about this" has exactly one answer for most of them and no answer at all for three
+// - and the page has to tell those apart, because a control offered against a row nothing
+// can re-open is the dead end this surface exists to end. The three are the two statuses
+// no re-opening reaches and the one guard that records an operator's own rescue.
+//
+// It returns the command WITH the path, because a command an operator has to assemble
+// themselves is a command they will assemble wrongly at two in the morning.
+function requeueCommand(j) {
+  if (!isTerminalRow(j)) return "";
+  if (NEVER_REOPENED.indexOf(j.status) >= 0) return "";
+  if (j.status === "skipped" && j.reason === NO_REQUEUE_GUARD) return "";
+  if (typeof j.path !== "string" || j.path === "") return "";
+  return REQUEUE_COMMAND + " " + j.path;
+}
+
+// requeueRefusal is why a row nothing re-opens is not offered the command, in words. It
+// is the other half of requeueCommand and exists for the same reason: a row that showed
+// nothing at all would read as a row nobody had thought about.
+function requeueRefusal(j) {
+  if (!isTerminalRow(j)) return "";
+  if (j.status === "indeterminate") return "parked: run holdfast resolve to record what happened";
+  if (j.status === "applied-despite-error") return "the replacement is already in place";
+  if (j.status === "skipped" && j.reason === NO_REQUEUE_GUARD) return "an operator restored this original";
+  return "";
+}
+
+// searchCountText states what a ledger search found, over the WHOLE ledger and not over
+// what it shipped, and says when the two differ.
+//
+// A count that could not be read is said so IN WORDS AND WITH NO NUMBER IN ITS PLACE,
+// the same rule the capped-table notices keep: a figure beside the word "matched" is read
+// as the total whatever the sentence around it says.
+function searchCountText(shown, total) {
+  if (!isNum(shown)) return "";
+  if (!total || typeof total !== "object" || Array.isArray(total) ||
+      total.available !== true || !isNum(total.count) || total.count < 0) {
+    return "How many rows matched could not be read.";
+  }
+  const n = Number(total.count);
+  if (n > shown) {
+    return "Showing " + shown.toLocaleString() + " of " + n.toLocaleString() + " matching rows.";
+  }
+  return n.toLocaleString() + " matching row" + (n === 1 ? "" : "s") + ".";
+}
+
 // Surface the API's silent row caps: it ships at most a fixed number of queue / history
 // rows, so a truncated view could read as the whole ledger.
 //
