@@ -3326,13 +3326,29 @@ func TestRendered_TheHarnessTakesExactlyOneReadingPerGrader(t *testing.T) {
 	//
 	// A retry is deliberately made VISIBLE rather than impossible. Impossible would rest
 	// on nobody ever reintroducing one; visible fails the next run that does.
+	//
+	// THE RETRY IS SCHEDULED LATE ON PURPOSE. It used to be 30ms out, and the count was
+	// read after the fixed 250ms grace runProbe spends on the browser's log - so this half
+	// held exactly when a browser timer plus one local POST fitted inside 250ms of real
+	// time, and a busy machine turned "the counterexample bit" into "the counterexample did
+	// not bite" on bytes that had not changed. That is the defect class this spec exists to
+	// remove, and it was in this grader. retryAfter is now several times that grace, so the
+	// grace CANNOT be what observes the second reading: what observes it is the harness
+	// waiting for a reading it declared, under the deadline it already holds. The assertion
+	// on postsAtSettle below is that statement made mechanical rather than left to a
+	// comment, and it is deterministic in one direction - a setTimeout fires later under
+	// load, never sooner.
+	const retryAfter = 1500 * time.Millisecond
 	retryTheReading := func(page string) string {
 		return strings.Replace(page, "    take();\n  }\n  attempt();",
-			"    take();\n    setTimeout(take, 30);\n  }\n  attempt();", 1)
+			fmt.Sprintf("    take();\n    setTimeout(take, %d);\n  }\n  attempt();", retryAfter/time.Millisecond), 1)
 	}
 	js := strings.NewReplacer("%MODE%", "live", "%FILTER%", "", "%STRIP%", "0").Replace(dashProbeJS)
 	ps := serveDocumentWith(t, serveOpts{
 		url: sourceoffer.Upstream, probe: js, snapshot: fixtureSnapshot(),
+		// Two readings are DECLARED, so runProbe waits for the second one on the render's
+		// own deadline instead of the caller reading a count after a pause.
+		expectPosts: 2,
 		probePageMutate: func(page string) string {
 			out := retryTheReading(page)
 			if out == page {
@@ -3355,11 +3371,19 @@ func TestRendered_TheHarnessTakesExactlyOneReadingPerGrader(t *testing.T) {
 		t.Errorf("the verdict taken from a harness that read twice carries reading %d, want the FIRST reading: "+
 			"a later attempt must never become the answer", v.Readings)
 	}
+	// The grace runProbe spends on the browser's log did not see the retry, and could not
+	// have: the retry is scheduled %s out. So whatever the next assertion reports, it is
+	// not reporting how fast this machine was.
+	if at := ps.postsAtSettle(); at >= 2 {
+		t.Errorf("the retry was already counted (%d readings) when runProbe's settle grace ended, though it is scheduled %s out: "+
+			"the count is being decided by that grace again, which is the wall clock this case exists to have removed", at, retryAfter)
+	}
 	if seen := ps.postsSeen(); seen < 2 {
-		t.Errorf("a harness that reads twice was counted as %d readings, so the single-reading check cannot fail\nbrowser output:\n%s",
-			seen, log)
+		t.Errorf("a harness that reads twice was counted as %d readings within the %s this render was given, so the "+
+			"single-reading check cannot fail\nbrowser output:\n%s", seen, verdictDeadline, log)
 	} else {
-		t.Logf("a reading retried once is counted as %d readings, which renderDashboard refuses", ps.postsSeen())
+		t.Logf("a reading retried %s after the first is counted as %d readings (%d had landed when the settle grace ended), "+
+			"which renderDashboard refuses", retryAfter, ps.postsSeen(), ps.postsAtSettle())
 	}
 }
 

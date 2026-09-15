@@ -420,11 +420,59 @@ type probeServer struct {
 	// how many readings were taken, kept on the side the page does not control, and it is
 	// what makes "this harness never retries a reading" a measurement rather than a claim.
 	posts atomic.Int32
+	// posted is pinged on every POST, so a reading this harness is WAITING for is observed
+	// WHEN IT LANDS rather than after a fixed pause. It is buffered and sent to without
+	// blocking: a ping that finds the buffer full is dropped, which loses no wakeup because
+	// a full buffer is itself a pending wakeup, and every waiter re-reads `posts` before it
+	// blocks again.
+	posted chan struct{}
+	// expectPosts is how many readings the probe THIS render serves is declared to take. It
+	// is 1 for every grader - the single-reading property - and the counterexample that
+	// mutates the probe into retrying declares 2. runProbe waits for that many under the
+	// deadline it is already holding, which is what keeps the count a property of the page
+	// instead of a race against a settle window.
+	expectPosts int
+	// atSettle is the count as it stood when runProbe's settle window ended, recorded
+	// BEFORE anything is waited for. It exists so a case can assert that the settle window
+	// was NOT what observed a reading, rather than leaving that to be believed. -1 until a
+	// run records it.
+	atSettle atomic.Int32
 }
 
 // postsSeen is how many readings the probe posted. Read after runProbe has reaped the
-// browser, so it covers the settle window runProbe already waits out.
+// browser, by which point every reading the render DECLARED has either landed or the
+// deadline the grader holds has expired - so this is a count of what the page did, never
+// of what fitted inside a pause.
 func (ps *probeServer) postsSeen() int { return int(ps.posts.Load()) }
+
+// postsAtSettle is how many readings had landed when runProbe's settle window ended, which
+// is what the count used to be read from. A case whose retry is scheduled well outside that
+// window asserts this is SHORT, and thereby proves the window is not what caught it.
+func (ps *probeServer) postsAtSettle() int { return int(ps.atSettle.Load()) }
+
+// awaitPosts blocks until the probe has POSTed at least n readings or the render's ONE
+// deadline expires, and reports how many it actually saw. Reporting rather than failing is
+// deliberate: the caller's own assertion is what decides, and it decides on the count the
+// page produced.
+//
+// This is the repair for a verdict that was decided by a wall clock. The count used to be
+// read after a fixed 250ms pause, so "a harness that reads twice is counted as reading
+// twice" held exactly when a browser timer plus one local POST fitted inside 250ms of real
+// time - a fact about how busy the machine was, on a page that had not changed, which is
+// the defect class this whole spec exists to remove. There is now ONE deadline for the
+// render and every reading it declared lands inside it or is reported missing.
+func (ps *probeServer) awaitPosts(n int, expired <-chan time.Time) int {
+	for {
+		if seen := ps.postsSeen(); seen >= n {
+			return seen
+		}
+		select {
+		case <-ps.posted:
+		case <-expired:
+			return ps.postsSeen()
+		}
+	}
+}
 
 // serveOpts is everything a grader can vary about the page under measurement. The
 // DOCUMENT is always the one the real handler produces, under the real response headers;
@@ -466,6 +514,12 @@ type serveOpts struct {
 	// it, so this is how that guard is shown to bite. nil serves the probe page as the
 	// graders use it.
 	probePageMutate func(string) string
+	// expectPosts is how many readings the probe served here is DECLARED to take. Unset it
+	// is 1, which is the single-reading property every grader holds. A counterexample that
+	// mutates the probe into retrying sets 2, and runProbe then waits for the second
+	// reading under the deadline it already holds instead of reading the count after a
+	// fixed pause - so a retry is caught because it happened, not because it was prompt.
+	expectPosts int
 
 	// --- S0053: the worlds the frontend-convention graders need ------------------
 	//
@@ -514,7 +568,11 @@ func serveDocumentWith(t *testing.T, o serveOpts) *probeServer {
 		}
 		o.snapshot = compact.Bytes()
 	}
-	ps := &probeServer{verdict: make(chan []byte, 4)}
+	if o.expectPosts <= 0 {
+		o.expectPosts = 1
+	}
+	ps := &probeServer{verdict: make(chan []byte, 4), posted: make(chan struct{}, 8), expectPosts: o.expectPosts}
+	ps.atSettle.Store(-1)
 	real := HandlerFor(offerFor(o.url))
 	mux := http.NewServeMux()
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -546,6 +604,12 @@ func serveDocumentWith(t *testing.T, o serveOpts) *probeServer {
 		ps.posts.Add(1)
 		select {
 		case ps.verdict <- b:
+		default:
+		}
+		// The count is incremented BEFORE the ping, so a waiter woken by this ping always
+		// re-reads a count that already includes this post.
+		select {
+		case ps.posted <- struct{}{}:
 		default:
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -787,6 +851,73 @@ func TestRenderHarness_TheReadinessBudgetLeavesRoomForTheDelayItWillSpend(t *tes
 	}
 }
 
+// The reading count is a PROPERTY of the page, not a race against a pause, and this is
+// where that is graded on its own - no browser, real POSTs through the real /verdict
+// handler, so the mechanism is exercised rather than described.
+//
+// It is the counterexample to the defect the dashboard's single-reading case shipped with:
+// the count was read after runProbe's fixed 250ms grace, so a second reading was counted
+// exactly when a browser timer plus one local POST fitted inside that grace. Both halves
+// of the replacement are held here. A reading that lands far outside ANY grace this file
+// spends is still counted, because the harness waits for a reading it declared. And a
+// reading that never comes is REPORTED as the count actually seen, at the deadline, so a
+// missing reading is a finding rather than a hang - the caller's assertion decides, on the
+// count the page produced.
+func TestRenderHarness_ADeclaredReadingIsWaitedForRatherThanCaughtByAPause(t *testing.T) {
+	// Far outside runProbe's grace, and far outside anything a settle window could cover.
+	const late = 2 * time.Second
+	// Generous, because it is never spent on the passing path: awaitPosts returns the
+	// moment the reading lands. Only a harness that stopped watching pays it.
+	const generous = 60 * time.Second
+
+	post := func(t *testing.T, ps *probeServer) {
+		t.Helper()
+		resp, err := http.Post(ps.url+"/verdict", "application/json", strings.NewReader(`{"ready":true,"readings":1}`))
+		if err != nil {
+			t.Errorf("posting a reading to the probe server: %v", err)
+			return
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}
+
+	t.Run("a reading that lands long after any pause is still counted", func(t *testing.T) {
+		ps := serveDocumentWith(t, serveOpts{url: sourceoffer.Upstream, expectPosts: 2})
+		post(t, ps)
+		go func() {
+			time.Sleep(late)
+			post(t, ps)
+		}()
+
+		start := time.Now()
+		seen := ps.awaitPosts(2, time.After(generous))
+		waited := time.Since(start)
+
+		if seen < 2 {
+			t.Errorf("a reading posted %s after the first was counted as %d readings inside %s: the harness stopped watching "+
+				"before it landed, so a retried reading would go unreported", late, seen, generous)
+		}
+		// And it was the WAIT that saw it, not a pause that happened to cover it: the
+		// call cannot have returned before the reading it was waiting for existed.
+		if waited < late {
+			t.Errorf("the wait returned after %s, sooner than the %s the second reading was held for, so it did not wait for "+
+				"the reading at all", waited.Round(time.Millisecond), late)
+		}
+	})
+
+	t.Run("a reading that never comes is reported, not waited on for ever", func(t *testing.T) {
+		ps := serveDocumentWith(t, serveOpts{url: sourceoffer.Upstream, expectPosts: 2})
+		post(t, ps)
+
+		expired := make(chan time.Time)
+		close(expired) // the deadline this render was given has already gone
+		if seen := ps.awaitPosts(2, expired); seen != 1 {
+			t.Errorf("a render that declared 2 readings and got 1 reports %d: the shortfall must be reported as the count "+
+				"actually seen, so the caller's own assertion is what decides", seen)
+		}
+	})
+}
+
 // probeArgs is the WHOLE command line every rendered grader launches the browser with.
 // It is a function rather than an expression inlined into runProbe so that the argv a
 // grader actually hands the engine is the thing a guard can be pointed at: the rule that
@@ -797,10 +928,18 @@ func probeArgs(profile, url string) []string {
 }
 
 // runProbe points the browser at the probe page and returns the raw verdict together with
-// everything the browser wrote to stdout/stderr. The browser is killed as soon as the
-// verdict arrives (after a short grace, so a console message raised during the render is
-// not truncated out of the log), and the process is REAPED before the log is read, so the
-// caller never races the copying goroutines for it.
+// everything the browser wrote to stdout/stderr. The browser is killed once the verdict has
+// arrived AND every reading this render declared has landed (after a short grace, so a
+// console message raised during the render is not truncated out of the log), and the
+// process is REAPED before the log is read, so the caller never races the copying
+// goroutines for it.
+//
+// ONE DEADLINE GOVERNS THE WHOLE RENDER, and that is what the `expired` timer below is.
+// The grace is for the LOG and nothing else: it used to be what the reading count was read
+// after too, which made "this harness read twice" true exactly when a browser timer and a
+// local POST fitted inside 250ms of real time. A reading the render declared is now waited
+// for on the same timer the verdict itself is waited for, so the count is a fact about the
+// page and a shortfall is reported as the count that was actually seen.
 //
 // It returns an error rather than failing the test, so the deadline itself is gradeable.
 func runProbe(bin string, ps *probeServer, deadline time.Duration, profile string) (raw []byte, browserLog string, err error) {
@@ -827,12 +966,15 @@ func runProbe(bin string, ps *probeServer, deadline time.Duration, profile strin
 	}
 	defer stop()
 
+	expired := time.After(deadline)
 	select {
 	case raw = <-ps.verdict:
 		time.Sleep(250 * time.Millisecond)
+		ps.atSettle.Store(int32(ps.postsSeen()))
+		ps.awaitPosts(ps.expectPosts, expired)
 		stop()
 		return raw, log.String(), nil
-	case <-time.After(deadline):
+	case <-expired:
 		stop()
 		return nil, log.String(), fmt.Errorf("the browser never posted a verdict for %s within %s\nbrowser output:\n%s",
 			page, deadline, log.String())
