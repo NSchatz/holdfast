@@ -43,14 +43,38 @@ function craftProblems(s) {
   ];
 }
 
+// The two regions an OPERATOR's own actions put on the page, driven for real on the page
+// already open rather than in a browser of their own. Neither is in the document a reader
+// meets: the ledger search's results appear when a search is run, and the withheld-paths
+// card appears when a path is withheld. A clause decided only over the document as it
+// loads is a clause with a hole exactly the size of everything the operator can summon,
+// and both of these are bordered containers, which is what C5 is about.
+//
+// The withheld list is a token-gated read, so the page is given a token first; without one
+// it has nothing to draw and this would measure an empty region and call it a pass.
+async function summonTheOperatorsOwnRegions(page) {
+  await page.evaluate(() => {
+    const e = document.getElementById("token");
+    e.value = "a-token";
+    e.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await page.fill("#ledger-search", "some-film");
+  await page.click("#search-go");
+  await page.locator("#search-results tr").first().waitFor({ state: "visible", timeout: 15000 });
+  await page.click("#history td.remedy button");
+  await page.locator("#held-list li").first().waitFor({ state: "visible", timeout: 15000 });
+}
+
 // Criteria: AC-1 (two channels of three), AC-2 (three painted sizes), AC-3 (three facts per
-// bordered container), AC-5 (every theme at every width, and a world that measured nothing
+// bordered container, over the page as it loads AND over the two regions an operator's own
+// actions put on it), AC-5 (every theme at every width, and a world that measured nothing
 // is a failure), AC-6 (no figure or no container found is a failure), AC-7 (a region with
 // no figure is named as unmeasured).
 test("hierarchy and density hold in every theme at every width, and every world measured something", async ({ browser, baseURL }, testInfo) => {
   const problems = [];
   const measured = [];
   const unmeasured = [];
+  const summoned = [];
 
   for (const world of WORLDS) {
     const { ctx, page } = await open(browser, {
@@ -58,27 +82,51 @@ test("hierarchy and density hold in every theme at every width, and every world 
       waitFor: waitRendered,
     });
     const s = await collect(page);
+    // The same page, after the operator has run a ledger search and withheld a path: two
+    // more bordered regions, measured in the browser already open rather than a new one.
+    await summonTheOperatorsOwnRegions(page);
+    const acted = await collect(page);
     await ctx.close();
 
-    for (const prob of craftProblems(s)) problems.push(`[${world.name}] ${prob}`);
+    for (const [what, reading] of [["as it loads", s], ["after a search and a withholding", acted]]) {
+      for (const prob of craftProblems(reading)) problems.push(`[${world.name}, ${what}] ${prob}`);
 
-    const figures = s.hierarchy.regions.reduce((n, r) => n + r.figures.length, 0);
-    measured.push({ world: world.name, figures, containers: craftContainers(s.chromed).length,
-      sizes: s.hierarchy.sizes.length });
-    // Clause AC-7's half: a region that rendered no figure is UNMEASURED for the hierarchy
-    // clause. It is not a pass and it is not a problem - it is named, here, so a region
-    // that quietly stopped rendering its figures is visible in the run rather than
-    // absorbed by a grader that found nothing to say about it.
-    for (const r of s.hierarchy.regions) {
-      if (r.figures.length === 0) unmeasured.push(`[${world.name}] ${r.what} ("${r.heading}") rendered no figure: UNMEASURED for interface-craft C3`);
+      const figures = reading.hierarchy.regions.reduce((n, r) => n + r.figures.length, 0);
+      measured.push({ world: `${world.name}, ${what}`, figures,
+        containers: craftContainers(reading.chromed).length,
+        sizes: reading.hierarchy.sizes.length });
+      // Clause AC-7's half: a region that rendered no figure is UNMEASURED for the
+      // hierarchy clause. It is not a pass and it is not a problem - it is named, here, so
+      // a region that quietly stopped rendering its figures is visible in the run rather
+      // than absorbed by a grader that found nothing to say about it.
+      for (const r of reading.hierarchy.regions) {
+        if (r.figures.length === 0) unmeasured.push(`[${world.name}, ${what}] ${r.what} ("${r.heading}") rendered no figure: UNMEASURED for interface-craft C3`);
+      }
     }
+    // And the two regions the actions summoned really were on the screen when the second
+    // reading was taken. Without this, a control that silently stopped working would turn
+    // the extra reading into a copy of the first and nothing would say so.
+    const actedContainers = craftContainers(acted.chromed).map((c) => c.what);
+    const actedFigures = acted.hierarchy.regions.reduce((n, r) => n + r.figures.length, 0);
+    const loadedFigures = s.hierarchy.regions.reduce((n, r) => n + r.figures.length, 0);
+    summoned.push({ world: world.name, containers: actedContainers.length,
+      figuresGained: actedFigures - loadedFigures });
+    expect(actedContainers,
+      `[${world.name}] the withheld-paths card is not among the containers the second reading measured, so the operator's action put a bordered card on the page without the density clause ever being decided over it`
+    ).toContain("div#held.held");
+    expect(actedFigures,
+      `[${world.name}] the ledger search's results added no figure to the hierarchy reading, so either the search did not run or the clause was not decided over what it drew`
+    ).toBeGreaterThan(loadedFigures);
   }
 
   for (const m of measured) {
     console.log(`${REPORT}craft: ${m.world} measured ${m.figures} figure(s), ${m.containers} bordered or raised container(s), ${m.sizes} painted text size(s)`);
   }
   for (const line of unmeasured) console.log(`${REPORT}craft: ${line}`);
-  testInfo.annotations.push({ type: "craft", description: JSON.stringify({ measured, unmeasured }) });
+  for (const t of summoned) {
+    console.log(`${REPORT}craft: ${t.world}, after a search and a withholding: ${t.containers} container(s), ${t.figuresGained} figure(s) more than the page as it loads`);
+  }
+  testInfo.annotations.push({ type: "craft", description: JSON.stringify({ measured, unmeasured, summoned }) });
 
   expect(problems, problems.join("\n")).toEqual([]);
   for (const m of measured) {
@@ -89,7 +137,12 @@ test("hierarchy and density hold in every theme at every width, and every world 
       `the ${m.world} world contributed no container measurement at all; interface-craft C5 must be DECIDED in every theme at every width, and a world that measured nothing is a missing run`
     ).toBeGreaterThan(0);
   }
-  expect(measured.length, "not every theme and width combination was visited").toBe(WORLDS.length);
+  // Every theme-and-width combination was visited, and each contributed BOTH of its
+  // readings: the page as it loads and the page after the operator has acted on it.
+  expect(summoned.map((t) => t.world), "not every theme and width combination was visited")
+    .toEqual(WORLDS.map((w) => w.name));
+  expect(measured.length, "a world contributed fewer than its two readings")
+    .toBe(WORLDS.length * 2);
 });
 
 // The empty snapshot. The page has nothing to list and still renders its counts, its
@@ -102,8 +155,12 @@ test("hierarchy and density hold in every theme at every width, and every world 
 test("hierarchy and density are decided under a snapshot with nothing to list", async ({ browser, baseURL }, testInfo) => {
   const { ctx, page } = await open(browser, {
     url: pageURL(baseURL, "empty"), theme: "dark", width: 1280, height: 900,
+    // The SNAPSHOT-driven views, which are the four a snapshot with nothing to list is a
+    // fact about. The ledger search's results view is filled by a search an operator asks
+    // for, so an empty snapshot leaves it exactly where it was and waiting for it to say
+    // "empty" would be waiting for the page to answer a question nobody put.
     waitFor: (p) => p.waitForFunction(() => {
-      const v = window.__hf.views();
+      const v = window.__hf.snapshotViews();
       return v.length === 4 && v.every((x) => x.state === "empty");
     }, null, { timeout: 15000 }),
   });

@@ -148,7 +148,7 @@ const TABLE = [
     name: "a bordered card left painting one of its facts, with the source untouched",
     defeats: "a bordered or raised container earns its chrome",
     mutation: mutate.css(`#aggregates .agg .agg-v, #aggregates .agg .agg-cov, #aggregates .agg .agg-ex { display: none !important; }`),
-    says: /draws a border on all four sides and holds 1 fact/,
+    says: /draws a border on all four of its own sides and holds 1 fact/,
   },
   {
     // interface-craft C3 (AC-1, AC-4, AC-10) over the figure written as NUMBER SPACE UNIT.
@@ -178,7 +178,7 @@ const TABLE = [
     defeats: "a bordered or raised container earns its chrome",
     mutation: mutate.css(`#chips .chip .n { border: var(--bw-flag) solid var(--border) !important;
       box-shadow: var(--shadow-raised) !important; border-radius: var(--radius-sm) !important; }`),
-    says: /div\.n draws a border on all four sides and holds 1 fact/,
+    says: /div\.n draws a border on all four of its own sides and holds 1 fact/,
   },
   {
     // interface-craft C3's second half (AC-10).

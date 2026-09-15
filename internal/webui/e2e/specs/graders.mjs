@@ -436,7 +436,7 @@ export function gradeTypeScaleCarriesThreeSizes(s) {
 
 // craftContainers is clause C5's subject, decided from the reading rather than chosen by
 // name. A container is an element the engine paints ENCLOSING chrome on - a border on all
-// four sides, or a shadow - that holds something:
+// four of its OWN sides, or a shadow - that holds something:
 //
 //   four sides, not one, because a single painted edge is a RULE between two things and
 //   not a box drawn around one. The separator under a heading and the line under a table
@@ -452,6 +452,16 @@ export function gradeTypeScaleCarriesThreeSizes(s) {
 // status pill that paints a box round one word IS "one card per fact", which C5 refuses by
 // name. An exclusion for it would remove precisely the worst violations from the subject
 // set and leave the grader unable to report the thing it exists to report.
+//
+// KNOWN BOUND, and it is a bound rather than a reading. The count is of the edges an
+// element paints ITSELF, so a box a reader sees closed because its fourth edge belongs to
+// its NEIGHBOUR - two bars sitting flush, the upper one's border-bottom closing the lower
+// one - is three edges here and is not a subject. That case is filed as its own item with
+// the finding that named it and a repro that fails against the served page; deciding it
+// needs a reading of whether the painted edges CLOSE a box, which is a different question
+// from how many this element drew, and it is deliberately not answered here. Until it
+// lands, a contributor can escape this grader by leaving one edge to a neighbour, and
+// docs/webui.md says so in the same words.
 export function craftContainers(chromedElements) {
   return (chromedElements || []).filter((c) =>
     (c.sides.length === 4 || c.shadow !== "") &&
@@ -464,12 +474,12 @@ export function gradeContainerEarnsItsChrome(s) {
   const subjects = craftContainers(s.chromed);
   if (subjects.length === 0) {
     const seen = (s.chromed || []).length;
-    return [`interface-craft C5 (AC-6): the page rendered no bordered or raised container at all, so this grader measured nothing and could not have failed. ${seen} element(s) painted a border or a shadow, and every one of them was a landmark, a control, a drawing or an element carrying a single painted edge`];
+    return [`interface-craft C5 (AC-6): the page rendered no bordered or raised container at all, so this grader measured nothing and could not have failed. ${seen} element(s) painted a border or a shadow, and every one of them was a landmark, a control, a drawing, or an element that paints fewer than four of its own edges and no shadow`];
   }
   const out = [];
   for (const c of subjects) {
     if (c.facts.length >= 3) continue;
-    const chrome = c.sides.length === 4 ? "a border on all four sides" : `a shadow (${c.shadow})`;
+    const chrome = c.sides.length === 4 ? "a border on all four of its own sides" : `a shadow (${c.shadow})`;
     out.push(`interface-craft C5 (AC-3): ${c.what} draws ${chrome} and holds ${c.facts.length} fact(s) [${c.facts.join(" | ")}]; a container that does not carry three facts has not earned its chrome`);
   }
   return out;

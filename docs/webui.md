@@ -293,17 +293,27 @@ separate target: a grader that no longer depends on a clock beats a loop that sa
   run that found no figure in any region FAILS: a subject query that matches nothing is the
   cheapest way for a grader like this to be green for ever.
 - **Density, interface-craft C5.** Every container the engine paints ENCLOSING chrome on -
-  a border on all four sides, or a shadow - holds at least three facts a reader can read
-  off it, and that includes an element holding a single run of text with no child of its
-  own: a box drawn round one word is "one card per fact", which is the case the clause
-  refuses by name. A single painted edge is a rule between two things rather than a box
-  around one, and a landmark, a control and a drawing are each reported and then set aside
-  with their reason rather than dropped from the reading. So a box may not be drawn around
-  one labelled figure or one state word: give the group the boundary and make the items
-  rows in it, which is what the counts and the two byte figures are, or let the thing say
-  what it says in words and colour, which is what the connection state and the two badges
-  do. A run that found no bordered container FAILS, for the same reason the hierarchy one
-  does.
+  a border on ALL FOUR of its own sides, or a shadow - holds at least three facts a reader
+  can read off it, and that includes an element holding a single run of text with no child
+  of its own: a box drawn round one word is "one card per fact", which is the case the
+  clause refuses by name. A single painted edge is a rule between two things rather than a
+  box around one, and a landmark, a control and a drawing are each reported and then set
+  aside with their reason rather than dropped from the reading. So an element may not draw
+  a box on its own four sides around one labelled figure or one state word: give the group
+  the boundary and make the items rows in it, which is what the counts and the two byte
+  figures are, or let the thing say what it says in words and colour, which is what the
+  connection state and the two badges do. A run that found no bordered container FAILS,
+  for the same reason the hierarchy one does.
+
+  **What this does NOT catch yet, said out loud rather than implied.** The subject query
+  counts the edges an element paints ITSELF. A box a reader sees closed because its fourth
+  edge belongs to its NEIGHBOUR is three edges to the engine and is outside the query: the
+  two control bars sit flush, the lower one paints right, bottom and left and takes the
+  bottom corners of the radius, and the bar above supplies the top edge with its own
+  `border-bottom`. Leaving one edge to a neighbour is therefore enough to escape this
+  grader today. That case is filed as its own item, carrying the finding and a repro that
+  fails against the served page in both themes at both widths; until it lands, this bullet
+  promises the four-own-edges and shadow cases and nothing wider.
 - The served Content Security Policy. It is asserted byte for byte AND by a rule about
   policies: no `unsafe-eval`, no host, scheme, nonce or hash source, no `img-src`, no
   default Trusted Types policy, no directive outside the served set. The rule is proved

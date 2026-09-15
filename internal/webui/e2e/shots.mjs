@@ -53,12 +53,48 @@ async function withToken(page) {
   });
 }
 
-// The three views this item changed, each driven into the state the change is about.
+// clipTo answers the box the engine laid an element out in, so a view that is a REGION of
+// the dashboard is photographed as that region rather than as the whole page with the
+// region somewhere in it. A craft clause is read off what a region shows; an image where
+// it is one band among twelve is an image nobody can read it from.
+async function clipTo(page, selector) {
+  await page.locator(selector).scrollIntoViewIfNeeded();
+  const box = await page.locator(selector).boundingBox();
+  if (!box) throw new Error(`shots: ${selector} laid out no box, so there is nothing to photograph`);
+  const pad = 12;
+  return {
+    x: Math.max(0, box.x - pad), y: Math.max(0, box.y - pad),
+    width: box.width + pad * 2, height: box.height + pad * 2,
+  };
+}
+
+// Each view this repository's surface work has changed, driven into the state the change is
+// about. A view is either the whole page or one region of it: the regions are photographed
+// clipped, because interface-craft C3 and C5 are read off a region and an image that shows
+// it as one band among twelve is not evidence about it.
 const VIEWS = {
   // The page as it arrives: the filter and the ledger search side by side, and the
   // per-row control on every terminal row.
   dashboard: async (page) => {
     await withToken(page);
+  },
+  // The live counts: the two state badges, the run's reclaimed figure and the band the
+  // nine count chips are rows in - the containers clause C5 moved.
+  counts: async (page) => {
+    await withToken(page);
+    return clipTo(page, "#counts");
+  },
+  // The two byte figures, entries in one bordered band rather than a card each. The band
+  // is the container clause C5 recognises and neither figure draws a box of its own.
+  "byte-figures": async (page) => {
+    await withToken(page);
+    return clipTo(page, ".stats");
+  },
+  // The aggregate cards, each a bordered container with its figure, its coverage and its
+  // exclusions - and the buckets whose keys clause C3 moved.
+  aggs: async (page) => {
+    await withToken(page);
+    return clipTo(page, "#aggregates");
   },
   // A ledger search that found something, in its own region.
   "ledger-search": async (page) => {
@@ -84,9 +120,9 @@ for (const [view, drive] of Object.entries(VIEWS)) {
       const page = await ctx.newPage();
       await page.goto(`${baseURL}/?scenario=full`, { waitUntil: "load" });
       await settle(page);
-      await drive(page);
+      const clip = await drive(page);
       const file = join(outDir, `${view}.${theme}.${label}.png`);
-      await page.screenshot({ path: file, fullPage: true });
+      await page.screenshot(clip ? { path: file, clip } : { path: file, fullPage: true });
       process.stdout.write(`${file}\n`);
       await ctx.close();
     }

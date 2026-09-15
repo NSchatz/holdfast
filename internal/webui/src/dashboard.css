@@ -238,15 +238,25 @@
 
   /* The paths this daemon is withholding. Drawn as a card, because the list IS the
      record: an operator reading it has to be able to see at a glance everything that is
-     currently being held out, and every entry carries the control that stops holding it. */
-  .held { background: var(--panel); border: var(--bw-hair) solid var(--border);
+     currently being held out, and every entry carries the control that stops holding it.
+     It carries a heading, a scope sentence, a row per path and its own message line, so
+     it is a container clause C5 recognises: three facts and more.
+
+     Addressed by its ID, not by `held` as a class. The word means two different things on
+     this page - the paths being withheld, and the BYTES held by the undo window - and the
+     byte figure is `p.stat.reclaimed.held`. A `.held` rule therefore drew this card's
+     border round that one figure as well, which is a box around a single labelled figure:
+     exactly what C5 refuses, and what the band around the two byte figures already
+     answers. The id is what the template gives this element and what every other rule and
+     every test already reaches it by. */
+  #held { background: var(--panel); border: var(--bw-hair) solid var(--border);
     border-left: var(--bw-flag) solid var(--warn);
     border-radius: var(--radius-md);
     padding: var(--sp-3) var(--sp-4);
     padding-left: calc(var(--sp-4) - var(--bw-flag) + var(--bw-hair));
     margin: 0 0 var(--sp-6); }
-  .held > h3 { margin-top: 0; }
-  .held .scope { margin-bottom: var(--sp-2); }
+  #held > h3 { margin-top: 0; }
+  #held .scope { margin-bottom: var(--sp-2); }
   #held-list { list-style: none; margin: 0; padding: 0;
     display: flex; flex-direction: column; gap: var(--sp-2); }
   #held-list li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
