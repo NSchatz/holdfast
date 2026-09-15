@@ -8,7 +8,7 @@ import { gradeEveryUnmeasuredFieldReadsTheAbsencePhrase, gradeSeveredStreamKeeps
 
 
 const waitAllViews = (state) => (p) => p.waitForFunction((want) => {
-  const v = window.__hf.views();
+  const v = window.__hf.snapshotViews();
   return v.length === 4 && v.every((x) => x.state === want);
 }, state, { timeout: 15000 });
 
@@ -24,14 +24,14 @@ test("every view shows its loading, empty and unreadable states in words", async
     });
     const s = await collect(page);
     for (const prob of gradeViewsAllIn(state)(s)) problems.push(`[${state}] ${prob}`);
-    texts[state] = Object.fromEntries(s.views.map((v) => [v.view, v.text]));
+    texts[state] = Object.fromEntries(s.snapshotViews.map((v) => [v.view, v.text]));
     // The controls stay operable in every one of the three states.
     for (const ctl of s.controls) {
       if (!ctl.present || !ctl.rendered) problems.push(`[${state}] the control "${ctl.id}" is not on the page`);
     }
     // And in the empty state, no view may still be claiming to be loading.
     if (state === "empty") {
-      for (const v of s.views) {
+      for (const v of s.snapshotViews) {
         if (v.state === "loading") problems.push(`the ${v.view} view still shows a loading state after a snapshot arrived`);
       }
     }
@@ -58,7 +58,7 @@ test("no count, total or aggregate reads as zero before a snapshot arrives", asy
   const { ctx, page } = await open(browser, {
     url: pageURL(baseURL, "loading"), theme: "light",
     waitFor: (p) => p.waitForFunction(
-      () => window.__hf.connText() === "live" && window.__hf.views().every((v) => v.state === "loading"),
+      () => window.__hf.connText() === "live" && window.__hf.snapshotViews().every((v) => v.state === "loading"),
       null, { timeout: 15000 }),
   });
   const s = await collect(page);

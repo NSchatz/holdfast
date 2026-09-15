@@ -45,6 +45,12 @@ import (
 var mutableGuards = map[string]bool{
 	"SkipHardlinked":          true,
 	"SkipUndoRetentionFailed": true,
+	// The operator's own withholding. It is cleared and re-derived on every pass from the
+	// record they created, so a requeue would have nothing to re-open: the lever is
+	// REMOVING the withholding, which the same surface that recorded it offers beside it.
+	// Putting the token in SkipGuards would offer an operator a second lever that could
+	// not move the row their first one is holding.
+	"SkipOperatorExcluded": true,
 }
 
 func TestRegress0082F7_EveryTerminalSkipTokenIsRequeueable(t *testing.T) {

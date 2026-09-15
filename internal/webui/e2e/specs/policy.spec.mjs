@@ -69,7 +69,7 @@ test("a server error on the snapshot endpoint still renders the offer and the co
   const { ctx, page, violations } = await open(browser, {
     url: pageURL(baseURL, "no-stream"), theme: "light",
     waitFor: (p) => p.waitForFunction(
-      () => window.__hf.views().length === 4 && window.__hf.views().every((v) => v.state === "unreadable"),
+      () => window.__hf.snapshotViews().length === 4 && window.__hf.snapshotViews().every((v) => v.state === "unreadable"),
       null, { timeout: 15000 }),
   });
   const probs = gradeServerErrorStillRendersTheOfferAndTheControls(await collect(page), violations);

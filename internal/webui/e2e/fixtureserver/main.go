@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -136,6 +137,11 @@ type fixtureServer struct {
 	// global switch here means one spec disarming the refusal another spec is still
 	// waiting on, and a case that fails or passes on which one got there first.
 	controlStatus map[string]int
+
+	// held is the withheld paths, per client, for the reason controlStatus is per client:
+	// the runner's specs share one server, and a global list would mean one spec removing a
+	// withholding another spec is still looking at.
+	held map[string][]string
 }
 
 func (s *fixtureServer) routes() http.Handler {
@@ -186,8 +192,90 @@ func (s *fixtureServer) routes() http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	// The per-file surface (S0094). Both are token-gated in the daemon, and the page
+	// carries whatever token the operator typed; this fixture answers either way, because
+	// what these specs decide is what the page DRAWS at a width, not who may ask.
+	//
+	// The withheld paths are per CLIENT, for the reason the severed stream is: the runner's
+	// specs share one server, and a global list would mean one spec removing a withholding
+	// another spec is still looking at.
+	mux.HandleFunc("/api/search", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		term := r.URL.Query().Get("path")
+		var rows []string
+		if strings.Contains("/media/archive/2011/a-very-long-directory-name/some-film.mkv", term) && term != "" {
+			rows = append(rows, `{"path":"/media/archive/2011/a-very-long-directory-name/some-film.mkv",`+
+				`"status":"done","worker":"w1","updated_at":1700000000,"encoder":"cpu",`+
+				`"vmaf_mean":97.1,"vmaf_min":90.2,"vmaf_model":"version=vmaf_v0.6.1",`+
+				`"source_bytes":2147483648,"output_bytes":1073741824,"encode_ms":600000}`)
+		}
+		_, _ = fmt.Fprintf(w, `{"term":%q,"results":[%s],"total":{"available":true,"unavailable":"",`+
+			`"covers":"every matching row in the ledger","cap":200,"count":%d}}`,
+			term, strings.Join(rows, ","), len(rows))
+	})
+	mux.HandleFunc("/api/exclusions", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		const runtimeState = "Withheld paths are runtime state this daemon holds. " +
+			"Nothing here is written to the configuration file, and no configuration key holds them."
+		var body struct {
+			Path string `json:"path"`
+		}
+		raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		_ = json.Unmarshal(raw, &body)
+		switch r.Method {
+		case http.MethodPost:
+			s.addHeld(clientOf(r), body.Path)
+			_, _ = fmt.Fprintf(w, `{"path":%q,"changed":true,"runtime_state":%q}`, body.Path, runtimeState)
+			return
+		case http.MethodDelete:
+			s.dropHeld(clientOf(r), body.Path)
+			_, _ = fmt.Fprintf(w, `{"path":%q,"changed":true,"runtime_state":%q}`, body.Path, runtimeState)
+			return
+		}
+		entries := []string{}
+		for i, p := range s.heldFor(clientOf(r)) {
+			entries = append(entries, fmt.Sprintf(`{"path":%q,"created_at":%d}`, p, 1700000000+i))
+		}
+		_, _ = fmt.Fprintf(w, `{"exclusions":[%s],"runtime_state":%q}`, strings.Join(entries, ","), runtimeState)
+	})
+
 	mux.HandleFunc("/api/events", s.events)
 	return mux
+}
+
+func (s *fixtureServer) addHeld(client, path string) {
+	if path == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.held == nil {
+		s.held = map[string][]string{}
+	}
+	for _, p := range s.held[client] {
+		if p == path {
+			return
+		}
+	}
+	s.held[client] = append(s.held[client], path)
+}
+
+func (s *fixtureServer) dropHeld(client, path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kept := []string{}
+	for _, p := range s.held[client] {
+		if p != path {
+			kept = append(kept, p)
+		}
+	}
+	s.held[client] = kept
+}
+
+func (s *fixtureServer) heldFor(client string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string{}, s.held[client]...)
 }
 
 // clientOf is the one page load a request belongs to. A request carrying no client cookie

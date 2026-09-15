@@ -131,7 +131,7 @@ function queueRow(j, headers) {
   return stamp(tr, "q:" + (j.path || ""), j);
 }
 
-function histRow(j, headers) {
+function histRow(j, headers, keyPrefix) {
   const tr = $("tpl-hist-row").content.cloneNode(true).firstElementChild;
   tr.dataset.path = (j.path || "").toLowerCase();
   pathCell(tr.querySelector(".path"), j.path);
@@ -152,6 +152,14 @@ function histRow(j, headers) {
   const upd = tr.querySelector(".upd");
   if (isNum(j.updated_at) && j.updated_at > 0) upd.textContent = fmtTime(j.updated_at);
   else upd.appendChild(nrNode());
+  remedyCell(tr.querySelector(".remedy"), j);
   if (headers) labelCells(tr, headers);
-  return stamp(tr, "h:" + (j.path || ""), j);
+  return stamp(tr, (keyPrefix || "h:") + (j.path || ""), j);
 }
+
+// A ledger search result is a terminal row and is rendered as one: same shell, same cells,
+// same remedy. A second projection of one row would be a second thing to keep in step, and
+// the row a search found is not a different fact from the row the history view holds - it
+// is the same row, reached by a different question. Only the KEY differs, so a path that
+// appears in both tables does not collide in the reconciler.
+function searchRow(j, headers) { return histRow(j, headers, "s:"); }

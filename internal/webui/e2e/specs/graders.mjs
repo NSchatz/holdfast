@@ -318,10 +318,14 @@ export function roundLen(v) { return Math.round(v * 100); }
 export function gradeViewsAllIn(want) {
   return (s) => {
     const out = [];
-    if (!s.views || s.views.length !== 4) {
-      return [`the page renders ${s.views ? s.views.length : 0} views, want the four the dashboard has (counts, queue, aggs, history)`];
+    // The SNAPSHOT-driven views, which are the ones every trigger of this criterion is a
+    // fact about (see SNAPSHOT_VIEWS in probe.mjs). A view filled by something else is
+    // graded by whatever fills it.
+    const views = s.snapshotViews || s.views;
+    if (!views || views.length !== 4) {
+      return [`the page renders ${views ? views.length : 0} snapshot-driven views, want the four the dashboard has (counts, queue, aggs, history)`];
     }
-    for (const v of s.views) {
+    for (const v of views) {
       if (v.state !== want) {
         out.push(`the ${v.view} view is in state "${v.state}", want "${want}" (it shows "${v.text}")`);
         continue;

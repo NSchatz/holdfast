@@ -73,3 +73,113 @@ async function control(path) {
 $("rescan").addEventListener("click", () => control("/api/rescan"));
 $("pause").addEventListener("click", () => control("/api/pause"));
 $("resume").addEventListener("click", () => control("/api/resume"));
+
+// --- the ledger search, and the paths this daemon is withholding ---------------------
+//
+// Both reach endpoints inside the same token-gated group the controls above use, and for
+// the same reason the search is there at all: the capped reads ship a few hundred rows, so
+// a ledger-wide search and a list of withheld paths serve per-file facts they never have.
+//
+// Every refusal below says, in words, that NOTHING CHANGED, and none of them renders
+// anything a reader could take for a result. The rest of the page is untouched and every
+// other control stays operable: a refused action costs nothing but itself.
+
+function bearer() {
+  return tokenInput.value ? { "Authorization": "Bearer " + tokenInput.value } : {};
+}
+
+// refusalText turns one response status into the reason a reader is owed. It is a
+// function of the STATUS and never of the body, because the body of a refusal is the
+// server's prose and the page has its own account to give.
+function refusalText(status) {
+  if (status === 403) return "Unavailable: control is disabled on this server.";
+  if (status === 401) return "Unavailable: the control token was refused.";
+  if (status === 400) return "Unavailable: the request was refused as malformed.";
+  return "Unavailable: the server returned " + status + ".";
+}
+
+async function runLedgerSearch() {
+  const term = $("ledger-search").value.trim();
+  const msg = $("search-msg");
+  msg.className = "";
+  if (term === "") {
+    msg.textContent = "Type part of a path to search for.";
+    return;
+  }
+  msg.textContent = "searching";
+  showFound("loading");
+  try {
+    const res = await fetch("/api/search?path=" + encodeURIComponent(term), { headers: bearer() });
+    if (!res.ok) {
+      msg.className = "err";
+      msg.textContent = "refused: nothing was searched.";
+      searchRefused(refusalText(res.status));
+      return;
+    }
+    let body;
+    try { body = await res.json(); }
+    catch (_) {
+      msg.className = "err"; msg.textContent = "refused: the answer could not be read.";
+      searchRefused("Unavailable: the answer could not be read.");
+      return;
+    }
+    msg.textContent = "";
+    renderSearchResults(body);
+  } catch (err) {
+    msg.className = "err";
+    msg.textContent = "refused: nothing was searched.";
+    searchRefused("Unavailable: the request did not reach the server.");
+  }
+}
+$("search-go").addEventListener("click", runLedgerSearch);
+$("ledger-search").addEventListener("keydown", (e) => { if (e.key === "Enter") runLedgerSearch(); });
+
+// refreshHeld reads the withholdings in force. It is the ONE reader of that list, so the
+// record an operator created and the record they can remove are always the same one.
+async function refreshHeld(message) {
+  if (!tokenInput.value) { renderHeld([], message); return; }
+  try {
+    const res = await fetch("/api/exclusions", { headers: bearer() });
+    if (!res.ok) { renderHeld([], message || refusalText(res.status)); return; }
+    const body = await res.json();
+    renderHeld(body && body.exclusions, message);
+  } catch (err) {
+    renderHeld([], message || "Unavailable: the request did not reach the server.");
+  }
+}
+
+// holdAction records or removes one withholding and then RE-READS the list, so what is on
+// screen is what the daemon holds rather than what the page assumed it would hold.
+async function holdAction(method, path) {
+  try {
+    const res = await fetch("/api/exclusions", {
+      method: method,
+      headers: Object.assign({ "Content-Type": "application/json" }, bearer()),
+      body: JSON.stringify({ path: path }),
+    });
+    if (!res.ok) {
+      // NOTHING CHANGED, said in words, with no part of the page rearranged as if it had.
+      await refreshHeld("Nothing changed. " + refusalText(res.status));
+      return;
+    }
+    await refreshHeld("");
+  } catch (err) {
+    await refreshHeld("Nothing changed. The request did not reach the server.");
+  }
+}
+
+// One listener for the whole document rather than one per control: rows are rebuilt on
+// every snapshot, and a listener attached while a row is built would be a listener the
+// next snapshot throws away. The path travels on the control itself.
+document.addEventListener("click", (e) => {
+  const t = e.target;
+  if (!t || !t.dataset) return;
+  if (t.dataset.hold) { holdAction("POST", t.dataset.hold); return; }
+  if (t.dataset.release) { holdAction("DELETE", t.dataset.release); }
+});
+
+// The list is read once at load when a token is already stored, and again whenever the
+// operator changes it: the page cannot read it without one, and an empty list and an
+// unasked question are different facts.
+tokenInput.addEventListener("change", () => refreshHeld(""));
+refreshHeld("");

@@ -336,6 +336,36 @@ type serveOpts struct {
 	// controlStatus, when non-zero, answers every mutating control endpoint with that
 	// status, so a refusal can be driven for real from a real click.
 	controlStatus int
+
+	// --- S0094: the per-file surface the page now reaches ------------------------
+	//
+	// These stand the two token-gated endpoints up so the page's OWN fetch, its OWN
+	// rendering and its OWN refusal handling are what a grader measures. None of them
+	// reaches inside the page.
+
+	// searchStatus, when non-zero, answers the ledger search with that status and no
+	// result set, which is how a REFUSAL is driven for real.
+	searchStatus int
+	// searchResults is the rows the ledger search returns, as raw JSON objects in the
+	// history projection. nil is a search that matched nothing, which is a different
+	// answer from a refusal and the page must say so differently.
+	searchResults []string
+	// searchTotal is the match count the search reports over the whole ledger. A
+	// negative value makes the total UNREADABLE, which the page states in words.
+	searchTotal int
+	// searchDelay holds the search's answer back for this long, so the window in which
+	// the page is showing its LOADING state is wide enough to be measured rather than
+	// raced for. It exists for one grader, the one that proves a wait on this region can
+	// tell "the search has been asked" from "the search has answered".
+	searchDelay time.Duration
+
+	// exclusionsStatus, when non-zero, answers every withheld-path request with that
+	// status, so the page's failure path is driven by a real response.
+	exclusionsStatus int
+	// exclusions seeds the withheld paths the server holds. The handlers below really
+	// add to and remove from it, so what the page renders after an action is what the
+	// server said and never what the page assumed.
+	exclusions []string
 }
 
 // serveDocument stands the REAL handler up on a real listener, plus the probe page
@@ -419,6 +449,88 @@ func serveDocumentWith(t *testing.T, o serveOpts) *probeServer {
 			_, _ = w.Write([]byte(`{"started":true}`))
 		})
 	}
+
+	// The per-file surface (S0094). The ledger search is a READ and the withheld paths are
+	// a small piece of state the handlers below really mutate, so a grader measures the
+	// page's own round trip rather than a value poked into it.
+	const runtimeState = "Withheld paths are runtime state this daemon holds. " +
+		"Nothing here is written to the configuration file, and no configuration key holds them."
+	mux.HandleFunc("/api/search", func(w http.ResponseWriter, r *http.Request) {
+		// Held back BEFORE the status is decided, so a delayed refusal is as reachable as
+		// a delayed answer. Zero is every other case and costs nothing.
+		if o.searchDelay > 0 {
+			select {
+			case <-time.After(o.searchDelay):
+			case <-r.Context().Done():
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if o.searchStatus != 0 {
+			w.WriteHeader(o.searchStatus)
+			_, _ = w.Write([]byte(`{"error":"refused"}`))
+			return
+		}
+		total := o.searchTotal
+		if total == 0 {
+			total = len(o.searchResults)
+		}
+		count := strconv.Itoa(total)
+		available := "true"
+		if total < 0 {
+			available, count = "false", "null"
+		}
+		_, _ = fmt.Fprintf(w, `{"term":%q,"results":[%s],"total":{"available":%s,"unavailable":"","covers":"every matching row in the ledger","cap":200,"count":%s}}`,
+			r.URL.Query().Get("path"), strings.Join(o.searchResults, ","), available, count)
+	})
+	held := append([]string{}, o.exclusions...)
+	var heldMu sync.Mutex
+	mux.HandleFunc("/api/exclusions", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if o.exclusionsStatus != 0 {
+			w.WriteHeader(o.exclusionsStatus)
+			_, _ = w.Write([]byte(`{"error":"refused"}`))
+			return
+		}
+		var body struct {
+			Path string `json:"path"`
+		}
+		raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		_ = json.Unmarshal(raw, &body)
+		heldMu.Lock()
+		defer heldMu.Unlock()
+		switch r.Method {
+		case http.MethodPost:
+			if body.Path != "" {
+				found := false
+				for _, p := range held {
+					if p == body.Path {
+						found = true
+					}
+				}
+				if !found {
+					held = append(held, body.Path)
+				}
+			}
+			_, _ = fmt.Fprintf(w, `{"path":%q,"changed":true,"runtime_state":%q}`, body.Path, runtimeState)
+			return
+		case http.MethodDelete:
+			kept := held[:0:0]
+			for _, p := range held {
+				if p != body.Path {
+					kept = append(kept, p)
+				}
+			}
+			held = kept
+			_, _ = fmt.Fprintf(w, `{"path":%q,"changed":true,"runtime_state":%q}`, body.Path, runtimeState)
+			return
+		}
+		entries := make([]string, 0, len(held))
+		for i, p := range held {
+			entries = append(entries, fmt.Sprintf(`{"path":%q,"created_at":%d}`, p, 1700000000+i))
+		}
+		_, _ = fmt.Fprintf(w, `{"exclusions":[%s],"runtime_state":%q}`, strings.Join(entries, ","), runtimeState)
+	})
 
 	// The event stream. With no snapshot this is the old behaviour (a JSON body, which the
 	// page treats as a failed stream and does not render from). With one it is a REAL SSE

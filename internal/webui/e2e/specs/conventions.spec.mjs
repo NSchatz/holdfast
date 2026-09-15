@@ -56,7 +56,7 @@ test("the body never scrolls sideways at 360 in every theme and state", async ({
       const waitFor = state === "live"
         ? waitRendered
         : (p) => p.waitForFunction((want) => {
-            const v = window.__hf.views();
+            const v = window.__hf.snapshotViews();
             return v.length === 4 && v.every((x) => x.state === want);
           }, state, { timeout: 15000 });
       const { ctx, page } = await open(browser, { url: pageURL(baseURL, scenario), theme, width: 360, height: 900, waitFor });

@@ -657,3 +657,62 @@ test("spreadPositions places the mean on the scale its own ends define", () => {
     assert.equal(d.spreadPositions(0, 5, v), null, "max " + String(v));
   }
 });
+
+// --- what an operator can DO about one terminal row ---------------------------------
+
+test("requeueCommand names the command with the row's own path, and nothing for the three nothing re-opens", () => {
+  // The rows a requeue re-opens. Each gets the WHOLE command, path included: a command an
+  // operator has to assemble themselves is one they will assemble wrongly.
+  for (const status of ["done", "skipped", "failed", "would-transcode"]) {
+    assert.equal(d.requeueCommand({ status: status, path: "/media/films/a.mkv" }),
+      "holdfast requeue /media/films/a.mkv", status);
+    assert.equal(d.requeueRefusal({ status: status, path: "/media/films/a.mkv" }), "", status);
+  }
+  // The three nothing re-opens. Each says why instead of showing a reader nothing.
+  for (const j of [
+    { status: "indeterminate", path: "/media/films/a.mkv" },
+    { status: "applied-despite-error", path: "/media/films/a.mkv" },
+    { status: "skipped", reason: "restored-original", path: "/media/films/a.mkv" },
+  ]) {
+    assert.equal(d.requeueCommand(j), "", JSON.stringify(j));
+    assert.ok(d.requeueRefusal(j).length > 0, "no reason given for " + JSON.stringify(j));
+  }
+  // A row that is still work in hand has no remedy at all: nothing is holding the file out.
+  for (const status of d.IN_FLIGHT) {
+    assert.equal(d.requeueCommand({ status: status, path: "/media/films/a.mkv" }), "", status);
+    assert.equal(d.requeueRefusal({ status: status, path: "/media/films/a.mkv" }), "", status);
+  }
+  // And nothing is fabricated out of an absent row, or out of a path that is not one. A
+  // path the server sent is whatever it sent - the page does not judge its shape - so the
+  // refusal here is exactly "absent or empty", and every non-string absence is one.
+  for (const v of ABSENT) {
+    assert.equal(d.requeueCommand(v), "", "row " + String(v));
+    assert.equal(d.requeueRefusal(v), "", "row " + String(v));
+    if (typeof v === "string") continue;
+    assert.equal(d.requeueCommand({ status: "done", path: v }), "", "path " + String(v));
+  }
+  assert.equal(d.requeueCommand({ status: "done", path: "" }), "");
+  // A status this build does not know is not a terminal row it can claim a remedy for.
+  assert.equal(d.requeueCommand({ status: "banana", path: "/media/films/a.mkv" }), "");
+});
+
+test("searchCountText states the count over the ledger and says when it could not be read", () => {
+  const total = (count) => ({ available: true, unavailable: "", covers: "every matching row in the ledger", cap: 200, count: count });
+  assert.equal(d.searchCountText(1, total(1)), "1 matching row.");
+  assert.equal(d.searchCountText(3, total(3)), "3 matching rows.");
+  assert.equal(d.searchCountText(0, total(0)), "0 matching rows.");
+  // More matched than were shipped: the page says both figures, so a reader knows the
+  // region is not the whole answer.
+  assert.equal(d.searchCountText(200, total(4096)), "Showing 200 of 4,096 matching rows.");
+  // A count that could not be read is said IN WORDS with no number in its place: a figure
+  // beside "matched" is read as the total whatever the sentence around it says.
+  const unreadable = d.searchCountText(2, { available: false, unavailable: "x", covers: "", cap: 200, count: null });
+  assert.ok(unreadable.includes("could not be read"), unreadable);
+  assert.ok(!/[0-9]/.test(unreadable), "the unreadable answer carries a digit: " + unreadable);
+  for (const v of ABSENT) {
+    const out = d.searchCountText(2, v);
+    refusesFabrication("searchCountText(2, " + String(v) + ")", out);
+    assert.ok(!/^[0-9]/.test(out), "an unreadable total produced a figure: " + out);
+  }
+  assert.equal(d.searchCountText(undefined, total(3)), "");
+});

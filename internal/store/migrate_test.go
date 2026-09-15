@@ -1303,17 +1303,38 @@ func atShippedVersion(t *testing.T, path string, version int) {
 	if ver != version {
 		t.Fatalf("the fixture is at version %d, want %d", ver, version)
 	}
-	if version < len(migrations) && hasColumn(t, db, newestStepColumn) {
-		t.Fatalf("a v%d fixture already carries %q, which the newest step adds - it is not an older database",
-			version, newestStepColumn)
+	// A fixture below this build's version must be recognisably an OLDER database rather
+	// than this one wearing an older number, and what says so is the shape the NEWEST step
+	// adds. That shape is now a whole TABLE rather than another column on jobs, so the
+	// question is asked of sqlite_master.
+	if version < len(migrations) && hasTable(t, db, newestStepTable) {
+		t.Fatalf("a v%d fixture already carries the %s table, which the newest step creates - it is not an older database",
+			version, newestStepTable)
+	}
+	// The stamp column arrives AT stampedFromVersion and every version from there on
+	// legitimately has it, so this sanity check is against THAT step and not against the end
+	// of the history: while the stamp happened to be the last step, the two were the same
+	// number, and the first step appended after it turned a correct fixture into a fatal.
+	if version < stampedFromVersion && hasColumn(t, db, "schema_version") {
+		t.Fatalf("a v%d fixture already carries the version stamp - it is not an older database", version)
 	}
 }
 
-// newestStepColumn is the column the LAST migration adds to the jobs table. It is what
-// makes a fixture below this build's version recognisably an OLDER database rather than
-// this one wearing an older number, and it tracks the END of the migrations slice: a step
-// appended after it moves this, exactly as it moves the wind-back fixtures.
-const newestStepColumn = "profile"
+// newestStepTable is the table the LAST migration creates. It tracks the END of the
+// migrations slice exactly as the column it replaced did: a step appended after this one
+// moves it, along with the wind-back fixtures.
+const newestStepTable = "path_exclusions"
+
+// stampedFromVersion is the step that added the per-record version stamp. It is looked up
+// in the history rather than written out, so appending a step cannot move it by accident.
+var stampedFromVersion = func() int {
+	for i, m := range migrations {
+		if strings.Contains(m.sql, "ADD COLUMN schema_version") {
+			return i + 1
+		}
+	}
+	return len(migrations)
+}()
 
 // stampStepVersion is the version at which the record stamp shipped, found in the history
 // rather than written down a second time. It is not the newest version once a step is
@@ -1483,8 +1504,8 @@ func TestMigrate_AStepMatchingItsDeclarationCommitsAndAdvancesTheStampedVersion(
 			step.Version, step.Name, schemaVersion(), last.name)
 	}
 	// Committed, not merely attempted: the shape the step adds is there afterwards.
-	if !hasColumn(t, s.db, newestStepColumn) {
-		t.Error("the step was reported applied and its column is not there")
+	if !hasTable(t, s.db, newestStepTable) {
+		t.Errorf("the step was reported applied and the %s table is not there", newestStepTable)
 	}
 }
 

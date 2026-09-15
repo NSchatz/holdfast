@@ -70,8 +70,12 @@ test("innerText reads what a reader sees and not a hidden subtree", async ({ pag
   await open(page, "full");
   const t = await readableText(page.locator("#history tr").first());
   expect(t).toContain("failed");
+  // BOTH cells that carry the path: the File column, and the Remedy column, where the row
+  // names the local command that re-opens its decision with the file's own path in it. A
+  // subtree hidden here has to be every place the string is, or what is left is the string
+  // from the cell that is still on screen and the reading proves nothing.
   await page.locator("#history tr").first().evaluate((el) => {
-    el.querySelector("td.path").style.display = "none";
+    for (const td of el.querySelectorAll("td.path, td.remedy")) td.style.display = "none";
   });
   const after = await readableText(page.locator("#history tr").first());
   expect(after, "innerText returned text from a display:none subtree").not.toContain("Corrupt Rip");

@@ -58,9 +58,54 @@
       <span id="msg" role="status" aria-live="polite"></span>
     </div>
 
-    <div class="controls">
-      <label for="filter" class="lbl">Filter</label>
-      <input id="filter" type="search" placeholder="filter queue and history by path" autocomplete="off">
+    <!-- Two controls, two DIFFERENT QUESTIONS, and the page has to say which is which:
+         filtering a capped view and searching the ledger are not the same act, and a
+         surface that ran them together would re-commit the error the cap notices exist to
+         prevent. The distinction is carried by the two LABELS, because a label is what a
+         reader meets at the control itself and what the engine computes each control's
+         accessible name from - so the two are told apart by a screen reader as well. -->
+    <div class="controls find">
+      <label for="filter" class="lbl">Filter the rows on screen</label>
+      <input id="filter" type="search" placeholder="hide rows whose path does not match" autocomplete="off">
+      <label for="ledger-search" class="lbl">Search the whole ledger</label>
+      <input id="ledger-search" type="search" placeholder="find a finished file the tables cannot reach" autocomplete="off">
+      <button id="search-go">Search</button>
+      <span id="search-msg" role="status" aria-live="polite"></span>
+    </div>
+
+    <!-- The ledger search's own results, in their own region under their own heading, so
+         nothing found here is ever read as a row of the capped tables below. It is absent
+         until a search has been made: a results table standing empty before anybody asked
+         a question is a page answering one nobody put. -->
+    <div class="found" id="found" hidden>
+      <h3 id="h-found">Ledger search results</h3>
+      <p class="note" id="found-count"></p>
+      <div class="tablewrap">
+        <table class="hist" aria-labelledby="h-found">
+          <colgroup>
+            <col class="c-file"><col class="c-result"><col class="c-size"><col class="c-vmaf">
+            <col class="c-enc"><col class="c-dur"><col class="c-upd"><col class="c-remedy">
+          </colgroup>
+          <thead><tr>
+            <th>File</th><th>Result</th><th>Size</th><th>VMAF</th><th>Encoder</th><th>Encode time</th><th>Updated</th><th>Remedy</th>
+          </tr></thead>
+          <tbody id="search-results" data-view="search"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- What this daemon is currently holding out of the pipeline, and the one sentence
+         that says where those records LIVE. It is absent while nothing is withheld, and
+         present - sentence and all - the moment a withheld path is rendered, because a
+         reader who takes one for configuration will go looking for it in a file that does
+         not mention it. Every entry carries its own removal, since a withholding nobody
+         can undo from the surface that made it is a file that silently stopped being
+         worked on. -->
+    <div class="held" id="held" hidden>
+      <h3 id="h-held">Paths this daemon is withholding</h3>
+      <p class="scope" id="held-scope">Runtime state; config.yaml untouched.</p>
+      <ul id="held-list"></ul>
+      <p class="note" id="held-msg"></p>
     </div>
 
     <h3 id="h-queue">Queue and active</h3>
@@ -121,13 +166,13 @@
       <table class="hist" aria-labelledby="h-hist">
         <colgroup>
           <col class="c-file"><col class="c-result"><col class="c-size"><col class="c-vmaf">
-          <col class="c-enc"><col class="c-dur"><col class="c-upd">
+          <col class="c-enc"><col class="c-dur"><col class="c-upd"><col class="c-remedy">
         </colgroup>
         <thead><tr>
-          <th>File</th><th>Result</th><th>Size</th><th>VMAF</th><th>Encoder</th><th>Encode time</th><th>Updated</th>
+          <th>File</th><th>Result</th><th>Size</th><th>VMAF</th><th>Encoder</th><th>Encode time</th><th>Updated</th><th>Remedy</th>
         </tr></thead>
         <tbody id="history" data-view="history">
-          <tr data-state="loading"><td class="empty" colspan="7">Loading finished swaps.</td></tr>
+          <tr data-state="loading"><td class="empty" colspan="8">Loading finished swaps.</td></tr>
         </tbody>
       </table>
     </div>
@@ -170,7 +215,16 @@
     <td class="enc"></td>
     <td class="dur"></td>
     <td class="upd"></td>
+    <td class="remedy"></td>
   </tr>
+</template>
+<!-- One withheld path: what is being held out, and the control that stops holding it.
+     A row, not a bare line: the removal belongs beside the record it undoes. -->
+<template id="tpl-held-row">
+  <li>
+    <span class="heldpath"></span>
+    <button class="heldgo" type="button"></button>
+  </li>
 </template>
 <!-- The figure shells. Every graphic on this page is an inline vector drawing whose SHAPE
      is markup written here and whose only variable is a geometry attribute the renderer

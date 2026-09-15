@@ -68,11 +68,22 @@ const VIEW_STATES = {
     empty: "No swap finished yet.",
     unreadable: "Finished swaps are unreadable.",
   },
+  // The ledger search's own results. Its three states are driven by a SEARCH rather than
+  // by a snapshot, which is why the shell ships this view with no state element at all and
+  // the whole region absent: before anybody has asked a question there is nothing to be
+  // loading, nothing to be empty of, and nothing that could not be read. The empty wording
+  // says NO ROW MATCHED and never "no such file" - the search covers the ledger, and the
+  // ledger is not the library.
+  search: {
+    loading: "Searching every recorded row.",
+    empty: "No recorded row matches that term.",
+    unreadable: "That search could not be answered.",
+  },
 };
 
 // The column count of each table, so a state row spans the whole table rather than
 // sitting in the first column.
-const VIEW_COLUMNS = { queue: 5, history: 7 };
+const VIEW_COLUMNS = { queue: 5, history: 8, search: 8 };
 
 // Human labels for the closed vocabulary of skip guards (internal/engine's Skip*
 // constants). An unknown token falls back to itself, so a new guard is never hidden.
@@ -87,4 +98,21 @@ const GUARD_LABELS = {
   "exotic-pixel-format": "exotic pixel format",
   "target-already-exists": "target file already exists",
   "symlinked-source": "symlinked source (would replace the link)",
+  "operator-excluded": "withheld by an operator",
 };
+
+// The terminal rows `holdfast requeue` will not re-open, by the status alone. Both are
+// FILESYSTEM-1 outcomes and neither is a configuration question: for an indeterminate job
+// whether the swap was applied is exactly what is unknown, and for one applied despite an
+// error the rename took effect, so the file at that path IS the replacement.
+const NEVER_REOPENED = ["indeterminate", "applied-despite-error"];
+
+// The one skip guard requeue also leaves alone, named by its stored token. An operator
+// deliberately put those bytes back through the undo window, and re-opening the row would
+// feed their rescued file to the very gates that passed the encode they rejected.
+const NO_REQUEUE_GUARD = "restored-original";
+
+// The command an operator runs to re-open a decision. It is a LOCAL command by a ratified
+// decision and never an endpoint - it changes what the engine will do to a media file -
+// so the page names it rather than offering a control that cannot exist.
+const REQUEUE_COMMAND = "holdfast requeue";

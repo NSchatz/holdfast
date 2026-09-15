@@ -105,6 +105,7 @@ export async function collect(page) {
     textRuns: __hf.textRuns(),
     targets: __hf.pointerTargets(),
     views: __hf.views(),
+    snapshotViews: __hf.snapshotViews(),
     labels: __hf.labels(),
     mainParagraphs: __hf.mainParagraphs(),
     doclinks: __hf.doclinks(),

@@ -466,7 +466,7 @@ func TestQueue_RendersProgressAndShowsAbsenceAsAbsence(t *testing.T) {
 	if !strings.Contains(s, `empty: "No work in hand."`) {
 		t.Error("the empty-queue rendering was changed")
 	}
-	if !strings.Contains(s, `const VIEW_COLUMNS = { queue: 5, history: 7 };`) {
+	if !strings.Contains(s, `const VIEW_COLUMNS = { queue: 5, history: 8, search: 8 };`) {
 		t.Error("the empty-queue row does not span the queue table's columns")
 	}
 }

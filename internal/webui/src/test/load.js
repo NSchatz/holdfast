@@ -29,6 +29,8 @@ const NAMES = [
   "announceText", "aggCoverageText", "aggExclusionText", "readBuckets", "bucketProportions",
   "spreadPositions",
   "codecText", "sourceSizeText", "candidateTotal", "candidateCoverageText", "candidateExclusionText",
+  "NEVER_REOPENED", "NO_REQUEUE_GUARD", "REQUEUE_COMMAND",
+  "isTerminalRow", "requeueCommand", "requeueRefusal", "searchCountText",
 ];
 
 // The modules that hold no DOM reference at all, and so load anywhere.
