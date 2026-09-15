@@ -485,12 +485,35 @@ func TestRendered_FilterAndLedgerSearchReadAsDifferentQuestions(t *testing.T) {
 
 // --- criterion 4: the results are their own region ----------------------------------
 
+// searchAnsweredJS is how a grader waits for the ledger search to have ANSWERED, and it is
+// ONE constant on purpose: the grader below waits on it and
+// TestRendered_TheLedgerSearchWaitTellsAskedFromAnswered proves it can tell the two apart,
+// so weakening it back reds that proof rather than silently re-opening the race.
+//
+// It asks for a child that is NOT a state row. The obvious `children.length > 0` is
+// satisfied by the LOADING row, because `#search-results` IS the `data-view="search"` host
+// and setViewState puts its <tr data-state="loading"> inside that same tbody - so that wait
+// returns the instant the search is dispatched, and a grader reading then counts the
+// placeholder as its one result. This is the page's own viewHasContent predicate, asked
+// from outside.
+const searchAnsweredJS = `(function () {
+	const b = document.getElementById("search-results");
+	if (!b) return false;
+	for (const el of b.children) { if (!(el.dataset && el.dataset.state)) return true; }
+	return false;
+})()`
+
 func TestRendered_LedgerSearchResultsAreTheirOwnRegion(t *testing.T) {
 	b := launchEngine(t)
 	p := pfPage(t, b, serveOpts{
 		snapshot:      mixedSnapshot(),
 		searchResults: []string{deepRow("/media/archive/2011/golf.mkv"), deepRow("/media/archive/2011/hotel.mkv")},
 		searchTotal:   2,
+		// The answer is held back a little ON PURPOSE, so the loading window this grader
+		// has to wait THROUGH exists on every run rather than only on a loaded machine.
+		// Without it the race that produced the one red here was invisible until a
+		// full-package run went wide, which is the worst way to meet a wait that is wrong.
+		searchDelay: 400 * time.Millisecond,
 	})
 	pfSetToken(t, p, "secret")
 
@@ -502,7 +525,7 @@ func TestRendered_LedgerSearchResultsAreTheirOwnRegion(t *testing.T) {
 	queueBefore := len(before.Queue)
 
 	pfSearch(t, p, "archive")
-	if err := p.waitUntil(`document.getElementById("search-results").children.length > 0`, 30*time.Second); err != nil {
+	if err := p.waitUntil(searchAnsweredJS, 30*time.Second); err != nil {
 		t.Fatalf("%v\nbrowser output:\n%s", err, b.output())
 	}
 	after := pfRead(t, p)
@@ -549,6 +572,73 @@ func TestRendered_LedgerSearchResultsAreTheirOwnRegion(t *testing.T) {
 	}
 	if !strings.Contains(after.Found.Count, "2") {
 		t.Errorf("the results region states the match count as %q, want the 2 the server reported", after.Found.Count)
+	}
+}
+
+// The wait the grader above uses has to tell "the search has been ASKED" from "the search
+// has ANSWERED", and this proves it does by driving the one moment where the two look the
+// same.
+//
+// The failure it exists to stop is not hypothetical: `#search-results` is the view host,
+// so setViewState puts the LOADING row inside that same tbody, and a wait on
+// `children.length > 0` is satisfied the instant the search is dispatched. Under a loaded
+// full-package run that raced, and criterion 4's grader read one row - the placeholder,
+// `State:loading StateText:"Searching every recorded row"` - where two results were owed.
+//
+// So the answer is held back here, the two predicates are asked in the one window where
+// the region holds the placeholder and nothing else, and the case asserts they DISAGREE:
+// the old one is already true and the new one is not. Then the answer lands and the new
+// one becomes true over the real rows. A wait that could not tell them apart fails this.
+func TestRendered_TheLedgerSearchWaitTellsAskedFromAnswered(t *testing.T) {
+	// The weak predicate is written out here, because it is the counterexample. The strong
+	// one is NOT: it is searchAnsweredJS, the very constant the grader above waits on, so
+	// this case grades the wait that actually runs rather than a copy of it that could
+	// stay right while the original went wrong.
+	const anyChild = `document.getElementById("search-results").children.length > 0`
+	const answered = searchAnsweredJS
+
+	b := launchEngine(t)
+	p := pfPage(t, b, serveOpts{
+		snapshot:      mixedSnapshot(),
+		searchResults: []string{deepRow("/media/archive/2011/golf.mkv"), deepRow("/media/archive/2011/hotel.mkv")},
+		searchTotal:   2,
+		searchDelay:   3 * time.Second,
+	})
+	pfSetToken(t, p, "secret")
+	pfSearch(t, p, "archive")
+
+	// The window: the region is showing its loading row and the answer has not arrived.
+	if err := p.waitUntil(`!!document.querySelector('[data-view="search"] [data-state="loading"]')`,
+		20*time.Second); err != nil {
+		t.Fatalf("the search never reached its loading state, so the window this case measures in "+
+			"never opened: %v\nbrowser output:\n%s", err, b.output())
+	}
+	var weak, strong bool
+	p.mustEval(anyChild, &weak)
+	p.mustEval(answered, &strong)
+	if !weak {
+		t.Error("the LOADING row did not satisfy `children.length > 0`, so this case is measuring " +
+			"a window in which the two predicates were never going to differ")
+	}
+	if strong {
+		t.Error("the wait predicate is already true while the region holds nothing but its loading row; " +
+			"it cannot tell an asked search from an answered one, which is the whole of what it is for")
+	}
+
+	// And it turns true on the answer, over the rows the search really returned.
+	if err := p.waitUntil(answered, 30*time.Second); err != nil {
+		t.Fatalf("the wait predicate never turned true after the search answered: %v\nbrowser output:\n%s",
+			err, b.output())
+	}
+	got := pfRead(t, p)
+	if len(got.Found.Rows) != 2 {
+		t.Errorf("the wait returned with %d rows on screen, want the 2 the search returned: %+v",
+			len(got.Found.Rows), got.Found.Rows)
+	}
+	for _, r := range got.Found.Rows {
+		if r.State != "" {
+			t.Errorf("the wait returned with a STATE row still in the results region: %+v", r)
+		}
 	}
 }
 

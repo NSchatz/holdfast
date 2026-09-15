@@ -353,6 +353,11 @@ type serveOpts struct {
 	// searchTotal is the match count the search reports over the whole ledger. A
 	// negative value makes the total UNREADABLE, which the page states in words.
 	searchTotal int
+	// searchDelay holds the search's answer back for this long, so the window in which
+	// the page is showing its LOADING state is wide enough to be measured rather than
+	// raced for. It exists for one grader, the one that proves a wait on this region can
+	// tell "the search has been asked" from "the search has answered".
+	searchDelay time.Duration
 
 	// exclusionsStatus, when non-zero, answers every withheld-path request with that
 	// status, so the page's failure path is driven by a real response.
@@ -451,6 +456,15 @@ func serveDocumentWith(t *testing.T, o serveOpts) *probeServer {
 	const runtimeState = "Withheld paths are runtime state this daemon holds. " +
 		"Nothing here is written to the configuration file, and no configuration key holds them."
 	mux.HandleFunc("/api/search", func(w http.ResponseWriter, r *http.Request) {
+		// Held back BEFORE the status is decided, so a delayed refusal is as reachable as
+		// a delayed answer. Zero is every other case and costs nothing.
+		if o.searchDelay > 0 {
+			select {
+			case <-time.After(o.searchDelay):
+			case <-r.Context().Done():
+				return
+			}
+		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		if o.searchStatus != 0 {
 			w.WriteHeader(o.searchStatus)
