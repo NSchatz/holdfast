@@ -70,7 +70,25 @@ type harness struct {
 
 func newHarness(t *testing.T, token string) *harness {
 	t.Helper()
-	st := newStore(t)
+	return newHarnessWith(t, token, "", nil)
+}
+
+// newHarnessWith is newHarness with the two seams the read-gate suite needs: a resolved
+// READ token, and a real handler at the root so "the dashboard page is still served" is a
+// claim about a page rather than about a nil handler. Every other caller wants neither,
+// which is why the two-argument form above stays.
+func newHarnessWith(t *testing.T, token, readToken string, ui http.Handler) *harness {
+	t.Helper()
+	return newHarnessOn(t, newStore(t), token, readToken, ui)
+}
+
+// newHarnessOn builds a harness over an EXISTING store, so two servers can answer from
+// the same rows. That is what makes "a credentialled request is answered exactly as it
+// would be with no read token configured" a comparison of two responses rather than of
+// two libraries: a second newStore would seed its own timestamps and the bodies would
+// differ for a reason that has nothing to do with the gate.
+func newHarnessOn(t *testing.T, st *store.SQLite, token, readToken string, ui http.Handler) *harness {
+	t.Helper()
 	h := &harness{
 		st:          st,
 		scanStarted: make(chan struct{}, 8),
@@ -89,7 +107,7 @@ func newHarness(t *testing.T, token string) *harness {
 	h.hub = NewHub(st, h.ctrl, discard())
 	h.ctrl.SetOnChange(h.hub.Trigger)
 	cfg := config.Config{}
-	h.srv = New(ctx, cfg, secret.NewValue(token), st, h.ctrl, h.hub, nil, nil, discard())
+	h.srv = New(ctx, cfg, secret.NewValue(token), secret.NewValue(readToken), st, h.ctrl, h.hub, ui, nil, discard())
 	return h
 }
 
@@ -1335,7 +1353,7 @@ func TestSnapshot_OneUnreadableAggregateStillShipsEverythingElse(t *testing.T) {
 	defer cancel()
 	ctrl := NewController(ctx, func(context.Context) error { return nil }, discard())
 	hub := NewHub(broken, ctrl, discard())
-	srv := New(ctx, config.Config{}, secret.Value{}, broken, ctrl, hub, nil, nil, discard())
+	srv := New(ctx, config.Config{}, secret.Value{}, secret.Value{}, broken, ctrl, hub, nil, nil, discard())
 
 	snap := snapshotOf(t, hub)
 	if snap.Summary[string(store.Done)] != 1 || len(snap.Queue) != 1 || len(snap.History) != 1 {

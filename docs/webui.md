@@ -391,8 +391,9 @@ those rows are already on the screen.
 **Searching the ledger** covers every terminal row the ledger holds, including the ones
 older than a capped table can reach. It is a request (`GET /api/search?path=TERM`) and it
 is token-gated, which is the one place this page's authorization line moved: the capped
-reads are unauthenticated and ship a few hundred rows, so a ledger-wide search serves
-per-file rows they never have. Making it a CONTROL-gated read adds no unauthenticated one.
+reads ship a few hundred rows and are open until `server_read_token` is set, so a
+ledger-wide search serves per-file rows they never have. Making it a CONTROL-gated read
+adds no read that is open by default.
 Its results are drawn in their own region under their own heading, never merged into
 either table, with the match count over the whole ledger beside them; a search that was
 refused says the search is unavailable and why, which is a different answer from "nothing

@@ -376,7 +376,8 @@ func TestProfileKnobSetIsClosedAndSingleSourced(t *testing.T) {
 		}
 	}
 	for _, daemon := range []string{
-		"workers", "state_dir", "server_addr", "server_auth_token", "undo_window_hours",
+		"workers", "state_dir", "server_addr", "server_auth_token", "server_read_token",
+		"undo_window_hours",
 		"history_retention_rows", "allow_non_local", "run_window", "max_load",
 		"scan_interval_sec", "notify_url", "tautulli_url", "tautulli_api_key",
 		"library_roots", "log_level", "dry_run", "video_exts", "metrics_enable",
@@ -517,7 +518,8 @@ func TestLoad_RefusesAnUnknownProfileKey(t *testing.T) {
 // mistake that is not there.
 func TestValidate_RefusesAProfileKnobThatIsDaemonLevel(t *testing.T) {
 	daemon := []string{
-		"workers", "state_dir", "server_addr", "server_auth_token", "undo_window_hours",
+		"workers", "state_dir", "server_addr", "server_auth_token", "server_read_token",
+		"undo_window_hours",
 		"history_retention_rows", "run_window", "max_load", "scan_interval_sec",
 		"notify_url", "tautulli_url", "tautulli_api_key",
 	}
