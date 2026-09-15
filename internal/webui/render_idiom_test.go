@@ -69,6 +69,42 @@ func TestRenderIdiom_NoGraderWaitsOnTheBrowserToDecideItIsDone(t *testing.T) {
 		t.Fatalf("the sweep looked at only %d files besides itself", swept)
 	}
 
+	// And the ARGV itself, which is the thing the rule is actually about. The sweep above
+	// reads source text, and source text cannot see a flag assembled from parts, read out
+	// of the environment, or appended by a helper it does not parse. probeArgs is the
+	// whole command line every rendered grader launches the browser with, so asking it
+	// directly settles the question the sweep can only approximate.
+	argv := probeArgs("/tmp/profile", "http://127.0.0.1:0/probe")
+	if len(argv) < len(hermeticFlags) {
+		t.Fatalf("probeArgs returned %d arguments, fewer than the hermetic flags it must carry (%d)", len(argv), len(hermeticFlags))
+	}
+	for _, arg := range argv {
+		for _, flag := range retiredDriverFlags {
+			if strings.HasPrefix(arg, flag) {
+				t.Errorf("the browser is launched with %q. The harness, not the browser, decides when a measurement is "+
+					"available: the verdict is POSTed back to the test and the test holds the deadline. Each of these flags "+
+					"has already cost this repository a CI run", arg)
+			}
+		}
+	}
+	// That argv check must BITE, or it is a loop over a list nobody can fail.
+	for _, bad := range [][]string{
+		{"--headless", "--dump-dom", "http://x/"},
+		{"--headless", "--virtual-time-budget=6000", "http://x/"},
+	} {
+		caught := false
+		for _, arg := range bad {
+			for _, flag := range retiredDriverFlags {
+				if strings.HasPrefix(arg, flag) {
+					caught = true
+				}
+			}
+		}
+		if !caught {
+			t.Errorf("the argv check passed %v, so it cannot fail", bad)
+		}
+	}
+
 	// The exemption, held: the file that names the flags must not be able to USE one.
 	own, err := os.ReadFile(guardFile)
 	if err != nil {

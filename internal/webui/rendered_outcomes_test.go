@@ -97,11 +97,18 @@ var fixturePaths = []string{"/lib/done.mkv", "/lib/failed.mkv", "/lib/parked.mkv
 // It decides nothing: every assertion is Go's, over the same bytes as before.
 const outcomesProbeJS = `
 var WANT = %PATHS%;
-function verdict(doc, win) {
+function renderedPaths(doc) {
   var rows = Array.prototype.slice.call(doc.querySelectorAll("tr"));
-  var rendered = WANT.filter(function (p) {
+  return WANT.filter(function (p) {
     return rows.some(function (r) { return r.textContent.indexOf(p) !== -1; });
   });
+}
+// The question the harness POLLS, kept apart from the one reading it then takes: the
+// snapshot arrives over SSE, after load, so a reading taken the moment the parent page
+// loads is a reading taken before the rows it is about exist.
+function probeReady(doc) { return renderedPaths(doc).length === WANT.length; }
+function verdict(doc, win) {
+  var rendered = renderedPaths(doc);
   return { ready: rendered.length === WANT.length, rendered: rendered,
            dom: doc.documentElement.outerHTML };
 }

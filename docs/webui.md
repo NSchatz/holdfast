@@ -57,6 +57,7 @@ a build, and no build step depends on it being regenerated:
 | `make webui-gen` | rewrite `internal/webui/index.html` from `internal/webui/src`. The only writer of that file |
 | `make webui-stale` | fail if the committed document is not what the sources generate. Part of `make check` |
 | `make webui-check` | the dashboard's three suites in REQUIRED mode (see below) |
+| `make webui-repeat-check` | run the rendered graders repeatedly against one unchanged tree and fail if two repetitions decided the same bytes differently. NOT part of `make check` or of `webui-check`; CI runs it |
 | `make webui-graders-selftest` | defeat each engine-only question on purpose and require the graders to red. NOT part of `make check`; CI runs it |
 | `make check-design-record` | hold `docs/design-record.md` to the token file and scan the identity sources for the C2 blocklist. Part of `make check`; needs no browser and no node |
 | `make check-design-record-selftest` | defeat that check once per failure mode and once per blocklist entry. NOT part of `make check`; CI runs it |
@@ -196,9 +197,80 @@ killed at the deadline before that was written down anywhere a check could read 
 `internal/webui/render_idiom_test.go` that reads it now.
 
 **Running them by hand.** From `internal/webui/e2e`: `npm ci` once, then `npx playwright
-test`. The fixture server is started for you. `--project=engine` is the convention set
-(it drives its own theme and viewport); `--project=dark-wide|light-wide|dark-narrow` are
-the specs that read the page as the project presents it.
+test`. The fixture server is started for you, on a port nothing was listening on when the
+run began - so two checkouts grading at once do not collide, and a killed run that left a
+listener behind cannot poison every later run on the host. A run never ADOPTS a server it
+did not start: that binary was built from a tree nobody can name, so the graders would
+report on a document this checkout did not produce. `HOLDFAST_E2E_PORT` pins an address
+for hand iteration, and `HOLDFAST_E2E_REUSE_SERVER=1` is the one case where adopting is
+what you meant. `--project=engine` is the convention set (it drives its own theme and
+viewport); `--project=dark-wide|light-wide|dark-narrow` are the specs that read the page
+as the project presents it.
+
+**A grader that disagrees with itself.** A rendered verdict must be a fact about the page,
+never about the machine, and this suite has been on the other side of that: run
+34236997921 went red on main and its rerun of the same commit went green, with nothing in
+either log saying which was right. Two mechanisms turned elapsed time into a verdict - row
+ages graded against fixed windows that tolerated sixty seconds of wall clock, and an
+in-page readiness budget of fifteen seconds sitting under a ninety-second deadline - and
+both are gone rather than widened. Two more made a verdict depend on the machine without
+depending on a clock: a mutation sweep an unrendered page could satisfy, which went green
+having looked at nothing, and a fixture server on a fixed port, which made a run's fate a
+question about what else was listening on the host. A fifth was carried in by that repair
+and found by running the determinism criterion's own command: the count that proves the
+single-reading check can fail was read after a fixed 250ms grace, so it held exactly when a
+browser timer and a local POST fitted inside that grace. It is recorded with the other four
+rather than quietly fixed, because a determinism fix putting a new clock into a determinism
+grader is the thing a later reader most needs to know can happen here. The diagnosis of
+record, with each mechanism, how it was reproduced and what replaced it, is at the head of
+`internal/webui/dashboard_rendered_test.go`. What holds it now: a grader that holds the
+reading back two full minutes and requires every DASH-9 property to return the verdict it
+returns with none, a grader that holds the SNAPSHOT back past any budget this harness
+carries, a mutated document that must still fail its graders after that same delay, a
+single-reading count the test server keeps rather than the page and WAITS FOR under the
+deadline the render already holds rather than reading after a pause, and
+`make webui-repeat-check` as the cheap repeated disconfirmation beside them.
+
+The row ages are the reading that replaced a wall clock, so what replaced it is worth
+stating exactly: a rendered age is graded on its DERIVATION, and the derivation is graded
+from the wire inwards. Each row's published basis must be the transition timestamp the
+SERVER sent for that row; the three rendered ages must then be explained by one page clock,
+each against its own basis; that clock must be the snapshot's, advanced by no more than the
+time the render itself measured; and the rows must fall in the order their timestamps put
+them. The first question is the load-bearing one. Grade only the arithmetic and a page that
+publishes a basis the wire never carried grades its own arithmetic - shift every
+`data-since` by half a minute and every figure on screen is half a minute short of what the
+ledger says, with every consistency check still green.
+
+**One budget, not two, and the harness owns it.** The in-page readiness poll is DERIVED
+from the deadline the Go side is holding (`derivedReadinessBudget` from `deadlineFor`), so
+the two cannot disagree and the only page that fails readiness is one no deadline here
+could have waited for. The same rule governs every other thing the harness waits for: a
+reading a render DECLARED is waited for on that same deadline rather than read after a
+pause. A fixed budget tighter than the deadline turns a merely slow page into a failed one,
+and a fixed pause turns a browser timer into a verdict; the ten arbitrary per-case budgets
+that had accumulated here are gone with the first of those.
+
+**What does NOT count as a repair.** Not a wider window, not a retry until the page looks
+acceptable, and not a deleted grader. A tolerance that swallows a mutation removes the only
+rendered check this surface has, and unlike a flake it never reports itself again - so the
+mutation self-tests (`make webui-graders-selftest`, and the in-suite sweeps that serve
+documents defeating all ten DASH-9 properties after the longest delay this work introduces)
+are what any repair has to survive.
+
+**What the suites cost, and why `make check` declares a timeout.** `go test`'s default is
+ten minutes per package binary, and `internal/webui` spends minutes on purpose: its latency
+graders hold a reading back two full minutes each to prove a verdict does not move with
+elapsed time, and the Playwright half executes here too on any machine where that project
+is installed - which is what this document tells you to do above. Under `-race` the package
+has been measured at over eighteen minutes, so `make check` declares `TEST_TIMEOUT` (30m)
+rather than inheriting the default and reporting a panic about how long the measurement
+took. It is a limit, not a target; nothing here is graded against elapsed time. `webui-check`
+declares 20m and `webui-repeat-check` 30m for the same reason.
+
+Repetition cannot prove determinism; it can only fail to disprove it. That is why the
+criteria that REMOVE the mechanism are graders in the suite and the repetition loop is a
+separate target: a grader that no longer depends on a clock beats a loop that samples one.
 
 ## What the graders will not let you change quietly
 
