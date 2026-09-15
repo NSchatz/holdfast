@@ -224,6 +224,32 @@ publishes a basis the wire never carried grades its own arithmetic - shift every
 `data-since` by half a minute and every figure on screen is half a minute short of what the
 ledger says, with every consistency check still green.
 
+**One budget, not two, and the harness owns it.** The in-page readiness poll is DERIVED
+from the deadline the Go side is holding (`derivedReadinessBudget` from `deadlineFor`), so
+the two cannot disagree and the only page that fails readiness is one no deadline here
+could have waited for. The same rule governs every other thing the harness waits for: a
+reading a render DECLARED is waited for on that same deadline rather than read after a
+pause. A fixed budget tighter than the deadline turns a merely slow page into a failed one,
+and a fixed pause turns a browser timer into a verdict; the ten arbitrary per-case budgets
+that had accumulated here are gone with the first of those.
+
+**What does NOT count as a repair.** Not a wider window, not a retry until the page looks
+acceptable, and not a deleted grader. A tolerance that swallows a mutation removes the only
+rendered check this surface has, and unlike a flake it never reports itself again - so the
+mutation self-tests (`make webui-graders-selftest`, and the in-suite sweeps that serve
+documents defeating all ten DASH-9 properties after the longest delay this work introduces)
+are what any repair has to survive.
+
+**What the suites cost, and why `make check` declares a timeout.** `go test`'s default is
+ten minutes per package binary, and `internal/webui` spends minutes on purpose: its latency
+graders hold a reading back two full minutes each to prove a verdict does not move with
+elapsed time, and the Playwright half executes here too on any machine where that project
+is installed - which is what this document tells you to do above. Under `-race` the package
+has been measured at over eighteen minutes, so `make check` declares `TEST_TIMEOUT` (30m)
+rather than inheriting the default and reporting a panic about how long the measurement
+took. It is a limit, not a target; nothing here is graded against elapsed time. `webui-check`
+declares 20m and `webui-repeat-check` 30m for the same reason.
+
 Repetition cannot prove determinism; it can only fail to disprove it. That is why the
 criteria that REMOVE the mechanism are graders in the suite and the repetition loop is a
 separate target: a grader that no longer depends on a clock beats a loop that samples one.

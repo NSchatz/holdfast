@@ -52,18 +52,25 @@ PLATFORM ?= linux/amd64
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o holdfast ./cmd/holdfast
 
-# The timeout is DECLARED, not defaulted (S0069). go test's default is 10 minutes per
-# package binary, and internal/webui now spends minutes on purpose: its latency graders
-# hold a reading back two full minutes each to prove a verdict does not move with elapsed
-# time, and the Playwright half executes here too on any machine where that project is
-# installed - which is what `docs/webui.md` tells a developer to do. Run those together
-# under -race and the package passes 10 minutes, whereupon this gate reports a panic about
-# how long the measurement took rather than anything about the code. That is the exact
-# defect S0069 exists to remove, one level up. 30m is the limit this gate declares, beside
-# the 20m webui-check declares and the 30m webui-repeat-check declares; it is a limit, not
-# a target, and nothing here is graded against elapsed time.
+# The per-package timeout is EXPLICIT, and it is a wall clock rather than a gate: it
+# removes no assertion, skips nothing, and cannot turn a failing test green. Go's default
+# is 10 minutes per test binary, and internal/engine is a suite of real libx265 encodes
+# behind the real verify gate: measured under `-race` on a 56-core container it takes 524s
+# ALONE at the commit before this line was written, and 568s with S0085's swap-metadata
+# fixtures added. That is 87% and 95% of the default budget respectively, before the
+# packages that run beside it (internal/probe, internal/webui, internal/store,
+# cmd/holdfast) have spent a core - and `go test ./...` runs them concurrently, so the
+# contention is what tips it. The package then dies with "panic: test timed out" one
+# second into a test that takes one second, with nothing having failed.
+#
+# A suite whose slowest package sits that close to an arbitrary clock reds for reasons
+# that are not about the code, and every fixture anyone adds to the engine after it
+# inherits the problem. The answer is the clock, not the coverage: deleting a proof to
+# fit a timeout is exactly the trade a data-safety tool must not make.
+TEST_TIMEOUT ?= 30m
+
 test:
-	go test -race -covermode=atomic -timeout 30m ./...
+	go test -race -covermode=atomic -timeout $(TEST_TIMEOUT) ./...
 
 fmt:
 	@out="$$(gofmt -l .)"; if [ -n "$$out" ]; then echo "gofmt needs:"; echo "$$out"; exit 1; fi
