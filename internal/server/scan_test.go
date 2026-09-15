@@ -753,11 +753,24 @@ func TestScanEndpoint_AddsNoRouteBeyondScan(t *testing.T) {
 	// The whole API surface, as it stands with this work in. A route added without being
 	// named here reds, which is the point: the decision this pins is about what the
 	// surface IS, not about which words a route happens to contain.
+	//
+	// The four S0094 routes are named here because that item's criteria admit exactly
+	// them, and each is on the right side of the line this test draws. `GET /api/search`
+	// is a READ of the ledger, token-gated only because it serves per-file rows the capped
+	// reads never have. The three `/api/exclusions` routes only ever WITHHOLD a path from
+	// the pipeline or stop withholding one: the direction is out, never in, so none of them
+	// is a network-reachable spelling of requeue, restore or resolve - S0094 criterion 13
+	// is the assertion that holds that shut, and criterion 12 is why the removal exists.
+	// The trailing slashes are chi's own rendering of a subrouter mounted at /exclusions.
 	want := map[string]bool{
 		"GET /api/summary": true, "GET /api/queue": true, "GET /api/history": true,
 		"GET /api/events":  true,
 		"POST /api/rescan": true, "POST /api/scan": true,
 		"POST /api/pause": true, "POST /api/resume": true,
+		"GET /api/search":         true,
+		"GET /api/exclusions/":    true,
+		"POST /api/exclusions/":   true,
+		"DELETE /api/exclusions/": true,
 	}
 	for _, r := range served {
 		if !strings.HasPrefix(r, "GET /api/") && !strings.HasPrefix(r, "POST /api/") {
