@@ -71,6 +71,18 @@ async function summonTheOperatorsOwnRegions(page) {
 // is a failure), AC-6 (no figure or no container found is a failure), AC-7 (a region with
 // no figure is named as unmeasured).
 test("hierarchy and density hold in every theme at every width, and every world measured something", async ({ browser, baseURL }, testInfo) => {
+  // A DECLARED budget, larger than the project's 30s default, because this case is
+  // deliberately larger than a case: it opens four browser contexts, takes eight whole
+  // readings and drives three real interactions in each world. AC-5 is why they are one
+  // case rather than four - "all four combinations were visited" is only assertable where
+  // all four ran - and the alternative to a bigger budget is four cases opening the same
+  // browsers again, which `## Risks` refuses by name.
+  //
+  // The number is measured, not guessed: ~15s on an idle machine, 30.9s under `make check`,
+  // where this runs inside `go test -race` beside every other package. 120s is the same
+  // budget the config gives its own webServer and leaves a wedge failing with its output
+  // rather than hanging, which is the rule the 30s default exists for.
+  test.setTimeout(120_000);
   const problems = [];
   const measured = [];
   const unmeasured = [];

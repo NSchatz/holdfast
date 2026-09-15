@@ -123,10 +123,22 @@ changed() {  # changed <case-name>
 # built from another tree would serve the unmutated page while the case reported on the
 # mutated one, which is a green over a defeated grader. CI=1 is set for its other effect:
 # a `.only` left in a spec is refused rather than quietly narrowing what ran.
-port=8940
+#
+# The port is one the OPERATING SYSTEM says nothing is listening on, asked for per case, and
+# not a number counted up from a constant. A fixed base makes every run's verdict a fact
+# about the machine: anything holding 8941 - a killed run's orphaned fixture server, a second
+# worktree grading in parallel - fails this script at start-up with "port already in use",
+# and the report it prints is "the shipped page passes a grader it should have defeated",
+# which is a lie about the page. That is the same defect S0069 took out of
+# playwright.config.mjs, answered here the same way and for the same reason; the rule it was
+# protecting is untouched, because a port nothing is on cannot be adopted.
+freeport() {
+  "$node" -e 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>{process.stdout.write(String(s.address().port));s.close();});'
+}
+port=""
 out=""; status=0
 run_graders() {  # run_graders <case-title-regex>
-  port=$((port + 1))
+  port="$(freeport)"
   set +e
   out="$(cd "$e2e" && CI=1 NO_COLOR=1 PATH="$goroot/bin:$PATH" \
     HOLDFAST_BROWSER="$browser" HOLDFAST_E2E_PORT="$port" \
