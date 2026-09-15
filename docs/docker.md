@@ -144,29 +144,61 @@ ports:
 That is the shipped default. It is loopback-only for THAT deployment, and it is the one to
 keep until putting holdfast behind a reverse proxy is a decision you have actually made.
 Publishing the port more widely, or letting a proxy reach the container over a shared
-container network, IS that decision: it removes the only protection the read surface has.
+container network, IS that decision: on the shipped defaults it removes the only protection
+the read surface has. `server_read_token`, below, is how you give it one of its own.
 
 <a id="reverse-proxy-posture"></a>
 
 **Reverse-proxy posture.** Read this before you give holdfast a hostname.
 
-The dashboard and the read API (`/api/summary`, `/api/queue`, `/api/history`,
-`/api/events`) are **unauthenticated**. Nothing in this daemon checks a credential for
-them; on the shipped defaults they are protected by the loopback bind and by nothing else.
-Put a proxy in front and that bind protects nothing, so the proxy's own authentication
-becomes **the only barrier** in front of every media path in your library. Configure
-forward auth (Authelia, oauth2-proxy, whatever your proxy calls it) on the route before
-the hostname resolves, not after.
+With `server_read_token` unset - the shipped default - the read API (`/api/summary`,
+`/api/queue`, `/api/history`, `/api/events`) is **unauthenticated**. Nothing in this daemon
+checks a credential for it; it is protected by the loopback bind and by nothing else. Put a
+proxy in front and that bind protects nothing, so the proxy's own authentication becomes
+**the only barrier** in front of every media path in your library. Configure forward auth
+(Authelia, oauth2-proxy, whatever your proxy calls it) on the route before the hostname
+resolves, not after.
+
+Point `server_read_token` at a secret and those four endpoints require an
+`Authorization: Bearer` credential of their own, so the proxy in front of them becomes
+**defence in depth** rather than the only barrier: a proxy misconfiguration stops being
+total exposure of every path in your library. It is a second, independent key - it buys
+reads and never a mutation, and the control token is accepted on the reads too, because one
+`Authorization` header cannot carry two values. It is reached by reference like every other
+credential here:
+
+```yaml
+services:
+  holdfast:
+    environment:
+      - HOLDFAST_SERVER_READ_TOKEN=file:/run/secrets/holdfast_read_token
+```
+
+**It does not gate the dashboard.** Even with a read token set, the page is still served
+with no credential, and so are its assets, so the proxy IS still the only barrier in front
+of the page - keep forward auth on that route. A browser sends no `Bearer` header on a
+navigation, so gating the page on this key would serve a login-less 401 to every operator
+who opened it; the page needs a cookie set from a login form, which does not exist yet.
+Until it does, with a read token set **the page loads but its data does not**: the document
+renders and its own requests to `/api/summary` and `/api/events` carry no credential and
+are refused. holdfast says so at startup rather than leaving you to find it. A half-gated
+surface that reads as gated is worse than an open one that says it is open.
+
+`/metrics` is gated by neither key. Its reachability is governed by `metrics_enable` alone,
+because the exposition carries counters, a byte total and two histograms labelled only by
+outcome and by state - it names no file - and a scrape credential is the one thing a
+Prometheus deployment most often cannot supply.
 
 The token-gated group stays **disabled** until a control token is configured. With no
 `server_auth_token` reference set (or `HOLDFAST_SERVER_AUTH_TOKEN` in the environment),
 `rescan`, `scan`, `pause`, `resume`, the ledger search (`/api/search`) and the withheld
 paths (`/api/exclusions`) answer **403** to every caller - a safe default, not a broken
-one, and the dashboard and the read API still work. The ledger search is in that group and
-not among the unauthenticated reads for a reason worth stating: the capped reads ship at
-most a few hundred rows, so a search over the whole ledger serves per-file rows they have
-never served, and gating it keeps this a control-gated read rather than a new
-unauthenticated one. A proxy identity header (`Remote-User`,
+one, and the dashboard and the read API still work, neither of them being gated by this
+key. The ledger search is in that group and not among the reads `server_read_token` gates,
+for a reason worth stating: the capped reads ship at most a few hundred rows, so a search
+over the whole ledger serves per-file rows they have never served, and gating it on the
+control token keeps this a control-gated read rather than one more read that is open
+whenever `server_read_token` is unset. A proxy identity header (`Remote-User`,
 `Remote-Groups`, `Remote-Email`, `Remote-Name`, any `X-Forwarded-*`) is **never**
 authorization for them: only a matching `Authorization: Bearer` token is, so a proxy that
 can be talked into forging one of those headers gains nothing by it. Enabling the controls
@@ -198,8 +230,8 @@ secrets:
 A literal token in `config.yaml` **or** in `HOLDFAST_SERVER_AUTH_TOKEN` refuses to start.
 That is deliberate: holdfast starts `ffmpeg` as a child process, a child inherits its
 parent's environment, and a credential in the environment is readable from every encoder
-invocation's `/proc/<pid>/environ`. The same applies to `notify_url` and
-`tautulli_api_key`. `docs/secrets.md` has the reference forms and the migration.
+invocation's `/proc/<pid>/environ`. The same applies to `server_read_token`, `notify_url`
+and `tautulli_api_key`. `docs/secrets.md` has the reference forms and the migration.
 
 ## Telling holdfast about one file: Sonarr / Radarr
 

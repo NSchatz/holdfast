@@ -31,8 +31,8 @@
 //     "attributes the window to the client's attribute caching", mechanically: the
 //     network window belongs to the client's cache and a network statement that never
 //     says so is not the statement that was owed.
-//   - The reverse-proxy statement must carry one token for EACH of the three clauses it
-//     owes (see ReverseProxyClauses), and they must be carried by ONE statement: a
+//   - The reverse-proxy statement must carry one token for EACH of the clauses it owes
+//     (see ReverseProxyClauses), and they must be carried by ONE statement: a
 //     document saying one clause here and another clause somewhere else has not said
 //     what a deploying operator has to read in one place.
 //   - The swap-metadata statement owes four clauses under the same one-statement rule
@@ -50,6 +50,10 @@
 //     tree, and a document under docs/design/ must be linked from CLAUDE.md. Those two
 //     read the TREE as well as the text, so they take a root and live under CheckRepo
 //     rather than Check.
+//   - No statement ANYWHERE in the corpus may call the read surface unauthenticated
+//     without naming `server_read_token` in the same statement (see
+//     StaleUnauthenticatedClaims). This one is not anchored, because the failure it
+//     prevents is two shipped documents disagreeing with each other.
 //
 // # Existence, and agreement
 //
@@ -110,15 +114,23 @@
 //
 // # Why the reverse-proxy anchor exists
 //
-// The read endpoints and the dashboard carry no authentication of their own. On the
-// shipped defaults they are protected by the loopback bind, so the day a reverse proxy
-// can reach the container that bind protects nothing and the proxy is the only barrier
-// left. Three facts decide whether that deployment is safe or quietly open, and none of
-// them is discoverable from the API's own responses: the read surface is
-// unauthenticated, the mutating endpoints are off until a control token is configured,
-// and the page's own requests are root-relative so it must be served at the host root.
-// An operator can only weigh those if they are written down, which is the same argument
-// the residual-window statements are here for.
+// On the shipped defaults the read endpoints and the dashboard carry no authentication of
+// their own, protected by the loopback bind, so the day a reverse proxy can reach the
+// container that bind protects nothing and the proxy is the only barrier left. Six facts
+// decide whether that deployment is safe or quietly open, and not one of them is
+// discoverable from the API's own responses: that the read surface is unauthenticated
+// until a read token is set; that setting one makes the proxy defence in depth in front
+// of the read API rather than the only barrier; that it does NOT gate the dashboard page,
+// which is still served with no credential; that the page consequently loads while its
+// data does not; that the mutating endpoints are off until a control token is configured;
+// and that the page's own requests are root-relative so it must be served at the host
+// root. An operator can only weigh those if they are written down, which is the same
+// argument the residual-window statements are here for.
+//
+// The middle three are the ones that make a HALF-GATED surface honest. A deployment where
+// the API refuses and the page does not is the shape an operator is most likely to
+// misread as gated, and misreading it is how the proxy's own authentication comes off the
+// route in front of the page.
 //
 // # The corpus
 //
@@ -226,8 +238,25 @@ type ReverseProxyClause = Clause
 var ReverseProxyClauses = []Clause{
 	{
 		Token: "the only barrier",
-		Clause: "that the dashboard and the read API are unauthenticated, " +
-			"so a reverse proxy in front of them is the only barrier",
+		Clause: "that with no read token configured the read API is unauthenticated, " +
+			"so a reverse proxy in front of it is the only barrier",
+	},
+	{
+		Token: "defence in depth",
+		Clause: "that server_read_token gates the read API, so a proxy in front of it " +
+			"becomes defence in depth rather than the only barrier",
+	},
+	{
+		Token: "the page is still served with no credential",
+		Clause: "that server_read_token does NOT gate the dashboard page - the page is " +
+			"still served with no credential, so the proxy IS still the only barrier " +
+			"in front of it",
+	},
+	{
+		Token: "the page loads but its data does not",
+		Clause: "that with a read token set the page loads but its data does not, " +
+			"because the page's own requests carry no credential, until a browser " +
+			"login exists",
 	},
 	{
 		Token: "server_auth_token",
@@ -240,6 +269,20 @@ var ReverseProxyClauses = []Clause{
 			"its own API and assets with root-relative paths",
 	},
 }
+
+// UnauthenticatedReadClaimTokens are the phrases by which a document CLAIMS that the read
+// surface carries no authentication of its own. Any statement carrying one of them must
+// name `server_read_token` too, which is the whole of StaleUnauthenticatedClaims below.
+//
+// The set is short on purpose. A wide list would catch prose about something else and
+// force `server_read_token` into a paragraph it has no business in; these two are how the
+// claim is actually written, and both were in this repository's own documentation on the
+// day the key was added.
+var UnauthenticatedReadClaimTokens = []string{"unauthenticated", "no authentication"}
+
+// ReadTokenKey is the configuration key a claim about an unauthenticated read surface has
+// to name. It is spelled once here so the rule and its failure message cannot disagree.
+const ReadTokenKey = "server_read_token"
 
 // SwapMetadataClauses is the whole of what the swap-metadata statement owes. Each token is
 // the shortest string that carries its clause and could not plausibly be written by
@@ -775,6 +818,12 @@ func Check(files []string) ([]string, error) {
 		problems = append(problems, checkClausesEveryOccurrence(sts, r.Anchor, r.What, r.Clauses)...)
 	}
 
+	stale, err := StaleUnauthenticatedClaims(files)
+	if err != nil {
+		return nil, err
+	}
+	problems = append(problems, stale...)
+
 	return problems, nil
 }
 
@@ -822,6 +871,106 @@ func CheckRepo(root string, files []string) ([]string, error) {
 		return nil, err
 	}
 	return append(append(problems, dead...), orphans...), nil
+}
+
+// StaleUnauthenticatedClaims walks the WHOLE corpus - not one anchored statement - and
+// reports every paragraph that calls the read surface unauthenticated without naming
+// `server_read_token` in the same paragraph.
+//
+// It is corpus-wide because the failure it prevents is: one document says the read API is
+// gated and another, written earlier and never revisited, still says it carries no
+// authentication of its own. Both are shipped, an operator reads whichever they open
+// first, and the two disagree about who may read the full path of every file in a
+// library. A rule confined to the reverse-proxy anchor would have held the one paragraph
+// somebody remembered and none of the others.
+//
+// The unit is the PARAGRAPH, which is what "the same statement" means in Markdown: a run
+// of non-blank lines, normalized the way every other token check here normalizes, so
+// where a line wrap happens to fall never decides whether the documentation passes. A
+// paragraph is allowed to make the claim - it is TRUE on the shipped default, and saying
+// so plainly is the point - as long as it says in the same breath which key changes it.
+func StaleUnauthenticatedClaims(files []string) ([]string, error) {
+	var problems []string
+	for _, f := range files {
+		paragraphs, err := paragraphsOf(f)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range paragraphs {
+			text := normalize(p)
+			if strings.Contains(text, strings.ToLower(ReadTokenKey)) {
+				continue
+			}
+			for _, token := range UnauthenticatedReadClaimTokens {
+				if !strings.Contains(text, token) {
+					continue
+				}
+				problems = append(problems, fmt.Sprintf(
+					"%s: a statement says %q without naming %s in the same statement, so this document "+
+						"contradicts the ones that describe the read API as gateable. Say which key changes "+
+						"it: %q. Offending statement: %s",
+					f, token, ReadTokenKey, ReadTokenKey, truncate(text)))
+				break // one problem per paragraph, naming the first claim it made
+			}
+		}
+	}
+	return problems, nil
+}
+
+// paragraphsOf splits a Markdown file into paragraphs: runs of non-blank lines, with
+// fenced code blocks dropped. A fence is dropped because the text inside one is a command
+// or a configuration sample rather than a statement about behaviour, and a sample that
+// happens to contain the word is not a claim anybody reads as one.
+func paragraphsOf(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	var out []string
+	var b strings.Builder
+	inFence := false
+	flush := func() {
+		if strings.TrimSpace(b.String()) != "" {
+			out = append(out, b.String())
+		}
+		b.Reset()
+	}
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			flush()
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+		if strings.TrimSpace(line) == "" {
+			flush()
+			continue
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	flush()
+	return out, nil
+}
+
+// truncate keeps a failure message readable while still quoting enough of the offending
+// statement that an author can find it without grepping.
+func truncate(s string) string {
+	const max = 160
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
 
 // checkClauses applies the multi-clause rule to one anchor: the statement must exist, must

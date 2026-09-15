@@ -21,7 +21,18 @@ import (
 // token the check looks for, so a token that changes without its fixture changing does
 // not silently keep passing.
 var clauseSentence = map[string]string{
-	"the only barrier": "The dashboard and the read API are unauthenticated, so a proxy in front of them is the only barrier.",
+	// This one carries an unauthenticated claim, so it names server_read_token in the
+	// same sentence - the corpus-wide rule applies to fixtures exactly as it applies to
+	// the shipped text, and a fixture exempt from a rule is a fixture that stops
+	// resembling the thing under test.
+	"the only barrier": "With server_read_token unset the read API is unauthenticated, so a proxy in " +
+		"front of it is the only barrier.",
+	"defence in depth": "Set server_read_token and the reads require a bearer credential, so the proxy " +
+		"becomes defence in depth in front of them.",
+	"the page is still served with no credential": "That key does not gate the dashboard: the page is still " +
+		"served with no credential, so the proxy remains the barrier in front of it.",
+	"the page loads but its data does not": "With a read token set the page loads but its data does not, " +
+		"because its own requests carry no credential, until a browser login exists.",
 	"server_auth_token": "The mutating endpoints stay disabled until a control token is configured: with no " +
 		"server_auth_token set they answer 403 to every caller.",
 	ReverseProxyRootPathToken: "Serve it at the host root: the page asks for its own API and assets with " +
@@ -402,6 +413,35 @@ func TestShippedDocumentation_TheCheckBitesOnTheREALTEXT(t *testing.T) {
 				return strings.ReplaceAll(s, ReverseProxyRootPathToken, "REDACTED")
 			},
 			problem: ReverseProxyRootPathToken,
+		},
+		{
+			name:   "the shipped posture statement stops saying a read token makes the proxy defence in depth",
+			anchor: AnchorReverseProxy,
+			mutate: func(s string) string {
+				return strings.ReplaceAll(s, "defence in depth", "REDACTED")
+			},
+			problem: "defence in depth",
+		},
+		{
+			name:   "the shipped posture statement stops saying the page is still served with no credential",
+			anchor: AnchorReverseProxy,
+			mutate: func(s string) string {
+				// The line wrap falls inside this token in the shipped text, and the
+				// check normalizes whitespace before looking, so the mutation has to
+				// reach the wrapped spelling too or it would change nothing.
+				out := strings.ReplaceAll(s, "the page is still served\nwith no credential", "REDACTED")
+				return strings.ReplaceAll(out, "the page is still served with no credential", "REDACTED")
+			},
+			problem: "the page is still served with no credential",
+		},
+		{
+			name:   "the shipped posture statement stops saying the page loads while its data does not",
+			anchor: AnchorReverseProxy,
+			mutate: func(s string) string {
+				out := strings.ReplaceAll(s, "the page loads but its data does\nnot", "REDACTED")
+				return strings.ReplaceAll(out, "the page loads but its data does not", "REDACTED")
+			},
+			problem: "the page loads but its data does not",
 		},
 		{
 			name:   "the shipped posture statement stops naming the control token",

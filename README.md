@@ -232,19 +232,23 @@ truth and the SQLite store stays the source of job state. The API can only **rea
 scan, and pause/resume the feeding of new files** - it never touches a media file, so the data-safety
 invariant is entirely unaffected.
 
-Every endpoint, what it answers and which of them need the token:
+Every endpoint, what it answers and which of them need a token:
 **[`docs/api-reference.md`](docs/api-reference.md)**.
 
-Fail-safes: the server **binds `127.0.0.1` by default**, and that bind is the whole of what
-protects the read endpoints and the dashboard - they carry no authentication of their own, so
-a reverse proxy in front of them is the only barrier there is (the reverse-proxy posture is in
-[docs/docker.md](docs/docker.md), and it is worth reading before you give holdfast a hostname);
+Fail-safes: the server **binds `127.0.0.1` by default**. With `server_read_token` unset -
+the shipped default - that bind is the whole of what protects the read endpoints, so a
+reverse proxy in front of them is the only barrier there is; set it and the four `/api`
+reads require a bearer token of their own, which makes the proxy defence in depth instead.
+It does **not** gate the dashboard page, which is still served without a credential either
+way (the reverse-proxy posture is in [docs/docker.md](docs/docker.md), and it is worth
+reading before you give holdfast a hostname);
 the mutating endpoints require a bearer token, reached **by reference**
 (`server_auth_token: file:/run/secrets/holdfast-token` - a literal token there, or in
 `HOLDFAST_SERVER_AUTH_TOKEN`, refuses to start; see [docs/secrets.md](docs/secrets.md)) and
 are **disabled entirely when no token is configured**; pause only ever
-*delays* work - it never interrupts an encode or the atomic swap. **Known limitation:** single-token auth
-(no per-user accounts); the queue/history views are capped at the most recent rows, not the whole ledger -
+*delays* work - it never interrupts an encode or the atomic swap. **Known limitation:** two
+single-value tokens and no per-user accounts, and no browser login, so a set read token
+leaves the dashboard page loading with no data in it; the queue/history views are capped at the most recent rows, not the whole ledger -
 but they now say what they were capped *against*, and `holdfast export` gives you the whole thing.
 
 ### The record, and what to read for it

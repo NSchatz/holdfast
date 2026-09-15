@@ -40,7 +40,7 @@ func newRootServer(t *testing.T, token string, ui http.Handler, st store.Store) 
 	ctrl := NewController(ctx, func(context.Context) error { return nil }, discard())
 	hub := NewHub(st, ctrl, discard())
 	ctrl.SetOnChange(hub.Trigger)
-	return New(ctx, config.Config{}, secret.NewValue(token), st, ctrl, hub, ui, nil, discard())
+	return New(ctx, config.Config{}, secret.NewValue(token), secret.Value{}, st, ctrl, hub, ui, nil, discard())
 }
 
 // getRoot fetches / with NO credentials of any kind.

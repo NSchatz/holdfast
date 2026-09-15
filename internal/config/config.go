@@ -52,8 +52,9 @@ var knownKeys = map[string]bool{
 	"vmaf_enable": true, "min_vmaf": true, "vmaf_min_pool": true,
 	"vmaf_min_chroma": true,
 	"vmaf_subsample":  true, "vmaf_model": true, "workers": true,
-	"server_addr": true, "server_auth_token": true, "scan_interval_sec": true,
-	"metrics_enable": true, "notify_url": true, "run_window": true,
+	"server_addr": true, "server_auth_token": true, "server_read_token": true,
+	"scan_interval_sec": true,
+	"metrics_enable":    true, "notify_url": true, "run_window": true,
 	"max_load": true, "tautulli_url": true, "tautulli_api_key": true,
 	"bitrate_kbps": true, "encode_profiles": true,
 	"scratch_dir": true, "scratch_min_free_gb": true,
@@ -103,6 +104,7 @@ func defaultLayer() map[string]any {
 		"workers":                1,
 		"server_addr":            defaultServerAddr,
 		"server_auth_token":      "",
+		"server_read_token":      "",
 		"scan_interval_sec":      0,
 		"metrics_enable":         true,
 		"notify_url":             "",
@@ -410,6 +412,32 @@ type Config struct {
 	// A literal token here, or in HOLDFAST_SERVER_AUTH_TOKEN, is a startup REFUSAL. See
 	// SecretRefs and internal/secret for the accepted forms and why there is no env: one.
 	ServerAuthToken string `yaml:"server_auth_token"`
+	// ServerReadToken is a SECRET REFERENCE (secrets K1), not a token: it names where the
+	// bearer token required on the READ endpoints under /api lives, and the value is
+	// resolved at the point of use and never stored here. Empty (default) leaves the read
+	// API OPEN, which is every existing install's behaviour and is why the default cannot
+	// change: a key that gated on upgrade would lock out every client that never sent a
+	// credential.
+	//
+	// It is a SECOND, INDEPENDENT key rather than a widening of ServerAuthToken because
+	// reading every media path in a library and starting a scan are different
+	// permissions, and an operator who wants a read-only dashboard behind their proxy
+	// must not have to hand out the control token to get one. The control token is
+	// accepted on the read endpoints too: one Authorization header cannot carry two
+	// values, so the more privileged holder would otherwise be locked out of the less
+	// privileged surface. The reverse never holds - a read token buys no mutation.
+	//
+	// It does NOT gate the dashboard PAGE or its embedded assets. A browser sends no
+	// Bearer header on a navigation, so gating the page here would serve a login-less
+	// 401 to every operator who opened it; the cookie-from-a-login-form that makes the
+	// page work is its own piece of work. With this key set the page is still served and
+	// its own /api requests are refused, which Notices() states at startup rather than
+	// leaving an operator to discover.
+	//
+	// A literal token here, or in HOLDFAST_SERVER_READ_TOKEN, is a startup REFUSAL, for
+	// the same reason the control token's is: a credential in holdfast's environment is
+	// inherited by every ffmpeg child it starts. See SecretRefs and internal/secret.
+	ServerReadToken string `yaml:"server_read_token"`
 	// ScanIntervalSec, when > 0, makes `serve` re-scan the library every N seconds
 	// (in addition to an initial scan on startup and manual rescans via the API).
 	// 0 (default) = no periodic scan: `serve` scans once on startup and thereafter
@@ -447,9 +475,16 @@ type Config struct {
 // SecretBearingKeys is the closed list of configuration keys whose value is a credential,
 // in the order SecretRefs reports them. Every one of them carries a REFERENCE (secrets
 // K1); `tautulli_url` and `server_addr` are addresses, not credentials, and are not here.
-var SecretBearingKeys = []string{"server_auth_token", "notify_url", "tautulli_api_key"}
+//
+// `server_read_token` is on this list for the same reason the control token is, and not
+// as a formality: it is a bearer credential, so a literal one written into the file or
+// into HOLDFAST_SERVER_READ_TOKEN would be readable from every ffmpeg child's
+// /proc/<pid>/environ. Membership here is what makes that a startup refusal, and it is
+// what the AC-7 suite in cmd/holdfast enumerates, so a key added here is graded by the
+// literal-refusal cases without being named in them.
+var SecretBearingKeys = []string{"server_auth_token", "server_read_token", "notify_url", "tautulli_api_key"}
 
-// SecretRefs parses all three secret-bearing keys into references, and is the ONE place
+// SecretRefs parses every secret-bearing key into a reference, and is the ONE place
 // that reading happens: Validate calls it so every subcommand refuses a literal at start,
 // and the start-time resolution in cmd/holdfast calls it so neither can be looking at a
 // different set of keys than the other.
@@ -457,7 +492,7 @@ var SecretBearingKeys = []string{"server_auth_token", "notify_url", "tautulli_ap
 // It returns the first refusal, which for a pasted credential is a *secret.ErrLiteral
 // naming the key and how to convert it, with no part of the value in the message.
 func (c *Config) SecretRefs() ([]secret.Ref, error) {
-	raw := []string{c.ServerAuthToken, c.NotifyURL, c.TautulliAPIKey}
+	raw := []string{c.ServerAuthToken, c.ServerReadToken, c.NotifyURL, c.TautulliAPIKey}
 	refs := make([]secret.Ref, 0, len(SecretBearingKeys))
 	for i, key := range SecretBearingKeys {
 		r, err := secret.ParseRef(key, raw[i])
@@ -492,6 +527,39 @@ func (c *Config) EffectiveServerAddr() string {
 		return defaultServerAddr
 	}
 	return c.ServerAddr
+}
+
+// isLoopbackBind reports whether a resolved host:port binds ONLY the loopback interface,
+// which is the whole of what protects an ungated read API on the shipped defaults.
+//
+// It answers about the HOST half, because that is what decides reachability: "127.0.0.1",
+// any other 127.0.0.0/8 literal, "::1" and the name "localhost" are loopback, and an
+// EMPTY host is not - `:8080` binds every interface, which is the one spelling that reads
+// like a local default and is not one.
+//
+// Everything it cannot resolve to a loopback address is reported as NOT loopback,
+// including a malformed address and a hostname other than localhost. That direction is
+// deliberate: the answer feeds a notice about an exposed library, and being told about an
+// exposure that turned out to be local costs a line of startup output, while the silence
+// on the other side costs every media path in the library. A hostname is not resolved
+// here either - `validate` must not depend on a resolver, and a name that resolves to a
+// loopback address today is a DNS change away from not doing so.
+func isLoopbackBind(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // EffectiveWorkers returns the number of workers to run, defaulting 0 (absent) or
@@ -1072,6 +1140,21 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("scan_interval_sec %d must be >= 0 (0 = scan once on startup + on demand)", c.ScanIntervalSec)
 	}
 
+	// A server_read_token that is non-empty but all whitespace is refused BY NAME, ahead
+	// of the reference check below, because that check would not see it: ParseRef trims
+	// before it decides, so "   " reads as an absent key and leaves the read API OPEN
+	// while the operator's file plainly says they gated it. That is the fail-safe rule
+	// exactly - ambiguous input refuses rather than resolving to the less safe of two
+	// meanings - and it is the one shape of this key an operator cannot detect from the
+	// outside, because an open read API answers a credential-less request the same way a
+	// correctly configured one answers a credentialled one.
+	if c.ServerReadToken != "" && strings.TrimSpace(c.ServerReadToken) == "" {
+		return errors.New("server_read_token is set but holds only whitespace: refusing. " +
+			"A reference is trimmed before it is read, so this value would leave the read API " +
+			"OPEN while the configuration says it is gated. Write a reference " +
+			"(server_read_token: file:/run/secrets/holdfast-read-token) or remove the key")
+	}
+
 	// Every secret-bearing key must carry a REFERENCE, never a credential (secrets K1).
 	// Checked HERE so that every subcommand which loads a config refuses a pasted token
 	// at start, before it can be read out of the file by anything else - and checked by
@@ -1204,6 +1287,35 @@ func (c *Config) Notices() []string {
 			"global_quality or qp value is passed to the encoder at all. Every no-loss gate is unchanged, and an "+
 			"encode that misses one is still rejected with the source untouched. Set bitrate_kbps to 0 (the default) "+
 			"to go back to the quality target.")
+	}
+	// The read surface, stated on whichever side of it this configuration lands. Both of
+	// these are notices and neither is a warning: the shipped default is an open read API
+	// on a loopback bind, and a default can never be a weakened gate.
+	//
+	// The bind is read through EffectiveServerAddr, never through ServerAddr, because the
+	// two disagree on exactly the value an operator is most likely to have: an ABSENT
+	// server_addr binds the loopback default, while an explicit `:8080` binds every
+	// interface. Judging the raw field would announce a library-wide exposure to somebody
+	// who configured nothing, and stay silent for the one who wrote the bare port.
+	switch {
+	case strings.TrimSpace(c.ServerReadToken) != "":
+		n = append(n, "server_read_token is set - the read endpoints under /api require a bearer "+
+			"token, BUT THE DASHBOARD PAGE AT / IS STILL SERVED WITHOUT A CREDENTIAL, and so are its "+
+			"embedded assets: this key gates /api reads and nothing else. A browser sends no "+
+			"Authorization header on a navigation, so THE PAGE LOADS AND ITS DATA DOES NOT - its own "+
+			"requests to /api/summary, /api/queue, /api/history and /api/events carry no credential "+
+			"and are refused - until a browser login exists. Keep your reverse proxy's own "+
+			"authentication in front of the page; in front of the read API it is now defence in "+
+			"depth rather than the only barrier.")
+	case !isLoopbackBind(c.EffectiveServerAddr()):
+		n = append(n, "server_addr is "+c.EffectiveServerAddr()+", which is NOT a loopback address, and "+
+			"server_read_token is empty: EVERY MEDIA PATH IN YOUR LIBRARY IS SERVED WITHOUT A "+
+			"CREDENTIAL on that address. /api/queue and /api/history return the full path of every "+
+			"file holdfast has seen, the /api/events stream pushes both on every change, and nothing "+
+			"in this daemon checks a credential for any of them - the loopback bind was the whole of "+
+			"what protected them, and this address is not it. Point server_read_token at a secret "+
+			"(file:/run/secrets/... or cmd:...) to require a bearer token on those reads. It does not "+
+			"gate the dashboard page, which stays behind your reverse proxy's own authentication.")
 	}
 	if strings.TrimSpace(c.ScratchDir) != "" {
 		n = append(n, "scratch_dir is set - the encoder writes its working file to "+strings.TrimSpace(c.ScratchDir)+

@@ -865,8 +865,8 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	// apply to it unchanged; this is a queue and a worker pool, and it decides nothing.
 	subs := eng.NewSubmissions(0, 0)
 
-	srv := server.New(ctx, *cfg, secrets.Get("server_auth_token"), st, ctrl, hub,
-		webui.HandlerFor(offer), metricsHandler, log)
+	srv := server.New(ctx, *cfg, secrets.Get("server_auth_token"), secrets.Get("server_read_token"),
+		st, ctrl, hub, webui.HandlerFor(offer), metricsHandler, log)
 	srv.SetSubmissions(subs)
 	var bg sync.WaitGroup
 	bg.Add(4)
@@ -882,6 +882,7 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		log.Info("serve listening",
 			"addr", addr,
 			"control_enabled", !secrets.Get("server_auth_token").Empty(),
+			"read_gated", !secrets.Get("server_read_token").Empty(),
 			"scan_interval_sec", cfg.ScanIntervalSec,
 			"metrics", cfg.MetricsEnable,
 			"notify", notifier.Enabled(),
