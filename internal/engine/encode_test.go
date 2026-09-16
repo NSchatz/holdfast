@@ -884,3 +884,225 @@ func TestSvtav1Preset_MapsPresetWords(t *testing.T) {
 		}
 	}
 }
+
+// --- stream selection: what the encode carries (S0088) ------------------------
+//
+// Every criterion here is graded on the ARGV the production encoder assembled and on the
+// STREAMS the resulting file actually carries - never on a re-derivation of either. A map
+// that agreed with the argv only in a test's own arithmetic would be the second derivation
+// this whole design exists to prevent.
+
+// TestStreamSelection_DefaultConfigurationBuildsTodaysEncodeCommand is [AC-1]: with none of
+// the four keys configured, the encode carries exactly the streams it carried before they
+// existed and builds the command this repository has always built.
+//
+// The map argv is asserted LITERALLY, because "the same encode command" is the criterion:
+// `-map 0 -map -0:d?` is the form, and a build that spelled the same selection out stream by
+// stream would carry the same streams while having changed the command for every install
+// there is.
+func TestStreamSelection_DefaultConfigurationBuildsTodaysEncodeCommand(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	_, roots := twoRoots(t, "tv")
+	src := filepath.Join(roots[0], "ep.mkv")
+	mkSourceWithStreams(t, ffmpeg, src, audioStream("eng"), audioStream("jpn"), subtitleStream("fre"))
+
+	run := runSelection(t, ffmpeg, ffprobe, selectionCfg(t, roots[0], ""), nil)
+
+	args := run.argv.forSource(t, src)
+	if !argvHas(args, "-map", "0", "-map", "-0:d?") {
+		t.Fatalf("the default encode no longer maps every stream but data: %v", args)
+	}
+	for _, s := range args {
+		if strings.HasPrefix(s, "0:") {
+			t.Fatalf("the default encode spelled its map out stream by stream (%q), so every "+
+				"existing install's command has changed: %v", s, args)
+		}
+	}
+	run.doneRow(t, src)
+	if n := countByType(streamsOf(t, run.eng, src)); n["audio"] != 2 || n["subtitle"] != 1 || n["video"] != 1 {
+		t.Fatalf("the replacement carries %v, want the source's 1 video, 2 audio and 1 subtitle", n)
+	}
+}
+
+// TestStreamSelection_CarriesOnlyTheConfiguredLanguages is [AC-2]: a root with a language
+// list carries forward only the streams of that type whose language matches one of its
+// codes, compared case-insensitively, and a type with no list keeps every stream.
+func TestStreamSelection_CarriesOnlyTheConfiguredLanguages(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	_, roots := twoRoots(t, "tv")
+	src := filepath.Join(roots[0], "ep.mkv")
+	mkSourceWithStreams(t, ffmpeg, src,
+		audioStream("eng"), audioStream("jpn"), audioStream("fre"),
+		subtitleStream("eng"), subtitleStream("jpn"))
+
+	// ENG in upper case, deliberately: the comparison is case-insensitive, and a build that
+	// compared raw text would carry no audio at all and then hit the never-a-silent-file
+	// fallback, which from the outside looks like a pass.
+	run := runSelection(t, ffmpeg, ffprobe,
+		selectionCfg(t, roots[0], "    audio_languages: [ENG, fre]\n"), nil)
+
+	out := streamsOf(t, run.eng, src)
+	row := run.doneRow(t, src)
+	if got := languagesOfType(out, "audio"); len(got) != 2 || got[0] != "eng" || got[1] != "fre" {
+		t.Fatalf("the replacement carries audio %v, want [eng fre]: the jpn track was to be dropped "+
+			"and the two listed ones kept", got)
+	}
+	// A type with NO list keeps everything, which is what an absent key has always meant.
+	if got := languagesOfType(out, "subtitle"); len(got) != 2 {
+		t.Fatalf("the replacement carries subtitles %v, want both: subtitle_languages was not set, "+
+			"so no subtitle may be dropped", got)
+	}
+	if row.SelectionNotApplied != "" {
+		t.Fatalf("the row says the selection was not applied (%q), so this case proves nothing "+
+			"about what a selection carries", row.SelectionNotApplied)
+	}
+}
+
+// TestStreamSelection_KeepsAnUntaggedStream is [AC-3]: a stream carrying no language tag, an
+// empty one, or the undefined code `und` is kept whatever a language list says.
+//
+// The end-to-end half runs a real Matroska source whose second audio track was written with
+// NO language tag - which the muxer stores as `und`, the spelling a real remux produces -
+// against a list naming neither it nor the tagged track. The table beside it pins the other
+// spellings at the derivation, where a container cannot be made to produce them on demand.
+func TestStreamSelection_KeepsAnUntaggedStream(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	_, roots := twoRoots(t, "tv")
+	src := filepath.Join(roots[0], "ep.mkv")
+	mkSourceWithStreams(t, ffmpeg, src, audioStream("jpn"), audioStream(""), subtitleStream(""))
+
+	run := runSelection(t, ffmpeg, ffprobe,
+		selectionCfg(t, roots[0], "    audio_languages: [eng]\n    subtitle_languages: [eng]\n"), nil)
+
+	out := streamsOf(t, run.eng, src)
+	row := run.doneRow(t, src)
+	got := languagesOfType(out, "audio")
+	if len(got) != 1 || !(got[0] == "" || got[0] == "und") {
+		t.Fatalf("the replacement carries audio %v, want exactly the UNTAGGED track: a list naming "+
+			"eng must drop the jpn track and keep the untagged one", got)
+	}
+	if subs := languagesOfType(out, "subtitle"); len(subs) != 1 {
+		t.Fatalf("the replacement carries subtitles %v, want the untagged one kept", subs)
+	}
+	// The fallback must NOT be what kept it: that would make this case prove AC-5 twice and
+	// this criterion not at all.
+	if row.SelectionNotApplied != "" {
+		t.Fatalf("the untagged track survived only because the never-a-silent-file fallback fired "+
+			"(%q); this case has to prove the untagged RULE", row.SelectionNotApplied)
+	}
+
+	for _, tag := range []string{"", "und", "UND", " und "} {
+		plan := DeriveStreamPlan([]probe.Stream{
+			{Index: 0, Type: probe.TypeVideo},
+			{Index: 1, Type: probe.TypeAudio, Language: "jpn"},
+			{Index: 2, Type: probe.TypeAudio, Language: tag},
+		}, selectionProfile(t, "    audio_languages: [eng]\n"), "h264")
+		if d := plan.Dropped(); len(d) != 1 || d[0].Index != 1 {
+			t.Fatalf("with the second track tagged %q the plan dropped %v, want only the jpn track",
+				tag, d)
+		}
+	}
+}
+
+// TestStreamSelection_DropsOnlyContainerMarkedCommentary is [AC-4]: with keep_commentary
+// false only the streams the CONTAINER marks as commentary are dropped, a title is never
+// read as such a mark, and an absent key resolves to true.
+func TestStreamSelection_DropsOnlyContainerMarkedCommentary(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	_, roots := twoRoots(t, "tv", "movies")
+	marked := filepath.Join(roots[0], "ep.mkv")
+	mkSourceWithStreams(t, ffmpeg, marked, audioStream("eng"), commentaryAudio("eng"))
+
+	run := runSelection(t, ffmpeg, ffprobe,
+		selectionCfg(t, roots[0], "    keep_commentary: false\n"), nil)
+	run.doneRow(t, marked)
+	if n := countByType(streamsOf(t, run.eng, marked)); n["audio"] != 1 {
+		t.Fatalf("the replacement carries %d audio stream(s), want 1: the container-marked "+
+			"commentary track was to be dropped", n["audio"])
+	}
+
+	// A TITLE is not a mark. The same two tracks, neither carrying the disposition, the
+	// second titled "Director's Commentary": nothing may be dropped.
+	titled := filepath.Join(roots[1], "film.mkv")
+	mkSourceWithStreams(t, ffmpeg, titled, audioStream("eng"), audioStream("eng"))
+	retitled := titled + ".titled.mkv"
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", titled, "-map", "0", "-c", "copy",
+		"-metadata:s:a:1", "title=Director's Commentary", "--", retitled)
+	if err := os.Rename(retitled, titled); err != nil {
+		t.Fatalf("rename the titled fixture: %v", err)
+	}
+	run2 := runSelection(t, ffmpeg, ffprobe,
+		selectionCfg(t, roots[1], "    keep_commentary: false\n"), nil)
+	run2.doneRow(t, titled)
+	if n := countByType(streamsOf(t, run2.eng, titled)); n["audio"] != 2 {
+		t.Fatalf("the replacement carries %d audio stream(s), want 2: a TITLE is not a commentary "+
+			"mark, and inferring one drops a main track on a mislabelled file", n["audio"])
+	}
+
+	// The absent key resolves to TRUE: the marked track survives.
+	plan := DeriveStreamPlan([]probe.Stream{
+		{Index: 0, Type: probe.TypeVideo},
+		{Index: 1, Type: probe.TypeAudio, Language: "eng"},
+		{Index: 2, Type: probe.TypeAudio, Language: "eng", Commentary: true},
+	}, selectionProfile(t, ""), "h264")
+	if d := plan.Dropped(); len(d) != 0 {
+		t.Fatalf("with keep_commentary absent the plan dropped %v, want nothing: dropping a "+
+			"commentary track is a choice and never a side effect of a language filter", d)
+	}
+}
+
+// TestStreamSelection_NeverProducesAFileWithNoAudio is [AC-5]: a selection that would leave
+// the output with zero audio streams is not applied to audio at all, the rest of the
+// selection still applies, and the row records that it was not applied and why.
+//
+// The fixture is the case an operator actually creates: a foreign-language film under
+// `audio_languages: [eng]`. Every audio track is Japanese, so applying the list would produce
+// a silent file - a data loss no re-run undoes, because the source is deleted once the
+// replacement passes every gate.
+func TestStreamSelection_NeverProducesAFileWithNoAudio(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	_, roots := twoRoots(t, "tv")
+	src := filepath.Join(roots[0], "ep.mkv")
+	mkSourceWithStreams(t, ffmpeg, src,
+		audioStream("jpn"), commentaryAudio("jpn"),
+		subtitleStream("eng"), subtitleStream("jpn"))
+
+	run := runSelection(t, ffmpeg, ffprobe,
+		selectionCfg(t, roots[0],
+			"    audio_languages: [eng]\n    subtitle_languages: [eng]\n    keep_commentary: false\n"), nil)
+
+	out := streamsOf(t, run.eng, src)
+	row := run.doneRow(t, src)
+	n := countByType(out)
+	if n["audio"] == 0 {
+		t.Fatal("the replacement has NO AUDIO: a source that had audio must never become a silent " +
+			"file, and the source it replaced is gone")
+	}
+	// EVERY audio stream, the commentary one included. A fallback that applied half of the
+	// audio selection would still be applying the selection that produced a silent file.
+	if n["audio"] != 2 {
+		t.Fatalf("the replacement carries %d audio stream(s), want all 2 of the source's: the "+
+			"fallback carries every audio stream forward, not a subset", n["audio"])
+	}
+	// The REST of the selection still applies: the jpn subtitle is still dropped.
+	if got := languagesOfType(out, "subtitle"); len(got) != 1 || got[0] != "eng" {
+		t.Fatalf("the replacement carries subtitles %v, want only [eng]: the audio fallback must "+
+			"not disable the rest of the selection", got)
+	}
+	if row.SelectionNotApplied != SelectionNotAppliedNoAudio {
+		t.Fatalf("selection_not_applied = %q, want %q: the row is where an operator finds out that "+
+			"the list they configured was not applied to this file",
+			row.SelectionNotApplied, SelectionNotAppliedNoAudio)
+	}
+	// And the row still records what WAS dropped, so neither fact hides the other.
+	if !row.DroppedStreams.Recorded() {
+		t.Fatal("the row recorded no dropped streams at all, so the subtitle this job dropped has " +
+			"no record anywhere")
+	}
+	for _, s := range row.DroppedStreams.Streams() {
+		if s.Type == "audio" {
+			t.Fatalf("the row records an audio stream as dropped (%+v) on a job whose audio "+
+				"selection was NOT applied", s)
+		}
+	}
+}

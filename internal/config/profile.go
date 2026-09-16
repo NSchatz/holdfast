@@ -65,11 +65,20 @@ const (
 // digest below is taken over this set alone, which is what keeps a filter edit from
 // moving the digest every terminal row records and detaching each row from the profile
 // that decided it. A root's filters live in Root.Filters.
+//
+// The four STREAM-SELECTION keys at the end are knobs and are digested, which is the
+// opposite ruling from the one the filters above got: a filter decides whether a file is
+// offered, and these decide which of its streams survive, which is what happens TO a
+// file. Appending them moves every existing root's digest exactly once, because the
+// digest input gains four knob names - a bounded, accepted consequence, and one that
+// re-opens no terminal row, since what re-opens a row is the inputs it recorded and
+// never a digest (see store.DecisionInputs).
 var profileKnobs = []string{
 	"encoder", "crf", "preset", "pixel_format", "container_ext",
 	"min_bitrate_kbps", "min_savings_percent", "skip_hardlinked",
 	"vmaf_enable", "min_vmaf", "vmaf_min_pool", "vmaf_min_chroma",
 	"vmaf_subsample", "vmaf_model",
+	audioLanguagesKey, subtitleLanguagesKey, keepCommentaryKey, remuxOnlyKey,
 }
 
 // ProfileKnobs returns the closed set of knobs a library_roots entry may override, in
@@ -123,6 +132,15 @@ type Profile struct {
 	VmafMinChroma     float64 `yaml:"vmaf_min_chroma"`
 	VmafSubsample     int     `yaml:"vmaf_subsample"`
 	VmafModel         string  `yaml:"vmaf_model"`
+
+	// The stream-selection knobs. The two lists are EMPTY by default, which means carry
+	// every stream of that type; the two pointers keep the same nil-is-the-default
+	// meaning the pointers above keep, so a Profile assembled by hand reads as the
+	// SHIPPED default rather than as the struct zero. See selection.go.
+	AudioLanguages    []string `yaml:"audio_languages"`
+	SubtitleLanguages []string `yaml:"subtitle_languages"`
+	KeepCommentary    *bool    `yaml:"keep_commentary"`
+	RemuxOnly         *bool    `yaml:"remux_only"`
 }
 
 // VmafGate reports whether the VMAF gate is enabled for this root, defaulting to true
@@ -153,6 +171,11 @@ func (p Profile) PixelFormatAuto() bool { return pixelFormatAuto(p.PixelFormat) 
 // A float is formatted with 'g' and -1 precision, which is the shortest text that
 // round-trips back to the same float64 - so 95 and 95.0 are one value here, as they are
 // to the gate.
+//
+// A LIST is rendered through renderLanguages - canonical, so two lists that decide every
+// file identically render to one text - and an empty one renders as the `none` token
+// rather than as nothing at all, for the reasons selection.go gives. The two new booleans
+// are rendered RESOLVED, exactly as the two above them are.
 func (p Profile) values() []string {
 	f := func(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) }
 	return []string{
@@ -170,6 +193,10 @@ func (p Profile) values() []string {
 		f(p.VmafMinChroma),
 		strconv.Itoa(p.VmafSubsample),
 		p.VmafModel,
+		renderLanguages(p.AudioLanguages),
+		renderLanguages(p.SubtitleLanguages),
+		strconv.FormatBool(p.CommentaryKept()),
+		strconv.FormatBool(p.RemuxOnlyEnabled()),
 	}
 }
 
@@ -257,7 +284,9 @@ func (p Profile) validate() error {
 	if p.VmafEnable != nil && *p.VmafEnable && p.MinVmaf == 0 && p.VmafMinPool == 0 && p.VmafMinChroma == 0 {
 		return errVmafGateNeverRejects
 	}
-	return nil
+	// The stream-selection keys, refused by the same function and therefore in the same
+	// words whether they were written at the top level or inside one root's entry.
+	return p.validateSelection()
 }
 
 // warnings reports the configurations of THIS profile that are valid but weaken a

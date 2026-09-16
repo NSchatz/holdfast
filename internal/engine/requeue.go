@@ -65,6 +65,11 @@ var SkipGuards = []string{
 	// or an ffprobe that can now establish a shape the one before it could not, is
 	// exactly the change only an operator can see - so this is the lever for it.
 	SkipMultiVideoStream,
+	// The source's FULL-shape guard, here for exactly the reasons the shape guard above
+	// is: it reads no configuration key, so no configuration change will ever offer one
+	// of its rows back, and an ffprobe that can now enumerate a container the one before
+	// it could not is a change only an operator can see.
+	SkipUnreadableStreamList,
 	SkipRestoredOriginal,
 }
 

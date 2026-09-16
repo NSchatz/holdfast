@@ -48,6 +48,10 @@ type VideoProps struct {
 	vsOnce      sync.Once
 	videoStream []VideoStream // the file's video streams, in container order
 	videoStrOK  bool          // whether ffprobe established that list at all
+
+	allOnce sync.Once
+	all     []Stream // every stream the file carries, in container order
+	allOK   bool     // whether ffprobe established that list at all
 }
 
 // scalarStreamEntries are every scalar video-stream field a source skip-guard or the
@@ -202,6 +206,22 @@ func (vp *VideoProps) VideoStreams() (streams []VideoStream, established bool) {
 		vp.videoStream, vp.videoStrOK = vp.p.VideoStreams(vp.ctx, vp.f)
 	})
 	return vp.videoStream, vp.videoStrOK
+}
+
+// AllStreams returns every stream the source carries and whether ffprobe established
+// that list, byte-for-byte the contract of Prober.Streams.
+//
+// Lazy and memoised, like the side data and the video-stream list, and here the laziness
+// is the whole reason it is on the snapshot at all: it is a second ffprobe, and only a
+// file that has already cleared every cheap guard (codec, bitrate, field order, HDR
+// class, pixel format) and is about to be ENCODED is ever asked what its full stream
+// shape is. A file that skipped at one of those never pays for it, which is what keeps a
+// library walk costing what it cost before stream selection existed.
+func (vp *VideoProps) AllStreams() (streams []Stream, established bool) {
+	vp.allOnce.Do(func() {
+		vp.all, vp.allOK = vp.p.Streams(vp.ctx, vp.f)
+	})
+	return vp.all, vp.allOK
 }
 
 // normColorValue drops the ffprobe non-values ("unknown"/"reserved"/"N/A"/"") to ""

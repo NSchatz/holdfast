@@ -371,7 +371,8 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 			target_path = NULL,
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
 			swap_cause = NULL, failure_class = NULL, decision_inputs = NULL,
-			library_root = NULL, profile_digest = NULL, profile = NULL
+			library_root = NULL, profile_digest = NULL, profile = NULL,
+			dropped_streams = NULL, selection_not_applied = NULL, vmaf_skipped = NULL
 		 WHERE path = ? AND fingerprint = ?`,
 		string(Probing), worker, now(), currentStamp(), path, fingerprint); err != nil {
 		return false, fmt.Errorf("store: claim update: %w", err)
@@ -614,7 +615,8 @@ func finishQuery(st Status, o *Outcome, maxFailures int) string {
 		target_path = ?,
 		guard_attributes = ?, guard_time_resolution = ?, guard_residual_window = ?,
 		swap_cause = ?, failure_class = ?, decision_inputs = ?,
-		library_root = ?, profile_digest = ?, profile = ?`
+		library_root = ?, profile_digest = ?, profile = ?,
+		dropped_streams = ?, selection_not_applied = ?, vmaf_skipped = ?`
 	switch {
 	case st != Failed:
 	case o.FailureClass.Final() && maxFailures > 0:
@@ -650,6 +652,8 @@ func finishArgs(st Status, o *Outcome, path, fingerprint string) []any {
 		nullString(o.GuardResidualWindow), nullString(o.SwapCause), nullString(class),
 		nullString(o.DecisionInputs.Encode()),
 		nullString(o.LibraryRoot), nullString(o.ProfileDigest), nullString(o.Profile),
+		nullString(o.DroppedStreams.Encode()),
+		nullString(o.SelectionNotApplied), nullString(o.VmafSkipped),
 		path, fingerprint,
 	}
 }
@@ -721,7 +725,8 @@ const outcomeColumns = `reason, encoder, vmaf_mean, vmaf_min, vmaf_model,
 	source_codec, source_bytes, output_bytes, encode_ms, target_path,
 	guard_attributes, guard_time_resolution, guard_residual_window, swap_cause,
 	failure_class, decision_inputs,
-	library_root, profile_digest, profile`
+	library_root, profile_digest, profile,
+	dropped_streams, selection_not_applied, vmaf_skipped`
 
 // outcomeScan holds one row's outcome columns on the way out of the driver. Every
 // field is a sql.Null* because every column is nullable: NULL is "not recorded" and
@@ -779,6 +784,12 @@ type outcomeScan struct {
 	// overrides laid over the library profile above, not the library profile itself.
 	// Nullable like the rest, and here NULL and "" say the same thing: none matched.
 	profile sql.NullString
+
+	// What the stream selection did. Nullable like the rest, and for dropped_streams the
+	// NULL is the state the column exists to keep distinguishable: a row written before
+	// it existed recorded nothing about what it dropped, and nothing is not "dropped
+	// nothing".
+	dropped, notApplied, vmafSkipped sql.NullString
 }
 
 // dest returns the scan destinations in outcomeColumns order.
@@ -790,6 +801,7 @@ func (s *outcomeScan) dest() []any {
 		&s.guardAttrs, &s.guardRes, &s.guardWindow, &s.swapCause,
 		&s.failClass, &s.inputs,
 		&s.libraryRoot, &s.profileDigest, &s.profile,
+		&s.dropped, &s.notApplied, &s.vmafSkipped,
 	}
 }
 
@@ -814,6 +826,12 @@ func (s *outcomeScan) outcome() Outcome {
 		FailureClass:   FailureClass(s.failClass.String).Class(),
 		DecisionInputs: ParseDecisionInputs(s.inputs.String),
 		Profile:        s.profile.String,
+		// NULL parses to the zero DroppedStreams, which reads as NOT RECORDED - never as
+		// an empty set, which would claim a job dropped nothing when nothing was ever
+		// recorded about it.
+		DroppedStreams:      ParseDroppedStreams(s.dropped.String),
+		SelectionNotApplied: s.notApplied.String,
+		VmafSkipped:         s.vmafSkipped.String,
 		Decision: Decision{
 			LibraryRoot:   s.libraryRoot.String,
 			ProfileDigest: s.profileDigest.String,
@@ -1110,7 +1128,8 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 			source_codec = NULL, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
 			target_path = NULL,
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
-			swap_cause = NULL, decision_inputs = NULL, profile = excluded.profile
+			swap_cause = NULL, decision_inputs = NULL, profile = excluded.profile,
+			dropped_streams = NULL, selection_not_applied = NULL, vmaf_skipped = NULL
 		 WHERE jobs.status = ?`,
 		path, fingerprint, string(Skipped), now(), nullString(reason),
 		nullString(by.LibraryRoot), nullString(by.ProfileDigest), currentStamp(), nullString(profile),

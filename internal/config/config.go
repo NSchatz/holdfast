@@ -59,6 +59,8 @@ var knownKeys = map[string]bool{
 	"bitrate_kbps": true, "encode_profiles": true,
 	"scratch_dir": true, "scratch_min_free_gb": true,
 	excludePathsKey: true, includePathsKey: true,
+	audioLanguagesKey: true, subtitleLanguagesKey: true,
+	keepCommentaryKey: true, remuxOnlyKey: true,
 }
 
 // profileKeys are the keys accepted inside one `encode_profiles` entry. The
@@ -113,6 +115,15 @@ func defaultLayer() map[string]any {
 		"max_load":               0.0,
 		"tautulli_url":           "",
 		"tautulli_api_key":       "",
+		// Stream selection, every value reproducing what this tool did before the keys
+		// existed: carry every audio and subtitle stream, keep commentary, re-encode the
+		// video. A knob in profileKnobs is seeded from the top-level value of the same
+		// key, so each of the four needs an entry here or a root would inherit a zero
+		// rather than the shipped default.
+		audioLanguagesKey:    []string{},
+		subtitleLanguagesKey: []string{},
+		keepCommentaryKey:    true,
+		remuxOnlyKey:         false,
 	}
 }
 
@@ -162,6 +173,38 @@ type Config struct {
 	// row. See filters.go.
 	ExcludePaths []string `yaml:"exclude_paths"`
 	IncludePaths []string `yaml:"include_paths"`
+
+	// The stream-selection keys: which of a source's streams a replacement may carry.
+	// Every one of them defaults to what this tool did before they existed, so a
+	// configuration that names none of them carries exactly the streams it always did
+	// and builds exactly the encode command it always built.
+	//
+	// AudioLanguages and SubtitleLanguages are ISO-639-2 codes, compared
+	// case-insensitively against a stream's own `language` tag. EMPTY - the default, and
+	// what an absent key resolves to - carries every stream of that type. A stream with
+	// NO language tag, an empty one, or the undefined code `und` is KEPT whatever the
+	// list says: an untagged track is more often the main audio than not, and dropping
+	// the only audio track is a data loss this tool cannot accept. If applying the audio
+	// list would leave the output with no audio at all, the list is not applied to audio
+	// and the fact is recorded on that file's row.
+	//
+	// KeepCommentary drops only streams the CONTAINER itself marks as commentary, and
+	// never infers commentary from a title or a filename. A nil pointer means the default
+	// (TRUE); use CommentaryKept() to read it.
+	//
+	// RemuxOnly stream-copies the video as well, so nothing is re-encoded. The output is
+	// held to every structural gate an encode is held to, and the perceptual gate is
+	// skipped only after every carried video stream is established to be identical to the
+	// stream it came from. A nil pointer means the default (FALSE); use
+	// RemuxOnlyEnabled() to read it.
+	//
+	// All four may also be written inside a `library_roots` entry, where the entry's value
+	// REPLACES the inherited one for that root. They ARE profile knobs - they decide what
+	// is done to a file - so the profile digest covers them. See selection.go.
+	AudioLanguages    []string `yaml:"audio_languages"`
+	SubtitleLanguages []string `yaml:"subtitle_languages"`
+	KeepCommentary    *bool    `yaml:"keep_commentary"`
+	RemuxOnly         *bool    `yaml:"remux_only"`
 
 	// LogLevel controls verbosity: debug|info|warn|error (default info).
 	LogLevel string `yaml:"log_level"`
@@ -690,6 +733,10 @@ func (c *Config) TopLevelProfile() Profile {
 		VmafMinChroma:     c.VmafMinChroma,
 		VmafSubsample:     c.VmafSubsample,
 		VmafModel:         c.VmafModel,
+		AudioLanguages:    c.AudioLanguages,
+		SubtitleLanguages: c.SubtitleLanguages,
+		KeepCommentary:    c.KeepCommentary,
+		RemuxOnly:         c.RemuxOnly,
 	}
 }
 
@@ -814,6 +861,13 @@ func Load(path string) (*Config, error) {
 	// mapping.
 	entries, err := parseRootEntries(k.Get("library_roots"), path)
 	if err != nil {
+		return nil, err
+	}
+	// remux_only and encoder in ONE layer is two instructions about the same job, and it
+	// is refused HERE because this is the last point at which the layers are still
+	// distinguishable: after resolveRoots every profile carries an encoder, inherited or
+	// not, and the conflict would be indistinguishable from the ordinary case.
+	if err := checkRemuxEncoderConflict(k.Get(remuxOnlyKey), explicitTop, entries, path); err != nil {
 		return nil, err
 	}
 	roots, err := resolveRoots(k, entries, explicitTop, path)
