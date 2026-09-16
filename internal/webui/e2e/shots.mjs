@@ -57,9 +57,13 @@ async function withToken(page) {
 // the dashboard is photographed as that region rather than as the whole page with the
 // region somewhere in it. A craft clause is read off what a region shows; an image where
 // it is one band among twelve is an image nobody can read it from.
+// The timeout is DECLARED rather than left to the runner's default, because this script is
+// not a test and nothing here reports a wedge: a selector that matches nothing waits, and a
+// run that hangs is indistinguishable from a slow one until somebody kills it. Fifteen
+// seconds and then an error naming the selector is the failure a reader can act on.
 async function clipTo(page, selector) {
-  await page.locator(selector).scrollIntoViewIfNeeded();
-  const box = await page.locator(selector).boundingBox();
+  await page.locator(selector).scrollIntoViewIfNeeded({ timeout: 15000 });
+  const box = await page.locator(selector).boundingBox({ timeout: 15000 });
   if (!box) throw new Error(`shots: ${selector} laid out no box, so there is nothing to photograph`);
   const pad = 12;
   return {
@@ -95,6 +99,15 @@ const VIEWS = {
   aggs: async (page) => {
     await withToken(page);
     return clipTo(page, "#aggregates");
+  },
+  // The control bar with the pointer ON the primary button. It is here because the hover
+  // affordance is the one thing about this surface that a picture of the page AT REST cannot
+  // show: interface-craft C7 asks every component to render the state, and a reader grading
+  // that clause off a resting screenshot would be grading the absence of it.
+  "controls-hover": async (page) => {
+    await withToken(page);
+    await page.hover("#rescan");
+    return clipTo(page, "div.controls:has(#rescan)");
   },
   // A ledger search that found something, in its own region.
   "ledger-search": async (page) => {

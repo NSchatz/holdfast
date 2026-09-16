@@ -132,7 +132,12 @@ Those three are the whole reason there is a browser in this gate, so they are th
 `make webui-graders-selftest` DEFEATS on purpose - one palette wearing both preferences, a
 control whose label is detached so the engine names it by its placeholder, a control taken
 out of the tab order - against a mutated COPY of the tree, requiring each grader to red and
-to say what it saw, and failing if any defeat did not execute. The same script then defeats
+to say what it saw, and failing if any defeat did not execute. The same route carries one
+mutation per refusal the interface-craft C4 and C7 graders name, and three of those mutate
+the COMMITTED RECORD (`docs/state-matrix.md`) rather than the page, because half of what C7
+refuses is a refusal about the record; one mutates the harness itself, because "every view"
+is the set the fixture server says it serves and the only honest way to hand a grader an
+empty view set is a server that really answers none. The same script then defeats
 what sits under all three, the browser RESOLUTION: a pin naming a path no process can
 execute is driven in both modes, and the two have to answer differently and name the engine
 either way - a failure under required mode, a skip that says so where `check` is simply
@@ -314,6 +319,44 @@ separate target: a grader that no longer depends on a clock beats a loop that sa
   grader today. That case is filed as its own item, carrying the finding and a repro that
   fails against the served page in both themes at both widths; until it lands, this bullet
   promises the four-own-edges and shadow cases and nothing wider.
+- **Ornament, interface-craft C4.** Three sentences, decided per VIEW, where a view is one
+  fixture scenario the harness says it serves crossed with one project the runner presents -
+  so the sweep is the fixture server's own answer (`/e2e/scenarios`) against the runner's own
+  configuration, and a fixture or a project added later is graded the day it is added. A view
+  draws at most ONE shadow depth, counted AT REST: a reading taken while anything was
+  hovered, focused or being pressed is refused rather than counted, because a focus ring and
+  a hover elevation are not a second depth and no reader meets either beside the first. Two
+  NEIGHBOURING regions - adjacent siblings, with the facing edges decided from the boxes the
+  layout produced - are told apart by a border OR by a surface change and never by both;
+  a neighbour that fills no background of its own IS the canvas at that point, so a bordered
+  panel against it is figure and ground rather than a double separation, and a control's own
+  edge is not a region separation at all. And no element carries a coloured strip down its
+  left edge as its ONLY signal: the status dots are why the page gives its terminal outcomes
+  a SHAPE as well as a colour. The run prints every view it measured with its region count,
+  its pair count and the depths it found, because a reader of the gate cannot tell a sweep
+  from a shrug by a zero exit - and a run that measured no view, or a view with no region or
+  no pair, FAILS.
+- **The state matrix, interface-craft C7.** Every interactive component renders and proves
+  default, hover, focus-visible, active, disabled, loading and error, once per density the
+  surface builds. The inventory is DERIVED, never listed: it is every element the
+  accessibility tree reports with an interactive role AND the engine places in the tab order,
+  grouped by what the served document says each control is - its tag, its `type`, its
+  classes, and deliberately not its role, so two elements the engine calls different things
+  landing in one group is a refusal that can actually fire. A control the keyboard reaches
+  that the tree does not call interactive belongs to no group and fails the run, which is how
+  a control escapes a matrix. [`state-matrix.md`](state-matrix.md) is the committed record: one entry per
+  component per state, `proved` or `not applicable` with a sentence saying why, and the
+  density set. A derived component the record does not name fails; so does a state entry that
+  is missing, a not-applicable bought without a reason, and any of `default`, `hover`,
+  `focus-visible` or `active` declared away - those four are reachable at the engine for
+  anything focusable, and only `disabled`, `loading` and `error` may be declared away.
+  Every cell the record calls proved is ENTERED FOR REAL - a dispatched Tab, a pointer the
+  engine moved, a button it holds down, the element's own `disabled` - and has to render
+  differently from that component's default in a property a reader can see. Nothing is
+  entered by injecting a class, an attribute or an inline style, and the mutation route
+  proves it: strip the real focus treatment, leave a ring only an injection could apply, and
+  the cell goes red. The run names the density `styling` S4 asks for that this surface does
+  not build rather than reporting an S4 pass it never took.
 - The served Content Security Policy. It is asserted byte for byte AND by a rule about
   policies: no `unsafe-eval`, no host, scheme, nonce or hash source, no `img-src`, no
   default Trusted Types policy, no directive outside the served set. The rule is proved
