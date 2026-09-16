@@ -284,8 +284,15 @@ func TestServe_ServesTheOfferAndTheVersionSubcommandAgrees(t *testing.T) {
 	if !strings.Contains(page, sourceoffer.Label+": "+hostileValue) {
 		t.Error("the served page does not carry the source URL verbatim after its label")
 	}
+	// The value itself is a tag, and it is in the page BY DESIGN - that is what the
+	// verbatim assertion above just proved. So the markup scan runs over what is left
+	// once the one verbatim offer is taken out: anything tag-shaped there was produced
+	// by the page rather than carried through it. The escaping entities still bite over
+	// the whole page, because a page that escaped the value would have failed the
+	// verbatim assertion and would carry them here.
+	rest := strings.ReplaceAll(page, hostileValue, "")
 	for _, banned := range []string{"<img", "<a ", "&#34;", "&gt;", "&lt;"} {
-		if strings.Contains(page, banned) {
+		if strings.Contains(rest, banned) {
 			t.Errorf("the root page carries markup or escaping (%s); it is plain text", banned)
 		}
 	}
