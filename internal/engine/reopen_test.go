@@ -320,8 +320,9 @@ func TestRequeue_RefusesAGuardTokenThatMatchesNothing(t *testing.T) {
 // nothing read and no configuration change will ever offer one back to the pipeline. That
 // makes `requeue --guard multi-video-stream` the ONLY lever over them, and a token absent
 // from SkipGuards is not an inconvenience but a permanent exclusion: requeue answers
-// ErrUnknownGuard for one and the operator has nothing else to reach for. The rule over
-// the whole vocabulary is asserted by TestSkipVocabularyIsDocumented; this is the behaviour.
+// ErrUnknownGuard for one and the operator has nothing else to reach for. That rule over
+// the whole vocabulary - every terminal token is in SkipGuards - is asserted by
+// TestSkipGuards_EveryTerminalSkipTokenIsRequeueable; this is the behaviour.
 func TestRequeue_ReopensAMultiVideoStreamRow(t *testing.T) {
 	ts := requeueStore(t)
 	ctx := context.Background()
