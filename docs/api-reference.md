@@ -172,6 +172,7 @@ out of your library, or a link pointing outside it, is refused rather than acted
 | `retention-area` | the path is inside a `.holdfast-undo` retention area, which holds originals the undo window is keeping |
 | `holdfast-working-file` | a work-in-progress temp, a retained original or a retained replacement - a file holdfast wrote, never a source |
 | `not-a-video-extension` | the extension is not one of the configured `video_exts` |
+| `excluded-by-path-filter` | the `exclude_paths`/`include_paths` in force for that library root keep the path out of this run ([docs/profiles.md](profiles.md#path-filters)) |
 | `duplicate-in-request` | the same file was named more than once in one request; it is accepted at most once |
 | `submission-queue-full` | the path passed every rule and could **not** be taken - retry it |
 
