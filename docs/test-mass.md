@@ -18,11 +18,31 @@ against the tree, which is the failure a recorded number actually has.
 
 <!-- test-mass:begin - written by scripts/test-mass.sh; re-derive with scripts/test-mass.sh -check -->
 ```text
-commit 0000000000000000000000000000000000000000
+commit 2d47da10e24d6dce59ff59deeb7254fedab89479
 module github.com/NSchatz/holdfast
-production-lines 0
-test-lines 0
-test-to-production 0.00
+production-lines 14489
+test-lines 38279
+test-to-production 2.64
+package cmd/holdfast 6143
+package internal/config 2184
+package internal/diskfree 81
+package internal/encoder 127
+package internal/engine 12713
+package internal/fsclass 139
+package internal/hdr 222
+package internal/heapmeasure 105
+package internal/logging 34
+package internal/metrics 502
+package internal/notify 383
+package internal/probe 634
+package internal/schedule 374
+package internal/secret 418
+package internal/secretscan 234
+package internal/server 4141
+package internal/sourceoffer 248
+package internal/startup 2901
+package internal/store 5801
+package internal/vmaf 895
 ```
 <!-- test-mass:end -->
 
