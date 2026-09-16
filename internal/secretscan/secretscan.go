@@ -89,8 +89,7 @@ func Families() []Family {
 // NameExemption is one tracked PATH the forbidden-NAME rule does not bind, and why.
 //
 // It exists for a collision the repository cannot resolve any other way, and it is
-// built to refuse growth rather than to accommodate it - the same discipline, and for the
-// same reason, as internal/commentdensity.Exemptions. What it does NOT do is exempt the
+// built to refuse growth rather than to accommodate it. What it does NOT do is exempt the
 // file from anything else: every credential family above, including the npm auth
 // directive, still applies to an exempted path in full. It forgives a NAME, never content.
 type NameExemption struct {

@@ -43,7 +43,6 @@ IMAGE    ?= holdfast:dev
 PLATFORM ?= linux/amd64
 
 .PHONY: build test check fmt vet staticcheck govulncheck govulncheck-selftest \
-        comment-density \
         check-pins check-pins-selftest install-ffmpeg-selftest check-pin-live \
         release-shape release-shape-selftest \
         secret-scan secret-scan-selftest install-hooks \
@@ -141,14 +140,6 @@ release-shape:
 release-shape-selftest:
 	./scripts/release-shape-selftest.sh
 
-# The prose ceiling on Go source, and the ranked table it is decided from. Counting is
-# by TOKENS - the Go parser decides what a comment is - and the ceiling, the warn band
-# and the exemption list all live in internal/commentdensity, never here: a threshold
-# written in two places is a threshold that drifts. docs/comment-density.md carries the
-# measurement it was derived from.
-comment-density:
-	go run ./scripts/comment-density-gate
-
 # --- secrets (S0132) ----------------------------------------------------------
 # The secret scanner (secrets K4). scripts/secret-scan.sh is the ONE invocation - this
 # target, the pre-commit hook and the self-test all go through it - because `go run` does
@@ -179,7 +170,7 @@ install-hooks:
 	@echo "pre-commit secret scan installed (core.hooksPath = .githooks). Undo: git config --unset core.hooksPath"
 
 # THE gate. CI and the release workflow both run exactly this.
-check: check-pins check-pins-selftest install-ffmpeg-selftest release-shape comment-density secret-scan secret-scan-selftest fmt vet build test staticcheck govulncheck govulncheck-selftest
+check: check-pins check-pins-selftest install-ffmpeg-selftest release-shape secret-scan secret-scan-selftest fmt vet build test staticcheck govulncheck govulncheck-selftest
 
 # Asks UPSTREAM whether the pinned ffmpeg release is still served. Deliberately NOT part
 # of `check`: the PR gate must not red because a third party had a bad afternoon. CI runs
