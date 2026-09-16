@@ -63,4 +63,26 @@ do
 done
 [ "$missing" -eq 0 ] || exit 1
 
+# And the two graders that are a CASE inside the third half rather than a half of their own.
+#
+# "The suite executed" and "this grader inside it executed" are different claims, and the
+# checks above only make the first: a case renamed, filtered out or quietly made conditional
+# leaves the Playwright half running, the case count above its floor, and the clause nobody
+# decided. Both of these announce themselves by REPORTING what they measured - which is
+# something three of their criteria require of them anyway - so the declaration is what is
+# looked for here. A grader that ran and found nothing to say would fail its own anti-vacuity
+# refusal long before it reached this line.
+for grader in \
+  'c4: measured:interface-craft C4 (depth discipline)' \
+  'c7: derived:interface-craft C7 (the state matrix)'
+do
+  mark="${grader%%:*}"
+  what="${grader#*:}"
+  if ! grep -qF -- "$mark" "$log"; then
+    echo "webui-check: FAILED - $what did not execute (nothing in the run declared \"$mark\")" >&2
+    missing=1
+  fi
+done
+[ "$missing" -eq 0 ] || exit 1
+
 echo "webui-check: OK - every half executed in required mode, nothing skipped"

@@ -29,6 +29,15 @@
 # engine a resolution DID accept can render is scripts/find-browser-selftest.sh's subject,
 # and it is defeated there.
 #
+# Case 6 onwards are interface-craft C4 and C7, one mutation per refusal those two graders
+# carry. They are here rather than beside the shipped run for the reason every case above is:
+# both graders are otherwise exercised only by a run expected GREEN, and "the page draws one
+# shadow depth" is equally true of a grader that decided nothing at all. Three of them mutate
+# the COMMITTED RECORD rather than the page, because half of what C7 refuses is a refusal
+# about the record; one mutates the HARNESS, because "every view" is the set the fixture
+# server says it serves and the only honest way to hand a grader an empty view set is a server
+# that really answers none.
+#
 # Deliberately NOT part of `make check`: the mutations belong in their own target, and
 # `check` must never rewrite - or in this case re-render - the tree it is grading. CI runs
 # it beside the dashboard gate. A guard nobody tries to defeat is a guard nobody knows works.
@@ -38,7 +47,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::webui-graders selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=6
+declared=24
 pass=0; failed=0
 
 repo="$work/repo"
@@ -107,15 +116,38 @@ cmp -s "$here/internal/webui/index.html" "$doc" \
 cp -p "$doc" "$pristine"
 reset() { cp -p "$pristine" "$doc"; }
 
-# Every mutation is asserted to have CHANGED the document. A sed that matched nothing would
-# otherwise leave the pristine page behind and the case would be graded against it, which is
-# this selftest's own version of the silent green it exists to catch.
-changed() {  # changed <case-name>
-  if cmp -s "$pristine" "$doc"; then
-    echo "::error::webui-graders selftest: the mutation for '$1' changed nothing - that case did NOT run" >&2
+# The other two files a defeat below mutates, each with a pristine copy of its own.
+#
+# The state-matrix RECORD is one of them, and it has to be: half of what clause C7 refuses is
+# a refusal about the record rather than about the page - a component the record does not
+# name, a state it gives no entry, a not-applicable it buys without a reason, a state it
+# declares away that the engine can reach. None of those can be produced by mutating a
+# stylesheet, and a refusal nobody defeats is a refusal nobody knows bites.
+#
+# The HARNESS is the other. "Every view" is the set the fixture server says it serves, so the
+# only way to hand the grader an empty view set is to make the harness say it serves nothing -
+# and the copy is compiled from this tree, so a sed here is a server that really answers that.
+record="$repo/docs/state-matrix.md"
+harness="$repo/internal/webui/e2e/fixtureserver/main.go"
+pristine_record="$work/state-matrix.md.pristine"
+pristine_harness="$work/fixtureserver.go.pristine"
+[ -r "$record" ] || { echo "::error::webui-graders selftest: the copy has no docs/state-matrix.md; interface-craft C7's record is what half its refusals are about" >&2; exit 1; }
+cp -p "$record" "$pristine_record"
+cp -p "$harness" "$pristine_harness"
+reset_record() { cp -p "$pristine_record" "$record"; }
+reset_harness() { cp -p "$pristine_harness" "$harness"; }
+reset_all() { reset; reset_record; reset_harness; }
+
+# Every mutation is asserted to have CHANGED the file it was aimed at. A sed that matched
+# nothing would otherwise leave the pristine copy behind and the case would be graded against
+# it, which is this selftest's own version of the silent green it exists to catch.
+changed_file() {  # changed_file <case-name> <file> <pristine>
+  if cmp -s "$3" "$2"; then
+    echo "::error::webui-graders selftest: the mutation for '$1' changed nothing in $2 - that case did NOT run" >&2
     exit 1
   fi
 }
+changed() { changed_file "$1" "$doc" "$pristine"; }
 
 # --- the harness --------------------------------------------------------------------------
 # Each run gets a port of its own, so the runner starts the fixture server from THIS COPY
@@ -166,6 +198,36 @@ expect() {
     printf '%s\n' "$out" | sed 's/^/       | /' >&2
     failed=$((failed + 1)); return
   fi
+  printf '  ok: %s\n' "$name"; pass=$((pass + 1))
+}
+
+# expectn <want-exit> <name> <title-regex> <must-run-regex> <must-mention-regex>...
+#
+# The same case as `expect` with more than one thing the output has to say. Three criteria in
+# S0126 require the run to DECLARE what it measured - the views and the regions, each
+# component group with its member count, the density set and the cells executed - and a
+# declaration is only asserted by naming every line of it. One regex could not.
+expectn() {
+  local want="$1" name="$2" title="$3" ran="$4"; shift 4
+  run_graders "$title"
+  if [ "$status" -ne "$want" ]; then
+    printf '::error::webui-graders selftest: %s - the graders exited %s, wanted %s\n' "$name" "$status" "$want" >&2
+    printf '%s\n' "$out" | sed 's/^/       | /' >&2
+    failed=$((failed + 1)); return
+  fi
+  if ! grep -qE -- "$ran" <<<"$out"; then
+    printf '::error::webui-graders selftest: %s - the run reported no case at all (a filter that matched nothing exits non-zero too)\n' "$name" >&2
+    printf '%s\n' "$out" | sed 's/^/       | /' >&2
+    failed=$((failed + 1)); return
+  fi
+  local msg
+  for msg in "$@"; do
+    if ! grep -qE -- "$msg" <<<"$out"; then
+      printf '::error::webui-graders selftest: %s - exited %s (correct) but nothing matched /%s/\n' "$name" "$status" "$msg" >&2
+      printf '%s\n' "$out" | sed 's/^/       | /' >&2
+      failed=$((failed + 1)); return
+    fi
+  done
   printf '  ok: %s\n' "$name"; pass=$((pass + 1))
 }
 
@@ -261,6 +323,194 @@ engine_case "AC-9: an unresolvable engine FAILS the required-mode run and names 
 run_without_an_engine ""
 engine_case "AC-9: the same unresolvable engine SKIPS outside required mode and names what it tried" \
   0 "not-an-engine" ''
+
+reset_all
+
+# --- 6 onwards. INTERFACE-CRAFT C4 AND C7 (S0126) ------------------------------------------
+#
+# Every refusal those two graders carry is defeated here, ONE MUTATION PER REFUSAL, against
+# the same copy of the tree. Both graders are otherwise routed at a run expected GREEN, which
+# exercises their happy branch and nothing else: "the page draws one shadow depth" and "the
+# page has no colour-only flag" are equally true of a grader that decided neither, and a
+# grader that cannot fail is not evidence. Each case below therefore makes the property FALSE
+# on purpose and requires the grader to go red AND to say what it saw, because a grader that
+# reds for somebody else's reason - a runner that could not start, a page that never rendered
+# - is as useless as one that passes.
+#
+# Two of them expect a GREEN run, and they are not the odd ones out. AC-2 is a claim about
+# WHEN the reading is taken - a hover elevation and a focus ring are not a second depth - and
+# the only way to assert it is to put both on the page and require the count not to move. The
+# two declaration cases are the other kind: AC-5, AC-7 and AC-15 each oblige the run to REPORT
+# what it measured, and a zero exit carries no declaration at all, so the lines themselves are
+# what is asserted.
+C4='ornament has a ceiling in every view the harness serves'
+C7='every interactive component proves its whole state matrix'
+
+# --- C4, first clause: a second shadow depth AT REST. -------------------------------------
+reset_all
+sed -i 's|</style>|.agg { box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35); }\n</style>|' "$doc"
+changed "a second shadow depth"
+expect 1 "AC-1: the depth grader reds when a view draws two shadow depths" \
+  "$C4" 'distinct shadow depths at rest' '1 failed'
+
+# --- C4, first clause under AC-2: the same two treatments, reachable only by HOVERING or by
+#        FOCUSING. Neither is a second depth, because no reader meets either beside the first,
+#        and a grader that counted them would red on a correct page. The run must stay green
+#        AND must still have measured something, which the declaration lines say. -----------
+reset_all
+sed -i 's|</style>|.agg:hover { box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35); }\n:focus-visible { box-shadow: 0 0 0 6px rgba(0, 0, 0, 0.35); }\n</style>|' "$doc"
+changed "a hover elevation and a focus shadow"
+expectn 0 "AC-2: a hover elevation and a focus shadow are NOT counted as a second depth" \
+  "$C4" '1 passed' \
+  'c4: measured [0-9]+ view\(s\)' \
+  'shadow depth\(s\)'
+
+# --- C4, second clause: two neighbouring regions told apart TWICE - a border on the facing
+#        edges and a different surface either side of it. ----------------------------------
+reset_all
+sed -i 's|</style>|.controls + .controls { border-top: var(--bw-hair) solid var(--border); background: var(--bg); }\n</style>|' "$doc"
+changed "a double separation between two neighbours"
+expect 1 "AC-3: the separation grader reds when two neighbours are told apart twice" \
+  "$C4" 'separated TWICE' '1 failed'
+
+# --- C4, third clause: a coloured strip down an element's left edge, on an element that says
+#        nothing else - no text, no mark, no accessible name. The status dot is exactly that
+#        element, which is why the page's own dots carry a SHAPE as well as a colour. -------
+reset_all
+sed -i 's|</style>|.dot { border-left: var(--bw-flag) solid var(--bad); }\n</style>|' "$doc"
+changed "a colour-only left strip"
+expect 1 "AC-4: the left-strip grader reds when a colour is an element's only signal" \
+  "$C4" 'paints a left-side border' '1 failed'
+
+# --- C4, AC-6, first half: a HARNESS that serves no view. The grader asks the fixture server
+#        which scenarios it has; a server that answers none leaves it with nothing to measure,
+#        and a grader with nothing to measure must fail rather than pass by default. --------
+reset_all
+sed -i 's|names = append(names, name)|_ = name|' "$harness"
+changed_file "a harness that serves no view" "$harness" "$pristine_harness"
+expect 1 "AC-6: the depth grader reds when the harness serves no view at all" \
+  "$C4" 'served NO view at all' '1 failed'
+
+# --- C4, AC-6, second half: a page with no REGION. Every border and every shadow taken away
+#        and the two regions' names detached, so nothing on the page is a region - the page
+#        still renders, still passes every source check, and there is nothing for any of the
+#        three clauses to be decided over. -----------------------------------------------
+reset_all
+sed -i 's|</style>|* { border: 0 !important; box-shadow: none !important; }\n</style>|' "$doc"
+sed -i 's| aria-labelledby="h-now"||; s| aria-labelledby="h-history"||' "$doc"
+changed "a page with no region at all"
+expect 1 "AC-6: the depth grader reds when a view renders no region at all" \
+  "$C4" 'rendered no region at all' '1 failed'
+
+# --- C4, AC-5: the run DECLARES what it measured. Three criteria require a declaration and
+#        all three are routed at a run that exits zero either way, so the lines are asserted
+#        here or by nothing. Unmutated on purpose: what is being proved is that a passing run
+#        still says which views, which regions and which depths it read. --------------------
+reset_all
+expectn 0 "AC-5: the depth run declares the views and the regions it measured" \
+  "$C4" '1 passed' \
+  'c4: measured [0-9]+ view\(s\) - [0-9]+ fixture scenario\(s\)' \
+  'c4: the "full" fixture .*: [0-9]+ region\(s\), [0-9]+ neighbouring pair\(s\)' \
+  'left-strip subject\(s\), over [0-9]+ element\(s\)'
+
+# --- C7, AC-8, first half: a control the engine puts in the TAB ORDER that the accessibility
+#        tree does not call interactive. It is reachable by keyboard and belongs to no
+#        component, which is precisely how a control escapes a state matrix. ----------------
+reset_all
+sed -i 's|<span id="conn">|<span id="conn" tabindex="0">|' "$doc"
+changed "a focusable element outside the inventory"
+expect 1 "AC-8: the inventory grader reds when a focusable element falls into no group" \
+  "$C7" 'falls into no reported group|does not report it with an interactive role' '1 failed'
+
+# --- C7, AC-8, second half: two elements the engine reports with DIFFERENT roles landing in
+#        one group. The grouping key deliberately carries no role, so this can fire; a key
+#        that carried one would make the refusal impossible and the check meaningless. ------
+reset_all
+sed -i 's|<button id="pause">|<button id="pause" role="link">|' "$doc"
+changed "two roles in one component group"
+expect 1 "AC-8: the grouping grader reds when one group holds two roles" \
+  "$C7" 'different roles' '1 failed'
+
+# --- C7, AC-9: an EMPTY inventory. Every control taken out of the tab order, repeatedly,
+#        because the page rebuilds its rows on every render. Nothing is derived, so nothing
+#        can be proved, and a matrix over nothing must never exit zero. --------------------
+reset_all
+sed -i 's|</body>|<script>setInterval(function(){for (const el of document.querySelectorAll("a,button,input,select,textarea")) el.setAttribute("tabindex","-1");},20);</script></body>|' "$doc"
+changed "an empty component inventory"
+expect 1 "AC-9: the matrix grader reds when the inventory is empty" \
+  "$C7" 'derived NO interactive component at all' '1 failed'
+
+# --- C7, AC-10: a component the engine DERIVES and the record does not name. This is the
+#        refusal that stops a control entering the surface without entering the matrix. -----
+reset_all
+sed -i '/^| a\.doclink |/d' "$record"
+changed_file "a component missing from the record" "$record" "$pristine_record"
+expect 1 "AC-10: the record grader reds when a derived component is named nowhere in it" \
+  "$C7" 'is named nowhere in the record' '1 failed'
+
+# --- C7, AC-11, first half: a state with no entry at all. ----------------------------------
+reset_all
+sed -i '/^| button | hover |/d' "$record"
+changed_file "a state with no entry" "$record" "$pristine_record"
+expect 1 "AC-11: the record grader reds when a component is given no entry for a state" \
+  "$C7" 'no entry for hover' '1 failed'
+
+# --- C7, AC-11, second half: a not-applicable bought without a reason. A state declared away
+#        with no sentence saying why is a state nobody decided. ----------------------------
+reset_all
+sed -i 's#^| button | loading | not applicable |.*#| button | loading | not applicable |  |#' "$record"
+changed_file "a not-applicable with no reason" "$record" "$pristine_record"
+expect 1 "AC-11: the record grader reds when a not-applicable carries no reason" \
+  "$C7" 'gives no reason' '1 failed'
+
+# --- C7, AC-12: one of the four states that may NEVER be declared away, declared away. ------
+reset_all
+sed -i 's#^| button | hover | proved |.*#| button | hover | not applicable | Nobody uses a pointer on this page. |#' "$record"
+changed_file "a reachable state declared away" "$record" "$pristine_record"
+expect 1 "AC-12: the record grader reds when a reachable state is declared not applicable" \
+  "$C7" 'only disabled, loading and error may be declared away' '1 failed'
+
+# --- C7, AC-13: a state DECLARED proved that renders exactly like the default. The rule that
+#        draws the plain button's hover edge is aimed at a class nothing wears, so the record
+#        still claims the state and the engine paints nothing. ----------------------------
+reset_all
+sed -i 's|button:hover:not(:disabled),|button.no-such-class:hover,|' "$doc"
+changed "a proved state that renders identically to the default"
+expect 1 "AC-13: the matrix grader reds when a proved state renders identically to the default" \
+  "$C7" 'renders VISUALLY IDENTICAL to its default' '1 failed'
+
+# --- C7, AC-14: THE ONE THAT DECIDES WHETHER THIS GRADER IS WORTH ANYTHING. The real
+#        focus-visible treatment is removed and a focus style is left in its place that only
+#        an INJECTED class could ever apply. A grader that entered the state by adding a
+#        class, an attribute or an inline style would find the ring and pass; one that
+#        presses Tab for real finds nothing, because a constructed KeyboardEvent is untrusted
+#        and moves focus nowhere. The cell has to go red. --------------------------------
+reset_all
+sed -i 's|:focus-visible {|:focus-visible { outline: none !important; }\n.hf-injected-focus {|' "$doc"
+changed "a focus treatment only an injection applies"
+expect 1 "AC-14: the matrix grader reds when focus-visible is only reachable by injection" \
+  "$C7" 'focus-visible .* renders VISUALLY IDENTICAL to its default' '1 failed'
+
+# --- C7, AC-16: a second density that exists only as a NAME. The record declares it and says
+#        how to enter it; the page renders exactly the same either way, so the two are one
+#        density under two names and the run must refuse to count it. ---------------------
+reset_all
+sed -i 's#^| compact | the document as served |#| compact | the document as served |\n| comfortable | data-density="comfortable" on the document element |#' "$record"
+changed_file "a density that exists only as a name" "$record" "$pristine_record"
+expect 1 "AC-16: the density grader reds when two densities render identically" \
+  "$C7" 'one density under two names' '1 failed'
+
+# --- C7, AC-7 and AC-15: the run DECLARES its inventory, its density set and the cells it
+#        executed. Unmutated, for the same reason the C4 declaration case is. ---------------
+reset_all
+expectn 0 "AC-7, AC-15: the matrix run declares its components, its densities and its cells" \
+  "$C7" '1 passed' \
+  'c7: derived [0-9]+ component group\(s\)' \
+  'c7: component "button" \(button\): [0-9]+ instance\(s\), graded ' \
+  'c7: densities declared built: [a-z]+.*; ran [0-9]+ cell\(s\)' \
+  'c7: styling S4 asks for 2 densities'
+
+reset_all
 
 echo
 # Report against the number of cases DECLARED, not the number that ran: "$pass/$pass" is

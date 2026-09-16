@@ -69,11 +69,18 @@ test("ornament has a ceiling in every view the harness serves", async ({ browser
   const problems = [];
   const measured = [];
 
+  // One scenario's worlds are read together and the scenarios in order. Each world is its
+  // own browser context with its own preference and viewport, so nothing is shared between
+  // them and a reading cannot be disturbed by the run beside it; four at once is the same
+  // cap the runner puts on its own workers, and for the same reason - every one of these
+  // waits on a real render rather than on a processor.
   for (const scenario of scenarios) {
-    for (const world of worlds) {
+    const readings = await Promise.all(worlds.map((world) =>
+      ornamentOf(browser, pageURL(baseURL, scenario), world)));
+    for (let i = 0; i < worlds.length; i++) {
+      const world = worlds[i], o = readings[i];
       const view = `the "${scenario}" fixture at the ${world.project} project (${
         world.theme === "" ? "no colour-scheme preference" : world.theme} theme, ${world.width}px)`;
-      const o = await ornamentOf(browser, pageURL(baseURL, scenario), world);
       problems.push(
         ...gradeOneShadowDepth(view, o),
         ...gradeNeighboursAreSeparatedOnce(view, o),
