@@ -66,6 +66,31 @@ dry_run: false
 # File extensions considered (case-insensitive).
 # video_exts: [mkv, mp4, avi, mov, m4v, ts, m2ts, wmv, flv]
 
+# Which PATHS under a library root holdfast may touch. Both keys are optional and both
+# default to empty, so a config that names neither scans exactly what it always did.
+# Both may also be written inside a library_roots entry above, where the entry's value
+# REPLACES this one for that root (empty list included) - see docs/profiles.md.
+#
+# Patterns are doublestar globs matched against the WHOLE of a path, never a substring of
+# it, so `movies/tv` does not also exclude `movies/tv-archive`. A pattern that does not
+# begin with / is weighed against the path relative to its library root; one that does is
+# weighed against the path as configured. A pattern naming a directory covers everything
+# under it. `**` must be its own path component: `Extras**` behaves as `Extras*`.
+#
+# EXCLUDE WINS. A file matched by both lists is excluded - the fail-safe direction for a
+# tool that deletes sources is to touch fewer files. An empty or absent include_paths
+# leaves every file under the root eligible.
+#
+# An excluded file is never claimed, probed or encoded and gets no new ledger row. One
+# that ALREADY has a terminal row keeps it, and `holdfast export` still carries it: the
+# scan lists exactly the directories it would have listed with no filter configured.
+#
+# exclude_paths:
+#   - "**/Extras"            # every file under any directory named Extras
+#   - "movies/4k"            # that directory, relative to the root, and all of it
+#   - "/mnt/media/import"    # the same thing spelled absolutely
+# include_paths: []          # empty: everything under the root stays eligible
+
 # --- codec / quality: the codec matrix (TRANSCODE-6) ---
 # encoder: cpu           # cpu (libx265/hevc) is the ARCHIVAL DEFAULT — best
 #                         # quality-per-bit, always available, no external device.

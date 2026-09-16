@@ -178,6 +178,12 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	for _, w := range cfg.Warnings() {
 		fmt.Fprintf(stdout, "warning: %s\n", w)
 	}
+	// A configured filter that can match nothing is the same kind of statement and is
+	// printed the same way: the configuration is valid, the run is not refused, and what
+	// the operator believes is protecting a directory is not protecting one.
+	for _, u := range cfg.UnreachablePatterns() {
+		fmt.Fprintf(stdout, "warning: %s\n", u)
+	}
 	return 0
 }
 
@@ -290,6 +296,32 @@ func printResolvedProfiles(w io.Writer, cfg *config.Config) {
 		fmt.Fprintln(w)
 		for _, k := range r.Effective() {
 			fmt.Fprintf(w, "  %-20s %-24s from %s\n", k.Knob, k.Value, k.Layer)
+		}
+		printPathFilters(w, r)
+	}
+}
+
+// printPathFilters prints the path filters in force for one root: every pattern, how
+// many of them there are, and which layer supplied that list.
+//
+// The count is a count OF PATTERNS and never of matching files. `validate` describes a
+// CONFIGURATION - it opens no directory and stats no path - so a count of files would be
+// a number it cannot produce without becoming a different command, and a wrong one would
+// be read as "this is how much of my library is protected".
+//
+// The patterns are printed beneath the knobs rather than beside them because they are not
+// knobs: a knob decides what happens to a file and a filter decides whether a file is
+// looked at, and the digest above covers the first and not the second.
+func printPathFilters(w io.Writer, r config.Root) {
+	for _, key := range config.FilterKeys() {
+		patterns := r.Filters.Patterns(key)
+		count := fmt.Sprintf("%d pattern(s)", len(patterns))
+		if len(patterns) == 0 {
+			count = "none"
+		}
+		fmt.Fprintf(w, "  %-20s %-24s from %s\n", key, count, r.Filters.LayerOf(key))
+		for _, p := range patterns {
+			fmt.Fprintf(w, "  %-20s   %s\n", "", p)
 		}
 	}
 }
@@ -773,6 +805,36 @@ func logConfigWarnings(cfg *config.Config, log *slog.Logger) {
 	}
 	for _, w := range cfg.Warnings() {
 		log.Warn(w)
+	}
+	logPathFilters(cfg, log)
+}
+
+// logPathFilters states, at daemon startup, which paths each root's filters keep this
+// run away from, and reports every configured pattern that can match nothing.
+//
+// The report is a WARN and not an error: the run continues, and there is no human action
+// this daemon is waiting on. It is not an info line either - a pattern that covers
+// nothing means the operator's configuration is not doing what its author believes, and
+// on a tool that deletes sources that is a degraded state, which is what warn means here.
+// It names the pattern, the key and the roots it was weighed against, because none of the
+// three is recoverable from the others.
+func logPathFilters(cfg *config.Config, log *slog.Logger) {
+	for _, r := range cfg.RootProfiles() {
+		if !r.Filters.InForce() {
+			continue
+		}
+		log.Info("library root path filters in force: only the files these allow are offered to the pipeline",
+			"library_root", r.Clean,
+			"exclude_paths", r.Filters.Exclude,
+			"exclude_paths_from", string(r.Filters.LayerOf("exclude_paths")),
+			"include_paths", r.Filters.Include,
+			"include_paths_from", string(r.Filters.LayerOf("include_paths")))
+	}
+	for _, u := range cfg.UnreachablePatterns() {
+		log.Warn("a configured path filter COVERS NOTHING: it is an absolute pattern anchored outside "+
+			"every library root it applies to, so nothing this run can reach will ever match it. The run "+
+			"continues; if this was meant to protect a directory, it is not protecting one",
+			"key", u.Key, "pattern", u.Pattern, "library_roots", u.Roots)
 	}
 }
 

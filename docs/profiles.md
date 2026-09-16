@@ -1,9 +1,10 @@
-# Per-job encode settings - `encode_profiles` and `bitrate_kbps`
+# Saying something different for part of a library
 
 The top-level `encoder`, `crf`, `preset`, `pixel_format`, `container_ext` and
 `bitrate_kbps` are what every file in every library root is transcoded under. This page
-is how you say something different for part of a library, and how you ask for a target
-bitrate instead of a quality target.
+is how you say something different for part of a library: different encode settings
+(`encode_profiles`), a target bitrate instead of a quality target (`bitrate_kbps`), or
+nothing at all for part of a root (`exclude_paths` and `include_paths`).
 
 Everything here is reachable from the config file and its `HOLDFAST_*` environment
 override, and from nowhere else: `run`, `serve` and `validate` gain no flags.
@@ -131,6 +132,90 @@ before this setting existed produces byte-identical encoder arguments.
 The value must be a whole number of kbps. `8000.5`, a quoted string with a unit, a
 boolean, a list, a negative, or the key with no value at all is a startup refusal naming
 the key and the value, never a silently truncated bitrate.
+
+## `exclude_paths` and `include_paths` - which paths this tool may touch
+
+<a id="path-filters"></a>
+
+```yaml
+exclude_paths:
+  - "**/Extras"            # every file under any directory named Extras, at any depth
+  - "movies/4k"            # that directory, relative to the root, and everything in it
+  - "/mnt/media/import"    # the same thing spelled absolutely
+include_paths: []          # empty: every file under the root stays eligible
+```
+
+These two keys decide which files are **offered to the pipeline at all**. They decide
+nothing about how a file is encoded, and they are the only keys here that can stop
+holdfast touching part of a library root without making that part a root of its own.
+
+Both are optional and **both default to empty**, so a configuration that names neither
+offers exactly the files it always did. An empty list means the same thing an absent key
+means: nothing is excluded, and with `include_paths` empty every file under the root
+stays eligible. That is the behaviour of every configuration written before these keys
+existed, and the reason a typo'd `include_paths` is the sharper of the two mistakes - an
+exclude pattern that matches nothing protects nothing, while an include pattern that
+matches nothing stops the whole library being scanned.
+
+**Exclude wins.** A file matched by both lists is excluded, always. The fail-safe
+direction for a tool that deletes sources is to touch fewer files, so the two keys are
+not symmetrical and a file is offered only when no exclude pattern reaches it.
+
+Both may be written at the top level and inside a `library_roots` entry. An entry that
+names one of them uses **its** value for that root instead of the top-level value, empty
+list included; an entry that does not name it inherits the top level. A filter is not a
+profile knob: editing one moves no root's profile digest and re-opens no terminal row,
+because a digest records what DECIDED a file and a filter decides whether a file is
+looked at at all.
+
+### The pattern language
+
+Patterns are [doublestar](https://github.com/bmatcuk/doublestar) globs, and a pattern is
+matched against the **whole** of a path and **never a substring** of it. `movies/tv`
+therefore does not reach `movies/tv-archive`, which is exactly what a substring filter
+(Tdarr's "file paths containing the entered input") gets wrong.
+
+- `*` matches any run of characters that are not a path separator
+- `**` matches any number of directories, and it must be **its own path component**:
+  `Extras/**` is what you want, while a mid-pattern doublestar like `Extras**` behaves
+  as `Extras*` and silently matches far less than it looks like it does
+- `?` matches one character that is not a path separator, `[class]` one character of a
+  class, and `{a,b}` either alternative
+
+A pattern that does not begin with `/` is weighed against the path that is
+**relative to the library root** containing the file (`movies/4k/x.mkv` under
+`/mnt/media`). A pattern that **does begin with** `/` is weighed against the path as
+configured (`/mnt/media/movies/4k/x.mkv`). A pattern naming a directory
+**covers everything** beneath it: the pattern is weighed against the file's own path and
+against every directory path containing it within the root, so `**/Extras` reaches the
+files inside an `Extras` directory and not merely the directory itself.
+
+A pattern that is not valid in this language is a **startup refusal** naming the key, the
+pattern and, when it came from a `library_roots` entry, that root - never a silent
+non-match for a directory the operator believes is protected. A pattern that is valid but
+anchored outside every root it applies to is **reported** as covering nothing, at startup
+and by `holdfast validate`, and refuses nothing: a filter legitimately guards a directory
+that does not exist yet.
+
+### What a filter does NOT change
+
+An excluded directory is still **listed**. The scan lists exactly the directories it
+would have listed with no filter configured and records exactly the same evidence about
+where it looked - because the ledger's retention pass may only remove a terminal row when
+this run LISTED the directory the file should be in and the file was not there. A filter
+that skipped the directory instead of its files would make every row beneath it read as a
+file that had been deleted, which would discard audit history irreversibly and hand the
+excluded subtree back to the encoder on the next scan.
+
+So an excluded file that already has a terminal row keeps it, and `holdfast export` still
+carries its record. Excluding a path is not a request to forget what was done to it.
+
+Filtering is not a way to make a scan faster: the walk is unchanged, and only the set of
+files offered to the pipeline is narrower.
+
+`holdfast validate` prints, per library root, the patterns in force, which layer supplied
+each list and how many patterns it holds. The count is a count OF PATTERNS - `validate`
+describes a configuration and walks no library, so it never counts matching files.
 
 ## Where the working file lives
 
