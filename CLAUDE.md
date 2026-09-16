@@ -127,4 +127,7 @@ bound, and the scanner's ruleset, exit codes and one setup step ·
 posture) · `docs/migration.md` the cutover from the Bash transcoder and Tdarr ·
 `docs/requeue.md` what a terminal row
 records about the configuration it was decided under, and the lever for the rows a
-configuration change cannot reason about.
+configuration change cannot reason about ·
+`docs/test-mass.md` how much of this repository is test code, what `scripts/test-mass.sh`
+counts, what was retired for grading presentation rather than behaviour, and why line
+coverage is not assertion.
