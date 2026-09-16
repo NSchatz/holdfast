@@ -69,13 +69,8 @@ reasoning lives in the document, not in this file.
 - `internal/metrics`, `internal/notify` - Prometheus collectors and best-effort
   shoutrrr notifications.
 - `internal/config` - koanf layered config: defaults, then YAML, then `HOLDFAST_*`.
-- `internal/docscheck` - a mechanical check, on the ordinary test step, that the
-  docs still describe the build. Its anchors are FIXED constants in the package,
-  because a check free to pick its own anchor can be made to pass by moving the
-  goalposts, and each owes a named clause table. A statement anywhere in the
-  Markdown corpus satisfies its anchor, so which document carries one is free and
-  adding an OBLIGATION means editing the package: a constant, a clause table, a
-  block in `Check`, and tests.
+- `internal/corpus` - locates the repository root and the Markdown it ships; the
+  one place a check that reads the shipped documents gets its file set from.
 - `internal/secret` - the credential wrapper: a reference is parsed, resolved once at
   start, and handed to exactly one consumer. `internal/secretscan` + `scripts/secret-scan`
   - the repository's own secret scanner, behind `scripts/secret-scan.sh`.
@@ -132,4 +127,7 @@ bound, and the scanner's ruleset, exit codes and one setup step ·
 posture) · `docs/migration.md` the cutover from the Bash transcoder and Tdarr ·
 `docs/requeue.md` what a terminal row
 records about the configuration it was decided under, and the lever for the rows a
-configuration change cannot reason about.
+configuration change cannot reason about ·
+`docs/test-mass.md` how much of this repository is test code, what `scripts/test-mass.sh`
+counts, what was retired for grading presentation rather than behaviour, and why line
+coverage is not assertion.

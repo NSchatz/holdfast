@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
-	"github.com/NSchatz/holdfast/internal/docscheck"
+	"github.com/NSchatz/holdfast/internal/corpus"
 	"github.com/NSchatz/holdfast/internal/engine"
 	"github.com/NSchatz/holdfast/internal/startup"
 	"github.com/NSchatz/holdfast/internal/store"
@@ -1118,7 +1118,7 @@ func TestAnalyze_IsDiscoverableTheWayEveryCommandIs(t *testing.T) {
 // TestAnalyze_IsInTheReadmeQuickStart is AC10c: the command is discoverable without
 // reading the source, in the block every other command is shown in.
 func TestAnalyze_IsInTheReadmeQuickStart(t *testing.T) {
-	root, err := docscheck.RepoRoot(".")
+	root, err := corpus.RepoRoot(".")
 	if err != nil {
 		t.Fatal(err)
 	}

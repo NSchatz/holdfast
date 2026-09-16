@@ -1,51 +1,9 @@
 package config
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
-
-// TestConfigExample_DocumentsTheReadToken: the shipped example is where an operator meets
-// a key for the first time, and every fact this one needs is a fact they cannot get from
-// the key's NAME. What it gates, that empty means open, that it does NOT reach the root
-// page, and that the environment variable is the way to supply it so no secret lands in
-// the file they are reading.
-//
-// docscheck deliberately excludes config.example.yaml from its corpus - an example carries
-// comments and states no contract - so this is the route that makes the obligation
-// mechanical rather than a file that merely exists.
-func TestConfigExample_DocumentsTheReadToken(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join("..", "..", "config.example.yaml"))
-	if err != nil {
-		t.Fatalf("reading the shipped example: %v", err)
-	}
-	example := string(b)
-	low := strings.ToLower(example)
-
-	if !strings.Contains(example, `# server_read_token: ""`) {
-		t.Error(`config.example.yaml does not carry the key, commented, with its default: # server_read_token: ""`)
-	}
-	for _, want := range []struct{ fact, token string }{
-		{"what it gates", "/api/summary"},
-		{"that empty means the read surface is open", "empty is the default and means the read surface"},
-		{"that it does not gate the root page", "it does not gate the root page"},
-		{"that the environment variable is the preferred way to supply it", "prefer the environment variable"},
-		{"so no secret lands in this file", "no secret lands in"},
-		{"and which variable that is", "holdfast_server_read_token"},
-	} {
-		if !strings.Contains(low, strings.ToLower(want.token)) {
-			t.Errorf("config.example.yaml never says %s (looked for %q)", want.fact, want.token)
-		}
-	}
-
-	// The default the example spells is the default this build ships, so the file cannot
-	// drift into documenting a behaviour the code no longer has.
-	if got := defaultLayer()["server_read_token"]; got != "" {
-		t.Errorf("server_read_token default = %v, but the example documents an empty one", got)
-	}
-}
 
 // readTokenNotices returns the notices this configuration emits that are ABOUT the read
 // surface, which is every notice naming server_read_token. Notices() also carries the

@@ -23,9 +23,8 @@ services:
     # To upgrade, resolve the digest of the release you want and change both halves:
     #   docker buildx imagetools inspect ghcr.io/nschatz/holdfast:vX.Y.Z
     #
-    # The NAME half is held against this repository's own release by
-    # scripts/release-shape-gate, and the reference is resolved against the registry by
-    # scripts/resolve-compose-image.sh on every release: docs/release.md, step 8.
+    # The reference is read by scripts/compose-image-ref and resolved against the registry
+    # by scripts/resolve-compose-image.sh on every release: docs/release.md, step 8.
     image: ghcr.io/nschatz/holdfast:v0.2.0@sha256:cb5125e1e95c93ee05256a37a8878c30349b75bb2ee2918c6e7b0ee9b4a5ec32
     # Build it yourself instead of pulling (or if the GHCR package is not readable
     # without credentials - see docs/release.md, step 8):
