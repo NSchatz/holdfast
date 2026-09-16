@@ -17,8 +17,8 @@ name: Release
 # decide "does this text publish?" were each beaten by ordinary shell (S0046 F1, F5, F7, F9,
 # F11, F12, F14, F15); the question is undecidable and has been replaced by one that is not.
 #
-# scripts/release-shape-gate (inside `make check`) decides that split rather than restating
-# it, and docs/release.md carries the record and the order.
+# docs/release.md carries the record, the order and the table of every step in the job that
+# holds the grant; the reviewer of a change to this file is what holds the split.
 #
 # This path is LIVE: v0.1.0 was published from it, so a release now moves a `:latest` that
 # real users pull.
@@ -271,11 +271,10 @@ jobs:
     permissions:
       contents: write # cut the GitHub release
       packages: write # push the image to GHCR
-    # Every step here carries an `id:`, and the gate requires it: an act in this job is
-    # identified by its declared id and the operator runbook has to name each one, so a step
-    # added to the job that can publish cannot slip past review by being spelled
-    # unrecognisably. Nothing about what a step SAYS is consulted - it is in this job, so it
-    # counts.
+    # Every step here carries an `id:`, and the operator runbook names each one: a step
+    # added to the job that can publish is reviewed by its declared id rather than by what
+    # its script says it does, so it cannot slip past by being spelled unrecognisably. What
+    # a step SAYS is not the question - it is in this job, so it counts.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         id: checkout

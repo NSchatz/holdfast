@@ -17,18 +17,17 @@
 #
 # Everything else in the release works with `${IMAGE}:${VERSION}`, which the workflow derives
 # from `github.repository`, so it is correct by construction and proves nothing about
-# docker-compose.yml. `make check` holds that file's NAME against this repository's own
-# release and refuses a reference that carries no digest or that pins the tag a release
-# moves; this is the half no offline check can cover.
+# docker-compose.yml. `make check` (scripts/check-pins.sh) refuses a reference that carries
+# no digest or that floats; this is the half no offline check can cover.
 #
-# THE REFERENCE HAS ONE READER, and it is not this script. `scripts/release-shape-gate
-# -print-compose-ref` decodes docker-compose.yml with a YAML parser and refuses anything it
-# cannot answer for (no image, more than one, unparseable); this script asks it. A second
-# reader here - a sed for `image:` and a hand-rolled quote strip - would agree with the gate
-# on today's file and disagree on a quoted or folded scalar, on a second service carrying an
-# `image:`, and on an `image:` key nested outside `services:`. That is the "one value, two
-# readers held in step by hope" shape this repository refuses for the ffmpeg pin, which is
-# parsed out of the Dockerfile rather than restated.
+# THE REFERENCE HAS ONE READER, and it is not this script. `scripts/compose-image-ref`
+# decodes docker-compose.yml with a YAML parser and refuses anything it cannot answer for
+# (no image, more than one, unparseable); this script asks it. A second reader here - a sed
+# for `image:` and a hand-rolled quote strip - would agree with that one on today's file and
+# disagree on a quoted or folded scalar, on a second service carrying an `image:`, and on an
+# `image:` key nested outside `services:`. That is the "one value, two readers held in step
+# by hope" shape this repository refuses for the ffmpeg pin, which is parsed out of the
+# Dockerfile rather than restated.
 #
 # Failure modes are distinct, named, and each exits with its own code:
 #
@@ -55,32 +54,32 @@ if [ ! -r "$compose" ]; then
   exit 3
 fi
 
-# Ask the one reader. RELEASE_SHAPE_GATE lets a caller that has already built it (the
-# self-test) hand over the binary; otherwise it is built from source here, which needs a Go
-# toolchain in THIS job - the job that runs `make check` is a different one, and its
-# `actions/setup-go` does not reach here.
+# Ask the one reader. COMPOSE_IMAGE_REF lets a caller that has already built it hand over
+# the binary; otherwise it is built from source here, which needs a Go toolchain in THIS
+# job - the job that runs `make check` is a different one, and its `actions/setup-go` does
+# not reach here.
 #
 # That preflight is the whole reason for exit 6. Without it a missing toolchain surfaces as
 # "docker-compose.yml names NO image reference", which sends the next person to read a file
 # that is perfectly correct.
-if [ -n "${RELEASE_SHAPE_GATE:-}" ]; then
-  if [ ! -x "$RELEASE_SHAPE_GATE" ]; then
-    echo "::error::resolve-compose-image: RELEASE_SHAPE_GATE is set to '$RELEASE_SHAPE_GATE', which is not an executable. That is the one reader of docker-compose.yml, and this script will not guess at the reference without it." >&2
+if [ -n "${COMPOSE_IMAGE_REF:-}" ]; then
+  if [ ! -x "$COMPOSE_IMAGE_REF" ]; then
+    echo "::error::resolve-compose-image: COMPOSE_IMAGE_REF is set to '$COMPOSE_IMAGE_REF', which is not an executable. That is the one reader of docker-compose.yml, and this script will not guess at the reference without it." >&2
     exit 6
   fi
 elif ! command -v go >/dev/null 2>&1; then
-  echo "::error::resolve-compose-image: no Go toolchain on PATH, and none was handed over in RELEASE_SHAPE_GATE." >&2
-  echo "       docker-compose.yml has exactly one reader - scripts/release-shape-gate -print-compose-ref - and building it needs Go." >&2
+  echo "::error::resolve-compose-image: no Go toolchain on PATH, and none was handed over in COMPOSE_IMAGE_REF." >&2
+  echo "       docker-compose.yml has exactly one reader - scripts/compose-image-ref - and building it needs Go." >&2
   echo "       This is a missing toolchain in THIS job, not a problem with the compose file: set up Go in the job that runs" >&2
-  echo "       this step, or build the reader earlier and pass it in RELEASE_SHAPE_GATE." >&2
+  echo "       this step, or build the reader earlier and pass it in COMPOSE_IMAGE_REF." >&2
   exit 6
 fi
 
 read_ref() {
-  if [ -n "${RELEASE_SHAPE_GATE:-}" ]; then
-    "$RELEASE_SHAPE_GATE" -root "$here" -print-compose-ref
+  if [ -n "${COMPOSE_IMAGE_REF:-}" ]; then
+    "$COMPOSE_IMAGE_REF" -root "$here"
   else
-    ( cd "$here" && go run ./scripts/release-shape-gate -root . -print-compose-ref )
+    ( cd "$here" && go run ./scripts/compose-image-ref -root . )
   fi
 }
 

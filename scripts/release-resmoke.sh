@@ -10,11 +10,10 @@
 # An unqualified `docker pull` resolves only the runner's own architecture, so the arm64
 # half would otherwise ship having been gated as a local build alone. Both are named.
 #
-# It lives in a file rather than inline in release.yml because the release-shape gate
-# identifies this step by the script it invokes, matched WHOLE. A role decided by searching
-# a step's text for a word is a role a step can claim by mentioning it (S0046 F13); a role
-# decided by "the `run:` is exactly this line" cannot be claimed by any quoting, nesting or
-# spelling, because nothing is being searched.
+# It lives in a file rather than inline in release.yml so the step invokes ONE program a
+# reviewer can read whole. A step whose `run:` is exactly one line naming its program says
+# what it does without anyone reading shell; a step carrying a body says it in whatever
+# quoting and nesting the body happens to use.
 #
 # Failure modes are distinct and each exits with its own code:
 #

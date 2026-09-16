@@ -7,12 +7,11 @@
 # handed every `docker compose pull` user an image it went on to reject.
 #
 # THE FLOATING TAG IS NOT WRITTEN HERE. It arrives as $FLOATING_TAG, declared in
-# release.yml's promotion step, because that is the value `make check` compares against
-# docker-compose.yml - and a value this script also spelled would be a second copy held in
-# step by hope, which is the shape this repository refuses for the ffmpeg pin.
+# release.yml's promotion step - and a value this script also spelled would be a second copy
+# held in step by hope, which is the shape this repository refuses for the ffmpeg pin.
 #
-# It lives in a file rather than inline in release.yml so the release-shape gate can
-# identify this step by the script it invokes, matched WHOLE. See release-resmoke.sh.
+# It lives in a file rather than inline in release.yml so the step invokes ONE program a
+# reviewer can read whole, rather than a shell body. See release-resmoke.sh.
 #
 # Failure modes are distinct and each exits with its own code:
 #
