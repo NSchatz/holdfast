@@ -217,6 +217,74 @@ func asErr[T error](err error, target *T) bool { return errors.As(err, target) }
 
 func itoa(n int) string { return strconv.Itoa(n) }
 
+// TestPathFilters_EditingAFilterReopensNoTerminalRow is the second half of [AC-11]: a
+// filter added, changed or removed with no other key moving re-opens no terminal row.
+//
+// A row is re-opened when the decision inputs it RECORDED no longer match what the
+// configuration resolves to now (store.DecisionInputs.StillMatches, which sqlite's claim
+// reads). Those inputs are a closed set of seven keys about what the encoder would
+// produce and what the bitrate guard would compare against; a filter is in none of them,
+// and must stay in none of them. A filter that entered the set would re-open every row in
+// the library the first time an operator excluded one directory - and every accepted
+// re-encode deletes its source.
+func TestPathFilters_EditingAFilterReopensNoTerminalRow(t *testing.T) {
+	base := config.Config{
+		LibraryRoots:   []string{"/mnt/tv", "/mnt/movies"},
+		VideoExts:      []string{"mkv"},
+		Encoder:        "cpu",
+		CRF:            22,
+		Preset:         "slow",
+		PixelFormat:    "auto",
+		ContainerExt:   "source",
+		MinBitrateKbps: 2500,
+	}
+	paths := []string{"/mnt/tv/show/ep.mkv", "/mnt/tv/Extras/clip.mkv", "/mnt/movies/film.mkv"}
+	recordedUnder := DecisionInputsPerPath(base)
+
+	for _, edit := range []struct {
+		name string
+		with func(c *config.Config)
+	}{
+		{"a filter added", func(c *config.Config) { c.ExcludePaths = []string{"**/Extras"} }},
+		{"a filter changed", func(c *config.Config) {
+			c.ExcludePaths = []string{"**/Featurettes"}
+			c.IncludePaths = []string{"show/**"}
+		}},
+		{"a filter on one root's own entry", func(c *config.Config) {
+			c.Roots = []config.Root{
+				{Path: "/mnt/tv", Clean: "/mnt/tv", Profile: c.TopLevelProfile(),
+					Filters: config.PathFilters{Exclude: []string{"Extras/**"}}},
+				{Path: "/mnt/movies", Clean: "/mnt/movies", Profile: c.TopLevelProfile()},
+			}
+		}},
+	} {
+		t.Run(edit.name, func(t *testing.T) {
+			edited := base
+			edit.with(&edited)
+			current := DecisionInputsPerPath(edited)
+			for _, p := range paths {
+				recorded, _ := recordedUnder(p)
+				now, _ := current(p)
+				if !recorded.StillMatches(now) {
+					t.Errorf("%s: a row decided before the filter edit no longer matches, so the next "+
+						"scan would re-open it\n  recorded: %s\n  now:      %s", p, recorded.Encode(), now.Encode())
+				}
+			}
+		})
+	}
+
+	// Anti-vacuity: an edit to a key the guards DO read re-opens, which is what the
+	// mechanism is for - so the cases above are evidence rather than a mechanism that
+	// never fires.
+	moved := base
+	moved.CRF = 23
+	recorded, _ := recordedUnder(paths[0])
+	now, _ := DecisionInputsPerPath(moved)(paths[0])
+	if recorded.StillMatches(now) {
+		t.Fatal("a crf edit re-opened nothing either, so this test could not detect a filter doing it")
+	}
+}
+
 // TestReopen_LeavesTheTwoMutableGuardsClearingAsBefore. The hardlink and
 // undo-retention-failed guards are cleared and re-derived on every pass, and the recorded
 // inputs must not change that in either direction: a stale skip is still dropped the

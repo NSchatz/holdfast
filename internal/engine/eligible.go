@@ -79,6 +79,13 @@ const (
 	// RuleNotAVideoFile is a path whose extension is not one of the configured
 	// video_exts, which is the same test the scan's enumeration applies.
 	RuleNotAVideoFile = "not-a-video-extension"
+
+	// RuleFilteredPath is a path the configured exclude_paths/include_paths filters
+	// keep out of this run. A scan reaches the same answer by not offering the file;
+	// this is that answer for a path arriving from outside, because a filter is the
+	// operator's statement about which paths this tool may touch and everything past
+	// this door is licensed to rewrite the file it was handed.
+	RuleFilteredPath = "excluded-by-path-filter"
 )
 
 // Declined is the whole of what this pipeline refuses OUTRIGHT: a path it will not claim,
@@ -255,10 +262,22 @@ func (el Eligibility) Judge(p string) (string, *Ineligible) {
 		return "", bad
 	}
 
-	if !el.rooted(resolved) {
+	root, rooted := el.rootFor(resolved)
+	if !rooted {
 		return "", &Ineligible{Rule: RuleOutsideRoots, Detail: fmt.Sprintf(
 			"%s does not lie at or beneath any configured library root (%s)",
 			spelling(p, resolved), el.rootList())}
+	}
+	// The path filters, asked of the RESOLVED path for the same reason the root check
+	// is: a submission may name an excluded tree through a link out of an included one,
+	// and the filter has to be answered against the path that would actually be
+	// rewritten. A scan reaches this answer by never offering the file.
+	if !root.Offers(resolved) {
+		return "", &Ineligible{Rule: RuleFilteredPath, Detail: fmt.Sprintf(
+			"%s is kept out of this run by the path filters in force for library root %s "+
+				"(exclude_paths: %s; include_paths: %s)",
+			spelling(p, resolved), root.Clean,
+			patternList(root.Filters.Exclude), patternList(root.Filters.Include))}
 	}
 	if InRetentionArea(resolved) {
 		return "", &Ineligible{Rule: RuleRetentionArea, Detail: fmt.Sprintf(
@@ -277,22 +296,34 @@ func (el Eligibility) Judge(p string) (string, *Ineligible) {
 	return resolved, nil
 }
 
-// rooted reports whether a RESOLVED path lies at or beneath one of the configured roots.
+// rootFor returns the configured root a RESOLVED path lies at or beneath, and whether
+// there is one. Nested roots are refused by config.Validate, so at most one root can
+// contain a path and this needs no precedence rule.
 //
 // It compares against each root's cleaned spelling and nothing else, deliberately. That
 // is the same spelling Engine.rootFor matches on when it decides which profile judges the
 // file, so a path accepted here is a path rootFor attributes to the SAME root - and a
-// submission cannot end up encoded at one root's crf while it was admitted under another
-// root's name. Where a configured root is itself a symbolic link the answer is a refusal,
-// which is the conservative direction and is what a scan reaches too: a walk does not
-// follow the link it is rooted at.
-func (el Eligibility) rooted(resolved string) bool {
+// submission cannot end up encoded at one root's crf, or weighed against another root's
+// filters, while it was admitted under a third root's name. Where a configured root is
+// itself a symbolic link the answer is a refusal, which is the conservative direction and
+// is what a scan reaches too: a walk does not follow the link it is rooted at.
+func (el Eligibility) rootFor(resolved string) (config.Root, bool) {
 	for _, r := range el.roots {
 		if r.Contains(resolved) {
-			return true
+			return r, true
 		}
 	}
-	return false
+	return config.Root{}, false
+}
+
+// patternList renders a filter list for a refusal message, stating an empty list as
+// such: "none" and an empty pair of brackets read very differently to somebody working
+// out which of their two keys refused a path.
+func patternList(patterns []string) string {
+	if len(patterns) == 0 {
+		return "none"
+	}
+	return strings.Join(patterns, ", ")
 }
 
 // rootList renders the configured roots for a refusal message. An empty list is stated as
