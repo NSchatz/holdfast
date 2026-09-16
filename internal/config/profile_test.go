@@ -387,11 +387,27 @@ func TestProfileKnobSetIsClosedAndSingleSourced(t *testing.T) {
 			t.Errorf("isProfileKnob(%q) = true - it describes the process, not a library", daemon)
 		}
 	}
-	// exclude_paths / include_paths are NOT overridable here: neither is a top-level key
-	// of this build, so there is no global value for a profile to override.
-	for _, absent := range []string{"exclude_paths", "include_paths"} {
-		if isProfileKnob(absent) || knownKeys[absent] {
-			t.Errorf("%q is treated as a knob, but this build has no such top-level key", absent)
+	// [AC-11] exclude_paths / include_paths are top-level keys an entry may carry, and
+	// they are NOT knobs. The distinction is the whole of AC-11: the digest is taken over
+	// profileKnobs, so a key outside that set is one a filter edit cannot move the digest
+	// through, however an entry writes it.
+	for _, filter := range FilterKeys() {
+		if !knownKeys[filter] {
+			t.Errorf("%q is not a top-level config key, so a root that does not set it has nothing "+
+				"to inherit", filter)
+		}
+		if !isFilterKey(filter) {
+			t.Errorf("isFilterKey(%q) = false for a key in the filter set", filter)
+		}
+		if isProfileKnob(filter) {
+			t.Errorf("isProfileKnob(%q) = true - a filter decides whether a file is looked at, not "+
+				"what happens to it, and a knob in this set moves every root's profile digest when "+
+				"it is edited", filter)
+		}
+		for _, knob := range knobs {
+			if knob == filter {
+				t.Errorf("%q is in profileKnobs, so editing it would move every root's digest", filter)
+			}
 		}
 	}
 
@@ -546,7 +562,9 @@ func TestValidate_RefusesAProfileKnobThatIsDaemonLevel(t *testing.T) {
 	// one (preserve_mtime is the one that landed while this was in flight) is covered the
 	// moment it is added rather than when somebody remembers to extend a list here.
 	for key := range knownKeys {
-		if isProfileKnob(key) || key == "library_roots" {
+		// The filter keys are accepted inside an entry by design (AC-7), so they are not
+		// part of the "refused there" rule this loop derives.
+		if isProfileKnob(key) || isFilterKey(key) || key == "library_roots" {
 			continue
 		}
 		t.Run("derived/"+key, func(t *testing.T) {
@@ -891,4 +909,178 @@ func showProfile(p Profile) string {
 		parts = append(parts, knob+"="+p.values()[i])
 	}
 	return "{" + strings.Join(parts, " ") + "}"
+}
+
+// --- path filters, resolved by the same three layers (S0086) --------------------------
+
+// TestPathFilters_AnEntryReplacesTheTopLevelValue is [AC-7]: a library_roots entry that
+// names a filter key uses ITS value for that root instead of the top-level one, empty
+// list included, and an entry that does not name the key inherits the top level, whose
+// own default is empty.
+//
+// REPLACED and not merged, deliberately. Merging would leave an operator no way to write
+// "this root, despite the global rule, is scanned whole", and a root would carry
+// protections the entry beside it does not mention - which on a delete-capable tool is
+// the configuration you cannot review.
+func TestPathFilters_AnEntryReplacesTheTopLevelValue(t *testing.T) {
+	c := loadYAML(t, `
+exclude_paths:
+  - "**/Extras"
+  - "**/Featurettes"
+include_paths:
+  - "movies/**"
+library_roots:
+  - path: /mnt/tv
+    exclude_paths:
+      - "**/Specials"
+  - path: /mnt/movies
+    exclude_paths: []
+    include_paths: []
+  - /mnt/music
+`)
+	for _, tc := range []struct {
+		root        string
+		exclude     []string
+		include     []string
+		excludeFrom Layer
+		includeFrom Layer
+	}{
+		{
+			root:        "/mnt/tv",
+			exclude:     []string{"**/Specials"},
+			include:     []string{"movies/**"},
+			excludeFrom: LayerProfile,
+			includeFrom: LayerTopLevel,
+		},
+		{
+			// The case a merge would get wrong: an entry naming the key with an EMPTY
+			// list means "nothing is filtered here", not "say nothing about it".
+			root:        "/mnt/movies",
+			exclude:     nil,
+			include:     nil,
+			excludeFrom: LayerProfile,
+			includeFrom: LayerProfile,
+		},
+		{
+			root:        "/mnt/music",
+			exclude:     []string{"**/Extras", "**/Featurettes"},
+			include:     []string{"movies/**"},
+			excludeFrom: LayerTopLevel,
+			includeFrom: LayerTopLevel,
+		},
+	} {
+		t.Run(tc.root, func(t *testing.T) {
+			r := rootByPath(t, c, tc.root)
+			if got := r.Filters.Patterns(excludePathsKey); !equalPatterns(got, tc.exclude) {
+				t.Errorf("exclude_paths in force = %v, want %v", got, tc.exclude)
+			}
+			if got := r.Filters.Patterns(includePathsKey); !equalPatterns(got, tc.include) {
+				t.Errorf("include_paths in force = %v, want %v", got, tc.include)
+			}
+			if got := r.Filters.LayerOf(excludePathsKey); got != tc.excludeFrom {
+				t.Errorf("exclude_paths came from %q, want %q", got, tc.excludeFrom)
+			}
+			if got := r.Filters.LayerOf(includePathsKey); got != tc.includeFrom {
+				t.Errorf("include_paths came from %q, want %q", got, tc.includeFrom)
+			}
+		})
+	}
+
+	// A configuration naming neither key: both lists empty, both from the built-in
+	// default, and nothing in force - which is what makes an untouched configuration
+	// behave exactly as it did before these keys existed.
+	plain := loadYAML(t, "library_roots:\n  - /mnt/tv\n")
+	r := rootByPath(t, plain, "/mnt/tv")
+	if r.Filters.InForce() {
+		t.Errorf("a configuration naming no filter has %v in force", r.Filters)
+	}
+	for _, key := range FilterKeys() {
+		if got := r.Filters.LayerOf(key); got != LayerDefault {
+			t.Errorf("%s came from %q, want the built-in default", key, got)
+		}
+	}
+}
+
+// TestPathFilters_EditingAFilterMovesNoRootsProfileDigest is [AC-11]: adding, changing or
+// removing a filter with no other key moving leaves every root's resolved profile digest
+// exactly where it was.
+//
+// The digest is a LEDGER field: every terminal row carries the digest of the profile that
+// decided that file, and a digest that moved because a filter was edited would detach
+// every existing row from the profile that decided it. A filter decides whether a file is
+// OFFERED; it decides nothing about what happens to one.
+func TestPathFilters_EditingAFilterMovesNoRootsProfileDigest(t *testing.T) {
+	const roots = `
+library_roots:
+  - path: /mnt/tv
+    crf: 20
+  - /mnt/movies
+`
+	before := loadYAML(t, roots)
+	for _, edit := range []struct {
+		name string
+		yaml string
+	}{
+		{"a filter added at the top level", roots + "exclude_paths:\n  - \"**/Extras\"\n"},
+		{"a filter added inside one entry", `
+library_roots:
+  - path: /mnt/tv
+    crf: 20
+    exclude_paths:
+      - "**/Extras"
+  - /mnt/movies
+`},
+		{"a filter changed inside one entry", `
+library_roots:
+  - path: /mnt/tv
+    crf: 20
+    exclude_paths:
+      - "**/Featurettes"
+    include_paths:
+      - "shows/**"
+  - /mnt/movies
+`},
+	} {
+		t.Run(edit.name, func(t *testing.T) {
+			after := loadYAML(t, edit.yaml)
+			if len(after.RootProfiles()) != len(before.RootProfiles()) {
+				t.Fatalf("the edit changed the root count: %d, want %d",
+					len(after.RootProfiles()), len(before.RootProfiles()))
+			}
+			for i, r := range after.RootProfiles() {
+				was := before.RootProfiles()[i]
+				if r.Profile.Digest() != was.Profile.Digest() {
+					t.Errorf("library root %s digest moved from %s to %s on a filter edit - every "+
+						"terminal row decided under the old one is now detached from the profile that "+
+						"decided it", r.Clean, was.Profile.Digest(), r.Profile.Digest())
+				}
+			}
+		})
+	}
+
+	// Anti-vacuity: the digest is not simply constant. A knob edit moves it, which is
+	// what it is for, and the cases above are therefore evidence rather than a tautology.
+	moved := loadYAML(t, `
+library_roots:
+  - path: /mnt/tv
+    crf: 21
+  - /mnt/movies
+`)
+	if moved.RootProfiles()[0].Profile.Digest() == before.RootProfiles()[0].Profile.Digest() {
+		t.Fatal("a crf edit left the digest where it was, so this test could not detect a filter moving it")
+	}
+}
+
+// equalPatterns compares two pattern lists, reading nil and empty as the same thing: an
+// absent key and a key written as an empty list both mean "no pattern".
+func equalPatterns(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

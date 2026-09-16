@@ -46,20 +46,25 @@ const (
 )
 
 // profileKnobs is THE enumeration of the knobs a library_roots entry may override, and
-// it is the only one. isProfileKnob (the acceptance check that refuses anything else
-// inside an entry) and resolveRoots (which seeds each root's profile from the top-level
-// value of every knob named here) both read it, so the set an entry is allowed to carry
-// and the set the resolver actually resolves cannot drift apart - and a knob added to
-// one without the other would be a knob an operator may write that nothing reads.
+// it is the only one. isProfileKnob (half of the acceptance check that refuses anything
+// else inside an entry) and resolveRoots (which seeds each root's profile from the
+// top-level value of every knob named here) both read it, so the set an entry is allowed
+// to carry and the set the resolver actually resolves cannot drift apart - and a knob
+// added to one without the other would be a knob an operator may write that nothing
+// reads.
 //
 // It is CLOSED. Everything else is either a typo or a key that describes the PROCESS
 // rather than a library, and both are startup refusals: silently ignoring `workers: 4`
 // inside an entry is how an operator comes to believe a root has a worker count it
 // does not.
 //
-// `exclude_paths` and `include_paths` are deliberately absent. Neither is a top-level
-// key of this build, so there is no global value for a profile to override; path
-// filtering is its own feature, not a profile of one that does not exist.
+// `exclude_paths` and `include_paths` are deliberately absent FROM THIS SET while being
+// keys an entry may carry (see filterKeys). They are resolved by the same three layers
+// and replaced whole by an entry that names them, but they are not knobs: a knob decides
+// what happens to a file, and a filter decides whether a file is looked at at all. The
+// digest below is taken over this set alone, which is what keeps a filter edit from
+// moving the digest every terminal row records and detaching each row from the profile
+// that decided it. A root's filters live in Root.Filters.
 var profileKnobs = []string{
 	"encoder", "crf", "preset", "pixel_format", "container_ext",
 	"min_bitrate_kbps", "min_savings_percent", "skip_hardlinked",
@@ -80,6 +85,13 @@ func isProfileKnob(key string) bool {
 		}
 	}
 	return false
+}
+
+// entryKeyList renders everything a library_roots entry may carry beside its path, for
+// the refusals that tell an operator what is accepted. It is derived from the two sets
+// rather than restated, so a key added to either reaches the message it is refused by.
+func entryKeyList() string {
+	return strings.Join(append(append([]string(nil), profileKnobs...), filterKeys...), ", ")
 }
 
 // rootPathKey is the one key inside an entry that is not a knob: which tree the profile
@@ -307,6 +319,11 @@ type Root struct {
 	Clean   string
 	Profile Profile
 
+	// Filters are the path filters in force for this root: which paths beneath it this
+	// run may offer to the pipeline. They are resolved by the same three layers as the
+	// profile and are deliberately NOT part of it - see profileKnobs and filters.go.
+	Filters PathFilters
+
 	// Layers says which of the three layers supplied each knob's resolved value, keyed
 	// by the knob's config key. It is what `holdfast validate` prints beside each value,
 	// so the printed configuration states not only what the inheritance produced but
@@ -432,7 +449,7 @@ func parseRootEntry(i int, item any, file string) (rootEntry, error) {
 	default:
 		return rootEntry{}, fmt.Errorf("library_roots[%d] in %s is %#v: an entry must be either a path "+
 			"(a string) or a mapping carrying %q plus any of the profile knobs (%s)",
-			i, file, item, rootPathKey, strings.Join(profileKnobs, ", "))
+			i, file, item, rootPathKey, entryKeyList())
 	}
 }
 
@@ -464,14 +481,14 @@ func parseRootMapping(i int, m map[string]any, file string) (rootEntry, error) {
 		if key == rootPathKey {
 			continue
 		}
-		if !isProfileKnob(key) {
+		if !isProfileKnob(key) && !isFilterKey(key) {
 			if knownKeys[key] {
 				return rootEntry{}, fmt.Errorf("%s sets %q, which is a DAEMON-level key: it describes the "+
 					"process, not a library, so it may only be set at the top level. A library_roots entry "+
-					"accepts %q plus: %s", where, key, rootPathKey, strings.Join(profileKnobs, ", "))
+					"accepts %q plus: %s", where, key, rootPathKey, entryKeyList())
 			}
 			return rootEntry{}, fmt.Errorf("%s has unknown key %q (typo?): a library_roots entry accepts "+
-				"%q plus: %s", where, key, rootPathKey, strings.Join(profileKnobs, ", "))
+				"%q plus: %s", where, key, rootPathKey, entryKeyList())
 		}
 		if val == nil {
 			// Neither an override nor an inherit. A profile key is "present overrides,
@@ -533,6 +550,9 @@ func resolveRoots(k *koanf.Koanf, entries []rootEntry, explicitTop map[string]bo
 			}
 		}
 		for knob, v := range e.override {
+			if isFilterKey(knob) {
+				continue
+			}
 			m[knob] = v
 			layers[knob] = LayerProfile
 		}
@@ -544,10 +564,40 @@ func resolveRoots(k *koanf.Koanf, entries []rootEntry, explicitTop map[string]bo
 			Path:    e.path,
 			Clean:   filepath.Clean(e.path),
 			Profile: p,
+			Filters: resolveFilters(k, e, explicitTop),
 			Layers:  layers,
 		})
 	}
 	return roots, nil
+}
+
+// resolveFilters produces one root's path filters under the same three layers the knobs
+// above resolve by, with one difference that is the whole of AC-7: a list is REPLACED
+// rather than merged. An entry that names a filter key takes that value for that root,
+// empty list included, and one that does not name it inherits the top level, whose own
+// default is empty.
+//
+// Merging would be the wrong reading of an operator's file on a delete-capable tool:
+// there would be no way to write "this root, despite the global rule, is scanned whole",
+// and a root would silently carry protections the entry beside it does not mention.
+func resolveFilters(k *koanf.Koanf, e rootEntry, explicitTop map[string]bool) PathFilters {
+	var f PathFilters
+	for _, key := range filterKeys {
+		patterns := stringList(k.Get(key))
+		layer := LayerDefault
+		if explicitTop[key] {
+			layer = LayerTopLevel
+		}
+		// PRESENT overrides, whatever its value; ABSENT inherits. The same discipline
+		// the knobs keep, and the reason `exclude_paths: []` inside an entry means
+		// "nothing is excluded here" rather than "say nothing about it".
+		if v, ok := e.override[key]; ok {
+			patterns = stringList(v)
+			layer = LayerProfile
+		}
+		f.set(key, patterns, layer)
+	}
+	return f
 }
 
 // decodeProfile turns a resolved knob map into a Profile. WeaklyTypedInput matches the
