@@ -18,16 +18,17 @@ against the tree, which is the failure a recorded number actually has.
 
 <!-- test-mass:begin - written by scripts/test-mass.sh; re-derive with scripts/test-mass.sh -check -->
 ```text
-commit 2d47da10e24d6dce59ff59deeb7254fedab89479
+commit e09a81963a367461c658cb209e7a30ccc3d5121e
 module github.com/NSchatz/holdfast
 production-lines 14489
-test-lines 38279
-test-to-production 2.64
+test-lines 38414
+test-to-production 2.65
 package cmd/holdfast 6143
 package internal/config 2184
+package internal/corpus 78
 package internal/diskfree 81
 package internal/encoder 127
-package internal/engine 12713
+package internal/engine 12770
 package internal/fsclass 139
 package internal/hdr 222
 package internal/heapmeasure 105
@@ -77,15 +78,46 @@ transcode-and-delete behaviour this repository exists to be trusted about. The u
 own fleet-wide `just lint` owns prose, document shape and release shape across every
 repository it holds, and `testing` T2 rules that a second copy of that grading inside a
 product suite is mass every stage session pays to read on every fix loop. That clause is why
-each row below is gone from here, and `just lint` is where the grading lives now.
+each row below is gone from here, and `just lint` is where the grading lives now. Retirement
+is decided by what a test takes as its SUBJECT and never by the directory it sat in, and two
+of the things the first row's package carried took holdfast's own Go source as their
+subject. The section after the table names them and says where each is asserted now.
 
 | retired | what it graded | lines |
 |---|---|---|
-| `internal/docscheck` (package, 58 test functions in `agreement_test.go`, `differentiator_test.go`, `docscheck_test.go`, `links_test.go`, `non_goal_library_manager_test.go`, `read_token_test.go`, `readme_plan_test.go`, `regress_0082_f7_test.go`, `swap_metadata_test.go`) | the repository's Markdown corpus: that each shipped document carried a fixed anchor, that the statement under it said the clauses a table required, that documents agreed with each other, and that links resolved | 3,707 raw |
-| `scripts/release-shape-gate` (Go command, 82 test functions in `expr_test.go`, `regress_0046_F22_test.go`, `regress_0046_F24_test.go`, `regress_0046_F26_test.go`, `regress_0046_F27_test.go`, `regress_0046_F29_test.go`, `regress_0065_test.go`, `version_test.go`, `workflow_test.go`) | the shape of `.github/workflows/release.yml`: which job held which permission, the order of the publishing steps, whether the operator runbook named every step, and whether each value a step was handed named the planning logic's output | 6,812 raw, of which 77 survive as `scripts/compose-image-ref` |
+| `internal/docscheck` (package, 57 of the 58 test functions it carried, in `agreement_test.go`, `differentiator_test.go`, `docscheck_test.go`, `links_test.go`, `non_goal_library_manager_test.go`, `read_token_test.go`, `readme_plan_test.go`, `swap_metadata_test.go`) | the repository's Markdown corpus: that each shipped document carried a fixed anchor, that the statement under it said the clauses a table required, that documents agreed with each other, and that links resolved | 3,707 raw, less the 177 of `regress_0082_f7_test.go`, which is not one of them |
+| `scripts/release-shape-gate` (Go command, 82 test functions in `expr_test.go`, `regress_0046_F22_test.go`, `regress_0046_F24_test.go`, `regress_0046_F26_test.go`, `regress_0046_F27_test.go`, `regress_0046_F29_test.go`, `regress_0065_test.go`, `version_test.go`, `workflow_test.go`) | the shape of `.github/workflows/release.yml`: which job held which permission, the order of the publishing steps, whether the operator runbook named every step, and whether each value a step was handed named the planning logic's output | 6,812 raw, of which 79 survive as `scripts/compose-image-ref` |
 | `scripts/release-shape-selftest.sh` | that the release-shape gate still bit, by defeating each of its assertions against a mutated copy of the repository | 1,809 raw |
 | `internal/config.TestConfigExample_DocumentsTheReadToken` | the comment text of `config.example.yaml` - that the shipped example spelled out what the read token gates and how to supply it | 39 raw |
 | `make release-shape`, `make release-shape-selftest`, and the CI step that ran the self-test | the invocations that put the two above on the gate | - |
+
+## What did not retire, and where it is asserted now
+
+`testing` T2 reaches prose, styling, comment density, document shape and release shape. It
+does not reach an assertion about holdfast's own Go source, and the umbrella's `just lint`
+cannot own one: it grades what every repository in the fleet has in common, not this
+package's vocabulary. Two things the retired package carried were of that kind: a test
+function whose subject was `internal/engine`'s vocabulary, and the direct assertions a
+corpus test made on the two helpers that were relocated rather than deleted. Neither is
+gone. Each is asserted now in the package whose behaviour it is about.
+
+- **Every terminal skip token is requeueable.** `internal/docscheck/regress_0082_f7_test.go`
+  (177 raw) parsed `internal/engine`'s declarations and asserted that every terminal `Skip*`
+  constant the package declares is in `engine.SkipGuards`, apart from the three mutable
+  guards `SkipGuards` is documented as omitting. A token outside that list is answered
+  `ErrUnknownGuard`, so `requeue --guard <token>` - the only lever over a verdict no
+  configuration key can move - cannot reach it, and the exclusion is permanent and silent.
+  The assertion is `internal/engine`'s `TestSkipGuards_EveryTerminalSkipTokenIsRequeueable`
+  (96 raw), which reads the same declarations and checks membership against the running
+  `SkipGuards`.
+- **The corpus helper's own behaviour.** `internal/docscheck/docscheck_test.go` asserted
+  `RepoRoot` and `Corpus` directly, inside a function that graded the shipped corpus with
+  them. The function is one of the 57 and retired with the package; the assertions on the
+  two helpers did not, because the helpers did not: they are `internal/corpus` now, and one
+  of them is on a production path, since `internal/startup`'s `ScratchCorpus` reads the set
+  `Markdown` produces. They are `internal/corpus/corpus_test.go` (96 raw): the root is the
+  module root from any directory inside it, and the corpus is a walk that reaches a document
+  at depth and leaves a vendored or VCS tree out.
 
 Two things that look like graders and are NOT, so they stayed:
 
