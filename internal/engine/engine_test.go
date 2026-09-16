@@ -32,7 +32,7 @@ import (
 	"testing"
 
 	"github.com/NSchatz/holdfast/internal/config"
-	"github.com/NSchatz/holdfast/internal/docscheck"
+	"github.com/NSchatz/holdfast/internal/corpus"
 	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
@@ -2534,7 +2534,7 @@ func TestProcessFile_StreamCopiesAttachedCoverArt(t *testing.T) {
 // pass. Parsing the declarations means the only way to add a token is to add a constant,
 // and the only way to add a constant without reding this test is to document it.
 func TestSkipVocabularyIsDocumented(t *testing.T) {
-	root, err := docscheck.RepoRoot(".")
+	root, err := corpus.RepoRoot(".")
 	if err != nil {
 		t.Fatalf("locate the repository root: %v", err)
 	}
@@ -2695,7 +2695,7 @@ func constStringValue(t *testing.T, name string, c declaredConst, depth int) str
 // would be a fact about the wire format that no check here could keep honest.
 func importedPackageDir(t *testing.T, file *ast.File, qualifier string) string {
 	t.Helper()
-	root, err := docscheck.RepoRoot(".")
+	root, err := corpus.RepoRoot(".")
 	if err != nil {
 		t.Fatalf("locate the repository root: %v", err)
 	}

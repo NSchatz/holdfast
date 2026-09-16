@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/NSchatz/holdfast/internal/docscheck"
+	"github.com/NSchatz/holdfast/internal/corpus"
 )
 
 // The shipped documentation's statement about the configurable working location,
@@ -30,14 +30,13 @@ import (
 // spares their array's drives.
 const (
 	// ScratchDocFile is where the statement lives today. It is named so a failure
-	// points somewhere, and the check is not narrowed to it: ScratchStatement is
-	// satisfied by the anchor wherever in the corpus it appears, exactly as
-	// internal/docscheck's obligations are.
+	// points somewhere, and the check is not narrowed to it: the statement is
+	// satisfied by the anchor wherever in the corpus it appears.
 	ScratchDocFile = "docs/scratch.md"
 
-	// AnchorScratchBenefit introduces the statement. It is a fixed anchor for the
-	// reason docscheck's are fixed: a check free to pick its own anchor is a check
-	// that can be made to pass by moving the goalposts.
+	// AnchorScratchBenefit introduces the statement. The anchor is a FIXED constant,
+	// because a check free to pick its own anchor is a check that can be made to pass
+	// by moving the goalposts.
 	AnchorScratchBenefit = "scratch-benefit"
 
 	// ScratchClaimAllow is the marker a line must carry to quote a forbidden claim
@@ -168,11 +167,11 @@ func CheckNoSourceDriveClaim(files []string) ([]string, error) {
 // WALK and not a list, so a claim moved into a document that did not exist when
 // this was written is still caught.
 func ScratchCorpus(dir string) ([]string, error) {
-	root, err := docscheck.RepoRoot(dir)
+	root, err := corpus.RepoRoot(dir)
 	if err != nil {
 		return nil, err
 	}
-	return docscheck.Corpus(root)
+	return corpus.Markdown(root)
 }
 
 // anchoredSection returns the text under an HTML anchor, up to the next anchor or
