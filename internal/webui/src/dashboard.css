@@ -210,13 +210,28 @@
     min-height: var(--size-tap); min-width: var(--size-tap);
     transition: border-color var(--motion-fast) linear, background-color var(--motion-fast) linear;
   }
-  button:hover:not(:disabled) { border-color: var(--accent); }
+  /* The HOVER affordance, and it is the same one for every control that takes a pointer:
+     the edge moves to the accent. It reaches the text fields as well as the buttons because
+     clause C7 asks every interactive component to render the state, and a field that looked
+     exactly the same under the pointer as away from it was rendering none. No value here is
+     new - it is the edge treatment the buttons already carried, on the controls beside
+     them. */
+  button:hover:not(:disabled),
+  .controls input:hover:not(:disabled) { border-color: var(--accent); }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg);
     font-weight: 600; }
+  /* The primary button already WEARS the accent, so the rule above moves nothing on it and
+     it was the one control with no hover state at all. Its affordance is the same move one
+     step further into the link role, which is the page's other declared blue: the fill
+     darkens under the pointer and the label keeps its own surface colour. */
+  button.primary:hover:not(:disabled) { background: var(--link); border-color: var(--link); }
   /* A disabled control is told apart by its DASHED edge, not by being faded: an
      opacity would take its text below the contrast floor and would say nothing at
-     all with the colours collapsed. */
-  button:disabled { color: var(--disabled); background: var(--panel);
+     all with the colours collapsed. The text fields take the same treatment for the same
+     reason the hover rule reaches them: a field a reader cannot type into has to look like
+     one, and this is the treatment the page already had for exactly that. */
+  button:disabled,
+  .controls input:disabled { color: var(--disabled); background: var(--panel);
     border-style: dashed; border-color: var(--disabled); cursor: not-allowed; }
   #msg { font-size: var(--fs-sm); color: var(--muted); min-height: var(--sp-5); }
   #msg.err { color: var(--bad); }
@@ -580,6 +595,12 @@
      the whole thing the offer owes. */
   .source-offer { margin: var(--sp-3) 0 0; }
   .source-offer a { color: var(--link); overflow-wrap: anywhere; }
+  /* The offer's own hover affordance: the underline it already draws, thickened to the
+     width the focus ring uses. It is the one link on this page set as prose rather than as
+     a mark, so it takes the treatment prose links take, and it changes no colour - the
+     displayed URL is what discharges the section 13 offer and its contrast is measured
+     where it rests. */
+  .source-offer a:hover { text-decoration-thickness: var(--bw-focus); }
   /* The mark is drawn in front of the URL, never instead of it: the displayed URL is
      what discharges the section 13 offer. It is decoration, so it takes the link's own
      colour and carries no meaning the text beside it does not. */

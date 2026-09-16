@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -183,6 +184,24 @@ func (s *fixtureServer) routes() http.Handler {
 			_, _ = w.Write([]byte(`{"started":true}`))
 		})
 	}
+	// The harness's own answer to "which fixture scenarios do you serve". A grader that has
+	// to measure EVERY view cannot carry a list of them: a list agrees with the fixture
+	// directory the day it is written and disagrees with it the day a fixture is added, and
+	// the grader would then report a full sweep it never took. This reports the keys
+	// loadFixtures actually built its map from, so the set is the harness's and the grader
+	// only reads it - and a harness that says it serves nothing is a refusal the grader owes
+	// rather than a pass it may take.
+	mux.HandleFunc("/e2e/scenarios", func(w http.ResponseWriter, _ *http.Request) {
+		names := make([]string, 0, len(s.snapshots))
+		for name := range s.snapshots {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		out, _ := json.Marshal(map[string][]string{"scenarios": names})
+		_, _ = w.Write(out)
+	})
+
 	// The one endpoint that is the TEST's, not the page's: it arms the refusal above, for
 	// the client that asked and no other.
 	mux.HandleFunc("/e2e/control-status", func(w http.ResponseWriter, r *http.Request) {

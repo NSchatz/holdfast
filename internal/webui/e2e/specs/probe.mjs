@@ -744,6 +744,255 @@ function chromed() {
   return out;
 }
 
+// --- interface-craft C4: depth, double separation and the coloured left strip -------------
+//
+// Everything below is a READING and decides nothing; the three predicates are in
+// graders.mjs. Each reading is the engine's own - the computed shadow after the cascade,
+// the border the engine painted on each of an element's four sides, the background it
+// actually filled, and the boxes the layout produced - so a later rule that changes only
+// what is PAINTED is caught here while every declaration in the source stays as written.
+
+// AT REST is the condition clause C4's first sentence is about: a view draws at most one
+// shadow depth, and a focus ring or a hover elevation is not a second depth because no
+// reader ever sees it at the same time as the first. So the reading records what the engine
+// says is hovered, focused or being pressed AT THE MOMENT IT WAS TAKEN, and the grader
+// refuses a reading taken while any of them was true. html and body are excluded on
+// purpose: they match :hover whenever the pointer is anywhere over the document at all,
+// which is a fact about the pointer and not about an element's own treatment.
+function atRest() {
+  const skip = new Set([document.documentElement, document.body]);
+  const names = (sel) => Array.prototype.slice.call(document.querySelectorAll(sel))
+    .filter(function (el) { return !skip.has(el); }).map(where);
+  const a = document.activeElement;
+  return {
+    hovered: names(":hover"),
+    active: names(":active"),
+    focused: a && a !== document.body && a !== document.documentElement ? where(a) : "",
+  };
+}
+
+// paintedBorders is the border the engine actually painted on each side: a side with no
+// style, no width or a fully transparent colour paints nothing and is absent from the
+// answer. What is written in the stylesheet is not consulted.
+function paintedBorders(cs) {
+  const out = {};
+  for (const side of ["top", "right", "bottom", "left"]) {
+    const S = side[0].toUpperCase() + side.slice(1);
+    const style = cs["border" + S + "Style"];
+    if (style === "none" || style === "hidden") continue;
+    const width = parseFloat(cs["border" + S + "Width"]) || 0;
+    if (width <= 0) continue;
+    const c = parseColor(cs["border" + S + "Color"]);
+    if (!c || c.a <= 0.01) continue;
+    out[side] = { style: style, width: width, colour: rgbText(c) };
+  }
+  return out;
+}
+
+// ownSurface is the background an element paints ITSELF, and null when it paints none. The
+// distinction is the whole of C4's second clause: an element that fills no background of
+// its own IS the canvas behind it at that point, and a bordered panel against the canvas is
+// figure and ground rather than two surfaces told apart twice.
+function ownSurface(cs) {
+  const c = parseColor(cs.backgroundColor);
+  if (!c || c.a <= 0.01) return null;
+  return rgbText(c);
+}
+
+// SECTIONING is the roles the accessibility tree reports for a region of the page. An
+// element is a REGION for this clause when it carries one of them AND a name - which is
+// what the page's own <section aria-labelledby> pairs are - or when it paints chrome of its
+// own: a visible border or a shadow. The second limb is what keeps the clause about what is
+// DRAWN rather than about which elements happen to be landmarks.
+const SECTIONING = "main, section, article, aside, nav, header, footer, form, " +
+  "[role=region], [role=main], [role=complementary], [role=navigation], [role=banner], " +
+  "[role=contentinfo], [role=form], [role=search]";
+
+function namedSection(el) {
+  if (!el.matches(SECTIONING)) return false;
+  if ((el.getAttribute("aria-label") || "").trim() !== "") return true;
+  const by = el.getAttribute("aria-labelledby");
+  if (!by) return false;
+  for (const id of by.split(/\s+/)) {
+    const t = document.getElementById(id);
+    if (t && visText(t) !== "") return true;
+  }
+  return false;
+}
+
+// hasNonColourSignal answers C4's third clause: whether the element says what it says by
+// something other than the colour of a strip down its left edge - rendered text of its own
+// or in a descendant, a drawing, or an accessible name the engine would announce.
+function hasNonColourSignal(el) {
+  const text = visText(el);
+  const mark = el.querySelector("svg, img, canvas, picture, video") ||
+    (el.matches("svg, img, canvas, picture, video") ? el : null);
+  const name = (el.getAttribute("aria-label") || el.getAttribute("title") || "").trim();
+  return { text: text.slice(0, 60), hasText: text !== "", hasMark: !!mark, name: name };
+}
+
+// ornament is the whole of clause C4's reading, taken in ONE pass over the rendered
+// document. Its one argument is the set of element INDICES the accessibility tree reported
+// with an interactive role, handed in by the driver: a control's own edge is not a region
+// separation, and which elements are controls is the engine's answer rather than a
+// selector's.
+function ornament(interactive) {
+  const all = Array.prototype.slice.call(document.querySelectorAll("*"));
+  const order = new Map();
+  for (let i = 0; i < all.length; i++) order.set(all[i], i);
+  const isControl = new Set(interactive || []);
+
+  const shadows = [], regions = [];
+  const strips = [];
+  for (const el of all) {
+    if (!isRendered(el)) continue;
+    const cs = getComputedStyle(el);
+    const shadow = cs.boxShadow && cs.boxShadow !== "none" ? cs.boxShadow : "";
+    const sides = paintedBorders(cs);
+    const sideNames = Object.keys(sides);
+    if (shadow) shadows.push({ what: where(el), shadow: shadow });
+
+    // The left-strip subject: a left edge painted in a colour none of the other painted
+    // edges carries. An element whose ONLY painted edge is the left one is the clearest
+    // case of it and is included by the same test.
+    if (sides.left) {
+      const others = [];
+      for (const side of ["top", "right", "bottom"]) if (sides[side]) others.push(sides[side].colour);
+      if (others.indexOf(sides.left.colour) < 0) {
+        const signal = hasNonColourSignal(el);
+        strips.push({ what: where(el), left: sides.left.colour, others: others,
+          lone: others.length === 0, text: signal.text, hasText: signal.hasText,
+          hasMark: signal.hasMark, name: signal.name,
+          control: isControl.has(order.get(el)) });
+      }
+    }
+
+    if (sideNames.length === 0 && shadow === "" && !namedSection(el)) continue;
+    regions.push({ index: order.get(el), what: where(el), sides: sides, shadow: shadow,
+      surface: ownSurface(cs), section: namedSection(el),
+      control: isControl.has(order.get(el)) });
+  }
+
+  // NEIGHBOURING is adjacent siblings inside one container, and which edges FACE each other
+  // is decided from the boxes the layout produced rather than from the writing mode or from
+  // the order of the markup. A pair the engine laid out overlapping, or wrapped onto
+  // another line, has no single facing edge and is reported as unresolved rather than
+  // silently dropped.
+  const inRegion = new Set(regions.map(function (r) { return r.index; }));
+  const byIndex = new Map();
+  for (const r of regions) byIndex.set(r.index, r);
+  const pairs = [], unresolved = [];
+  for (const el of all) {
+    const next = el.nextElementSibling;
+    if (!next || !isRendered(el) || !isRendered(next)) continue;
+    const ai = order.get(el), bi = order.get(next);
+    if (!inRegion.has(ai) && !inRegion.has(bi)) continue;
+    if (isControl.has(ai) || isControl.has(bi)) continue;
+    const ra = el.getBoundingClientRect(), rb = next.getBoundingClientRect();
+    const ca = getComputedStyle(el), cb = getComputedStyle(next);
+    const A = byIndex.get(ai) || { sides: paintedBorders(ca), surface: ownSurface(ca), what: where(el) };
+    const B = byIndex.get(bi) || { sides: paintedBorders(cb), surface: ownSurface(cb), what: where(next) };
+    let axis = "", aEdge = "", bEdge = "";
+    if (rb.top >= ra.bottom - 1) { axis = "vertical"; aEdge = "bottom"; bEdge = "top"; }
+    else if (rb.left >= ra.right - 1) { axis = "horizontal"; aEdge = "right"; bEdge = "left"; }
+    else if (ra.left >= rb.right - 1) { axis = "horizontal"; aEdge = "left"; bEdge = "right"; }
+    if (axis === "") { unresolved.push({ a: where(el), b: where(next) }); continue; }
+    pairs.push({ a: A.what, b: B.what, axis: axis,
+      aEdge: aEdge, bEdge: bEdge,
+      aBorder: A.sides[aEdge] || null, bBorder: B.sides[bEdge] || null,
+      aSurface: A.surface, bSurface: B.surface,
+      aIsRegion: inRegion.has(ai), bIsRegion: inRegion.has(bi) });
+  }
+
+  return { rest: atRest(), shadows: shadows, regions: regions, pairs: pairs,
+    strips: strips, unresolved: unresolved, elements: all.length };
+}
+
+// --- interface-craft C7: one component in one state -----------------------------------
+//
+// STATE_PROPERTIES is what "renders differently" is decided over: the properties an
+// engine changes when a control enters a state, each read AFTER the cascade. It is a
+// closed list on purpose - a comparison over every computed property would report a
+// difference for a layout the state happened to reflow - and every one of them is
+// something a reader can see.
+const STATE_PROPERTIES = ["color", "backgroundColor", "backgroundImage",
+  "borderTopColor", "borderRightColor", "borderBottomColor", "borderLeftColor",
+  "borderTopStyle", "borderRightStyle", "borderBottomStyle", "borderLeftStyle",
+  "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
+  "outlineStyle", "outlineWidth", "outlineColor", "outlineOffset",
+  "boxShadow", "opacity", "textDecorationLine", "textDecorationColor",
+  "textDecorationThickness", "textDecorationStyle",
+  "fontWeight", "fontStyle", "transform", "filter", "visibility"];
+
+// stateOf is one component instance's rendered appearance right now, plus the pseudo-class
+// the engine says it is in. The pseudo-class matters: a cell that claims to have entered
+// :focus-visible and did not is a cell that measured the default twice, and only the
+// engine can say which it was.
+function stateOf(index) {
+  const all = Array.prototype.slice.call(document.querySelectorAll("*"));
+  const el = all[index];
+  if (!el) return { missing: true };
+  const cs = getComputedStyle(el);
+  const props = {};
+  for (const p of STATE_PROPERTIES) props[p] = String(cs[p]);
+  const r = el.getBoundingClientRect();
+  return { missing: false, what: where(el), props: props,
+    rendered: isRendered(el), width: r.width, height: r.height,
+    matches: {
+      hover: el.matches(":hover"), active: el.matches(":active"),
+      focus: el.matches(":focus"), focusVisible: el.matches(":focus-visible"),
+      disabled: el.matches(":disabled"),
+    },
+    disabledProperty: "disabled" in el ? !!el.disabled : null };
+}
+
+// componentsOf turns the element indices the driver derived into the readings the grouping
+// runs over. Nothing here groups anything: the key and the checks are in graders.mjs.
+function componentsOf(indices) {
+  const all = Array.prototype.slice.call(document.querySelectorAll("*"));
+  const out = [];
+  for (const i of indices || []) {
+    const el = all[i];
+    if (!el) { out.push({ index: i, missing: true }); continue; }
+    const cls = (el.getAttribute("class") || "").trim();
+    out.push({ index: i, missing: false, what: where(el),
+      tag: el.tagName.toLowerCase(), type: el.getAttribute("type") || "",
+      classes: cls === "" ? [] : cls.split(/\s+/).slice().sort(),
+      rendered: isRendered(el),
+      canDisable: "disabled" in el,
+      disabled: "disabled" in el ? !!el.disabled : false });
+  }
+  return out;
+}
+
+// tabIndexOf reports the element the engine currently focuses, by the same index
+// componentsOf uses. It is read after a REAL key press and is the only honest answer to
+// what Tab moved: a KeyboardEvent constructed in the page is untrusted and moves nothing.
+function focusedIndex() {
+  const a = document.activeElement;
+  if (!a || a === document.body || a === document.documentElement) return -1;
+  return Array.prototype.slice.call(document.querySelectorAll("*")).indexOf(a);
+}
+
+// tagNames is the document's elements in the order querySelectorAll walks them. The driver
+// cross-checks it against the tree the DevTools protocol returned, so an index computed on
+// one side and used on the other cannot quietly mean two different elements.
+function tagNames() {
+  return Array.prototype.slice.call(document.querySelectorAll("*"))
+    .map(function (el) { return el.tagName.toLowerCase(); });
+}
+
+// densityMechanism applies the way the record says a density is entered, and reports what
+// it did. "the document as served" changes nothing, which is the honest answer for a
+// surface that builds one density and offers no switch.
+function applyDensity(attr, value) {
+  const de = document.documentElement;
+  if (!attr) return { applied: "the document as served" };
+  if (value === null) de.removeAttribute(attr);
+  else de.setAttribute(attr, value);
+  return { applied: attr + "=" + JSON.stringify(value) };
+}
+
 function rendered() {
   const sr = document.getElementById("sr-status");
   return !!sr && sr.textContent.trim() !== "";
@@ -757,6 +1006,8 @@ return {
   fonts: fonts, shadows: shadows, motion: motion, painted: painted,
   figures: figures, elapsedValues: elapsedValues, controls: controls,
   hierarchy: hierarchy, chromed: chromed,
+  ornament: ornament, stateOf: stateOf, componentsOf: componentsOf,
+  focusedIndex: focusedIndex, tagNames: tagNames, applyDensity: applyDensity,
   connText: connText, rendered: rendered,
   bodyText: function () { return document.body.innerText; },
   bodyTextWithoutTheLiveClock: bodyTextWithoutTheLiveClock,

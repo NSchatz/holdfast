@@ -112,7 +112,7 @@ const WORKERS = Number(process.env.HOLDFAST_E2E_WORKERS || 0) ||
 
 // The specs that set up their own theme, viewport and preference. They run once, under the
 // `engine` project, and are ignored by the per-theme ones.
-const PAGE_DRIVEN = /(conventions|a11y|states|motion|policy|mutations|inert|docs|alignment|craft)\.spec\.mjs$/;
+const PAGE_DRIVEN = /(conventions|a11y|states|motion|policy|mutations|inert|docs|alignment|craft|depth|statematrix)\.spec\.mjs$/;
 
 export default defineConfig({
   testDir: "./specs",

@@ -485,6 +485,350 @@ export function gradeContainerEarnsItsChrome(s) {
   return out;
 }
 
+// --- interface-craft C4: ornament has a ceiling -------------------------------------------
+//
+// Three clauses, three predicates, all decided from the reading probe.mjs took off the
+// ENGINE and from nothing else. None of them may pass by measuring nothing: a view with no
+// region and a run with no view are both FAILURES here and are named as such, because a
+// grader that read no element is the cheapest wrong green this suite can produce.
+
+// Clause C4's first sentence, and the condition it is only true under. A view draws at most
+// one shadow depth AT REST: a focus ring or a hover elevation is not a second depth, because
+// no reader meets it beside the first. So a reading taken while anything was hovered,
+// focused or being pressed is REFUSED rather than counted - a grader that measured a hovered
+// page would report a depth the page does not have, and one that quietly tolerated it would
+// be measuring whatever the pointer last touched.
+export function gradeOneShadowDepth(view, o) {
+  const out = [];
+  if (!o || !o.rest) return [`interface-craft C4 (AC-1): ${view} produced no reading at all`];
+  const busy = [];
+  if (o.rest.hovered.length) busy.push(`hovered: ${o.rest.hovered.join(", ")}`);
+  if (o.rest.active.length) busy.push(`being pressed: ${o.rest.active.join(", ")}`);
+  if (o.rest.focused) busy.push(`focused: ${o.rest.focused}`);
+  if (busy.length) {
+    out.push(`interface-craft C4 (AC-2): ${view} was not measured AT REST (${busy.join("; ")}), so a focus ring or a hover elevation could be counted as a second shadow depth`);
+  }
+  const byValue = new Map();
+  for (const s of o.shadows || []) {
+    if (!byValue.has(s.shadow)) byValue.set(s.shadow, s.what);
+  }
+  if (byValue.size > 1) {
+    const said = [...byValue.entries()].map(([value, what]) => `"${value}" (on ${what})`).join(" and ");
+    out.push(`interface-craft C4 (AC-1): ${view} draws ${byValue.size} distinct shadow depths at rest: ${said}. The clause allows one`);
+  }
+  return out;
+}
+
+// Clause C4's second sentence: a region is separated from its neighbour by a border OR a
+// surface change, never both.
+//
+// The reading of "neighbour" is the spec's: adjacent siblings inside one container, with
+// the facing edges decided from the boxes the layout produced. The reading of "surface
+// change" is the refinement that makes the clause decidable, and it follows from the same
+// spec's ruling that a region's separation from the page canvas is FIGURE AND GROUND: a
+// neighbour that fills no background of its own IS the canvas at that point, so a bordered
+// panel beside it is separated once, not twice. Two surfaces both painted and both
+// different, with a border on the edge between them, is the double separation the clause
+// refuses - and it is the only thing this reports.
+export function gradeNeighboursAreSeparatedOnce(view, o) {
+  const out = [];
+  if (!o) return [`interface-craft C4 (AC-3): ${view} produced no reading at all`];
+  for (const p of o.pairs || []) {
+    const border = p.aBorder || p.bBorder;
+    if (!border) continue;
+    if (p.aSurface === null || p.bSurface === null) continue;
+    if (p.aSurface === p.bSurface) continue;
+    const drawn = [];
+    if (p.aBorder) drawn.push(`${p.a} paints its ${p.aEdge} edge ${p.aBorder.width}px ${p.aBorder.style} ${p.aBorder.colour}`);
+    if (p.bBorder) drawn.push(`${p.b} paints its ${p.bEdge} edge ${p.bBorder.width}px ${p.bBorder.style} ${p.bBorder.colour}`);
+    out.push(`interface-craft C4 (AC-3): in ${view} the neighbours ${p.a} and ${p.b} are separated TWICE - by a border (${drawn.join("; ")}) and by a surface change (${p.a} fills ${p.aSurface}, ${p.b} fills ${p.bSurface}). The clause allows one or the other`);
+  }
+  return out;
+}
+
+// Clause C4's third sentence: no element carries a coloured left-border strip as its ONLY
+// state signal. The subject is an element whose left edge is painted in a colour none of
+// its other painted edges carries - a lone left rule included - and it passes when the same
+// thing is also said in rendered text, by a mark that is not a colour, or by the accessible
+// name the engine would announce.
+export function gradeNoColourOnlyLeftStrip(view, o) {
+  const out = [];
+  if (!o) return [`interface-craft C4 (AC-4): ${view} produced no reading at all`];
+  for (const s of o.strips || []) {
+    if (s.hasText || s.hasMark || String(s.name || "").trim() !== "") continue;
+    const others = s.lone ? "no other painted edge" : `its other edges (${s.others.join(", ")})`;
+    out.push(`interface-craft C4 (AC-4): in ${view} ${s.what} paints a left-side border ${s.left} against ${others}, and carries no rendered text, no non-colour mark and no accessible name saying the same thing. A colour is not a state signal on its own`);
+  }
+  return out;
+}
+
+// The anti-vacuity half of C4, and the reason the three above can be trusted at all. A run
+// that measured no view, or a view in which no region and no neighbouring pair resolved, has
+// decided nothing - and a grader that decided nothing must never exit zero.
+export function gradeC4MeasuredSomething(measured) {
+  if (!measured || measured.length === 0) {
+    return ["interface-craft C4 (AC-6): the harness served NO view at all, so every clause in C4 was decided over nothing"];
+  }
+  const out = [];
+  for (const m of measured) {
+    if (m.regions === 0) {
+      out.push(`interface-craft C4 (AC-6): ${m.view} rendered no region at all (no element carried a named sectioning role, a painted border or a shadow), so C4 was decided over nothing there`);
+    }
+    if (m.pairs === 0) {
+      out.push(`interface-craft C4 (AC-6): ${m.view} resolved no neighbouring pair at all, so the second clause asserted nothing there`);
+    }
+  }
+  return out;
+}
+
+// --- interface-craft C7: components ship their whole state matrix --------------------------
+
+// The seven states the clause names, in the order a report lists them.
+export const C7_STATES = ["default", "hover", "focus-visible", "active", "disabled", "loading", "error"];
+
+// The four that are REACHABLE at the engine for anything the tree calls interactive and the
+// engine puts in the tab order. They may never be declared away; only disabled, loading and
+// error may, and only with a reason.
+export const C7_ALWAYS_REACHABLE = ["default", "hover", "focus-visible", "active"];
+
+// The two values a state entry resolves to.
+export const PROVED = "proved";
+export const NOT_APPLICABLE = "not applicable";
+
+// componentKey is the grouping, and it deliberately does NOT carry the role. Two elements
+// the engine reports with different roles landing in one group is a refusal this grader owes
+// (AC-8), and a key that carried the role would make that refusal impossible to fire - a
+// check that cannot fail is not a check. Everything in the key is read off the served
+// document at the engine: the element's tag, its type attribute where it has one, and the
+// classes the cascade selects it by.
+export function componentKey(c) {
+  let k = c.tag;
+  if (c.type) k += `[type=${c.type}]`;
+  for (const cls of c.classes || []) k += `.${cls}`;
+  return k;
+}
+
+// groupComponents turns the derived inventory into the components a matrix is kept for: one
+// group per key, each carrying every instance and the one that will be graded. The graded
+// instance is the first that REACHED THE SCREEN, because a state entered on an element
+// nobody can see is a state nobody proved.
+export function groupComponents(inventory) {
+  const groups = new Map();
+  for (const c of inventory || []) {
+    const key = componentKey(c);
+    if (!groups.has(key)) groups.set(key, { key, members: [], roles: new Set(), graded: null });
+    const g = groups.get(key);
+    g.members.push(c);
+    g.roles.add(c.role);
+    if (g.graded === null && c.rendered) g.graded = c;
+  }
+  return [...groups.values()].map((g) => ({ key: g.key, members: g.members,
+    count: g.members.length, roles: [...g.roles].sort(), graded: g.graded }));
+}
+
+// Clause C7's inventory, and the two ways it can be wrong. Nothing here is read from a
+// hand-written list: `inventory` is every element the accessibility tree reported with an
+// interactive role AND the engine placed in the tab order, and `strays` is everything the
+// tab order reached that the tree does NOT call interactive - a control a keyboard can get
+// to that no component owns, which is exactly how a control escapes a state matrix.
+export function gradeInventoryIsWholeAndGrouped(inventory, strays, groups) {
+  const out = [];
+  if (!inventory || inventory.length === 0) {
+    return ["interface-craft C7 (AC-9): the accessibility tree and the tab order between them derived NO interactive component at all, so the whole state matrix was decided over nothing"];
+  }
+  for (const s of strays || []) {
+    out.push(`interface-craft C7 (AC-8): the engine places ${s.what} in the tab order and the accessibility tree does not report it with an interactive role (it reports "${s.role || "none"}"), so it falls into no reported group and no state matrix is kept for it`);
+  }
+  const accounted = new Set();
+  for (const g of groups || []) {
+    if (g.roles.length > 1) {
+      out.push(`interface-craft C7 (AC-8): the group "${g.key}" holds elements the engine reports with ${g.roles.length} different roles (${g.roles.join(", ")}): ${g.members.map((m) => `${m.what} is a ${m.role}`).join(", ")}. A grouping that puts two roles together collapses the inventory`);
+    }
+    if (!g.graded) {
+      out.push(`interface-craft C7 (AC-8): the group "${g.key}" has ${g.count} member(s) and not one of them reached the screen, so no instance of it could be graded`);
+    }
+    for (const m of g.members) accounted.add(m.index);
+  }
+  for (const c of inventory) {
+    if (!accounted.has(c.index)) {
+      out.push(`interface-craft C7 (AC-8): the derived component ${c.what} falls into no reported group`);
+    }
+  }
+  return out;
+}
+
+// --- the committed record ------------------------------------------------------------------
+//
+// docs/state-matrix.md carries one entry per component per state and the density set the
+// surface builds. It is parsed as the two Markdown tables it is - the columns are named in
+// the header row, so a table that grew a column does not silently shift every reading - and
+// a record this parser cannot read is a failure, never an empty record that passes.
+
+function tableRows(text, firstColumn) {
+  const lines = String(text).split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const head = lines[i].trim();
+    if (!head.startsWith("|")) continue;
+    const cols = head.split("|").slice(1, -1).map((c) => c.trim().toLowerCase());
+    if (cols[0] !== firstColumn) continue;
+    const rows = [];
+    for (let j = i + 2; j < lines.length; j++) {
+      const line = lines[j].trim();
+      if (!line.startsWith("|")) break;
+      rows.push(line.split("|").slice(1, -1).map((c) => c.trim()));
+    }
+    return { columns: cols, rows };
+  }
+  return null;
+}
+
+export function parseStateMatrixRecord(text) {
+  const densities = tableRows(text, "density");
+  const components = tableRows(text, "component");
+  const problems = [];
+  if (!densities) problems.push("the record carries no density table (a table whose first column is `density`)");
+  if (!components) problems.push("the record carries no component table (a table whose first column is `component`)");
+  const out = { densities: [], entries: [], problems };
+  for (const r of (densities && densities.rows) || []) {
+    out.densities.push({ name: r[0], entered: r[1] || "" });
+  }
+  for (const r of (components && components.rows) || []) {
+    out.entries.push({ component: r[0], state: r[1], verdict: (r[2] || "").toLowerCase(), why: r[3] || "" });
+  }
+  if (out.densities.length === 0) problems.push("the record declares no density at all");
+  if (out.entries.length === 0) problems.push("the record declares no state entry at all");
+  return out;
+}
+
+// Clause C7 over the record itself: every derived component is named in it, every named
+// component carries an entry for each of the seven states, each entry resolves to proved or
+// to not applicable WITH a reason, and the four states that are reachable at the engine for
+// anything focusable are never declared away.
+export function gradeRecordCoversEveryComponent(record, groups) {
+  const out = record.problems.map((p) => `interface-craft C7 (AC-11): ${p}`);
+  const named = new Set(record.entries.map((e) => e.component));
+  for (const g of groups || []) {
+    if (!named.has(g.key)) {
+      out.push(`interface-craft C7 (AC-10): the derived component "${g.key}" (${g.count} instance(s), e.g. ${g.graded ? g.graded.what : "none on screen"}) is named nowhere in the record, so a control entered the surface without entering the matrix`);
+    }
+  }
+  const keys = new Set((groups || []).map((g) => g.key));
+  for (const component of named) {
+    if (!keys.has(component)) {
+      out.push(`interface-craft C7 (AC-10): the record keeps a matrix for "${component}", which the engine derives nowhere on this surface. A record that outlives its component records nothing`);
+    }
+    const seen = new Map();
+    for (const e of record.entries) {
+      if (e.component !== component) continue;
+      seen.set(e.state, e);
+    }
+    for (const state of C7_STATES) {
+      const e = seen.get(state);
+      if (!e) {
+        out.push(`interface-craft C7 (AC-11): the record gives "${component}" no entry for ${state}`);
+        continue;
+      }
+      if (e.verdict !== PROVED && e.verdict !== NOT_APPLICABLE) {
+        out.push(`interface-craft C7 (AC-11): the record answers "${component}" / ${state} with "${e.verdict}"; the only two answers are "${PROVED}" and "${NOT_APPLICABLE}"`);
+        continue;
+      }
+      if (e.verdict === NOT_APPLICABLE && String(e.why).trim().split(/\s+/).filter(Boolean).length < 4) {
+        out.push(`interface-craft C7 (AC-11): the record declares "${component}" / ${state} not applicable and gives no reason ("${e.why}"); a state declared away without a sentence saying why is a state nobody decided`);
+      }
+      if (e.verdict === NOT_APPLICABLE && C7_ALWAYS_REACHABLE.includes(state)) {
+        out.push(`interface-craft C7 (AC-12): the record declares "${component}" / ${state} not applicable. That state is reachable at the engine for anything the tree calls interactive and the engine puts in the tab order; only disabled, loading and error may be declared away`);
+      }
+    }
+  }
+  return out;
+}
+
+// Clause C7's proof, and the whole point of grading it at the engine: a state DECLARED
+// proved was entered for real, the component rendered in it, and what it rendered differs
+// from its default in at least one property a reader can see. The three failures are named
+// apart - not entered, not rendered, not distinct - because they are three different defects
+// and a report that ran them together would send a reader to the wrong one.
+export function gradeProvedStatesRenderApart(cells) {
+  const out = [];
+  if (!cells || cells.length === 0) {
+    return ["interface-craft C7 (AC-13): no state cell was executed at all, so nothing was proved"];
+  }
+  for (const c of cells) {
+    if (c.entered === false) {
+      out.push(`interface-craft C7 (AC-13): [${c.density}] "${c.component}" / ${c.state} was declared proved and this run could not enter that state at the engine (${c.note || "the engine never reported the component in it"})`);
+      continue;
+    }
+    if (!c.rendered) {
+      out.push(`interface-craft C7 (AC-13): [${c.density}] "${c.component}" / ${c.state} did not render at all (${c.instance})`);
+      continue;
+    }
+    if (c.state === "default") continue;
+    if (c.differing && c.differing.length > 0) continue;
+    out.push(`interface-craft C7 (AC-13): [${c.density}] "${c.component}" / ${c.state} (${c.instance}) renders VISUALLY IDENTICAL to its default. Compared: ${(c.compared || []).join(", ")}`);
+  }
+  return out;
+}
+
+// Clause S4 through C7: the whole matrix runs once per density the record says the surface
+// BUILDS, and a density that exists only as a name cannot buy a pass. Two densities whose
+// graded components render with no computed difference between them are one density under
+// two names, which is what this refuses.
+export function gradeDensitiesAreReallyDifferent(readings) {
+  const out = [];
+  const names = readings.map((r) => r.density);
+  if (names.length === 0) return ["styling S4 (AC-15): the record declares no density at all, so the matrix ran zero times"];
+  for (let i = 0; i < readings.length; i++) {
+    for (let j = i + 1; j < readings.length; j++) {
+      const a = readings[i], b = readings[j];
+      const differing = [];
+      for (const key of Object.keys(a.defaults)) {
+        const x = a.defaults[key], y = b.defaults[key];
+        if (!y) continue;
+        for (const p of Object.keys(x)) if (x[p] !== y[p]) differing.push(`${key}.${p}`);
+      }
+      if (differing.length === 0) {
+        out.push(`styling S4 (AC-16): the densities "${a.density}" and "${b.density}" render every graded component with no computed difference at all, so they are one density under two names`);
+      }
+    }
+  }
+  return out;
+}
+
+// densityEntry turns the record's own sentence about how a density is ENTERED into the
+// action the driver takes. Two forms are readable, and nothing else is: "the document as
+// served", which is the honest answer for a surface that builds one density and offers no
+// switch, and an attribute on the document element, which is how a switch is expressed. A
+// sentence this cannot read is a refusal rather than a density quietly skipped - the run
+// would otherwise report a density it never entered.
+export function densityEntry(d) {
+  const text = String(d.entered || "").trim();
+  if (text === "the document as served") {
+    return { name: d.name, attribute: null, value: null, how: text };
+  }
+  const m = /^([a-z][-a-z0-9]*)="([^"]*)" on the document element$/.exec(text);
+  if (m) return { name: d.name, attribute: m[1], value: m[2], how: text };
+  return { name: d.name, attribute: null, value: null, how: text, unreadable: true };
+}
+
+export function gradeDensityMechanismsAreReadable(densities) {
+  const out = [];
+  for (const d of densities) {
+    if (!d.unreadable) continue;
+    out.push(`styling S4 (AC-15): the record says the density "${d.name}" is entered by "${d.how}", which this grader has no way to do. Write either "the document as served" or \`attribute="value" on the document element\``);
+  }
+  return out;
+}
+
+// The two densities clause S4 requires, by name. A run that measured fewer says which it did
+// not measure rather than reporting an S4 pass it never took.
+export const S4_DENSITIES = ["compact", "comfortable"];
+
+export function densityShortfall(declared) {
+  const missing = S4_DENSITIES.filter((d) => !declared.includes(d));
+  if (declared.length >= S4_DENSITIES.length && missing.length === 0) return "";
+  return `styling S4 asks for ${S4_DENSITIES.length} densities (${S4_DENSITIES.join(", ")}); this surface declares it builds ${declared.length} (${declared.join(", ") || "none"}), so this run did NOT measure: ${missing.join(", ") || "none"}`;
+}
+
 // Every predicate this project decides on a LIVE page, by name. The mutation spec drives
 // each one against a document built to defeat it.
 export function convGraders() {
