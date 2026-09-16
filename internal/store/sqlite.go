@@ -368,6 +368,7 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 			reason = NULL, encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
 			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL, vmaf_stream = NULL,
 			source_codec = NULL, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
+			target_path = NULL,
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
 			swap_cause = NULL, failure_class = NULL, decision_inputs = NULL,
 			library_root = NULL, profile_digest = NULL, profile = NULL
@@ -610,6 +611,7 @@ func finishQuery(st Status, o *Outcome, maxFailures int) string {
 		reason = ?, encoder = ?, vmaf_mean = ?, vmaf_min = ?, vmaf_model = ?,
 		vmaf_pix_fmt = ?, vmaf_chroma = ?, vmaf_chroma_metric = ?, vmaf_stream = ?,
 		source_codec = ?, source_bytes = ?, output_bytes = ?, encode_ms = ?,
+		target_path = ?,
 		guard_attributes = ?, guard_time_resolution = ?, guard_residual_window = ?,
 		swap_cause = ?, failure_class = ?, decision_inputs = ?,
 		library_root = ?, profile_digest = ?, profile = ?`
@@ -643,6 +645,7 @@ func finishArgs(st Status, o *Outcome, path, fingerprint string) []any {
 		nullString(o.VmafPixFmt), nullFloat(o.VmafChroma), nullString(o.VmafChromaMetric),
 		nullString(o.VmafStream),
 		nullString(o.SourceCodec), nullInt(o.SourceBytes), nullInt(o.OutputBytes), nullInt(o.EncodeMs),
+		nullString(o.TargetPath),
 		nullString(o.GuardAttributes), nullString(o.GuardTimeResolution),
 		nullString(o.GuardResidualWindow), nullString(o.SwapCause), nullString(class),
 		nullString(o.DecisionInputs.Encode()),
@@ -715,7 +718,7 @@ func scanJob(sc interface{ Scan(...any) error }) (Job, error) {
 // column is appended. Its order is the order outcomeScan expects.
 const outcomeColumns = `reason, encoder, vmaf_mean, vmaf_min, vmaf_model,
 	vmaf_pix_fmt, vmaf_chroma, vmaf_chroma_metric, vmaf_stream,
-	source_codec, source_bytes, output_bytes, encode_ms,
+	source_codec, source_bytes, output_bytes, encode_ms, target_path,
 	guard_attributes, guard_time_resolution, guard_residual_window, swap_cause,
 	failure_class, decision_inputs,
 	library_root, profile_digest, profile`
@@ -744,6 +747,12 @@ type outcomeScan struct {
 	// other outcome column: a row written before it existed, and any row that never
 	// probed a codec, reads as not recorded.
 	srcCodec sql.NullString
+
+	// The path a replacement WOULD have been written to, recorded by a dry-run decision.
+	// Nullable like every other outcome column, and here the distinction is the whole of it:
+	// a row that recorded none must never read as a path, because no file was ever written
+	// at one.
+	targetPath sql.NullString
 
 	// The source-mutation guard's achieved granularity and the distinctly-reported
 	// cause of a failed swap (FILESYSTEM-1). All four are strings and all four are
@@ -777,7 +786,7 @@ func (s *outcomeScan) dest() []any {
 	return []any{
 		&s.reason, &s.encoder, &s.mean, &s.worst, &s.model,
 		&s.pixFmt, &s.chroma, &s.chromaMetric, &s.stream,
-		&s.srcCodec, &s.srcBytes, &s.outBytes, &s.encMs,
+		&s.srcCodec, &s.srcBytes, &s.outBytes, &s.encMs, &s.targetPath,
 		&s.guardAttrs, &s.guardRes, &s.guardWindow, &s.swapCause,
 		&s.failClass, &s.inputs,
 		&s.libraryRoot, &s.profileDigest, &s.profile,
@@ -799,6 +808,7 @@ func (s *outcomeScan) outcome() Outcome {
 		VmafPixFmt: s.pixFmt.String, VmafChromaMetric: s.chromaMetric.String,
 		VmafStream:      s.stream.String,
 		SourceCodec:     s.srcCodec.String,
+		TargetPath:      s.targetPath.String,
 		GuardAttributes: s.guardAttrs.String, GuardTimeResolution: s.guardRes.String,
 		GuardResidualWindow: s.guardWindow.String, SwapCause: s.swapCause.String,
 		FailureClass:   FailureClass(s.failClass.String).Class(),
@@ -1098,6 +1108,7 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 			encoder = NULL, vmaf_mean = NULL, vmaf_min = NULL, vmaf_model = NULL,
 			vmaf_pix_fmt = NULL, vmaf_chroma = NULL, vmaf_chroma_metric = NULL, vmaf_stream = NULL,
 			source_codec = NULL, source_bytes = NULL, output_bytes = NULL, encode_ms = NULL,
+			target_path = NULL,
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
 			swap_cause = NULL, decision_inputs = NULL, profile = excluded.profile
 		 WHERE jobs.status = ?`,

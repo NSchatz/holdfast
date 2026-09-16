@@ -428,6 +428,29 @@ CREATE TABLE IF NOT EXISTS path_exclusions (
 CREATE INDEX IF NOT EXISTS idx_path_exclusions_created ON path_exclusions(created_at);
 `,
 	},
+	{
+		// v16 - the path a replacement WOULD have been written to, which a dry-run decision
+		// records and nothing else does.
+		//
+		// The other three facts such a decision carries were already storable: the source's
+		// size is v2's source_bytes, its codec is v8's source_codec, and the target codec and
+		// the encoder that would have run are v10's decision_inputs, where they belong because
+		// the guard chain READ them. The target path is none of those - it is derived from the
+		// source's own name and the container extension in force, so it is neither a
+		// configuration value to compare nor a measurement anybody took - and until this step
+		// it existed only in a log line, which is not a row.
+		//
+		// NULLABLE with NO DEFAULT, the rule every step since v2 has kept. Every row already
+		// in the field records no target path and must READ as not recorded; deriving one for
+		// them from the configuration now in force would name a path that build never chose.
+		// No index: nothing queries BY it, every reader has the row in hand.
+		name: "dry-run target path",
+		// One nullable column: ADD COLUMN rewrites no row and creates none.
+		rows: noRowChange,
+		sql: `
+ALTER TABLE jobs ADD COLUMN target_path TEXT;
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

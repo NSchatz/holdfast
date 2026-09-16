@@ -227,6 +227,17 @@ type Outcome struct {
 	// is being re-encoded.
 	SourceCodec string
 
+	// TargetPath is the path a replacement WOULD have been written to. It is recorded by a
+	// dry-run decision, whose whole purpose is to say what a real run would do to that file:
+	// the container extension is configurable, so a preview that named only the source
+	// leaves an operator to re-resolve the layering themselves to learn which name the swap
+	// would publish under.
+	//
+	// It is never a claim that a file is there. A would-transcode row reaches no encode and
+	// no swap, so this names a path nothing has written; "" is NOT RECORDED, the rule every
+	// string here keeps, and is what a row written before this fact existed carries.
+	TargetPath string
+
 	// SourceBytes and OutputBytes are the file sizes either side of the swap. BOTH are
 	// persisted rather than only their difference, which is what makes a durable lifetime
 	// reclaimed total derivable and lets a UI show before and after.

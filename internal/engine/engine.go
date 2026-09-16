@@ -1144,8 +1144,16 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		// configured the honest answer names the profile whose settings that run would have
 		// used. "" says the top-level settings would have run, which is the true answer and
 		// not a missing measurement.
+		//
+		// The target path is on the ROW and not only in the line below it, because the name
+		// the swap would publish under is a fact about this file that an operator cannot
+		// re-derive from the row alone: container_ext is layered per root and per encode
+		// profile. It is recorded on the row that reaches no swap, so it never says a file is
+		// there - the four facts together are what a run WOULD do, and none of them is a
+		// measurement of work nobody did.
 		out := &store.Outcome{
 			SourceCodec:    codec,
+			TargetPath:     final,
 			Profile:        ts.Profile,
 			Decision:       by,
 			DecisionInputs: e.inputsRead(prof, ts, InputTargetCodec, InputEncoder, InputCRF, InputPreset),
