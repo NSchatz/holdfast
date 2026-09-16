@@ -200,56 +200,67 @@ reset
 name_case "a name that merely STARTS like an example is still refused" "testdata/.env.example.real"
 
 # =====================================================================================
-# Cases 22-25: the bounded exemption register. It exists for one collision the repository
-# cannot resolve otherwise (check-pins.sh section 8 REQUIRES a committed .npmrc), and its
-# whole value is that it refuses to become an allowlist.
+# Cases 22-25: the bounded exemption register. The register is EMPTY as committed - this
+# repository holds no node manifest and so no tracked .npmrc to decide about - so every
+# case here INJECTS an entry through a compiled-in init and then defeats it. Injecting is
+# what keeps the cases honest against an empty register: sed-mutating an entry that is not
+# there is a mutation that does not mutate, which is the silent green this file exists for.
 # =====================================================================================
+# inject_exemption <go-literal-body> <case-number>: append one NameExemption through an
+# init in the COPY, rebuild the scanner, and report a build that did not happen. A case
+# whose mutation failed to compile would otherwise grade the UNMUTATED scanner.
+inject_exemption() {
+  cat > "$repo/internal/secretscan/zz_selftest_mutation.go" <<GO
+package secretscan
+
+func init() { NameExemptions = append(NameExemptions, NameExemption{$1}) }
+GO
+  if ! ( cd "$repo" && go build -o "$scanbin" ./scripts/secret-scan ) >/dev/null 2>&1; then
+    printf '::error::selftest: case %s could not rebuild the scanner after the mutation\n' "$2" >&2
+    failed=$((failed + 1)); return 1
+  fi
+}
+
+drop_exemption() {
+  rm -f "$repo/internal/secretscan/zz_selftest_mutation.go"
+  ( cd "$repo" && go build -o "$scanbin" ./scripts/secret-scan ) >/dev/null 2>&1
+}
+
 # --- 22. The exempt path is still CONTENT-scanned in full. This is what makes the
 #         exemption safe rather than a hole: the name is forgiven, the content never is.
-plant "internal/webui/e2e/.npmrc" "ignore-scripts=true
+if inject_exemption 'Path: "tools/harness/.npmrc", Reason: "the selftest injected it"' 22; then
+  plant "tools/harness/.npmrc" "ignore-scripts=true
 //registry.npmjs.org/:$F_NPMAUTH"
-expect $FOUND "the exempted .npmrc still bites on CONTENT" "e2e/\.npmrc:2:" "npm registry auth directive"
+  expect $FOUND "the exempted .npmrc still bites on CONTENT" "harness/\.npmrc:2:" "npm registry auth directive"
+fi
+drop_exemption
 reset
 
 # --- 23. A register entry naming a path that is not in the tree grants nothing, and a
 #         register nobody prunes is a register that outlives its reason.
-sed -i 's|Path: "internal/webui/e2e/\.npmrc"|Path: "internal/webui/e2e/.npmrc-gone"|' \
-  "$repo/internal/secretscan/secretscan.go"
-( cd "$repo" && go build -o "$scanbin" ./scripts/secret-scan ) >/dev/null 2>&1 \
-  || { echo "::error::selftest: case 23 could not rebuild the scanner" >&2; failed=$((failed + 1)); }
-expect $CANNOT_RUN "a stale register entry is COULD NOT RUN, not a wider scanner" "grants nothing"
-git -C "$repo" checkout -q -- internal/secretscan/secretscan.go
-( cd "$repo" && go build -o "$scanbin" ./scripts/secret-scan ) >/dev/null 2>&1
+if inject_exemption 'Path: "gone/.npmrc", Reason: "the selftest injected it"' 23; then
+  expect $CANNOT_RUN "a stale register entry is COULD NOT RUN, not a wider scanner" "grants nothing"
+fi
+drop_exemption
 reset
 
 # --- 24. An entry naming a path whose NAME was never forbidden grants nothing either, so
 #         the register cannot be used to exempt an ordinary file from anything.
-sed -i 's|Path: "internal/webui/e2e/\.npmrc"|Path: "go.mod"|' \
-  "$repo/internal/secretscan/secretscan.go"
-( cd "$repo" && go build -o "$scanbin" ./scripts/secret-scan ) >/dev/null 2>&1
-expect $CANNOT_RUN "a register entry for a name that is not forbidden is COULD NOT RUN" "not forbidden"
-git -C "$repo" checkout -q -- internal/secretscan/secretscan.go
-( cd "$repo" && go build -o "$scanbin" ./scripts/secret-scan ) >/dev/null 2>&1
+if inject_exemption 'Path: "go.mod", Reason: "the selftest injected it"' 24; then
+  expect $CANNOT_RUN "a register entry for a name that is not forbidden is COULD NOT RUN" "not forbidden"
+fi
+drop_exemption
 reset
 
 # --- 25. An entry with no reason is refused: an exemption nobody can check is an
-#         exemption nobody can retire. Mutated by a compiled-in init rather than by sed,
-#         because the reason is a multi-line concatenation and a sed that edited only its
-#         first line would leave a reason that is still non-empty - a mutation that did not
-#         mutate, which is the selftest version of the silent green this file exists for.
-cat > "$repo/internal/secretscan/zz_selftest_mutation.go" <<'GO'
-package secretscan
-
-func init() { NameExemptions[0].Reason = "" }
-GO
-if ( cd "$repo" && go build -o "$scanbin" ./scripts/secret-scan ) >/dev/null 2>&1; then
+#         exemption nobody can retire. The reason is the empty string here rather than a
+#         sed over a multi-line concatenation, whose first line edited alone would leave a
+#         reason that is still non-empty - a mutation that did not mutate.
+if inject_exemption 'Path: "tools/harness/.npmrc", Reason: ""' 25; then
+  plant "tools/harness/.npmrc" "ignore-scripts=true"
   expect $CANNOT_RUN "a register entry with no reason is COULD NOT RUN" "no reason"
-else
-  printf '::error::selftest: case 25 could not rebuild the scanner after the mutation\n' >&2
-  failed=$((failed + 1))
 fi
-rm -f "$repo/internal/secretscan/zz_selftest_mutation.go"
-( cd "$repo" && go build -o "$scanbin" ./scripts/secret-scan ) >/dev/null 2>&1
+drop_exemption
 reset
 
 # =====================================================================================

@@ -70,16 +70,15 @@ type harness struct {
 
 func newHarness(t *testing.T, token string) *harness {
 	t.Helper()
-	return newHarnessWith(t, token, "", nil)
+	return newHarnessWith(t, token, "")
 }
 
-// newHarnessWith is newHarness with the two seams the read-gate suite needs: a resolved
-// READ token, and a real handler at the root so "the dashboard page is still served" is a
-// claim about a page rather than about a nil handler. Every other caller wants neither,
-// which is why the two-argument form above stays.
-func newHarnessWith(t *testing.T, token, readToken string, ui http.Handler) *harness {
+// newHarnessWith is newHarness with the seam the read-gate suite needs: a resolved READ
+// token. Every other caller wants the default, which is why the one-argument form above
+// stays.
+func newHarnessWith(t *testing.T, token, readToken string) *harness {
 	t.Helper()
-	return newHarnessOn(t, newStore(t), token, readToken, ui)
+	return newHarnessOn(t, newStore(t), token, readToken)
 }
 
 // newHarnessOn builds a harness over an EXISTING store, so two servers can answer from
@@ -87,7 +86,7 @@ func newHarnessWith(t *testing.T, token, readToken string, ui http.Handler) *har
 // would be with no read token configured" a comparison of two responses rather than of
 // two libraries: a second newStore would seed its own timestamps and the bodies would
 // differ for a reason that has nothing to do with the gate.
-func newHarnessOn(t *testing.T, st *store.SQLite, token, readToken string, ui http.Handler) *harness {
+func newHarnessOn(t *testing.T, st *store.SQLite, token, readToken string) *harness {
 	t.Helper()
 	h := &harness{
 		st:          st,
@@ -107,7 +106,7 @@ func newHarnessOn(t *testing.T, st *store.SQLite, token, readToken string, ui ht
 	h.hub = NewHub(st, h.ctrl, discard())
 	h.ctrl.SetOnChange(h.hub.Trigger)
 	cfg := config.Config{}
-	h.srv = New(ctx, cfg, secret.NewValue(token), secret.NewValue(readToken), st, h.ctrl, h.hub, ui, nil, discard())
+	h.srv = New(ctx, cfg, secret.NewValue(token), secret.NewValue(readToken), st, h.ctrl, h.hub, nil, discard())
 	return h
 }
 
@@ -283,7 +282,7 @@ func TestHub_BytesReclaimedAccumulates(t *testing.T) {
 	}
 }
 
-// The dashboard's reclaimed figure must be DURABLE: a lifetime total that survives a
+// The published reclaimed figure must be DURABLE: a lifetime total that survives a
 // restart, not a per-process counter that resets to 0. The Hub reads a baseline from
 // the store's already-recorded done rows at construction, and the live figure is that
 // baseline plus this process's reclaims. (TRANSCODE-14.)
@@ -491,7 +490,7 @@ func TestHistoryEndpoint_ReturnsAReasonForFailedAndSkipped(t *testing.T) {
 // TestHistoryEndpoint_TheTwoSwapOutcomesShowAsThemselves is this surface's half of the
 // rule that a job parked indeterminate, or one applied despite an error, is reported AS
 // THE STATE IT IS IN. Leaving them out of the history view would have made a parked job -
-// the one job on the whole dashboard actually waiting for a human - the only job that
+// the one job in the whole report actually waiting for a human - the only job that
 // never appears anywhere, which is the same failure as reporting it as a success.
 func TestHistoryEndpoint_TheTwoSwapOutcomesShowAsThemselves(t *testing.T) {
 	h := newHarness(t, "")
@@ -1353,7 +1352,7 @@ func TestSnapshot_OneUnreadableAggregateStillShipsEverythingElse(t *testing.T) {
 	defer cancel()
 	ctrl := NewController(ctx, func(context.Context) error { return nil }, discard())
 	hub := NewHub(broken, ctrl, discard())
-	srv := New(ctx, config.Config{}, secret.Value{}, secret.Value{}, broken, ctrl, hub, nil, nil, discard())
+	srv := New(ctx, config.Config{}, secret.Value{}, secret.Value{}, broken, ctrl, hub, nil, discard())
 
 	snap := snapshotOf(t, hub)
 	if snap.Summary[string(store.Done)] != 1 || len(snap.Queue) != 1 || len(snap.History) != 1 {
@@ -1513,7 +1512,7 @@ func getRaw(t *testing.T, url string) string {
 
 // --- the authorization posture behind a reverse proxy ------------------------
 //
-// The read endpoints and the dashboard are "protected by the localhost-default bind,
+// The read endpoints are "protected by the localhost-default bind,
 // not a token". The moment a reverse proxy fronts this daemon that bind protects
 // nothing and the proxy is the only barrier, and the whole safety argument for such a
 // deployment rests on ONE property of this package: a proxy-supplied identity header is
@@ -1658,7 +1657,7 @@ func TestWrongBearer_Is401_WithAndWithoutProxyIdentityHeaders(t *testing.T) {
 
 // The read endpoints are UNAUTHENTICATED BY DESIGN, and this asserts it rather than
 // leaving it assumed. A deployment behind a proxy claims the proxy is the ONLY barrier
-// in front of the dashboard and the read API; that claim is only true if these really do
+// in front of the read API; that claim is only true if these really do
 // answer a credential-less request. If this ever starts failing because holdfast grew
 // read authentication of its own, that deployment's statement needs rewriting - which is
 // exactly why it is asserted here.

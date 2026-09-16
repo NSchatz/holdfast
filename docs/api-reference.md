@@ -9,7 +9,7 @@ per-field reference `README.md` points at rather than restates.
 
 | Method & path | Auth | Purpose |
 |---|---|---|
-| `GET /` | - | the embedded dashboard. Never gated: a browser sends no `Bearer` header on a navigation |
+| `GET /` | - | a plain-text page naming the endpoints and carrying the AGPL section 13 source offer. holdfast ships no frontend. Never gated: it holds no library datum |
 | `GET /api/summary` | read | counts per status + bytes reclaimed (**lifetime** and this-run) + `bytes_held_by_undo_window` (space a retained original still holds, never folded into either reclaimed figure; `null` = unreadable) + paused/scanning + the **whole-ledger aggregates** (see below) |
 | `GET /api/queue` | read | pending + active jobs, capped, with `queue_total` - see *The total behind a cap* |
 | `GET /api/history?limit=N` | read | recent terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, capped, with `history_total` - see below |
@@ -268,7 +268,7 @@ concludes "nothing qualifies".
 Two properties are load-bearing and neither is negotiable:
 
 - **It counts decisions, never transcodes.** Nothing has encoded these files, so the row carries no output
-  size, no percentage reclaimed and no VMAF, and the dashboard shows no projected saving anywhere. The
+  size, no percentage reclaimed and no VMAF, so there is no projected saving to report anywhere. The
   figure beside the candidate rows is the **total source bytes** they account for and nothing else: the
   size of what is under consideration, with the rows it left out for want of a recorded size counted and
   reported beside it.
@@ -276,18 +276,18 @@ Two properties are load-bearing and neither is negotiable:
   the file from a later run: set `dry_run: false`, run again, and exactly the files that list named are
   the files that get transcoded. Two dry runs over an unchanged file still report **one** candidate.
 
-The **dashboard renders all of this per file** - size before → after and percent reclaimed, the encoder,
-the encode duration, and the VMAF pair shown with its model, its pooling and its luma-only blind spot - so
-the proof is on the page, not only in the JSON. A skipped row names its guard; a failed row shows its
-reason; a fact that was never recorded reads "not recorded", never `0`.
+**Every terminal row carries all of this per file** - size before → after and percent reclaimed, the
+encoder, the encode duration, and the VMAF pair with its model, its pooling and its luma-only blind spot -
+so the proof is in the record a client reads. A skipped row names its guard; a failed row shows its
+reason; a fact that was never recorded is `null`, never `0`.
 
 ### An in-flight job - how far it has got
 
 A terminal row says what happened; an **active** row says what is happening. Every job in `/api/queue`
 (and in the SSE snapshot's `queue`) carries `updated_at`, the timestamp of its last transition, and the
-snapshot carries `now`, the server's clock when the frame was built - together those are how the
-dashboard shows **how long a file has been in the state it is in**, recomputed from the timestamp on
-every tick rather than counted up in the page.
+snapshot carries `now`, the server's clock when the frame was built - together those are how a client
+computes **how long a file has been in the state it is in**, from the timestamps in each frame rather
+than by counting up locally.
 
 An **encoding** row additionally carries what the encoder itself reports, read from ffmpeg's documented
 `-progress` stream rather than estimated from elapsed time:
@@ -306,7 +306,8 @@ state it does not describe is the one thing this surface must never show.
 
 The same `null` rule applies, and it bites harder here: an encoder that has not reported yet, and a
 source whose container reports no duration, are both **unrecorded**, and a `0` would read as "0% encoded"
-- a figure nobody measured. The dashboard shows those as *unknown*. Progress is **not persisted**: it is
+- a figure nobody measured, so both are `null` and a client must read them as unknown. Progress is
+**not persisted**: it is
 state about a running process, so after a restart an in-flight job simply has none reported yet, and a
 finished row never carries one. There is deliberately **no ETA** - every figure here is measured, and a
 predicted finish time is not.
@@ -350,11 +351,11 @@ Each one carries the same envelope, and every part of it is load-bearing:
   fails on another is a runtime failure on somebody else's machine.
 - **`available`** is `false` when the figure could not be read at all, with a fixed `unavailable`
   statement. One unreadable figure never suppresses the rest: the summary, the queue rows and the history
-  rows still ship, the SSE broadcast still fires, and the dashboard draws that one card as unavailable
-  while the rest of the page renders.
+  rows still ship, and the SSE broadcast still fires, so one unreadable figure costs a client that figure
+  and nothing else.
 
-The dashboard shows all of it under **Across the whole ledger**, each figure beside the set it covers and
-the count of rows it had to leave out.
+Every aggregate ships beside the set it covers and the count of rows it had to leave out, so a client
+never has to guess what a figure was taken over.
 
 ### The total behind a cap
 
@@ -383,8 +384,8 @@ in the `jobs` table**:
 - **`available`** is `false` when the total could not be read, and `count` is then an explicit **`null`**,
   never `0`. Why it is never a zero, and why the rows ship anyway:
   [docs/design/ledger-totals.md](design/ledger-totals.md#null-is-not-zero).
-- The dashboard renders that total in each table's cap notice, and when the total is unavailable it says so
-  **and shows no figure in its place**.
+- A client showing a capped table should say what it was capped against, and when the total is unavailable
+  say so rather than putting a figure in its place.
 
 #### When holdfast cannot tell what the swap did (`indeterminate`) - and how you get out of it
 

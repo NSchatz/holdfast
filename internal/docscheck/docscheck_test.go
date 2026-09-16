@@ -29,14 +29,8 @@ var clauseSentence = map[string]string{
 		"front of it is the only barrier.",
 	"defence in depth": "Set server_read_token and the reads require a bearer credential, so the proxy " +
 		"becomes defence in depth in front of them.",
-	"the page is still served with no credential": "That key does not gate the dashboard: the page is still " +
-		"served with no credential, so the proxy remains the barrier in front of it.",
-	"the page loads but its data does not": "With a read token set the page loads but its data does not, " +
-		"because its own requests carry no credential, until a browser login exists.",
 	"server_auth_token": "The mutating endpoints stay disabled until a control token is configured: with no " +
 		"server_auth_token set they answer 403 to every caller.",
-	ReverseProxyRootPathToken: "Serve it at the host root: the page asks for its own API and assets with " +
-		"root-relative paths, so a prefix strip breaks it silently.",
 }
 
 // postureBlock builds a reverse-proxy posture statement carrying every clause EXCEPT the
@@ -224,7 +218,7 @@ func TestCheck_AHeadingImmediatelyAfterAnAnchorIsNotAStatement(t *testing.T) {
 // --- the reverse-proxy posture statement --------------------------------------
 //
 // Same shape as the residual-window rule, and here for the same reason: the read
-// endpoints and the dashboard carry no authentication of their own, so the day a proxy
+// endpoints carry no authentication of their own, so the day a proxy
 // fronts this daemon the loopback bind protects nothing and the proxy is the only
 // barrier. Three facts decide whether such a deployment is safe, none of them
 // discoverable from the API's own responses, so they are owed in the shipped
@@ -284,20 +278,6 @@ func TestCheck_ReverseProxyStatementMissingAClauseIsReportedMissing(t *testing.T
 	}
 }
 
-// The root-path clause, asserted by name as well as by table. A router that strips a
-// path prefix serves the document and 404s every request under it, so this is the clause
-// a proxy configuration actually gets wrong, and the check has to red when the
-// documentation stops carrying it.
-func TestCheck_ReverseProxyStatementWithoutTheRootPathTokenFails(t *testing.T) {
-	dir := writeCorpus(t, map[string]string{
-		"docs.md": residualWindowBlock() + metadataBlock() + agreeingBlocks() + nonGoalBlock() + differentiatorBlock() + "\n" + postureBlock(ReverseProxyRootPathToken),
-	})
-	problems := check(t, dir)
-	if len(problems) != 1 || !strings.Contains(problems[0], ReverseProxyRootPathToken) {
-		t.Fatalf("dropping the root-path token was not reported: %v", problems)
-	}
-}
-
 // The three clauses must be carried by ONE statement. A document that says the read API
 // is unauthenticated and a different document that says the endpoints are off has not
 // told a deploying operator, in one place, what fronting this daemon costs - and a check
@@ -305,9 +285,9 @@ func TestCheck_ReverseProxyStatementWithoutTheRootPathTokenFails(t *testing.T) {
 func TestCheck_ReverseProxyClausesMustBeCarriedByOneStatement(t *testing.T) {
 	dir := writeCorpus(t, map[string]string{
 		"a.md": residualWindowBlock() + metadataBlock() + agreeingBlocks() + nonGoalBlock() + differentiatorBlock(),
-		"b.md": postureBlock("server_auth_token", ReverseProxyRootPathToken),
+		"b.md": postureBlock("server_auth_token"),
 		"c.md": "<a id=\"" + AnchorReverseProxy + "\"></a>\n\n" +
-			clauseSentence["server_auth_token"] + "\n\n" + clauseSentence[ReverseProxyRootPathToken] + "\n",
+			clauseSentence["server_auth_token"] + "\n",
 	})
 	problems := check(t, dir)
 	if len(problems) == 0 {
@@ -407,41 +387,12 @@ func TestShippedDocumentation_TheCheckBitesOnTheREALTEXT(t *testing.T) {
 			problem: "the only barrier",
 		},
 		{
-			name:   "the shipped posture statement loses the root-path constraint",
-			anchor: AnchorReverseProxy,
-			mutate: func(s string) string {
-				return strings.ReplaceAll(s, ReverseProxyRootPathToken, "REDACTED")
-			},
-			problem: ReverseProxyRootPathToken,
-		},
-		{
 			name:   "the shipped posture statement stops saying a read token makes the proxy defence in depth",
 			anchor: AnchorReverseProxy,
 			mutate: func(s string) string {
 				return strings.ReplaceAll(s, "defence in depth", "REDACTED")
 			},
 			problem: "defence in depth",
-		},
-		{
-			name:   "the shipped posture statement stops saying the page is still served with no credential",
-			anchor: AnchorReverseProxy,
-			mutate: func(s string) string {
-				// The line wrap falls inside this token in the shipped text, and the
-				// check normalizes whitespace before looking, so the mutation has to
-				// reach the wrapped spelling too or it would change nothing.
-				out := strings.ReplaceAll(s, "the page is still served\nwith no credential", "REDACTED")
-				return strings.ReplaceAll(out, "the page is still served with no credential", "REDACTED")
-			},
-			problem: "the page is still served with no credential",
-		},
-		{
-			name:   "the shipped posture statement stops saying the page loads while its data does not",
-			anchor: AnchorReverseProxy,
-			mutate: func(s string) string {
-				out := strings.ReplaceAll(s, "the page loads but its data does\nnot", "REDACTED")
-				return strings.ReplaceAll(out, "the page loads but its data does not", "REDACTED")
-			},
-			problem: "the page loads but its data does not",
 		},
 		{
 			name:   "the shipped posture statement stops naming the control token",

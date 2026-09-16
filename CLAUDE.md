@@ -64,8 +64,8 @@ reasoning lives in the document, not in this file.
 - `internal/store` - the persistent job and outcome state.
 - `internal/fsclass` - the one enumeration of what this build calls local.
 - `internal/schedule` - host-fair run windows.
-- `internal/server`, `internal/webui` - the HTTP surface and the embedded
-  dashboard.
+- `internal/server` - the HTTP surface. holdfast ships no frontend: the JSON API
+  is the interface, and `/` is a plain-text page carrying the source offer.
 - `internal/metrics`, `internal/notify` - Prometheus collectors and best-effort
   shoutrrr notifications.
 - `internal/config` - koanf layered config: defaults, then YAML, then `HOLDFAST_*`.
@@ -90,17 +90,12 @@ read the target rather than any prose about it. The Makefile owns the tool pins
 and CI invokes the same target, so a PR, a release and a human run the identical
 thing.
 
-CI adds three things `check` deliberately does not: the config-schema self-test
-(proves `validate` reds on a bad config), the image smoke gate
-(`scripts/smoke-image.sh`, needs Docker), and the dashboard gate
-(`make webui-check`, needs node and a browser engine). `check` must stay green on
-a machine with no browser, so the dashboard suites skip there and `webui-check`
-is where a missing runtime is a failure.
+CI adds two things `check` deliberately does not: the config-schema self-test
+(proves `validate` reds on a bad config) and the image smoke gate
+(`scripts/smoke-image.sh`, needs Docker).
 
-The gate needs the pinned ffmpeg (`scripts/install-ffmpeg.sh`) and a browser on
-`PATH` (or `HOLDFAST_BROWSER`): a criterion about what the DASHBOARD SHOWS is
-graded against a page loaded in a real engine. Neither is skipped when absent - a
-grader that skips is a false green.
+The gate needs the pinned ffmpeg (`scripts/install-ffmpeg.sh`), and it is not
+skipped when absent - a grader that skips is a false green.
 
 Never claim green without running it. Every change that touches the engine
 extends the fixture suite so it reds on that specific regression: a data-safety
@@ -135,6 +130,6 @@ tool proves its unhappy paths.
 bound, and the scanner's ruleset, exit codes and one setup step ·
 `docs/docker.md` deployment (volumes, permissions, TZ, GPU passthrough, security
 posture) · `docs/migration.md` the cutover from the Bash transcoder and Tdarr ·
-`docs/webui.md` the dashboard reference · `docs/requeue.md` what a terminal row
+`docs/requeue.md` what a terminal row
 records about the configuration it was decided under, and the lever for the rows a
 configuration change cannot reason about.

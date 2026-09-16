@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -19,9 +18,9 @@ import (
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/fsclass"
+	"github.com/NSchatz/holdfast/internal/server"
 	"github.com/NSchatz/holdfast/internal/sourceoffer"
 	"github.com/NSchatz/holdfast/internal/version"
-	"github.com/NSchatz/holdfast/internal/webui"
 )
 
 const (
@@ -45,25 +44,6 @@ func freeAddr(t *testing.T) string {
 // writeServeConfig writes a valid serve config bound to addr and returns its path plus
 // the state directory it names (which must not exist if serve refused before doing
 // anything).
-// offerTagRe matches one element tag, so a decorative mark can be taken out of the link
-// before its displayed text is compared.
-var offerTagRe = regexp.MustCompile(`<[^>]*>`)
-
-// offerShownText is what a reader actually reads inside the offer's link: its content with
-// every tag removed. A mark contributes no text, so what is left must be the URL alone.
-func offerShownText(offer string) string {
-	open := strings.Index(offer, `<a class="source-offer-link"`)
-	end := strings.Index(offer, "</a>")
-	if open < 0 || end < open {
-		return ""
-	}
-	gt := strings.Index(offer[open:], ">")
-	if gt < 0 {
-		return ""
-	}
-	return strings.TrimSpace(offerTagRe.ReplaceAllString(offer[open+gt+1:end], ""))
-}
-
 func writeServeConfig(t *testing.T, addr string) (cfgPath, stateDir string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -96,7 +76,7 @@ func setSourceURL(t *testing.T, v string) {
 // developer box is a reason to skip them. It is never a reason to skip the engine
 // safety proof, which fails loud and must keep doing so. Every assertion that can be
 // made without an encoder - the whole AC6 refusal set, and every rendering assertion
-// in internal/webui and internal/server - runs unconditionally.
+// in internal/server - runs unconditionally.
 // It guards the OTHER precondition serve has for coming up too, for the same reason and
 // with the same rule: FILESYSTEM-1 refuses to start on storage it cannot positively
 // identify as local, and a host whose temp directory is a tmpfs - which several container
@@ -138,9 +118,9 @@ func requireDurableTempDir(t *testing.T) {
 // AC6: a build whose Corresponding Source URL is unusable REFUSES to start any
 // listener that would serve the root path, exits non-zero, and names the rejected
 // value. The refusal is the first thing the serve command does, ahead of every
-// listener it can create and ahead of the engine, so neither root-serving branch - the
-// dashboard nor the API-only page - can be reached with a rejected value (binding
-// advisories F13 and F16: one validation, on the path both branches share).
+// listener it can create and ahead of the engine, so the root path cannot be reached
+// with a rejected value (binding advisories F13 and F16: one validation, on the path the
+// startup refusal and the root handler share).
 //
 // It needs no encoder: nothing runs before the refusal.
 func TestServe_RefusesToStartOnARejectedSourceURL(t *testing.T) {
@@ -203,7 +183,7 @@ func TestRejectedSourceURL_DoesNotBreakNonServingCommands(t *testing.T) {
 // page from the same binary, stamped with version and commit values the test chooses,
 // and compare the values found in each". That is exactly what happens here - the
 // binary is this test binary, the subcommand is dispatched through the real
-// command-line entry point, and the page is fetched over HTTP from the real dashboard
+// command-line entry point, and the page is fetched over HTTP from the real root
 // handler this binary would mount. The one thing it does not exercise is `serve`
 // standing the ENGINE up, which needs a working ffmpeg encoder;
 // TestServe_ServesTheOfferAndTheVersionSubcommandAgrees below does that and skips
@@ -225,10 +205,11 @@ func TestVersionSubcommandAndTheServedPageNameTheSameBuild(t *testing.T) {
 		t.Fatal("the version subcommand printed nothing")
 	}
 
-	// The page from that same binary, over a real listener.
-	ts := httptest.NewServer(webui.HandlerFor(sourceoffer.Current()))
+	// The page from that same binary, over a real listener. holdfast ships no frontend,
+	// so the root handler's plain-text body IS the offer.
+	ts := httptest.NewServer(server.RootHandler())
 	defer ts.Close()
-	offer := dashboardOfferOf(t, httpGet(t, ts.URL+"/"))
+	offer := rootOfferOf(t, httpGet(t, ts.URL+"/"))
 
 	if !strings.Contains(offer, banner) {
 		t.Errorf("the offer does not name the build the version subcommand reports.\n version: %q\n   offer: %s", banner, offer)
@@ -297,12 +278,16 @@ func TestServe_ServesTheOfferAndTheVersionSubcommandAgrees(t *testing.T) {
 			t.Errorf("the chosen stamp %q is not in both the version output and the page", want)
 		}
 	}
-	// AC11: the value is served, escaped, and introduces no markup.
-	if !strings.Contains(page, `href="https://example.invalid/a?b=&#34;&gt;&lt;img src=x onerror=1&gt;"`) {
-		t.Error("the served page does not carry the escaped source URL as the link target")
+	// AC11: an absolute https value carrying HTML-significant characters is served
+	// VERBATIM and introduces no markup - the root page is plain text, so nothing is
+	// escaped and nothing is a sink.
+	if !strings.Contains(page, sourceoffer.Label+": "+hostileValue) {
+		t.Error("the served page does not carry the source URL verbatim after its label")
 	}
-	if strings.Contains(page, "<img") {
-		t.Error("the source URL introduced an img element into the served page")
+	for _, banned := range []string{"<img", "<a ", "&#34;", "&gt;", "&lt;"} {
+		if strings.Contains(page, banned) {
+			t.Errorf("the root page carries markup or escaping (%s); it is plain text", banned)
+		}
 	}
 
 	cancel()
@@ -407,17 +392,12 @@ func TestLdflags_StampedForkValueIsServedAndUpstreamIsAbsent(t *testing.T) {
 	waitHTTP(t, "http://"+addr+"/api/summary", 30*time.Second)
 	page := httpGet(t, "http://"+addr+"/")
 
-	offer := dashboardOfferOf(t, page)
-	// The link may carry a DECORATIVE mark in front of the URL (the GitHub glyph is drawn
-	// inline when the source URL is a GitHub one), so the displayed text is read with the
-	// tags removed rather than matched as one literal string. What must remain is the URL
-	// and nothing else: the displayed URL is what discharges the section 13 offer, so a
-	// mark that replaced it, or one that said anything of its own, fails here.
-	if !strings.Contains(offer, `<a class="source-offer-link" href="`+forkValue+`">`) {
-		t.Errorf("the stamped fork value is not the link target: %s", offer)
-	}
-	if shown := offerShownText(offer); shown != forkValue {
-		t.Errorf("the link's displayed text is %q, want the stamped fork value %q: %s", shown, forkValue, offer)
+	offer := rootOfferOf(t, page)
+	// The URL is written verbatim, with the literal label immediately before it: on a
+	// plain-text page the displayed URL and the route to the source are the same string,
+	// and that string is what discharges the section 13 offer.
+	if !strings.Contains(offer, sourceoffer.Label+": "+forkValue) {
+		t.Errorf("the stamped fork value does not follow the label verbatim: %s", offer)
 	}
 	if strings.Contains(offer, sourceoffer.Upstream) {
 		t.Errorf("the upstream URL occurs inside a stamped fork build's offer: %s", offer)
@@ -427,17 +407,20 @@ func TestLdflags_StampedForkValueIsServedAndUpstreamIsAbsent(t *testing.T) {
 	}
 }
 
-func dashboardOfferOf(t *testing.T, body string) string {
+// rootOfferOf is the source offer inside a served root page. The page is plain text and
+// the offer is its tail, so this finds the labelled line and returns from there: a page
+// that carries no label at all fails here rather than silently returning "" and letting
+// every assertion built on it pass over nothing.
+func rootOfferOf(t *testing.T, body string) string {
 	t.Helper()
-	const open = `<p class="source-offer">`
-	i := strings.Index(body, open)
+	i := strings.Index(body, sourceoffer.Label+": ")
 	if i < 0 {
 		t.Fatalf("the served page carries no source offer:\n%s", body[:min(400, len(body))])
 	}
-	rest := body[i:]
-	j := strings.Index(rest, "</p>")
+	// Back up to the start of the offer, which opens with the build identity.
+	j := strings.LastIndex(body[:i], "\n\n")
 	if j < 0 {
-		t.Fatal("the source offer element is not closed")
+		return body[i:]
 	}
-	return rest[:j+len("</p>")]
+	return body[j+2:]
 }

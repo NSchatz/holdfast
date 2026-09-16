@@ -533,8 +533,8 @@ elif [ "$from_bad" -eq 0 ]; then
 fi
 
 # --- 8. A node manifest must carry a lifecycle-script decision (P4) ----------------
-# There is no node manifest in this repository today and the dashboard is built by the Go
-# toolchain alone, so this check is a TRIPWIRE rather than a current assertion: the moment
+# There is no node manifest in this repository today - holdfast ships no frontend and no
+# JavaScript at all - so this check is a TRIPWIRE rather than a current assertion: the moment
 # somebody adds a package.json, `npm install` gains the right to execute arbitrary
 # `postinstall` code from every transitive dependency, on a runner holding this
 # repository's credentials.

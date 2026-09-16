@@ -47,7 +47,7 @@ services:
       - TZ=Etc/UTC
       # A SECRET REFERENCE to the bearer token for the MUTATING endpoints
       # (rescan/pause/resume), never the token itself. Leave it unset and those endpoints
-      # stay DISABLED (the read-only API and the dashboard still work).
+      # stay DISABLED (the read-only API still works).
       #
       # A LITERAL token here refuses to start. holdfast runs ffmpeg as a child process and a
       # child inherits its parent's environment, so a token in this variable is readable from
@@ -81,7 +81,7 @@ services:
     # own, so where this port is published is what decides who can reach it. LOOPBACK
     # ONLY is the posture of THIS example deployment, not a property of the daemon: put
     # holdfast behind a reverse proxy and that proxy's own authentication becomes the
-    # only barrier in front of the dashboard and the read API. Read the reverse-proxy
+    # only barrier in front of the read API. Read the reverse-proxy
     # posture in docs/docker.md before you give it a hostname. (config.yaml must say
     # `server_addr: 0.0.0.0:8080` for the container to accept the forwarded connection
     # at all — 127.0.0.1 inside a container namespace is not reachable from the host.)

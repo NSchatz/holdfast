@@ -58,30 +58,6 @@ jobs:
           ./scripts/install-ffmpeg.sh /opt/ffmpeg
           echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
 
-      # The dashboard graders that concern what the page SHOWS load it in a real browser
-      # engine, because the rows are built by script from a snapshot and reading the
-      # source text cannot say what an operator sees. Resolve the browser HERE so its
-      # absence is a named step failure rather than a puzzling red inside a Go test,
-      # and so it fails loud rather than being skipped, which for a grader is a false
-      # green. GitHub's runner images ship Chrome; this only locates it.
-      #
-      # The resolution is scripts/find-browser.sh, and it is a SCRIPT because this repeated
-      # it: the `dashboard` job below carried a second, weaker copy that asked `command -v`
-      # and printed a version, so the two jobs measured different engines and the weaker
-      # answer was on the job that exists to make a missing browser fatal. One definition,
-      # run by both jobs, by the release workflow and by a human typing `make find-browser`.
-      #
-      # The resolved path is assigned BEFORE it is echoed, deliberately: `echo "X=$(cmd)"`
-      # exits 0 however cmd exited, so a failed resolution would write an empty pin and the
-      # step would go green - and an empty HOLDFAST_BROWSER is not a pin at all, it is the
-      # PATH search this step exists to replace.
-      - name: browser for the rendered dashboard graders
-        run: |
-          set -euo pipefail
-          p="$(./scripts/find-browser.sh)"
-          [ -n "$p" ] || { echo "::error::the browser resolution produced no path"; exit 1; }
-          echo "HOLDFAST_BROWSER=$p" >> "$GITHUB_ENV"
-
       # THE gate. Invoked through the Makefile, and deliberately NOT re-listed as steps
       # here: the Makefile's `check:` target is the definition, so CI, the release workflow
       # and a human run the identical gate, and adding to it lands in one file. (Restating
@@ -101,18 +77,6 @@ jobs:
       # running it.
       - name: release-shape self-test (the gate must still bite)
         run: make release-shape-selftest
-
-      # The design-record check's own self-test, on top of the gate. `make check` RUNS the
-      # check (scripts/check-design-record, holding interface-craft C1 and C2); this
-      # defeats it on purpose against a mutated COPY of the record and the dashboard's
-      # sources - once per way it could fail silently, and once per blocklist entry, the
-      # eleven this surface does not carry written in and the four it does carry losing
-      # their exception. How MANY ways is `declared=` in the self-test, which is its single
-      # writer and which the run prints. It sits here rather than in `check` for the same
-      # reason the release-shape self-test does: its mutations must not touch the tree
-      # `check` grades. It needs no browser and no node, so it belongs to this job.
-      - name: design-record self-test (the check must still bite)
-        run: make check-design-record-selftest
 
       # Config schema self-test (anti-advisory-only), on top of the gate: the committed
       # example must validate, and each known-invalid config must be REJECTED — one via
@@ -134,97 +98,6 @@ jobs:
             fi
           done
           echo "config schema self-test OK (valid accepted; unknown-key, bad-value, daemon-level profile key and nested roots rejected)"
-
-  # The dashboard's own suites, in REQUIRED mode (WEBUI-10).
-  #
-  # `make check` above runs them with this repository's skip-when-absent idiom, so a
-  # contributor with no browser is not blocked - the same courtesy the docker gate gets.
-  # That idiom has exactly one failure mode: a suite that skips on every machine reports
-  # "ok" forever while measuring nothing. This job closes it. HOLDFAST_WEBUI_REQUIRED=1
-  # turns a missing runtime into a failure, and scripts/webui-check.sh fails the run if
-  # anything skipped or if either half did not execute at all.
-  #
-  # It is a separate job because it needs runtimes the gate does not: node (for the
-  # derivation units, in node's BUILT-IN test runner, and for the Playwright graders' own
-  # runner) and a browser engine (for every grader that decides what the page SHOWS by
-  # loading the served document rather than by matching its source text).
-  #
-  # The Playwright project is installed with `npm ci` from the committed lockfile, so what
-  # CI runs is the runner version this repository pinned. It is TEST tooling and reaches
-  # nothing a user runs: the generator is still Go and stdlib, `make build` is still a
-  # plain `go build`, and the image gains no stage - which is not asked for here, it is
-  # enforced by TestBuild_TheTestOnlyDependencyCannotReachTheBuiltArtifact inside the
-  # gate. The browser is the runner's own; Playwright is told to use it rather than
-  # downloading one, so no browser download enters this repository's CI.
-  dashboard:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          check-latest: false
-
-      # Named and proven present BEFORE the gate runs, so "the browser was missing" is a
-      # sentence in the log rather than a mystery inside a test binary.
-      #
-      # PROVEN, which this step used to only claim. It asked `command -v` and printed a
-      # `--version`, which every candidate answers - including the one that then never
-      # paints - and it exported nothing, so the graders were left to search for themselves
-      # and found the runner's /usr/bin/chromium. Two of them spent 90 seconds each waiting
-      # on it, eight minutes into every run, while the identical graders were green in
-      # `build` above, because `build` had pinned an engine it had watched render. The
-      # resolution is one script now and it PINS what it proved, so both jobs measure the
-      # same engine and the log says which.
-      - name: the runtimes the dashboard suites require
-        run: |
-          set -euo pipefail
-          node --version
-          p="$(./scripts/find-browser.sh)"
-          [ -n "$p" ] || { echo "::error::the browser resolution produced no path"; exit 1; }
-          echo "HOLDFAST_BROWSER=$p" >> "$GITHUB_ENV"
-
-      # The graders' runner, from the committed lockfile. `npm ci` REFUSES a lockfile that
-      # disagrees with the manifest, which is what makes this a pin rather than a request.
-      - name: the dashboard graders' test runner
-        run: npm ci --no-audit --no-fund
-        working-directory: internal/webui/e2e
-        env:
-          # The graders use the browser proved present above. Downloading a second one
-          # would put an unpinned, undigested browser build in the path of a repository
-          # whose entire packaging story is a pinned, digest-verified artifact.
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
-
-      - name: the dashboard's unit suite and rendered graders, in required mode
-        run: make webui-check
-
-      # The rendered graders must AGREE WITH THEMSELVES. The step above asks whether they
-      # pass; this one runs them repeatedly against the one tree this job checked out and
-      # fails if two repetitions decided the same bytes differently. It is here because
-      # that is exactly how the defect it guards arrived: a grader whose verdict depended
-      # on how loaded the runner was broke main, and the rerun that passed made it look
-      # like nothing had happened. A rerun is not evidence when the thing being tested is
-      # whether reruns agree.
-      #
-      # Repetitions cannot prove determinism, only fail to disprove it. The criteria that
-      # remove the mechanism are graders inside the suite above - a reading held back for
-      # two minutes, a snapshot held back past any budget the harness carries - and this
-      # step is the cheap disconfirmation that runs beside them and catches a NEW clock
-      # dependence introduced by someone who has read none of that.
-      - name: the rendered graders must agree with themselves
-        run: make webui-repeat-check
-
-      # The engine-only graders' own self-test, on top of the gate. `make webui-check` RUNS
-      # them; this defeats each of the three questions that exist only at the engine - the
-      # operating system's colour-scheme preference, the accessible name the engine
-      # computes, the focus a real key press moves - against a mutated COPY of the tree, and
-      # fails if any defeat did not execute or came back green. Proving a grader REDS is a
-      # different assertion from running it, and these three are the whole reason there is a
-      # browser in this gate. It sits here rather than in `check` for the same reason the
-      # release-shape self-test does: its mutations must not touch the tree `check` grades.
-      - name: the engine-only graders must still bite
-        run: make webui-graders-selftest
 
   # The packaging gate. It runs on every PR the same script the release workflow runs
   # before it pushes anything (scripts/smoke-image.sh), so the image a tag ships is the

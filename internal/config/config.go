@@ -395,9 +395,9 @@ type Config struct {
 	// encoder in a later phase). Use EffectiveWorkers() to read the resolved value.
 	Workers int `yaml:"workers"`
 
-	// --- server / API+UI (TRANSCODE-7, `holdfast serve`) ---
+	// --- server / API (TRANSCODE-7, `holdfast serve`) ---
 
-	// ServerAddr is the host:port the `serve` HTTP API + web UI binds to. Default
+	// ServerAddr is the host:port the `serve` HTTP API binds to. Default
 	// "127.0.0.1:8080" — LOCALHOST by design (fail-safe: the control surface is not
 	// exposed to the network unless the operator opts in, then fronts it with a
 	// reverse proxy). An empty value is treated as the default by `serve` (never a
@@ -407,7 +407,7 @@ type Config struct {
 	// the bearer token required on the MUTATING endpoints (rescan/pause/resume) lives,
 	// and the value is resolved at the point of use and never stored here. Empty
 	// (default) DISABLES those endpoints entirely - remote control is off until a
-	// reference is configured (fail-safe). Read endpoints and the UI never require it.
+	// reference is configured (fail-safe). Read endpoints never require it.
 	//
 	// A literal token here, or in HOLDFAST_SERVER_AUTH_TOKEN, is a startup REFUSAL. See
 	// SecretRefs and internal/secret for the accepted forms and why there is no env: one.
@@ -421,18 +421,17 @@ type Config struct {
 	//
 	// It is a SECOND, INDEPENDENT key rather than a widening of ServerAuthToken because
 	// reading every media path in a library and starting a scan are different
-	// permissions, and an operator who wants a read-only dashboard behind their proxy
+	// permissions, and an operator who wants a read-only client behind their proxy
 	// must not have to hand out the control token to get one. The control token is
 	// accepted on the read endpoints too: one Authorization header cannot carry two
 	// values, so the more privileged holder would otherwise be locked out of the less
 	// privileged surface. The reverse never holds - a read token buys no mutation.
 	//
-	// It does NOT gate the dashboard PAGE or its embedded assets. A browser sends no
-	// Bearer header on a navigation, so gating the page here would serve a login-less
-	// 401 to every operator who opened it; the cookie-from-a-login-form that makes the
-	// page work is its own piece of work. With this key set the page is still served and
-	// its own /api requests are refused, which Notices() states at startup rather than
-	// leaving an operator to discover.
+	// It does NOT gate the ROOT PATH or /metrics. holdfast ships no frontend: the root
+	// serves a plain-text page naming the endpoints and carrying the AGPL section 13
+	// source offer, and it holds no library datum for a credential to protect. /metrics
+	// is governed by metrics_enable alone and its exposition names no file. Both are
+	// stated by Notices() at startup rather than left for an operator to discover.
 	//
 	// A literal token here, or in HOLDFAST_SERVER_READ_TOKEN, is a startup REFUSAL, for
 	// the same reason the control token's is: a credential in holdfast's environment is
@@ -1300,13 +1299,12 @@ func (c *Config) Notices() []string {
 	switch {
 	case strings.TrimSpace(c.ServerReadToken) != "":
 		n = append(n, "server_read_token is set - the read endpoints under /api require a bearer "+
-			"token, BUT THE DASHBOARD PAGE AT / IS STILL SERVED WITHOUT A CREDENTIAL, and so are its "+
-			"embedded assets: this key gates /api reads and nothing else. A browser sends no "+
-			"Authorization header on a navigation, so THE PAGE LOADS AND ITS DATA DOES NOT - its own "+
-			"requests to /api/summary, /api/queue, /api/history and /api/events carry no credential "+
-			"and are refused - until a browser login exists. Keep your reverse proxy's own "+
-			"authentication in front of the page; in front of the read API it is now defence in "+
-			"depth rather than the only barrier.")
+			"token, BUT THE ROOT PATH AT / IS STILL SERVED WITHOUT A CREDENTIAL, and so is /metrics: "+
+			"this key gates /api reads and nothing else. holdfast ships no frontend, so the root is a "+
+			"plain-text page naming the endpoints and carrying the Corresponding Source offer, and it "+
+			"carries NO LIBRARY DATUM - the media paths live behind /api/queue, /api/history and "+
+			"/api/events, which this key now gates. In front of the read API your reverse proxy's own "+
+			"authentication is now defence in depth rather than the only barrier.")
 	case !isLoopbackBind(c.EffectiveServerAddr()):
 		n = append(n, "server_addr is "+c.EffectiveServerAddr()+", which is NOT a loopback address, and "+
 			"server_read_token is empty: EVERY MEDIA PATH IN YOUR LIBRARY IS SERVED WITHOUT A "+
@@ -1315,7 +1313,7 @@ func (c *Config) Notices() []string {
 			"in this daemon checks a credential for any of them - the loopback bind was the whole of "+
 			"what protected them, and this address is not it. Point server_read_token at a secret "+
 			"(file:/run/secrets/... or cmd:...) to require a bearer token on those reads. It does not "+
-			"gate the dashboard page, which stays behind your reverse proxy's own authentication.")
+			"gate the plain-text root page, which carries no library datum, or /metrics.")
 	}
 	if strings.TrimSpace(c.ScratchDir) != "" {
 		n = append(n, "scratch_dir is set - the encoder writes its working file to "+strings.TrimSpace(c.ScratchDir)+

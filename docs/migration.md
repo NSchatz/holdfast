@@ -153,7 +153,7 @@ replacement of it. Read this before you switch.
 4. **Rehearse with `dry_run: true`** and read the skip reasons. A library Tdarr has been through
    will report a lot of "already HEVC" skips — that is the correct answer, arrived at by looking
    at the files rather than by trusting a database.
-5. Bring it up: `docker compose up -d`, and watch the dashboard.
+5. Bring it up: `docker compose up -d`, and watch `/api/summary` and `/api/events`.
 
 ### What "safe" costs you
 

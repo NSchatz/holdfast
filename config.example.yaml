@@ -54,7 +54,7 @@ log_level: info
 # When true, report intended actions without changing any file: every guard runs, and
 # nothing is encoded, swapped or deleted. A file that passes every guard is RECORDED as
 # `would-transcode` - a terminal outcome that says what a real run would do to it,
-# carrying that file's source codec and source size - so the dashboard, /api/history and
+# carrying that file's source codec and source size - so /api/history and
 # holdfast_files_total{outcome="would-transcode"} answer "which files would this
 # transcode?" instead of leaving them looking like work still in progress.
 #
@@ -464,10 +464,11 @@ dry_run: false
 #   - /media/tv
 #   - /state
 
-# --- HTTP API + web UI (`holdfast serve`) ---
-# `holdfast serve` runs a REST API + SSE live stream + an embedded web dashboard
-# (single binary). It is a READ-AND-CONTROL surface: this YAML stays the source of
-# truth, and the API can only start a scan and pause/resume new-file feeding — it
+# --- HTTP API (`holdfast serve`) ---
+# `holdfast serve` runs a REST API + SSE live stream (single binary). holdfast ships NO
+# FRONTEND: this API is the whole interface, and the root path serves a plain-text page
+# naming the endpoints. It is a READ-AND-CONTROL surface: this YAML stays the source of
+# truth, and the API can only start a scan and pause/resume new-file feeding - it
 # never touches a media file.
 # server_addr: 127.0.0.1:8080  # bind address. LOCALHOST by default (fail-safe: the
 #                              #   control surface is not network-exposed unless you
@@ -489,12 +490,12 @@ dry_run: false
 #                              #   server_auth_token is accepted there too, because one
 #                              #   Authorization header cannot carry two values. A read
 #                              #   token is NEVER accepted for a mutation.
-#                              #   IT DOES NOT GATE THE DASHBOARD PAGE. The page at / and
-#                              #   its assets are still served with no credential when this
-#                              #   is set - a browser sends no Bearer header on a navigation
-#                              #   - so the page loads and its data does not until a browser
-#                              #   login exists. Keep a reverse proxy's own authentication
-#                              #   in front of the page. /metrics is not gated either.
+#                              #   IT DOES NOT GATE THE ROOT PAGE. holdfast ships no
+#                              #   frontend, so / is a plain-text page naming the endpoints
+#                              #   and carrying the Corresponding Source offer: it is still
+#                              #   served with no credential when this is set, and it holds
+#                              #   no library datum for a credential to protect. /metrics is
+#                              #   not gated either.
 #                              #   PREFER THE ENVIRONMENT VARIABLE, so no secret lands in
 #                              #   this file: set HOLDFAST_SERVER_READ_TOKEN to the
 #                              #   reference and leave the key out of the YAML entirely.

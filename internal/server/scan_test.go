@@ -94,7 +94,7 @@ func newScanHarness(t *testing.T, token string) *scanHarness {
 	// Room for more than one request's worth, so a case about the path COUNT is never
 	// answered by the queue's capacity instead.
 	h.subs = eng.NewSubmissions(1, engine.DefaultSubmissionQueue)
-	h.srv = New(ctx, cfg, secret.NewValue(token), secret.Value{}, st, h.ctrl, hub, nil, nil, discard())
+	h.srv = New(ctx, cfg, secret.NewValue(token), secret.Value{}, st, h.ctrl, hub, nil, discard())
 	h.srv.SetSubmissions(h.subs)
 	h.ts = httptest.NewServer(h.srv)
 	t.Cleanup(h.ts.Close)
@@ -898,7 +898,7 @@ func TestScanEndpoint_ShutdownJoinsInFlightWorkAndDropsTheRest(t *testing.T) {
 	ctrl := NewController(ctx, func(context.Context) error { return nil }, discard())
 	hub := NewHub(st, ctrl, discard())
 	subs := eng.NewSubmissions(1, 8) // one worker, so the other two must wait
-	srv := New(ctx, cfg, secret.NewValue("tok"), secret.Value{}, st, ctrl, hub, nil, nil, discard())
+	srv := New(ctx, cfg, secret.NewValue("tok"), secret.Value{}, st, ctrl, hub, nil, discard())
 	srv.SetSubmissions(subs)
 	ts := httptest.NewServer(srv)
 	defer ts.Close()

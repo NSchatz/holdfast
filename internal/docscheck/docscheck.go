@@ -114,23 +114,22 @@
 //
 // # Why the reverse-proxy anchor exists
 //
-// On the shipped defaults the read endpoints and the dashboard carry no authentication of
-// their own, protected by the loopback bind, so the day a reverse proxy can reach the
-// container that bind protects nothing and the proxy is the only barrier left. Six facts
-// decide whether that deployment is safe or quietly open, and not one of them is
+// On the shipped defaults the read endpoints carry no authentication of their own,
+// protected by the loopback bind, so the day a reverse proxy can reach the container that
+// bind protects nothing and the proxy is the only barrier left. Three facts decide whether
+// that deployment is safe or quietly open, and not one of them is
 // discoverable from the API's own responses: that the read surface is unauthenticated
 // until a read token is set; that setting one makes the proxy defence in depth in front
-// of the read API rather than the only barrier; that it does NOT gate the dashboard page,
-// which is still served with no credential; that the page consequently loads while its
-// data does not; that the mutating endpoints are off until a control token is configured;
-// and that the page's own requests are root-relative so it must be served at the host
-// root. An operator can only weigh those if they are written down, which is the same
-// argument the residual-window statements are here for.
+// of the read API rather than the only barrier; and that the mutating endpoints are off
+// until a control token is configured. An operator can only weigh those if they are
+// written down, which is the same argument the residual-window statements are here for.
 //
-// The middle three are the ones that make a HALF-GATED surface honest. A deployment where
-// the API refuses and the page does not is the shape an operator is most likely to
-// misread as gated, and misreading it is how the proxy's own authentication comes off the
-// route in front of the page.
+// It was six facts while holdfast served a dashboard, three of them about a page this
+// repository no longer has: that the read token did not gate it, that it therefore loaded
+// with no data in it, and that its root-relative asset requests forced a host-root mount.
+// Those went out with the frontend. A clause that describes a surface that does not exist
+// does not go on protecting anybody - it gets satisfied by prose nobody means, which is
+// how a gate stops grading and starts decorating.
 //
 // # The corpus
 //
@@ -194,14 +193,6 @@ const (
 // loopback.
 const AnchorReverseProxy = "reverse-proxy-posture"
 
-// ReverseProxyRootPathToken carries the ROOT-PATH constraint, and it is the one token
-// here whose absence is a deployment that BREAKS rather than one that is merely
-// undocumented: the dashboard requests its own API and its own assets with
-// root-relative paths, so a router that strips or rewrites a path prefix serves the
-// document and 404s everything under it. It is called out as its own exported constant
-// because that is the clause a proxy configuration gets wrong.
-const ReverseProxyRootPathToken = "root-relative"
-
 // AnchorSwapMetadata introduces the swap-metadata statement: what a swap CHANGES about
 // the file it publishes, beside the existing statement of what holdfast NEEDS from the
 // filesystem.
@@ -232,9 +223,17 @@ type ReverseProxyClause = Clause
 
 // ReverseProxyClauses is the whole obligation. Each token is the shortest string that
 // carries its clause and could not plausibly be written by accident while meaning
-// something else, and two of the three are identifiers this repository already treats
-// as fixed (`server_auth_token` is a config key; `root-relative` is how the page's own
-// requests are described everywhere else).
+// something else, and one of the three is an identifier this repository already treats as
+// fixed (`server_auth_token` is a config key).
+//
+// It held three more while holdfast served a dashboard: that the key did not gate the
+// page, that the page therefore loaded with no data, and that the daemon had to be served
+// at the host root because the page asked for its own assets with root-relative paths.
+// holdfast ships no frontend, so all three are obligations to state something that is no
+// longer true - and a clause a document cannot honestly carry is a clause that gets
+// honoured with prose nobody means. What survives is what a deploying operator still has
+// to read: what the key gates, what it does not, and that the mutating endpoints stay
+// disabled until the control token is configured.
 var ReverseProxyClauses = []Clause{
 	{
 		Token: "the only barrier",
@@ -247,26 +246,9 @@ var ReverseProxyClauses = []Clause{
 			"becomes defence in depth rather than the only barrier",
 	},
 	{
-		Token: "the page is still served with no credential",
-		Clause: "that server_read_token does NOT gate the dashboard page - the page is " +
-			"still served with no credential, so the proxy IS still the only barrier " +
-			"in front of it",
-	},
-	{
-		Token: "the page loads but its data does not",
-		Clause: "that with a read token set the page loads but its data does not, " +
-			"because the page's own requests carry no credential, until a browser " +
-			"login exists",
-	},
-	{
 		Token: "server_auth_token",
 		Clause: "that the mutating endpoints stay disabled until a control token " +
 			"(server_auth_token / HOLDFAST_SERVER_AUTH_TOKEN) is configured",
-	},
-	{
-		Token: ReverseProxyRootPathToken,
-		Clause: "that holdfast must be served at the host root, because the page requests " +
-			"its own API and assets with root-relative paths",
 	},
 }
 

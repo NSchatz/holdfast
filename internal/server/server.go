@@ -21,10 +21,11 @@ import (
 )
 
 // Server is the HTTP surface: chi router + read endpoints + SSE + token-gated
-// controls + the embedded UI. Two independent bearer tokens gate it: the control token
+// controls. Two independent bearer tokens gate it: the control token
 // (`server_auth_token`) on the mutating endpoints, and the read token
-// (`server_read_token`) on the reads under /api when it is configured. The dashboard page
-// and /metrics are gated by neither, for the reasons given at their routes. It holds no
+// (`server_read_token`) on the reads under /api when it is configured. The plain-text
+// root page and /metrics are gated by neither, for the reasons given at their routes.
+// holdfast ships no frontend, so /api IS the interface. It holds no
 // media handles - every mutating action routes through the Controller (scan/pause), which
 // cannot touch a file.
 type Server struct {
@@ -42,7 +43,6 @@ type Server struct {
 	store     store.Store
 	ctrl      *Controller
 	hub       *Hub
-	ui        http.Handler
 	metrics   http.Handler
 	log       *slog.Logger
 	mux       http.Handler
@@ -72,23 +72,25 @@ func (s *Server) Wait() {
 
 // New builds the Server and its router. baseCtx bounds long-lived handlers (the SSE
 // stream watches it, so a shutdown that cancels baseCtx releases open streams
-// promptly instead of hanging graceful shutdown). ui is the embedded web UI handler
-// (served at "/"); pass nil to serve a minimal API-only page. metrics is the
-// Prometheus /metrics handler (TRANSCODE-8); pass nil to omit the route. The caller
-// starts hub.Run and listens on cfg.EffectiveServerAddr() with s as the handler.
+// promptly instead of hanging graceful shutdown). metrics is the Prometheus /metrics
+// handler (TRANSCODE-8); pass nil to omit the route. The caller starts hub.Run and
+// listens on cfg.EffectiveServerAddr() with s as the handler.
+//
+// holdfast ships no frontend: the root path serves RootHandler's plain-text page and
+// the HTTP JSON API under /api is the whole of the machine-readable interface.
 //
 // token is the control token RESOLVED from cfg's `server_auth_token` reference; an empty
 // one leaves the mutating endpoints disabled, exactly as an unconfigured key does.
 // readToken is the read token RESOLVED from cfg's `server_read_token` reference; an empty
 // one leaves the read endpoints OPEN, which is what every install before this key did.
-func New(baseCtx context.Context, cfg config.Config, token, readToken secret.Value, st store.Store, ctrl *Controller, hub *Hub, ui, metrics http.Handler, log *slog.Logger) *Server {
+func New(baseCtx context.Context, cfg config.Config, token, readToken secret.Value, st store.Store, ctrl *Controller, hub *Hub, metrics http.Handler, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
-	s := &Server{baseCtx: baseCtx, cfg: cfg, token: token, readToken: readToken, store: st, ctrl: ctrl, hub: hub, ui: ui, metrics: metrics, log: log}
+	s := &Server{baseCtx: baseCtx, cfg: cfg, token: token, readToken: readToken, store: st, ctrl: ctrl, hub: hub, metrics: metrics, log: log}
 	s.mux = s.routes()
 	return s
 }
@@ -154,33 +156,26 @@ func (s *Server) routes() http.Handler {
 		r.Handle("/metrics", s.metrics)
 	}
 
-	// The embedded UI at the root, and DELIBERATELY NOT GATED either. A browser sends no
-	// Authorization header on a navigation, so gating the page on a bearer token would
-	// serve a login-less 401 to every operator who opened it; the page needs a cookie set
-	// from a login form, which is its own piece of work. With a read token set the page is
-	// therefore still served and its own /api requests are refused - the page loads and
-	// its data does not - which is what Notices() states at startup.
-	if s.ui != nil {
-		r.Handle("/*", s.ui)
-	} else {
-		r.Get("/", apiOnlyRoot())
-	}
+	// The root path, and DELIBERATELY NOT GATED either: it is a plain-text page naming
+	// the API's endpoints and carrying the AGPL section 13 source offer, so there is
+	// nothing behind it for a credential to protect.
+	r.Get("/", RootHandler())
 	return r
 }
 
-// apiOnlyRoot serves the minimal plain-text page that stands in for the dashboard
-// when the server is constructed without one. It is a root response a remote user can
-// get, so it owes the same AGPL section 13 source offer the dashboard does
-// (LICENSE-3) - the source URL in effect, the licence name and the build identity,
-// with the same literal label immediately before the URL. No markup, so the URL is
-// written verbatim.
+// RootHandler serves the plain-text page at "/". holdfast ships no frontend, so this is
+// the whole of the root response: a line naming the read endpoints, and the AGPL
+// section 13 source offer. It is a root response a remote user can get, so it owes that
+// offer (LICENSE-3) - the source URL in effect, the licence name and the build identity,
+// with the literal label immediately before the URL. No markup, so the URL is written
+// verbatim.
 //
 // It resolves the offer through the SAME accept test the daemon runs at startup, and
-// refuses if the value was rejected: a rejected value must not reach a root response
-// on either branch. In the daemon that refusal has already happened before any
-// listener exists - this branch is reachable only in process, where there is no
-// listener to refuse and no exit code to return.
-func apiOnlyRoot() http.HandlerFunc {
+// refuses if the value was rejected: a rejected value must not reach a root response.
+// In the daemon that refusal has already happened before any listener exists - this
+// branch is reachable only in process, where there is no listener to refuse and no exit
+// code to return.
+func RootHandler() http.HandlerFunc {
 	const banner = "holdfast API is running. See /api/summary, /api/queue, /api/history, /api/events.\n"
 	offer, err := sourceoffer.Resolve()
 	if err != nil {

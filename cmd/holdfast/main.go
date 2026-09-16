@@ -42,7 +42,6 @@ import (
 	"github.com/NSchatz/holdfast/internal/store"
 	"github.com/NSchatz/holdfast/internal/version"
 	"github.com/NSchatz/holdfast/internal/vmaf"
-	"github.com/NSchatz/holdfast/internal/webui"
 )
 
 func main() {
@@ -799,8 +798,10 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	// A refusal, never a fall back to upstream. A fork whose override is malformed
 	// and silently fell back would tell its users that upstream is the source of a
 	// binary it is not.
-	offer, err := sourceoffer.Resolve()
-	if err != nil {
+	// The resolved offer is not held here: the root handler resolves it again at
+	// construction, through this same accept test, so there is one accept test and no
+	// value passed along that a second site could disagree about.
+	if _, err := sourceoffer.Resolve(); err != nil {
 		fmt.Fprintf(stderr, "holdfast: refusing to serve: %v\n", err)
 		return 1
 	}
@@ -866,7 +867,7 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	subs := eng.NewSubmissions(0, 0)
 
 	srv := server.New(ctx, *cfg, secrets.Get("server_auth_token"), secrets.Get("server_read_token"),
-		st, ctrl, hub, webui.HandlerFor(offer), metricsHandler, log)
+		st, ctrl, hub, metricsHandler, log)
 	srv.SetSubmissions(subs)
 	var bg sync.WaitGroup
 	bg.Add(4)

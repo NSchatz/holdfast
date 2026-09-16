@@ -9,9 +9,9 @@ import (
 
 // TestConfigExample_DocumentsTheReadToken: the shipped example is where an operator meets
 // a key for the first time, and every fact this one needs is a fact they cannot get from
-// the key's NAME. What it gates, that empty means open, that it does NOT reach the
-// dashboard page, and that the environment variable is the way to supply it so no secret
-// lands in the file they are reading.
+// the key's NAME. What it gates, that empty means open, that it does NOT reach the root
+// page, and that the environment variable is the way to supply it so no secret lands in
+// the file they are reading.
 //
 // docscheck deliberately excludes config.example.yaml from its corpus - an example carries
 // comments and states no contract - so this is the route that makes the obligation
@@ -30,7 +30,7 @@ func TestConfigExample_DocumentsTheReadToken(t *testing.T) {
 	for _, want := range []struct{ fact, token string }{
 		{"what it gates", "/api/summary"},
 		{"that empty means the read surface is open", "empty is the default and means the read surface"},
-		{"that it does not gate the dashboard page", "it does not gate the dashboard page"},
+		{"that it does not gate the root page", "it does not gate the root page"},
 		{"that the environment variable is the preferred way to supply it", "prefer the environment variable"},
 		{"so no secret lands in this file", "no secret lands in"},
 		{"and which variable that is", "holdfast_server_read_token"},
@@ -151,12 +151,12 @@ func TestNotices_WarnsOnNonLoopbackBindWithNoReadToken(t *testing.T) {
 	})
 }
 
-// TestNotices_StatesTheDashboardIsStillOpenWhenAReadTokenIsSet is the other half of the
+// TestNotices_StatesTheRootPageIsStillOpenWhenAReadTokenIsSet is the other half of the
 // startup statement, and the one an operator cannot get anywhere else. With a read token
-// set the page is STILL SERVED and its own /api requests are refused, so the dashboard
-// loads and stays empty. A half-gated surface that reads as gated is worse than an open
-// one that says it is open, and this is where it gets said.
-func TestNotices_StatesTheDashboardIsStillOpenWhenAReadTokenIsSet(t *testing.T) {
+// set the root path is STILL SERVED with no credential, and so is /metrics: this key
+// gates /api reads and nothing else. A half-gated surface that reads as gated is worse
+// than an open one that says it is open, and this is where it gets said.
+func TestNotices_StatesTheRootPageIsStillOpenWhenAReadTokenIsSet(t *testing.T) {
 	c := &Config{
 		LibraryRoots:    []string{"/mnt/media"},
 		ServerAddr:      "0.0.0.0:8080",
@@ -168,10 +168,10 @@ func TestNotices_StatesTheDashboardIsStillOpenWhenAReadTokenIsSet(t *testing.T) 
 	}
 	low := strings.ToLower(got[0])
 	for _, phrase := range []string{
-		"dashboard page",       // WHICH surface is still open
+		"root path at /",       // WHICH surface is still open
 		"without a credential", // that it is served without one
-		"its data does not",    // and what that costs: the page loads, the data does not
-		"browser login",        // and what will fix it
+		"/metrics",             // and the other surface this key does not reach
+		"no library datum",     // and what that costs: nothing, which is why it is safe
 	} {
 		if !strings.Contains(low, phrase) {
 			t.Errorf("the read-token notice never says %q:\n%s", phrase, got[0])

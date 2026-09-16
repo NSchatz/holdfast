@@ -162,7 +162,7 @@ func TestSecretScan_AC10_ForbiddenNamesAreRefusedWhateverTheyContain(t *testing.
 // AC-10/AC-11: the bounded exemption register forgives a NAME and never content, which is
 // the whole reason it is safe to have one.
 func TestSecretScan_AC10_TheExemptionRegisterForgivesANameAndNeverContent(t *testing.T) {
-	const path = "internal/webui/e2e/.npmrc"
+	const path = "tools/harness/.npmrc"
 	exempt := []NameExemption{{Path: path, Reason: "because the test says so"}}
 
 	if _, bad := ForbiddenName(path, exempt); bad {
@@ -190,7 +190,7 @@ func TestSecretScan_AC10_TheExemptionRegisterForgivesANameAndNeverContent(t *tes
 // AC-11: the register refuses to go stale or to grant anything it was not given. An
 // allowlist that may grow is an allowlist that grows until the scanner stops scanning.
 func TestSecretScan_AC11_TheRegisterRefusesToOutliveItsReason(t *testing.T) {
-	present := []string{"internal/webui/e2e/.npmrc", "go.mod"}
+	present := []string{"tools/harness/.npmrc", "go.mod"}
 	cases := map[string]struct {
 		list []NameExemption
 		want string
@@ -200,11 +200,11 @@ func TestSecretScan_AC11_TheRegisterRefusesToOutliveItsReason(t *testing.T) {
 		"a name that was never forbidden": {
 			[]NameExemption{{Path: "go.mod", Reason: "r"}}, "not forbidden"},
 		"no reason": {
-			[]NameExemption{{Path: "internal/webui/e2e/.npmrc", Reason: "  "}}, "no reason"},
+			[]NameExemption{{Path: "tools/harness/.npmrc", Reason: "  "}}, "no reason"},
 		"a duplicate": {
 			[]NameExemption{
-				{Path: "internal/webui/e2e/.npmrc", Reason: "r"},
-				{Path: "internal/webui/e2e/.npmrc", Reason: "r"},
+				{Path: "tools/harness/.npmrc", Reason: "r"},
+				{Path: "tools/harness/.npmrc", Reason: "r"},
 			}, "listed twice"},
 		"over the cap": {
 			func() []NameExemption {

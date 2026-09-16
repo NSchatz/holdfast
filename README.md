@@ -2,8 +2,6 @@
 
 **A config-as-code, data-safe, self-hosted media transcoder - an open-source [Tdarr](https://tdarr.io) replacement.**
 
-![The holdfast web dashboard: live queue, per-status summary, reclaimed-space totals, whole-ledger figures, and history with each swap's proof of safety - served from the single binary by `holdfast serve`.](docs/dashboard.png)
-
 `holdfast` watches a media library, re-encodes bloated non-HEVC/non-AV1 video to a smaller modern codec
 to reclaim disk space, and - the whole point - **never destroys a source until a replacement is provably
 faithful**. It is configured entirely by **YAML** (config-as-code), so what it does is reviewable and
@@ -15,8 +13,8 @@ reproducible from git, not hidden in a UI database.
 > skip guards → same-directory temp encode → the full verify gate → atomic swap → delete - proven by a
 > real-ffmpeg fixture suite that reds on the specific regression. Built on top of it: colour/HDR
 > preservation (`TRANSCODE-3`), the VMAF perceptual gate (`TRANSCODE-4`), a persistent crash-safe queue +
-> worker pool (`TRANSCODE-5`), hardware/AV1 encoders (`TRANSCODE-6`), the REST/SSE API + embedded web UI
-> (`TRANSCODE-7`, shown above), observability + host-fair scheduling (`TRANSCODE-8`), and **packaging: a
+> worker pool (`TRANSCODE-5`), hardware/AV1 encoders (`TRANSCODE-6`), the REST/SSE API
+> (`TRANSCODE-7`), observability + host-fair scheduling (`TRANSCODE-8`), and **packaging: a
 > multi-arch, non-root container image bundling a pinned ffmpeg (`TRANSCODE-9`)**. Cutting a tag is a
 > deliberate human act: [`docs/release.md`](docs/release.md) is the ordered runbook, says which of its
 > steps can be undone, and carries the record of what `v0.1.0` already published. See the roadmap for the
@@ -121,7 +119,7 @@ docker compose config -q && docker compose up -d
 ```
 
 A container config differs from a bare-metal one in exactly three places - miss the third and the
-dashboard is unreachable from the host (the API would be bound to the *container's* loopback):
+API is unreachable from the host (it would be bound to the *container's* loopback):
 
 ```yaml
 library_roots: [/media]     # the CONTAINER path your library is mounted at
@@ -140,7 +138,7 @@ cp config.example.yaml config.yaml   # then edit library_roots
 holdfast validate --config config.yaml
 holdfast analyze --config config.yaml  # what is in the library, reading only (--health: what is broken)
 holdfast run --config config.yaml   # one scan: re-encode bloated non-HEVC video, safely
-holdfast serve --config config.yaml # HTTP API + web dashboard (scan on demand / on an interval)
+holdfast serve --config config.yaml # HTTP API (scan on demand / on an interval)
 holdfast resolve --config config.yaml  # list (and resolve) any job whose swap outcome is unknown
 holdfast restore --config config.yaml  # what the undo window is holding (see below)
 holdfast export --config config.yaml --out ledger.ndjson  # the whole ledger, as NDJSON
@@ -223,10 +221,11 @@ values have moved. So lowering `min_bitrate_kbps` or changing the target codec r
 previous configuration answered; an edit to a key no guard read reaches nothing; re-opening is not
 re-encoding; `holdfast requeue` is the LOCAL lever for the rest - **[docs/requeue.md](docs/requeue.md)**.
 
-### Web API + UI (`serve`)
+### Web API (`serve`)
 
 `holdfast serve` runs a REST API + [SSE](https://developer.mozilla.org/docs/Web/API/Server-sent_events)
-live stream and an **embedded web dashboard** (baked into the single binary - no assets to deploy). It is
+live stream. **holdfast currently ships no frontend: the HTTP JSON API is the interface**, and the root
+path serves a plain-text page naming the endpoints. It is
 a **read-and-control** surface on top of the config-as-code engine: the YAML file stays the source of
 truth and the SQLite store stays the source of job state. The API can only **read the store, start a
 scan, and pause/resume the feeding of new files** - it never touches a media file, so the data-safety
@@ -239,16 +238,15 @@ Fail-safes: the server **binds `127.0.0.1` by default**. With `server_read_token
 the shipped default - that bind is the whole of what protects the read endpoints, so a
 reverse proxy in front of them is the only barrier there is; set it and the four `/api`
 reads require a bearer token of their own, which makes the proxy defence in depth instead.
-It does **not** gate the dashboard page, which is still served without a credential either
-way (the reverse-proxy posture is in [docs/docker.md](docs/docker.md), and it is worth
+It does **not** gate the root path or `/metrics`, neither of which carries a library datum
+(the reverse-proxy posture is in [docs/docker.md](docs/docker.md), and it is worth
 reading before you give holdfast a hostname);
 the mutating endpoints require a bearer token, reached **by reference**
 (`server_auth_token: file:/run/secrets/holdfast-token` - a literal token there, or in
 `HOLDFAST_SERVER_AUTH_TOKEN`, refuses to start; see [docs/secrets.md](docs/secrets.md)) and
 are **disabled entirely when no token is configured**; pause only ever
 *delays* work - it never interrupts an encode or the atomic swap. **Known limitation:** two
-single-value tokens and no per-user accounts, and no browser login, so a set read token
-leaves the dashboard page loading with no data in it; the queue/history views are capped at the most recent rows, not the whole ledger -
+single-value tokens and no per-user accounts; the queue/history endpoints are capped at the most recent rows, not the whole ledger -
 but they now say what they were capped *against*, and `holdfast export` gives you the whole thing.
 
 ### The record, and what to read for it
@@ -265,8 +263,6 @@ they are computed over and mark what they cannot cover. The ledger can be bounde
 `serve` also carries the observability and host-fair scheduling surfaces.
 
 Every field, every figure and the exact semantics: **[`docs/api-reference.md`](docs/api-reference.md)**.
-The dashboard's own methodology is in
-[`docs/dashboard-methodology.md`](docs/dashboard-methodology.md).
 
 
 ## Build
@@ -293,7 +289,7 @@ missing rather than skipping, because a skipped safety proof is a false green.
 life as a Bash script inside a private homelab repo. That predecessor already proved the no-loss contract
 (verify-then-swap-then-delete, HDR-aware, crash-safe) against a real-ffmpeg fixture suite; this project
 ports it to Go and grows it into a production application (persistent queue, worker pool, hardware-encoder
-matrix, web UI, observability). The phased plan and its research live in the umbrella that tracks this repo.
+matrix, observability). The phased plan and its research live in the umbrella that tracks this repo.
 
 ## License
 
@@ -301,11 +297,10 @@ matrix, web UI, observability). The phased plan and its research live in the umb
 
 ### Running a modified holdfast on a network
 
-The dashboard offers its Corresponding Source: every response the root path serves carries a link to the
-source, the licence name and the build identity the `version` subcommand reports. AGPL-3.0 section 13 binds
+`holdfast serve` offers its Corresponding Source: every response the root path serves carries the source
+URL, the licence name and the build identity the `version` subcommand reports. AGPL-3.0 section 13 binds
 whoever runs a **modified** holdfast over a network to offer that source, so if you fork this, point the
-offer at **your** tree. It is a build-time value on both paths that build the binary, and you never patch
-the embedded HTML to change it:
+offer at **your** tree. It is a build-time value on both paths that build the binary:
 
 ```bash
 make build SOURCE_URL=https://git.example.org/me/holdfast

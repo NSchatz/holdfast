@@ -28,8 +28,8 @@ var activeAndPending = []store.Status{store.Pending, store.Probing, store.Encodi
 //
 // The two FILESYSTEM-1 outcomes are here for a reason that is not cosmetic: a job
 // parked indeterminate, or one applied despite an error, must be reported AS THE STATE
-// IT IS IN. Leaving them out would have made a parked job - the one job on the whole
-// dashboard that is actually waiting for a human - the only job that never appears
+// IT IS IN. Leaving them out would have made a parked job - the one job in the whole
+// report that is actually waiting for a human - the only job that never appears
 // anywhere, which is the same failure as reporting it as a success.
 //
 // A dry run's recorded decision is here too, and the split it lands on is a partition of
@@ -244,7 +244,7 @@ func HistoryRowJSON(j store.Job) ([]byte, error) {
 
 // snapshot is the full state the SSE stream pushes and the read endpoints compose.
 //
-// BytesReclaimedLifetime is the DURABLE total the dashboard leads with (TRANSCODE-14):
+// BytesReclaimedLifetime is the DURABLE total a client leads with (TRANSCODE-14):
 // it survives restarts, where BytesReclaimedSession — a per-PROCESS counter — resets to
 // 0. It is computed WITHOUT the unbounded per-snapshot table scan the phase warned
 // against: a one-time baseline (SUM over done rows, read once when the Hub is built) plus
@@ -405,7 +405,7 @@ type Hub struct {
 
 	// reclaimedBaseline is the lifetime reclaimed total AS OF Hub construction — a
 	// single SUM over the store's done rows, read once (never per snapshot). The
-	// durable lifetime total the dashboard shows is reclaimedBaseline + bytesReclaimed:
+	// durable lifetime total this package publishes is reclaimedBaseline + bytesReclaimed:
 	// the baseline is everything reclaimed before this process started, the counter is
 	// what this process has reclaimed since, and the two never overlap because the
 	// baseline is frozen at startup. Immutable after NewHub, so it needs no lock.

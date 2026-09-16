@@ -95,6 +95,10 @@ and the ratio they carry now:
 | `internal/engine/inputs.go` | 51.0% | 51 | 49 | 46.7% |
 | `internal/config/config.go` | 50.6% | 465 | 454 | 48.5% |
 
+`internal/webui/webui.go` is in that table because it was in the measurement. The web
+frontend has since been pulled out of holdfast entirely, so the file no longer exists;
+the row records what was measured, not what is here to measure.
+
 That set is exactly what was trimmed. No file the measurement did not flag was touched,
 and nothing but comment text was: no `//go:` or `//lint:` directive was removed, and no
 comment recording a safety invariant, a `rename-guard-allow` marker, or a rationale

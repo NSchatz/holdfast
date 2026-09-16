@@ -69,7 +69,7 @@ func newPerFileHarness(t *testing.T, token string) *perFileHarness {
 	// An empty read token leaves the reads OPEN, which is what this harness assumed before
 	// server_read_token existed: every case here is about the CONTROL token.
 	h.srv = New(ctx, config.Config{LibraryRoots: []string{root}}, secret.NewValue(token), secret.Value{},
-		h.st, h.ctrl, h.hub, nil, nil, discard())
+		h.st, h.ctrl, h.hub, nil, discard())
 	return &perFileHarness{harness: h, root: root, configPath: cfgPath}
 }
 
@@ -311,7 +311,7 @@ func serverOver(t *testing.T, st *store.SQLite, root, token string) *Server {
 	ctrl := NewController(ctx, func(context.Context) error { return nil }, discard())
 	hub := NewHub(st, ctrl, discard())
 	return New(ctx, config.Config{LibraryRoots: []string{root}}, secret.NewValue(token), secret.Value{},
-		st, ctrl, hub, nil, nil, discard())
+		st, ctrl, hub, nil, discard())
 }
 
 // --- criterion 12: a withholding is removable and the path is eligible again --------

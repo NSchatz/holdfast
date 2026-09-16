@@ -88,7 +88,7 @@ func Families() []Family {
 
 // NameExemption is one tracked PATH the forbidden-NAME rule does not bind, and why.
 //
-// It exists for a single collision the repository cannot resolve any other way, and it is
+// It exists for a collision the repository cannot resolve any other way, and it is
 // built to refuse growth rather than to accommodate it - the same discipline, and for the
 // same reason, as internal/commentdensity.Exemptions. What it does NOT do is exempt the
 // file from anything else: every credential family above, including the npm auth
@@ -100,20 +100,18 @@ type NameExemption struct {
 
 // MaxNameExemptions caps the escape hatch. Narrowing the ruleset to fit a file is never
 // the answer, and an allowlist that may grow is an allowlist that grows until the scanner
-// stops scanning.
+// stops scanning. The cap is unchanged by the register being empty: it bounds what a
+// future entry may cost, which is the question it was added to answer.
 const MaxNameExemptions = 2
 
-// NameExemptions is the whole list. One entry is the healthy state here; empty is not
-// reachable while check-pins.sh section 8 stands.
-var NameExemptions = []NameExemption{{
-	Path: "internal/webui/e2e/.npmrc",
-	Reason: "scripts/check-pins.sh section 8 REQUIRES a committed .npmrc beside every " +
-		"package.json (it is the only surface that records the lifecycle-script decision, and " +
-		"check-pins-selftest.sh proves that requirement bites), so this repository cannot both " +
-		"satisfy its own supply-chain gate and hold no tracked .npmrc. This one carries " +
-		"ignore-scripts=true and comments; the npm-auth-directive family above still binds it, " +
-		"so the moment it gains a registry token the scan refuses it again",
-}}
+// NameExemptions is the whole list, and EMPTY is the healthy state. It held one entry
+// while this repository carried a tracked .npmrc beside a package.json - check-pins.sh
+// section 8 requires that decision surface wherever a node manifest exists - and holds
+// none now that there is no node manifest to decide about. The register stays, and stays
+// validated, because section 8 is a tripwire rather than a ban: the moment a manifest
+// comes back so does its .npmrc, and an exemption granted then must be checked the same
+// way this one was.
+var NameExemptions = []NameExemption{}
 
 // ValidateNameExemptions returns one problem per entry that has outlived its reason, so a
 // stale or useless exemption fails the scan instead of quietly widening it. paths is the

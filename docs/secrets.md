@@ -11,7 +11,7 @@ The four keys:
 | key | what the credential is | what happens when it is absent |
 |---|---|---|
 | `server_auth_token` | the bearer token the MUTATING API endpoints require | `rescan`, `scan`, `pause`, `resume` answer 403: remote control is off |
-| `server_read_token` | the bearer token the READ endpoints under `/api` require | those four endpoints are OPEN, which is the shipped default. They carry the full path of every file holdfast has seen, so on a non-loopback bind that is the whole library served without a credential, and holdfast says so at startup. It does not gate the dashboard page |
+| `server_read_token` | the bearer token the READ endpoints under `/api` require | those four endpoints are OPEN, which is the shipped default. They carry the full path of every file holdfast has seen, so on a non-loopback bind that is the whole library served without a credential, and holdfast says so at startup. It does not gate the plain-text root page or `/metrics` |
 | `notify_url` | a shoutrrr service URL, which carries its credential in its own userinfo, host, path or query | notifications are off |
 | `tautulli_api_key` | the Tautulli API key | the Plex-aware pause is off |
 

@@ -51,22 +51,6 @@ func TestCheck_ReverseProxyStatementWithoutTheDefenceInDepthClauseFails(t *testi
 	missingClauseFails(t, "defence in depth")
 }
 
-// The clause that says what the read token does NOT buy. This is the one whose absence is
-// actively dangerous: an operator who reads "the read API is gated" and nothing else
-// concludes the surface is gated, takes forward auth off the route, and leaves the
-// dashboard page - which is still served to anyone - behind nothing at all.
-func TestCheck_ReverseProxyStatementWithoutThePageStillOpenClauseFails(t *testing.T) {
-	missingClauseFails(t, "the page is still served with no credential")
-}
-
-// The clause that says what the half-gated state LOOKS like. Without it the first thing
-// an operator meets after setting the key is a dashboard that renders and stays empty,
-// with nothing in the documentation to tell them that is the expected shape rather than a
-// broken deployment.
-func TestCheck_ReverseProxyStatementWithoutThePageDataClauseFails(t *testing.T) {
-	missingClauseFails(t, "the page loads but its data does not")
-}
-
 // TestCheck_AStaleUnauthenticatedClaimFails is the corpus-wide rule, which is not anchored
 // and is not about one statement being incomplete. It is about two shipped documents
 // DISAGREEING: one says the read API can be gated, another - written earlier and never
@@ -82,11 +66,11 @@ func TestCheck_AStaleUnauthenticatedClaimFails(t *testing.T) {
 		},
 		{
 			name:  "no authentication",
-			stale: "The read endpoints and the dashboard carry no authentication of their own.\n",
+			stale: "The read endpoints carry no authentication of their own.\n",
 		},
 		{
 			name: "the claim wrapped across lines, because a line break is not a change of meaning",
-			stale: "The read endpoints and the dashboard carry no\nauthentication of their own, " +
+			stale: "The read endpoints carry no\nauthentication of their own, " +
 				"so the proxy is all there is.\n",
 		},
 	} {
@@ -182,7 +166,7 @@ func TestShippedDocumentation_HasNoStaleUnauthenticatedClaim(t *testing.T) {
 		// The claim README.md carried before this key existed, put back into the REAL
 		// shipped text rather than into a fixture that resembles it.
 		mutated := string(original) +
-			"\n\nThe bind is the whole of what protects the read endpoints and the dashboard - " +
+			"\n\nThe bind is the whole of what protects the read endpoints - " +
 			"they carry no authentication of their own.\n"
 		dst := filepath.Join(t.TempDir(), "README.md")
 		if err := os.WriteFile(dst, []byte(mutated), 0o644); err != nil {

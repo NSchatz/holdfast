@@ -165,20 +165,6 @@ jobs:
           ./scripts/install-ffmpeg.sh /opt/ffmpeg
           echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
 
-      # The gate now includes dashboard graders that load the page in a real browser
-      # engine, so the release resolves one too - through the same script ci.yml uses, so
-      # the release measures the engine the pull-request gate measured. A candidate is
-      # accepted only once it has actually RENDERED a page under a timeout, because
-      # /usr/bin/chromium can be a snap shim that hangs instead of failing. A grader that
-      # skipped for want of a browser would be a false green, and a release is the last
-      # place to accept one.
-      - name: browser for the rendered dashboard graders
-        run: |
-          set -euo pipefail
-          p="$(./scripts/find-browser.sh)"
-          [ -n "$p" ] || { echo "::error::the browser resolution produced no path"; exit 1; }
-          echo "HOLDFAST_BROWSER=$p" >> "$GITHUB_ENV"
-
       - name: the full gate (make check)
         id: full-gate
         run: make check

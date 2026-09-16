@@ -13,7 +13,6 @@ import (
 
 	"github.com/NSchatz/holdfast/internal/secret"
 	"github.com/NSchatz/holdfast/internal/sourceoffer"
-	"github.com/NSchatz/holdfast/internal/webui"
 )
 
 // The credentials this suite uses. readTok and ctrlTok are deliberately the SAME LENGTH
@@ -86,8 +85,8 @@ func assertNoLibraryPath(t *testing.T, where, body string) {
 
 // TestReadEndpoints_RequireTheReadTokenWhenSet is the whole read gate, in both directions
 // the spec grades: the four /api reads are gated when server_read_token is set and open
-// when it is not, AND the dashboard root is served with no credential either way, because
-// the page is not this key's to gate.
+// when it is not, AND the plain-text root page is served with no credential either way,
+// because the root is not this key's to gate.
 func TestReadEndpoints_RequireTheReadTokenWhenSet(t *testing.T) {
 	// The shipped default. Every existing install is this case, and it must not move: no
 	// credential, the same 200 and the same body the daemon served before this key
@@ -112,7 +111,7 @@ func TestReadEndpoints_RequireTheReadTokenWhenSet(t *testing.T) {
 	// The gate itself. No Authorization header at all is the shape an unaware client
 	// arrives in, and it is the one the 401 has to be exactly right about.
 	t.Run("a set read token refuses an unauthenticated read", func(t *testing.T) {
-		h := newHarnessWith(t, "", readTok, nil)
+		h := newHarnessWith(t, "", readTok)
 		ts := httptest.NewServer(h.srv)
 		defer ts.Close()
 		for _, p := range readPaths {
@@ -136,7 +135,7 @@ func TestReadEndpoints_RequireTheReadTokenWhenSet(t *testing.T) {
 	// runs, so a gate placed INSIDE it would push every queued and historical path to the
 	// client it was about to refuse.
 	t.Run("an unauthenticated /api/events is refused before any SSE data", func(t *testing.T) {
-		h := newHarnessWith(t, "", readTok, nil)
+		h := newHarnessWith(t, "", readTok)
 		ts := httptest.NewServer(h.srv)
 		defer ts.Close()
 		resp, body := get(t, ts.URL, "/api/events", "")
@@ -157,8 +156,8 @@ func TestReadEndpoints_RequireTheReadTokenWhenSet(t *testing.T) {
 	// so a difference is the gate's doing and nothing else's.
 	t.Run("the configured read token is answered exactly as an open server answers", func(t *testing.T) {
 		st := newStore(t)
-		open := newHarnessOn(t, st, "", "", nil)
-		gated := newHarnessOn(t, st, "", readTok, nil)
+		open := newHarnessOn(t, st, "", "")
+		gated := newHarnessOn(t, st, "", readTok)
 		openTS, gatedTS := httptest.NewServer(open.srv), httptest.NewServer(gated.srv)
 		defer openTS.Close()
 		defer gatedTS.Close()
@@ -199,7 +198,7 @@ func TestReadEndpoints_RequireTheReadTokenWhenSet(t *testing.T) {
 	// PREFIX of the token and a value the token is a proper prefix OF both pass a
 	// `strings.HasPrefix` and both must be refused.
 	t.Run("a malformed or wrong credential is refused", func(t *testing.T) {
-		h := newHarnessWith(t, "", readTok, nil)
+		h := newHarnessWith(t, "", readTok)
 		ts := httptest.NewServer(h.srv)
 		defer ts.Close()
 		for _, tc := range []struct {
@@ -231,7 +230,7 @@ func TestReadEndpoints_RequireTheReadTokenWhenSet(t *testing.T) {
 	// One Authorization header cannot carry two values, so the operator holding the MORE
 	// privileged credential must not be locked out of the LESS privileged surface.
 	t.Run("the control token is accepted on every read endpoint", func(t *testing.T) {
-		h := newHarnessWith(t, ctrlTok, readTok, nil)
+		h := newHarnessWith(t, ctrlTok, readTok)
 		ts := httptest.NewServer(h.srv)
 		defer ts.Close()
 		for _, p := range readPaths {
@@ -255,7 +254,7 @@ func TestReadEndpoints_RequireTheReadTokenWhenSet(t *testing.T) {
 	// daemon with the controls disabled - the shipped default - would serve its gated
 	// read API to any request that sent no Authorization header at all.
 	t.Run("an empty control token is not a credential for a read", func(t *testing.T) {
-		h := newHarnessWith(t, "", readTok, nil)
+		h := newHarnessWith(t, "", readTok)
 		ts := httptest.NewServer(h.srv)
 		defer ts.Close()
 		for _, p := range readPaths {
@@ -268,16 +267,15 @@ func TestReadEndpoints_RequireTheReadTokenWhenSet(t *testing.T) {
 		}
 	})
 
-	// The dashboard root, which this key deliberately does NOT gate. A browser sends no
-	// Bearer header on a navigation, so gating the page here would serve a login-less 401
-	// to every operator who opened it; the page is the cookie-from-a-login-form item's.
-	// Asserted as SAME BYTES rather than merely 200, because a gate that served a
-	// different page to an uncredentialled client would also be 200.
-	t.Run("the dashboard root is served with no credential while a read token is set", func(t *testing.T) {
+	// The plain-text root page, which this key deliberately does NOT gate. holdfast ships
+	// no frontend, so the root carries the endpoint banner and the AGPL section 13 source
+	// offer and no library datum at all - there is nothing behind it for a credential to
+	// protect. Asserted as SAME BYTES rather than merely 200, because a gate that served a
+	// different body to an uncredentialled client would also be 200.
+	t.Run("the root page is served with no credential while a read token is set", func(t *testing.T) {
 		st := newStore(t)
-		ui := func() http.Handler { return webui.HandlerFor(sourceoffer.Current()) }
-		open := newHarnessOn(t, st, "", "", ui())
-		gated := newHarnessOn(t, st, "", readTok, ui())
+		open := newHarnessOn(t, st, "", "")
+		gated := newHarnessOn(t, st, "", readTok)
 		openTS, gatedTS := httptest.NewServer(open.srv), httptest.NewServer(gated.srv)
 		defer openTS.Close()
 		defer gatedTS.Close()
@@ -291,42 +289,26 @@ func TestReadEndpoints_RequireTheReadTokenWhenSet(t *testing.T) {
 			t.Fatalf("GET / with no read token = %d, want 200", openResp.StatusCode)
 		}
 		if gatedBody != openBody {
-			t.Errorf("the dashboard root served different bytes with a read token set:\n gated len %d\n open  len %d",
+			t.Errorf("the root page served different bytes with a read token set:\n gated len %d\n open  len %d",
 				len(gatedBody), len(openBody))
 		}
 		if len(gatedBody) == 0 {
-			t.Error("the dashboard root served an empty body, so the comparison proves nothing")
+			t.Error("the root page served an empty body, so the comparison proves nothing")
+		}
+		if !strings.Contains(gatedBody, sourceoffer.Label+": ") {
+			t.Errorf("the root page lost the Corresponding Source offer:\n%s", gatedBody)
+		}
+		// And it names no media path: the root is not a way around the read gate.
+		for _, mp := range seededPaths {
+			if strings.Contains(gatedBody, mp) {
+				t.Errorf("the root page carries the media path %q - it must hold no library datum:\n%s", mp, gatedBody)
+			}
 		}
 		if got := gatedResp.Header.Get("WWW-Authenticate"); got != "" {
-			t.Errorf("the dashboard root sent a Bearer challenge (%q) - it is not this key's to gate", got)
+			t.Errorf("the root page sent a Bearer challenge (%q) - it is not this key's to gate", got)
 		}
 	})
 
-	// ... and every other path the UI handler owns, not merely "/". This build inlines
-	// its CSS and script into one document, so there is no second asset path to fetch
-	// today; the case asserts about the ROUTE anyway, because the claim is that the gate
-	// does not reach under the UI handler and a future asset route must not have to
-	// rediscover that.
-	t.Run("an embedded asset path is served with no credential too", func(t *testing.T) {
-		const asset = "/assets/app.js"
-		stub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			_, _ = io.WriteString(w, "asset:"+r.URL.Path)
-		})
-		st := newStore(t)
-		gated := newHarnessOn(t, st, "", readTok, stub)
-		ts := httptest.NewServer(gated.srv)
-		defer ts.Close()
-		for _, p := range []string{"/", asset, "/assets/app.css"} {
-			resp, body := get(t, ts.URL, p, "")
-			if resp.StatusCode != http.StatusOK {
-				t.Errorf("GET %s with a read token set and no credential = %d, want 200", p, resp.StatusCode)
-			}
-			if body != "asset:"+p {
-				t.Errorf("GET %s returned %q, want the UI handler's own body", p, body)
-			}
-		}
-	})
 }
 
 // TestReadToken_IsNotAcceptedForAMutation: the two keys authorise different things, and
@@ -337,7 +319,7 @@ func TestReadToken_IsNotAcceptedForAMutation(t *testing.T) {
 	mutations := []string{"/api/rescan", "/api/pause", "/api/resume"}
 
 	t.Run("the read token is refused on every mutating endpoint", func(t *testing.T) {
-		h := newHarnessWith(t, ctrlTok, readTok, nil)
+		h := newHarnessWith(t, ctrlTok, readTok)
 		ts := httptest.NewServer(h.srv)
 		defer ts.Close()
 		for _, p := range mutations {
@@ -392,7 +374,7 @@ func TestReadToken_IsNotAcceptedForAMutation(t *testing.T) {
 	// who configures the wrong thing.
 	t.Run("with no control token the mutations stay disabled with 403", func(t *testing.T) {
 		for _, readTokenValue := range []string{"", readTok} {
-			h := newHarnessWith(t, "", readTokenValue, nil)
+			h := newHarnessWith(t, "", readTokenValue)
 			ts := httptest.NewServer(h.srv)
 			for _, p := range mutations {
 				for _, credential := range []string{"", readTok, ctrlTok} {
@@ -446,7 +428,7 @@ func TestMetrics_IsNotGatedByTheReadToken(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := New(ctx, configZero(), secret.Value{}, secret.NewValue(tc.readToken),
-				st, ctrl, hub, nil, handler, discard())
+				st, ctrl, hub, handler, discard())
 			ts := httptest.NewServer(srv)
 			defer ts.Close()
 			resp, body := get(t, ts.URL, "/metrics", "")

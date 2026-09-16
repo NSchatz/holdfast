@@ -45,11 +45,7 @@ PLATFORM ?= linux/amd64
 .PHONY: build test check fmt vet staticcheck govulncheck govulncheck-selftest \
         comment-density \
         check-pins check-pins-selftest install-ffmpeg-selftest check-pin-live \
-        find-browser find-browser-selftest \
         release-shape release-shape-selftest \
-        webui-gen webui-stale webui-check webui-repeat-check webui-graders-selftest \
-        webui-shots \
-        check-design-record check-design-record-selftest \
         secret-scan secret-scan-selftest install-hooks \
         tidy clean image image-smoke compose-check
 
@@ -62,7 +58,7 @@ build:
 # behind the real verify gate: measured under `-race` on a 56-core container it takes 524s
 # ALONE at the commit before this line was written, and 568s with S0085's swap-metadata
 # fixtures added. That is 87% and 95% of the default budget respectively, before the
-# packages that run beside it (internal/probe, internal/webui, internal/store,
+# packages that run beside it (internal/probe, internal/store, internal/server,
 # cmd/holdfast) have spent a core - and `go test ./...` runs them concurrently, so the
 # contention is what tips it. The package then dies with "panic: test timed out" one
 # second into a test that takes one second, with nothing having failed.
@@ -122,22 +118,6 @@ check-pins-selftest:
 install-ffmpeg-selftest:
 	./scripts/install-ffmpeg-selftest.sh
 
-# Proves scripts/find-browser.sh - the ONE browser resolution both CI jobs and the release
-# workflow use - still refuses a browser it has not seen render. That question used to be
-# asked two ways in one workflow: `build` proved a candidate could render, `dashboard`
-# printed its `--version`, and the weaker one was on the job whose whole purpose is that
-# the dashboard graders cannot come back green without a browser. Hermetic (every engine
-# here is a shell script), so it runs on a machine with no browser at all. A guard nobody
-# tries to defeat is a guard nobody knows works.
-find-browser-selftest:
-	./scripts/find-browser-selftest.sh
-
-# What THIS machine's browser resolution answers, for a human debugging a red grader. It is
-# the same script the workflows run, so "which engine did the gate measure" has one answer
-# a contributor can also ask.
-find-browser:
-	@./scripts/find-browser.sh
-
 # --- the release path (S0046) -------------------------------------------------
 # Everything that decides whether the one-way door opens correctly - that a manual
 # dispatch publishes nothing, that the version tag is pushed before `:latest` moves, that
@@ -160,95 +140,6 @@ release-shape:
 # is a guard nobody knows works.
 release-shape-selftest:
 	./scripts/release-shape-selftest.sh
-
-# --- the dashboard (WEBUI-10) -------------------------------------------------
-# internal/webui/index.html is GENERATED and COMMITTED: the binary embeds one
-# self-contained file, and it is built from the modules under internal/webui/src by
-# internal/webui/gen with the Go toolchain alone - no JavaScript runtime, no bundler, no
-# registry package, no lockfile, no network, and so no new stage or tool in the image
-# build. `webui-gen` is the only writer of that file.
-webui-gen:
-	go run ./internal/webui/gen/genindex
-
-# The stale-artifact gate. A committed document that is not what the sources generate is
-# a page whose behaviour nobody can predict from its source, so `check` refuses it by
-# name rather than silently regenerating behind the build.
-webui-stale:
-	go run ./internal/webui/gen/genindex -check
-
-# The dashboard's suites in REQUIRED mode: the derivation units (node's built-in test
-# runner) and the rendered graders (a real browser engine). A runtime it needs and cannot
-# find is a FAILURE here, and a suite that reported itself skipped is a failure too - the
-# whole point of this target is that it cannot come back green without having measured
-# anything. `check` keeps the repo's skip-when-absent idiom instead, exactly as the docker
-# gate does, so a contributor with no browser is not blocked.
-webui-check:
-	./scripts/webui-check.sh
-
-# The DETERMINISM gate. `webui-check` asks whether the rendered graders pass; this asks
-# whether they AGREE WITH THEMSELVES - it runs them more than once against one unchanged
-# tree, prints how many repetitions it ran, and fails if any two repetitions decided the
-# same bytes differently. A grader that returns a different verdict on identical input is
-# reporting how busy the machine was, and it cannot carry an acceptance criterion; one of
-# those broke main once, and the rerun that passed is what made it look like nothing.
-#
-# Deliberately NOT inside `check` and not inside `webui-check`: it is the same suite run
-# N times, so folding it into either would multiply the cost of every PR by N to re-ask a
-# question those targets do not ask. HOLDFAST_WEBUI_REPEAT sets the count (default 3).
-webui-repeat-check:
-	./scripts/webui-repeat-check.sh
-
-# Proves the dashboard's ENGINE-ONLY graders still BITE. Three questions are the whole
-# reason there is a browser in this gate - the operating system's colour-scheme preference,
-# the accessible name the engine computes, and the focus a real key press moves - and none
-# of them is answerable from the document, so a grader that quietly stopped deciding one
-# would take the coverage with it and report "ok". Each is defeated on purpose here against
-# a mutated COPY of the tree, each defeat must be red AND say what it saw, and the run fails
-# if any defeat did not execute. Deliberately NOT part of `check`: the mutations belong in
-# their own target, and `check` must never re-render the tree it is grading. A guard nobody
-# tries to defeat is a guard nobody knows works.
-webui-graders-selftest:
-	./scripts/webui-graders-selftest.sh
-
-# The RENDERED EVIDENCE, for the craft clauses no assertion reaches. It photographs each
-# view internal/webui/e2e/shots.mjs names, in both colour schemes at 360 and at desktop
-# width, from the same engine and the same served document the graders read - the fixture
-# server it starts mounts the real webui.HandlerFor.
-#
-# It is a target rather than a note in a document because the evidence has to be
-# REPRODUCIBLE: a picture taken by a command nobody can re-run is a picture nobody can
-# check, and the previous route was a script each session wrote for itself. It decides
-# nothing and is deliberately outside `check` - it writes files, and a gate never does.
-#
-#   make webui-shots OUT=/path/to/shots
-webui-shots: OUT ?= ./shots
-webui-shots:
-	@./scripts/webui-shots.sh "$(OUT)"
-
-# --- the design record (S0123) ------------------------------------------------
-# interface-craft C1 and C2, held by a machine. C1 asks this repository to declare its
-# display face, text face, accent, radius signature and shadow signature with one sentence
-# each; C2 names the defaults an unspecified interface converges on and allows one only
-# where the record names it with its reason. docs/design-record.md is that record, and this
-# holds it to internal/webui/src/tokens.css - the token file is the one writer of a VALUE,
-# the record the one writer of a REASON - and then scans the dashboard's stylesheet,
-# template and generated sources for every blocklist entry.
-#
-# It is in `check:` rather than beside the dashboard graders because every question it asks
-# is about what a file DECLARES: no browser, no node, no network. What the page SHOWS is
-# C3 to C7 and belongs to the engine, in the dashboard job.
-check-design-record:
-	go run ./scripts/check-design-record
-
-# Proves check-design-record still BITES. Every failure mode it has - an absent, unreadable
-# or unparseable record, an empty identity-source set, a value that disagrees with its
-# token, an exception bought without a reason - and every blocklist entry in turn is
-# defeated on purpose against a mutated COPY of the tree, each defeat is required to be red
-# and to name what it saw, and the run fails if any defeat did not execute. Deliberately NOT
-# part of `check`: the mutations belong in their own target, and `check` must never rewrite
-# the tree it is grading. A guard nobody tries to defeat is a guard nobody knows works.
-check-design-record-selftest:
-	./scripts/check-design-record-selftest.sh
 
 # The prose ceiling on Go source, and the ranked table it is decided from. Counting is
 # by TOKENS - the Go parser decides what a comment is - and the ceiling, the warn band
@@ -288,7 +179,7 @@ install-hooks:
 	@echo "pre-commit secret scan installed (core.hooksPath = .githooks). Undo: git config --unset core.hooksPath"
 
 # THE gate. CI and the release workflow both run exactly this.
-check: check-pins check-pins-selftest install-ffmpeg-selftest find-browser-selftest release-shape webui-stale check-design-record comment-density secret-scan secret-scan-selftest fmt vet build test staticcheck govulncheck govulncheck-selftest
+check: check-pins check-pins-selftest install-ffmpeg-selftest release-shape comment-density secret-scan secret-scan-selftest fmt vet build test staticcheck govulncheck govulncheck-selftest
 
 # Asks UPSTREAM whether the pinned ffmpeg release is still served. Deliberately NOT part
 # of `check`: the PR gate must not red because a third party had a bad afternoon. CI runs

@@ -13,7 +13,6 @@ import (
 	"github.com/NSchatz/holdfast/internal/sourceoffer"
 	"github.com/NSchatz/holdfast/internal/store"
 	"github.com/NSchatz/holdfast/internal/version"
-	"github.com/NSchatz/holdfast/internal/webui"
 )
 
 const (
@@ -31,16 +30,16 @@ func setSourceURL(t *testing.T, v string) {
 	t.Cleanup(func() { sourceoffer.URL = old })
 }
 
-// newRootServer builds a Server around st with the given UI handler. Pass nil for ui
-// to select the API-only branch - the seam New documents, and the only way to reach
-// the plain-text root page.
-func newRootServer(t *testing.T, token string, ui http.Handler, st store.Store) *Server {
+// newRootServer builds a Server around st. holdfast ships no frontend, so there is one
+// root-serving branch and this is the whole of it: the plain-text page RootHandler
+// serves, mounted in the real router.
+func newRootServer(t *testing.T, token string, st store.Store) *Server {
 	t.Helper()
 	ctx := context.Background()
 	ctrl := NewController(ctx, func(context.Context) error { return nil }, discard())
 	hub := NewHub(st, ctrl, discard())
 	ctrl.SetOnChange(hub.Trigger)
-	return New(ctx, config.Config{}, secret.NewValue(token), secret.Value{}, st, ctrl, hub, ui, nil, discard())
+	return New(ctx, config.Config{}, secret.NewValue(token), secret.Value{}, st, ctrl, hub, nil, discard())
 }
 
 // getRoot fetches / with NO credentials of any kind.
@@ -95,14 +94,14 @@ func TestPlainTextOfferGrader_FailsAgainstEveryMutation(t *testing.T) {
 	}
 }
 
-// AC9: the root path served by a server constructed WITHOUT the embedded dashboard
-// still carries the source URL in effect, the licence name and the build identity.
+// AC9: the root path, which is the only root path holdfast has now that it ships no
+// frontend, carries the source URL in effect, the licence name and the build identity.
 // AC7: it is served to a request with no bearer token, whether or not the binary has
 // a control token configured at all.
 func TestAPIOnlyRoot_CarriesTheSourceOffer(t *testing.T) {
 	for _, token := range []string{"", "a-configured-token"} {
 		st := newStore(t)
-		srv := newRootServer(t, token, nil, st)
+		srv := newRootServer(t, token, st)
 		code, body := getRoot(t, srv)
 		if code != http.StatusOK {
 			t.Fatalf("token=%q: GET / with no credentials: code %d, want 200", token, code)
@@ -122,7 +121,7 @@ func TestAPIOnlyRoot_CarriesTheSourceOffer(t *testing.T) {
 // the upstream URL occurs nowhere in it (there, the body IS the offer).
 func TestAPIOnlyRoot_ForkBuildNamesItsOwnTree(t *testing.T) {
 	setSourceURL(t, forkValue)
-	srv := newRootServer(t, "", nil, newStore(t))
+	srv := newRootServer(t, "", newStore(t))
 	code, body := getRoot(t, srv)
 	if code != http.StatusOK {
 		t.Fatalf("code %d, want 200", code)
@@ -144,7 +143,7 @@ func TestAPIOnlyRoot_RefusesEveryRejectedValue(t *testing.T) {
 	for _, bad := range []string{"", "   ", "not-a-url", "javascript:alert(1)", "//example.com"} {
 		old := sourceoffer.URL
 		sourceoffer.URL = bad
-		srv := newRootServer(t, "", nil, newStore(t))
+		srv := newRootServer(t, "", newStore(t))
 		code, body := getRoot(t, srv)
 		if code != http.StatusServiceUnavailable {
 			t.Errorf("source URL %q: code %d, want 503", bad, code)
@@ -164,28 +163,13 @@ func TestAPIOnlyRoot_RefusesEveryRejectedValue(t *testing.T) {
 // value that is NOT clean under RFC 3986 is served, not refused.
 func TestAPIOnlyRoot_ServesAnHTMLSignificantValue(t *testing.T) {
 	setSourceURL(t, hostileValue)
-	srv := newRootServer(t, "", nil, newStore(t))
+	srv := newRootServer(t, "", newStore(t))
 	code, body := getRoot(t, srv)
 	if code != http.StatusOK {
 		t.Fatalf("code %d, want 200 - an absolute http/https value is served, never refused for being unclean", code)
 	}
 	if probs := plainTextOfferProblems(body, hostileValue); probs != nil {
 		t.Errorf("%v\nbody: %s", probs, body)
-	}
-}
-
-// AC7 on the dashboard branch, mounted in the real router: the root is not behind the
-// bearer token that gates the mutating endpoints, with or without one configured.
-func TestDashboardRoot_ServedWithoutCredentials(t *testing.T) {
-	for _, token := range []string{"", "a-configured-token"} {
-		srv := newRootServer(t, token, webui.HandlerFor(sourceoffer.Current()), newStore(t))
-		code, body := getRoot(t, srv)
-		if code != http.StatusOK {
-			t.Fatalf("token=%q: GET / with no credentials: code %d, want 200", token, code)
-		}
-		if !strings.Contains(body, `<p class="source-offer">`) {
-			t.Errorf("token=%q: the dashboard root carries no source offer", token)
-		}
 	}
 }
 
@@ -226,56 +210,46 @@ func (failingStore) Aggregates(context.Context) store.Aggregates {
 func TestSourceOffer_SurvivesEveryOpenReadEndpointFailing(t *testing.T) {
 	setSourceURL(t, forkValue)
 
-	for _, tc := range []struct {
-		name string
-		ui   func() http.Handler
-		find func(string) string
-	}{
-		{"dashboard", func() http.Handler { return webui.HandlerFor(sourceoffer.Current()) }, dashboardOffer},
-		{"api-only", func() http.Handler { return nil }, func(b string) string { return b }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			healthy := newRootServer(t, "", tc.ui(), newStore(t))
-			codeH, bodyH := getRoot(t, healthy)
-			if codeH != http.StatusOK {
-				t.Fatalf("healthy server: code %d, want 200", codeH)
-			}
+	healthy := newRootServer(t, "", newStore(t))
+	codeH, bodyH := getRoot(t, healthy)
+	if codeH != http.StatusOK {
+		t.Fatalf("healthy server: code %d, want 200", codeH)
+	}
 
-			broken := newRootServer(t, "", tc.ui(), failingStore{})
-			// Every open read endpoint is down - the precondition of this test.
-			for _, ep := range []string{"/api/summary", "/api/queue", "/api/history"} {
-				rec := httptest.NewRecorder()
-				broken.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, ep, nil))
-				if rec.Code != http.StatusInternalServerError {
-					t.Fatalf("%s: code %d, want 500 (the precondition of this test)", ep, rec.Code)
-				}
-			}
-			codeB, bodyB := getRoot(t, broken)
-			if codeB != http.StatusOK {
-				t.Fatalf("broken server: GET / code %d, want 200 - the offer must survive", codeB)
-			}
-			if tc.find(bodyB) != tc.find(bodyH) {
-				t.Errorf("the offer changed when the read endpoints failed.\n broken: %s\nhealthy: %s",
-					tc.find(bodyB), tc.find(bodyH))
-			}
-			if !strings.Contains(tc.find(bodyB), forkValue) {
-				t.Errorf("the offer lost the source URL in effect: %s", tc.find(bodyB))
-			}
-		})
+	broken := newRootServer(t, "", failingStore{})
+	// Every open read endpoint is down - the precondition of this test.
+	for _, ep := range []string{"/api/summary", "/api/queue", "/api/history"} {
+		rec := httptest.NewRecorder()
+		broken.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, ep, nil))
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("%s: code %d, want 500 (the precondition of this test)", ep, rec.Code)
+		}
+	}
+	codeB, bodyB := getRoot(t, broken)
+	if codeB != http.StatusOK {
+		t.Fatalf("broken server: GET / code %d, want 200 - the offer must survive", codeB)
+	}
+	// The root body IS the offer here, so it is compared whole.
+	if bodyB != bodyH {
+		t.Errorf("the root response changed when the read endpoints failed.\n broken: %s\nhealthy: %s",
+			bodyB, bodyH)
+	}
+	if !strings.Contains(bodyB, forkValue) {
+		t.Errorf("the offer lost the source URL in effect: %s", bodyB)
 	}
 }
 
-// dashboardOffer extracts the source offer element from a served dashboard.
-func dashboardOffer(body string) string {
-	const open = `<p class="source-offer">`
-	i := strings.Index(body, open)
-	if i < 0 {
-		return ""
+// The root page is the root page and nothing else: with no frontend there is no catch-all
+// under "/", so a stray asset request 404s rather than being answered with the root body.
+// A handler that served the same page for every path would make the offer assertions above
+// pass for paths that carry no offer obligation at all.
+func TestRoot_ServesOnlyTheRootPath(t *testing.T) {
+	srv := newRootServer(t, "", newStore(t))
+	for _, p := range []string{"/assets/app.js", "/index.html", "/anything"} {
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s: code %d, want 404 - holdfast serves no asset tree", p, rec.Code)
+		}
 	}
-	rest := body[i:]
-	j := strings.Index(rest, "</p>")
-	if j < 0 {
-		return ""
-	}
-	return rest[:j+len("</p>")]
 }

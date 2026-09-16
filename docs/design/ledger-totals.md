@@ -25,6 +25,6 @@ zero.
 
 The rows still ship. One unreadable figure never suppresses the rest of the
 response: the summary, the queue rows and the history rows are all returned, the
-SSE broadcast still fires, and the dashboard draws that one figure as unavailable
+SSE broadcast still fires, and that one figure ships marked unavailable
 and shows no number in its place while the rest of the page renders. One
 unreadable figure never costs an operator the records.

@@ -131,7 +131,7 @@ wrong hours, silently and correctly, on the wrong clock.
 
 ## The control surface
 
-`holdfast serve` exposes the API + dashboard. Its default bind is `127.0.0.1`, which inside a
+`holdfast serve` exposes the HTTP JSON API. Its default bind is `127.0.0.1`, which inside a
 container namespace means *nothing outside the container can reach it* — so a containerised
 `serve` needs `server_addr: 0.0.0.0:8080`, and the real boundary moves to the **published
 port**:
@@ -174,15 +174,11 @@ services:
       - HOLDFAST_SERVER_READ_TOKEN=file:/run/secrets/holdfast_read_token
 ```
 
-**It does not gate the dashboard.** Even with a read token set, the page is still served
-with no credential, and so are its assets, so the proxy IS still the only barrier in front
-of the page - keep forward auth on that route. A browser sends no `Bearer` header on a
-navigation, so gating the page on this key would serve a login-less 401 to every operator
-who opened it; the page needs a cookie set from a login form, which does not exist yet.
-Until it does, with a read token set **the page loads but its data does not**: the document
-renders and its own requests to `/api/summary` and `/api/events` carry no credential and
-are refused. holdfast says so at startup rather than leaving you to find it. A half-gated
-surface that reads as gated is worse than an open one that says it is open.
+**It does not gate the root path.** holdfast ships no frontend, so `/` is a plain-text page
+naming the endpoints and carrying the Corresponding Source offer. It is still served with no
+credential when a read token is set, and it holds no library datum for a credential to
+protect - every media path is behind `/api/queue`, `/api/history` and `/api/events`, which
+the key does gate. holdfast says so at startup rather than leaving you to find it.
 
 `/metrics` is gated by neither key. Its reachability is governed by `metrics_enable` alone,
 because the exposition carries counters, a byte total and two histograms labelled only by
@@ -193,8 +189,7 @@ The token-gated group stays **disabled** until a control token is configured. Wi
 `server_auth_token` reference set (or `HOLDFAST_SERVER_AUTH_TOKEN` in the environment),
 `rescan`, `scan`, `pause`, `resume`, the ledger search (`/api/search`) and the withheld
 paths (`/api/exclusions`) answer **403** to every caller - a safe default, not a broken
-one, and the dashboard and the read API still work, neither of them being gated by this
-key. The ledger search is in that group and not among the reads `server_read_token` gates,
+one, and the read API still works, not being gated by this key. The ledger search is in that group and not among the reads `server_read_token` gates,
 for a reason worth stating: the capped reads ship at most a few hundred rows, so a search
 over the whole ledger serves per-file rows they have never served, and gating it on the
 control token keeps this a control-gated read rather than one more read that is open
@@ -205,11 +200,10 @@ can be talked into forging one of those headers gains nothing by it. Enabling th
 is a decision separate from putting a proxy in front, and it is the one that gives a stolen
 bearer token something to buy.
 
-Serve holdfast at the **host root**, on a hostname of its own. The page asks for its own
-API and its own assets with **root-relative** paths (`/api/events`, `/api/rescan`), so a
-router that strips or rewrites a path prefix breaks it silently: the document loads and
-every request under it 404s. Pass the Host header through, and put no prefix strip and no
-path rewrite on this route.
+Serve holdfast at the **host root**, on a hostname of its own. The API's own paths are
+absolute (`/api/events`, `/api/rescan`), so a router that strips or rewrites a path prefix
+serves the root page and 404s every request under it. Pass the Host header through, and put
+no prefix strip and no path rewrite on this route.
 
 The control token is reached **by reference** and never written anywhere as a literal. Mount
 the token as a file and point the key at it:
@@ -393,9 +387,9 @@ behind. Run it against any image you are about to trust.
 
 ### Building a modified holdfast: the source offer
 
-The dashboard offers its Corresponding Source (AGPL-3.0 section 13). An image built from this
-repository unchanged offers this tree; an image you build from a **modified** tree must offer
-yours, and one build argument does it, with no patching of the embedded HTML:
+`holdfast serve` offers its Corresponding Source on the root path (AGPL-3.0 section 13). An
+image built from this repository unchanged offers this tree; an image you build from a
+**modified** tree must offer yours, and one build argument does it:
 
 ```bash
 docker buildx build --build-arg SOURCE_URL=https://git.example.org/me/holdfast -t my/holdfast .

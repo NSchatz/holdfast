@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/sourceoffer"
 )
 
 func TestDispatch(t *testing.T) {
@@ -135,9 +136,13 @@ func TestServeSmoke(t *testing.T) {
 	base := "http://" + addr
 	waitHTTP(t, base+"/api/summary", 3*time.Second)
 
-	// The embedded UI serves from the binary.
-	if bdy := httpGet(t, base+"/"); !strings.Contains(bdy, "<title>holdfast</title>") {
-		t.Fatalf("UI not served from binary: %q", bdy[:min(80, len(bdy))])
+	// The root path serves the plain-text page: holdfast ships no frontend, so what a
+	// browser gets at / is the endpoint banner and the AGPL section 13 source offer.
+	// Both halves are asserted - a banner with no offer would be a licence failure the
+	// binary is meant to make impossible.
+	if bdy := httpGet(t, base+"/"); !strings.Contains(bdy, "/api/summary") ||
+		!strings.Contains(bdy, sourceoffer.Label+": ") {
+		t.Fatalf("root page not served from binary: %q", bdy[:min(160, len(bdy))])
 	}
 	// TRANSCODE-8: metrics endpoint is served (default-on) and exposes our series.
 	if bdy := httpGet(t, base+"/metrics"); !strings.Contains(bdy, "holdfast_files_total") {
