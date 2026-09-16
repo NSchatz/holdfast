@@ -723,62 +723,86 @@ func TestDryRun_MutatesNothingEvenWithEveryLibraryRootReadOnly(t *testing.T) {
 }
 
 // TestDryRun_AnInterruptedPassLeavesTheRowToStaleRecovery grades [AC-10]: a pass interrupted
-// after it claimed a file and before it decided one leaves that row in an active state for the
-// ordinary stale-row recovery every real run performs at startup, and writes no decision.
+// after it claimed a file and before that file is decided leaves the row in an active state for
+// the ordinary stale-row recovery every real run performs at startup, and writes no decision.
 //
 // The interruption is a cancelled context, which is what a SIGTERM becomes inside the engine,
-// taken at the instant the claim lands.
+// and it is taken at BOTH points where a claimed file is not yet decided. The second is the one
+// with teeth: the guards have concluded, so a build that recorded its decision through anything
+// but the interrupted pass's own context would write a would-transcode row for a pass that was
+// already over, and the first case cannot see that because it never reaches the record at all.
 func TestDryRun_AnInterruptedPassLeavesTheRowToStaleRecovery(t *testing.T) {
-	ffmpeg, _ := tools(t)
-	root := t.TempDir()
-	candidate := filepath.Join(root, "candidate.mkv")
-	mkH264(t, ffmpeg, candidate, "8M")
-	key := probe.Fingerprint(candidate)
+	for _, tc := range []struct {
+		name string
+		at   func(eng *Engine, cancel func())
+	}{
+		{
+			name: "interrupted before the guards concluded",
+			at:   func(eng *Engine, cancel func()) { eng.onClaim = func(string, string) { cancel() } },
+		},
+		{
+			name: "interrupted after the decision was computed and before it was recorded",
+			at: func(eng *Engine, cancel func()) {
+				eng.hookBeforeDryRunRecord = func(string) { cancel() }
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ffmpeg, _ := tools(t)
+			root := t.TempDir()
+			candidate := filepath.Join(root, "candidate.mkv")
+			mkH264(t, ffmpeg, candidate, "8M")
+			key := probe.Fingerprint(candidate)
 
-	cfg := baseCfg(root)
-	cfg.ContainerExt = "source"
-	cfg.DryRun = true
-	ts := newTestStore(t, root)
-	eng := newDryEngine(t, cfg, ts, discardLogger())
+			cfg := baseCfg(root)
+			cfg.ContainerExt = "source"
+			cfg.DryRun = true
+			ts := newTestStore(t, root)
+			eng := newDryEngine(t, cfg, ts, discardLogger())
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	eng.onClaim = func(string, string) { cancel() }
-	_ = eng.ProcessFile(ctx, "w0", candidate)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			tc.at(eng, cancel)
+			_ = eng.ProcessFile(ctx, "w0", candidate)
 
-	live := context.Background()
-	status, _, exists, err := ts.Get(live, candidate, key)
-	if err != nil || !exists {
-		t.Fatalf("Get after the interruption: status=%q exists=%v err=%v", status, exists, err)
-	}
-	if !status.Active() {
-		t.Fatalf("the interrupted claim left the row %q. A pass that was cut off before it decided "+
-			"anything must leave the row where the claim put it, so the recovery every run already "+
-			"performs picks it up", status)
-	}
-	rows, err := ts.List(live, []store.Status{store.WouldTranscode}, 0)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(rows) != 0 {
-		t.Errorf("the interrupted pass wrote %d decision(s) claiming an action nobody computed: %+v",
-			len(rows), rows)
-	}
+			live := context.Background()
+			status, _, exists, err := ts.Get(live, candidate, key)
+			if err != nil || !exists {
+				t.Fatalf("Get after the interruption: status=%q exists=%v err=%v", status, exists, err)
+			}
+			if !status.Active() {
+				t.Fatalf("the interrupted pass left the row %q. A pass cut off before the file was "+
+					"decided must leave the row where the claim put it, so the recovery every run "+
+					"already performs picks it up", status)
+			}
+			rows, err := ts.List(live, nil, 0)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			for _, r := range rows {
+				if r.Status.Terminal() {
+					t.Errorf("the interrupted pass recorded a terminal row (%q) for %s. The pass was over "+
+						"before that file was decided, so the row describes a decision no pass published: %+v",
+						r.Status, r.Path, r.Outcome)
+				}
+			}
 
-	// The ordinary recovery a real run performs at startup, and nothing else, is what frees it.
-	n, err := ts.RecoverStale(live)
-	if err != nil {
-		t.Fatalf("RecoverStale: %v", err)
-	}
-	if n != 1 {
-		t.Errorf("stale recovery reset %d row(s), want 1", n)
-	}
-	status, _, _, err = ts.Get(live, candidate, key)
-	if err != nil {
-		t.Fatalf("Get after recovery: %v", err)
-	}
-	if status != store.Pending {
-		t.Errorf("after the ordinary stale recovery the row is %q, want %q", status, store.Pending)
+			// The ordinary recovery a real run performs at startup, and nothing else, frees it.
+			n, err := ts.RecoverStale(live)
+			if err != nil {
+				t.Fatalf("RecoverStale: %v", err)
+			}
+			if n != 1 {
+				t.Errorf("stale recovery reset %d row(s), want 1", n)
+			}
+			status, _, _, err = ts.Get(live, candidate, key)
+			if err != nil {
+				t.Fatalf("Get after recovery: %v", err)
+			}
+			if status != store.Pending {
+				t.Errorf("after the ordinary stale recovery the row is %q, want %q", status, store.Pending)
+			}
+		})
 	}
 }
 
