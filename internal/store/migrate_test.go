@@ -322,6 +322,7 @@ var headColumns = []string{
 	"reason", "encoder", "vmaf_mean", "vmaf_min", "vmaf_model",
 	"vmaf_pix_fmt", "vmaf_chroma", "vmaf_chroma_metric", "vmaf_stream",
 	"source_codec", "source_bytes", "output_bytes", "encode_ms",
+	"target_path",
 	"decision_inputs",
 }
 
@@ -1305,11 +1306,11 @@ func atShippedVersion(t *testing.T, path string, version int) {
 	}
 	// A fixture below this build's version must be recognisably an OLDER database rather
 	// than this one wearing an older number, and what says so is the shape the NEWEST step
-	// adds. That shape is now a whole TABLE rather than another column on jobs, so the
-	// question is asked of sqlite_master.
-	if version < len(migrations) && hasTable(t, db, newestStepTable) {
-		t.Fatalf("a v%d fixture already carries the %s table, which the newest step creates - it is not an older database",
-			version, newestStepTable)
+	// adds. That shape is a column on jobs again, so the question goes back to
+	// pragma_table_info.
+	if version < len(migrations) && hasColumn(t, db, newestStepColumn) {
+		t.Fatalf("a v%d fixture already carries the %s column, which the newest step adds - it is not an older database",
+			version, newestStepColumn)
 	}
 	// The stamp column arrives AT stampedFromVersion and every version from there on
 	// legitimately has it, so this sanity check is against THAT step and not against the end
@@ -1320,10 +1321,11 @@ func atShippedVersion(t *testing.T, path string, version int) {
 	}
 }
 
-// newestStepTable is the table the LAST migration creates. It tracks the END of the
-// migrations slice exactly as the column it replaced did: a step appended after this one
-// moves it, along with the wind-back fixtures.
-const newestStepTable = "path_exclusions"
+// newestStepColumn is the jobs column the LAST migration adds. It tracks the END of the
+// migrations slice: a step appended after this one moves it, along with the wind-back
+// fixtures. Where that step creates a table instead, this becomes a table name and the two
+// readers below ask sqlite_master rather than pragma_table_info.
+const newestStepColumn = "target_path"
 
 // stampedFromVersion is the step that added the per-record version stamp. It is looked up
 // in the history rather than written out, so appending a step cannot move it by accident.
@@ -1504,8 +1506,8 @@ func TestMigrate_AStepMatchingItsDeclarationCommitsAndAdvancesTheStampedVersion(
 			step.Version, step.Name, schemaVersion(), last.name)
 	}
 	// Committed, not merely attempted: the shape the step adds is there afterwards.
-	if !hasTable(t, s.db, newestStepTable) {
-		t.Errorf("the step was reported applied and the %s table is not there", newestStepTable)
+	if !hasColumn(t, s.db, newestStepColumn) {
+		t.Errorf("the step was reported applied and the %s column is not there", newestStepColumn)
 	}
 }
 
