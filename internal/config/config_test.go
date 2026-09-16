@@ -611,3 +611,146 @@ func TestVmafConfig(t *testing.T) {
 		})
 	}
 }
+
+// --- path filters: the refusal and the report (S0086) ---------------------------------
+
+// TestValidate_RefusesAMalformedPattern is [AC-6]: a pattern the matcher cannot read is
+// a STARTUP refusal naming the key, the pattern and - when it came from a library_roots
+// entry - that root.
+//
+// A refusal and not a report, because the alternative is a filter that silently matches
+// nothing: an operator who wrote a broken exclude pattern believes a directory is being
+// held back from a tool that deletes sources, and the run would hand every file in it to
+// the encoder. The fail-safe rule this repository is built on says malformed input never
+// produces a confident wrong result.
+func TestValidate_RefusesAMalformedPattern(t *testing.T) {
+	roots := []string{"/mnt/media"}
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		want []string // every substring the refusal must carry
+	}{
+		{
+			name: "an unterminated character class at the top level",
+			cfg:  Config{LibraryRoots: roots, ExcludePaths: []string{"movies/[4k/**"}},
+			want: []string{excludePathsKey, "movies/[4k/**"},
+		},
+		{
+			name: "an unterminated alternation at the top level",
+			cfg:  Config{LibraryRoots: roots, IncludePaths: []string{"{movies,tv"}},
+			want: []string{includePathsKey, "{movies,tv"},
+		},
+		{
+			name: "an empty pattern is neither a filter nor an absent one",
+			cfg:  Config{LibraryRoots: roots, ExcludePaths: []string{"movies/**", "   "}},
+			want: []string{excludePathsKey, "empty pattern"},
+		},
+		{
+			name: "a malformed pattern inside a library_roots entry names that root",
+			cfg: Config{
+				LibraryRoots: roots,
+				Roots: []Root{{
+					Path: "/mnt/media", Clean: "/mnt/media",
+					Filters: PathFilters{Exclude: []string{"Extras/["}, ExcludeLayer: LayerProfile},
+				}},
+			},
+			want: []string{excludePathsKey, "Extras/[", "/mnt/media"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if err == nil {
+				t.Fatal("Validate() = nil, want a refusal: a pattern nothing can read must not reach a scan")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the refusal does not name %q; got: %v", want, err)
+				}
+			}
+		})
+	}
+
+	// Anti-vacuity: the same shapes, spelled correctly, are accepted. Without this every
+	// case above would pass against a build that refused every pattern there is.
+	ok := Config{
+		LibraryRoots: roots,
+		ExcludePaths: []string{"movies/[4k]/**", "**/Extras", "/mnt/media/import"},
+		IncludePaths: []string{"{movies,tv}/**"},
+	}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("Validate() on well-formed patterns = %v, want nil", err)
+	}
+}
+
+// TestValidate_ReportsAPatternThatCoversNothing is [AC-9]: a pattern anchored outside
+// every root it applies to is REPORTED, naming the pattern and the roots it was weighed
+// against, and the run is NOT refused.
+//
+// Not refused, because a filter legitimately guards a directory that does not exist yet
+// or is empty this week. The anchoring case is the one a CONFIGURATION can decide on its
+// own, with no directory listed and nothing stat'd, which is what lets `validate` answer
+// it without walking the library.
+func TestValidate_ReportsAPatternThatCoversNothing(t *testing.T) {
+	c := Config{
+		LibraryRoots: []string{"/mnt/media", "/mnt/tv"},
+		ExcludePaths: []string{"/srv/elsewhere/**", "/mnt/media/import", "**/Extras"},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil: a pattern that covers nothing is a report, not a refusal", err)
+	}
+
+	got := c.UnreachablePatterns()
+	if len(got) != 1 {
+		t.Fatalf("UnreachablePatterns() = %v, want exactly the one anchored outside every root", got)
+	}
+	u := got[0]
+	if u.Key != excludePathsKey || u.Pattern != "/srv/elsewhere/**" {
+		t.Errorf("the report names %s %q, want exclude_paths and the pattern anchored elsewhere", u.Key, u.Pattern)
+	}
+	if len(u.Roots) != 2 || u.Roots[0] != "/mnt/media" || u.Roots[1] != "/mnt/tv" {
+		t.Errorf("the report weighed it against %v, want both configured roots", u.Roots)
+	}
+	for _, want := range []string{"/srv/elsewhere/**", excludePathsKey, "/mnt/media", "/mnt/tv"} {
+		if !strings.Contains(u.String(), want) {
+			t.Errorf("the rendered report does not name %q: %s", want, u.String())
+		}
+	}
+
+	// The cases that must NOT be reported, each a working filter: a pattern under one of
+	// two roots is doing its job under that one, a relative pattern is weighed against a
+	// path relative to whichever root contains the file, and a pattern above a root
+	// reaches everything in it.
+	for _, tc := range []struct {
+		name    string
+		exclude []string
+	}{
+		{"an absolute pattern under one of the two roots", []string{"/mnt/tv/Extras/**"}},
+		{"a relative pattern, weighed against every root", []string{"Extras/**"}},
+		{"a pattern anchored above the roots", []string{"/mnt/**"}},
+		{"a pattern naming a root itself", []string{"/mnt/media"}},
+		{"a wildcard in the first component, which anchors nowhere", []string{"/*/media/**"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Config{LibraryRoots: []string{"/mnt/media", "/mnt/tv"}, ExcludePaths: tc.exclude}
+			if got := c.UnreachablePatterns(); len(got) != 0 {
+				t.Fatalf("UnreachablePatterns() = %v, want none: reporting a working filter teaches an "+
+					"operator to ignore the report", got)
+			}
+		})
+	}
+
+	// A root's OWN pattern is weighed against that root alone, which is what makes the
+	// report attributable: the same string can be unreachable from the root that wrote it
+	// while an inherited copy elsewhere is fine.
+	own := Config{
+		LibraryRoots: []string{"/mnt/media"},
+		Roots: []Root{{
+			Path: "/mnt/media", Clean: "/mnt/media",
+			Filters: PathFilters{Include: []string{"/mnt/tv/**"}, IncludeLayer: LayerProfile},
+		}},
+	}
+	got = own.UnreachablePatterns()
+	if len(got) != 1 || got[0].Key != includePathsKey || len(got[0].Roots) != 1 || got[0].Roots[0] != "/mnt/media" {
+		t.Fatalf("UnreachablePatterns() = %v, want the entry's own pattern weighed against its own root", got)
+	}
+}

@@ -810,6 +810,12 @@ func (e *Engine) enumerate() ([]string, map[string]bool) { return e.enumerateIn(
 // information a walk collected does not outlive the scan that used it.
 func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
 	var files []string
+	// filtered counts the files the configured path filters kept out of this scan. It
+	// counts FILES and never directories, because the filters are applied to an entry
+	// this scan has ALREADY LISTED: what a filter changes is the set of files offered,
+	// never the set of directories listed, and the observed map below is the evidence
+	// that difference rests on (AC-10).
+	var filtered int
 	observed := map[string]bool{}
 	if e.Coverage != nil {
 		for _, dir := range e.Coverage {
@@ -841,12 +847,22 @@ func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
 					continue
 				}
 				if source {
-					if p := filepath.Join(dir, ent.Name); e.offered(p) {
+					p := filepath.Join(dir, ent.Name)
+					// The filter is asked AFTER this directory was listed and marked
+					// observed, and it is asked about the FILE. That ordering is the
+					// whole of AC-10: an excluded directory is still listed, so the
+					// retention pass has exactly the evidence it had before.
+					if !e.filterAllows(p) {
+						filtered++
+						continue
+					}
+					if e.offered(p) {
 						files = append(files, p)
 					}
 				}
 			}
 		}
+		e.reportFiltered(filtered)
 		if pass.selfListed > 0 {
 			// Entry information that was never collected is never evidence: where
 			// none was carried in, this scan listed for itself and says so.
@@ -888,6 +904,13 @@ func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
 					e.skipSourceNamedDirectory(path)
 					return nil
 				}
+				// Asked here and not on the way into the directory, for the reason the
+				// covered branch above gives: a filter changes which FILES are offered
+				// and never which directories were listed (AC-10).
+				if !e.filterAllows(path) {
+					filtered++
+					return nil
+				}
 				if e.offered(path) {
 					files = append(files, path)
 				}
@@ -895,8 +918,46 @@ func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
 			return nil
 		})
 	}
+	e.reportFiltered(filtered)
 	sort.Strings(files)
 	return files, observed
+}
+
+// filterAllows reports whether the path filters in force for this path's library root
+// let this run offer it, and says which root excluded it when they do not.
+//
+// It decides from the PATH: nothing is opened, stat'd or listed here, which is what lets
+// it be asked about an entry the scan has already listed without touching what that
+// listing recorded. A path under no configured root is left alone - the enumeration
+// reaches none, and a filter is a statement about a root's own tree.
+//
+// The per-file line is DEBUG and the count below is INFO, deliberately. One line per
+// excluded file is the right detail when an operator is asking why a particular file was
+// not touched, and the wrong volume for a run over an excluded subtree of ten thousand
+// files - which is the configuration this feature exists for.
+func (e *Engine) filterAllows(p string) bool {
+	root, known := e.rootFor(p)
+	if !known || !root.Filters.InForce() || root.Offers(p) {
+		return true
+	}
+	e.Log.Debug("not enumerating (a configured path filter excludes it)",
+		"file", p, "library_root", root.Clean,
+		"exclude_paths", root.Filters.Exclude, "include_paths", root.Filters.Include)
+	return false
+}
+
+// reportFiltered states what the path filters kept out of one enumeration, and states
+// beside it the thing an operator cannot see and the ledger depends on: every directory
+// was still listed, so the retention pass has the same evidence it would have had with
+// no filter configured.
+func (e *Engine) reportFiltered(filtered int) {
+	if filtered == 0 {
+		return
+	}
+	e.Log.Info("path filters kept files out of this scan; every directory this scan would "+
+		"have listed was still listed, so the ledger retention pass reads exactly the evidence it "+
+		"read before the filters were configured",
+		"files_excluded_by_a_path_filter", filtered)
 }
 
 // offered reports whether a path this run found may be OFFERED to the pipeline, and

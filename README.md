@@ -194,7 +194,9 @@ here has looked inside it.
 
 `encode_profiles` overrides the top-level encode settings per job (ordered; the first profile whose
 `match` glob selects a source wins), `bitrate_kbps` swaps the quality target for a target-bitrate rate
-control, and neither is reachable from a flag: **[docs/profiles.md](docs/profiles.md)**. `scratch_dir`
+control, and `exclude_paths`/`include_paths` say which paths under a root holdfast may touch at all -
+both default to empty, exclude wins over include, and none of the three is reachable from a flag:
+**[docs/profiles.md](docs/profiles.md)**. `scratch_dir`
 moves the encode's **working file** elsewhere and nothing else - the accepted result is still copied
 back beside the source and finalized by the same atomic rename: **[docs/scratch.md](docs/scratch.md)**.
 

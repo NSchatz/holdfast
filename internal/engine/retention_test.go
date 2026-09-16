@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -619,4 +620,165 @@ func TestRetention_APruneFailureIsLoggedAndLeavesEveryRowItDidNotRemoveInPlace(t
 		t.Error("after a prune failure the engine stopped encoding; a bookkeeping failure must not " +
 			"stop the thing this process exists to do")
 	}
+}
+
+// --- path filters must not move what the run counts as LOOKED AT (S0086) --------------
+
+// TestRetention_DoesNotPruneRowsForMerelyExcludedFiles is [AC-10], and it is the one
+// criterion of this spec whose failure is invisible until it has already destroyed
+// something.
+//
+// The retention pass may only remove a terminal row when THIS RUN LISTED the directory
+// the file should be in and the file was not there. A filter that skipped an excluded
+// directory instead of skipping its FILES would take that directory out of the observed
+// set, and every row under it would then read as "we looked and it was gone" - which
+// deletes audit history irreversibly and, because a terminal row is exactly what holds a
+// file out of the encoder, hands the whole excluded subtree back to a delete-capable
+// engine on the next scan. Retention ships disabled, so nothing anybody runs by hand
+// would show it.
+//
+// The FIRST half is what reds against that implementation: the observed set with a filter
+// in force must be identical to the observed set without one. The second half is the
+// consequence stated in the ledger, and it asserts WHY the row was kept - kept because the
+// file is still in the library, never because the run had no evidence about its directory.
+func TestRetention_DoesNotPruneRowsForMerelyExcludedFiles(t *testing.T) {
+	t.Run("the evidence is identical with a filter in force", func(t *testing.T) {
+		root, coverage := pathFilterFixture(t)
+		exclude := []string{"movies/4k/**", "**/Extras", "import/**"}
+		for _, branch := range []struct {
+			name     string
+			coverage []string
+		}{
+			{"walking the library roots directly", nil},
+			{"bounded by the startup walk", coverage},
+		} {
+			t.Run(branch.name, func(t *testing.T) {
+				plainFiles, plainObserved := pathFilterEngine(t, root, branch.coverage, nil, nil).enumerate()
+				filteredFiles, filteredObserved := pathFilterEngine(t, root, branch.coverage, exclude, nil).enumerate()
+
+				if !sameObserved(plainObserved, filteredObserved) {
+					t.Fatalf("a filter changed what the run recorded as LOOKED AT:\n  with no filter: %v\n"+
+						"  with a filter:  %v\nEvery directory an unfiltered run listed must still be "+
+						"listed, or the retention pass reads a filtered-out file as a deleted one",
+						sortedKeys(plainObserved), sortedKeys(filteredObserved))
+				}
+				// Anti-vacuity: the filter really was in force on the same fixture, so the
+				// equality above is a property of the evidence and not of a filter that did
+				// nothing.
+				if len(filteredFiles) >= len(plainFiles) {
+					t.Fatalf("the filter excluded nothing (%d files with it, %d without), so the "+
+						"observed sets would match whatever this build does",
+						len(filteredFiles), len(plainFiles))
+				}
+			})
+		}
+	})
+
+	t.Run("a terminal row for a merely excluded file survives the pass and is still exported", func(t *testing.T) {
+		ffmpeg, ffprobe := tools(t)
+		root := t.TempDir()
+		// The one file on disk, and it is excluded. Nothing here is ever probed or
+		// encoded, so a plain file is the whole fixture: the retention pass decides
+		// "spent" by stat-ing the path and comparing the fingerprint, never by asking
+		// what was enumerated.
+		excluded := filepath.Join(root, "import", "still-copying.mkv")
+		mustWrite(t, excluded)
+
+		var buf bytes.Buffer
+		eng := buildEngine(t, ffmpeg, ffprobe, root, nil, func(c *config.Config) {
+			c.HistoryRetentionRows = 1 // aggressive on purpose: prune everything it may
+			c.ExcludePaths = []string{"import/**"}
+		})
+		eng.Log = captureLogger(&buf)
+		ts := eng.Store.(*testStore)
+
+		// The excluded file's row, plus history for files that really are gone - which is
+		// what the prune is allowed to remove and what proves the pass ran at all.
+		//
+		// The prune examines rows oldest first and, within one timestamp, by path, so the
+		// gone files are named to sort AFTER the excluded one. That ordering is what makes
+		// the excluded row the first the prune offers itself, and therefore the one it has
+		// to refuse out loud rather than never reach.
+		seedRowForRealFile(t, ts, excluded, store.Done, &store.Outcome{Reason: "seeded"})
+		gone := []string{filepath.Join(root, "zgone0.mkv"), filepath.Join(root, "zgone1.mkv")}
+		for _, p := range gone {
+			seedRow(t, ts, p, store.Skipped, &store.Outcome{Reason: SkipLowBitrate})
+		}
+
+		if err := eng.RunOneshot(context.Background()); err != nil {
+			t.Fatalf("RunOneshot: %v", err)
+		}
+
+		held := map[string]bool{}
+		for _, r := range terminalRows(t, ts) {
+			held[r.Path] = true
+		}
+		if !held[excluded] {
+			t.Fatal("the terminal row for a file that is merely EXCLUDED was pruned. Excluding a path is " +
+				"not a request to forget what was done to it, and the row is what holds that file out of " +
+				"the encoder")
+		}
+		// The pass really ran: the rows for files that are genuinely gone went.
+		for _, p := range gone {
+			if held[p] {
+				t.Fatalf("%s is still in the ledger, so the retention pass did not prune and the row "+
+					"above survived for want of a pass rather than by the rule", p)
+			}
+		}
+
+		// WHY it was kept. Under an implementation that filtered inside the walk the row
+		// would survive too - as a row whose directory this run never listed, which is the
+		// state that turns into a prune the moment the exclusion is lifted for one scan.
+		log := buf.String()
+		if !strings.Contains(log, "kept_file_still_in_the_library=1") {
+			t.Errorf("the run did not keep the row because the file is still in the library:\n%s", log)
+		}
+		if !strings.Contains(log, "kept_directory_this_run_did_not_list=0") {
+			t.Errorf("the run recorded the excluded file's directory as one it did not list, so the "+
+				"filter moved the evidence:\n%s", log)
+		}
+
+		// And `holdfast export` still carries it: the export reads every terminal row
+		// through EachTerminal, which is the seam the command itself writes from.
+		var exported []string
+		if err := ts.EachTerminal(context.Background(), func(j store.Job) error {
+			exported = append(exported, j.Path)
+			return nil
+		}); err != nil {
+			t.Fatalf("EachTerminal: %v", err)
+		}
+		found := false
+		for _, p := range exported {
+			if p == excluded {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("holdfast export would not carry the excluded file's record: %v", exported)
+		}
+	})
+}
+
+// sameObserved reports whether two runs recorded evidence about exactly the same
+// directories.
+func sameObserved(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for dir, seen := range a {
+		if b[dir] != seen {
+			return false
+		}
+	}
+	return true
+}
+
+// sortedKeys renders an observed set for a failure message, in a stable order.
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

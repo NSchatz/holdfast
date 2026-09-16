@@ -58,6 +58,7 @@ var knownKeys = map[string]bool{
 	"max_load": true, "tautulli_url": true, "tautulli_api_key": true,
 	"bitrate_kbps": true, "encode_profiles": true,
 	"scratch_dir": true, "scratch_min_free_gb": true,
+	excludePathsKey: true, includePathsKey: true,
 }
 
 // profileKeys are the keys accepted inside one `encode_profiles` entry. The
@@ -139,6 +140,28 @@ type Config struct {
 	// RootProfiles then derives one root per LibraryRoots entry carrying the top-level
 	// values - which is exactly the single-policy behaviour this generalizes.
 	Roots []Root `yaml:"-"`
+
+	// ExcludePaths and IncludePaths are the path filters: which paths under a library
+	// root this tool may touch. Both are optional and both default to empty, so a
+	// configuration that names neither offers exactly the files it always did.
+	//
+	// They are matched as doublestar globs against the WHOLE of a file's path - never a
+	// substring, so `movies/tv` does not reach `movies/tv-archive` - and a pattern that
+	// names a directory covers everything under it. A pattern that does not begin with
+	// `/` is weighed against the path relative to the root that contains the file; one
+	// that does begin with `/` is weighed against the absolute path.
+	//
+	// ExcludePaths WINS over IncludePaths. A file matched by both is excluded, because
+	// the fail-safe direction for a tool that deletes sources is to touch fewer files.
+	// An empty or absent IncludePaths leaves every file under the root eligible.
+	//
+	// Both may also be written inside a `library_roots` entry, where the entry's value
+	// REPLACES the top-level one for that root, empty list included. A filter decides
+	// whether a file is offered at all and never how one is encoded, so it is not a
+	// profile knob: editing one moves no root's profile digest and re-opens no terminal
+	// row. See filters.go.
+	ExcludePaths []string `yaml:"exclude_paths"`
+	IncludePaths []string `yaml:"include_paths"`
 
 	// LogLevel controls verbosity: debug|info|warn|error (default info).
 	LogLevel string `yaml:"log_level"`
@@ -685,9 +708,10 @@ func (c *Config) RootProfiles() []Root {
 		return c.Roots
 	}
 	top := c.TopLevelProfile()
+	filters := c.TopLevelFilters()
 	roots := make([]Root, 0, len(c.LibraryRoots))
 	for _, r := range c.LibraryRoots {
-		roots = append(roots, Root{Path: r, Clean: filepath.Clean(r), Profile: top})
+		roots = append(roots, Root{Path: r, Clean: filepath.Clean(r), Profile: top, Filters: filters})
 	}
 	return roots
 }
@@ -1169,6 +1193,17 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxLoad < 0 {
 		return fmt.Errorf("max_load %g must be >= 0 (0 disables the CPU-load cap)", c.MaxLoad)
+	}
+
+	// The path filters, at both levels. A pattern that is not valid in the decided
+	// language is refused HERE, at start and by name, rather than met for the first time
+	// half way through a scan: a filter is the operator's statement about which files
+	// this tool may touch, and one the matcher cannot read is not that statement. A
+	// pattern that is valid but can match nothing is a REPORT and not a refusal - a
+	// filter legitimately guards a directory that does not exist yet (see
+	// UnreachablePatterns).
+	if err := c.validateFilters(); err != nil {
+		return err
 	}
 
 	// Every per-value refusal above, re-run against what each root ACTUALLY resolved to,

@@ -25,10 +25,12 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/NSchatz/holdfast/internal/config"
@@ -2824,6 +2826,289 @@ func TestDecodeOK_FailsWhenAnAdditionalVideoStreamIsDamaged(t *testing.T) {
 	// the rejection above is attributable to the damage and not to the wider map.
 	if !pr.DecodeOK(ctx, p("clean.mkv")) {
 		t.Error("DecodeOK rejected a two-stream file that is not damaged at all")
+	}
+}
+
+// --- path filters: which paths under a library root this run may touch (S0086) --------
+//
+// Every case here is asked of BOTH enumeration branches. The coverage-bounded branch
+// lists exactly the directories the startup walk traversed; the direct branch walks the
+// roots itself. Both offer files, so a filter applied to one and not the other would be
+// a filter that lapses the first time a run starts without a startup check.
+
+// pathFilterFixture writes the tree these cases are asked about and returns its root and
+// the directories a coverage-bounded enumeration would list.
+//
+// It is chosen for the distinctions the pattern language has to make: `movies/tv` beside
+// `movies/tv-archive` (a substring match would reach both), an `Extras` directory at
+// depth, a `4k` directory to name absolutely, and a file directly under the root.
+func pathFilterFixture(t *testing.T) (root string, coverage []string) {
+	t.Helper()
+	root = t.TempDir()
+	for _, rel := range []string{
+		"top.mkv",
+		"movies/tv/a.mkv",
+		"movies/tv-archive/b.mkv",
+		"movies/Extras/c.mkv",
+		"movies/4k/d.mkv",
+		"import/e.mkv",
+	} {
+		mustWrite(t, filepath.Join(root, filepath.FromSlash(rel)))
+	}
+	coverage = []string{
+		root,
+		filepath.Join(root, "import"),
+		filepath.Join(root, "movies"),
+		filepath.Join(root, "movies", "4k"),
+		filepath.Join(root, "movies", "Extras"),
+		filepath.Join(root, "movies", "tv"),
+		filepath.Join(root, "movies", "tv-archive"),
+	}
+	return root, coverage
+}
+
+// everyFileInTheFixture is what pathFilterFixture offers with no filter in force, as
+// root-relative slash paths.
+var everyFileInTheFixture = []string{
+	"import/e.mkv", "movies/4k/d.mkv", "movies/Extras/c.mkv",
+	"movies/tv-archive/b.mkv", "movies/tv/a.mkv", "top.mkv",
+}
+
+// pathFilterEngine builds an engine over root with the given filters. A nil coverage set
+// is the direct-walk branch; a non-nil one is the branch bounded by the startup walk.
+func pathFilterEngine(t *testing.T, root string, coverage, exclude, include []string) *Engine {
+	t.Helper()
+	ffmpeg, ffprobe := tools(t)
+	cfg := config.Config{
+		LibraryRoots: []string{root},
+		VideoExts:    []string{"mkv", "mp4"},
+		ExcludePaths: exclude,
+		IncludePaths: include,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("the fixture configuration is invalid, so the case would prove nothing: %v", err)
+	}
+	e := New(cfg, probe.New(ffmpeg, ffprobe), nil, nil, discardLogger())
+	e.Coverage = coverage
+	return e
+}
+
+// offeredRel enumerates and returns what was offered as root-relative slash paths, which
+// is how the patterns are written and therefore how a failure reads.
+func offeredRel(t *testing.T, e *Engine, root string) []string {
+	t.Helper()
+	files, _ := e.enumerate()
+	out := make([]string, 0, len(files))
+	for _, f := range files {
+		rel, err := filepath.Rel(root, f)
+		if err != nil {
+			t.Fatalf("%s is not under %s: %v", f, root, err)
+		}
+		out = append(out, filepath.ToSlash(rel))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// offersUnderBothBranches asserts that both enumeration branches offer exactly want.
+func offersUnderBothBranches(t *testing.T, root string, coverage, exclude, include, want []string) {
+	t.Helper()
+	sort.Strings(want)
+	for _, branch := range []struct {
+		name     string
+		coverage []string
+	}{
+		{"walking the library roots directly", nil},
+		{"bounded by the startup walk", coverage},
+	} {
+		t.Run(branch.name, func(t *testing.T) {
+			got := offeredRel(t, pathFilterEngine(t, root, branch.coverage, exclude, include), root)
+			if !equalStrings(got, want) {
+				t.Fatalf("offered %v, want %v (exclude_paths %v, include_paths %v)",
+					got, want, exclude, include)
+			}
+		})
+	}
+}
+
+// TestPathFilters_WithNoFilterEveryFileIsOfferedExactlyAsBefore is [AC-1]: a
+// configuration naming neither key offers exactly the files it offered before these keys
+// existed. It is the criterion every other one here is measured against.
+func TestPathFilters_WithNoFilterEveryFileIsOfferedExactlyAsBefore(t *testing.T) {
+	root, coverage := pathFilterFixture(t)
+	offersUnderBothBranches(t, root, coverage, nil, nil, append([]string(nil), everyFileInTheFixture...))
+
+	// An empty list is the same statement as an absent key, which is what makes an
+	// operator's `exclude_paths: []` a no-op rather than a filter that matches nothing.
+	offersUnderBothBranches(t, root, coverage, []string{}, []string{},
+		append([]string(nil), everyFileInTheFixture...))
+}
+
+// TestPathFilters_AnExcludedFileIsNeverOffered is [AC-2]: a file matching an
+// exclude_paths pattern in force for its root is never offered in that run - not claimed,
+// not probed, not encoded, and no new ledger row is written for it.
+func TestPathFilters_AnExcludedFileIsNeverOffered(t *testing.T) {
+	root, coverage := pathFilterFixture(t)
+	offersUnderBothBranches(t, root, coverage, []string{"movies/4k/**"}, nil,
+		[]string{"import/e.mkv", "movies/Extras/c.mkv", "movies/tv-archive/b.mkv",
+			"movies/tv/a.mkv", "top.mkv"})
+
+	// The half the enumeration cannot show: a real pass over a real library, where the
+	// excluded file reaches neither the encoder nor the ledger. The row is what matters -
+	// a file that was claimed and then skipped would still have one.
+	t.Run("the excluded file reaches neither the encoder nor the ledger", func(t *testing.T) {
+		ffmpeg, ffprobe := tools(t)
+		lib := t.TempDir()
+		kept := filepath.Join(lib, "keep", "kept.mkv")
+		excluded := filepath.Join(lib, "import", "still-copying.mkv")
+		for _, p := range []string{kept, excluded} {
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			mkH264(t, ffmpeg, p, "8M")
+		}
+
+		var encodes atomic.Int32
+		ts := run(t, ffmpeg, ffprobe, lib, countingEncoder(&encodes), func(c *config.Config) {
+			c.ExcludePaths = []string{"import/**"}
+		})
+		rows, err := ts.List(context.Background(), []store.Status{
+			store.Pending, store.Probing, store.Encoding, store.Verifying,
+			store.Done, store.Skipped, store.Failed,
+		}, 0)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		var keptRow bool
+		for _, r := range rows {
+			if r.Path == excluded {
+				t.Errorf("the excluded file has a ledger row (%s): it was claimed, so it was offered", r.Status)
+			}
+			if r.Path == kept {
+				keptRow = true
+			}
+		}
+		// Anti-vacuity: the identical pass DID reach the file beside it, so the absence
+		// above is the filter and not a scan that found nothing.
+		if !keptRow {
+			t.Fatalf("the file that was not excluded has no ledger row either, so this pass proves "+
+				"nothing about the filter: %v", rows)
+		}
+		if encodes.Load() != 1 {
+			t.Errorf("the encoder was handed %d files, want exactly the one that was not excluded",
+				encodes.Load())
+		}
+	})
+
+	// A path arriving from OUTSIDE reaches the same answer. `POST /api/scan` hands a
+	// caller's path to Eligibility.Judge, and everything past that door is licensed to
+	// rewrite the file it was handed - so a filter that bound only the enumeration would
+	// leave the excluded tree reachable by any client holding the control token, which is
+	// exactly the import directory an operator excluded because something else is still
+	// writing into it.
+	t.Run("a submitted path is refused by the same filter", func(t *testing.T) {
+		fixture, _ := pathFilterFixture(t)
+		lib, err := filepath.EvalSymlinks(fixture)
+		if err != nil {
+			t.Fatal(err)
+		}
+		el := NewEligibility(config.Config{
+			LibraryRoots: []string{lib},
+			VideoExts:    []string{"mkv"},
+			ExcludePaths: []string{"movies/4k/**"},
+		})
+		if _, bad := el.Judge(filepath.Join(lib, "movies", "4k", "d.mkv")); bad == nil || bad.Rule != RuleFilteredPath {
+			t.Fatalf("Judge on an excluded path = %v, want a refusal under %q", bad, RuleFilteredPath)
+		}
+		// Anti-vacuity: the file beside it, which no filter names, is still admitted.
+		if _, bad := el.Judge(filepath.Join(lib, "movies", "tv", "a.mkv")); bad != nil {
+			t.Fatalf("Judge refused a path no filter names: %v", bad)
+		}
+	})
+}
+
+// TestPathFilters_IncludeNarrowsAndAnEmptyIncludeChangesNothing is [AC-3]: a non-empty
+// include_paths offers only what matches one of its patterns, and an absent or empty one
+// leaves every file under the root eligible.
+//
+// include_paths is the sharper of the two keys: a typo in an exclude pattern protects
+// nothing, while a typo in an include pattern silently stops the whole library being
+// scanned - so "empty means everything" is the behaviour that must not drift.
+func TestPathFilters_IncludeNarrowsAndAnEmptyIncludeChangesNothing(t *testing.T) {
+	root, coverage := pathFilterFixture(t)
+	offersUnderBothBranches(t, root, coverage, nil, []string{"movies/tv/**"},
+		[]string{"movies/tv/a.mkv"})
+	offersUnderBothBranches(t, root, coverage, nil, []string{"movies/tv/**", "import/**"},
+		[]string{"import/e.mkv", "movies/tv/a.mkv"})
+	offersUnderBothBranches(t, root, coverage, nil, nil,
+		append([]string(nil), everyFileInTheFixture...))
+}
+
+// TestPathFilters_ExcludeWinsOverInclude is [AC-4], an unhappy path: a file matched by
+// both lists is EXCLUDED. The fail-safe direction for a tool that deletes sources is to
+// touch fewer files, so the two keys are not symmetrical and must not be made so.
+func TestPathFilters_ExcludeWinsOverInclude(t *testing.T) {
+	root, coverage := pathFilterFixture(t)
+	offersUnderBothBranches(t, root, coverage,
+		[]string{"movies/4k/**"}, []string{"movies/**"},
+		[]string{"movies/Extras/c.mkv", "movies/tv-archive/b.mkv", "movies/tv/a.mkv"})
+
+	// The same file, named by both lists as directly as it can be.
+	offersUnderBothBranches(t, root, coverage,
+		[]string{"movies/tv/a.mkv"}, []string{"movies/tv/a.mkv"}, []string{})
+}
+
+// TestPathFilters_MatchesTheWholePathOrAnAncestorAndNeverASubstring is [AC-5]: a pattern
+// is weighed against the WHOLE of a file's root-relative path, and a file is matched when
+// the pattern matches that path or any directory path containing it within the root.
+//
+// Both halves are load-bearing. Without whole-path matching, `movies/tv` reaches
+// `movies/tv-archive` and an operator excluding one library silently excludes another -
+// which is exactly what a substring filter does. Without the ancestor rule, `**/Extras`
+// matches a directory nobody offers and every file inside it stays eligible, which is the
+// opposite of what the operator wrote.
+func TestPathFilters_MatchesTheWholePathOrAnAncestorAndNeverASubstring(t *testing.T) {
+	root, coverage := pathFilterFixture(t)
+	absolute4k := path.Join(filepath.ToSlash(root), "movies", "4k")
+
+	for _, tc := range []struct {
+		name    string
+		exclude []string
+		want    []string
+	}{
+		{
+			name:    "a directory named exactly covers what is under it and nothing beside it",
+			exclude: []string{"movies/tv"},
+			want: []string{"import/e.mkv", "movies/4k/d.mkv", "movies/Extras/c.mkv",
+				"movies/tv-archive/b.mkv", "top.mkv"},
+		},
+		{
+			name:    "a doublestar as its own component reaches that directory at any depth",
+			exclude: []string{"**/Extras"},
+			want: []string{"import/e.mkv", "movies/4k/d.mkv", "movies/tv-archive/b.mkv",
+				"movies/tv/a.mkv", "top.mkv"},
+		},
+		{
+			name:    "a pattern beginning with a slash is weighed against the path as configured",
+			exclude: []string{absolute4k},
+			want: []string{"import/e.mkv", "movies/Extras/c.mkv", "movies/tv-archive/b.mkv",
+				"movies/tv/a.mkv", "top.mkv"},
+		},
+		{
+			name:    "a file named exactly is the only file excluded",
+			exclude: []string{"movies/tv/a.mkv"},
+			want: []string{"import/e.mkv", "movies/4k/d.mkv", "movies/Extras/c.mkv",
+				"movies/tv-archive/b.mkv", "top.mkv"},
+		},
+		{
+			name:    "a pattern matching no whole path matches nothing at all",
+			exclude: []string{"ovies"},
+			want:    append([]string(nil), everyFileInTheFixture...),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			offersUnderBothBranches(t, root, coverage, tc.exclude, nil, tc.want)
+		})
 	}
 }
 

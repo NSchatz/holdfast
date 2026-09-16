@@ -490,3 +490,117 @@ func TestValidate_PrintsTheDisabledUndoWindow(t *testing.T) {
 		t.Errorf("validate announced a disabled window for a 24h one:\n%s", out.String())
 	}
 }
+
+// TestValidate_PrintsThePathFiltersInForce is [AC-8]: `validate` prints, per library
+// root, the patterns in force for that root, which layer supplied each list, and a count
+// OF PATTERNS - and it exits 0 even when a directory beneath a root cannot be listed,
+// because it describes a configuration and walks no library.
+//
+// The count is of patterns and never of matching files. A count of files is a number
+// `validate` cannot produce without becoming a different command, and an operator would
+// read a wrong one as "this is how much of my library is protected".
+func TestValidate_PrintsThePathFiltersInForce(t *testing.T) {
+	dir := t.TempDir()
+	// A REAL library root with a directory beneath it that this process may not list.
+	// If `validate` walked the library it would meet this; it must not, and it must
+	// still exit 0.
+	lib := filepath.Join(dir, "media")
+	sealed := filepath.Join(lib, "sealed")
+	if err := os.MkdirAll(sealed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sealed, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sealed, 0o755) })
+	if _, err := os.ReadDir(sealed); err == nil {
+		t.Fatal("the fixture directory is still listable, so this case would prove nothing about a walk")
+	}
+
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := "exclude_paths:\n  - \"**/Extras\"\n  - \"**/Featurettes\"\n" +
+		"library_roots:\n" +
+		"  - path: " + lib + "\n" +
+		"    include_paths:\n      - \"movies/**\"\n" +
+		"  - path: " + filepath.Join(dir, "music") + "\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	if code := dispatch([]string{"validate", "--config", cfgPath}, &out, &errOut); code != 0 {
+		t.Fatalf("validate exited %d over a root with an unlistable directory beneath it: %s",
+			code, errOut.String())
+	}
+	got := out.String()
+	for _, want := range []string{
+		// Every pattern in force, per root.
+		"**/Extras", "**/Featurettes", "movies/**",
+		// The count, which is of PATTERNS.
+		"2 pattern(s)", "1 pattern(s)",
+		// Which layer supplied each list. The second root inherits the top-level
+		// exclude list and has no include list at all.
+		"exclude_paths", "include_paths",
+		string(config.LayerTopLevel), string(config.LayerProfile), string(config.LayerDefault),
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("validate does not print %q:\n%s", want, got)
+		}
+	}
+	// Nothing here counts files. A figure that looked like one would be read as a
+	// measurement of the library, which this command never opened.
+	if strings.Contains(got, "file(s) matched") || strings.Contains(got, "files matched") {
+		t.Errorf("validate reported a count of matching FILES; it walks no library:\n%s", got)
+	}
+
+	// The covers-nothing report, on stdout with the other things a valid configuration
+	// has to say about itself, and still exit 0.
+	stray := filepath.Join(dir, "stray.yaml")
+	strayBody := "exclude_paths:\n  - \"/srv/elsewhere/**\"\nlibrary_roots:\n  - " + lib + "\n"
+	if err := os.WriteFile(stray, []byte(strayBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := dispatch([]string{"validate", "--config", stray}, &out, &errOut); code != 0 {
+		t.Fatalf("a pattern that covers nothing refused the configuration (exit %d): %s", code, errOut.String())
+	}
+	for _, want := range []string{"COVERS NOTHING", "/srv/elsewhere/**", lib} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("validate does not report the pattern that covers nothing (%q):\n%s", want, out.String())
+		}
+	}
+}
+
+// TestValidate_RefusesAMalformedPatternTheSameWay is [AC-6] at the command: `validate`
+// refuses the same configuration a run refuses, in the same words, non-zero, on stderr.
+// An operator checks a configuration here BEFORE pointing it at a library, so a
+// refusal only the daemon makes is a refusal discovered too late.
+func TestValidate_RefusesAMalformedPatternTheSameWay(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := "library_roots:\n  - /mnt/media\nexclude_paths:\n  - \"movies/[4k/**\"\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	code := dispatch([]string{"validate", "--config", cfgPath}, &out, &errOut)
+	if code == 0 {
+		t.Fatalf("validate accepted a malformed pattern (stdout: %s)", out.String())
+	}
+	for _, want := range []string{"exclude_paths", "movies/[4k/**"} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Errorf("the refusal does not name %q:\n%s", want, errOut.String())
+		}
+	}
+	// The same configuration refuses a RUN too, and the run is the one that would have
+	// touched files.
+	out.Reset()
+	errOut.Reset()
+	if code := dispatch([]string{"run", "--config", cfgPath}, &out, &errOut); code == 0 {
+		t.Fatalf("run accepted a malformed pattern (stdout: %s)", out.String())
+	}
+	if !strings.Contains(errOut.String(), "movies/[4k/**") {
+		t.Errorf("the run's refusal does not name the pattern:\n%s", errOut.String())
+	}
+}

@@ -341,6 +341,63 @@ func TestStartupCheck_TheScanIsBoundedByTheWalk(t *testing.T) {
 // TestValidate_TakesNoDecisionAndPaysNoWalk: `validate` opens no store and
 // touches no media, so none of this fires on it - it neither classifies nor
 // refuses, and a configuration that would be refused at `run` still validates.
+// TestStartupCheck_AFilterDoesNotWidenTheLocalityRefusal is [AC-12]: a filesystem
+// beneath a library root that is not local and is not named in allow_non_local refuses
+// the run exactly as it does today, whether or not every path on it is excluded by a
+// filter.
+//
+// The two keys are kept apart on purpose. Excluding a path is not an assertion that
+// holdfast may run on storage it could not identify as local - allow_non_local stays the
+// only key that says so - and coupling two safety keys would widen one of them by
+// accident: an operator who excluded a NAS subtree to stop it being transcoded would
+// silently also have told the tool the NAS was fine to act on.
+func TestStartupCheck_AFilterDoesNotWidenTheLocalityRefusal(t *testing.T) {
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "nas", "media")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(dir, "state")
+	substitute(t, typesByPrefix(map[string]string{filepath.Join(dir, "nas"): "nfs"}))
+
+	base := config.Config{LibraryRoots: []string{lib}, StateDir: state, VideoExts: []string{"mkv"}}
+
+	// Every path on that filesystem excluded, as completely as the language can say it.
+	filtered := base
+	filtered.ExcludePaths = []string{"**"}
+	var filteredErr bytes.Buffer
+	filteredRes, filteredCode := startupCheck(&filtered, discardLog(), &filteredErr)
+	if filteredCode == 0 || filteredRes.Start {
+		t.Fatalf("a filesystem that is not local started because a filter excluded it: code %d, causes %+v",
+			filteredCode, filteredRes.Causes)
+	}
+	for _, want := range []string{"nfs", lib, startup.ConfigKey} {
+		if !strings.Contains(filteredErr.String(), want) {
+			t.Errorf("the refusal does not name %q:\n%s", want, filteredErr.String())
+		}
+	}
+
+	// EXACTLY as it does today: the same decision, cause for cause, and the same account
+	// written to an operator, as the identical configuration with no filter in it.
+	var plainErr bytes.Buffer
+	plainRes, plainCode := startupCheck(&base, discardLog(), &plainErr)
+	if plainCode != filteredCode || plainRes.Start != filteredRes.Start ||
+		len(plainRes.Causes) != len(filteredRes.Causes) || plainErr.String() != filteredErr.String() {
+		t.Errorf("a filter changed the locality decision:\n  with a filter: code %d, %d cause(s)\n%s\n"+
+			"  without one:   code %d, %d cause(s)\n%s",
+			filteredCode, len(filteredRes.Causes), filteredErr.String(),
+			plainCode, len(plainRes.Causes), plainErr.String())
+	}
+
+	// And allow_non_local is still the key that permits it, with the filter left exactly
+	// where it was - so the refusal above is the locality rule and not the filter.
+	allowed := filtered
+	allowed.AllowNonLocal = []string{lib}
+	if res, code := startupCheck(&allowed, discardLog(), io.Discard); code != 0 || !res.Start {
+		t.Fatalf("the declared filesystem was still refused: code %d, causes %+v", code, res.Causes)
+	}
+}
+
 func TestValidate_TakesNoDecisionAndPaysNoWalk(t *testing.T) {
 	cfgPath, state := nasLayout(t, "")
 	var out, errOut bytes.Buffer
