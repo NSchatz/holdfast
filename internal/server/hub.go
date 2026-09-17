@@ -716,18 +716,27 @@ func (h *Hub) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-h.events:
+		case ev := <-h.events:
 			// Coalesce: drain everything queued so a burst of transitions produces
 			// one broadcast, not one per event.
+			//
+			// progressOnly tracks whether EVERY event in this batch was a live progress
+			// report. It is what AC-6 rests on: an encoder reports its position once a
+			// second and none of those reports can move a whole-ledger figure, because
+			// no row changed state. A batch carrying even one transition is not
+			// progress-only, and the frame it produces refreshes the figure set on the
+			// ordinary interval rule.
+			progressOnly := ev.Progress != nil
 			drained := true
 			for drained {
 				select {
-				case <-h.events:
+				case ev := <-h.events:
+					progressOnly = progressOnly && ev.Progress != nil
 				default:
 					drained = false
 				}
 			}
-			h.broadcast(ctx)
+			h.broadcast(ctx, progressOnly)
 		}
 	}
 }
@@ -750,11 +759,17 @@ func (h *Hub) subscriberCount() int {
 // nothing, and the price of that is nothing: a subscriber that attaches later has its
 // own first frame built for it at that moment (see Subscribe), so no client is ever
 // served a frame that was built before it existed.
-func (h *Hub) broadcast(ctx context.Context) {
+//
+// progressOnly says the batch behind this frame was nothing but live progress reports.
+// Such a frame publishes the whole-ledger figures it already has and refreshes none of
+// them, whatever the interval says: the reports moved no row, so there is nothing for a
+// scan of the ledger to find. The figures it carries keep their envelopes and their
+// availability - a progress frame downgrades nothing.
+func (h *Hub) broadcast(ctx context.Context, progressOnly bool) {
 	if h.subscriberCount() == 0 {
 		return
 	}
-	snap, err := h.buildSnapshot(ctx)
+	snap, err := h.buildSnapshot(ctx, !progressOnly)
 	if err != nil {
 		h.log.Warn("snapshot build failed (skipping broadcast)", "err", err)
 		return
@@ -809,9 +824,10 @@ func (h *Hub) Subscribe(ctx context.Context) (<-chan []byte, func()) {
 }
 
 // SnapshotJSON returns the current snapshot as marshaled JSON (used for the initial
-// SSE frame and reusable by handlers/tests).
+// SSE frame and reusable by handlers/tests). It is a frame built ON DEMAND, so it may
+// refresh the whole-ledger figure set when the interval has elapsed.
 func (h *Hub) SnapshotJSON(ctx context.Context) ([]byte, error) {
-	snap, err := h.buildSnapshot(ctx)
+	snap, err := h.buildSnapshot(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -825,8 +841,13 @@ func (h *Hub) SnapshotJSON(ctx context.Context) ([]byte, error) {
 // ledgerFigureInterval, so the per-frame cost here is the summary, the two capped list
 // reads and the undo window's held bytes - work bounded by what the frame ships and by
 // what is currently retained, never by the ledger's history.
-func (h *Hub) buildSnapshot(ctx context.Context) (snapshot, error) {
-	figures := h.ledgerFigures(ctx, true)
+//
+// mayRefresh false is a frame that must issue no whole-ledger query at all (a progress
+// tick). It changes nothing about what the frame CARRIES: every figure keeps its
+// envelope, its availability and its value, and states its age exactly as it does on any
+// other frame.
+func (h *Hub) buildSnapshot(ctx context.Context, mayRefresh bool) (snapshot, error) {
+	figures := h.ledgerFigures(ctx, mayRefresh)
 	sum, err := h.store.Summary(ctx)
 	if err != nil {
 		return snapshot{}, err

@@ -130,6 +130,14 @@ func (c *countingStore) wholeLedgerReads() int {
 	return c.aggregates + c.countRows
 }
 
+// counts is a synchronized copy of every counter, for a test whose subject runs on the
+// hub's own goroutine.
+func (c *countingStore) counts() (aggregates, countRows int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.aggregates, c.countRows
+}
+
 func (c *countingStore) reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -157,7 +165,7 @@ func TestBroadcast_BuildsNothingWithNoSubscribers(t *testing.T) {
 	hub, cs := countingHub(t)
 
 	for i := 0; i < 25; i++ {
-		hub.broadcast(context.Background())
+		hub.broadcast(context.Background(), false)
 	}
 
 	if got := cs.reads(); got != 0 {
@@ -178,7 +186,7 @@ func TestBroadcast_BuildsNothingWithNoSubscribers_StillBuildsForASubscriber(t *t
 	defer cancel()
 	cs.reset() // the subscription's own first frame is AC-2's subject, not this one
 
-	hub.broadcast(context.Background())
+	hub.broadcast(context.Background(), false)
 
 	if cs.summary == 0 || cs.list == 0 {
 		t.Fatalf("a broadcast with one subscriber read nothing: summary=%d list=%d", cs.summary, cs.list)
@@ -199,7 +207,7 @@ func TestSubscribe_InitialFrameIsBuiltOnDemand(t *testing.T) {
 	// An idle stretch first: nobody is watching, so nothing has been built and there is
 	// no frame anywhere for a new subscriber to be handed.
 	for i := 0; i < 10; i++ {
-		hub.broadcast(context.Background())
+		hub.broadcast(context.Background(), false)
 	}
 	if got := cs.reads(); got != 0 {
 		t.Fatalf("the idle stretch was not idle: %d store reads", got)
@@ -244,7 +252,7 @@ func TestSubscribe_InitialFrameIsBuiltOnDemand_SurvivesAFailedBuild(t *testing.T
 
 	// The subscription is live: a later broadcast, over a store that reads, reaches it.
 	hub.store = &countingStore{}
-	hub.broadcast(context.Background())
+	hub.broadcast(context.Background(), false)
 	select {
 	case data := <-ch:
 		if len(data) == 0 {

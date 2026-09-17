@@ -25,12 +25,33 @@ import (
 
 // clockedHub is a Hub over a counting double whose clock a test drives. The returned
 // advance moves the hub's clock forward without sleeping through a 30s interval.
+//
+// The clock is behind a mutex because the hub reads it from its own Run goroutine: a
+// plain variable here would be a data race in every test that starts one, which under
+// -race is a failure about the test rather than about the code.
 func clockedHub(t *testing.T) (*Hub, *countingStore, func(time.Duration)) {
 	t.Helper()
 	hub, cs := countingHub(t)
-	at := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-	hub.now = func() time.Time { return at }
-	return hub, cs, func(d time.Duration) { at = at.Add(d) }
+	c := &testClock{at: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)}
+	hub.now = c.now
+	return hub, cs, c.advance
+}
+
+type testClock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func (c *testClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+func (c *testClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at = c.at.Add(d)
 }
 
 // [AC-3] WHEN frames are published inside one refresh interval THE SYSTEM SHALL run at
@@ -48,7 +69,7 @@ func TestSnapshot_WholeLedgerFiguresRefreshAtMostOncePerInterval(t *testing.T) {
 	// 40 frames spread across ONE interval. The ledger is read for the first of them and
 	// for none of the other 39.
 	for i := 0; i < 40; i++ {
-		if _, err := hub.buildSnapshot(ctx); err != nil {
+		if _, err := hub.buildSnapshot(ctx, true); err != nil {
 			t.Fatalf("buildSnapshot: %v", err)
 		}
 		advance(ledgerFigureInterval / 50)
@@ -70,7 +91,7 @@ func TestSnapshot_WholeLedgerFiguresRefreshAtMostOncePerInterval(t *testing.T) {
 	cs.reset()
 	advance(ledgerFigureInterval)
 	for i := 0; i < 5; i++ {
-		if _, err := hub.buildSnapshot(ctx); err != nil {
+		if _, err := hub.buildSnapshot(ctx, true); err != nil {
 			t.Fatalf("buildSnapshot after the interval: %v", err)
 		}
 	}
@@ -87,9 +108,9 @@ func TestSnapshot_WholeLedgerFiguresRefreshAtMostOncePerInterval_AcrossEveryPubl
 	ctx := context.Background()
 
 	for i := 0; i < 20; i++ {
-		aggregatesOf(hub.ledgerFigures(ctx, true))             // what /api/summary publishes
-		rowTotalOf(hub.ledgerFigures(ctx, true).QueueTotal, 1) // what /api/queue publishes
-		if _, err := hub.buildSnapshot(ctx); err != nil {      // what a subscriber is sent
+		aggregatesOf(hub.ledgerFigures(ctx, true))              // what /api/summary publishes
+		rowTotalOf(hub.ledgerFigures(ctx, true).QueueTotal, 1)  // what /api/queue publishes
+		if _, err := hub.buildSnapshot(ctx, true); err != nil { // what a subscriber is sent
 			t.Fatalf("buildSnapshot: %v", err)
 		}
 		advance(ledgerFigureInterval / 100)
