@@ -97,12 +97,14 @@ func isProfileKnob(key string) bool {
 }
 
 // entryKeyList renders everything a library_roots entry may carry beside its path, for
-// the refusals that tell an operator what is accepted. It is derived from the three sets
+// the refusals that tell an operator what is accepted. It is derived from the four sets
 // rather than restated, so a key added to any of them reaches the message it is refused
 // by. `rules` is last because it is the one that is neither a knob nor a filter: a list of
-// per-band overrides, which is why it has no top-level counterpart to inherit from.
+// per-band overrides, which is why it has no top-level counterpart to inherit from. The
+// watch keys sit beside it for the same reason - they are written here and nowhere else.
 func entryKeyList() string {
 	keys := append(append([]string(nil), profileKnobs...), filterKeys...)
+	keys = append(keys, watchKeys...)
 	return strings.Join(append(keys, rulesKey), ", ")
 }
 
@@ -383,6 +385,12 @@ type Root struct {
 	// profile and are deliberately NOT part of it - see profileKnobs and filters.go.
 	Filters PathFilters
 
+	// Watch is this root's RESOLVED watch state: whether an event-driven discovery
+	// accelerator runs over it, and the settle period it offers files after. It is
+	// written inside the entry and inherits from nothing, so it has no layer to record -
+	// see watch.go. The zero value is what every entry that stays silent resolves to.
+	Watch Watch
+
 	// Layers says which of the three layers supplied each knob's resolved value, keyed
 	// by the knob's config key. It is what `holdfast validate` prints beside each value,
 	// so the printed configuration states not only what the inheritance produced but
@@ -452,6 +460,10 @@ type rootEntry struct {
 	// is not a knob: nothing at the top level supplies one, so it inherits from nothing and
 	// the knob resolver never sees it.
 	rules Rules
+
+	// watch is the entry's resolved watch state, parsed out of the entry for the same
+	// reason rules is: it inherits from nothing, so the knob resolver never sees it.
+	watch Watch
 }
 
 // parseRootEntries turns the raw library_roots value into entries, refusing anything
@@ -543,6 +555,10 @@ func parseRootMapping(i int, m map[string]any, file string) (rootEntry, error) {
 
 	override := make(map[string]any, len(m)-1)
 	var rules Rules
+	// The watch keys are collected as WRITTEN and resolved together below: whether a
+	// settle period is a value nothing reads depends on the opt-in beside it, and a map
+	// iteration reaches the two keys in either order.
+	watchRaw := map[string]any{}
 	for key, val := range m {
 		if key == rootPathKey {
 			continue
@@ -556,6 +572,14 @@ func parseRootMapping(i int, m map[string]any, file string) (rootEntry, error) {
 				return rootEntry{}, err
 			}
 			rules = r
+			continue
+		}
+		if isWatchKey(key) {
+			if val == nil {
+				return rootEntry{}, fmt.Errorf("%s sets %q with no value: the watch is either on for this "+
+					"root (%s: true) or absent, which is off", where, key, watchKey)
+			}
+			watchRaw[key] = val
 			continue
 		}
 		if !isProfileKnob(key) && !isFilterKey(key) {
@@ -581,11 +605,16 @@ func parseRootMapping(i int, m map[string]any, file string) (rootEntry, error) {
 	if len(override) == 0 {
 		override = nil
 	}
+	w, err := parseWatch(where, watchRaw)
+	if err != nil {
+		return rootEntry{}, err
+	}
 	e, err := checkedEntry(i, p, override, file)
 	if err != nil {
 		return rootEntry{}, err
 	}
 	e.rules = rules
+	e.watch = w
 	return e, nil
 }
 
@@ -651,6 +680,7 @@ func resolveRoots(k *koanf.Koanf, entries []rootEntry, explicitTop map[string]bo
 			Clean:   filepath.Clean(e.path),
 			Profile: p,
 			Filters: resolveFilters(k, e, explicitTop),
+			Watch:   e.watch,
 			Layers:  layers,
 		})
 	}
