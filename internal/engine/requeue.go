@@ -75,6 +75,11 @@ var SkipGuards = []string{
 	// now read a height the one before it could not, is a change no configuration edit
 	// expresses, and this is the lever for it.
 	SkipUndeterminedSourceHeight,
+	// The FIELD-ORDER guard, here for the reasons the two shape guards above are: it reads
+	// no configuration key, so no configuration change will ever offer one of its rows back,
+	// and a re-muxed source - or an ffprobe that can now read a field order the one before
+	// it could not - is a change only an operator can see.
+	SkipUnknownFieldOrder,
 	SkipRestoredOriginal,
 }
 

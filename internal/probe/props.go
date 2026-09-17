@@ -190,6 +190,15 @@ func positiveInt(s string) (int, bool) {
 // Prober.FieldOrder.
 func (vp *VideoProps) FieldOrder() string { return normFieldOrder(vp.fields["field_order"]) }
 
+// FieldOrderRaw returns the field_order value VERBATIM, before normalisation, and "" where
+// the stream carried none at all.
+//
+// The normalised form collapses every way of not answering into one empty string, which is
+// right for a guard deciding what to do and wrong for the line that tells an operator WHY a
+// file was held back: "ffprobe said unknown" and "the field is not in this container at all"
+// send them to different places. It is a scalar off the eager snapshot, so it costs nothing.
+func (vp *VideoProps) FieldOrderRaw() string { return vp.fields["field_order"] }
+
 // CodecTag returns codec_tag_string verbatim, identical to Prober.CodecTagString.
 func (vp *VideoProps) CodecTag() string { return vp.fields["codec_tag_string"] }
 

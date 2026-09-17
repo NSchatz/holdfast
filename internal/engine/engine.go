@@ -98,6 +98,25 @@ const (
 	// next scan offers the file to the pipeline again.
 	SkipUndeterminedSourceHeight = "undetermined-source-height"
 
+	// SkipUnknownFieldOrder is the FIELD-ORDER guard: ffprobe did not establish whether the
+	// source is progressive or interlaced, so nothing in front of the encoder knows which it
+	// is.
+	//
+	// It is the fail-safe rule applied to scan type. An unestablished field order used to
+	// reach the encoder BY OMISSION - the interlace guard named the four interlaced
+	// spellings and let everything else through - so an interlaced source whose container
+	// never said so was re-encoded by a progressive-assuming pipeline, which bakes combing
+	// in permanently, and the source was then deleted. That is a silent wrong result, which
+	// is the one outcome this pipeline may never produce: an unknown is classified, not
+	// assumed to be the common case.
+	//
+	// It reads no configuration key - what a file says about its own fields is a property of
+	// the file - so its rows record nothing read and no configuration change re-derives one.
+	// That is why the token is in SkipGuards: `requeue --guard unknown-field-order` is the
+	// only lever, for a source that has since been remuxed or an ffprobe that can now read
+	// what the one before it could not.
+	SkipUnknownFieldOrder = "unknown-field-order"
+
 	// SkipOperatorExcluded is the operator's OWN withholding: a path they took out of the
 	// pipeline from the surface that showed them the file, recorded as runtime state this
 	// daemon holds (store.PathExclusion) and never in the configuration file.
@@ -153,6 +172,7 @@ var SkipVocabulary = []string{
 	SkipUnreadableStreamList,
 	SkipUndoRetentionFailed,
 	SkipUndeterminedSourceHeight,
+	SkipUnknownFieldOrder,
 	SkipOperatorExcluded,
 	SkipRestoredOriginal,
 }
@@ -2067,13 +2087,27 @@ func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, pr
 			logArgs: []any{"kbps", br, "min", prof.MinBitrateKbps, "library_root", root.Clean}}
 	}
 
-	// Interlace guard. This tool never deinterlaces — re-encoding an interlaced
-	// source with a progressive-assuming pipeline bakes in combing artifacts
-	// permanently. Progressive or unknown field_order proceeds.
+	// Scan-type guards. Every branch of the field order is answered here and none of them
+	// falls through: an interlaced source is skipped unless a deinterlace is configured for
+	// it, and a field order ffprobe could not establish is CLASSIFIED rather than assumed
+	// progressive. Only `progressive` proceeds on the strength of what the file said about
+	// itself.
 	switch props.FieldOrder() {
 	case "tt", "bb", "tb", "bt":
-		return props, sourceVerdict{guard: SkipInterlaced, codec: codec,
-			log: "skip (interlaced — not deinterlacing)"}
+		if v, stop := e.interlacedVerdict(ctx, f, prof, props, codec); stop {
+			return props, v
+		}
+	case "progressive":
+		// The one answer that licenses the progressive encode path.
+	default:
+		// Neither progressive nor one of the four interlaced spellings: ffprobe reported
+		// `unknown`, `N/A` or nothing at all (normalised to "" by probe.normFieldOrder), or
+		// a value this build does not know. Re-encoding it would be a guess about whether
+		// combing is about to be baked into the replacement of a file this tool then
+		// deletes, so the file is decided under no scan type at all and the row says why.
+		return props, sourceVerdict{guard: SkipUnknownFieldOrder, codec: codec,
+			log:     "skip (ffprobe did not establish this source's field order - refusing to encode it as progressive on a guess)",
+			logArgs: []any{"field_order", props.FieldOrderRaw()}}
 	}
 
 	// HDR/DV guard (TRANSCODE-3). A generic libx265 re-encode cannot preserve a Dolby Vision
@@ -2159,6 +2193,19 @@ func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, pr
 	}
 
 	return props, sourceVerdict{codec: codec, outExt: outExt, target: final}
+}
+
+// interlacedVerdict answers what happens to a source ffprobe reported as interlaced, and
+// reports whether the guards STOP there.
+//
+// It exists as its own function because the answer stopped being one line: the interlace
+// skip is what this tool has always done and remains what it does unless the root's profile
+// asks for a deinterlace, and the cases that refuse a deinterlace refuse it under their own
+// tokens rather than under the interlace one.
+func (e *Engine) interlacedVerdict(ctx context.Context, f string, prof config.Profile,
+	props *probe.VideoProps, codec string) (sourceVerdict, bool) {
+	return sourceVerdict{guard: SkipInterlaced, codec: codec,
+		log: "skip (interlaced - not deinterlacing)"}, true
 }
 
 // advance is a small logged wrapper around Store.Advance — a store error here is
