@@ -72,10 +72,10 @@ func TestEveryPublishedMetricNameIsDocumented(t *testing.T) {
 	}
 }
 
-// TestUndocumented_BitesOnAMetricNobodyDocumented is the check's own self-test: it proves
-// the assertion above can FAIL. A documentation check that cannot fail attests to nothing,
-// and this one runs over a corpus it did not choose, so "everything is documented" is
-// exactly what it would report if it had quietly stopped looking.
+// TestUndocumented_BitesOnAMetricNobodyDocumented is [AC-11]'s own self-test: it proves the
+// assertion above can FAIL. A documentation check that cannot fail attests to nothing, and
+// this one runs over a corpus it did not choose, so "everything is documented" is exactly
+// what it would report if it had quietly stopped looking.
 func TestUndocumented_BitesOnAMetricNobodyDocumented(t *testing.T) {
 	docs := shippedMarkdown(t)
 	const invented = "holdfast_a_series_no_document_mentions"
@@ -96,10 +96,11 @@ func TestUndocumented_BitesOnAMetricNobodyDocumented(t *testing.T) {
 	}
 }
 
-// TestPublishedNames_ReadsTheRegistryAndNotAScrape is the other half of AC-11's honesty: the
-// name set is read from the registry's DESCRIPTORS, so it includes a series that has no
+// TestPublishedNames_ReadsTheRegistryAndNotAScrape is the other half of [AC-11]'s honesty:
+// the name set is read from the registry's DESCRIPTORS, so it includes a series that has no
 // samples yet. A check built on a scrape would silently shrink to the metrics that happen
-// to have data, and would stop covering the rest without saying so.
+// to have data, and would stop covering the rest without saying so - the way this check
+// fails is by quietly grading fewer names, so what it reads is the thing to pin.
 func TestPublishedNames_ReadsTheRegistryAndNotAScrape(t *testing.T) {
 	names := publishedNames(t)
 	got := map[string]bool{}
