@@ -234,6 +234,12 @@ knows when an import finished, which is the hard part, so wiring this up lets yo
 periodic scan off entirely (`scan_interval_sec: 0`) and still have every new file examined
 the moment it lands.
 
+No *arr to wire up? A library root can carry `watch: true` instead, and holdfast hears about
+the file from the platform's own filesystem events - see
+[docs/profiles.md](profiles.md#watch-and-watch_settle_sec---how-a-new-file-under-this-root-is-found).
+It is off unless a root asks for it, and it accelerates the periodic scan rather than
+replacing it.
+
 It is a **targeted scan**, not a second pipeline. An accepted path goes through the same
 guards, the same claim and the same swap discipline a whole-library scan puts it through,
 and records the same verdict. It re-encodes nothing a scan would have skipped, and it is

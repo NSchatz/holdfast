@@ -950,14 +950,27 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	// apply to it unchanged; this is a queue and a worker pool, and it decides nothing.
 	subs := eng.NewSubmissions(0, 0)
 
+	// The per-root filesystem watch (S0091), beside the scan loop below rather than
+	// instead of it: it is an OPT-IN accelerator for discovery and never the mechanism.
+	// Events are lossy by construction, so the startup scan and the interval scan run
+	// exactly as they do with no watch configured, and a root that asked for a watch and
+	// cannot have one says so once, at startup, and is served by that scan alone.
+	//
+	// It is built AFTER buildEngine on purpose: the watch registers exactly the
+	// directories the startup walk traversed successfully, which buildEngine has bound to
+	// the engine by here, so a subtree that walk declined is one the watch touches in no
+	// way at all.
+	watches := eng.NewWatches()
+
 	srv := server.New(ctx, *cfg, secrets.Get("server_auth_token"), secrets.Get("server_read_token"),
 		st, ctrl, hub, metricsHandler, log)
 	srv.SetSubmissions(subs)
 	var bg sync.WaitGroup
-	bg.Add(4)
+	bg.Add(5)
 	go func() { defer bg.Done(); hub.Run(ctx) }()
 	go func() { defer bg.Done(); notifier.Run(ctx) }()
 	go func() { defer bg.Done(); subs.Run(ctx) }()                               // drains POST /api/scan
+	go func() { defer bg.Done(); watches.Run(ctx) }()                            // opt-in per-root filesystem watch
 	go func() { defer bg.Done(); srv.StartScanLoop(ctx, cfg.ScanIntervalSec) }() // initial scan + optional interval
 
 	addr := cfg.EffectiveServerAddr()
@@ -1002,7 +1015,11 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	// unwinding - wait for the scan goroutine AND any in-flight targeted submission to
 	// finish issuing store calls so the store handle is never closed out from under
 	// them. srv.Wait joins both; submissions still queued are dropped unprocessed and
-	// unrecorded, because nothing looked at them.
+	// unrecorded, because nothing looked at them. bg.Wait then joins the watch, whose
+	// descriptors the cancelled ctx has already released and whose own workers finish any
+	// file they were inside for the same reason - a settled path still in its queue is
+	// dropped, and the next interval scan finds the file exactly as it finds one no event
+	// ever named.
 	srv.Wait()
 	bg.Wait()
 	return 0

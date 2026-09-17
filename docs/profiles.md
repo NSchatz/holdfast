@@ -5,7 +5,8 @@ The top-level `encoder`, `crf`, `preset`, `pixel_format`, `container_ext` and
 is how you say something different for part of a library: different encode settings
 (`encode_profiles`), a target bitrate instead of a quality target (`bitrate_kbps`),
 different thresholds for a band of source resolutions (`rules`), or nothing at all for part
-of a root (`exclude_paths` and `include_paths`).
+of a root (`exclude_paths` and `include_paths`). One key here is not about what is done to a
+file but about how it is FOUND: `watch` turns on a filesystem watch for that root.
 
 Everything here is reachable from the config file and its `HOLDFAST_*` environment
 override, and from nowhere else: `run`, `serve` and `validate` gain no flags.
@@ -401,6 +402,107 @@ before this tool did it to somebody's only copy of a film.
 `holdfast validate` prints, per library root, the resolved value of each of these four keys
 and which layer supplied it - the same way it prints every other knob, and for the same
 reason: the resolved value is the only thing that says what a root will actually do.
+
+## `watch` and `watch_settle_sec` - how a new file under this root is found
+
+Every other key on this page decides what holdfast does to a file. These two decide when it
+hears about one.
+
+Without them a new file is discovered by a full library traversal: once at startup, and
+again every `scan_interval_sec` seconds. That is the whole reason `scan_interval_sec` ships
+at `0` and nobody sets it aggressively - enumerating a library to notice that one episode
+arrived is the wrong shape of work - so in practice a new file waits for a manual rescan or
+a restart.
+
+```yaml
+library_roots:
+  - path: /mnt/tv
+    watch: true              # default: absent, which is off
+    watch_settle_sec: 60     # default: 60
+  - path: /mnt/film          # says nothing, so it is not watched
+```
+
+**Off unless a root asks.** A configuration written before this existed carries neither key
+and behaves exactly as it did. There is no top-level `watch` and no `HOLDFAST_WATCH`: a
+top-level one would be inherited by every root that stayed silent, and a library still
+filling over a network mount must not be watched because a different root asked to be.
+Written at the top level, in the file or in the environment, either key refuses to start and
+says where it goes.
+
+**It accelerates the scan and never replaces it.** Events are lossy by construction: the
+platform's queue overflows and drops them, a restart misses everything that happened while
+the process was down, and a file moved in by a rename the watch never saw is simply there.
+So the startup scan and the `scan_interval_sec` scan run exactly as they do with no watch
+configured, and they remain the source of truth. The watch only ever makes a file's
+discovery earlier.
+
+**A watched file goes through the same door as a scanned one.** There is no second pipeline:
+an offered path enters the same entry point a scan's worker uses, so every skip guard, every
+gate, the same store claim and the same swap discipline apply to it unchanged, and a watch
+offer racing a scan over one path results in exactly one claim.
+
+### `watch_settle_sec` - why a watched file waits
+
+A scan meets a file that has been sitting there. A watch meets one the moment a download
+client created it, and probing a half-written 40 GB remux reads a duration and a packet
+count that are not the finished file's. Every gate downstream is weighed against those
+numbers, up to and including the decision that the replacement is faithful enough to delete
+the source for.
+
+So a watched file is offered only once its **size has held still** for `watch_settle_sec`
+seconds. The period is measured from the last time the size CHANGED, not from the event: a
+file that has been growing steadily for an hour has never been stable for a minute. The
+default is 60. `0` offers a file the moment an event names it, and startup warns about that
+root in as many words. A `watch_settle_sec` written without `watch: true` beside it is
+refused rather than quietly read by nothing.
+
+A path that is removed, renamed away or becomes unreadable before it settles is dropped: no
+probe, no offer, and no record at `error`. A download client writing to a temporary name and
+renaming it into place is routine, and a log that shouted about it would train you to ignore
+the log you need.
+
+### When a root cannot be watched
+
+The watch either exists for a root or it does not, and a root nobody is watching is never
+reported as watched. Each of these is decided **once, at startup**, recorded at `warn`
+naming the root, the dependency that failed and what was tried, and leaves that root served
+by the interval scan alone:
+
+- this build carries no filesystem-event backend for the platform;
+- the platform refused a watcher;
+- the startup filesystem check could not positively identify the root's storage as local.
+  NFS and SMB provide no file-notification support at all, and storage holdfast cannot
+  identify is not evidence that it does - see [docs/filesystem.md](filesystem.md);
+- the startup walk traversed nothing under that root, so there is no directory to register.
+
+A root that IS watched gets one record naming the **event mechanism actually obtained** -
+`inotify` on Linux, `kqueue` on the BSDs and macOS, `ReadDirectoryChangesW` on Windows,
+`FEN` on illumos - beside the number of watch descriptors it is holding and its settle
+period. There is no polling fallback anywhere in this, by design: a watch that had quietly
+degraded to polling would be reporting something it is not doing.
+
+### The descriptor count, and the host's own limit
+
+The watch is not recursive: a descriptor is one per **directory** under the root, and the
+count grows with the tree. The host caps it (`fs.inotify.max_user_watches` on Linux, whose
+default differs per distribution and per available memory), and holdfast carries a bound of
+its own so the ceiling is one it chose rather than whichever the host happens to have.
+
+Reaching either is an announced degradation, never a watch that quietly sees half a library:
+the record says the root is **no longer fully watched**, how many of its directories are
+held, and that the interval scan covers the rest.
+
+The directories registered are exactly the ones the startup walk traversed successfully - a
+subtree that walk declined is one the watch touches in no way at all - and a directory
+created later is found by the scan rather than by the watch.
+
+### What it does not change
+
+`holdfast validate` prints what the inheritance produced for each root and is unchanged by
+these keys: they are not encode settings, and neither of them moves the resolved profile
+digest a terminal row records its configuration by. Turning the watch on re-opens nothing
+and re-offers nothing - it is a discovery accelerator, and the ledger cannot tell the
+difference between a file the watch found and the same file found by a scan.
 
 ## Where the working file lives
 

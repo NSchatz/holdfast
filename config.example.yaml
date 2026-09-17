@@ -35,9 +35,10 @@
 # history_retention_rows, run_window, max_load and the notification keys describe the
 # PROCESS, not a library, and stay at the top level.
 #
-# An entry may also carry exclude_paths / include_paths (which files it offers at all)
-# and `rules` (per-resolution-band overrides of three of the knobs above). See the
-# commented block below and docs/profiles.md.
+# An entry may also carry exclude_paths / include_paths (which files it offers at all),
+# `rules` (per-resolution-band overrides of three of the knobs above), and `watch` /
+# `watch_settle_sec` (how files under that root are DISCOVERED). See the commented blocks
+# below and docs/profiles.md.
 #
 # NO ROOT MAY CONTAIN ANOTHER. Nesting is refused rather than resolved by a precedence
 # rule, because a file under two roots would have two answers to what may be done to it.
@@ -87,6 +88,52 @@ library_roots:
   #         min_source_height: 2160
   #       min_bitrate_kbps: 12000
   #       min_savings_percent: 20
+  #
+  # THE FILESYSTEM WATCH, commented out because it is OFF unless a root asks for it and
+  # a configuration that says nothing about it behaves exactly as it always has.
+  #
+  # Without it a new file is discovered by a full library traversal - on startup, or on
+  # the scan_interval_sec tick. With it, the platform's own event mechanism (inotify on
+  # Linux, kqueue on the BSDs and macOS, ReadDirectoryChangesW on Windows, FEN on
+  # illumos) tells holdfast the moment a file arrives, so an episode that lands at 03:00
+  # is not waiting for the next scan.
+  #
+  # IT ACCELERATES THE SCAN AND NEVER REPLACES IT. Events are lossy by construction: the
+  # platform's queue overflows, a restart misses everything, a file moved in by a rename
+  # nobody saw is simply there. The startup scan and scan_interval_sec run exactly as
+  # they do with no watch configured, and they remain the source of truth.
+  #
+  # BOTH KEYS GO INSIDE THE ENTRY. There is no top-level `watch` and no HOLDFAST_WATCH: a
+  # top-level one would be inherited by every root that stayed silent, and a library
+  # still filling over a network mount must not be watched because another root asked to
+  # be. Written at the top level, either key refuses to start and says where it goes.
+  #
+  # watch_settle_sec is the delay before a watched file is offered for processing: its
+  # SIZE must hold still for that long first. A download client writing a 40 GB remux
+  # produces an event long before the file is finished, and a probe taken then reads a
+  # duration and a packet count that are not the file's - which every gate downstream,
+  # up to and including the decision to delete the source, is then weighed against. 60
+  # seconds is the default; 0 offers a file the moment an event names it and is loudly
+  # warned about at startup. A settle period without `watch: true` beside it is refused
+  # rather than silently read by nothing.
+  #
+  # IF IT CANNOT BE WATCHED IT SAYS SO, ONCE, AT STARTUP, AT WARN, AND FALLS BACK to the
+  # interval scan for that root: a platform this build carries no backend for, a platform
+  # that refused a watcher, storage the startup filesystem check could not positively
+  # identify as local (NFS and SMB carry no file notifications at all - see
+  # docs/filesystem.md), or the watch-descriptor bound being reached. The record names
+  # the root, the dependency that failed, what was tried and that the interval scan
+  # covers it. A watch is never reported over a root that has none.
+  #
+  # The count of watch descriptors held is reported too. fsnotify is not recursive, so
+  # that is one per DIRECTORY under the root and it grows with the tree, against a host
+  # limit that differs per distro (fs.inotify.max_user_watches on Linux). Reaching either
+  # that limit or holdfast's own bound degrades LOUDLY: the record says the root is no
+  # longer fully watched and that the interval scan covers the rest.
+  #
+  # - path: /mnt/tv
+  #   watch: true              # default: absent, which is off
+  #   watch_settle_sec: 60     # default: 60. The file's size must hold still this long
 
 # Log verbosity: debug | info | warn | error  (default: info)
 log_level: info
@@ -602,6 +649,11 @@ dry_run: false
 #                              #   START (see THE FOUR SECRET KEYS below).
 # scan_interval_sec: 0         # 0 = scan once on startup + on demand (via the API).
 #                              #   >0 = also re-scan every N seconds.
+#                              #   A library_roots entry carrying `watch: true` is served
+#                              #   by BOTH: the watch makes a new file's discovery
+#                              #   immediate, and this scan remains the source of truth
+#                              #   for everything an event never named. See the watch
+#                              #   block under library_roots above.
 
 # --- observability + host-fair scheduling (`holdfast serve`) ---
 # metrics_enable: true         # expose Prometheus metrics at /metrics (read-only

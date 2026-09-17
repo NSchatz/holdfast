@@ -810,6 +810,13 @@ func Load(path string) (*Config, error) {
 		if top == rulesKey {
 			return nil, misplacedRulesError(path)
 		}
+		// The watch keys are per library root and have no top-level counterpart, so one
+		// written here is the same misplacement `rules` is and is refused in the same
+		// shape: a build that ignored it would start and watch nothing while the file
+		// plainly says a watch is on.
+		if isWatchKey(top) {
+			return nil, misplacedWatchError(top, path)
+		}
 		if !knownKeys[top] {
 			return nil, fmt.Errorf("unknown config key %q in %s (typo?)", top, path)
 		}
@@ -847,6 +854,12 @@ func Load(path string) (*Config, error) {
 		// believing a band is in force that nothing reads.
 		if top == rulesKey {
 			return nil, misplacedRulesError(envPrefix + "RULES")
+		}
+		// The environment is a TOP-LEVEL layer, so HOLDFAST_WATCH is the same
+		// misplacement the file's own top level is. A watch is per root, and a value
+		// silently ignored here would be an operator believing a library is watched.
+		if isWatchKey(top) {
+			return nil, misplacedWatchError(top, envPrefix+strings.ToUpper(top))
 		}
 		explicitTop[top] = true
 	}
@@ -1280,6 +1293,15 @@ func (c *Config) Validate() error {
 	for _, r := range c.RootProfiles() {
 		if err := r.Profile.validate(); err != nil {
 			return fmt.Errorf("library root %s: %w", r.Clean, err)
+		}
+		// The watch's own per-value refusal, run here as well as at parse time so a
+		// Config assembled in Go rather than read from a file is held to it too. A
+		// negative settle period is not a shorter wait, it is a watch that offers a file
+		// the moment it sees one - which on a file still being written is the probe the
+		// delay exists to prevent.
+		if r.Watch.Enabled && r.Watch.SettleSec < 0 {
+			return fmt.Errorf("library root %s: %s %d must be >= 0 (the settle period is how long a file's "+
+				"size must hold still before the watch offers it)", r.Clean, watchSettleKey, r.Watch.SettleSec)
 		}
 	}
 	// And once more per RULE, against the profile each rule would actually produce. A rule
