@@ -699,9 +699,28 @@ func (h *Hub) Run(ctx context.Context) {
 	}
 }
 
+// subscriberCount is how many SSE subscribers are registered right now.
+func (h *Hub) subscriberCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.subs)
+}
+
 // broadcast builds the current snapshot and pushes it to every subscriber, dropping
 // for any subscriber whose buffer is full (a slow client just gets the next one).
+//
+// THE SUBSCRIBER COUNT IS READ FIRST, and on zero this returns having read nothing.
+// A snapshot is a store-derived value with no consumer but a subscriber: an engine
+// running with nobody watching emits a progress report per second per encode, and
+// building a frame for each of them spent roughly ten queries - several of them scans
+// of the whole jobs table - on a value that was then discarded. An idle daemon now pays
+// nothing, and the price of that is nothing: a subscriber that attaches later has its
+// own first frame built for it at that moment (see Subscribe), so no client is ever
+// served a frame that was built before it existed.
 func (h *Hub) broadcast(ctx context.Context) {
+	if h.subscriberCount() == 0 {
+		return
+	}
 	snap, err := h.buildSnapshot(ctx)
 	if err != nil {
 		h.log.Warn("snapshot build failed (skipping broadcast)", "err", err)
@@ -724,7 +743,17 @@ func (h *Hub) broadcast(ctx context.Context) {
 
 // Subscribe registers a new SSE subscriber and returns its channel plus a cancel
 // func to unregister it (call on connection close).
-func (h *Hub) Subscribe() (<-chan []byte, func()) {
+//
+// It BUILDS THAT SUBSCRIBER'S FIRST FRAME HERE, on demand, and seeds the channel with
+// it. That is what makes broadcast's zero-subscriber return safe: while nobody is
+// watching, no frame exists, so a client attaching after an idle period must be given
+// one built at the moment it attached rather than whatever the last broadcast produced.
+// Registering BEFORE the build is deliberate - a transition that lands while the frame
+// is being read still reaches this subscriber, where the reverse order would drop it.
+//
+// A build failure seeds nothing and is logged: the stream still opens, and the next
+// engine transition delivers a frame. It is never fatal to the connection.
+func (h *Hub) Subscribe(ctx context.Context) (<-chan []byte, func()) {
 	ch := make(chan []byte, 4)
 	h.mu.Lock()
 	h.subs[ch] = struct{}{}
@@ -733,6 +762,15 @@ func (h *Hub) Subscribe() (<-chan []byte, func()) {
 		h.mu.Lock()
 		delete(h.subs, ch)
 		h.mu.Unlock()
+	}
+	data, err := h.SnapshotJSON(ctx)
+	if err != nil {
+		h.log.Warn("initial frame build failed (the stream opens without one)", "err", err)
+		return ch, cancel
+	}
+	select {
+	case ch <- data:
+	default:
 	}
 	return ch, cancel
 }

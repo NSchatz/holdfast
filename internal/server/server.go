@@ -291,14 +291,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering (nginx)
 
-	ch, cancel := s.hub.Subscribe()
+	// Subscribe builds this client's own first frame and seeds the channel with it, so
+	// the initial state a just-connected client renders is read AT THE MOMENT IT
+	// SUBSCRIBED. The handler no longer takes a second snapshot of its own: one build
+	// per subscription, arriving on the same channel as every frame after it.
+	ch, cancel := s.hub.Subscribe(r.Context())
 	defer cancel()
-
-	// Initial state so a just-connected client renders immediately.
-	if data, err := s.hub.SnapshotJSON(r.Context()); err == nil {
-		writeSSE(w, data)
-		flusher.Flush()
-	}
 
 	heartbeat := time.NewTicker(25 * time.Second)
 	defer heartbeat.Stop()
