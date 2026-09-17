@@ -244,6 +244,23 @@ type Outcome struct {
 	SourceBytes *int64
 	OutputBytes *int64
 
+	// The pixel dimensions either side of the job: the SOURCE's, recorded on every row a
+	// probe reached, and the OUTPUT's, recorded when a file was produced and measured.
+	//
+	// They are on the row because resolution decides things now. A rule bands a library by
+	// source height, so the band a file was judged in is the difference between a threshold
+	// that fits it and one that does not - and a row that did not say how tall its source
+	// was would leave an operator inferring the band from the outcome, which is backwards.
+	//
+	// Pointers, like every other measurement here, and the rule is the strict one: 0 is a
+	// legal pixel dimension for nothing, so a 0 could only ever be a fabrication. nil is NOT
+	// RECORDED - a row written before these columns existed, a guard that fired before any
+	// probe, a job that produced no output - and a reader renders it as such.
+	SourceWidth  *int
+	SourceHeight *int
+	OutputWidth  *int
+	OutputHeight *int
+
 	// EncodeMs is the wall-clock encode duration in milliseconds.
 	EncodeMs *int64
 

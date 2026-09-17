@@ -309,7 +309,7 @@ func TestRequeueInputs_TheThreeRowsNothingReopensSurviveAnyConfigurationChange(t
 	top := cfg.TopLevelProfile()
 	seedRowForRealFile(t, ts, ordinary, store.Skipped,
 		(&Engine{Cfg: cfg}).because(SkipAlreadyTargetCodec, store.Decision{}, top,
-			cfg.TranscodeIn(top, ordinary), InputTargetCodec))
+			cfg.TranscodeIn(top, ordinary), nil, InputTargetCodec))
 
 	moved := cfg
 	moved.Encoder = "svtav1"

@@ -26,6 +26,12 @@ var stepsSinceDecisionInputs = []struct {
 	version int
 	undo    []string
 }{
+	{18, []string{
+		`ALTER TABLE jobs DROP COLUMN source_width`,
+		`ALTER TABLE jobs DROP COLUMN source_height`,
+		`ALTER TABLE jobs DROP COLUMN output_width`,
+		`ALTER TABLE jobs DROP COLUMN output_height`,
+	}},
 	{17, []string{
 		`ALTER TABLE jobs DROP COLUMN dropped_streams`,
 		`ALTER TABLE jobs DROP COLUMN selection_not_applied`,

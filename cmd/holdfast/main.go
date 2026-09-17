@@ -298,6 +298,28 @@ func printResolvedProfiles(w io.Writer, cfg *config.Config) {
 			fmt.Fprintf(w, "  %-20s %-24s from %s\n", k.Knob, k.Value, k.Layer)
 		}
 		printPathFilters(w, r)
+		printRules(w, r)
+	}
+}
+
+// printRules prints the resolution rules in force for one root: every rule, IN LIST ORDER,
+// with the band it applies to and the knobs it overrides.
+//
+// The order is the whole reason this exists. First match wins and nothing merges, so a rule
+// is shadowed by any earlier rule whose band contains its own - which is a configuration an
+// operator can write, cannot see in their file at a glance, and would otherwise discover
+// only as a threshold that never applied. Printing the list in the order the resolver reads
+// it is what makes that visible without running the library.
+//
+// A root with NO rules prints nothing at all, exactly as it did before rules existed: an
+// absent list is not a state worth a line, and the shipped configuration carries none.
+func printRules(w io.Writer, r config.Root) {
+	if len(r.Profile.Rules) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "  %-20s %d rule(s), first match wins, no merging\n", "rules", len(r.Profile.Rules))
+	for i, rule := range r.Profile.Rules {
+		fmt.Fprintf(w, "  %-20s   [%d] %s\n", "", i, rule)
 	}
 }
 

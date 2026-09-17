@@ -97,10 +97,13 @@ func isProfileKnob(key string) bool {
 }
 
 // entryKeyList renders everything a library_roots entry may carry beside its path, for
-// the refusals that tell an operator what is accepted. It is derived from the two sets
-// rather than restated, so a key added to either reaches the message it is refused by.
+// the refusals that tell an operator what is accepted. It is derived from the three sets
+// rather than restated, so a key added to any of them reaches the message it is refused
+// by. `rules` is last because it is the one that is neither a knob nor a filter: a list of
+// per-band overrides, which is why it has no top-level counterpart to inherit from.
 func entryKeyList() string {
-	return strings.Join(append(append([]string(nil), profileKnobs...), filterKeys...), ", ")
+	keys := append(append([]string(nil), profileKnobs...), filterKeys...)
+	return strings.Join(append(keys, rulesKey), ", ")
 }
 
 // rootPathKey is the one key inside an entry that is not a knob: which tree the profile
@@ -141,6 +144,18 @@ type Profile struct {
 	SubtitleLanguages []string `yaml:"subtitle_languages"`
 	KeepCommentary    *bool    `yaml:"keep_commentary"`
 	RemuxOnly         *bool    `yaml:"remux_only"`
+
+	// Rules are this root's ordered, first-match resolution bands (see rules.go). They are
+	// NOT a knob and carry no `yaml` tag of their own: they are resolved out of the entry
+	// before the knob map is decoded, and a rule supplies a subset of the knobs above for
+	// the files its band admits.
+	//
+	// They live on the PROFILE rather than beside it because they DECIDE what happens to a
+	// file - which is the same test that put the stream-selection knobs in profileKnobs and
+	// kept the path filters out - and because the digest has to see them: two roots that
+	// differ only in their rules decide their files differently and must not carry one
+	// identifier. A root with none digests exactly as it did before rules existed.
+	Rules Rules `yaml:"-"`
 }
 
 // VmafGate reports whether the VMAF gate is enabled for this root, defaulting to true
@@ -219,12 +234,27 @@ const digestLength = 16
 // The knob NAME is hashed beside its value, and the values are separated rather than
 // concatenated, so no two different profiles can produce one text: without that,
 // preset "slow" + model "auto" and preset "slowauto" + model "" would be the same bytes.
+//
+// The RULES are hashed after the knobs and ONLY when there are any, which is what keeps a
+// root with no rules - every root every configuration written before this item has - at
+// exactly the digest this build computed for it before. Two roots differing only in their
+// rules differ here, because a rule changes which threshold a file is compared against and
+// a row attributed to a profile that no longer decides it that way is a row nobody can
+// interpret. An EMPTY rules list is the same state as an absent one (parseRules collapses
+// the two), so writing `rules: []` moves no digest either.
 func (p Profile) Digest() string {
 	var b strings.Builder
+	vals := p.values()
 	for i, knob := range profileKnobs {
 		b.WriteString(knob)
 		b.WriteByte('=')
-		b.WriteString(p.values()[i])
+		b.WriteString(vals[i])
+		b.WriteByte('\n')
+	}
+	if len(p.Rules) > 0 {
+		b.WriteString(rulesKey)
+		b.WriteByte('=')
+		b.WriteString(p.Rules.Canonical())
 		b.WriteByte('\n')
 	}
 	sum := sha256.Sum256([]byte(b.String()))
@@ -416,6 +446,12 @@ func underRoot(root, child string) bool {
 type rootEntry struct {
 	path     string
 	override map[string]any
+
+	// rules is the entry's resolved rule list, in written order, and nil for an entry
+	// carrying none. It is parsed out of the entry rather than left in override because it
+	// is not a knob: nothing at the top level supplies one, so it inherits from nothing and
+	// the knob resolver never sees it.
+	rules Rules
 }
 
 // parseRootEntries turns the raw library_roots value into entries, refusing anything
@@ -506,8 +542,20 @@ func parseRootMapping(i int, m map[string]any, file string) (rootEntry, error) {
 	}
 
 	override := make(map[string]any, len(m)-1)
+	var rules Rules
 	for key, val := range m {
 		if key == rootPathKey {
+			continue
+		}
+		// `rules` is neither a knob nor a filter: it is a LIST of per-band overrides, so it
+		// is parsed here, in full, rather than carried into the knob map the three layers
+		// resolve. Every refusal it produces names this entry and the rule's own index.
+		if key == rulesKey {
+			r, err := parseRules(where, val)
+			if err != nil {
+				return rootEntry{}, err
+			}
+			rules = r
 			continue
 		}
 		if !isProfileKnob(key) && !isFilterKey(key) {
@@ -533,7 +581,12 @@ func parseRootMapping(i int, m map[string]any, file string) (rootEntry, error) {
 	if len(override) == 0 {
 		override = nil
 	}
-	return checkedEntry(i, p, override, file)
+	e, err := checkedEntry(i, p, override, file)
+	if err != nil {
+		return rootEntry{}, err
+	}
+	e.rules = rules
+	return e, nil
 }
 
 // checkedEntry applies the two checks that hold for BOTH spellings of an entry, so a
@@ -589,6 +642,10 @@ func resolveRoots(k *koanf.Koanf, entries []rootEntry, explicitTop map[string]bo
 		if err := decodeProfile(m, &p); err != nil {
 			return nil, fmt.Errorf("resolving the profile of library root %q in %s: %w", e.path, file, err)
 		}
+		// The entry's rules ride onto the resolved profile in WRITTEN ORDER, after the
+		// knobs, because they override the values the three layers just produced rather
+		// than joining them: a rule has no top-level counterpart and no layer of its own.
+		p.Rules = e.rules
 		roots = append(roots, Root{
 			Path:    e.path,
 			Clean:   filepath.Clean(e.path),

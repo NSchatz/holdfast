@@ -404,7 +404,7 @@ func TestRequeue_ReopensAMultiVideoStreamRow(t *testing.T) {
 	// before they existed.
 	top := cfg.TopLevelProfile()
 	seedTerminal(t, ts, path, store.Skipped,
-		(&Engine{Cfg: cfg}).because(SkipMultiVideoStream, store.Decision{}, top, cfg.TranscodeIn(top, path)))
+		(&Engine{Cfg: cfg}).because(SkipMultiVideoStream, store.Decision{}, top, cfg.TranscodeIn(top, path), nil))
 
 	// The precondition that makes this the case requeue exists for: a MOVED configuration
 	// re-opens nothing here, because the row read nothing for a new value to disagree with.

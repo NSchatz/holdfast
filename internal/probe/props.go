@@ -57,6 +57,7 @@ type VideoProps struct {
 // scalarStreamEntries are every scalar video-stream field a source skip-guard or the
 // encoder reads. Fetched in one ffprobe call instead of one call per field.
 const scalarStreamEntries = "codec_name,bit_rate,field_order,codec_tag_string,pix_fmt," +
+	"width,height," +
 	"color_primaries,color_transfer,color_space,color_range"
 
 // snapshotEntries is the single -show_entries argument the snapshot probe issues: the
@@ -152,6 +153,37 @@ func (vp *VideoProps) DurationSec() (sec float64, ok bool) {
 		return 0, false
 	}
 	return v, true
+}
+
+// Dimensions returns the coded width and height of the first video stream in pixels, and
+// whether the probe established BOTH of them. It rides the eager scalar probe, so a file
+// that skips at an early guard pays nothing for it.
+//
+// established is false - and the two values are 0 - whenever either dimension is missing,
+// unparseable or not positive. It is a second return value rather than a zero because 0 is
+// not a legal pixel dimension for anything: a caller that read a bare 0 as a height would
+// judge a file it could not measure against whichever band admits zero, and on a tool that
+// deletes sources the fail-safe direction is to decide nothing at all. The same rule
+// DurationSec keeps, for the same reason.
+func (vp *VideoProps) Dimensions() (width, height int, established bool) {
+	w, wok := positiveInt(vp.fields["width"])
+	h, hok := positiveInt(vp.fields["height"])
+	if !wok || !hok {
+		return 0, 0, false
+	}
+	return w, h, true
+}
+
+// positiveInt reads one verbatim ffprobe scalar as a positive integer.
+func positiveInt(s string) (int, bool) {
+	if !intRe.MatchString(s) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // FieldOrder returns the normalised field_order (unknown/N/A/"" → ""), identical to

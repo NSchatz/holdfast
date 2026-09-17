@@ -35,6 +35,10 @@
 # history_retention_rows, run_window, max_load and the notification keys describe the
 # PROCESS, not a library, and stay at the top level.
 #
+# An entry may also carry exclude_paths / include_paths (which files it offers at all)
+# and `rules` (per-resolution-band overrides of three of the knobs above). See the
+# commented block below and docs/profiles.md.
+#
 # NO ROOT MAY CONTAIN ANOTHER. Nesting is refused rather than resolved by a precedence
 # rule, because a file under two roots would have two answers to what may be done to it.
 library_roots:
@@ -47,6 +51,42 @@ library_roots:
   - path: /mnt/anime
     crf: 20
     vmaf_min_pool: 45
+  # RESOLUTION RULES, commented out because the shipped configuration carries none and a
+  # root with none behaves exactly as it always has. Uncomment to band a library.
+  #
+  # One bitrate floor is one number for a 480p DVD rip and a 2160p remux alike:
+  # min_bitrate_kbps: 2500 either excludes most of a 1080p library or lets SD files
+  # through that will bloat. A rule says "for sources in this band of heights, these
+  # knobs are different".
+  #
+  # ORDERED, FIRST MATCH WINS, NOTHING MERGES. The first rule whose `when` admits the
+  # file supplies every knob it names; every knob it does not name comes from the root
+  # above; no later rule contributes anything. So an early broad rule SHADOWS a later
+  # specific one - `holdfast validate` prints the list in order so you can see it.
+  #
+  # `when` selects on the SOURCE height in pixels. Both bounds are INCLUSIVE, an absent
+  # bound leaves that side unbounded, and a rule with no `when` matches every file. The
+  # keys are min_source_height / max_source_height: they select which files the rule
+  # applies TO and are not an output ceiling - nothing here downscales anything.
+  #
+  # A rule may override exactly three knobs: min_bitrate_kbps, crf, min_savings_percent.
+  #
+  # - path: /mnt/tv
+  #   min_bitrate_kbps: 2500
+  #   crf: 22
+  #   rules:
+  #     # SD: a 480p rip at 2500 kbps is already large for its size, so lower the floor
+  #     # and encode a little harder.
+  #     - when:
+  #         max_source_height: 576
+  #       min_bitrate_kbps: 800
+  #       crf: 24
+  #     # UHD: only touch a remux that is genuinely bloated, and only when the encode
+  #     # reclaims real space.
+  #     - when:
+  #         min_source_height: 2160
+  #       min_bitrate_kbps: 12000
+  #       min_savings_percent: 20
 
 # Log verbosity: debug | info | warn | error  (default: info)
 log_level: info

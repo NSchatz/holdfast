@@ -663,12 +663,12 @@ func bumpSchemaVersion(t *testing.T, dbPath string, version int) {
 
 // olderSchemaVersion is the schema this repository shipped immediately before the NEWEST
 // migration appended its own step: the shape a database written by the previous holdfast
-// has. That newest step is now the stream-selection record a job writes, so the version
-// below and the objects seedOlderLedger removes both moved with it. It is a literal because
-// cmd/holdfast cannot see the store's unexported version counter - and
+// has. That newest step is now the source and output resolution a job records, so the
+// version below and the objects seedOlderLedger removes both moved with it. It is a literal
+// because cmd/holdfast cannot see the store's unexported version counter - and
 // TestExport_TheDaemonsDoorIsWhatMigratesAndThatIsWhyTheExportDoesNotUseIt keeps the literal
 // honest by asserting store.Open really does move a fixture built from it.
-const olderSchemaVersion = 16
+const olderSchemaVersion = 17
 
 // seedOlderLedger builds a real ledger with rows and then removes exactly what the NEWEST
 // migration added, restoring the previous version stamp. Not a current database wearing an
@@ -697,9 +697,10 @@ func seedOlderLedger(t *testing.T, stateDir string) {
 	// Any index goes first: SQLite refuses to drop a column an index refers to. The
 	// newest step adds none, so there is nothing to drop ahead of its columns today.
 	for _, stmt := range []string{
-		`ALTER TABLE jobs DROP COLUMN dropped_streams`,
-		`ALTER TABLE jobs DROP COLUMN selection_not_applied`,
-		`ALTER TABLE jobs DROP COLUMN vmaf_skipped`,
+		`ALTER TABLE jobs DROP COLUMN source_width`,
+		`ALTER TABLE jobs DROP COLUMN source_height`,
+		`ALTER TABLE jobs DROP COLUMN output_width`,
+		`ALTER TABLE jobs DROP COLUMN output_height`,
 		fmt.Sprintf(`PRAGMA user_version = %d`, olderSchemaVersion),
 	} {
 		if _, err := db.Exec(stmt); err != nil {
@@ -742,4 +743,106 @@ func exportLines(t *testing.T, body string) []string {
 	}
 	lines := strings.Split(strings.TrimSuffix(body, "\n"), "\n")
 	return lines
+}
+
+// TestExport_CarriesTheSourceAndOutputResolution is S0089 [AC-17]'s surfacing half: the
+// source and output pixel dimensions a terminal row records reach `holdfast export` and
+// `/api/history` as `source_width`, `source_height`, `output_width` and `output_height`,
+// each unrecorded value an explicit JSON null - never 0, and never a fabricated default.
+//
+// The null is the criterion. A library root can band its thresholds by source height now,
+// so the resolution is what says which band a file was judged in; 0 is a legal pixel
+// dimension for nothing, so a zero on the wire would be a resolution nobody measured on a
+// row whose whole job is to be evidence. The assertions are on the RAW bytes because that
+// is the only place the difference between null and 0 still exists.
+//
+// The additive half is asserted too: [AC-17] holds this change to additive, so every field
+// the response already published must still be there, under the same name.
+//
+// MUTATION: publish the dimensions as plain ints rather than pointers and the two
+// not-recorded rows export 0; add `omitempty` and the keys vanish, which a consumer cannot
+// tell from a field that was removed.
+func TestExport_CarriesTheSourceAndOutputResolution(t *testing.T) {
+	stateDir, cfgPath := exportFixture(t)
+	st := openFixtureStore(t, stateDir)
+
+	w, h := 1920, 1080
+	// A job that ran: both sides measured.
+	finishRow(t, st, "/lib/encoded.mkv", store.Done, &store.Outcome{
+		Encoder: "cpu", SourceWidth: &w, SourceHeight: &h, OutputWidth: &w, OutputHeight: &h,
+	})
+	// A guard that fired after the probe but before any output existed: the source is
+	// measured and the output is not.
+	sw, sh := 854, 480
+	finishRow(t, st, "/lib/skipped.mkv", store.Skipped, &store.Outcome{
+		Reason: "low-bitrate", SourceWidth: &sw, SourceHeight: &sh,
+	})
+	// A row nothing probed at all - a guard in front of the probe, or a row an earlier
+	// build wrote.
+	finishRow(t, st, "/lib/unmeasured.mkv", store.Skipped, &store.Outcome{Reason: "symlinked-source"})
+	_ = st.Close()
+
+	code, stdout, stderr := runExport(t, "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("export exited %d: %s", code, stderr)
+	}
+	byPath := map[string]map[string]json.RawMessage{}
+	for _, raw := range exportLines(t, stdout) {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+			t.Fatalf("an export line is not JSON (%v): %s", err, raw)
+		}
+		var p string
+		if err := json.Unmarshal(obj["path"], &p); err != nil {
+			t.Fatalf("an export line carries no path: %s", raw)
+		}
+		byPath[p] = obj
+	}
+
+	for field, want := range map[string]string{
+		"source_width": "1920", "source_height": "1080",
+		"output_width": "1920", "output_height": "1080",
+	} {
+		if got := string(byPath["/lib/encoded.mkv"][field]); got != want {
+			t.Errorf("the encoded row exports %s as %s, want %s", field, got, want)
+		}
+	}
+	skipped := byPath["/lib/skipped.mkv"]
+	for field, want := range map[string]string{"source_width": "854", "source_height": "480"} {
+		if got := string(skipped[field]); got != want {
+			t.Errorf("the skipped row exports %s as %s, want %s", field, got, want)
+		}
+	}
+	for _, field := range []string{"output_width", "output_height"} {
+		if got := string(skipped[field]); got != "null" {
+			t.Errorf("the skipped row exports %s as %s; no output was ever produced, and a 0 would "+
+				"claim a measurement nobody took", field, got)
+		}
+	}
+	for _, field := range []string{"source_width", "source_height", "output_width", "output_height"} {
+		if got := string(byPath["/lib/unmeasured.mkv"][field]); got != "null" {
+			t.Errorf("a row nothing probed exports %s as %s, want an explicit null", field, got)
+		}
+	}
+
+	// ADDITIVE, and nothing else. Every field the response published before this item is
+	// still published, under the same name: [AC-17] holds the change to additive, and a
+	// removed or renamed field is the breaking change a consumer finds at runtime.
+	//
+	// The list is the fields this row carries UNCONDITIONALLY - the ones whose absence is
+	// spelled as an explicit null rather than by dropping the key. The `omitempty` strings
+	// beside them (reason, encoder, vmaf_model and the rest) are absent from a row that
+	// recorded none of them and always were, so naming them here would grade this build's
+	// fixture rather than its wire format.
+	for _, field := range []string{
+		"path", "status", "fail_count", "updated_at",
+		"profile", "vmaf_mean", "vmaf_min", "vmaf_chroma",
+		"source_codec", "source_bytes", "output_bytes", "encode_ms",
+		"progress_seconds", "progress_duration_seconds", "progress_fraction",
+		"library_root", "profile_digest", "dropped_streams",
+	} {
+		if _, ok := byPath["/lib/encoded.mkv"][field]; !ok {
+			t.Errorf("the exported row no longer publishes %q: this change is additive only", field)
+		}
+	}
 }

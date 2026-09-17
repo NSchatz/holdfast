@@ -121,6 +121,21 @@ type jobDTO struct {
 	OutputBytes *int64 `json:"output_bytes"`
 	EncodeMs    *int64 `json:"encode_ms"`
 
+	// The pixel dimensions either side of the job. POINTERS and deliberately not
+	// omitempty, for the reason source_codec and the two profile fields are: they ARE the
+	// fact rather than a companion to one, so a row that dropped the key would leave a
+	// client deciding for itself whether nothing was recorded or the field had gone away.
+	//
+	// The null is the whole of it. A library root can band its thresholds by source height
+	// now, so the resolution is what says which band a file was judged in - and 0 is a legal
+	// pixel dimension for nothing, so a zero would be a resolution nobody measured. A row
+	// written before these columns existed, one whose guard fired before any probe, and one
+	// whose job produced no output each carry explicit nulls.
+	SourceWidth  *int `json:"source_width"`
+	SourceHeight *int `json:"source_height"`
+	OutputWidth  *int `json:"output_width"`
+	OutputHeight *int `json:"output_height"`
+
 	// Live progress of a RUNNING encode (S0030). These are the only fields here that do
 	// not come from the store: progress is state about a process, not a ledger fact, so
 	// it is never persisted and a terminal row never carries it.
@@ -239,6 +254,11 @@ func toDTOs(jobs []store.Job) []jobDTO {
 			SourceBytes: j.Outcome.SourceBytes,
 			OutputBytes: j.Outcome.OutputBytes,
 			EncodeMs:    j.Outcome.EncodeMs,
+
+			SourceWidth:  j.Outcome.SourceWidth,
+			SourceHeight: j.Outcome.SourceHeight,
+			OutputWidth:  j.Outcome.OutputWidth,
+			OutputHeight: j.Outcome.OutputHeight,
 
 			GuardAttributes:     j.Outcome.GuardAttributes,
 			GuardTimeResolution: j.Outcome.GuardTimeResolution,

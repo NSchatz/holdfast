@@ -440,3 +440,28 @@ func (p *Prober) Height(ctx context.Context, f string) int {
 	n, _ := strconv.Atoi(s)
 	return n
 }
+
+// Dimensions returns the coded width and height of the first video stream in pixels, and
+// whether the probe established BOTH of them. It is what the OUTPUT side of a job is
+// measured with: the source's own dimensions ride the snapshot every guard reads
+// (VideoProps.Dimensions), and this is the one extra probe a job that produced a file pays
+// to say what came out.
+//
+// established is false whenever either dimension is missing or is not positive, and the
+// two values are then 0. A caller records "not recorded" for such a file rather than a
+// zero, which would be a measurement nobody took in the column whose job is to be
+// evidence.
+func (p *Prober) Dimensions(ctx context.Context, f string) (width, height int, established bool) {
+	out := firstLine(ctx, p.FFprobe, "-v", "error", "-select_streams", "v:0",
+		"-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", "--", f)
+	w, h, ok := strings.Cut(strings.TrimSpace(out), "x")
+	if !ok {
+		return 0, 0, false
+	}
+	wi, wok := positiveInt(w)
+	hi, hok := positiveInt(h)
+	if !wok || !hok {
+		return 0, 0, false
+	}
+	return wi, hi, true
+}

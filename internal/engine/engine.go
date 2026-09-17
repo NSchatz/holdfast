@@ -81,6 +81,23 @@ const (
 	// claim rather than parking the file for ever.
 	SkipUndoRetentionFailed = "undo-retention-failed"
 
+	// SkipUndeterminedSourceHeight is the BAND guard: this file's root carries at least one
+	// rule whose `when` selects on the source height, and the probe could not establish
+	// what that height is.
+	//
+	// It is the fail-safe rule applied to a band. With no height there is no answer to
+	// which rule applies, and both of the plausible fallbacks are a confident wrong result:
+	// deciding the file under the root's own profile ignores a band the operator wrote for
+	// it, and reading an unreadable height as 0 drops it into whichever band admits zero.
+	// Either one judges a file against a threshold nobody chose, on a tool that deletes the
+	// source of every file it accepts. So the file is decided under NO rule and under no
+	// profile at all, and the row says why.
+	//
+	// It READS the rule list (InputRules), which is what makes it re-derivable: removing
+	// every `when`-carrying rule from that root leaves the root needing no height, and the
+	// next scan offers the file to the pipeline again.
+	SkipUndeterminedSourceHeight = "undetermined-source-height"
+
 	// SkipOperatorExcluded is the operator's OWN withholding: a path they took out of the
 	// pipeline from the surface that showed them the file, recorded as runtime state this
 	// daemon holds (store.PathExclusion) and never in the configuration file.
@@ -487,6 +504,54 @@ func (e *Engine) rootFor(path string) (config.Root, bool) {
 		}
 	}
 	return config.Root{Profile: e.Cfg.TopLevelProfile()}, false
+}
+
+// effectiveProfile is WHICH PROFILE DECIDES ONE FILE: the root's own resolved profile with
+// the first matching resolution rule laid over it.
+//
+// It returns the snapshot it took, so the caller can hand the SAME one to the guard chain -
+// a file under a banded root therefore pays for one ffprobe, not two, exactly as it did
+// before rules existed. A root with no bounded rule is not probed here at all and the
+// returned snapshot is nil: the common case, and every configuration written before this
+// item.
+//
+// established is FALSE when the root bands its files and the probe could not read this
+// one's height. The caller must then decide the file under nothing at all (see
+// SkipUndeterminedSourceHeight); the profile it gets back is the root's own, which is what
+// the claim and the row are attributed to, and no rule has been applied to it.
+//
+// It is resolved BEFORE the claim on purpose. The claim compares what this configuration
+// offers for this file against what the row recorded, and a row that recorded a rule's floor
+// while the claim offered the root's would be re-opened on every scan for ever - which on a
+// library is a re-encode of everything, and every accepted encode deletes its source.
+func (e *Engine) effectiveProfile(ctx context.Context, f string, root config.Root,
+	snapshot func(context.Context, string) *probe.VideoProps) (config.Profile, *probe.VideoProps, bool) {
+	prof := root.Profile
+	if len(prof.Rules) == 0 {
+		return prof, nil, true
+	}
+	if !prof.Rules.NeedsSourceHeight() {
+		// Every rule matches every file, so the first one decides and no height is read.
+		// The height argument is unused in that case and 0 is passed rather than probed.
+		return prof.WithRules(0), nil, true
+	}
+	props := snapshot(ctx, f)
+	_, height, ok := props.Dimensions()
+	if !ok {
+		return prof, props, false
+	}
+	return prof.WithRules(height), props, true
+}
+
+// reuse hands the SAME probe snapshot back to the guard chain that the rule resolution
+// already paid for, so a banded root costs no extra ffprobe. A nil snapshot means none was
+// taken and the chain takes its own.
+func reuse(taken *probe.VideoProps,
+	fallback func(context.Context, string) *probe.VideoProps) func(context.Context, string) *probe.VideoProps {
+	if taken == nil {
+		return fallback
+	}
+	return func(context.Context, string) *probe.VideoProps { return taken }
 }
 
 // decidedBy is what a terminal row records about the profile that judged the file: the
@@ -1061,8 +1126,14 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// the pixel-format derivation, the output container, the encode's argv and every gate in
 	// verifyOutput. Re-deriving it at each use would let a file be guarded by one root's
 	// floor and encoded at another root's crf.
+	//
+	// The root's own profile is only half of it now. A root may carry RESOLUTION RULES, an
+	// ordered first-match list of per-band overrides, and the profile that decides this file
+	// is the root's with the first matching rule laid over it. That resolution reads the
+	// source height where a band needs one, and the snapshot it takes is handed on to the
+	// guard chain below rather than taken twice.
 	root, rooted := e.rootFor(f)
-	prof := root.Profile
+	prof, pre, heightKnown := e.effectiveProfile(ctx, f, root, e.Probe.VideoProps)
 	by := decidedBy(root, rooted)
 
 	key := probe.Fingerprint(f)
@@ -1121,7 +1192,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		} else if changed {
 			// Emitted only when it was newly recorded, so a live client sees it once and
 			// not once per scan for as long as the withholding stands.
-			e.emit(Event{Path: f, Status: store.Skipped, Outcome: e.because(SkipOperatorExcluded, by, prof, ts)})
+			e.emit(Event{Path: f, Status: store.Skipped, Outcome: e.because(SkipOperatorExcluded, by, prof, ts, pre)})
 		}
 		return nil
 	}
@@ -1131,6 +1202,17 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// from being a file that silently stops being worked on for ever.
 	if err := e.Store.ClearSkip(ctx, f, key, SkipOperatorExcluded); err != nil {
 		e.Log.Warn("clear stale withheld skip failed (continuing)", "file", f, "err", err)
+	}
+
+	// THE BAND GUARD, and it stands in front of every guard that reads a knob a rule may
+	// supply. This root selects on the source height and the probe could not establish one,
+	// so there is no answer to which rule applies - and the fail-safe rule says a file this
+	// build cannot place is decided under NOTHING rather than under a plausible guess. It
+	// runs after the operator's own withholding, which outranks every verdict this build
+	// reaches, and before the profile decides anything at all.
+	if !heightKnown {
+		e.recordUndeterminedHeight(ctx, worker, f, key, root, by, prof, ts, pre)
+		return nil
 	}
 
 	// Hardlink guard. A file with >1 hard link is almost always an *arr import that is also
@@ -1155,7 +1237,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			} else if changed {
 				// Emit only when the skip was newly recorded, so a live client sees it once
 				// rather than once per scan for the lifetime of the seed.
-				e.emit(Event{Path: f, Status: store.Skipped, Outcome: e.because(SkipHardlinked, by, prof, ts)})
+				e.emit(Event{Path: f, Status: store.Skipped, Outcome: e.because(SkipHardlinked, by, prof, ts, pre)})
 			}
 			return nil
 		}
@@ -1191,14 +1273,17 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// Every source-side guard, in one call, off one probe snapshot and writing nothing.
 	// What each of them decides is unchanged; what changed is that the read-only plan pass
 	// asks the same chain rather than carrying a second copy of it (see guardSource).
-	props, v := e.guardSource(ctx, f, root, ts, targetCodec, e.Probe.VideoProps)
+	//
+	// The snapshot is the one the rule resolution already took where it took one, so a
+	// banded root costs the same single ffprobe an unbanded one does.
+	props, v := e.guardSource(ctx, f, root, prof, ts, targetCodec, reuse(pre, e.Probe.VideoProps))
 	if v.stopped() {
 		e.Log.Info(v.log, append([]any{"file", f}, v.logArgs...)...)
 		status := store.Skipped
 		if v.failed {
 			status = store.Failed
 		}
-		e.finish(ctx, f, key, status, e.because(v.guard, by, prof, ts, v.inputs...))
+		e.finish(ctx, f, key, status, e.because(v.guard, by, prof, ts, props, v.inputs...))
 		return nil
 	}
 
@@ -1247,13 +1332,13 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		// profile. It is recorded on the row that reaches no swap, so it never says a file is
 		// there - the four facts together are what a run WOULD do, and none of them is a
 		// measurement of work nobody did.
-		out := &store.Outcome{
+		out := withSourceDimensions(&store.Outcome{
 			SourceCodec:    codec,
 			TargetPath:     final,
 			Profile:        ts.Profile,
 			Decision:       by,
 			DecisionInputs: e.inputsRead(prof, ts, InputTargetCodec, InputEncoder, InputCRF, InputPreset),
-		}
+		}, props)
 		if st, err := os.Stat(f); err == nil {
 			out.SourceBytes = ptr(st.Size())
 		} else {
@@ -1284,7 +1369,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		// untouched.
 		e.Log.Info("skip (ffprobe could not enumerate the source's streams - "+
 			"refusing to encode without knowing which streams the output must carry)", "file", f)
-		e.finish(ctx, f, key, store.Skipped, e.because(SkipUnreadableStreamList, by, prof, ts))
+		e.finish(ctx, f, key, store.Skipped, e.because(SkipUnreadableStreamList, by, prof, ts, props))
 		return nil
 	}
 	plan := DeriveStreamPlan(sourceStreams, prof, codec)
@@ -1318,7 +1403,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		w, err := e.pickTempPath(ctx, dir, stem, outExt)
 		if err != nil {
 			e.Log.Warn("FAIL (no free temp path beside the source, source untouched)", "file", f, "err", err)
-			e.finish(ctx, f, key, store.Failed, &store.Outcome{Reason: err.Error(), Profile: ts.Profile, Decision: by})
+			e.finish(ctx, f, key, store.Failed, withSourceDimensions(
+				&store.Outcome{Reason: err.Error(), Profile: ts.Profile, Decision: by}, props))
 			return nil
 		}
 		work = w
@@ -1330,13 +1416,15 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		// the figures, leaves the source untouched, and the scan carries on.
 		if err := e.scratchRoomFor(scratch, f, fi.Size()); err != nil {
 			e.Log.Warn("FAIL (not enough room in the scratch directory, source untouched)", "file", f, "err", err)
-			e.finish(ctx, f, key, store.Failed, &store.Outcome{Reason: err.Error(), Profile: ts.Profile, Decision: by})
+			e.finish(ctx, f, key, store.Failed, withSourceDimensions(
+				&store.Outcome{Reason: err.Error(), Profile: ts.Profile, Decision: by}, props))
 			return nil
 		}
 		w, err := e.pickScratchPath(scratch, f, outExt)
 		if err != nil {
 			e.Log.Warn("FAIL (no free working path in the scratch directory, source untouched)", "file", f, "err", err)
-			e.finish(ctx, f, key, store.Failed, &store.Outcome{Reason: err.Error(), Profile: ts.Profile, Decision: by})
+			e.finish(ctx, f, key, store.Failed, withSourceDimensions(
+				&store.Outcome{Reason: err.Error(), Profile: ts.Profile, Decision: by}, props))
 			return nil
 		}
 		work = w
@@ -1361,7 +1449,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// ledger and the live UI cannot disagree about what happened. From here on the file has
 	// reached the encoder, so the encoder is attributable - on a failure as much as on a
 	// success - and so is the encode profile that chose it.
-	out := &store.Outcome{Encoder: ts.Encoder, Profile: ts.Profile, Decision: by}
+	out := withSourceDimensions(&store.Outcome{Encoder: ts.Encoder, Profile: ts.Profile, Decision: by}, props)
 	// What this job's selection did, recorded from the SAME plan the argv is built from
 	// and the gate is checked against - on a failure as much as on a success, because a
 	// rejected encode is exactly where an operator wants to know which streams it was
@@ -1386,6 +1474,18 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	}
 	encodeDur := time.Since(encStart)
 	out.EncodeMs = ptr(encodeDur.Milliseconds())
+	// What actually came out, measured on the file the encoder wrote and recorded on the row
+	// whether the gates below then accept it or reject it: a rejected encode is exactly where
+	// an operator wants to know what was produced. This build downscales nothing, so these
+	// are the source's own dimensions on every ordinary job - which is what makes a row where
+	// they are NOT a fact worth having. An output the probe cannot measure records nothing
+	// rather than a zero.
+	if w, h, ok := e.Probe.Dimensions(ctx, work); ok {
+		out.OutputWidth, out.OutputHeight = ptr(w), ptr(h)
+	} else {
+		e.Log.Warn("the output's resolution could not be measured (recorded as not recorded)",
+			"file", f, "working_file", work)
+	}
 
 	e.advance(ctx, f, key, store.Verifying)
 	proof, class, reason := e.verifyOutput(ctx, f, work, prof, targetCodec, plan)
@@ -1533,7 +1633,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			e.Log.Info("skip (the original could not be retained, so the swap could not be undone — source untouched)",
 				"file", f, "err", rerr)
 			_ = os.Remove(tmp)
-			e.finish(ctx, f, key, store.Skipped, e.because(SkipUndoRetentionFailed, by, prof, ts))
+			e.finish(ctx, f, key, store.Skipped, e.because(SkipUndoRetentionFailed, by, prof, ts, props))
 			return nil
 		}
 		retained = r
@@ -1812,13 +1912,15 @@ func (v sourceVerdict) stopped() bool { return v.guard != "" }
 // The returned snapshot is nil exactly when the guards stopped the file before one was taken
 // (the symlink guard), which is why that guard is where it is: a symbolic link never pays for
 // an ffprobe.
-func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, ts config.Transcode,
-	targetCodec string, snapshot func(context.Context, string) *probe.VideoProps) (*probe.VideoProps, sourceVerdict) {
-	// The bitrate floor and every threshold below are the ROOT's and not this job's: an
-	// encode profile may change what the encoder produces and may not move a gate that
-	// decides whether a source is destroyed.
-	prof := root.Profile
-
+// prof is the EFFECTIVE library profile for this file - the root's own values with the
+// first matching resolution rule laid over them - and it is a parameter rather than read off
+// root.Profile because the two differ exactly where a band applies. The bitrate floor and
+// every threshold below are still the library's and not this job's: an encode profile may
+// change what the encoder produces and may not move a gate that decides whether a source is
+// destroyed, and a rule may move the threshold only for the band its operator wrote it for.
+func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, prof config.Profile,
+	ts config.Transcode, targetCodec string,
+	snapshot func(context.Context, string) *probe.VideoProps) (*probe.VideoProps, sourceVerdict) {
 	// Symlink guard (TRANSCODE-16). A symlink has nlink == 1 and slips past the hardlink
 	// guard, and config.Validate refuses a symlinked ROOT but not a symlinked file within
 	// the tree. The swap would replace the LINK itself with a regular file, orphaning the
@@ -1961,6 +2063,37 @@ func (e *Engine) advance(ctx context.Context, path, key string, s store.Status) 
 	e.emit(Event{Path: path, Status: s})
 }
 
+// recordUndeterminedHeight writes the band guard's terminal row: this root selects on the
+// source height and the probe could not establish one, so no rule and no profile decides
+// this file.
+//
+// It claims the row first, exactly as every verdict that records what it READ must: the
+// claim is where a row's recorded inputs are compared against what the configuration now
+// offers, and a skip written outside it would be a verdict nothing re-derives. The input it
+// records is the RULE LIST, because the list is what it read - remove every `when`-carrying
+// rule from this root and the next scan offers the file to the pipeline again.
+//
+// A store error is survived in the withholding direction, the same trade every claim path in
+// this function takes: the file is simply left for the next scan.
+func (e *Engine) recordUndeterminedHeight(ctx context.Context, worker, f, key string, root config.Root,
+	by store.Decision, prof config.Profile, ts config.Transcode, props *probe.VideoProps) {
+	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures, e.inputsFor(prof, ts))
+	if err != nil {
+		e.Log.Warn("claim error (skipping this pass, will retry)", "file", f, "err", err)
+		return
+	}
+	if !claimed {
+		return
+	}
+	// warn, which in this fleet means the process continued in a degraded state: the run
+	// goes on and this file is not in it, which is a condition an operator fixes.
+	e.Log.Warn("skip (the source height could not be determined and this library root selects "+
+		"thresholds by it - refusing to decide the file under a band nobody could place it in)",
+		"file", f, "library_root", root.Clean, "rules", prof.Rules.Canonical())
+	e.finish(ctx, f, key, store.Skipped,
+		e.because(SkipUndeterminedSourceHeight, by, prof, ts, props, InputRules))
+}
+
 // finishStore records a terminal outcome + its proof in the store WITHOUT emitting an
 // event. The Done swap path uses this (then emits one rich Done event itself); every
 // other terminal path uses finish, which emits as well.
@@ -2013,13 +2146,39 @@ func (e *Engine) finish(ctx context.Context, path, key string, s store.Status, o
 // encode profile can move is READ, because that is where the guard that read it read it.
 // The two are one reading on purpose: an input exists to be compared, and a row recording a
 // value the layering for its own path never produces is a row nothing can re-derive.
-func (e *Engine) because(reason string, by store.Decision, prof config.Profile, ts config.Transcode, read ...string) *store.Outcome {
-	return &store.Outcome{
+// props is the source snapshot the guard was decided off, or nil where the verdict was
+// reached before one was taken. It supplies the SOURCE's pixel dimensions, which every
+// terminal row carries now that a root can band its files by them: a row that did not say
+// how tall its source was would leave an operator inferring the band from the verdict. A nil
+// snapshot, or one whose dimensions the probe could not establish, records nothing at all
+// rather than a zero.
+func (e *Engine) because(reason string, by store.Decision, prof config.Profile, ts config.Transcode,
+	props *probe.VideoProps, read ...string) *store.Outcome {
+	o := &store.Outcome{
 		Reason:         reason,
 		Decision:       by,
 		Profile:        ts.Profile,
 		DecisionInputs: e.inputsRead(prof, ts, read...),
 	}
+	return withSourceDimensions(o, props)
+}
+
+// withSourceDimensions records the SOURCE's pixel dimensions on a terminal outcome, from the
+// snapshot the decision was taken off.
+//
+// Nothing is recorded where there is no snapshot or where the probe could not establish both
+// dimensions. That is the discipline every measurement on this row keeps: nil is NOT
+// RECORDED, and 0 is not a legal pixel dimension for anything, so a zero here would be a
+// claim about a file nobody measured - in the one table whose job is to be evidence about
+// sources that have since been deleted.
+func withSourceDimensions(o *store.Outcome, props *probe.VideoProps) *store.Outcome {
+	if props == nil {
+		return o
+	}
+	if w, h, ok := props.Dimensions(); ok {
+		o.SourceWidth, o.SourceHeight = ptr(w), ptr(h)
+	}
+	return o
 }
 
 // finalVerdictPrefix precedes the gate's own text on a failure no retry can change. It
