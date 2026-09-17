@@ -2,10 +2,13 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -623,6 +626,219 @@ func TestProcessFile_SymlinkedSourceStillSkips(t *testing.T) {
 	}
 	if md5f(t, target) != targetBefore {
 		t.Error("the link's target was modified")
+	}
+}
+
+// ---- AC-10, AC-11 ------------------------------------------------------------
+
+// recordedLine is one log record the engine emitted, reduced to what a criterion about
+// records asks: at what level, saying what, about which file, carrying which error.
+type recordedLine struct {
+	level slog.Level
+	msg   string
+	attrs map[string]string
+}
+
+// lineRecorder collects the engine's log records so a test can ask what the process said
+// about a condition it handled. It is a handler and not a parsed buffer, so the level is the
+// level rather than a string that happens to start with one.
+type lineRecorder struct {
+	mu    sync.Mutex
+	lines []recordedLine
+}
+
+func (r *lineRecorder) Enabled(context.Context, slog.Level) bool { return true }
+
+func (r *lineRecorder) Handle(_ context.Context, rec slog.Record) error {
+	line := recordedLine{level: rec.Level, msg: rec.Message, attrs: map[string]string{}}
+	rec.Attrs(func(a slog.Attr) bool {
+		line.attrs[a.Key] = a.Value.String()
+		return true
+	})
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lines = append(r.lines, line)
+	return nil
+}
+
+func (r *lineRecorder) WithAttrs([]slog.Attr) slog.Handler { return r }
+func (r *lineRecorder) WithGroup(string) slog.Handler      { return r }
+
+// about returns the records naming path in their "file" attribute.
+func (r *lineRecorder) about(path string) []recordedLine {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var got []recordedLine
+	for _, l := range r.lines {
+		if l.attrs["file"] == path {
+			got = append(got, l)
+		}
+	}
+	return got
+}
+
+// TestScan_UnreadableFileIsSkippedAndTheScanContinues grades AC-10: a file whose attributes
+// cannot be read - because there is nothing at the other end of the path, or because this
+// process may not search the directory holding it - is left alone, gets no row, is RECORDED
+// at a level that does not demand a human act (observability O3), and does not stop the scan
+// reaching the rest of the library.
+//
+// Both conditions are produced for real rather than injected. The consolidation collapsed
+// four failure sites into one, so this is the branch that carries every one of them.
+func TestScan_UnreadableFileIsSkippedAndTheScanContinues(t *testing.T) {
+	root := t.TempDir()
+
+	// Nothing at the other end: the ordinary dangling link, and the same read failure a
+	// file that went away between the enumeration and now produces.
+	dangling := filepath.Join(root, "dangling.mkv")
+	if err := os.Symlink(filepath.Join(root, "no-such-target.mkv"), dangling); err != nil {
+		t.Fatal(err)
+	}
+
+	// Denied: a directory this process may LIST but not SEARCH, so its entries are
+	// enumerated and stat of any one of them is refused.
+	locked := filepath.Join(root, "locked")
+	if err := os.Mkdir(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	denied := filepath.Join(locked, "denied.mkv")
+	if err := os.WriteFile(denied, []byte("unreachable"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	// Registered AFTER the TempDir whose cleanup must follow it, so the directory is
+	// searchable again before anything tries to remove its contents.
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	if _, err := os.Stat(denied); err == nil {
+		t.Skip("this process can stat inside a directory it has no search permission on " +
+			"(running as root?), so the denied half of this criterion cannot be produced")
+	}
+
+	// The rest of the library, which the scan must still reach.
+	reachable := filepath.Join(root, "reachable.mkv")
+	if err := os.WriteFile(reachable, []byte("a source the scan must still meet"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	eng, cs := countingEngine(t, root)
+	rec := &lineRecorder{}
+	eng.Log = slog.New(rec)
+
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+
+	for _, unreadable := range []string{dangling, denied} {
+		if got := cs.writesFor(unreadable); len(got) != 0 {
+			t.Errorf("%s: an unreadable file cost %v store write(s)", filepath.Base(unreadable), got)
+		}
+		lines := rec.about(unreadable)
+		if len(lines) == 0 {
+			t.Errorf("%s: the scan skipped an unreadable file and recorded nothing about it",
+				filepath.Base(unreadable))
+			continue
+		}
+		for _, l := range lines {
+			if l.level >= slog.LevelError {
+				t.Errorf("%s: recorded at %v, which demands a human act for a condition the "+
+					"scan handled itself: %q", filepath.Base(unreadable), l.level, l.msg)
+			}
+		}
+	}
+	// Lstat, because the dangling link is exactly a path os.Stat cannot answer for: the
+	// question here is whether the entry is still there, not what it points at.
+	if _, err := os.Lstat(dangling); err != nil {
+		t.Errorf("the scan removed the dangling link it could not read: %v", err)
+	}
+	if _, err := os.Lstat(locked); err != nil {
+		t.Errorf("the scan removed the directory it could not search: %v", err)
+	}
+	claimed := false
+	for _, p := range cs.claimedPaths() {
+		if p == reachable {
+			claimed = true
+		}
+	}
+	if !claimed {
+		t.Error("the scan did not reach the readable file beside the unreadable ones")
+	}
+}
+
+// TestScan_StoreErrorInTheClaimPathRetriesNextPass grades AC-11: a store that errors while
+// the claim decision is being taken leaves the file unmutated, records nothing about it,
+// leaves it eligible on the next pass, and says which dependency failed, what it attempted
+// and what happens next (observability O4) rather than only carrying a trace.
+func TestScan_StoreErrorInTheClaimPathRetriesNextPass(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	p := filepath.Join(root, "movie.mkv")
+	if err := os.WriteFile(p, []byte("a source no failing store may touch"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := md5f(t, p)
+
+	eng, cs := countingEngine(t, root)
+	rec := &lineRecorder{}
+	eng.Log = slog.New(rec)
+	cs.claimErr = errors.New("database is locked")
+
+	if err := eng.RunOneshot(ctx); err != nil {
+		t.Fatalf("RunOneshot must survive a store error: %v", err)
+	}
+
+	if got := cs.writesFor(p); len(got) != 0 {
+		t.Errorf("a file whose claim errored cost %v store write(s)", got)
+	}
+	if md5f(t, p) != before {
+		t.Error("a file whose claim errored was modified")
+	}
+	rows, err := cs.List(ctx, nil, 0)
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	for _, r := range rows {
+		if r.Path == p {
+			t.Errorf("a file whose claim errored has a %q row: a store error must never read "+
+				"as a verdict about the file", r.Status)
+		}
+	}
+	lines := rec.about(p)
+	if len(lines) == 0 {
+		t.Fatal("the claim failed and nothing was recorded about the file")
+	}
+	said := lines[len(lines)-1]
+	if said.level >= slog.LevelError {
+		t.Errorf("recorded at %v for a condition the scan handled itself: %q", said.level, said.msg)
+	}
+	if !strings.Contains(said.msg, "store") {
+		t.Errorf("the record does not name the dependency that failed: %q", said.msg)
+	}
+	if !strings.Contains(said.msg, "next scan") {
+		t.Errorf("the record does not say what happens to the file next: %q", said.msg)
+	}
+	if said.attrs["err"] == "" {
+		t.Errorf("the record carries no error to say what the dependency answered: %v", said.attrs)
+	}
+
+	// Still eligible: the store recovers and the very next pass takes the file.
+	cs.mu.Lock()
+	cs.claimErr = nil
+	cs.mu.Unlock()
+	cs.reset()
+	if err := eng.RunOneshot(ctx); err != nil {
+		t.Fatalf("RunOneshot after the store recovered: %v", err)
+	}
+	claimed := false
+	for _, got := range cs.claimedPaths() {
+		if got == p {
+			claimed = true
+		}
+	}
+	if !claimed {
+		t.Error("the file was not claimed on the pass after the store recovered: a store " +
+			"error excluded it rather than deferring it")
 	}
 }
 

@@ -1321,7 +1321,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	if err != nil {
 		// Fail safe: a store error must never be treated as "done". Log and skip
 		// this pass; the file is retried on the next scan once the store recovers.
-		e.Log.Warn("claim error (skipping this pass, will retry)", "file", f, "err", err)
+		e.Log.Warn("the store could not take the claim for this file (nothing is recorded for it, "+
+			"it is not treated as done, and the next scan offers it again)", "file", f, "err", err)
 		return nil
 	}
 	if !claimed {
@@ -2144,7 +2145,8 @@ func (e *Engine) recordUndeterminedHeight(ctx context.Context, worker, f, key st
 	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures, e.inputsFor(prof, ts),
 		supersededAbove(SkipHardlinked)...)
 	if err != nil {
-		e.Log.Warn("claim error (skipping this pass, will retry)", "file", f, "err", err)
+		e.Log.Warn("the store could not take the claim for this file (nothing is recorded for it, "+
+			"it is not treated as done, and the next scan offers it again)", "file", f, "err", err)
 		return
 	}
 	if !claimed {
