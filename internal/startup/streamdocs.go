@@ -53,19 +53,19 @@ var streamSelectionParts = []struct {
 		},
 	},
 	{
-		Name: "that a stream with no language tag, an empty one, or the undefined code und is KEPT whatever a list says",
+		Name:  "that a stream with no language tag, an empty one, or the undefined code und is KEPT whatever a list says",
 		Needs: []string{"no language tag", "und", "is kept whatever"},
 	},
 	{
-		Name: "that a selection which would leave the file with no audio is not applied to audio at all, and that the row says so",
+		Name:  "that a selection which would leave the file with no audio is not applied to audio at all, and that the row says so",
 		Needs: []string{"no audio at all", "every audio stream is carried", "recorded on that file's row"},
 	},
 	{
-		Name: "that remux_only skips the VMAF gate, and only after every carried video stream is established identical to the source's",
+		Name:  "that remux_only skips the VMAF gate, and only after every carried video stream is established identical to the source's",
 		Needs: []string{"skips the vmaf gate", "identical to the source", "rejected and the source is kept"},
 	},
 	{
-		Name: "that audio TRANSCODING is a non-goal: these keys select and copy, and none of them re-encodes, downmixes or adds a track",
+		Name:  "that audio TRANSCODING is a non-goal: these keys select and copy, and none of them re-encodes, downmixes or adds a track",
 		Needs: []string{"non-goal", "selection and copy", "downmix"},
 	},
 }
