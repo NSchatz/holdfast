@@ -16,6 +16,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -600,10 +601,26 @@ func TestWatch_PeriodicScanStillRuns(t *testing.T) {
 	root := t.TempDir()
 	mkH264(t, ffmpeg, filepath.Join(root, "present.mkv"), "8M")
 
-	var encodes atomic.Int32
-	eng := buildEngine(t, ffmpeg, ffprobe, root, countingEncoder(&encodes),
+	// What the encoder SAW is the assertion, not how many times it was called: the
+	// counting encoder fails every encode, so a file it met stays non-terminal and the next
+	// scan meets it again. Which files a pass reached is the property; the retry policy for
+	// a failed encode is somebody else's criterion.
+	var mu sync.Mutex
+	var seen []string
+	eng := buildEngine(t, ffmpeg, ffprobe, root,
+		EncoderFunc(func(_ context.Context, in, _ string, _ *probe.VideoProps) error {
+			mu.Lock()
+			seen = append(seen, filepath.Base(in))
+			mu.Unlock()
+			return errFake
+		}),
 		func(c *config.Config) { watchedRoots(c, 60) })
 	eng.SetCoverage([]string{root}, nil)
+	reached := func(name string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Contains(seen, name)
+	}
 
 	stub := newStubBackend()
 	w := eng.NewWatches()
@@ -620,8 +637,8 @@ func TestWatch_PeriodicScanStillRuns(t *testing.T) {
 	if err := eng.RunOneshot(ctx); err != nil {
 		t.Fatalf("RunOneshot: %v", err)
 	}
-	if got := encodes.Load(); got != 1 {
-		t.Fatalf("the startup scan reached the encoder %d times with the watch running, want 1", got)
+	if !reached("present.mkv") {
+		t.Fatalf("the startup scan reached %v with the watch running, and the file that was there is not in it", seen)
 	}
 
 	// A file arrives and the watch never hears about it - the rename nobody saw, the
@@ -630,12 +647,15 @@ func TestWatch_PeriodicScanStillRuns(t *testing.T) {
 	if n := len(stub.events); n != 0 {
 		t.Fatalf("the stub event source carries %d events; this case is about a file no event named", n)
 	}
+	if reached("arrived-unseen.mkv") {
+		t.Fatalf("%s reached the pipeline before the periodic pass ran: %v", "arrived-unseen.mkv", seen)
+	}
 	if err := eng.RunOneshot(ctx); err != nil {
 		t.Fatalf("RunOneshot (the periodic pass): %v", err)
 	}
-	if got := encodes.Load(); got != 2 {
-		t.Errorf("the periodic scan reached the encoder %d times in total, want 2: the file no event named "+
-			"is exactly what the scan is still the source of truth for", got)
+	if !reached("arrived-unseen.mkv") {
+		t.Errorf("the periodic scan reached %v, and the file no event ever named is not in it: that file is "+
+			"exactly what the scan is still the source of truth for", seen)
 	}
 	if !w.Watching(root) {
 		t.Error("the watch stopped watching the root over the course of two scans")
