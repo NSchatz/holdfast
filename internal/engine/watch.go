@@ -180,6 +180,16 @@ func (w *Watches) Run(ctx context.Context) {
 			// Nothing is watched: no configuration asked for one, or every root that did
 			// fell back and has said so. Starting a pool and a loop over no event source
 			// would be a daemon holding goroutines open to do nothing.
+			//
+			// A backend obtained for a root that then fell back - the platform refused the
+			// very first directory, say - is released HERE, because the loop that would
+			// otherwise have released it is the one not starting.
+			if err := w.Close(); err != nil {
+				w.log.Warn("releasing the watcher obtained for a root that then fell back failed; no root is "+
+					"watched and the interval scan covers every one of them",
+					"dependency", "github.com/fsnotify/fsnotify", "err", err,
+					"next", "the interval scan (scan_interval_sec) serves every root; nothing else changes")
+			}
 			return
 		}
 		for i := 0; i < w.workers; i++ {
