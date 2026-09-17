@@ -277,6 +277,19 @@ identity cannot be established at all - is **rejected and the source is kept**.
 `remux_only` beside an `encoder` in the same layer is refused at startup: they are two
 instructions about one job.
 
+Two things `remux_only` does NOT change, and both decide how much a root actually reclaims.
+It does not change which files are **offered**: the guard that skips a file already in the
+target codec runs before this mode is consulted, so a file already in that codec is never
+handed to a remux, whatever it carries. `remux_only` reclaims on the files this tool would
+have re-encoded anyway and reclaims them without re-encoding - on a library already in the
+target codec it reclaims nothing at all, and that is not a failure you will see reported,
+because those files skip exactly as they always did. It also does not mark a file as
+already thinned: the swap gives the file a new size and mtime, a ledger row is keyed to
+both, so the next scan sees a file it has no row for and offers it again, and that second
+pass has nothing left to drop. On a root you remux, set `min_savings_percent` above zero:
+a pass that reclaims nothing is then rejected on the size floor rather than swapped for
+whatever the container's own overhead happens to differ by.
+
 Whatever a job drops, the row records: each dropped stream by its source index, its type
 and its language as the source tagged it (`dropped_streams` in `holdfast export`). The
 dropped bytes are not recoverable from the replacement, so that row is the only record

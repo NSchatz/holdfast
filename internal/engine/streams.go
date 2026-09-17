@@ -303,8 +303,10 @@ func (p *StreamPlan) AttachedPictureIndexes() []int {
 // not fall below the source's passes an output that carries a different stream of the
 // same type, and passes every selection that did not actually apply - which is the half
 // that catches a build that dropped nothing when it was told to drop something. This
-// compares the MULTISET of (type, language) per type, and it names what it counted on
-// both sides, because a rejection an operator cannot read is one they cannot act on.
+// compares the MULTISET of (type, language, commentary, attached picture): every fact
+// the plan itself decided on, so no substitution the selection ruled on can pass as the
+// stream it replaced. It names what it counted on both sides, because a rejection an
+// operator cannot read is one they cannot act on.
 //
 // out is the output's own stream list as ffprobe established it. A caller that could not
 // establish one must REJECT rather than call this: an unknown shape is never read as the
@@ -331,17 +333,30 @@ func (p *StreamPlan) CheckOutput(out []probe.Stream) error {
 	return nil
 }
 
-// tallyKey is one kind of stream a tally counts: its type and the language the source
-// tagged it with. Data streams are excluded by the caller, never here.
+// tallyKey is one kind of stream a tally counts: its type, the language the source tagged
+// it with, and the two container dispositions a selection rules on. Data streams are
+// excluded by the caller, never here.
 type tallyKey struct {
-	typ  string
-	lang string
+	typ             string
+	lang            string
+	commentary      bool
+	attachedPicture bool
 }
 
-// streamTally counts streams by (type, language). It counts LANGUAGE as well as type
-// because a per-type count cannot tell "kept the English track" from "kept the Japanese
-// one" - and a selection that carried the wrong track has lost exactly as much as one
-// that carried none.
+// streamTally counts streams by (type, language, commentary, attached picture).
+//
+// It counts LANGUAGE as well as type because a per-type count cannot tell "kept the
+// English track" from "kept the Japanese one" - and a selection that carried the wrong
+// track has lost exactly as much as one that carried none.
+//
+// It counts the two DISPOSITIONS for the same reason one step further in. They are the
+// other facts the plan decided on, and the source carries both on every stream on both
+// sides of this gate: without them an English commentary track and the English main track
+// are one kind, so an output that kept the commentary the plan dropped and lost the main
+// track the plan intends tallies identically to the map and is accepted - on the ordinary
+// `keep_commentary: false` configuration, with the source then deleted. The same holds for
+// a cover picture standing in for a second video angle, which is the multi-video coverage
+// this check carries forward.
 func streamTally(streams []probe.Stream) map[tallyKey]int {
 	t := make(map[tallyKey]int, len(streams))
 	for _, s := range streams {
@@ -355,16 +370,33 @@ func streamTally(streams []probe.Stream) map[tallyKey]int {
 			// them as different kinds would reject a faithful remux of an untagged track.
 			lang = ""
 		}
-		t[tallyKey{typ: s.Type, lang: lang}]++
+		t[tallyKey{
+			typ:             s.Type,
+			lang:            lang,
+			commentary:      s.Commentary,
+			attachedPicture: s.AttachedPicture,
+		}]++
 	}
 	return t
 }
 
+// describeTallyKey names one kind of stream the way a rejection has to name it: the type,
+// then the language, then whichever dispositions distinguish it from a plain stream of
+// that type. A kind that carries neither disposition reads exactly as it always has.
 func describeTallyKey(k tallyKey) string {
+	parts := make([]string, 0, 3)
 	if k.lang == "" {
-		return k.typ + " (no language tag)"
+		parts = append(parts, "no language tag")
+	} else {
+		parts = append(parts, k.lang)
 	}
-	return k.typ + " (" + k.lang + ")"
+	if k.commentary {
+		parts = append(parts, "commentary")
+	}
+	if k.attachedPicture {
+		parts = append(parts, "attached picture")
+	}
+	return k.typ + " (" + strings.Join(parts, ", ") + ")"
 }
 
 // describeTally renders a tally in a stable order, so two rejections of the same shape
@@ -388,8 +420,7 @@ func describeTally(t map[tallyKey]int) string {
 func sortTallyKeys(keys []tallyKey) {
 	for i := 1; i < len(keys); i++ {
 		for j := i; j > 0; j-- {
-			a, b := keys[j-1], keys[j]
-			if a.typ < b.typ || (a.typ == b.typ && a.lang <= b.lang) {
+			if tallyKeyOrdered(keys[j-1], keys[j]) {
 				break
 			}
 			keys[j-1], keys[j] = keys[j], keys[j-1]
@@ -397,10 +428,29 @@ func sortTallyKeys(keys []tallyKey) {
 	}
 }
 
+// tallyKeyOrdered reports whether a sorts at or before b. Every field of the key takes
+// part, because two kinds that differ only in a disposition are two kinds and a renderer
+// that left their order to the map's iteration would print the same rejection two ways.
+func tallyKeyOrdered(a, b tallyKey) bool {
+	switch {
+	case a.typ != b.typ:
+		return a.typ < b.typ
+	case a.lang != b.lang:
+		return a.lang < b.lang
+	case a.commentary != b.commentary:
+		return !a.commentary
+	case a.attachedPicture != b.attachedPicture:
+		return !a.attachedPicture
+	default:
+		return true
+	}
+}
+
 // DroppedRecord is what this plan's dropped streams are recorded AS on a terminal row:
-// each by its source index, its type and its language as the source tagged it. The
+// each by its source index, its type and its language AS THE SOURCE TAGGED IT. The
 // dropped bytes are not recoverable from the replacement, so the row is the only record
-// there is.
+// there is, and a record of evidence reports what the source said rather than the folded
+// form this build compared against (probe.Stream.SourceLanguageTag).
 //
 // A plan that dropped nothing records an EMPTY set, which is a record and not an absence:
 // "this job dropped nothing" and "nothing is known about what this job dropped" are two
@@ -414,7 +464,7 @@ func (p *StreamPlan) DroppedRecord() store.DroppedStreams {
 		out = append(out, store.DroppedStream{
 			Index:    s.Index,
 			Type:     s.Type,
-			Language: s.Language,
+			Language: s.SourceLanguageTag,
 		})
 	}
 	return store.RecordDroppedStreams(out)

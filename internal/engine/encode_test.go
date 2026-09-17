@@ -1106,3 +1106,62 @@ func TestStreamSelection_NeverProducesAFileWithNoAudio(t *testing.T) {
 		}
 	}
 }
+
+// TestStreamSelection_RecordsADroppedStreamsLanguageAsTheSourceTaggedIt is [AC-10]'s "its
+// language AS THE SOURCE TAGGED IT" clause, on a source that spells the tag in a case this
+// build does not: a Matroska track tagged `JPN`.
+//
+// The two readings of that tag are not interchangeable here. The FOLDED one is what a
+// language list is matched against, and it has to be, because AC-2 makes the match
+// case-insensitive. The SOURCE's own spelling is what the row reports, because the dropped
+// bytes are not recoverable from the replacement and this row is the only evidence they
+// were ever there - evidence that quietly reports a value the source never wrote is a record
+// of what this build compared against rather than of what it found.
+//
+// Both halves are asserted on one fixture, so a build that collapsed them into one value
+// reds whichever way it collapsed them.
+func TestStreamSelection_RecordsADroppedStreamsLanguageAsTheSourceTaggedIt(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	_, roots := twoRoots(t, "tv")
+	src := filepath.Join(roots[0], "ep.mkv")
+	mkSourceWithStreams(t, ffmpeg, src, audioStream("eng"), audioStream("JPN"))
+
+	// The fixture premise: the container really did keep the source's own spelling, so the
+	// case below is about what this build records and not about what the muxer wrote.
+	pre := buildEngine(t, ffmpeg, ffprobe, roots[0], nil, nil)
+	tagged := false
+	for _, s := range streamsOf(t, pre, src) {
+		if s.SourceLanguageTag == "JPN" {
+			tagged = true
+		}
+	}
+	if !tagged {
+		t.Skip("this ffmpeg's Matroska muxer normalised the language tag, so the source does " +
+			"not carry a spelling this build could report wrongly")
+	}
+
+	// AC-2's half, taken BEFORE the run swaps the source: the upper-cased tag still matches
+	// a lower-cased list, so the folded form is what the selection reads.
+	keeps := planFor(t, pre, src, selectionProfile(t, "    audio_languages: [jpn]\n"))
+	if d := keeps.Dropped(); len(d) != 1 || d[0].Language != "eng" {
+		t.Fatalf("under `audio_languages: [jpn]` the plan dropped %+v, want only the eng track: "+
+			"the match is case-insensitive and a JPN-tagged track matches jpn", d)
+	}
+
+	run := runSelection(t, ffmpeg, ffprobe,
+		selectionCfg(t, roots[0], "    audio_languages: [eng]\n"), nil)
+	row := run.doneRow(t, src)
+	if !row.DroppedStreams.Recorded() {
+		t.Fatal("the row recorded no dropped streams at all, so the track this job dropped has " +
+			"no record anywhere")
+	}
+	got := row.DroppedStreams.Streams()
+	if len(got) != 1 || got[0].Type != "audio" {
+		t.Fatalf("the row records %+v as dropped, want exactly the one audio track", got)
+	}
+	if got[0].Language != "JPN" {
+		t.Errorf("the row records the dropped track's language as %q, want %q - the tag the "+
+			"source itself carried. The bytes are gone; this row is the only record there is",
+			got[0].Language, "JPN")
+	}
+}

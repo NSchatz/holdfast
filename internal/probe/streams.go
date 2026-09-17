@@ -22,12 +22,18 @@ type Stream struct {
 	// Type is ffprobe's codec_type verbatim: "video", "audio", "subtitle",
 	// "attachment", "data".
 	Type string
-	// Language is the `language` stream tag exactly as the source spells it, lowercased
-	// but otherwise untouched. "" is an ABSENT tag, which is not the same fact as the
-	// undefined code "und" even though a selection treats them the same way - the
-	// distinction is kept here so a record of a dropped stream reports what the source
-	// actually said.
+	// Language is the `language` stream tag FOLDED for comparison: trimmed and
+	// lowercased. It is what a language list is matched against and what the intended-map
+	// gate counts, because a match is case-insensitive and a container writes the code in
+	// whatever case its muxer chose. "" is an ABSENT tag, which is not the same fact as
+	// the undefined code "und" even though a selection treats them the same way.
 	Language string
+	// SourceLanguageTag is the same tag AS THE SOURCE SPELLED IT, trimmed and otherwise
+	// untouched. It is what a record of a dropped stream reports, because that record is
+	// the only surviving evidence of bytes the replacement does not have, and evidence
+	// says what the source said rather than what this build folded it to. Nothing
+	// compares it: every comparison reads Language.
+	SourceLanguageTag string
 	// Commentary is the container's own `comment` disposition.
 	Commentary bool
 	// AttachedPicture is the container's own `attached_pic` disposition: cover art
@@ -99,12 +105,14 @@ func (p *Prober) Streams(ctx context.Context, f string) (streams []Stream, estab
 			// be checked for, so the whole answer is unknown rather than partly known.
 			return nil, false
 		}
+		tag := strings.TrimSpace(s.Tags["language"])
 		streams = append(streams, Stream{
-			Index:           s.Index,
-			Type:            s.CodecType,
-			Language:        strings.ToLower(strings.TrimSpace(s.Tags["language"])),
-			Commentary:      s.Disposition.Comment == 1,
-			AttachedPicture: s.Disposition.AttachedPic == 1,
+			Index:             s.Index,
+			Type:              s.CodecType,
+			Language:          strings.ToLower(tag),
+			SourceLanguageTag: tag,
+			Commentary:        s.Disposition.Comment == 1,
+			AttachedPicture:   s.Disposition.AttachedPic == 1,
 		})
 	}
 	return streams, true

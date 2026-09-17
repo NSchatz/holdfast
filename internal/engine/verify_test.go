@@ -992,6 +992,65 @@ func TestIntendedMap_CarriesEveryVideoStreamIncludingAttachedPictures(t *testing
 	}
 }
 
+// TestIntendedMap_RejectsACoverPictureStandingInForAVideoStream is [AC-8]'s other half and
+// [AC-7]'s "carries a stream the map does not intend" half on the VIDEO type: the multi-video
+// coverage this re-expression carries forward is coverage of WHICH video streams, not of how
+// many.
+//
+// The source carries two genuine moving-picture streams and the map intends both. The output
+// carries the first one and a one-frame cover picture where the second angle was: the same
+// number of video streams, neither of them language-tagged, and a different file. A tally
+// that did not count the attached_pic disposition reads the two as one kind and accepts it,
+// which is the multi-video property lost to the very check that was supposed to carry it.
+func TestIntendedMap_RejectsACoverPictureStandingInForAVideoStream(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "movie.mp4")
+	mkTwoVideoStreams(t, ffmpeg, ffprobe, src, "3M")
+
+	cover := filepath.Join(dir, "cover.jpg")
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=1:size=160x120:rate=10", "-frames:v", "1",
+		"-c:v", "mjpeg", "-pix_fmt", "yuvj420p", "--", cover)
+	out := filepath.Join(dir, "out.mp4")
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-i", cover,
+		"-map", "0:v:0", "-map", "1:v",
+		"-c:v:0", "libx265", "-x265-params", "log-level=error", "-preset", "ultrafast",
+		"-pix_fmt", "yuv420p10le", "-tag:v:0", "hvc1", "-c:v:1", "copy",
+		"-disposition:v:1", "attached_pic", "--", out)
+	assertVideoStreamShape(t, ffprobe, out, []bool{false, true})
+
+	eng := buildEngine(t, ffmpeg, ffprobe, dir, nil, nil)
+	top := eng.Cfg.TopLevelProfile()
+	plan := planFor(t, eng, src, top)
+
+	// The premise: the counts match on every type, so nothing that counts per type sees this.
+	in, got := countByType(streamsOf(t, eng, src)), countByType(streamsOf(t, eng, out))
+	if got["video"] != in["video"] || in["video"] != 2 {
+		t.Fatalf("the fixture drifted: the source carries %d video stream(s) and the output %d, "+
+			"want 2 and 2 - a case about WHICH video streams needs the counts to agree",
+			in["video"], got["video"])
+	}
+
+	if err := plan.CheckOutput(streamsOf(t, eng, out)); err == nil {
+		t.Fatalf("the intended-map check ACCEPTED an output carrying a cover picture where the "+
+			"map intends a second moving-picture stream: intended=%+v output=%+v",
+			plan.Intended(), streamsOf(t, eng, out))
+	} else if !strings.Contains(err.Error(), "attached picture") {
+		t.Fatalf("the rejection must name the attached picture it counted; got: %v", err)
+	}
+
+	_, class, err := eng.verifyOutput(context.Background(), src, out, top,
+		targetCodecFor(eng.Cfg.TranscodeIn(top, src).Encoder), plan)
+	if err == nil {
+		t.Fatal("the whole gate ACCEPTED it: every check in front of the deletion of the source " +
+			"is green on an output that lost a video stream to a still picture")
+	}
+	if class != store.FailureDeterministic {
+		t.Errorf("class = %q, want %q", class, store.FailureDeterministic)
+	}
+}
+
 // TestVerify_RejectsAnOutputWhoseStreamsCannotBeEnumerated is [AC-9]'s output half: an
 // output whose streams ffprobe will not answer about is rejected and the source is kept. An
 // unknown shape is never read as the common one.
