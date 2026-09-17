@@ -258,6 +258,13 @@ type Engine struct {
 	// attributes, as a client attribute cache populated before the swap would.
 	restatFn func(path string) (probe.Attributes, error)
 
+	// statFn, when non-nil, replaces the ONE attribute read the pre-claim path takes of a
+	// source file. It is the seam a test COUNTS through: how many times a scan reads one
+	// file's attributes is not visible in any outcome the scan records, and elapsed time
+	// cannot tell one read from three on a warm page cache, so the count has to come from
+	// the code rather than from a proxy for it.
+	statFn func(path string) (os.FileInfo, error)
+
 	// --- the four S0085 metadata seams ---------------------------------------------
 	//
 	// The swap carries the SOURCE's mode, ownership and modification time onto the
@@ -354,6 +361,47 @@ func (e *Engine) rename(oldpath, newpath string) error {
 		return e.renameFn(oldpath, newpath)
 	}
 	return os.Rename(oldpath, newpath)
+}
+
+// statSource reads one source file's filesystem attributes, routing through the test seam
+// when one is set. It is the pre-claim path's ONLY route to a file's attributes, which is
+// what makes "one file costs one read" a countable property rather than a claim.
+//
+// It FOLLOWS a symbolic link, as every pre-claim read it replaced did. The symlink guard
+// that must not follow one (probe.IsSymlink) runs after the claim and takes its own Lstat.
+func (e *Engine) statSource(f string) (os.FileInfo, error) {
+	if e.statFn != nil {
+		return e.statFn(f)
+	}
+	return os.Stat(f)
+}
+
+// declinedSource, fingerprintSource and nlinkSource are DeclinedPath, probe.Fingerprint and
+// probe.NLink taken through statSource, so that every attribute read the pre-claim path
+// makes goes through the one seam and none of them is invisible to a count of them. Each
+// keeps its original's fail-safe answer exactly.
+func (e *Engine) declinedSource(f string) (rule, detail string, yes bool) {
+	if rule, detail, yes := Declined(f); yes {
+		return rule, detail, true
+	}
+	fi, err := e.statSource(f)
+	return DeclinedByAttributes(f, fi, err)
+}
+
+func (e *Engine) fingerprintSource(f string) string {
+	fi, err := e.statSource(f)
+	if err != nil {
+		return "0:0"
+	}
+	return probe.AttributesOf(fi).String()
+}
+
+func (e *Engine) nlinkSource(f string) uint64 {
+	fi, err := e.statSource(f)
+	if err != nil {
+		return 1
+	}
+	return probe.NLinkOf(fi)
 }
 
 // restat reads a path's rename-invariant attributes after a failed swap, routing
@@ -1087,7 +1135,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// The order below is unchanged: a path with no file at the other end returns as silently
 	// as it always did (a dangling link is met every pass and must not narrate every pass),
 	// and the character rule is still said out loud below the hold-backs.
-	rule, _, declined := DeclinedPath(f)
+	rule, _, declined := e.declinedSource(f)
 	if declined && rule != RuleUnsupportedCharacters {
 		return nil
 	}
@@ -1096,7 +1144,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// measures its retention by. A second stat deliberately: the question above answers
 	// whether this path may be processed at all, and only this caller wants a number about
 	// the file. A file that went away between the two returns here, as it always did.
-	fi, err := os.Stat(f)
+	fi, err := e.statSource(f)
 	if err != nil {
 		return nil
 	}
@@ -1136,7 +1184,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	prof, pre, heightKnown := e.effectiveProfile(ctx, f, root, e.Probe.VideoProps)
 	by := decidedBy(root, rooted)
 
-	key := probe.Fingerprint(f)
+	key := e.fingerprintSource(f)
 
 	// THIS JOB's effective ENCODE settings, resolved once, here, from that root's profile
 	// and the source path: the root's own values overlaid with the first matching encode
@@ -1227,7 +1275,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// window was protecting. Discounting is proved per link (same inode, live retention
 	// record), never assumed from the count, so a foreign extra link still skips.
 	if prof.HardlinkSkip() {
-		if links := probe.NLink(f); links > 1 && links > 1+e.retainedLinks(ctx, f, key) {
+		if links := e.nlinkSource(f); links > 1 && links > 1+e.retainedLinks(ctx, f, key) {
 			e.Log.Info("skip (hardlinked — swap would break a seed and reclaim nothing)", "file", f, "links", links)
 			changed, err := e.Store.RecordSkip(ctx, f, key, SkipHardlinked, by, ts.Profile)
 			if err != nil {

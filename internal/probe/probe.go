@@ -8,6 +8,7 @@ package probe
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"regexp"
@@ -271,7 +272,7 @@ func Fingerprint(f string) string {
 	if err != nil {
 		return "0:0"
 	}
-	return Attributes{SizeBytes: fi.Size(), MTimeUnix: fi.ModTime().Unix()}.String()
+	return AttributesOf(fi).String()
 }
 
 // Attributes is a file's RENAME-INVARIANT attribute record: the byte count and the
@@ -313,6 +314,30 @@ func (a Attributes) String() string {
 	return strconv.FormatInt(a.SizeBytes, 10) + ":" + strconv.FormatInt(a.MTimeUnix, 10)
 }
 
+// AttributesOf is the record read out of an attribute read the caller ALREADY TOOK, so a
+// caller that wants the size, the modification time and the link count of one file pays for
+// one stat rather than one per question.
+//
+// Which stat it is handed is the caller's to get right and is not a detail: fi must come
+// from a FOLLOWING read (os.Stat), because the key a symlinked source is recorded under has
+// always been its TARGET's size and time. An os.Lstat here would key every symlinked source
+// on the link - a different size and a different time - and every stored row for one would
+// stop matching, offering a file that was already done back to a pipeline that deletes its
+// source.
+func AttributesOf(fi fs.FileInfo) Attributes {
+	return Attributes{SizeBytes: fi.Size(), MTimeUnix: fi.ModTime().Unix()}
+}
+
+// NLinkOf is NLink's answer from an attribute read the caller already took, and keeps
+// NLink's fail-safe default: a record this platform does not spell as a Stat_t reports ONE
+// link, so an unreadable count never trips the hardlink guard.
+func NLinkOf(fi fs.FileInfo) uint64 {
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return uint64(st.Nlink)
+	}
+	return 1
+}
+
 // StatAttributes reads f's rename-invariant attribute record. Unlike Fingerprint it
 // returns the ERROR rather than a "0:0" sentinel, because after a failed swap the
 // difference between "the file is not there" and "the file is there and is zero bytes
@@ -323,7 +348,7 @@ func StatAttributes(f string) (Attributes, error) {
 	if err != nil {
 		return Attributes{}, err
 	}
-	return Attributes{SizeBytes: fi.Size(), MTimeUnix: fi.ModTime().Unix()}, nil
+	return AttributesOf(fi), nil
 }
 
 // IsSymlink reports whether f is itself a symbolic link (Lstat, so it does NOT
@@ -351,10 +376,7 @@ func NLink(f string) uint64 {
 	if err != nil {
 		return 1
 	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-		return uint64(st.Nlink)
-	}
-	return 1
+	return NLinkOf(fi)
 }
 
 // ---- colour / HDR + source-property probes (TRANSCODE-3) -------------------

@@ -119,6 +119,17 @@ func DeclinedPath(p string) (rule, detail string, yes bool) {
 		return rule, detail, true
 	}
 	fi, err := os.Stat(p)
+	return DeclinedByAttributes(p, fi, err)
+}
+
+// DeclinedByAttributes is the half of DeclinedPath that needs an attribute read, answered
+// from a read the caller already took. err is the failure of that read itself.
+//
+// It is split out so a caller that stats the file anyway asks this question off ITS OWN
+// read rather than paying for a second one, and so the rule stays in ONE place while it
+// does: a refusal added here still reaches every door, exactly as DeclinedPath's doc
+// promises. The read must FOLLOW the link, as DeclinedPath's own does.
+func DeclinedByAttributes(p string, fi os.FileInfo, err error) (rule, detail string, yes bool) {
 	if err != nil {
 		return RuleNotARegularFile, fmt.Sprintf("%s is not a file this run can act on: %v", p, err), true
 	}
