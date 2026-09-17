@@ -98,6 +98,21 @@ func New(baseCtx context.Context, cfg config.Config, token, readToken secret.Val
 // ServeHTTP makes Server an http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
 
+// reads is the handle every READ endpoint answers from, and it is deliberately the HUB's
+// rather than a second field of this struct.
+//
+// At `serve` the hub is built on a read-only door onto the ledger - a handle the database
+// itself refuses every write on - so a reporting read cannot occupy the single connection
+// the engine's Claim/Advance/Finish writes queue on. Taking it from the hub is what makes
+// the stream and the polled endpoints structurally incapable of disagreeing about which
+// door they read through: there is one place the reporting handle is supplied, and it is
+// the hub's constructor.
+//
+// s.store stays the WRITE handle, and the mutating endpoints keep using it: the withheld
+// paths are recorded through it, and a ledger search is a control-gated read that may as
+// well share the writer's connection because it is not on any frame's path.
+func (s *Server) reads() store.Store { return s.hub.store }
+
 func (s *Server) routes() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer) // a panicking handler must never crash the daemon
@@ -213,7 +228,7 @@ type controlState struct {
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
-	sum, err := s.store.Summary(r.Context())
+	sum, err := s.reads().Summary(r.Context())
 	if err != nil {
 		s.fail(w, "summary", err)
 		return
@@ -237,7 +252,7 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
-	jobs, err := s.store.List(r.Context(), activeAndPending, queueLimit)
+	jobs, err := s.reads().List(r.Context(), activeAndPending, queueLimit)
 	if err != nil {
 		s.fail(w, "queue", err)
 		return
@@ -267,7 +282,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	jobs, err := s.store.List(r.Context(), terminal, limit)
+	jobs, err := s.reads().List(r.Context(), terminal, limit)
 	if err != nil {
 		s.fail(w, "history", err)
 		return
