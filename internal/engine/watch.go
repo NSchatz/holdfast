@@ -580,9 +580,10 @@ func (w *Watches) offer(path string) {
 	}
 }
 
-// drain is one worker: it offers settled paths to ProcessFile, the exported door every
-// scan-found file enters by. It decides nothing about a file - the guards, the gates, the
-// claim and the swap discipline are all on the other side of that door.
+// drain is one worker. The ctx check before processing is what makes a cancelled watch
+// drop its backlog rather than work through it: a receive that wins the race with the
+// cancellation still hands back a path, and starting an encode at that point would be
+// starting work the shutdown has already decided not to do.
 func (w *Watches) drain(ctx context.Context, worker string) {
 	defer w.wg.Done()
 	for {
@@ -596,10 +597,18 @@ func (w *Watches) drain(ctx context.Context, worker string) {
 			if ctx.Err() != nil {
 				return
 			}
-			if err := w.eng.ProcessFile(ctx, worker, p); err != nil {
-				w.log.Warn("a watched file ended with an error", "file", p, "err", err)
-			}
+			w.process(ctx, worker, p)
 		}
+	}
+}
+
+// process hands ONE settled path to the pipeline, through the same exported door a scan's
+// worker uses. It decides nothing about the file - the skip guards, the gates, the claim
+// and the swap discipline are all on the other side of that door, which is precisely why
+// the watch reaches them without holding a second copy of any of them.
+func (w *Watches) process(ctx context.Context, worker, path string) {
+	if err := w.eng.ProcessFile(ctx, worker, path); err != nil {
+		w.log.Warn("a watched file ended with an error", "file", path, "err", err)
 	}
 }
 
