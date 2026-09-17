@@ -217,6 +217,81 @@ files offered to the pipeline is narrower.
 each list and how many patterns it holds. The count is a count OF PATTERNS - `validate`
 describes a configuration and walks no library, so it never counts matching files.
 
+## `audio_languages`, `subtitle_languages`, `keep_commentary` and `remux_only` - which streams survive
+
+<a id="stream-selection"></a>
+
+```yaml
+audio_languages: [eng, jpn]    # keep these audio languages; empty (the default) keeps every one
+subtitle_languages: [eng]      # the same, for subtitles
+keep_commentary: false         # drop the tracks the CONTAINER marks as commentary
+remux_only: true               # stream-copy the video too: drop streams, re-encode nothing
+```
+
+These four keys decide which of a source's streams the replacement carries. The defaults
+are the behaviour this tool had before they existed:
+both language lists default to empty, which keeps every stream of that type;
+keep_commentary defaults to true, so dropping a commentary track is a choice and never a
+side effect of a language filter; and
+remux_only defaults to false, so the video is re-encoded as it always was.
+A configuration that names none of them therefore carries exactly the streams it always
+did and builds exactly the encode command it always built. Each may be written at the top
+level and inside a `library_roots` entry, where the entry's value **replaces** the
+inherited one for that root. They ARE profile knobs: editing one moves that root's profile
+digest, because a digest records what decided a file and these decide what is done to it.
+
+A language list is a list of ISO-639-2 codes, compared **case-insensitively** against a
+stream's own `language` tag, and a code is validated by SHAPE - three alphabetic
+characters - rather than against a registry, so `english` and `en` are refused at startup
+and a code this build has never heard of is not. An empty list means the same thing an
+absent key means: every stream of that type is carried.
+
+A stream with no language tag, an empty one, or the undefined code und
+**is kept whatever a list says**. Containers spell "unknown" both ways, and an untagged
+track is more often the main audio than not - so this is the fail-safe direction, and it
+is the reason a list can only ever drop tracks whose language you can see.
+
+**If applying the audio selection would leave the file with no audio at all**, the
+selection is not applied to audio: every audio stream is carried forward instead, the rest
+of the selection still applies, and the fact is recorded on that file's row
+(`selection_not_applied` in `holdfast export`). `audio_languages: [eng]` over a
+foreign-language film therefore keeps its Japanese audio rather than producing a silent
+file, which is a loss nothing recovers once the source is gone. Only AUDIO has this guard:
+a file with no subtitle track is watchable, and extending the guard would make
+`subtitle_languages: [eng]` silently a no-op on every foreign-language film.
+
+`keep_commentary: false` drops only the streams the **container itself marks** as
+commentary. A title, a stream name or a filename is never read as such a mark: inferring
+one would drop a main track on a mislabelled file, on a configuration its operator
+believed was conservative.
+
+**`remux_only: true` stream-copies the video as well**, so nothing is re-encoded and the
+job reclaims exactly the bytes of the streams it dropped. It is held to every structural
+gate an encode is held to - length parity, the intended-stream check and the size floor in
+force for that root, which is **not** waived or lowered for the mode - and it
+**skips the VMAF gate**, recording on the row that the gate did not run and why
+(`vmaf_skipped`), with no VMAF figure of any kind. That skip is paid for and not free:
+before it is taken, every video stream the output carries is established to be
+**identical to the source** stream it came from, and an output that is not - or whose
+identity cannot be established at all - is **rejected and the source is kept**.
+`remux_only` beside an `encoder` in the same layer is refused at startup: they are two
+instructions about one job.
+
+Whatever a job drops, the row records: each dropped stream by its source index, its type
+and its language as the source tagged it (`dropped_streams` in `holdfast export`). The
+dropped bytes are not recoverable from the replacement, so that row is the only record
+there is - and a row written before this build existed reads as **not recorded** rather
+than as "dropped nothing".
+
+Audio **transcoding is a non-goal**: this is selection and copy, and nothing here
+re-encodes a track, downmixes one, or adds an AAC stereo companion. Transcoding audio
+reopens the fidelity question for a second medium, and it would need its own gate argument
+before this tool did it to somebody's only copy of a film.
+
+`holdfast validate` prints, per library root, the resolved value of each of these four keys
+and which layer supplied it - the same way it prints every other knob, and for the same
+reason: the resolved value is the only thing that says what a root will actually do.
+
 ## Where the working file lives
 
 `scratch_dir` is a separate question - it moves where the encode WORKS, not what it

@@ -388,3 +388,54 @@ func TestDecisionInputs_RoundTripAndFailSafeParsing(t *testing.T) {
 		t.Errorf("a record of the empty set must round-trip as a record of the empty set, got %+v", in)
 	}
 }
+
+// TestClaim_AMovedProfileDigestReopensNoTerminalRow is [AC-16]'s second half, and it is the
+// half that decides whether an upgrade is quiet or a library-wide re-encode.
+//
+// Adding knobs to the profile moves every root's digest at once, because the digest input
+// gains their names - a bounded, accepted consequence. It is only bounded if a digest is not
+// what re-opens a row. So: a done row carrying the digest an earlier build wrote, claimed
+// under a configuration whose digest is now something else and whose recorded INPUTS are
+// unchanged, must stay terminal.
+//
+// This can fail. A build that compared digests at claim time - which is the obvious thing to
+// reach for, and what `profile_digest` looks like it is for - would re-open every terminal
+// row in the ledger on the first scan after the upgrade, and every encode that passes the
+// gates deletes its source.
+func TestClaim_AMovedProfileDigestReopensNoTerminalRow(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	ok, err := s.Claim(ctx, "/lib/done.mkv", "20:200", "seed", 3, sameConfig)
+	if err != nil || !ok {
+		t.Fatalf("seed claim: ok=%v err=%v", ok, err)
+	}
+	if err := s.Finish(ctx, "/lib/done.mkv", "20:200", Done, &Outcome{
+		Encoder:        "cpu",
+		DecisionInputs: sameConfig,
+		// The digest a build WITHOUT the stream-selection knobs computed.
+		Decision: Decision{LibraryRoot: "/lib", ProfileDigest: "beforetheknobs"},
+	}, 3); err != nil {
+		t.Fatalf("seed finish: %v", err)
+	}
+
+	// This build resolves more knobs, so the digest it would compute for the same root is a
+	// different one. The recorded inputs have not moved.
+	claimed, err := s.Claim(ctx, "/lib/done.mkv", "20:200", "w0", 3, sameConfig)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if claimed {
+		t.Fatal("a terminal row was re-opened because the profile digest moved. Adding knobs moves " +
+			"every root's digest at once, so this would offer an entire library back to the encoder " +
+			"on the first scan after an upgrade - and every encode that passes the gates deletes its " +
+			"source. What re-opens a row is the inputs it recorded")
+	}
+	rows, err := s.List(ctx, []Status{Done}, 0)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("List: rows=%d err=%v", len(rows), err)
+	}
+	if rows[0].Outcome.ProfileDigest != "beforetheknobs" {
+		t.Errorf("the refused claim disturbed the recorded digest (%q): the row still says which "+
+			"profile decided it", rows[0].Outcome.ProfileDigest)
+	}
+}

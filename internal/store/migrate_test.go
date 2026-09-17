@@ -1325,7 +1325,7 @@ func atShippedVersion(t *testing.T, path string, version int) {
 // migrations slice: a step appended after this one moves it, along with the wind-back
 // fixtures. Where that step creates a table instead, this becomes a table name and the two
 // readers below ask sqlite_master rather than pragma_table_info.
-const newestStepColumn = "target_path"
+const newestStepColumn = "dropped_streams"
 
 // stampedFromVersion is the step that added the per-record version stamp. It is looked up
 // in the history rather than written out, so appending a step cannot move it by accident.
@@ -1865,6 +1865,86 @@ func TestMigrate_TheVersionStampStepMovesNoRowAndStampsNothingThatAlreadyExisted
 		if got := stampedRows(t, path, table); got != 0 {
 			t.Errorf("%d row(s) in %s carry a stamp after the migration, want none backfilled", got, table)
 		}
+	}
+}
+
+// TestStreamSelection_ALedgerAnEarlierBuildWroteMigratesAndReadsAsNotRecorded is [AC-11]: a
+// ledger written before the stream-selection columns existed is migrated forward, every row
+// is kept, and no existing row is handed a fabricated value - a row that recorded no
+// stream-selection facts reads as NOT RECORDED and never as "dropped nothing".
+//
+// The distinction is the whole criterion. "This job dropped nothing" is a statement about a
+// job somebody ran; an old row is the absence of one. Backfilling the first onto every row
+// in the field would be inventing evidence about swaps nobody measured, in the one table
+// whose entire job is to be evidence - which is why the step adds its columns NULLABLE WITH
+// NO DEFAULT (`data-migration` M1/M2).
+func TestStreamSelection_ALedgerAnEarlierBuildWroteMigratesAndReadsAsNotRecorded(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "jobs.db")
+	prev := schemaVersion() - 1
+	atShippedVersion(t, dbPath, prev)
+	older := "/lib/decided-by-the-previous-build.mkv"
+	seedPreviousBuildRow(t, dbPath, older)
+	before := rowCountOf(t, dbPath, "jobs")
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open a ledger the previous build wrote: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+
+	// M1: the migration EXPANDED. Every row survived.
+	if after := rowCountOf(t, dbPath, "jobs"); after != before {
+		t.Fatalf("the migration left %d job row(s), was %d", after, before)
+	}
+	rows, err := st.List(ctx, []Status{WouldTranscode}, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Path != older {
+		t.Fatalf("the previous build's row is not readable after the migration: %+v", rows)
+	}
+	old := rows[0].Outcome
+	if old.DroppedStreams.Recorded() {
+		t.Fatalf("a row written before the columns existed reads as HAVING RECORDED what it dropped "+
+			"(%s). Nothing recorded anything, and reading it as 'dropped nothing' is a claim about a "+
+			"job this build never saw", old.DroppedStreams)
+	}
+	if old.SelectionNotApplied != "" || old.VmafSkipped != "" {
+		t.Errorf("a row written before the columns existed reads selection_not_applied=%q "+
+			"vmaf_skipped=%q, want both not recorded", old.SelectionNotApplied, old.VmafSkipped)
+	}
+	// An expansion adds; it does not rewrite what that build recorded.
+	if old.SourceCodec != "h264" || old.SourceBytes == nil || *old.SourceBytes != 4_000_000 {
+		t.Errorf("the migration disturbed what the previous build recorded: %+v", old)
+	}
+
+	// And a row THIS build writes carries the fact, so the absence above is a fact about
+	// that build rather than a column nothing ever fills.
+	fresh := "/lib/decided-now.mkv"
+	if ok, err := st.Claim(ctx, fresh, "8:8", "w0", 3, DecisionInputs{}); err != nil || !ok {
+		t.Fatalf("Claim(%s): ok=%v err=%v", fresh, ok, err)
+	}
+	if err := st.Finish(ctx, fresh, "8:8", Done,
+		&Outcome{Encoder: "cpu", DroppedStreams: RecordDroppedStreams(nil)}, 3); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	done, err := st.List(ctx, []Status{Done}, 0)
+	if err != nil {
+		t.Fatalf("List(done): %v", err)
+	}
+	var written *Job
+	for i := range done {
+		if done[i].Path == fresh {
+			written = &done[i]
+		}
+	}
+	if written == nil {
+		t.Fatalf("the row this build just wrote is not in the ledger: %+v", done)
+	}
+	if !written.Outcome.DroppedStreams.Recorded() {
+		t.Error("a row this build wrote for a job that dropped nothing reads as NOT RECORDED: the two " +
+			"states have collapsed into one and the criterion is unprovable either way")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"math"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -1892,5 +1893,115 @@ func TestAggregates_ADeterministicFailureAddsNothingToTheSkipBreakdown(t *testin
 				t.Errorf("bucket %q grew from %d to %d because of a failure", b.Key, was.Count, b.Count)
 			}
 		}
+	}
+}
+
+// --- the stream-selection record (S0088) --------------------------------------
+
+// TestFinish_RecordsWhichStreamsAJobDroppedAndSurvivesAReopen is [AC-10]: a job that drops
+// a stream records WHICH streams it dropped - each by its source index, its type and its
+// language as the source tagged it - and that record survives a restart.
+//
+// The reopen half is the durability: the dropped bytes are not recoverable from the
+// replacement, so the row is the only record there is, and a record that lived in one
+// process's memory would be no record at all.
+func TestFinish_RecordsWhichStreamsAJobDroppedAndSurvivesAReopen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "jobs.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	if ok, err := s.Claim(ctx, "/a/movie.mkv", "fp1", "w0", 3, sameConfig); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	dropped := []DroppedStream{
+		{Index: 2, Type: "audio", Language: "jpn"},
+		{Index: 4, Type: "subtitle", Language: ""},
+	}
+	if err := s.Finish(ctx, "/a/movie.mkv", "fp1", Done, &Outcome{
+		Encoder:             "cpu",
+		DroppedStreams:      RecordDroppedStreams(dropped),
+		SelectionNotApplied: "audio-selection-would-leave-no-audio",
+		VmafSkipped:         "remux-only-video-identical",
+	}, 3); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// A RESTART: a second process, over the same file.
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+	rows, err := s2.List(ctx, []Status{Done}, 0)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("List: rows=%d err=%v", len(rows), err)
+	}
+	got := rows[0].Outcome
+	if !got.DroppedStreams.Recorded() {
+		t.Fatal("the record did not survive the restart: the dropped bytes are gone and this row was " +
+			"the only evidence they were ever there")
+	}
+	if !reflect.DeepEqual(got.DroppedStreams.Streams(), dropped) {
+		t.Fatalf("dropped streams read back as %+v, want %+v - the index, the type and the language "+
+			"the source tagged it with are each part of the record",
+			got.DroppedStreams.Streams(), dropped)
+	}
+	if got.SelectionNotApplied != "audio-selection-would-leave-no-audio" || got.VmafSkipped != "remux-only-video-identical" {
+		t.Errorf("the two reasons read back as %q / %q", got.SelectionNotApplied, got.VmafSkipped)
+	}
+}
+
+// TestDroppedStreams_NotRecordedIsNeverDroppedNothing is [AC-11] at the type that carries
+// the distinction: a row that recorded no stream-selection facts reads as NOT RECORDED,
+// and a job that applied a selection and dropped nothing reads as a recorded empty set.
+//
+// The two are one value apart and a mile apart in meaning. Collapsing them would put "this
+// job kept every stream" onto every row written before this build existed - a fabricated
+// claim about jobs nobody measured, in the one table whose entire job is to be evidence.
+func TestDroppedStreams_NotRecordedIsNeverDroppedNothing(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name         string
+		out          *Outcome
+		wantRecorded bool
+	}{
+		{"a row that recorded nothing", &Outcome{Encoder: "cpu"}, false},
+		{"a job that dropped nothing", &Outcome{Encoder: "cpu", DroppedStreams: RecordDroppedStreams(nil)}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := "/a/" + tc.name + ".mkv"
+			if ok, err := s.Claim(ctx, path, "fp", "w0", 3, sameConfig); err != nil || !ok {
+				t.Fatalf("claim: ok=%v err=%v", ok, err)
+			}
+			if err := s.Finish(ctx, path, "fp", Done, tc.out, 3); err != nil {
+				t.Fatalf("Finish: %v", err)
+			}
+			rows, err := s.List(ctx, []Status{Done}, 0)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			for _, r := range rows {
+				if r.Path != path {
+					continue
+				}
+				if got := r.Outcome.DroppedStreams.Recorded(); got != tc.wantRecorded {
+					t.Fatalf("Recorded() = %v, want %v - %q and %q are different statements and the "+
+						"column has to keep them apart", got, tc.wantRecorded,
+						"nothing is known about what this job dropped", "this job dropped nothing")
+				}
+				if n := r.Outcome.DroppedStreams.Len(); n != 0 {
+					t.Fatalf("the record names %d stream(s), want none", n)
+				}
+				return
+			}
+			t.Fatalf("no row for %s", path)
+		})
 	}
 }

@@ -604,3 +604,76 @@ func TestValidate_RefusesAMalformedPatternTheSameWay(t *testing.T) {
 		t.Errorf("the run's refusal does not name the pattern:\n%s", errOut.String())
 	}
 }
+
+// TestValidate_PrintsTheStreamSelectionInForce is [AC-17]: `validate` prints, per library
+// root, the resolved value of each of the four stream-selection keys and which layer
+// supplied it, exits 0 on a valid configuration, and walks no library doing it.
+//
+// The resolved value is the only thing that answers "what will this root do to my files".
+// A key may be a built-in default, a top-level choice or that root's own entry, and the
+// value reads the same in all three cases - so the YAML cannot tell an operator which, and
+// on these keys the wrong answer is a track that is gone from the replacement.
+func TestValidate_PrintsTheStreamSelectionInForce(t *testing.T) {
+	dir := t.TempDir()
+	tv := filepath.Join(dir, "tv")
+	anime := filepath.Join(dir, "anime")
+	for _, r := range []string{tv, anime} {
+		if err := os.MkdirAll(r, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A real media file under a root, so "walks no library" has something to walk.
+	media := filepath.Join(tv, "ep.mkv")
+	if err := os.WriteFile(media, []byte("not really a video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(dir, "state")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(
+		"library_roots:\n"+
+			"  - path: "+tv+"\n"+
+			"  - path: "+anime+"\n"+
+			"    audio_languages: [jpn]\n"+
+			"    remux_only: true\n"+
+			"audio_languages: [eng]\n"+
+			"keep_commentary: false\n"+
+			"state_dir: "+stateDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	if code := dispatch([]string{"validate", "--config", cfgPath}, &out, &errOut); code != 0 {
+		t.Fatalf("validate exited %d on a valid configuration: %s", code, errOut.String())
+	}
+	got := out.String()
+
+	tvSection, animeSection := sectionFor(t, got, tv), sectionFor(t, got, anime)
+	// Every one of the four is printed under EVERY root: a key an operator cannot see
+	// resolved is one they find out about from the file that came back missing a track.
+	for _, knob := range config.SelectionKnobs() {
+		for name, section := range map[string]string{tv: tvSection, anime: animeSection} {
+			if !strings.Contains(section, knob) {
+				t.Errorf("the printed configuration for %s does not carry %q:\n%s", name, knob, section)
+			}
+		}
+	}
+	// The values, and the layer each came from. Three layers are represented, which is what
+	// a printer that only ever wrote one of them would fail on.
+	assertKnob(t, tvSection, "audio_languages", "eng", string(config.LayerTopLevel))
+	assertKnob(t, animeSection, "audio_languages", "jpn", string(config.LayerProfile))
+	assertKnob(t, tvSection, "subtitle_languages", "none", string(config.LayerDefault))
+	assertKnob(t, tvSection, "keep_commentary", "false", string(config.LayerTopLevel))
+	assertKnob(t, animeSection, "keep_commentary", "false", string(config.LayerTopLevel))
+	assertKnob(t, tvSection, "remux_only", "false", string(config.LayerDefault))
+	assertKnob(t, animeSection, "remux_only", "true", string(config.LayerProfile))
+
+	// And it walked nothing: no state directory was created and the library is as it was.
+	if _, err := os.Stat(stateDir); err == nil {
+		t.Error("validate created the state directory: it describes a configuration and must not " +
+			"open a ledger to do it")
+	}
+	entries, err := os.ReadDir(tv)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "ep.mkv" {
+		t.Errorf("the library root is not as it was (%v, err=%v)", entries, err)
+	}
+}

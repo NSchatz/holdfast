@@ -86,6 +86,10 @@ vmaf_min_pool: 55
 vmaf_min_chroma: 28
 vmaf_subsample: 2
 vmaf_model: version=vmaf_v0.6.1
+audio_languages: [eng, jpn]
+subtitle_languages: [eng]
+keep_commentary: false
+remux_only: false
 workers: 4
 state_dir: /var/lib/holdfast
 undo_window_hours: 24
@@ -115,6 +119,10 @@ max_load: 1.5
 		VmafMinChroma:     28,
 		VmafSubsample:     2,
 		VmafModel:         "version=vmaf_v0.6.1",
+		AudioLanguages:    []string{"eng", "jpn"},
+		SubtitleLanguages: []string{"eng"},
+		KeepCommentary:    &no,
+		RemuxOnly:         &no,
 	}
 	roots := c.RootProfiles()
 	if len(roots) != 2 {
@@ -342,6 +350,10 @@ func TestProfileKnobSetIsClosedAndSingleSourced(t *testing.T) {
 		"min_bitrate_kbps", "min_savings_percent", "skip_hardlinked",
 		"vmaf_enable", "min_vmaf", "vmaf_min_pool", "vmaf_min_chroma",
 		"vmaf_subsample", "vmaf_model",
+		// The stream-selection keys. They decide what is DONE to a file - which of its
+		// streams survive - so they are knobs and the digest covers them, unlike the path
+		// filters below, which decide whether a file is looked at at all.
+		"audio_languages", "subtitle_languages", "keep_commentary", "remux_only",
 	}
 	if !reflect.DeepEqual(knobs, want) {
 		t.Fatalf("ProfileKnobs() = %v, want %v", knobs, want)
@@ -476,6 +488,8 @@ func setDistinct(t *testing.T, f reflect.Value, n int) {
 	case reflect.Ptr:
 		b := n%2 == 0
 		f.Set(reflect.ValueOf(&b))
+	case reflect.Slice:
+		f.Set(reflect.ValueOf([]string{fmt.Sprintf("l%02d", n)}))
 	default:
 		t.Fatalf("setDistinct: unhandled kind %s", f.Kind())
 	}
@@ -885,6 +899,10 @@ func bump(t *testing.T, f reflect.Value) {
 		cur := f.IsNil() || f.Elem().Bool()
 		next := !cur
 		f.Set(reflect.ValueOf(&next))
+	case reflect.Slice:
+		// A list knob is read CANONICALLY - lowercased, sorted, de-duplicated - so the
+		// move has to be one that survives that: a code the list does not already carry.
+		f.Set(reflect.Append(f, reflect.ValueOf("zzz")))
 	default:
 		t.Fatalf("bump: unhandled kind %s", f.Kind())
 	}
@@ -1068,6 +1086,46 @@ library_roots:
 `)
 	if moved.RootProfiles()[0].Profile.Digest() == before.RootProfiles()[0].Profile.Digest() {
 		t.Fatal("a crf edit left the digest where it was, so this test could not detect a filter moving it")
+	}
+}
+
+// --- the stream-selection knobs and the digest (S0088) ------------------------
+
+// TestProfileDigest_TwoRootsDifferingInASelectionKnobDigestDifferently is [AC-16]'s first
+// half: two roots that resolve to different values for any of the four keys carry different
+// profile digests.
+//
+// These keys decide what is DONE to a file - which of its streams survive - so a digest that
+// could not tell two such roots apart would be a digest that lies about what decided a row,
+// on a row whose source is deleted once the replacement passes.
+func TestProfileDigest_TwoRootsDifferingInASelectionKnobDigestDifferently(t *testing.T) {
+	for _, tc := range []struct{ name, a, b string }{
+		{"audio_languages", "    audio_languages: [eng]\n", "    audio_languages: [jpn]\n"},
+		{"audio_languages, one empty", "    audio_languages: [eng]\n", "    audio_languages: []\n"},
+		{"subtitle_languages", "    subtitle_languages: [eng]\n", "    subtitle_languages: [eng, fre]\n"},
+		{"keep_commentary", "    keep_commentary: true\n", "    keep_commentary: false\n"},
+		{"remux_only", "    remux_only: false\n", "    remux_only: true\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := loadYAML(t, "library_roots:\n  - path: /mnt/a\n"+tc.a+"  - path: /mnt/b\n"+tc.b)
+			a := rootByPath(t, c, "/mnt/a").Profile.Digest()
+			b := rootByPath(t, c, "/mnt/b").Profile.Digest()
+			if a == b {
+				t.Fatalf("two roots differing in %s both digest %s: a row decided under one would be "+
+					"indistinguishable from a row decided under the other", tc.name, a)
+			}
+		})
+	}
+
+	// And the other direction: two roots that decide every file identically digest
+	// identically, however the values were spelled. The lists are compared
+	// case-insensitively and order-free, so these two profiles ARE one profile.
+	same := loadYAML(t, "library_roots:\n"+
+		"  - path: /mnt/a\n    audio_languages: [jpn, ENG]\n"+
+		"  - path: /mnt/b\n    audio_languages: [eng, jpn, eng]\n")
+	if a, b := rootByPath(t, same, "/mnt/a").Profile.Digest(), rootByPath(t, same, "/mnt/b").Profile.Digest(); a != b {
+		t.Errorf("two roots that select exactly the same streams digest %s and %s: the canonical "+
+			"rendering is what the digest and the matcher must share", a, b)
 	}
 }
 

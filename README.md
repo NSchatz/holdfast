@@ -86,6 +86,13 @@ while Dolby Vision and HDR10+ **dynamic** metadata is **detect-and-skipped** rat
 and embedded artwork is carried through unencoded. It transcodes files in a library other tools
 manage - not a media server.
 
+**Audio transcoding is a non-goal.** A library root can say which audio and subtitle streams its
+replacements carry (`audio_languages`, `subtitle_languages`, `keep_commentary`, `remux_only` - see
+**[docs/profiles.md](docs/profiles.md#stream-selection)**), and that is selection and **copy**: no
+downmix, no re-encode, no AAC stereo companion track. Transcoding audio reopens the fidelity question
+for a second medium, and it would need its own gate argument before this tool did it to somebody's
+only copy of a film.
+
 **Distributed or remote processing is a non-goal by design, not a missing feature.** holdfast is one
 process: no server/node split, no remote workers. The no-loss argument rests on an atomic
 same-filesystem `rename(2)` - it either happened or it did not, so a failure never leaves a partial

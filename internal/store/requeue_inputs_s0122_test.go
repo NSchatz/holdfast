@@ -26,6 +26,11 @@ var stepsSinceDecisionInputs = []struct {
 	version int
 	undo    []string
 }{
+	{17, []string{
+		`ALTER TABLE jobs DROP COLUMN dropped_streams`,
+		`ALTER TABLE jobs DROP COLUMN selection_not_applied`,
+		`ALTER TABLE jobs DROP COLUMN vmaf_skipped`,
+	}},
 	{16, []string{`ALTER TABLE jobs DROP COLUMN target_path`}},
 	// v15 is the first step here that creates a TABLE rather than adding a column, so its
 	// reverse drops one. The index goes first, mirroring the create order backwards: SQLite
