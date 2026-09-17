@@ -222,13 +222,17 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	for st, n := range sum {
 		counts[string(st)] = n
 	}
+	// The same whole-ledger figure set the stream publishes, from the same cache and
+	// under the same refresh interval: a client that polls sees what a client that
+	// subscribes sees, and polling this endpoint cannot make the figures cost more than
+	// one refresh per interval however often it is called.
 	writeJSON(w, http.StatusOK, controlState{
 		Summary:                counts,
 		BytesReclaimedSession:  s.hub.BytesReclaimed(),
 		BytesReclaimedLifetime: s.hub.ReclaimedLifetime(),
 		Paused:                 s.ctrl.Paused(),
 		Scanning:               s.ctrl.Scanning(),
-		Aggregates:             s.hub.aggregates(r.Context()),
+		Aggregates:             aggregatesOf(s.hub.ledgerFigures(r.Context(), true)),
 	})
 }
 
@@ -249,7 +253,7 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"queue":       s.hub.queueDTOs(jobs),
 		"now":         time.Now().Unix(),
-		"queue_total": s.hub.rowTotal(r.Context(), "queue_total", activeAndPending, queueLimit),
+		"queue_total": rowTotalOf(s.hub.ledgerFigures(r.Context(), true).QueueTotal, queueLimit),
 	})
 }
 
@@ -273,7 +277,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	// `count` does not. A total that tracked the request would just be len(history).
 	writeJSON(w, http.StatusOK, map[string]any{
 		"history":       toDTOs(jobs),
-		"history_total": s.hub.rowTotal(r.Context(), "history_total", terminal, limit),
+		"history_total": rowTotalOf(s.hub.ledgerFigures(r.Context(), true).HistoryTotal, limit),
 	})
 }
 

@@ -231,7 +231,7 @@ func TestSubscribe_InitialFrameIsBuiltOnDemand(t *testing.T) {
 // exists to prevent.
 func TestSubscribe_InitialFrameIsBuiltOnDemand_SurvivesAFailedBuild(t *testing.T) {
 	hub, _ := countingHub(t)
-	hub.store = failingSummaryStore{}
+	hub.store = failingSummaryStore{&countingStore{}}
 
 	ch, cancel := hub.Subscribe(context.Background())
 	defer cancel()
@@ -255,18 +255,17 @@ func TestSubscribe_InitialFrameIsBuiltOnDemand_SurvivesAFailedBuild(t *testing.T
 	}
 }
 
-// failingSummaryStore fails the one read buildSnapshot cannot survive.
-type failingSummaryStore struct{ store.Store }
+// failingSummaryStore fails the one read buildSnapshot cannot survive, and reads
+// everything else normally - so a frame that fails here failed for the reason the test
+// names and not because the double is thin.
+type failingSummaryStore struct{ *countingStore }
 
 func (failingSummaryStore) Summary(context.Context) (map[store.Status]int, error) {
 	return nil, errSummaryUnreadable
 }
-
-func (failingSummaryStore) ReclaimedTotal(context.Context) (int64, error) { return 0, nil }
 
 var errSummaryUnreadable = errStatic("simulated: the summary could not be read")
 
 type errStatic string
 
 func (e errStatic) Error() string { return string(e) }
-

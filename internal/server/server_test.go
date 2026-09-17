@@ -1283,10 +1283,10 @@ func TestSnapshot_EveryAggregateStatesTheSetItCovers(t *testing.T) {
 	// A bounded figure states its bound ALONGSIDE the figure, on the wire, in the same
 	// object. This drives the projection with a windowed aggregate to prove the
 	// statement travels rather than being dropped on the way out.
-	windowed := (&Hub{log: discard()}).spread("windowed", store.Spread{
+	windowed := spreadOf(figureReading[store.Spread]{served: true, value: store.Spread{
 		Coverage: store.Coverage{Set: "done rows in the ledger", Window: "the most recent 200 rows"},
 		Counted:  5,
-	})
+	}})
 	if windowed.Window != "the most recent 200 rows" || windowed.Covers != "done rows in the ledger" {
 		t.Errorf("a bounded figure lost its window on the wire: %+v", windowed)
 	}
@@ -1472,9 +1472,14 @@ func TestSnapshot_AggregatesAddNoAuthorizationAndNoPerFileDatum(t *testing.T) {
 	if err := json.Unmarshal(aggRaw, &members); err != nil {
 		t.Fatalf("decode aggregates: %v", err)
 	}
+	// age_seconds is here deliberately (S0096): it is how old the VALUE being served is,
+	// a fact about the read rather than about any file, and it names nothing a library
+	// contains. It is what lets a figure be published from a bounded refresh without
+	// being published as though it had been computed for this frame.
 	allowed := map[string]bool{
 		"available": true, "unavailable": true, "covers": true, "window": true,
-		"counted": true, "excluded": true, "min": true, "mean": true, "max": true, "buckets": true,
+		"age_seconds": true,
+		"counted":     true, "excluded": true, "min": true, "mean": true, "max": true, "buckets": true,
 	}
 	for name, fields := range members {
 		for k := range fields {
