@@ -807,6 +807,9 @@ func Load(path string) (*Config, error) {
 	explicitTop := make(map[string]bool, len(knownKeys))
 	for _, key := range kf.Keys() {
 		top := topLevelKey(key)
+		if top == rulesKey {
+			return nil, misplacedRulesError(path)
+		}
 		if !knownKeys[top] {
 			return nil, fmt.Errorf("unknown config key %q in %s (typo?)", top, path)
 		}
@@ -836,7 +839,16 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("load env overrides: %w", err)
 	}
 	for _, key := range ke.Keys() {
-		explicitTop[topLevelKey(key)] = true
+		top := topLevelKey(key)
+		// The environment is a TOP-LEVEL layer, so HOLDFAST_RULES is the same misplacement
+		// the file's own top level is and is refused in the same words. A rule list has no
+		// environment spelling at all: it is a list of mappings that lives inside ONE
+		// library_roots entry, and a value silently ignored here would be an operator
+		// believing a band is in force that nothing reads.
+		if top == rulesKey {
+			return nil, misplacedRulesError(envPrefix + "RULES")
+		}
+		explicitTop[top] = true
 	}
 	if err := k.Merge(ke); err != nil {
 		return nil, fmt.Errorf("merge env overrides: %w", err)
@@ -1270,7 +1282,30 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("library root %s: %w", r.Clean, err)
 		}
 	}
-	return nil
+	// And once more per RULE, against the profile each rule would actually produce. A rule
+	// carries a subset of the same keys, so a crf of 99 inside one is the same
+	// misconfiguration as a crf of 99 beside it and is refused in the same words - with the
+	// root and the rule's index in front of them, because that is where the operator has to
+	// go to fix it.
+	return c.validateRules()
+}
+
+// misplacedRulesError is the refusal for `rules` written where no rule lives. where names
+// the file or the environment variable that carried it.
+//
+// It is a refusal and not a warning because the alternative is silence: `rules` is not a
+// top-level key, so a build that merely ignored it would start, scan, and decide every file
+// by the thresholds the operator believed they had just overridden.
+func misplacedRulesError(where string) error {
+	return fmt.Errorf("%q is a TOP-LEVEL key in %s: rules are written INSIDE a library_roots "+
+		"entry, beside its %q, because a rule is a per-library band and there is nothing at the "+
+		"top level for one to inherit from. Write it as:\n"+
+		"  library_roots:\n"+
+		"    - path: /media/tv\n"+
+		"      %s:\n"+
+		"        - %s: {%s: 576}\n"+
+		"          min_bitrate_kbps: 800",
+		rulesKey, where, rootPathKey, rulesKey, whenKey, maxSourceHeightKey)
 }
 
 // errVmafGateNeverRejects is the refusal for an explicitly-enabled VMAF gate with every

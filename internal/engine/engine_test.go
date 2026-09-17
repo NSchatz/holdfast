@@ -1764,18 +1764,29 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 
 // ---- S0030: live progress, and what it must not cost -------------------------
 
-// The per-job subprocess budget for one done job with the VMAF gate off: 10 ffprobe
+// The per-job subprocess budget for one done job with the VMAF gate off: 11 ffprobe
 // invocations and 2 ffmpeg invocations (the encode and the decode-integrity check).
 //
 // The ffprobe side is the source snapshot, the source's stream-shape probe that the
 // multi-video-stream guard reads, the source's full stream list that the intended stream
-// map is derived from, and verifyOutput's codec/duration probes plus the ONE probe that
-// enumerates the output's streams for the intended-map check.
+// map is derived from, verifyOutput's codec/duration probes plus the ONE probe that
+// enumerates the output's streams for the intended-map check, and the OUTPUT's pixel
+// dimensions, measured once on the file the encoder wrote.
 //
 // It came DOWN from 16 when that check replaced the per-type stream-count pass, which
 // asked both files about each of FOUR types (v, a, s, t) and was eight probes on its own.
 // The map costs one probe per file instead, and it answers a strictly stronger question -
 // which streams, not how many of each type.
+//
+// It went UP from 10 for the output's resolution (S0089), re-measured here in the commit
+// that moved it. The cost falls on a job that ENCODED - a file a guard stopped pays none
+// of it, and a library walk is unchanged - and it buys the one fact a terminal row could
+// not otherwise carry: what came out, beside what went in, on a build where a library root
+// may band its thresholds by source height. The other probe that item can add is not here
+// and is not paid by this configuration: a root's resolution rules are read off the source
+// snapshot ProcessFile already takes, and a root carrying a `when`-bounded rule takes that
+// snapshot BEFORE the claim and hands it on, so such a job pays one probe for it rather
+// than two.
 //
 // These constants are NOT the evidence for AC12 and must not be read as it — they are a
 // long-run ceiling, so that a per-PR "no worse than last time" cannot ratchet the cost up
@@ -1784,7 +1795,7 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 // fails if these numbers ever stop matching what it measures, so they cannot decay into
 // folklore.
 const (
-	probeBudgetFFprobe = 10
+	probeBudgetFFprobe = 11
 	probeBudgetFFmpeg  = 2
 )
 

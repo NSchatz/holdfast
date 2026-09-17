@@ -3,8 +3,9 @@
 The top-level `encoder`, `crf`, `preset`, `pixel_format`, `container_ext` and
 `bitrate_kbps` are what every file in every library root is transcoded under. This page
 is how you say something different for part of a library: different encode settings
-(`encode_profiles`), a target bitrate instead of a quality target (`bitrate_kbps`), or
-nothing at all for part of a root (`exclude_paths` and `include_paths`).
+(`encode_profiles`), a target bitrate instead of a quality target (`bitrate_kbps`),
+different thresholds for a band of source resolutions (`rules`), or nothing at all for part
+of a root (`exclude_paths` and `include_paths`).
 
 Everything here is reachable from the config file and its `HOLDFAST_*` environment
 override, and from nowhere else: `run`, `serve` and `validate` gain no flags.
@@ -216,6 +217,102 @@ files offered to the pipeline is narrower.
 `holdfast validate` prints, per library root, the patterns in force, which layer supplied
 each list and how many patterns it holds. The count is a count OF PATTERNS - `validate`
 describes a configuration and walks no library, so it never counts matching files.
+
+## `rules` - per-resolution-band overrides inside one library root
+
+<a id="resolution-rules"></a>
+
+```yaml
+library_roots:
+  - path: /mnt/tv
+    min_bitrate_kbps: 2500
+    crf: 22
+    rules:
+      - when:
+          max_source_height: 576   # SD
+        min_bitrate_kbps: 800
+        crf: 24
+      - when:
+          min_source_height: 2160  # UHD
+        min_bitrate_kbps: 12000
+        min_savings_percent: 20
+```
+
+A threshold is one number for a 480p DVD rip and a 2160p remux alike. `min_bitrate_kbps:
+2500` either excludes most of a 1080p library or lets SD files through that will bloat, and
+the same is true of the quality target and the savings floor. A rule says "for sources in
+this band of heights, these knobs are different".
+
+`rules` lives INSIDE a `library_roots` entry, beside its `path`. There is no top-level
+`rules` and no `HOLDFAST_RULES`: a rule is a per-library band, so there is nothing at the
+top level for one to inherit from, and writing it there refuses to start with the entry form
+named.
+
+### Ordered, first match wins, nothing merges
+
+The FIRST rule whose `when` admits the file supplies every knob it names. Every knob it does
+not name comes from the root's own resolved profile. No later rule contributes anything -
+not even a knob the first one is silent about.
+
+That is a deliberate trade. Merging would mean a file guarded by a floor from one rule and
+encoded at a quality target from another, with no line of your file saying so, on a tool
+that deletes the source of every file it accepts. The cost is that an early broad rule
+SHADOWS a later specific one, so:
+
+- a rule that names no knob at all is **refused at start**: it would match, win, and change
+  nothing, making every rule after it unreachable for the files it took; and
+- `holdfast validate` prints each root's rules **in list order**, with the band and the
+  knobs each overrides, so a shadow is visible without running the library.
+
+### `when` - which files a rule applies to
+
+`min_source_height` and `max_source_height` are heights in pixels of the SOURCE. Both bounds
+are INCLUSIVE (`max_source_height: 720` covers a 720p file), an absent bound leaves that side
+unbounded, and a rule with no `when` at all matches every file under its root.
+
+They are spelled `*_source_height` on purpose. A `when` bound selects which files a rule
+applies TO; it is not an output ceiling, and nothing here downscales anything. `min_height`
+and `max_height` are refused by name, with that distinction stated, rather than accepted as
+synonyms.
+
+### What a rule may override
+
+Exactly three knobs: `min_bitrate_kbps`, `crf`, `min_savings_percent`. These are the ones
+whose right value depends on how many pixels the source has. Anything else inside a rule
+refuses to start, naming the offending key and listing what a rule may carry; a value the
+top level would refuse - a `crf` of 99, a `min_savings_percent` of 140 - is refused in the
+top level's own words, with the root and the rule's index in front of them.
+
+A rule may not move the VMAF floors, the encoder, or anything else. A rule that could weaken
+the perceptual gate would be a rule that could weaken the thing standing between a band of
+files and the deletion of their sources.
+
+### A source whose height cannot be read
+
+If a root carries any rule with a `when`, and ffprobe cannot establish a file's height, that
+file is decided under NO rule and under no profile: it records a terminal skip
+`undetermined-source-height`, warned about with its path. Reading an unreadable height as 0
+would drop the file into whichever band admits zero, and ignoring the rules would judge it by
+a threshold its operator wrote a band to avoid.
+
+The skip records the rule list as what it read, so removing every `when`-carrying rule from
+that root offers the file to the pipeline again on the next scan. `holdfast requeue --guard
+undetermined-source-height` is the other lever, for a source that has since been remuxed.
+
+### What a row records
+
+Every terminal row carries the SOURCE's pixel dimensions, and the OUTPUT's where a file was
+produced and measured (`source_width`, `source_height`, `output_width`, `output_height` in
+`/api/history` and `holdfast export`) - so the band a file was judged in is readable in the
+ledger rather than inferred. A dimension nothing measured is an explicit `null`, never a 0.
+
+A row decided by a rule records the EFFECTIVE threshold the guard compared against, not the
+root's. Editing that rule offers the file back to the pipeline on the next scan; editing a
+key the guard never read does not. See [docs/requeue.md](requeue.md).
+
+A root's `profile_digest` covers its rules: two roots that differ only in their rules carry
+different digests, and a root with no `rules` key - or with an empty one - digests exactly as
+it did before this existed.
 
 ## `audio_languages`, `subtitle_languages`, `keep_commentary` and `remux_only` - which streams survive
 

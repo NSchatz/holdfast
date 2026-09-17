@@ -477,6 +477,41 @@ ALTER TABLE jobs ADD COLUMN selection_not_applied  TEXT;
 ALTER TABLE jobs ADD COLUMN vmaf_skipped           TEXT;
 `,
 	},
+	{
+		// v18 - the pixel dimensions either side of a job: the source's, and the output's
+		// where one was produced and measured.
+		//
+		// Resolution used to enter exactly one decision in this build - which VMAF model to
+		// load - and no other, so nothing about it was worth a column. Per-band rules change
+		// that: a file is now judged against the thresholds its source height selects, and a
+		// row that does not say how tall its source was leaves an operator inferring the band
+		// from the verdict, which is the wrong direction to read a ledger in.
+		//
+		// It sits at the END of the history and not at the v13 the spec that asked for it
+		// named. Five steps have shipped under the ordinals in between and a database in the
+		// field has already run their text, so two steps claiming one version would fork the
+		// schema in two. Nothing about the SQL changes, only where it sits.
+		//
+		// NULLABLE with NO DEFAULT, the rule every step since v2 has kept, and here it is the
+		// whole point: 0 is a legal pixel dimension for nothing. Every row already in the
+		// field was written by a build that measured no dimension and must read as NOT
+		// RECORDED; a DEFAULT of 0 would put a fabricated resolution on every one of them at
+		// once, and a row whose source has since been deleted is the only record there is.
+		//
+		// No index: nothing queries BY a dimension, and every reader has the row in hand.
+		name: "source and output resolution",
+		// Four nullable columns: ADD COLUMN rewrites no row and creates none, so every
+		// table's count is what it was. Declared rather than left off, which is what makes
+		// applyMigration compare the counts either side of this step inside its own
+		// transaction and roll the whole step back if one moved.
+		rows: noRowChange,
+		sql: `
+ALTER TABLE jobs ADD COLUMN source_width  INTEGER;
+ALTER TABLE jobs ADD COLUMN source_height INTEGER;
+ALTER TABLE jobs ADD COLUMN output_width  INTEGER;
+ALTER TABLE jobs ADD COLUMN output_height INTEGER;
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

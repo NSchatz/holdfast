@@ -31,6 +31,17 @@ const (
 	// records - which is why moving `encoder: nvenc` to `encoder: qsv` re-opens nothing
 	// it skipped (both target hevc) while moving it to `svtav1` re-opens all of it.
 	InputTargetCodec = "target_codec"
+
+	// InputRules is the root's RULE LIST, rendered canonically, and exactly one decision
+	// reads it: the band guard, which fires when a rule selects on a source height nobody
+	// could read (SkipUndeterminedSourceHeight).
+	//
+	// Every other decision records the effective VALUE a rule supplied - the floor the
+	// guard actually compared against - because that is the number it read and because
+	// that number is what an edit to the rule moves. This one read no value at all: what
+	// it read was the fact that the root bands its files. So the list itself is the input,
+	// and removing the `when`-carrying rules is what re-derives the verdict.
+	InputRules = "rules"
 )
 
 // EVERY VALUE HERE IS RESOLVED FOR ONE PATH, through the whole layering the decision that
@@ -47,11 +58,18 @@ const (
 //
 // ts is that job's effective encode settings and supplies every key an encode profile can
 // move, target_codec included (what ts.Encoder RESOLVES to, which is what the guard compares
-// against). prof is the library root's own profile and supplies the ones an encode profile
+// against). prof is the EFFECTIVE library profile for this file - the root's own values with
+// the first matching resolution rule laid over them - and supplies the ones an encode profile
 // cannot reach: min_bitrate_kbps is a gate deciding whether a source may be destroyed, and
-// the guard that reads it reads the root's value (see Engine.ProcessFile).
+// the guard that reads it reads that effective value (see Engine.ProcessFile).
+//
+// A rule's value therefore lands here under the ORDINARY key rather than beside it, which is
+// what makes "editing the rule offers the file back, editing an unread key does not" true of
+// the same comparison every other key goes through. The rule LIST is offered as well, for the
+// one decision that reads the list rather than a value, and only where the root has rules -
+// a root with none offers exactly the keys it offered before this item.
 func DecisionInputsForJob(prof config.Profile, ts config.Transcode) store.DecisionInputs {
-	return store.InputsRead(map[string]string{
+	read := map[string]string{
 		InputTargetCodec:    targetCodecFor(ts.Encoder),
 		InputEncoder:        ts.Encoder,
 		InputCRF:            strconv.Itoa(ts.CRF),
@@ -59,7 +77,11 @@ func DecisionInputsForJob(prof config.Profile, ts config.Transcode) store.Decisi
 		InputPixelFormat:    ts.PixelFormat,
 		InputMinBitrateKbps: strconv.Itoa(prof.MinBitrateKbps),
 		InputContainerExt:   ts.ContainerExt,
-	})
+	}
+	if len(prof.Rules) > 0 {
+		read[InputRules] = prof.Rules.Canonical()
+	}
+	return store.InputsRead(read)
 }
 
 // DecisionInputsForProfile is one resolved library profile's decision inputs with NO encode
@@ -96,6 +118,21 @@ func DecisionInputsFor(cfg config.Config) store.DecisionInputs {
 // empty or duplicated one; a Config that has never been through Validate (which the engine's
 // own tests assemble freely) can therefore collapse two same-named profiles into one cached
 // resolution. The closure is stateful and is called row by row from the survey's one goroutine.
+//
+// # What it cannot resolve, and why that is a report and never a decision
+//
+// A resolution rule whose band selects on the source height needs that height, and this
+// read has a PATH and nothing else - no probe, and often no file, since the source of a
+// done row was deleted by the swap that wrote it. So for a root whose rules are all
+// unbounded the rules are applied here exactly as the scan applies them, and for a root
+// that bands its files this answers with the root's own resolved profile.
+//
+// The consequence is bounded and is in one direction: a banded root's rows can be COUNTED
+// as moved when the next scan will find them still matching. This survey writes nothing,
+// re-opens nothing and gates nothing - it is the two figures a run and `validate` print
+// before a scan - so an over-count is a number an operator reads, never a file the engine
+// touches. The under-count, which would tell an operator nothing will move when the scan is
+// about to re-encode a library, cannot happen: every key the scan compares is offered here.
 func DecisionInputsPerPath(cfg config.Config) store.InputsForPath {
 	roots := cfg.RootProfiles()
 	top := cfg.TopLevelProfile()
@@ -107,6 +144,9 @@ func DecisionInputsPerPath(cfg config.Config) store.InputsForPath {
 				prof, rooted, key = r.Profile, true, r.Clean
 				break
 			}
+		}
+		if !prof.Rules.NeedsSourceHeight() {
+			prof = prof.WithRules(0)
 		}
 		ts := cfg.TranscodeIn(prof, path)
 		key += "\x00" + ts.Profile

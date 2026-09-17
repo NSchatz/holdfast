@@ -466,10 +466,25 @@ func yamlTag(f reflect.StructField) string {
 	return tag
 }
 
+// yamlTags returns the yaml tag of every field the decoder can reach, which is every field
+// except the ones tagged "-".
+//
+// A "-" is not a knob whose name was forgotten: it is the explicit statement that the
+// decoder must never write this field, so a key of that name resolves through no layer and
+// belongs to no entry's knob map. Profile.Rules is the one, and it is a LIST of per-band
+// overrides resolved out of the entry before the knobs are decoded at all.
+//
+// Skipping it narrows nothing the check above exists for: every field the resolver DOES
+// decode into is still required to be named by profileKnobs, and a field added with no tag
+// at all still reads as "" here and still reds.
 func yamlTags(t reflect.Type) []string {
 	out := make([]string, 0, t.NumField())
 	for i := 0; i < t.NumField(); i++ {
-		out = append(out, yamlTag(t.Field(i)))
+		tag := yamlTag(t.Field(i))
+		if tag == "-" {
+			continue
+		}
+		out = append(out, tag)
 	}
 	return out
 }

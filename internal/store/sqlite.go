@@ -372,7 +372,8 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
 			swap_cause = NULL, failure_class = NULL, decision_inputs = NULL,
 			library_root = NULL, profile_digest = NULL, profile = NULL,
-			dropped_streams = NULL, selection_not_applied = NULL, vmaf_skipped = NULL
+			dropped_streams = NULL, selection_not_applied = NULL, vmaf_skipped = NULL,
+			source_width = NULL, source_height = NULL, output_width = NULL, output_height = NULL
 		 WHERE path = ? AND fingerprint = ?`,
 		string(Probing), worker, now(), currentStamp(), path, fingerprint); err != nil {
 		return false, fmt.Errorf("store: claim update: %w", err)
@@ -616,7 +617,8 @@ func finishQuery(st Status, o *Outcome, maxFailures int) string {
 		guard_attributes = ?, guard_time_resolution = ?, guard_residual_window = ?,
 		swap_cause = ?, failure_class = ?, decision_inputs = ?,
 		library_root = ?, profile_digest = ?, profile = ?,
-		dropped_streams = ?, selection_not_applied = ?, vmaf_skipped = ?`
+		dropped_streams = ?, selection_not_applied = ?, vmaf_skipped = ?,
+		source_width = ?, source_height = ?, output_width = ?, output_height = ?`
 	switch {
 	case st != Failed:
 	case o.FailureClass.Final() && maxFailures > 0:
@@ -654,6 +656,8 @@ func finishArgs(st Status, o *Outcome, path, fingerprint string) []any {
 		nullString(o.LibraryRoot), nullString(o.ProfileDigest), nullString(o.Profile),
 		nullString(o.DroppedStreams.Encode()),
 		nullString(o.SelectionNotApplied), nullString(o.VmafSkipped),
+		nullPixels(o.SourceWidth), nullPixels(o.SourceHeight),
+		nullPixels(o.OutputWidth), nullPixels(o.OutputHeight),
 		path, fingerprint,
 	}
 }
@@ -678,6 +682,17 @@ func nullFloat(f *float64) any {
 }
 
 func nullInt(i *int64) any {
+	if i == nil {
+		return nil
+	}
+	return *i
+}
+
+// nullPixels is nullInt for a pixel dimension. It is its own helper rather than a cast at
+// each call site because the four dimensions are *int - a dimension is a count of pixels,
+// not a file size - and a nil one must reach the column as NULL: 0 is a legal dimension
+// for nothing, so a zero written here would be a resolution nobody measured.
+func nullPixels(i *int) any {
 	if i == nil {
 		return nil
 	}
@@ -726,7 +741,8 @@ const outcomeColumns = `reason, encoder, vmaf_mean, vmaf_min, vmaf_model,
 	guard_attributes, guard_time_resolution, guard_residual_window, swap_cause,
 	failure_class, decision_inputs,
 	library_root, profile_digest, profile,
-	dropped_streams, selection_not_applied, vmaf_skipped`
+	dropped_streams, selection_not_applied, vmaf_skipped,
+	source_width, source_height, output_width, output_height`
 
 // outcomeScan holds one row's outcome columns on the way out of the driver. Every
 // field is a sql.Null* because every column is nullable: NULL is "not recorded" and
@@ -790,6 +806,13 @@ type outcomeScan struct {
 	// it existed recorded nothing about what it dropped, and nothing is not "dropped
 	// nothing".
 	dropped, notApplied, vmafSkipped sql.NullString
+
+	// The pixel dimensions either side of the job. Nullable like the rest, and here the
+	// NULL is load-bearing twice over: a row written before these columns existed measured
+	// nothing, and a row whose guard fired before any probe - or whose job produced no
+	// output - measured nothing either. Scanning one into a bare 0 would hand a reader a
+	// resolution nobody took.
+	srcWidth, srcHeight, outWidth, outHeight sql.NullInt64
 }
 
 // dest returns the scan destinations in outcomeColumns order.
@@ -802,6 +825,7 @@ func (s *outcomeScan) dest() []any {
 		&s.failClass, &s.inputs,
 		&s.libraryRoot, &s.profileDigest, &s.profile,
 		&s.dropped, &s.notApplied, &s.vmafSkipped,
+		&s.srcWidth, &s.srcHeight, &s.outWidth, &s.outHeight,
 	}
 }
 
@@ -843,6 +867,10 @@ func (s *outcomeScan) outcome() Outcome {
 	o.SourceBytes = nullableInt(s.srcBytes)
 	o.OutputBytes = nullableInt(s.outBytes)
 	o.EncodeMs = nullableInt(s.encMs)
+	o.SourceWidth = nullablePixels(s.srcWidth)
+	o.SourceHeight = nullablePixels(s.srcHeight)
+	o.OutputWidth = nullablePixels(s.outWidth)
+	o.OutputHeight = nullablePixels(s.outHeight)
 	return o
 }
 
@@ -859,6 +887,18 @@ func nullableInt(n sql.NullInt64) *int64 {
 		return nil
 	}
 	v := n.Int64
+	return &v
+}
+
+// nullablePixels is nullableInt for a pixel dimension, which the Outcome holds as an *int.
+// A column that is NULL, or that holds a value no dimension can be, reads as NOT RECORDED
+// rather than as a number: this is the read half of the rule nullPixels keeps on the way
+// in, and it also covers a row some repair script edited.
+func nullablePixels(n sql.NullInt64) *int {
+	if !n.Valid || n.Int64 <= 0 {
+		return nil
+	}
+	v := int(n.Int64)
 	return &v
 }
 
@@ -1129,7 +1169,8 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 			target_path = NULL,
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
 			swap_cause = NULL, decision_inputs = NULL, profile = excluded.profile,
-			dropped_streams = NULL, selection_not_applied = NULL, vmaf_skipped = NULL
+			dropped_streams = NULL, selection_not_applied = NULL, vmaf_skipped = NULL,
+			source_width = NULL, source_height = NULL, output_width = NULL, output_height = NULL
 		 WHERE jobs.status = ?`,
 		path, fingerprint, string(Skipped), now(), nullString(reason),
 		nullString(by.LibraryRoot), nullString(by.ProfileDigest), currentStamp(), nullString(profile),

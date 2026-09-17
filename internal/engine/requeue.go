@@ -70,6 +70,11 @@ var SkipGuards = []string{
 	// of its rows back, and an ffprobe that can now enumerate a container the one before
 	// it could not is a change only an operator can see.
 	SkipUnreadableStreamList,
+	// The BAND guard. It reads the rule list, so removing the `when`-carrying rules from
+	// that root does offer its rows back - but a re-muxed source, or an ffprobe that can
+	// now read a height the one before it could not, is a change no configuration edit
+	// expresses, and this is the lever for it.
+	SkipUndeterminedSourceHeight,
 	SkipRestoredOriginal,
 }
 

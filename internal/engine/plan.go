@@ -151,13 +151,29 @@ func (e *Engine) Plan(ctx context.Context, opt PlanOptions) *PlanPass {
 func (e *Engine) planFile(ctx context.Context, f string, ledger LedgerReader,
 	snapshot func(context.Context, string) *probe.VideoProps, probes *int) PlanFile {
 	root, _ := e.rootFor(f)
-	prof := root.Profile
+
+	// Counted where the snapshot is actually TAKEN, never where one might be: a guard that
+	// stops a file before the probe (the symlink guard) costs nothing, and a count that
+	// said otherwise would be evidence for a claim this pass does not make. It is built
+	// here because the rule resolution below is the first thing that may take one.
+	counted := func(ctx context.Context, path string) *probe.VideoProps {
+		*probes++
+		return snapshot(ctx, path)
+	}
+
+	// The profile that decides this file, resolved exactly as ProcessFile resolves it: the
+	// root's own, with the first matching resolution rule laid over it. A banded root reads
+	// the source height here and the guard chain below reuses that same snapshot, so this
+	// pass counts the probes a run would take rather than one more.
+	prof, pre, heightKnown := e.effectiveProfile(ctx, f, root, counted)
 	ts := e.Cfg.TranscodeIn(prof, f)
 
 	pf := PlanFile{
-		Path:          f,
-		Root:          root.Clean,
-		ProfileDigest: prof.Digest(),
+		Path: f,
+		Root: root.Clean,
+		// The ROOT's digest, which is what a terminal row records - never the digest of the
+		// per-file profile a rule produced, which names no root an operator configured.
+		ProfileDigest: root.Profile.Digest(),
 		EncodeProfile: ts.Profile,
 	}
 
@@ -175,6 +191,14 @@ func (e *Engine) planFile(ctx context.Context, f string, ledger LedgerReader,
 	}
 	pf.Bytes = fi.Size()
 
+	// The band guard, where ProcessFile asks it: in front of every guard that reads a knob a
+	// rule may supply. A pass that reported what the profile WOULD do to a file this build
+	// cannot place in a band would be reporting a decision the run will not take.
+	if !heightKnown {
+		pf.Guard = SkipUndeterminedSourceHeight
+		return pf
+	}
+
 	// Hardlink guard, asked exactly as ProcessFile asks it and before anything is probed:
 	// the guard is on for this root's profile, the file carries more than one link, and
 	// more of them than this tool itself holds through the undo window.
@@ -186,14 +210,7 @@ func (e *Engine) planFile(ctx context.Context, f string, ledger LedgerReader,
 		}
 	}
 
-	// Counted where the snapshot is actually TAKEN, never where one might be: a guard that
-	// stops a file before the probe (the symlink guard) costs nothing, and a count that
-	// said otherwise would be evidence for a claim this pass does not make.
-	counted := func(ctx context.Context, path string) *probe.VideoProps {
-		*probes++
-		return snapshot(ctx, path)
-	}
-	_, v := e.guardSource(ctx, f, root, ts, targetCodecFor(ts.Encoder), counted)
+	_, v := e.guardSource(ctx, f, root, prof, ts, targetCodecFor(ts.Encoder), reuse(pre, counted))
 	switch {
 	case v.failed:
 		// The probe answered nothing about this file. The daemon records a failure; a plan
