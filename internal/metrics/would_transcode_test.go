@@ -21,7 +21,7 @@ import (
 // counted as DECISIONS: nothing was encoded, so nothing rides along in the reclaimed
 // bytes, the encode-duration histogram or the VMAF distribution.
 func TestMetrics_ADryRunsDecisionsAreCountedUnderTheirOwnOutcome(t *testing.T) {
-	m := New(openStore(t))
+	m := New(openStore(t), nil)
 
 	src := int64(4_000_000)
 	for i := 0; i < 3; i++ {
@@ -66,7 +66,7 @@ func TestMetrics_ADryRunsDecisionsAreCountedUnderTheirOwnOutcome(t *testing.T) {
 // does not fire - it evaluates to no data. So the series is pre-created at construction,
 // exactly as the other outcomes are, and reads a real 0.
 func TestMetrics_TheCandidateSeriesReadsZeroBeforeTheFirstDryRun(t *testing.T) {
-	m := New(openStore(t))
+	m := New(openStore(t), nil)
 
 	body := scrape(t, m)
 	if !strings.Contains(body, `holdfast_files_total{outcome="would-transcode"} 0`) {
@@ -100,7 +100,7 @@ func TestMetrics_TheLiveDepthGaugeReportsCandidatesAsThemselves(t *testing.T) {
 		t.Fatalf("Claim(in-hand): ok=%v err=%v", ok, err)
 	}
 
-	body := scrape(t, New(st))
+	body := scrape(t, New(st, nil))
 	if got := queueDepth(t, body, string(store.WouldTranscode)); got != 2 {
 		t.Errorf("holdfast_queue_depth{state=\"would-transcode\"} = %d, want 2", got)
 	}
@@ -128,7 +128,7 @@ func TestMetrics_NoNewMetricNameIsPublished(t *testing.T) {
 		t.Fatalf("Finish: %v", err)
 	}
 
-	m := New(st)
+	m := New(st, nil)
 	src := int64(1024)
 	m.Observe(engine.Event{
 		Status:  store.WouldTranscode,

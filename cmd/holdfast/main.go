@@ -926,7 +926,7 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 
 	var metricsHandler http.Handler
 	if cfg.MetricsEnable {
-		mx := metrics.New(st)
+		mx := metrics.New(st, log)
 		observers = append(observers, mx.Observe)
 		metricsHandler = mx.Handler()
 	}
