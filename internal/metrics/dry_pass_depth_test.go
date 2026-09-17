@@ -24,7 +24,7 @@ import (
 // answering yes whatever the collector did.
 func TestMetrics_AfterADryPassTheDepthGaugeReadsZeroForEveryActiveState(t *testing.T) {
 	st := openStore(t)
-	m := New(st)
+	m := New(st, nil)
 	ctx := context.Background()
 
 	candidate, guarded := "/lib/candidate.mkv", "/lib/already.mkv"

@@ -619,7 +619,7 @@ func (e *Engine) handleFailedSwap(ctx context.Context, f, key, tmp, final string
 			e.Log.Warn("FAIL ("+report+"; source confirmed untouched)", "file", f,
 				"cause", causeOrNone(cause), "storage", cls.String(), "case", dec.Case)
 		}
-		e.finish(ctx, f, key, store.Failed, out)
+		e.fail(ctx, f, key, GateSwap, out)
 		return
 
 	case store.AppliedDespiteError:

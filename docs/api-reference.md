@@ -596,13 +596,28 @@ response and no `holdfast export` line carries it, and the shapes documented abo
 
 - **Prometheus** (`/metrics`, default on): whether it is reachable is governed by `metrics_enable` and by
   nothing else - `server_read_token` does not gate it, and neither does `server_auth_token`. The exposition
-  carries counters, a byte total, two histograms and a gauge, labelled only by outcome and by state, so it
-  **names no file**; a scrape credential is also the one thing a Prometheus deployment most often cannot
-  supply. That premise is a test, so a later metric that labelled a series by path would fail the build.
-  The series are `holdfast_files_total{outcome}`, `holdfast_bytes_reclaimed_total`,
-  `holdfast_encode_duration_seconds`, `holdfast_vmaf_score` (perceptual-quality distribution), and a
-  `holdfast_queue_depth{state}` gauge read live from the store. Metrics are read-only instrumentation -
-  best-effort, never affecting file handling.
+  carries counters, a byte total, three histograms and two gauges, labelled only by outcome, guard, gate and
+  state, so it **names no file**; a scrape credential is also the one thing a Prometheus deployment most
+  often cannot supply. That premise is a test, so a later metric that labelled a series by path would fail
+  the build. Metrics are read-only instrumentation - best-effort, never affecting file handling.
+
+  **The series, what each counts, and what a movement in it means.** Every metric name here is PUBLISHED: a
+  rename breaks every dashboard and alert built on it and there is no redirect, so the names do not change
+  and a name this build registers without a line in this table fails `make check`.
+
+  | series | what it counts | what a rise or fall means |
+  |---|---|---|
+  | `holdfast_files_total{outcome}` | files reaching a terminal outcome | the shape of the run. A rise in `failed` or `indeterminate` against a flat `done` is the first thing to look at |
+  | `holdfast_skips_total{guard}` | files skipped, by the GUARD that skipped them | which guard is holding files back. A spike in `exotic-pixel-format` or `low-bitrate` after a configuration change says the change was wrong; a rise in `hardlinked` says something started hardlinking your library |
+  | `holdfast_failures_total{gate}` | files that FAILED, by the gate or stage that rejected them | which check is rejecting encodes. A rise in `vmaf-chroma` says the encoder or the content changed in a way only the colour planes see; a rise in `size` says this configuration cannot beat the sources it is being given; a rise in `swap` is about the filesystem and not about quality |
+  | `holdfast_bytes_reclaimed_total` | bytes of disk reclaimed by successful transcodes | the point of the tool. Flat while `holdfast_files_total{outcome="done"}` climbs means the encodes are barely smaller than their sources |
+  | `holdfast_encode_duration_seconds` | wall-clock duration of successful encodes | how long the queue will take. A shift right is a slower encoder, a busier host, or larger sources |
+  | `holdfast_vmaf_score` | pooled harmonic-mean VMAF of accepted outputs | the AVERAGE fidelity being accepted. A fall toward `min_vmaf` says the encodes are getting worse and the floor is about to start rejecting them |
+  | `holdfast_vmaf_min` | the WORST (sub)sampled frame's VMAF on accepted outputs | whether encodes are locally broken. The mean hides local damage, so a falling worst frame under a steady mean is the signal nothing else carries. Approaching `vmaf_min_pool` (60 by default) means files are about to be rejected |
+  | `holdfast_vmaf_chroma` | the worst frame's chroma PSNR, **in dB** (not a 0-100 VMAF) | whether the COLOUR survived. The VMAF model is luma-only, so this is the only series that sees a flattened or desaturated encode. Around 40 dB is healthy; a fall toward `vmaf_min_chroma` (30 dB by default) is colour damage |
+  | `holdfast_queue_depth{state}` | jobs in each status, read from the store at scrape time | live queue depth and ledger growth. A `pending` that only climbs means work is arriving faster than it is being done |
+  | `holdfast_bytes_held_by_undo_window` | bytes the undo window is still HOLDING, read at scrape time | why free space has not gone up. A retained original is a second link to the source's bytes, so reclaimed space is not returned to the filesystem until the window releases it. Falls as originals age out |
+
   The `outcome` label set is `done | skipped | failed | would-transcode | indeterminate |
   applied-despite-error`. **`would-transcode` counts DECISIONS a dry run took, never transcodes that
   happened**: under `dry_run: true` holdfast applies every guard and encodes, swaps and deletes nothing, so
@@ -611,6 +626,24 @@ response and no `holdfast export` line carries it, and the shapes documented abo
   candidate count before the first dry run. The same value appears as a `holdfast_queue_depth{state}`
   series, where it is counted as itself and **not** inside `probing`: that state means claimed and not yet
   decided.
+
+  The `guard` label set is the skip vocabulary enumerated under [the recorded outcome](#the-recorded-outcome---the-proof-a-swap-was-safe),
+  plus `unclassified` for a reason this build does not recognise. The `gate` label set is
+  `probe | encode | codec | length | size | stream-parity | decode | vmaf-mean | vmaf-min | vmaf-chroma |
+  vmaf-unmeasured | swap | other`, decided where the rejection is made and never read off the failure's
+  `reason` text. Both are CLOSED vocabularies pre-created at `0`, which is what lets an alert be written
+  before the first such skip or rejection, and what keeps the number of series knowable in advance: a value
+  outside the set is counted under its fallback (`unclassified`, `other`) and never becomes a label of its
+  own. The per-gate counts always sum to `holdfast_files_total{outcome="failed"}`.
+
+  `holdfast_vmaf_min` and `holdfast_vmaf_chroma` are observed **only where the figure was measured**. A
+  remux, a disabled gate and a measurement that failed contribute nothing rather than a `0`: on these two
+  series `0` is a destroyed frame and an obliterated colour plane, which is a reading and not an absence.
+
+  The two gauges are read from the store **on every scrape**, and they fail independently: a store read that
+  fails omits that one gauge from that one scrape, leaves every other series in place, and still answers the
+  scrape `200`. The next scrape reads again, and the daemon logs the degraded read at `warn` rather than
+  going quiet about it.
 - **Notifications** (`notify_url`, [shoutrrr](https://shoutrrr.nickfedor.com/)): one service URL fans out to
   ntfy/Discord/Gotify/… - a message per failed file and a per-scan summary. Sends run off the engine's path,
   and a send failure is logged, never crashing the daemon or altering files. An unconfigured key disables it.

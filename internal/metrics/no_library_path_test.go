@@ -35,7 +35,7 @@ func TestExposition_NamesNoLibraryPath(t *testing.T) {
 	}
 
 	st := openStore(t)
-	m := New(st)
+	m := New(st, nil)
 	ctx := context.Background()
 
 	// One row per terminal outcome that carries a figure, so the seeding exercises the

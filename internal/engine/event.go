@@ -15,6 +15,21 @@ type Event struct {
 	// Worker owns the transition, "" when a skip was decided before any claim.
 	Worker string
 
+	// Gate is WHICH gate or stage rejected this job, on a FAILED event and on no other
+	// (see the Gate* constants). It is decided at the line that refused the job and
+	// carried out from there, never read back off the Reason text: a consumer that
+	// classified failures by matching on an error message would drift the moment one was
+	// reworded, and the message is unbounded where this is a closed vocabulary.
+	//
+	// It rides the EVENT rather than the Outcome deliberately. The Outcome is the durable
+	// row, and this is an observer's label: carrying it here answers "what rejected this"
+	// for the live surfaces without changing the shape of anything stored.
+	//
+	// "" is "not attributed", which a consumer counts under GateOther rather than dropping
+	// - a failure that vanished from a per-gate count would make those counts disagree
+	// with the failure count beside them.
+	Gate string
+
 	// Outcome is the proof of a TERMINAL transition and nil on every other event. It is
 	// the SAME value handed to Store.Finish, so an observer and the ledger cannot drift
 	// apart. A nil numeric in it is "not recorded", never 0, and Done is emitted exactly

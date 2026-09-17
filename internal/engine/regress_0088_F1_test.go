@@ -80,7 +80,7 @@ func TestRegress0088F1_AcceptsAnOutputCarryingADroppedCommentaryTrack(t *testing
 	}
 
 	// And so does the whole verification gate, which is what actually licenses the swap.
-	_, class, err := eng.verifyOutput(context.Background(), src, out, prof,
+	_, _, class, err := eng.verifyOutput(context.Background(), src, out, prof,
 		targetCodecFor(eng.Cfg.TranscodeIn(prof, src).Encoder), plan)
 	if err == nil {
 		t.Errorf("verifyOutput ACCEPTED it (class=%q): every gate in front of the deletion of "+

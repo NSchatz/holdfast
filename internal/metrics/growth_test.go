@@ -40,10 +40,15 @@ import (
 // alert an operator has already built, which is why the assertion is on the SET and not
 // on "at least these".
 var holdfastMetrics = []string{
+	"holdfast_bytes_held_by_undo_window",
 	"holdfast_bytes_reclaimed_total",
 	"holdfast_encode_duration_seconds",
+	"holdfast_failures_total",
 	"holdfast_files_total",
 	"holdfast_queue_depth",
+	"holdfast_skips_total",
+	"holdfast_vmaf_chroma",
+	"holdfast_vmaf_min",
 	"holdfast_vmaf_score",
 }
 
@@ -120,7 +125,7 @@ func scanWithRetention(t *testing.T, st store.Store, root string, rows int) {
 
 func TestGrowth_WithRetentionDisabledEveryRowIsKeptAndTheGaugeShowsTheTableGrowing(t *testing.T) {
 	st := openStore(t)
-	m := New(st)
+	m := New(st, nil)
 	root := t.TempDir()
 
 	// The shipped default: history_retention_rows unset, which resolves to 0.
@@ -156,7 +161,7 @@ func TestGrowth_WithRetentionDisabledEveryRowIsKeptAndTheGaugeShowsTheTableGrowi
 // makes the reading above a measurement of the ledger rather than of the seeding loop.
 func TestGrowth_TheGaugeFollowsTheTableDownWhenRetentionIsEnabled(t *testing.T) {
 	st := openStore(t)
-	m := New(st)
+	m := New(st, nil)
 	root := t.TempDir()
 
 	seedSkipped(t, st, root, 0, 400)
@@ -174,7 +179,7 @@ func TestGrowth_TheGaugeFollowsTheTableDownWhenRetentionIsEnabled(t *testing.T) 
 
 func TestGrowth_TheMetricNamesPublishedTodayAreStillPublishedAndNoneWasRenamed(t *testing.T) {
 	st := openStore(t)
-	m := New(st)
+	m := New(st, nil)
 
 	// Something in every series, so nothing is absent merely for want of a data point.
 	seedSkipped(t, st, t.TempDir(), 0, 3)
@@ -274,7 +279,7 @@ func TestGrowth_ARetentionPassPublishesNoNewMetricOfItsOwn(t *testing.T) {
 	// counter would be a new name to freeze at the first tag for no gain, and the spec
 	// puts adding one out of scope.
 	st := openStore(t)
-	m := New(st)
+	m := New(st, nil)
 	root := t.TempDir()
 	seedSkipped(t, st, root, 0, 50)
 	before := publishedMetricNames(t, m)
