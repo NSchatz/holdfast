@@ -382,7 +382,8 @@ func streamTally(streams []probe.Stream) map[tallyKey]int {
 
 // describeTallyKey names one kind of stream the way a rejection has to name it: the type,
 // then the language, then whichever dispositions distinguish it from a plain stream of
-// that type. A kind that carries neither disposition reads exactly as it always has.
+// that type. A kind carrying neither reads as `type (language)`, which is all there is to
+// say about an ordinary stream and all a rejection about one should make an operator read.
 func describeTallyKey(k tallyKey) string {
 	parts := make([]string, 0, 3)
 	if k.lang == "" {
