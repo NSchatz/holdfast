@@ -1282,7 +1282,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		// AC-9's source half, and the fail-safe rule this whole pipeline keeps: an unknown
 		// shape is never read as the common one. Nothing is encoded and the source is
 		// untouched.
-		e.Log.Info("skip (ffprobe could not enumerate the source's streams — "+
+		e.Log.Info("skip (ffprobe could not enumerate the source's streams - "+
 			"refusing to encode without knowing which streams the output must carry)", "file", f)
 		e.finish(ctx, f, key, store.Skipped, e.because(SkipUnreadableStreamList, by, prof, ts))
 		return nil

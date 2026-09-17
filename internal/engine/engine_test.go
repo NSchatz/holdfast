@@ -1764,13 +1764,18 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 
 // ---- S0030: live progress, and what it must not cost -------------------------
 
-// The per-job subprocess budget for one done job with the VMAF gate off: 16 ffprobe
+// The per-job subprocess budget for one done job with the VMAF gate off: 10 ffprobe
 // invocations and 2 ffmpeg invocations (the encode and the decode-integrity check).
 //
 // The ffprobe side is the source snapshot, the source's stream-shape probe that the
-// multi-video-stream guard reads, and verifyOutput's codec/duration/packet probes plus its
-// per-type stream-count pass - which asks both files about each of FOUR types (v, a, s, t),
-// so the parity loop alone is eight of them.
+// multi-video-stream guard reads, the source's full stream list that the intended stream
+// map is derived from, and verifyOutput's codec/duration probes plus the ONE probe that
+// enumerates the output's streams for the intended-map check.
+//
+// It came DOWN from 16 when that check replaced the per-type stream-count pass, which
+// asked both files about each of FOUR types (v, a, s, t) and was eight probes on its own.
+// The map costs one probe per file instead, and it answers a strictly stronger question -
+// which streams, not how many of each type.
 //
 // These constants are NOT the evidence for AC12 and must not be read as it — they are a
 // long-run ceiling, so that a per-PR "no worse than last time" cannot ratchet the cost up
@@ -1779,7 +1784,7 @@ func TestWorkerStore_PrunesSupersededRow(t *testing.T) {
 // fails if these numbers ever stop matching what it measures, so they cannot decay into
 // folklore.
 const (
-	probeBudgetFFprobe = 16
+	probeBudgetFFprobe = 10
 	probeBudgetFFmpeg  = 2
 )
 

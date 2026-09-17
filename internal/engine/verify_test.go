@@ -389,8 +389,11 @@ func TestVerify_RejectsAnOutputMissingAVideoStream(t *testing.T) {
 			reason = r.Outcome.Reason
 		}
 	}
-	if !strings.Contains(reason, "stream-count parity failed (type=v") {
-		t.Errorf("the recorded reason must name the TYPE that was dropped; got: %s", reason)
+	// The gate that catches this is now the intended-map check (S0088), which names the
+	// stream it is missing rather than the type's count - a strictly stronger statement of
+	// the same rejection, and still a statement an operator can act on.
+	if !strings.Contains(reason, "the output is missing video") {
+		t.Errorf("the recorded reason must name the video stream that was dropped; got: %s", reason)
 	}
 	// The no-loss contract, which is the whole reason the gate exists.
 	if md5f(t, src) != before {
@@ -405,15 +408,20 @@ func TestVerify_RejectsAnOutputMissingAVideoStream(t *testing.T) {
 }
 
 // TestVerify_RejectsAnOutputWhoseVideoStreamsCannotBeCounted pins the fail-safe half of
-// the same gate: an output this build cannot COUNT the video streams of counts as zero,
-// which is below any source's count, so it is rejected and the source is kept.
+// the same gate, END TO END: an output this build cannot establish the video streams of is
+// rejected and the source is kept.
 //
-// The condition is produced by an ffprobe that refuses exactly one question - the stream
-// count - and only for the TEMP, delegating everything else to the real binary. That is
-// deliberate: the temp has to reach gate 5 for this to be about gate 5 at all, so it must
-// still probe as the right codec, the right duration and smaller, and a wholly broken
-// probe would have failed it long before. A half-installed ffprobe, or one being replaced
-// under a running scan, is exactly this shape.
+// The condition is produced by an ffprobe that refuses exactly one question - the one the
+// gate establishes an output's streams with - and only for the TEMP, delegating everything
+// else to the real binary. That is deliberate: the temp has to reach gate 5 for this to be
+// about gate 5 at all, so it must still probe as the right codec, the right duration and
+// smaller, and a wholly broken probe would have failed it long before. A half-installed
+// ffprobe, or one being replaced under a running scan, is exactly this shape.
+//
+// The question moved when the per-type COUNT became the intended-map check (S0088): one
+// enumeration now answers for every stream type at once, so the probe a fail-safe has to
+// blind is that one. The property is unchanged and is if anything wider - an output whose
+// shape cannot be established is rejected, whatever type the unestablished stream was.
 func TestVerify_RejectsAnOutputWhoseVideoStreamsCannotBeCounted(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
 	d := t.TempDir()
@@ -421,9 +429,10 @@ func TestVerify_RejectsAnOutputWhoseVideoStreamsCannotBeCounted(t *testing.T) {
 	mkH264(t, ffmpeg, src, "8M")
 	before := md5f(t, src)
 
-	// "stream=index" with a csv output IS the stream-count probe; the stream-shape probe
-	// the source-shape guard runs asks a different question and still gets its answer.
-	fake := delegatingFFprobe(t, t.TempDir(), ffprobe, "stream=index", TempMarker)
+	// probe.StreamEntries IS the stream-list probe the gate reads; the scalar snapshot and
+	// the stream-shape probe the source-shape guard runs ask different questions and still
+	// get their answers, which is what lets the temp reach the gate at all.
+	fake := delegatingFFprobe(t, t.TempDir(), ffprobe, probe.StreamEntries, TempMarker)
 	ts := run(t, ffmpeg, fake, d, nil, nil)
 
 	if !ledgerHas(t, ts, store.Failed, "movie.mkv") {
@@ -439,9 +448,9 @@ func TestVerify_RejectsAnOutputWhoseVideoStreamsCannotBeCounted(t *testing.T) {
 			reason = r.Outcome.Reason
 		}
 	}
-	if !strings.Contains(reason, "stream-count parity failed (type=v in=1 out=0") {
-		t.Errorf("an uncountable output must be treated as carrying ZERO video streams and "+
-			"rejected on parity; recorded reason was: %s", reason)
+	if !strings.Contains(reason, "streams could not be enumerated") {
+		t.Errorf("an output whose streams cannot be established must be rejected rather than "+
+			"swapped on an unknown; recorded reason was: %s", reason)
 	}
 	if md5f(t, src) != before {
 		t.Error("the source changed on an uncountable-output rejection")
