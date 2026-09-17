@@ -346,11 +346,21 @@ dry_run: false
 # SKIPPED, never silently converted:
 #   - an interlaced source (field_order tt/bb/tb/bt) — this tool never deinterlaces
 #   - Dolby Vision (codec tag dvhe/dvh1/dvav/dav1, or a DOVI configuration record)
-#     — the RPU cannot survive a generic re-encode
-#   - HDR10+ (SMPTE2094-40 dynamic metadata) — cannot survive a generic re-encode
+#     - the RPU cannot survive a generic re-encode. DEFERRED, not permanent
+#   - HDR10+ (SMPTE2094-40 dynamic metadata) - cannot survive a generic re-encode.
+#     DEFERRED, not permanent
 #   - an HDR10 source whose mastering-display or content-light block is PRESENT
 #     but unparseable — re-encoding would silently drop metadata that IS there
 #   - a source with an exotic/unrecognized pixel format (see pixel_format above)
+#
+#   Those two dynamic-HDR skips are deferred rather than settled, and both halves of
+#   what it would take are written here because together they are the reason. Lifting
+#   them needs an external RPU toolchain beside the bundled ffmpeg, to extract the RPU
+#   or the SMPTE2094-40 metadata and reinject it into the replacement; and it needs a
+#   way to VERIFY that the reinjected metadata survived, which nothing here has - the
+#   gate compares pixels, an RPU is not pixels, and holdfast will not delete a source
+#   on the strength of a step it did not check. Possible, not free, and not until the
+#   metadata can be verified. The README says the same under "Non-goals".
 # PRESERVED through the encode, never flattened or invented:
 #   - HDR10 static metadata (mastering-display SMPTE ST 2086 + MaxCLL/FALL) and the
 #     colour primaries/transfer/matrix/range tags — an SDR source is never wrongly

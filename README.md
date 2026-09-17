@@ -75,16 +75,17 @@ own licence text or project page.
 
 ## Non-goals
 
-Four boundaries, and they are boundaries rather than a backlog: **no distributed or remote
+Four boundaries. Three of them are boundaries rather than a backlog: **no distributed or remote
 processing**; **not a media server and not a library manager**; **interlaced sources are skipped, not
-converted**; and **HDR10 static metadata is preserved while Dolby Vision and HDR10+ dynamic metadata
-are detect-and-skipped**. Each is stated in full below, in this one section.
+converted**. The fourth is DEFERRED rather than settled: **HDR10 static metadata is preserved while
+Dolby Vision and HDR10+ dynamic metadata are detect-and-skipped**, at the cost
+[stated below](#dynamic-hdr-deferred). Each is stated in full below, in this one section.
 
 Codec-only, same-content re-encoding (no resolution downscaling): **interlaced**, exotic-chroma and
 `multi-video-stream` sources are **skipped, not converted**; HDR10 **static** metadata is preserved
-while Dolby Vision and HDR10+ **dynamic** metadata is **detect-and-skipped** rather than guessed at;
-and embedded artwork is carried through unencoded. It transcodes files in a library other tools
-manage - not a media server.
+while Dolby Vision and HDR10+ **dynamic** metadata is **detect-and-skipped** rather than guessed at,
+a skip that is [deferred, not permanent](#dynamic-hdr-deferred); and embedded artwork is carried
+through unencoded. It transcodes files in a library other tools manage - not a media server.
 
 **Audio transcoding is a non-goal.** A library root can say which audio and subtitle streams its
 replacements carry (`audio_languages`, `subtitle_languages`, `keep_commentary`, `remux_only` - see
@@ -99,6 +100,16 @@ same-filesystem `rename(2)` - it either happened or it did not, so a failure nev
 file where the source was. A remote worker encoding to its own disk and shipping the result back is a
 **copy**, not a rename, and every gate here would have to be re-argued for that primitive. To use more
 of one machine, raise `workers` (default 1, deliberately - see **[docs/docker.md](docs/docker.md)**).
+
+<a id="dynamic-hdr-deferred"></a>
+
+**The Dolby Vision and HDR10+ skip is deferred, not permanent.** A generic libx265 re-encode strips a
+Dolby Vision RPU or HDR10+ SMPTE2094-40 dynamic metadata, and that loss is invisible until somebody
+watches the file, so holdfast skips those sources rather than quietly flattening them. Lifting the
+skip needs an external RPU toolchain beside the bundled ffmpeg, to extract the dynamic metadata and
+reinject it into the replacement. What keeps it deferred is the other half of that work: the gate
+compares pixels, an RPU is not pixels, and holdfast will not delete a source on the strength of a
+step it did not check. Possible, not free, and not until the metadata can be verified.
 
 <a id="non-goal-library-manager"></a>
 
