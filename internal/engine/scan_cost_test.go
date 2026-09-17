@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/NSchatz/holdfast/internal/diskfree"
 	"github.com/NSchatz/holdfast/internal/probe"
@@ -238,9 +239,15 @@ func noOpEngine(tb testing.TB, root string, st store.Store, stat func(string) (o
 	return eng
 }
 
-// countingEngine is the pair the cost tests use: a real SQLite store behind a write
-// counter, and an engine over root whose attribute reads are counted.
-func countingEngine(t *testing.T, root string) (*Engine, *countingStore, *countingStat) {
+// countingEngine is the pair the cost tests use: a real SQLite store behind a write counter,
+// and an engine over root.
+//
+// It deliberately does NOT install the attribute-read counter. That counter is a seam over
+// the pre-claim read, and the read is exactly what the fingerprint cases are about - an
+// engine using the seam would key its files off whatever the seam does, so a production read
+// that followed the wrong kind of link would be invisible to them. Only the test that
+// COUNTS reads installs it; every other test here exercises the real one.
+func countingEngine(t *testing.T, root string) (*Engine, *countingStore) {
 	t.Helper()
 	dbDir := t.TempDir()
 	sq, err := store.Open(filepath.Join(dbDir, "jobs.db"))
@@ -249,8 +256,7 @@ func countingEngine(t *testing.T, root string) (*Engine, *countingStore, *counti
 	}
 	t.Cleanup(func() { _ = sq.Close() })
 	cs := &countingStore{Store: sq}
-	stat := newCountingStat()
-	return noOpEngine(t, root, cs, stat.stat), cs, stat
+	return noOpEngine(t, root, cs, nil), cs
 }
 
 // ---- AC-1 --------------------------------------------------------------------
@@ -264,7 +270,7 @@ func countingEngine(t *testing.T, root string) (*Engine, *countingStore, *counti
 // see; the only observable is whether the statement was issued.
 func TestScan_IssuesNoStoreWriteForATerminalFile(t *testing.T) {
 	root := t.TempDir()
-	eng, cs, _ := countingEngine(t, root)
+	eng, cs := countingEngine(t, root)
 	paths := terminalLibrary(t, cs, root, 4)
 	// The seeding went through the counter, so its own writes are proof the counter is
 	// wired to the store the engine holds - a shadowed method that stopped being called
@@ -305,7 +311,7 @@ func TestScan_EmptyLibraryIssuesNoStoreWrite(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "poster.jpg"), []byte("not a video"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	eng, cs, _ := countingEngine(t, root)
+	eng, cs := countingEngine(t, root)
 
 	if err := eng.RunOneshot(context.Background()); err != nil {
 		t.Fatalf("RunOneshot over an empty library: %v", err)
@@ -384,7 +390,7 @@ func TestMutableGuard_StillClearsWhenTheConditionResolves(t *testing.T) {
 			if err := os.WriteFile(p, []byte("a source this scan will meet"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			eng, cs, _ := countingEngine(t, root)
+			eng, cs := countingEngine(t, root)
 			key := probe.Fingerprint(p)
 			tc.seed(t, cs, p, key)
 			cs.reset()
@@ -420,7 +426,9 @@ func TestMutableGuard_StillClearsWhenTheConditionResolves(t *testing.T) {
 // stats of a file whose inode is in cache are not distinguishable from one by a clock.
 func TestScan_ReadsFileAttributesOncePerFile(t *testing.T) {
 	root := t.TempDir()
-	eng, cs, stat := countingEngine(t, root)
+	eng, cs := countingEngine(t, root)
+	stat := newCountingStat()
+	eng.statFn = stat.stat
 	paths := terminalLibrary(t, cs, root, 4)
 
 	if err := eng.RunOneshot(context.Background()); err != nil {
@@ -435,6 +443,186 @@ func TestScan_ReadsFileAttributesOncePerFile(t *testing.T) {
 	}
 	if p, n := stat.worst(); n > 1 {
 		t.Errorf("worst file was %s at %d reads", filepath.Base(p), n)
+	}
+}
+
+// ---- AC-5, AC-6 --------------------------------------------------------------
+
+// fingerprintFixture is one file the no-op pass will meet, and the fingerprint text the
+// store already holds for it.
+//
+// want is a LITERAL, and that is the whole point of these cases. It was captured by running
+// probe.Fingerprint over exactly these fixtures at the commit BEFORE the pre-claim reads
+// were consolidated, and it is what the row is seeded under here. A value recomputed from
+// the consolidated read would prove only that the new code agrees with itself, which is
+// precisely the regression that re-keys a library: every stored row stops matching, every
+// file that was already done is offered back to a pipeline that deletes its source, and no
+// re-run undoes the deletion.
+//
+// Each fixture's size and modification time are SET, so the text is deterministic and the
+// literal means something. The values sit on representation boundaries on purpose: the
+// epoch, the stat-failure sentinel's own text, the 32-bit signed second and the one after
+// it, a time before the epoch, and a sub-second time whose fraction the record truncates.
+type fingerprintFixture struct {
+	name string
+	size int
+	sec  int64
+	nsec int64
+	want string
+	// symlinkTo, when set, makes this fixture a symbolic link to a file of that size and
+	// time built OUTSIDE the library. Its fingerprint is the TARGET's, because the read
+	// follows the link - a link's own size is the length of the path it holds, which is a
+	// different number in every temporary directory, so an Lstat here would not even be
+	// stable, let alone equal to what the store holds.
+	symlinkTo bool
+}
+
+var fingerprintFixtures = []fingerprintFixture{
+	{name: "plain.mkv", size: 12, sec: 1700000000, want: "12:1700000000"},
+	{name: "epoch.mkv", size: 0, sec: 0, want: "0:0"},
+	{name: "y2038.mkv", size: 5, sec: 2147483647, want: "5:2147483647"},
+	{name: "beyond2038.mkv", size: 6, sec: 2147483648, want: "6:2147483648"},
+	{name: "preepoch.mkv", size: 8, sec: -1, want: "8:-1"},
+	{name: "subsecond.mkv", size: 9, sec: 1234567890, nsec: 999999999, want: "9:1234567890"},
+	{name: "link.mkv", size: 21, sec: 1600000000, want: "21:1600000000", symlinkTo: true},
+}
+
+// buildFingerprintFixtures writes the fixtures into root (targets of links go to outside,
+// which is NOT a library root, so a link's target is never itself enumerated) and returns
+// each fixture's path.
+func buildFingerprintFixtures(t *testing.T, root, outside string) map[string]string {
+	t.Helper()
+	write := func(dir, name string, size int, sec, nsec int64) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, make([]byte, size), 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+		when := time.Unix(sec, nsec)
+		if err := os.Chtimes(p, when, when); err != nil {
+			t.Fatalf("set times on %s: %v", p, err)
+		}
+		return p
+	}
+	paths := make(map[string]string, len(fingerprintFixtures))
+	for _, fx := range fingerprintFixtures {
+		if !fx.symlinkTo {
+			paths[fx.name] = write(root, fx.name, fx.size, fx.sec, fx.nsec)
+			continue
+		}
+		target := write(outside, "target-of-"+fx.name, fx.size, fx.sec, fx.nsec)
+		link := filepath.Join(root, fx.name)
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatalf("symlink %s: %v", link, err)
+		}
+		paths[fx.name] = link
+	}
+	return paths
+}
+
+// TestScan_NoOpPassReOpensNoTerminalRow grades AC-6: a no-op pass over a library holding a
+// symlinked source and files whose recorded size or time sits at a representation boundary
+// derives, for each of them, the fingerprint text the store ALREADY HOLDS - so every
+// terminal row stays matched and none is re-opened.
+//
+// Every row here is seeded under the captured literal, never under a value this build
+// derived, so the assertion is against the store as an older build left it.
+func TestScan_NoOpPassReOpensNoTerminalRow(t *testing.T) {
+	ctx := context.Background()
+	root, outside := t.TempDir(), t.TempDir()
+	paths := buildFingerprintFixtures(t, root, outside)
+	eng, cs := countingEngine(t, root)
+
+	for _, fx := range fingerprintFixtures {
+		p := paths[fx.name]
+		took, err := cs.Claim(ctx, p, fx.want, "seed", 3, store.InputsRead(nil))
+		if err != nil || !took {
+			t.Fatalf("seed claim %s at %q: took=%v err=%v", fx.name, fx.want, took, err)
+		}
+		// The symlinked source is seeded as the skip its own guard records; the rest as
+		// done. Both are terminal, and neither records an input a configuration change
+		// could move.
+		status, out := store.Done, &store.Outcome{DecisionInputs: store.InputsRead(nil)}
+		if fx.symlinkTo {
+			status = store.Skipped
+			out.Reason = SkipSymlink
+		}
+		if err := cs.Finish(ctx, p, fx.want, status, out, 3); err != nil {
+			t.Fatalf("seed finish %s: %v", fx.name, err)
+		}
+	}
+	cs.reset()
+
+	if err := eng.RunOneshot(ctx); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+
+	if took := cs.claimedPaths(); len(took) != 0 {
+		t.Errorf("the no-op pass re-opened %d terminal row(s): %v - the pass derived a "+
+			"fingerprint the store does not hold for those files", len(took), took)
+	}
+	rows, err := cs.List(ctx, nil, 0)
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	held := map[string][]store.Job{}
+	for _, r := range rows {
+		held[r.Path] = append(held[r.Path], r)
+	}
+	for _, fx := range fingerprintFixtures {
+		p := paths[fx.name]
+		got := held[p]
+		if len(got) != 1 {
+			t.Errorf("%s: the store holds %d rows for it after the pass, want 1 - a second "+
+				"row means the pass keyed the file differently and re-offered it", fx.name, len(got))
+			continue
+		}
+		if got[0].Fingerprint != fx.want {
+			t.Errorf("%s: row is keyed %q after the pass, want the seeded %q",
+				fx.name, got[0].Fingerprint, fx.want)
+		}
+		if got[0].Status != store.Done && got[0].Status != store.Skipped {
+			t.Errorf("%s: row is %q after the pass, want it left terminal", fx.name, got[0].Status)
+		}
+	}
+}
+
+// TestProcessFile_SymlinkedSourceStillSkips grades AC-5: a source file that is itself a
+// symbolic link records a skip carrying the symlinked-source reason, and both the link and
+// its target are left byte-for-byte unchanged.
+//
+// The guard it grades runs AFTER the claim and takes its own Lstat, and the consolidation
+// may not move it: a read before the claim that did not follow the link would change the key
+// of every symlinked source, and one after it that DID follow would swap the link for a
+// regular file and orphan the target.
+func TestProcessFile_SymlinkedSourceStillSkips(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	target := filepath.Join(outside, "target.mkv")
+	if err := os.WriteFile(target, []byte("the real file, which the library only points at"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link.mkv")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	targetBefore := md5f(t, target)
+
+	eng, cs := countingEngine(t, root)
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+
+	if got := skipReasonAt(t, cs, link); got != SkipSymlink {
+		t.Errorf("skip reason for a symlinked source = %q, want %q", got, SkipSymlink)
+	}
+	li, err := os.Lstat(link)
+	if err != nil || li.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the library entry is no longer a symbolic link: %v (err %v)", li, err)
+	}
+	if got, err := os.Readlink(link); err != nil || got != target {
+		t.Errorf("the link points at %q (err %v), want %q", got, err, target)
+	}
+	if md5f(t, target) != targetBefore {
+		t.Error("the link's target was modified")
 	}
 }
 

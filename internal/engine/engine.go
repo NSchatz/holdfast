@@ -405,34 +405,6 @@ func (e *Engine) statSource(f string) (os.FileInfo, error) {
 	return os.Stat(f)
 }
 
-// declinedSource, fingerprintSource and nlinkSource are DeclinedPath, probe.Fingerprint and
-// probe.NLink taken through statSource, so that every attribute read the pre-claim path
-// makes goes through the one seam and none of them is invisible to a count of them. Each
-// keeps its original's fail-safe answer exactly.
-func (e *Engine) declinedSource(f string) (rule, detail string, yes bool) {
-	if rule, detail, yes := Declined(f); yes {
-		return rule, detail, true
-	}
-	fi, err := e.statSource(f)
-	return DeclinedByAttributes(f, fi, err)
-}
-
-func (e *Engine) fingerprintSource(f string) string {
-	fi, err := e.statSource(f)
-	if err != nil {
-		return "0:0"
-	}
-	return probe.AttributesOf(fi).String()
-}
-
-func (e *Engine) nlinkSource(f string) uint64 {
-	fi, err := e.statSource(f)
-	if err != nil {
-		return 1
-	}
-	return probe.NLinkOf(fi)
-}
-
 // restat reads a path's rename-invariant attributes after a failed swap, routing
 // through the test seam when one is set.
 func (e *Engine) restat(path string) (probe.Attributes, error) {
@@ -1158,24 +1130,49 @@ func (e *Engine) offered(path string) bool {
 // before Claim but its RecordSkip/ClearSkip is a report-only write that never claims the
 // file, so it cannot let two workers encode one source.
 func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
-	// Both of the questions this door asks about the PATH itself, answered by the one
-	// function the read-only plan pass and the census ask too (DeclinedPath), so a refusal
-	// added there reaches the daemon and every report that predicts it with no second edit.
-	// The order below is unchanged: a path with no file at the other end returns as silently
-	// as it always did (a dangling link is met every pass and must not narrate every pass),
-	// and the character rule is still said out loud below the hold-backs.
-	rule, _, declined := e.declinedSource(f)
+	// Both of the questions this door asks about the PATH itself, still answered by the
+	// functions the read-only plan pass and the census ask too, so a refusal added to either
+	// reaches the daemon and every report that predicts it with no second edit. The character
+	// rule touches no filesystem, so it is asked first and for free; the other half is
+	// answered below off the one read this file costs. The character rule is still said out
+	// loud below the hold-backs.
+	rule, _, declined := Declined(f)
 	if declined && rule != RuleUnsupportedCharacters {
 		return nil
 	}
 
-	// The source's PRE-ENCODE size, which the terminal row records and the undo window
-	// measures its retention by. A second stat deliberately: the question above answers
-	// whether this path may be processed at all, and only this caller wants a number about
-	// the file. A file that went away between the two returns here, as it always did.
+	// THE ONE ATTRIBUTE READ this file costs before the claim, and everything the pre-claim
+	// path wants about the file is derived from it: whether there is a file at the other end
+	// at all, the PRE-ENCODE size the terminal row records and the undo window measures its
+	// retention by, the size:mtime key every row is stored under, and the hard-link count the
+	// seed guard reads. Four reads of the same inode used to answer those four questions, per
+	// file, on every pass over a library that had already been decided.
+	//
+	// It FOLLOWS a symbolic link, exactly as every read it replaces did, and that is not a
+	// detail: the key a symlinked source is recorded under is its TARGET's size and time, so
+	// an os.Lstat here would change the key of every symlinked source in the library, stop
+	// every stored row for one matching, and offer files that were already done back to a
+	// pipeline that deletes its source. The guard that must NOT follow a link is the symlink
+	// guard, it takes its own Lstat, and it still runs after the claim.
 	fi, err := e.statSource(f)
 	if err != nil {
+		// warn, which in this fleet means the process continued in a degraded state: the
+		// pass goes on and this one file is not in it. It is not error, because nothing here
+		// asks a human to act - a file that vanished between the enumeration and now and a
+		// file this process may not read are the same branch, and the error text is what
+		// tells them apart. What happens next is named because a record of a failed read
+		// that does not say so is a trace: nothing is written for the file, and the next
+		// scan meets it again.
+		e.Log.Warn("skip (could not read this file's attributes; nothing is recorded for it and "+
+			"the next scan meets it again)", "file", f, "err", err)
 		return nil
+	}
+	// The other half of the door's question, off that read. A path the character rule already
+	// declined is not asked - it has its own answer and its own line below.
+	if !declined {
+		if _, _, notAFile := DeclinedByAttributes(f, fi, nil); notAFile {
+			return nil
+		}
 	}
 
 	// Hold-backs, re-checked here rather than trusted to the scan: ProcessFile is exported
@@ -1213,7 +1210,10 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	prof, pre, heightKnown := e.effectiveProfile(ctx, f, root, e.Probe.VideoProps)
 	by := decidedBy(root, rooted)
 
-	key := e.fingerprintSource(f)
+	// The job key, off the read above rather than a second stat. It is the same "size:mtime"
+	// text probe.Fingerprint has always produced from the same following stat, which is what
+	// keeps every row already in the store matched.
+	key := probe.AttributesOf(fi).String()
 
 	// THIS JOB's effective ENCODE settings, resolved once, here, from that root's profile
 	// and the source path: the root's own values overlaid with the first matching encode
@@ -1287,7 +1287,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// window was protecting. Discounting is proved per link (same inode, live retention
 	// record), never assumed from the count, so a foreign extra link still skips.
 	if prof.HardlinkSkip() {
-		if links := e.nlinkSource(f); links > 1 && links > 1+e.retainedLinks(ctx, f, key) {
+		if links := probe.NLinkOf(fi); links > 1 && links > 1+e.retainedLinks(ctx, f, key) {
 			e.Log.Info("skip (hardlinked — swap would break a seed and reclaim nothing)", "file", f, "links", links)
 			changed, err := e.Store.RecordSkip(ctx, f, key, SkipHardlinked, by, ts.Profile,
 				supersededAbove(SkipHardlinked)...)
