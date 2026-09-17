@@ -124,6 +124,35 @@ const (
 	FailUnreadable = "unreadable-or-no-video-stream"
 )
 
+// mutableGuards are the guards whose skipped row is a NOTE and not a verdict, in the order
+// their guards run in ProcessFile. Each records a condition that gets FIXED - a retention
+// that succeeds, a withholding an operator lifts, a seed that finishes - so the row must
+// never outlive the condition it describes, and a file carrying one is offered to the
+// pipeline again the moment it resolves.
+//
+// The order is what supersededAbove slices, so it is the chain's order and not an
+// alphabetical one. SkipRestoredOriginal is deliberately absent: it is the one skip that is
+// NOT mutable, and no write here may replace it.
+var mutableGuards = []string{SkipUndoRetentionFailed, SkipOperatorExcluded, SkipHardlinked}
+
+// supersededAbove is the mutable-guard rows a write may replace: the rows left by the guards
+// ABOVE it in the chain, and none of its own or below.
+//
+// That boundary is not a nicety, it is the ordering the pre-claim path used to get from
+// three unconditional DELETEs. Each guard dropped its own stale row for the guards after it,
+// so by the time a write ran, exactly the rows above it were gone - and a write finding its
+// OWN reason still standing did nothing, which is what reports a skip once rather than once
+// per scan for as long as the condition lasts. Carrying the list into the write keeps both,
+// and costs nothing for the file that has no such row.
+func supersededAbove(reason string) []string {
+	for i, r := range mutableGuards {
+		if r == reason {
+			return mutableGuards[:i]
+		}
+	}
+	return mutableGuards
+}
+
 // Engine drives the transcode over a set of library roots.
 type Engine struct {
 	Cfg   config.Config
@@ -1202,15 +1231,6 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	ts := e.Cfg.TranscodeIn(prof, f)
 	targetCodec := targetCodecFor(ts.Encoder)
 
-	// The undo window's own guard is MUTABLE (UNDO-6): a retention that could not be taken
-	// is a condition that gets fixed, so a stale skip from a previous scan is dropped here
-	// and the file re-enters the normal path. Not gated on the window still being enabled,
-	// for the reason the release sweep is not: with the window off no retention is attempted
-	// at all, so a row left over from when it was on would park that file indefinitely.
-	if err := e.Store.ClearSkip(ctx, f, key, SkipUndoRetentionFailed); err != nil {
-		e.Log.Warn("clear stale undo-retention skip failed (continuing)", "file", f, "err", err)
-	}
-
 	// The operator's own withholding, and it runs FIRST among the guards for a reason:
 	// every guard below it is this build deciding something about the file, and this one is
 	// a person deciding it. A row naming a guard that ran after the withholding would
@@ -1232,7 +1252,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	}
 	if withheld {
 		e.Log.Info("skip (an operator withheld this path from the pipeline)", "file", f)
-		changed, err := e.Store.RecordSkip(ctx, f, key, SkipOperatorExcluded, by, ts.Profile)
+		changed, err := e.Store.RecordSkip(ctx, f, key, SkipOperatorExcluded, by, ts.Profile,
+			supersededAbove(SkipOperatorExcluded)...)
 		if err != nil {
 			// Fail safe: recording the skip is the reporting half, never the decision, so
 			// a store hiccup still withholds the file.
@@ -1244,14 +1265,6 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		}
 		return nil
 	}
-	// Not (or no longer) withheld: drop the stale row from a previous scan so the file
-	// re-enters the ordinary path. A no-op for a path nobody ever withheld, and the whole
-	// of what makes a withholding REVERSIBLE - which is what keeps a wrongly recorded one
-	// from being a file that silently stops being worked on for ever.
-	if err := e.Store.ClearSkip(ctx, f, key, SkipOperatorExcluded); err != nil {
-		e.Log.Warn("clear stale withheld skip failed (continuing)", "file", f, "err", err)
-	}
-
 	// THE BAND GUARD, and it stands in front of every guard that reads a knob a rule may
 	// supply. This root selects on the source height and the probe could not establish one,
 	// so there is no answer to which rule applies - and the fail-safe rule says a file this
@@ -1267,8 +1280,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// an active seed, and replacing it via rename breaks the link, reclaiming no space and
 	// silently breaking the seed. The skip is RECORDED as "hardlinked" so an operator sees
 	// WHICH guard fired, and the link count is MUTABLE: RecordSkip only writes where no real
-	// outcome exists, and the else-branch's ClearSkip removes the stale row once the seed
-	// finishes.
+	// outcome exists, and the claim below drops the stale row once the seed finishes.
 	//
 	// A link THIS TOOL holds is discounted (UNDO-6): the undo window takes a second link
 	// before the rename, so a run interrupted there would otherwise park the very file the
@@ -1277,7 +1289,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	if prof.HardlinkSkip() {
 		if links := e.nlinkSource(f); links > 1 && links > 1+e.retainedLinks(ctx, f, key) {
 			e.Log.Info("skip (hardlinked — swap would break a seed and reclaim nothing)", "file", f, "links", links)
-			changed, err := e.Store.RecordSkip(ctx, f, key, SkipHardlinked, by, ts.Profile)
+			changed, err := e.Store.RecordSkip(ctx, f, key, SkipHardlinked, by, ts.Profile,
+				supersededAbove(SkipHardlinked)...)
 			if err != nil {
 				// Fail safe: recording the skip is a reporting nicety, never the decision,
 				// so a store hiccup still skips the file.
@@ -1289,11 +1302,6 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			}
 			return nil
 		}
-		// Not (or no longer) hardlinked: drop any stale "hardlinked" skip from a previous
-		// scan so the file re-enters the Claim path. A no-op if it was never hardlinked.
-		if err := e.Store.ClearSkip(ctx, f, key, SkipHardlinked); err != nil {
-			e.Log.Warn("clear stale hardlink skip failed (continuing)", "file", f, "err", err)
-		}
 	}
 
 	// Claim: the resume short-circuit AND the cross-worker mutual-exclusion guard in one
@@ -1301,7 +1309,15 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// recorded still match what is handed in here and are RE-OPENED when they do not; failed
 	// is retryable up to MaxFailures, since a transient ENOSPC must not exclude a file for
 	// ever; active means another worker holds it, or it is stale and awaits RecoverStale.
-	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures, e.inputsFor(prof, ts))
+	//
+	// It also carries the mutable guards' re-evaluation: a file parked by one of them whose
+	// condition has since resolved - the seed finished, the retention succeeded, the
+	// withholding was lifted - has its stale row dropped and is claimed, inside this one
+	// transaction. The claim is where that belongs, because clearing such a row and taking
+	// the file are the same decision, and doing it here is what lets a library with no such
+	// row pay nothing for the question.
+	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures, e.inputsFor(prof, ts),
+		mutableGuards...)
 	if err != nil {
 		// Fail safe: a store error must never be treated as "done". Log and skip
 		// this pass; the file is retried on the next scan once the store recovers.
@@ -2125,7 +2141,8 @@ func (e *Engine) advance(ctx context.Context, path, key string, s store.Status) 
 // this function takes: the file is simply left for the next scan.
 func (e *Engine) recordUndeterminedHeight(ctx context.Context, worker, f, key string, root config.Root,
 	by store.Decision, prof config.Profile, ts config.Transcode, props *probe.VideoProps) {
-	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures, e.inputsFor(prof, ts))
+	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures, e.inputsFor(prof, ts),
+		supersededAbove(SkipHardlinked)...)
 	if err != nil {
 		e.Log.Warn("claim error (skipping this pass, will retry)", "file", f, "err", err)
 		return

@@ -747,7 +747,14 @@ type Store interface {
 	// run decided about that scan, not a disposal of the file, so the run that is allowed
 	// to transcode must be able to pick the file up - otherwise turning dry-run off would
 	// leave every file the dry run examined permanently untouched.
-	Claim(ctx context.Context, path, fingerprint, worker string, maxFailures int, current DecisionInputs) (bool, error)
+	//
+	// supersedes names the MUTABLE-GUARD reasons whose skipped row this claim may replace,
+	// and it is where the engine's per-file "clear the stale guard row" writes went. Such a
+	// row is deleted and the file claimed fresh, in THIS transaction, which is exactly what
+	// a ClearSkip immediately before this call did - and it costs nothing at all for the
+	// file that has no such row, where the DELETE was paid by every file on every scan.
+	// GuardRestoredOriginal is refused however it is asked for, as it is above.
+	Claim(ctx context.Context, path, fingerprint, worker string, maxFailures int, current DecisionInputs, supersedes ...string) (bool, error)
 
 	// Reopen clears what ONE terminal row recorded about the configuration its decision
 	// was taken under, so the next Claim reads that decision as one it cannot re-derive
@@ -899,13 +906,22 @@ type Store interface {
 	// beside reason on purpose: two adjacent strings is precisely the call that silently
 	// swaps, and a row naming its guard as its profile would be worse than one naming
 	// neither.
-	RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision, profile string) (changed bool, err error)
+	// supersedes carries the MUTABLE-GUARD reasons this write may replace: a skipped row
+	// standing under one of them is one a guard wrote and a later pass is free to answer
+	// again, so this write converts it exactly as it converts a pending row. A row under
+	// any OTHER reason, and a row under GuardRestoredOriginal whatever the caller asks,
+	// is still refused. The caller names the reasons rather than the store assuming them,
+	// because which of them a given write may replace is decided by WHERE in the guard
+	// chain that write sits, and only the chain knows that.
+	RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision, profile string, supersedes ...string) (changed bool, err error)
 
 	// ClearSkip deletes the row ONLY when it is a Skipped row whose reason matches: the
-	// re-evaluation half of a MUTABLE guard. The hardlink guard re-checks every scan, since
-	// a seed may finish and drop the link count, and this removes the stale skip so the
-	// file is reclaimed on the normal path. The reason+status match is what keeps it from
+	// re-evaluation half of a MUTABLE guard. The reason+status match is what keeps it from
 	// ever touching a real outcome. No-op when no such row exists.
+	//
+	// The engine no longer runs one per file per scan. A clear that has to happen is
+	// carried by the write that needed it - Claim's supersedes, or RecordSkip's - inside
+	// that write's own statement, so an already-processed library pays no DELETE at all.
 	ClearSkip(ctx context.Context, path, fingerprint, reason string) error
 
 	// RecordSwapIncident persists a swap that did not complete cleanly. It writes the

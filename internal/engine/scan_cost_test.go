@@ -91,14 +91,14 @@ func (c *countingStore) claimedPaths() []string {
 }
 
 func (c *countingStore) Claim(ctx context.Context, path, fingerprint, worker string, maxFailures int,
-	current store.DecisionInputs) (bool, error) {
+	current store.DecisionInputs, supersedes ...string) (bool, error) {
 	c.mu.Lock()
 	claimErr := c.claimErr
 	c.mu.Unlock()
 	if claimErr != nil {
 		return false, claimErr
 	}
-	took, err := c.Store.Claim(ctx, path, fingerprint, worker, maxFailures, current)
+	took, err := c.Store.Claim(ctx, path, fingerprint, worker, maxFailures, current, supersedes...)
 	if took {
 		c.record("Claim", path)
 		c.mu.Lock()
@@ -114,9 +114,9 @@ func (c *countingStore) ClearSkip(ctx context.Context, path, fingerprint, reason
 }
 
 func (c *countingStore) RecordSkip(ctx context.Context, path, fingerprint, reason string,
-	by store.Decision, profile string) (bool, error) {
+	by store.Decision, profile string, supersedes ...string) (bool, error) {
 	c.record("RecordSkip", path)
-	return c.Store.RecordSkip(ctx, path, fingerprint, reason, by, profile)
+	return c.Store.RecordSkip(ctx, path, fingerprint, reason, by, profile, supersedes...)
 }
 
 func (c *countingStore) Finish(ctx context.Context, path, fingerprint string, s store.Status,
@@ -312,6 +312,101 @@ func TestScan_EmptyLibraryIssuesNoStoreWrite(t *testing.T) {
 	}
 	if got := cs.allWrites(); len(got) != 0 {
 		t.Errorf("an empty library cost %d store write(s) about a file: %v", len(got), got)
+	}
+}
+
+// ---- AC-2, AC-3 --------------------------------------------------------------
+
+// skipReasonAt returns the reason recorded on the SKIPPED row for path, or "" when no
+// skipped row stands for it.
+func skipReasonAt(t *testing.T, st store.Store, path string) string {
+	t.Helper()
+	rows, err := st.List(context.Background(), []store.Status{store.Skipped}, 0)
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	for _, r := range rows {
+		if r.Path == path {
+			return r.Outcome.Reason
+		}
+	}
+	return ""
+}
+
+// TestMutableGuard_StillClearsWhenTheConditionResolves grades AC-2 (hardlink) and AC-3
+// (undo retention): a file parked by a MUTABLE guard whose condition has since resolved is
+// CLAIMED on that scan, and no skip row is left standing for it under that guard's reason.
+//
+// This is the property the deleted clears carried, and it is the one that must not be lost
+// with them: a mutable guard's row records a condition that gets fixed, so a row that
+// outlives the condition is a file that stops being worked on for ever. Each case seeds the
+// row the way the guard itself writes it, then removes the condition and scans.
+func TestMutableGuard_StillClearsWhenTheConditionResolves(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name, reason string
+		seed         func(t *testing.T, st store.Store, path, key string)
+	}{
+		{
+			// The hardlink guard parks through RecordSkip, which records no decision
+			// inputs at all.
+			name:   "hardlink",
+			reason: SkipHardlinked,
+			seed: func(t *testing.T, st store.Store, path, key string) {
+				if _, err := st.RecordSkip(ctx, path, key, SkipHardlinked, store.Decision{}, ""); err != nil {
+					t.Fatalf("seed hardlink skip: %v", err)
+				}
+			},
+		},
+		{
+			// The undo window parks through a terminal Finish, and the row it leaves
+			// records the EMPTY input set - a verdict no configuration change re-opens.
+			// Nothing but this clear ever offers that file to the pipeline again, which
+			// is what makes this the case that must not be lost.
+			name:   "undo_retention",
+			reason: SkipUndoRetentionFailed,
+			seed: func(t *testing.T, st store.Store, path, key string) {
+				took, err := st.Claim(ctx, path, key, "seed", 3, store.InputsRead(nil))
+				if err != nil || !took {
+					t.Fatalf("seed claim: took=%v err=%v", took, err)
+				}
+				if err := st.Finish(ctx, path, key, store.Skipped, &store.Outcome{
+					Reason: SkipUndoRetentionFailed, DecisionInputs: store.InputsRead(nil),
+				}, 3); err != nil {
+					t.Fatalf("seed undo-retention skip: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			p := filepath.Join(root, "movie.mkv")
+			if err := os.WriteFile(p, []byte("a source this scan will meet"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			eng, cs, _ := countingEngine(t, root)
+			key := probe.Fingerprint(p)
+			tc.seed(t, cs, p, key)
+			cs.reset()
+
+			if err := eng.RunOneshot(ctx); err != nil {
+				t.Fatalf("RunOneshot: %v", err)
+			}
+
+			claimed := false
+			for _, got := range cs.claimedPaths() {
+				if got == p {
+					claimed = true
+				}
+			}
+			if !claimed {
+				t.Errorf("a file parked under %q was not claimed once the condition resolved: "+
+					"it is parked for ever", tc.reason)
+			}
+			if got := skipReasonAt(t, cs, p); got == tc.reason {
+				t.Errorf("a skip row under %q still stands after the condition resolved", tc.reason)
+			}
+		})
 	}
 }
 

@@ -247,7 +247,7 @@ func (s *SQLite) RecoverStale(ctx context.Context) (int, error) {
 // would hand the same job to two workers). The transaction (SQLite's default
 // isolation locks the database for its duration) makes the whole read-modify-write
 // atomic, which is what actually delivers the "exactly one claimant" guarantee.
-func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, maxFailures int, current DecisionInputs) (bool, error) {
+func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, maxFailures int, current DecisionInputs, supersedes ...string) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("store: claim begin tx: %w", err)
@@ -283,6 +283,32 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 
 	st := Status(status)
 	switch {
+	case st == Skipped && supersedable(reason.String, supersedes):
+		// A MUTABLE GUARD's own skip row, and this caller is the write that used to run
+		// immediately after the DELETE which removed it. The condition that guard recorded
+		// is one that gets fixed - a seed finishes, a retention succeeds, an operator lifts
+		// a withholding - so the row is not a verdict to re-derive, it is a note to drop.
+		//
+		// Dropped here rather than before the call, and that is the whole of this item: a
+		// library whose files have no such row paid one DELETE per file per scan to find
+		// out, and this pays nothing to reach the same answer. The row is DELETEd and
+		// re-INSERTed rather than updated in place, so the claim the caller gets is
+		// byte-for-byte the fresh one the removed DELETE left it - fail_count included.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM jobs WHERE path = ? AND fingerprint = ? AND status = ? AND reason = ?`,
+			path, fingerprint, string(Skipped), reason.String); err != nil {
+			return false, fmt.Errorf("store: claim clear superseded skip: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, schema_version)
+			 VALUES (?, ?, ?, 0, ?, ?, ?)`,
+			path, fingerprint, string(Probing), worker, now(), currentStamp()); err != nil {
+			return false, fmt.Errorf("store: claim insert over superseded skip: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return false, fmt.Errorf("store: claim commit: %w", err)
+		}
+		return true, nil
 	case st == Done || st == Skipped:
 		if !reopens(st, reason.String, ParseDecisionInputs(inputs.String), current) {
 			return false, nil // terminal, and its decision still re-derives the same way
@@ -405,6 +431,39 @@ func reopens(st Status, reason string, recorded, current DecisionInputs) bool {
 		return false
 	}
 	return !recorded.StillMatches(current)
+}
+
+// supersedable reports whether a skipped row recorded under reason is one the caller's
+// write may replace outright.
+//
+// Two refusals are in here rather than in the callers. A row with NO reason at all is never
+// superseded: "" is how this package spells NULL, so an empty entry in a caller's list would
+// match every reasonless skipped row rather than none. And GuardRestoredOriginal is refused
+// however it is asked for, which is the same refusal reopens and Reopen already make and for
+// the same reason - those are an operator's rescued bytes, and no guard may hand them back
+// to the gates that passed the encode they rejected.
+func supersedable(reason string, supersedes []string) bool {
+	if reason == "" || reason == GuardRestoredOriginal {
+		return false
+	}
+	for _, r := range supersedes {
+		if r == reason {
+			return true
+		}
+	}
+	return false
+}
+
+// supersedableReasons is the caller's list with everything supersedable refuses removed, so
+// a statement built from it can never carry an entry that would match the wrong row.
+func supersedableReasons(supersedes []string) []string {
+	kept := make([]string, 0, len(supersedes))
+	for _, r := range supersedes {
+		if r != "" && r != GuardRestoredOriginal {
+			kept = append(kept, r)
+		}
+	}
+	return kept
 }
 
 // carryReclaimed moves one row's contribution to the lifetime reclaimed total into the
@@ -1137,14 +1196,16 @@ func (s *SQLite) DropRetained(ctx context.Context, sourcePath string) error {
 	return nil
 }
 
-// RecordSkip is documented on the Store interface. The ON CONFLICT DO UPDATE is
-// gated by `WHERE jobs.status = 'pending'`, which is what keeps a mutable guard from
-// clobbering a real outcome: on a fresh key the INSERT runs (1 row); on a pending
-// row it converts to skipped (1 row); on a row that is already skipped/done/failed
-// the DO UPDATE's WHERE excludes it and nothing changes (0 rows). RowsAffected is
-// therefore exactly "did this call newly record the skip", which the caller uses to
-// emit — and count — the skip once, not once per scan. The outcome columns are
-// cleared so a converted row carries no stale proof (the same discipline as Claim).
+// RecordSkip is documented on the Store interface. The ON CONFLICT DO UPDATE is gated by
+// its WHERE, which is what keeps a mutable guard from clobbering a real outcome: on a fresh
+// key the INSERT runs (1 row); on a pending row, or on a skip left by one of the mutable
+// guards the caller named, it converts to skipped (1 row); on a row that is already
+// done/failed, or a skip under any other reason, the WHERE excludes it and nothing changes
+// (0 rows). RowsAffected is therefore exactly "did this call newly record the skip", which
+// the caller uses to emit — and count — the skip once, not once per scan. The outcome
+// columns are cleared so a converted row carries no stale proof (the same discipline as
+// Claim), and the attempt count is kept for a pending row and reset for a superseded skip,
+// which is precisely what a DELETE of that row followed by this INSERT left behind.
 //
 // The library profile and the encode profile are the ONLY outcome columns this write
 // carries values for rather than clearing, and that is the same discipline rather than
@@ -1154,7 +1215,35 @@ func (s *SQLite) DropRetained(ctx context.Context, sourcePath string) error {
 // THIS attempt exactly as the reason does. Clearing the encode profile would record
 // "nothing matched this file" on a row a profile decided, which is a false statement and
 // not an absence - for that column NULL and "" say the same thing.
-func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision, profile string) (bool, error) {
+func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision, profile string, supersedes ...string) (bool, error) {
+	// The rows this write may replace besides a pending one: a skip another MUTABLE guard
+	// left, which the caller used to clear with its own DELETE immediately before getting
+	// here. It is spelled as part of the conflict rule so the replacement happens only
+	// where such a row EXISTS, and costs nothing where it does not. Its own reason is
+	// excluded whatever the caller passes, which is what keeps changed=false - and so the
+	// event and the count - to the scan that first recorded the skip.
+	over := supersedableReasons(supersedes)
+	conflict := `jobs.status = ?`
+	if len(over) > 0 {
+		ph := make([]string, len(over))
+		for i := range over {
+			ph[i] = "?"
+		}
+		conflict += ` OR (jobs.status = ? AND jobs.reason <> excluded.reason AND jobs.reason IN (` +
+			strings.Join(ph, ", ") + `))`
+	}
+	args := []any{
+		path, fingerprint, string(Skipped), now(), nullString(reason),
+		nullString(by.LibraryRoot), nullString(by.ProfileDigest), currentStamp(), nullString(profile),
+		string(Pending), // the attempt count's CASE, below
+		string(Pending), // the conflict rule's own pending arm
+	}
+	if len(over) > 0 {
+		args = append(args, string(Skipped))
+		for _, r := range over {
+			args = append(args, r)
+		}
+	}
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, reason,
 			library_root, profile_digest, schema_version, profile)
@@ -1170,11 +1259,9 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
 			swap_cause = NULL, decision_inputs = NULL, profile = excluded.profile,
 			dropped_streams = NULL, selection_not_applied = NULL, vmaf_skipped = NULL,
-			source_width = NULL, source_height = NULL, output_width = NULL, output_height = NULL
-		 WHERE jobs.status = ?`,
-		path, fingerprint, string(Skipped), now(), nullString(reason),
-		nullString(by.LibraryRoot), nullString(by.ProfileDigest), currentStamp(), nullString(profile),
-		string(Pending))
+			source_width = NULL, source_height = NULL, output_width = NULL, output_height = NULL,
+			fail_count = CASE WHEN jobs.status = ? THEN jobs.fail_count ELSE 0 END
+		 WHERE `+conflict, args...)
 	if err != nil {
 		return false, fmt.Errorf("store: record skip: %w", err)
 	}
