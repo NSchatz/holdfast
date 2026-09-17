@@ -47,6 +47,25 @@ type ProfileEncoder interface {
 	ForProfile(prof config.Profile) Encoder
 }
 
+// StreamPlanEncoder is an Encoder whose argv is built from an INTENDED STREAM MAP - the
+// set of source streams this job means the output to carry, derived once by the engine
+// from the source's own probe.
+//
+// It is a separate optional interface for the reason ProfileEncoder is: an Encoder with
+// no per-job stream behaviour has nothing to do with a plan, and a test's deterministic
+// fake writes the bytes it was told to write. ForStreamPlan must return an Encoder
+// equivalent to the receiver in every respect but the plan, and must not mutate the
+// receiver - the engine's workers share one Encoder across goroutines.
+//
+// The plan is HANDED IN and never derived here, which is the whole of AC-6: the map the
+// argv is built from and the map the verification gate is checked against have to be ONE
+// derivation, because two of them would be two answers to whether a track was lost, and
+// that answer decides whether the source is deleted.
+type StreamPlanEncoder interface {
+	Encoder
+	ForStreamPlan(plan *StreamPlan) Encoder
+}
+
 // EncoderFunc adapts a plain function to Encoder (used by tests).
 type EncoderFunc func(ctx context.Context, in, out string, props *probe.VideoProps) error
 
@@ -83,6 +102,17 @@ type FFmpegEncoder struct {
 	// existed) encodes at.
 	Prof *config.Profile
 
+	// Plan is THIS JOB's intended stream map, derived once by the engine from the
+	// source's probe and handed here through ForStreamPlan. It decides which source
+	// streams the argv maps and whether the video is stream-copied too.
+	//
+	// nil means "carry every stream but data", which is the argv this repository has
+	// always built and is what a direct caller of this exported type gets. It is never
+	// DERIVED here: an encoder that worked out its own map would be a second derivation,
+	// and the gate would then be checking a different answer than the argv was built
+	// from.
+	Plan *StreamPlan
+
 	// newProgressPipe, when non-nil, replaces os.Pipe when opening the channel ffmpeg
 	// writes -progress reports to. Unexported test seam (the engine tests are in this
 	// package): returning an error from it is how a test drives the "progress collection
@@ -105,6 +135,15 @@ type FFmpegEncoder struct {
 // several roots encode concurrently and none of them can see another's profile.
 func (e FFmpegEncoder) ForProfile(prof config.Profile) Encoder {
 	e.Prof = &prof
+	return e
+}
+
+// ForStreamPlan returns this encoder built from plan's intended stream map. The receiver
+// is a VALUE, so the copy is the whole of the isolation the engine's workers need, exactly
+// as it is for ForProfile: several files under several roots encode concurrently and none
+// of them can see another's plan.
+func (e FFmpegEncoder) ForStreamPlan(plan *StreamPlan) Encoder {
+	e.Plan = plan
 	return e
 }
 
@@ -140,6 +179,15 @@ func (e FFmpegEncoder) Encode(ctx context.Context, in, out string, props *probe.
 // pipe cannot be opened at all, the -progress option is simply not passed and the encode
 // runs precisely as it did before this existed.
 func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, props *probe.VideoProps, sink ProgressSink) error {
+	// A REMUX-ONLY job re-encodes nothing, so it needs none of what follows: no encoder
+	// spec, no pixel format, no colour derivation and no quality knob, because there is no
+	// encode for any of them to describe. It is the intended stream map and `-c copy`, and
+	// every structural gate an encode is held to still runs against what it produces.
+	if e.Plan.RemuxOnly() {
+		return e.runFFmpeg(ctx, in, out, sink, nil,
+			append(e.Plan.MapArgs(), "-c", "copy"))
+	}
+
 	// THIS JOB's settings: the profile of the root the engine handed this encoder,
 	// overlaid with the first encode profile whose pattern matches the SOURCE path
 	// (TRANSCODE-PROFILES). It is a pure function of the configuration, that profile
@@ -190,6 +238,75 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 		props.SideData(),
 	)
 
+	// The stream map, and WHICH of the mapped video streams must be pinned back to copy.
+	//
+	// Both come from the intended stream map when the engine supplied one, and from the
+	// source's probe when a direct caller did not. They are the same question asked of one
+	// derivation or of none - never of two: an encoder that worked out its own map beside
+	// the one the gate checks would be the second answer this whole design exists to
+	// prevent.
+	//
+	// An ATTACHED PICTURE is a video stream and the blanket `-c:v` below would re-encode
+	// it, so each one is pinned back to copy by its own per-stream option, AFTER the
+	// blanket option it overrides. The map preserves stream order, so the N of an output
+	// `v:N` is the N of the video streams the output carries. A single-video-stream source
+	// yields no such option and therefore byte-identical argv to the encoder that predates
+	// this.
+	mapArgs, pictures, err := e.streamArgs(in, props)
+	if err != nil {
+		return err
+	}
+
+	body := append([]string(nil), mapArgs...)
+	body = append(body, "-c", "copy", "-c:v", spec.FFmpegCodec)
+	for _, i := range pictures {
+		body = append(body, "-c:v:"+strconv.Itoa(i), "copy")
+	}
+	body = append(body, buildArgs(spec, ts, pixFmt, colorArgs, x265Color)...)
+
+	var pre []string
+	if spec.Key == "vaapi" {
+		// -vaapi_device is a GLOBAL option that must precede -i so the hwupload
+		// filter (added by buildArgs) has a device to target. Every other Spec has no
+		// such ordering requirement.
+		pre = []string{"-vaapi_device", "/dev/dri/renderD128"}
+	}
+	return e.runFFmpeg(ctx, in, out, sink, pre, body)
+}
+
+// streamArgs is the stream-selection half of the argv: which source streams are mapped,
+// and the output video-relative indexes of the attached pictures among them.
+//
+// With an intended stream map it reads THAT and nothing else. Without one - a direct
+// caller of this exported type, which is chiefly a test - it falls back to the argv this
+// repository has always built and asks the source's probe which of its video streams are
+// artwork, exactly as it did before stream selection existed.
+//
+// Whether ffprobe ESTABLISHED the source's shape is not dropped on either path. An
+// encoder that could not find out what video streams its source carries cannot know
+// whether one of them is artwork that must be pinned back to copy, and an unknown shape
+// has to fail safe rather than default to the common one - the same posture the engine's
+// own source-shape guard takes, and the same one the pixel-format derivation takes for the
+// same class of unknown.
+func (e FFmpegEncoder) streamArgs(in string, props *probe.VideoProps) (mapArgs []string, pictures []int, err error) {
+	if e.Plan != nil {
+		return e.Plan.MapArgs(), e.Plan.AttachedPictureIndexes(), nil
+	}
+	streams, established := props.VideoStreams()
+	if !established {
+		return nil, nil, fmt.Errorf("cannot establish the video streams of %q (ffprobe did not answer): "+
+			"refusing to encode without knowing whether one of them is an attached picture", in)
+	}
+	return []string{"-map", "0", "-map", "-0:d?"}, attachedPictureCopyIndexes(streams), nil
+}
+
+// runFFmpeg assembles the full argv around a job's own options and runs the encoder.
+//
+// It is ONE exec path for every job this encoder performs - a re-encode and a remux
+// alike - so the progress channel, the captured output, the returned error and its
+// wrapping cannot drift between them. pre carries the GLOBAL options that must precede
+// `-i` (today only the VAAPI device); body is everything between the input and the output.
+func (e FFmpegEncoder) runFFmpeg(ctx context.Context, in, out string, sink ProgressSink, pre, body []string) error {
 	// Open the progress channel BEFORE the argv is assembled: the -progress option is
 	// only ever passed when there is a reader for it. A sink-less call, or a pipe we
 	// could not open, produces byte-identical argv to the pre-progress encoder.
@@ -202,39 +319,9 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 		// "pipe:1" precisely because stdout is part of the captured error text.
 		args = append(args, "-progress", "pipe:3")
 	}
-	if spec.Key == "vaapi" {
-		// -vaapi_device is a GLOBAL option that must precede -i so the hwupload
-		// filter (added below by buildArgs) has a device to target. Every other
-		// Spec has no such ordering requirement.
-		args = append(args, "-vaapi_device", "/dev/dri/renderD128")
-	}
-	args = append(args, "-i", in,
-		"-map", "0", "-map", "-0:d?",
-		"-c", "copy", "-c:v", spec.FFmpegCodec,
-	)
-	// An ATTACHED PICTURE is a video stream and `-c:v` above would re-encode it, so each
-	// one is pinned back to copy by its own per-stream option. It must come AFTER the
-	// blanket -c:v, which is what it overrides; `-map 0` preserves stream order, so the
-	// N of an output `v:N` is the N of the source's. A single-video-stream source yields
-	// no such option and therefore byte-identical argv to the encoder that predates this.
-	//
-	// Whether ffprobe ESTABLISHED that shape is not dropped. An encoder that could not
-	// find out what video streams its source carries cannot know whether one of them is
-	// artwork that must be pinned back to copy, and an unknown shape has to fail safe
-	// rather than default to the common one - the same posture the engine's own
-	// source-shape guard takes, and the same one the pixel-format derivation above takes
-	// for the same class of unknown. Through the engine this is unreachable: that guard
-	// skipped the file already and hands this call the snapshot it read. It is the
-	// backstop for a direct caller of this exported type, which builds its own.
-	streams, established := props.VideoStreams()
-	if !established {
-		return fmt.Errorf("cannot establish the video streams of %q (ffprobe did not answer): "+
-			"refusing to encode without knowing whether one of them is an attached picture", in)
-	}
-	for _, i := range attachedPictureCopyIndexes(streams) {
-		args = append(args, "-c:v:"+strconv.Itoa(i), "copy")
-	}
-	args = append(args, buildArgs(spec, ts, pixFmt, colorArgs, x265Color)...)
+	args = append(args, pre...)
+	args = append(args, "-i", in)
+	args = append(args, body...)
 	args = append(args, "--", out)
 
 	if e.argvObserver != nil {

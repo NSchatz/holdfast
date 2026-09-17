@@ -62,6 +62,19 @@ const (
 	// rather than encoding on a guess.
 	SkipMultiVideoStream = "multi-video-stream"
 
+	// SkipUnreadableStreamList is the source's FULL-shape guard: ffprobe could not
+	// establish what streams the source carries at all, so the intended stream map this
+	// job would be built from and checked against cannot be derived.
+	//
+	// It skips rather than encoding on a guess, for the reason every unknown in this
+	// pipeline does: the map is what stands between a silently-dropped track and the
+	// deletion of the source, and a map derived from a stream list nobody could read
+	// would be a gate checking an answer it invented. Like the shape guard above it reads
+	// no configuration key - what streams a file carries is a property of the file - so
+	// its rows record nothing read and only a requeue (or a source that changed) revisits
+	// them.
+	SkipUnreadableStreamList = "unreadable-stream-list"
+
 	// SkipUndoRetentionFailed is the undo window's own guard (UNDO-6): the original could
 	// not be retained, so the swap that would have destroyed it does not run. It is a
 	// MUTABLE guard, like the hardlink one, so ProcessFile clears a stale one before the
@@ -111,6 +124,19 @@ type Engine struct {
 	// staticMetadataIncomplete, when non-nil, replaces hdr.StaticMetadataIncomplete for the
 	// HDR10 static-metadata guard. Unexported test seam; production leaves it nil.
 	staticMetadataIncomplete func(flatSideData string) bool
+
+	// planObserver, when non-nil, receives the intended stream map at each of the two
+	// points that read one: the encode the argv is built for, and the gate the output is
+	// checked by. Unexported test seam (the engine tests are in this package), nil in
+	// production.
+	//
+	// It exists for the one question no output file can answer: did the argv and the gate
+	// read ONE derivation of the map? A test that merely runs a job and finds the output
+	// acceptable passes just as well against two derivations that happen to agree on the
+	// fixture, and the whole hazard is a pair that agrees on a fixture and disagrees on a
+	// library. Announcing the plan's IDENTITY at both seams makes the question answerable,
+	// and answerable NO.
+	planObserver func(stage string, plan *StreamPlan)
 
 	// vmafScore, when non-nil, replaces the real libvmaf measurement in the VMAF gate, so a
 	// test can force a low score or an unavailable-libvmaf error without a second real
@@ -355,10 +381,19 @@ const progressEmitInterval = time.Second
 // runs is an encoder built from that root's knobs rather than one told about them
 // afterwards. An Encoder that is not profile-aware encodes from what it was constructed
 // with, exactly as before.
-func (e *Engine) encode(ctx context.Context, worker, in, out string, props *probe.VideoProps, prof config.Profile) error {
+func (e *Engine) encode(ctx context.Context, worker, in, out string, props *probe.VideoProps, prof config.Profile, plan *StreamPlan) error {
 	enc := e.Enc
 	if pe, ok := enc.(ProfileEncoder); ok {
 		enc = pe.ForProfile(prof)
+	}
+	if se, ok := enc.(StreamPlanEncoder); ok {
+		// THE SEAM. The plan the argv is built from is handed over HERE and announced
+		// here, and the gate announces the plan it checked against at its own seam; a test
+		// holding both can ask whether they are ONE derivation, which is a question that
+		// can be answered NO - and would be, if anything on either side ever derived a map
+		// of its own (see SameDerivation).
+		e.observePlan(planStageEncode, plan)
+		enc = se.ForStreamPlan(plan)
 	}
 	pe, ok := enc.(ProgressEncoder)
 	if !ok || e.Observer == nil {
@@ -1230,6 +1265,40 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		return nil
 	}
 
+	// THE INTENDED STREAM MAP, derived ONCE, here, and threaded into both the encode and
+	// the gate. It is what the argv is built from and what the output is checked against,
+	// and it is one value rather than two derivations because two derivations would be two
+	// answers to whether a track was lost - and that answer decides whether the source is
+	// deleted.
+	//
+	// The source's stream list is fetched HERE and not earlier. It is a second ffprobe, and
+	// every guard above this line can skip a file; a list fetched at the top of the pass
+	// would be paid for by every enumerated file, including the ones that never reach an
+	// encoder (see probe.VideoProps.AllStreams, which is lazy and memoised for exactly
+	// this reason). A dry run returns above without paying for it at all: it encodes
+	// nothing, so it drops nothing.
+	sourceStreams, enumerated := props.AllStreams()
+	if !enumerated {
+		// AC-9's source half, and the fail-safe rule this whole pipeline keeps: an unknown
+		// shape is never read as the common one. Nothing is encoded and the source is
+		// untouched.
+		e.Log.Info("skip (ffprobe could not enumerate the source's streams - "+
+			"refusing to encode without knowing which streams the output must carry)", "file", f)
+		e.finish(ctx, f, key, store.Skipped, e.because(SkipUnreadableStreamList, by, prof, ts))
+		return nil
+	}
+	plan := DeriveStreamPlan(sourceStreams, prof, codec)
+	if plan.AudioSelectionNotApplied() {
+		// The run CONTINUES, in a state the operator did not configure: warn, which in this
+		// fleet means exactly that. The row records the same fact durably, because a log
+		// line is not evidence about a file whose source is about to be deleted.
+		e.Log.Warn("the audio selection was NOT applied: applying it would have left this file "+
+			"with no audio at all, so every audio stream is carried forward instead",
+			"file", f, "why", SelectionNotAppliedNoAudio,
+			"audio_languages", strings.Join(prof.AudioLanguageCodes(), ","),
+			"keep_commentary", prof.CommentaryKept())
+	}
+
 	// WHERE THE ENCODER WRITES. With no scratch_dir configured this is a temp beside the
 	// source and the pipeline below is byte for byte the one this repository has always run:
 	// one file, encoded in place, verified in place, renamed onto the source. With a
@@ -1293,9 +1362,18 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// reached the encoder, so the encoder is attributable - on a failure as much as on a
 	// success - and so is the encode profile that chose it.
 	out := &store.Outcome{Encoder: ts.Encoder, Profile: ts.Profile, Decision: by}
+	// What this job's selection did, recorded from the SAME plan the argv is built from
+	// and the gate is checked against - on a failure as much as on a success, because a
+	// rejected encode is exactly where an operator wants to know which streams it was
+	// asked to carry. An empty record is a record: it says this job applied a selection
+	// and dropped nothing, which is a different statement from a row that says nothing.
+	out.DroppedStreams = plan.DroppedRecord()
+	if plan.AudioSelectionNotApplied() {
+		out.SelectionNotApplied = SelectionNotAppliedNoAudio
+	}
 
 	encStart := time.Now()
-	if err := e.encode(ctx, worker, f, work, props, prof); err != nil {
+	if err := e.encode(ctx, worker, f, work, props, prof, plan); err != nil {
 		if ctx.Err() != nil { // interrupted: discard temp, DON'T finish — leave active for RecoverStale
 			_ = os.Remove(tmp)
 			return ctx.Err()
@@ -1310,7 +1388,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	out.EncodeMs = ptr(encodeDur.Milliseconds())
 
 	e.advance(ctx, f, key, store.Verifying)
-	proof, class, reason := e.verifyOutput(ctx, f, work, prof, targetCodec)
+	proof, class, reason := e.verifyOutput(ctx, f, work, prof, targetCodec, plan)
 	// Record whatever VMAF measured, on the reject path too: the numbers that rejected an
 	// encode are exactly the ones an operator wants to see.
 	out.VmafMean, out.VmafMin, out.VmafModel = proof.Mean, proof.Min, proof.Model
@@ -1321,6 +1399,15 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// And which video stream those pixels came from. An unmeasured gate carries "" and the
 	// column stays NULL: not recorded, never the stream this build would have scored.
 	out.VmafStream = proof.Stream
+	// Why the gate did not run, when it did not. It travels beside the figures rather than
+	// instead of them: every VMAF field above is "" or nil on such a row, so what a reader
+	// gets is "not measured, and here is why" - never a zero, which would be a fabricated
+	// measurement of a gate nobody ran.
+	out.VmafSkipped = proof.Skipped
+	if proof.Skipped != "" {
+		e.Log.Warn("the VMAF gate did not run on this job", "file", f, "why", proof.Skipped,
+			"established_instead", "every carried video stream is identical to the source stream it came from")
+	}
 	if reason != nil {
 		if ctx.Err() != nil {
 			_ = os.Remove(tmp)

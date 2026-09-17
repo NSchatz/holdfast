@@ -35,6 +35,15 @@ type vmafProof struct {
 	// an obliterated plane, the most important thing this field could ever report.
 	ChromaMin    *float64
 	ChromaMetric string
+
+	// Skipped names WHY the gate did not run on a job that reached it, and is "" on every
+	// job whose gate ran. It is a stable token (see VmafSkippedRemuxOnly).
+	//
+	// A proof carrying it carries no figure at all - every field above is nil or "" -
+	// which is the distinction it exists for: "the gate did not run, and here is why" is a
+	// statement a reader can act on, where a zeroed score would be a fabricated
+	// measurement of a gate nobody ran.
+	Skipped string
 }
 
 // verifyOutput checks a freshly-encoded temp before it may replace the source, and is the
@@ -64,8 +73,18 @@ type vmafProof struct {
 // targetCodec is what THIS JOB's effective encoder produces, passed in rather than derived
 // from prof: a run can carry more than one target, and a check made against any other job's
 // would reject an output that is exactly what this one's own settings asked for.
-func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.Profile, targetCodec string) (vmafProof, store.FailureClass, error) {
+// plan is THIS JOB's intended stream map - the SAME value the encode's argv was built
+// from, handed in rather than derived here. Gate 5 is checked against it, and that is the
+// whole of why it is a parameter: a gate that derived its own map would be answering a
+// different question than the encoder was asked, and the two answers would differ on
+// exactly the file nobody tested.
+func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.Profile, targetCodec string, plan *StreamPlan) (vmafProof, store.FailureClass, error) {
 	var none vmafProof
+
+	// THE SEAM, announced before any gate runs: this is the map the checks below read.
+	// The encode announced the map its argv was built from at its own seam, so a reader
+	// holding both can ask whether they were ONE derivation (see Engine.planObserver).
+	e.observePlan(planStageVerify, plan)
 
 	// 1. exists & non-empty. TRANSIENT: an empty temp is what a full disk, a killed ffmpeg
 	// or a write that never landed leaves behind, none of them properties of the source.
@@ -73,12 +92,21 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.P
 		return none, store.FailureTransient, fmt.Errorf("temp missing or empty")
 	}
 
-	// 2. output codec must be the codec THIS JOB's encoder targets (hevc or av1,
-	// TRANSCODE-6), so a hardware or AV1 encode is held to the same bar as CPU libx265 and
-	// two encoders in one run are each held to their own. DETERMINISTIC: the job's encoder
-	// produces the codec it produces.
-	if oc := e.Probe.VideoCodec(ctx, tmp); oc != targetCodec {
-		return none, store.FailureDeterministic, fmt.Errorf("output codec is %q, not %s", oc, targetCodec)
+	// 2. output codec must be the codec THIS JOB produces, so a hardware or AV1 encode is
+	// held to the same bar as CPU libx265 and two encoders in one run are each held to
+	// their own. DETERMINISTIC: the job's encoder produces the codec it produces.
+	//
+	// A REMUX produces the codec it COPIED, which is the source's - the gate is unchanged,
+	// it is the expectation that follows what the job was asked to do. Holding a remux to
+	// the configured target codec would reject every remux there is, and lowering the gate
+	// to "whatever came out" would accept anything; the source's own codec is the only
+	// expectation that is neither.
+	wantCodec := targetCodec
+	if plan.RemuxOnly() {
+		wantCodec = plan.SourceVideoCodec()
+	}
+	if oc := e.Probe.VideoCodec(ctx, tmp); oc != wantCodec {
+		return none, store.FailureDeterministic, fmt.Errorf("output codec is %q, not %s", oc, wantCodec)
 	}
 
 	// 3. length: the encode must not be truncated. lengthParity classifies its own two
@@ -96,18 +124,30 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.P
 		return none, store.FailureDeterministic, fmt.Errorf("size-increase reject (in=%dB out=%dB min_savings=%d%%)", sin, sout, prof.MinSavingsPercent)
 	}
 
-	// 5. per-type stream-count parity: no video/audio/subtitle/attachment track dropped. Size,
-	// duration and a clean decode can all pass while a track was silently lost, and video is in
-	// the loop with the most at stake - a second angle or a cover picture can come out one
-	// stream short with every other check green. The encode maps every stream but data, so
-	// v/a/s/t counts must not fall below the source. An output whose streams cannot be counted
-	// counts as ZERO: reject and keep the source rather than swap on an unknown. DETERMINISTIC.
-	for _, typ := range []string{"v", "a", "s", "t"} {
-		cin := e.Probe.StreamCount(ctx, in, typ)
-		cout := e.Probe.StreamCount(ctx, tmp, typ)
-		if cout < cin {
-			return none, store.FailureDeterministic, fmt.Errorf("stream-count parity failed (type=%s in=%d out=%d — a track was dropped)", typ, cin, cout)
-		}
+	// 5. THE INTENDED-STREAM CHECK: the output carries exactly the streams this job meant
+	// it to carry, and nothing else. Size, duration and a clean decode can all pass while a
+	// track was silently lost, and video is in the check with the most at stake - a second
+	// angle or a cover picture can come out one stream short with every other check green.
+	//
+	// It REPLACES a per-type count that merely had not to fall below the source's, and it
+	// is strictly stronger in both directions. A count passes an output that carries a
+	// DIFFERENT stream of the same type, and it passes a selection that did not apply at
+	// all; this rejects the first because the map names the language of each stream it
+	// intends, and the second because an unintended stream present is a rejection here
+	// where a count would have read it as "not fewer than the source".
+	//
+	// An output whose streams cannot be enumerated is REJECTED - AC-9's output half, and
+	// the same posture the source half takes: an unknown shape is never read as the common
+	// one, and the source is kept. DETERMINISTIC.
+	outStreams, enumerated := e.Probe.Streams(ctx, tmp)
+	if !enumerated {
+		return none, store.FailureDeterministic, fmt.Errorf(
+			"the output's streams could not be enumerated (ffprobe did not answer): refusing to "+
+				"accept an output whose stream map cannot be checked against the %d stream(s) this job "+
+				"intended to carry", len(plan.Intended()))
+	}
+	if err := plan.CheckOutput(outStreams); err != nil {
+		return none, store.FailureDeterministic, err
 	}
 
 	// 6. decode-integrity healthcheck on EVERY encode. TRANSIENT: an output that does not
@@ -120,10 +160,69 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.P
 	// 7. VMAF perceptual-quality gate, last because it costs a second full decode. The
 	// structural checks prove the output exists, decodes and carries the tracks; VMAF proves
 	// it still LOOKS like the source. Unavailable libvmaf or a failed measurement REJECTS.
+	//
+	// A REMUX declines it, and pays for the skip with a STRONGER check rather than with
+	// nothing. The ordering below is the whole of that bargain and is not an implementation
+	// detail: identity is established FIRST, the output is rejected when it cannot be, and
+	// only then is the gate skipped. An implementation that skipped first and checked
+	// loosely afterwards would have removed a gate.
+	if plan.RemuxOnly() {
+		if err := e.videoIdentity(ctx, in, tmp); err != nil {
+			return none, store.FailureDeterministic, err
+		}
+		// Nothing was measured, so NOTHING is reported: an empty proof carrying only the
+		// reason the gate did not run. A zeroed score here would be a fabricated
+		// measurement of a gate nobody ran, on the row an operator reads after the source
+		// is gone.
+		return vmafProof{Skipped: VmafSkippedRemuxOnly}, "", nil
+	}
 	if prof.VmafGate() {
 		return e.vmafGate(ctx, tmp, in, prof)
 	}
 	return none, "", nil
+}
+
+// videoIdentity establishes that every video stream the output carries is IDENTICAL to
+// the stream it came from. It is what pays for the skipped perceptual gate on a remux.
+//
+// Skipping a gate is only safe when the property that gate proved is established another
+// way. VMAF proves an encode still looks like its source; bit-identity of the copied
+// stream is strictly stronger than any perceptual score, and it is the property a stream
+// copy is supposed to have. So this asks for it directly rather than assuming the copy
+// copied.
+//
+// Every way of NOT establishing it rejects. An unreadable source, an unreadable output, a
+// different number of video streams, one hash that differs - each leaves the output
+// unproved, and an unproved output must not replace a file this tool is about to delete.
+// The rejection names which stream differed, because "not identical" without it sends an
+// operator to a diff they cannot run.
+func (e *Engine) videoIdentity(ctx context.Context, in, out string) error {
+	want, okIn := e.Probe.VideoStreamHashes(ctx, in)
+	if !okIn {
+		return fmt.Errorf("remux-only: the SOURCE's video streams could not be hashed, so this " +
+			"output cannot be established as an identical copy - and the perceptual gate is skipped " +
+			"on this path, so there is nothing else standing here. The source is kept")
+	}
+	got, okOut := e.Probe.VideoStreamHashes(ctx, out)
+	if !okOut {
+		return fmt.Errorf("remux-only: the OUTPUT's video streams could not be hashed, so it cannot " +
+			"be established as an identical copy of the source - and the perceptual gate is skipped " +
+			"on this path, so there is nothing else standing here. The source is kept")
+	}
+	if len(want) != len(got) {
+		return fmt.Errorf("remux-only: the output carries %d video stream(s) and the source carries "+
+			"%d - a remux copies the video, so a different count means the video was not copied. "+
+			"The source is kept", len(got), len(want))
+	}
+	for i := range want {
+		if want[i] != got[i] {
+			return fmt.Errorf("remux-only: video stream v:%d is NOT identical to the source's "+
+				"(source %s, output %s) - a remux re-encodes nothing, so a stream that changed was "+
+				"not copied, and the perceptual gate that would have measured the difference is "+
+				"skipped on this path. The source is kept", i, want[i], got[i])
+		}
+	}
+	return nil
 }
 
 // lengthParity is gate 3 on its own: an encode of `in` must not be TRUNCATED. It is a named

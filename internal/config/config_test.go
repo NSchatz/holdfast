@@ -754,3 +754,118 @@ func TestValidate_ReportsAPatternThatCoversNothing(t *testing.T) {
 		t.Fatalf("UnreachablePatterns() = %v, want the entry's own pattern weighed against its own root", got)
 	}
 }
+
+// --- the two stream-selection refusals (S0088) --------------------------------
+
+// TestLoad_RefusesRemuxOnlyBesideAnEncoderInOneLayer is [AC-14]: a layer that sets
+// `remux_only: true` and also names `encoder` is refused at startup, naming both keys and -
+// where they came from an entry - that root, with nothing else having happened.
+//
+// PER LAYER, and the inherited case is the half that matters as much: `encoder` has a
+// built-in default so every profile resolves one, and a build that refused the RESOLVED pair
+// would make every remux-only configuration in the world unloadable.
+func TestLoad_RefusesRemuxOnlyBesideAnEncoderInOneLayer(t *testing.T) {
+	t.Run("both at the top level", func(t *testing.T) {
+		_, err := load(t, "library_roots:\n  - /mnt/tv\nremux_only: true\nencoder: svtav1\n")
+		if err == nil {
+			t.Fatal("Load accepted remux_only beside an encoder at the top level: two instructions " +
+				"about the same job, and the build would be silently picking one")
+		}
+		for _, want := range []string{"remux_only", "encoder"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the refusal does not name %q: %v", want, err)
+			}
+		}
+	})
+
+	t.Run("both in one entry", func(t *testing.T) {
+		_, err := load(t, "library_roots:\n  - path: /mnt/tv\n    remux_only: true\n    encoder: svtav1\n")
+		if err == nil {
+			t.Fatal("Load accepted remux_only beside an encoder in one entry")
+		}
+		for _, want := range []string{"remux_only", "encoder", "/mnt/tv"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the refusal does not name %q - an operator has to be told WHERE: %v", want, err)
+			}
+		}
+	})
+
+	// An encoder merely INHERITED is not a conflict, whichever way round it is written.
+	for _, tc := range []struct{ name, yaml string }{
+		{"the encoder is inherited from the top level",
+			"library_roots:\n  - path: /mnt/tv\n    remux_only: true\nencoder: svtav1\n"},
+		{"remux_only is inherited by a root that names an encoder",
+			"library_roots:\n  - path: /mnt/tv\n    encoder: svtav1\nremux_only: true\n"},
+		{"the shipped default encoder beside a remux-only root",
+			"library_roots:\n  - path: /mnt/tv\n    remux_only: true\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := load(t, tc.yaml); err != nil {
+				t.Fatalf("Load refused a configuration whose encoder is inherited rather than named "+
+					"beside remux_only, which would make every remux-only configuration unloadable: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidate_RefusesALanguageCodeThatIsNotThreeLetters is [AC-15]: a configured language
+// code that is not three alphabetic characters is refused, naming the key, the offending
+// value and - where it came from an entry - that root.
+//
+// By SHAPE and not against a registry, deliberately: a copy of ISO 639-2 in this build would
+// refuse the day a container uses a code the copy predates, while three alphabetic
+// characters catches the failure that actually happens.
+func TestValidate_RefusesALanguageCodeThatIsNotThreeLetters(t *testing.T) {
+	for _, tc := range []struct {
+		name, yaml string
+		wants      []string
+	}{
+		{
+			name:  "an English word at the top level",
+			yaml:  "library_roots:\n  - /mnt/tv\naudio_languages: [english]\n",
+			wants: []string{"audio_languages", "english"},
+		},
+		{
+			name:  "a two-letter code at the top level",
+			yaml:  "library_roots:\n  - /mnt/tv\nsubtitle_languages: [en]\n",
+			wants: []string{"subtitle_languages", "en"},
+		},
+		{
+			name:  "a stray comma inside one entry",
+			yaml:  "library_roots:\n  - path: /mnt/tv\n    audio_languages: [\"eng,jpn\"]\n",
+			wants: []string{"audio_languages", "eng,jpn", "/mnt/tv"},
+		},
+		{
+			name:  "a digit where a code should be",
+			yaml:  "library_roots:\n  - path: /mnt/tv\n    subtitle_languages: [e1g]\n",
+			wants: []string{"subtitle_languages", "e1g", "/mnt/tv"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := load(t, tc.yaml)
+			if err == nil {
+				err = c.Validate()
+			}
+			if err == nil {
+				t.Fatal("the configuration was accepted: a code nothing can match is a filter an " +
+					"operator believes is selecting tracks and is not")
+			}
+			for _, want := range tc.wants {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the refusal does not name %q: %v", want, err)
+				}
+			}
+		})
+	}
+
+	// The anti-vacuity half: a well-formed list, in either case, is accepted.
+	for _, ok := range []string{"[eng, jpn]", "[ENG]", "[]"} {
+		c, err := load(t, "library_roots:\n  - /mnt/tv\naudio_languages: "+ok+"\n")
+		if err != nil {
+			t.Fatalf("Load refused audio_languages: %s: %v", ok, err)
+		}
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate refused audio_languages: %s: %v", ok, err)
+		}
+	}
+}

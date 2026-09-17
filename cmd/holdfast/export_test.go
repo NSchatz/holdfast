@@ -189,6 +189,92 @@ func TestExport_WritesEveryTerminalRowWithItsOutcomeAndKeepsAbsenceAbsent(t *tes
 	}
 }
 
+// TestExport_CarriesTheStreamsAJobDropped is [AC-10]'s reporting half: the record of which
+// streams a job dropped reaches `holdfast export`, each by its source index, its type and
+// its language as the source tagged it.
+//
+// The three states are exported apart, and keeping them apart is the point. A job that
+// dropped tracks lists them; a job that applied a selection and dropped nothing exports an
+// EMPTY LIST; a row written before this build existed exports NULL. The dropped bytes are
+// not recoverable from the replacement, so a consumer that read "nobody knows" as "nothing
+// was dropped" would be reading the only record there is and getting it wrong.
+func TestExport_CarriesTheStreamsAJobDropped(t *testing.T) {
+	stateDir, cfgPath := exportFixture(t)
+	st := openFixtureStore(t, stateDir)
+
+	finishRow(t, st, "/lib/dropped.mkv", store.Done, &store.Outcome{
+		Encoder: "cpu",
+		DroppedStreams: store.RecordDroppedStreams([]store.DroppedStream{
+			{Index: 2, Type: "audio", Language: "jpn"},
+			{Index: 5, Type: "subtitle", Language: ""},
+		}),
+		SelectionNotApplied: "audio-selection-would-leave-no-audio",
+		VmafSkipped:         "remux-only-video-identical",
+	})
+	finishRow(t, st, "/lib/kept-everything.mkv", store.Done, &store.Outcome{
+		Encoder: "cpu", DroppedStreams: store.RecordDroppedStreams(nil),
+	})
+	finishRow(t, st, "/lib/before-this-build.mkv", store.Done, &store.Outcome{Encoder: "cpu"})
+	_ = st.Close()
+
+	code, stdout, stderr := runExport(t, "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("export exited %d: %s", code, stderr)
+	}
+	byPath := map[string]map[string]json.RawMessage{}
+	for _, raw := range exportLines(t, stdout) {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+			t.Fatalf("an export line is not JSON (%v): %s", err, raw)
+		}
+		var p string
+		if err := json.Unmarshal(obj["path"], &p); err != nil {
+			t.Fatalf("an export line carries no path: %s", raw)
+		}
+		byPath[p] = obj
+	}
+
+	var dropped []struct {
+		Index    int     `json:"index"`
+		Type     string  `json:"type"`
+		Language *string `json:"language"`
+	}
+	if err := json.Unmarshal(byPath["/lib/dropped.mkv"]["dropped_streams"], &dropped); err != nil {
+		t.Fatalf("dropped_streams is not a list: %v (%s)", err, byPath["/lib/dropped.mkv"]["dropped_streams"])
+	}
+	if len(dropped) != 2 {
+		t.Fatalf("the export names %d dropped stream(s), want 2: %+v", len(dropped), dropped)
+	}
+	if dropped[0].Index != 2 || dropped[0].Type != "audio" || dropped[0].Language == nil || *dropped[0].Language != "jpn" {
+		t.Errorf("the first dropped stream exports as %+v, want index 2, audio, jpn", dropped[0])
+	}
+	// An untagged stream exports a NULL language, never "": the source tagged none, and a
+	// consumer must not have to know this build's empty-string convention to read that.
+	if dropped[1].Index != 5 || dropped[1].Type != "subtitle" || dropped[1].Language != nil {
+		t.Errorf("the second dropped stream exports as %+v, want index 5, subtitle, a null language",
+			dropped[1])
+	}
+	for field, want := range map[string]string{
+		"selection_not_applied": `"audio-selection-would-leave-no-audio"`,
+		"vmaf_skipped":          `"remux-only-video-identical"`,
+	} {
+		if got := string(byPath["/lib/dropped.mkv"][field]); got != want {
+			t.Errorf("the row exports %s as %s, want %s", field, got, want)
+		}
+	}
+
+	// The two absences, apart. The assertion is on the RAW bytes because that is the only
+	// place the difference between [] and null still exists.
+	if got := string(byPath["/lib/kept-everything.mkv"]["dropped_streams"]); got != "[]" {
+		t.Errorf("a job that applied a selection and dropped nothing exports dropped_streams as %s, "+
+			"want []: it has something to say and this is it", got)
+	}
+	if got := string(byPath["/lib/before-this-build.mkv"]["dropped_streams"]); got != "null" {
+		t.Errorf("a row that recorded nothing exports dropped_streams as %s, want null: reading it as "+
+			"[] claims a job kept every stream when nobody recorded anything at all", got)
+	}
+}
+
 func TestExport_UsesTheSameFieldNamesTheAPIPublishesForARow(t *testing.T) {
 	// The format is defined as "what /api/history publishes for a row", and it is kept
 	// that way by CALLING that projection. This asserts the promise directly: the exported
@@ -577,12 +663,12 @@ func bumpSchemaVersion(t *testing.T, dbPath string, version int) {
 
 // olderSchemaVersion is the schema this repository shipped immediately before the NEWEST
 // migration appended its own step: the shape a database written by the previous holdfast
-// has. That newest step is now the target path a dry run's decision records, so the version
-// below and the object seedOlderLedger removes both moved with it. It is a literal because
+// has. That newest step is now the stream-selection record a job writes, so the version
+// below and the objects seedOlderLedger removes both moved with it. It is a literal because
 // cmd/holdfast cannot see the store's unexported version counter - and
 // TestExport_TheDaemonsDoorIsWhatMigratesAndThatIsWhyTheExportDoesNotUseIt keeps the literal
 // honest by asserting store.Open really does move a fixture built from it.
-const olderSchemaVersion = 15
+const olderSchemaVersion = 16
 
 // seedOlderLedger builds a real ledger with rows and then removes exactly what the NEWEST
 // migration added, restoring the previous version stamp. Not a current database wearing an
@@ -609,9 +695,11 @@ func seedOlderLedger(t *testing.T, stateDir string) {
 	}
 	defer func() { _ = db.Close() }()
 	// Any index goes first: SQLite refuses to drop a column an index refers to. The
-	// newest step adds none, so there is nothing to drop ahead of the column today.
+	// newest step adds none, so there is nothing to drop ahead of its columns today.
 	for _, stmt := range []string{
-		`ALTER TABLE jobs DROP COLUMN target_path`,
+		`ALTER TABLE jobs DROP COLUMN dropped_streams`,
+		`ALTER TABLE jobs DROP COLUMN selection_not_applied`,
+		`ALTER TABLE jobs DROP COLUMN vmaf_skipped`,
 		fmt.Sprintf(`PRAGMA user_version = %d`, olderSchemaVersion),
 	} {
 		if _, err := db.Exec(stmt); err != nil {

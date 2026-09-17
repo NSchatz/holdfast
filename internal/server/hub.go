@@ -171,6 +171,47 @@ type jobDTO struct {
 	// now means something else.
 	LibraryRoot   *string `json:"library_root"`
 	ProfileDigest *string `json:"profile_digest"`
+
+	// Which source streams this job dropped, each by its source index, its type and its
+	// language as the source tagged it.
+	//
+	// It is a POINTER TO A SLICE and deliberately not omitempty, because the two states a
+	// bare array collapses are the whole point of the field. `null` is NOT RECORDED - a
+	// row written before this build, or one that never reached a selection - and `[]` is
+	// a job that applied a selection and dropped nothing. The dropped bytes are not
+	// recoverable from the replacement, so a consumer that could not tell "this job kept
+	// everything" from "nobody knows what this job kept" would be reading the only record
+	// there is and getting it wrong.
+	DroppedStreams *[]droppedStreamDTO `json:"dropped_streams"`
+
+	// SelectionNotApplied names a part of the selection this job did NOT apply and why -
+	// today only the never-a-silent-file fallback. VmafSkipped names why the perceptual
+	// gate did not run. Both are stable tokens; both are absent when they do not apply,
+	// exactly as swap_cause is.
+	SelectionNotApplied string `json:"selection_not_applied,omitempty"`
+	VmafSkipped         string `json:"vmaf_skipped,omitempty"`
+}
+
+// droppedStreamDTO is one dropped stream on the wire. `language` is the tag AS THE SOURCE
+// SPELLED IT and is null when the source carried none - never "", which a consumer would
+// have to know a convention to read, and never a code nobody wrote.
+type droppedStreamDTO struct {
+	Index    int     `json:"index"`
+	Type     string  `json:"type"`
+	Language *string `json:"language"`
+}
+
+// droppedStreamsDTO carries the store's recorded/not-recorded distinction onto the wire:
+// nil for a row that recorded nothing, and a (possibly empty) array for one that did.
+func droppedStreamsDTO(d store.DroppedStreams) *[]droppedStreamDTO {
+	if !d.Recorded() {
+		return nil
+	}
+	out := make([]droppedStreamDTO, 0, d.Len())
+	for _, s := range d.Streams() {
+		out = append(out, droppedStreamDTO{Index: s.Index, Type: s.Type, Language: nullableText(s.Language)})
+	}
+	return &out
 }
 
 func toDTOs(jobs []store.Job) []jobDTO {
@@ -206,6 +247,10 @@ func toDTOs(jobs []store.Job) []jobDTO {
 
 			LibraryRoot:   nullableText(j.Outcome.LibraryRoot),
 			ProfileDigest: nullableText(j.Outcome.ProfileDigest),
+
+			DroppedStreams:      droppedStreamsDTO(j.Outcome.DroppedStreams),
+			SelectionNotApplied: j.Outcome.SelectionNotApplied,
+			VmafSkipped:         j.Outcome.VmafSkipped,
 		})
 	}
 	return out

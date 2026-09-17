@@ -91,6 +91,39 @@ dry_run: false
 #   - "/mnt/media/import"    # the same thing spelled absolutely
 # include_paths: []          # empty: everything under the root stays eligible
 
+# Which STREAMS of a source the replacement carries. All four are optional, all four may
+# also be written inside a library_roots entry above (where the entry's value REPLACES
+# this one for that root), and every default below is what holdfast did before these keys
+# existed - see docs/profiles.md.
+#
+# The language lists are ISO 639-2 codes compared case-insensitively against a stream's
+# own language tag; empty (the default) keeps every stream of that type. A code that is
+# not three alphabetic characters is refused at startup.
+#
+# A stream with NO language tag, an empty one, or the undefined code `und` is KEPT
+# whatever a list says: an untagged track is more often the main audio than not.
+#
+# If applying the audio list would leave the file with NO AUDIO AT ALL, it is not applied
+# to audio: every audio stream is carried forward, the rest of the selection still
+# applies, and the row says so. holdfast never produces a silent file from a source that
+# had audio.
+#
+# keep_commentary: false drops only the tracks the CONTAINER marks as commentary. A title
+# is never read as such a mark.
+#
+# remux_only: true stream-copies the video too, so nothing is re-encoded. It is held to
+# every structural gate an encode is held to (the size floor included, which is NOT
+# waived) and SKIPS the VMAF gate - only after every video stream it carries is
+# established identical to the source's. It may not be written beside `encoder` in the
+# same layer.
+#
+# Audio TRANSCODING is a non-goal: selection and copy only, no downmix and no re-encode.
+#
+# audio_languages: [eng, jpn]
+# subtitle_languages: [eng]
+# keep_commentary: true
+# remux_only: false
+
 # --- codec / quality: the codec matrix (TRANSCODE-6) ---
 # encoder: cpu           # cpu (libx265/hevc) is the ARCHIVAL DEFAULT — best
 #                         # quality-per-bit, always available, no external device.

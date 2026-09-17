@@ -273,6 +273,34 @@ type Outcome struct {
 	// is never attributed to a swap that failed for some other reason.
 	SwapCause string
 
+	// DroppedStreams is which source streams this job selected away, each by its source
+	// index, its type and its language as the source tagged it. The dropped bytes are not
+	// recoverable from the replacement, so this row is the only record there is.
+	//
+	// Its zero value is NOT RECORDED, and that is distinct from a recorded EMPTY set: a
+	// row written before the column existed says nothing about what it dropped, while a
+	// job that applied a selection and dropped nothing has said something. A reader must
+	// ask Recorded before it renders either (see DroppedStreams).
+	DroppedStreams DroppedStreams
+
+	// SelectionNotApplied names a part of the stream selection this job did NOT apply,
+	// and why - today only the never-a-silent-file fallback, when applying the audio
+	// selection would have left the output with no audio at all. It is a stable token
+	// (see engine.SelectionNotAppliedNoAudio), treated as a wire format the way the guard
+	// tokens are, and "" is NOT RECORDED: the selection applied, or this row predates the
+	// column.
+	SelectionNotApplied string
+
+	// VmafSkipped names why the perceptual gate did not run on a job that reached it -
+	// today only a remux whose carried video streams were established to be identical to
+	// the source's. It is a stable token (see engine.VmafSkippedRemuxOnly).
+	//
+	// A row that carries it records NO VMAF FIGURE OF ANY KIND: every VMAF field above is
+	// nil or "", because nothing was measured. That is the distinction this column is for
+	// - "the gate did not run, and here is why" is a statement, where a zeroed score
+	// would be a fabricated measurement of a gate nobody ran.
+	VmafSkipped string
+
 	// DecisionInputs is what the decision that wrote this row READ from the
 	// configuration, and it is what lets Claim re-derive the row rather than treat it
 	// as a permanent answer (see DecisionInputs and Claim). Its zero value is NOT

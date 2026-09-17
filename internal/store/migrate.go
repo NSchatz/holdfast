@@ -451,6 +451,32 @@ CREATE INDEX IF NOT EXISTS idx_path_exclusions_created ON path_exclusions(create
 ALTER TABLE jobs ADD COLUMN target_path TEXT;
 `,
 	},
+	{
+		// v17 - what a stream selection did: which source streams the job dropped, which
+		// part of the selection it did NOT apply, and why the perceptual gate did not run.
+		//
+		// dropped_streams is the only record the dropped bytes leave. They are not
+		// recoverable from the replacement, and the row outlives the source.
+		//
+		// NULLABLE with NO DEFAULT, the rule every step since v2 has kept, and here the
+		// distinction is the whole point: a row written by an earlier build recorded no
+		// stream-selection facts, and it must read as NOT RECORDED rather than as
+		// "dropped nothing". A DEFAULT of '' or of the empty-set token would put that
+		// fabricated claim on every existing row at once - a statement about jobs nobody
+		// measured, in the one table whose entire job is to be evidence. "Dropped nothing"
+		// is itself representable and is spelled by the writer, never by the schema (see
+		// DroppedStreams.Encode).
+		//
+		// No index: nothing queries BY any of them, and every reader has the row in hand.
+		name: "stream selection record",
+		// Three nullable columns: ADD COLUMN rewrites no row and creates none.
+		rows: noRowChange,
+		sql: `
+ALTER TABLE jobs ADD COLUMN dropped_streams        TEXT;
+ALTER TABLE jobs ADD COLUMN selection_not_applied  TEXT;
+ALTER TABLE jobs ADD COLUMN vmaf_skipped           TEXT;
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the
