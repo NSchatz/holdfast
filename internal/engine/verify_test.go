@@ -548,42 +548,48 @@ func TestVerify_EveryRejectionCarriesTheClassOfItsVerdict(t *testing.T) {
 
 	eng := buildEngine(t, ffmpeg, ffprobe, dir, nil, nil)
 
+	// wantGate grades [AC-4] of S0104 beside the class: each rejection carries the IDENTITY
+	// of the check that made it, decided at that line, so a consumer counting failures per
+	// gate never has to read the message to work out which one fired.
 	cases := []struct {
 		name     string
 		in, tmp  string
 		wantText string
 		want     store.FailureClass
+		wantGate string
 		why      string
 	}{
 		{
 			name: "the temp is missing or empty", in: src, tmp: outEmpty,
-			wantText: "temp missing or empty", want: store.FailureTransient,
+			wantText: "temp missing or empty", want: store.FailureTransient, wantGate: GateEncode,
 			why: "an empty temp is what a full disk or a killed encoder leaves; the next attempt can differ",
 		},
 		{
 			name: "the output is not the target codec", in: src, tmp: outH264,
-			wantText: "output codec is", want: store.FailureDeterministic,
+			wantText: "output codec is", want: store.FailureDeterministic, wantGate: GateCodec,
 			why: "the configured encoder produces the codec it produces",
 		},
 		{
 			name: "the output is truncated", in: src, tmp: outShort,
-			wantText: "duration parity failed", want: store.FailureDeterministic,
+			wantText: "duration parity failed", want: store.FailureDeterministic, wantGate: GateLength,
 			why: "how long this source is, is a property of the file",
 		},
 		{
 			name: "the output is not smaller", in: src, tmp: outBig,
-			wantText: "size-increase reject", want: store.FailureDeterministic,
+			wantText: "size-increase reject", want: store.FailureDeterministic, wantGate: GateSize,
 			why: "the same source at the same settings compresses to the same size",
 		},
 		{
 			name: "a track was dropped", in: srcAudio, tmp: outNoAudio,
 			wantText: "intended-stream check failed: the output is missing audio", want: store.FailureDeterministic,
-			why: "which streams this source has, and which this build maps, is fixed",
+			wantGate: GateStreamParity,
+			why:      "which streams this source has, and which this build maps, is fixed",
 		},
 		{
 			name: "a video stream was dropped", in: srcCover, tmp: outNoCover,
 			wantText: "intended-stream check failed: the output is missing video", want: store.FailureDeterministic,
-			why: "which video streams this source has, and which this build maps, is fixed",
+			wantGate: GateStreamParity,
+			why:      "which video streams this source has, and which this build maps, is fixed",
 		},
 	}
 	for _, tc := range cases {
@@ -593,7 +599,7 @@ func TestVerify_EveryRejectionCarriesTheClassOfItsVerdict(t *testing.T) {
 			// the question the engine asks it rather than a run-global one.
 			top := eng.Cfg.TopLevelProfile()
 			target := targetCodecFor(eng.Cfg.TranscodeIn(top, tc.in).Encoder)
-			_, class, err := eng.verifyOutput(context.Background(), tc.in, tc.tmp, top, target,
+			_, gate, class, err := eng.verifyOutput(context.Background(), tc.in, tc.tmp, top, target,
 				planFor(t, eng, tc.in, top))
 			if err == nil {
 				t.Fatalf("the gate ACCEPTED this pair; the case proves nothing about the class of a rejection")
@@ -603,6 +609,10 @@ func TestVerify_EveryRejectionCarriesTheClassOfItsVerdict(t *testing.T) {
 			}
 			if class != tc.want {
 				t.Errorf("class = %q, want %q - %s", class, tc.want, tc.why)
+			}
+			if gate != tc.wantGate {
+				t.Errorf("gate = %q, want %q - the identity of the check that refused is decided "+
+					"where the refusal is, never read back off the message", gate, tc.wantGate)
 			}
 		})
 	}
@@ -644,7 +654,7 @@ func TestVerify_EveryRejectionCarriesTheClassOfItsVerdict(t *testing.T) {
 				probe.FileSize(good), probe.FileSize(src))
 		}
 		top := eng.Cfg.TopLevelProfile()
-		_, class, err := eng.verifyOutput(context.Background(), src, good, top,
+		_, _, class, err := eng.verifyOutput(context.Background(), src, good, top,
 			targetCodecFor(eng.Cfg.TranscodeIn(top, src).Encoder), planFor(t, eng, src, top))
 		if err != nil {
 			t.Fatalf("the gate rejected a faithful smaller HEVC encode: %v", err)
@@ -666,42 +676,46 @@ func TestVmafGate_FloorsAreFinalAndAnUnmeasurableRunIsNot(t *testing.T) {
 	src := filepath.Join(dir, "src.mkv")
 	mkH264(t, ffmpeg, src, "8M")
 
+	// wantGate grades [AC-4] of S0104: the three FLOORS are three different gates, because
+	// a rise in chroma-floor rejections is a different thing to act on than a rise in
+	// mean-floor ones, and the two cases where nothing could be MEASURED are a fourth.
 	cases := []struct {
 		name     string
 		result   vmaf.Result
 		err      error
 		wantText string
 		want     store.FailureClass
+		wantGate string
 		why      string
 	}{
 		{
 			name:     "the average is below the threshold",
 			result:   vmaf.Result{HarmonicMean: 80.0, Min: 75.0, ChromaMin: 41.2, ChromaMetric: vmaf.ChromaMetricName, PixelFormat: "yuv420p10le"},
-			wantText: "VMAF below threshold", want: store.FailureDeterministic,
+			wantText: "VMAF below threshold", want: store.FailureDeterministic, wantGate: GateVmafMean,
 			why: "the same two files scored by the same model produce the same number",
 		},
 		{
 			name:     "the worst frame is below the floor",
 			result:   vmaf.Result{HarmonicMean: 97.5, Min: 43.0, ChromaMin: 41.2, ChromaMetric: vmaf.ChromaMetricName, PixelFormat: "yuv420p10le"},
-			wantText: "VMAF worst-frame below floor", want: store.FailureDeterministic,
+			wantText: "VMAF worst-frame below floor", want: store.FailureDeterministic, wantGate: GateVmafMin,
 			why: "the frame that collapsed collapses again on the same encode",
 		},
 		{
 			name:     "the chroma planes are below the floor",
 			result:   vmaf.Result{HarmonicMean: 98.97, Min: 96.86, ChromaMin: 26.21, ChromaMetric: vmaf.ChromaMetricName, PixelFormat: "yuv420p10le"},
-			wantText: "chroma below floor", want: store.FailureDeterministic,
+			wantText: "chroma below floor", want: store.FailureDeterministic, wantGate: GateVmafChroma,
 			why: "the colour damage is in the encode this configuration produces",
 		},
 		{
 			name:     "libvmaf is not in this ffmpeg build",
 			err:      vmaf.ErrUnavailable,
-			wantText: "libvmaf is not available", want: store.FailureTransient,
+			wantText: "libvmaf is not available", want: store.FailureTransient, wantGate: GateVmafUnmeasured,
 			why: "an operator who installs a libvmaf-capable ffmpeg has changed the thing that rejected",
 		},
 		{
 			name:     "the measurement itself failed",
 			err:      errors.New("vmaf: ffmpeg failed: exit status 1"),
-			wantText: "VMAF measurement failed", want: store.FailureTransient,
+			wantText: "VMAF measurement failed", want: store.FailureTransient, wantGate: GateVmafUnmeasured,
 			why: "a measurement that fell over says nothing about the encode",
 		},
 	}
@@ -717,7 +731,7 @@ func TestVmafGate_FloorsAreFinalAndAnUnmeasurableRunIsNot(t *testing.T) {
 				}
 				return tc.result, nil
 			}
-			_, class, err := eng.vmafGate(context.Background(), src, src, eng.Cfg.TopLevelProfile())
+			_, gate, class, err := eng.vmafGate(context.Background(), src, src, eng.Cfg.TopLevelProfile())
 			if err == nil {
 				t.Fatal("the gate accepted this measurement; the case proves nothing about a rejection")
 			}
@@ -726,6 +740,11 @@ func TestVmafGate_FloorsAreFinalAndAnUnmeasurableRunIsNot(t *testing.T) {
 			}
 			if class != tc.want {
 				t.Errorf("class = %q, want %q - %s", class, tc.want, tc.why)
+			}
+			if gate != tc.wantGate {
+				t.Errorf("gate = %q, want %q - the three floors are three gates and an "+
+					"unmeasurable run is a fourth; folded together, none of them can be alerted on",
+					gate, tc.wantGate)
 			}
 		})
 	}
@@ -737,8 +756,9 @@ func TestVmafGate_FloorsAreFinalAndAnUnmeasurableRunIsNot(t *testing.T) {
 		c.MinVmaf, c.VmafMinPool, c.VmafMinChroma = 95, 60, 30
 	})
 	eng.vmafScore = func(context.Context, vmaf.Request) (vmaf.Result, error) { return passing(), nil }
-	if _, class, err := eng.vmafGate(context.Background(), src, src, eng.Cfg.TopLevelProfile()); err != nil || class != "" {
-		t.Errorf("a passing measurement produced err=%v class=%q, want no rejection and no class", err, class)
+	if _, gate, class, err := eng.vmafGate(context.Background(), src, src, eng.Cfg.TopLevelProfile()); err != nil || class != "" || gate != "" {
+		t.Errorf("a passing measurement produced err=%v class=%q gate=%q, want no rejection, no class and no gate",
+			err, class, gate)
 	}
 }
 
@@ -793,7 +813,7 @@ func TestVmafGate_UnnameableComparisonFormatIsARejection(t *testing.T) {
 		return passing(), nil
 	}
 
-	proof, class, err := eng.vmafGate(context.Background(), normal, exotic, eng.Cfg.TopLevelProfile())
+	proof, _, class, err := eng.vmafGate(context.Background(), normal, exotic, eng.Cfg.TopLevelProfile())
 	if err == nil {
 		t.Fatal("vmafGate accepted a pair whose comparison format cannot be named")
 	}
@@ -817,7 +837,7 @@ func TestVmafGate_UnnameableComparisonFormatIsARejection(t *testing.T) {
 
 	// Anti-vacuity: the SAME gate over a nameable pair reaches the scorer and passes.
 	called = false
-	if _, _, err := eng.vmafGate(context.Background(), normal, normal, eng.Cfg.TopLevelProfile()); err != nil {
+	if _, _, _, err := eng.vmafGate(context.Background(), normal, normal, eng.Cfg.TopLevelProfile()); err != nil {
 		t.Fatalf("the nameable-pair control failed (%v) - the case above proves nothing", err)
 	}
 	if !called {
@@ -866,7 +886,7 @@ func TestVerify_RejectsAnOutputMissingAnIntendedStream(t *testing.T) {
 		}
 	}
 
-	_, class, err := eng.verifyOutput(context.Background(), src, out, top,
+	_, _, class, err := eng.verifyOutput(context.Background(), src, out, top,
 		targetCodecFor(eng.Cfg.TranscodeIn(top, src).Encoder), planFor(t, eng, src, top))
 	if err == nil {
 		t.Fatal("the gate ACCEPTED an output that lost the Japanese track: the counts matched, the " +
@@ -925,7 +945,7 @@ func TestVerify_RejectsAnOutputCarryingAStreamTheMapDoesNotIntend(t *testing.T) 
 			"(%d), so today's check would reject it too", got["audio"], in["audio"])
 	}
 
-	_, class, err := eng.verifyOutput(context.Background(), src, out, prof,
+	_, _, class, err := eng.verifyOutput(context.Background(), src, out, prof,
 		targetCodecFor(eng.Cfg.TranscodeIn(prof, src).Encoder), plan)
 	if err == nil {
 		t.Fatal("the gate ACCEPTED an output carrying a stream the map did not intend: a selection " +
@@ -984,7 +1004,7 @@ func TestIntendedMap_CarriesEveryVideoStreamIncludingAttachedPictures(t *testing
 	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", src,
 		"-map", "0:v:0", "-c:v", "libx265", "-x265-params", "log-level=error", "-preset", "ultrafast",
 		"-pix_fmt", "yuv420p10le", "-tag:v", "hvc1", "--", out)
-	if _, _, err := eng.verifyOutput(context.Background(), src, out, top,
+	if _, _, _, err := eng.verifyOutput(context.Background(), src, out, top,
 		targetCodecFor(eng.Cfg.TranscodeIn(top, src).Encoder), plan); err == nil {
 		t.Fatal("the gate ACCEPTED an output that dropped the attached picture")
 	} else if !strings.Contains(err.Error(), "missing video") {
@@ -1040,7 +1060,7 @@ func TestIntendedMap_RejectsACoverPictureStandingInForAVideoStream(t *testing.T)
 		t.Fatalf("the rejection must name the attached picture it counted; got: %v", err)
 	}
 
-	_, class, err := eng.verifyOutput(context.Background(), src, out, top,
+	_, _, class, err := eng.verifyOutput(context.Background(), src, out, top,
 		targetCodecFor(eng.Cfg.TranscodeIn(top, src).Encoder), plan)
 	if err == nil {
 		t.Fatal("the whole gate ACCEPTED it: every check in front of the deletion of the source " +
@@ -1070,7 +1090,7 @@ func TestVerify_RejectsAnOutputWhoseStreamsCannotBeEnumerated(t *testing.T) {
 	plan := planFor(t, real, src, top)
 
 	blind := buildEngine(t, ffmpeg, blindToStreamList(t, dir, realFFprobe, "out.mkv"), dir, nil, nil)
-	_, class, err := blind.verifyOutput(context.Background(), src, out, top,
+	_, _, class, err := blind.verifyOutput(context.Background(), src, out, top,
 		targetCodecFor(blind.Cfg.TranscodeIn(top, src).Encoder), plan)
 	if err == nil {
 		t.Fatal("the gate ACCEPTED an output it could not enumerate: nothing established that the " +
@@ -1085,7 +1105,7 @@ func TestVerify_RejectsAnOutputWhoseStreamsCannotBeEnumerated(t *testing.T) {
 
 	// Anti-vacuity: the same pair through a WORKING probe passes, so what rejected it above
 	// is the blindness and not the fixture.
-	if _, _, err := real.verifyOutput(context.Background(), src, out, top,
+	if _, _, _, err := real.verifyOutput(context.Background(), src, out, top,
 		targetCodecFor(real.Cfg.TranscodeIn(top, src).Encoder), plan); err != nil {
 		t.Fatalf("the control pair was rejected by a working probe (%v), so the case above proves "+
 			"nothing about enumeration", err)

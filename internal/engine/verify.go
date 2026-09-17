@@ -49,8 +49,18 @@ type vmafProof struct {
 // verifyOutput checks a freshly-encoded temp before it may replace the source, and is the
 // heart of the no-loss contract: the source is replaced only when this returns nil. Gates run
 // cheap-to-expensive, so the full decode and VMAF (TRANSCODE-4) come last. It returns the VMAF
-// proof and the CLASS of the rejection beside the pass/fail error, the proof on the REJECT
-// paths too: a rejection whose score is thrown away re-commits the defect TRANSCODE-13 fixes.
+// proof, the GATE that refused and the CLASS of the rejection beside the pass/fail error, the
+// proof on the REJECT paths too: a rejection whose score is thrown away re-commits the defect
+// TRANSCODE-13 fixes.
+//
+// # The gate, and why it is produced HERE
+//
+// The gate is WHICH check refused, in the closed vocabulary the Gate* constants declare, and
+// it is chosen at the line that returns the rejection for the same reason the class is: a
+// consumer deriving it afterwards from the message would be matching on unbounded text that
+// is reworded whenever the message is improved. It is "" beside a nil error - a job nothing
+// refused was refused by no gate - and it changes nothing that is stored or decided: it
+// travels out on the Event for the surfaces that count failures per gate.
 //
 // prof is the profile of the root the source was enumerated under: every threshold comes from
 // it, and targetCodec is what its own `encoder` resolves to, so a film library and a
@@ -78,7 +88,7 @@ type vmafProof struct {
 // whole of why it is a parameter: a gate that derived its own map would be answering a
 // different question than the encoder was asked, and the two answers would differ on
 // exactly the file nobody tested.
-func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.Profile, targetCodec string, plan *StreamPlan) (vmafProof, store.FailureClass, error) {
+func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.Profile, targetCodec string, plan *StreamPlan) (vmafProof, string, store.FailureClass, error) {
 	var none vmafProof
 
 	// THE SEAM, announced before any gate runs: this is the map the checks below read.
@@ -89,7 +99,7 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.P
 	// 1. exists & non-empty. TRANSIENT: an empty temp is what a full disk, a killed ffmpeg
 	// or a write that never landed leaves behind, none of them properties of the source.
 	if probe.FileSize(tmp) <= 0 {
-		return none, store.FailureTransient, fmt.Errorf("temp missing or empty")
+		return none, GateEncode, store.FailureTransient, fmt.Errorf("temp missing or empty")
 	}
 
 	// 2. output codec must be the codec THIS JOB produces, so a hardware or AV1 encode is
@@ -106,13 +116,13 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.P
 		wantCodec = plan.SourceVideoCodec()
 	}
 	if oc := e.Probe.VideoCodec(ctx, tmp); oc != wantCodec {
-		return none, store.FailureDeterministic, fmt.Errorf("output codec is %q, not %s", oc, wantCodec)
+		return none, GateCodec, store.FailureDeterministic, fmt.Errorf("output codec is %q, not %s", oc, wantCodec)
 	}
 
 	// 3. length: the encode must not be truncated. lengthParity classifies its own two
 	// rejections (both deterministic).
 	if class, err := e.lengthParity(ctx, in, tmp); err != nil {
-		return none, class, err
+		return none, GateLength, class, err
 	}
 
 	// 4. size: reclaiming space is the whole point. DETERMINISTIC, and the headline case:
@@ -121,7 +131,7 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.P
 	sout := probe.FileSize(tmp)
 	limit := float64(sin) * (1 - float64(prof.MinSavingsPercent)/100.0)
 	if !(sout > 0 && float64(sout) <= limit && sout < sin) {
-		return none, store.FailureDeterministic, fmt.Errorf("size-increase reject (in=%dB out=%dB min_savings=%d%%)", sin, sout, prof.MinSavingsPercent)
+		return none, GateSize, store.FailureDeterministic, fmt.Errorf("size-increase reject (in=%dB out=%dB min_savings=%d%%)", sin, sout, prof.MinSavingsPercent)
 	}
 
 	// 5. THE INTENDED-STREAM CHECK: the output carries exactly the streams this job meant
@@ -141,20 +151,20 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.P
 	// one, and the source is kept. DETERMINISTIC.
 	outStreams, enumerated := e.Probe.Streams(ctx, tmp)
 	if !enumerated {
-		return none, store.FailureDeterministic, fmt.Errorf(
+		return none, GateStreamParity, store.FailureDeterministic, fmt.Errorf(
 			"the output's streams could not be enumerated (ffprobe did not answer): refusing to "+
 				"accept an output whose stream map cannot be checked against the %d stream(s) this job "+
 				"intended to carry", len(plan.Intended()))
 	}
 	if err := plan.CheckOutput(outStreams); err != nil {
-		return none, store.FailureDeterministic, err
+		return none, GateStreamParity, store.FailureDeterministic, err
 	}
 
 	// 6. decode-integrity healthcheck on EVERY encode. TRANSIENT: an output that does not
 	// fully decode is a damaged FILE, and a filled disk, a killed process or a flipped bit
 	// are conditions of the run rather than properties of the source.
 	if !e.Probe.DecodeOK(ctx, tmp) {
-		return none, store.FailureTransient, fmt.Errorf("decode-integrity check failed (output does not fully decode)")
+		return none, GateDecode, store.FailureTransient, fmt.Errorf("decode-integrity check failed (output does not fully decode)")
 	}
 
 	// 7. VMAF perceptual-quality gate, last because it costs a second full decode. The
@@ -168,18 +178,23 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.P
 	// loosely afterwards would have removed a gate.
 	if plan.RemuxOnly() {
 		if err := e.videoIdentity(ctx, in, tmp); err != nil {
-			return none, store.FailureDeterministic, err
+			// No member of the gate vocabulary names the remux identity check: it stands in
+			// place of the perceptual gate on this path, and it is none of the three floors,
+			// none of the structural gates, and not an unmeasured VMAF. So it is attributed
+			// to the FALLBACK rather than to a gate it is not - which is what the fallback is
+			// for - and the row's Reason still names the stream that differed.
+			return none, GateOther, store.FailureDeterministic, err
 		}
 		// Nothing was measured, so NOTHING is reported: an empty proof carrying only the
 		// reason the gate did not run. A zeroed score here would be a fabricated
 		// measurement of a gate nobody ran, on the row an operator reads after the source
 		// is gone.
-		return vmafProof{Skipped: VmafSkippedRemuxOnly}, "", nil
+		return vmafProof{Skipped: VmafSkippedRemuxOnly}, "", "", nil
 	}
 	if prof.VmafGate() {
 		return e.vmafGate(ctx, tmp, in, prof)
 	}
-	return none, "", nil
+	return none, "", "", nil
 }
 
 // videoIdentity establishes that every video stream the output carries is IDENTICAL to
@@ -282,7 +297,11 @@ func (e *Engine) lengthParity(ctx context.Context, in, out string) (store.Failur
 // from the build or a measurement that failed, are transient, since installing a libvmaf-capable
 // build changes exactly the thing that rejected. Every floor is read off prof, so a root that
 // set a stricter bar is held to its own and not the top-level one.
-func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof config.Profile) (vmafProof, store.FailureClass, error) {
+//
+// The GATE it returns keeps the three floors apart - vmaf-mean, vmaf-min and vmaf-chroma are
+// three different things to act on - and gives the three unmeasurable cases one token of their
+// own (vmaf-unmeasured): those say the instrument was missing, not that the encode was bad.
+func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof config.Profile) (vmafProof, string, store.FailureClass, error) {
 	model := resolveVmafModel(prof.VmafModel, e.Probe.Height(ctx, distorted))
 
 	// Name the comparison format BEFORE anything is measured, from the two streams' own pixel
@@ -291,7 +310,7 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof
 	// depend on an undocumented choice nobody recorded. An unnameable pair is REJECTED.
 	pixFmt, ok := vmaf.ComparisonFormat(e.Probe.PixFmt(ctx, reference), e.Probe.PixFmt(ctx, distorted))
 	if !ok {
-		return vmafProof{}, store.FailureDeterministic, fmt.Errorf(
+		return vmafProof{}, GateVmafUnmeasured, store.FailureDeterministic, fmt.Errorf(
 			"cannot name a comparison pixel format for source pix_fmt %q and output pix_fmt %q "+
 				"(refusing to score a pair whose comparison format would be chosen by filter negotiation)",
 			e.Probe.PixFmt(ctx, reference), e.Probe.PixFmt(ctx, distorted))
@@ -300,7 +319,7 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof
 	score := e.vmafScore
 	if score == nil {
 		if !vmaf.Available(ctx, e.Probe.FFmpeg) {
-			return vmafProof{}, store.FailureTransient, fmt.Errorf("VMAF gate enabled but libvmaf is not available in the ffmpeg build (refusing to accept an unmeasured encode)")
+			return vmafProof{}, GateVmafUnmeasured, store.FailureTransient, fmt.Errorf("VMAF gate enabled but libvmaf is not available in the ffmpeg build (refusing to accept an unmeasured encode)")
 		}
 		score = func(ctx context.Context, req vmaf.Request) (vmaf.Result, error) {
 			return vmaf.Score(ctx, e.Probe.FFmpeg, req)
@@ -318,7 +337,7 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof
 		// Nothing was measured, so there is nothing to record: an empty proof, NOT a zeroed
 		// one. vmaf.Score already refuses a log missing ANY pooled statistic (TRANSCODE-11
 		// for the luma pair, GATE-4 for the chroma planes), so this is never a partial one.
-		return vmafProof{}, store.FailureTransient, fmt.Errorf("VMAF measurement failed (refusing to accept an unmeasured encode): %w", err)
+		return vmafProof{}, GateVmafUnmeasured, store.FailureTransient, fmt.Errorf("VMAF measurement failed (refusing to accept an unmeasured encode): %w", err)
 	}
 	proof := vmafProof{
 		Mean: &res.HarmonicMean, Min: &res.Min, Model: model,
@@ -327,13 +346,13 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof
 	}
 
 	if res.HarmonicMean < prof.MinVmaf {
-		return proof, store.FailureDeterministic, fmt.Errorf("VMAF below threshold (harmonic_mean=%.2f < min_vmaf=%.2f)", res.HarmonicMean, prof.MinVmaf)
+		return proof, GateVmafMean, store.FailureDeterministic, fmt.Errorf("VMAF below threshold (harmonic_mean=%.2f < min_vmaf=%.2f)", res.HarmonicMean, prof.MinVmaf)
 	}
 	// The worst-frame floor. On by default (vmaf_min_pool=60): a locally-broken
 	// encode is invisible to the mean above and to every structural check, so this
 	// is the only gate standing between it and the deletion of the source.
 	if prof.VmafMinPool > 0 && res.Min < prof.VmafMinPool {
-		return proof, store.FailureDeterministic, fmt.Errorf(
+		return proof, GateVmafMin, store.FailureDeterministic, fmt.Errorf(
 			"VMAF worst-frame below floor (min=%.2f < vmaf_min_pool=%.2f) — the encode is locally broken: "+
 				"its average is fine (harmonic_mean=%.2f) but at least one frame collapsed, so the source is kept",
 			res.Min, prof.VmafMinPool, res.HarmonicMean)
@@ -346,13 +365,13 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof
 	// sees it, and the reason NAMES the metric and the floor so an operator need not
 	// go to the logs to learn which of three gates fired.
 	if prof.VmafMinChroma > 0 && res.ChromaMin < prof.VmafMinChroma {
-		return proof, store.FailureDeterministic, fmt.Errorf(
+		return proof, GateVmafChroma, store.FailureDeterministic, fmt.Errorf(
 			"chroma below floor (%s=%.2f < vmaf_min_chroma=%.2f) - the encode is damaged in its COLOUR "+
 				"planes: its luma is fine (harmonic_mean=%.2f, worst frame=%.2f) and the VMAF model is "+
 				"luma-only, so nothing else would have seen this; the source is kept",
 			res.ChromaMetric, res.ChromaMin, prof.VmafMinChroma, res.HarmonicMean, res.Min)
 	}
-	return proof, "", nil
+	return proof, "", "", nil
 }
 
 // resolveVmafModel maps the config VmafModel to a libvmaf model spec. The rule lives in

@@ -124,6 +124,109 @@ const (
 	FailUnreadable = "unreadable-or-no-video-stream"
 )
 
+// SkipVocabulary is the WHOLE skip vocabulary - every Skip* token declared above, in one
+// place a consumer can enumerate at runtime.
+//
+// It is NOT SkipGuards and the two must not be confused. SkipGuards is the smaller set
+// `requeue --guard` accepts, and it deliberately omits the MUTABLE guards (hardlinked,
+// undo-retention-failed, operator-excluded) because a requeue has nothing to re-open for
+// a verdict the next pass clears and re-derives by itself. Those guards fire in ordinary
+// operation, so a consumer that has to account for every skip this engine can record -
+// the /metrics label set is the standing one - reads THIS list. One built on SkipGuards
+// would silently have no bucket for three live guards.
+//
+// Adding a Skip* constant means adding it here. The metrics surface asserts this list
+// against the constants themselves (parsed out of this package), so a token added above
+// and forgotten here reds that test rather than appearing unannounced at first use.
+var SkipVocabulary = []string{
+	SkipAlreadyTargetCodec,
+	SkipLowBitrate,
+	SkipHardlinked,
+	SkipInterlaced,
+	SkipDolbyVision,
+	SkipHDR10Plus,
+	SkipIncompleteHDRMetadata,
+	SkipExoticPixelFormat,
+	SkipTargetExists,
+	SkipSymlink,
+	SkipMultiVideoStream,
+	SkipUnreadableStreamList,
+	SkipUndoRetentionFailed,
+	SkipUndeterminedSourceHeight,
+	SkipOperatorExcluded,
+	SkipRestoredOriginal,
+}
+
+// The GATE vocabulary: WHICH gate or stage refused a job that failed. Like the skip
+// tokens above it is a closed, stable wire format - it is published as a metric label,
+// and a renamed one silently breaks every dashboard built on it.
+//
+// It is decided AT THE SITE that rejected the job and travels out on the Event beside the
+// failure class, never derived from the error text: the text is unbounded, and a
+// classifier matching on strings drifts the moment a message is reworded. The class and
+// the gate are orthogonal and both are kept - the class answers "will retrying help", the
+// gate answers "what rejected this".
+//
+// Each member is a rejection an operator acts on DIFFERENTLY; that is the whole test for
+// membership. The three VMAF floors are three members rather than one for exactly that
+// reason: a rise in chroma-floor rejections says something about the encoder or the
+// content changed, and folded into a single "vmaf" it would be indistinguishable.
+const (
+	// GateProbe: the source could not be read, or it carries no video stream.
+	GateProbe = "probe"
+	// GateEncode: the encoder itself failed, or produced no usable output file.
+	GateEncode = "encode"
+	// GateCodec: the output is not the codec this job was asked to produce.
+	GateCodec = "codec"
+	// GateLength: duration parity or packet-count parity failed - a truncated encode.
+	GateLength = "length"
+	// GateSize: the min-savings reject. An output that did not reclaim enough space.
+	GateSize = "size"
+	// GateStreamParity: the output does not carry the streams this job intended, or its
+	// streams could not be enumerated to check.
+	GateStreamParity = "stream-parity"
+	// GateDecode: the decode-integrity healthcheck - the output does not fully decode.
+	GateDecode = "decode"
+	// GateVmafMean: the pooled harmonic mean fell below min_vmaf.
+	GateVmafMean = "vmaf-mean"
+	// GateVmafMin: the worst (sub)sampled frame fell below vmaf_min_pool - the encode is
+	// locally broken however good its average is.
+	GateVmafMin = "vmaf-min"
+	// GateVmafChroma: the worst frame's chroma PSNR fell below vmaf_min_chroma - the
+	// COLOUR planes were damaged, which the luma-only model cannot see.
+	GateVmafChroma = "vmaf-chroma"
+	// GateVmafUnmeasured: the perceptual gate could not MEASURE - libvmaf absent from the
+	// build, the measurement failed, or no comparison pixel format could be named. An
+	// unmeasured encode is refused, so this is a rejection like any other.
+	GateVmafUnmeasured = "vmaf-unmeasured"
+	// GateSwap: any refusal from the pre-swap steps onward - the collision re-check, the
+	// copy back beside the source, the metadata carry, the fsync, the retention hook, the
+	// re-fingerprint, the pre-swap attribute record, and the rename itself.
+	GateSwap = "swap"
+	// GateOther: the fallback, and a real member rather than an absence. A failure
+	// attributable to no gate above is counted HERE, so the failures a consumer counts
+	// always add up to the failures that happened.
+	GateOther = "other"
+)
+
+// GateVocabulary is the whole gate vocabulary, in one place a consumer can enumerate.
+// A member may be added; none may be renamed.
+var GateVocabulary = []string{
+	GateProbe,
+	GateEncode,
+	GateCodec,
+	GateLength,
+	GateSize,
+	GateStreamParity,
+	GateDecode,
+	GateVmafMean,
+	GateVmafMin,
+	GateVmafChroma,
+	GateVmafUnmeasured,
+	GateSwap,
+	GateOther,
+}
+
 // Engine drives the transcode over a set of library roots.
 type Engine struct {
 	Cfg   config.Config
@@ -1279,11 +1382,14 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	props, v := e.guardSource(ctx, f, root, prof, ts, targetCodec, reuse(pre, e.Probe.VideoProps))
 	if v.stopped() {
 		e.Log.Info(v.log, append([]any{"file", f}, v.logArgs...)...)
-		status := store.Skipped
+		out := e.because(v.guard, by, prof, ts, props, v.inputs...)
 		if v.failed {
-			status = store.Failed
+			// The one source-side verdict that FAILS rather than skips: the probe reported
+			// no video stream, so the gate that refused this job is the probe.
+			e.fail(ctx, f, key, GateProbe, out)
+			return nil
 		}
-		e.finish(ctx, f, key, status, e.because(v.guard, by, prof, ts, props, v.inputs...))
+		e.finish(ctx, f, key, store.Skipped, out)
 		return nil
 	}
 
@@ -1403,7 +1509,9 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		w, err := e.pickTempPath(ctx, dir, stem, outExt)
 		if err != nil {
 			e.Log.Warn("FAIL (no free temp path beside the source, source untouched)", "file", f, "err", err)
-			e.finish(ctx, f, key, store.Failed, withSourceDimensions(
+			// Nothing has been encoded and no gate has run: this is the working area
+			// refusing, which no member of the gate vocabulary names, so it is the fallback.
+			e.fail(ctx, f, key, GateOther, withSourceDimensions(
 				&store.Outcome{Reason: err.Error(), Profile: ts.Profile, Decision: by}, props))
 			return nil
 		}
@@ -1416,14 +1524,14 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		// the figures, leaves the source untouched, and the scan carries on.
 		if err := e.scratchRoomFor(scratch, f, fi.Size()); err != nil {
 			e.Log.Warn("FAIL (not enough room in the scratch directory, source untouched)", "file", f, "err", err)
-			e.finish(ctx, f, key, store.Failed, withSourceDimensions(
+			e.fail(ctx, f, key, GateOther, withSourceDimensions(
 				&store.Outcome{Reason: err.Error(), Profile: ts.Profile, Decision: by}, props))
 			return nil
 		}
 		w, err := e.pickScratchPath(scratch, f, outExt)
 		if err != nil {
 			e.Log.Warn("FAIL (no free working path in the scratch directory, source untouched)", "file", f, "err", err)
-			e.finish(ctx, f, key, store.Failed, withSourceDimensions(
+			e.fail(ctx, f, key, GateOther, withSourceDimensions(
 				&store.Outcome{Reason: err.Error(), Profile: ts.Profile, Decision: by}, props))
 			return nil
 		}
@@ -1469,7 +1577,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		e.Log.Warn("FAIL (encode error, source untouched)", "file", f, "err", err)
 		_ = os.Remove(tmp)
 		out.Reason = err.Error() // the failure error — previously computed and dropped
-		e.finish(ctx, f, key, store.Failed, out)
+		e.fail(ctx, f, key, GateEncode, out)
 		return nil
 	}
 	encodeDur := time.Since(encStart)
@@ -1488,7 +1596,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	}
 
 	e.advance(ctx, f, key, store.Verifying)
-	proof, class, reason := e.verifyOutput(ctx, f, work, prof, targetCodec, plan)
+	proof, gate, class, reason := e.verifyOutput(ctx, f, work, prof, targetCodec, plan)
 	// Record whatever VMAF measured, on the reject path too: the numbers that rejected an
 	// encode are exactly the ones an operator wants to see.
 	out.VmafMean, out.VmafMin, out.VmafModel = proof.Mean, proof.Min, proof.Model
@@ -1516,11 +1624,12 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		e.Log.Warn("FAIL (verify rejected, source untouched)", "file", f,
 			"reason", reason.Error(), "failure_class", class.Class())
 		_ = os.Remove(tmp)
-		// The gate decided both of these at the line that rejected the encode; nothing here
-		// re-reads the message to work out what kind of rejection it was.
+		// The gate decided all three of these at the line that rejected the encode; nothing
+		// here re-reads the message to work out what kind of rejection it was, or which
+		// check made it.
 		out.FailureClass = class
 		out.Reason = failureReason(class, reason.Error())
-		e.finish(ctx, f, key, store.Failed, out)
+		e.fail(ctx, f, key, gate, out)
 		return nil
 	}
 
@@ -1531,7 +1640,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			e.Log.Warn("FAIL (target appeared during encode — refusing to clobber)", "file", f, "target", final)
 			_ = os.Remove(tmp)
 			out.Reason = "target appeared during encode — refused to clobber " + final
-			e.finish(ctx, f, key, store.Failed, out)
+			e.fail(ctx, f, key, GateSwap, out)
 			return nil
 		}
 	}
@@ -1559,7 +1668,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		if err != nil {
 			e.Log.Warn("FAIL (no free temp path beside the source for the accepted encode, source untouched)", "file", f, "err", err)
 			out.Reason = err.Error()
-			e.finish(ctx, f, key, store.Failed, out)
+			e.fail(ctx, f, key, GateSwap, out)
 			return nil
 		}
 		if err := e.copyBackBesideSource(work, t); err != nil {
@@ -1570,7 +1679,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			e.Log.Warn("FAIL (the accepted encode could not be established beside the source, source untouched)",
 				"file", f, "scratch_working_file", work, "copy", t, "err", err)
 			out.Reason = err.Error()
-			e.finish(ctx, f, key, store.Failed, out)
+			e.fail(ctx, f, key, GateSwap, out)
 			return nil
 		}
 		tmp = t
@@ -1593,7 +1702,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		e.Log.Warn("FAIL (could not "+step+", source untouched)", "file", f, "temp", tmp, "err", merr)
 		_ = os.Remove(tmp)
 		out.Reason = "could not " + step + ": " + merr.Error()
-		e.finish(ctx, f, key, store.Failed, out)
+		e.fail(ctx, f, key, GateSwap, out)
 		return nil
 	}
 
@@ -1612,7 +1721,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		e.Log.Warn("FAIL (could not fsync the encode before the swap, source untouched)", "file", f, "err", err)
 		_ = os.Remove(tmp)
 		out.Reason = "fsync temp before swap: " + err.Error()
-		e.finish(ctx, f, key, store.Failed, out)
+		e.fail(ctx, f, key, GateSwap, out)
 		return nil
 	}
 
@@ -1642,7 +1751,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 				u.discard(retained)
 				_ = os.Remove(tmp)
 				out.Reason = "aborted after retaining the original: " + herr.Error()
-				e.finish(ctx, f, key, store.Failed, out)
+				e.fail(ctx, f, key, GateSwap, out)
 				return nil
 			}
 		}
@@ -1685,7 +1794,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		abandon()
 		_ = os.Remove(tmp)
 		out.Reason = "source changed during encode (fingerprint " + key + " -> " + cur + ") — refused to overwrite newer content"
-		e.finish(ctx, f, key, store.Failed, out)
+		e.fail(ctx, f, key, GateSwap, out)
 		return nil
 	}
 
@@ -1704,7 +1813,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		_ = os.Remove(tmp)
 		out.Reason = "could not record the pre-swap attributes of both files - refused the swap: " +
 			errText(srcErr) + " / " + errText(replErr)
-		e.finish(ctx, f, key, store.Failed, out)
+		e.fail(ctx, f, key, GateSwap, out)
 		return nil
 	}
 
@@ -2119,6 +2228,21 @@ func (e *Engine) finishStore(ctx context.Context, path, key string, s store.Stat
 func (e *Engine) finish(ctx context.Context, path, key string, s store.Status, o *store.Outcome) {
 	e.finishStore(ctx, path, key, s, o)
 	e.emit(Event{Path: path, Status: s, Outcome: o})
+}
+
+// fail is finish for the FAILED terminal transition, carrying the GATE that refused the
+// job out to the observer beside the proof (see Event.Gate).
+//
+// It exists so the token is chosen at each rejecting call site rather than re-derived
+// afterwards from the message, and so that every failed row leaves through one door: a
+// path that reached for finish instead would emit a failure attributed to no gate, which
+// is the one thing a per-gate count cannot detect by itself.
+//
+// Nothing about what is STORED changes here - o is handed to the store exactly as finish
+// hands it - so the verdict, the Reason text and the failure class are untouched.
+func (e *Engine) fail(ctx context.Context, path, key, gate string, o *store.Outcome) {
+	e.finishStore(ctx, path, key, store.Failed, o)
+	e.emit(Event{Path: path, Status: store.Failed, Outcome: o, Gate: gate})
 }
 
 // because builds the Outcome a guard records: WHICH guard fired, WHICH library profile
