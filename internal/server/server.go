@@ -98,6 +98,21 @@ func New(baseCtx context.Context, cfg config.Config, token, readToken secret.Val
 // ServeHTTP makes Server an http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
 
+// reads is the handle every READ endpoint answers from, and it is deliberately the HUB's
+// rather than a second field of this struct.
+//
+// At `serve` the hub is built on a read-only door onto the ledger - a handle the database
+// itself refuses every write on - so a reporting read cannot occupy the single connection
+// the engine's Claim/Advance/Finish writes queue on. Taking it from the hub is what makes
+// the stream and the polled endpoints structurally incapable of disagreeing about which
+// door they read through: there is one place the reporting handle is supplied, and it is
+// the hub's constructor.
+//
+// s.store stays the WRITE handle, and the mutating endpoints keep using it: the withheld
+// paths are recorded through it, and a ledger search is a control-gated read that may as
+// well share the writer's connection because it is not on any frame's path.
+func (s *Server) reads() store.Store { return s.hub.store }
+
 func (s *Server) routes() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer) // a panicking handler must never crash the daemon
@@ -213,7 +228,7 @@ type controlState struct {
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
-	sum, err := s.store.Summary(r.Context())
+	sum, err := s.reads().Summary(r.Context())
 	if err != nil {
 		s.fail(w, "summary", err)
 		return
@@ -222,18 +237,22 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	for st, n := range sum {
 		counts[string(st)] = n
 	}
+	// The same whole-ledger figure set the stream publishes, from the same cache and
+	// under the same refresh interval: a client that polls sees what a client that
+	// subscribes sees, and polling this endpoint cannot make the figures cost more than
+	// one refresh per interval however often it is called.
 	writeJSON(w, http.StatusOK, controlState{
 		Summary:                counts,
 		BytesReclaimedSession:  s.hub.BytesReclaimed(),
 		BytesReclaimedLifetime: s.hub.ReclaimedLifetime(),
 		Paused:                 s.ctrl.Paused(),
 		Scanning:               s.ctrl.Scanning(),
-		Aggregates:             s.hub.aggregates(r.Context()),
+		Aggregates:             aggregatesOf(s.hub.ledgerFigures(r.Context(), true)),
 	})
 }
 
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
-	jobs, err := s.store.List(r.Context(), activeAndPending, queueLimit)
+	jobs, err := s.reads().List(r.Context(), activeAndPending, queueLimit)
 	if err != nil {
 		s.fail(w, "queue", err)
 		return
@@ -249,7 +268,7 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"queue":       s.hub.queueDTOs(jobs),
 		"now":         time.Now().Unix(),
-		"queue_total": s.hub.rowTotal(r.Context(), "queue_total", activeAndPending, queueLimit),
+		"queue_total": rowTotalOf(s.hub.ledgerFigures(r.Context(), true).QueueTotal, queueLimit),
 	})
 }
 
@@ -263,7 +282,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	jobs, err := s.store.List(r.Context(), terminal, limit)
+	jobs, err := s.reads().List(r.Context(), terminal, limit)
 	if err != nil {
 		s.fail(w, "history", err)
 		return
@@ -273,7 +292,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	// `count` does not. A total that tracked the request would just be len(history).
 	writeJSON(w, http.StatusOK, map[string]any{
 		"history":       toDTOs(jobs),
-		"history_total": s.hub.rowTotal(r.Context(), "history_total", terminal, limit),
+		"history_total": rowTotalOf(s.hub.ledgerFigures(r.Context(), true).HistoryTotal, limit),
 	})
 }
 
@@ -291,14 +310,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering (nginx)
 
-	ch, cancel := s.hub.Subscribe()
+	// Subscribe builds this client's own first frame and seeds the channel with it, so
+	// the initial state a just-connected client renders is read AT THE MOMENT IT
+	// SUBSCRIBED. The handler no longer takes a second snapshot of its own: one build
+	// per subscription, arriving on the same channel as every frame after it.
+	ch, cancel := s.hub.Subscribe(r.Context())
 	defer cancel()
-
-	// Initial state so a just-connected client renders immediately.
-	if data, err := s.hub.SnapshotJSON(r.Context()); err == nil {
-		writeSSE(w, data)
-		flusher.Flush()
-	}
 
 	heartbeat := time.NewTicker(25 * time.Second)
 	defer heartbeat.Stop()

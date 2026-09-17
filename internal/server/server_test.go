@@ -241,8 +241,9 @@ func TestHub_BroadcastsSnapshotOnEvent(t *testing.T) {
 	defer cancel()
 	go h.hub.Run(ctx)
 
-	sub, unsub := h.hub.Subscribe()
+	sub, unsub := h.hub.Subscribe(ctx)
 	defer unsub()
+	drainFrames(sub) // the subscription's own first frame; the broadcast is the subject here
 
 	h.hub.Observe(engine.Event{Path: "/lib/x.mkv", Status: store.Encoding})
 
@@ -1282,10 +1283,10 @@ func TestSnapshot_EveryAggregateStatesTheSetItCovers(t *testing.T) {
 	// A bounded figure states its bound ALONGSIDE the figure, on the wire, in the same
 	// object. This drives the projection with a windowed aggregate to prove the
 	// statement travels rather than being dropped on the way out.
-	windowed := (&Hub{log: discard()}).spread("windowed", store.Spread{
+	windowed := spreadOf(figureReading[store.Spread]{served: true, value: store.Spread{
 		Coverage: store.Coverage{Set: "done rows in the ledger", Window: "the most recent 200 rows"},
 		Counted:  5,
-	})
+	}})
 	if windowed.Window != "the most recent 200 rows" || windowed.Covers != "done rows in the ledger" {
 		t.Errorf("a bounded figure lost its window on the wire: %+v", windowed)
 	}
@@ -1380,8 +1381,9 @@ func TestSnapshot_OneUnreadableAggregateStillShipsEverythingElse(t *testing.T) {
 
 	// The broadcast still fires - a subscriber gets the frame, it is not skipped.
 	go hub.Run(ctx)
-	sub, unsub := hub.Subscribe()
+	sub, unsub := hub.Subscribe(ctx)
 	defer unsub()
+	drainFrames(sub) // the subscription's own first frame; the broadcast is the subject here
 	hub.Observe(engine.Event{Path: "/lib/x.mkv", Status: store.Encoding})
 	select {
 	case data := <-sub:
@@ -1470,9 +1472,14 @@ func TestSnapshot_AggregatesAddNoAuthorizationAndNoPerFileDatum(t *testing.T) {
 	if err := json.Unmarshal(aggRaw, &members); err != nil {
 		t.Fatalf("decode aggregates: %v", err)
 	}
+	// age_seconds is here deliberately (S0096): it is how old the VALUE being served is,
+	// a fact about the read rather than about any file, and it names nothing a library
+	// contains. It is what lets a figure be published from a bounded refresh without
+	// being published as though it had been computed for this frame.
 	allowed := map[string]bool{
 		"available": true, "unavailable": true, "covers": true, "window": true,
-		"counted": true, "excluded": true, "min": true, "mean": true, "max": true, "buckets": true,
+		"age_seconds": true,
+		"counted":     true, "excluded": true, "min": true, "mean": true, "max": true, "buckets": true,
 	}
 	for name, fields := range members {
 		for k := range fields {
@@ -1762,10 +1769,20 @@ func TestSSE_AReconnectGetsAFullSnapshotAsItsFirstMessage(t *testing.T) {
 // subscriberCount reads the hub's live subscriber set. In-package on purpose: a leaked
 // subscription is invisible from the wire - the symptom is a hub holding a channel
 // nobody drains.
-func subscriberCount(h *Hub) int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return len(h.subs)
+func subscriberCount(h *Hub) int { return h.subscriberCount() }
+
+// drainFrames empties whatever is already waiting on a subscription channel. Subscribe
+// seeds each new subscriber with its own first frame (S0096), so a test whose subject is
+// a LATER publish takes that one off first rather than reading it and calling it the
+// broadcast it was waiting for.
+func drainFrames(ch <-chan []byte) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
 }
 
 // A proxy makes cancelled requests routine: a client that navigates away, a health probe
@@ -1804,8 +1821,9 @@ func TestSSE_ARequestCancelledBeforeTheFirstEventLeaksNoSubscriber(t *testing.T)
 
 	// And the hub still publishes: a later event reaches a live subscriber promptly, so
 	// nothing the cancelled request left behind blocks a publisher.
-	ch, unsub := h.hub.Subscribe()
+	ch, unsub := h.hub.Subscribe(context.Background())
 	defer unsub()
+	drainFrames(ch) // the subscription's own first frame; the later publish is the subject
 	h.hub.Trigger()
 	select {
 	case <-ch:

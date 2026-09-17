@@ -1,0 +1,39 @@
+{
+  "benchmark": "BenchmarkSnapshot_AtLedgerScale",
+  "invocation": "make snapshot-bench",
+  "measures": "the store reads ONE published frame makes: the six whole-ledger aggregates, the two row totals, the summary, the two capped list reads and the undo window's held bytes",
+  "unit": "ns per snapshot",
+  "how_to_read": "A figure here means something only against the figure beside it, taken the same way on the same machine. It is NEVER a build gate: an absolute threshold on a shared runner false-positives at roughly 45% (performance PB5), so a regression is argued by re-running this benchmark and comparing to these numbers, not by a check that reds.",
+  "machine": {
+    "cpu": "Intel(R) Xeon(R) CPU E5-2680 v4 @ 2.40GHz",
+    "logical_cpus_visible": 56,
+    "gomaxprocs": 5,
+    "note": "a shared container, CPU-quota limited; GOMAXPROCS is Go's cgroup default and is what the -5 suffix in the benchmark output names"
+  },
+  "build": {
+    "go": "go1.25.14 linux/amd64",
+    "sqlite_driver": "modernc.org/sqlite v1.53.0",
+    "flags": "-benchtime 1x -count=3, no -race"
+  },
+  "commit": "285a13d730f9337eb600da1d1dca776e86620833",
+  "commit_note": "the commit the measurement was taken AT, which is the parent of the commit carrying this file. holdfast's own rules forbid dates in its files, and the commit identifies the tree more exactly than a date does.",
+  "runs": 3,
+  "figures": [
+    {
+      "rows": 10000,
+      "ns_per_snapshot": { "min": 78029464, "mean": 99303181, "max": 110958743 },
+      "samples_ns": [110958743, 78029464, 108921337]
+    },
+    {
+      "rows": 100000,
+      "ns_per_snapshot": { "min": 778524882, "mean": 811265864, "max": 876225747 },
+      "samples_ns": [779046962, 876225747, 778524882]
+    },
+    {
+      "rows": 500000,
+      "ns_per_snapshot": { "min": 3055067507, "mean": 3580213515, "max": 3865473434 },
+      "samples_ns": [3055067507, 3820099604, 3865473434]
+    }
+  ],
+  "what_the_figures_say": "The cost scales with the ROW COUNT of jobs and not with the rows a frame ships, which is the complexity the spec names (performance PB4): 10x the rows costs roughly 8x, and 50x costs roughly 36x, while the queue and history reads stay capped at 500 and 200 rows throughout. At 500k rows one frame is over three seconds of reads, and before S0096 a frame was built once per second per running encode whether or not anybody was subscribed, on the single connection the engine's writes queue on."
+}

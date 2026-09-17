@@ -386,6 +386,20 @@ type bucketDTO struct {
 //	window      - "" for a figure over that whole set; otherwise the bound narrowing it.
 //	counted     - rows that contributed a value.
 //	excluded    - matching rows that recorded none, reported rather than dropped.
+//	age_seconds - how old the value being served is, in whole seconds.
+//
+// age_seconds is an ADDED OPTIONAL FIELD and none of the frozen names above changed
+// meaning, which is what makes this a non-breaking change to a published surface: every
+// existing consumer reads exactly what it read before. In particular `window` still says
+// what it has always said - "" for a figure over its whole set, otherwise the BOUND
+// narrowing it - because a figure's currency is a fact about the READ and not about the
+// population, and folding the two into one string would leave a consumer unable to tell a
+// narrowed set from a stale value.
+//
+// It is a POINTER and deliberately not omitempty, the discipline every other fact-bearing
+// field here keeps: 0 is a REAL value for it - a figure computed for this very frame - so
+// a plain zero could not also mean "no value is being served". An unavailable figure
+// carries an explicit null, because there is no value for an age to be the age OF.
 //
 // min/mean/max are pointers and deliberately NOT omitempty: they serialize as explicit
 // null when nothing was recorded, the same discipline the per-row outcome fields keep,
@@ -396,6 +410,7 @@ type spreadDTO struct {
 	Unavailable string   `json:"unavailable"`
 	Covers      string   `json:"covers"`
 	Window      string   `json:"window"`
+	AgeSeconds  *int64   `json:"age_seconds"`
 	Counted     int64    `json:"counted"`
 	Excluded    int64    `json:"excluded"`
 	Min         *float64 `json:"min"`
@@ -412,16 +427,22 @@ type spreadDTO struct {
 //	unavailable - why, in the same fixed words the aggregates use; "" when available.
 //	covers      - the SET counted, always stated. Never the rows returned.
 //	cap         - the row limit this response applied, so "of N" is beside "showing M".
+//	age_seconds - how old the count being served is, on the terms spreadDTO states.
 //	count       - a POINTER, and deliberately not omitempty: an unreadable total goes out
 //	              as an explicit null, never as 0. A zero here would say "the ledger holds
 //	              nothing", which is the one thing a figure that could not be read must not
 //	              claim - and it is the claim a client would then render beside rows it can
 //	              see with its own eyes.
+//
+// `cap` moves with the request and the age does not: the cap is what THIS response
+// applied, while the count and its age are what the last refresh of the whole-ledger set
+// read.
 type rowTotalDTO struct {
 	Available   bool   `json:"available"`
 	Unavailable string `json:"unavailable"`
 	Covers      string `json:"covers"`
 	Cap         int    `json:"cap"`
+	AgeSeconds  *int64 `json:"age_seconds"`
 	Count       *int64 `json:"count"`
 }
 
@@ -430,6 +451,7 @@ type breakdownDTO struct {
 	Unavailable string      `json:"unavailable"`
 	Covers      string      `json:"covers"`
 	Window      string      `json:"window"`
+	AgeSeconds  *int64      `json:"age_seconds"`
 	Counted     int64       `json:"counted"`
 	Excluded    int64       `json:"excluded"`
 	Buckets     []bucketDTO `json:"buckets"`
@@ -488,6 +510,16 @@ type Hub struct {
 	// so the pre-swap key would otherwise linger).
 	progress map[string]engine.Progress
 
+	// figures is the whole-ledger figure set between refreshes - the six aggregates and
+	// the two row totals, each held with the time it was read. See ledgerfigures.go for
+	// what is in the set, what is deliberately not, and why the bound exists.
+	figures ledgerCache
+
+	// now is the clock the frame's `now` basis and every figure's age are measured on.
+	// It is a field rather than a direct time.Now call so a test can advance the clock
+	// across the refresh interval without sleeping through it.
+	now func() time.Time
+
 	mu   sync.Mutex
 	subs map[chan []byte]struct{}
 }
@@ -515,6 +547,7 @@ func NewHub(st store.Store, ctrl *Controller, log *slog.Logger) *Hub {
 		subs:              make(map[chan []byte]struct{}),
 		progress:          make(map[string]engine.Progress),
 		reclaimedBaseline: baseline,
+		now:               time.Now,
 	}
 }
 
@@ -683,26 +716,60 @@ func (h *Hub) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-h.events:
+		case ev := <-h.events:
 			// Coalesce: drain everything queued so a burst of transitions produces
 			// one broadcast, not one per event.
+			//
+			// progressOnly tracks whether EVERY event in this batch was a live progress
+			// report. It is what AC-6 rests on: an encoder reports its position once a
+			// second and none of those reports can move a whole-ledger figure, because
+			// no row changed state. A batch carrying even one transition is not
+			// progress-only, and the frame it produces refreshes the figure set on the
+			// ordinary interval rule.
+			progressOnly := ev.Progress != nil
 			drained := true
 			for drained {
 				select {
-				case <-h.events:
+				case ev := <-h.events:
+					progressOnly = progressOnly && ev.Progress != nil
 				default:
 					drained = false
 				}
 			}
-			h.broadcast(ctx)
+			h.broadcast(ctx, progressOnly)
 		}
 	}
 }
 
+// subscriberCount is how many SSE subscribers are registered right now.
+func (h *Hub) subscriberCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.subs)
+}
+
 // broadcast builds the current snapshot and pushes it to every subscriber, dropping
 // for any subscriber whose buffer is full (a slow client just gets the next one).
-func (h *Hub) broadcast(ctx context.Context) {
-	snap, err := h.buildSnapshot(ctx)
+//
+// THE SUBSCRIBER COUNT IS READ FIRST, and on zero this returns having read nothing.
+// A snapshot is a store-derived value with no consumer but a subscriber: an engine
+// running with nobody watching emits a progress report per second per encode, and
+// building a frame for each of them spent roughly ten queries - several of them scans
+// of the whole jobs table - on a value that was then discarded. An idle daemon now pays
+// nothing, and the price of that is nothing: a subscriber that attaches later has its
+// own first frame built for it at that moment (see Subscribe), so no client is ever
+// served a frame that was built before it existed.
+//
+// progressOnly says the batch behind this frame was nothing but live progress reports.
+// Such a frame publishes the whole-ledger figures it already has and refreshes none of
+// them, whatever the interval says: the reports moved no row, so there is nothing for a
+// scan of the ledger to find. The figures it carries keep their envelopes and their
+// availability - a progress frame downgrades nothing.
+func (h *Hub) broadcast(ctx context.Context, progressOnly bool) {
+	if h.subscriberCount() == 0 {
+		return
+	}
+	snap, err := h.buildSnapshot(ctx, !progressOnly)
 	if err != nil {
 		h.log.Warn("snapshot build failed (skipping broadcast)", "err", err)
 		return
@@ -724,7 +791,17 @@ func (h *Hub) broadcast(ctx context.Context) {
 
 // Subscribe registers a new SSE subscriber and returns its channel plus a cancel
 // func to unregister it (call on connection close).
-func (h *Hub) Subscribe() (<-chan []byte, func()) {
+//
+// It BUILDS THAT SUBSCRIBER'S FIRST FRAME HERE, on demand, and seeds the channel with
+// it. That is what makes broadcast's zero-subscriber return safe: while nobody is
+// watching, no frame exists, so a client attaching after an idle period must be given
+// one built at the moment it attached rather than whatever the last broadcast produced.
+// Registering BEFORE the build is deliberate - a transition that lands while the frame
+// is being read still reaches this subscriber, where the reverse order would drop it.
+//
+// A build failure seeds nothing and is logged: the stream still opens, and the next
+// engine transition delivers a frame. It is never fatal to the connection.
+func (h *Hub) Subscribe(ctx context.Context) (<-chan []byte, func()) {
 	ch := make(chan []byte, 4)
 	h.mu.Lock()
 	h.subs[ch] = struct{}{}
@@ -734,13 +811,23 @@ func (h *Hub) Subscribe() (<-chan []byte, func()) {
 		delete(h.subs, ch)
 		h.mu.Unlock()
 	}
+	data, err := h.SnapshotJSON(ctx)
+	if err != nil {
+		h.log.Warn("initial frame build failed (the stream opens without one)", "err", err)
+		return ch, cancel
+	}
+	select {
+	case ch <- data:
+	default:
+	}
 	return ch, cancel
 }
 
 // SnapshotJSON returns the current snapshot as marshaled JSON (used for the initial
-// SSE frame and reusable by handlers/tests).
+// SSE frame and reusable by handlers/tests). It is a frame built ON DEMAND, so it may
+// refresh the whole-ledger figure set when the interval has elapsed.
 func (h *Hub) SnapshotJSON(ctx context.Context) ([]byte, error) {
-	snap, err := h.buildSnapshot(ctx)
+	snap, err := h.buildSnapshot(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -749,7 +836,18 @@ func (h *Hub) SnapshotJSON(ctx context.Context) ([]byte, error) {
 
 // buildSnapshot reads the store (the source of truth) plus the live control/counter
 // state into a snapshot. Pure reads — it never mutates a row.
-func (h *Hub) buildSnapshot(ctx context.Context) (snapshot, error) {
+//
+// The whole-ledger figure set comes from the cache, refreshed at most once per
+// ledgerFigureInterval, so the per-frame cost here is the summary, the two capped list
+// reads and the undo window's held bytes - work bounded by what the frame ships and by
+// what is currently retained, never by the ledger's history.
+//
+// mayRefresh false is a frame that must issue no whole-ledger query at all (a progress
+// tick). It changes nothing about what the frame CARRIES: every figure keeps its
+// envelope, its availability and its value, and states its age exactly as it does on any
+// other frame.
+func (h *Hub) buildSnapshot(ctx context.Context, mayRefresh bool) (snapshot, error) {
+	figures := h.ledgerFigures(ctx, mayRefresh)
 	sum, err := h.store.Summary(ctx)
 	if err != nil {
 		return snapshot{}, err
@@ -772,15 +870,15 @@ func (h *Hub) buildSnapshot(ctx context.Context) (snapshot, error) {
 		// History rows are terminal, so they are projected WITHOUT live progress — a
 		// finished file carries the proof its swap was safe, never a running figure.
 		History:                toDTOs(hist),
-		QueueTotal:             h.rowTotal(ctx, "queue_total", activeAndPending, queueLimit),
-		HistoryTotal:           h.rowTotal(ctx, "history_total", terminal, historyLimit),
+		QueueTotal:             rowTotalOf(figures.QueueTotal, queueLimit),
+		HistoryTotal:           rowTotalOf(figures.HistoryTotal, historyLimit),
 		BytesReclaimedSession:  h.bytesReclaimed.Load(),
 		BytesReclaimedLifetime: h.ReclaimedLifetime(),
 		BytesHeldByUndoWindow:  h.heldByUndoWindow(ctx),
 		Paused:                 h.ctrl.Paused(),
 		Scanning:               h.ctrl.Scanning(),
-		Now:                    time.Now().Unix(),
-		Aggregates:             h.aggregates(ctx),
+		Now:                    h.now().Unix(),
+		Aggregates:             aggregatesOf(figures),
 	}, nil
 }
 
@@ -803,69 +901,69 @@ func (h *Hub) heldByUndoWindow(ctx context.Context) *int64 {
 	return &held
 }
 
-// aggregates reads the whole-ledger figures for a snapshot. It CANNOT fail the
+// aggregatesOf projects the whole-ledger figure set onto the wire. It CANNOT fail the
 // snapshot, and that is the point: buildSnapshot returns an error on any store read
 // failure and broadcast then skips the frame entirely, so an aggregate read on that
 // all-or-nothing path would let one unreadable figure blank the live page for every
-// subscriber. Each figure carries its own error out of the store instead, and an
-// unreadable one is marked unavailable while the summary, the queue and the history
-// still ship and the broadcast still fires.
-func (h *Hub) aggregates(ctx context.Context) aggregatesDTO {
-	a := h.store.Aggregates(ctx)
+// subscriber. Each figure carries its own failure instead, and an unreadable one is
+// marked unavailable while the summary, the queue and the history still ship and the
+// broadcast still fires.
+func aggregatesOf(f ledgerSet) aggregatesDTO {
 	return aggregatesDTO{
-		Outcomes:     h.breakdown("outcomes", a.Outcomes),
-		SkipsByGuard: h.breakdown("skips_by_guard", a.SkipsByGuard),
-		SizeRatio:    h.spread("size_ratio", a.SizeRatio),
-		EncodeMs:     h.spread("encode_ms", a.EncodeMs),
-		VmafMean:     h.spread("vmaf_mean", a.VmafMean),
-		VmafMin:      h.spread("vmaf_min", a.VmafMin),
+		Outcomes:     breakdownOf(f.Outcomes),
+		SkipsByGuard: breakdownOf(f.SkipsByGuard),
+		SizeRatio:    spreadOf(f.SizeRatio),
+		EncodeMs:     spreadOf(f.EncodeMs),
+		VmafMean:     spreadOf(f.VmafMean),
+		VmafMin:      spreadOf(f.VmafMin),
 	}
 }
 
-// rowTotal reads the total behind one cap and projects it onto the wire.
+// rowTotalOf projects the total behind one cap onto the wire.
 //
 // Like the aggregates and for the same reason, it CANNOT fail the response that carries
 // it: buildSnapshot returns an error on a store read failure and broadcast then skips the
 // frame, and the read endpoints 500. A total that cannot be read must not cost an operator
 // the rows they can otherwise see, so the failure is carried in this figure alone and
 // rendered as unavailable. The real error is logged where an operator with server access
-// can read it; the unauthenticated response is told only that the figure could not be
-// read, which is the whole of what a client needs to render honestly.
+// can read it (see recordFigure); the unauthenticated response is told only that the
+// figure could not be read, which is the whole of what a client needs to render honestly.
 //
 // The count is over the MATCHING rows, never over the rows returned. That is the whole
 // point of the field: a total derived from the payload is the payload's own length.
-func (h *Hub) rowTotal(ctx context.Context, name string, statuses []store.Status, capApplied int) rowTotalDTO {
-	t := h.store.CountRows(ctx, statuses)
+// capApplied is this RESPONSE's cap and moves with the request; the count and its age are
+// what the last refresh read.
+func rowTotalOf(r figureReading[store.RowTotal], capApplied int) rowTotalDTO {
 	out := rowTotalDTO{
-		Available: t.Err == nil,
-		Covers:    t.Coverage.Set,
+		Available: r.served,
+		Covers:    r.value.Coverage.Set,
 		Cap:       capApplied,
 	}
-	if t.Err != nil {
-		h.log.Warn("row total unavailable (the rows still ship)", "total", name, "err", t.Err)
+	if !r.served {
 		out.Unavailable = aggregateUnavailable
 		return out
 	}
-	n := t.Count
-	out.Count = &n
+	n, age := r.value.Count, r.ageSec
+	out.Count, out.AgeSeconds = &n, &age
 	return out
 }
 
-// breakdown projects one keyed aggregate, logging the real error where an operator can
-// read it and shipping only the fixed unavailable text. A failed figure carries NO
-// counts and NO buckets: an unreadable breakdown that reported zeros would be
-// indistinguishable from a ledger in which nothing has happened yet.
-func (h *Hub) breakdown(name string, b store.Breakdown) breakdownDTO {
+// breakdownOf projects one keyed aggregate. A failed figure carries NO counts, NO buckets
+// and NO age: an unreadable breakdown that reported zeros would be indistinguishable from
+// a ledger in which nothing has happened yet, and an age is the age of a value there is
+// none of.
+func breakdownOf(r figureReading[store.Breakdown]) breakdownDTO {
 	out := breakdownDTO{
-		Available: b.Err == nil,
-		Covers:    b.Coverage.Set,
-		Window:    b.Coverage.Window,
+		Available: r.served,
+		Covers:    r.value.Coverage.Set,
+		Window:    r.value.Coverage.Window,
 	}
-	if b.Err != nil {
-		h.log.Warn("aggregate unavailable (the rest of the snapshot still ships)", "aggregate", name, "err", b.Err)
+	if !r.served {
 		out.Unavailable = aggregateUnavailable
 		return out
 	}
+	b, age := r.value, r.ageSec
+	out.AgeSeconds = &age
 	out.Counted, out.Excluded = b.Counted, b.Excluded
 	out.Buckets = make([]bucketDTO, 0, len(b.Buckets))
 	for _, x := range b.Buckets {
@@ -874,20 +972,21 @@ func (h *Hub) breakdown(name string, b store.Breakdown) breakdownDTO {
 	return out
 }
 
-// spread projects one numeric aggregate. See breakdown - and note that min/mean/max stay
-// nil on a failure as well as on an empty set, so a figure that could not be read never
-// goes out as a number.
-func (h *Hub) spread(name string, s store.Spread) spreadDTO {
+// spreadOf projects one numeric aggregate. See breakdownOf - and note that min/mean/max
+// stay nil on a failure as well as on an empty set, so a figure that could not be read
+// never goes out as a number.
+func spreadOf(r figureReading[store.Spread]) spreadDTO {
 	out := spreadDTO{
-		Available: s.Err == nil,
-		Covers:    s.Coverage.Set,
-		Window:    s.Coverage.Window,
+		Available: r.served,
+		Covers:    r.value.Coverage.Set,
+		Window:    r.value.Coverage.Window,
 	}
-	if s.Err != nil {
-		h.log.Warn("aggregate unavailable (the rest of the snapshot still ships)", "aggregate", name, "err", s.Err)
+	if !r.served {
 		out.Unavailable = aggregateUnavailable
 		return out
 	}
+	s, age := r.value, r.ageSec
+	out.AgeSeconds = &age
 	out.Counted, out.Excluded = s.Counted, s.Excluded
 	out.Min, out.Mean, out.Max = s.Min, s.Mean, s.Max
 	return out

@@ -44,7 +44,7 @@ PLATFORM ?= linux/amd64
 
 .PHONY: build test check fmt vet staticcheck govulncheck govulncheck-selftest \
         check-pins check-pins-selftest install-ffmpeg-selftest check-pin-live \
-        secret-scan secret-scan-selftest install-hooks \
+        secret-scan secret-scan-selftest install-hooks snapshot-bench \
         tidy clean image image-smoke compose-check
 
 build:
@@ -146,6 +146,14 @@ install-hooks:
 	@echo "pre-commit secret scan installed (core.hooksPath = .githooks). Undo: git config --unset core.hooksPath"
 
 # THE gate. CI and the release workflow both run exactly this.
+#
+# `snapshot-bench` is DELIBERATELY NOT a prerequisite here, and no command this target
+# runs passes -bench. The benchmark seeds ledgers of 10k, 100k and 500k rows, which is
+# minutes of work that grades nothing: its output is a measurement to compare against the
+# stored previous one (performance PB5), and an absolute number is never a gate here
+# because run-to-run variation on a shared runner makes such a gate false-positive at
+# roughly 45%. `test` above runs `go test` WITHOUT -bench, so the benchmark compiles on
+# every gate run and executes on none of them.
 check: check-pins check-pins-selftest install-ffmpeg-selftest secret-scan secret-scan-selftest fmt vet build test staticcheck govulncheck govulncheck-selftest
 
 # Asks UPSTREAM whether the pinned ffmpeg release is still served. Deliberately NOT part
@@ -155,6 +163,14 @@ check: check-pins check-pins-selftest install-ffmpeg-selftest secret-scan secret
 # exactly how the last one surfaced. Needs network.
 check-pin-live:
 	./scripts/check-pin-live.sh
+
+# What one published frame costs at ledger scale, at 10k, 100k and 500k rows. Run it by
+# hand when a change touches the reporting reads, and compare what it prints against
+# internal/store/snapshot_cost_baseline.json - the figures there carry the machine, the
+# build and the commit they were taken at, because a measurement means nothing without
+# them. It fails on nothing; it reports. Minutes, mostly seeding.
+snapshot-bench:
+	go test ./internal/store -run '^$$' -bench BenchmarkSnapshot_AtLedgerScale -benchtime 1x -count=3
 
 # --- packaging (TRANSCODE-9) --------------------------------------------------
 # The same commands CI runs, so the packaging gate is reproducible by a human and not

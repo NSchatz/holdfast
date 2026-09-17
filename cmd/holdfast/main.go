@@ -905,8 +905,18 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	}
 	defer st.Close()
 
+	// The REPORTING DOOR: every read that publishes a frame or answers a read endpoint
+	// goes through a handle the database itself refuses every write on, opened beside
+	// the engine's write handle and never instead of it. The hub receives it, and the
+	// server answers its read endpoints from the hub's handle, so the stream and the
+	// polled endpoints cannot end up on different doors.
+	reads := reportingDoor(filepath.Join(effectiveStateDir(cfg), "jobs.db"), st, log)
+	if reads != st {
+		defer func() { _ = reads.Close() }()
+	}
+
 	ctrl := server.NewController(ctx, eng.RunOneshot, log)
-	hub := server.NewHub(st, ctrl, log)
+	hub := server.NewHub(reads, ctrl, log)
 	ctrl.SetOnChange(hub.Trigger) // a pause/scan-state flip broadcasts to SSE clients
 
 	// Observability + host-fair scheduling (TRANSCODE-8), all optional and additive.
@@ -1023,6 +1033,43 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	srv.Wait()
 	bg.Wait()
 	return 0
+}
+
+// reportingDoor opens the handle every reporting read goes through: a READ-ONLY door
+// onto the ledger, beside the engine's write handle rather than instead of it.
+//
+// WHY A SECOND HANDLE AT ALL. store.Open sets SetMaxOpenConns(1), and that single
+// connection is what actually prevents "database is locked" under concurrent workers -
+// there is never a second connection to contend with. What it also means is that every
+// reporting read sits in the same queue as the engine's writes: a snapshot rebuild,
+// /api/summary and /api/history each went in front of the next Claim/Advance/Finish.
+// Open's DSN already sets journal_mode(WAL), so a second READER is a concurrency WAL
+// permits rather than a new lock risk, and the write door's single connection is
+// untouched by this - which is the property the no-loss contract rests on.
+//
+// WHAT IT BUYS, AND WHAT IT DOES NOT. Freedom from the WRITE connection, and not
+// concurrency among the reads: store's own read door caps itself at one connection too,
+// and it is left that way on purpose. That cap is shared with `export` and `validate`,
+// nothing here measured a second read connection as worth taking, and the reads this
+// serializes are reads of each other rather than of an encode's next transition.
+//
+// A DOOR THAT WILL NOT OPEN IS NOT FATAL. Reporting is not what this daemon is for. It
+// degrades to the write handle, records which door it tried and what it is doing
+// instead, and serves - a ledger one schema version behind, an unreadable state
+// directory or a file that has just been replaced must cost an operator their figures
+// at worst, never their encodes.
+func reportingDoor(dbPath string, write store.Store, log *slog.Logger) store.Store {
+	reads, err := store.OpenReadOnly(dbPath)
+	if err != nil {
+		log.Warn("the ledger's read-only door could not be opened: reporting reads degrade to the write handle",
+			"dependency", "the job ledger's read-only door",
+			"ledger", dbPath,
+			"attempted", "store.OpenReadOnly (mode=ro with query_only, at this build's schema version)",
+			"next", "serving every reporting read through the engine's write handle, where they queue with its writes",
+			"err", err)
+		return write
+	}
+	return reads
 }
 
 // fanout composes several observers into one engine.Observer, calling each in
