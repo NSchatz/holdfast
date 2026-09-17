@@ -27,6 +27,7 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
 
+	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/schedule"
 	"github.com/NSchatz/holdfast/internal/secret"
 )
@@ -61,6 +62,7 @@ var knownKeys = map[string]bool{
 	excludePathsKey: true, includePathsKey: true,
 	audioLanguagesKey: true, subtitleLanguagesKey: true,
 	keepCommentaryKey: true, remuxOnlyKey: true,
+	deinterlaceKey: true,
 }
 
 // profileKeys are the keys accepted inside one `encode_profiles` entry. The
@@ -124,6 +126,12 @@ func defaultLayer() map[string]any {
 		subtitleLanguagesKey: []string{},
 		keepCommentaryKey:    true,
 		remuxOnlyKey:         false,
+		// Deinterlacing is OFF, which is what this tool has always done: an interlaced
+		// source is skipped rather than converted. A knob in profileKnobs is seeded from the
+		// top-level value of the same key, so it needs an entry here or a root would inherit
+		// an empty string rather than the shipped default - the two mean the same thing to
+		// deinterlace.Lookup, and only one of them prints as an answer in `validate`.
+		deinterlaceKey: deinterlace.Off,
 	}
 }
 
@@ -205,6 +213,21 @@ type Config struct {
 	SubtitleLanguages []string `yaml:"subtitle_languages"`
 	KeepCommentary    *bool    `yaml:"keep_commentary"`
 	RemuxOnly         *bool    `yaml:"remux_only"`
+
+	// Deinterlace names the filter an INTERLACED source is deinterlaced with, and `off`
+	// (the default) means interlaced sources keep being skipped exactly as they always were.
+	//
+	// It is the one knob in this file that changes what the replacement IS. Every other one
+	// moves a threshold, a codec or a stream selection; this one removes information the
+	// source carried, so a replacement made under it is no longer the same content as the
+	// source and Notices() says so out loud before the first file goes.
+	//
+	// Accepted values are `off`, `yadif`, `bwdif`, and either filter with an explicit mode
+	// (`yadif=send_frame`). Only frame-rate-preserving modes run: a mode that emits one
+	// frame per FIELD is refused at start and refused again before the encode, because it
+	// changes the frame count that packet-count parity and duration parity are graded on.
+	// See internal/deinterlace, which is the one place a value resolves to a filter.
+	Deinterlace string `yaml:"deinterlace"`
 
 	// LogLevel controls verbosity: debug|info|warn|error (default info).
 	LogLevel string `yaml:"log_level"`
@@ -668,6 +691,18 @@ func (c *Config) HardlinkSkip() bool { return hardlinkSkip(c.SkipHardlinked) }
 // them behind.
 const preserveMtimeKey = "preserve_mtime"
 
+// deinterlaceKey is the one place the deinterlace key is spelled: knownKeys, defaultLayer,
+// profileKnobs and the decision-input token all read it from here.
+const deinterlaceKey = "deinterlace"
+
+// DeinterlaceFilter is the filter this configuration's TOP LEVEL would deinterlace with,
+// and ok reports whether the value resolves at all. It is the top-level reading; a file is
+// decided by its own root's profile (see Profile.DeinterlaceFilter), which is what the
+// engine asks.
+func (c *Config) DeinterlaceFilter() (deinterlace.Filter, bool) {
+	return deinterlace.Lookup(c.Deinterlace)
+}
+
 // PreserveMtimeEnabled reports whether the swap carries the source's modification time
 // onto the replacement, defaulting to TRUE when unset (nil). It is the single reading of
 // that default, so the engine, the loader and the documentation cannot disagree about what
@@ -737,6 +772,7 @@ func (c *Config) TopLevelProfile() Profile {
 		SubtitleLanguages: c.SubtitleLanguages,
 		KeepCommentary:    c.KeepCommentary,
 		RemuxOnly:         c.RemuxOnly,
+		Deinterlace:       c.Deinterlace,
 	}
 }
 
@@ -1461,6 +1497,17 @@ func (c *Config) Notices() []string {
 			"(file:/run/secrets/... or cmd:...) to require a bearer token on those reads. It does not "+
 			"gate the plain-text root page, which carries no library datum, or /metrics.")
 	}
+	// The deinterlace, stated once per root that asks for one and NAMING that root: one
+	// process may run over a film library that is left alone and a broadcast library that is
+	// deinterlaced, and an unattributed notice would leave an operator unable to tell which.
+	//
+	// It is a NOTICE and not a warning, on this file's own rule: no gate is weakened, every
+	// floor still applies at its configured strictness and a rejected encode still leaves
+	// the source untouched. What it says is what nothing else here can say - that a
+	// replacement made under this key is not the same content as the source it replaces -
+	// and that is precisely the thing somebody deleting originals should hear stated before
+	// the first one goes.
+	n = append(n, c.deinterlaceNotices()...)
 	if strings.TrimSpace(c.ScratchDir) != "" {
 		n = append(n, "scratch_dir is set - the encoder writes its working file to "+strings.TrimSpace(c.ScratchDir)+
 			" and the accepted result is COPIED BACK into a temp beside the source before the swap. The swap itself is "+
@@ -1468,6 +1515,48 @@ func (c *Config) Notices() []string {
 			"a full write-plus-read cycle per transcode, at video-file sizes.")
 	}
 	return n
+}
+
+// deinterlaceNotices is what Notices says about a configuration that deinterlaces: one
+// statement per root that asks for one, naming the root and the filter, and nothing at all
+// for the shipped default.
+//
+// It is read off the RESOLVED profiles, the same reading Warnings takes and for the same
+// reason: the value that decides a file is its own root's, and a notice derived from the
+// top level would announce a deinterlace to an operator whose roots all override it away,
+// or stay silent for the one who wrote it inside a single entry.
+func (c *Config) deinterlaceNotices() []string {
+	roots := c.RootProfiles()
+	if len(roots) == 0 {
+		return deinterlaceNotice(c.TopLevelProfile(), "")
+	}
+	var n []string
+	for _, r := range roots {
+		n = append(n, deinterlaceNotice(r.Profile, r.Clean)...)
+	}
+	return n
+}
+
+// deinterlaceNotice is the statement one resolved profile earns. root names the tree it is
+// about; "" names none, which is what a configuration with no roots at all gets.
+func deinterlaceNotice(p Profile, root string) []string {
+	f, ok := p.DeinterlaceFilter()
+	if !ok || !f.Enabled() {
+		return nil
+	}
+	where := ""
+	if root != "" {
+		where = "library root " + root + ": "
+	}
+	return []string{where + deinterlaceKey + " is " + f.Value + " - THE REPLACEMENT IS NO LONGER THE SAME " +
+		"CONTENT AS THE SOURCE. Every interlaced file under this root is deinterlaced with `" + f.Spec +
+		"` before it is encoded, which removes the interlacing the source carried: the original fields " +
+		"cannot be recovered from the replacement, and the swap deletes the original. The frame rate is " +
+		"preserved and every gate still applies at full strength - the perceptual gate scores the encode " +
+		"against a reference put through the SAME filter, so it measures this encode rather than the " +
+		"difference the filter made - but a file decided under this key is a converted file, not a " +
+		"re-encoded copy of what you had. Set " + deinterlaceKey + ": " + deinterlace.Off +
+		" (the default) to skip interlaced sources instead."}
 }
 
 // Warnings reports configurations that are VALID but weaken a safety gate — the

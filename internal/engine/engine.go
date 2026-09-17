@@ -2204,8 +2204,15 @@ func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, pr
 // tokens rather than under the interlace one.
 func (e *Engine) interlacedVerdict(ctx context.Context, f string, prof config.Profile,
 	props *probe.VideoProps, codec string) (sourceVerdict, bool) {
+	// The interlace skip records the key it READ, which is what makes the verdict
+	// re-derivable rather than permanent: configure a deinterlace for this root and the next
+	// scan offers every file this guard held back. A root that configures none records
+	// nothing here, because the key is offered only where it is enabled (see
+	// InputDeinterlace) - so a row written for such a root is the row this build's
+	// predecessor wrote.
 	return sourceVerdict{guard: SkipInterlaced, codec: codec,
-		log: "skip (interlaced - not deinterlacing)"}, true
+		inputs: []string{InputDeinterlace},
+		log:    "skip (interlaced - not deinterlacing)"}, true
 }
 
 // advance is a small logged wrapper around Store.Advance — a store error here is

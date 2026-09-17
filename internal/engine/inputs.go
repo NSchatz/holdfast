@@ -42,6 +42,18 @@ const (
 	// it read was the fact that the root bands its files. So the list itself is the input,
 	// and removing the `when`-carrying rules is what re-derives the verdict.
 	InputRules = "rules"
+
+	// InputDeinterlace is the root's `deinterlace` value, read by the scan-type guards: the
+	// interlace skip is what happens when it is off, and the cadence guard exists only
+	// because it is on.
+	//
+	// It is OFFERED ONLY WHERE IT IS ENABLED, exactly as the rule list above is offered only
+	// where a root carries rules, and for the same reason: a root that does not ask for a
+	// deinterlace offers precisely the keys it offered before this knob existed, so no
+	// terminal row this build writes for such a root records anything the build before it
+	// did not. Turning the key ON is then a real change to what a guard read, and turning it
+	// back OFF re-opens the rows decided under it.
+	InputDeinterlace = "deinterlace"
 )
 
 // EVERY VALUE HERE IS RESOLVED FOR ONE PATH, through the whole layering the decision that
@@ -80,6 +92,9 @@ func DecisionInputsForJob(prof config.Profile, ts config.Transcode) store.Decisi
 	}
 	if len(prof.Rules) > 0 {
 		read[InputRules] = prof.Rules.Canonical()
+	}
+	if prof.DeinterlaceEnabled() {
+		read[InputDeinterlace] = prof.Deinterlace
 	}
 	return store.InputsRead(read)
 }

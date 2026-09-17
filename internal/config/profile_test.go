@@ -90,6 +90,7 @@ audio_languages: [eng, jpn]
 subtitle_languages: [eng]
 keep_commentary: false
 remux_only: false
+deinterlace: off
 workers: 4
 state_dir: /var/lib/holdfast
 undo_window_hours: 24
@@ -354,6 +355,10 @@ func TestProfileKnobSetIsClosedAndSingleSourced(t *testing.T) {
 		// streams survive - so they are knobs and the digest covers them, unlike the path
 		// filters below, which decide whether a file is looked at at all.
 		"audio_languages", "subtitle_languages", "keep_commentary", "remux_only",
+		// The deinterlace knob. It decides what is done to a file in the strongest sense
+		// this configuration has - the replacement is no longer the same content as the
+		// source - so it is a knob and the digest covers it, conditionally: see Digest.
+		"deinterlace",
 	}
 	if !reflect.DeepEqual(knobs, want) {
 		t.Fatalf("ProfileKnobs() = %v, want %v", knobs, want)
