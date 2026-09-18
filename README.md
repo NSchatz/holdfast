@@ -75,38 +75,25 @@ own licence text or project page.
 
 ## Non-goals
 
-Four boundaries. Three of them are boundaries rather than a backlog: **no distributed or remote
-processing**; **not a media server and not a library manager**; **no resolution downscaling**. The
-fourth is DEFERRED rather than settled: **HDR10 static metadata is preserved while Dolby Vision and
+Four boundaries, each stated in full below. Three are boundaries rather than a backlog: **no distributed
+or remote processing**; **not a media server and not a library manager** - it transcodes files in a
+library other tools manage; **no resolution downscaling**, with exotic-chroma and `multi-video-stream`
+sources **skipped, not converted** and embedded artwork carried through unencoded.
+The fourth is DEFERRED rather than settled: **HDR10 static metadata is preserved while Dolby Vision and
 HDR10+ dynamic metadata are detect-and-skipped**, at the cost [stated below](#dynamic-hdr-deferred).
-Each is stated in full below, in this one section. Interlacing is its own case and is
-[stated below too](#interlacing-posture): it is the one transformation this tool will make on request.
-
-Codec-only re-encoding with no resolution change: exotic-chroma and `multi-video-stream` sources are
-**skipped, not converted**; HDR10 **static** metadata is preserved while Dolby Vision and HDR10+
-**dynamic** metadata is **detect-and-skipped** rather than guessed at, a skip that is
-[deferred, not permanent](#dynamic-hdr-deferred); and embedded artwork is carried through unencoded. It
-transcodes files in a library other tools manage - not a media server.
+[Interlacing](#interlacing-posture) is its own case: the one transformation this tool makes on request.
 
 <a id="interlacing-posture"></a>
 
-**Interlaced sources are deinterlaced on request, and skipped otherwise.** The `deinterlace` key is
-**off by default**, and off means an interlaced source is skipped exactly as it always was - no existing
-configuration changes behaviour. Set it (`yadif` or `bwdif`) on a library root and every interlaced
-source under that root is deinterlaced before it is encoded, which means **the replacement is no longer
-the same content as the source**: the fields the source carried are gone and cannot be recovered from
-the replacement, and the swap deletes the original. Turning it on is announced as a notice at startup
-for that reason. It is **frame-rate-preserving** only: a mode that emits one frame per field is refused
-at startup and refused again before the encode, because it doubles the frame count that packet-count
-parity and duration parity are graded against, and no gate is weakened to admit it. **Telecined sources
-are skipped** under their own guard whatever the key says - 3:2 pulldown is progressive film carried in
-an interlaced stream, deinterlacing it leaves judder no perceptual metric flags well, and undoing it
-properly is inverse telecine, which this build does not do - and so is a source whose cadence cannot be
-established either way. Every gate applies at full strength to a deinterlaced encode: the perceptual
-gate scores it against a reference produced from the source by the **same filter at the same
-parameters**, so what it measures is the encode rather than the difference the filter made, and the
-filter is recorded on the row beside the score. A source whose field order ffprobe cannot establish at
-all is skipped under its own guard rather than encoded as progressive on a guess.
+**Interlaced sources are deinterlaced on request, and skipped otherwise.** `deinterlace` is **off by
+default**, as it always has been. Set it (`yadif`/`bwdif`) on a root and its interlaced sources are
+deinterlaced before encoding, so **the replacement is no longer the same content as the source**: the
+fields are gone and the swap deletes the original, as a startup notice says.
+**Frame-rate-preserving** only - one frame per field is refused, since it doubles the frame count two
+parity gates grade. **Telecined sources are skipped** under their own guard whatever the key says
+(undoing a 3:2 pulldown is inverse telecine, which this build does not do), and so is a cadence nobody
+could establish. No floor moves: the gate scores the encode against a reference put through the **same
+filter at the same parameters**.
 
 **Audio transcoding is a non-goal.** A library root can say which audio and subtitle streams its
 replacements carry (`audio_languages`, `subtitle_languages`, `keep_commentary`, `remux_only` - see
@@ -221,34 +208,8 @@ holdfast plan --config config.yaml            # eligible files, eligible bytes, 
 holdfast plan --config config.yaml --json     # the same plan as one JSON document on stdout
 ```
 
-#### The skip guards, and what each token means
-
-A skipped file records **which guard** held it back, as a stable token: it is on the ledger row, in
-`/api/history`, in the export and on the `holdfast_skips_total{guard}` metric, and `holdfast requeue
---guard <token>` offers those rows back to the pipeline. Every token this build can record is here.
-
-<a id="skip-guards"></a>
-
-| guard | what it means |
-|---|---|
-| `already-at-target-codec` | the source is already in the codec this configuration targets |
-| `low-bitrate` | the source is below `min_bitrate_kbps`: there is nothing worth reclaiming |
-| `hardlinked` | the source has more than one link and `skip_hardlinked` is on - replacing it by rename would break the link and reclaim nothing |
-| `symlinked-source` | the source is a symbolic link; the swap would replace the LINK and orphan its target |
-| `interlaced` | the source is interlaced and no `deinterlace` is configured for its root (see [the interlacing posture](#interlacing-posture)) |
-| `telecine-cadence` | a deinterlace was configured, and the source is telecined - or its cadence could not be established either way. Both need inverse telecine rather than a deinterlace, which this build does not do |
-| `unknown-field-order` | ffprobe could not establish whether the source is progressive or interlaced, so encoding it either way would be a guess |
-| `dolby-vision` | a Dolby Vision RPU cannot survive a generic re-encode ([deferred, not permanent](#dynamic-hdr-deferred)) |
-| `hdr10-plus` | HDR10+ dynamic metadata cannot survive a generic re-encode (same deferral) |
-| `incomplete-hdr-metadata` | HDR10 static metadata is present but this build cannot fully parse it, so re-encoding would silently drop part of it |
-| `exotic-pixel-format` | the source's pixel format is one this build will not map, rather than silently subsample it |
-| `multi-video-stream` | the source carries a moving-picture stream beyond the first, or its stream shape could not be established: every decision here reads `v:0` |
-| `unreadable-stream-list` | ffprobe could not enumerate the source's streams at all, so the intended stream map cannot be derived |
-| `undetermined-source-height` | this root bands its thresholds by source height and the probe could not establish one |
-| `target-already-exists` | the output container differs from the source's and a distinct file is already at the target name |
-| `undo-retention-failed` | the original could not be retained for the undo window, so the swap that would have destroyed it did not run |
-| `operator-excluded` | an operator withheld this path from the pipeline |
-| `restored-original` | an operator put this original back through the undo window; it is never re-encoded by a later scan |
+Every skip token this build records has a row in
+**[the guard table](docs/api-reference.md#skip-guards)**.
 
 The reclaim figure is an **estimate and says so wherever it appears**, derived from the size ratios of
 encodes **this install has already completed** and published with the sample size and the spread it came

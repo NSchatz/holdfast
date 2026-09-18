@@ -33,6 +33,35 @@ entirely until a control token is configured, and the read surface is open until
 `server_read_token` is set: the posture that follows from that is in
 [docs/docker.md](docker.md#reverse-proxy-posture).
 
+### The skip guards, and what each token means
+
+A skipped row's `reason` is a stable token, not prose: it is what `/api/history`, the export, the
+`holdfast_skips_total{guard}` metric and `holdfast requeue --guard <token>` all key off. Every one this
+build can record is here, and a token with no row fails the documentation check.
+
+<a id="skip-guards"></a>
+
+| guard | what it means |
+|---|---|
+| `already-at-target-codec` | the source is already in the codec this configuration targets |
+| `low-bitrate` | the source is below `min_bitrate_kbps`: there is nothing worth reclaiming |
+| `hardlinked` | the source has more than one link and `skip_hardlinked` is on - replacing it by rename would break the link and reclaim nothing |
+| `symlinked-source` | the source is a symbolic link; the swap would replace the LINK and orphan its target |
+| `interlaced` | the source is interlaced and no `deinterlace` is configured for its root (see the README's interlacing posture) |
+| `telecine-cadence` | a deinterlace was configured and the source is telecined, or its cadence could not be established either way. Both need inverse telecine rather than a deinterlace, which this build does not do |
+| `unknown-field-order` | ffprobe could not establish whether the source is progressive or interlaced, so encoding it either way would be a guess |
+| `dolby-vision` | a Dolby Vision RPU cannot survive a generic re-encode |
+| `hdr10-plus` | HDR10+ dynamic metadata cannot survive a generic re-encode |
+| `incomplete-hdr-metadata` | HDR10 static metadata is present but this build cannot fully parse it, so re-encoding would silently drop part of it |
+| `exotic-pixel-format` | the source's pixel format is one this build will not map, rather than silently subsample it |
+| `multi-video-stream` | the source carries a moving-picture stream beyond the first, or its stream shape could not be established: every decision here reads `v:0` |
+| `unreadable-stream-list` | ffprobe could not enumerate the source's streams at all, so the intended stream map cannot be derived |
+| `undetermined-source-height` | this root bands its thresholds by source height and the probe could not establish one |
+| `target-already-exists` | the output container differs from the source's and a distinct file is already at the target name |
+| `undo-retention-failed` | the original could not be retained for the undo window, so the swap that would have destroyed it did not run |
+| `operator-excluded` | an operator withheld this path from the pipeline |
+| `restored-original` | an operator put this original back through the undo window; it is never re-encoded by a later scan |
+
 ### The recorded outcome - the proof a swap was safe
 
 A terminal job carries the evidence the engine used to decide, so you can audit a swap after the fact
