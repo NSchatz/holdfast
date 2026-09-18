@@ -125,6 +125,29 @@ func TestDeinterlace_SkipsTelecinedContent(t *testing.T) {
 		})
 	}
 
+	t.Run("a remux-only root cannot deinterlace, so it keeps skipping", func(t *testing.T) {
+		// Both keys together: remux_only stream-copies the video, so no filter can run. The
+		// file must keep the skip it has always had rather than be remuxed with its
+		// interlacing intact while the row claims a deinterlace - which would be a false
+		// provenance claim on the record that outlives the source.
+		d := t.TempDir()
+		src := filepath.Join(d, "movie.mkv")
+		mkInterlacedLong(t, ffmpeg, src, "8M")
+		before := md5f(t, src)
+
+		led := run(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
+			c.Deinterlace = "yadif"
+			c.RemuxOnly = boolPtr(true)
+		})
+		if got := skipReason(t, led, "movie.mkv"); got != SkipInterlaced {
+			t.Errorf("recorded reason = %q, want %q - a root that stream-copies the video cannot "+
+				"deinterlace one", got, SkipInterlaced)
+		}
+		if md5f(t, src) != before {
+			t.Error("the source was replaced by a remux under a configuration that cannot deinterlace it")
+		}
+	})
+
 	t.Run("plainly interlaced content is not held back by this guard", func(t *testing.T) {
 		d := t.TempDir()
 		src := filepath.Join(d, "movie.mkv")

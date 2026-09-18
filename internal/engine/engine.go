@@ -2293,7 +2293,9 @@ func (e *Engine) interlacedVerdict(ctx context.Context, f string, prof config.Pr
 		inputs: []string{InputDeinterlace},
 		log:    "skip (interlaced - not deinterlacing)"}
 
-	if !prof.DeinterlaceEnabled() {
+	// A root that asks for no deinterlace - and one that asks for one it cannot perform,
+	// because it stream-copies the video - keeps the skip this tool has always taken.
+	if !deinterlaceWanted(prof) {
 		return interlaced, true
 	}
 

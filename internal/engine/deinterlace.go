@@ -42,6 +42,24 @@ func deinterlaceFor(prof config.Profile) (deinterlace.Filter, error) {
 	return f, nil
 }
 
+// deinterlaceWanted reports whether this profile asks for a deinterlace AND is in a state
+// that can perform one.
+//
+// A REMUX-ONLY root cannot: it stream-copies the video, so nothing re-encodes and no filter
+// can run. The two keys together are not a contradiction to refuse at startup - remux_only
+// is about what is done to the video, deinterlace about what is done to an interlaced one -
+// but a job under both must fall back to what this tool did before the key existed and SKIP
+// the interlaced source. The alternative is a remux that carries the interlacing through
+// while the row claims a deinterlace, which is a false provenance claim on the one record
+// that outlives the source.
+//
+// An operator who removes remux_only offers those files back with
+// `requeue --guard interlaced`: the guard recorded the deinterlace value it read, and that
+// value has not moved.
+func deinterlaceWanted(prof config.Profile) bool {
+	return prof.DeinterlaceEnabled() && !prof.RemuxOnlyEnabled()
+}
+
 // deinterlaceApplied is the filter that runs for THIS source: the profile's configured one
 // where the source's container reports an interlaced field order, and none otherwise.
 //
@@ -57,7 +75,7 @@ func deinterlaceFor(prof config.Profile) (deinterlace.Filter, error) {
 // established the scan type of.
 func deinterlaceApplied(prof config.Profile, props *probe.VideoProps) (deinterlace.Filter, error) {
 	f, err := deinterlaceFor(prof)
-	if err != nil || !f.Enabled() {
+	if err != nil || !f.Enabled() || !deinterlaceWanted(prof) {
 		return deinterlace.Filter{}, err
 	}
 	if props == nil || !interlacedFieldOrder(props.FieldOrder()) {
