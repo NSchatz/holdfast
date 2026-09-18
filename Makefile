@@ -55,6 +55,7 @@ PLATFORM ?= linux/amd64
 .PHONY: build test check fmt vet staticcheck govulncheck govulncheck-selftest \
         check-pins check-pins-selftest install-ffmpeg-selftest check-pin-live \
         secret-scan secret-scan-selftest install-hooks snapshot-bench \
+        check-enumeration-memory \
         api-schema api-schema-baseline api-schema-diff api-schema-diff-selftest \
         happy-path-log-selftest \
         mutation-diff mutation-full mutation-shape mutation-selftest \
@@ -290,6 +291,32 @@ check-pin-live:
 # them. It fails on nothing; it reports. Minutes, mostly seeding.
 snapshot-bench:
 	go test ./internal/store -run '^$$' -bench BenchmarkSnapshot_AtLedgerScale -benchtime 1x -count=3
+
+# What the ENUMERATION costs at library scale (S0099), and whether the figures it was
+# measured at are still written down. Two commands, because the criterion has two halves and
+# either alone would be believed for the other.
+#
+# The MEASUREMENT runs one whole scan over synthetic libraries of 100,000 and then 1,000,000
+# media-shaped paths spread over the same fixed 10,000 directories, and refuses a peak heap or
+# a time-to-first-file at the larger size that is twice the figure at the smaller one. What is
+# asserted is the RATIO between two readings taken in one process against one baseline, never
+# an absolute number: an absolute heap figure is a property of the machine, the build and the
+# allocator, and a gate on one is false-positive often enough to be ignored inside a month.
+# A materialising enumeration shows roughly ten; a streaming one shows roughly one.
+#
+# The RECORD check refuses a repository that measured something and wrote nothing down, or
+# that wrote the numbers down without the hardware, the build, the date, the run count or the
+# spread they were taken with - a figure missing those is a number nothing can be compared
+# against, including the next measurement of the same thing. It rides `check` too (it is an
+# ordinary test), and it is repeated here so this target fails on its own account.
+#
+# DELIBERATELY NOT part of `check`: the million-path run is a minute of work, which is too
+# slow for the gate every commit waits on. Nothing here writes outside its own temporary
+# directory and nothing touches real media - the library is generated through the scan's own
+# listing seam, so a million paths cost no inodes.
+check-enumeration-memory:
+	go test ./internal/engine -run '^$$' -bench '^BenchmarkScan_EnumerationAtScale$$' -benchtime 1x -count=1 -v
+	go test ./internal/docscheck -run 'EnumerationFigures' -count=1
 
 # --- packaging (TRANSCODE-9) --------------------------------------------------
 # The same commands CI runs, so the packaging gate is reproducible by a human and not
