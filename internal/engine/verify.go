@@ -7,6 +7,7 @@ import (
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/deinterlace"
+	"github.com/NSchatz/holdfast/internal/downscale"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
 	"github.com/NSchatz/holdfast/internal/vmaf"
@@ -46,6 +47,17 @@ type vmafProof struct {
 	// encode, so a number with no reference named beside it cannot be read at all - and
 	// this row outlives the source it describes.
 	Deinterlace string
+
+	// ScaledWidth and ScaledHeight are the resolution the comparison was made AT, and they
+	// are nil on a job whose gate did not run. On an ordinary job they are the output's own
+	// dimensions, because nothing was resampled; on a downscaling job they are the SOURCE's,
+	// because the output was scaled back up to meet it.
+	//
+	// They are recorded for the reason PixFmt is: a pooled VMAF taken at 3840x2160 and one
+	// taken at 1920x1080 are two measurements, and a row carrying neither cannot say which
+	// it holds. Pointers, like every other measurement here: nil is "not measured" and 0
+	// would be a resolution nobody scored at.
+	ScaledWidth, ScaledHeight *int
 
 	// Skipped names WHY the gate did not run on a job that reached it, and is "" on every
 	// job whose gate ran. It is a stable token (see VmafSkippedRemuxOnly).
@@ -104,8 +116,13 @@ type vmafProof struct {
 // the encoder actually ran, and a gate that re-derived its own would be a second answer to
 // what the output should be compared against. A disabled filter is the ordinary case and
 // leaves every gate below exactly as it was.
+// shrink is the resolution ceiling THIS JOB applied, resolved once by the engine and handed
+// in for the same reason film is: the perceptual gate has to scale the OUTPUT back up to the
+// resolution of the file that is about to be deleted, and a gate that re-derived its own
+// would be a second answer to what was compared. A disabled scale is the ordinary case and
+// leaves every gate below exactly as it was.
 func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.Profile, targetCodec string,
-	plan *StreamPlan, film deinterlace.Filter) (vmafProof, string, store.FailureClass, error) {
+	plan *StreamPlan, film deinterlace.Filter, shrink downscale.Scale) (vmafProof, string, store.FailureClass, error) {
 	var none vmafProof
 
 	// THE SEAM, announced before any gate runs: this is the map the checks below read.
@@ -209,7 +226,7 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.P
 		return vmafProof{Skipped: VmafSkippedRemuxOnly}, "", "", nil
 	}
 	if prof.VmafGate() {
-		return e.vmafGate(ctx, tmp, in, prof, film)
+		return e.vmafGate(ctx, tmp, in, prof, film, shrink)
 	}
 	return none, "", "", nil
 }
@@ -325,9 +342,35 @@ func (e *Engine) lengthParity(ctx context.Context, in, out string) (store.Failur
 // IN, never re-derived, and there is no path here that scores against an unfiltered
 // reference when one was owed - a measurement that cannot be taken is a rejection, which is
 // the same posture every other unmeasurable case in this function has.
+//
+// # Scoring a downscaled output
+//
+// shrink is the resolution ceiling this job applied. Where it scaled anything, the DISTORTED
+// output is scaled back UP to the source's own resolution and the comparison is made there,
+// against the source EXACTLY AS IT IS. The reference is never resampled to meet the output,
+// and that direction is the whole safety property of this gate rather than a preference: the
+// detail a downscale threw away is present in the source and absent from the up-scaled
+// output, so the pooled statistics carry what it cost. Scale the reference down instead and
+// the detail is gone from both sides, nothing measures its loss, every downscaled encode
+// scores near the top of the scale, and the floors admit outputs they exist to refuse - after
+// which the swap deletes the source and nothing can take the measurement again.
+//
+// The MODEL is resolved from the height the comparison is made at rather than from the
+// output's own, for the same reason: on a downscaling job those are two different heights,
+// and libvmaf's UHD model exists because a 4K comparison is not an HD one. On every other job
+// they are the same number and this resolves exactly what it always did.
 func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof config.Profile,
-	film deinterlace.Filter) (vmafProof, string, store.FailureClass, error) {
-	model := resolveVmafModel(prof.VmafModel, e.Probe.Height(ctx, distorted))
+	film deinterlace.Filter, shrink downscale.Scale) (vmafProof, string, store.FailureClass, error) {
+	// The height the comparison is made at: the output's own on every job that scaled
+	// nothing, which is the one probe this line has always taken, and the SOURCE's where the
+	// distorted is about to be scaled back up to it. Nothing extra is probed on the ordinary
+	// path - a job with no ceiling reaches resolveVmafModel with exactly the value it always
+	// reached it with.
+	scoredHeight := e.Probe.Height(ctx, distorted)
+	if shrink.Enabled() {
+		scoredHeight = shrink.ScoredHeight()
+	}
+	model := resolveVmafModel(prof.VmafModel, scoredHeight)
 
 	// Name the comparison format BEFORE anything is measured, from the two streams' own pixel
 	// formats: `pixel_format: auto` floors output depth at 10, so an 8-bit source routinely
@@ -352,12 +395,20 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof
 	}
 
 	res, err := score(ctx, vmaf.Request{
-		Distorted:       distorted,
-		Reference:       reference,
-		Subsample:       prof.VmafSubsample,
-		Model:           model,
-		PixelFormat:     pixFmt,
+		Distorted: distorted,
+		Reference: reference,
+		Subsample: prof.VmafSubsample,
+		Model:     model,
+		// The comparison format, named by holdfast rather than negotiated by libavfilter.
+		PixelFormat: pixFmt,
+		// The reference's chain: the transformation the ENCODE applied, reproduced on the
+		// source. A SCALE never rides here (see internal/vmaf) - a reference resampled down
+		// to meet a smaller output is a reference that lost the detail this gate exists to
+		// measure, and the source is deleted on the strength of what comes back.
 		ReferenceFilter: film.Spec,
+		// The distorted's chain: the up-scale back to the source's own resolution that a
+		// downscaling job owes, and "" on every other job.
+		DistortedFilter: shrink.ScoreSpec(),
 	})
 	if err != nil {
 		// Nothing was measured, so there is nothing to record: an empty proof, NOT a zeroed
@@ -375,6 +426,17 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof
 		Mean: &res.HarmonicMean, Min: &res.Min, Model: model,
 		PixFmt: res.PixelFormat, ChromaMin: &res.ChromaMin, ChromaMetric: res.ChromaMetric,
 		Stream: res.Stream, Deinterlace: res.ReferenceFilter,
+	}
+	// The resolution the comparison was made at, recorded ONLY where the job scaled
+	// something. On every other job it is the output's own size, which the row already
+	// carries in output_width/output_height, and writing it twice would put a second number
+	// on every row already in the field for a fact that has not moved. Here it is a fact
+	// nothing else on the row states: the output is 1920x1080 and the comparison was made at
+	// 3840x2160, and a reader with only the first cannot tell which of the two directions
+	// this gate took.
+	if shrink.Enabled() {
+		w, h := shrink.ScoredWidth(), shrink.ScoredHeight()
+		proof.ScaledWidth, proof.ScaledHeight = &w, &h
 	}
 
 	if res.HarmonicMean < prof.MinVmaf {

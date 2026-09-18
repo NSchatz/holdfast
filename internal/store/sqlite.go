@@ -374,7 +374,9 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 			library_root = NULL, profile_digest = NULL, profile = NULL,
 			dropped_streams = NULL, selection_not_applied = NULL, vmaf_skipped = NULL,
 			source_width = NULL, source_height = NULL, output_width = NULL, output_height = NULL,
-			deinterlaced = NULL, deinterlace_filter = NULL
+			deinterlaced = NULL, deinterlace_filter = NULL,
+			downscaled = NULL, downscale_scaler = NULL,
+			vmaf_scored_width = NULL, vmaf_scored_height = NULL
 		 WHERE path = ? AND fingerprint = ?`,
 		string(Probing), worker, now(), currentStamp(), path, fingerprint); err != nil {
 		return false, fmt.Errorf("store: claim update: %w", err)
@@ -620,7 +622,9 @@ func finishQuery(st Status, o *Outcome, maxFailures int) string {
 		library_root = ?, profile_digest = ?, profile = ?,
 		dropped_streams = ?, selection_not_applied = ?, vmaf_skipped = ?,
 		source_width = ?, source_height = ?, output_width = ?, output_height = ?,
-		deinterlaced = ?, deinterlace_filter = ?`
+		deinterlaced = ?, deinterlace_filter = ?,
+		downscaled = ?, downscale_scaler = ?,
+		vmaf_scored_width = ?, vmaf_scored_height = ?`
 	switch {
 	case st != Failed:
 	case o.FailureClass.Final() && maxFailures > 0:
@@ -661,6 +665,8 @@ func finishArgs(st Status, o *Outcome, path, fingerprint string) []any {
 		nullPixels(o.SourceWidth), nullPixels(o.SourceHeight),
 		nullPixels(o.OutputWidth), nullPixels(o.OutputHeight),
 		nullBool(o.Deinterlaced), nullString(o.DeinterlaceFilter),
+		nullBool(o.Downscaled), nullString(o.DownscaleScaler),
+		nullPixels(o.VmafScoredWidth), nullPixels(o.VmafScoredHeight),
 		path, fingerprint,
 	}
 }
@@ -757,7 +763,8 @@ const outcomeColumns = `reason, encoder, vmaf_mean, vmaf_min, vmaf_model,
 	library_root, profile_digest, profile,
 	dropped_streams, selection_not_applied, vmaf_skipped,
 	source_width, source_height, output_width, output_height,
-	deinterlaced, deinterlace_filter`
+	deinterlaced, deinterlace_filter,
+	downscaled, downscale_scaler, vmaf_scored_width, vmaf_scored_height`
 
 // outcomeScan holds one row's outcome columns on the way out of the driver. Every
 // field is a sql.Null* because every column is nullable: NULL is "not recorded" and
@@ -835,6 +842,16 @@ type outcomeScan struct {
 	// somebody looked and found no deinterlace on a job nobody ran.
 	deinterlaced sql.NullBool
 	deintFilter  sql.NullString
+
+	// Whether this job scaled its picture down, with which resampler, and the resolution the
+	// perceptual comparison was then made at. Nullable for the reasons the pair above is,
+	// with one extra: the scored resolution is NULL on every job that scaled nothing, whose
+	// comparison was made at the size outWidth and outHeight already carry - so here NULL
+	// means "not a separate fact" as well as "not recorded", and both read back as nothing.
+	downscaled       sql.NullBool
+	downscaleScaler  sql.NullString
+	vmafScoredWidth  sql.NullInt64
+	vmafScoredHeight sql.NullInt64
 }
 
 // dest returns the scan destinations in outcomeColumns order.
@@ -849,6 +866,8 @@ func (s *outcomeScan) dest() []any {
 		&s.dropped, &s.notApplied, &s.vmafSkipped,
 		&s.srcWidth, &s.srcHeight, &s.outWidth, &s.outHeight,
 		&s.deinterlaced, &s.deintFilter,
+		&s.downscaled, &s.downscaleScaler,
+		&s.vmafScoredWidth, &s.vmafScoredHeight,
 	}
 }
 
@@ -880,6 +899,7 @@ func (s *outcomeScan) outcome() Outcome {
 		SelectionNotApplied: s.notApplied.String,
 		VmafSkipped:         s.vmafSkipped.String,
 		DeinterlaceFilter:   s.deintFilter.String,
+		DownscaleScaler:     s.downscaleScaler.String,
 		Decision: Decision{
 			LibraryRoot:   s.libraryRoot.String,
 			ProfileDigest: s.profileDigest.String,
@@ -896,6 +916,9 @@ func (s *outcomeScan) outcome() Outcome {
 	o.OutputWidth = nullablePixels(s.outWidth)
 	o.OutputHeight = nullablePixels(s.outHeight)
 	o.Deinterlaced = nullableBool(s.deinterlaced)
+	o.Downscaled = nullableBool(s.downscaled)
+	o.VmafScoredWidth = nullablePixels(s.vmafScoredWidth)
+	o.VmafScoredHeight = nullablePixels(s.vmafScoredHeight)
 	return o
 }
 
@@ -1208,7 +1231,9 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 			swap_cause = NULL, decision_inputs = NULL, profile = excluded.profile,
 			dropped_streams = NULL, selection_not_applied = NULL, vmaf_skipped = NULL,
 			source_width = NULL, source_height = NULL, output_width = NULL, output_height = NULL,
-			deinterlaced = NULL, deinterlace_filter = NULL
+			deinterlaced = NULL, deinterlace_filter = NULL,
+			downscaled = NULL, downscale_scaler = NULL,
+			vmaf_scored_width = NULL, vmaf_scored_height = NULL
 		 WHERE jobs.status = ?`,
 		path, fingerprint, string(Skipped), now(), nullString(reason),
 		nullString(by.LibraryRoot), nullString(by.ProfileDigest), currentStamp(), nullString(profile),

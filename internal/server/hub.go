@@ -216,6 +216,23 @@ type jobDTO struct {
 	Deinterlaced      *bool   `json:"deinterlaced"`
 	DeinterlaceFilter *string `json:"deinterlace_filter"`
 
+	// Whether this job's replacement was produced by SCALING THE PICTURE DOWN to a
+	// configured `max_height`, and the resampler that did it. Same shape and same null rule
+	// as the pair above, and the same reason for both: the pixels above the ceiling are not
+	// in the replacement, and a consumer reading an unmeasured row as "not downscaled" would
+	// be stating the provenance of a file nobody established. The dimensions it produced are
+	// already on this row as output_width/output_height.
+	Downscaled      *bool   `json:"downscaled"`
+	DownscaleScaler *string `json:"downscale_scaler"`
+
+	// The resolution the PERCEPTUAL COMPARISON was made at, which on a downscaling job is
+	// the SOURCE's rather than the output's: such an output is scaled back up to meet the
+	// source and scored there, against the source exactly as it is. Both are null on every
+	// job that scaled nothing, whose comparison was made at the size output_width and
+	// output_height already state.
+	VmafScoredWidth  *int `json:"vmaf_scored_width"`
+	VmafScoredHeight *int `json:"vmaf_scored_height"`
+
 	// SelectionNotApplied names a part of the selection this job did NOT apply and why -
 	// today only the never-a-silent-file fallback. VmafSkipped names why the perceptual
 	// gate did not run. Both are stable tokens; both are absent when they do not apply,
@@ -287,6 +304,11 @@ func toDTOs(jobs []store.Job) []jobDTO {
 
 			Deinterlaced:      j.Outcome.Deinterlaced,
 			DeinterlaceFilter: nullableText(j.Outcome.DeinterlaceFilter),
+
+			Downscaled:       j.Outcome.Downscaled,
+			DownscaleScaler:  nullableText(j.Outcome.DownscaleScaler),
+			VmafScoredWidth:  j.Outcome.VmafScoredWidth,
+			VmafScoredHeight: j.Outcome.VmafScoredHeight,
 
 			DroppedStreams:      droppedStreamsDTO(j.Outcome.DroppedStreams),
 			SelectionNotApplied: j.Outcome.SelectionNotApplied,

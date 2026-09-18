@@ -54,6 +54,30 @@ const (
 	// did not. Turning the key ON is then a real change to what a guard read, and turning it
 	// back OFF re-opens the rows decided under it.
 	InputDeinterlace = "deinterlace"
+
+	// InputMaxHeight is the EFFECTIVE output height ceiling for this file - the root's own,
+	// or whatever the first matching rule supplied - read by the two decisions that need it:
+	// the source-height guard, which fires when a ceiling is set and nobody could read how
+	// tall the source is, and the final-swap guard, which refuses an unacknowledged
+	// downscale into a swap nothing can walk back.
+	//
+	// It is OFFERED ONLY WHERE A CEILING IS IN FORCE, exactly as the deinterlace above is
+	// offered only where it is enabled, and for the same reason: a root that sets no ceiling
+	// offers precisely the keys it offered before this knob existed, so no terminal row this
+	// build writes for such a root records anything the build before it did not. Setting the
+	// key is then a real change to what a guard read, and removing it re-opens the rows
+	// decided under it.
+	InputMaxHeight = "max_height"
+
+	// InputUndoWindow is the undo window's own configured length in hours, and exactly one
+	// decision reads it: the final-swap guard, whose whole question is whether the swap it is
+	// standing in front of can be walked back.
+	//
+	// It is a DAEMON-level key rather than a profile knob, which every other input here is,
+	// and it is offered on the same terms as the two above - only where a ceiling is in force
+	// - so no row written for a configuration that sets no ceiling carries it. Opening the
+	// window re-opens the rows that guard held, which is one of its two remedies.
+	InputUndoWindow = "undo_window_hours"
 )
 
 // EVERY VALUE HERE IS RESOLVED FOR ONE PATH, through the whole layering the decision that
@@ -80,7 +104,12 @@ const (
 // the same comparison every other key goes through. The rule LIST is offered as well, for the
 // one decision that reads the list rather than a value, and only where the root has rules -
 // a root with none offers exactly the keys it offered before this item.
-func DecisionInputsForJob(prof config.Profile, ts config.Transcode) store.DecisionInputs {
+//
+// cfg supplies the one input here that is NOT a profile knob: the undo window's length,
+// which the final-swap guard weighs beside the ceiling. It is a daemon-level key, so it
+// cannot come off prof, and a guard whose two conditions were recorded one-and-a-half would
+// hold its files against an operator who fixed the half it did not record.
+func DecisionInputsForJob(cfg config.Config, prof config.Profile, ts config.Transcode) store.DecisionInputs {
 	read := map[string]string{
 		InputTargetCodec:    targetCodecFor(ts.Encoder),
 		InputEncoder:        ts.Encoder,
@@ -96,14 +125,24 @@ func DecisionInputsForJob(prof config.Profile, ts config.Transcode) store.Decisi
 	if prof.DeinterlaceEnabled() {
 		read[InputDeinterlace] = prof.Deinterlace
 	}
+	// The ceiling and the window that decides whether its swap can be walked back, offered
+	// TOGETHER and only where a ceiling is in force. Together, because the final-swap guard
+	// weighed both and either edit is a remedy an operator may reasonably take; only where a
+	// ceiling is in force, because a configuration that sets none must offer exactly the keys
+	// it offered before this item, or every terminal row already in the field would be
+	// re-opened once by a key it never read.
+	if prof.DownscaleEnabled() {
+		read[InputMaxHeight] = strconv.Itoa(prof.MaxHeight)
+		read[InputUndoWindow] = strconv.Itoa(cfg.UndoWindowHours)
+	}
 	return store.InputsRead(read)
 }
 
 // DecisionInputsForProfile is one resolved library profile's decision inputs with NO encode
 // profile laid over them: what every file under that root resolves to when no encode
 // profile's match selects it, which is every file in a configuration that has none.
-func DecisionInputsForProfile(prof config.Profile) store.DecisionInputs {
-	return DecisionInputsForJob(prof, config.Transcode{
+func DecisionInputsForProfile(cfg config.Config, prof config.Profile) store.DecisionInputs {
+	return DecisionInputsForJob(cfg, prof, config.Transcode{
 		Encoder:      prof.Encoder,
 		CRF:          prof.CRF,
 		Preset:       prof.Preset,
@@ -119,7 +158,7 @@ func DecisionInputsForProfile(prof config.Profile) store.DecisionInputs {
 // It is a package function rather than a method because `holdfast validate` has to
 // answer the same question with no engine, no ffmpeg and no store open for writing.
 func DecisionInputsFor(cfg config.Config) store.DecisionInputs {
-	return DecisionInputsForProfile(cfg.TopLevelProfile())
+	return DecisionInputsForProfile(cfg, cfg.TopLevelProfile())
 }
 
 // DecisionInputsPerPath is how the ledger survey behind the startup report and `validate`
@@ -168,7 +207,7 @@ func DecisionInputsPerPath(cfg config.Config) store.InputsForPath {
 		if in, ok := cached[key]; ok {
 			return in, rooted
 		}
-		in := DecisionInputsForJob(prof, ts)
+		in := DecisionInputsForJob(cfg, prof, ts)
 		cached[key] = in
 		return in, rooted
 	}
@@ -191,7 +230,7 @@ func targetCodecFor(key string) string {
 // Claim. ts is the job's effective settings, resolved once per file from that file's own
 // path, so the value handed to Claim is the value a decision on that path would record.
 func (e *Engine) inputsFor(prof config.Profile, ts config.Transcode) store.DecisionInputs {
-	return DecisionInputsForJob(prof, ts)
+	return DecisionInputsForJob(e.Cfg, prof, ts)
 }
 
 // inputsRead is the record ONE decision writes: the current value, under the settings that

@@ -85,6 +85,11 @@ var SkipGuards = []string{
 	// tell telecine from interlacing where this one could not, is a change no configuration
 	// edit expresses, and this is the lever for it.
 	SkipTelecineCadence,
+	// The FINAL-SWAP guard. It reads `max_height` and the undo window, so acknowledging the
+	// trade or opening that window does re-derive its rows - but an operator who wants one
+	// file scaled without changing either key has no configuration edit that says so, and
+	// this is the lever for that.
+	SkipDownscaleUnacknowledged,
 	SkipRestoredOriginal,
 }
 

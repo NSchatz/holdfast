@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/downscale"
 	"github.com/NSchatz/holdfast/internal/fsclass"
 	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/probe"
@@ -81,22 +82,45 @@ const (
 	// claim rather than parking the file for ever.
 	SkipUndoRetentionFailed = "undo-retention-failed"
 
-	// SkipUndeterminedSourceHeight is the BAND guard: this file's root carries at least one
-	// rule whose `when` selects on the source height, and the probe could not establish
-	// what that height is.
+	// SkipUndeterminedSourceHeight is the SOURCE-HEIGHT guard: this file's configuration
+	// cannot decide it without knowing how tall the source is, and the probe could not
+	// establish that. Two configurations need it - a root carrying at least one rule whose
+	// `when` selects on the source height, and a root or rule setting a `max_height` output
+	// ceiling - and they share this token because they share a verdict and a remedy.
 	//
-	// It is the fail-safe rule applied to a band. With no height there is no answer to
-	// which rule applies, and both of the plausible fallbacks are a confident wrong result:
-	// deciding the file under the root's own profile ignores a band the operator wrote for
-	// it, and reading an unreadable height as 0 drops it into whichever band admits zero.
-	// Either one judges a file against a threshold nobody chose, on a tool that deletes the
-	// source of every file it accepts. So the file is decided under NO rule and under no
-	// profile at all, and the row says why.
+	// It is the fail-safe rule applied to a height. With none there is no answer to which
+	// rule applies, and no answer to whether this source is above the ceiling or below it;
+	// every plausible fallback is a confident wrong result. Deciding the file under the
+	// root's own profile ignores a band the operator wrote for it; reading an unreadable
+	// height as 0 drops it into whichever band admits zero; encoding it against a default or
+	// guessed height scales a file by a factor nobody measured and then hands the perceptual
+	// gate a source resolution nobody measured either. Each judges a file against something
+	// nobody chose, on a tool that deletes the source of every file it accepts. So the file
+	// is decided under NO rule and under no ceiling at all, and the row says why.
 	//
-	// It READS the rule list (InputRules), which is what makes it re-derivable: removing
-	// every `when`-carrying rule from that root leaves the root needing no height, and the
-	// next scan offers the file to the pipeline again.
+	// It READS the keys that needed the height - the rule list (InputRules) where the root
+	// has rules, the ceiling (InputMaxHeight) where one is in force - which is what makes it
+	// re-derivable: remove them and the next scan offers the file to the pipeline again.
 	SkipUndeterminedSourceHeight = "undetermined-source-height"
+
+	// SkipDownscaleUnacknowledged is the FINAL-SWAP guard, and it fires only where all three
+	// of its conditions hold: this file would be scaled down by a configured `max_height`,
+	// the undo window is disabled so the swap that replaces it is FINAL, and the governing
+	// profile did not separately acknowledge that trade.
+	//
+	// The two keys are not one statement. `max_height` says what the replacement should look
+	// like; `downscale_acknowledged` says the operator accepts that the original is not
+	// coming back. With `undo_window_hours: 0` - the shipped default - those differ, because
+	// the rename that publishes the replacement destroys the source and nothing retains it.
+	// This build will not make an irreversible swap to a smaller picture on the strength of
+	// one key, so it SKIPS: nothing is encoded, no temp is written, and the source is
+	// byte-for-byte what it was.
+	//
+	// It is a skip and not a failure because nothing about the FILE is wrong. It reads both
+	// keys it weighed (InputMaxHeight and InputUndoWindow), so either remedy - acknowledging
+	// the trade, or opening the undo window so the swap can be walked back - offers every
+	// held file straight back on the next scan.
+	SkipDownscaleUnacknowledged = "downscale-unacknowledged"
 
 	// SkipTelecineCadence is the CADENCE guard, and it fires only where a deinterlace was
 	// configured: the source is telecined, or its cadence could not be established either
@@ -196,6 +220,7 @@ var SkipVocabulary = []string{
 	SkipUnreadableStreamList,
 	SkipUndoRetentionFailed,
 	SkipUndeterminedSourceHeight,
+	SkipDownscaleUnacknowledged,
 	SkipUnknownFieldOrder,
 	SkipTelecineCadence,
 	SkipOperatorExcluded,
@@ -659,14 +684,21 @@ func (e *Engine) rootFor(path string) (config.Root, bool) {
 //
 // It returns the snapshot it took, so the caller can hand the SAME one to the guard chain -
 // a file under a banded root therefore pays for one ffprobe, not two, exactly as it did
-// before rules existed. A root with no bounded rule is not probed here at all and the
+// before rules existed. A root that needs no source height is not probed here at all and the
 // returned snapshot is nil: the common case, and every configuration written before this
 // item.
 //
-// established is FALSE when the root bands its files and the probe could not read this
-// one's height. The caller must then decide the file under nothing at all (see
+// established is FALSE when this configuration needs the source's height and the probe could
+// not read it. The caller must then decide the file under nothing at all (see
 // SkipUndeterminedSourceHeight); the profile it gets back is the root's own, which is what
 // the claim and the row are attributed to, and no rule has been applied to it.
+//
+// TWO CONFIGURATIONS NEED THE HEIGHT and the answer is the same for both. A root whose rules
+// band on it needs it to pick a rule; a root or rule setting a `max_height` ceiling needs it
+// to know whether this source is above the ceiling and by how much. The second is asked
+// AFTER the rules are applied where it can be, because a rule may be what set the ceiling -
+// so a list of unbounded rules is resolved first, at a height nothing reads, and only then is
+// the resolved ceiling weighed.
 //
 // It is resolved BEFORE the claim on purpose. The claim compares what this configuration
 // offers for this file against what the row recorded, and a row that recorded a rule's floor
@@ -675,13 +707,20 @@ func (e *Engine) rootFor(path string) (config.Root, bool) {
 func (e *Engine) effectiveProfile(ctx context.Context, f string, root config.Root,
 	snapshot func(context.Context, string) *probe.VideoProps) (config.Profile, *probe.VideoProps, bool) {
 	prof := root.Profile
-	if len(prof.Rules) == 0 {
-		return prof, nil, true
-	}
-	if !prof.Rules.NeedsSourceHeight() {
-		// Every rule matches every file, so the first one decides and no height is read.
-		// The height argument is unused in that case and 0 is passed rather than probed.
-		return prof.WithRules(0), nil, true
+	switch {
+	case len(prof.Rules) == 0:
+		if !prof.DownscaleEnabled() {
+			return prof, nil, true
+		}
+	case !prof.Rules.NeedsSourceHeight():
+		// Every rule matches every file, so the first one decides and no height is read for
+		// THAT. The height argument is unused in that case and 0 is passed rather than
+		// probed - but the rule the first match supplied may itself carry a ceiling, so the
+		// resolved profile is what is asked about one.
+		resolved := prof.WithRules(0)
+		if !resolved.DownscaleEnabled() {
+			return resolved, nil, true
+		}
 	}
 	props := snapshot(ctx, f)
 	_, height, ok := props.Dimensions()
@@ -1655,6 +1694,13 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// error was already refused above, before a temp path was chosen.
 	film, _ := deinterlaceApplied(prof, props)
 
+	// THE RESOLUTION CEILING THIS JOB APPLIES, resolved once from the same profile and the
+	// same snapshot, on exactly the deinterlace's terms. The encoder resolves the same value
+	// from the same two inputs through the same function, and the perceptual gate is HANDED
+	// this one - so the scale that ran, the scale the output is measured back up through and
+	// the scale the row records are one answer.
+	shrink := downscaleApplied(prof, props)
+
 	encStart := time.Now()
 	if err := e.encode(ctx, worker, f, work, props, prof, plan); err != nil {
 		if ctx.Err() != nil { // interrupted: discard temp, DON'T finish — leave active for RecoverStale
@@ -1671,10 +1717,10 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	out.EncodeMs = ptr(encodeDur.Milliseconds())
 	// What actually came out, measured on the file the encoder wrote and recorded on the row
 	// whether the gates below then accept it or reject it: a rejected encode is exactly where
-	// an operator wants to know what was produced. This build downscales nothing, so these
-	// are the source's own dimensions on every ordinary job - which is what makes a row where
-	// they are NOT a fact worth having. An output the probe cannot measure records nothing
-	// rather than a zero.
+	// an operator wants to know what was produced. A job under no `max_height` ceiling scales
+	// nothing, so these are the source's own dimensions on every such job - which is what
+	// makes a row where they are NOT a fact worth having. An output the probe cannot measure
+	// records nothing rather than a zero.
 	if w, h, ok := e.Probe.Dimensions(ctx, work); ok {
 		out.OutputWidth, out.OutputHeight = ptr(w), ptr(h)
 	} else {
@@ -1683,7 +1729,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	}
 
 	e.advance(ctx, f, key, store.Verifying)
-	proof, gate, class, reason := e.verifyOutput(ctx, f, work, prof, targetCodec, plan, film)
+	proof, gate, class, reason := e.verifyOutput(ctx, f, work, prof, targetCodec, plan, film, shrink)
 	// Record whatever VMAF measured, on the reject path too: the numbers that rejected an
 	// encode are exactly the ones an operator wants to see.
 	out.VmafMean, out.VmafMin, out.VmafModel = proof.Mean, proof.Min, proof.Model
@@ -1702,6 +1748,23 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// deinterlaced nothing, which is a different fact from the NULL every row written before
 	// this column carries.
 	out.Deinterlaced, out.DeinterlaceFilter = ptr(film.Enabled()), film.Spec
+	// And WHETHER THE PICTURE WAS MADE SMALLER, recorded on the same terms and from the same
+	// place: the scale the encoder applied, not the proof, because it is true of the job
+	// whether or not the perceptual gate ran, and recorded on the reject path as much as on
+	// the accept path. An explicit FALSE is this build saying it ran the job and scaled
+	// nothing, which is a different fact from the NULL every row written before this column
+	// carries. The SCALER travels with it because "scaled" with no algorithm named beside it
+	// does not say what was done: two resamplers produce two different pictures from one
+	// source, and this row outlives that source.
+	out.Downscaled = ptr(shrink.Enabled())
+	if shrink.Enabled() {
+		out.DownscaleScaler = downscale.Scaler
+	}
+	// The resolution the perceptual gate MEASURED at, which on a downscaling job is the
+	// source's rather than the output's. It comes off the proof and not off the scale,
+	// because it is a fact about the measurement: a job whose gate did not run records
+	// nothing here, exactly as it records no score.
+	out.VmafScoredWidth, out.VmafScoredHeight = proof.ScaledWidth, proof.ScaledHeight
 	// Why the gate did not run, when it did not. It travels beside the figures rather than
 	// instead of them: every VMAF field above is "" or nil on such a row, so what a reader
 	// gets is "not measured, and here is why" - never a zero, which would be a fabricated
@@ -2166,6 +2229,45 @@ func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, pr
 			logArgs: []any{"kbps", br, "min", prof.MinBitrateKbps, "library_root", root.Clean}}
 	}
 
+	// THE FINAL-SWAP GUARD, and it stands here because it is a refusal about the
+	// CONFIGURATION rather than about the file: a root that sets a ceiling with the undo
+	// window closed and no acknowledgement refuses every source above that ceiling, and
+	// telling the operator about the one file's field order first would bury the thing they
+	// have to fix. Everything above it is cheaper still and leaves this file out of the
+	// question entirely - a source already at the target codec is not re-encoded at all, so
+	// nothing would scale it.
+	//
+	// It costs no probe: the dimensions come off the snapshot every guard below reads.
+	//
+	// The SOURCE-HEIGHT arm is the backstop behind ProcessFile's own, which decides the file
+	// under nothing at all before a claim is taken (see effectiveProfile). It is reachable
+	// through the read-only plan pass and through a Config assembled in Go, and without it a
+	// ceiling would be resolved against dimensions nobody established.
+	if prof.DownscaleEnabled() {
+		w, h, established := props.Dimensions()
+		if !established {
+			return props, sourceVerdict{guard: SkipUndeterminedSourceHeight, codec: codec,
+				inputs: []string{InputMaxHeight, InputUndoWindow},
+				log: "skip (ffprobe did not establish this source's dimensions and this library root " +
+					"sets a max_height ceiling - refusing to scale a file by a factor nobody measured)",
+				logArgs: []any{"library_root", root.Clean, "max_height", prof.MaxHeight}}
+		}
+		if shrink := prof.DownscaleFor(w, h); downscaleRefused(&e.Cfg, prof, shrink) {
+			return props, sourceVerdict{guard: SkipDownscaleUnacknowledged, codec: codec,
+				inputs: []string{InputMaxHeight, InputUndoWindow},
+				log: "skip (this file would be scaled down by max_height AND the undo window is " +
+					"disabled, so the swap would be final, AND this root did not set " +
+					"downscale_acknowledged - refusing to make an irreversible swap to fewer pixels " +
+					"on the strength of one key; nothing was encoded and the source is untouched. " +
+					"Set downscale_acknowledged: true to accept it, or set undo_window_hours so the " +
+					"swap can be walked back)",
+				logArgs: []any{"library_root", root.Clean, "max_height", prof.MaxHeight,
+					"undo_window_hours", e.Cfg.UndoWindowHours,
+					"source", strconv.Itoa(w) + "x" + strconv.Itoa(h),
+					"would_become", strconv.Itoa(shrink.Width) + "x" + strconv.Itoa(shrink.Height)}}
+		}
+	}
+
 	// Scan-type guards. Every branch of the field order is answered here and none of them
 	// falls through: an interlaced source is skipped unless a deinterlace is configured for
 	// it, and a field order ffprobe could not establish is CLASSIFIED rather than assumed
@@ -2334,15 +2436,16 @@ func (e *Engine) advance(ctx context.Context, path, key string, s store.Status) 
 	e.emit(Event{Path: path, Status: s})
 }
 
-// recordUndeterminedHeight writes the band guard's terminal row: this root selects on the
-// source height and the probe could not establish one, so no rule and no profile decides
-// this file.
+// recordUndeterminedHeight writes the source-height guard's terminal row: this root's
+// configuration needs to know how tall the source is and the probe could not establish it,
+// so no rule and no ceiling decides this file.
 //
 // It claims the row first, exactly as every verdict that records what it READ must: the
 // claim is where a row's recorded inputs are compared against what the configuration now
-// offers, and a skip written outside it would be a verdict nothing re-derives. The input it
-// records is the RULE LIST, because the list is what it read - remove every `when`-carrying
-// rule from this root and the next scan offers the file to the pipeline again.
+// offers, and a skip written outside it would be a verdict nothing re-derives. The inputs it
+// records are exactly the keys that needed the height - the RULE LIST where the root bands
+// its files, and the CEILING where one is in force - so removing whichever of them the
+// operator wrote offers the file to the pipeline again on the next scan.
 //
 // A store error is survived in the withholding direction, the same trade every claim path in
 // this function takes: the file is simply left for the next scan.
@@ -2356,13 +2459,21 @@ func (e *Engine) recordUndeterminedHeight(ctx context.Context, worker, f, key st
 	if !claimed {
 		return
 	}
+	// The keys this verdict READ, which is what makes it re-derivable. inputsRead offers only
+	// the ones the configuration actually carries, so a banded root with no ceiling records
+	// exactly what it recorded before this item.
+	read := []string{InputRules, InputMaxHeight, InputUndoWindow}
 	// warn, which in this fleet means the process continued in a degraded state: the run
-	// goes on and this file is not in it, which is a condition an operator fixes.
-	e.Log.Warn("skip (the source height could not be determined and this library root selects "+
-		"thresholds by it - refusing to decide the file under a band nobody could place it in)",
-		"file", f, "library_root", root.Clean, "rules", prof.Rules.Canonical())
+	// goes on and this file is not in it, which is a condition an operator fixes. It names
+	// the DEPENDENCY, what was tried and what happens next, and it names both configurations
+	// that can need a height so the operator is not sent to the one they did not write.
+	e.Log.Warn("skip (ffprobe did not establish this source's height, and this library root needs "+
+		"one - a band selects thresholds by it, a max_height ceiling decides whether this source is "+
+		"above it - so the file is decided under no band and no ceiling rather than under a guess)",
+		"file", f, "library_root", root.Clean, "rules", prof.Rules.Canonical(),
+		"max_height", prof.MaxHeight)
 	e.finish(ctx, f, key, store.Skipped,
-		e.because(SkipUndeterminedSourceHeight, by, prof, ts, props, InputRules))
+		e.because(SkipUndeterminedSourceHeight, by, prof, ts, props, read...))
 }
 
 // finishStore records a terminal outcome + its proof in the store WITHOUT emitting an

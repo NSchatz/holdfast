@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/NSchatz/holdfast/internal/deinterlace"
+	"github.com/NSchatz/holdfast/internal/downscale"
 	"github.com/NSchatz/holdfast/internal/store"
 )
 
@@ -82,7 +83,7 @@ func TestRegress0088F1_AcceptsAnOutputCarryingADroppedCommentaryTrack(t *testing
 
 	// And so does the whole verification gate, which is what actually licenses the swap.
 	_, _, class, err := eng.verifyOutput(context.Background(), src, out, prof,
-		targetCodecFor(eng.Cfg.TranscodeIn(prof, src).Encoder), plan, deinterlace.Filter{})
+		targetCodecFor(eng.Cfg.TranscodeIn(prof, src).Encoder), plan, deinterlace.Filter{}, downscale.Scale{})
 	if err == nil {
 		t.Errorf("verifyOutput ACCEPTED it (class=%q): every gate in front of the deletion of "+
 			"the source is green on an output that lost the main English audio track", class)
