@@ -728,7 +728,13 @@ func TestScan_ObservedIsTheListingThisScanDrewItsSourcesFrom(t *testing.T) {
 	}
 	res2 := walkOver(t, root, e2.Cfg.VideoExts, counts)
 	e2.SetCoverage(res2.Coverage, res2.Entries)
-	e2.Paused = func() bool { return true } // no encoder here: this half is about the rows
+	// This half is about the ROWS, and it used to reach them with the engine held paused.
+	// It no longer can: the enumeration and the feed are one loop now (S0099), so a pause
+	// stops the scan where it stands and the pass observes only the directories it had
+	// listed by then - which is [AC-6], and which would leave this assertion grading an
+	// enumeration that never happened. Nothing encodes here anyway: this engine is built
+	// with no ffmpeg and no ffprobe, so the one real file in the tree reaches a terminal
+	// row without a byte being written.
 	if err := e2.RunOneshot(context.Background()); err != nil {
 		t.Fatalf("RunOneshot: %v", err)
 	}

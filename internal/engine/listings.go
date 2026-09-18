@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/NSchatz/holdfast/internal/startup"
 )
@@ -137,6 +138,20 @@ func (e *Engine) readDir(dir string) ([]os.DirEntry, error) {
 		return e.readDirFn(dir)
 	}
 	return os.ReadDir(dir)
+}
+
+// sortEntriesByName puts one directory's listing into entry-name order, in place.
+// The hand-out order rests on it (docs/enumeration.md), and the rule is the
+// ENUMERATION's rather than the filesystem's: os.ReadDir happens to return a
+// sorted listing and a startup walk happens to carry that order across, but a
+// deterministic hand-out order that rested on a library's own read of a directory
+// would be a property of the platform rather than of this build.
+//
+// In place, and on a slice this pass owns: a listing taken from `pass` is deleted
+// from it as it is taken, and one this scan made itself has no other reader. So
+// the order costs one sort of one directory's entries and no allocation.
+func sortEntriesByName(ents []startup.Entry) {
+	sort.Slice(ents, func(i, j int) bool { return ents[i].Name < ents[j].Name })
 }
 
 // isDirectory reports whether path is a directory once its links are followed. A

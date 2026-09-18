@@ -14,7 +14,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1049,17 +1048,24 @@ func (e *Engine) sweepTemp(ctx context.Context, path string) bool {
 	return os.Remove(path) == nil
 }
 
-// scanOnce walks the roots, sorts matches for deterministic order, and fans them out to a
-// pool of workers (Cfg.EffectiveWorkers(), minimum 1). A cancelled ctx stops workers pulling
+// scanOnce walks the roots and fans what it finds out to a pool of workers
+// (Cfg.EffectiveWorkers(), minimum 1) AS IT FINDS IT. A cancelled ctx stops workers pulling
 // new files and kills the in-flight ffmpeg subprocess through exec.CommandContext.
+//
+// The enumeration and the feed are the same loop, run on THIS goroutine: the workers start
+// first, and each source reaches one the moment its directory's listing returns, rather than
+// after the last directory in the library has been read. So the first encode no longer waits
+// for the last readdir, and what the scan holds is one directory's listing plus whatever is
+// in flight rather than every path in the library at once.
 //
 // It returns the set of directories this scan LISTED SUCCESSFULLY - the only places this run
 // has evidence about, and therefore the only places the retention pass may read a missing
 // file as a file that is gone (see rowIsSpent). It is the enumeration's own record rather
-// than a re-derivation, so the two cannot disagree about where holdfast looked.
+// than a re-derivation, so the two cannot disagree about where holdfast looked. Streaming
+// does not weaken that: the map is written by this goroutine alone, it is returned only once
+// the enumeration has finished with it, and a directory enters it only after a listing of it
+// RETURNED - so a pass cut short mid-stream reports the directories it did list and no more.
 func (e *Engine) scanOnce(ctx context.Context, pass *listings) (map[string]bool, error) {
-	files, observed := e.enumerateIn(pass)
-
 	n := e.Cfg.EffectiveWorkers()
 	ch := make(chan string)
 	var wg sync.WaitGroup
@@ -1096,21 +1102,41 @@ func (e *Engine) scanOnce(ctx context.Context, pass *listings) (map[string]bool,
 		}(workerID)
 	}
 
-feed:
-	for _, f := range files {
-		// Pause control: stop handing out NEW files the moment we are paused. Checked
-		// before the send, so pause only ever DELAYS work and never touches an in-flight
-		// encode; the not-yet-fed files stay pending for the next scan after resume.
+	// Pause control: stop handing out NEW files the moment we are paused, and say so ONCE.
+	// Asked before each send and before each directory is listed, so a pause lands inside a
+	// stretch of directories holding no source at all just as it lands between two files.
+	// Pause only ever DELAYS work and never touches an in-flight encode; the files this pass
+	// never handed out stay pending for the next scan after resume, and the directories it
+	// never reached are simply not listed, so they are not reported as observed either.
+	said := false
+	stop := func() bool {
+		if ctx.Err() != nil {
+			return true
+		}
 		if e.Paused != nil && e.Paused() {
-			e.Log.Info("paused — stopping feed of new files; in-flight encodes finish safely")
-			break feed
+			if !said {
+				said = true
+				e.Log.Info("paused - stopping the feed of new files; in-flight encodes finish safely")
+			}
+			return true
 		}
-		select {
-		case <-ctx.Done():
-			break feed
-		case ch <- f:
-		}
+		return false
 	}
+
+	observed := e.enumerateStream(pass, sink{
+		offer: func(f string) bool {
+			if stop() {
+				return false
+			}
+			select {
+			case <-ctx.Done():
+				return false
+			case ch <- f:
+				return true
+			}
+		},
+		stopped: stop,
+	})
 	close(ch)
 	wg.Wait()
 
@@ -1120,8 +1146,36 @@ feed:
 	return observed, ctx.Err()
 }
 
-// enumerate returns every source this run may act on, sorted for a deterministic order, and
-// the set of directories it LISTED SUCCESSFULLY to find them.
+// sink is where a streamed enumeration puts what it finds, and the only thing that can stop
+// it short.
+//
+// Both halves are called on the ENUMERATION's own goroutine, in the order the enumeration
+// reaches them, so neither needs a lock and the hand-out order simply IS the order offer was
+// called in. Returning false from either stops the enumeration where it stands: nothing
+// further is listed, so nothing further is reported as observed.
+type sink struct {
+	// offer takes one source path this run may act on, in hand-out order, and reports
+	// whether the enumeration should carry on.
+	offer func(path string) bool
+
+	// stopped is asked before each directory is listed, so a scan cancelled or paused while
+	// it is crossing a run of directories that hold no source at all stops there rather than
+	// listing the rest of the library for nothing. nil is never stopped.
+	stopped func() bool
+}
+
+// halted reports whether this sink has asked the enumeration to stop.
+func (s sink) halted() bool { return s.stopped != nil && s.stopped() }
+
+// collect is a sink that gathers every path into files and never stops the enumeration. It is
+// how a caller that wants the whole list - the read-only plan pass - drives the same
+// enumeration the scan streams.
+func collect(files *[]string) sink {
+	return sink{offer: func(p string) bool { *files = append(*files, p); return true }}
+}
+
+// enumerate returns every source this run may act on, in hand-out order, and the set of
+// directories it LISTED SUCCESSFULLY to find them.
 //
 // With a Coverage set (FILESYSTEM-1) it lists exactly the directories the startup walk
 // traversed successfully and nothing else: no recursion of its own, so a directory the walk
@@ -1141,13 +1195,31 @@ feed:
 // EMPTY is in it: holdfast looked and found nothing, which is not the same as never looking.
 func (e *Engine) enumerate() ([]string, map[string]bool) { return e.enumerateIn(e.passListings()) }
 
-// enumerateIn is the enumeration as a pass runs it, over the listings that pass
+// enumerateIn is the enumeration as a pass runs it, collected into a slice. It is what a
+// caller that wants the whole answer at once drives - the read-only plan pass, and the cases
+// that assert what a given tree enumerates - and it is the SAME traversal the scan streams,
+// in the same hand-out order, so a plan and the scan it predicts cannot disagree about
+// either the set or the sequence.
+//
+// The scan itself does NOT come through here: it calls enumerateStream directly, so nothing
+// on the path a daemon takes ever holds the library's paths at once.
+func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
+	var files []string
+	observed := e.enumerateStream(pass, collect(&files))
+	return files, observed
+}
+
+// enumerateStream is the enumeration as a pass runs it, over the listings that pass
 // holds: the startup walk's where this is the first scan after that walk, the
 // sweep's where the sweep already listed for this one, and its own otherwise. It
 // RELEASES each directory's entries as it consumes them, so the entry
 // information a walk collected does not outlive the scan that used it.
-func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
-	var files []string
+//
+// It hands each source to the sink AS IT FINDS IT and keeps nothing: what this holds is one
+// directory's listing plus the observed map, and neither grows with the number of FILES in
+// the library. See docs/enumeration.md for the order it hands them out in and for what
+// a later declared queue order may build on it.
+func (e *Engine) enumerateStream(pass *listings, to sink) map[string]bool {
 	// filtered counts the files the configured path filters kept out of this scan. It
 	// counts FILES and never directories, because the filters are applied to an entry
 	// this scan has ALREADY LISTED: what a filter changes is the set of files offered,
@@ -1156,7 +1228,14 @@ func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
 	var filtered int
 	observed := map[string]bool{}
 	if e.Coverage != nil {
+	covered:
 		for _, dir := range e.Coverage {
+			// Asked BEFORE the listing, so a cancelled or paused scan stops here with this
+			// directory unlisted - and therefore unobserved - rather than paying for a
+			// listing whose files it has already decided not to hand out.
+			if to.halted() {
+				break covered
+			}
 			// The retention area holds this tool's own retained originals and nothing
 			// else. Its files are already excluded by name (IsSourceName); skipping the
 			// directory too means no route at all feeds rescued bytes back to the encoder.
@@ -1170,9 +1249,20 @@ func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
 				pass.selfListed++
 			}
 			if got.err != nil {
+				e.reportUnlistedDirectory(dir, got.err)
 				continue
 			}
+			// Marked observed HERE, and this is the only statement on this branch that
+			// writes the map: physically downstream of a listing that RETURNED, so no
+			// interruption below can leave a directory in the set that this run did not
+			// list. Over-reporting is the one failure this enumeration cannot be allowed
+			// to have - the retention pass reads a file missing from an observed directory
+			// as a file that is gone, and expires the undo record that is the only route
+			// back to the original bytes.
 			observed[dir] = true
+			// The hand-out order within one directory is entry-NAME order, imposed here
+			// rather than inherited from whatever produced the listing.
+			sortEntriesByName(got.entries)
 			for _, ent := range got.entries {
 				source := IsSourceName(ent.Name, e.Cfg.VideoExts)
 				// The kind the listing reported, and - where anything established
@@ -1194,8 +1284,11 @@ func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
 						filtered++
 						continue
 					}
-					if e.offered(p) {
-						files = append(files, p)
+					// offered() is the record-based hold-back and it is asked HERE, on
+					// the last step before a path leaves the enumeration, exactly where
+					// it was asked when this loop filled a slice instead.
+					if e.offered(p) && !to.offer(p) {
+						break covered
 					}
 				}
 			}
@@ -1207,21 +1300,32 @@ func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
 			e.Log.Info("this scan listed covered directories itself; the startup walk's own listings serve the first scan after that walk and no later one",
 				"directories_this_scan_listed", pass.selfListed, "directories_covered", len(e.Coverage))
 		}
-		sort.Strings(files)
-		return files, observed
+		return observed
 	}
 	for _, root := range e.Cfg.LibraryRoots {
+		if to.halted() {
+			break
+		}
 		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				// WalkDir reports a directory it could not read by calling back a SECOND
 				// time for it, carrying the error. Withdraw what was marked on the way in:
-				// a listing that failed is not one this run may conclude from.
+				// a listing that failed is not one this run may conclude from. The
+				// withdrawal happens before any entry under that directory could be
+				// reached - there are none, the listing is what failed - so the set this
+				// returns never names a directory whose listing did not return.
 				if d != nil && d.IsDir() {
 					delete(observed, path)
+					e.reportUnlistedDirectory(path, err)
 				}
 				return nil
 			}
 			if d.IsDir() {
+				if to.halted() {
+					// Stopped on the way IN, before this directory is marked: a scan that
+					// stopped here did not list it and must not claim to have.
+					return fs.SkipAll
+				}
 				// The retention area is never a source, and is skipped BEFORE being marked
 				// observed: a directory this run declined to list is not evidence about
 				// what is in it.
@@ -1249,16 +1353,35 @@ func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
 					filtered++
 					return nil
 				}
-				if e.offered(path) {
-					files = append(files, path)
+				if e.offered(path) && !to.offer(path) {
+					return fs.SkipAll
 				}
 			}
 			return nil
 		})
 	}
 	e.reportFiltered(filtered)
-	sort.Strings(files)
-	return files, observed
+	return observed
+}
+
+// reportUnlistedDirectory states a directory this run could not list: WHICH directory, WHAT
+// was tried, and WHAT HAPPENS NEXT (observability O4). Before this the coverage branch
+// dropped a failed listing in silence, which left the one fact an operator needs - that a
+// region of the library was not looked at this pass - visible nowhere at all.
+//
+// It is `warn` and not `error` (observability O3): the scan continues over every other
+// directory it can list, no human has to act for the rest of the pass to finish, and a
+// library with one unreadable directory in it would otherwise raise an alarm on every scan
+// for ever. What it costs is stated rather than implied - the directory is left OUT of the
+// observed set, so the retention pass reads it as "no evidence" and not as "the files under
+// it are gone", which is the fail-safe direction.
+func (e *Engine) reportUnlistedDirectory(dir string, err error) {
+	e.Log.Warn("a directory could not be listed; this scan continues without it",
+		"directory", dir,
+		"operation", "list the directory",
+		"err", errText(err),
+		"next", "no file under it is enumerated this pass and it is NOT reported as observed, so the "+
+			"ledger retention pass draws no conclusion from a file that is missing under it")
 }
 
 // filterAllows reports whether the path filters in force for this path's library root
