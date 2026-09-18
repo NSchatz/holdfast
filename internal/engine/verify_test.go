@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
 	"github.com/NSchatz/holdfast/internal/vmaf"
@@ -600,7 +601,7 @@ func TestVerify_EveryRejectionCarriesTheClassOfItsVerdict(t *testing.T) {
 			top := eng.Cfg.TopLevelProfile()
 			target := targetCodecFor(eng.Cfg.TranscodeIn(top, tc.in).Encoder)
 			_, gate, class, err := eng.verifyOutput(context.Background(), tc.in, tc.tmp, top, target,
-				planFor(t, eng, tc.in, top))
+				planFor(t, eng, tc.in, top), deinterlace.Filter{})
 			if err == nil {
 				t.Fatalf("the gate ACCEPTED this pair; the case proves nothing about the class of a rejection")
 			}
@@ -655,7 +656,7 @@ func TestVerify_EveryRejectionCarriesTheClassOfItsVerdict(t *testing.T) {
 		}
 		top := eng.Cfg.TopLevelProfile()
 		_, _, class, err := eng.verifyOutput(context.Background(), src, good, top,
-			targetCodecFor(eng.Cfg.TranscodeIn(top, src).Encoder), planFor(t, eng, src, top))
+			targetCodecFor(eng.Cfg.TranscodeIn(top, src).Encoder), planFor(t, eng, src, top), deinterlace.Filter{})
 		if err != nil {
 			t.Fatalf("the gate rejected a faithful smaller HEVC encode: %v", err)
 		}
@@ -731,7 +732,7 @@ func TestVmafGate_FloorsAreFinalAndAnUnmeasurableRunIsNot(t *testing.T) {
 				}
 				return tc.result, nil
 			}
-			_, gate, class, err := eng.vmafGate(context.Background(), src, src, eng.Cfg.TopLevelProfile())
+			_, gate, class, err := eng.vmafGate(context.Background(), src, src, eng.Cfg.TopLevelProfile(), deinterlace.Filter{})
 			if err == nil {
 				t.Fatal("the gate accepted this measurement; the case proves nothing about a rejection")
 			}
@@ -756,7 +757,7 @@ func TestVmafGate_FloorsAreFinalAndAnUnmeasurableRunIsNot(t *testing.T) {
 		c.MinVmaf, c.VmafMinPool, c.VmafMinChroma = 95, 60, 30
 	})
 	eng.vmafScore = func(context.Context, vmaf.Request) (vmaf.Result, error) { return passing(), nil }
-	if _, gate, class, err := eng.vmafGate(context.Background(), src, src, eng.Cfg.TopLevelProfile()); err != nil || class != "" || gate != "" {
+	if _, gate, class, err := eng.vmafGate(context.Background(), src, src, eng.Cfg.TopLevelProfile(), deinterlace.Filter{}); err != nil || class != "" || gate != "" {
 		t.Errorf("a passing measurement produced err=%v class=%q gate=%q, want no rejection, no class and no gate",
 			err, class, gate)
 	}
@@ -813,7 +814,7 @@ func TestVmafGate_UnnameableComparisonFormatIsARejection(t *testing.T) {
 		return passing(), nil
 	}
 
-	proof, _, class, err := eng.vmafGate(context.Background(), normal, exotic, eng.Cfg.TopLevelProfile())
+	proof, _, class, err := eng.vmafGate(context.Background(), normal, exotic, eng.Cfg.TopLevelProfile(), deinterlace.Filter{})
 	if err == nil {
 		t.Fatal("vmafGate accepted a pair whose comparison format cannot be named")
 	}
@@ -837,7 +838,7 @@ func TestVmafGate_UnnameableComparisonFormatIsARejection(t *testing.T) {
 
 	// Anti-vacuity: the SAME gate over a nameable pair reaches the scorer and passes.
 	called = false
-	if _, _, _, err := eng.vmafGate(context.Background(), normal, normal, eng.Cfg.TopLevelProfile()); err != nil {
+	if _, _, _, err := eng.vmafGate(context.Background(), normal, normal, eng.Cfg.TopLevelProfile(), deinterlace.Filter{}); err != nil {
 		t.Fatalf("the nameable-pair control failed (%v) - the case above proves nothing", err)
 	}
 	if !called {
@@ -887,7 +888,7 @@ func TestVerify_RejectsAnOutputMissingAnIntendedStream(t *testing.T) {
 	}
 
 	_, _, class, err := eng.verifyOutput(context.Background(), src, out, top,
-		targetCodecFor(eng.Cfg.TranscodeIn(top, src).Encoder), planFor(t, eng, src, top))
+		targetCodecFor(eng.Cfg.TranscodeIn(top, src).Encoder), planFor(t, eng, src, top), deinterlace.Filter{})
 	if err == nil {
 		t.Fatal("the gate ACCEPTED an output that lost the Japanese track: the counts matched, the " +
 			"streams did not, and accepting it deletes a source carrying a track the replacement " +
@@ -946,7 +947,7 @@ func TestVerify_RejectsAnOutputCarryingAStreamTheMapDoesNotIntend(t *testing.T) 
 	}
 
 	_, _, class, err := eng.verifyOutput(context.Background(), src, out, prof,
-		targetCodecFor(eng.Cfg.TranscodeIn(prof, src).Encoder), plan)
+		targetCodecFor(eng.Cfg.TranscodeIn(prof, src).Encoder), plan, deinterlace.Filter{})
 	if err == nil {
 		t.Fatal("the gate ACCEPTED an output carrying a stream the map did not intend: a selection " +
 			"that silently did not apply has no other check in front of it")
@@ -1005,7 +1006,7 @@ func TestIntendedMap_CarriesEveryVideoStreamIncludingAttachedPictures(t *testing
 		"-map", "0:v:0", "-c:v", "libx265", "-x265-params", "log-level=error", "-preset", "ultrafast",
 		"-pix_fmt", "yuv420p10le", "-tag:v", "hvc1", "--", out)
 	if _, _, _, err := eng.verifyOutput(context.Background(), src, out, top,
-		targetCodecFor(eng.Cfg.TranscodeIn(top, src).Encoder), plan); err == nil {
+		targetCodecFor(eng.Cfg.TranscodeIn(top, src).Encoder), plan, deinterlace.Filter{}); err == nil {
 		t.Fatal("the gate ACCEPTED an output that dropped the attached picture")
 	} else if !strings.Contains(err.Error(), "missing video") {
 		t.Fatalf("the rejection must name the missing video stream; got: %v", err)
@@ -1061,7 +1062,7 @@ func TestIntendedMap_RejectsACoverPictureStandingInForAVideoStream(t *testing.T)
 	}
 
 	_, _, class, err := eng.verifyOutput(context.Background(), src, out, top,
-		targetCodecFor(eng.Cfg.TranscodeIn(top, src).Encoder), plan)
+		targetCodecFor(eng.Cfg.TranscodeIn(top, src).Encoder), plan, deinterlace.Filter{})
 	if err == nil {
 		t.Fatal("the whole gate ACCEPTED it: every check in front of the deletion of the source " +
 			"is green on an output that lost a video stream to a still picture")
@@ -1091,7 +1092,7 @@ func TestVerify_RejectsAnOutputWhoseStreamsCannotBeEnumerated(t *testing.T) {
 
 	blind := buildEngine(t, ffmpeg, blindToStreamList(t, dir, realFFprobe, "out.mkv"), dir, nil, nil)
 	_, _, class, err := blind.verifyOutput(context.Background(), src, out, top,
-		targetCodecFor(blind.Cfg.TranscodeIn(top, src).Encoder), plan)
+		targetCodecFor(blind.Cfg.TranscodeIn(top, src).Encoder), plan, deinterlace.Filter{})
 	if err == nil {
 		t.Fatal("the gate ACCEPTED an output it could not enumerate: nothing established that the " +
 			"replacement carries the streams this job intended, and the source would be deleted")
@@ -1106,7 +1107,7 @@ func TestVerify_RejectsAnOutputWhoseStreamsCannotBeEnumerated(t *testing.T) {
 	// Anti-vacuity: the same pair through a WORKING probe passes, so what rejected it above
 	// is the blindness and not the fixture.
 	if _, _, _, err := real.verifyOutput(context.Background(), src, out, top,
-		targetCodecFor(real.Cfg.TranscodeIn(top, src).Encoder), plan); err != nil {
+		targetCodecFor(real.Cfg.TranscodeIn(top, src).Encoder), plan, deinterlace.Filter{}); err != nil {
 		t.Fatalf("the control pair was rejected by a working probe (%v), so the case above proves "+
 			"nothing about enumeration", err)
 	}

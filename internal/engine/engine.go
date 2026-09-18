@@ -1648,6 +1648,13 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		out.SelectionNotApplied = SelectionNotAppliedNoAudio
 	}
 
+	// THE DEINTERLACE THIS JOB APPLIES, resolved once from the profile and this source's own
+	// snapshot. The encoder resolves the same value from the same two inputs through the same
+	// function, and the perceptual gate is HANDED this one - so the filter that ran, the
+	// filter the reference is produced by and the filter the row records are one answer. The
+	// error was already refused above, before a temp path was chosen.
+	film, _ := deinterlaceApplied(prof, props)
+
 	encStart := time.Now()
 	if err := e.encode(ctx, worker, f, work, props, prof, plan); err != nil {
 		if ctx.Err() != nil { // interrupted: discard temp, DON'T finish — leave active for RecoverStale
@@ -1676,7 +1683,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	}
 
 	e.advance(ctx, f, key, store.Verifying)
-	proof, gate, class, reason := e.verifyOutput(ctx, f, work, prof, targetCodec, plan)
+	proof, gate, class, reason := e.verifyOutput(ctx, f, work, prof, targetCodec, plan, film)
 	// Record whatever VMAF measured, on the reject path too: the numbers that rejected an
 	// encode are exactly the ones an operator wants to see.
 	out.VmafMean, out.VmafMin, out.VmafModel = proof.Mean, proof.Min, proof.Model
@@ -1997,7 +2004,11 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		"encode_ms", encodeDur.Milliseconds(),
 		"vmaf", logScore(proof.Mean), "vmaf_min", logScore(proof.Min),
 		"vmaf_pix_fmt", logText(proof.PixFmt), "vmaf_stream", logText(proof.Stream),
-		"vmaf_chroma", logScore(proof.ChromaMin), "vmaf_chroma_metric", logText(proof.ChromaMetric))
+		"vmaf_chroma", logScore(proof.ChromaMin), "vmaf_chroma_metric", logText(proof.ChromaMetric),
+		// The filter the reference was produced by, beside the format the comparison was made
+		// in, for the same reason: a score whose reference nobody can name is not a number a
+		// reader can act on, and this line is one of the surfaces the score is recorded on.
+		"deinterlace", logText(film.Spec))
 	// The done row is keyed under the FINAL file's own path+fingerprint (mirroring
 	// the pre-TRANSCODE-5 ledger behaviour) so a resume short-circuits on the new
 	// file's identity, not the pre-swap source's. The post-swap fingerprint is ALWAYS a
