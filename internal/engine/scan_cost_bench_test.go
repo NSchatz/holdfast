@@ -64,11 +64,17 @@ func BenchmarkScan_NoOpPass(b *testing.B) {
 			// The ledger goes BESIDE the library rather than inside it, so the scan never
 			// enumerates the database, and under the same fixture directory, so one
 			// removal takes the whole of what this size created.
-			st := benchStore(b, filepath.Dir(root))
+			fixture := filepath.Dir(root)
+			st := benchStore(b, fixture)
 			seedProcessedLibrary(b, st, root, files, DecisionInputsFor(cfg))
 
-			eng := New(cfg, probe.New(filepath.Join(b.TempDir(), "no-such-ffmpeg"),
-				filepath.Join(b.TempDir(), "no-such-ffprobe")), benchRefusingEncoder{b}, st, discardLogger())
+			// Two paths that do not exist, for a prober nothing in this pass may reach.
+			// They are under the fixture directory rather than under a fresh temporary one
+			// so that EVERYTHING this benchmark needs is inside the one directory it was
+			// pointed at - a run that takes twenty minutes must not be able to lose to a
+			// temporary directory somebody else tidied up while it was working.
+			eng := New(cfg, probe.New(filepath.Join(fixture, "no-such-ffmpeg"),
+				filepath.Join(fixture, "no-such-ffprobe")), benchRefusingEncoder{b}, st, discardLogger())
 			ctx := context.Background()
 
 			b.ResetTimer()
