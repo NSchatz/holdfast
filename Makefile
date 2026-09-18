@@ -46,6 +46,7 @@ PLATFORM ?= linux/amd64
         check-pins check-pins-selftest install-ffmpeg-selftest check-pin-live \
         secret-scan secret-scan-selftest install-hooks snapshot-bench \
         api-schema api-schema-baseline api-schema-diff api-schema-diff-selftest \
+        happy-path-log-selftest \
         tidy clean image image-smoke compose-check
 
 build:
@@ -177,6 +178,22 @@ api-schema-diff:
 # works. Outside `check` for the same reason every other selftest here is.
 api-schema-diff-selftest:
 	./scripts/api-schema-diff-selftest.sh
+
+# --- the happy-path log grader (S0130) ----------------------------------------
+# Proves cmd/holdfast/happy_path_log_test.go still BITES. That test asserts one completed
+# oneshot run emits no record at `error` level (observability O3), and every way that
+# assertion can be wrong is a way it goes GREEN: an error record it failed to see, a
+# capture that held nothing, a line it could not read counted as not-an-error, a missing
+# tool it skipped over, a run that never reached transcode reported as clean, a capture it
+# could not read back. Each is defeated on purpose here as its own case against a mutated
+# COPY, and the ADDITIONAL-warn case is required to stay green so "never fails on warn"
+# is not satisfied by a grader that never met one.
+#
+# Outside `check` for the same reason every other selftest here is: it mutates a copy of
+# the tree, and a gate grading a tree its own selftest had written would be grading the
+# mutations. CI runs it as its own step beside the gate.
+happy-path-log-selftest:
+	./scripts/happy-path-log-selftest.sh
 
 # THE ONE SETUP STEP a clone performs to get the pre-commit scan. It points
 # core.hooksPath at the committed hooks directory, so there is nothing to copy and a hook
