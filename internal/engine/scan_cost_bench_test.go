@@ -22,6 +22,7 @@ package engine
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,6 +32,19 @@ import (
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
 )
+
+// scanFixtureDir is the actionable half of the refusal below. The library goes under the
+// benchmark's own temporary directory by default, which is the right answer on a machine
+// whose temporary filesystem is a real one - and the wrong answer on a machine where it is
+// a small shared tmpfs, where the honest choices are to refuse or to be pointed somewhere
+// else. This is somewhere else. The library is created under a fresh subdirectory of it
+// and removed when that size is finished, exactly as the default is.
+//
+//	go test -run '^$' -bench '^BenchmarkScan_NoOpPass$' -benchtime 1x ./internal/engine/ \
+//	    -args -scan-fixture-dir=/var/tmp
+var scanFixtureDir = flag.String("scan-fixture-dir", "",
+	"build BenchmarkScan_NoOpPass's library under this directory rather than under the "+
+		"benchmark's own temporary one. It is removed either way.")
 
 // noOpFixtureBytesPerFile is what one fixture file costs on disk, generously rounded up
 // from the handful of bytes written to a whole filesystem block plus its inode and its
@@ -47,7 +61,10 @@ func BenchmarkScan_NoOpPass(b *testing.B) {
 			root, cleanup := noOpFixtureRoot(b, files)
 			defer cleanup()
 			cfg := baseCfg(root)
-			st := benchStore(b)
+			// The ledger goes BESIDE the library rather than inside it, so the scan never
+			// enumerates the database, and under the same fixture directory, so one
+			// removal takes the whole of what this size created.
+			st := benchStore(b, filepath.Dir(root))
 			seedProcessedLibrary(b, st, root, files, DecisionInputsFor(cfg))
 
 			eng := New(cfg, probe.New(filepath.Join(b.TempDir(), "no-such-ffmpeg"),
@@ -75,7 +92,14 @@ func BenchmarkScan_NoOpPass(b *testing.B) {
 // the 10,000-file library is gone before the 100,000-file one is built.
 func noOpFixtureRoot(b *testing.B, n int) (string, func()) {
 	b.Helper()
-	root := filepath.Join(b.TempDir(), "library")
+	parent := b.TempDir()
+	if *scanFixtureDir != "" {
+		var err error
+		if parent, err = os.MkdirTemp(*scanFixtureDir, "holdfast-scan-cost-"); err != nil {
+			b.Fatalf("creating the fixture library under %s: %v", *scanFixtureDir, err)
+		}
+	}
+	root := filepath.Join(parent, "library")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		b.Fatalf("creating the fixture library: %v", err)
 	}
@@ -101,7 +125,9 @@ func noOpFixtureRoot(b *testing.B, n int) (string, func()) {
 				i, n, err, (int64(n)*noOpFixtureBytesPerFile)>>20, n, root)
 		}
 	}
-	return root, func() { _ = os.RemoveAll(root) }
+	// The whole parent goes, not only the library inside it: where the operator pointed
+	// this somewhere of their own, the directory made for it is this benchmark's to remove.
+	return root, func() { _ = os.RemoveAll(parent) }
 }
 
 // requireRoomFor refuses the run when the filesystem it was handed cannot take the
@@ -133,11 +159,10 @@ func requireRoomFor(b *testing.B, dir string, n int) {
 // the file count.
 const perDirInodeSlack = 100
 
-// benchStore opens a ledger for one benchmark size, beside the library rather than inside
-// it, so the scan never enumerates the database.
-func benchStore(b *testing.B) *store.SQLite {
+// benchStore opens the ledger for one benchmark size under dir.
+func benchStore(b *testing.B, dir string) *store.SQLite {
 	b.Helper()
-	st, err := store.Open(filepath.Join(b.TempDir(), "jobs.db"))
+	st, err := store.Open(filepath.Join(dir, "jobs.db"))
 	if err != nil {
 		b.Fatalf("store.Open: %v", err)
 	}

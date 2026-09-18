@@ -420,8 +420,15 @@ func claimFresh(ctx context.Context, tx *sql.Tx, path, fingerprint, worker strin
 // supersededBy reports whether a skipped row's reason is one this claim was told it may
 // clear. An empty reason is never one: a row carrying no reason at all records no guard,
 // so there is no mutable condition behind it to have resolved.
+//
+// A `restored-original` row is never one either, WHATEVER the caller names, and that
+// refusal is here rather than left to the caller's list on purpose. It is the row an
+// operator wrote by deliberately putting their file back through the undo window, and
+// re-opening it feeds those rescued bytes to the very gates that passed the encode they
+// rejected. reopens refuses it first and without reading anything else; this branch runs
+// before reopens, so it owes the same refusal or it is a way around it.
 func supersededBy(reason string, supersede []string) bool {
-	if reason == "" {
+	if reason == "" || reason == GuardRestoredOriginal {
 		return false
 	}
 	for _, r := range supersede {
