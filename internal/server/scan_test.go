@@ -737,11 +737,11 @@ func TestScanEndpoint_SaysSoWhenItCannotTakeTheWork(t *testing.T) {
 // it lands rather than when somebody remembers to add it to a list.
 func TestScanEndpoint_AddsNoRouteBeyondScan(t *testing.T) {
 	h := newScanHarness(t, "tok")
-	var routes chi.Routes = h.srv.mux
-	if routes == nil {
+	if h.srv.mux == nil {
 		t.Fatal("the server holds no chi router, so its routes cannot be enumerated " +
 			"and this check would pass over anything")
 	}
+	var routes chi.Routes = h.srv.mux
 	var served []string
 	if err := chi.Walk(routes, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
 		served = append(served, method+" "+route)

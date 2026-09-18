@@ -15,7 +15,6 @@ import (
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/secret"
-	"github.com/NSchatz/holdfast/internal/store"
 	"github.com/NSchatz/holdfast/internal/version"
 )
 
@@ -457,5 +456,3 @@ func dropDeclaredField(t *testing.T, doc Document, path, field string) Document 
 	}
 	return out
 }
-
-var _ = store.Done

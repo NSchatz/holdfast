@@ -27,11 +27,11 @@ func TestRoutes_NoRequeueEndpointExists(t *testing.T) {
 	// 1. Every route this router serves, from the ROUTER ITSELF rather than from a list
 	// of paths a test author thought to try. A route added tomorrow is covered by this
 	// walk on the day it lands.
-	var routes chi.Routes = h.srv.mux
-	if routes == nil {
+	if h.srv.mux == nil {
 		t.Fatal("the server holds no chi router, so its routes cannot be enumerated " +
 			"and this check would pass over anything")
 	}
+	var routes chi.Routes = h.srv.mux
 	var served []string
 	if err := chi.Walk(routes, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
 		served = append(served, method+" "+route)
