@@ -84,9 +84,9 @@ low one.
 | `^internal/metrics/` | 23 seconds: collector registration and scrape fixtures, once per mutant. |
 
 What that leaves measured is the decision logic: configuration and profile selection, the
-encoder matrix, skip and holdback rules, scheduling windows, the secret resolver and the
-secret scanner, notification routing, disk accounting, filesystem classification and the
-startup checks.
+ffprobe inspection every skip decision is read off, the encoder matrix, skip and holdback
+rules, scheduling windows, the secret resolver and the secret scanner, notification routing,
+disk accounting, filesystem classification and the startup checks.
 
 ## The two runs
 
