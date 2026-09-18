@@ -538,6 +538,42 @@ ALTER TABLE jobs ADD COLUMN deinterlaced       INTEGER;
 ALTER TABLE jobs ADD COLUMN deinterlace_filter TEXT;
 `,
 	},
+	{
+		// v20 - whether a job SCALED ITS PICTURE DOWN to a configured max_height, with which
+		// resampler, and the resolution the perceptual comparison was then made at.
+		//
+		// The first pair is v19's argument applied to a blunter transformation: the pixels
+		// above the ceiling are simply not in the replacement, and a row that did not say so
+		// would leave an operator holding a smaller file with nothing to say it was meant to
+		// be smaller, after the source was deleted.
+		//
+		// The second pair is a fact about the MEASUREMENT rather than about the encode. A
+		// downscaling job's output is scaled back up to the source's resolution and scored
+		// there, against the source exactly as it is; resampling the source down to meet the
+		// output instead would grade the encode against a reference degraded first, and
+		// nothing else on the row distinguishes those two numbers. So the resolution travels
+		// with the score, exactly as vmaf_pix_fmt and vmaf_stream do. Both are NULL on a job
+		// that scaled nothing, whose comparison was made at the size output_width and
+		// output_height already state.
+		//
+		// NULLABLE with NO DEFAULT, the rule every step since v2 has kept, and load-bearing
+		// here in v19's own way: a DEFAULT of 0 on `downscaled` would say every row already in
+		// the field was measured and found not downscaled. Those rows were written by a build
+		// that could not downscale at all, so nothing about them was measured, and the sources
+		// they describe are gone.
+		//
+		// No index: nothing queries BY any of them, and every reader has the row in hand.
+		name: "applied downscale",
+		// Four nullable columns: ADD COLUMN rewrites no row and creates none, so every
+		// table's count is what it was.
+		rows: noRowChange,
+		sql: `
+ALTER TABLE jobs ADD COLUMN downscaled         INTEGER;
+ALTER TABLE jobs ADD COLUMN downscale_scaler   TEXT;
+ALTER TABLE jobs ADD COLUMN vmaf_scored_width  INTEGER;
+ALTER TABLE jobs ADD COLUMN vmaf_scored_height INTEGER;
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

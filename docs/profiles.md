@@ -272,17 +272,30 @@ are INCLUSIVE (`max_source_height: 720` covers a 720p file), an absent bound lea
 unbounded, and a rule with no `when` at all matches every file under its root.
 
 They are spelled `*_source_height` on purpose. A `when` bound selects which files a rule
-applies TO; it is not an output ceiling, and nothing here downscales anything. `min_height`
-and `max_height` are refused by name, with that distinction stated, rather than accepted as
-synonyms.
+applies TO, and it is a property of the SOURCE. `max_height` is a different thing entirely -
+an output ceiling, a property of what is WRITTEN - and a rule may carry one, but beside the
+`when` rather than inside it. Both `min_height` and `max_height` are refused inside a `when`
+by name, with that distinction stated and with the place `max_height` does belong named,
+rather than accepted as synonyms.
 
 ### What a rule may override
 
-Exactly three knobs: `min_bitrate_kbps`, `crf`, `min_savings_percent`. These are the ones
-whose right value depends on how many pixels the source has. Anything else inside a rule
-refuses to start, naming the offending key and listing what a rule may carry; a value the
+Exactly four knobs: `min_bitrate_kbps`, `crf`, `min_savings_percent`, `max_height`. These are
+the ones whose right value depends on how many pixels the source has. Anything else inside a
+rule refuses to start, naming the offending key and listing what a rule may carry; a value the
 top level would refuse - a `crf` of 99, a `min_savings_percent` of 140 - is refused in the
 top level's own words, with the root and the rule's index in front of them.
+
+`max_height` is an OUTPUT height ceiling: a source taller than it is scaled to it in the
+source's own aspect ratio before it is encoded, and one at or below it is left alone. It is
+the one knob here that makes a replacement a different picture from its source, so it is off
+unless you set it and a root that sets it earns a startup notice saying what that means. With
+`undo_window_hours: 0` - the default, under which a swap is final - a file it would scale is
+SKIPPED unless the root also sets `downscale_acknowledged: true`. The README states the whole
+posture under [its own anchor](../README.md#downscaling-posture), which is the one place it is
+written down; a height that is not a positive EVEN whole number of pixels is refused at start,
+because every pixel format this build encodes to is 4:2:0 and has no representation for an odd
+dimension.
 
 A rule may not move the VMAF floors, the encoder, or anything else. A rule that could weaken
 the perceptual gate would be a rule that could weaken the thing standing between a band of

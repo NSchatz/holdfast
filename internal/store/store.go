@@ -243,6 +243,44 @@ type Outcome struct {
 	Deinterlaced      *bool
 	DeinterlaceFilter string
 
+	// Downscaled says whether this job's replacement was produced by SCALING THE PICTURE
+	// DOWN to a configured `max_height`, and DownscaleScaler names the resampler that did it.
+	//
+	// They are on the row for the reason the deinterlace pair above is, and the claim is
+	// stronger: a downscale is the transformation this tool performs that the replacement
+	// most plainly cannot be read back from, because the pixels above the ceiling are simply
+	// not in it. A row that did not say so would leave an operator holding a smaller file
+	// with nothing to say it was meant to be smaller, after the source was deleted.
+	//
+	// Downscaled is a POINTER on exactly Deinterlaced's terms: nil is NOT RECORDED - a row
+	// written before this build, or one whose job never reached an encode - and an explicit
+	// false is a job this build ran and did not scale.
+	//
+	// DownscaleScaler is the algorithm, not the filter expression: two resamplers produce two
+	// different pictures from one source, so "scaled" with none named beside it does not say
+	// what was done. The dimensions it produced are already on the row as OutputWidth and
+	// OutputHeight, measured on the file the encoder wrote rather than restated from the
+	// configuration. "" is NOT RECORDED, the rule every string here keeps.
+	Downscaled      *bool
+	DownscaleScaler string
+
+	// VmafScoredWidth and VmafScoredHeight are the resolution the PERCEPTUAL COMPARISON was
+	// made at, recorded only where it is not the output's own size - which is to say, only on
+	// a job that scaled the picture down.
+	//
+	// Such a job's output is scaled back UP to the source's resolution and scored there,
+	// against the source exactly as it is, so that the pooled statistics carry what the
+	// downscale cost. The alternative - resampling the source down to meet the output - would
+	// grade an encode against a reference degraded first, and there is nothing else on this
+	// row from which a reader could tell those two apart. So the resolution travels with the
+	// score, exactly as VmafPixFmt and VmafStream do.
+	//
+	// Both are nil on every job that scaled nothing: the comparison was made at the output's
+	// own size, which OutputWidth and OutputHeight already state, and a second copy of an
+	// unmoved fact on every row in the field is not evidence.
+	VmafScoredWidth  *int
+	VmafScoredHeight *int
+
 	// SourceCodec is the video codec the SOURCE was in when this job was decided, as
 	// ffprobe named it. It is recorded on a dry-run decision, whose whole purpose is to say
 	// what a real run WOULD do to that file: an operator sizing the job needs to know what

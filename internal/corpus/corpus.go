@@ -1,4 +1,4 @@
-// Package corpus locates this repository and the Markdown it ships.
+// Package corpus locates this repository and the documents it ships.
 //
 // Both halves are defined RELATIVE TO THE REPOSITORY rather than to a working
 // directory: a caller that guessed its own root would read a different set of files
@@ -57,6 +57,33 @@ func Markdown(root string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// ExampleConfigName is the shipped example configuration.
+const ExampleConfigName = "config.example.yaml"
+
+// Documents returns every document this repository SHIPS TO A READER: the Markdown, plus
+// the example configuration.
+//
+// The example belongs in the set for the same reason every Markdown file does, and the fact
+// that it is not Markdown is a property of its syntax rather than of its readership. It is
+// the file an operator copies before the first file goes, it is where three of this build's
+// knobs are actually written, and a claim standing in it reaches exactly the reader a claim
+// standing in the README reaches. A check over "the documents" that admitted only one file
+// extension would be narrowed by a detail nobody chose, and an ABSENCE check narrowed that
+// way reports everything clean.
+func Documents(root string) ([]string, error) {
+	out, err := Markdown(root)
+	if err != nil {
+		return nil, err
+	}
+	example := filepath.Join(root, ExampleConfigName)
+	if _, err := os.Stat(example); err != nil {
+		return nil, fmt.Errorf("corpus: %s: %w", ExampleConfigName, err)
+	}
+	out = append(out, example)
 	sort.Strings(out)
 	return out, nil
 }

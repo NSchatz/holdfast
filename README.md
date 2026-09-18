@@ -7,18 +7,15 @@ to reclaim disk space, and - the whole point - **never destroys a source until a
 faithful**. It is configured entirely by **YAML** (config-as-code), so what it does is reviewable and
 reproducible from git, not hidden in a UI database.
 
-> **Status: `v0.1.0` released (2026-07-18); major version zero, so anything MAY change.** This repository was built phase by
-> phase from a mature, battle-tested Bash predecessor (see _Provenance_). **The data-safety core
-> (`TRANSCODE-1`)** is the heart of it: `holdfast run` performs one oneshot scan of the library roots -
-> skip guards → same-directory temp encode → the full verify gate → atomic swap → delete - proven by a
-> real-ffmpeg fixture suite that reds on the specific regression. Built on top of it: colour/HDR
-> preservation (`TRANSCODE-3`), the VMAF perceptual gate (`TRANSCODE-4`), a persistent crash-safe queue +
-> worker pool (`TRANSCODE-5`), hardware/AV1 encoders (`TRANSCODE-6`), the REST/SSE API
-> (`TRANSCODE-7`), observability + host-fair scheduling (`TRANSCODE-8`), and **packaging: a
-> multi-arch, non-root container image bundling a pinned ffmpeg (`TRANSCODE-9`)**. Cutting a tag is a
-> deliberate human act: [`docs/release.md`](docs/release.md) is the ordered runbook, says which of its
-> steps can be undone, and carries the record of what `v0.1.0` already published. See the roadmap for the
-> full plan.
+> **Status: `v0.1.0` released (2026-07-18); major version zero, so anything MAY change.** This repository
+> was built phase by phase from a mature, battle-tested Bash predecessor (see _Provenance_). **The
+> data-safety core (`TRANSCODE-1`)** is the heart of it: `holdfast run` performs one oneshot scan of the
+> library roots - skip guards → same-directory temp encode → the full verify gate → atomic swap → delete
+> - proven by a real-ffmpeg fixture suite that reds on the specific regression. Colour/HDR preservation,
+> the VMAF perceptual gate, a crash-safe queue and worker pool, hardware/AV1 encoders, the REST/SSE API,
+> observability, host-fair scheduling and a multi-arch non-root image are built on top of it; the roadmap
+> names each phase. Cutting a tag is a deliberate human act:
+> [`docs/release.md`](docs/release.md) is the ordered runbook and says which of its steps can be undone.
 
 ## Why another transcoder?
 
@@ -75,62 +72,71 @@ own licence text or project page.
 
 ## Non-goals
 
-Four boundaries, each stated in full below. Three are boundaries rather than a backlog: **no distributed
-or remote processing**; **not a media server and not a library manager** - it transcodes files in a
-library other tools manage; **no resolution downscaling**, with exotic-chroma and `multi-video-stream`
-sources **skipped, not converted** and embedded artwork carried through unencoded.
-The fourth is DEFERRED rather than settled: **HDR10 static metadata is preserved while Dolby Vision and
-HDR10+ dynamic metadata are detect-and-skipped**, at the cost [stated below](#dynamic-hdr-deferred).
-[Interlacing](#interlacing-posture) is its own case: the one transformation this tool makes on request.
+Four boundaries, each stated in full below - three settled, and the Dolby Vision / HDR10+ skip
+[DEFERRED](#dynamic-hdr-deferred) rather than settled. Exotic-chroma and `multi-video-stream` sources
+are **skipped, not converted**. Two things are NOT boundaries - they are the transformations this tool
+makes on request, each **off by default**: [interlacing](#interlacing-posture) and
+[the resolution ceiling](#downscaling-posture).
 
 <a id="interlacing-posture"></a>
 
 **Interlaced sources are deinterlaced on request, and skipped otherwise.** `deinterlace` is **off by
-default**, as it always has been. Set it (`yadif`/`bwdif`) on a root and its interlaced sources are
-deinterlaced before encoding, so **the replacement is no longer the same content as the source**: the
-fields are gone and the swap deletes the original, as a startup notice says.
+default**. Set it (`yadif`/`bwdif`) and a root's interlaced sources are deinterlaced before encoding,
+so **the replacement is no longer the same content as the source**: the fields are gone and the swap
+deletes the original, as a startup notice says.
 **Frame-rate-preserving** only - one frame per field is refused, since it doubles the frame count two
-parity gates grade. **Telecined sources are skipped** under their own guard whatever the key says
-(undoing a 3:2 pulldown is inverse telecine, which this build does not do), and so is a cadence nobody
-could establish. No floor moves: the gate scores the encode against a reference put through the **same
-filter at the same parameters**.
+parity gates grade. **Telecined sources are skipped** under their own guard whatever the key says (that
+needs inverse telecine, which this build does not do), and so is a cadence nobody could establish. No
+floor moves: the gate scores the encode against a reference put through the **same filter at the same
+parameters**.
+
+<a id="downscaling-posture"></a>
+
+**Resolution downscaling is available, and `max_height` is off by default.** Set it on a root (or one
+band of its `rules`) and every taller source is scaled to it in the source's aspect ratio before
+encoding, so **the replacement is no longer the same content as the source**: those pixels are gone and
+the swap deletes the original. 4K-to-1080p is the largest reclaim most libraries have and it is a trade,
+so it is opted into TWICE where it cannot be walked back: with `undo_window_hours` at its default of `0`
+a swap is final, and a file this key would scale is **skipped** until the root also sets
+`downscale_acknowledged: true` (or you open the window).
+No floor moves: the gate scales the **output back up** and is **scored at the source's resolution**,
+against the source as it is, so the figures carry what was lost - scoring against a source resampled
+*down* would take that detail out of both sides and hide it, and the row says which resolution it
+measured at. Keys: [docs/profiles.md](docs/profiles.md#resolution-rules).
 
 **Audio transcoding is a non-goal.** A library root can say which audio and subtitle streams its
 replacements carry (`audio_languages`, `subtitle_languages`, `keep_commentary`, `remux_only` - see
 **[docs/profiles.md](docs/profiles.md#stream-selection)**), and that is selection and **copy**: no
-downmix, no re-encode, no AAC stereo companion track. Transcoding audio reopens the fidelity question
-for a second medium, and it would need its own gate argument before this tool did it to somebody's
-only copy of a film.
+downmix, no re-encode, no AAC companion track. Transcoding audio reopens the fidelity question for a
+second medium, and would need its own gate argument first.
 
 **Distributed or remote processing is a non-goal by design, not a missing feature.** holdfast is one
 process: no server/node split, no remote workers. The no-loss argument rests on an atomic
-same-filesystem `rename(2)` - it either happened or it did not, so a failure never leaves a partial
-file where the source was. A remote worker encoding to its own disk and shipping the result back is a
-**copy**, not a rename, and every gate here would have to be re-argued for that primitive. To use more
-of one machine, raise `workers` (default 1, deliberately - see **[docs/docker.md](docs/docker.md)**).
+same-filesystem `rename(2)` - it either happened or it did not, so a failure never leaves a partial file
+where the source was. A remote worker encoding to its own disk and shipping the result back is a
+**copy**, not a rename, and every gate here would have to be re-argued for it. To use more of one
+machine, raise `workers` (default 1 - see **[docs/docker.md](docs/docker.md)**).
 
 <a id="dynamic-hdr-deferred"></a>
 
 **The Dolby Vision and HDR10+ skip is deferred, not permanent.** A generic libx265 re-encode strips a
 Dolby Vision RPU or HDR10+ SMPTE2094-40 dynamic metadata, and that loss is invisible until somebody
-watches the file, so holdfast skips those sources rather than quietly flattening them. Lifting the
-skip needs an external RPU toolchain beside the bundled ffmpeg, to extract the dynamic metadata and
-reinject it into the replacement. What keeps it deferred is the other half of that work: the gate
-compares pixels, an RPU is not pixels, and holdfast will not delete a source on the strength of a
-step it did not check. Possible, not free, and not until the metadata can be verified.
+watches the file, so those sources are skipped rather than quietly flattened. Lifting the skip needs an
+external RPU toolchain beside the bundled ffmpeg to extract and reinject that metadata - and then the
+other half: the gate compares pixels, an RPU is not pixels, and holdfast will not delete a source on
+the strength of a step it did not check.
 
 <a id="non-goal-library-manager"></a>
 
-**Library management is a permanent non-goal.** No renaming to a scheme, no moving between folders, no folder
-organisation, no metadata fetch, no duplicate detection, no deletion of anything but a source whose verified
-replacement passed: these are filesystem mutations the verify gate cannot cover, so use the tools that manage the library instead.
+**Library management is a permanent non-goal.** No renaming to a scheme, no moving between folders, no
+metadata fetch, no duplicate detection, no deletion of anything but a source whose verified replacement
+passed.
 
-Every gate in this tool is one judgement made by comparing two video files, and not one of those operations
-can be judged that way. Whether a file belongs in another folder, or under another name, or is a duplicate
-worth losing, is a question about a library's conventions, and no decoder can answer it. Shipping them would
-mean shipping mutations with nothing to gate them, in the same binary that offers a gate for everything else
-it does. Plex, Jellyfin and the *arr tools are where that work belongs: point holdfast at the library they
-manage, and leave the managing to them.
+Every gate here is one judgement made by comparing two video files, and not one of those operations can
+be judged that way: whether a file belongs in another folder, under another name, or is a duplicate
+worth losing, is a question about a library's conventions that no decoder can answer. Shipping them
+would mean shipping mutations with nothing to gate them, in the binary that offers a gate for everything
+else. Plex, Jellyfin and the *arr tools are where that work belongs.
 
 ## Quick start
 
@@ -291,7 +297,6 @@ measurement that says whether the COLOUR survived.
 An in-flight job reports how far it has got. The whole-ledger figures say what
 they are computed over and mark what they cannot cover. The ledger can be bounded
 (`history_retention_rows`, off by default) and exported (`holdfast export`).
-`serve` also carries the observability and host-fair scheduling surfaces.
 
 Every field, every figure and the exact semantics: **[`docs/api-reference.md`](docs/api-reference.md)**.
 

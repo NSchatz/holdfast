@@ -9,6 +9,7 @@ import (
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/deinterlace"
+	"github.com/NSchatz/holdfast/internal/downscale"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
 	"github.com/NSchatz/holdfast/internal/vmaf"
@@ -127,7 +128,8 @@ func TestDeinterlace_ScoresAgainstADeinterlacedReference(t *testing.T) {
 	})
 	prof := eng.Cfg.TopLevelProfile()
 	proof, gate, class, verr := eng.verifyOutput(context.Background(), src, out, prof,
-		targetCodecFor(eng.Cfg.TranscodeIn(prof, src).Encoder), planFor(t, eng, src, prof), film)
+		targetCodecFor(eng.Cfg.TranscodeIn(prof, src).Encoder), planFor(t, eng, src, prof), film,
+		downscale.Scale{})
 	if verr != nil {
 		t.Fatalf("the gate rejected a deinterlaced encode scored against a deinterlaced reference "+
 			"(gate=%q class=%q): %v", gate, class, verr)
@@ -323,7 +325,7 @@ func gateVerdict(t *testing.T, ffmpeg, ffprobe, dir, src, out, key string,
 		return r, nil
 	}
 	prof := eng.Cfg.TopLevelProfile()
-	_, gate, class, err := eng.vmafGate(context.Background(), out, src, prof, film)
+	_, gate, class, err := eng.vmafGate(context.Background(), out, src, prof, film, downscale.Scale{})
 	refused := "accepted"
 	if err != nil {
 		refused = "refused"

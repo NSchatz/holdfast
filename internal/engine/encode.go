@@ -10,6 +10,7 @@ import (
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/deinterlace"
+	"github.com/NSchatz/holdfast/internal/downscale"
 	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/probe"
@@ -238,6 +239,16 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 		return err
 	}
 
+	// THE RESOLUTION CEILING, resolved from the same profile and the same probe snapshot,
+	// for the same reason the deinterlace above is: the scale that runs here is the scale the
+	// perceptual gate scores the output back up through and the scale the terminal row
+	// records. A ceiling this build cannot target is refused in config.Validate and again in
+	// the engine before a temp path is chosen; a source whose dimensions the probe did not
+	// establish is skipped in front of this, and resolves to NO scale here as the backstop
+	// behind that - a filter built against a guessed source size would encode a library to a
+	// resolution nobody measured.
+	shrink := downscaleApplied(e.profile(), props)
+
 	// Colour/HDR propagation: carry the source's primaries/transfer/matrix/range
 	// forward instead of letting the encode silently drop them. These -color_* flags
 	// are encoder-agnostic and applied to every Spec. x265Color (HDR10 static
@@ -275,7 +286,14 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 	for _, i := range pictures {
 		body = append(body, "-c:v:"+strconv.Itoa(i), "copy")
 	}
-	body = append(body, withDeinterlace(buildArgs(spec, ts, pixFmt, colorArgs, x265Color), film)...)
+	// The two filters go on in this order so the CHAIN reads deinterlace, then scale, then
+	// whatever the encoder family built: each helper prepends to the head, so composing the
+	// scale first and the deinterlace second puts the deinterlace in front of it. That order
+	// is the right one and not an accident - a deinterlacer interpolates from the fields the
+	// source carried, so it has to see them at the resolution they were shot at, and a
+	// resampler run first would have blended two fields into every line it produced.
+	body = append(body, withDeinterlace(
+		withDownscale(buildArgs(spec, ts, pixFmt, colorArgs, x265Color), shrink), film)...)
 
 	var pre []string
 	if spec.Key == "vaapi" {
@@ -512,17 +530,44 @@ func buildArgs(spec encoder.Spec, ts config.Transcode, pixFmt string, colorArgs 
 // never upload. It goes at the HEAD of that chain because the software filter works on
 // software frames and has to run before anything that uploads them to a device.
 func withDeinterlace(args []string, film deinterlace.Filter) []string {
-	if !film.Enabled() {
+	return withHeadFilter(args, film.Spec)
+}
+
+// withDownscale composes the resolution ceiling's scale into a job's video filter chain, and
+// is the ONE place in the argv where the picture is made smaller.
+//
+// A disabled scale returns the arguments untouched, which is what keeps the command line of
+// every configuration that names no ceiling byte for byte what it was. An enabled one is
+// composed into the chain on exactly withDeinterlace's terms and for exactly its reason:
+// ffmpeg takes one -vf per output, so a second would silently replace the first.
+//
+// It goes at the HEAD of the chain for the VAAPI case above all - the scale is a software
+// filter and has to run before anything uploads frames to a device - and the caller puts the
+// deinterlace in front of it afterwards, so a job doing both deinterlaces at the source's own
+// resolution and only then resamples.
+func withDownscale(args []string, s downscale.Scale) []string {
+	return withHeadFilter(args, s.Spec())
+}
+
+// withHeadFilter prepends one filter expression to a job's -vf chain, or starts the chain
+// with it where the encoder family built none. An empty expression is a no-op, which is what
+// makes an unconfigured filter leave the argv exactly as it was.
+//
+// It is shared by the two composers above so there is ONE answer to "how does a filter reach
+// this argv": two copies of this loop would be two places for a second -vf to appear, and a
+// second -vf silently replaces the first rather than erroring.
+func withHeadFilter(args []string, spec string) []string {
+	if spec == "" {
 		return args
 	}
 	for i, a := range args {
 		if a == "-vf" && i+1 < len(args) {
 			out := append([]string(nil), args...)
-			out[i+1] = film.Spec + "," + out[i+1]
+			out[i+1] = spec + "," + out[i+1]
 			return out
 		}
 	}
-	return append(args, "-vf", film.Spec)
+	return append(args, "-vf", spec)
 }
 
 // bitrateArgs is the TARGET-BITRATE half of buildArgs: everything after the

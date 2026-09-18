@@ -124,8 +124,11 @@ replacement of it. Read this before you switch.
   Use more of the one machine with `workers` instead (default 1, and
   [docs/docker.md](docker.md) says why); running a second holdfast process against one
   `state_dir` is not supported.
-- **Anything that is not codec-only re-encoding.** No downscaling, no remuxing-as-a-feature, no
-  audio/subtitle mangling, no library management.
+- **Filters as a pipeline.** No cropping, no black-bar removal, no aspect-ratio changes, no
+  remuxing-as-a-feature, no audio/subtitle mangling, no library management. The two
+  transformations this tool will make on request are deinterlacing and an output height
+  ceiling, each off by default and each stated in full in the
+  [README's non-goals](../README.md#non-goals).
 
 ### What you get
 

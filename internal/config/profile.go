@@ -86,6 +86,15 @@ var profileKnobs = []string{
 	// written yesterday attached to the profile that decided it. A root that DOES ask for
 	// one is deciding its files differently and must digest differently.
 	deinterlaceKey,
+	// The two RESOLUTION-CEILING knobs, appended on exactly the deinterlace knob's terms
+	// and for exactly its reason: each contributes to the digest only where its resolved
+	// value is something other than the shipped default, so a root that sets no ceiling
+	// digests to what this build computed for it before either key existed. A root that
+	// sets one is deciding its files differently in the strongest sense this configuration
+	// has - its replacements are a smaller picture than their sources - and must not share
+	// a digest with one that does not.
+	maxHeightKey,
+	downscaleAckKey,
 }
 
 // ProfileKnobs returns the closed set of knobs a library_roots entry may override, in
@@ -159,6 +168,18 @@ type Profile struct {
 	// what a Profile assembled in Go carries. See Config.Deinterlace for the whole of what
 	// the key means.
 	Deinterlace string `yaml:"deinterlace"`
+
+	// MaxHeight is the OUTPUT height ceiling: a source taller than it is scaled down to it
+	// before it is encoded, one at or below it is left alone. 0 - the default, and what a
+	// Profile assembled in Go carries - is no ceiling at all, which is what this tool did
+	// before the key existed.
+	//
+	// DownscaleAck is the operator's separate affirmation that a replacement with fewer
+	// pixels than its source is acceptable. It keeps the nil-is-the-default meaning the
+	// pointers above keep, and its default is FALSE. See ceiling.go for why it is a second
+	// key rather than a second reading of the first.
+	MaxHeight    int   `yaml:"max_height"`
+	DownscaleAck *bool `yaml:"downscale_acknowledged"`
 
 	// Rules are this root's ordered, first-match resolution bands (see rules.go). They are
 	// NOT a knob and carry no `yaml` tag of their own: they are resolved out of the entry
@@ -245,6 +266,8 @@ func (p Profile) values() []string {
 		strconv.FormatBool(p.CommentaryKept()),
 		strconv.FormatBool(p.RemuxOnlyEnabled()),
 		renderDeinterlace(p.Deinterlace),
+		renderMaxHeight(p.MaxHeight),
+		strconv.FormatBool(p.DownscaleAcknowledged()),
 	}
 }
 
@@ -300,7 +323,7 @@ func (p Profile) Digest() string {
 	var b strings.Builder
 	vals := p.values()
 	for i, knob := range profileKnobs {
-		if knob == deinterlaceKey && vals[i] == deinterlace.Off {
+		if digestSilent(profileKnobs[i], vals[i]) {
 			continue
 		}
 		b.WriteString(knob)
@@ -316,6 +339,25 @@ func (p Profile) Digest() string {
 	}
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:])[:digestLength]
+}
+
+// digestSilent reports whether this knob at this RENDERED value contributes nothing to the
+// digest, because the value is the one every configuration written before the knob existed
+// resolves to. It is the whole of the conditional rule Digest describes, in one place, so a
+// knob added on those terms cannot be half-added.
+//
+// The test is the rendered VALUE and not "does this build accept it", so a value nobody can
+// resolve still digests apart from the default rather than collapsing into it.
+func digestSilent(knob, value string) bool {
+	switch knob {
+	case deinterlaceKey:
+		return value == deinterlace.Off
+	case maxHeightKey:
+		return value == noCeiling
+	case downscaleAckKey:
+		return value == "false"
+	}
+	return false
 }
 
 // validate runs every per-value refusal that belongs to a knob a profile may carry. It
@@ -372,6 +414,12 @@ func (p Profile) validate() error {
 		return errVmafGateNeverRejects
 	}
 	if err := p.validateDeinterlace(); err != nil {
+		return err
+	}
+	// The output height ceiling, held to the same bar wherever it was written: a value this
+	// build cannot target is refused at START, by name, rather than met halfway through a
+	// library. See ceiling.go for why an odd height is refused rather than rounded.
+	if err := p.validateCeiling(); err != nil {
 		return err
 	}
 	// The stream-selection keys, refused by the same function and therefore in the same
@@ -687,6 +735,15 @@ func parseRootMapping(i int, m map[string]any, file string) (rootEntry, error) {
 			return rootEntry{}, fmt.Errorf("%s sets %q with no value: a profile knob either carries a value "+
 				"(which overrides the top level, even when it is zero) or is absent (which inherits it)",
 				where, key)
+		}
+		// The ceiling goes through its own reading here, where the value the operator WROTE
+		// is still in hand: past resolveRoots a written 0 and an absent key are one state,
+		// and 0 is the no-ceiling sentinel there. Same discipline as the top level's own
+		// check and a rule's, in the same words. See ceiling.go.
+		if key == maxHeightKey {
+			if _, err := ceilingValue(where, val); err != nil {
+				return rootEntry{}, err
+			}
 		}
 		override[key] = val
 	}

@@ -30,11 +30,12 @@ import (
 //
 // # Why the bounds are spelled min_source_height / max_source_height
 //
-// They select which files a rule applies TO. A later item adds downscaling, whose
-// `max_height` is an output CEILING - a target - and two keys one word apart, one
-// selecting inputs and one shaping outputs, is a configuration an operator gets wrong once
-// and does not notice. So `min_height` and `max_height` are REFUSED here by name, with the
-// distinction stated, rather than accepted as synonyms.
+// They select which files a rule applies TO. `max_height` is an output CEILING - a target,
+// and a knob a rule may carry beside its `when` - and two keys one word apart, one selecting
+// inputs and one shaping outputs, is a configuration an operator gets wrong once and does not
+// notice. So `min_height` and `max_height` are REFUSED INSIDE A `when` by name, with the
+// distinction stated and with the place `max_height` does belong named, rather than accepted
+// as synonyms.
 
 const (
 	// rulesKey is the one place the key is spelled: the entry parser, the top-level
@@ -48,10 +49,10 @@ const (
 	maxSourceHeightKey = "max_source_height"
 
 	// The two spellings a `when` REFUSES, named here because the refusal has to name
-	// them: they are the keys the downscale item takes for its output ceiling, and an
-	// operator who writes one here meant one of the two above.
+	// them. `max_height` is a real key - the output ceiling, written beside `when` rather
+	// than inside it (see ceiling.go, which spells it) - and `min_height` is nothing at
+	// all; an operator who writes either inside a `when` meant one of the two bounds above.
 	minHeightKey = "min_height"
-	maxHeightKey = "max_height"
 )
 
 // ruleKnobs is THE enumeration of the knobs a rule may override, in the order a rule is
@@ -59,13 +60,19 @@ const (
 // list the refusal for an unknown rule key is rendered from - so a knob added here by a
 // later item is named by that message with no second list to edit.
 //
-// It is deliberately three and not fourteen. These are the knobs whose right value depends
+// It is deliberately four and not fourteen. These are the knobs whose right value depends
 // on how many pixels the source has: the floor below which re-encoding reclaims nothing,
-// the quality target, and the saving that makes the attempt worth taking. `encoder`,
-// `vmaf_model` and the rest do not vary by band, and a rule that could move the VMAF
-// floors would be a rule that could weaken the gate standing between a band of files and
-// the deletion of their sources.
-var ruleKnobs = []string{"min_bitrate_kbps", "crf", "min_savings_percent"}
+// the quality target, the saving that makes the attempt worth taking, and the ceiling the
+// output's own height is held to. `encoder`, `vmaf_model` and the rest do not vary by band,
+// and a rule that could move the VMAF floors would be a rule that could weaken the gate
+// standing between a band of files and the deletion of their sources.
+//
+// `max_height` is the newest member and the most obviously band-shaped of the four: capping
+// a 2160p band at 1080 while leaving a 576p band alone is the whole reason an operator writes
+// a ceiling per band rather than per library. It is a CEILING and never a floor - a rule
+// cannot raise a source's resolution - so a band that sets one can only ever produce a
+// smaller picture, never a bigger one.
+var ruleKnobs = []string{"min_bitrate_kbps", "crf", "min_savings_percent", maxHeightKey}
 
 // RuleKnobs returns the closed set of knobs a rule may override, in the order a rule is
 // printed. It returns a copy: the set is closed, and a caller must not be able to open it.
@@ -135,6 +142,7 @@ type Rule struct {
 	MinBitrateKbps    *int
 	CRF               *int
 	MinSavingsPercent *int
+	MaxHeight         *int
 }
 
 // knob returns the value this rule supplies for key, and whether it supplies one. It is
@@ -149,6 +157,8 @@ func (r Rule) knob(key string) (int, bool) {
 		p = r.CRF
 	case "min_savings_percent":
 		p = r.MinSavingsPercent
+	case maxHeightKey:
+		p = r.MaxHeight
 	}
 	if p == nil {
 		return 0, false
@@ -178,6 +188,9 @@ func (r Rule) applyTo(p Profile) Profile {
 	}
 	if v, ok := r.knob("min_savings_percent"); ok {
 		p.MinSavingsPercent = v
+	}
+	if v, ok := r.knob(maxHeightKey); ok {
+		p.MaxHeight = v
 	}
 	return p
 }
@@ -337,7 +350,18 @@ func parseRule(where string, item any) (Rule, error) {
 			}
 			r.When = band
 		case isRuleKnob(key):
-			v, err := ruleKnobValue(where, key, val)
+			// `max_height` goes through its OWN reading, which refuses every value this
+			// build cannot target - a present 0 and an odd height included - in the same
+			// words the top level and a `library_roots` entry refuse them. The generic
+			// whole-number read below would accept both and leave the ceiling to be
+			// discovered as a failed encode halfway through a library.
+			var v int
+			var err error
+			if key == maxHeightKey {
+				v, err = ceilingValue(where, val)
+			} else {
+				v, err = ruleKnobValue(where, key, val)
+			}
 			if err != nil {
 				return Rule{}, err
 			}
@@ -348,6 +372,8 @@ func parseRule(where string, item any) (Rule, error) {
 				r.CRF = &v
 			case "min_savings_percent":
 				r.MinSavingsPercent = &v
+			case maxHeightKey:
+				r.MaxHeight = &v
 			}
 		default:
 			return Rule{}, fmt.Errorf("%s has unknown key %q: a rule may carry %s and nothing else",
@@ -388,9 +414,11 @@ func parseBand(where string, raw any) (Band, error) {
 		case minHeightKey, maxHeightKey:
 			return Band{}, fmt.Errorf("%s: a %s bound is spelled %s / %s, not %q. A %s bound "+
 				"selects which files a rule applies TO - it is a property of the SOURCE - and is "+
-				"not an output ceiling: nothing here downscales, and a rule cannot change the "+
-				"resolution of what is written",
-				where, whenKey, minSourceHeightKey, maxSourceHeightKey, key, whenKey)
+				"not an output ceiling. %s IS an output ceiling and this rule may carry one, but "+
+				"BESIDE the %s rather than inside it: a rule whose %s selects a band, and whose "+
+				"%s caps what that band is encoded to",
+				where, whenKey, minSourceHeightKey, maxSourceHeightKey, key, whenKey,
+				maxHeightKey, whenKey, whenKey, maxHeightKey)
 		default:
 			return Band{}, fmt.Errorf("%s: a %s has unknown key %q: it may carry %s and %s and "+
 				"nothing else", where, whenKey, key, minSourceHeightKey, maxSourceHeightKey)

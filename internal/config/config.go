@@ -62,7 +62,9 @@ var knownKeys = map[string]bool{
 	excludePathsKey: true, includePathsKey: true,
 	audioLanguagesKey: true, subtitleLanguagesKey: true,
 	keepCommentaryKey: true, remuxOnlyKey: true,
-	deinterlaceKey: true,
+	deinterlaceKey:  true,
+	maxHeightKey:    true,
+	downscaleAckKey: true,
 }
 
 // profileKeys are the keys accepted inside one `encode_profiles` entry. The
@@ -132,6 +134,14 @@ func defaultLayer() map[string]any {
 		// an empty string rather than the shipped default - the two mean the same thing to
 		// deinterlace.Lookup, and only one of them prints as an answer in `validate`.
 		deinterlaceKey: deinterlace.Off,
+		// No output height ceiling and no acknowledgement of one, which is what this tool
+		// has always done: a replacement carries the source's own resolution. Both are knobs
+		// in profileKnobs and are seeded from the top-level value of the same key, so each
+		// needs an entry here or a root would inherit the Go zero rather than the shipped
+		// default - and MaxHeightDefault reads this map rather than restating the number,
+		// which is what lets the shipped documentation be graded against it.
+		maxHeightKey:    0,
+		downscaleAckKey: false,
 	}
 }
 
@@ -228,6 +238,27 @@ type Config struct {
 	// changes the frame count that packet-count parity and duration parity are graded on.
 	// See internal/deinterlace, which is the one place a value resolves to a filter.
 	Deinterlace string `yaml:"deinterlace"`
+
+	// MaxHeight is the OUTPUT height ceiling and DownscaleAck is the affirmation that
+	// stands beside it. Both default to "no ceiling, not acknowledged", which is what this
+	// tool did before either key existed: a replacement carries the source's own resolution.
+	//
+	// MaxHeight is the second knob in this file that changes what the replacement IS, and it
+	// is the blunter of the two: a source taller than it is SCALED DOWN to it in the source's
+	// own aspect ratio, so the pixels above that height are gone from the replacement and the
+	// swap deletes the original. Notices() says so out loud before the first file goes.
+	//
+	// It may also be written inside a `library_roots` entry and inside one of that entry's
+	// `rules`, which is what lets a 4K band be capped while an SD band is left alone. A
+	// height this build cannot target - not a whole number, not positive, or ODD, which
+	// 4:2:0 chroma subsampling has no representation for - is refused at start by name.
+	//
+	// DownscaleAck is NOT a second spelling of MaxHeight. With `undo_window_hours: 0` (the
+	// default) a swap is FINAL, and a file that would be downscaled under that combination is
+	// SKIPPED unless this key affirms it. See ceiling.go, which is the one place either value
+	// resolves.
+	MaxHeight    int   `yaml:"max_height"`
+	DownscaleAck *bool `yaml:"downscale_acknowledged"`
 
 	// LogLevel controls verbosity: debug|info|warn|error (default info).
 	LogLevel string `yaml:"log_level"`
@@ -773,6 +804,8 @@ func (c *Config) TopLevelProfile() Profile {
 		KeepCommentary:    c.KeepCommentary,
 		RemuxOnly:         c.RemuxOnly,
 		Deinterlace:       c.Deinterlace,
+		MaxHeight:         c.MaxHeight,
+		DownscaleAck:      c.DownscaleAck,
 	}
 }
 
@@ -912,6 +945,24 @@ func Load(path string) (*Config, error) {
 	// faithfully and is refused by Validate, with the rest of the range checks.)
 	if err := requireWholeRows(k.Get(retentionKey), retentionKey, path); err != nil {
 		return nil, err
+	}
+
+	// max_height is a WHOLE NUMBER OF PIXELS this build must be able to target, and the
+	// decoders below would read 1080.5 as 1080, "1080" as 1080 and `true` as 1 without a
+	// word - three resolutions the operator did not write, on the knob that decides how many
+	// pixels their replacements keep. Same discipline as the retention and bitrate checks;
+	// ahead of resolveRoots, which seeds every root from this value and would otherwise
+	// refuse it in mapstructure's words rather than in ones naming the key and the fix.
+	//
+	// It is checked against the value the FILE or the ENVIRONMENT carried, because that is
+	// the only layer at which a written 0 is still distinguishable from the shipped default -
+	// and a written 0 is a typo rather than an instruction, since a ceiling of zero pixels is
+	// not a picture. An entry's own value and a rule's go through the same function at their
+	// own parse sites. See ceiling.go.
+	if explicitTop[maxHeightKey] {
+		if _, err := ceilingValue("the top level of "+path, k.Get(maxHeightKey)); err != nil {
+			return nil, err
+		}
 	}
 
 	// The per-root profiles, resolved once, here. library_roots is the one key whose
@@ -1508,6 +1559,18 @@ func (c *Config) Notices() []string {
 	// and that is precisely the thing somebody deleting originals should hear stated before
 	// the first one goes.
 	n = append(n, c.deinterlaceNotices()...)
+	// The output height ceiling, stated once per root that sets one and NAMING that root,
+	// for the reason the deinterlace notice above is: one process may run over a 4K library
+	// that is capped and a film library that is left alone.
+	//
+	// It is a NOTICE and not a warning, on this file's own rule: no gate is weakened, every
+	// floor still applies at its configured strictness, the perceptual gate scores the output
+	// back at the source's own resolution rather than against a reference degraded to meet
+	// it, and a rejected encode still leaves the source untouched. What it says is what
+	// nothing else here can say - that a replacement made under this key is a smaller picture
+	// than the source it replaces - and that is precisely the thing somebody deleting
+	// originals should hear stated before the first one goes.
+	n = append(n, c.downscaleNotices()...)
 	if strings.TrimSpace(c.ScratchDir) != "" {
 		n = append(n, "scratch_dir is set - the encoder writes its working file to "+strings.TrimSpace(c.ScratchDir)+
 			" and the accepted result is COPIED BACK into a temp beside the source before the swap. The swap itself is "+

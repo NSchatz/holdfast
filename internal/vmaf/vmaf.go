@@ -1,8 +1,8 @@
 // Package vmaf runs libvmaf (via ffmpeg) to measure the perceptual quality of a transcoded
 // output against its source: the last no-loss layer. The structural gates prove an output
 // exists, decodes and carries the tracks; VMAF ESTIMATES whether it still looks like the
-// source. A codec-only transcode keeps the resolution identical, so it applies with no
-// scaling.
+// source. A transcode that keeps the resolution identical - which is every job on a
+// configuration that sets no `max_height` - applies with no scaling at all.
 //
 // Three pooled statistics come back and the gate needs ALL of them (see Result): a mean
 // alone averages a destroyed segment away, and luma alone misses a transcode that leaves
@@ -10,6 +10,25 @@
 //
 // libvmaf's filter takes the DISTORTED stream as its first input and the REFERENCE as its
 // second; getting this backwards inverts the meaning, so it is fixed here.
+//
+// # Scoring across a resolution change, and the direction that is not optional
+//
+// Where the encode scaled the picture down, the two files are no longer the same size and
+// something has to make them one. The choice is not symmetric and only one arm of it is a
+// measurement of the encode:
+//
+//   - Scale the DISTORTED output back UP to the source's resolution and score there. Every
+//     detail the downscale threw away is missing from the up-scaled output and present in
+//     the reference, so the pooled statistics carry what the downscale cost. This is what
+//     DistortedFilter does and it is the only direction this package offers.
+//   - Scale the REFERENCE down to meet the output. The detail is then absent from BOTH
+//     sides, nothing measures its loss, every downscaled encode scores near the top of the
+//     scale, and the floors admit outputs they exist to refuse. The source is deleted
+//     immediately afterwards, and nothing can re-run a measurement whose subject is gone.
+//
+// So a scaling filter reaches the reference chain through exactly one field, ReferenceFilter,
+// whose whole job is to reproduce on the source a transformation the ENCODE also applied
+// (today a deinterlace). The up-scale is not such a transformation and never travels there.
 package vmaf
 
 import (
@@ -83,6 +102,18 @@ type Result struct {
 	// the number everywhere the number goes, because a score whose reference nobody can name
 	// is not interpretable.
 	ReferenceFilter string
+
+	// DistortedFilter is the filter expression the DISTORTED output was put through before
+	// the comparison, and "" where it was scored as it is - which is every job that scaled
+	// nothing.
+	//
+	// Today it carries one thing: the up-scale back to the source's resolution that a
+	// downscaling job owes. It is recorded for the reason ReferenceFilter is, and with one
+	// extra claim: it says WHICH SIDE was resampled. A row carrying a scale on this field
+	// was scored at the source's resolution against an unfiltered reference; a row carrying
+	// one on ReferenceFilter would have been scored against a reference that was degraded
+	// first, and those two numbers are not comparable.
+	DistortedFilter string
 }
 
 // Request is one scoring pass: which files, at what sampling interval, under which model,
@@ -108,7 +139,20 @@ type Request struct {
 	// it carry its own options (`yadif=mode=send_frame:parity=auto:deint=all`). Its value
 	// comes from this build's own closed registry (internal/deinterlace) and never from a
 	// path, a filename or anything else a library can influence.
+	//
+	// A SCALE NEVER BELONGS HERE. See the package comment: a reference resampled down to
+	// meet a smaller output is a reference that lost the detail the gate exists to measure.
 	ReferenceFilter string
+
+	// DistortedFilter is an ffmpeg filter expression applied to the DISTORTED output before
+	// the comparison, so that an output the encode made SMALLER is scored at the resolution
+	// of the file it is about to replace. "" is the ordinary case and leaves the graph
+	// exactly as it was.
+	//
+	// It is a filter EXPRESSION on the same terms ReferenceFilter is, and its value comes
+	// from this build's own closed registry (internal/downscale) and never from anything a
+	// library can influence.
+	DistortedFilter string
 }
 
 // ErrUnavailable indicates the ffmpeg build has no libvmaf filter, so quality cannot be
@@ -212,10 +256,19 @@ func BuildFilter(req Request, logPath string) string {
 	if req.ReferenceFilter != "" {
 		ref = req.ReferenceFilter + ","
 	}
+	// The DISTORTED's own chain, composed on exactly the same terms and in exactly the same
+	// place. It carries the up-scale a downscaling job owes, and the asymmetry between the
+	// two is the whole safety property of this graph: the resampling that makes two
+	// differently-sized files comparable is applied to the OUTPUT, never to the source the
+	// output is graded against. See the package comment for what the mirror image would cost.
+	dist := ""
+	if req.DistortedFilter != "" {
+		dist = req.DistortedFilter + ","
+	}
 	return fmt.Sprintf(
-		"[0:%s]format=%s[dist];[1:%s]%sformat=%s[ref];"+
+		"[0:%s]%sformat=%s[dist];[1:%s]%sformat=%s[ref];"+
 			"[dist][ref]libvmaf=model=%s:feature=%s:log_fmt=json:log_path=%s:n_subsample=%d",
-		ScoredStream, req.PixelFormat, ScoredStream, ref, req.PixelFormat,
+		ScoredStream, dist, req.PixelFormat, ScoredStream, ref, req.PixelFormat,
 		req.Model, chromaFeature, escapeFilterValue(logPath), sub)
 }
 
@@ -276,6 +329,7 @@ func Score(ctx context.Context, ffmpeg string, req Request) (Result, error) {
 		PixelFormat:     req.PixelFormat,
 		Stream:          ScoredStream,
 		ReferenceFilter: req.ReferenceFilter,
+		DistortedFilter: req.DistortedFilter,
 	}, nil
 }
 

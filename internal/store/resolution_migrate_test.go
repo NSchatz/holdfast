@@ -146,7 +146,7 @@ func TestResolution_AMigrationThatCannotCompleteRefusesToOpenAndMovesNothing(t *
 	// this package tracks the end of the migrations slice: a step appended after this line
 	// moves it, and pre-adding a column an EARLIER step already created would break the
 	// fixture rather than the migration under test.
-	execRaw(t, dbPath, `ALTER TABLE jobs ADD COLUMN deinterlaced INTEGER`)
+	execRaw(t, dbPath, `ALTER TABLE jobs ADD COLUMN downscaled INTEGER`)
 
 	st, err := Open(dbPath)
 	if err == nil {
@@ -165,8 +165,8 @@ func TestResolution_AMigrationThatCannotCompleteRefusesToOpenAndMovesNothing(t *
 	}
 	// The other half of "rather than run against a half-migrated database": the columns the
 	// step would have added are not there, so nothing wrote into a shape that half exists.
-	if columnExists(t, dbPath, "deinterlace_filter") {
-		t.Error("the failed step left deinterlace_filter behind: the transaction did not roll back")
+	if columnExists(t, dbPath, "downscale_scaler") {
+		t.Error("the failed step left downscale_scaler behind: the transaction did not roll back")
 	}
 }
 

@@ -1325,7 +1325,7 @@ func atShippedVersion(t *testing.T, path string, version int) {
 // migrations slice: a step appended after this one moves it, along with the wind-back
 // fixtures. Where that step creates a table instead, this becomes a table name and the two
 // readers below ask sqlite_master rather than pragma_table_info.
-const newestStepColumn = "deinterlaced"
+const newestStepColumn = "downscaled"
 
 // stampedFromVersion is the step that added the per-record version stamp. It is looked up
 // in the history rather than written out, so appending a step cannot move it by accident.
