@@ -98,6 +98,30 @@ const (
 	// next scan offers the file to the pipeline again.
 	SkipUndeterminedSourceHeight = "undetermined-source-height"
 
+	// SkipTelecineCadence is the CADENCE guard, and it fires only where a deinterlace was
+	// configured: the source is telecined, or its cadence could not be established either
+	// way, so the deinterlace that was asked for is not the right operation for it.
+	//
+	// Telecine is progressive film carried in an interlaced stream by repeating fields on a
+	// 3:2 pattern. Deinterlacing one interpolates fields that were never a moving picture
+	// and leaves judder that NO perceptual metric flags well - the frames it produces are
+	// individually plausible, so VMAF scores them highly while the motion is visibly wrong,
+	// and the swap then deletes the source. That is the worst outcome this pipeline has: a
+	// wrong answer every gate agrees with. Undoing telecine is inverse telecine, a different
+	// transformation with its own gates to argue, and it is not built here - so a telecined
+	// source is left exactly as it is, whatever `deinterlace` is set to.
+	//
+	// An UNESTABLISHED cadence skips under the same token, for the reason every unknown in
+	// this pipeline does: a detector that could not decide is not a licence to transform.
+	// The two share a token because they share a remedy - this build leaves the file alone -
+	// and the row's log line carries which of them it was.
+	//
+	// It reads the `deinterlace` key (it exists only because that key is on), so its rows
+	// record that value and turning the key off re-derives them. `requeue --guard
+	// telecine-cadence` is the lever for the rest: a re-encoded source, or a later build
+	// that can tell the two apart where this one could not.
+	SkipTelecineCadence = "telecine-cadence"
+
 	// SkipUnknownFieldOrder is the FIELD-ORDER guard: ffprobe did not establish whether the
 	// source is progressive or interlaced, so nothing in front of the encoder knows which it
 	// is.
@@ -173,6 +197,7 @@ var SkipVocabulary = []string{
 	SkipUndoRetentionFailed,
 	SkipUndeterminedSourceHeight,
 	SkipUnknownFieldOrder,
+	SkipTelecineCadence,
 	SkipOperatorExcluded,
 	SkipRestoredOriginal,
 }
@@ -2210,9 +2235,36 @@ func (e *Engine) interlacedVerdict(ctx context.Context, f string, prof config.Pr
 	// nothing here, because the key is offered only where it is enabled (see
 	// InputDeinterlace) - so a row written for such a root is the row this build's
 	// predecessor wrote.
-	return sourceVerdict{guard: SkipInterlaced, codec: codec,
+	interlaced := sourceVerdict{guard: SkipInterlaced, codec: codec,
 		inputs: []string{InputDeinterlace},
-		log:    "skip (interlaced - not deinterlacing)"}, true
+		log:    "skip (interlaced - not deinterlacing)"}
+
+	if !prof.DeinterlaceEnabled() {
+		return interlaced, true
+	}
+
+	// A deinterlace was asked for, so the CADENCE decides. It costs a bounded decode of the
+	// source and is taken here, on a file that has already cleared every cheap guard and is
+	// about to be transformed - never on the ordinary path, where the answer would be paid
+	// for by every file in a library and read by nothing.
+	cad := props.Cadence()
+	if !cad.Deinterlaceable() {
+		return sourceVerdict{guard: SkipTelecineCadence, codec: codec,
+			inputs: []string{InputDeinterlace},
+			log: "skip (this source is not one a deinterlace is the right operation for - a telecined " +
+				"source needs inverse telecine, which this build does not do, and an unestablished " +
+				"cadence is not a licence to transform)",
+			logArgs: []any{
+				"cadence", string(cad.Class),
+				"frames_classified", cad.Frames,
+				"repeated_fields", cad.Repeated,
+				"interlaced_frames", cad.Interlaced,
+				"why", cad.Why,
+			}}, true
+	}
+	// Real interlacing, no pulldown, and a filter configured for it: the file proceeds to
+	// the encode, which applies that filter.
+	return sourceVerdict{}, false
 }
 
 // advance is a small logged wrapper around Store.Advance — a store error here is

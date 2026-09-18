@@ -52,6 +52,9 @@ type VideoProps struct {
 	allOnce sync.Once
 	all     []Stream // every stream the file carries, in container order
 	allOK   bool     // whether ffprobe established that list at all
+
+	cadenceOnce sync.Once
+	cadence     Cadence // what a bounded decode found the source's interlacing to be
 }
 
 // scalarStreamEntries are every scalar video-stream field a source skip-guard or the
@@ -263,6 +266,21 @@ func (vp *VideoProps) AllStreams() (streams []Stream, established bool) {
 		vp.all, vp.allOK = vp.p.Streams(vp.ctx, vp.f)
 	})
 	return vp.all, vp.allOK
+}
+
+// Cadence returns what a bounded decode found this source's interlacing to BE - real
+// interlacing, a telecine pulldown, or something nobody could establish - byte-for-byte the
+// contract of Prober.Cadence.
+//
+// Lazy and memoised, and here the laziness is the whole reason it is on the snapshot: it
+// DECODES, where every other field on this type is read from a header. Only a file whose
+// container reports an interlaced field order AND whose root asks for a deinterlace is ever
+// asked, so no file any existing configuration processes pays for it at all.
+func (vp *VideoProps) Cadence() Cadence {
+	vp.cadenceOnce.Do(func() {
+		vp.cadence = vp.p.Cadence(vp.ctx, vp.f)
+	})
+	return vp.cadence
 }
 
 // normColorValue drops the ffprobe non-values ("unknown"/"reserved"/"N/A"/"") to ""

@@ -19,7 +19,9 @@ configuration values **the decision that wrote it actually read**, and no others
 | `skipped / target-already-exists` | `container_ext` |
 | `done` | `target_codec`, `encoder`, `crf`, `preset` - the settings the encode was taken under, resolved for the **replacement's** path |
 | `skipped / undetermined-source-height` | `rules` - the band list its root carries. That guard read no threshold at all: what it read was that the root selects thresholds by a height nobody could establish |
-| a guard that read no configuration (interlaced, Dolby Vision, a symlinked source) | nothing, recorded **as** nothing read: a verdict no key can move |
+| `skipped / interlaced` | `deinterlace`, where the root sets one. A root that leaves it `off` - the default - records nothing here, exactly as this guard always has |
+| `skipped / telecine-cadence` | `deinterlace` - that guard exists only because the key is on, so turning it off re-derives every row it wrote |
+| a guard that read no configuration (Dolby Vision, a symlinked source, `unknown-field-order`) | nothing, recorded **as** nothing read: a verdict no key can move |
 
 Where a library root carries [resolution rules](profiles.md#resolution-rules), the value a
 row records is the **effective** one the guard compared against - the floor the file's own
