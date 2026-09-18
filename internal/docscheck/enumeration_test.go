@@ -90,9 +90,9 @@ func TestEnumerationFiguresAreRecorded(t *testing.T) {
 	}
 }
 
-// TestEnumerationFiguresCheckBites proves that check can FAIL, clause by clause: dropping the
-// hardware, the build, the date, the run count, the spread or either figure is refused, and
-// the refusal names what went missing.
+// TestEnumerationFiguresCheckBites proves that check can FAIL, which is the other half of the
+// recording clause [AC-9] and [AC-10] share: dropping the hardware, the build, the date, the
+// run count, the spread or either figure is refused, and the refusal names what went missing.
 func TestEnumerationFiguresCheckBites(t *testing.T) {
 	full := make([]string, 0, len(docscheck.EnumerationFigureClauses))
 	for _, c := range docscheck.EnumerationFigureClauses {
