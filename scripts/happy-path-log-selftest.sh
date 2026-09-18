@@ -129,7 +129,7 @@ expect() {
   for re in "$@"; do
     printf '%s' "$out" | grep -qF -- "$re" || missing="$missing [$re]"
   done
-  [ -z "$missing" ] || why="$why; output never names$missing"
+  [ -z "$missing" ] || why="${why:+$why; }output never names$missing"
   if [ -z "$why" ]; then
     printf '  ok  %s: %s\n' "$criterion" "$name"
     pass=$((pass + 1))
