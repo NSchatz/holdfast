@@ -11,8 +11,9 @@ the tests of the package that line is in, and records whether they failed. A fau
 tests notice is KILLED; one they run straight past is LIVED.
 
 The runner is [gremlins](https://gremlins.dev). The Makefile owns its pin, the way it owns
-`staticcheck` and `govulncheck`, and it is reached with `go run <module>@<version>`: it is
-not a requirement of this module and does not appear in `go.mod`.
+`staticcheck` and `govulncheck`, and it is installed from that pin into a temporary
+directory that is thrown away with the run: it is not a requirement of this module and does
+not appear in `go.mod`.
 
 ## The floor
 
@@ -60,17 +61,24 @@ An excluded path is an UNMEASURED path. That is the honest weak point of this ga
 is why the list is short, why every entry carries its reason here, and why
 `make mutation-shape` refuses to let this table drift away from `.gremlins.yaml`.
 
-An entry earns its place one of two ways: the package's tests need the pinned ffmpeg,
-which the mutation job does not install, or the suite takes long enough that re-running it
-once per mutant does not finish. The timings below are wall-clock `go test` measurements
-of the package's own suite.
+An entry earns its place one way: re-running that package's own suite once per mutant does
+not finish. The timings below are wall-clock `go test` measurements of the suite, and a
+mutant costs one of them.
+
+Needing the real ffmpeg is NOT by itself a reason to be outside the domain. `internal/probe`
+and `internal/encoder` drive the real `ffmpeg` and `ffprobe`, fail loud without them, and are
+inside the domain at 1.2 and 0.7 seconds a suite - so the job that runs the mutation installs
+the pinned build through `scripts/install-ffmpeg.sh`, exactly the way `ci.yml` does. The gate
+runs the domain's suite before it mutates anything and refuses to measure a tree that is not
+green, so a job that could not run those suites would publish no score at all rather than a
+low one.
 
 <!-- mutation-exclusions -->
 | excluded path | why it is excluded |
 |---|---|
 | `^internal/engine/` | Real libx265 encodes behind the real verify gate. The Makefile records this suite at 524 to 568 seconds ALONE under `-race`, and a mutant re-runs it. |
-| `^internal/vmaf/` | Drives libvmaf through the pinned ffmpeg: the instrument the no-loss verdict is measured with, and not something a mutation job should install in order to mutate. |
-| `^cmd/holdfast/` | Drives real oneshot runs end to end - a real encode, a real VMAF measurement, a real swap - so it needs the pinned ffmpeg for the same reason `internal/engine` does. |
+| `^internal/vmaf/` | 24 seconds: every case measures VMAF over a real encode through libvmaf, once per mutant. |
+| `^cmd/holdfast/` | 147 seconds: drives real oneshot runs end to end - a real encode, a real VMAF measurement, a real swap - once per mutant. |
 | `^internal/store/` | 143 seconds: sqlite migrations and ledger-scale fixtures, once per mutant. |
 | `^internal/server/` | 97 seconds: the HTTP surface's own suite, once per mutant. |
 | `^internal/metrics/` | 23 seconds: collector registration and scrape fixtures, once per mutant. |
@@ -123,11 +131,20 @@ fails too, and the run was already red.
     make mutation-diff REF=origin/main     # what a pull request runs
     make mutation-full                     # what the schedule runs
     make mutation-shape                    # the hermetic agreement gate, also part of `make check`
-    make mutation-selftest                 # proves the gate still bites
+    make mutation-selftest                 # proves the gate still bites; ci.yml runs it too
 
-`REF` is any git reference: the diff scope is taken against the merge base with it. The
-unscoped run needs no network beyond the module proxy and no ffmpeg, because nothing in
-the domain needs one.
+`REF` is any git reference: the diff scope is taken against the merge base with it.
+
+Either run needs the pinned ffmpeg and ffprobe on `PATH`, because `internal/probe` and
+`internal/encoder` are inside the domain and their suites drive the real binaries:
+
+    sudo mkdir -p /opt/ffmpeg && sudo chown "$USER" /opt/ffmpeg
+    ./scripts/install-ffmpeg.sh /opt/ffmpeg
+    export PATH="/opt/ffmpeg/bin:$PATH"
+
+That is the same script and the same pin `.github/workflows/mutation.yml` and `ci.yml`
+install, and beyond it a run needs no network except the module proxy the pinned runner
+comes from.
 
 Both runs write `mutation-report.json`: the mode, the reference, the floor, the score, the
 mutant counts, and every file that was mutated with what became of its mutants. The file

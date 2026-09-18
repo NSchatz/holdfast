@@ -20,26 +20,28 @@ unleash:
     # would make a red run ambiguous about which of the two failed.
     mutant-coverage: 0
 
-  # THE MUTATION DOMAIN: the module minus these paths. Every entry is here for one of two
-  # reasons, and docs/mutation-testing.md states the reason and the measurement beside
-  # each. An excluded path is an UNMEASURED path, so this list is the honest weak point of
-  # the gate and is kept as short as the run cost allows.
+  # THE MUTATION DOMAIN: the module minus these paths. Every entry carries its reason and
+  # its measurement, here and in docs/mutation-testing.md. An excluded path is an
+  # UNMEASURED path, so this list is the honest weak point of the gate and is kept as short
+  # as the run cost allows.
   #
-  # The rule that decides an entry: a package is excluded when its own test suite needs
-  # the pinned ffmpeg (which the mutation job does not install), or when the suite takes
-  # long enough that re-running it once per mutant does not finish. Every other package in
-  # the module is in the domain, including the ones that carry no tests at all - those
-  # score NOT COVERED, which the floor's figure ignores, and they start counting on the
-  # day someone gives them a test.
+  # The rule that decides an entry: a package is excluded when re-running its own test
+  # suite once per mutant does not finish. NEEDING THE REAL FFMPEG IS NOT A REASON -
+  # internal/probe and internal/encoder need it, cost a second each, and are in the domain,
+  # which is why .github/workflows/mutation.yml installs the pinned build through
+  # scripts/install-ffmpeg.sh the same way ci.yml does. Every other package in the module
+  # is in the domain too, including the ones that carry no tests at all - those score NOT
+  # COVERED, which the floor's figure ignores, and they start counting on the day someone
+  # gives them a test.
   exclude-files:
     # Real libx265 encodes behind the real verify gate. The Makefile records this suite at
     # 524 to 568 seconds ALONE under -race, and a mutant re-runs it.
     - '^internal/engine/'
-    # libvmaf through the pinned ffmpeg: the instrument the no-loss verdict is measured
-    # with, and not something a mutation job should be installing to mutate.
+    # Measured at 24 seconds: every case measures VMAF over a real encode through libvmaf,
+    # once per mutant.
     - '^internal/vmaf/'
-    # Drives real oneshot runs end to end - a real encode, a real VMAF measurement, a real
-    # swap - so it needs the pinned ffmpeg for the same reason internal/engine does.
+    # Measured at 147 seconds: real oneshot runs end to end - a real encode, a real VMAF
+    # measurement, a real swap - once per mutant.
     - '^cmd/holdfast/'
     # Measured at 143 seconds: sqlite migrations and ledger-scale fixtures, once per
     # mutant.

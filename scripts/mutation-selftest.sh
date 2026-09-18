@@ -13,9 +13,10 @@
 #   AC-3  a change touching no Go file in the domain reports that and exits ZERO, without
 #         reaching for the runner. Nothing to mutate is not a score of zero.
 #   AC-4  the workflow's own planning shell decides which run happens; flipping it is red.
-#   AC-5  the scheduled run's notification is graded by its own Go tests against a stubbed
-#         issues API (scripts/mutation-gate/notify_test.go); the shape of the step that
-#         fires it is graded here.
+#   AC-5  the scheduled run's notification is driven against a stubbed issues API by
+#         scripts/mutation-gate/notify_test.go, which this target RUNS - the criterion's
+#         grade route has to decide the criterion - and the shape of the step that fires it,
+#         including the guard that decides whether it fires at all, is graded here.
 #   AC-6  a runner that cannot be obtained, or cannot execute, exits non-zero naming the
 #         module path, the pin and the command - and reports NO number in place of a score.
 #   AC-8  the floor and the exclusion list in .gremlins.yaml and docs/mutation-testing.md
@@ -29,7 +30,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::mutation selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=21
+declared=24
 pass=0; failed=0
 repo="$work/repo"
 out=""
@@ -292,7 +293,35 @@ cmd=("${shape[@]}")
 run_expect 1 AC-5 "a job that could not open its tracking issue" 'issues: write'
 restore_clone
 
-# --- 17. the tree the gate grades is never rewritten -----------------------------------
+# A guard on a STEP OUTPUT is empty for a run that died before that step ran, so a
+# scheduled run that fell over at the checkout, the toolchain or the ffmpeg install would
+# file nothing - and that is the run nobody is watching. AC-5 binds a failure for ANY
+# reason, so the guard has to read something the job has before its first step.
+sed -i "s|^        if: failure() && github.event_name != 'pull_request'$|        if: failure() \&\& steps.plan.outputs.notify == 'true'|" \
+  "$repo/.github/workflows/mutation.yml"
+cmd=("${shape[@]}")
+run_expect 1 AC-5 "a notification guarded by an output a dead run never wrote" \
+  'STEP OUTPUT' 'github.event_name'
+restore_clone
+
+# --- 17-18. AC-5's substance, on AC-5's own grade route --------------------------------
+# The assignee, the three facts in the body and the marker a second consecutive failure
+# finds are decided by driving the notification against a stubbed issues API, and those
+# tests live beside the gate. They are RUN here because this target is the criterion's
+# grade route: a criterion graded by a command that does not exercise it is graded by
+# nothing.
+cmd=(env -C "$repo" go test -count=1 ./scripts/mutation-gate)
+run_expect 0 AC-5 "the notification driven against a stubbed issues API" 'ok.*scripts/mutation-gate'
+
+# ... and those tests BITE. Without the marker in the body there is nothing for the next
+# failure to find, so every red Saturday opens another issue - the weekly noise that
+# teaches a reader to close them unread, which is the whole reason the marker exists.
+sed -i 's|^\tb.WriteString(issueMarker)$|\tb.WriteString("")|' "$repo/scripts/mutation-gate/notify.go"
+cmd=(env -C "$repo" go test -count=1 ./scripts/mutation-gate)
+run_expect 1 AC-5 "a notification body that lost its de-duplication marker" 'FAIL'
+git -C "$repo" checkout -q -- scripts/mutation-gate/notify.go
+
+# --- 19. the tree the gate grades is never rewritten -----------------------------------
 after="$(cksum "$here/.gremlins.yaml" "$here/docs/mutation-testing.md" "$here/.github/workflows/mutation.yml" 2>/dev/null || true)"
 if [ "$before" = "$after" ] && [ -n "$before" ]; then
   printf '  ok  the graded tree was never written: the configuration, the document and the workflow are byte-identical\n'

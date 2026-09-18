@@ -244,8 +244,9 @@ mutation-shape:
 # works.
 #
 # Outside `check` for the same reason every other selftest that mutates a tree is: it
-# writes to a copy of the repository and it drives the real runner. CI runs it beside the
-# gate.
+# writes to a copy of the repository and it drives the real runner. ci.yml runs it as its
+# own step beside the gate, in the job that installs the pinned ffmpeg, so it binds every
+# pull request rather than waiting for somebody to type it.
 mutation-selftest:
 	./scripts/mutation-selftest.sh
 

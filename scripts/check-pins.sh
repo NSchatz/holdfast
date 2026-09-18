@@ -61,6 +61,15 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
+# The workflow files, enumerated ONCE here and read by every section that needs them: the Go
+# toolchain pin in section 3 and the action references in section 5. Each of those sections
+# refuses an enumeration that found nothing, because an empty one passes every file it never
+# saw.
+wf_files=()
+while IFS= read -r f; do
+  [ -n "$f" ] && wf_files+=("$f")
+done < <(find "$here/.github/workflows" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) 2>/dev/null | sort)
+
 # --- 1. NOTICE must name the exact ffmpeg the image bundles ------------------------
 # It is the source offer for the GPL binaries the image redistributes. If it drifts, the
 # image ships binaries whose licence record names a DIFFERENT upstream build.
@@ -160,20 +169,48 @@ for a in AMD64 ARM64; do
 done
 
 # --- 3. One Go version across the proof and the artifact ---------------------------
-# The gate must run on the Go that builds the binary we ship. Nothing forces these three
+# The gate must run on the Go that builds the binary we ship. Nothing forces these files
 # together but this check.
+#
+# The workflows are ENUMERATED, never listed by hand. This section used to read ci.yml and
+# release.yml BY NAME, so a third workflow declaring GO_VERSION was a restatement no check
+# compared - it could drift to any 1.25.x, or past a govulncheck stdlib advisory, under a
+# green build, which is this script's own founding failure. A workflow added later is
+# covered on the day it lands, the way section 5 already covers its actions.
 go_image="$(arg GO_IMAGE)"                       # golang:1.25.14-bookworm@sha256:...
 docker_go="${go_image#golang:}"; docker_go="${docker_go%%-*}"
-ci_go="$(sed -n 's/^ *GO_VERSION: *"\(.*\)"$/\1/p' "$here/.github/workflows/ci.yml" | head -1)"
-rel_go="$(sed -n 's/^ *GO_VERSION: *"\(.*\)"$/\1/p' "$here/.github/workflows/release.yml" | head -1)"
 
-if [ -n "$docker_go" ] && [ "$ci_go" = "$docker_go" ] && [ "$rel_go" = "$docker_go" ]; then
-  note "ok: one Go version everywhere ($docker_go — Dockerfile, ci.yml, release.yml)"
-else
-  bad "Go version drift — the gate would run on a different Go than the shipped binary is built with.
+go_wfs=()
+go_drift=0
+for wf in "${wf_files[@]}"; do
+  rel="${wf#"$here"/}"
+  wf_go="$(sed -n 's/^ *GO_VERSION: *"\(.*\)"$/\1/p' "$wf" | head -1)"
+  [ -n "$wf_go" ] || continue
+  go_wfs+=("$rel")
+  [ "$wf_go" = "$docker_go" ] && continue
+  go_drift=$((go_drift + 1))
+  bad "Go version drift - $rel would run on a different Go than the shipped binary is built with.
        Dockerfile GO_IMAGE: $docker_go
-       ci.yml GO_VERSION:   $ci_go
-       release.yml:         $rel_go"
+       $rel GO_VERSION:     $wf_go"
+done
+
+# ci.yml and release.yml are REQUIRED to declare one: they are the gate and the release,
+# and a workflow that stopped declaring it would silently run on whatever setup-go resolves
+# today - which is the same drift, arrived at by deletion rather than by edit.
+for req in .github/workflows/ci.yml .github/workflows/release.yml; do
+  case " ${go_wfs[*]} " in
+    *" $req "*) ;;
+    *)
+      go_drift=$((go_drift + 1))
+      bad "$req declares no GO_VERSION, so nothing holds it to the Dockerfile's toolchain. It would run on whatever actions/setup-go resolves on the day, and the proof would detach from the artifact."
+      ;;
+  esac
+done
+
+if [ -z "$docker_go" ]; then
+  bad "could not read a Go toolchain out of the Dockerfile's GO_IMAGE ARG ('$go_image'), so there is nothing to hold the workflows equal to. A check that could not run has not passed."
+elif [ "$go_drift" -eq 0 ]; then
+  note "ok: one Go version everywhere ($docker_go - Dockerfile and ${#go_wfs[@]} workflow file(s): ${go_wfs[*]})"
 fi
 
 # The tag above is only a LABEL. What Docker pulls is the digest beside it, and this
@@ -271,15 +308,10 @@ fi
 # would put a third party's availability inside `make check` - refused, same as the ffmpeg
 # liveness probe. This checks the SHAPE, which is the half that can be checked offline.
 #
-# The directory is ENUMERATED, never listed by hand: a workflow added later must be
-# covered by the pin gate on the day it lands, not on the day somebody remembers to add
-# it here. `runs-on: ubuntu-latest` is deliberately NOT matched - that is a runner label,
-# not an image reference.
-wf_files=()
-while IFS= read -r f; do
-  [ -n "$f" ] && wf_files+=("$f")
-done < <(find "$here/.github/workflows" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) 2>/dev/null | sort)
-
+# The directory is ENUMERATED, never listed by hand (the list is built in section 0): a
+# workflow added later must be covered by the pin gate on the day it lands, not on the day
+# somebody remembers to add it here. `runs-on: ubuntu-latest` is deliberately NOT matched -
+# that is a runner label, not an image reference.
 if [ "${#wf_files[@]}" -eq 0 ]; then
   bad ".github/workflows/ contains no workflow files - this check enumerates that directory, so it just asserted nothing at all. An empty enumeration passes every reference it never saw."
 else

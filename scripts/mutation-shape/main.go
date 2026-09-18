@@ -313,12 +313,30 @@ func checkWorkflow(root string) *workflow {
 
 	// The notification fires on a FAILED run and nothing about it makes the run green.
 	notify, ok := wf.step(func(s step) bool { return strings.Contains(s.Run, "mutation-gate notify") })
-	if !ok {
+	switch {
+	case !ok:
 		bad("%s has no step that files the tracking issue (`mutation-gate notify`). A red scheduled run with nobody watching is the case this whole route exists for.", workflowPath)
-	} else if !strings.Contains(notify.If, "failure()") {
+	case !strings.Contains(notify.If, "failure()"):
 		bad("the notification step in %s is guarded by %q rather than failure(). It has to fire when the run went red, and only then.", workflowPath, notify.If)
-	} else {
-		note("ok: a failed run files the tracking issue, and the step that does it runs only on failure()")
+
+	// A failure "FOR ANY REASON" includes the reasons that arrive before the job has run
+	// anything of its own: the checkout, the toolchain, the ffmpeg install. A step output is
+	// EMPTY for a run that never reached the step that sets it, so a guard reading one is a
+	// guard that silently skips exactly the failures nobody else is watching. The event name
+	// exists before the first step starts.
+	case strings.Contains(notify.If, "steps."):
+		bad(`the notification step in %s is guarded by a STEP OUTPUT (%q).
+       That output is empty for a run that failed before the step which sets it - a checkout,
+       a toolchain or an install failure on the schedule - so the one run nobody is watching
+       would file no tracking issue at all. Guard on github.event_name, which exists before
+       any step of the job has run.`, workflowPath, notify.If)
+	case !strings.Contains(notify.If, "github.event_name"):
+		bad(`the notification step in %s is guarded by %q, which does not read github.event_name.
+       The pull-request run must not file an issue (its red run is already in front of a
+       human) and every other run must, whatever stopped it. That distinction has to be made
+       from something the job has before its first step.`, workflowPath, notify.If)
+	default:
+		note("ok: a failed run files the tracking issue, guarded on failure() and the event name - never on an output a dead run never wrote")
 	}
 
 	gate, ok := wf.step(func(s step) bool { return s.ID == "gate" })
@@ -364,26 +382,25 @@ func checkPlanning(root string, wf *workflow) {
 	}
 
 	for _, tc := range []struct {
-		event      string
-		baseRef    string
-		wantMode   string
-		wantRef    string
-		wantNotify string
-		wantArgv   string
-		why        string
+		event    string
+		baseRef  string
+		wantMode string
+		wantRef  string
+		wantArgv string
+		why      string
 	}{
 		{
-			event: "schedule", wantMode: mutation.ModeFull, wantRef: "", wantNotify: "true",
+			event: "schedule", wantMode: mutation.ModeFull, wantRef: "",
 			wantArgv: "mutation-full",
-			why:      "the scheduled run mutates the WHOLE domain: no diff scope, and a failure has to reach a human",
+			why:      "the scheduled run mutates the WHOLE domain: no diff scope",
 		},
 		{
-			event: "workflow_dispatch", wantMode: mutation.ModeFull, wantRef: "", wantNotify: "true",
+			event: "workflow_dispatch", wantMode: mutation.ModeFull, wantRef: "",
 			wantArgv: "mutation-full",
 			why:      "a run started by hand is the unscoped one too",
 		},
 		{
-			event: "pull_request", baseRef: "main", wantMode: mutation.ModeDiff, wantRef: "origin/main", wantNotify: "false",
+			event: "pull_request", baseRef: "main", wantMode: mutation.ModeDiff, wantRef: "origin/main",
 			wantArgv: "mutation-diff REF=origin/main",
 			why:      "a pull request mutates only what it changed, measured against its base branch",
 		},
@@ -393,12 +410,12 @@ func checkPlanning(root string, wf *workflow) {
 			bad("the planning step in %s could not be executed for event %q: %v", workflowPath, tc.event, err)
 			continue
 		}
-		if outputs["mode"] != tc.wantMode || outputs["ref"] != tc.wantRef || outputs["notify"] != tc.wantNotify {
+		if outputs["mode"] != tc.wantMode || outputs["ref"] != tc.wantRef {
 			bad(`the planning step plans the WRONG RUN for event %q.
-       got:  mode=%q ref=%q notify=%q
-       want: mode=%q ref=%q notify=%q
+       got:  mode=%q ref=%q
+       want: mode=%q ref=%q
        %s`,
-				tc.event, outputs["mode"], outputs["ref"], outputs["notify"], tc.wantMode, tc.wantRef, tc.wantNotify, tc.why)
+				tc.event, outputs["mode"], outputs["ref"], tc.wantMode, tc.wantRef, tc.why)
 			continue
 		}
 		argv, err := runGateStep(root, gate.Run, outputs["mode"], outputs["ref"])

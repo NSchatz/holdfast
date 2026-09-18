@@ -61,6 +61,21 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           check-latest: false
 
+      # THE DOMAIN'S OWN SUITES HAVE TO BE RUNNABLE IN THIS JOB. internal/probe and
+      # internal/encoder are inside the mutation domain and they drive the real ffmpeg and
+      # ffprobe, failing loud when those are absent (a skip would be a false green). The gate
+      # runs the domain's suite before it mutates anything and REFUSES to measure a red tree,
+      # so a job without ffmpeg does not produce a low score - it produces no score, no
+      # report and an empty artifact. Same route ci.yml takes, and the pin is parsed out of
+      # the Dockerfile by the installer rather than restated here.
+      - name: install ffmpeg (the pin the image ships; the domain's suites drive it)
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /opt/ffmpeg
+          sudo chown "$USER" /opt/ffmpeg
+          ./scripts/install-ffmpeg.sh /opt/ffmpeg
+          echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
+
       # THE PLANNING STEP. Which run happens, and what it is scoped to, is decided HERE
       # and nowhere else - scripts/mutation-shape decides this workflow's shape by
       # EXECUTING this block with an event name in hand, rather than by matching its text,
@@ -74,18 +89,15 @@ jobs:
           set -euo pipefail
           mode="full"
           ref=""
-          notify="true"
           if [ "${EVENT_NAME}" = "pull_request" ]; then
             mode="diff"
             ref="origin/${BASE_REF}"
-            notify="false"
           fi
           {
             echo "mode=${mode}"
             echo "ref=${ref}"
-            echo "notify=${notify}"
           } >> "$GITHUB_OUTPUT"
-          echo "planned: mode=${mode} ref=${ref:-<none>} notify=${notify}"
+          echo "planned: mode=${mode} ref=${ref:-<none>}"
 
       # Through the Makefile, like every other gate in this repository, so CI and a human
       # typing the same target run the identical thing. The floor is in neither line.
@@ -116,8 +128,14 @@ jobs:
       # SCHEDULED run happens where nobody is, so it says so where the work is tracked.
       # This does not rescue the job: the gate step above has already failed and the run
       # stays red whatever happens here.
+      #
+      # The guard is the EVENT, which exists before any step of this job has run. It used to
+      # be a plan-step output, and an output is empty for a run that never reached the step
+      # that sets it - so a scheduled run that died at checkout, at setup-go or at the ffmpeg
+      # install told nobody, which is exactly the run nobody is watching. A failure for any
+      # reason has to reach a human.
       - name: file the tracking issue
-        if: failure() && steps.plan.outputs.notify == 'true'
+        if: failure() && github.event_name != 'pull_request'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GATE_OUTCOME: ${{ steps.gate.outcome }}
