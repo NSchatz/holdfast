@@ -91,6 +91,8 @@ subtitle_languages: [eng]
 keep_commentary: false
 remux_only: false
 deinterlace: off
+max_height: 1080
+downscale_acknowledged: true
 workers: 4
 state_dir: /var/lib/holdfast
 undo_window_hours: 24
@@ -124,6 +126,8 @@ max_load: 1.5
 		SubtitleLanguages: []string{"eng"},
 		KeepCommentary:    &no,
 		RemuxOnly:         &no,
+		MaxHeight:         1080,
+		DownscaleAck:      &yes,
 	}
 	roots := c.RootProfiles()
 	if len(roots) != 2 {
@@ -359,6 +363,11 @@ func TestProfileKnobSetIsClosedAndSingleSourced(t *testing.T) {
 		// this configuration has - the replacement is no longer the same content as the
 		// source - so it is a knob and the digest covers it, conditionally: see Digest.
 		"deinterlace",
+		// The resolution-ceiling pair, on the same terms: `max_height` decides how many
+		// pixels a replacement keeps, and `downscale_acknowledged` decides whether a job
+		// that would drop some may run into a final swap at all. Both are digested
+		// conditionally, so a root that sets neither digests as it always did.
+		"max_height", "downscale_acknowledged",
 	}
 	if !reflect.DeepEqual(knobs, want) {
 		t.Fatalf("ProfileKnobs() = %v, want %v", knobs, want)
