@@ -47,7 +47,8 @@ one-time acts and they have been taken. Steps **2 and 7** have each run twice an
 per release. Step **8** has never been done, and run `34350141882` did not do it either -
 the step that resolves the compose reference is one of the two that run skipped. So the NEXT
 release is: dispatch the dry run (2), pick and choose a version HIGHER THAN `v0.2.0` (4, 6),
-push that tag (7), confirm the pull (8). `v0.1.0` and `v0.2.0` are both spent: a released
+push that tag (7), confirm the pull (8), regenerate and commit the API surface baseline (9).
+`v0.1.0` and `v0.2.0` are both spent: a released
 version's contents "MUST NOT be modified" (semver.org), and nothing here can un-publish
 either.
 
@@ -302,6 +303,46 @@ passes on someone else's machine, nothing above proves it.
 
 Undone by: nothing to undo.
 
+## 9. Regenerate the API surface baseline and commit it
+
+`docs/api-schema.json` is the committed record of the HTTP surface of the LAST RELEASED
+version, and `make api-schema-diff` compares every later build against it on every
+`make check`. Until this step runs, that record still describes the PREVIOUS release, so
+every addition made since it shipped goes on being reported as an addition - which is
+harmless but is not what the file claims to be.
+
+From a clean checkout of the tag you just pushed:
+
+```sh
+git fetch --tags && git checkout v0.3.0
+make api-schema-baseline      # prints the endpoint count and the version it recorded
+```
+
+The command writes the file and then reads back what it wrote, failing if the result does
+not parse as the document the gate consumes or records no version. The version it records is
+`git describe`, so run it ON the tag: a run from an untagged commit records a development
+build's identity and the file then names a version nobody released.
+
+Commit the result to the default branch, on its own, with a message naming the tag:
+
+```sh
+git checkout main && git checkout v0.3.0 -- docs/api-schema.json
+git commit -m "chore: record the v0.3.0 HTTP surface baseline" docs/api-schema.json
+```
+
+This is the step the release workflow cannot take for you: a tag-triggered run has
+`contents: read` in the job that could do it and cannot push to the default branch, and the
+job that holds a write grant is the one that publishes. So it is yours.
+
+Also clear `.api-schema-breaks.yaml` of any entry this release has now carried. The gate
+fails on a record whose difference the tree no longer has, so a stale entry reds the next
+`make check` rather than sitting there as a standing exemption - but deleting it here is
+what makes that a tidy-up instead of a surprise.
+
+Undone by: `git revert` of that commit. Nothing has left the machine - the file is a record
+this repository keeps about itself, and no published artefact reads it. It is the only step
+after the tag push that is fully reversible.
+
 ## Known limits
 
 ### Backport tags move `:latest` backwards
@@ -330,10 +371,13 @@ project has not made about three surfaces:
 - **the metric names** - the `holdfast_*` Prometheus namespace, where a rename silently
   breaks every dashboard built on it
 
-None of the three is enumerated or drift-gated yet. Declaring them stable means listing
-them here, gating them against drift the way `scripts/check-pins.sh` gates the pins, and
-only then editing the refusal in `release.yml`'s plan step. Until that record exists, a
-non-zero major would be a promise nobody could check.
+The HTTP surface is now enumerated and drift-gated: the running server generates it at
+`GET /api/schema`, `docs/api-schema.json` records the last release's copy, and
+`make api-schema-diff` refuses a breaking change to it on every `make check`. That is one of
+the three. The configuration keys and the metric names are still neither enumerated nor
+drift-gated, and declaring the set stable means doing for them what step 9 and that gate do
+for this one, and only then editing the refusal in `release.yml`'s plan step. Until those
+records exist, a non-zero major would be a promise nobody could check.
 ## What holds the release path, now that no gate does
 
 A committed program used to decide, on every `make check`, that `release.yml` still had the
