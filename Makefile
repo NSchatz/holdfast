@@ -7,6 +7,16 @@
 # smoke gate — scripts/smoke-image.sh — which needs Docker.)
 STATICCHECK_VERSION ?= 2025.1.1
 GOVULNCHECK_VERSION ?= v1.1.4
+GREMLINS_VERSION ?= v0.6.0
+
+# Where a mutation run publishes its machine-readable result. The workflow uploads this
+# exact path as the run's artifact, and scripts/mutation-shape refuses a workflow that
+# uploads a different one.
+MUTATION_REPORT ?= mutation-report.json
+
+# The git reference a diff-scoped mutation run scopes against. In a pull request it is the
+# base branch; by hand it is whatever you are working away from.
+REF ?= origin/main
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -47,6 +57,7 @@ PLATFORM ?= linux/amd64
         secret-scan secret-scan-selftest install-hooks snapshot-bench \
         api-schema api-schema-baseline api-schema-diff api-schema-diff-selftest \
         happy-path-log-selftest \
+        mutation-diff mutation-full mutation-shape mutation-selftest \
         tidy clean image image-smoke compose-check
 
 build:
@@ -195,6 +206,50 @@ api-schema-diff-selftest:
 happy-path-log-selftest:
 	./scripts/happy-path-log-selftest.sh
 
+# --- the mutation gate (S0133) ------------------------------------------------
+# Coverage proves a line EXECUTED. It proves nothing about whether anything asserted on
+# it, and this is the repository that deletes a source file on the strength of its own
+# tests. These targets measure the other half (testing T5): deliberate faults are
+# introduced into the mutation domain one at a time, the suite is re-run, and the score is
+# the percentage of them it noticed. The floor is 70% and it lives in .gremlins.yaml with
+# the domain; docs/mutation-testing.md says what both mean.
+#
+# DIFF-SCOPED, against a git reference: only the files inside the domain that differ from
+# the merge base are mutated. This is what every pull request runs, and it is seconds of
+# work where the unscoped run is not. A change that touches no file in the domain reports
+# that and passes - nothing to mutate is not a score of zero.
+mutation-diff:
+	./scripts/mutation.sh --version $(GREMLINS_VERSION) --mode diff --ref $(REF) --out $(MUTATION_REPORT)
+
+# UNSCOPED: the whole mutation domain. This is the one the floor is a statement about, and
+# the one that re-runs a package's suite once per mutant, so it is what the schedule runs
+# and not what a pull request waits for.
+mutation-full:
+	./scripts/mutation.sh --version $(GREMLINS_VERSION) --mode full --out $(MUTATION_REPORT)
+
+# THE AGREEMENT GATE, and the only part of this that rides `check`. It invokes no runner
+# and needs no network: it reads .gremlins.yaml and docs/mutation-testing.md and refuses a
+# floor or an exclusion that one carries and the other does not, and it decides the
+# workflow's shape by EXECUTING that workflow's own planning shell rather than matching
+# its text. A document that drifts away from the configuration is how a gate comes to be
+# believed for a figure it no longer holds.
+mutation-shape:
+	@go run ./scripts/mutation-shape
+
+# Proves the mutation gate still BITES. Every way this gate can fail is a way it fails
+# SILENTLY: a report below the floor read as a pass, a runner that could not be obtained
+# reported as nothing to do, an empty diff scope reported as a score of zero, a red
+# scheduled run whose notification never fired. Each is defeated on purpose here, against
+# a THROWAWAY CLONE, on every run. A guard nobody tries to defeat is a guard nobody knows
+# works.
+#
+# Outside `check` for the same reason every other selftest that mutates a tree is: it
+# writes to a copy of the repository and it drives the real runner. ci.yml runs it as its
+# own step beside the gate, in the job that installs the pinned ffmpeg, so it binds every
+# pull request rather than waiting for somebody to type it.
+mutation-selftest:
+	./scripts/mutation-selftest.sh
+
 # THE ONE SETUP STEP a clone performs to get the pre-commit scan. It points
 # core.hooksPath at the committed hooks directory, so there is nothing to copy and a hook
 # that changes in the repository changes for everyone who has run this.
@@ -211,7 +266,14 @@ install-hooks:
 # because run-to-run variation on a shared runner makes such a gate false-positive at
 # roughly 45%. `test` above runs `go test` WITHOUT -bench, so the benchmark compiles on
 # every gate run and executes on none of them.
-check: check-pins check-pins-selftest install-ffmpeg-selftest secret-scan secret-scan-selftest api-schema-diff fmt vet build test staticcheck govulncheck govulncheck-selftest
+#
+# `mutation-shape` is here and the mutation RUN is not. The run needs a merge base with a
+# base branch, which a pull-request checkout has and the tree a human types `make check`
+# into does not, so binding it here would make this target mean two different things in
+# the two places it runs. What is hermetic - that .gremlins.yaml and
+# docs/mutation-testing.md still agree about the floor and the domain, and that the
+# workflow still plans an unscoped run with no diff scope - rides the gate.
+check: check-pins check-pins-selftest install-ffmpeg-selftest secret-scan secret-scan-selftest api-schema-diff mutation-shape fmt vet build test staticcheck govulncheck govulncheck-selftest
 
 # Asks UPSTREAM whether the pinned ffmpeg release is still served. Deliberately NOT part
 # of `check`: the PR gate must not red because a third party had a bad afternoon. CI runs

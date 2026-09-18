@@ -8,6 +8,13 @@
 /dist/
 /out/
 
+# What a mutation run publishes (make mutation-diff / mutation-full). It is the record of
+# ONE run on ONE machine - the score, the files mutated, the mutants that survived - and
+# the run publishes it as a CI artifact. A copy committed here would be a measurement
+# nobody re-derived, sitting beside a floor that is checked on every run.
+/mutation-report.json*
+/mutation-runner-report.json*
+
 # Local state / runtime
 *.db
 *.db-wal

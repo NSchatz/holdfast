@@ -130,4 +130,7 @@ records about the configuration it was decided under, and the lever for the rows
 configuration change cannot reason about ·
 `docs/test-mass.md` how much of this repository is test code, what `scripts/test-mass.sh`
 counts, what was retired for grading presentation rather than behaviour, and why line
-coverage is not assertion.
+coverage is not assertion ·
+`docs/mutation-testing.md` the mutation score floor, the figure it is applied to, which
+packages are in the mutation domain and why each exclusion is there, what a pull request
+runs against what the schedule runs, and how to reproduce either by hand.

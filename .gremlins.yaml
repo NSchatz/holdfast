@@ -1,0 +1,79 @@
+# The mutation gate's configuration, and the ONE committed home of the floor and the
+# mutation domain (testing T5). scripts/mutation.sh reads both out of this file, the
+# pull-request run and the scheduled run take them from here, and
+# scripts/mutation-shape-gate refuses a value here that disagrees with
+# docs/mutation-testing.md.
+#
+# The floor is applied to EFFICACY - KILLED / (KILLED + LIVED) - which is the percentage
+# of the faults the suite actually ran that it also caught. Mutant coverage,
+# (KILLED + LIVED) / (KILLED + LIVED + NOT_COVERED), measures reach rather than assertion
+# and is what line coverage already claims, so it is left unenforced on purpose: one
+# floor, one figure.
+silent: false
+
+unleash:
+  threshold:
+    # The floor. docs/mutation-testing.md carries the same number and the reason it is
+    # this number; the two are held equal by `make mutation-shape`, which rides `check`.
+    efficacy: 70
+    # Deliberately unenforced. See the note above: enforcing reach as well as assertion
+    # would make a red run ambiguous about which of the two failed.
+    mutant-coverage: 0
+
+  # THE MUTATION DOMAIN: the module minus these paths. Every entry carries its reason and
+  # its measurement, here and in docs/mutation-testing.md. An excluded path is an
+  # UNMEASURED path, so this list is the honest weak point of the gate and is kept as short
+  # as the run cost allows.
+  #
+  # The rule that decides an entry: a package is excluded when re-running its own test
+  # suite once per mutant does not finish. NEEDING THE REAL FFMPEG IS NOT A REASON -
+  # internal/probe and internal/encoder need it, cost a second each, and are in the domain,
+  # which is why .github/workflows/mutation.yml installs the pinned build through
+  # scripts/install-ffmpeg.sh the same way ci.yml does. Every other package in the module
+  # is in the domain too, including the ones that carry no tests at all - those score NOT
+  # COVERED, which the floor's figure ignores, and they start counting on the day someone
+  # gives them a test.
+  exclude-files:
+    # Real libx265 encodes behind the real verify gate. The Makefile records this suite at
+    # 524 to 568 seconds ALONE under -race, and a mutant re-runs it.
+    - '^internal/engine/'
+    # Measured at 24 seconds: every case measures VMAF over a real encode through libvmaf,
+    # once per mutant.
+    - '^internal/vmaf/'
+    # Measured at 147 seconds: real oneshot runs end to end - a real encode, a real VMAF
+    # measurement, a real swap - once per mutant.
+    - '^cmd/holdfast/'
+    # Measured at 143 seconds: sqlite migrations and ledger-scale fixtures, once per
+    # mutant.
+    - '^internal/store/'
+    # Measured at 97 seconds: the HTTP surface's own suite, once per mutant.
+    - '^internal/server/'
+    # Measured at 23 seconds: collector registration and scrape fixtures, once per mutant.
+    - '^internal/metrics/'
+
+  # Each mutated test process gets ONE CPU, and this is measured rather than tidy. Gremlins
+  # runs one worker per core; letting each of those workers also take every core is 56
+  # times 56 on the machine this was written on, and the oversubscription turns
+  # slow-but-passing packages into TIMED OUT mutants - verdicts about scheduling rather
+  # than about an assertion. On this domain the same run reported 618 timed-out mutants
+  # without this line and 53 with it, which is the difference between measuring 496 mutants
+  # and measuring 1061 of them.
+  test-cpu: 1
+
+  # Each mutant's test run is allowed two hundred times the time the package's coverage
+  # run took. That multiple looks enormous and is not, because of what it multiplies: the
+  # coverage run is ONE process against a warm build cache and takes well under a second
+  # on most packages here, while a MUTANT costs a fresh link of the test binary plus a run
+  # that is competing with every other worker. The budget is therefore proportional to the
+  # cheapest thing in the run and is spent on the most expensive, and at the default
+  # multiple this domain reported more TIMED OUT mutants than KILLED ones - every one of
+  # them a verdict about scheduling rather than about an assertion.
+  #
+  # That matters beyond tidiness: a timed-out mutant is in neither the numerator nor the
+  # denominator of the score, and the runner's JSON does not carry the count, so a timeout
+  # budget too small to tell a hung mutant from a busy machine is the cheap way for this
+  # gate to measure a fraction of the domain and report a number as if it had measured all
+  # of it. scripts/mutation-gate counts the timed-out mutants off the runner's own output
+  # and puts the total in the report, so a reader can see how much of the run was decided
+  # by a clock.
+  timeout-coefficient: 200

@@ -1,0 +1,149 @@
+name: mutation
+
+# The mutation gate (testing T5). Coverage proves a line executed; this proves something
+# asserted on it. Deliberate faults are introduced into the mutation domain one at a time,
+# the suite is re-run, and the score is the percentage of them it noticed.
+#
+# Two runs, one definition. On a pull request the run is DIFF-SCOPED: only the files the
+# change touched inside the domain are mutated, which is seconds of work and is what makes
+# it reasonable to bind every pull request. On a schedule the run is UNSCOPED: the whole
+# domain, which re-runs a package's suite once per mutant and is the operation that can
+# take hours - so it happens where nobody is waiting for it.
+#
+# Both take the floor and the domain from .gremlins.yaml, through the same
+# scripts/mutation.sh. Neither carries the figure in this file: a pin or a threshold
+# restated in CI is the drift this repository has already been bitten by twice, and
+# scripts/mutation-shape (part of `make check`) refuses a floor that is not read from the
+# committed configuration.
+#
+# It is NOT in `make check`. A diff-scoped run needs a merge base with a base branch, which
+# exists in a pull-request checkout and does not exist on the tree a human is typing `make
+# check` into, so binding it to that target would make the gate mean two different things
+# in the two places it runs. What rides `check` is the hermetic agreement gate.
+
+on:
+  pull_request:
+  schedule:
+    # 03:23 UTC every Saturday. Off the hour on purpose: the top of the hour is when
+    # GitHub's scheduled-run queue is deepest and a cron there is the one that silently
+    # does not run. A scheduled workflow runs against the default branch.
+    - cron: '23 3 * * 6'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Held equal to the Dockerfile and the other workflows by scripts/check-pins.sh.
+  GO_VERSION: "1.25.14"
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The red scheduled run opens or updates ONE tracking issue. This repository's
+      # default workflow permission is read, so the job has to ask for this itself.
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The diff-scoped run resolves a merge base with the base branch, which a
+          # shallow checkout does not have.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
+      # THE DOMAIN'S OWN SUITES HAVE TO BE RUNNABLE IN THIS JOB. internal/probe and
+      # internal/encoder are inside the mutation domain and they drive the real ffmpeg and
+      # ffprobe, failing loud when those are absent (a skip would be a false green). The gate
+      # runs the domain's suite before it mutates anything and REFUSES to measure a red tree,
+      # so a job without ffmpeg does not produce a low score - it produces no score, no
+      # report and an empty artifact. Same route ci.yml takes, and the pin is parsed out of
+      # the Dockerfile by the installer rather than restated here.
+      - name: install ffmpeg (the pin the image ships; the domain's suites drive it)
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /opt/ffmpeg
+          sudo chown "$USER" /opt/ffmpeg
+          ./scripts/install-ffmpeg.sh /opt/ffmpeg
+          echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
+
+      # THE PLANNING STEP. Which run happens, and what it is scoped to, is decided HERE
+      # and nowhere else - scripts/mutation-shape decides this workflow's shape by
+      # EXECUTING this block with an event name in hand, rather than by matching its text,
+      # so flipping the logic cannot leave a text matcher green.
+      - name: plan the run
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          mode="full"
+          ref=""
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            mode="diff"
+            ref="origin/${BASE_REF}"
+          fi
+          {
+            echo "mode=${mode}"
+            echo "ref=${ref}"
+          } >> "$GITHUB_OUTPUT"
+          echo "planned: mode=${mode} ref=${ref:-<none>}"
+
+      # Through the Makefile, like every other gate in this repository, so CI and a human
+      # typing the same target run the identical thing. The floor is in neither line.
+      - name: mutation gate
+        id: gate
+        env:
+          MODE: ${{ steps.plan.outputs.mode }}
+          REF: ${{ steps.plan.outputs.ref }}
+        run: |
+          set -euo pipefail
+          if [ "${MODE}" = "diff" ]; then
+            make mutation-diff REF="${REF}"
+          else
+            make mutation-full
+          fi
+
+      # Always, including on a red run: the report is what says which files were mutated
+      # and which mutants survived, and that is most worth having when the gate failed.
+      - name: publish the machine-readable report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mutation-report
+          path: mutation-report.json
+          if-no-files-found: warn
+
+      # A red pull-request run reds the pull request and someone is already looking. A red
+      # SCHEDULED run happens where nobody is, so it says so where the work is tracked.
+      # This does not rescue the job: the gate step above has already failed and the run
+      # stays red whatever happens here.
+      #
+      # The guard is the EVENT, which exists before any step of this job has run. It used to
+      # be a plan-step output, and an output is empty for a run that never reached the step
+      # that sets it - so a scheduled run that died at checkout, at setup-go or at the ffmpeg
+      # install told nobody, which is exactly the run nobody is watching. A failure for any
+      # reason has to reach a human.
+      - name: file the tracking issue
+        if: failure() && github.event_name != 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GATE_OUTCOME: ${{ steps.gate.outcome }}
+        run: |
+          set -euo pipefail
+          go run ./scripts/mutation-gate notify \
+            --repo "${GITHUB_REPOSITORY}" \
+            --assignee "${GITHUB_REPOSITORY_OWNER}" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --report mutation-report.json \
+            --failure "the mutation gate step ended ${GATE_OUTCOME} without publishing a score; the run log names what stopped it"

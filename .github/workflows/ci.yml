@@ -74,6 +74,16 @@ jobs:
       - name: happy-path log grader self-test
         run: make happy-path-log-selftest
 
+      # The mutation gate's own self-test (S0133), and it is here for the same two reasons:
+      # it MUTATES a copy of the tree, so it cannot ride `check`, and it drives the real
+      # runner against real suites, so it belongs in the job that installs the pinned ffmpeg.
+      # It is the only guard over the ways that gate goes silently GREEN - a report below the
+      # floor read as a pass, an empty diff scope reported as a score of zero, a diff scope
+      # that matched nothing, a red scheduled run whose notification never fired - and a
+      # guard that runs only when somebody types the target is a guard nobody knows works.
+      - name: mutation gate self-test
+        run: make mutation-selftest
+
       # Config schema self-test (anti-advisory-only), on top of the gate: the committed
       # example must validate, and each known-invalid config must be REJECTED — one via
       # the schema (unknown key), one via value validation (out-of-range crf), and two

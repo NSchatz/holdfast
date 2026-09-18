@@ -5,7 +5,9 @@
 # Four families of case live here. Cases 0-6 defeat the RENAME guard; cases 7-17 (S0022)
 # defeat the FFMPEG PIN guard - the floating alias, the short-retention daily build, a
 # blanked digest, and a NOTICE that has drifted from the Dockerfile it is supposed to be
-# the source offer for; case 18 (S0024) defeats the GO TOOLCHAIN pin's digest half; cases
+# the source offer for; case 18 (S0024) defeats the GO TOOLCHAIN pin's digest half and case
+# 30 its enumeration half, in a workflow that is neither of the two that section used to
+# read by name; cases
 # 19-29 (S0057) defeat the SUPPLY-CHAIN pin guards - a mutable action reference, an
 # unreadable one, a compose image that lost its digest or gained a `latest` tag, a base
 # image ARG that lost its digest or its tag, a node manifest with no lifecycle-script
@@ -48,7 +50,7 @@ OLD_ENV="TRANSCODE""_SERVER_AUTH_TOKEN"
 OLD_CRF="TRANSCODE""_CRF"
 OLD_METRIC="transcode""_files_total"
 
-declared=30
+declared=31
 pass=0; failed=0
 repo="$work/repo"
 
@@ -360,6 +362,18 @@ cat >> "$repo/.github/workflows/release.yml" <<'YAML'
           echo "image: ghcr.io/nschatz/holdfast:latest"
 YAML
 expect 0 "release.yml publishing :latest does NOT red the gate (publishing is not depending)"
+reset
+
+# --- 30. A THIRD workflow's Go pin drifting. Section 3 used to read ci.yml and release.yml
+#         by name, so any other workflow declaring GO_VERSION was a restatement nothing
+#         compared: it could sit a patch release behind the toolchain the shipped binary is
+#         built with, or behind a govulncheck stdlib advisory, under a green build. The
+#         section enumerates the directory now, the way the action check already does, and
+#         this moves the pin in a workflow that is neither of the two former names.
+sed -i 's/^  GO_VERSION: ".*"$/  GO_VERSION: "1.25.0"/' "$repo/.github/workflows/mutation.yml"
+grep -q '^  GO_VERSION: "1.25.0"$' "$repo/.github/workflows/mutation.yml" \
+  || { echo "::error::selftest: could not move mutation.yml's GO_VERSION, so this case did NOT run" >&2; exit 1; }
+expect 1 "a Go pin drifting in a workflow that is neither ci.yml nor release.yml is caught" "Go version drift - .github/workflows/mutation.yml"
 reset
 
 echo
