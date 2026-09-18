@@ -20,6 +20,13 @@
 #          reached, and must not report the error-record assertion as satisfied.
 #   AC-8   a capture that cannot be read back must FAIL naming the path and the operation,
 #          distinctly from AC-4.
+#   AC-11  every path HP-RUN is aimed at must be one the grader created. holdfast layers
+#          HOLDFAST_* OVER the config file, so an ambient HOLDFAST_LIBRARY_ROOTS or
+#          HOLDFAST_STATE_DIR must NOT reach the run, and a library root outside the
+#          directory created for the run must be REFUSED BEFORE the child is spawned:
+#          the encode, the swap and the deletion are real and a red afterwards undoes
+#          none of them. A decoy library stands where an operator's would, and each of
+#          these cases requires it byte-identical after the run.
 #   AC-14  an ADDITIONAL `warn` record must stay GREEN and must show up in the per-level
 #          tally. Without this case, AC-12 is satisfied by a grader that never met a warn.
 #
@@ -34,7 +41,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)" || { echo "::error::selftest: mktemp failed" >&2; exit 1; }
 trap 'rm -rf "$work"' EXIT
 
-declared=9
+declared=12
 pass=0; failed=0
 repo="$work/repo"
 
@@ -59,12 +66,18 @@ for f in "${touched[@]}"; do
   cp "$repo/$f" "$work/pristine.$(echo "$f" | tr / .)"
 done
 
+# case_env is the environment a case adds to the grader's run, and case_watch is a file
+# the case requires BYTE-IDENTICAL across it. Both are per case: reset clears them, so a
+# case that forgets to set one cannot inherit the previous case's.
+case_env=(); case_watch=""
+
 # reset puts every file a case can mutate back to what the working tree holds, so each
 # case starts from the tree `make check` grades and no mutation stacks on another.
 reset() {
   for f in "${touched[@]}"; do
     cp "$work/pristine.$(echo "$f" | tr / .)" "$repo/$f"
   done
+  case_env=(); case_watch=""
 }
 
 # mutate <file> <sed-expression> <what> - applies the edit and PROVES it landed. A sed
@@ -81,7 +94,7 @@ mutate() {
 
 out=""
 run_grader() {
-  out="$( cd "$repo" && go test -count=1 -v \
+  out="$( cd "$repo" && env ${case_env[@]+"${case_env[@]}"} go test -count=1 -v \
             -run '^TestHappyPathRunEmitsNoErrorRecords$' ./cmd/holdfast/ 2>&1 )"
 }
 
@@ -91,19 +104,26 @@ run_grader() {
 # that bit, and D6 puts each reason in its own words precisely so this can be checked.
 expect() {
   local want="$1" criterion="$2" name="$3"; shift 3
-  local got=0
+  local got=0 watched_before="" watched_after=""
+  # A case that watches a file watches it across the run itself: a grader that destroys
+  # an operator's media and then reds has still destroyed it, so the bytes are the
+  # observation and the exit status is not.
+  [ -z "$case_watch" ] || watched_before="$(cksum "$case_watch" 2>/dev/null || echo ABSENT)"
   set +e
   run_grader
   got=$?
   set -e
   local why=""
+  if [ -n "$case_watch" ]; then
+    watched_after="$(cksum "$case_watch" 2>/dev/null || echo ABSENT)"
+    [ "$watched_before" = "$watched_after" ] \
+      || why="the file at $case_watch was REWRITTEN by the run [$watched_before] -> [$watched_after]"
+  fi
   if [ "$got" -ne "$want" ]; then
-    if [ "$want" -ne 0 ]; then
-      why="the grader CAME BACK GREEN (exit $got) where it had to bite"
-      [ "$got" -eq 0 ] || why="the grader exited $got, wanted $want"
-    else
-      why="the grader exited $got, wanted $want"
-    fi
+    local status_why="the grader exited $got, wanted $want"
+    [ "$want" -eq 0 ] || [ "$got" -ne 0 ] \
+      || status_why="the grader CAME BACK GREEN (exit $got) where it had to bite"
+    why="${why:+$why; }$status_why"
   fi
   local missing=""
   for re in "$@"; do
@@ -126,7 +146,7 @@ tally_warn() {
   printf '%s' "$out" | sed -n 's/^HP-RUN per-level tally:.*[[:space:]]warn=\([0-9]\{1,\}\).*$/\1/p' | head -1
 }
 
-echo "happy-path log grader selftest: defeating AC-2, AC-4, AC-5, AC-6, AC-7, AC-8 and AC-14 on purpose"
+echo "happy-path log grader selftest: defeating AC-2, AC-4, AC-5, AC-6, AC-7, AC-8, AC-11 and AC-14 on purpose"
 echo
 
 # --- 1. the unmutated copy passes, or every case below is graded against a red tree ---
@@ -199,7 +219,63 @@ want_warn=$((baseline_warn + 1))
 expect 0 "AC-14" "REQUIRED GREEN - an additional warn record stays green and shows in the per-level tally" \
   "HP-RUN per-level tally:" "warn=$want_warn" "error=0"
 
-# --- 9. the tree the grader grades is never rewritten -----------------------------------
+# --- AC-11: the decoy an ambient HOLDFAST_* would aim HP-RUN at -------------------------
+# An operator's library, standing where the machine that runs the gate keeps its own: a
+# real H.264 file above the shipped bitrate floor, so the pipeline would take it if it
+# ever saw it. Nothing below may change a byte of it.
+ffmpeg_bin="${HOLDFAST_FFMPEG:-ffmpeg}"
+command -v "$ffmpeg_bin" >/dev/null 2>&1 || {
+  echo "::error::selftest: $ffmpeg_bin is not on PATH, so the AC-11 decoy cannot be built and those cases did NOT run" >&2
+  exit 1
+}
+decoy_lib="$work/operator-library"; decoy_state="$work/operator-state"
+mkdir -p "$decoy_lib" "$decoy_state"
+decoy="$decoy_lib/irreplaceable.mkv"
+"$ffmpeg_bin" -hide_banner -loglevel error -y -f lavfi \
+  -i "testsrc2=duration=2:size=320x240:rate=10" \
+  -c:v libx264 -preset ultrafast -b:v 8M -maxrate 8M -bufsize 8M -x264-params nal-hrd=cbr \
+  -pix_fmt yuv420p -- "$decoy" || {
+  echo "::error::selftest: could not build the AC-11 decoy library - those cases did NOT run" >&2
+  exit 1
+}
+
+# --- 9. AC-11: an ambient HOLDFAST_* is REMOVED, and the run is unaffected by it ---------
+# The unmutated grader, started by a shell that exports the two path keys at the decoy.
+# It must run its own happy path to completion anyway, say which variables it removed,
+# and leave the decoy alone.
+reset
+case_env=("HOLDFAST_LIBRARY_ROOTS=$decoy_lib" "HOLDFAST_STATE_DIR=$decoy_state")
+case_watch="$decoy"
+expect 0 "AC-11" "REQUIRED GREEN - an ambient HOLDFAST_LIBRARY_ROOTS cannot aim HP-RUN at a library the grader did not create" \
+  "HP-RUN environment:" "HOLDFAST_LIBRARY_ROOTS" "and nothing else" "error=0"
+
+# --- 10. AC-11: with the isolation removed, the run is REFUSED before the child exists ---
+# The defeat: the grader stops emptying its own environment, so the ambient variables
+# reach the configuration HP-RUN would run under. The refusal has to come BEFORE the
+# child is spawned - a grader that noticed afterwards would have noticed a deletion.
+reset
+mutate "$grader" 's|removed := hpIsolateFromAmbientConfig(t)|removed := []string{}|' \
+  "a grader that inherits the ambient environment"
+case_env=("HOLDFAST_LIBRARY_ROOTS=$decoy_lib" "HOLDFAST_STATE_DIR=$decoy_state")
+case_watch="$decoy"
+expect 1 "AC-11" "DEFEATED - an inherited HOLDFAST_* is caught BEFORE the child is spawned, not after the delete" \
+  "HAPPY-PATH LOG GRADER COULD NOT RUN" "HOLDFAST_LIBRARY_ROOTS" \
+  "REFUSED BEFORE the child was spawned"
+
+# --- 11. AC-11: a library root the grader did not create is REFUSED ----------------------
+# The other half of the same clause, with no environment involved: the fixture builder
+# is pointed at the decoy library, so the configuration names a path this run did not
+# make. The paths are checked against the directory created for the run, not merely
+# against each other.
+reset
+mutate "$grader" "s|libRoot = filepath.Join(dir, \"library\")|libRoot = \"$decoy_lib\"|" \
+  "a library root the grader did not create"
+case_watch="$decoy"
+expect 1 "AC-11" "DEFEATED - a library root outside the directory created for this run is REFUSED" \
+  "HAPPY-PATH LOG GRADER COULD NOT RUN" "$decoy_lib" "is not inside" \
+  "REFUSED BEFORE the child was spawned"
+
+# --- 12. the tree the grader grades is never rewritten ----------------------------------
 after="$(cd "$here" && cksum "${touched[@]}" 2>/dev/null || true)"
 if [ "$before" = "$after" ] && [ -n "$before" ]; then
   printf '  ok  the graded tree was never written: %s are byte-identical\n' "${touched[*]}"
@@ -222,4 +298,4 @@ if [ "$failed" -ne 0 ]; then
   echo "::error::happy-path log selftest: $failed of $declared case(s) did not bite - the happy-path log grader is not trustworthy" >&2
   exit 1
 fi
-echo "happy-path log selftest: $pass/$declared cases bite; defeated on purpose: AC-2 AC-4 AC-5 AC-6 AC-7 AC-8 AC-14"
+echo "happy-path log selftest: $pass/$declared cases bite; defeated on purpose: AC-2 AC-4 AC-5 AC-6 AC-7 AC-8 AC-11 AC-14"

@@ -26,7 +26,10 @@ import (
 // synthetic H.264 source built here by the pinned ffmpeg at a bitrate above the
 // shipped min_bitrate_kbps floor. Every path the configuration names (the config
 // file, the library root, the state directory) is created by this test, and the
-// config path is passed to the command explicitly with --config.
+// config path is passed to the command explicitly with --config. The child's
+// environment is built here rather than inherited: holdfast layers HOLDFAST_* over
+// the config file, so an ambient HOLDFAST_LIBRARY_ROOTS or HOLDFAST_STATE_DIR would
+// otherwise aim all of that at a directory this test never made.
 //
 // The stages HP-RUN traverses, in order: config load and validate; secret
 // resolution; the startup filesystem classification; the ffmpeg/ffprobe lookup;
@@ -74,6 +77,19 @@ const (
 	hpFoundErrors = "HP-RUN RAN AND EMITTED ERROR RECORD(S)"
 )
 
+// hpEnvPrefix is internal/config's envPrefix: the layer that overrides the file.
+// Load builds its configuration from defaults, then the YAML file, then HOLDFAST_*,
+// and `library_roots` and `state_dir` are both keys it accepts there - so a variable
+// exported by the shell that started the gate can replace the paths this grader
+// created, and HP-RUN's encode, atomic swap and deletion are all real.
+const hpEnvPrefix = "HOLDFAST_"
+
+// hpChildEnvNames are the only HOLDFAST_* variables permitted to reach HP-RUN: the
+// marker that routes the re-executed test binary into the CLI, and the two tool paths
+// HP-RUN looks up. hpChildEnv sets exactly these and hpRequireConfiguredPaths refuses
+// to spawn the child if its environment carries any other.
+var hpChildEnvNames = []string{subprocessEnv, "HOLDFAST_FFMPEG", "HOLDFAST_FFPROBE"}
+
 // hpRecord is one parsed line of the capture.
 type hpRecord struct {
 	raw   string
@@ -97,10 +113,26 @@ func TestHappyPathRunEmitsNoErrorRecords(t *testing.T) {
 	// ffmpeg would be a false green on the exact gate this test adds.
 	ffmpegBin, ffprobeBin := hpRequireBinaries(t)
 
+	// AC-11. Those two tool paths are the only HOLDFAST_* variables this grader takes
+	// from the environment it was started in, and it re-sets them on the child
+	// explicitly below. Every other one is removed here, before a fixture exists and
+	// long before the child does, so that nothing an operator exported can be layered
+	// over the configuration written below.
+	removed := hpIsolateFromAmbientConfig(t)
+
 	dir := t.TempDir()
 	cfgPath, libRoot, stateDir, src := hpFixture(t, dir, ffmpegBin)
 	wrote := hpSize(t, src)
 	hpRequireCapabilities(t, cfgPath, ffmpegBin, ffprobeBin)
+
+	// AC-11. The child's environment is built here and PROVED before the child exists:
+	// the three variables this grader sets are the only HOLDFAST_* in it, the three
+	// paths the configuration names were all created above under dir, and the
+	// configuration resolves to those paths and no others. The proof is taken here
+	// rather than after the run because the swap and the deletion are real: a red that
+	// arrives once the child has finished undoes neither.
+	childEnv := hpChildEnv(ffmpegBin, ffprobeBin)
+	hpRequireConfiguredPaths(t, dir, cfgPath, libRoot, stateDir, childEnv, removed)
 
 	// AC-8. The capture is everything the PROCESS writes to its own standard error
 	// for the duration of HP-RUN, taken from the process's stream rather than from a
@@ -115,13 +147,11 @@ func TestHappyPathRunEmitsNoErrorRecords(t *testing.T) {
 
 	// AC-11. The command gets the config path explicitly - `run` refuses without
 	// --config and has no default config location - and that file, its single
-	// library_roots entry and its state_dir are the three paths created above.
+	// library_roots entry and its state_dir are the three paths created above. The
+	// environment is the slice hpRequireConfiguredPaths just proved clean, so what was
+	// checked is what the child runs under.
 	cmd := exec.Command(os.Args[0], "run", "--config", cfgPath)
-	cmd.Env = append(os.Environ(),
-		subprocessEnv+"=1",
-		"HOLDFAST_FFMPEG="+ffmpegBin,
-		"HOLDFAST_FFPROBE="+ffprobeBin,
-	)
+	cmd.Env = childEnv
 	cmd.Stdout = io.Discard
 	cmd.Stderr = capture
 	runErr := cmd.Run()
@@ -216,6 +246,145 @@ func hpRequireBinaries(t *testing.T) (ffmpegBin, ffprobeBin string) {
 		}
 	}
 	return ffmpegBin, ffprobeBin
+}
+
+// hpIsolateFromAmbientConfig removes every HOLDFAST_* variable from THIS process's
+// environment, restores each when the test ends, and returns the names it removed.
+//
+// It is AC-11's first half. holdfast layers HOLDFAST_* over the config file, so a
+// variable exported by the shell that ran the gate would replace the library root or
+// the state directory this grader creates, and HP-RUN would aim a REAL encode, a REAL
+// atomic swap and the REAL deletion of a source at a directory nothing here made. The
+// removal also makes the configuration this process reads back - the capability
+// preflight and the path check below, both of which call config.Load - the one the
+// child will run under rather than a different resolution of the same file.
+func hpIsolateFromAmbientConfig(t *testing.T) []string {
+	t.Helper()
+	var removed []string
+	for _, name := range hpAmbientConfigVars() {
+		value := os.Getenv(name)
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatalf("%s: %s is set in this process's environment and could not be removed: %v. "+
+				"holdfast layers HOLDFAST_* over the config file, so HP-RUN cannot be aimed at the "+
+				"paths this grader created while it is set.", hpCouldNotRun, name, err)
+		}
+		t.Cleanup(func() { _ = os.Setenv(name, value) })
+		removed = append(removed, name)
+	}
+	return removed
+}
+
+// hpAmbientConfigVars names the HOLDFAST_* variables this process's environment
+// currently carries, sorted.
+func hpAmbientConfigVars() []string {
+	var names []string
+	for _, kv := range os.Environ() {
+		if name, _, ok := strings.Cut(kv, "="); ok && strings.HasPrefix(name, hpEnvPrefix) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// hpChildEnv is the environment HP-RUN's child process gets: this process's
+// environment, which hpIsolateFromAmbientConfig has emptied of every HOLDFAST_*
+// variable, plus exactly the three in hpChildEnvNames. It is returned rather than
+// assigned so that hpRequireConfiguredPaths can check the very slice the child is
+// handed.
+func hpChildEnv(ffmpegBin, ffprobeBin string) []string {
+	return append(os.Environ(),
+		subprocessEnv+"=1",
+		"HOLDFAST_FFMPEG="+ffmpegBin,
+		"HOLDFAST_FFPROBE="+ffprobeBin,
+	)
+}
+
+// hpRequireConfiguredPaths is AC-11's second half: HP-RUN is not spawned at all unless
+// the configuration it would run under is the one this test wrote. Three facts, all
+// established BEFORE the child exists, because a red that arrives after a swap and a
+// deletion undoes neither:
+//
+//  1. the environment the child will run under carries no HOLDFAST_* variable beyond
+//     the three this grader sets, so no ambient value can be layered over the file;
+//  2. the config file, the library root and the state directory all lie inside the
+//     directory created for this run, so each is a path this test made;
+//  3. the configuration that file resolves to names that single library root and that
+//     state directory, and nothing else.
+//
+// The configuration is read through internal/config.Load, the call `run` itself makes.
+func hpRequireConfiguredPaths(t *testing.T, dir, cfgPath, libRoot, stateDir string, childEnv, removed []string) {
+	t.Helper()
+	visible := hpAmbientConfigVars()
+	refused := "REFUSED BEFORE the child was spawned: nothing was encoded, swapped or deleted."
+
+	allowed := make(map[string]bool, len(hpChildEnvNames))
+	for _, name := range hpChildEnvNames {
+		allowed[name] = true
+	}
+	var stray []string
+	for _, kv := range childEnv {
+		if name, value, ok := strings.Cut(kv, "="); ok && strings.HasPrefix(name, hpEnvPrefix) && !allowed[name] {
+			stray = append(stray, name+"="+value)
+		}
+	}
+	if len(stray) > 0 {
+		t.Fatalf("%s: the environment built for HP-RUN's child carries %d HOLDFAST_* variable(s) "+
+			"beyond the %s this grader sets: %s. holdfast layers HOLDFAST_* OVER the config file, so "+
+			"one of those can replace the library root or the state directory created here and aim a "+
+			"REAL encode, a REAL atomic swap and a REAL deletion at a directory this test never made. "+
+			"%s", hpCouldNotRun, len(stray), strings.Join(hpChildEnvNames, ", "),
+			strings.Join(stray, " "), refused)
+	}
+
+	inside := filepath.Clean(dir) + string(filepath.Separator)
+	for _, p := range []struct{ what, path string }{
+		{"the config file", cfgPath}, {"the library root", libRoot}, {"the state directory", stateDir},
+	} {
+		if !strings.HasPrefix(filepath.Clean(p.path), inside) {
+			t.Fatalf("%s: %s HP-RUN would use is %s, which is not inside %s - the directory created "+
+				"for this run. AC-11 requires every path the invocation names to be one this grader "+
+				"created, because HP-RUN encodes, swaps and DELETES for real. %s",
+				hpCouldNotRun, p.what, p.path, dir, refused)
+		}
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("%s: the configuration this test wrote at %s does not load: %v",
+			hpCouldNotRun, cfgPath, err)
+	}
+	roots := make([]string, 0, len(cfg.LibraryRoots))
+	for _, r := range cfg.LibraryRoots {
+		roots = append(roots, filepath.Clean(r))
+	}
+	if len(roots) != 1 || roots[0] != filepath.Clean(libRoot) {
+		t.Fatalf("%s: the configuration HP-RUN would run under names library_roots %v, not the single "+
+			"root this test created at %s. HOLDFAST_* visible to this process: %s. %s",
+			hpCouldNotRun, roots, libRoot, hpNamesOrNone(visible), refused)
+	}
+	if got, want := filepath.Clean(cfg.StateDir), filepath.Clean(stateDir); got != want {
+		t.Fatalf("%s: the configuration HP-RUN would run under names state_dir %s, not the directory "+
+			"this test created at %s. HOLDFAST_* visible to this process: %s. %s",
+			hpCouldNotRun, got, want, hpNamesOrNone(visible), refused)
+	}
+
+	// Reported for the same reason the per-level tally is: a run that was isolated and
+	// a run that had nothing to isolate look identical otherwise, and the defeat runner
+	// grades this line.
+	fmt.Fprintf(os.Stdout, "HP-RUN environment: %d ambient HOLDFAST_* variable(s) removed (%s); the "+
+		"child gets %s and nothing else; library_roots=%v and state_dir=%s, both created under %s\n",
+		len(removed), hpNamesOrNone(removed), strings.Join(hpChildEnvNames, ", "),
+		roots, filepath.Clean(cfg.StateDir), dir)
+}
+
+// hpNamesOrNone renders a variable-name list, saying so when it is empty rather than
+// printing nothing where a reader cannot tell an empty list from a missing one.
+func hpNamesOrNone(names []string) string {
+	if len(names) == 0 {
+		return "none"
+	}
+	return strings.Join(names, " ")
 }
 
 // hpRequireCapabilities is AC-6's second half: the encoder and the VMAF model HP-RUN
