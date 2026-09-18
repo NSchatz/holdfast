@@ -737,11 +737,11 @@ func TestScanEndpoint_SaysSoWhenItCannotTakeTheWork(t *testing.T) {
 // it lands rather than when somebody remembers to add it to a list.
 func TestScanEndpoint_AddsNoRouteBeyondScan(t *testing.T) {
 	h := newScanHarness(t, "tok")
-	routes, ok := h.srv.mux.(chi.Routes)
-	if !ok {
-		t.Fatalf("the server's handler is not a chi router (%T), so its routes cannot be enumerated "+
-			"and this check would pass over anything", h.srv.mux)
+	if h.srv.mux == nil {
+		t.Fatal("the server holds no chi router, so its routes cannot be enumerated " +
+			"and this check would pass over anything")
 	}
+	var routes chi.Routes = h.srv.mux
 	var served []string
 	if err := chi.Walk(routes, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
 		served = append(served, method+" "+route)
@@ -771,6 +771,10 @@ func TestScanEndpoint_AddsNoRouteBeyondScan(t *testing.T) {
 		"GET /api/exclusions/":    true,
 		"POST /api/exclusions/":   true,
 		"DELETE /api/exclusions/": true,
+		// S0128's self-describing surface. It is a pure READ of the router and the
+		// response types - paths, methods, status codes, media types, field names and
+		// field types - so it re-offers, overwrites and disposes of nothing.
+		"GET /api/schema": true,
 	}
 	for _, r := range served {
 		if !strings.HasPrefix(r, "GET /api/") && !strings.HasPrefix(r, "POST /api/") {

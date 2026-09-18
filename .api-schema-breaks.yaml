@@ -1,0 +1,31 @@
+# Breaking changes to the HTTP surface that are being taken DELIBERATELY, one entry each.
+#
+# This file is the only thing in the repo that can stop a breaking surface difference
+# failing `make check`. It is not an ignore list: an entry is a record of a decision, and
+# the gate (make api-schema-diff -> scripts/api-schema) refuses to honour one that does not
+# read like one.
+#
+# A breaking difference is exactly http-surface H5's list and nothing wider: an endpoint or
+# method removed, a declared response field removed, a field's declaration narrowed, a
+# status code removed, or the response recorded for a status code changed. Every addition -
+# a new endpoint, a new field, a new status code - is additive and needs no entry.
+#
+# The shape is a sequence of mappings with EXACTLY these four keys:
+#
+#   - difference:  the difference id the gate prints, copied verbatim. It names the
+#                  endpoint, the status and the field, so an entry covers one break and
+#                  never a class of them.
+#     version:     the version that will CARRY the break (vMAJOR.MINOR.PATCH). H5 says a
+#                  breaking change is a version change, and nothing in a pull request knows
+#                  the tag it will ship under, so naming it here is the enforceable form.
+#     reason:      why the break is being taken rather than avoided.
+#     recorded:    the ISO date (YYYY-MM-DD) the entry was written.
+#
+# A missing key, an unknown key, an empty value, a repeated difference or a version that is
+# not a tag fails the gate naming the entry - never skipped, never honoured. And an entry is
+# honoured only while the tree still HAS that difference: a record that outlives its
+# difference is stale and fails the gate, so this file cannot survive as a blanket switch
+# once the break it recorded has shipped and the baseline has moved past it.
+#
+# Empty is the correct state.
+[]

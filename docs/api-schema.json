@@ -1,0 +1,3075 @@
+{
+  "schema": "holdfast.http-surface",
+  "schema_version": "1",
+  "holdfast_version": "v0.2.0-47-gec9f57f",
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 503,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/events",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "text/event-stream",
+          "body": {
+            "kind": "event-stream"
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 500,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/exclusions/",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "path",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "changed",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "runtime_state",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 400,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 500,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/exclusions/",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "exclusions",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "created_at",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "name": "runtime_state",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 500,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/exclusions/",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "path",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "changed",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "runtime_state",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 400,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 500,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/history",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "history",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "status",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "worker",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "fail_count",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "updated_at",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "reason",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "encoder",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "profile",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "vmaf_mean",
+                        "required": true,
+                        "type": {
+                          "kind": "number",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "vmaf_min",
+                        "required": true,
+                        "type": {
+                          "kind": "number",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "vmaf_model",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "vmaf_pix_fmt",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "vmaf_chroma",
+                        "required": true,
+                        "type": {
+                          "kind": "number",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "vmaf_chroma_metric",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "vmaf_stream",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "source_codec",
+                        "required": true,
+                        "type": {
+                          "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "source_bytes",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "output_bytes",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "encode_ms",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "source_width",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "source_height",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "output_width",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "output_height",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "progress_seconds",
+                        "required": true,
+                        "type": {
+                          "kind": "number",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "progress_duration_seconds",
+                        "required": true,
+                        "type": {
+                          "kind": "number",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "progress_fraction",
+                        "required": true,
+                        "type": {
+                          "kind": "number",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "guard_attributes",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "guard_time_resolution",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "guard_residual_window",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "swap_cause",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "library_root",
+                        "required": true,
+                        "type": {
+                          "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "profile_digest",
+                        "required": true,
+                        "type": {
+                          "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "dropped_streams",
+                        "required": true,
+                        "type": {
+                          "kind": "array",
+                          "nullable": true,
+                          "elem": {
+                            "kind": "object",
+                            "fields": [
+                              {
+                                "name": "index",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer"
+                                }
+                              },
+                              {
+                                "name": "type",
+                                "required": true,
+                                "type": {
+                                  "kind": "string"
+                                }
+                              },
+                              {
+                                "name": "language",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        "name": "deinterlaced",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "deinterlace_filter",
+                        "required": true,
+                        "type": {
+                          "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "selection_not_applied",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "vmaf_skipped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "name": "history_total",
+                "required": true,
+                "type": {
+                  "kind": "object",
+                  "fields": [
+                    {
+                      "name": "available",
+                      "required": true,
+                      "type": {
+                        "kind": "boolean"
+                      }
+                    },
+                    {
+                      "name": "unavailable",
+                      "required": true,
+                      "type": {
+                        "kind": "string"
+                      }
+                    },
+                    {
+                      "name": "covers",
+                      "required": true,
+                      "type": {
+                        "kind": "string"
+                      }
+                    },
+                    {
+                      "name": "cap",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "age_seconds",
+                      "required": true,
+                      "type": {
+                        "kind": "integer",
+                        "nullable": true
+                      }
+                    },
+                    {
+                      "name": "count",
+                      "required": true,
+                      "type": {
+                        "kind": "integer",
+                        "nullable": true
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 500,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/pause",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "paused",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "scanning",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/queue",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "now",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "queue",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "status",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "worker",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "fail_count",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "updated_at",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "reason",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "encoder",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "profile",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "vmaf_mean",
+                        "required": true,
+                        "type": {
+                          "kind": "number",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "vmaf_min",
+                        "required": true,
+                        "type": {
+                          "kind": "number",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "vmaf_model",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "vmaf_pix_fmt",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "vmaf_chroma",
+                        "required": true,
+                        "type": {
+                          "kind": "number",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "vmaf_chroma_metric",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "vmaf_stream",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "source_codec",
+                        "required": true,
+                        "type": {
+                          "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "source_bytes",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "output_bytes",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "encode_ms",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "source_width",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "source_height",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "output_width",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "output_height",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "progress_seconds",
+                        "required": true,
+                        "type": {
+                          "kind": "number",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "progress_duration_seconds",
+                        "required": true,
+                        "type": {
+                          "kind": "number",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "progress_fraction",
+                        "required": true,
+                        "type": {
+                          "kind": "number",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "guard_attributes",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "guard_time_resolution",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "guard_residual_window",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "swap_cause",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "library_root",
+                        "required": true,
+                        "type": {
+                          "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "profile_digest",
+                        "required": true,
+                        "type": {
+                          "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "dropped_streams",
+                        "required": true,
+                        "type": {
+                          "kind": "array",
+                          "nullable": true,
+                          "elem": {
+                            "kind": "object",
+                            "fields": [
+                              {
+                                "name": "index",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer"
+                                }
+                              },
+                              {
+                                "name": "type",
+                                "required": true,
+                                "type": {
+                                  "kind": "string"
+                                }
+                              },
+                              {
+                                "name": "language",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        "name": "deinterlaced",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "deinterlace_filter",
+                        "required": true,
+                        "type": {
+                          "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "selection_not_applied",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "vmaf_skipped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "name": "queue_total",
+                "required": true,
+                "type": {
+                  "kind": "object",
+                  "fields": [
+                    {
+                      "name": "available",
+                      "required": true,
+                      "type": {
+                        "kind": "boolean"
+                      }
+                    },
+                    {
+                      "name": "unavailable",
+                      "required": true,
+                      "type": {
+                        "kind": "string"
+                      }
+                    },
+                    {
+                      "name": "covers",
+                      "required": true,
+                      "type": {
+                        "kind": "string"
+                      }
+                    },
+                    {
+                      "name": "cap",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "age_seconds",
+                      "required": true,
+                      "type": {
+                        "kind": "integer",
+                        "nullable": true
+                      }
+                    },
+                    {
+                      "name": "count",
+                      "required": true,
+                      "type": {
+                        "kind": "integer",
+                        "nullable": true
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 500,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/rescan",
+      "responses": [
+        {
+          "status": 202,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "paused",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "reason",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "scanning",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "started",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 409,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "paused",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "reason",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "scanning",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "started",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/resume",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "paused",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "scanning",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/scan",
+      "responses": [
+        {
+          "status": 202,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "error",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 400,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "error",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 409,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "error",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 413,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "error",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 503,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "accepted",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rejected",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "rule",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "error",
+                "required": false,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "retryable",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "accepted",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      },
+                      {
+                        "name": "resolved",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "rule",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "detail",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "retryable",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/schema",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "schema",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "schema_version",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "holdfast_version",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "endpoints",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "method",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "responses",
+                        "required": true,
+                        "type": {
+                          "kind": "array",
+                          "nullable": true,
+                          "elem": {
+                            "kind": "object",
+                            "fields": [
+                              {
+                                "name": "status",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer"
+                                }
+                              },
+                              {
+                                "name": "media_type",
+                                "required": true,
+                                "type": {
+                                  "kind": "string"
+                                }
+                              },
+                              {
+                                "name": "body",
+                                "required": true,
+                                "type": {
+                                  "kind": "shape"
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 500,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/search",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "term",
+                "required": true,
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "results",
+                "required": true,
+                "type": {
+                  "kind": "array",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "name": "path",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "status",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "worker",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "fail_count",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "updated_at",
+                        "required": true,
+                        "type": {
+                          "kind": "integer"
+                        }
+                      },
+                      {
+                        "name": "reason",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "encoder",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "profile",
+                        "required": true,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "vmaf_mean",
+                        "required": true,
+                        "type": {
+                          "kind": "number",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "vmaf_min",
+                        "required": true,
+                        "type": {
+                          "kind": "number",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "vmaf_model",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "vmaf_pix_fmt",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "vmaf_chroma",
+                        "required": true,
+                        "type": {
+                          "kind": "number",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "vmaf_chroma_metric",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "vmaf_stream",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "source_codec",
+                        "required": true,
+                        "type": {
+                          "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "source_bytes",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "output_bytes",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "encode_ms",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "source_width",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "source_height",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "output_width",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "output_height",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "progress_seconds",
+                        "required": true,
+                        "type": {
+                          "kind": "number",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "progress_duration_seconds",
+                        "required": true,
+                        "type": {
+                          "kind": "number",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "progress_fraction",
+                        "required": true,
+                        "type": {
+                          "kind": "number",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "guard_attributes",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "guard_time_resolution",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "guard_residual_window",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "swap_cause",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "library_root",
+                        "required": true,
+                        "type": {
+                          "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "profile_digest",
+                        "required": true,
+                        "type": {
+                          "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "dropped_streams",
+                        "required": true,
+                        "type": {
+                          "kind": "array",
+                          "nullable": true,
+                          "elem": {
+                            "kind": "object",
+                            "fields": [
+                              {
+                                "name": "index",
+                                "required": true,
+                                "type": {
+                                  "kind": "integer"
+                                }
+                              },
+                              {
+                                "name": "type",
+                                "required": true,
+                                "type": {
+                                  "kind": "string"
+                                }
+                              },
+                              {
+                                "name": "language",
+                                "required": true,
+                                "type": {
+                                  "kind": "string",
+                                  "nullable": true
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        "name": "deinterlaced",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "deinterlace_filter",
+                        "required": true,
+                        "type": {
+                          "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "selection_not_applied",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "vmaf_skipped",
+                        "required": false,
+                        "type": {
+                          "kind": "string"
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "name": "total",
+                "required": true,
+                "type": {
+                  "kind": "object",
+                  "fields": [
+                    {
+                      "name": "available",
+                      "required": true,
+                      "type": {
+                        "kind": "boolean"
+                      }
+                    },
+                    {
+                      "name": "unavailable",
+                      "required": true,
+                      "type": {
+                        "kind": "string"
+                      }
+                    },
+                    {
+                      "name": "covers",
+                      "required": true,
+                      "type": {
+                        "kind": "string"
+                      }
+                    },
+                    {
+                      "name": "cap",
+                      "required": true,
+                      "type": {
+                        "kind": "integer"
+                      }
+                    },
+                    {
+                      "name": "age_seconds",
+                      "required": true,
+                      "type": {
+                        "kind": "integer",
+                        "nullable": true
+                      }
+                    },
+                    {
+                      "name": "count",
+                      "required": true,
+                      "type": {
+                        "kind": "integer",
+                        "nullable": true
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 400,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 403,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 500,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/summary",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "application/json; charset=utf-8",
+          "body": {
+            "kind": "object",
+            "fields": [
+              {
+                "name": "summary",
+                "required": true,
+                "type": {
+                  "kind": "map",
+                  "nullable": true,
+                  "elem": {
+                    "kind": "integer"
+                  }
+                }
+              },
+              {
+                "name": "bytes_reclaimed_session",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "bytes_reclaimed_lifetime",
+                "required": true,
+                "type": {
+                  "kind": "integer"
+                }
+              },
+              {
+                "name": "paused",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "scanning",
+                "required": true,
+                "type": {
+                  "kind": "boolean"
+                }
+              },
+              {
+                "name": "aggregates",
+                "required": true,
+                "type": {
+                  "kind": "object",
+                  "fields": [
+                    {
+                      "name": "outcomes",
+                      "required": true,
+                      "type": {
+                        "kind": "object",
+                        "fields": [
+                          {
+                            "name": "available",
+                            "required": true,
+                            "type": {
+                              "kind": "boolean"
+                            }
+                          },
+                          {
+                            "name": "unavailable",
+                            "required": true,
+                            "type": {
+                              "kind": "string"
+                            }
+                          },
+                          {
+                            "name": "covers",
+                            "required": true,
+                            "type": {
+                              "kind": "string"
+                            }
+                          },
+                          {
+                            "name": "window",
+                            "required": true,
+                            "type": {
+                              "kind": "string"
+                            }
+                          },
+                          {
+                            "name": "age_seconds",
+                            "required": true,
+                            "type": {
+                              "kind": "integer",
+                              "nullable": true
+                            }
+                          },
+                          {
+                            "name": "counted",
+                            "required": true,
+                            "type": {
+                              "kind": "integer"
+                            }
+                          },
+                          {
+                            "name": "excluded",
+                            "required": true,
+                            "type": {
+                              "kind": "integer"
+                            }
+                          },
+                          {
+                            "name": "buckets",
+                            "required": true,
+                            "type": {
+                              "kind": "array",
+                              "nullable": true,
+                              "elem": {
+                                "kind": "object",
+                                "fields": [
+                                  {
+                                    "name": "key",
+                                    "required": true,
+                                    "type": {
+                                      "kind": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "count",
+                                    "required": true,
+                                    "type": {
+                                      "kind": "integer"
+                                    }
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "name": "skips_by_guard",
+                      "required": true,
+                      "type": {
+                        "kind": "object",
+                        "fields": [
+                          {
+                            "name": "available",
+                            "required": true,
+                            "type": {
+                              "kind": "boolean"
+                            }
+                          },
+                          {
+                            "name": "unavailable",
+                            "required": true,
+                            "type": {
+                              "kind": "string"
+                            }
+                          },
+                          {
+                            "name": "covers",
+                            "required": true,
+                            "type": {
+                              "kind": "string"
+                            }
+                          },
+                          {
+                            "name": "window",
+                            "required": true,
+                            "type": {
+                              "kind": "string"
+                            }
+                          },
+                          {
+                            "name": "age_seconds",
+                            "required": true,
+                            "type": {
+                              "kind": "integer",
+                              "nullable": true
+                            }
+                          },
+                          {
+                            "name": "counted",
+                            "required": true,
+                            "type": {
+                              "kind": "integer"
+                            }
+                          },
+                          {
+                            "name": "excluded",
+                            "required": true,
+                            "type": {
+                              "kind": "integer"
+                            }
+                          },
+                          {
+                            "name": "buckets",
+                            "required": true,
+                            "type": {
+                              "kind": "array",
+                              "nullable": true,
+                              "elem": {
+                                "kind": "object",
+                                "fields": [
+                                  {
+                                    "name": "key",
+                                    "required": true,
+                                    "type": {
+                                      "kind": "string"
+                                    }
+                                  },
+                                  {
+                                    "name": "count",
+                                    "required": true,
+                                    "type": {
+                                      "kind": "integer"
+                                    }
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "name": "size_ratio",
+                      "required": true,
+                      "type": {
+                        "kind": "object",
+                        "fields": [
+                          {
+                            "name": "available",
+                            "required": true,
+                            "type": {
+                              "kind": "boolean"
+                            }
+                          },
+                          {
+                            "name": "unavailable",
+                            "required": true,
+                            "type": {
+                              "kind": "string"
+                            }
+                          },
+                          {
+                            "name": "covers",
+                            "required": true,
+                            "type": {
+                              "kind": "string"
+                            }
+                          },
+                          {
+                            "name": "window",
+                            "required": true,
+                            "type": {
+                              "kind": "string"
+                            }
+                          },
+                          {
+                            "name": "age_seconds",
+                            "required": true,
+                            "type": {
+                              "kind": "integer",
+                              "nullable": true
+                            }
+                          },
+                          {
+                            "name": "counted",
+                            "required": true,
+                            "type": {
+                              "kind": "integer"
+                            }
+                          },
+                          {
+                            "name": "excluded",
+                            "required": true,
+                            "type": {
+                              "kind": "integer"
+                            }
+                          },
+                          {
+                            "name": "min",
+                            "required": true,
+                            "type": {
+                              "kind": "number",
+                              "nullable": true
+                            }
+                          },
+                          {
+                            "name": "mean",
+                            "required": true,
+                            "type": {
+                              "kind": "number",
+                              "nullable": true
+                            }
+                          },
+                          {
+                            "name": "max",
+                            "required": true,
+                            "type": {
+                              "kind": "number",
+                              "nullable": true
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "name": "encode_ms",
+                      "required": true,
+                      "type": {
+                        "kind": "object",
+                        "fields": [
+                          {
+                            "name": "available",
+                            "required": true,
+                            "type": {
+                              "kind": "boolean"
+                            }
+                          },
+                          {
+                            "name": "unavailable",
+                            "required": true,
+                            "type": {
+                              "kind": "string"
+                            }
+                          },
+                          {
+                            "name": "covers",
+                            "required": true,
+                            "type": {
+                              "kind": "string"
+                            }
+                          },
+                          {
+                            "name": "window",
+                            "required": true,
+                            "type": {
+                              "kind": "string"
+                            }
+                          },
+                          {
+                            "name": "age_seconds",
+                            "required": true,
+                            "type": {
+                              "kind": "integer",
+                              "nullable": true
+                            }
+                          },
+                          {
+                            "name": "counted",
+                            "required": true,
+                            "type": {
+                              "kind": "integer"
+                            }
+                          },
+                          {
+                            "name": "excluded",
+                            "required": true,
+                            "type": {
+                              "kind": "integer"
+                            }
+                          },
+                          {
+                            "name": "min",
+                            "required": true,
+                            "type": {
+                              "kind": "number",
+                              "nullable": true
+                            }
+                          },
+                          {
+                            "name": "mean",
+                            "required": true,
+                            "type": {
+                              "kind": "number",
+                              "nullable": true
+                            }
+                          },
+                          {
+                            "name": "max",
+                            "required": true,
+                            "type": {
+                              "kind": "number",
+                              "nullable": true
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "name": "vmaf_mean",
+                      "required": true,
+                      "type": {
+                        "kind": "object",
+                        "fields": [
+                          {
+                            "name": "available",
+                            "required": true,
+                            "type": {
+                              "kind": "boolean"
+                            }
+                          },
+                          {
+                            "name": "unavailable",
+                            "required": true,
+                            "type": {
+                              "kind": "string"
+                            }
+                          },
+                          {
+                            "name": "covers",
+                            "required": true,
+                            "type": {
+                              "kind": "string"
+                            }
+                          },
+                          {
+                            "name": "window",
+                            "required": true,
+                            "type": {
+                              "kind": "string"
+                            }
+                          },
+                          {
+                            "name": "age_seconds",
+                            "required": true,
+                            "type": {
+                              "kind": "integer",
+                              "nullable": true
+                            }
+                          },
+                          {
+                            "name": "counted",
+                            "required": true,
+                            "type": {
+                              "kind": "integer"
+                            }
+                          },
+                          {
+                            "name": "excluded",
+                            "required": true,
+                            "type": {
+                              "kind": "integer"
+                            }
+                          },
+                          {
+                            "name": "min",
+                            "required": true,
+                            "type": {
+                              "kind": "number",
+                              "nullable": true
+                            }
+                          },
+                          {
+                            "name": "mean",
+                            "required": true,
+                            "type": {
+                              "kind": "number",
+                              "nullable": true
+                            }
+                          },
+                          {
+                            "name": "max",
+                            "required": true,
+                            "type": {
+                              "kind": "number",
+                              "nullable": true
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "name": "vmaf_min",
+                      "required": true,
+                      "type": {
+                        "kind": "object",
+                        "fields": [
+                          {
+                            "name": "available",
+                            "required": true,
+                            "type": {
+                              "kind": "boolean"
+                            }
+                          },
+                          {
+                            "name": "unavailable",
+                            "required": true,
+                            "type": {
+                              "kind": "string"
+                            }
+                          },
+                          {
+                            "name": "covers",
+                            "required": true,
+                            "type": {
+                              "kind": "string"
+                            }
+                          },
+                          {
+                            "name": "window",
+                            "required": true,
+                            "type": {
+                              "kind": "string"
+                            }
+                          },
+                          {
+                            "name": "age_seconds",
+                            "required": true,
+                            "type": {
+                              "kind": "integer",
+                              "nullable": true
+                            }
+                          },
+                          {
+                            "name": "counted",
+                            "required": true,
+                            "type": {
+                              "kind": "integer"
+                            }
+                          },
+                          {
+                            "name": "excluded",
+                            "required": true,
+                            "type": {
+                              "kind": "integer"
+                            }
+                          },
+                          {
+                            "name": "min",
+                            "required": true,
+                            "type": {
+                              "kind": "number",
+                              "nullable": true
+                            }
+                          },
+                          {
+                            "name": "mean",
+                            "required": true,
+                            "type": {
+                              "kind": "number",
+                              "nullable": true
+                            }
+                          },
+                          {
+                            "name": "max",
+                            "required": true,
+                            "type": {
+                              "kind": "number",
+                              "nullable": true
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "status": 401,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        },
+        {
+          "status": 405,
+          "media_type": "",
+          "body": {
+            "kind": "empty"
+          }
+        },
+        {
+          "status": 500,
+          "media_type": "text/plain; charset=utf-8",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "CONNECT",
+      "path": "/metrics",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "text/plain",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/metrics",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "text/plain",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/metrics",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "text/plain",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "HEAD",
+      "path": "/metrics",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "text/plain",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "OPTIONS",
+      "path": "/metrics",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "text/plain",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/metrics",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "text/plain",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/metrics",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "text/plain",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/metrics",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "text/plain",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    },
+    {
+      "method": "TRACE",
+      "path": "/metrics",
+      "responses": [
+        {
+          "status": 200,
+          "media_type": "text/plain",
+          "body": {
+            "kind": "text"
+          }
+        }
+      ]
+    }
+  ]
+}

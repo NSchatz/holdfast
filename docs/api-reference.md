@@ -14,6 +14,7 @@ per-field reference `README.md` points at rather than restates.
 | `GET /api/queue` | read | pending + active jobs, capped, with `queue_total` - see *The total behind a cap* |
 | `GET /api/history?limit=N` | read | recent terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, capped, with `history_total` - see below |
 | `GET /api/events` | read | SSE: a fresh snapshot on every state change |
+| `GET /api/schema` | - | a machine-readable document of this surface, GENERATED from the router and the response types this build actually serves. Never gated: it carries endpoint paths, methods, status codes, media types, field names and field types, and no value of any kind - see below |
 | `GET /metrics` | - | Prometheus metrics (when `metrics_enable`, default on). Never gated: it names no file |
 | `POST /api/rescan` | control | start a library scan (409 if paused / scanning / outside the run window) |
 | `POST /api/pause` | control | stop feeding **new** files (in-flight encodes finish safely) |
@@ -27,6 +28,29 @@ per-field reference `README.md` points at rather than restates.
 **control** = always required, and the endpoint answers 403 until `server_auth_token` is
 configured. The control token is accepted on a read; a read token is never accepted for a
 mutation.
+
+### `GET /api/schema` - the surface describing itself
+
+The document is built at request time from the router `internal/server` constructs and by
+reflection over the Go types its handlers encode. There is no hand-maintained copy of it:
+a route that is registered is listed, a route that is not registered cannot be listed, and
+a response field renamed or retyped moves the document in the same build. That is the whole
+of why it is worth reading - a description that could disagree with the service would be
+worth less than no description at all.
+
+It names its own format (`schema`) and that format's version (`schema_version`) at the top
+level, the version this binary reports (`holdfast_version`), and then every endpoint with
+its method, its path, and every status code it answers with - each carrying the media type
+and the body shape that goes out under it. A body shape is a closed set of named fields,
+each with a type, whether it may be `null` and whether it is always present.
+
+`docs/api-schema.json` is the same document for the LAST RELEASED version. `make
+api-schema-diff` compares this build against it on every `make check` and refuses a breaking
+change - an endpoint or method removed, a declared field removed, a field's declaration
+narrowed, a status code removed, or the response recorded for a status code changed - unless
+`.api-schema-breaks.yaml` names that exact difference and the version that will carry it.
+Additions pass: the baseline describes a release, and additive drift between releases is the
+normal state.
 
 `POST /api/scan` has a section of its own below. The control-guarded endpoints are disabled
 entirely until a control token is configured, and the read surface is open until
