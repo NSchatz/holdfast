@@ -80,11 +80,25 @@ Both figures are dominated by the constants: the peak is essentially the `observ
 directory listing. The whole scan takes ten times as long, which is the linear part and is
 the figure that is expected to scale.
 
-There is no earlier figure to compare these against: before this measurement existed the scan
-materialised every path, so what it held was the path set itself - on the order of tens of
-megabytes at a million media-shaped paths - and the first file could not reach a worker until
-the last directory had been read, which at this fixture's shape is the whole-scan figure and
-not the one beside it.
+### What it cost before
+
+The same benchmark against a scan that materialises every path before feeding the first one -
+the arrangement this replaced - taken the same way, on the same machine, on the same day:
+
+| library | peak heap | time to first file | whole scan |
+|---|---|---|---|
+| 100,000 paths | 20.5 MiB | 3.8 s | 4.6 s |
+| 1,000,000 paths | 200.4 MiB | 29.3 s | 37.4 s |
+
+- Runs: 1, `-benchtime 1x -count=1`. One run each, so there is no spread to report: these
+  figures exist to be an order of magnitude and not a baseline, and the build they were taken
+  against was a deliberate local edit rather than a commit.
+
+That build holds 460 times as much at a million paths and takes 29 seconds to reach its first
+worker where this one takes four milliseconds - on storage ten times slower, which is what a
+cold network mount is, that is minutes of a daemon looking hung. Both of its figures grow with
+the number of files: ten times the library, ten times the heap and eight times the wait. Those
+are the two shapes this document exists to keep apart.
 
 ### Running it again
 

@@ -425,17 +425,37 @@ func TestScan_HandOutOrderIsTotalAndDeterministic(t *testing.T) {
 	})
 }
 
-// fourDirs builds a library of four covered directories, each holding one source, and
-// returns the root and the covered directories in the order a scan takes them.
+// fourDirs builds a library of four covered directories and returns the root and those
+// directories in the order a scan takes them.
+//
+// The SECOND holds no source at all, which is not decoration: a stop is noticed at two
+// different places in the enumeration - between two directories, and at a file it was about
+// to hand out - and a library whose every directory holds a source only ever exercises the
+// second. A run of source-free directories after a cancellation is precisely where a scan
+// could go on listing (and so go on OBSERVING) after it had stopped feeding.
 func fourDirs(t *testing.T) (root string, dirs []string) {
 	t.Helper()
 	root = t.TempDir()
-	for _, name := range []string{"a-dir", "b-dir", "c-dir", "d-dir"} {
+	for i, name := range []string{"a-dir", "b-dir", "c-dir", "d-dir"} {
 		dir := filepath.Join(root, name)
-		mustWrite(t, filepath.Join(dir, "Source.mkv"))
+		if i == 1 {
+			mustWrite(t, filepath.Join(dir, "notes.txt"))
+		} else {
+			mustWrite(t, filepath.Join(dir, "Source.mkv"))
+		}
 		dirs = append(dirs, dir)
 	}
 	return root, dirs
+}
+
+// stopPoints are the two places a stop is noticed, named by the directory whose listing
+// triggers it. In both, the first directory's source has already gone out to a worker.
+var stopPoints = []struct {
+	name   string
+	stopAt int
+}{
+	{"between two directories, with no file to hand out", 1},
+	{"at a file it was about to hand out", 2},
 }
 
 // TestScan_CancelMidStreamObservesOnlyWhatItListed is [AC-5].
@@ -446,41 +466,49 @@ func fourDirs(t *testing.T) (root string, dirs []string) {
 // pass reads a file missing from an observed directory as a file that is GONE and expires
 // the undo record that is the only route back to the original bytes.
 func TestScan_CancelMidStreamObservesOnlyWhatItListed(t *testing.T) {
-	root, dirs := fourDirs(t)
-	e, a := streamEngine(t, root, dirs, 1)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	for _, point := range stopPoints {
+		t.Run("cancelled "+point.name, func(t *testing.T) {
+			root, dirs := fourDirs(t)
+			e, a := streamEngine(t, root, dirs, 1)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 
-	seen := newListedDirs()
-	e.readDirFn = func(dir string) ([]os.DirEntry, error) {
-		ents, err := seen.readDir(dir)
-		if dir == dirs[1] {
-			// Listed, and cancelled with the listing in hand: THIS directory is evidence,
-			// and the two after it must not become any.
-			cancel()
-		}
-		return ents, err
-	}
+			seen := newListedDirs()
+			e.readDirFn = func(dir string) ([]os.DirEntry, error) {
+				ents, err := seen.readDir(dir)
+				if dir == dirs[point.stopAt] {
+					// Listed, and cancelled with the listing in hand: THIS directory is
+					// evidence, and the ones after it must not become any.
+					cancel()
+				}
+				return ents, err
+			}
 
-	observed, err := e.scanOnce(ctx, e.passListings())
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("scanOnce returned %v, want the cancellation error handed back to the caller", err)
-	}
+			observed, err := e.scanOnce(ctx, e.passListings())
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("scanOnce returned %v, want the cancellation error handed back to the caller", err)
+			}
 
-	want := map[string]bool{dirs[0]: true, dirs[1]: true}
-	if !reflect.DeepEqual(observed, want) {
-		t.Fatalf("observed = %v, want exactly %v: a cancelled scan reports the directories it had already "+
-			"listed and no others", sortedKeys(observed), sortedKeys(want))
-	}
-	for _, dir := range dirs[2:] {
-		if seen.was(dir) {
-			t.Errorf("%s was listed after the scan was cancelled; a cancelled scan stops where it stands", dir)
-		}
-	}
-	for _, p := range a.paths() {
-		if filepath.Dir(p) != dirs[0] {
-			t.Errorf("%s was handed to a worker after the scan was cancelled", p)
-		}
+			want := map[string]bool{}
+			for _, dir := range dirs[:point.stopAt+1] {
+				want[dir] = true
+			}
+			if !reflect.DeepEqual(observed, want) {
+				t.Fatalf("observed = %v, want exactly %v: a cancelled scan reports the directories it had "+
+					"already listed and no others", sortedKeys(observed), sortedKeys(want))
+			}
+			for _, dir := range dirs[point.stopAt+1:] {
+				if seen.was(dir) {
+					t.Errorf("%s was listed after the scan was cancelled; a cancelled scan stops where it "+
+						"stands, and a directory it goes on to list is one it would go on to OBSERVE", dir)
+				}
+			}
+			for _, p := range a.paths() {
+				if filepath.Dir(p) != dirs[0] {
+					t.Errorf("%s was handed to a worker after the scan was cancelled", p)
+				}
+			}
+		})
 	}
 }
 
@@ -491,101 +519,105 @@ func TestScan_CancelMidStreamObservesOnlyWhatItListed(t *testing.T) {
 // return until it has), the observed set is exactly what had been listed by then, and what
 // was never handed out is handed out by the next scan after resume.
 func TestScan_PauseMidStreamObservesOnlyWhatItListed(t *testing.T) {
-	root, dirs := fourDirs(t)
-	e, a := streamEngine(t, root, dirs, 1)
-	var paused atomic.Bool
-	e.Paused = paused.Load
+	for _, point := range stopPoints {
+		t.Run("paused "+point.name, func(t *testing.T) {
+			root, dirs := fourDirs(t)
+			e, a := streamEngine(t, root, dirs, 1)
+			var paused atomic.Bool
+			e.Paused = paused.Load
 
-	begun := make(chan struct{})
-	finish := make(chan struct{})
-	var releasedFirst atomic.Bool
-	a.after(func(string) {
-		close(begun)
-		<-finish
-	})
-
-	seen := newListedDirs()
-	var pauseOnce sync.Once
-	e.readDirFn = func(dir string) ([]os.DirEntry, error) {
-		if dir == dirs[1] {
-			// The pause lands with a worker inside the first file and this directory's
-			// listing in hand: paused WHILE the enumeration is still running, which is
-			// [AC-6]'s premise. Once only, so the scan after resume is not re-paused.
-			pauseOnce.Do(func() {
-				<-begun
-				paused.Store(true)
+			first := filepath.Join(dirs[0], "Source.mkv")
+			begun := make(chan struct{})
+			finish := make(chan struct{})
+			a.after(func(string) {
+				close(begun)
+				<-finish
 			})
-		}
-		return seen.readDir(dir)
-	}
 
-	type result struct {
-		observed map[string]bool
-		err      error
-	}
-	done := make(chan result, 1)
-	go func() {
-		observed, err := e.scanOnce(context.Background(), e.passListings())
-		done <- result{observed, err}
-	}()
+			seen := newListedDirs()
+			var pauseOnce sync.Once
+			e.readDirFn = func(dir string) ([]os.DirEntry, error) {
+				if dir == dirs[point.stopAt] {
+					// The pause lands with a worker inside the first file and this
+					// directory's listing in hand: paused WHILE the enumeration is still
+					// running, which is [AC-6]'s premise. Once only, so the scan after
+					// resume is not paused again.
+					pauseOnce.Do(func() {
+						<-begun
+						paused.Store(true)
+					})
+				}
+				return seen.readDir(dir)
+			}
 
-	select {
-	case <-begun:
-	case got := <-done:
-		t.Fatalf("the scan returned (%v) without any worker having begun a file", got.err)
-	case <-time.After(streamWait):
-		close(finish)
-		t.Fatalf("no worker began a file within %s", streamWait)
-	}
-	select {
-	case got := <-done:
-		close(finish)
-		t.Fatalf("the paused scan returned (%v) with a file still in flight; a pause never interrupts work "+
-			"already running", got.err)
-	case <-time.After(250 * time.Millisecond):
-	}
-	releasedFirst.Store(true)
-	close(finish)
+			type result struct {
+				observed map[string]bool
+				err      error
+			}
+			done := make(chan result, 1)
+			go func() {
+				observed, err := e.scanOnce(context.Background(), e.passListings())
+				done <- result{observed, err}
+			}()
 
-	got := <-done
-	if !releasedFirst.Load() {
-		t.Error("the scan returned before the in-flight file was released")
-	}
-	if got.err != nil {
-		t.Errorf("scanOnce returned %v; a pause is not an error", got.err)
-	}
+			select {
+			case <-begun:
+			case got := <-done:
+				t.Fatalf("the scan returned (%v) without any worker having begun a file", got.err)
+			case <-time.After(streamWait):
+				close(finish)
+				t.Fatalf("no worker began a file within %s", streamWait)
+			}
+			// The in-flight file is still in flight, and the scan has not returned: a pause
+			// never interrupts work already running.
+			select {
+			case got := <-done:
+				close(finish)
+				t.Fatalf("the paused scan returned (%v) with a file still in flight", got.err)
+			case <-time.After(250 * time.Millisecond):
+			}
+			close(finish)
 
-	want := map[string]bool{dirs[0]: true, dirs[1]: true}
-	if !reflect.DeepEqual(got.observed, want) {
-		t.Fatalf("observed = %v, want exactly %v: a paused scan reports the directories it had already "+
-			"listed and no others", sortedKeys(got.observed), sortedKeys(want))
-	}
-	for _, dir := range dirs[2:] {
-		if seen.was(dir) {
-			t.Errorf("%s was listed after the scan was paused", dir)
-		}
-	}
-	if fed := a.paths(); !reflect.DeepEqual(fed, []string{filepath.Join(dirs[0], "Source.mkv")}) {
-		t.Errorf("the paused scan handed out %v, want only the file that was already in flight", fed)
-	}
+			got := <-done
+			if got.err != nil {
+				t.Errorf("scanOnce returned %v; a pause is not an error", got.err)
+			}
 
-	// Resumed: the files it never handed out are still pending, and the next scan takes them.
-	paused.Store(false)
-	a.after(nil)
-	next, err := e.scanOnce(context.Background(), e.passListings())
-	if err != nil {
-		t.Fatalf("the scan after resume: %v", err)
-	}
-	var all []string
-	for _, dir := range dirs {
-		all = append(all, filepath.Join(dir, "Source.mkv"))
-	}
-	if fed := a.paths()[1:]; !reflect.DeepEqual(fed, all) {
-		t.Errorf("the scan after resume handed out %v, want every source including the ones the paused scan "+
-			"left pending: %v", fed, all)
-	}
-	if len(next) != len(dirs) {
-		t.Errorf("the scan after resume observed %v, want all four directories", sortedKeys(next))
+			want := map[string]bool{}
+			for _, dir := range dirs[:point.stopAt+1] {
+				want[dir] = true
+			}
+			if !reflect.DeepEqual(got.observed, want) {
+				t.Fatalf("observed = %v, want exactly %v: a paused scan reports the directories it had "+
+					"already listed and no others", sortedKeys(got.observed), sortedKeys(want))
+			}
+			for _, dir := range dirs[point.stopAt+1:] {
+				if seen.was(dir) {
+					t.Errorf("%s was listed after the scan was paused; a directory it goes on to list is "+
+						"one it would go on to OBSERVE", dir)
+				}
+			}
+			if fed := a.paths(); !reflect.DeepEqual(fed, []string{first}) {
+				t.Errorf("the paused scan handed out %v, want only the file that was already in flight", fed)
+			}
+
+			// Resumed: the files it never handed out are still pending, and the next scan
+			// takes them.
+			paused.Store(false)
+			a.after(nil)
+			next, err := e.scanOnce(context.Background(), e.passListings())
+			if err != nil {
+				t.Fatalf("the scan after resume: %v", err)
+			}
+			all := []string{first, filepath.Join(dirs[2], "Source.mkv"), filepath.Join(dirs[3], "Source.mkv")}
+			if fed := a.paths()[1:]; !reflect.DeepEqual(fed, all) {
+				t.Errorf("the scan after resume handed out %v, want every source including the ones the "+
+					"paused scan left pending: %v", fed, all)
+			}
+			if len(next) != len(dirs) {
+				t.Errorf("the scan after resume observed %v, want all four directories", sortedKeys(next))
+			}
+		})
 	}
 }
 
