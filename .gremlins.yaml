@@ -1,0 +1,67 @@
+# The mutation gate's configuration, and the ONE committed home of the floor and the
+# mutation domain (testing T5). scripts/mutation.sh reads both out of this file, the
+# pull-request run and the scheduled run take them from here, and
+# scripts/mutation-shape-gate refuses a value here that disagrees with
+# docs/mutation-testing.md.
+#
+# The floor is applied to EFFICACY - KILLED / (KILLED + LIVED) - which is the percentage
+# of the faults the suite actually ran that it also caught. Mutant coverage,
+# (KILLED + LIVED) / (KILLED + LIVED + NOT_COVERED), measures reach rather than assertion
+# and is what line coverage already claims, so it is left unenforced on purpose: one
+# floor, one figure.
+silent: false
+
+unleash:
+  threshold:
+    # The floor. docs/mutation-testing.md carries the same number and the reason it is
+    # this number; the two are held equal by `make mutation-shape`, which rides `check`.
+    efficacy: 70
+    # Deliberately unenforced. See the note above: enforcing reach as well as assertion
+    # would make a red run ambiguous about which of the two failed.
+    mutant-coverage: 0
+
+  # THE MUTATION DOMAIN: the module minus these paths. Every entry is here for one of two
+  # reasons, and docs/mutation-testing.md states the reason and the measurement beside
+  # each. An excluded path is an UNMEASURED path, so this list is the honest weak point of
+  # the gate and is kept as short as the run cost allows.
+  #
+  # The rule that decides an entry: a package is excluded when its own test suite needs
+  # the pinned ffmpeg (which the mutation job does not install), or when the suite takes
+  # long enough that re-running it once per mutant does not finish. Every other package in
+  # the module is in the domain, including the ones that carry no tests at all - those
+  # score NOT COVERED, which the floor's figure ignores, and they start counting on the
+  # day someone gives them a test.
+  exclude-files:
+    # Real libx265 encodes behind the real verify gate. The Makefile records this suite at
+    # 524 to 568 seconds ALONE under -race, and a mutant re-runs it.
+    - '^internal/engine/'
+    # libvmaf through the pinned ffmpeg: the instrument the no-loss verdict is measured
+    # with, and not something a mutation job should be installing to mutate.
+    - '^internal/vmaf/'
+    # Drives real oneshot runs end to end - a real encode, a real VMAF measurement, a real
+    # swap - so it needs the pinned ffmpeg for the same reason internal/engine does.
+    - '^cmd/holdfast/'
+    # Measured at 143 seconds: sqlite migrations and ledger-scale fixtures, once per
+    # mutant.
+    - '^internal/store/'
+    # Measured at 97 seconds: the HTTP surface's own suite, once per mutant.
+    - '^internal/server/'
+    # Measured at 23 seconds: collector registration and scrape fixtures, once per mutant.
+    - '^internal/metrics/'
+
+  # Each mutant's test run is allowed fifty times the time the package's coverage run
+  # took. That multiple looks enormous and is not: the coverage run is measured with a
+  # warm build cache and takes well under a second on most packages here, while the cost
+  # of a MUTANT is dominated by linking a fresh test binary, which does not shrink with
+  # the suite. At the default multiple this domain reported more TIMED OUT mutants than
+  # KILLED ones, every one of them a verdict about scheduling rather than about an
+  # assertion.
+  #
+  # That matters beyond tidiness: a timed-out mutant is in neither the numerator nor the
+  # denominator of the score, and the runner's JSON does not carry the count, so a timeout
+  # budget too small to tell a hung mutant from a busy machine is the cheap way for this
+  # gate to measure a fraction of the domain and report a number as if it had measured all
+  # of it. scripts/mutation-gate counts the timed-out mutants off the runner's own output
+  # and puts the total in the report, so a reader can see how much of the run was decided
+  # by a clock.
+  timeout-coefficient: 50
