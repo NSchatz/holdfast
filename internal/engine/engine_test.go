@@ -3222,13 +3222,13 @@ func (w *writeCountingStore) everyWrite() []string {
 }
 
 func (w *writeCountingStore) Claim(ctx context.Context, path, fingerprint, worker string,
-	maxFailures int, current store.DecisionInputs) (bool, error) {
+	maxFailures int, current store.DecisionInputs, supersede ...string) (bool, error) {
 	if w.claimErr != nil {
 		if err := w.claimErr(path); err != nil {
 			return false, err
 		}
 	}
-	claimed, err := w.Store.Claim(ctx, path, fingerprint, worker, maxFailures, current)
+	claimed, err := w.Store.Claim(ctx, path, fingerprint, worker, maxFailures, current, supersede...)
 	if claimed {
 		w.note(path, "Claim")
 	}
@@ -3763,4 +3763,169 @@ func readlink(t *testing.T, path string) string {
 		t.Fatalf("readlink %s: %v (it is no longer a symbolic link)", path, err)
 	}
 	return got
+}
+
+// AC-10. A file whose attributes cannot be read is left ALONE - not mutated, no row
+// written for it - it is recorded at a level that does not demand a human act on a
+// condition the scan handled itself (observability O3), and the scan runs to completion
+// over the rest of the library.
+//
+// The two causes are the two the criterion names, and both are injected through the
+// attribute-read seam because neither is producible otherwise: a file that vanishes
+// between the enumeration and the claim is a race no fixture can hold open, and a path an
+// unprivileged uid may not stat is not something this gate's user can create.
+func TestScan_UnreadableFileIsSkippedAndTheScanContinues(t *testing.T) {
+	root := t.TempDir()
+	cfg := baseCfg(root)
+	ts := newTestStore(t, root)
+
+	vanished := filepath.Join(root, "vanished.mkv")
+	denied := filepath.Join(root, "denied.mkv")
+	ordinary := filepath.Join(root, "ordinary.mkv")
+	for _, p := range []string{vanished, denied, ordinary} {
+		if err := os.WriteFile(p, []byte("a source this pass will or will not be able to read"), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", p, err)
+		}
+	}
+	before := map[string]string{vanished: md5f(t, vanished), denied: md5f(t, denied)}
+
+	counter := newStatCounter()
+	counter.fail = func(path string) error {
+		switch path {
+		case vanished:
+			return os.ErrNotExist
+		case denied:
+			return os.ErrPermission
+		}
+		return nil
+	}
+	var logged bytes.Buffer
+	counted := countingStore(ts)
+	eng := toollessEngine(t, cfg, counted, jsonLogger(&logged))
+	eng.statFn = counter.stat
+
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+
+	for _, p := range []string{vanished, denied} {
+		if row, ok := ledgerRowFor(t, ts, p); ok {
+			t.Errorf("%s could not be read, yet the pass wrote a row for it: %+v. A row is a "+
+				"statement about a file this pass never looked at", filepath.Base(p), row)
+		}
+		if w := counted.writesFor(p); len(w) != 0 {
+			t.Errorf("%s could not be read, yet the pass issued %v for it", filepath.Base(p), w)
+		}
+		if md5f(t, p) != before[p] {
+			t.Errorf("%s was MODIFIED by a pass that could not even read its attributes", filepath.Base(p))
+		}
+	}
+
+	// The scan ran to completion over the rest of the library: the readable file beside
+	// them went the ordinary way, which here means it reached the probe that does not
+	// exist and was recorded unreadable. The point is only that it was reached at all.
+	if _, ok := ledgerRowFor(t, ts, ordinary); !ok {
+		t.Error("the file beside the unreadable ones left no row, so one bad file took the scan " +
+			"down with it instead of being stepped over")
+	}
+
+	// RECORDED, and at a level that does not summon anybody. `error` in this fleet means a
+	// human must act; this is a condition the pass handled itself and re-reads next scan.
+	records := logRecords(t, &logged)
+	for _, p := range []string{vanished, denied} {
+		var said bool
+		for _, rec := range records {
+			if rec["file"] != p {
+				continue
+			}
+			said = true
+			if lvl, _ := rec["level"].(string); lvl != "INFO" {
+				t.Errorf("%s was recorded at %q. `error` demands a human act and `warn` says the "+
+					"run is degraded; a file re-read on the next scan with no operator action in "+
+					"between is neither, and a library with one dangling link in it would raise "+
+					"that alarm on every scan for ever", filepath.Base(p), lvl)
+			}
+		}
+		if !said {
+			t.Errorf("%s was skipped with NOTHING recorded about it. A file that silently stops "+
+				"being worked on, with no line naming it, is the dead end this clause exists to "+
+				"close", filepath.Base(p))
+		}
+	}
+	for _, rec := range records {
+		if lvl, _ := rec["level"].(string); lvl == "ERROR" {
+			t.Errorf("the pass logged at ERROR for a condition it handled: %v", rec)
+		}
+	}
+}
+
+// AC-11. A store that fails INSIDE the claim decision must never be read as a verdict
+// about the file. Nothing about the file is mutated, it is not treated as done, it stays
+// eligible for the next pass, and the record names which dependency failed, what was being
+// attempted and that the file is retried - not a wrapped trace (observability O4).
+func TestScan_StoreErrorInTheClaimPathRetriesNextPass(t *testing.T) {
+	root := t.TempDir()
+	cfg := baseCfg(root)
+	ts := newTestStore(t, root)
+
+	f := filepath.Join(root, "film.mkv")
+	if err := os.WriteFile(f, []byte("a source the store will refuse to claim, once"), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", f, err)
+	}
+	before := md5f(t, f)
+
+	counted := countingStore(ts)
+	errClaim := errors.New("injected: the ledger is unreachable")
+	counted.claimErr = func(string) error { return errClaim }
+
+	var logged bytes.Buffer
+	eng := toollessEngine(t, cfg, counted, jsonLogger(&logged))
+	claims := watchClaims(eng)
+
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: a single file's store error must never abort the scan: %v", err)
+	}
+	if got := claims.taken(); len(got) != 0 {
+		t.Errorf("the pass got past a claim that errored: %v", got)
+	}
+	if md5f(t, f) != before {
+		t.Error("the source was MODIFIED on a pass whose claim never succeeded")
+	}
+	if row, ok := ledgerRowFor(t, ts, f); ok {
+		t.Errorf("a claim that errored left a row behind: %+v. A store error is not a verdict, "+
+			"and a done or skipped row here would hold the file out of every later pass", row)
+	}
+
+	// O4: the dependency, the attempt and what happens next, each a field rather than an
+	// error string somebody has to read prose out of.
+	var stated bool
+	for _, rec := range logRecords(t, &logged) {
+		if rec["file"] != f || rec["dependency"] == nil {
+			continue
+		}
+		stated = true
+		if rec["dependency"] != "store" || rec["attempted"] != "claim" || rec["next"] == nil {
+			t.Errorf("the claim failure records %v; O4 wants the dependency, the attempt and the "+
+				"next action all named there", rec)
+		}
+		if lvl, _ := rec["level"].(string); lvl == "ERROR" {
+			t.Errorf("the claim failure was logged at ERROR, but the pass recovered from it "+
+				"itself and retries on the next scan: %v", rec)
+		}
+	}
+	if !stated {
+		t.Error("a store error inside the claim decision was not recorded as a stated state at " +
+			"all, so an operator has a file that is quietly not being worked on and nothing to " +
+			"read about it")
+	}
+
+	// STILL ELIGIBLE. The very next pass, with the store answering again, claims it.
+	counted.claimErr = nil
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot (second pass): %v", err)
+	}
+	if got := claims.taken(); len(got) != 1 || got[0] != f {
+		t.Errorf("the next pass claimed %v, want exactly [%s]. A file the store could not answer "+
+			"for has to come back, or one bad moment excludes it for ever", got, f)
+	}
 }

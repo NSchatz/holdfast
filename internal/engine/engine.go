@@ -227,6 +227,26 @@ var SkipVocabulary = []string{
 	SkipRestoredOriginal,
 }
 
+// mutableGuardSkips are the skip reasons that are a CONDITION rather than a verdict about
+// the file: a seed that will finish, a retention area that will become writable, a
+// withholding an operator will lift. Each parks its file behind a skipped row, and each is
+// re-evaluated on every scan, so a row carrying one is cleared the moment its guard stops
+// firing and the file re-enters the pipeline on THAT scan.
+//
+// They are handed to Claim, which already reads the status and the reason inside the one
+// transaction that decides whether the file is claimable, so the clearing is a write only
+// where there is a row to clear. A DELETE per reason per file per pass, which is what
+// asking from outside that transaction costs, matches no row on any file of a fully
+// processed library and is paid on every one of them for ever.
+//
+// It is a CLOSED list and what is NOT on it matters as much. A skip recording a verdict
+// about the FILE - its codec, its bitrate, its shape, a height nobody could read - is a
+// real outcome, and the decision-inputs rule is the only thing that re-opens one. A
+// `restored-original` row is refused by that rule outright and must never appear here:
+// re-opening it would feed an operator's rescued bytes back to the very gates that passed
+// the encode they rejected.
+var mutableGuardSkips = []string{SkipUndoRetentionFailed, SkipOperatorExcluded, SkipHardlinked}
+
 // The GATE vocabulary: WHICH gate or stage refused a job that failed. Like the skip
 // tokens above it is a closed, stable wire format - it is published as a metric label,
 // and a renamed one silently breaks every dashboard built on it.
@@ -567,25 +587,6 @@ func (e *Engine) stat(path string) (os.FileInfo, error) {
 		return e.statFn(path)
 	}
 	return os.Stat(path)
-}
-
-// fingerprint is probe.Fingerprint over that seam: the same followed-link read rendered
-// as the same "size:mtime" text, including the "0:0" a path it cannot stat answers with.
-func (e *Engine) fingerprint(f string) string {
-	fi, err := e.stat(f)
-	if err != nil {
-		return "0:0"
-	}
-	return probe.AttributesOf(fi).String()
-}
-
-// nlink is probe.NLink over that seam, fail-safe default and all.
-func (e *Engine) nlink(f string) uint64 {
-	fi, err := e.stat(f)
-	if err != nil {
-		return 1
-	}
-	return probe.NLinkOf(fi)
 }
 
 // heldBack reports whether a path is one of the PUBLISHED snapshot's two record-based
@@ -1315,27 +1316,55 @@ func (e *Engine) offered(path string) bool {
 //
 // The store.Claim call is the mutual-exclusion guard: the ONLY thing standing between two
 // workers, or two overlapping runs, both encoding the same source. The hardlink guard runs
-// before Claim but its RecordSkip/ClearSkip is a report-only write that never claims the
-// file, so it cannot let two workers encode one source.
+// before Claim but its RecordSkip is a report-only write that never claims the file, so it
+// cannot let two workers encode one source.
+//
+// ONE ATTRIBUTE READ reaches that claim, and everything before it is derived from that one
+// read: whether there is a file at the other end of this path at all, the source's
+// pre-encode size, the fingerprint the claim is keyed by, and the hard-link count. It is
+// os.Stat and it FOLLOWS a symbolic link, which is not a detail - the fingerprint is the
+// key that holds a terminal row out of a pipeline that deletes sources, and every stored
+// row for a symlinked source is keyed by its TARGET's attributes. The symlink guard is the
+// one read that must not follow the link, and it is an Lstat after the claim, where it has
+// always been.
 func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// Both of the questions this door asks about the PATH itself, answered by the one
 	// function the read-only plan pass and the census ask too (DeclinedPath), so a refusal
 	// added there reaches the daemon and every report that predicts it with no second edit.
-	// The order below is unchanged: a path with no file at the other end returns as silently
-	// as it always did (a dangling link is met every pass and must not narrate every pass),
-	// and the character rule is still said out loud below the hold-backs.
+	// The character rule is still said out loud below the hold-backs, as it always was.
+	//
+	// The door hands back the stat it took, and that is the whole consolidation: every
+	// question below about this file's NUMBERS is answered from it rather than by asking
+	// the filesystem again. Two reads of one path are also two answers about a file that
+	// can change between them.
 	door := declinedPath(f, e.stat)
+	if door.statErr != nil {
+		// Nothing is at the other end of this path, or this process may not look: a
+		// dangling link, a file that went away between the enumeration and here, a
+		// directory it cannot traverse. The file is left ALONE - no row, no mutation - and
+		// the scan carries on over the rest of the library. info rather than warn or
+		// error: the condition is handled here and completely, the next pass re-reads the
+		// path with no operator action in between, and a library with a dangling link in
+		// it would otherwise raise an alarm on every scan for ever.
+		e.Log.Info("skip (this file's attributes could not be read, so it is left untouched "+
+			"and re-read on the next scan)", "file", f, "err", door.statErr)
+		return nil
+	}
 	if door.declined && door.rule != RuleUnsupportedCharacters {
 		return nil
 	}
 
 	// The source's PRE-ENCODE size, which the terminal row records and the undo window
-	// measures its retention by. A second stat deliberately: the question above answers
-	// whether this path may be processed at all, and only this caller wants a number about
-	// the file. A file that went away between the two returns here, as it always did.
-	fi, err := e.stat(f)
-	if err != nil {
-		return nil
+	// measures its retention by, off the door's own read.
+	fi := door.fi
+	if fi == nil {
+		// The path carries a tab or a newline, so the door answered on the name alone and
+		// took no stat. The number below still has to come from somewhere, and a path this
+		// build refuses to key a row on is the one case where a second read costs nothing.
+		var err error
+		if fi, err = e.stat(f); err != nil {
+			return nil
+		}
 	}
 
 	// Hold-backs, re-checked here rather than trusted to the scan: ProcessFile is exported
@@ -1373,7 +1402,11 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	prof, pre, heightKnown := e.effectiveProfile(ctx, f, root, e.Probe.VideoProps)
 	by := decidedBy(root, rooted)
 
-	key := e.fingerprint(f)
+	// The key this file's row is stored under, derived from the read already taken. It is
+	// the SAME two fields rendered the same way probe.Fingerprint renders them, off the
+	// same followed-link stat, because every row already in the field is keyed that way and
+	// a key that moved would offer files that were already done back to the pipeline.
+	key := probe.AttributesOf(fi).String()
 
 	// THIS JOB's effective ENCODE settings, resolved once, here, from that root's profile
 	// and the source path: the root's own values overlaid with the first matching encode
@@ -1390,15 +1423,6 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// alike, can record which profile chose this job's settings.
 	ts := e.Cfg.TranscodeIn(prof, f)
 	targetCodec := targetCodecFor(ts.Encoder)
-
-	// The undo window's own guard is MUTABLE (UNDO-6): a retention that could not be taken
-	// is a condition that gets fixed, so a stale skip from a previous scan is dropped here
-	// and the file re-enters the normal path. Not gated on the window still being enabled,
-	// for the reason the release sweep is not: with the window off no retention is attempted
-	// at all, so a row left over from when it was on would park that file indefinitely.
-	if err := e.Store.ClearSkip(ctx, f, key, SkipUndoRetentionFailed); err != nil {
-		e.Log.Warn("clear stale undo-retention skip failed (continuing)", "file", f, "err", err)
-	}
 
 	// The operator's own withholding, and it runs FIRST among the guards for a reason:
 	// every guard below it is this build deciding something about the file, and this one is
@@ -1433,13 +1457,6 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		}
 		return nil
 	}
-	// Not (or no longer) withheld: drop the stale row from a previous scan so the file
-	// re-enters the ordinary path. A no-op for a path nobody ever withheld, and the whole
-	// of what makes a withholding REVERSIBLE - which is what keeps a wrongly recorded one
-	// from being a file that silently stops being worked on for ever.
-	if err := e.Store.ClearSkip(ctx, f, key, SkipOperatorExcluded); err != nil {
-		e.Log.Warn("clear stale withheld skip failed (continuing)", "file", f, "err", err)
-	}
 
 	// THE BAND GUARD, and it stands in front of every guard that reads a knob a rule may
 	// supply. This root selects on the source height and the probe could not establish one,
@@ -1456,15 +1473,19 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// an active seed, and replacing it via rename breaks the link, reclaiming no space and
 	// silently breaking the seed. The skip is RECORDED as "hardlinked" so an operator sees
 	// WHICH guard fired, and the link count is MUTABLE: RecordSkip only writes where no real
-	// outcome exists, and the else-branch's ClearSkip removes the stale row once the seed
-	// finishes.
+	// outcome exists, and reaching the claim below without firing is what drops the stale
+	// row once the seed finishes (mutableGuardSkips).
+	//
+	// The count comes out of the read this file already cost, and NOT following the link
+	// count to a fresh stat is what the fail-safe rests on: a stat record this build cannot
+	// read the count out of answers 1, so an unreadable count never trips the guard.
 	//
 	// A link THIS TOOL holds is discounted (UNDO-6): the undo window takes a second link
 	// before the rename, so a run interrupted there would otherwise park the very file the
 	// window was protecting. Discounting is proved per link (same inode, live retention
 	// record), never assumed from the count, so a foreign extra link still skips.
 	if prof.HardlinkSkip() {
-		if links := e.nlink(f); links > 1 && links > 1+e.retainedLinks(ctx, f, key) {
+		if links := probe.NLinkOf(fi); links > 1 && links > 1+e.retainedLinks(ctx, f, key) {
 			e.Log.Info("skip (hardlinked — swap would break a seed and reclaim nothing)", "file", f, "links", links)
 			changed, err := e.Store.RecordSkip(ctx, f, key, SkipHardlinked, by, ts.Profile)
 			if err != nil {
@@ -1478,23 +1499,32 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			}
 			return nil
 		}
-		// Not (or no longer) hardlinked: drop any stale "hardlinked" skip from a previous
-		// scan so the file re-enters the Claim path. A no-op if it was never hardlinked.
-		if err := e.Store.ClearSkip(ctx, f, key, SkipHardlinked); err != nil {
-			e.Log.Warn("clear stale hardlink skip failed (continuing)", "file", f, "err", err)
-		}
 	}
 
-	// Claim: the resume short-circuit AND the cross-worker mutual-exclusion guard in one
-	// atomic call. done/skipped hold the file out for as long as the decision inputs they
-	// recorded still match what is handed in here and are RE-OPENED when they do not; failed
-	// is retryable up to MaxFailures, since a transient ENOSPC must not exclude a file for
-	// ever; active means another worker holds it, or it is stale and awaits RecoverStale.
-	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures, e.inputsFor(prof, ts))
+	// Claim: the resume short-circuit, the cross-worker mutual-exclusion guard AND the
+	// mutable guards' re-evaluation, in one atomic call. done/skipped hold the file out for
+	// as long as the decision inputs they recorded still match what is handed in here and
+	// are RE-OPENED when they do not; failed is retryable up to MaxFailures, since a
+	// transient ENOSPC must not exclude a file for ever; active means another worker holds
+	// it, or it is stale and awaits RecoverStale.
+	//
+	// mutableGuardSkips is the third of those. Reaching this line is every mutable guard
+	// above saying its condition no longer holds, and the claim already reads the status
+	// and the reason inside the transaction that decides claimability - so a row parked by
+	// one of them is cleared there, where the answer is known, instead of by a DELETE per
+	// guard per file per pass that matches nothing on every file of a processed library.
+	// What it decides is unchanged; what it costs is a write only where there is a row.
+	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures,
+		e.inputsFor(prof, ts), mutableGuardSkips...)
 	if err != nil {
-		// Fail safe: a store error must never be treated as "done". Log and skip
-		// this pass; the file is retried on the next scan once the store recovers.
-		e.Log.Warn("claim error (skipping this pass, will retry)", "file", f, "err", err)
+		// Fail safe: a store error must never be treated as "done", and it must never be
+		// treated as a verdict about the file either. Nothing about the file is touched,
+		// no row is written for it, and it stays eligible: the next scan asks again. The
+		// record names the dependency, what was being attempted and what happens next,
+		// because a trace alone does not tell an operator whether the file is lost.
+		e.Log.Warn("the store could not take the claim, so this file is left untouched this pass "+
+			"and retried on the next scan", "dependency", "store", "attempted", "claim",
+			"next", "retry on the next scan", "file", f, "err", err)
 		return nil
 	}
 	if !claimed {
@@ -2501,9 +2531,15 @@ func (e *Engine) advance(ctx context.Context, path, key string, s store.Status) 
 // this function takes: the file is simply left for the next scan.
 func (e *Engine) recordUndeterminedHeight(ctx context.Context, worker, f, key string, root config.Root,
 	by store.Decision, prof config.Profile, ts config.Transcode, props *probe.VideoProps) {
-	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures, e.inputsFor(prof, ts))
+	// The same mutable-guard re-evaluation the ordinary claim makes, and for the same
+	// reason: this file reached the band guard with every mutable guard above it silent, so
+	// a row one of them parked is stale and the verdict recorded here supersedes it.
+	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures,
+		e.inputsFor(prof, ts), mutableGuardSkips...)
 	if err != nil {
-		e.Log.Warn("claim error (skipping this pass, will retry)", "file", f, "err", err)
+		e.Log.Warn("the store could not take the claim, so this file is left untouched this pass "+
+			"and retried on the next scan", "dependency", "store", "attempted", "claim",
+			"next", "retry on the next scan", "file", f, "err", err)
 		return
 	}
 	if !claimed {
