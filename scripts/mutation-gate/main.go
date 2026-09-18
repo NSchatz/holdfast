@@ -37,6 +37,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -125,8 +126,12 @@ type runnerReport struct {
 	MutantsLived      int      `json:"mutants_lived"`
 	MutantsNotViable  int      `json:"mutants_not_viable"`
 	MutantsNotCovered int      `json:"mutants_not_covered"`
-	ElapsedTime       float64  `json:"elapsed_time"`
-	Files             []struct {
+	// The runner does not report this one. It is counted from the per-mutant statuses,
+	// because a timed-out mutant is in neither side of the score and a reader is owed the
+	// number.
+	MutantsTimedOut int     `json:"mutants_timed_out,omitempty"`
+	ElapsedTime     float64 `json:"elapsed_time"`
+	Files           []struct {
 		FileName  string `json:"file_name"`
 		Mutations []struct {
 			Line   int    `json:"line"`
@@ -427,8 +432,17 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	}
 	defer func() { _ = os.RemoveAll(filepath.Dir(runnerBin)) }()
 
+	var changed map[string][]lineRange
+	if *mode == mutation.ModeDiff {
+		changed, err = changedLines(absRoot, *ref, scoped)
+		if err != nil {
+			fmt.Fprintf(stderr, "::error::mutation gate: %v\n", err)
+			return exitDiffReference
+		}
+	}
+
 	rawPath := filepath.Join(filepath.Dir(mustAbs(*out)), "mutation-runner-report.json")
-	rr, timedOut, code := invokeRunner(absRoot, runnerBin, *version, *mode, *ref, pkgs, rawPath, stdout, stderr)
+	rr, timedOut, code := invokeRunner(absRoot, runnerBin, *version, *mode, *ref, pkgs, scoped, changed, rawPath, stdout, stderr)
 	if code != exitOK {
 		return code
 	}
@@ -534,6 +548,77 @@ func scopeFiles(root, ref string, excludes []*regexp.Regexp) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// lineRange is a span of lines in a file, as the merge base sees it changed.
+type lineRange struct{ from, to int }
+
+// changedLines returns, per changed file, the lines that differ from the merge base with
+// ref. It is what makes a diff-scoped run a statement about THIS change: a mutant on a
+// line the change did not touch is not this pull request's to answer for.
+//
+// The filtering is done here, on the runner's report, rather than through the runner's own
+// diff flag. That flag matches the diff against the mutant's file path, and the paths the
+// runner reports are relative to the package it was pointed at, so with the per-package
+// invocation this gate uses it matches nothing and skips every mutant. Reading the hunk
+// headers is the same question asked where the answer is unambiguous.
+func changedLines(root, ref string, files []string) (map[string][]lineRange, error) {
+	base, err := git(root, "merge-base", "HEAD", ref)
+	if err != nil {
+		return nil, fmt.Errorf("could not resolve a merge base between HEAD and %q: %w", ref, err)
+	}
+	base = strings.TrimSpace(base)
+	out := map[string][]lineRange{}
+	for _, f := range files {
+		patch, err := git(root, "diff", "-U0", base, "--", f)
+		if err != nil {
+			return nil, fmt.Errorf("could not read the changed lines of %s: %w", f, err)
+		}
+		for _, line := range strings.Split(patch, "\n") {
+			if !strings.HasPrefix(line, "@@") {
+				continue
+			}
+			r, ok := parseHunk(line)
+			if ok {
+				out[f] = append(out[f], r)
+			}
+		}
+	}
+	return out, nil
+}
+
+var hunkRe = regexp.MustCompile(`^@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@`)
+
+func parseHunk(line string) (lineRange, bool) {
+	m := hunkRe.FindStringSubmatch(line)
+	if m == nil {
+		return lineRange{}, false
+	}
+	start, err := strconv.Atoi(m[1])
+	if err != nil {
+		return lineRange{}, false
+	}
+	count := 1
+	if m[2] != "" {
+		count, err = strconv.Atoi(m[2])
+		if err != nil {
+			return lineRange{}, false
+		}
+	}
+	if count == 0 {
+		// A pure deletion adds no line to answer for.
+		return lineRange{}, false
+	}
+	return lineRange{from: start, to: start + count - 1}, true
+}
+
+func inRanges(line int, ranges []lineRange) bool {
+	for _, r := range ranges {
+		if line >= r.from && line <= r.to {
+			return true
+		}
+	}
+	return false
 }
 
 func git(root string, args ...string) (string, error) {
@@ -702,7 +787,7 @@ func (p *progress) snapshot() (int, int, int, int) {
 // failure to run. The floor is a statement about the DOMAIN, so that verdict is ignored
 // here and re-derived once over the merged counts. Anything else non-zero means the runner
 // did not complete, and that is exit 4.
-func invokeRunner(root, bin, version, mode, ref string, pkgs []string, rawPath string, stdout, stderr io.Writer) (runnerReport, int, int) {
+func invokeRunner(root, bin, version, mode, ref string, pkgs, scoped []string, changed map[string][]lineRange, rawPath string, stdout, stderr io.Writer) (runnerReport, int, int) {
 	var merged runnerReport
 	merged.GoModule = ""
 
@@ -743,8 +828,18 @@ func invokeRunner(root, bin, version, mode, ref string, pkgs []string, rawPath s
 	for i, pkg := range pkgs {
 		reportPath := filepath.Join(work, fmt.Sprintf("%03d.json", i))
 		args := []string{"unleash", "--output", reportPath}
+		// In diff mode the package's OTHER files are kept out of the run, so the runner
+		// only mutates what the change touched. Which of those mutants count is decided
+		// again on the report, by line.
 		if mode == mutation.ModeDiff {
-			args = append(args, "--diff", ref)
+			others, err := otherFiles(root, pkg, scoped)
+			if err != nil {
+				fmt.Fprintf(stderr, "::error::mutation gate: %v\n", err)
+				return merged, 0, exitReport
+			}
+			for _, f := range others {
+				args = append(args, "--exclude-files", "(^|/)"+regexp.QuoteMeta(f)+"$")
+			}
 		}
 		args = append(args, "./"+pkg)
 
@@ -766,10 +861,7 @@ func invokeRunner(root, bin, version, mode, ref string, pkgs []string, rawPath s
 			fmt.Fprintf(stderr, "       A report that cannot be read is not a clean run, and no score is being reported in its place.\n")
 			return merged, p.timedOut, exitReport
 		}
-		if err := mergeReport(&merged, one, pkg); err != nil {
-			fmt.Fprintf(stderr, "::error::mutation gate: %s: %v\n", pkg, err)
-			return merged, p.timedOut, exitReport
-		}
+		mergeReport(&merged, one, pkg, mode, changed)
 	}
 
 	// The merged figure is the definition the floor is applied to, over the whole domain.
@@ -783,10 +875,10 @@ func invokeRunner(root, bin, version, mode, ref string, pkgs []string, rawPath s
 		_ = os.WriteFile(rawPath, append(b, '\n'), 0o644)
 	}
 
-	s, _, _, to := p.snapshot()
-	fmt.Fprintf(stdout, "mutation gate: the runner finished in %s (%d mutant(s) reported, %d timed out)\n",
-		time.Since(started).Round(time.Second), s, to)
-	return merged, to, exitOK
+	s, _, _, _ := p.snapshot()
+	fmt.Fprintf(stdout, "mutation gate: the runner finished in %s (%d mutant(s) reported, %d of them in scope and timed out)\n",
+		time.Since(started).Round(time.Second), s, merged.MutantsTimedOut)
+	return merged, merged.MutantsTimedOut, exitOK
 }
 
 // runOne drives the runner over a single package, streaming its output so the heartbeat
@@ -838,31 +930,75 @@ func runOne(root, bin, version, pkg string, args []string, p *progress, stdout, 
 	return exitRunner
 }
 
-// mergeReport folds one package's report into the run's. File names come back relative to
-// the package the runner was pointed at, so they are qualified here: a report that named
-// three different "config.go" would name nothing.
-func mergeReport(into *runnerReport, one runnerReport, pkg string) error {
-	ran := one.MutantsKilled + one.MutantsLived
-	if ran > 0 && one.TestEfficacy != nil {
-		want := 100 * float64(one.MutantsKilled) / float64(ran)
-		if math.Abs(*one.TestEfficacy-want) > 0.05 {
-			return fmt.Errorf("the runner reports efficacy %.2f%% but KILLED/(KILLED+LIVED) over its own counts is %.2f%% (killed %d, lived %d). The figure the floor is applied to is the second one, and a runner whose own figure no longer means that cannot be graded against this floor",
-				*one.TestEfficacy, want, one.MutantsKilled, one.MutantsLived)
-		}
-	}
+// mergeReport folds one package's report into the run's.
+//
+// The counts are re-derived from the per-mutant list rather than taken from the summary
+// the runner wrote, because in diff mode the mutants that count are only those ON THE
+// CHANGED LINES - the rest are in the file the change touched but are not what it did.
+// File names come back relative to the package the runner was pointed at, so they are
+// qualified here: a report naming three different "config.go" would name nothing.
+func mergeReport(into *runnerReport, one runnerReport, pkg, mode string, changed map[string][]lineRange) {
 	if into.GoModule == "" {
 		into.GoModule = one.GoModule
 	}
-	into.MutantsKilled += one.MutantsKilled
-	into.MutantsLived += one.MutantsLived
-	into.MutantsNotViable += one.MutantsNotViable
-	into.MutantsNotCovered += one.MutantsNotCovered
 	into.ElapsedTime += one.ElapsedTime
 	for _, f := range one.Files {
-		if !strings.HasPrefix(f.FileName, pkg+"/") {
-			f.FileName = pkg + "/" + f.FileName
+		name := f.FileName
+		if !strings.HasPrefix(name, pkg+"/") {
+			name = pkg + "/" + name
 		}
-		into.Files = append(into.Files, f)
+		kept := f
+		kept.FileName = name
+		kept.Mutations = kept.Mutations[:0]
+		for _, m := range f.Mutations {
+			if mode == mutation.ModeDiff && !inRanges(m.Line, changed[name]) {
+				continue
+			}
+			kept.Mutations = append(kept.Mutations, m)
+			switch normalizeStatus(m.Status) {
+			case "KILLED":
+				into.MutantsKilled++
+			case "LIVED":
+				into.MutantsLived++
+			case "NOT_COVERED":
+				into.MutantsNotCovered++
+			case "NOT_VIABLE":
+				into.MutantsNotViable++
+			case "TIMED_OUT":
+				into.MutantsTimedOut++
+			}
+		}
+		if len(kept.Mutations) > 0 {
+			into.Files = append(into.Files, kept)
+		}
 	}
-	return nil
+}
+
+func normalizeStatus(s string) string {
+	return strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(s), " ", "_"))
+}
+
+// otherFiles lists the Go files of a package that the change did NOT touch, so the runner
+// can be told to leave them alone.
+func otherFiles(root, pkg string, scoped []string) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(root, pkg))
+	if err != nil {
+		return nil, fmt.Errorf("could not read the package %s: %w", pkg, err)
+	}
+	inScope := map[string]bool{}
+	for _, f := range scoped {
+		inScope[f] = true
+	}
+	var out []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		if inScope[pkg+"/"+name] {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out, nil
 }
