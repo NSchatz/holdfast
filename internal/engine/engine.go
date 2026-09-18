@@ -1438,6 +1438,41 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		return nil
 	}
 
+	// THE FIELD-DOUBLING REFUSAL, taken before anything is encoded and before a temp path
+	// is even chosen, so the source is byte-for-byte what it was and there is nothing to
+	// discard. A configuration that would emit one frame per FIELD produces an output whose
+	// frame count is twice the source's, and packet-count parity and duration parity are
+	// graded against the source's count - so encoding it would mean either failing a parity
+	// gate after paying for a full encode, or weakening the gate that stands in front of a
+	// deletion. Neither is acceptable, and the refusal is recorded rather than logged: a row
+	// is what an operator reads after the fact.
+	//
+	// config.Validate refuses the same configuration at START and names the key, so this is
+	// the backstop rather than the operator-facing message - the same shape the exotic
+	// pixel-format guard and the encoder's own derivation backstop already have. It is
+	// reachable by a Config assembled in Go, which is how this package's own callers build
+	// one, and it is what makes the refusal a property of the ENGINE rather than of whoever
+	// remembered to validate.
+	if _, err := deinterlaceFor(prof); err != nil {
+		e.Log.Error("FAIL (the deinterlace configured for this root would change the output's frame "+
+			"count, so nothing was encoded and the source is untouched)", "file", f,
+			"library_root", root.Clean, "err", err)
+		e.fail(ctx, f, key, GateEncode, withSourceDimensions(&store.Outcome{
+			Reason:  err.Error(),
+			Profile: ts.Profile,
+			// TRANSIENT, and deliberately: the verdict is a pure function of the
+			// configuration, but the remedy is an edit to that configuration and a retry
+			// costs NOTHING here - no encode runs, no gate runs, no byte is written. Parking
+			// the file would hold it by an attempt count that the operator's fix does not
+			// clear, so correcting the key would leave the file exactly where it was and the
+			// only way out would be `requeue --failed`.
+			FailureClass:   store.FailureTransient,
+			Decision:       by,
+			DecisionInputs: e.inputsRead(prof, ts, InputDeinterlace),
+		}, props))
+		return nil
+	}
+
 	codec := v.codec
 	outExt := v.outExt
 	// final is where the swap publishes, chosen by the same guard chain that just refused
@@ -2117,12 +2152,12 @@ func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, pr
 	// it, and a field order ffprobe could not establish is CLASSIFIED rather than assumed
 	// progressive. Only `progressive` proceeds on the strength of what the file said about
 	// itself.
-	switch props.FieldOrder() {
-	case "tt", "bb", "tb", "bt":
+	switch order := props.FieldOrder(); {
+	case interlacedFieldOrder(order):
 		if v, stop := e.interlacedVerdict(ctx, f, prof, props, codec); stop {
 			return props, v
 		}
-	case "progressive":
+	case order == "progressive":
 		// The one answer that licenses the progressive encode path.
 	default:
 		// Neither progressive nor one of the four interlaced spellings: ffprobe reported

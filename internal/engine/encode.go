@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/probe"
@@ -225,6 +226,18 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 		pixFmt = derived
 	}
 
+	// THE DEINTERLACE, resolved from the same profile and the same probe snapshot the
+	// engine's own guards read, so the filter that runs here is the filter the perceptual
+	// gate builds its reference through and the filter the terminal row records. A
+	// configuration this build will not run is refused HERE as well as in the engine and in
+	// config.Validate, for the reason the pixel-format derivation below is: a backstop so
+	// the encoder itself can never silently transform a file when a check in front of it is
+	// bypassed.
+	film, err := deinterlaceApplied(e.profile(), props)
+	if err != nil {
+		return err
+	}
+
 	// Colour/HDR propagation: carry the source's primaries/transfer/matrix/range
 	// forward instead of letting the encode silently drop them. These -color_* flags
 	// are encoder-agnostic and applied to every Spec. x265Color (HDR10 static
@@ -252,9 +265,9 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 	// `v:N` is the N of the video streams the output carries. A single-video-stream source
 	// yields no such option and therefore byte-identical argv to the encoder that predates
 	// this.
-	mapArgs, pictures, err := e.streamArgs(in, props)
-	if err != nil {
-		return err
+	mapArgs, pictures, errStreams := e.streamArgs(in, props)
+	if errStreams != nil {
+		return errStreams
 	}
 
 	body := append([]string(nil), mapArgs...)
@@ -262,7 +275,7 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 	for _, i := range pictures {
 		body = append(body, "-c:v:"+strconv.Itoa(i), "copy")
 	}
-	body = append(body, buildArgs(spec, ts, pixFmt, colorArgs, x265Color)...)
+	body = append(body, withDeinterlace(buildArgs(spec, ts, pixFmt, colorArgs, x265Color), film)...)
 
 	var pre []string
 	if spec.Key == "vaapi" {
@@ -488,6 +501,30 @@ func buildArgs(spec encoder.Spec, ts config.Transcode, pixFmt string, colorArgs 
 	return args
 }
 
+// withDeinterlace composes the deinterlace into a job's video filter chain, and is the ONE
+// place in the argv where it is applied.
+//
+// A disabled filter returns the arguments untouched, which is what keeps the command line
+// of every configuration written before this key existed byte for byte what it was. An
+// enabled one is composed INTO a chain the encoder family already built rather than added
+// beside it: ffmpeg takes one -vf per output, so a second would silently replace the first
+// and a VAAPI job would upload frames to the GPU with no deinterlace, or deinterlace and
+// never upload. It goes at the HEAD of that chain because the software filter works on
+// software frames and has to run before anything that uploads them to a device.
+func withDeinterlace(args []string, film deinterlace.Filter) []string {
+	if !film.Enabled() {
+		return args
+	}
+	for i, a := range args {
+		if a == "-vf" && i+1 < len(args) {
+			out := append([]string(nil), args...)
+			out[i+1] = film.Spec + "," + out[i+1]
+			return out
+		}
+	}
+	return append(args, "-vf", film.Spec)
+}
+
 // bitrateArgs is the TARGET-BITRATE half of buildArgs: everything after the
 // universal pixel-format/colour/fps block, for a job whose effective settings carry
 // a positive BitrateKbps.
@@ -512,41 +549,44 @@ func buildArgs(spec encoder.Spec, ts config.Transcode, pixFmt string, colorArgs 
 //     values. AMF's cqp is a fixed-quantiser mode that ignores -b:v outright.
 func bitrateArgs(spec encoder.Spec, ts config.Transcode, x265Color string) []string {
 	rate := strconv.Itoa(ts.BitrateKbps) + "k"
+	var args []string
 	switch spec.Key {
 	case "cpu":
-		return []string{
+		args = []string{
 			"-preset", ts.Preset,
 			"-b:v", rate,
 			"-x265-params", "log-level=error" + x265Color,
 		}
 	case "svtav1":
-		return []string{
+		args = []string{
 			"-preset", strconv.Itoa(svtav1Preset(ts.Preset)),
 			"-b:v", rate,
 		}
 	case "nvenc", "av1_nvenc":
-		return []string{
+		args = []string{
 			"-rc", "vbr",
 			"-b:v", rate,
 			"-preset", "p5",
 		}
 	case "qsv":
-		return []string{"-b:v", rate}
+		args = []string{"-b:v", rate}
 	case "vaapi":
-		return []string{
+		args = []string{
 			"-vf", "format=nv12,hwupload",
 			"-b:v", rate,
 		}
 	case "amf":
-		return []string{
+		args = []string{
 			"-rc", "vbr_peak",
 			"-b:v", rate,
 		}
+	default:
+		// A Spec this build ships but this function does not name would silently lose
+		// the operator's target, so it gets the codec-independent option and nothing
+		// else rather than the quality knob it did not ask for.
+		args = []string{"-b:v", rate}
 	}
-	// A Spec this build ships but this function does not name would silently lose
-	// the operator's target, so it gets the codec-independent option and nothing
-	// else rather than the quality knob it did not ask for.
-	return []string{"-b:v", rate}
+	return args
 }
 
 // svtav1Preset maps the config Preset word to SVT-AV1's numeric 0-13 preset scale
