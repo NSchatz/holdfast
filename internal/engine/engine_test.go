@@ -30,8 +30,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/corpus"
@@ -3140,4 +3142,790 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// ---- S0098: what one no-op pass over a processed library costs ----------------
+//
+// A fully processed library is the steady state of a scan_interval_sec daemon: the state
+// it is in on almost every pass it runs, and the state in which it has nothing to do. The
+// cases below hold the two costs that state pays PER FILE - the store writes issued before
+// the claim can conclude there is nothing to do, and the filesystem attribute reads taken
+// to get there - and they hold the decisions that pass reaches identical while it gets
+// cheaper, because the fingerprint those reads derive is the key that holds a terminal row
+// out of a pipeline which deletes source media.
+//
+// Nothing here is a real video and nothing here needs one: every case is decided before
+// the probe snapshot, the prober is pointed at a program that does not exist, and the
+// encoder is one that fails the case if anything is ever offered to it. That is half the
+// assertion rather than a convenience - a file the claim holds out must reach neither.
+
+// writeCountingStore records the store WRITES a pass issues, bucketed by the path they
+// were issued for, so a case can say "this file cost nothing" rather than "the pass felt
+// quick". Everything it does not override passes through to the real store, which is what
+// keeps the subject real (testing T3): the double stands in for nothing, it only watches.
+//
+// A CLAIM counts as a write only when it reports taking the file. That is the statement
+// truth rather than a convenience: a claim that refuses issues BEGIN / SELECT / ROLLBACK
+// and leaves the row exactly as it found it, while one that takes the file INSERTs or
+// UPDATEs. Counting the refusal would leave this counter unable to tell a read from a
+// write, which is the one distinction it exists to draw.
+type writeCountingStore struct {
+	store.Store
+	mu       sync.Mutex
+	perPath  map[string][]string
+	passWide []string
+
+	// claimErr, when non-nil, is consulted before each claim and its error is returned in
+	// place of the real store's answer. It is how a store that fails INSIDE the claim
+	// decision is produced, which is not a state a real database file can be put into
+	// without corrupting it.
+	claimErr func(path string) error
+}
+
+func countingStore(st store.Store) *writeCountingStore {
+	return &writeCountingStore{Store: st, perPath: map[string][]string{}}
+}
+
+func (w *writeCountingStore) note(path, method string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if path == "" {
+		w.passWide = append(w.passWide, method)
+		return
+	}
+	w.perPath[path] = append(w.perPath[path], method)
+}
+
+// writesFor is every write this pass issued for one path, in order.
+func (w *writeCountingStore) writesFor(path string) []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]string(nil), w.perPath[path]...)
+}
+
+// everyWrite renders the whole pass, path-scoped and pass-wide alike, so a failure says
+// WHICH statement was issued rather than only how many there were.
+func (w *writeCountingStore) everyWrite() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var out []string
+	for _, m := range w.passWide {
+		out = append(out, m+"(pass)")
+	}
+	for p, ms := range w.perPath {
+		for _, m := range ms {
+			out = append(out, m+"("+filepath.Base(p)+")")
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (w *writeCountingStore) Claim(ctx context.Context, path, fingerprint, worker string,
+	maxFailures int, current store.DecisionInputs, supersede ...string) (bool, error) {
+	if w.claimErr != nil {
+		if err := w.claimErr(path); err != nil {
+			return false, err
+		}
+	}
+	claimed, err := w.Store.Claim(ctx, path, fingerprint, worker, maxFailures, current, supersede...)
+	if claimed {
+		w.note(path, "Claim")
+	}
+	return claimed, err
+}
+
+func (w *writeCountingStore) ClearSkip(ctx context.Context, path, fingerprint, reason string) error {
+	w.note(path, "ClearSkip:"+reason)
+	return w.Store.ClearSkip(ctx, path, fingerprint, reason)
+}
+
+func (w *writeCountingStore) RecordSkip(ctx context.Context, path, fingerprint, reason string,
+	by store.Decision, profile string) (bool, error) {
+	w.note(path, "RecordSkip:"+reason)
+	return w.Store.RecordSkip(ctx, path, fingerprint, reason, by, profile)
+}
+
+func (w *writeCountingStore) Finish(ctx context.Context, path, fingerprint string, s store.Status,
+	o *store.Outcome, maxFailures int) error {
+	w.note(path, "Finish")
+	return w.Store.Finish(ctx, path, fingerprint, s, o, maxFailures)
+}
+
+func (w *writeCountingStore) Advance(ctx context.Context, path, fingerprint string, s store.Status) error {
+	w.note(path, "Advance")
+	return w.Store.Advance(ctx, path, fingerprint, s)
+}
+
+func (w *writeCountingStore) Delete(ctx context.Context, path, fingerprint string) error {
+	w.note(path, "Delete")
+	return w.Store.Delete(ctx, path, fingerprint)
+}
+
+func (w *writeCountingStore) Reopen(ctx context.Context, path, fingerprint string, clearFailures bool) (bool, error) {
+	w.note(path, "Reopen")
+	return w.Store.Reopen(ctx, path, fingerprint, clearFailures)
+}
+
+func (w *writeCountingStore) ExcludePath(ctx context.Context, path string) (bool, error) {
+	w.note(path, "ExcludePath")
+	return w.Store.ExcludePath(ctx, path)
+}
+
+func (w *writeCountingStore) UnexcludePath(ctx context.Context, path string) (bool, error) {
+	w.note(path, "UnexcludePath")
+	return w.Store.UnexcludePath(ctx, path)
+}
+
+func (w *writeCountingStore) Retain(ctx context.Context, r store.Retained) error {
+	w.note(r.SourcePath, "Retain")
+	return w.Store.Retain(ctx, r)
+}
+
+func (w *writeCountingStore) DropRetained(ctx context.Context, sourcePath string) error {
+	w.note(sourcePath, "DropRetained")
+	return w.Store.DropRetained(ctx, sourcePath)
+}
+
+func (w *writeCountingStore) MarkRestored(ctx context.Context, sourcePath string, at int64) error {
+	w.note(sourcePath, "MarkRestored")
+	return w.Store.MarkRestored(ctx, sourcePath, at)
+}
+
+func (w *writeCountingStore) RecordSwapIncident(ctx context.Context, in store.SwapIncident) error {
+	w.note(in.SourcePath, "RecordSwapIncident")
+	return w.Store.RecordSwapIncident(ctx, in)
+}
+
+func (w *writeCountingStore) RecoverStale(ctx context.Context) (int, error) {
+	w.note("", "RecoverStale")
+	return w.Store.RecoverStale(ctx)
+}
+
+func (w *writeCountingStore) PruneTerminal(ctx context.Context, maxRows, maxFailures int,
+	prunable store.Prunable) (store.Prune, error) {
+	w.note("", "PruneTerminal")
+	return w.Store.PruneTerminal(ctx, maxRows, maxFailures, prunable)
+}
+
+// passBookkeeping is the write set a pass issues whatever the library holds: the recovery
+// of rows a previous process left active. It is per PASS and never per file, which is the
+// distinction the criteria draw ("no write statement to the store for that file"), so it
+// is named here rather than quietly tolerated by a counter that looks only at paths.
+var passBookkeeping = []string{"RecoverStale(pass)"}
+
+// statCounter counts what a pass reads from the filesystem about each path, through the
+// engine's own attribute-read seam. It is a COUNTER the code exposes, deliberately not a
+// stopwatch: on a warm page cache elapsed time cannot distinguish one read from three, so
+// a timing proxy would grade nothing at all.
+type statCounter struct {
+	mu   sync.Mutex
+	n    map[string]int
+	fail func(path string) error
+}
+
+func newStatCounter() *statCounter { return &statCounter{n: map[string]int{}} }
+
+func (s *statCounter) stat(path string) (os.FileInfo, error) {
+	s.mu.Lock()
+	s.n[path]++
+	s.mu.Unlock()
+	if s.fail != nil {
+		if err := s.fail(path); err != nil {
+			return nil, err
+		}
+	}
+	return os.Stat(path)
+}
+
+func (s *statCounter) reads(path string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.n[path]
+}
+
+// processedLibrary is a library in the state a daemon finds it in on every pass after the
+// one that processed it: every file carries a TERMINAL row that still re-derives under the
+// configuration in force, so the claim holds each of them out and nothing needs doing.
+type processedLibrary struct {
+	root  string
+	files []string
+	cfg   config.Config
+	ts    *testStore
+}
+
+func newProcessedLibrary(t *testing.T, n int) *processedLibrary {
+	t.Helper()
+	root := t.TempDir()
+	cfg := baseCfg(root)
+	ts := newTestStore(t, root)
+	in := DecisionInputsFor(cfg)
+	lib := &processedLibrary{root: root, cfg: cfg, ts: ts}
+	for i := 0; i < n; i++ {
+		p := filepath.Join(root, fmt.Sprintf("film%02d.mkv", i))
+		if err := os.WriteFile(p, []byte(strings.Repeat("x", 64+i)), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", p, err)
+		}
+		seedProcessedRow(t, ts, p, probe.Fingerprint(p), store.Skipped,
+			&store.Outcome{Reason: SkipAlreadyTargetCodec, DecisionInputs: in})
+		lib.files = append(lib.files, p)
+	}
+	return lib
+}
+
+// seedProcessedRow writes the terminal row a completed pass leaves behind: the verdict AND
+// the configuration values the guard that reached it read, which is what holds the row out
+// of the pipeline on every later pass (store.DecisionInputs.StillMatches). A row recording
+// no inputs would be re-opened by that rule alone, and would prove nothing about what the
+// pass costs or about what the mutable guards do.
+func seedProcessedRow(t *testing.T, ts *testStore, path, key string, st store.Status, o *store.Outcome) {
+	t.Helper()
+	ctx := context.Background()
+	if ok, err := ts.Claim(ctx, path, key, "seed", 3, o.DecisionInputs); err != nil || !ok {
+		t.Fatalf("seeding %s: claim ok=%v err=%v", path, ok, err)
+	}
+	if err := ts.Finish(ctx, path, key, st, o, 3); err != nil {
+		t.Fatalf("seeding %s: finish: %v", path, err)
+	}
+}
+
+// toollessEngine builds an engine over a library with no real tooling behind it: an
+// ffprobe that does not exist and an encoder that fails the case if anything reaches it.
+func toollessEngine(t *testing.T, cfg config.Config, st store.Store, log *slog.Logger) *Engine {
+	t.Helper()
+	return New(cfg, probe.New(filepath.Join(t.TempDir(), "no-such-ffmpeg"),
+		filepath.Join(t.TempDir(), "no-such-ffprobe")), refusingEncoder{t}, st, log)
+}
+
+// ledgerRowFor returns the ledger row for path, and whether there is one at all. It takes
+// a store.Store rather than the concrete test store, so a case can ask the same question
+// of a substituted one.
+func ledgerRowFor(t *testing.T, st store.Store, path string) (store.Job, bool) {
+	t.Helper()
+	rows, err := st.List(context.Background(), nil, 0)
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	for _, r := range rows {
+		if r.Path == path {
+			return r, true
+		}
+	}
+	return store.Job{}, false
+}
+
+// claimWatcher records every path a pass gets PAST the claim on, which is the observable
+// behind "re-opened": a terminal row that still holds turns its file away at the claim, and
+// one that no longer holds hands it to the pipeline.
+type claimWatcher struct {
+	mu    sync.Mutex
+	paths []string
+}
+
+func watchClaims(eng *Engine) *claimWatcher {
+	w := &claimWatcher{}
+	eng.onClaim = func(_, path string) {
+		w.mu.Lock()
+		w.paths = append(w.paths, path)
+		w.mu.Unlock()
+	}
+	return w
+}
+
+func (w *claimWatcher) taken() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]string(nil), w.paths...)
+}
+
+// AC-1. A file whose stored row is already terminal for the configuration in force, and
+// whose size and modification time have not moved, costs the store NO WRITE STATEMENT at
+// all. This is the steady state of a daemon: every write issued here is one per file per
+// pass, serialized on the single write connection, competing with whatever encode is in
+// flight, to reach the answer the previous pass already reached.
+func TestScan_IssuesNoStoreWriteForATerminalFile(t *testing.T) {
+	lib := newProcessedLibrary(t, 3)
+	counted := countingStore(lib.ts)
+	eng := toollessEngine(t, lib.cfg, counted, discardLogger())
+
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+
+	for _, f := range lib.files {
+		if w := counted.writesFor(f); len(w) != 0 {
+			t.Errorf("%s is terminal and unchanged, yet the pass issued %d write(s) for it: %v",
+				filepath.Base(f), len(w), w)
+		}
+	}
+	if got := counted.everyWrite(); !equalStrings(got, passBookkeeping) {
+		t.Errorf("the pass issued %v, want only the per-pass bookkeeping %v. A write beyond that "+
+			"list is one every file in the library pays for on every scan", got, passBookkeeping)
+	}
+
+	// The decisions are unchanged, which is the point of making them cheaper: every row
+	// still stands, still terminal, still naming the guard that reached it.
+	for _, f := range lib.files {
+		row, ok := ledgerRowFor(t, lib.ts, f)
+		if !ok || row.Status != store.Skipped || row.Outcome.Reason != SkipAlreadyTargetCodec {
+			t.Errorf("%s: the pass moved a terminal row it had no business touching: exists=%v %+v",
+				filepath.Base(f), ok, row.Outcome)
+		}
+	}
+
+	// THE COUNTER CAN FIRE. A grader unable to report a write is not evidence that none was
+	// issued, so a file with no row at all goes through the same pass and must be counted:
+	// it is claimed, it reaches the probe that does not exist, and it is recorded.
+	fresh := filepath.Join(lib.root, "unseen.mkv")
+	if err := os.WriteFile(fresh, []byte("no row for this one"), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", fresh, err)
+	}
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot (with an unseen file): %v", err)
+	}
+	if w := counted.writesFor(fresh); len(w) == 0 {
+		t.Error("a file with no stored row cost the store nothing, so this counter would report " +
+			"zero whatever the engine did and the assertion above proves nothing")
+	}
+}
+
+// AC-4. One file, at most one filesystem attribute read before the claim decides. The
+// count comes from a counter the code exposes, never from elapsed time: three stats and
+// one stat are indistinguishable on a warm page cache, so a timing proxy would pass a
+// build that took ten.
+//
+// The library is already terminal, so the claim refuses every file and nothing downstream
+// of it runs - which makes every read counted here a PRE-CLAIM read.
+func TestScan_ReadsFileAttributesOncePerFile(t *testing.T) {
+	lib := newProcessedLibrary(t, 3)
+	counter := newStatCounter()
+	eng := toollessEngine(t, lib.cfg, lib.ts, discardLogger())
+	eng.statFn = counter.stat
+
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+
+	for _, f := range lib.files {
+		switch n := counter.reads(f); {
+		case n == 0:
+			t.Errorf("%s was never read at all, so this counter is not watching the pass and the "+
+				"bound below proves nothing", filepath.Base(f))
+		case n > 1:
+			t.Errorf("%s cost %d attribute reads before the claim, want at most 1. Each of them is "+
+				"paid per file per pass on a library that needs nothing done", filepath.Base(f), n)
+		}
+	}
+}
+
+// AC-12. A library with no eligible file completes without error and costs no file any
+// write. The empty case is where an accidental per-file write hides, so it is graded on
+// the same counter rather than on the run returning nil.
+func TestScan_EmptyLibraryIssuesNoStoreWrite(t *testing.T) {
+	root := t.TempDir()
+	cfg := baseCfg(root)
+	ts := newTestStore(t, root)
+	counted := countingStore(ts)
+	eng := toollessEngine(t, cfg, counted, discardLogger())
+
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot over an empty library: %v", err)
+	}
+	if got := counted.everyWrite(); !equalStrings(got, passBookkeeping) {
+		t.Errorf("an empty library cost %v, want only the per-pass bookkeeping %v", got, passBookkeeping)
+	}
+	rows, err := ts.List(context.Background(), nil, 0)
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("an empty library left %d row(s) on the ledger: %+v", len(rows), rows)
+	}
+}
+
+// AC-6. THE REGRESSION THE BENCHMARK CANNOT SEE, and the one that destroys data.
+//
+// A terminal row is held out of the pipeline only while the fingerprint the scan derives
+// now equals the one the row is keyed by. That fingerprint is "size:mtime" from a stat
+// which FOLLOWS a symbolic link. A consolidation that resolves a path differently - Lstat
+// where Stat was used - or renders either attribute differently re-keys every affected
+// row, so every file that was already done is offered back to a pipeline that transcodes
+// it and deletes the source. No re-run undoes that deletion.
+//
+// The expected keys below are LITERALS captured from the code as it stood BEFORE the
+// pre-claim reads were consolidated. They are not recomputed from the read under test: a
+// golden derived from the new read proves only that the new code agrees with itself, which
+// is precisely the failure that deletes a source. Each row is SEEDED with its literal, so
+// what the pass compares against is the stored text rather than a fresh derivation.
+func TestScan_NoOpPassReOpensNoTerminalRow(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir() // the symlink's target, deliberately not itself enumerated
+	cfg := baseCfg(root)
+	ts := newTestStore(t, root)
+	in := DecisionInputsFor(cfg)
+
+	// The link's TARGET. os.Stat follows the link, so the link's row is keyed by these two
+	// numbers; an Lstat would key it by the length of the target's path and the link's own
+	// timestamp instead, and the row would stop matching.
+	target := filepath.Join(outside, "target.mkv")
+	writeSized(t, target, 2048, 1700000001)
+
+	cases := []struct {
+		name string
+		path string
+		// wantKey is the fingerprint text the pre-consolidation build derived for this
+		// file, committed as a literal.
+		wantKey string
+		make    func(t *testing.T, path string)
+	}{
+		{
+			name: "an ordinary source", path: filepath.Join(root, "plain.mkv"),
+			wantKey: "4096:1700000000",
+			make:    func(t *testing.T, p string) { writeSized(t, p, 4096, 1700000000) },
+		},
+		{
+			// The symlinked source. Its key is its TARGET's size and mtime.
+			name: "a symlinked source", path: filepath.Join(root, "link.mkv"),
+			wantKey: "2048:1700000001",
+			make: func(t *testing.T, p string) {
+				if err := os.Symlink(target, p); err != nil {
+					t.Fatalf("symlink %s: %v", p, err)
+				}
+			},
+		},
+		{
+			// A representation boundary, and a nasty one: a zero-byte file at the epoch
+			// renders the same text the fingerprint uses as its CANNOT-STAT sentinel, so a
+			// read that quietly failed here would look exactly like one that succeeded.
+			name: "zero bytes at the epoch", path: filepath.Join(root, "epoch.mkv"),
+			wantKey: "0:0",
+			make:    func(t *testing.T, p string) { writeSized(t, p, 0, 0) },
+		},
+		{
+			// The other boundary: an mtime past the signed 32-bit second count, which a
+			// build that narrowed the field anywhere would truncate or wrap.
+			name: "an mtime past 2038", path: filepath.Join(root, "y2038.mkv"),
+			wantKey: "1:2147483648",
+			make:    func(t *testing.T, p string) { writeSized(t, p, 1, 2147483648) },
+		},
+	}
+
+	for _, c := range cases {
+		c.make(t, c.path)
+		seedProcessedRow(t, ts, c.path, c.wantKey, store.Skipped,
+			&store.Outcome{Reason: SkipAlreadyTargetCodec, DecisionInputs: in})
+	}
+
+	eng := toollessEngine(t, cfg, ts, discardLogger())
+	claims := watchClaims(eng)
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+
+	if got := claims.taken(); len(got) != 0 {
+		t.Errorf("the no-op pass RE-OPENED %v. A terminal row is re-opened only when the key the "+
+			"pass derives differs from the key the row is stored under, so this pass is deriving a "+
+			"fingerprint the stored rows do not carry - which offers files that were already done "+
+			"back to a pipeline that deletes their sources", got)
+	}
+	for _, c := range cases {
+		row, ok := ledgerRowFor(t, ts, c.path)
+		if !ok {
+			t.Errorf("%s: the row keyed %q is gone", c.name, c.wantKey)
+			continue
+		}
+		if row.Fingerprint != c.wantKey {
+			t.Errorf("%s: the row is now keyed %q, want the stored %q", c.name, row.Fingerprint, c.wantKey)
+		}
+		if row.Status != store.Skipped || row.Outcome.Reason != SkipAlreadyTargetCodec {
+			t.Errorf("%s: the terminal row moved: status=%q reason=%q", c.name, row.Status, row.Outcome.Reason)
+		}
+	}
+}
+
+// writeSized creates path with exactly size bytes and exactly mtimeUnix as its
+// modification time, so the fingerprint text it produces is decided by the fixture rather
+// than by when the case happened to run.
+func writeSized(t *testing.T, path string, size int, mtimeUnix int64) {
+	t.Helper()
+	if err := os.WriteFile(path, bytes.Repeat([]byte("v"), size), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+	when := time.Unix(mtimeUnix, 0)
+	if err := os.Chtimes(path, when, when); err != nil {
+		t.Fatalf("setting the mtime of %s: %v", path, err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if fi.Size() != int64(size) || fi.ModTime().Unix() != mtimeUnix {
+		t.Fatalf("the filesystem under this case will not hold %d bytes at mtime %d (it reports %d at %d), "+
+			"so the boundary this case exists to cover is not being covered",
+			size, mtimeUnix, fi.Size(), fi.ModTime().Unix())
+	}
+}
+
+// AC-2 and AC-3. The two MUTABLE guards. Each parks a file on a condition that later gets
+// fixed - a seed that finishes, a retention area that becomes writable - so a skip
+// recorded under either is re-opened the moment the condition resolves, and the file is
+// claimed on THAT scan rather than on some later one.
+//
+// Each row is seeded WITH the configuration values it was decided under, so the inputs
+// rule alone holds it out: the only thing that can re-open it is the mutable guard's own
+// re-evaluation, which is exactly what these two cases grade.
+func TestMutableGuard_StillClearsWhenTheConditionResolves(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		reason string
+	}{
+		{"hardlink", SkipHardlinked},
+		{"undo_retention", SkipUndoRetentionFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			cfg := baseCfg(root)
+			ts := newTestStore(t, root)
+
+			parked := filepath.Join(root, "parked.mkv")
+			if err := os.WriteFile(parked, []byte("the guard's condition has since resolved"), 0o644); err != nil {
+				t.Fatalf("writing %s: %v", parked, err)
+			}
+			seedProcessedRow(t, ts, parked, probe.Fingerprint(parked), store.Skipped,
+				&store.Outcome{Reason: tc.reason, DecisionInputs: DecisionInputsFor(cfg)})
+
+			eng := toollessEngine(t, cfg, ts, discardLogger())
+			claims := watchClaims(eng)
+			if err := eng.RunOneshot(context.Background()); err != nil {
+				t.Fatalf("RunOneshot: %v", err)
+			}
+
+			got := claims.taken()
+			if len(got) != 1 || got[0] != parked {
+				t.Fatalf("the pass claimed %v, want exactly [%s]. A skip recorded under a MUTABLE "+
+					"guard whose condition has resolved goes back into the pipeline on this scan, "+
+					"or the file is parked by a record nobody can see", got, parked)
+			}
+			if row, ok := ledgerRowFor(t, ts, parked); ok && row.Status == store.Skipped && row.Outcome.Reason == tc.reason {
+				t.Errorf("the %q skip row is still standing after the condition resolved: %+v", tc.reason, row)
+			}
+		})
+	}
+}
+
+// AC-5. A source that is itself a symbolic link is SKIPPED under its own reason, and both
+// the link and its target are left byte for byte. Replacing such a file via rename would
+// swap the LINK for a regular file, orphaning the real target and changing what the
+// library entry means - so the guard exists, and it reads the path with Lstat, the one
+// pre-swap read that must NOT follow the link.
+func TestProcessFile_SymlinkedSourceStillSkips(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	cfg := baseCfg(root)
+	ts := newTestStore(t, root)
+
+	target := filepath.Join(outside, "real.mkv")
+	if err := os.WriteFile(target, []byte("the bytes the link points at"), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", target, err)
+	}
+	link := filepath.Join(root, "linked.mkv")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	targetBefore, linkBefore := md5f(t, target), readlink(t, link)
+
+	eng := toollessEngine(t, cfg, ts, discardLogger())
+	if err := eng.ProcessFile(context.Background(), "w0", link); err != nil {
+		t.Fatalf("ProcessFile: %v", err)
+	}
+
+	row, ok := ledgerRowFor(t, ts, link)
+	if !ok {
+		t.Fatalf("the symlinked source left no row at all")
+	}
+	if row.Status != store.Skipped || row.Outcome.Reason != SkipSymlink {
+		t.Errorf("the symlinked source is recorded status=%q reason=%q, want a skip carrying %q",
+			row.Status, row.Outcome.Reason, SkipSymlink)
+	}
+	if got := readlink(t, link); got != linkBefore {
+		t.Errorf("the link was rewritten: it points at %q, was %q", got, linkBefore)
+	}
+	if got := md5f(t, target); got != targetBefore {
+		t.Error("the link's TARGET was modified by a pass that was supposed to skip the link")
+	}
+}
+
+// readlink is what a symbolic link points at, or a failed case.
+func readlink(t *testing.T, path string) string {
+	t.Helper()
+	got, err := os.Readlink(path)
+	if err != nil {
+		t.Fatalf("readlink %s: %v (it is no longer a symbolic link)", path, err)
+	}
+	return got
+}
+
+// AC-10. A file whose attributes cannot be read is left ALONE - not mutated, no row
+// written for it - it is recorded at a level that does not demand a human act on a
+// condition the scan handled itself (observability O3), and the scan runs to completion
+// over the rest of the library.
+//
+// The two causes are the two the criterion names, and both are injected through the
+// attribute-read seam because neither is producible otherwise: a file that vanishes
+// between the enumeration and the claim is a race no fixture can hold open, and a path an
+// unprivileged uid may not stat is not something this gate's user can create.
+func TestScan_UnreadableFileIsSkippedAndTheScanContinues(t *testing.T) {
+	root := t.TempDir()
+	cfg := baseCfg(root)
+	ts := newTestStore(t, root)
+
+	vanished := filepath.Join(root, "vanished.mkv")
+	denied := filepath.Join(root, "denied.mkv")
+	ordinary := filepath.Join(root, "ordinary.mkv")
+	for _, p := range []string{vanished, denied, ordinary} {
+		if err := os.WriteFile(p, []byte("a source this pass will or will not be able to read"), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", p, err)
+		}
+	}
+	before := map[string]string{vanished: md5f(t, vanished), denied: md5f(t, denied)}
+
+	counter := newStatCounter()
+	counter.fail = func(path string) error {
+		switch path {
+		case vanished:
+			return os.ErrNotExist
+		case denied:
+			return os.ErrPermission
+		}
+		return nil
+	}
+	var logged bytes.Buffer
+	counted := countingStore(ts)
+	eng := toollessEngine(t, cfg, counted, jsonLogger(&logged))
+	eng.statFn = counter.stat
+
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+
+	for _, p := range []string{vanished, denied} {
+		if row, ok := ledgerRowFor(t, ts, p); ok {
+			t.Errorf("%s could not be read, yet the pass wrote a row for it: %+v. A row is a "+
+				"statement about a file this pass never looked at", filepath.Base(p), row)
+		}
+		if w := counted.writesFor(p); len(w) != 0 {
+			t.Errorf("%s could not be read, yet the pass issued %v for it", filepath.Base(p), w)
+		}
+		if md5f(t, p) != before[p] {
+			t.Errorf("%s was MODIFIED by a pass that could not even read its attributes", filepath.Base(p))
+		}
+	}
+
+	// The scan ran to completion over the rest of the library: the readable file beside
+	// them went the ordinary way, which here means it reached the probe that does not
+	// exist and was recorded unreadable. The point is only that it was reached at all.
+	if _, ok := ledgerRowFor(t, ts, ordinary); !ok {
+		t.Error("the file beside the unreadable ones left no row, so one bad file took the scan " +
+			"down with it instead of being stepped over")
+	}
+
+	// RECORDED, and at a level that does not summon anybody. `error` in this fleet means a
+	// human must act; this is a condition the pass handled itself and re-reads next scan.
+	records := logRecords(t, &logged)
+	for _, p := range []string{vanished, denied} {
+		var said bool
+		for _, rec := range records {
+			if rec["file"] != p {
+				continue
+			}
+			said = true
+			if lvl, _ := rec["level"].(string); lvl != "INFO" {
+				t.Errorf("%s was recorded at %q. `error` demands a human act and `warn` says the "+
+					"run is degraded; a file re-read on the next scan with no operator action in "+
+					"between is neither, and a library with one dangling link in it would raise "+
+					"that alarm on every scan for ever", filepath.Base(p), lvl)
+			}
+		}
+		if !said {
+			t.Errorf("%s was skipped with NOTHING recorded about it. A file that silently stops "+
+				"being worked on, with no line naming it, is the dead end this clause exists to "+
+				"close", filepath.Base(p))
+		}
+	}
+	for _, rec := range records {
+		if lvl, _ := rec["level"].(string); lvl == "ERROR" {
+			t.Errorf("the pass logged at ERROR for a condition it handled: %v", rec)
+		}
+	}
+}
+
+// AC-11. A store that fails INSIDE the claim decision must never be read as a verdict
+// about the file. Nothing about the file is mutated, it is not treated as done, it stays
+// eligible for the next pass, and the record names which dependency failed, what was being
+// attempted and that the file is retried - not a wrapped trace (observability O4).
+func TestScan_StoreErrorInTheClaimPathRetriesNextPass(t *testing.T) {
+	root := t.TempDir()
+	cfg := baseCfg(root)
+	ts := newTestStore(t, root)
+
+	f := filepath.Join(root, "film.mkv")
+	if err := os.WriteFile(f, []byte("a source the store will refuse to claim, once"), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", f, err)
+	}
+	before := md5f(t, f)
+
+	counted := countingStore(ts)
+	errClaim := errors.New("injected: the ledger is unreachable")
+	counted.claimErr = func(string) error { return errClaim }
+
+	var logged bytes.Buffer
+	eng := toollessEngine(t, cfg, counted, jsonLogger(&logged))
+	claims := watchClaims(eng)
+
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: a single file's store error must never abort the scan: %v", err)
+	}
+	if got := claims.taken(); len(got) != 0 {
+		t.Errorf("the pass got past a claim that errored: %v", got)
+	}
+	if md5f(t, f) != before {
+		t.Error("the source was MODIFIED on a pass whose claim never succeeded")
+	}
+	if row, ok := ledgerRowFor(t, ts, f); ok {
+		t.Errorf("a claim that errored left a row behind: %+v. A store error is not a verdict, "+
+			"and a done or skipped row here would hold the file out of every later pass", row)
+	}
+
+	// O4: the dependency, the attempt and what happens next, each a field rather than an
+	// error string somebody has to read prose out of.
+	var stated bool
+	for _, rec := range logRecords(t, &logged) {
+		if rec["file"] != f || rec["dependency"] == nil {
+			continue
+		}
+		stated = true
+		if rec["dependency"] != "store" || rec["attempted"] != "claim" || rec["next"] == nil {
+			t.Errorf("the claim failure records %v; O4 wants the dependency, the attempt and the "+
+				"next action all named there", rec)
+		}
+		if lvl, _ := rec["level"].(string); lvl == "ERROR" {
+			t.Errorf("the claim failure was logged at ERROR, but the pass recovered from it "+
+				"itself and retries on the next scan: %v", rec)
+		}
+	}
+	if !stated {
+		t.Error("a store error inside the claim decision was not recorded as a stated state at " +
+			"all, so an operator has a file that is quietly not being worked on and nothing to " +
+			"read about it")
+	}
+
+	// STILL ELIGIBLE. The very next pass, with the store answering again, claims it.
+	counted.claimErr = nil
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot (second pass): %v", err)
+	}
+	if got := claims.taken(); len(got) != 1 || got[0] != f {
+		t.Errorf("the next pass claimed %v, want exactly [%s]. A file the store could not answer "+
+			"for has to come back, or one bad moment excludes it for ever", got, f)
+	}
 }

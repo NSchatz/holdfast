@@ -247,7 +247,8 @@ func (s *SQLite) RecoverStale(ctx context.Context) (int, error) {
 // would hand the same job to two workers). The transaction (SQLite's default
 // isolation locks the database for its duration) makes the whole read-modify-write
 // atomic, which is what actually delivers the "exactly one claimant" guarantee.
-func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, maxFailures int, current DecisionInputs) (bool, error) {
+func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, maxFailures int,
+	current DecisionInputs, supersede ...string) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("store: claim begin tx: %w", err)
@@ -267,22 +268,34 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		// Never seen before: claim it fresh.
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, schema_version)
-			 VALUES (?, ?, ?, 0, ?, ?, ?)`,
-			path, fingerprint, string(Probing), worker, now(), currentStamp()); err != nil {
-			return false, fmt.Errorf("store: claim insert: %w", err)
-		}
-		if err := tx.Commit(); err != nil {
-			return false, fmt.Errorf("store: claim commit: %w", err)
-		}
-		return true, nil
+		return claimFresh(ctx, tx, path, fingerprint, worker)
 	case err != nil:
 		return false, fmt.Errorf("store: claim select: %w", err)
 	}
 
 	st := Status(status)
 	switch {
+	case st == Skipped && supersededBy(reason.String, supersede):
+		// A MUTABLE guard's own row, re-evaluated. The caller reached this call without
+		// that guard firing, which is the guard saying its condition no longer holds, so
+		// the row goes and the file re-enters the pipeline exactly as an unseen one does.
+		//
+		// It is HERE rather than in a ClearSkip beside the call because the status and the
+		// reason are already read, in this transaction, to decide whether the file is
+		// claimable at all. Asking a DELETE the same question outside it costs a write
+		// statement for every file of every scan - on a processed library, one per mutable
+		// guard per file per pass, for ever, to match no row - and it is a write the
+		// caller can only issue by guessing, since it does not know what the row says.
+		// Folded in, the write is issued exactly where there is a row to write.
+		//
+		// Deleting and re-inserting, rather than falling through to the update below, is
+		// what keeps this identical to the clear-then-claim it replaces: the attempt count
+		// goes back to zero with the row, as it does for any file this build has not seen.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM jobs WHERE path = ? AND fingerprint = ?`, path, fingerprint); err != nil {
+			return false, fmt.Errorf("store: claim clear superseded skip: %w", err)
+		}
+		return claimFresh(ctx, tx, path, fingerprint, worker)
 	case st == Done || st == Skipped:
 		if !reopens(st, reason.String, ParseDecisionInputs(inputs.String), current) {
 			return false, nil // terminal, and its decision still re-derives the same way
@@ -385,6 +398,45 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 		return false, fmt.Errorf("store: claim commit: %w", err)
 	}
 	return true, nil
+}
+
+// claimFresh writes the row a file this build has not seen gets, and commits. It is the
+// one spelling of that INSERT: a claim reaches it both for a path with no row at all and
+// for one whose mutable-guard skip was just superseded, and those two must stay the same
+// row or the second would quietly carry something forward from the verdict it replaced.
+func claimFresh(ctx context.Context, tx *sql.Tx, path, fingerprint, worker string) (bool, error) {
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO jobs (path, fingerprint, status, fail_count, worker, updated_at, schema_version)
+		 VALUES (?, ?, ?, 0, ?, ?, ?)`,
+		path, fingerprint, string(Probing), worker, now(), currentStamp()); err != nil {
+		return false, fmt.Errorf("store: claim insert: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("store: claim commit: %w", err)
+	}
+	return true, nil
+}
+
+// supersededBy reports whether a skipped row's reason is one this claim was told it may
+// clear. An empty reason is never one: a row carrying no reason at all records no guard,
+// so there is no mutable condition behind it to have resolved.
+//
+// A `restored-original` row is never one either, WHATEVER the caller names, and that
+// refusal is here rather than left to the caller's list on purpose. It is the row an
+// operator wrote by deliberately putting their file back through the undo window, and
+// re-opening it feeds those rescued bytes to the very gates that passed the encode they
+// rejected. reopens refuses it first and without reading anything else; this branch runs
+// before reopens, so it owes the same refusal or it is a way around it.
+func supersededBy(reason string, supersede []string) bool {
+	if reason == "" || reason == GuardRestoredOriginal {
+		return false
+	}
+	for _, r := range supersede {
+		if r == reason {
+			return true
+		}
+	}
+	return false
 }
 
 // reopens decides whether a DONE or SKIPPED row goes back to the pipeline. It is the

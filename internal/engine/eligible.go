@@ -115,17 +115,42 @@ func Declined(p string) (rule, detail string, yes bool) {
 // what a run would do must not count one, which is why the read-only plan pass and the
 // census ask this rather than a rule of their own.
 func DeclinedPath(p string) (rule, detail string, yes bool) {
+	d := declinedPath(p, os.Stat)
+	return d.rule, d.detail, d.declined
+}
+
+// pathDoor is everything one pass of that door established about a path: the rule it broke
+// if it broke one, the stat taken on the way (nil where the question was answered without
+// one, or where the stat itself failed), and that stat's error.
+//
+// The stat is handed back because the caller that acts on the file wants a NUMBER about
+// the same file and taking a second stat for it is two answers about one path - and, on a
+// processed library, a second read per file per pass for ever. The error is handed back
+// because "there is nothing at the other end of this path" and "this is a directory" reach
+// the same refusal and are not the same event to report.
+type pathDoor struct {
+	rule, detail string
+	fi           os.FileInfo
+	statErr      error
+	declined     bool
+}
+
+// declinedPath is DeclinedPath over a SUPPLIED stat, so the engine's own seam reaches this
+// door and a pass's attribute reads are countable in one place.
+func declinedPath(p string, stat func(string) (os.FileInfo, error)) pathDoor {
 	if rule, detail, yes := Declined(p); yes {
-		return rule, detail, true
+		return pathDoor{rule: rule, detail: detail, declined: true}
 	}
-	fi, err := os.Stat(p)
+	fi, err := stat(p)
 	if err != nil {
-		return RuleNotARegularFile, fmt.Sprintf("%s is not a file this run can act on: %v", p, err), true
+		return pathDoor{rule: RuleNotARegularFile, statErr: err, declined: true,
+			detail: fmt.Sprintf("%s is not a file this run can act on: %v", p, err)}
 	}
 	if fi.IsDir() {
-		return RuleNotARegularFile, fmt.Sprintf("%s is a directory, not a regular file", p), true
+		return pathDoor{rule: RuleNotARegularFile, fi: fi, declined: true,
+			detail: fmt.Sprintf("%s is a directory, not a regular file", p)}
 	}
-	return "", "", false
+	return pathDoor{fi: fi}
 }
 
 // Ineligible is the ONE rule a path broke, and what was seen. Rule is the token; Detail

@@ -266,12 +266,33 @@ func FileSize(f string) int64 {
 // Fingerprint returns a cheap "size:mtime" content key. A re-downloaded/edited file
 // changes size or mtime, so its key changes and it is reconsidered. Returns
 // "0:0" if the file cannot be stat'd.
+//
+// The stat FOLLOWS a symbolic link, which is load-bearing rather than incidental: a
+// symlinked source is keyed on the attributes of the file it points at, and every terminal
+// row already stored for one is keyed that way. Reading such a path with Lstat instead
+// would key it on the link (its target's path length, and the link's own timestamp), no
+// stored row would match any more, and every file that was already done would be offered
+// back to a pipeline that deletes sources.
 func Fingerprint(f string) string {
 	fi, err := os.Stat(f)
 	if err != nil {
 		return "0:0"
 	}
-	return Attributes{SizeBytes: fi.Size(), MTimeUnix: fi.ModTime().Unix()}.String()
+	return AttributesOf(fi).String()
+}
+
+// AttributesOf derives the attribute record from a stat ALREADY TAKEN.
+//
+// It is THE derivation: Fingerprint and StatAttributes both read through it, and so does a
+// caller that already holds the FileInfo and must not pay for a second stat to get the
+// same two numbers. One derivation is the point - the text it renders is the key a
+// terminal row is held out of the pipeline by, so a second spelling of it beside this one
+// is a row that silently stops matching.
+//
+// It takes what the CALLER's stat returned and asks the filesystem nothing, so whether the
+// link was followed was decided by that caller, where it is visible.
+func AttributesOf(fi os.FileInfo) Attributes {
+	return Attributes{SizeBytes: fi.Size(), MTimeUnix: fi.ModTime().Unix()}
 }
 
 // Attributes is a file's RENAME-INVARIANT attribute record: the byte count and the
@@ -323,7 +344,7 @@ func StatAttributes(f string) (Attributes, error) {
 	if err != nil {
 		return Attributes{}, err
 	}
-	return Attributes{SizeBytes: fi.Size(), MTimeUnix: fi.ModTime().Unix()}, nil
+	return AttributesOf(fi), nil
 }
 
 // IsSymlink reports whether f is itself a symbolic link (Lstat, so it does NOT
@@ -351,10 +372,21 @@ func NLink(f string) uint64 {
 	if err != nil {
 		return 1
 	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-		return uint64(st.Nlink)
+	return NLinkOf(fi)
+}
+
+// NLinkOf reads the hard-link count out of a stat ALREADY TAKEN, for a caller holding one
+// that must not pay for a second. It is where the fail-safe default lives for both forms:
+// a stat record this build cannot read the count out of answers 1, so an unreadable count
+// NEVER trips the hardlink guard. That direction is deliberate and it is not symmetric - a
+// wrongly tripped guard parks a file an operator then has to find, and a wrongly cleared
+// one breaks a live seed by swapping the file out from under it.
+func NLinkOf(fi os.FileInfo) uint64 {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 1
 	}
-	return 1
+	return uint64(st.Nlink)
 }
 
 // ---- colour / HDR + source-property probes (TRANSCODE-3) -------------------

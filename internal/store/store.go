@@ -807,7 +807,30 @@ type Store interface {
 	// run decided about that scan, not a disposal of the file, so the run that is allowed
 	// to transcode must be able to pick the file up - otherwise turning dry-run off would
 	// leave every file the dry run examined permanently untouched.
-	Claim(ctx context.Context, path, fingerprint, worker string, maxFailures int, current DecisionInputs) (bool, error)
+	//
+	// supersede names the SKIP REASONS this claim may clear on its way through, and it is
+	// how a MUTABLE guard is re-evaluated. A guard whose condition an operator or the world
+	// fixes - a seed that finishes, a retention area that becomes writable, a withholding
+	// that is lifted - parks its file behind a skipped row, and the caller reaching this
+	// call at all is that guard saying the condition no longer holds. Where the row IS such
+	// a skip, it is removed and the file is claimed exactly as an unseen file is; where it
+	// is anything else, including a skip carrying a reason not named here, nothing is
+	// written and the ordinary rules above decide.
+	//
+	// It belongs here and not in a ClearSkip beside the call because the status and the
+	// reason are already read, inside the one transaction that decides claimability. A
+	// caller clearing from outside has to guess, so it issues the delete for every file of
+	// every pass - on a processed library that is one write per named reason per file per
+	// scan, serialized on the single write connection, matching no row. Named here, the
+	// write happens only where there is a row to write.
+	//
+	// Pass nothing to supersede no row, which is every caller but the scan's own pre-claim
+	// path. A reason that would re-open a verdict about the FILE (its codec, its bitrate,
+	// its shape) does not belong in it: those are real outcomes, re-opened by the decision
+	// inputs above and by nothing else. GuardRestoredOriginal is refused outright by
+	// reopens and must never be named here either.
+	Claim(ctx context.Context, path, fingerprint, worker string, maxFailures int,
+		current DecisionInputs, supersede ...string) (bool, error)
 
 	// Reopen clears what ONE terminal row recorded about the configuration its decision
 	// was taken under, so the next Claim reads that decision as one it cannot re-derive
@@ -961,11 +984,16 @@ type Store interface {
 	// neither.
 	RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision, profile string) (changed bool, err error)
 
-	// ClearSkip deletes the row ONLY when it is a Skipped row whose reason matches: the
-	// re-evaluation half of a MUTABLE guard. The hardlink guard re-checks every scan, since
-	// a seed may finish and drop the link count, and this removes the stale skip so the
-	// file is reclaimed on the normal path. The reason+status match is what keeps it from
-	// ever touching a real outcome. No-op when no such row exists.
+	// ClearSkip deletes the row ONLY when it is a Skipped row whose reason matches: one
+	// mutable guard's parked file, released. The reason+status match is what keeps it from
+	// ever touching a real outcome, and it is a no-op when no such row exists.
+	//
+	// THE SCAN NO LONGER ASKS IT. Every guard whose file it used to release now names its
+	// reason to Claim's supersede instead, because the scan cannot know whether there is a
+	// row here without reading one, and asking blind is a write statement per guard per
+	// file per pass that matches nothing on a library with nothing to do. This stays as the
+	// standalone primitive for a caller that wants exactly this one row gone and is not
+	// also claiming the file.
 	ClearSkip(ctx context.Context, path, fingerprint, reason string) error
 
 	// RecordSwapIncident persists a swap that did not complete cleanly. It writes the
