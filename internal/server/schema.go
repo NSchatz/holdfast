@@ -163,6 +163,30 @@ func (s *Server) SurfaceJSON() ([]byte, error) {
 	return MarshalDocument(doc)
 }
 
+// ParseDocument reads a document back - the committed baseline, or a response body. It is
+// STRICT about being a surface document rather than merely being JSON: bytes that parse as
+// JSON and name no format are not a baseline, and a gate that accepted them would compare
+// this build's surface against nothing and report it unchanged.
+func ParseDocument(raw []byte) (Document, error) {
+	var doc Document
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&doc); err != nil {
+		return Document{}, err
+	}
+	if doc.Schema != SchemaFormat {
+		return Document{}, fmt.Errorf("names format %q, not %q", doc.Schema, SchemaFormat)
+	}
+	if doc.SchemaVersion != SchemaFormatVersion {
+		return Document{}, fmt.Errorf("is format version %q, and this build reads version %q",
+			doc.SchemaVersion, SchemaFormatVersion)
+	}
+	if len(doc.Endpoints) == 0 {
+		return Document{}, fmt.Errorf("lists no endpoint")
+	}
+	return doc, nil
+}
+
 // MarshalDocument renders a document the one way it is ever rendered.
 func MarshalDocument(doc Document) ([]byte, error) {
 	b, err := json.MarshalIndent(doc, "", "  ")

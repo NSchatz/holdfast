@@ -45,6 +45,7 @@ PLATFORM ?= linux/amd64
 .PHONY: build test check fmt vet staticcheck govulncheck govulncheck-selftest \
         check-pins check-pins-selftest install-ffmpeg-selftest check-pin-live \
         secret-scan secret-scan-selftest install-hooks snapshot-bench \
+        api-schema api-schema-baseline api-schema-diff api-schema-diff-selftest \
         tidy clean image image-smoke compose-check
 
 build:
@@ -138,6 +139,45 @@ secret-scan:
 secret-scan-selftest:
 	./scripts/secret-scan-selftest.sh
 
+# --- the self-describing HTTP surface (S0128) ---------------------------------
+# The document the running server serves at GET /api/schema, printed. It is GENERATED from
+# the router internal/server builds and from the Go types its handlers encode, so there is
+# no hand-maintained copy of it here or anywhere else (http-surface H4).
+api-schema:
+	@go run ./scripts/api-schema generate
+
+# Rewrites docs/api-schema.json, the committed record of the LAST RELEASED version's
+# surface, and reads back what it wrote - so this command's own exit status says the file is
+# usable as a baseline and names the version whose surface it describes.
+#
+# DELIBERATELY NOT part of `check`. A gate that regenerated its own baseline would compare
+# the tree against itself and pass on every change, which is the one answer this pair must
+# never give. Run it as the numbered step in docs/release.md, after the tag is pushed: the
+# version stamp below is `git describe`, so on a tagged commit the file records that tag.
+api-schema-baseline:
+	go run -ldflags="$(LDFLAGS)" ./scripts/api-schema baseline
+
+# THE SURFACE GATE (http-surface H5). Generates this build's surface, compares it against
+# the committed baseline, and refuses a BREAKING difference - an endpoint or method removed,
+# a declared response field removed, a field's declaration narrowed, a status code removed,
+# or the response recorded for a status code changed. Every addition passes: the baseline
+# describes the last RELEASE, and additive drift between releases is the normal state.
+#
+# .api-schema-breaks.yaml is the only surface that can make one non-fatal, and only by
+# naming that exact difference and the version that will carry it.
+#
+# Needs no browser, no Docker and no network: the baseline is committed.
+api-schema-diff:
+	@go run ./scripts/api-schema diff
+
+# Proves the surface gate still BITES. Every way it can fail is a way it fails SILENTLY - a
+# baseline it could not read reported as "unchanged", a break it classified as an addition,
+# a record honoured that names nothing. So each is defeated on purpose here, against a
+# THROWAWAY CLONE, on every run. A guard nobody tries to defeat is a guard nobody knows
+# works. Outside `check` for the same reason every other selftest here is.
+api-schema-diff-selftest:
+	./scripts/api-schema-diff-selftest.sh
+
 # THE ONE SETUP STEP a clone performs to get the pre-commit scan. It points
 # core.hooksPath at the committed hooks directory, so there is nothing to copy and a hook
 # that changes in the repository changes for everyone who has run this.
@@ -154,7 +194,7 @@ install-hooks:
 # because run-to-run variation on a shared runner makes such a gate false-positive at
 # roughly 45%. `test` above runs `go test` WITHOUT -bench, so the benchmark compiles on
 # every gate run and executes on none of them.
-check: check-pins check-pins-selftest install-ffmpeg-selftest secret-scan secret-scan-selftest fmt vet build test staticcheck govulncheck govulncheck-selftest
+check: check-pins check-pins-selftest install-ffmpeg-selftest secret-scan secret-scan-selftest api-schema-diff fmt vet build test staticcheck govulncheck govulncheck-selftest
 
 # Asks UPSTREAM whether the pinned ffmpeg release is still served. Deliberately NOT part
 # of `check`: the PR gate must not red because a third party had a bad afternoon. CI runs
