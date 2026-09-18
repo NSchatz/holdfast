@@ -1694,6 +1694,14 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// And which video stream those pixels came from. An unmeasured gate carries "" and the
 	// column stays NULL: not recorded, never the stream this build would have scored.
 	out.VmafStream = proof.Stream
+	// WHAT THIS JOB DID TO THE PICTURE. It is recorded from the filter the encoder applied,
+	// not from the proof, because it is true of the job whether or not the perceptual gate
+	// ran - and it is recorded on the reject path as much as on the accept path, because a
+	// row that says a file was refused says nothing about provenance unless it also says
+	// what was tried. An explicit FALSE here is a statement this build ran the job and
+	// deinterlaced nothing, which is a different fact from the NULL every row written before
+	// this column carries.
+	out.Deinterlaced, out.DeinterlaceFilter = ptr(film.Enabled()), film.Spec
 	// Why the gate did not run, when it did not. It travels beside the figures rather than
 	// instead of them: every VMAF field above is "" or nil on such a row, so what a reader
 	// gets is "not measured, and here is why" - never a zero, which would be a fabricated

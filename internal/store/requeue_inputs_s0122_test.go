@@ -26,6 +26,10 @@ var stepsSinceDecisionInputs = []struct {
 	version int
 	undo    []string
 }{
+	{19, []string{
+		`ALTER TABLE jobs DROP COLUMN deinterlaced`,
+		`ALTER TABLE jobs DROP COLUMN deinterlace_filter`,
+	}},
 	{18, []string{
 		`ALTER TABLE jobs DROP COLUMN source_width`,
 		`ALTER TABLE jobs DROP COLUMN source_height`,

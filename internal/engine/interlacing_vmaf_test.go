@@ -141,6 +141,34 @@ func TestDeinterlace_ScoresAgainstADeinterlacedReference(t *testing.T) {
 		t.Errorf("the proof is incomplete (pix_fmt=%q mean=%v), so what the filter was recorded beside "+
 			"is not the proof the gate produced", proof.PixFmt, proof.Mean)
 	}
+
+	// 4. EVERYWHERE THAT PROOF IS RECORDED. A proof that carries the filter and a ROW that
+	// does not is a filter recorded nowhere a reader will look: the row outlives the source,
+	// and the log line scrolls away.
+	e2e := t.TempDir()
+	esrc := filepath.Join(e2e, "movie.mkv")
+	mkInterlacedLong(t, ffmpeg, esrc, "8M")
+	led := run(t, ffmpeg, ffprobe, e2e, nil, func(c *config.Config) {
+		c.Deinterlace = "yadif"
+		c.VmafEnable = boolPtr(true)
+		c.MinVmaf = 90
+	})
+	row := rowForFile(t, led, "movie.mkv")
+	if row.Status != store.Done {
+		t.Fatalf("the end-to-end job is %q/%q, want done", row.Status, row.Outcome.Reason)
+	}
+	if row.Outcome.VmafPixFmt == "" {
+		t.Fatal("the row carries no comparison pixel format, so there is no proof here for the filter " +
+			"to be recorded beside")
+	}
+	if row.Outcome.DeinterlaceFilter != film.Spec {
+		t.Errorf("the terminal row records deinterlace filter %q, want %q - beside vmaf_pix_fmt, on the "+
+			"same row, because that is where the proof is kept", row.Outcome.DeinterlaceFilter, film.Spec)
+	}
+	if row.Outcome.Deinterlaced == nil || !*row.Outcome.Deinterlaced {
+		t.Errorf("the terminal row records deinterlaced = %v for a job that deinterlaced its source",
+			row.Outcome.Deinterlaced)
+	}
 }
 
 // TestDeinterlace_ReferenceFailureLeavesSourceIntact grades [AC-11] of

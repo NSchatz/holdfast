@@ -373,7 +373,8 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 			swap_cause = NULL, failure_class = NULL, decision_inputs = NULL,
 			library_root = NULL, profile_digest = NULL, profile = NULL,
 			dropped_streams = NULL, selection_not_applied = NULL, vmaf_skipped = NULL,
-			source_width = NULL, source_height = NULL, output_width = NULL, output_height = NULL
+			source_width = NULL, source_height = NULL, output_width = NULL, output_height = NULL,
+			deinterlaced = NULL, deinterlace_filter = NULL
 		 WHERE path = ? AND fingerprint = ?`,
 		string(Probing), worker, now(), currentStamp(), path, fingerprint); err != nil {
 		return false, fmt.Errorf("store: claim update: %w", err)
@@ -618,7 +619,8 @@ func finishQuery(st Status, o *Outcome, maxFailures int) string {
 		swap_cause = ?, failure_class = ?, decision_inputs = ?,
 		library_root = ?, profile_digest = ?, profile = ?,
 		dropped_streams = ?, selection_not_applied = ?, vmaf_skipped = ?,
-		source_width = ?, source_height = ?, output_width = ?, output_height = ?`
+		source_width = ?, source_height = ?, output_width = ?, output_height = ?,
+		deinterlaced = ?, deinterlace_filter = ?`
 	switch {
 	case st != Failed:
 	case o.FailureClass.Final() && maxFailures > 0:
@@ -658,6 +660,7 @@ func finishArgs(st Status, o *Outcome, path, fingerprint string) []any {
 		nullString(o.SelectionNotApplied), nullString(o.VmafSkipped),
 		nullPixels(o.SourceWidth), nullPixels(o.SourceHeight),
 		nullPixels(o.OutputWidth), nullPixels(o.OutputHeight),
+		nullBool(o.Deinterlaced), nullString(o.DeinterlaceFilter),
 		path, fingerprint,
 	}
 }
@@ -686,6 +689,17 @@ func nullInt(i *int64) any {
 		return nil
 	}
 	return *i
+}
+
+// nullBool maps a tri-state boolean to the column: NULL for "nobody measured this", and 0
+// or 1 for a measurement. It is its own helper rather than a cast at the call site because
+// the distinction is the whole reason the field is a pointer - a false written where nil
+// was meant is a claim about a job nobody ran.
+func nullBool(b *bool) any {
+	if b == nil {
+		return nil
+	}
+	return *b
 }
 
 // nullPixels is nullInt for a pixel dimension. It is its own helper rather than a cast at
@@ -742,7 +756,8 @@ const outcomeColumns = `reason, encoder, vmaf_mean, vmaf_min, vmaf_model,
 	failure_class, decision_inputs,
 	library_root, profile_digest, profile,
 	dropped_streams, selection_not_applied, vmaf_skipped,
-	source_width, source_height, output_width, output_height`
+	source_width, source_height, output_width, output_height,
+	deinterlaced, deinterlace_filter`
 
 // outcomeScan holds one row's outcome columns on the way out of the driver. Every
 // field is a sql.Null* because every column is nullable: NULL is "not recorded" and
@@ -813,6 +828,13 @@ type outcomeScan struct {
 	// output - measured nothing either. Scanning one into a bare 0 would hand a reader a
 	// resolution nobody took.
 	srcWidth, srcHeight, outWidth, outHeight sql.NullInt64
+
+	// Whether this job deinterlaced its source, and with which filter. Nullable like the
+	// rest, and here the NULL is the whole of it: a row written by a build that could not
+	// deinterlace at all measured nothing, and scanning one into a bare false would say that
+	// somebody looked and found no deinterlace on a job nobody ran.
+	deinterlaced sql.NullBool
+	deintFilter  sql.NullString
 }
 
 // dest returns the scan destinations in outcomeColumns order.
@@ -826,6 +848,7 @@ func (s *outcomeScan) dest() []any {
 		&s.libraryRoot, &s.profileDigest, &s.profile,
 		&s.dropped, &s.notApplied, &s.vmafSkipped,
 		&s.srcWidth, &s.srcHeight, &s.outWidth, &s.outHeight,
+		&s.deinterlaced, &s.deintFilter,
 	}
 }
 
@@ -856,6 +879,7 @@ func (s *outcomeScan) outcome() Outcome {
 		DroppedStreams:      ParseDroppedStreams(s.dropped.String),
 		SelectionNotApplied: s.notApplied.String,
 		VmafSkipped:         s.vmafSkipped.String,
+		DeinterlaceFilter:   s.deintFilter.String,
 		Decision: Decision{
 			LibraryRoot:   s.libraryRoot.String,
 			ProfileDigest: s.profileDigest.String,
@@ -871,7 +895,20 @@ func (s *outcomeScan) outcome() Outcome {
 	o.SourceHeight = nullablePixels(s.srcHeight)
 	o.OutputWidth = nullablePixels(s.outWidth)
 	o.OutputHeight = nullablePixels(s.outHeight)
+	o.Deinterlaced = nullableBool(s.deinterlaced)
 	return o
+}
+
+// nullableBool is the read side of nullBool: SQL NULL becomes nil, which is NOT RECORDED,
+// and a stored 0 becomes an explicit false, which is a job that ran and deinterlaced
+// nothing. The two must not collapse - the rows that predate the column describe sources
+// this tool has already deleted.
+func nullableBool(n sql.NullBool) *bool {
+	if !n.Valid {
+		return nil
+	}
+	v := n.Bool
+	return &v
 }
 
 func nullableFloat(n sql.NullFloat64) *float64 {
@@ -1170,7 +1207,8 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 			guard_attributes = NULL, guard_time_resolution = NULL, guard_residual_window = NULL,
 			swap_cause = NULL, decision_inputs = NULL, profile = excluded.profile,
 			dropped_streams = NULL, selection_not_applied = NULL, vmaf_skipped = NULL,
-			source_width = NULL, source_height = NULL, output_width = NULL, output_height = NULL
+			source_width = NULL, source_height = NULL, output_width = NULL, output_height = NULL,
+			deinterlaced = NULL, deinterlace_filter = NULL
 		 WHERE jobs.status = ?`,
 		path, fingerprint, string(Skipped), now(), nullString(reason),
 		nullString(by.LibraryRoot), nullString(by.ProfileDigest), currentStamp(), nullString(profile),

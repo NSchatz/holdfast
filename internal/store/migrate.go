@@ -512,6 +512,32 @@ ALTER TABLE jobs ADD COLUMN output_width  INTEGER;
 ALTER TABLE jobs ADD COLUMN output_height INTEGER;
 `,
 	},
+	{
+		// v19 - whether a job DEINTERLACED its source, and with which filter.
+		//
+		// It is the one transformation this tool performs that cannot be read back from the
+		// replacement: every other knob changes how the same picture was encoded, and this
+		// removes the fields the source carried. The filter is stored whole, mode and parity
+		// included, because the same filter at a different mode is a different transformation.
+		//
+		// NULLABLE with NO DEFAULT, the rule every step since v2 has kept, and here it is
+		// load-bearing in a way a reader must not lose: a DEFAULT of 0 would say that every
+		// row already in the field was measured and found not deinterlaced. Those rows were
+		// written by a build that could not deinterlace at all, so nothing about them was
+		// measured - and the sources they describe have been deleted, which makes the row the
+		// only record there is. Unmeasured and measured-false are different facts, and only
+		// NULL can say which one a row holds.
+		//
+		// No index: nothing queries BY either column, and every reader has the row in hand.
+		name: "applied deinterlace",
+		// Two nullable columns: ADD COLUMN rewrites no row and creates none, so every
+		// table's count is what it was.
+		rows: noRowChange,
+		sql: `
+ALTER TABLE jobs ADD COLUMN deinterlaced       INTEGER;
+ALTER TABLE jobs ADD COLUMN deinterlace_filter TEXT;
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

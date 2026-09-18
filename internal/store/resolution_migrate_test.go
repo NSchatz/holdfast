@@ -142,7 +142,11 @@ func TestResolution_AMigrationThatCannotCompleteRefusesToOpenAndMovesNothing(t *
 
 	// Break the step in the only way that is faithful to a half-applied one: the shape it
 	// means to add is already partly there, while the stamp still says it never ran.
-	execRaw(t, dbPath, `ALTER TABLE jobs ADD COLUMN source_height INTEGER`)
+	// It names the column the NEWEST step adds, for the reason every wind-back fixture in
+	// this package tracks the end of the migrations slice: a step appended after this line
+	// moves it, and pre-adding a column an EARLIER step already created would break the
+	// fixture rather than the migration under test.
+	execRaw(t, dbPath, `ALTER TABLE jobs ADD COLUMN deinterlaced INTEGER`)
 
 	st, err := Open(dbPath)
 	if err == nil {
@@ -161,8 +165,8 @@ func TestResolution_AMigrationThatCannotCompleteRefusesToOpenAndMovesNothing(t *
 	}
 	// The other half of "rather than run against a half-migrated database": the columns the
 	// step would have added are not there, so nothing wrote into a shape that half exists.
-	if columnExists(t, dbPath, "source_width") {
-		t.Error("the failed step left source_width behind: the transaction did not roll back")
+	if columnExists(t, dbPath, "deinterlace_filter") {
+		t.Error("the failed step left deinterlace_filter behind: the transaction did not roll back")
 	}
 }
 
