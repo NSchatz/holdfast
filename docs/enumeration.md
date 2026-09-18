@@ -31,6 +31,10 @@ everything inside that directory's subdirectories, where sorting the full path s
 put it last. A global sort cannot be produced without holding every path at once, which is
 the cost this arrangement exists to remove.
 
+The read-only pass behind `holdfast plan` traverses the library the same way and reports what
+it found in that same sequence. There is one hand-out order in this repository, so a plan
+predicts the order a scan will work in as well as the set of files it will offer.
+
 ### What a declared queue order may build on this
 
 An order that needs a key rather than a position - largest first, newest first - is a
@@ -39,6 +43,22 @@ guarantees a later order is that the enumeration yields a stable, total sequence
 paths without materialising them, so an order that can be decided from a key may keep
 `(key, path)` pairs alone and state its own memory bound, and an order that is already this
 sequence keeps nothing at all.
+
+## What a scan that stops early reports
+
+Cancelling or pausing stops the enumeration where it stands. The directories it had not
+reached are not listed, and a directory that was not listed is not reported as observed:
+`observed` names the directories THIS scan listed successfully and no others. That is what the
+ledger retention pass needs it to mean, because it is entitled to read a file missing from an
+observed directory as a file that is gone. A directory wrongly named there costs an undo
+record; one missing from it costs only a retention decision that waits for the next scan.
+
+The limit of that rule is a scan that begins while holdfast is already paused. It lists
+nothing, so it observes nothing, so no terminal ledger row is spent on its evidence and the
+retention pass removes nothing at all. Under a pause held across every pass, the ledger is not
+pruned - deliberately, and in the safe direction: the pass draws no conclusion from a library
+it never looked at. The files it never handed out are still pending for the first scan after
+the resume.
 
 ## What the enumeration costs
 

@@ -1217,7 +1217,7 @@ func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
 //
 // It hands each source to the sink AS IT FINDS IT and keeps nothing: what this holds is one
 // directory's listing plus the observed map, and neither grows with the number of FILES in
-// the library. See docs/enumeration-order.md for the order it hands them out in and for what
+// the library. See docs/enumeration.md for the order it hands them out in and for what
 // a later declared queue order may build on it.
 func (e *Engine) enumerateStream(pass *listings, to sink) map[string]bool {
 	// filtered counts the files the configured path filters kept out of this scan. It

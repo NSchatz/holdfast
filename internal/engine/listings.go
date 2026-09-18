@@ -141,7 +141,7 @@ func (e *Engine) readDir(dir string) ([]os.DirEntry, error) {
 }
 
 // sortEntriesByName puts one directory's listing into entry-name order, in place.
-// The hand-out order rests on it (docs/enumeration-order.md), and the rule is the
+// The hand-out order rests on it (docs/enumeration.md), and the rule is the
 // ENUMERATION's rather than the filesystem's: os.ReadDir happens to return a
 // sorted listing and a startup walk happens to carry that order across, but a
 // deterministic hand-out order that rested on a library's own read of a directory

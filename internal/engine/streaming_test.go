@@ -279,7 +279,7 @@ func sameSet(a, b []string) bool {
 
 // TestScan_HandOutOrderIsTotalAndDeterministic is [AC-2].
 //
-// The rule the hand-out order follows is stated in docs/enumeration-order.md and it is
+// The rule the hand-out order follows is stated in docs/enumeration.md and it is
 // PINNED here, spelled out file by file rather than re-derived: a later spec declaring a
 // queue order builds on this sequence, so a change to it has to be a change somebody made on
 // purpose. The fixture's names are chosen so that this order and a global sort of the full
