@@ -75,13 +75,15 @@ own licence text or project page.
 
 ## Non-goals
 
-Four boundaries, each stated in full below. Three are boundaries rather than a backlog: **no distributed
+Four boundaries, each stated in full below. Two are boundaries rather than a backlog: **no distributed
 or remote processing**; **not a media server and not a library manager** - it transcodes files in a
-library other tools manage; **no resolution downscaling**, with exotic-chroma and `multi-video-stream`
+library other tools manage, with exotic-chroma and `multi-video-stream`
 sources **skipped, not converted** and embedded artwork carried through unencoded.
-The fourth is DEFERRED rather than settled: **HDR10 static metadata is preserved while Dolby Vision and
+The third is DEFERRED rather than settled: **HDR10 static metadata is preserved while Dolby Vision and
 HDR10+ dynamic metadata are detect-and-skipped**, at the cost [stated below](#dynamic-hdr-deferred).
-[Interlacing](#interlacing-posture) is its own case: the one transformation this tool makes on request.
+The fourth is **audio transcoding**, below.
+Two things are NOT boundaries and are the transformations this tool makes on request:
+[interlacing](#interlacing-posture) and [the resolution ceiling](#downscaling-posture).
 
 <a id="interlacing-posture"></a>
 
@@ -94,6 +96,24 @@ parity gates grade. **Telecined sources are skipped** under their own guard what
 (undoing a 3:2 pulldown is inverse telecine, which this build does not do), and so is a cadence nobody
 could establish. No floor moves: the gate scores the encode against a reference put through the **same
 filter at the same parameters**.
+
+<a id="downscaling-posture"></a>
+
+**Resolution downscaling is available, and off by default.** `max_height` is unset unless you set it,
+and a replacement then carries the source's own resolution, which is what this tool has always done.
+Set it on a root (or on one band of a root's `rules`) and every source taller than it is scaled down to
+it in the source's own aspect ratio before it is encoded, so **the replacement is no longer the same
+content as the source**: the pixels above that height are gone, they cannot be recovered from the
+replacement, and the swap deletes the original. 4K-to-1080p is the largest single reclaim most libraries
+have, and it is a trade rather than a free win - which is why it is opted into TWICE where it cannot be
+walked back. With `undo_window_hours` at its default of `0` a swap is final, so a file this key would
+scale is **skipped** until the root also sets `downscale_acknowledged: true` (or you open the undo
+window). `holdfast validate` states what the key means before the first file goes.
+No floor moves. The perceptual gate scales the **output back up** to the source's resolution and is
+**scored at the source's resolution**, against the source exactly as it is - so the figures carry what
+the downscale cost. Scoring against a source resampled *down* to meet the output would take that detail
+out of both sides and hide it, and the row records the resolution it measured at so the two can never be
+confused.
 
 **Audio transcoding is a non-goal.** A library root can say which audio and subtitle streams its
 replacements carry (`audio_languages`, `subtitle_languages`, `keep_commentary`, `remux_only` - see
