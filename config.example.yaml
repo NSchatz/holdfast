@@ -30,15 +30,17 @@
 #
 # A root may override ONLY these: encoder, crf, preset, pixel_format, container_ext,
 # min_bitrate_kbps, min_savings_percent, skip_hardlinked, vmaf_enable, min_vmaf,
-# vmaf_min_pool, vmaf_min_chroma, vmaf_subsample, vmaf_model. Anything else inside an
-# entry refuses to start: workers, state_dir, server_*, undo_window_hours,
-# history_retention_rows, run_window, max_load and the notification keys describe the
-# PROCESS, not a library, and stay at the top level.
+# vmaf_min_pool, vmaf_min_chroma, vmaf_subsample, vmaf_model, audio_languages,
+# subtitle_languages, keep_commentary, remux_only, deinterlace, max_height,
+# downscale_acknowledged. Anything else inside an entry refuses to start: workers,
+# state_dir, server_*, undo_window_hours, history_retention_rows, run_window, max_load
+# and the notification keys describe the PROCESS, not a library, and stay at the top
+# level.
 #
 # An entry may also carry exclude_paths / include_paths (which files it offers at all),
-# `rules` (per-resolution-band overrides of three of the knobs above), and `watch` /
-# `watch_settle_sec` (how files under that root are DISCOVERED). See the commented blocks
-# below and docs/profiles.md.
+# `rules` (per-resolution-band overrides of the height-sensitive knobs above, named in
+# the commented block below), and `watch` / `watch_settle_sec` (how files under that root
+# are DISCOVERED). See the commented blocks below and docs/profiles.md.
 #
 # NO ROOT MAY CONTAIN ANOTHER. Nesting is refused rather than resolved by a precedence
 # rule, because a file under two roots would have two answers to what may be done to it.
@@ -68,9 +70,13 @@ library_roots:
   # `when` selects on the SOURCE height in pixels. Both bounds are INCLUSIVE, an absent
   # bound leaves that side unbounded, and a rule with no `when` matches every file. The
   # keys are min_source_height / max_source_height: they select which files the rule
-  # applies TO and are not an output ceiling - nothing here downscales anything.
+  # applies TO and are not an output ceiling. The output ceiling is max_height, which a
+  # rule carries BESIDE its `when` rather than inside it - both min_height and max_height
+  # are refused inside a `when` by name, with the place max_height does belong named.
   #
-  # A rule may override exactly three knobs: min_bitrate_kbps, crf, min_savings_percent.
+  # A rule may override these knobs: min_bitrate_kbps, crf, min_savings_percent,
+  # max_height. Anything else inside a rule refuses to start, naming the key it did not
+  # accept and listing what a rule may carry.
   #
   # - path: /mnt/tv
   #   min_bitrate_kbps: 2500
@@ -83,11 +89,14 @@ library_roots:
   #       min_bitrate_kbps: 800
   #       crf: 24
   #     # UHD: only touch a remux that is genuinely bloated, and only when the encode
-  #     # reclaims real space.
+  #     # reclaims real space. max_height here caps what this band WRITES at 1080p - see
+  #     # the two keys under "codec / quality" below before you uncomment it, because the
+  #     # replacement then carries fewer pixels than the source the swap deletes.
   #     - when:
   #         min_source_height: 2160
   #       min_bitrate_kbps: 12000
   #       min_savings_percent: 20
+  #       max_height: 1080
   #
   # THE FILESYSTEM WATCH, commented out because it is OFF unless a root asks for it and
   # a configuration that says nothing about it behaves exactly as it always has.
@@ -313,6 +322,41 @@ dry_run: false
 #                         # whatever this is set to, and so is one whose cadence
 #                         # cannot be established: deinterlacing telecined content
 #                         # produces judder no perceptual metric flags well.
+
+# max_height: 0          # 0 (the DEFAULT, and what an absent key means) leaves every
+#                         # source at the resolution it already has, which is what this
+#                         # tool has always done. A positive EVEN number of pixels is an
+#                         # OUTPUT HEIGHT CEILING: a source taller than it is scaled to
+#                         # it in the source's own aspect ratio before it is encoded, one
+#                         # at or below it is left alone, and the replacement then carries
+#                         # FEWER PIXELS than the source the swap deletes. It is the only
+#                         # knob in this file that makes a replacement a different picture
+#                         # rather than a re-encoding of the same one, so a root or a rule
+#                         # that sets it earns a startup notice saying so. READ THE
+#                         # README'S NON-GOALS SECTION FIRST: that is the one place the
+#                         # whole posture is written down, and nothing else in this
+#                         # repository restates it. Every gate still applies at full
+#                         # strength, and the perceptual gate scales the OUTPUT back up
+#                         # and scores at the source's own resolution, so it measures what
+#                         # the trade cost rather than hiding it.
+#                         # An odd height, a zero, or anything that is not a whole number
+#                         # of pixels REFUSES TO START naming the key and the value: every
+#                         # pixel format this build encodes to is 4:2:0 and has no
+#                         # representation for an odd dimension, and rounding it would be
+#                         # holdfast choosing between two libraries you did not ask for.
+#                         # It may also be written per band, inside `rules` above.
+# downscale_acknowledged: false
+#                         # false (the DEFAULT, and what an absent key means). Setting
+#                         # max_height is not enough on its own where the swap cannot be
+#                         # walked back: with undo_window_hours at its default of 0 the
+#                         # rename destroys the original, so a file that ceiling would
+#                         # scale is SKIPPED, with its reason recorded, until this root
+#                         # also sets this to true - or until you open the undo window.
+#                         # Two keys and not one, because setting a ceiling says what the
+#                         # replacement should look like and this says the original is not
+#                         # coming back, and those are the same statement only while the
+#                         # window is open. It is a ROOT knob and never a rule knob: it is
+#                         # a statement about a library, not about one band of it.
 
 # --- per-job settings: transcode profiles ---
 # encode_profiles is an ORDERED list. The FIRST profile whose match selects a

@@ -197,12 +197,26 @@ var (
 // rename guard in scripts/check-pins.sh matches IDENTIFIERS and says in as many words that
 // prose is not matched.
 //
-// IDENTIFIERS ARE NOT CLAIMS. `downscaled` and `downscale_scaler` are API fields, and
-// `downscale-unacknowledged` is a guard token; each is documented wherever it is used, and a
-// check that read a field name as a restatement of the posture would force the reference
-// documentation to describe the build in words that avoid the build's own vocabulary. So
-// every code span is REMOVED before the search rather than unwrapped into the prose.
-func CheckDownscaleStatedOnce(files []string) error {
+// IDENTIFIERS ARE NOT CLAIMS. `downscaled` and `downscale_scaler` are API fields,
+// `downscale-unacknowledged` is a guard token and `downscale_acknowledged` is a configuration
+// key; each is documented wherever it is used, and a check that read a name as a restatement
+// of the posture would force the reference documentation to describe the build in words that
+// avoid the build's own vocabulary. So identifiers are REMOVED before the search rather than
+// read as prose, and they are recognised two ways because documents are written two ways:
+//
+//   - by MARKUP, for the Markdown: a code span and a link target are identifiers by
+//     construction, whatever they happen to contain;
+//   - by VOCABULARY, for everything else: identifiers names this build PUBLISHES, handed in
+//     by the caller off the build itself, exactly as CheckGuardTable is handed the engine's
+//     own skip vocabulary. config.example.yaml has no code spans to mark its key names with,
+//     and a check that only understood markup would read every commented-out key in it as a
+//     claim - or, read the other way round, would have to be kept away from the one document
+//     in this repository where these keys are actually written.
+//
+// The vocabulary only ever makes this check STRICTER to supply and looser to withhold, so
+// there is no anti-vacuity refusal on an empty one: a caller passing nothing gets the markup
+// rule alone. What it must not be handed is a list of ordinary English words.
+func CheckDownscaleStatedOnce(files, identifiers []string) error {
 	if len(files) == 0 {
 		return fmt.Errorf("docscheck: no documents to search - a check with no corpus passes everything")
 	}
@@ -213,7 +227,7 @@ func CheckDownscaleStatedOnce(files []string) error {
 		if err != nil {
 			return fmt.Errorf("docscheck: read %s: %w", f, err)
 		}
-		for _, sentence := range sentenceSplit.Split(prose(string(b)), -1) {
+		for _, sentence := range sentenceSplit.Split(prose(string(b), identifiers), -1) {
 			if !carriesAny(sentence, DownscaleClaimTokens) {
 				continue
 			}
@@ -284,11 +298,38 @@ func carriesAny(sentence string, tokens []string) bool {
 	return false
 }
 
-// prose is normalize with Markdown CODE SPANS and LINK TARGETS removed and the remaining
-// emphasis marks stripped: what is left is what the document ASSERTS, with the identifiers it
-// merely names taken out. See CheckDownscaleStatedOnce for why that distinction is the check.
-func prose(s string) string {
-	return plain(linkTarget.ReplaceAllString(codeSpan.ReplaceAllString(s, " "), "] "))
+// prose is normalize with Markdown CODE SPANS and LINK TARGETS removed, the remaining
+// emphasis marks stripped, and every identifier this build publishes taken out: what is left
+// is what the document ASSERTS, with the names it merely mentions gone. See
+// CheckDownscaleStatedOnce for why that distinction is the check.
+func prose(s string, identifiers []string) string {
+	return withoutIdentifiers(plain(linkTarget.ReplaceAllString(codeSpan.ReplaceAllString(s, " "), "] ")),
+		identifiers)
+}
+
+// withoutIdentifiers removes each identifier from already-normalised text, longest first so a
+// name that contains a shorter one is removed whole rather than left in pieces - `hardlinked`
+// is a guard token and `skip_hardlinked` is a key, and taking the short one out of the long
+// one first would leave half a name behind to be read as a word.
+//
+// Each identifier goes through the SAME normalisation the text did, or the two never meet:
+// plain strips the underscores out of a document, so a name looked for with its underscores
+// still in it is a name that is never found.
+//
+// The replacement is a SPACE and never the empty string: removing a name from between two
+// words must not join them into a third that neither document wrote.
+func withoutIdentifiers(text string, identifiers []string) string {
+	names := make([]string, 0, len(identifiers))
+	for _, id := range identifiers {
+		if n := plain(id); n != "" {
+			names = append(names, n)
+		}
+	}
+	sort.Slice(names, func(i, j int) bool { return len(names[i]) > len(names[j]) })
+	for _, n := range names {
+		text = strings.ReplaceAll(text, n, " ")
+	}
+	return text
 }
 
 // first returns the first of a document's matching sentences, for a message that has to point

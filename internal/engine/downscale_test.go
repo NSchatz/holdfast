@@ -89,9 +89,10 @@ func vfChain(args []string) (string, bool) {
 // which scaled nothing could not pass by producing a source-sized output that happened to
 // match.
 //
-// MUTATION: drop withDownscale from the argv and the dimensions arm reds; compute the width
-// by truncation rather than to the nearest even value and the aspect arm reds on a source
-// whose ratio does not divide exactly.
+// MUTATION: drop withDownscale from the argv and both the argv arm and the dimensions arm
+// red. The ROUNDING is not gradeable here and deliberately is not graded here: 640x480 at a
+// ceiling of 240 has an ideal width of exactly 320, so a build that truncated or emitted an
+// odd width would pass this case. That is the next test.
 func TestDownscale_ScalesASourceAboveTheCeiling(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
 	d := t.TempDir()
@@ -140,6 +141,121 @@ func TestDownscale_ScalesASourceAboveTheCeiling(t *testing.T) {
 	if srcW*gotH != gotW*srcH {
 		t.Errorf("the replacement is %dx%d and the source was %dx%d: the aspect ratio moved",
 			gotW, gotH, srcW, srcH)
+	}
+}
+
+// widthError is how far a produced width is from the one that exactly holds the source's
+// aspect ratio at this height, in whole pixels and in integer arithmetic: |w - srcW*h/srcH|
+// multiplied through by srcH, so nothing is compared through a float the way the code under
+// test deliberately does not.
+func widthError(gotW, srcW, srcH, h int) int {
+	e := gotW*srcH - srcW*h
+	if e < 0 {
+		return -e
+	}
+	return e
+}
+
+// TestDownscale_HoldsTheAspectRatioAndEvenDimensionsWhereTheyDoNotDivide grades the second
+// half of [AC-1] - "preserving the source's aspect ratio and producing even dimensions in
+// both axes" - at the values where that clause can actually be broken.
+//
+// The case above cannot break it. 640x480 at a ceiling of 240 has an ideal width of exactly
+// 320, so the rounding term contributes nothing there and a build that truncated, or that
+// emitted an odd width, would pass it. A clause graded only where it cannot fail is a clause
+// with no grader behind it.
+//
+// Two halves, because the clause is owed to two readers. A REAL encode at a ceiling where the
+// ideal width is NOT a whole number proves ffmpeg accepted the dimensions this build asked it
+// for - an odd or zero dimension is a filter expression it refuses outright. The resolution
+// itself, over the shapes a library actually holds, is where the clause can be graded at more
+// than one point for the cost of arithmetic.
+//
+// Every assertion is the CLAUSE and not the implementation: the height is the ceiling, both
+// dimensions are even, and the width is within ONE pixel of the one that exactly holds the
+// source's ratio. Nothing here asserts a number this build happens to compute.
+//
+// MUTATION: truncate in evenWidth (drop the `+ half/2`) and the width arm reds on 640x480 at
+// 220 and on 1440x1080 at 700; drop the `2 *` and the even arm reds; drop the MinHeight clamp
+// and the narrow-source arm reds with a width of zero.
+func TestDownscale_HoldsTheAspectRatioAndEvenDimensionsWhereTheyDoNotDivide(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+
+	// A ceiling of 220 on the 640x480 fixture: the width that exactly holds 4:3 there is
+	// 293.33, so what gets written is whatever the rounding decides, and truncation and
+	// nearest-even decide it differently (292 against 294).
+	const ceiling = 220
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264Tall(t, ffmpeg, src, "8M")
+	srcW, srcH := dimsOf(t, ffprobe, src)
+
+	ts := run(t, ffmpeg, ffprobe, d, FFmpegEncoder{
+		FFmpeg: ffmpeg, Cfg: func() config.Config { c := baseCfg(d); capping(ceiling)(&c); return c }(),
+		Probe: probe.New(ffmpeg, ffprobe),
+	}, capping(ceiling))
+
+	if !ledgerHas(t, ts, store.Done, "movie.mkv") {
+		row := rowForFile(t, ts, "movie.mkv")
+		t.Fatalf("the encode at a ceiling of %d is %q/%q, not done - a width ffmpeg refused looks "+
+			"exactly like this", ceiling, row.Status, row.Outcome.Reason)
+	}
+	gotW, gotH := dimsOf(t, ffprobe, src)
+	if gotH != ceiling {
+		t.Errorf("the replacement is %d pixels tall, want the configured ceiling of %d", gotH, ceiling)
+	}
+	if gotW%2 != 0 || gotH%2 != 0 {
+		t.Errorf("the replacement is %dx%d, which is odd in at least one axis - every pixel format "+
+			"this build encodes to is 4:2:0 and has no representation for one", gotW, gotH)
+	}
+	if e := widthError(gotW, srcW, srcH, ceiling); e > srcH {
+		t.Errorf("the replacement is %dx%d from a %dx%d source: the width that holds that ratio at "+
+			"%d is %.2f, and %d is more than a pixel away from it, so the aspect ratio moved",
+			gotW, gotH, srcW, srcH, ceiling, float64(srcW*ceiling)/float64(srcH), gotW)
+	}
+
+	// The shapes a library holds, resolved rather than encoded: a 4:3 source whose width does
+	// not divide, an ultrawide one, a UHD remux at 1080p, PAL SD, and a 4:3 HD master at a
+	// ceiling that is not a standard height.
+	for _, tc := range []struct {
+		name                  string
+		srcW, srcH, maxHeight int
+	}{
+		{"a 4:3 source whose width does not divide at the ceiling", 640, 480, 220},
+		{"an ultrawide source", 2560, 1080, 720},
+		{"a UHD remux at 1080p", 3840, 2160, 1080},
+		{"PAL standard definition", 720, 576, 480},
+		{"a 4:3 HD master at a non-standard ceiling", 1440, 1080, 700},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := downscale.Resolve(tc.maxHeight, tc.srcW, tc.srcH)
+			if !s.Enabled() {
+				t.Fatalf("a %dx%d source under a ceiling of %d scales nothing, so the clause is not "+
+					"being graded at all", tc.srcW, tc.srcH, tc.maxHeight)
+			}
+			if s.Height != tc.maxHeight {
+				t.Errorf("the target is %d pixels tall, want the ceiling of %d", s.Height, tc.maxHeight)
+			}
+			if s.Width%2 != 0 || s.Height%2 != 0 {
+				t.Errorf("the target is %dx%d, which is odd in at least one axis - no 4:2:0 pixel "+
+					"format has a representation for one, and ffmpeg refuses the filter", s.Width, s.Height)
+			}
+			if e := widthError(s.Width, tc.srcW, tc.srcH, tc.maxHeight); e > tc.srcH {
+				t.Errorf("a %dx%d source at a ceiling of %d resolves to %dx%d: the width that holds "+
+					"that ratio is %.2f, and %d is more than a pixel away from it",
+					tc.srcW, tc.srcH, tc.maxHeight, s.Width, s.Height,
+					float64(tc.srcW*tc.maxHeight)/float64(tc.srcH), s.Width)
+			}
+		})
+	}
+
+	// The floor, which is the other end of the same clause: a source so narrow that the width
+	// holding its ratio rounds to zero still resolves to a picture. `scale=0:2` is not a
+	// dimension ffmpeg can target, and a filter expression it refuses fails the job rather
+	// than producing one.
+	if s := downscale.Resolve(downscale.MinHeight, 2, 1000); s.Width < downscale.MinHeight || s.Width%2 != 0 {
+		t.Errorf("a 2x1000 source at a ceiling of %d resolves to a width of %d: below %d, or odd, is "+
+			"a scale filter ffmpeg refuses", downscale.MinHeight, s.Width, downscale.MinHeight)
 	}
 }
 

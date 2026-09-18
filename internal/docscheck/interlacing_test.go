@@ -1,16 +1,18 @@
 package docscheck_test
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/NSchatz/holdfast/internal/corpus"
 	"github.com/NSchatz/holdfast/internal/docscheck"
 	"github.com/NSchatz/holdfast/internal/engine"
 )
 
-// shippedCorpus is every Markdown file this repository ships, from the package's own one
-// way of getting a file set. A check over the corpus that chose its own list would decide
-// the answer by deciding the list.
+// shippedCorpus is every document this repository ships, from the package's own one way of
+// getting a file set. A check over the corpus that chose its own list would decide the answer
+// by deciding the list.
 func shippedCorpus(t *testing.T) []string {
 	t.Helper()
 	files, err := docscheck.Corpus()
@@ -18,8 +20,22 @@ func shippedCorpus(t *testing.T) []string {
 		t.Fatalf("read the shipped corpus: %v", err)
 	}
 	if len(files) < 5 {
-		t.Fatalf("only %d Markdown file(s) were found - the corpus is not being read, so nothing "+
+		t.Fatalf("only %d document(s) were found - the corpus is not being read, so nothing "+
 			"below is being checked", len(files))
+	}
+	// Anti-vacuity on the half that is not Markdown: the example configuration is the
+	// document an operator copies, and a corpus silently back down to .md only would report
+	// every check below clean without looking at it.
+	example := false
+	for _, f := range files {
+		if filepath.Base(f) == corpus.ExampleConfigName {
+			example = true
+		}
+	}
+	if !example {
+		t.Fatalf("the corpus of %d document(s) does not carry %s, so nothing below reads the one "+
+			"document in this repository where these keys are actually written", len(files),
+			corpus.ExampleConfigName)
 	}
 	return files
 }

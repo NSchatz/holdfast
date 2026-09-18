@@ -102,23 +102,29 @@ type RetiredClaim struct {
 	Why string
 }
 
-// Corpus returns every Markdown file this repository ships.
+// Corpus returns every document this repository ships: the Markdown, and the example
+// configuration beside it.
 //
 // It is here so a check over the whole corpus has one way to get its file set, and so an
 // ABSENCE check in particular cannot be narrowed by accident: a retired claim that survives
 // in a document nobody thought to list is exactly the failure such a check exists to catch,
 // and a caller that passed its own list would decide the answer by deciding the list.
+//
+// THE FILE EXTENSION IS NOT THE READERSHIP. config.example.yaml is the document an operator
+// copies before the first file goes and the place three of this build's knobs are written,
+// so a contradiction standing in it reaches the same reader a contradiction in the README
+// reaches. Admitting only .md was how one survived a check written to catch exactly it.
 func Corpus() ([]string, error) {
 	root, err := corpus.RepoRoot(".")
 	if err != nil {
 		return nil, fmt.Errorf("docscheck: locate the repository root: %w", err)
 	}
-	files, err := corpus.Markdown(root)
+	files, err := corpus.Documents(root)
 	if err != nil {
-		return nil, fmt.Errorf("docscheck: list the shipped Markdown: %w", err)
+		return nil, fmt.Errorf("docscheck: list the shipped documents: %w", err)
 	}
 	if len(files) == 0 {
-		return nil, fmt.Errorf("docscheck: the repository ships no Markdown - a check with no corpus " +
+		return nil, fmt.Errorf("docscheck: the repository ships no documents - a check with no corpus " +
 			"passes everything")
 	}
 	return files, nil

@@ -1,11 +1,15 @@
 package docscheck_test
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/corpus"
 	"github.com/NSchatz/holdfast/internal/docscheck"
+	"github.com/NSchatz/holdfast/internal/engine"
 )
 
 // The shipped documentation's statement about RESOLUTION DOWNSCALING.
@@ -30,10 +34,35 @@ func TestDownscalePostureStatementIsPresent(t *testing.T) {
 	}
 }
 
+// publishedIdentifiers is the vocabulary this build PUBLISHES: every key a configuration may
+// carry and every token a skip may record, read off the build rather than written down here.
+//
+// A name is documented wherever it is used, so a check counting CLAIMS has to be able to tell
+// a name from a claim in a document that has no markup to mark one with. Reading the set off
+// the build is the same instrument CheckGuardTable is handed, and for the same reason: a list
+// inlined here would stop matching the build the day a key was added, silently.
+func publishedIdentifiers(t *testing.T) []string {
+	t.Helper()
+	ids := append(config.ProfileKnobs(), config.RuleKnobs()...)
+	ids = append(ids, engine.SkipVocabulary...)
+	// Anti-vacuity in the direction this one can fail: too FEW names read as claims, so an
+	// empty or truncated vocabulary would red on the documents that merely name a key.
+	if len(ids) < 20 {
+		t.Fatalf("the published vocabulary reads as %d name(s) (%v) - it is not being read off the "+
+			"build, so a document naming a key would be counted as a claim about it", len(ids), ids)
+	}
+	return ids
+}
+
 // TestDownscaleNonGoalIsStatedInExactlyOneDocument grades [AC-9]'s first half: the posture is
 // stated in exactly one shipped document, and it is the one carrying the anchor.
+//
+// The corpus is every document this repository ships, config.example.yaml included. That file
+// is where an operator meets `max_height` and it is not Markdown, so a check admitting one
+// file extension would have counted the documents an operator reads and missed the one they
+// copy.
 func TestDownscaleNonGoalIsStatedInExactlyOneDocument(t *testing.T) {
-	if err := docscheck.CheckDownscaleStatedOnce(shippedCorpus(t)); err != nil {
+	if err := docscheck.CheckDownscaleStatedOnce(shippedCorpus(t), publishedIdentifiers(t)); err != nil {
 		t.Errorf("the downscaling posture is not stated in exactly one shipped document: %v", err)
 	}
 }
@@ -155,7 +184,8 @@ func TestDownscaleDefaultClause_TracksTheShippedDefault(t *testing.T) {
 // is used, and a check that read a field name as a restatement would force the reference
 // documentation to describe this build in words that avoid its own vocabulary.
 func TestDownscaleStatedOnce_BitesOnASecondDocument(t *testing.T) {
-	if err := docscheck.CheckDownscaleStatedOnce(nil); err == nil {
+	ids := publishedIdentifiers(t)
+	if err := docscheck.CheckDownscaleStatedOnce(nil, ids); err == nil {
 		t.Error("an empty corpus passed: a check with no documents passes everything")
 	}
 
@@ -163,13 +193,13 @@ func TestDownscaleStatedOnce_BitesOnASecondDocument(t *testing.T) {
 		[]string{"Resolution downscaling is available and off by default."})
 
 	if err := docscheck.CheckDownscaleStatedOnce(writeCorpus(t, statement,
-		"# Reference\n\nProse about encoders and floors.\n")); err != nil {
+		"# Reference\n\nProse about encoders and floors.\n"), ids); err != nil {
 		t.Fatalf("one statement beside a document that says nothing about it was refused: %v", err)
 	}
 
 	// A second document restating the posture, in a spelling the first does not use.
 	err := docscheck.CheckDownscaleStatedOnce(writeCorpus(t, statement,
-		"# Elsewhere\n\nThis build downscales nothing.\n"))
+		"# Elsewhere\n\nThis build downscales nothing.\n"), ids)
 	if err == nil {
 		t.Error("a second document restating the posture passed - which is precisely how the flat " +
 			"non-goal this key replaced came to survive in three files")
@@ -180,7 +210,7 @@ func TestDownscaleStatedOnce_BitesOnASecondDocument(t *testing.T) {
 	// A document NAMING the identifiers is not restating anything.
 	if err := docscheck.CheckDownscaleStatedOnce(writeCorpus(t, statement,
 		"# Reference\n\nThe `downscaled` field, the `downscale_scaler` beside it, and the\n"+
-			"`downscale-unacknowledged` guard, each null on a job that scaled nothing.\n")); err != nil {
+			"`downscale-unacknowledged` guard, each null on a job that scaled nothing.\n"), ids); err != nil {
 		t.Errorf("a reference document naming the fields and the guard token was read as a second "+
 			"statement of the posture, so the reference cannot use this build's own vocabulary: %v", err)
 	}
@@ -189,11 +219,62 @@ func TestDownscaleStatedOnce_BitesOnASecondDocument(t *testing.T) {
 	// following the link arrives somewhere the statement is not.
 	err = docscheck.CheckDownscaleStatedOnce(writeCorpus(t,
 		"# Elsewhere\n\nResolution downscaling is available and off by default.\n",
-		statementDoc(docscheck.AnchorDownscale, []string{"Some unrelated prose."})))
+		statementDoc(docscheck.AnchorDownscale, []string{"Some unrelated prose."})), ids)
 	if err == nil {
 		t.Error("the claim in a document with no anchor passed, so the anchor a reader is sent to " +
 			"and the statement that exists can be two different things")
 	}
+}
+
+// TestDownscaleStatedOnce_ReachesTheExampleConfiguration is [AC-9]'s grader half where it was
+// actually breached: the second document is not Markdown.
+//
+// The example configuration has no code spans to mark a key name with, so both halves have to
+// hold at once or the check is useless there. A sentence in it that restates the posture must
+// RED, and a commented-out key line naming `max_height` or `downscale_acknowledged` - which is
+// what that file is FOR - must not.
+func TestDownscaleStatedOnce_ReachesTheExampleConfiguration(t *testing.T) {
+	ids := publishedIdentifiers(t)
+	statement := statementDoc(docscheck.AnchorDownscale,
+		[]string{"Resolution downscaling is available and off by default."})
+
+	// The example as this repository ships it: the keys written, the posture deferred to.
+	keys := "# A root may override max_height and downscale_acknowledged. See the README.\n" +
+		"# max_height: 0\n# downscale_acknowledged: false\n"
+	if err := docscheck.CheckDownscaleStatedOnce(
+		append(writeCorpus(t, statement), writeExample(t, keys)), ids); err != nil {
+		t.Errorf("an example configuration that WRITES the keys and states nothing was read as a "+
+			"second statement of the posture: %v\nThe keys have to be writable in the file they are "+
+			"written in, or the check forces the example to describe a build in words that avoid the "+
+			"build's own vocabulary", err)
+	}
+
+	// The sentence that shipped in it, which is the retired non-goal stated a second time.
+	err := docscheck.CheckDownscaleStatedOnce(
+		append(writeCorpus(t, statement),
+			writeExample(t, "# they select which files the rule applies TO and are not an output\n"+
+				"# ceiling - nothing here downscales anything.\n")), ids)
+	if err == nil {
+		t.Fatal("a restatement in the example configuration passed: the check counts Markdown only, " +
+			"so the one document an operator COPIES can contradict the one they read")
+	}
+	if !strings.Contains(err.Error(), "downscales anything") {
+		t.Errorf("the failure does not quote the restatement it found: %v", err)
+	}
+	if !strings.Contains(err.Error(), corpus.ExampleConfigName) {
+		t.Errorf("the failure does not name the file to edit: %v", err)
+	}
+}
+
+// writeExample writes one fixture document under the shipped example's own name, so a case
+// about that file is graded through a file with that file's name and extension.
+func writeExample(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), corpus.ExampleConfigName)
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatalf("write the fixture example: %v", err)
+	}
+	return p
 }
 
 // TestFlatSameContentClaim_BitesOnTheRetiredSentence is [AC-8]'s second half proving it can
