@@ -431,6 +431,19 @@ type Engine struct {
 	// attributes, as a client attribute cache populated before the swap would.
 	restatFn func(path string) (probe.Attributes, error)
 
+	// statFn, when non-nil, replaces the attribute read the pre-claim path takes of a
+	// source. Two things need it and neither has another route.
+	//
+	// What a pass COSTS is the first: a case counts the reads through this seam, which is a
+	// counter the code exposes rather than a stopwatch - on a warm page cache elapsed time
+	// cannot tell one read from three, so timing would grade nothing.
+	//
+	// The read FAILURES are the second. A file that went away between the enumeration and
+	// the claim is a race no fixture can hold open, and a path this process may not stat is
+	// not producible under the unprivileged uid the gate runs as; both are conditions the
+	// scan must survive, so both are injected here.
+	statFn func(path string) (os.FileInfo, error)
+
 	// --- the four S0085 metadata seams ---------------------------------------------
 	//
 	// The swap carries the SOURCE's mode, ownership and modification time onto the
@@ -536,6 +549,43 @@ func (e *Engine) restat(path string) (probe.Attributes, error) {
 		return e.restatFn(path)
 	}
 	return probe.StatAttributes(path)
+}
+
+// stat reads a source's attributes, routing through the test seam when one is set. EVERY
+// pre-claim read of a source goes through here, which is what makes "one read per file"
+// a property a case can count rather than a claim about a profile.
+//
+// It is os.Stat and it FOLLOWS a symbolic link, exactly as the three reads it replaced
+// did. That is the half of this that cannot move: the fingerprint derived from it is the
+// key every terminal row is held out by, and a read that resolved a symlinked source to
+// the link instead of its target would re-key every one of those rows, offering files that
+// were already done back to a pipeline that deletes sources. The symlink guard is the
+// other half and it is the one call that must NOT follow the link (probe.IsSymlink, via
+// Lstat); it runs after the claim, where it always has.
+func (e *Engine) stat(path string) (os.FileInfo, error) {
+	if e.statFn != nil {
+		return e.statFn(path)
+	}
+	return os.Stat(path)
+}
+
+// fingerprint is probe.Fingerprint over that seam: the same followed-link read rendered
+// as the same "size:mtime" text, including the "0:0" a path it cannot stat answers with.
+func (e *Engine) fingerprint(f string) string {
+	fi, err := e.stat(f)
+	if err != nil {
+		return "0:0"
+	}
+	return probe.AttributesOf(fi).String()
+}
+
+// nlink is probe.NLink over that seam, fail-safe default and all.
+func (e *Engine) nlink(f string) uint64 {
+	fi, err := e.stat(f)
+	if err != nil {
+		return 1
+	}
+	return probe.NLinkOf(fi)
 }
 
 // heldBack reports whether a path is one of the PUBLISHED snapshot's two record-based
@@ -1274,8 +1324,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// The order below is unchanged: a path with no file at the other end returns as silently
 	// as it always did (a dangling link is met every pass and must not narrate every pass),
 	// and the character rule is still said out loud below the hold-backs.
-	rule, _, declined := DeclinedPath(f)
-	if declined && rule != RuleUnsupportedCharacters {
+	door := declinedPath(f, e.stat)
+	if door.declined && door.rule != RuleUnsupportedCharacters {
 		return nil
 	}
 
@@ -1283,7 +1333,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// measures its retention by. A second stat deliberately: the question above answers
 	// whether this path may be processed at all, and only this caller wants a number about
 	// the file. A file that went away between the two returns here, as it always did.
-	fi, err := os.Stat(f)
+	fi, err := e.stat(f)
 	if err != nil {
 		return nil
 	}
@@ -1303,7 +1353,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	}
 
 	// The half of that answer this daemon says out loud, in the place it has always said it.
-	if declined {
+	if door.declined {
 		e.Log.Info("skip (path contains a tab/newline — unsupported)", "file", f)
 		return nil
 	}
@@ -1323,7 +1373,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	prof, pre, heightKnown := e.effectiveProfile(ctx, f, root, e.Probe.VideoProps)
 	by := decidedBy(root, rooted)
 
-	key := probe.Fingerprint(f)
+	key := e.fingerprint(f)
 
 	// THIS JOB's effective ENCODE settings, resolved once, here, from that root's profile
 	// and the source path: the root's own values overlaid with the first matching encode
@@ -1414,7 +1464,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// window was protecting. Discounting is proved per link (same inode, live retention
 	// record), never assumed from the count, so a foreign extra link still skips.
 	if prof.HardlinkSkip() {
-		if links := probe.NLink(f); links > 1 && links > 1+e.retainedLinks(ctx, f, key) {
+		if links := e.nlink(f); links > 1 && links > 1+e.retainedLinks(ctx, f, key) {
 			e.Log.Info("skip (hardlinked — swap would break a seed and reclaim nothing)", "file", f, "links", links)
 			changed, err := e.Store.RecordSkip(ctx, f, key, SkipHardlinked, by, ts.Profile)
 			if err != nil {
