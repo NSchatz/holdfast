@@ -66,6 +66,14 @@ jobs:
       - name: make check (the gate)
         run: make check
 
+      # The happy-path log grader's own self-test (S0130). It is deliberately NOT in
+      # `check`: it MUTATES a copy of the tree, and the gate must never grade a tree one
+      # of its own members has written. It lives in THIS job because the grader drives a
+      # real oneshot run - a real encode, a real VMAF measurement, a real swap - and this
+      # is the job that installs the pinned ffmpeg with libx265 and libvmaf above.
+      - name: happy-path log grader self-test
+        run: make happy-path-log-selftest
+
       # Config schema self-test (anti-advisory-only), on top of the gate: the committed
       # example must validate, and each known-invalid config must be REJECTED — one via
       # the schema (unknown key), one via value validation (out-of-range crf), and two
