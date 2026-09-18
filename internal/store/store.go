@@ -221,6 +221,28 @@ type Outcome struct {
 	// a comparison nobody made.
 	VmafStream string
 
+	// Deinterlaced says whether this job's replacement was produced by DEINTERLACING the
+	// source, and DeinterlaceFilter names the filter and the parameters that produced it.
+	//
+	// They are on the row because a deinterlace is the one transformation this tool performs
+	// that the replacement cannot be read back from: every other knob changes how the same
+	// picture was encoded, and this one removes the fields the source carried. A row that
+	// did not say so would leave an operator holding a file whose provenance is unstatable,
+	// after the source it came from was deleted.
+	//
+	// Deinterlaced is a POINTER for the reason every measurement here is one, and here the
+	// two states it separates are the whole point: nil is NOT RECORDED - a row written
+	// before this build, or one whose job never reached an encode - and an explicit false is
+	// a job this build ran and did not deinterlace. Unmeasured and measured-false are
+	// different facts about a source that no longer exists, and a bare false would claim the
+	// second about every row of the first.
+	//
+	// DeinterlaceFilter carries the WHOLE expression, mode and parity included, because
+	// "yadif" alone is not a transformation: the same filter at a different mode is a
+	// different one. "" is NOT RECORDED, the rule every string here keeps.
+	Deinterlaced      *bool
+	DeinterlaceFilter string
+
 	// SourceCodec is the video codec the SOURCE was in when this job was decided, as
 	// ffprobe named it. It is recorded on a dry-run decision, whose whole purpose is to say
 	// what a real run WOULD do to that file: an operator sizing the job needs to know what

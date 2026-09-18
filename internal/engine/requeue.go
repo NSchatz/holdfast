@@ -75,6 +75,16 @@ var SkipGuards = []string{
 	// now read a height the one before it could not, is a change no configuration edit
 	// expresses, and this is the lever for it.
 	SkipUndeterminedSourceHeight,
+	// The FIELD-ORDER guard, here for the reasons the two shape guards above are: it reads
+	// no configuration key, so no configuration change will ever offer one of its rows back,
+	// and a re-muxed source - or an ffprobe that can now read a field order the one before
+	// it could not - is a change only an operator can see.
+	SkipUnknownFieldOrder,
+	// The CADENCE guard. It reads the `deinterlace` key, so turning that key off does
+	// re-derive its rows - but a source that has since been re-encoded, or a build that can
+	// tell telecine from interlacing where this one could not, is a change no configuration
+	// edit expresses, and this is the lever for it.
+	SkipTelecineCadence,
 	SkipRestoredOriginal,
 }
 

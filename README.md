@@ -75,17 +75,25 @@ own licence text or project page.
 
 ## Non-goals
 
-Four boundaries. Three of them are boundaries rather than a backlog: **no distributed or remote
-processing**; **not a media server and not a library manager**; **interlaced sources are skipped, not
-converted**. The fourth is DEFERRED rather than settled: **HDR10 static metadata is preserved while
-Dolby Vision and HDR10+ dynamic metadata are detect-and-skipped**, at the cost
-[stated below](#dynamic-hdr-deferred). Each is stated in full below, in this one section.
+Four boundaries, each stated in full below. Three are boundaries rather than a backlog: **no distributed
+or remote processing**; **not a media server and not a library manager** - it transcodes files in a
+library other tools manage; **no resolution downscaling**, with exotic-chroma and `multi-video-stream`
+sources **skipped, not converted** and embedded artwork carried through unencoded.
+The fourth is DEFERRED rather than settled: **HDR10 static metadata is preserved while Dolby Vision and
+HDR10+ dynamic metadata are detect-and-skipped**, at the cost [stated below](#dynamic-hdr-deferred).
+[Interlacing](#interlacing-posture) is its own case: the one transformation this tool makes on request.
 
-Codec-only, same-content re-encoding (no resolution downscaling): **interlaced**, exotic-chroma and
-`multi-video-stream` sources are **skipped, not converted**; HDR10 **static** metadata is preserved
-while Dolby Vision and HDR10+ **dynamic** metadata is **detect-and-skipped** rather than guessed at,
-a skip that is [deferred, not permanent](#dynamic-hdr-deferred); and embedded artwork is carried
-through unencoded. It transcodes files in a library other tools manage - not a media server.
+<a id="interlacing-posture"></a>
+
+**Interlaced sources are deinterlaced on request, and skipped otherwise.** `deinterlace` is **off by
+default**, as it always has been. Set it (`yadif`/`bwdif`) on a root and its interlaced sources are
+deinterlaced before encoding, so **the replacement is no longer the same content as the source**: the
+fields are gone and the swap deletes the original, as a startup notice says.
+**Frame-rate-preserving** only - one frame per field is refused, since it doubles the frame count two
+parity gates grade. **Telecined sources are skipped** under their own guard whatever the key says
+(undoing a 3:2 pulldown is inverse telecine, which this build does not do), and so is a cadence nobody
+could establish. No floor moves: the gate scores the encode against a reference put through the **same
+filter at the same parameters**.
 
 **Audio transcoding is a non-goal.** A library root can say which audio and subtitle streams its
 replacements carry (`audio_languages`, `subtitle_languages`, `keep_commentary`, `remux_only` - see
@@ -199,6 +207,9 @@ invoking one never gets the other's observable effect.
 holdfast plan --config config.yaml            # eligible files, eligible bytes, and which guard skipped the rest
 holdfast plan --config config.yaml --json     # the same plan as one JSON document on stdout
 ```
+
+Every skip token this build records has a row in
+**[the guard table](docs/api-reference.md#skip-guards)**.
 
 The reclaim figure is an **estimate and says so wherever it appears**, derived from the size ratios of
 encodes **this install has already completed** and published with the sample size and the spread it came

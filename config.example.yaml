@@ -294,6 +294,26 @@ dry_run: false
 #                         # unit, true or a list is a startup REFUSAL naming the
 #                         # key and the value, never a silently truncated bitrate.
 
+# deinterlace: off       # "off" (the DEFAULT): an interlaced source is SKIPPED,
+#                         # exactly as this tool has always treated one. Set
+#                         # "yadif" or "bwdif" to deinterlace interlaced sources
+#                         # under this root instead - and read the notice it
+#                         # prints at startup first: the replacement is then NOT
+#                         # the same content as the source, because the fields the
+#                         # source carried are gone and the swap deletes the
+#                         # original. Every gate still applies at full strength,
+#                         # and the perceptual gate scores the encode against a
+#                         # reference put through the SAME filter, so it measures
+#                         # this encode rather than the difference the filter made.
+#                         # Frame-rate-preserving ONLY: a mode that emits one frame
+#                         # per FIELD (yadif=send_field) is a startup REFUSAL
+#                         # naming the key, because it doubles the frame count that
+#                         # packet-count parity and duration parity are graded on.
+#                         # A TELECINED source is skipped under its own guard
+#                         # whatever this is set to, and so is one whose cadence
+#                         # cannot be established: deinterlacing telecined content
+#                         # produces judder no perceptual metric flags well.
+
 # --- per-job settings: transcode profiles ---
 # encode_profiles is an ORDERED list. The FIRST profile whose match selects a
 # source supplies that job's settings, laid over what that file would otherwise be

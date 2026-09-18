@@ -52,6 +52,9 @@ type VideoProps struct {
 	allOnce sync.Once
 	all     []Stream // every stream the file carries, in container order
 	allOK   bool     // whether ffprobe established that list at all
+
+	cadenceOnce sync.Once
+	cadence     Cadence // what a bounded decode found the source's interlacing to be
 }
 
 // scalarStreamEntries are every scalar video-stream field a source skip-guard or the
@@ -190,6 +193,15 @@ func positiveInt(s string) (int, bool) {
 // Prober.FieldOrder.
 func (vp *VideoProps) FieldOrder() string { return normFieldOrder(vp.fields["field_order"]) }
 
+// FieldOrderRaw returns the field_order value VERBATIM, before normalisation, and "" where
+// the stream carried none at all.
+//
+// The normalised form collapses every way of not answering into one empty string, which is
+// right for a guard deciding what to do and wrong for the line that tells an operator WHY a
+// file was held back: "ffprobe said unknown" and "the field is not in this container at all"
+// send them to different places. It is a scalar off the eager snapshot, so it costs nothing.
+func (vp *VideoProps) FieldOrderRaw() string { return vp.fields["field_order"] }
+
 // CodecTag returns codec_tag_string verbatim, identical to Prober.CodecTagString.
 func (vp *VideoProps) CodecTag() string { return vp.fields["codec_tag_string"] }
 
@@ -254,6 +266,21 @@ func (vp *VideoProps) AllStreams() (streams []Stream, established bool) {
 		vp.all, vp.allOK = vp.p.Streams(vp.ctx, vp.f)
 	})
 	return vp.all, vp.allOK
+}
+
+// Cadence returns what a bounded decode found this source's interlacing to BE - real
+// interlacing, a telecine pulldown, or something nobody could establish - byte-for-byte the
+// contract of Prober.Cadence.
+//
+// Lazy and memoised, and here the laziness is the whole reason it is on the snapshot: it
+// DECODES, where every other field on this type is read from a header. Only a file whose
+// container reports an interlaced field order AND whose root asks for a deinterlace is ever
+// asked, so no file any existing configuration processes pays for it at all.
+func (vp *VideoProps) Cadence() Cadence {
+	vp.cadenceOnce.Do(func() {
+		vp.cadence = vp.p.Cadence(vp.ctx, vp.f)
+	})
+	return vp.cadence
 }
 
 // normColorValue drops the ffprobe non-values ("unknown"/"reserved"/"N/A"/"") to ""

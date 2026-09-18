@@ -199,6 +199,23 @@ type jobDTO struct {
 	// there is and getting it wrong.
 	DroppedStreams *[]droppedStreamDTO `json:"dropped_streams"`
 
+	// Whether this job's replacement was produced by DEINTERLACING the source, and the
+	// filter and parameters that produced it.
+	//
+	// Both are POINTERS and deliberately NOT omitempty, on the same terms as source_codec
+	// and the two profile fields: they ARE the fact rather than a companion to one, so a row
+	// that dropped the key would leave a client deciding for itself whether nothing was
+	// recorded or the field had gone away.
+	//
+	// The null is the whole of it here, more than anywhere else on this row. `null` is NOT
+	// RECORDED - a row written before this build, one whose job never reached an encode -
+	// and `false` is a job this build ran and did not deinterlace. Unmeasured and
+	// measured-false are different facts about a source this tool has already deleted, and a
+	// consumer that read the first as the second would be stating the provenance of a file
+	// nobody established.
+	Deinterlaced      *bool   `json:"deinterlaced"`
+	DeinterlaceFilter *string `json:"deinterlace_filter"`
+
 	// SelectionNotApplied names a part of the selection this job did NOT apply and why -
 	// today only the never-a-silent-file fallback. VmafSkipped names why the perceptual
 	// gate did not run. Both are stable tokens; both are absent when they do not apply,
@@ -267,6 +284,9 @@ func toDTOs(jobs []store.Job) []jobDTO {
 
 			LibraryRoot:   nullableText(j.Outcome.LibraryRoot),
 			ProfileDigest: nullableText(j.Outcome.ProfileDigest),
+
+			Deinterlaced:      j.Outcome.Deinterlaced,
+			DeinterlaceFilter: nullableText(j.Outcome.DeinterlaceFilter),
 
 			DroppedStreams:      droppedStreamsDTO(j.Outcome.DroppedStreams),
 			SelectionNotApplied: j.Outcome.SelectionNotApplied,

@@ -6,6 +6,7 @@ import (
 	"math"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
 	"github.com/NSchatz/holdfast/internal/vmaf"
@@ -35,6 +36,16 @@ type vmafProof struct {
 	// an obliterated plane, the most important thing this field could ever report.
 	ChromaMin    *float64
 	ChromaMetric string
+
+	// Deinterlace is the filter expression the REFERENCE was produced from the source by,
+	// and "" where the reference was the source as it is - which is every job that applied
+	// no deinterlace, and every job whose gate did not run.
+	//
+	// It is recorded for the reason PixFmt is: it is part of what was measured. A
+	// deinterlaced encode scored against its interlaced source scores like a damaged
+	// encode, so a number with no reference named beside it cannot be read at all - and
+	// this row outlives the source it describes.
+	Deinterlace string
 
 	// Skipped names WHY the gate did not run on a job that reached it, and is "" on every
 	// job whose gate ran. It is a stable token (see VmafSkippedRemuxOnly).
@@ -88,7 +99,13 @@ type vmafProof struct {
 // whole of why it is a parameter: a gate that derived its own map would be answering a
 // different question than the encoder was asked, and the two answers would differ on
 // exactly the file nobody tested.
-func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.Profile, targetCodec string, plan *StreamPlan) (vmafProof, string, store.FailureClass, error) {
+// film is the deinterlace THIS JOB applied, resolved once by the engine and handed in for
+// the same reason plan is: the perceptual gate has to build its reference through the filter
+// the encoder actually ran, and a gate that re-derived its own would be a second answer to
+// what the output should be compared against. A disabled filter is the ordinary case and
+// leaves every gate below exactly as it was.
+func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.Profile, targetCodec string,
+	plan *StreamPlan, film deinterlace.Filter) (vmafProof, string, store.FailureClass, error) {
 	var none vmafProof
 
 	// THE SEAM, announced before any gate runs: this is the map the checks below read.
@@ -192,7 +209,7 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.P
 		return vmafProof{Skipped: VmafSkippedRemuxOnly}, "", "", nil
 	}
 	if prof.VmafGate() {
-		return e.vmafGate(ctx, tmp, in, prof)
+		return e.vmafGate(ctx, tmp, in, prof, film)
 	}
 	return none, "", "", nil
 }
@@ -301,7 +318,15 @@ func (e *Engine) lengthParity(ctx context.Context, in, out string) (store.Failur
 // The GATE it returns keeps the three floors apart - vmaf-mean, vmaf-min and vmaf-chroma are
 // three different things to act on - and gives the three unmeasurable cases one token of their
 // own (vmaf-unmeasured): those say the instrument was missing, not that the encode was bad.
-func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof config.Profile) (vmafProof, string, store.FailureClass, error) {
+// film is the deinterlace this job applied. Where it is set, the REFERENCE is produced from
+// the source by that same filter at those same parameters before either stream is compared:
+// the encode removed interlacing the source carried, so a score against the source as it is
+// would measure the difference the FILTER made and read as a damaged encode. It is HANDED
+// IN, never re-derived, and there is no path here that scores against an unfiltered
+// reference when one was owed - a measurement that cannot be taken is a rejection, which is
+// the same posture every other unmeasurable case in this function has.
+func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof config.Profile,
+	film deinterlace.Filter) (vmafProof, string, store.FailureClass, error) {
 	model := resolveVmafModel(prof.VmafModel, e.Probe.Height(ctx, distorted))
 
 	// Name the comparison format BEFORE anything is measured, from the two streams' own pixel
@@ -327,22 +352,29 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof
 	}
 
 	res, err := score(ctx, vmaf.Request{
-		Distorted:   distorted,
-		Reference:   reference,
-		Subsample:   prof.VmafSubsample,
-		Model:       model,
-		PixelFormat: pixFmt,
+		Distorted:       distorted,
+		Reference:       reference,
+		Subsample:       prof.VmafSubsample,
+		Model:           model,
+		PixelFormat:     pixFmt,
+		ReferenceFilter: film.Spec,
 	})
 	if err != nil {
 		// Nothing was measured, so there is nothing to record: an empty proof, NOT a zeroed
 		// one. vmaf.Score already refuses a log missing ANY pooled statistic (TRANSCODE-11
 		// for the luma pair, GATE-4 for the chroma planes), so this is never a partial one.
+		//
+		// A reference that could not be PRODUCED arrives here as exactly this error - the
+		// filter is part of the scoring graph, so a graph ffmpeg cannot build is a
+		// measurement that did not happen - and it is refused on the same terms. There is
+		// deliberately no second attempt without the filter: that attempt would score this
+		// encode against a source it no longer resembles and call the result a measurement.
 		return vmafProof{}, GateVmafUnmeasured, store.FailureTransient, fmt.Errorf("VMAF measurement failed (refusing to accept an unmeasured encode): %w", err)
 	}
 	proof := vmafProof{
 		Mean: &res.HarmonicMean, Min: &res.Min, Model: model,
 		PixFmt: res.PixelFormat, ChromaMin: &res.ChromaMin, ChromaMetric: res.ChromaMetric,
-		Stream: res.Stream,
+		Stream: res.Stream, Deinterlace: res.ReferenceFilter,
 	}
 
 	if res.HarmonicMean < prof.MinVmaf {

@@ -11,6 +11,7 @@ import (
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/knadh/koanf/v2"
 
+	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/encoder"
 )
 
@@ -79,6 +80,12 @@ var profileKnobs = []string{
 	"vmaf_enable", "min_vmaf", "vmaf_min_pool", "vmaf_min_chroma",
 	"vmaf_subsample", "vmaf_model",
 	audioLanguagesKey, subtitleLanguagesKey, keepCommentaryKey, remuxOnlyKey,
+	// The deinterlace knob is LAST, and its digest contribution is conditional (see
+	// Digest): a root that does not ask for a deinterlace digests to exactly what this
+	// build computed for it before the knob existed, which is what keeps a terminal row
+	// written yesterday attached to the profile that decided it. A root that DOES ask for
+	// one is deciding its files differently and must digest differently.
+	deinterlaceKey,
 }
 
 // ProfileKnobs returns the closed set of knobs a library_roots entry may override, in
@@ -147,6 +154,12 @@ type Profile struct {
 	KeepCommentary    *bool    `yaml:"keep_commentary"`
 	RemuxOnly         *bool    `yaml:"remux_only"`
 
+	// Deinterlace is the filter an interlaced source under this root is deinterlaced with,
+	// `off` (the default) leaving it skipped. "" is the same statement as `off`, which is
+	// what a Profile assembled in Go carries. See Config.Deinterlace for the whole of what
+	// the key means.
+	Deinterlace string `yaml:"deinterlace"`
+
 	// Rules are this root's ordered, first-match resolution bands (see rules.go). They are
 	// NOT a knob and carry no `yaml` tag of their own: they are resolved out of the entry
 	// before the knob map is decoded, and a rule supplies a subset of the knobs above for
@@ -175,6 +188,23 @@ func (p Profile) ContainerMatchesSource() bool { return containerMatchesSource(p
 // PixelFormatAuto reports whether this root's PixelFormat is the "derive per source"
 // sentinel rather than a forced pixel format.
 func (p Profile) PixelFormatAuto() bool { return pixelFormatAuto(p.PixelFormat) }
+
+// DeinterlaceFilter is the filter an interlaced source under this root is deinterlaced
+// with, and ok reports whether the configured value resolves at all. It is THE reading of
+// this knob: the guard that decides whether an interlaced source is skipped, the encoder
+// that applies the filter and the perceptual gate that builds its reference from it all go
+// through here, so no two of them can resolve one value differently.
+func (p Profile) DeinterlaceFilter() (deinterlace.Filter, bool) {
+	return deinterlace.Lookup(p.Deinterlace)
+}
+
+// DeinterlaceEnabled reports whether this root asks for a deinterlace at all. A value that
+// does not resolve is NOT enabled here - Validate refuses it at start, and a reader past
+// that point must not treat an unresolvable value as an instruction to transform a file.
+func (p Profile) DeinterlaceEnabled() bool {
+	f, ok := p.DeinterlaceFilter()
+	return ok && f.Enabled()
+}
 
 // values renders the resolved knobs in profileKnobs order, as the canonical text the
 // digest is taken over and as the values `validate` prints. Both readings come from
@@ -214,7 +244,19 @@ func (p Profile) values() []string {
 		renderLanguages(p.SubtitleLanguages),
 		strconv.FormatBool(p.CommentaryKept()),
 		strconv.FormatBool(p.RemuxOnlyEnabled()),
+		renderDeinterlace(p.Deinterlace),
 	}
+}
+
+// renderDeinterlace is the deinterlace knob as `validate` prints it and as the digest reads
+// it: the RESOLVED value, so the empty string a Profile assembled in Go carries and the
+// `off` a configuration file writes are one value here, exactly as the tri-state pointers
+// above are rendered resolved. Two profiles that deinterlace nothing must render alike.
+func renderDeinterlace(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return deinterlace.Off
+	}
+	return v
 }
 
 // digestLength is how many hex characters of the SHA-256 a profile digest carries. It is
@@ -237,6 +279,16 @@ const digestLength = 16
 // concatenated, so no two different profiles can produce one text: without that,
 // preset "slow" + model "auto" and preset "slowauto" + model "" would be the same bytes.
 //
+// The DEINTERLACE knob is hashed on exactly the same terms and for exactly the same
+// reason: only where its resolved value is something other than `off`. A root that
+// deinterlaces nothing behaves identically to one written before the knob existed, so it
+// digests identically, and a terminal row written yesterday stays attached to the profile
+// that decided it. A root that asks for ANYTHING else is deciding its files differently -
+// its replacements are not the same content as their sources - and must not share a digest
+// with one that does not. The test is the rendered VALUE and not "does this build accept
+// it", so a value nobody can resolve still digests apart from the default rather than
+// collapsing into it.
+//
 // The RULES are hashed after the knobs and ONLY when there are any, which is what keeps a
 // root with no rules - every root every configuration written before this item has - at
 // exactly the digest this build computed for it before. Two roots differing only in their
@@ -248,6 +300,9 @@ func (p Profile) Digest() string {
 	var b strings.Builder
 	vals := p.values()
 	for i, knob := range profileKnobs {
+		if knob == deinterlaceKey && vals[i] == deinterlace.Off {
+			continue
+		}
 		b.WriteString(knob)
 		b.WriteByte('=')
 		b.WriteString(vals[i])
@@ -316,9 +371,42 @@ func (p Profile) validate() error {
 	if p.VmafEnable != nil && *p.VmafEnable && p.MinVmaf == 0 && p.VmafMinPool == 0 && p.VmafMinChroma == 0 {
 		return errVmafGateNeverRejects
 	}
+	if err := p.validateDeinterlace(); err != nil {
+		return err
+	}
 	// The stream-selection keys, refused by the same function and therefore in the same
 	// words whether they were written at the top level or inside one root's entry.
 	return p.validateSelection()
+}
+
+// validateDeinterlace refuses a `deinterlace` value this build will not run, at START and
+// by name, so a configuration that asks for something impossible never reaches a file.
+//
+// The two refusals are deliberately different. A value that does not RESOLVE is a typo or a
+// filter this build does not ship, and the message lists what it accepts. A value that
+// resolves to a FIELD-DOUBLING mode is understood exactly and still refused: it emits one
+// frame per field, which changes the output's frame count, and packet-count parity and
+// duration parity are graded on that count. Weakening either to admit such an output would
+// be weakening a gate that decides whether a source is destroyed, so the value is refused
+// instead - permanently, and not as a limitation of this build.
+//
+// The engine refuses the same configuration AGAIN before it encodes (see
+// Engine.deinterlaceFor). Both, deliberately: this one is the operator-facing refusal at
+// start, and that one covers a Profile assembled in Go that never came through here.
+func (p Profile) validateDeinterlace() error {
+	f, ok := deinterlace.Lookup(p.Deinterlace)
+	if !ok {
+		return fmt.Errorf("%s %q is not a value this build accepts (known: %v; the modes are %v)",
+			deinterlaceKey, p.Deinterlace, deinterlace.Known(), deinterlace.Modes())
+	}
+	if f.EmitsOneFramePerField() {
+		return fmt.Errorf("%s %q emits one frame per FIELD, which doubles the output's frame rate: "+
+			"refusing. Packet-count parity and duration parity are graded against the source's own "+
+			"frame count, and holdfast will not weaken a gate that decides whether a source is "+
+			"deleted in order to admit an output it was never written for. Use a frame-rate-preserving "+
+			"mode (%s or %s)", deinterlaceKey, p.Deinterlace, "send_frame", "send_frame_nospatial")
+	}
+	return nil
 }
 
 // warnings reports the configurations of THIS profile that are valid but weaken a

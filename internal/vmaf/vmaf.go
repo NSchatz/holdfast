@@ -71,6 +71,18 @@ type Result struct {
 	// it looked at cannot be lined up against the guards that inspected the same file. "" is
 	// NOT RECORDED and never a fabricated default.
 	Stream string
+
+	// ReferenceFilter is the filter expression the REFERENCE was put through before the
+	// comparison, and "" where the reference was the source as it is.
+	//
+	// It is part of what was measured, exactly as PixelFormat is. Where the encode applied a
+	// transformation the source did not carry - today a deinterlace - a score taken against
+	// the untransformed source measures the difference the FILTER made and not the
+	// difference the ENCODE made, and the two are not close: a deinterlaced encode scored
+	// against its interlaced source scores like a damaged encode. So the filter travels with
+	// the number everywhere the number goes, because a score whose reference nobody can name
+	// is not interpretable.
+	ReferenceFilter string
 }
 
 // Request is one scoring pass: which files, at what sampling interval, under which model,
@@ -88,6 +100,15 @@ type Request struct {
 	// PixelFormat is the format both inputs are converted to before scoring. It is
 	// REQUIRED: Score refuses an empty value rather than fall back to negotiation.
 	PixelFormat string
+	// ReferenceFilter is an ffmpeg filter expression applied to the REFERENCE before the
+	// comparison, so that a reference is produced from the source by the SAME transformation
+	// the encode applied. "" is the ordinary case and leaves the graph exactly as it was.
+	//
+	// It is a filter EXPRESSION and rides into the filtergraph unescaped, which is what lets
+	// it carry its own options (`yadif=mode=send_frame:parity=auto:deint=all`). Its value
+	// comes from this build's own closed registry (internal/deinterlace) and never from a
+	// path, a filename or anything else a library can influence.
+	ReferenceFilter string
 }
 
 // ErrUnavailable indicates the ffmpeg build has no libvmaf filter, so quality cannot be
@@ -181,10 +202,20 @@ func BuildFilter(req Request, logPath string) string {
 	// log_path lives INSIDE the -lavfi filtergraph, where ':' separates option pairs, so a
 	// path with a ':' (or other filtergraph metachar) must be escaped or ffmpeg mis-parses the
 	// filter and the gate fails every encode. The media paths are safe (separate -i argv).
+	// The REFERENCE's own chain, ahead of the format conversion: where the encode applied a
+	// transformation the source did not carry, the reference is produced from the source by
+	// that same transformation at those same parameters, or the score is a measurement of
+	// the filter rather than of the encode. It is composed HERE, in the single writer of
+	// this graph, so the reference the gate scores against cannot be built one way in one
+	// call site and another way in the next.
+	ref := ""
+	if req.ReferenceFilter != "" {
+		ref = req.ReferenceFilter + ","
+	}
 	return fmt.Sprintf(
-		"[0:%s]format=%s[dist];[1:%s]format=%s[ref];"+
+		"[0:%s]format=%s[dist];[1:%s]%sformat=%s[ref];"+
 			"[dist][ref]libvmaf=model=%s:feature=%s:log_fmt=json:log_path=%s:n_subsample=%d",
-		ScoredStream, req.PixelFormat, ScoredStream, req.PixelFormat,
+		ScoredStream, req.PixelFormat, ScoredStream, ref, req.PixelFormat,
 		req.Model, chromaFeature, escapeFilterValue(logPath), sub)
 }
 
@@ -238,12 +269,13 @@ func Score(ctx context.Context, ffmpeg string, req Request) (Result, error) {
 			p.VMAF.HarmonicMean != nil, p.VMAF.Min != nil, p.PsnrCb.Min != nil, p.PsnrCr.Min != nil)
 	}
 	return Result{
-		HarmonicMean: *p.VMAF.HarmonicMean,
-		Min:          *p.VMAF.Min,
-		ChromaMin:    math.Min(*p.PsnrCb.Min, *p.PsnrCr.Min),
-		ChromaMetric: ChromaMetricName,
-		PixelFormat:  req.PixelFormat,
-		Stream:       ScoredStream,
+		HarmonicMean:    *p.VMAF.HarmonicMean,
+		Min:             *p.VMAF.Min,
+		ChromaMin:       math.Min(*p.PsnrCb.Min, *p.PsnrCr.Min),
+		ChromaMetric:    ChromaMetricName,
+		PixelFormat:     req.PixelFormat,
+		Stream:          ScoredStream,
+		ReferenceFilter: req.ReferenceFilter,
 	}, nil
 }
 

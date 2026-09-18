@@ -75,7 +75,7 @@ func windBackOneSchemaVersion(t *testing.T, path string) int {
 		t.Fatalf("raw open %s: %v", path, err)
 	}
 	defer func() { _ = db.Close() }()
-	// Exactly what the NEWEST migration added, undone. That is the resolution columns and
+	// Exactly what the NEWEST migration added, undone. That is the deinterlace columns and
 	// not any step before it: this helper has to track the END of the migrations slice,
 	// because the whole point of it is to produce the database the PREVIOUS build wrote, and
 	// a wind-back that undid a step which is no longer the last one leaves a database still
@@ -85,10 +85,8 @@ func windBackOneSchemaVersion(t *testing.T, path string) int {
 	// Any index goes first: SQLite refuses to drop a column an index refers to. The
 	// newest step adds none, so there is nothing to drop ahead of its columns today.
 	for _, stmt := range []string{
-		`ALTER TABLE jobs DROP COLUMN source_width`,
-		`ALTER TABLE jobs DROP COLUMN source_height`,
-		`ALTER TABLE jobs DROP COLUMN output_width`,
-		`ALTER TABLE jobs DROP COLUMN output_height`,
+		`ALTER TABLE jobs DROP COLUMN deinterlaced`,
+		`ALTER TABLE jobs DROP COLUMN deinterlace_filter`,
 		fmt.Sprintf(`PRAGMA user_version = %d`, prev),
 	} {
 		if _, err := db.Exec(stmt); err != nil {

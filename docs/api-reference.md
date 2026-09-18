@@ -33,6 +33,35 @@ entirely until a control token is configured, and the read surface is open until
 `server_read_token` is set: the posture that follows from that is in
 [docs/docker.md](docker.md#reverse-proxy-posture).
 
+### The skip guards, and what each token means
+
+A skipped row's `reason` is a stable token, not prose: it is what `/api/history`, the export, the
+`holdfast_skips_total{guard}` metric and `holdfast requeue --guard <token>` all key off. Every one this
+build can record is here, and a token with no row fails the documentation check.
+
+<a id="skip-guards"></a>
+
+| guard | what it means |
+|---|---|
+| `already-at-target-codec` | the source is already in the codec this configuration targets |
+| `low-bitrate` | the source is below `min_bitrate_kbps`: there is nothing worth reclaiming |
+| `hardlinked` | the source has more than one link and `skip_hardlinked` is on - replacing it by rename would break the link and reclaim nothing |
+| `symlinked-source` | the source is a symbolic link; the swap would replace the LINK and orphan its target |
+| `interlaced` | the source is interlaced and no `deinterlace` is configured for its root (see the README's interlacing posture) |
+| `telecine-cadence` | a deinterlace was configured and the source is telecined, or its cadence could not be established either way. Both need inverse telecine rather than a deinterlace, which this build does not do |
+| `unknown-field-order` | ffprobe could not establish whether the source is progressive or interlaced, so encoding it either way would be a guess |
+| `dolby-vision` | a Dolby Vision RPU cannot survive a generic re-encode |
+| `hdr10-plus` | HDR10+ dynamic metadata cannot survive a generic re-encode |
+| `incomplete-hdr-metadata` | HDR10 static metadata is present but this build cannot fully parse it, so re-encoding would silently drop part of it |
+| `exotic-pixel-format` | the source's pixel format is one this build will not map, rather than silently subsample it |
+| `multi-video-stream` | the source carries a moving-picture stream beyond the first, or its stream shape could not be established: every decision here reads `v:0` |
+| `unreadable-stream-list` | ffprobe could not enumerate the source's streams at all, so the intended stream map cannot be derived |
+| `undetermined-source-height` | this root bands its thresholds by source height and the probe could not establish one |
+| `target-already-exists` | the output container differs from the source's and a distinct file is already at the target name |
+| `undo-retention-failed` | the original could not be retained for the undo window, so the swap that would have destroyed it did not run |
+| `operator-excluded` | an operator withheld this path from the pipeline |
+| `restored-original` | an operator put this original back through the undo window; it is never re-encoded by a later scan |
+
 ### The recorded outcome - the proof a swap was safe
 
 A terminal job carries the evidence the engine used to decide, so you can audit a swap after the fact
@@ -41,7 +70,7 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | Field | On | What it is |
 |---|---|---|
 | `reason` | failed | the error that rejected it (the encode error, or **which gate** refused the output) |
-| `reason` | skipped | **which guard** fired - `already-at-target-codec`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `multi-video-stream`, `unreadable-stream-list`, `undetermined-source-height`, `target-already-exists`, `undo-retention-failed`, `restored-original`, `operator-excluded` |
+| `reason` | skipped | **which guard** fired - `already-at-target-codec`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `multi-video-stream`, `unreadable-stream-list`, `undetermined-source-height`, `unknown-field-order`, `telecine-cadence`, `target-already-exists`, `undo-retention-failed`, `restored-original`, `operator-excluded` |
 | `encoder` | any job that reached the encoder | the encoder that ran (`cpu`, `svtav1`, `nvenc`, …) - a skip, or a file with no readable video stream, never gets that far and records none |
 | `profile` | every terminal row | the `encode_profiles` entry that supplied this job's settings, `""` for the top-level ones. `encoder` alone stops answering "what ran" once two encoders can run in one scan, and a **skip** carries it too - the profile is what decided the file was already at its target codec. `""` is a **real value**, not a missing measurement, so the key is always present |
 | `vmaf_mean`, `vmaf_min` | done, and a VMAF-rejected failure | the pooled harmonic mean **and the worst frame** |
@@ -49,6 +78,8 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | `vmaf_pix_fmt` | as above | the single pixel format **both streams were converted to** before scoring - chosen and named by holdfast, so a score says which pixels were compared |
 | `vmaf_stream` | as above | **which video stream** of each file was compared, in the specifier every ffprobe read here uses: `v:0`, the first video stream. A source can carry more than one, so this is what lines a score up against the file it was measured on. Absent on a row whose gate never ran - never a fabricated `v:0` |
 | `vmaf_chroma`, `vmaf_chroma_metric` | as above | the worst frame's chroma measurement and what it is (`psnr_cb/psnr_cr min (dB)`) - the only figure on the row that says whether the **colour** survived |
+| `deinterlaced` | any job that reached the encoder | whether the replacement was produced by **deinterlacing** the source. `true` or `false` is a measurement this build took; `null` is NOT RECORDED - a row written before the column existed, or a job that never reached an encode. The two are different facts about a source that has since been deleted, so `null` is never reported as not-deinterlaced |
+| `deinterlace_filter` | a job that deinterlaced | the filter and its parameters, whole (`yadif=mode=send_frame:parity=auto:deint=all`) - the same filter the perceptual gate produced its reference with, so the score beside it is a measurement of THIS encode. `null` on a job that deinterlaced nothing, which `deinterlaced: false` already states |
 | `source_codec` | would-transcode | the video codec the SOURCE was in when a dry run decided it - `null` when it was never read |
 | `source_bytes`, `output_bytes` | done | the sizes either side of the swap |
 | `source_bytes` | would-transcode | the size of the file that was decided. `output_bytes` is `null`: nothing encoded it, so there is no output to have a size |
