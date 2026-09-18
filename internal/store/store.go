@@ -984,11 +984,16 @@ type Store interface {
 	// neither.
 	RecordSkip(ctx context.Context, path, fingerprint, reason string, by Decision, profile string) (changed bool, err error)
 
-	// ClearSkip deletes the row ONLY when it is a Skipped row whose reason matches: the
-	// re-evaluation half of a MUTABLE guard. The hardlink guard re-checks every scan, since
-	// a seed may finish and drop the link count, and this removes the stale skip so the
-	// file is reclaimed on the normal path. The reason+status match is what keeps it from
-	// ever touching a real outcome. No-op when no such row exists.
+	// ClearSkip deletes the row ONLY when it is a Skipped row whose reason matches: one
+	// mutable guard's parked file, released. The reason+status match is what keeps it from
+	// ever touching a real outcome, and it is a no-op when no such row exists.
+	//
+	// THE SCAN NO LONGER ASKS IT. Every guard whose file it used to release now names its
+	// reason to Claim's supersede instead, because the scan cannot know whether there is a
+	// row here without reading one, and asking blind is a write statement per guard per
+	// file per pass that matches nothing on a library with nothing to do. This stays as the
+	// standalone primitive for a caller that wants exactly this one row gone and is not
+	// also claiming the file.
 	ClearSkip(ctx context.Context, path, fingerprint, reason string) error
 
 	// RecordSwapIncident persists a swap that did not complete cleanly. It writes the
