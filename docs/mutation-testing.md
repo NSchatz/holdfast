@@ -46,8 +46,9 @@ never means something else.
 A mutant whose test run exceeded its time budget is TIMED OUT, and the runner puts it in
 neither figure. The published report carries the count, because a run with many of them
 measured the machine as much as it measured the suite. `.gremlins.yaml` sets the timeout
-budget as a generous multiple of the coverage run, so that a busy machine does not quietly
-shrink the number of mutants the score is computed over.
+budget as a generous multiple of the coverage run, and gives each mutated test process one
+CPU so that the runner's own parallelism does not oversubscribe the machine, because a
+busy machine quietly shrinks the number of mutants the score is computed over.
 
 ## The mutation domain
 

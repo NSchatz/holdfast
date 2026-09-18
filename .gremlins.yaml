@@ -49,13 +49,23 @@ unleash:
     # Measured at 23 seconds: collector registration and scrape fixtures, once per mutant.
     - '^internal/metrics/'
 
-  # Each mutant's test run is allowed fifty times the time the package's coverage run
-  # took. That multiple looks enormous and is not: the coverage run is measured with a
-  # warm build cache and takes well under a second on most packages here, while the cost
-  # of a MUTANT is dominated by linking a fresh test binary, which does not shrink with
-  # the suite. At the default multiple this domain reported more TIMED OUT mutants than
-  # KILLED ones, every one of them a verdict about scheduling rather than about an
-  # assertion.
+  # Each mutated test process gets ONE CPU, and this is measured rather than tidy. Gremlins
+  # runs one worker per core; letting each of those workers also take every core is 56
+  # times 56 on the machine this was written on, and the oversubscription turns
+  # slow-but-passing packages into TIMED OUT mutants - verdicts about scheduling rather
+  # than about an assertion. On this domain the same run reported 618 timed-out mutants
+  # without this line and 53 with it, which is the difference between measuring 496 mutants
+  # and measuring 1061 of them.
+  test-cpu: 1
+
+  # Each mutant's test run is allowed two hundred times the time the package's coverage
+  # run took. That multiple looks enormous and is not, because of what it multiplies: the
+  # coverage run is ONE process against a warm build cache and takes well under a second
+  # on most packages here, while a MUTANT costs a fresh link of the test binary plus a run
+  # that is competing with every other worker. The budget is therefore proportional to the
+  # cheapest thing in the run and is spent on the most expensive, and at the default
+  # multiple this domain reported more TIMED OUT mutants than KILLED ones - every one of
+  # them a verdict about scheduling rather than about an assertion.
   #
   # That matters beyond tidiness: a timed-out mutant is in neither the numerator nor the
   # denominator of the score, and the runner's JSON does not carry the count, so a timeout
@@ -64,4 +74,4 @@ unleash:
   # of it. scripts/mutation-gate counts the timed-out mutants off the runner's own output
   # and puts the total in the report, so a reader can see how much of the run was decided
   # by a clock.
-  timeout-coefficient: 50
+  timeout-coefficient: 200
