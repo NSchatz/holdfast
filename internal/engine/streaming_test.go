@@ -14,14 +14,22 @@ package engine
 // enumeration, the feed and the workers are the real ones.
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/store"
 )
 
 // streamWait bounds every case here that waits for one goroutine to reach a point another
@@ -163,4 +171,619 @@ func TestScan_ObservedIsCompleteAfterAStreamedPass(t *testing.T) {
 			"(holdfast looked and found nothing) and one whose listing FAILED is not (%s)",
 			sortedKeys(observed), sortedKeys(want), gone)
 	}
+}
+
+// --- shared apparatus ---------------------------------------------------------------
+
+// arrivals records every path a WORKER began, in the order the workers reached it. A worker
+// begins a file at ProcessFile's attribute read, which is the first thing it does with a
+// path it was handed, on the worker's own goroutine.
+type arrivals struct {
+	mu   sync.Mutex
+	seen []string
+	// then, when non-nil, runs on the worker's goroutine once the arrival is recorded. It
+	// is how a case holds a worker inside one file while it drives the enumeration past it.
+	then func(path string)
+}
+
+func (a *arrivals) statFn(path string) (os.FileInfo, error) {
+	a.mu.Lock()
+	a.seen = append(a.seen, path)
+	then := a.then
+	a.mu.Unlock()
+	if then != nil {
+		then(path)
+	}
+	return os.Stat(path)
+}
+
+func (a *arrivals) paths() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.seen...)
+}
+
+func (a *arrivals) after(then func(path string)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.then = then
+}
+
+// safeLog is a logger whose buffer may be read while workers are still running. The suite's
+// captureLogger writes into a bare bytes.Buffer, which is right for a case that reads it
+// after the run and wrong for one whose subject is a record made DURING it.
+type safeLog struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *safeLog) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *safeLog) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+func (s *safeLog) logger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(s, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+// streamEngine builds an engine over root, bounded by coverage, with a recorder on the
+// per-file attribute read. It publishes this run's hold-backs exactly as RunOneshot does.
+func streamEngine(t *testing.T, root string, coverage []string, workers int) (*Engine, *arrivals) {
+	t.Helper()
+	ffmpeg, ffprobe := tools(t)
+	e := buildEngine(t, ffmpeg, ffprobe, root, nil, func(c *config.Config) { c.Workers = workers })
+	e.Coverage = coverage
+	a := &arrivals{}
+	e.statFn = a.statFn
+	e.EnsureHoldBacks(context.Background())
+	return e, a
+}
+
+// listedDirs records which directories a run actually asked the filesystem for, which is
+// how a case asserts that a stopped scan stopped LISTING and not merely feeding.
+type listedDirs struct {
+	mu   sync.Mutex
+	seen map[string]bool
+}
+
+func newListedDirs() *listedDirs { return &listedDirs{seen: map[string]bool{}} }
+
+func (l *listedDirs) readDir(dir string) ([]os.DirEntry, error) {
+	l.mu.Lock()
+	l.seen[dir] = true
+	l.mu.Unlock()
+	return os.ReadDir(dir)
+}
+
+func (l *listedDirs) was(dir string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.seen[dir]
+}
+
+// sameSet reports whether two path slices hold the same paths, whatever the order.
+func sameSet(a, b []string) bool {
+	x := append([]string(nil), a...)
+	y := append([]string(nil), b...)
+	sort.Strings(x)
+	sort.Strings(y)
+	return reflect.DeepEqual(x, y)
+}
+
+// TestScan_HandOutOrderIsTotalAndDeterministic is [AC-2].
+//
+// The rule the hand-out order follows is stated in docs/enumeration-order.md and it is
+// PINNED here, spelled out file by file rather than re-derived: a later spec declaring a
+// queue order builds on this sequence, so a change to it has to be a change somebody made on
+// purpose. The fixture's names are chosen so that this order and a global sort of the full
+// paths are DIFFERENT answers - `zz.mkv` in the root comes before everything under `sub/`,
+// where a global sort of the paths would put it last.
+func TestScan_HandOutOrderIsTotalAndDeterministic(t *testing.T) {
+	root := t.TempDir()
+	for _, p := range []string{
+		filepath.Join(root, "b.mkv"),
+		filepath.Join(root, "a.mkv"),
+		filepath.Join(root, "zz.mkv"),
+		filepath.Join(root, "sub", "c.mkv"),
+		filepath.Join(root, "sub", "a.mkv"),
+		filepath.Join(root, "sub", "deeper", "b.mkv"),
+		filepath.Join(root, "sub", "deeper", "a.mkv"),
+	} {
+		mustWrite(t, p)
+	}
+	res := walkOver(t, root, []string{"mkv"}, newListingCounter())
+	wantCoverage := []string{root, filepath.Join(root, "sub"), filepath.Join(root, "sub", "deeper")}
+	if !reflect.DeepEqual(res.Coverage, wantCoverage) {
+		t.Fatalf("the startup walk covered %v, want %v: the hand-out order below IS that sequence, so a "+
+			"change to it is a change to the documented rule", res.Coverage, wantCoverage)
+	}
+	want := []string{
+		filepath.Join(root, "a.mkv"),
+		filepath.Join(root, "b.mkv"),
+		filepath.Join(root, "zz.mkv"),
+		filepath.Join(root, "sub", "a.mkv"),
+		filepath.Join(root, "sub", "c.mkv"),
+		filepath.Join(root, "sub", "deeper", "a.mkv"),
+		filepath.Join(root, "sub", "deeper", "b.mkv"),
+	}
+
+	// The order as the enumeration produces it, at a given worker count and over a given
+	// reading of the filesystem.
+	enumerated := func(workers int, readDir func(string) ([]os.DirEntry, error)) []string {
+		e, _ := streamEngine(t, root, res.Coverage, workers)
+		e.readDirFn = readDir
+		var got []string
+		e.enumerateStream(e.passListings(), sink{offer: func(p string) bool {
+			got = append(got, p)
+			return true
+		}})
+		return got
+	}
+
+	t.Run("two scans over an unchanged library agree, and hand out every source once", func(t *testing.T) {
+		for _, pass := range []string{"first", "second"} {
+			e, a := streamEngine(t, root, res.Coverage, 1)
+			if _, err := e.scanOnce(context.Background(), e.passListings()); err != nil {
+				t.Fatalf("%s scanOnce: %v", pass, err)
+			}
+			// ONE worker: the order files come off the channel is the order they went on
+			// it, so what the worker saw is the hand-out order, end to end.
+			if got := a.paths(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("the %s scan handed out\n  %v\nwant\n  %v", pass, got, want)
+			}
+		}
+	})
+
+	t.Run("the order does not read the worker count", func(t *testing.T) {
+		for _, workers := range []int{1, 4, 16} {
+			if got := enumerated(workers, nil); !reflect.DeepEqual(got, want) {
+				t.Errorf("with %d workers configured the enumeration produced\n  %v\nwant\n  %v", workers, got, want)
+			}
+		}
+	})
+
+	t.Run("the order is the enumeration's own and not the filesystem's", func(t *testing.T) {
+		reversed := func(dir string) ([]os.DirEntry, error) {
+			ents, err := os.ReadDir(dir)
+			sort.Slice(ents, func(i, j int) bool { return ents[i].Name() > ents[j].Name() })
+			return ents, err
+		}
+		if got := enumerated(1, reversed); !reflect.DeepEqual(got, want) {
+			t.Errorf("over a filesystem returning each listing in reverse name order the enumeration "+
+				"produced\n  %v\nwant\n  %v", got, want)
+		}
+	})
+
+	// The order is unaffected by WHICH WORKER FINISHES WHEN. Two workers, an unbuffered
+	// channel, and every worker held inside its file until this case releases it: with both
+	// held the enumeration is blocked on its next send, so releasing one - the one handed the
+	// MOST RECENT file, which is the reverse of the order they went out in - frees exactly one
+	// receiver and the next arrival is unambiguous. Only the first two arrivals can be
+	// permuted (two workers racing to record one each), so those are asserted as a SET and
+	// every arrival after them in exact sequence.
+	t.Run("the order is unaffected by the order workers finish in", func(t *testing.T) {
+		const workers = 2
+		gates := make(map[string]chan struct{}, len(want))
+		for _, p := range want {
+			gates[p] = make(chan struct{})
+		}
+		arrived := make(chan string, len(want))
+
+		e, _ := streamEngine(t, root, res.Coverage, workers)
+		e.statFn = func(path string) (os.FileInfo, error) {
+			arrived <- path
+			<-gates[path]
+			return os.Stat(path)
+		}
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := e.scanOnce(context.Background(), e.passListings())
+			done <- err
+		}()
+
+		var got, inFlight []string
+		for len(got) < len(want) {
+			select {
+			case p := <-arrived:
+				got = append(got, p)
+				inFlight = append(inFlight, p)
+			case <-time.After(streamWait):
+				for _, p := range inFlight {
+					close(gates[p])
+				}
+				t.Fatalf("the scan handed out %d of %d files and then stopped for %s", len(got), len(want), streamWait)
+			}
+			if len(inFlight) == workers || len(got) == len(want) {
+				last := inFlight[len(inFlight)-1]
+				inFlight = inFlight[:len(inFlight)-1]
+				close(gates[last])
+			}
+		}
+		for _, p := range inFlight {
+			close(gates[p])
+		}
+		if err := <-done; err != nil {
+			t.Fatalf("scanOnce: %v", err)
+		}
+
+		if !sameSet(got[:workers], want[:workers]) {
+			t.Errorf("the first %d files handed out were %v, want those two in some order: %v",
+				workers, got[:workers], want[:workers])
+		}
+		if !reflect.DeepEqual(got[workers:], want[workers:]) {
+			t.Errorf("with workers finishing in the reverse of the order they were fed, the scan handed out\n"+
+				"  %v\nwant\n  %v\nfrom position %d on", got, want, workers)
+		}
+	})
+}
+
+// fourDirs builds a library of four covered directories, each holding one source, and
+// returns the root and the covered directories in the order a scan takes them.
+func fourDirs(t *testing.T) (root string, dirs []string) {
+	t.Helper()
+	root = t.TempDir()
+	for _, name := range []string{"a-dir", "b-dir", "c-dir", "d-dir"} {
+		dir := filepath.Join(root, name)
+		mustWrite(t, filepath.Join(dir, "Source.mkv"))
+		dirs = append(dirs, dir)
+	}
+	return root, dirs
+}
+
+// TestScan_CancelMidStreamObservesOnlyWhatItListed is [AC-5].
+//
+// Cancellation lands with the second covered directory listed and the third and fourth not.
+// The set this reports as observed is asserted by IDENTITY: a directory it never listed
+// appearing there is the failure this whole item is written around, because the retention
+// pass reads a file missing from an observed directory as a file that is GONE and expires
+// the undo record that is the only route back to the original bytes.
+func TestScan_CancelMidStreamObservesOnlyWhatItListed(t *testing.T) {
+	root, dirs := fourDirs(t)
+	e, a := streamEngine(t, root, dirs, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	seen := newListedDirs()
+	e.readDirFn = func(dir string) ([]os.DirEntry, error) {
+		ents, err := seen.readDir(dir)
+		if dir == dirs[1] {
+			// Listed, and cancelled with the listing in hand: THIS directory is evidence,
+			// and the two after it must not become any.
+			cancel()
+		}
+		return ents, err
+	}
+
+	observed, err := e.scanOnce(ctx, e.passListings())
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("scanOnce returned %v, want the cancellation error handed back to the caller", err)
+	}
+
+	want := map[string]bool{dirs[0]: true, dirs[1]: true}
+	if !reflect.DeepEqual(observed, want) {
+		t.Fatalf("observed = %v, want exactly %v: a cancelled scan reports the directories it had already "+
+			"listed and no others", sortedKeys(observed), sortedKeys(want))
+	}
+	for _, dir := range dirs[2:] {
+		if seen.was(dir) {
+			t.Errorf("%s was listed after the scan was cancelled; a cancelled scan stops where it stands", dir)
+		}
+	}
+	for _, p := range a.paths() {
+		if filepath.Dir(p) != dirs[0] {
+			t.Errorf("%s was handed to a worker after the scan was cancelled", p)
+		}
+	}
+}
+
+// TestScan_PauseMidStreamObservesOnlyWhatItListed is [AC-6].
+//
+// A worker is held inside the first file for the whole of the pause, so all four clauses are
+// asserted of one pass: no new file goes out, the in-flight one finishes (the scan does not
+// return until it has), the observed set is exactly what had been listed by then, and what
+// was never handed out is handed out by the next scan after resume.
+func TestScan_PauseMidStreamObservesOnlyWhatItListed(t *testing.T) {
+	root, dirs := fourDirs(t)
+	e, a := streamEngine(t, root, dirs, 1)
+	var paused atomic.Bool
+	e.Paused = paused.Load
+
+	begun := make(chan struct{})
+	finish := make(chan struct{})
+	var releasedFirst atomic.Bool
+	a.after(func(string) {
+		close(begun)
+		<-finish
+	})
+
+	seen := newListedDirs()
+	var pauseOnce sync.Once
+	e.readDirFn = func(dir string) ([]os.DirEntry, error) {
+		if dir == dirs[1] {
+			// The pause lands with a worker inside the first file and this directory's
+			// listing in hand: paused WHILE the enumeration is still running, which is
+			// [AC-6]'s premise. Once only, so the scan after resume is not re-paused.
+			pauseOnce.Do(func() {
+				<-begun
+				paused.Store(true)
+			})
+		}
+		return seen.readDir(dir)
+	}
+
+	type result struct {
+		observed map[string]bool
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		observed, err := e.scanOnce(context.Background(), e.passListings())
+		done <- result{observed, err}
+	}()
+
+	select {
+	case <-begun:
+	case got := <-done:
+		t.Fatalf("the scan returned (%v) without any worker having begun a file", got.err)
+	case <-time.After(streamWait):
+		close(finish)
+		t.Fatalf("no worker began a file within %s", streamWait)
+	}
+	select {
+	case got := <-done:
+		close(finish)
+		t.Fatalf("the paused scan returned (%v) with a file still in flight; a pause never interrupts work "+
+			"already running", got.err)
+	case <-time.After(250 * time.Millisecond):
+	}
+	releasedFirst.Store(true)
+	close(finish)
+
+	got := <-done
+	if !releasedFirst.Load() {
+		t.Error("the scan returned before the in-flight file was released")
+	}
+	if got.err != nil {
+		t.Errorf("scanOnce returned %v; a pause is not an error", got.err)
+	}
+
+	want := map[string]bool{dirs[0]: true, dirs[1]: true}
+	if !reflect.DeepEqual(got.observed, want) {
+		t.Fatalf("observed = %v, want exactly %v: a paused scan reports the directories it had already "+
+			"listed and no others", sortedKeys(got.observed), sortedKeys(want))
+	}
+	for _, dir := range dirs[2:] {
+		if seen.was(dir) {
+			t.Errorf("%s was listed after the scan was paused", dir)
+		}
+	}
+	if fed := a.paths(); !reflect.DeepEqual(fed, []string{filepath.Join(dirs[0], "Source.mkv")}) {
+		t.Errorf("the paused scan handed out %v, want only the file that was already in flight", fed)
+	}
+
+	// Resumed: the files it never handed out are still pending, and the next scan takes them.
+	paused.Store(false)
+	a.after(nil)
+	next, err := e.scanOnce(context.Background(), e.passListings())
+	if err != nil {
+		t.Fatalf("the scan after resume: %v", err)
+	}
+	var all []string
+	for _, dir := range dirs {
+		all = append(all, filepath.Join(dir, "Source.mkv"))
+	}
+	if fed := a.paths()[1:]; !reflect.DeepEqual(fed, all) {
+		t.Errorf("the scan after resume handed out %v, want every source including the ones the paused scan "+
+			"left pending: %v", fed, all)
+	}
+	if len(next) != len(dirs) {
+		t.Errorf("the scan after resume observed %v, want all four directories", sortedKeys(next))
+	}
+}
+
+// TestScan_ListingErrorMidStreamIsNotObservedAndDoesNotAbort is [AC-7].
+//
+// One directory's listing fails while a worker is running. The scan keeps going, that worker
+// is untouched, the directory is absent from the observed set, the failure is not the scan's
+// returned error, and it is RECORDED once - naming the directory, the operation and that the
+// run continues without it (observability O4), at warn because the process continued in a
+// degraded state and no human has to act for this pass to finish (O3).
+func TestScan_ListingErrorMidStreamIsNotObservedAndDoesNotAbort(t *testing.T) {
+	root, dirs := fourDirs(t)
+	e, a := streamEngine(t, root, dirs, 1)
+	log := &safeLog{}
+	e.Log = log.logger()
+
+	begun := make(chan struct{})
+	failed := make(chan struct{})
+	first := filepath.Join(dirs[0], "Source.mkv")
+	a.after(func(path string) {
+		if path != first {
+			return
+		}
+		close(begun)
+		// Held until the listing has failed, so the failure lands on a RUNNING worker.
+		<-failed
+	})
+
+	boom := errors.New("simulated listing failure")
+	e.readDirFn = func(dir string) ([]os.DirEntry, error) {
+		if dir == dirs[1] {
+			<-begun
+			defer close(failed)
+			return nil, boom
+		}
+		return os.ReadDir(dir)
+	}
+
+	observed, err := e.scanOnce(context.Background(), e.passListings())
+	if err != nil {
+		t.Errorf("scanOnce returned %v; a directory this run could not list is skipped with a reason, never "+
+			"turned into the scan's error", err)
+	}
+
+	want := map[string]bool{dirs[0]: true, dirs[2]: true, dirs[3]: true}
+	if !reflect.DeepEqual(observed, want) {
+		t.Fatalf("observed = %v, want exactly %v: a directory whose listing FAILED is no evidence about "+
+			"what is in it", sortedKeys(observed), sortedKeys(want))
+	}
+
+	var wantFed []string
+	for _, dir := range []string{dirs[0], dirs[2], dirs[3]} {
+		wantFed = append(wantFed, filepath.Join(dir, "Source.mkv"))
+	}
+	if fed := a.paths(); !reflect.DeepEqual(fed, wantFed) {
+		t.Errorf("the scan handed out %v, want %v: the enumeration carries on past a directory it could not "+
+			"list, and the worker already running is left alone", fed, wantFed)
+	}
+
+	out := log.String()
+	var records []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "could not be listed") {
+			records = append(records, line)
+		}
+	}
+	if len(records) != 1 {
+		t.Fatalf("the failed listing was recorded %d time(s), want exactly once:\n%s", len(records), out)
+	}
+	rec := records[0]
+	for _, must := range []string{"level=WARN", dirs[1], "operation=", "continues without it"} {
+		if !strings.Contains(rec, must) {
+			t.Errorf("the record does not carry %q: %s", must, rec)
+		}
+	}
+}
+
+// TestScan_HoldBacksSurviveStreaming is [AC-8].
+//
+// Streaming moved where a path LEAVES the enumeration; it must not move where the two
+// hold-backs are asked, nor when the undo retention area is skipped. Every withheld path
+// here sits in a directory the scan does list, and an ordinary source sits beside it, so
+// nothing passes by the scan having narrowed itself.
+func TestScan_HoldBacksSurviveStreaming(t *testing.T) {
+	root := t.TempDir()
+	ts := newTestStore(t, root)
+	ctx := context.Background()
+
+	parkedSrc := filepath.Join(root, "Parked.mkv")
+	parkedRepl := filepath.Join(root, "Parked."+RetainedMarker+".mkv")
+	orphanRepl := filepath.Join(root, "Orphan."+RetainedMarker+".mkv") // no record at all
+	excluded := filepath.Join(root, "Excluded.mkv")                    // an ORDINARY name: only the record holds it
+	ordinary := filepath.Join(root, "Ordinary.mkv")
+	deep := filepath.Join(root, "sub", "Deep.mkv")
+	undo := undoDirFor(root)
+	inUndo := filepath.Join(undo, "Rescued.mkv") // a plain source NAME inside the retention area
+	for _, p := range []string{parkedSrc, parkedRepl, orphanRepl, excluded, ordinary, deep, inUndo} {
+		mustWrite(t, p)
+	}
+
+	if err := ts.RecordSwapIncident(ctx, store.SwapIncident{
+		SourcePath: parkedSrc, SourceFingerprint: "1:1", ReplacementPath: parkedRepl,
+		SourceAttrs: "1:1", ReplacementAttrs: "2:2", Outcome: store.Indeterminate,
+	}); err != nil {
+		t.Fatalf("record the parked incident: %v", err)
+	}
+	// A replacement whose recorded disposition still EXCLUDES it: resolved, so nothing is
+	// parked on its account and the record is the only thing holding the path back.
+	if err := ts.RecordSwapIncident(ctx, store.SwapIncident{
+		SourcePath: ordinary, SourceFingerprint: "3:3", ReplacementPath: excluded,
+		SourceAttrs: "3:3", ReplacementAttrs: "4:4", Outcome: store.Indeterminate,
+	}); err != nil {
+		t.Fatalf("record the second incident: %v", err)
+	}
+	if err := ts.ResolveIncident(ctx, 2, store.Resolution{
+		Determination: store.SourceIsIntact, By: "operator",
+		DispositionSource: store.KeptInPlace, DispositionReplacement: store.RetainedExcluded,
+	}); err != nil {
+		t.Fatalf("resolve the second incident: %v", err)
+	}
+
+	coverage := []string{root, filepath.Join(root, "sub"), undo}
+	e, a := streamEngine(t, root, coverage, 1)
+	e.Store = ts
+	e.held.Store(e.loadHoldBacks(ctx))
+
+	observed, err := e.scanOnce(ctx, e.passListings())
+	if err != nil {
+		t.Fatalf("scanOnce: %v", err)
+	}
+
+	fed := a.paths()
+	for _, held := range []struct{ path, why string }{
+		{parkedRepl, "a retained replacement, held back on its NAME as something holdfast wrote"},
+		{orphanRepl, "a retained replacement no record survived for, held back on its name alone"},
+		{parkedSrc, "a parked job's recorded SOURCE path"},
+		{excluded, "a replacement whose recorded disposition still excludes it"},
+		{inUndo, "a source name inside the undo retention area"},
+	} {
+		if contains(fed, held.path) {
+			t.Errorf("%s reached a worker: %s", held.path, held.why)
+		}
+	}
+	if want := []string{ordinary, deep}; !reflect.DeepEqual(fed, want) {
+		t.Errorf("the scan handed out %v, want exactly the two ordinary sources %v", fed, want)
+	}
+	if observed[undo] {
+		t.Error("the undo retention area was reported as observed; it is skipped by DIRECTORY NAME before " +
+			"anything in it is read, and a directory this run never opened is no evidence about what is in it")
+	}
+	wantObserved := map[string]bool{root: true, filepath.Join(root, "sub"): true}
+	if !reflect.DeepEqual(observed, wantObserved) {
+		t.Errorf("observed = %v, want exactly %v", sortedKeys(observed), sortedKeys(wantObserved))
+	}
+}
+
+// TestScan_EmptyCoverageStreamsNothingAndObservesWhatItListed is [AC-11], both of its cases:
+// a covered set with nothing in it, and one whose every directory lists empty. The second is
+// the one that matters - holdfast LOOKED there, which is evidence, and is not the same as
+// never looking.
+func TestScan_EmptyCoverageStreamsNothingAndObservesWhatItListed(t *testing.T) {
+	t.Run("the covered set is empty", func(t *testing.T) {
+		root := t.TempDir()
+		mustWrite(t, filepath.Join(root, "Unreachable.mkv"))
+		e, a := streamEngine(t, root, []string{}, 1)
+		observed, err := e.scanOnce(context.Background(), e.passListings())
+		if err != nil {
+			t.Fatalf("scanOnce: %v", err)
+		}
+		if fed := a.paths(); len(fed) != 0 {
+			t.Errorf("a scan bounded by an empty covered set handed out %v", fed)
+		}
+		if len(observed) != 0 {
+			t.Errorf("observed = %v, want nothing at all", sortedKeys(observed))
+		}
+	})
+
+	t.Run("every covered directory lists empty", func(t *testing.T) {
+		root := t.TempDir()
+		var coverage []string
+		for _, name := range []string{"a-empty", "b-empty"} {
+			dir := filepath.Join(root, name)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			coverage = append(coverage, dir)
+		}
+		e, a := streamEngine(t, root, coverage, 1)
+		observed, err := e.scanOnce(context.Background(), e.passListings())
+		if err != nil {
+			t.Fatalf("scanOnce: %v", err)
+		}
+		if fed := a.paths(); len(fed) != 0 {
+			t.Errorf("a scan over directories that all list empty handed out %v", fed)
+		}
+		want := map[string]bool{coverage[0]: true, coverage[1]: true}
+		if !reflect.DeepEqual(observed, want) {
+			t.Fatalf("observed = %v, want exactly %v", sortedKeys(observed), sortedKeys(want))
+		}
+	})
 }
