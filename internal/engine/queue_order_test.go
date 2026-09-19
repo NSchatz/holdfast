@@ -84,6 +84,26 @@ var orderingLibrary = []orderedFile{
 	{rel: "e/echo.mkv", bytes: 700, mtime: at(2023)},
 }
 
+// nestedOrderingLibrary is the fixture that can tell `path` from a sort of the full path
+// strings, which the one above cannot: it puts files BESIDE a subdirectory rather than one
+// per sibling directory.
+//
+// `movies/zulu.mkv` is the file that separates the two. The traversal hands it out with the
+// rest of its own directory's files, before anything under `movies/sub/`; sorting the full
+// path strings puts it last of the five. A fixture with one file per sibling directory
+// produces the same sequence either way, so an assertion about `path` over one of those
+// grades neither answer.
+//
+// The five sizes and the five modification times are all distinct here too, so each of the
+// four keyed orders is one unambiguous sequence over the same library.
+var nestedOrderingLibrary = []orderedFile{
+	{rel: "movies/mike.mkv", bytes: 500, mtime: at(2020)},
+	{rel: "movies/zulu.mkv", bytes: 100, mtime: at(2024)},
+	{rel: "movies/sub/alpha.mkv", bytes: 300, mtime: at(2022)},
+	{rel: "movies/sub/biggest.mkv", bytes: 900, mtime: at(2021)},
+	{rel: "movies/sub/echo.mkv", bytes: 700, mtime: at(2023)},
+}
+
 // orderingEngine builds an engine over root with the queue order set and nothing else
 // unusual. It needs no tooling: nothing here encodes, and the enumeration is what is under
 // test.
@@ -145,7 +165,13 @@ func countingStat(eng *Engine, n *atomic.Int64) {
 // ---- [AC-1] the five orders -------------------------------------------------------
 
 // TestEnumerate_OffersTheCandidatesInTheConfiguredOrder is [AC-1]. Each of the five values
-// produces its own sequence over one fixture whose size, time and path orders all differ.
+// produces its own sequence, over TWO libraries: a flat one whose size, time and path orders
+// all differ, and a nested one on the coverage branch - the branch a daemon runs - where the
+// traversal and a sort of the full path strings are two different sequences.
+//
+// The nested half is the one that grades `path` at all, and it is why it is here. Over a
+// library with one file per sibling directory the traversal and a full-path sort coincide, so
+// an assertion about `path` there passes whichever the build produces and settles nothing.
 func TestEnumerate_OffersTheCandidatesInTheConfiguredOrder(t *testing.T) {
 	root := writeLibrary(t, orderingLibrary)
 	for _, tc := range []struct {
@@ -158,10 +184,50 @@ func TestEnumerate_OffersTheCandidatesInTheConfiguredOrder(t *testing.T) {
 		{config.QueueOrderNewest, []string{"b/bravo.mkv", "e/echo.mkv", "c/charlie.mkv", "d/delta.mkv", "a/alpha.mkv"}},
 		{config.QueueOrderOldest, []string{"a/alpha.mkv", "d/delta.mkv", "c/charlie.mkv", "e/echo.mkv", "b/bravo.mkv"}},
 	} {
-		t.Run(tc.order, func(t *testing.T) {
+		t.Run("flat/"+tc.order, func(t *testing.T) {
 			got := enumerated(t, orderingEngine(t, root, tc.order), root)
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("queue_order %q offered\n  %v\nwant\n  %v", tc.order, got, tc.want)
+			}
+		})
+	}
+
+	nested := writeLibrary(t, nestedOrderingLibrary)
+	traversal := []string{"movies/mike.mkv", "movies/zulu.mkv",
+		"movies/sub/alpha.mkv", "movies/sub/biggest.mkv", "movies/sub/echo.mkv"}
+	fullPathAscending := append([]string(nil), traversal...)
+	slices.Sort(fullPathAscending)
+
+	// The fixture's power to separate the two, asserted rather than assumed. A later edit
+	// that flattened this library would leave every case below green while grading `path`
+	// no better than the flat fixture does.
+	if slices.Equal(traversal, fullPathAscending) {
+		t.Fatalf("the nested fixture hands out\n  %v\nwhich is already the full paths in ascending "+
+			"order: the `path` case below would grade nothing", traversal)
+	}
+
+	for _, tc := range []struct {
+		order string
+		want  []string
+	}{
+		{config.QueueOrderPath, traversal},
+		{config.QueueOrderLargest, []string{"movies/sub/biggest.mkv", "movies/sub/echo.mkv",
+			"movies/mike.mkv", "movies/sub/alpha.mkv", "movies/zulu.mkv"}},
+		{config.QueueOrderSmallest, []string{"movies/zulu.mkv", "movies/sub/alpha.mkv",
+			"movies/mike.mkv", "movies/sub/echo.mkv", "movies/sub/biggest.mkv"}},
+		{config.QueueOrderNewest, []string{"movies/zulu.mkv", "movies/sub/echo.mkv",
+			"movies/sub/alpha.mkv", "movies/sub/biggest.mkv", "movies/mike.mkv"}},
+		{config.QueueOrderOldest, []string{"movies/mike.mkv", "movies/sub/biggest.mkv",
+			"movies/sub/alpha.mkv", "movies/sub/echo.mkv", "movies/zulu.mkv"}},
+	} {
+		t.Run("nested/"+tc.order, func(t *testing.T) {
+			eng := coveredOrderingEngine(t, nested, tc.order, "movies", "movies/sub")
+			got := enumerated(t, eng, nested)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("over a library with files BESIDE a subdirectory, queue_order %q offered\n"+
+					"  %v\nwant\n  %v\n`path` is the enumeration's own traversal: a directory's own "+
+					"files before anything under its subdirectories, which is not a sort of the full "+
+					"path strings. That sort would give\n  %v", tc.order, got, tc.want, fullPathAscending)
 			}
 		})
 	}

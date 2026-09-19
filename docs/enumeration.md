@@ -62,6 +62,13 @@ the key says, in a different order.
 
 Any other value, the empty string included, refuses to start and names the five it accepts.
 
+`newest` and `oldest` read the modification time at WHOLE-SECOND resolution, which is the
+granularity every attribute read in this repository carries. Two sources written inside the
+same second therefore hold the same key and are handed out on the path tie-break below, not
+on whatever sub-second stamps the filesystem happens to keep - which is what a bulk copy or
+an archive extraction produces, and it is the one library where these two values have less
+to say than an operator might expect.
+
 Each of the four keyed orders is TOTAL and deterministic in the sense the traversal is: two
 candidates carrying the same key break on the full path ascending, a path occurs once, and
 two scans over an unchanged library therefore offer the same files in the same sequence. A
@@ -74,6 +81,12 @@ decides sequence, and a file left out of a queue is a file that is never process
 
 `path` reads no metadata at all and holds nothing per candidate. It is the traversal, so the
 figures below and every property above them are unchanged by this key existing.
+
+Read that as the cost of ORDERING and not as the whole of what a pass reads. A scan still
+makes stat-family calls for reasons that have nothing to do with sequence - resolving a
+path's form while a record-based hold-back is in force, and telling a symbolic link carrying
+a source name from a directory - and those are what they were before `queue_order` existed.
+The figures here count the reads the ordering itself takes.
 
 Each keyed order reads ONE attribute per candidate - the size and the modification time come
 out of the same read - and holds one `(key, path)` pair per candidate until the listing is
