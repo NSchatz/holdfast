@@ -35,10 +35,22 @@ const (
 // The flag names are read out of the command's OWN help output rather than from a
 // list held here, so a flag added to any of the three appears in this comparison the
 // moment it exists.
+//
+// S0100 added `run --file` and `run --limit`, and they are listed here rather than
+// weakening the criterion, because neither is a setting. A setting is a value the
+// library is processed UNDER - an encoder, a quality floor, a working location - and
+// every one of those is still reachable from the YAML file and HOLDFAST_* alone. A
+// bound says which files THIS invocation offers to the pipeline the configuration
+// already describes; it moves no knob, and a file it does offer is decided by exactly
+// the configuration a whole-library run would decide it by.
 func TestFlags_RunServeAndValidateListExactlyTheFlagsThePinListed(t *testing.T) {
-	// The pin's flag set for all three: --config, and nothing else. loadConfig is
-	// the single place it is declared, which is why all three agree.
-	want := []string{"config"}
+	// The flag set per command. loadConfig is the single place --config is declared,
+	// which is why all three agree about it; `run` carries the two bounds beside it.
+	want := map[string][]string{
+		"run":      {"config", "file", "limit"},
+		"serve":    {"config"},
+		"validate": {"config"},
+	}
 
 	for _, cmd := range []string{"run", "serve", "validate"} {
 		t.Run(cmd, func(t *testing.T) {
@@ -47,9 +59,9 @@ func TestFlags_RunServeAndValidateListExactlyTheFlagsThePinListed(t *testing.T) 
 				t.Fatalf("%s -h exited %d (stderr: %s)", cmd, code, errOut.String())
 			}
 			got := flagNames(errOut.String() + out.String())
-			if strings.Join(got, ",") != strings.Join(want, ",") {
+			if strings.Join(got, ",") != strings.Join(want[cmd], ",") {
 				t.Fatalf("%s -h lists %v, want exactly %v - a setting this item adds became reachable from the command line\n%s",
-					cmd, got, want, errOut.String())
+					cmd, got, want[cmd], errOut.String())
 			}
 		})
 	}

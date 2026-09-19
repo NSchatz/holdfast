@@ -473,7 +473,7 @@ func restoreOne(ctx context.Context, undo *engine.UndoWindow, path string, stdou
 // this host (never a silent cpu fallback), open the job store, and construct the
 // engine. It returns the engine, the store (the caller MUST Close it), and a
 // nonzero exit code on failure (with a message already written to stderr).
-func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engine.Engine, store.Store, int) {
+func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope classifyScope) (*engine.Engine, store.Store, int) {
 	// FILESYSTEM-1, and it goes FIRST. holdfast's no-loss contract is stated for
 	// a local filesystem and this is where the tool checks it has one: it
 	// classifies every path this run would act on, reports each, and takes ONE
@@ -481,7 +481,7 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer) (*engin
 	// the job store is opened, and before anything is created in or under the
 	// state directory, so a refused run leaves no jobs.db, journal or sidecar
 	// behind on storage it just refused.
-	res, code := startupCheck(cfg, log, stderr)
+	res, code := startupCheck(cfg, log, stderr, scope)
 	if code != 0 {
 		return nil, nil, code
 	}
@@ -662,8 +662,25 @@ var startupPlatform = func() startup.Platform { return startup.System(nil, nil) 
 // caller assembling its own Check is a second answer waiting to diverge from the
 // decision the mutating path takes.
 func startupDecision(cfg *config.Config) startup.Result {
+	return startupDecisionScoped(cfg, classifyScope{})
+}
+
+// startupDecisionScoped is that one construction under a narrowing (AC-9). An empty scope
+// is the whole-library decision every command has always taken; a `--file` run may narrow
+// the classification to the root it will act under, which leaves the TARGET PATH's own
+// decision untouched - its root, the state directory, the scratch directory and the
+// declaration test are all weighed exactly as before - and declines to traverse roots this
+// run provably cannot reach a file under. The roots it left out come back in the Result so
+// the caller can name them, because a decision taken over part of the configuration is one
+// its reader has to be told the shape of.
+func startupDecisionScoped(cfg *config.Config, scope classifyScope) startup.Result {
+	only := []string(nil)
+	if scope.scoped() {
+		only = []string{scope.Root}
+	}
 	return startup.Run(startup.Check{
 		Roots:        cfg.LibraryRoots,
+		ClassifyOnly: only,
 		StateDir:     stateDirPath(cfg),
 		Declarations: cfg.AllowNonLocal,
 		IsMediaFile:  func(base string) bool { return engine.IsSourceName(base, cfg.VideoExts) },
@@ -681,14 +698,28 @@ func startupDecision(cfg *config.Config) startup.Result {
 // refusal it writes the operator-facing account to stderr - every cause it
 // established, each with the exact declaration that would permit it or, where no
 // declaration could, the remedy - and returns a nonzero exit code.
-func startupCheck(cfg *config.Config, log *slog.Logger, stderr io.Writer) (startup.Result, int) {
-	res := startupDecision(cfg)
+func startupCheck(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope classifyScope) (startup.Result, int) {
+	res := startupDecisionScoped(cfg, scope)
 	res.Log(log)
+	// A narrowed classification says so, names the target it was narrowed for and names
+	// every configured root it did not classify (AC-9). It is `info`: nothing here asks a
+	// human to act, and it is the operator's own `--file` that asked for it - but it is
+	// never silent, because the narrowing is the one thing a bounded run does that an
+	// unbounded run's refusal would have caught.
+	if scope.scoped() {
+		log.Info("the start-or-refuse classification was scoped to this run's target file: the library "+
+			"roots this run cannot reach a file under were not classified, so a condition under one of "+
+			"them did not refuse this run",
+			"classification", "scoped-to-target",
+			"file", scope.File,
+			"classified_library_root", scope.Root,
+			"library_roots_not_classified", res.Unclassified)
+	}
 	if !res.Start {
 		res.WriteRefusal(stderr)
-		return res, 1
+		return res, exitError
 	}
-	return res, 0
+	return res, exitOK
 }
 
 // resolveSecrets turns every configured secret reference into a value, ONCE, at start
@@ -716,12 +747,29 @@ func resolveSecrets(ctx context.Context, cfg *config.Config, stderr io.Writer) (
 }
 
 func cmdRun(args []string, stdout, stderr io.Writer) int {
+	// The help text is answered before anything is parsed, so it reaches STDOUT whole -
+	// every flag, a runnable example per shape and the exit-code table - rather than the
+	// flag package's own defaults on stderr (cli L2, L5).
+	if wantsHelp(args) {
+		fmt.Fprint(stdout, runUsage())
+		return exitOK
+	}
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	fs.Usage = func() { fmt.Fprint(stderr, runUsage()) }
+	bounds := addBoundFlags(fs)
 	cfg, code := loadConfig(fs, args, stderr)
 	if cfg == nil {
 		return code
 	}
 	log := logging.New(cfg.LogLevel)
+
+	// The bound, and the refusals it adds, BEFORE anything is built: a `--file` path this
+	// configuration would never act on refuses here, with nothing probed, encoded, mutated
+	// or created under the state directory (AC-2, AC-3, AC-6, AC-7).
+	bound, scope, code := resolveBound(cfg, bounds, stderr)
+	if code != exitOK {
+		return code
+	}
 
 	// Every configured reference is proved resolvable BEFORE the library is walked or a
 	// single frame is encoded, even though a oneshot run consumes none of the three
@@ -741,8 +789,8 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	logResolvedProfiles(cfg, log)
 	logConfigWarnings(cfg, log)
 
-	eng, st, code := buildEngine(cfg, log, stderr)
-	if code != 0 {
+	eng, st, code := buildEngine(cfg, log, stderr, scope)
+	if code != exitOK {
 		return code
 	}
 	defer st.Close()
@@ -753,16 +801,18 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := eng.RunOneshot(ctx); err != nil {
+	// One call for both shapes: an unbounded Bound is the whole-library pass this command
+	// has always run, so there is no second route into the engine to keep in step.
+	if err := eng.RunBounded(ctx, bound); err != nil {
 		if errors.Is(err, context.Canceled) {
 			log.Warn("interrupted — stopped safely; in-flight temp discarded, source untouched")
-			return 0
+			return exitOK
 		}
 		fmt.Fprintf(stderr, "holdfast: %v\n", err)
-		return 1
+		return exitError
 	}
 	log.Info("scan complete")
-	return 0
+	return exitOK
 }
 
 // cmdServe runs the HTTP API + embedded web UI (TRANSCODE-7). It builds the same
@@ -899,7 +949,9 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		return code
 	}
 
-	eng, st, code := buildEngine(cfg, log, stderr)
+	// The daemon serves the WHOLE library - it scans on an interval and takes submissions
+	// for any configured root - so its classification is never narrowed.
+	eng, st, code := buildEngine(cfg, log, stderr, classifyScope{})
 	if code != 0 {
 		return code
 	}

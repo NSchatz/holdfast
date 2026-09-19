@@ -176,7 +176,7 @@ func TestBuildEngine_TheDaemonEmitsTheRecordOfTheMigrationItJustRan(t *testing.T
 		t.Fatalf("load config: %v", err)
 	}
 	log, buf := jsonLog()
-	eng, st, code := buildEngine(cfg, log, io.Discard)
+	eng, st, code := buildEngine(cfg, log, io.Discard, classifyScope{})
 	if code != 0 || eng == nil || st == nil {
 		t.Fatalf("buildEngine exit code = %d", code)
 	}

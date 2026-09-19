@@ -689,6 +689,10 @@ func (e *Engine) recordIncident(ctx context.Context, in store.SwapIncident,
 			"store_error", err)
 		return
 	}
+	// The row is on disk, and it is a terminal one: neither outcome this writes is ever
+	// re-claimable, so each is a file this run carried to a state the ledger records as
+	// final and each spends a bounded run's count (see countTerminalRow).
+	e.countTerminalRow(in.Outcome)
 	e.emit(Event{Path: sourcePath, Status: in.Outcome, Outcome: in.JobOutcome})
 }
 

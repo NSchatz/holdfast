@@ -80,7 +80,7 @@ func TestScan_StartsWorkBeforeEnumerationCompletes(t *testing.T) {
 	eng.EnsureHoldBacks(ctx)
 	done := make(chan error, 1)
 	go func() {
-		_, err := eng.scanOnce(ctx, eng.passListings())
+		_, err := eng.scanOnce(ctx, eng.passListings(), nil)
 		done <- err
 	}()
 
@@ -156,7 +156,7 @@ func TestScan_ObservedIsCompleteAfterAStreamedPass(t *testing.T) {
 
 	ctx := context.Background()
 	eng.EnsureHoldBacks(ctx)
-	observed, err := eng.scanOnce(ctx, eng.passListings())
+	observed, err := eng.scanOnce(ctx, eng.passListings(), nil)
 	if err != nil {
 		t.Fatalf("scanOnce: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestScan_HandOutOrderIsTotalAndDeterministic(t *testing.T) {
 	t.Run("two scans over an unchanged library agree, and hand out every source once", func(t *testing.T) {
 		for _, pass := range []string{"first", "second"} {
 			e, a := streamEngine(t, root, res.Coverage, 1)
-			if _, err := e.scanOnce(context.Background(), e.passListings()); err != nil {
+			if _, err := e.scanOnce(context.Background(), e.passListings(), nil); err != nil {
 				t.Fatalf("%s scanOnce: %v", pass, err)
 			}
 			// ONE worker: the order files come off the channel is the order they went on
@@ -385,7 +385,7 @@ func TestScan_HandOutOrderIsTotalAndDeterministic(t *testing.T) {
 
 		done := make(chan error, 1)
 		go func() {
-			_, err := e.scanOnce(context.Background(), e.passListings())
+			_, err := e.scanOnce(context.Background(), e.passListings(), nil)
 			done <- err
 		}()
 
@@ -484,7 +484,7 @@ func TestScan_CancelMidStreamObservesOnlyWhatItListed(t *testing.T) {
 				return ents, err
 			}
 
-			observed, err := e.scanOnce(ctx, e.passListings())
+			observed, err := e.scanOnce(ctx, e.passListings(), nil)
 			if !errors.Is(err, context.Canceled) {
 				t.Errorf("scanOnce returned %v, want the cancellation error handed back to the caller", err)
 			}
@@ -556,7 +556,7 @@ func TestScan_PauseMidStreamObservesOnlyWhatItListed(t *testing.T) {
 			}
 			done := make(chan result, 1)
 			go func() {
-				observed, err := e.scanOnce(context.Background(), e.passListings())
+				observed, err := e.scanOnce(context.Background(), e.passListings(), nil)
 				done <- result{observed, err}
 			}()
 
@@ -605,7 +605,7 @@ func TestScan_PauseMidStreamObservesOnlyWhatItListed(t *testing.T) {
 			// takes them.
 			paused.Store(false)
 			a.after(nil)
-			next, err := e.scanOnce(context.Background(), e.passListings())
+			next, err := e.scanOnce(context.Background(), e.passListings(), nil)
 			if err != nil {
 				t.Fatalf("the scan after resume: %v", err)
 			}
@@ -656,7 +656,7 @@ func TestScan_ListingErrorMidStreamIsNotObservedAndDoesNotAbort(t *testing.T) {
 		return os.ReadDir(dir)
 	}
 
-	observed, err := e.scanOnce(context.Background(), e.passListings())
+	observed, err := e.scanOnce(context.Background(), e.passListings(), nil)
 	if err != nil {
 		t.Errorf("scanOnce returned %v; a directory this run could not list is skipped with a reason, never "+
 			"turned into the scan's error", err)
@@ -744,7 +744,7 @@ func TestScan_HoldBacksSurviveStreaming(t *testing.T) {
 	e.Store = ts
 	e.held.Store(e.loadHoldBacks(ctx))
 
-	observed, err := e.scanOnce(ctx, e.passListings())
+	observed, err := e.scanOnce(ctx, e.passListings(), nil)
 	if err != nil {
 		t.Fatalf("scanOnce: %v", err)
 	}
@@ -783,7 +783,7 @@ func TestScan_EmptyCoverageStreamsNothingAndObservesWhatItListed(t *testing.T) {
 		root := t.TempDir()
 		mustWrite(t, filepath.Join(root, "Unreachable.mkv"))
 		e, a := streamEngine(t, root, []string{}, 1)
-		observed, err := e.scanOnce(context.Background(), e.passListings())
+		observed, err := e.scanOnce(context.Background(), e.passListings(), nil)
 		if err != nil {
 			t.Fatalf("scanOnce: %v", err)
 		}
@@ -806,7 +806,7 @@ func TestScan_EmptyCoverageStreamsNothingAndObservesWhatItListed(t *testing.T) {
 			coverage = append(coverage, dir)
 		}
 		e, a := streamEngine(t, root, coverage, 1)
-		observed, err := e.scanOnce(context.Background(), e.passListings())
+		observed, err := e.scanOnce(context.Background(), e.passListings(), nil)
 		if err != nil {
 			t.Fatalf("scanOnce: %v", err)
 		}
