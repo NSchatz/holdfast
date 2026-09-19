@@ -169,21 +169,16 @@ Bash transcoder.
 cp config.example.yaml config.yaml   # then edit library_roots
 holdfast validate --config config.yaml
 holdfast analyze --config config.yaml  # what is in the library, reading only (--health: what is broken)
-holdfast run --config config.yaml --file /media/tv/pilot.mkv  # ONE file, for real: every guard, gate and swap
-holdfast run --config config.yaml   # one scan: re-encode bloated non-HEVC video, safely
+holdfast run --config config.yaml --file /media/tv/a.mkv  # ONE file, for real: every gate, and the swap
+holdfast run --config config.yaml   # the whole library (--limit 5 bounds it)
 holdfast serve --config config.yaml # HTTP API (scan on demand / on an interval)
-holdfast resolve --config config.yaml  # list (and resolve) any job whose swap outcome is unknown
-holdfast restore --config config.yaml  # what the undo window is holding (see below)
+holdfast resolve --config config.yaml  # a job whose swap outcome is unknown
+holdfast restore --config config.yaml  # what the undo window is holding
 holdfast export --config config.yaml --out ledger.ndjson  # the whole ledger, as NDJSON
 ```
 
-Start with `--file`, or with `--limit 5`. A bounded run is **narrower, not weaker**: it is the same
-pipeline deciding a real file, so it replaces that source and deletes the original if the encode
-clears every gate - which is exactly what you are there to watch. It runs no ledger retention pass
-and no stale-temp sweep, because neither has looked at the whole library.
-
 `run`/`serve` need `ffmpeg` and `ffprobe` on `PATH` (or set `HOLDFAST_FFMPEG` / `HOLDFAST_FFPROBE`); they
-exit non-zero if they are missing rather than silently doing nothing. Use a build with **libx265** and
+exit non-zero if they are missing. Use a build with **libx265** and
 **libvmaf** - a distro ffmpeg typically lacks the latter, which is why the image exists.
 
 ### The filesystem check at startup
