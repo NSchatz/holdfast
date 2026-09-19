@@ -368,7 +368,7 @@ func TestRunFile_ScopesTheClassificationWithoutMovingTheTargetsDecision(t *testi
 	t.Run("the target's own root decides identically", func(t *testing.T) {
 		// The narrowing must not reach the target: a condition under ITS root refuses a
 		// scoped run exactly as it refuses a whole-library one.
-		cfgPath, state := nasLayout(t, "")
+		cfgPath, _ := nasLayout(t, "")
 		cfg, err := config.Load(cfgPath)
 		if err != nil {
 			t.Fatalf("load config: %v", err)
@@ -386,7 +386,6 @@ func TestRunFile_ScopesTheClassificationWithoutMovingTheTargetsDecision(t *testi
 		if len(scoped.Unclassified) != 0 {
 			t.Errorf("a single-root configuration reported %v as unclassified", scoped.Unclassified)
 		}
-		_ = state
 	})
 }
 
