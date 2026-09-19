@@ -164,6 +164,13 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintf(stdout, "config OK: %d library root(s)\n", len(cfg.LibraryRoots))
+	// The order the workers will be fed in, stated wherever the key is stated. An operator
+	// watching a queue cannot tell a configured order from an accident of the traversal by
+	// looking at what is running, so `validate` says which one is in force BEFORE they point
+	// it at a library - and it prints the RESOLVED value, so an absent key reads as the
+	// default rather than as nothing at all.
+	fmt.Fprintf(stdout, "queue order: %s - the order in which this configuration offers files "+
+		"to its workers (one of %s)\n", cfg.EffectiveQueueOrder(), config.QueueOrderList())
 	printResolvedProfiles(stdout, cfg)
 	// What this configuration MEANS, before what it has weakened. A disabled undo
 	// window is the shipped default and not a weakened gate, but it is the setting in
@@ -785,6 +792,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		"library_roots", cfg.LibraryRoots,
 		"encoder", cfg.Encoder, "crf", cfg.CRF, "preset", cfg.Preset,
 		"dry_run", cfg.DryRun,
+		"queue_order", cfg.EffectiveQueueOrder(),
 	)
 	logResolvedProfiles(cfg, log)
 	logConfigWarnings(cfg, log)
@@ -1044,6 +1052,7 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 			"control_enabled", !secrets.Get("server_auth_token").Empty(),
 			"read_gated", !secrets.Get("server_read_token").Empty(),
 			"scan_interval_sec", cfg.ScanIntervalSec,
+			"queue_order", cfg.EffectiveQueueOrder(),
 			"metrics", cfg.MetricsEnable,
 			"notify", notifier.Enabled(),
 			"run_window", window.String(),

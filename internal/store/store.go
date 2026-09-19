@@ -851,6 +851,27 @@ type Store interface {
 	// counts what it changed rather than what it asked for.
 	Reopen(ctx context.Context, path, fingerprint string, clearFailures bool) (bool, error)
 
+	// TerminalHolds reports which fingerprints recorded AT THIS PATH would turn a Claim
+	// away because their row is terminal and its recorded decision inputs still match
+	// current. It is the read-only half of the question Claim answers, taken with the
+	// same predicates, and it exists so a caller can decline to SPEND a worker on a file
+	// the claim would refuse without holding a second copy of the re-opening rule.
+	//
+	// It is never a verdict. It writes nothing, moves no row and decides nothing about the
+	// file: a caller that acts on it declines to offer a file this pass, and the next pass
+	// asks again. Claim remains the only thing that admits a file to the pipeline.
+	//
+	// It answers about the PATH and returns the fingerprints, because a row is keyed by
+	// path AND fingerprint: a file that has been edited or re-downloaded leaves its old
+	// row behind and is claimed exactly as an unseen file is, so a caller may only act on
+	// this where it can show the file still keys to one of the rows returned. An empty
+	// result means no row here would refuse a claim on those grounds.
+	//
+	// supersede carries the same skip reasons Claim is passed, so a row a mutable guard
+	// parked - one the claim would clear and re-claim - is not reported as a hold.
+	TerminalHolds(ctx context.Context, path string, current DecisionInputs,
+		supersede ...string) ([]string, error)
+
 	// SurveyDecisionInputs reports what the ledger says about the configuration its
 	// terminal decisions were taken under, measured against current: how many done and
 	// skipped rows record inputs that have moved, how many record none at all, and how

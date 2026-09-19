@@ -806,8 +806,18 @@ type holdBacks struct {
 	parked []store.SwapIncident
 }
 
+// held reports whether p is one of this snapshot's record-based hold-backs, and why.
+//
+// AN EMPTY SNAPSHOT ANSWERS WITHOUT TOUCHING THE FILESYSTEM. Resolving the form is what
+// makes two spellings of one path compare equal, and it costs a stat-family call per path
+// COMPONENT: EvalSymlinks walks the path. Against an empty map the answer is no whatever
+// the resolved form is, so resolving it buys nothing and spends that walk on every
+// candidate of every scan - which is the ordinary case, since a library with no parked
+// incident and no recorded replacement has an empty map. It is an identical answer by a
+// cheaper route and never a narrower check: the lookup below is unreachable only when there
+// is nothing to look up.
 func (h *holdBacks) held(p string) (string, bool) {
-	if h == nil {
+	if h == nil || len(h.paths) == 0 {
 		return "", false
 	}
 	why, ok := h.paths[resolvedForm(p)]

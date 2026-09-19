@@ -1180,10 +1180,21 @@ func (e *Engine) scanOnce(ctx context.Context, pass *listings, bud *budget) (map
 		return false
 	}
 
-	observed := e.enumerateStream(pass, sink{
+	// What the feed may decline to spend a worker on: a candidate whose ledger row Claim
+	// would refuse anyway (S0095 AC-9). Built once per pass, asked per candidate, and it
+	// decides NOTHING about the file - see feedHoldOut.
+	holdOut := e.newFeedHoldOut()
+
+	observed := e.enumerateOrdered(pass, sink{
 		offer: func(f string) bool {
 			if stop() {
 				return false
+			}
+			// Asked BEFORE the bound takes a slot: a row this feed declines to spend a
+			// worker on is one no decision is reached about, so it must not consume one of
+			// the decisions a bounded pass was told to make.
+			if holdOut.declines(ctx, f) {
+				return true
 			}
 			// The bound is asked HERE, where a file would be handed out, and it takes a
 			// slot before the send: a file in flight is a terminal outcome this pass has
@@ -1203,6 +1214,7 @@ func (e *Engine) scanOnce(ctx context.Context, pass *listings, bud *budget) (map
 		},
 		stopped: func() bool { return stop() || bud.met() },
 	})
+	holdOut.report()
 	close(ch)
 	wg.Wait()
 
@@ -1271,7 +1283,7 @@ func (e *Engine) enumerate() ([]string, map[string]bool) { return e.enumerateIn(
 // on the path a daemon takes ever holds the library's paths at once.
 func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
 	var files []string
-	observed := e.enumerateStream(pass, collect(&files))
+	observed := e.enumerateOrdered(pass, collect(&files))
 	return files, observed
 }
 

@@ -663,6 +663,25 @@ dry_run: false
 # workers: 1                 # concurrent encode workers (default 1 = sequential;
 #                             # CPU libx265 already saturates cores per encode, so
 #                             # raising this is an opt-in for many small/low-res files)
+# queue_order: path          # the order those workers are fed in. One of
+#                            #   path|largest|smallest|newest|oldest; any other value,
+#                            #   including an empty one, is a startup REFUSAL.
+#                            #   It decides SEQUENCE and never membership: the same files
+#                            #   are offered whatever it says, in a different order.
+#                            #     path      the library's own traversal order (the
+#                            #               default, and what this tool has always done).
+#                            #               It is the only value that holds nothing and
+#                            #               reads nothing: the first file reaches a worker
+#                            #               while the library is still being listed.
+#                            #     largest   biggest source first - the most reclaimed
+#                            #               bytes per hour of CPU.
+#                            #     smallest  smallest first - the most complete verdicts
+#                            #               per hour, for validating a new configuration.
+#                            #     newest    most recently modified first.
+#                            #     oldest    least recently modified first.
+#                            #   The four keyed orders read each candidate's size or
+#                            #   modification time ONCE and hold that key and the path
+#                            #   until the listing is finished; see docs/enumeration.md.
 
 # --- storage that is not local ---
 # holdfast's no-loss contract is stated for a LOCAL filesystem: an atomic
