@@ -247,6 +247,127 @@ func TestBoundedRun_LimitStopsAtThatManyTerminalOutcomes(t *testing.T) {
 	}
 }
 
+// everyTerminalRow is every row in a store whose status the LEDGER answers Terminal() for,
+// which is the set of decisions the bound is a count of.
+//
+// It is deliberately not terminalRows: that helper lists the three ordinary statuses, and
+// the two a swap incident records - indeterminate and applied-despite-error - are exactly
+// the rows a count of the ordinary three cannot see.
+func everyTerminalRow(t *testing.T, ts *testStore) []store.Job {
+	t.Helper()
+	rows, err := ts.List(context.Background(), []store.Status{
+		store.Done, store.Skipped, store.Failed,
+		store.WouldTranscode, store.Indeterminate, store.AppliedDespiteError,
+	}, 0)
+	if err != nil {
+		t.Fatalf("List(every terminal status): %v", err)
+	}
+	return rows
+}
+
+// TestBoundedRun_LimitCountsASwapIncidentAsTheDecisionItIs grades AC-4 over the outcomes a
+// swap that did not complete cleanly records: indeterminate and applied-despite-error.
+//
+// Both are terminal in this repository's own vocabulary - store.Status.Terminal() answers
+// yes for each and neither is ever re-claimable - so each is "a file this run carried to a
+// state the ledger records as final", which is the spec's own definition of what the bound
+// counts. They are written by recordIncident rather than by finishStore, so they are a
+// second writer of a terminal row and a second place the count has to be raised.
+//
+// What is at stake is the bound itself. A pass that never observes a decision being
+// recorded offers, encodes, gates and swaps every eligible file in the library, and the
+// applied-despite-error half is the sharp one: there the rename took effect, so the
+// overshoot replaces a source on a file the operator did not ask this run to touch.
+//
+// The branch is reached through the engine's own seams - a rename that reports an error,
+// over storage the filesystem lookup answers "nfs" for - which is how swap_test.go reaches
+// the same outcome.
+func TestBoundedRun_LimitCountsASwapIncidentAsTheDecisionItIs(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	root := t.TempDir()
+	for i := 0; i < 3; i++ {
+		mkH264(t, ffmpeg, filepath.Join(root, "film"+strconv.Itoa(i)+".mkv"), "8M")
+	}
+	eng := buildEngine(t, ffmpeg, ffprobe, root, nil, func(c *config.Config) { c.Workers = 1 })
+	eng.renameFn = failingRename(errSwap)
+	eng.fsLookup = lookups("nfs")
+	ts := eng.Store.(*testStore)
+
+	if err := eng.RunBounded(context.Background(), Bound{Limit: 1}); err != nil {
+		t.Fatalf("RunBounded(limit 1): %v", err)
+	}
+
+	rows := everyTerminalRow(t, ts)
+	// The fixture has to actually reach the branch, or the assertion below is vacuous.
+	incidents := 0
+	for _, r := range rows {
+		if r.Status == store.Indeterminate || r.Status == store.AppliedDespiteError {
+			incidents++
+		}
+	}
+	if incidents == 0 {
+		t.Fatalf("no swap-incident row was produced, so this fixture asserts nothing; rows: %+v", rows)
+	}
+	if len(rows) > 1 {
+		paths := make([]string, 0, len(rows))
+		for _, r := range rows {
+			paths = append(paths, filepath.Base(r.Path)+"="+string(r.Status))
+		}
+		t.Fatalf("a --limit 1 run recorded %d terminal outcomes (%v), want no more than 1: a row a "+
+			"swap incident writes is a decision this run took, so it spends the bound", len(rows), paths)
+	}
+}
+
+// TestBoundedRun_LimitHoldsWhereTheSwapCompletes is the anti-vacuity arm of the case above:
+// the identical fixture with the rename seam removed records exactly one outcome, so a
+// failure there is about the uncounted incident row rather than about the bound being
+// broken for every run.
+//
+// It grades AC-4.
+func TestBoundedRun_LimitHoldsWhereTheSwapCompletes(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	root := t.TempDir()
+	for i := 0; i < 3; i++ {
+		mkH264(t, ffmpeg, filepath.Join(root, "film"+strconv.Itoa(i)+".mkv"), "8M")
+	}
+	eng := buildEngine(t, ffmpeg, ffprobe, root, nil, func(c *config.Config) { c.Workers = 1 })
+	ts := eng.Store.(*testStore)
+
+	if err := eng.RunBounded(context.Background(), Bound{Limit: 1}); err != nil {
+		t.Fatalf("RunBounded(limit 1): %v", err)
+	}
+	if rows := everyTerminalRow(t, ts); len(rows) != 1 {
+		t.Fatalf("a --limit 1 run over three clean sources recorded %d terminal outcomes, want 1", len(rows))
+	}
+}
+
+// TestBoundedRun_LimitHoldsWithSeveralWorkers grades the half of AC-4 a single-worker
+// fixture cannot reach: the bound is exact where a pool of workers is holding files when
+// the last slot is recorded, which is what budget.admit's in-flight accounting is for.
+//
+// The assertion is two-sided on purpose. Fewer rows than the limit is a bound that stopped
+// early (an over-count), more is the overshoot the criterion forbids.
+func TestBoundedRun_LimitHoldsWithSeveralWorkers(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	for _, limit := range []int{1, 2, 3} {
+		t.Run("limit="+strconv.Itoa(limit), func(t *testing.T) {
+			root := t.TempDir()
+			for i := 0; i < 8; i++ {
+				mkHevc(t, ffmpeg, filepath.Join(root, "f"+strconv.Itoa(i)+".mkv"), "800k")
+			}
+			eng := buildEngine(t, ffmpeg, ffprobe, root, nil, func(c *config.Config) { c.Workers = 4 })
+			ts := eng.Store.(*testStore)
+			if err := eng.RunBounded(context.Background(), Bound{Limit: limit}); err != nil {
+				t.Fatalf("RunBounded(limit %d): %v", limit, err)
+			}
+			if rows := everyTerminalRow(t, ts); len(rows) != limit {
+				t.Fatalf("a --limit %d run over eight eligible files with four workers recorded %d "+
+					"terminal outcomes, want exactly %d", limit, len(rows), limit)
+			}
+		})
+	}
+}
+
 // TestBoundedRun_AnExhaustedLibraryIsACompleteRun grades AC-5: where the roots hold fewer
 // files eligible for a terminal outcome than the bound asks for, every one of them is
 // processed, the pass returns no error, and nothing about the unmet bound is recorded at
