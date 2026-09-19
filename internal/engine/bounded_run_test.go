@@ -11,6 +11,9 @@ package engine
 import (
 	"bytes"
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"sort"
@@ -366,6 +369,140 @@ func TestBoundedRun_LimitHoldsWithSeveralWorkers(t *testing.T) {
 			}
 		})
 	}
+}
+
+// terminalRowWriters is every store call that can create a terminal ledger row. A bound is
+// a count of those rows, so this set is what the count has to be complete over.
+var terminalRowWriters = map[string]bool{
+	"Finish":             true,
+	"RecordSkip":         true,
+	"RecordSwapIncident": true,
+}
+
+// TestBoundedRun_EveryWriterOfATerminalRowIsCounted is the other half of AC-4, and it is
+// the half that keeps the bound honest as the engine changes.
+//
+// A `--limit N` run stops on a count of the terminal rows it wrote, so the bound is only as
+// complete as the enumeration of what writes one. A writer that does not raise the count is
+// not a smaller bug than an off-by-one: the pass never observes a decision being recorded,
+// so it offers, encodes, gates and swaps EVERY eligible file in the library.
+//
+// So the enumeration is read out of the source rather than remembered. Every function in
+// this package that calls one of the three store writes above is held here, with whether it
+// raises the count, and a fourth writer or a fifth call site fails this rather than shipping
+// as a bound nobody can see is broken.
+func TestBoundedRun_EveryWriterOfATerminalRowIsCounted(t *testing.T) {
+	// The enumeration. Each entry is a function that writes a terminal row, and whether it
+	// must raise the count.
+	//
+	// recordRestoreInJobs is the one that must not, and it is not an exception to the rule
+	// so much as a case outside it: the undo window is reached by `holdfast restore`, an
+	// operator command that runs no pass, and it is deliberately separable from the engine
+	// (it has no counter to raise). A run pass that ever reaches it is the change that has
+	// to revisit this line.
+	want := map[string]bool{
+		"(*Engine).ProcessFile":             true,
+		"(*Engine).finishStore":             true,
+		"(*Engine).recordIncident":          true,
+		"(*UndoWindow).recordRestoreInJobs": false,
+	}
+
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		t.Fatalf("parse the engine package: %v", err)
+	}
+	pkg, ok := pkgs["engine"]
+	if !ok {
+		t.Fatal("no package engine here; this check cannot read the writers")
+	}
+
+	found := map[string]bool{}
+	for _, f := range pkg.Files {
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || !writesATerminalRow(fd) {
+				continue
+			}
+			name := funcName(fd)
+			found[name] = true
+			raises, expected := want[name]
+			if !expected {
+				t.Errorf("%s writes a terminal ledger row and is not in this enumeration: a bounded "+
+					"run counts rows it does not know are being written, so `--limit N` would carry "+
+					"every eligible file in the library", name)
+				continue
+			}
+			if raises != calls(fd, "countTerminalRow") {
+				t.Errorf("%s writes a terminal ledger row and raises the count: %v, want %v",
+					name, !raises, raises)
+			}
+		}
+	}
+	// The anti-vacuity arm: a walk that found nothing would agree with any enumeration at
+	// all, including an empty one.
+	for name := range want {
+		if !found[name] {
+			t.Errorf("the walk never found %s, so it grades less than it claims to", name)
+		}
+	}
+}
+
+// writesATerminalRow reports whether fd calls one of the store writes that can create a
+// terminal ledger row, on the store itself (`x.Store.Finish(...)`).
+func writesATerminalRow(fd *ast.FuncDecl) bool {
+	writes := false
+	ast.Inspect(fd, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || !terminalRowWriters[sel.Sel.Name] {
+			return true
+		}
+		if on, ok := sel.X.(*ast.SelectorExpr); ok && on.Sel.Name == "Store" {
+			writes = true
+		}
+		return true
+	})
+	return writes
+}
+
+// calls reports whether fd calls the named method on its own receiver.
+func calls(fd *ast.FuncDecl, name string) bool {
+	called := false
+	ast.Inspect(fd, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == name {
+			called = true
+		}
+		return true
+	})
+	return called
+}
+
+// funcName is how a function is named in the enumeration above: `(*Type).Method` for a
+// method, the plain name for anything else.
+func funcName(fd *ast.FuncDecl) string {
+	if fd.Recv == nil || len(fd.Recv.List) == 0 {
+		return fd.Name.Name
+	}
+	recv := fd.Recv.List[0].Type
+	if star, ok := recv.(*ast.StarExpr); ok {
+		if id, ok := star.X.(*ast.Ident); ok {
+			return "(*" + id.Name + ")." + fd.Name.Name
+		}
+	}
+	if id, ok := recv.(*ast.Ident); ok {
+		return id.Name + "." + fd.Name.Name
+	}
+	return fd.Name.Name
 }
 
 // TestBoundedRun_AnExhaustedLibraryIsACompleteRun grades AC-5: where the roots hold fewer

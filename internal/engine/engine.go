@@ -496,12 +496,14 @@ type Engine struct {
 	held atomic.Pointer[holdBacks]
 
 	// terminal counts the terminal ledger rows this ENGINE has recorded: one per file
-	// carried to a state the ledger records as final, whether that is a swap, a failure or
-	// a skip with a reason. It is raised exactly where such a row is WRITTEN, so a file
-	// that was enumerated, or that was turned away at the claim by a row it already had,
-	// raises nothing - which is what makes `--limit` a count of decisions rather than of
-	// directory entries (S0100). It only ever grows; a bounded pass reads the difference
-	// across itself rather than the absolute figure (see budget).
+	// carried to a state the ledger records as final, whether that is a swap, a failure, a
+	// skip with a reason or a swap that did not complete cleanly. Every writer of such a
+	// row raises it through countTerminalRow, which is where the enumeration of them lives
+	// and is the only place this moves, so a file that was enumerated, or that was turned
+	// away at the claim by a row it already had, raises nothing - which is what makes
+	// `--limit` a count of decisions rather than of directory entries (S0100). It only ever
+	// grows; a bounded pass reads the difference across itself rather than the absolute
+	// figure (see budget).
 	terminal atomic.Int64
 
 	// passes counts the scan passes IN FLIGHT, raised by RunOneshot just after it publishes
@@ -1639,8 +1641,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			e.Log.Warn("record withheld skip failed (still withholding the file)", "file", f, "err", err)
 		} else if changed {
 			// A terminal row was newly recorded here, so this file is one of the decisions
-			// a bounded run counts (see Engine.terminal).
-			e.terminal.Add(1)
+			// a bounded run counts (see countTerminalRow).
+			e.countTerminalRow(store.Skipped)
 			// Emitted only when it was newly recorded, so a live client sees it once and
 			// not once per scan for as long as the withholding stands.
 			e.emit(Event{Path: f, Status: store.Skipped, Outcome: e.because(SkipOperatorExcluded, by, prof, ts, pre)})
@@ -1683,8 +1685,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 				// so a store hiccup still skips the file.
 				e.Log.Warn("record hardlink skip failed (still skipping the file)", "file", f, "err", err)
 			} else if changed {
-				// A terminal row was newly recorded here too (see Engine.terminal).
-				e.terminal.Add(1)
+				// A terminal row was newly recorded here too (see countTerminalRow).
+				e.countTerminalRow(store.Skipped)
 				// Emit only when the skip was newly recorded, so a live client sees it once
 				// rather than once per scan for the lifetime of the seed.
 				e.emit(Event{Path: f, Status: store.Skipped, Outcome: e.because(SkipHardlinked, by, prof, ts, pre)})
@@ -2754,6 +2756,35 @@ func (e *Engine) recordUndeterminedHeight(ctx context.Context, worker, f, key st
 		e.because(SkipUndeterminedSourceHeight, by, prof, ts, props, read...))
 }
 
+// countTerminalRow raises the count of terminal ledger rows this engine has written, for a
+// row that WAS written and whose status the ledger itself calls final.
+//
+// It is the ONE place that count moves. Three store calls in this package can create a
+// terminal row, and each reaches here after its own write succeeded:
+//
+//   - Finish, through finishStore - the swap's done row, every failure, every skip a guard
+//     records after the claim.
+//   - RecordSkip, at the two guards that fire BEFORE the claim, and only where the write
+//     actually recorded a row rather than finding one already there.
+//   - RecordSwapIncident, through recordIncident - a swap that did not complete cleanly,
+//     which records indeterminate or applied-despite-error. Neither of those is ever
+//     re-claimable, so each is as final as a done row is.
+//
+// That enumeration is the whole of it, and it is what a count bound rests on: a writer that
+// does not reach here is a `--limit N` run that never observes a decision being recorded
+// and carries every eligible file in the library instead of the N it was asked for.
+//
+// store.Status.Terminal() is ASKED rather than assumed, because the ledger is the authority
+// on which of its own rows are final: a status it does not call final is not a decision a
+// bounded run has spent, and a status it starts calling final is counted here the day it
+// does.
+func (e *Engine) countTerminalRow(s store.Status) {
+	if !s.Terminal() {
+		return
+	}
+	e.terminal.Add(1)
+}
+
 // finishStore records a terminal outcome + its proof in the store WITHOUT emitting an
 // event. The Done swap path uses this (then emits one rich Done event itself); every
 // other terminal path uses finish, which emits as well.
@@ -2772,11 +2803,11 @@ func (e *Engine) finishStore(ctx context.Context, path, key string, s store.Stat
 		e.Log.Warn("store finish failed", "file", path, "status", s, "err", err)
 		return
 	}
-	// A terminal row was WRITTEN, which is what a bounded run counts (see Engine.terminal).
-	// It is raised here rather than at each call site so every terminal transition - done,
+	// A terminal row was WRITTEN, which is what a bounded run counts (see countTerminalRow).
+	// It is counted here rather than at each call site so every terminal transition - done,
 	// failed, skipped - is counted by construction, and a write that failed counts nothing
 	// because nothing was recorded.
-	e.terminal.Add(1)
+	e.countTerminalRow(s)
 }
 
 // finish records a terminal outcome AND emits an event carrying the SAME proof — used
