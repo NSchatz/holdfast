@@ -515,6 +515,55 @@ func (s *SQLite) Reopen(ctx context.Context, path, fingerprint string, clearFail
 	return n > 0, nil
 }
 
+// TerminalHolds is documented on the Store interface.
+//
+// It answers with the SAME two predicates Claim decides by - supersededBy and reopens - and
+// that is the whole reason it lives here rather than in the caller. A second reading of the
+// re-opening rule anywhere else in this repository would be a second answer to "is this row
+// still terminal", and the two would drift on the first change to either.
+//
+// It is a pure read on the ordinary (path, fingerprint) index's leading column, and it reads
+// every row at the path rather than one: a file that was re-downloaded leaves the old row
+// behind at the old key, so the question "which fingerprints would be refused here" has more
+// than one possible answer and the caller holds the one that decides it.
+func (s *SQLite) TerminalHolds(ctx context.Context, path string, current DecisionInputs,
+	supersede ...string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT fingerprint, status, reason, decision_inputs FROM jobs WHERE path = ?`, path)
+	if err != nil {
+		return nil, fmt.Errorf("store: terminal holds: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var held []string
+	for rows.Next() {
+		var fingerprint, status string
+		var reason, inputs sql.NullString
+		if err := rows.Scan(&fingerprint, &status, &reason, &inputs); err != nil {
+			return nil, fmt.Errorf("store: terminal holds scan: %w", err)
+		}
+		// Only the two statuses a DECISION INPUT can re-open. Every other refusal Claim
+		// makes - a parked failure, an active row, an indeterminate incident - is left to
+		// Claim, because none of them is what this read exists to see coming and each is a
+		// state the caller must not learn to reason about for itself.
+		st := Status(status)
+		if st != Done && st != Skipped {
+			continue
+		}
+		if supersededBy(reason.String, supersede) {
+			continue
+		}
+		if reopens(st, reason.String, ParseDecisionInputs(inputs.String), current) {
+			continue
+		}
+		held = append(held, fingerprint)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: terminal holds rows: %w", err)
+	}
+	return held, nil
+}
+
 // SurveyDecisionInputs is documented on the Store interface.
 //
 // It reads a row at a time rather than grouping by the stored value, and it has to: the

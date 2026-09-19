@@ -59,6 +59,7 @@ var knownKeys = map[string]bool{
 	"max_load": true, "tautulli_url": true, "tautulli_api_key": true,
 	"bitrate_kbps": true, "encode_profiles": true,
 	"scratch_dir": true, "scratch_min_free_gb": true,
+	queueOrderKey:   true,
 	excludePathsKey: true, includePathsKey: true,
 	audioLanguagesKey: true, subtitleLanguagesKey: true,
 	keepCommentaryKey: true, remuxOnlyKey: true,
@@ -109,16 +110,22 @@ func defaultLayer() map[string]any {
 		"vmaf_subsample":         1,
 		"vmaf_model":             "auto",
 		"workers":                1,
-		"server_addr":            defaultServerAddr,
-		"server_auth_token":      "",
-		"server_read_token":      "",
-		"scan_interval_sec":      0,
-		"metrics_enable":         true,
-		"notify_url":             "",
-		"run_window":             "",
-		"max_load":               0.0,
-		"tautulli_url":           "",
-		"tautulli_api_key":       "",
+		// The enumeration's own hand-out order, which is what this tool has always done, so
+		// a configuration that says nothing offers its files in exactly the sequence it
+		// always did. It is a real value in this layer rather than an empty string, because
+		// only a defaults layer that FILLS the key lets Load tell an absent key from one an
+		// operator wrote with no value (see queueorder.go).
+		queueOrderKey:       QueueOrderPath,
+		"server_addr":       defaultServerAddr,
+		"server_auth_token": "",
+		"server_read_token": "",
+		"scan_interval_sec": 0,
+		"metrics_enable":    true,
+		"notify_url":        "",
+		"run_window":        "",
+		"max_load":          0.0,
+		"tautulli_url":      "",
+		"tautulli_api_key":  "",
 		// Stream selection, every value reproducing what this tool did before the keys
 		// existed: carry every audio and subtitle stream, keep commentary, re-encode the
 		// video. A knob in profileKnobs is seeded from the top-level value of the same
@@ -514,6 +521,12 @@ type Config struct {
 	// 1 is an explicit opt-in (e.g. many small/low-resolution files, or a hardware
 	// encoder in a later phase). Use EffectiveWorkers() to read the resolved value.
 	Workers int `yaml:"workers"`
+
+	// QueueOrder is the order a scan offers its candidate files to those workers in:
+	// path (the default), largest, smallest, newest or oldest. It decides SEQUENCE and
+	// never membership. Read the resolved value through EffectiveQueueOrder(), which
+	// answers `path` for a Config that carries none; see queueorder.go.
+	QueueOrder string `yaml:"queue_order"`
 
 	// --- server / API (TRANSCODE-7, `holdfast serve`) ---
 
@@ -947,6 +960,30 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
+	// queue_order is checked against the value the FILE or the ENVIRONMENT carried, because
+	// this is the only layer at which a WRITTEN EMPTY value is still distinguishable from an
+	// absent key - the defaults layer above has already filled the second with `path`, and
+	// the struct below renders both as "". A key written with no value is a typo rather than
+	// a request for the default, and on the knob that decides which half of a library is
+	// processed first the fail-safe rule says refuse rather than guess. Every other invalid
+	// spelling is refused again by Validate, which is the door a Config assembled by hand
+	// comes through.
+	if explicitTop[queueOrderKey] {
+		// The layer that CARRIED it, not the merge: koanf leaves a key written with no value
+		// at all showing the defaults layer's own value, so reading the merge back would
+		// accept the one spelling this check exists for.
+		raw := k.Get(queueOrderKey)
+		if kf.Exists(queueOrderKey) {
+			raw = kf.Get(queueOrderKey)
+		}
+		if ke.Exists(queueOrderKey) {
+			raw = ke.Get(queueOrderKey)
+		}
+		if v := renderQueueOrder(raw); !ValidQueueOrder(v) {
+			return nil, queueOrderRefusal(v)
+		}
+	}
+
 	// max_height is a WHOLE NUMBER OF PIXELS this build must be able to target, and the
 	// decoders below would read 1080.5 as 1080, "1080" as 1080 and `true` as 1 without a
 	// word - three resolutions the operator did not write, on the knob that decides how many
@@ -1316,6 +1353,14 @@ func (c *Config) Validate() error {
 	}
 	if c.Workers < 0 || c.Workers > 1024 {
 		return fmt.Errorf("workers %d out of range (0-1024; 0 means the default of 1)", c.Workers)
+	}
+	// The order those workers are fed in. A written value outside the accepted set refuses
+	// at START and names both halves (cli L7): the alternative is a daemon that resolves an
+	// unreadable order to something and spends the next four hours processing a library in
+	// a sequence the operator did not ask for. An EMPTY value is refused by Load, which is
+	// the one layer that can tell it from an absent key.
+	if c.QueueOrder != "" && !ValidQueueOrder(c.QueueOrder) {
+		return queueOrderRefusal(c.QueueOrder)
 	}
 
 	// Server knobs (TRANSCODE-7). A non-empty bind address must be a valid
