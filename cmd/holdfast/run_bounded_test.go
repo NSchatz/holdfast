@@ -437,6 +437,12 @@ func TestRunHelp_ListsTheBoundsTheExampleAndEveryExitCode(t *testing.T) {
 // can reach, down to each integer literal returned as an exit code. A `return 4` added
 // anywhere on that path, without a row in runExitCodes, fails here rather than shipping as
 // a number the help text never mentions.
+//
+// A code can reach the command without being a literal, though, and that is the second
+// assertion below: `const exitSomething = 4` returned BY NAME is not an integer literal
+// anywhere on the path, so the walk cannot see it. Every exit* constant this package
+// declares must therefore appear in the table itself, which is the same property from the
+// other end - one declared set, no code outside it.
 func TestRunExitCodes_TheTableIsTheOnlySourceOfTruth(t *testing.T) {
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
@@ -500,6 +506,83 @@ func TestRunExitCodes_TheTableIsTheOnlySourceOfTruth(t *testing.T) {
 			t.Errorf("the run-path walk never reached %s, so it grades less than it claims to", want)
 		}
 	}
+
+	// Every exit* constant the package declares has a row. This is the leg the walk above
+	// cannot cover: a code spelled as a named constant and returned by name is no integer
+	// literal, so it would otherwise reach the command with nothing in the table and
+	// nothing in the help.
+	named := exitConstants(pkg)
+	if !named["exitRefused"] {
+		t.Fatal("no exit* constants were found, so this leg grades nothing")
+	}
+	inTable := identsIn(pkg, "runExitCodes")
+	if len(inTable) == 0 {
+		t.Fatal("runExitCodes was not found, so this leg grades nothing")
+	}
+	for name := range named {
+		if !inTable[name] {
+			t.Errorf("%s is declared as an exit code and has no row in runExitCodes - "+
+				"returning it by name would reach a caller that `run --help` never told about it", name)
+		}
+	}
+}
+
+// exitConstants is every constant in the package whose name declares it an exit code.
+func exitConstants(pkg *ast.Package) map[string]bool {
+	out := map[string]bool{}
+	for _, f := range pkg.Files {
+		for _, d := range f.Decls {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, name := range vs.Names {
+					if strings.HasPrefix(name.Name, "exit") {
+						out[name.Name] = true
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// identsIn is every identifier named in the value of the package-level variable v - here
+// the table itself, so what it declares is read from the declaration rather than from a
+// second list a test would have to maintain.
+func identsIn(pkg *ast.Package, v string) map[string]bool {
+	out := map[string]bool{}
+	for _, f := range pkg.Files {
+		for _, d := range f.Decls {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, name := range vs.Names {
+					if name.Name != v || i >= len(vs.Values) {
+						continue
+					}
+					ast.Inspect(vs.Values[i], func(n ast.Node) bool {
+						if id, ok := n.(*ast.Ident); ok {
+							out[id.Name] = true
+						}
+						return true
+					})
+				}
+			}
+		}
+	}
+	return out
 }
 
 // exitCodeResult reports the result position carrying an exit code - the LAST result,
@@ -525,8 +608,8 @@ func exitCodeResult(fd *ast.FuncDecl) (int, bool) {
 }
 
 // returnedIntLiterals collects every integer LITERAL returned in the exit-code position.
-// A named constant is not one, and does not need to be: the constants are the table's own
-// rows (exitcodes.go), so a code spelled by name is a code the table declares.
+// A named constant is not one: those are covered by the constants leg of the check above,
+// which holds every exit* constant to a row in the table rather than assuming it has one.
 func returnedIntLiterals(fd *ast.FuncDecl, at int) []int {
 	var out []int
 	ast.Inspect(fd, func(n ast.Node) bool {
