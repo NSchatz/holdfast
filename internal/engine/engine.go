@@ -495,6 +495,15 @@ type Engine struct {
 	// a second RunOneshot can never be observed mid-write.
 	held atomic.Pointer[holdBacks]
 
+	// terminal counts the terminal ledger rows this ENGINE has recorded: one per file
+	// carried to a state the ledger records as final, whether that is a swap, a failure or
+	// a skip with a reason. It is raised exactly where such a row is WRITTEN, so a file
+	// that was enumerated, or that was turned away at the claim by a row it already had,
+	// raises nothing - which is what makes `--limit` a count of decisions rather than of
+	// directory entries (S0100). It only ever grows; a bounded pass reads the difference
+	// across itself rather than the absolute figure (see budget).
+	terminal atomic.Int64
+
 	// passes counts the scan passes IN FLIGHT, raised by RunOneshot just after it publishes
 	// this pass's snapshot and lowered when the pass returns. It answers one question: is
 	// there a scan whose snapshot a decision taken now must agree with? See holdBacksInForce,
@@ -808,7 +817,14 @@ func decidedBy(root config.Root, known bool) store.Decision {
 // discovered files out to a pool of workers. A cancelled ctx stops workers picking up new
 // files and kills the in-flight encode's subprocess; the temp it was writing is orphaned but
 // never swapped in, and cleanStaleTemps sweeps it on the next startup.
-func (e *Engine) RunOneshot(ctx context.Context) error {
+func (e *Engine) RunOneshot(ctx context.Context) error { return e.runPass(ctx, Bound{}) }
+
+// runPass is the oneshot pass, unbounded or bounded, in one body. A bounded run is a
+// SMALLER run and not a lighter one, so the sequence below is the same sequence in the
+// same order and the bound changes exactly three things, each of them named in bounded.go:
+// what is offered, the two whole-library passes that are not run, and the record that says
+// so.
+func (e *Engine) runPass(ctx context.Context, b Bound) error {
 	// FILESYSTEM-1: read this run's hold-backs FIRST and publish them before anything
 	// walks a root. Every parked job is reported here, naming both of its files, and
 	// its two recorded paths - plus every recorded replacement path still carrying a
@@ -825,10 +841,12 @@ func (e *Engine) RunOneshot(ctx context.Context) error {
 	// every scan_interval_sec says it again on each pass.
 	e.ownershipNoticeGiven.Store(false)
 
-	// This pass's listings, taken here and used by the sweep and the enumeration between
-	// them, so every covered directory is listed exactly once for the whole pass: the
-	// startup walk's own where this is the first scan after that walk, this scan's where not.
-	pass := e.passListings()
+	// What this pass is bounded by and what that costs, said out loud BEFORE any of it
+	// happens: the two passes below that will not run are the operator-visible difference
+	// between this and an ordinary scan (S0100 AC-11).
+	if b.bounded() {
+		e.reportBound(b)
+	}
 
 	if _, err := e.Store.RecoverStale(ctx); err != nil {
 		// Fail safe: a stuck "active" row means one file is skipped this pass (Claim treats
@@ -845,17 +863,41 @@ func (e *Engine) RunOneshot(ctx context.Context) error {
 	// already retained: the second link on disk for ever, the space never returned. The
 	// setting governs whether a NEW retention is taken, nothing else.
 	e.undo().ReleaseExpired(ctx)
-	e.sweepStaleTemps(ctx, pass)
-	// The configured working location is swept here and not by sweepStaleTemps, and
-	// it is the one sweep that does NOT read this pass's listings: the scratch
-	// directory is not under a library root, so it is outside the coverage bound
-	// those listings are taken over and nothing in `pass` can describe it. It lists
-	// itself, once, under the same construction and the same hold-back exceptions -
-	// see cleanScratch.
-	e.cleanScratch(ctx)
-	observed, err := e.scanOnce(ctx, pass)
+
+	// A single named file is carried straight to the pipeline's own door: nothing is
+	// listed, so nothing below needs this pass's listings (see processOne).
+	if b.File != "" {
+		return e.processOne(ctx, b.File)
+	}
+
+	// This pass's listings, taken here and used by the sweep and the enumeration between
+	// them, so every covered directory is listed exactly once for the whole pass: the
+	// startup walk's own where this is the first scan after that walk, this scan's where not.
+	pass := e.passListings()
+
+	// THE TWO WHOLE-LIBRARY PASSES, and a bounded run runs neither (S0100 AC-10). Both
+	// reason from "this pass looked at the whole library": the sweep decides a file
+	// holdfast wrote is orphaned, and the retention pass decides a row's file is gone. A
+	// partial pass has no evidence for either, and the retention pass's mistake is an
+	// irreversible delete of audit history that no re-run restores.
+	if !b.bounded() {
+		e.sweepStaleTemps(ctx, pass)
+		// The configured working location is swept here and not by sweepStaleTemps, and
+		// it is the one sweep that does NOT read this pass's listings: the scratch
+		// directory is not under a library root, so it is outside the coverage bound
+		// those listings are taken over and nothing in `pass` can describe it. It lists
+		// itself, once, under the same construction and the same hold-back exceptions -
+		// see cleanScratch.
+		e.cleanScratch(ctx)
+	}
+	bud := e.budgetFor(b)
+	observed, err := e.scanOnce(ctx, pass, bud)
 	if err != nil {
 		return err
+	}
+	if b.bounded() {
+		bud.reportReached()
+		return nil
 	}
 	e.enforceRetention(ctx, observed)
 	return nil
@@ -1065,7 +1107,10 @@ func (e *Engine) sweepTemp(ctx context.Context, path string) bool {
 // does not weaken that: the map is written by this goroutine alone, it is returned only once
 // the enumeration has finished with it, and a directory enters it only after a listing of it
 // RETURNED - so a pass cut short mid-stream reports the directories it did list and no more.
-func (e *Engine) scanOnce(ctx context.Context, pass *listings) (map[string]bool, error) {
+// bud, when non-nil, is this pass's bound on how many files may reach a terminal outcome.
+// It is asked before each file is offered and released as each returns, so the pass stops
+// OFFERING at the bound rather than stopping work that is already under way.
+func (e *Engine) scanOnce(ctx context.Context, pass *listings, bud *budget) (map[string]bool, error) {
 	n := e.Cfg.EffectiveWorkers()
 	ch := make(chan string)
 	var wg sync.WaitGroup
@@ -1082,21 +1127,31 @@ func (e *Engine) scanOnce(ctx context.Context, pass *listings) (map[string]bool,
 		go func(workerID string) {
 			defer wg.Done()
 			for f := range ch {
-				if ctx.Err() != nil {
-					return
-				}
-				if err := e.ProcessFile(ctx, workerID, f); err != nil {
-					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-						mu.Lock()
-						if firstCancelErr == nil {
-							firstCancelErr = err
-						}
-						mu.Unlock()
-						return
+				// The release is deferred inside this closure rather than written after
+				// the call, so every way out of one file - a cancellation, an error, an
+				// ordinary return - gives the bound its slot back exactly once.
+				done := func() bool {
+					defer bud.release()
+					if ctx.Err() != nil {
+						return true
 					}
-					// A per-file error is logged and recorded inside ProcessFile and never
-					// takes down the scan; a non-context error here is unexpected.
-					e.Log.Warn("process file error (continuing)", "file", f, "err", err)
+					if err := e.ProcessFile(ctx, workerID, f); err != nil {
+						if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+							mu.Lock()
+							if firstCancelErr == nil {
+								firstCancelErr = err
+							}
+							mu.Unlock()
+							return true
+						}
+						// A per-file error is logged and recorded inside ProcessFile and
+						// never takes down the scan; a non-context error here is unexpected.
+						e.Log.Warn("process file error (continuing)", "file", f, "err", err)
+					}
+					return false
+				}()
+				if done {
+					return
 				}
 			}
 		}(workerID)
@@ -1128,14 +1183,23 @@ func (e *Engine) scanOnce(ctx context.Context, pass *listings) (map[string]bool,
 			if stop() {
 				return false
 			}
+			// The bound is asked HERE, where a file would be handed out, and it takes a
+			// slot before the send: a file in flight is a terminal outcome this pass has
+			// already committed to, so counting only what is RECORDED would let a pool of
+			// workers overshoot the bound by up to one file each. admit blocks rather
+			// than refusing while every slot is merely in flight - see budget.
+			if !bud.admit() {
+				return false
+			}
 			select {
 			case <-ctx.Done():
+				bud.release()
 				return false
 			case ch <- f:
 				return true
 			}
 		},
-		stopped: stop,
+		stopped: func() bool { return stop() || bud.met() },
 	})
 	close(ch)
 	wg.Wait()
@@ -1574,6 +1638,9 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			// a store hiccup still withholds the file.
 			e.Log.Warn("record withheld skip failed (still withholding the file)", "file", f, "err", err)
 		} else if changed {
+			// A terminal row was newly recorded here, so this file is one of the decisions
+			// a bounded run counts (see Engine.terminal).
+			e.terminal.Add(1)
 			// Emitted only when it was newly recorded, so a live client sees it once and
 			// not once per scan for as long as the withholding stands.
 			e.emit(Event{Path: f, Status: store.Skipped, Outcome: e.because(SkipOperatorExcluded, by, prof, ts, pre)})
@@ -1616,6 +1683,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 				// so a store hiccup still skips the file.
 				e.Log.Warn("record hardlink skip failed (still skipping the file)", "file", f, "err", err)
 			} else if changed {
+				// A terminal row was newly recorded here too (see Engine.terminal).
+				e.terminal.Add(1)
 				// Emit only when the skip was newly recorded, so a live client sees it once
 				// rather than once per scan for the lifetime of the seed.
 				e.emit(Event{Path: f, Status: store.Skipped, Outcome: e.because(SkipHardlinked, by, prof, ts, pre)})
@@ -2701,7 +2770,13 @@ func (e *Engine) recordUndeterminedHeight(ctx context.Context, worker, f, key st
 func (e *Engine) finishStore(ctx context.Context, path, key string, s store.Status, o *store.Outcome) {
 	if err := e.Store.Finish(ctx, path, key, s, o, e.Cfg.MaxFailures); err != nil {
 		e.Log.Warn("store finish failed", "file", path, "status", s, "err", err)
+		return
 	}
+	// A terminal row was WRITTEN, which is what a bounded run counts (see Engine.terminal).
+	// It is raised here rather than at each call site so every terminal transition - done,
+	// failed, skipped - is counted by construction, and a write that failed counts nothing
+	// because nothing was recorded.
+	e.terminal.Add(1)
 }
 
 // finish records a terminal outcome AND emits an event carrying the SAME proof — used

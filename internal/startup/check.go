@@ -219,6 +219,12 @@ type Result struct {
 	// LocalSet is the complete set of filesystem types this build classifies
 	// local.
 	LocalSet []string
+	// Unclassified names the configured library roots this check did NOT
+	// classify, in configuration order, because Check.ClassifyOnly narrowed it.
+	// It is empty for an ordinary whole-library check, and a caller that narrows
+	// one is expected to report it: a decision taken over part of the
+	// configuration is one whose reader has to be told which part.
+	Unclassified []string
 	// ScratchProbed records whether the scratch directory's writability probe
 	// actually ran - which is the only moment this check creates anything at all,
 	// and then only a zero-length file it removes again. It is on the Result so
@@ -244,6 +250,25 @@ type Check struct {
 	// enumerate as a source. Deciding it needs no read of any file, which is why
 	// the walk's cost is bounded by the directory tree and not by the library.
 	IsMediaFile func(base string) bool
+	// ClassifyOnly, when non-empty, narrows the library roots this check INSPECTS
+	// and WALKS to the ones it names. It exists for a run that acts under ONE
+	// root - `holdfast run --file` - where classifying a root the run provably
+	// never touches costs a traversal of it for a decision nothing reads.
+	//
+	// Roots stays the WHOLE configured set, and that is the point rather than an
+	// oversight: the declaration test is syntactic and decided from the declared
+	// text and the configured root text alone, so it must answer identically
+	// whether or not the classification was narrowed. A declaration naming a root
+	// this check did not classify is well formed exactly as before, and is
+	// reported as covering nothing IN THIS RUN rather than as malformed.
+	//
+	// What narrowing does change is stated plainly: a root that does not exist,
+	// cannot be inspected or sits on storage that is not local refuses the whole
+	// run when it is classified and does not when it is not. That is a narrowing
+	// of the decision to the paths the run will act on, and the roots left out
+	// are named in Unclassified so no caller can take it silently.
+	ClassifyOnly []string
+
 	// ScratchDir is the configured working location, or "" when the encoder
 	// writes beside the source. It is checked, classified and reported, and it
 	// is never walked: it is not a library and nothing is enumerated from it.
@@ -346,9 +371,15 @@ func (r *checkRun) run() {
 	wellFormed := r.checkDeclarations()
 
 	// (2) The roots and the state directory, classified before anything is
-	// walked and long before anything is opened.
+	// walked and long before anything is opened. A narrowed check inspects only
+	// the roots it was told to and names the rest, which is the ONE place the
+	// narrowing takes effect (see Check.ClassifyOnly).
 	rootInfo := make([]*Info, len(r.roots))
 	for i, root := range r.roots {
+		if !r.classifies(root) {
+			r.res.Unclassified = append(r.res.Unclassified, r.c.Roots[i])
+			continue
+		}
 		rootInfo[i] = r.inspectRoot(root)
 	}
 	r.inspectStateDir()
@@ -415,6 +446,35 @@ func (r *checkRun) checkDeclarations() []string {
 		ok = append(ok, text)
 	}
 	return ok
+}
+
+// classifies reports whether this check inspects and walks a configured root. An
+// un-narrowed check classifies every one of them, which is what `run` and `serve`
+// take over a whole library.
+func (r *checkRun) classifies(root string) bool {
+	if len(r.c.ClassifyOnly) == 0 {
+		return true
+	}
+	for _, only := range r.c.ClassifyOnly {
+		if cleanPath(only) == root {
+			return true
+		}
+	}
+	return false
+}
+
+// scopedOut reports the unclassified configured root a path lies at or beneath, or
+// "". It exists so a declaration naming such a path is reported for the reason that
+// is TRUE - this run did not classify that root - rather than as a declaration
+// covering a path where the walk found no mounted filesystem.
+func (r *checkRun) scopedOut(clean string) string {
+	for _, root := range r.res.Unclassified {
+		c := cleanPath(root)
+		if clean == c || lexicallyBeneath(clean, c) {
+			return root
+		}
+	}
+	return ""
 }
 
 func (r *checkRun) wellFormedHint() string {
@@ -701,10 +761,12 @@ func (r *checkRun) applyDeclarations(decls []string) {
 		// declaration can be compared against it (AC10a) and none can lift it,
 		// so calling it unnecessary would tell the operator to delete the line
 		// when the remedy is to grant permission or move the setting.
-		unresolvable := false
+		unresolvable, scopedOut := false, ""
 		if !matched {
 			if rec, ok := r.unresolvableRecord(cleanPath(d)); ok {
 				unresolvable, denied = true, rec.Denied
+			} else {
+				scopedOut = r.scopedOut(cleanPath(d))
 			}
 		}
 		switch {
@@ -712,6 +774,10 @@ func (r *checkRun) applyDeclarations(decls []string) {
 			r.notice(NoticeUnresolvable, d, "this declaration covers nothing: holdfast cannot inspect that path, and no declaration permits a run on a path it cannot inspect")
 		case unresolvable:
 			r.notice(NoticeUnresolvable, d, "this declaration covers nothing: the resolved form of that checked path could not be established, so no declaration can be compared against it")
+		case scopedOut != "":
+			r.notice(NoticeUnnecessary, d, "this declaration covers nothing IN THIS RUN: the classification was "+
+				"narrowed to the roots this run acts under, and "+scopedOut+" was not classified. Nothing is wrong "+
+				"with the line, and a whole-library run weighs it exactly as it always did")
 		case missing:
 			r.notice(NoticeUnnecessary, d, "this declaration covers nothing: the configured library root it names does not exist, so there is no storage there to classify or to permit")
 		case matched:

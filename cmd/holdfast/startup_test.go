@@ -176,7 +176,7 @@ func TestStartupCheck_AFreshInstallStarts(t *testing.T) {
 	substitute(t, fixedType("ext4"))
 
 	cfg := &config.Config{LibraryRoots: []string{lib}, StateDir: state, VideoExts: []string{"mkv"}}
-	res, code := startupCheck(cfg, discardLog(), io.Discard)
+	res, code := startupCheck(cfg, discardLog(), io.Discard, classifyScope{})
 	if code != 0 || !res.Start {
 		t.Fatalf("a fresh install was refused: code %d, causes %+v", code, res.Causes)
 	}
@@ -234,7 +234,7 @@ func TestStartupCheck_TheStateDirectoryIsCreatedOnlyAfterTheDecision(t *testing.
 				cfg.AllowNonLocal = []string{state}
 			}
 
-			res, code := startupCheck(cfg, discardLog(), io.Discard)
+			res, code := startupCheck(cfg, discardLog(), io.Discard, classifyScope{})
 			if code != 0 || !res.Start {
 				t.Fatalf("refused: %+v", res.Causes)
 			}
@@ -281,7 +281,7 @@ func TestStartupCheck_TheRelativeDefaultStateDirectoryIsPrintedAbsolute(t *testi
 	// The shipped default: state_dir is the RELATIVE string "state".
 	cfg := &config.Config{LibraryRoots: []string{lib}, StateDir: "state", VideoExts: []string{"mkv"}}
 	var errOut bytes.Buffer
-	res, code := startupCheck(cfg, discardLog(), &errOut)
+	res, code := startupCheck(cfg, discardLog(), &errOut, classifyScope{})
 	if code == 0 {
 		t.Fatal("a state directory on network storage started the run")
 	}
@@ -295,7 +295,7 @@ func TestStartupCheck_TheRelativeDefaultStateDirectoryIsPrintedAbsolute(t *testi
 
 	// Feed back exactly the text it printed: accepted, and it starts.
 	cfg.AllowNonLocal = printed
-	res2, code2 := startupCheck(cfg, discardLog(), io.Discard)
+	res2, code2 := startupCheck(cfg, discardLog(), io.Discard, classifyScope{})
 	if code2 != 0 || !res2.Start {
 		t.Fatalf("the declaration holdfast printed did not start the run: %+v", res2.Causes)
 	}
@@ -323,7 +323,7 @@ func TestStartupCheck_TheScanIsBoundedByTheWalk(t *testing.T) {
 	substitute(t, fixedType("ext4"))
 
 	cfg := &config.Config{LibraryRoots: []string{lib}, StateDir: filepath.Join(dir, "state"), VideoExts: []string{"mkv"}}
-	res, code := startupCheck(cfg, discardLog(), io.Discard)
+	res, code := startupCheck(cfg, discardLog(), io.Discard, classifyScope{})
 	if code != 0 {
 		t.Fatalf("refused: %+v", res.Causes)
 	}
@@ -366,7 +366,7 @@ func TestStartupCheck_AFilterDoesNotWidenTheLocalityRefusal(t *testing.T) {
 	filtered := base
 	filtered.ExcludePaths = []string{"**"}
 	var filteredErr bytes.Buffer
-	filteredRes, filteredCode := startupCheck(&filtered, discardLog(), &filteredErr)
+	filteredRes, filteredCode := startupCheck(&filtered, discardLog(), &filteredErr, classifyScope{})
 	if filteredCode == 0 || filteredRes.Start {
 		t.Fatalf("a filesystem that is not local started because a filter excluded it: code %d, causes %+v",
 			filteredCode, filteredRes.Causes)
@@ -380,7 +380,7 @@ func TestStartupCheck_AFilterDoesNotWidenTheLocalityRefusal(t *testing.T) {
 	// EXACTLY as it does today: the same decision, cause for cause, and the same account
 	// written to an operator, as the identical configuration with no filter in it.
 	var plainErr bytes.Buffer
-	plainRes, plainCode := startupCheck(&base, discardLog(), &plainErr)
+	plainRes, plainCode := startupCheck(&base, discardLog(), &plainErr, classifyScope{})
 	if plainCode != filteredCode || plainRes.Start != filteredRes.Start ||
 		len(plainRes.Causes) != len(filteredRes.Causes) || plainErr.String() != filteredErr.String() {
 		t.Errorf("a filter changed the locality decision:\n  with a filter: code %d, %d cause(s)\n%s\n"+
@@ -393,7 +393,7 @@ func TestStartupCheck_AFilterDoesNotWidenTheLocalityRefusal(t *testing.T) {
 	// where it was - so the refusal above is the locality rule and not the filter.
 	allowed := filtered
 	allowed.AllowNonLocal = []string{lib}
-	if res, code := startupCheck(&allowed, discardLog(), io.Discard); code != 0 || !res.Start {
+	if res, code := startupCheck(&allowed, discardLog(), io.Discard, classifyScope{}); code != 0 || !res.Start {
 		t.Fatalf("the declared filesystem was still refused: code %d, causes %+v", code, res.Causes)
 	}
 }

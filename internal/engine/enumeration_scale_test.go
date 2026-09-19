@@ -160,7 +160,7 @@ func measureEnumerationAt(b *testing.B, total int) scaleFigure {
 	}
 
 	e.EnsureHoldBacks(context.Background())
-	if _, err := e.scanOnce(context.Background(), e.passListings()); err != nil {
+	if _, err := e.scanOnce(context.Background(), e.passListings(), nil); err != nil {
 		b.Fatalf("scanOnce over %d paths: %v", total, err)
 	}
 	elapsed := time.Since(start)
