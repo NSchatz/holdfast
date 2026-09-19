@@ -64,14 +64,19 @@ func addBoundFlags(fs *flag.FlagSet) boundFlags {
 // It returns the bound, the classification scope a `--file` run may take, and the exit
 // code: exitOK to carry on, exitUsage for an invocation this command cannot read, and
 // exitRefused for a well-formed invocation naming a path this configuration would never
-// act on. The three are distinct because a caller treats them differently - fix your argv,
-// fix the host, or accept the answer is no.
+// act on. Those two are distinct because a caller treats them differently - fix your
+// argv, or accept that the answer is no - and neither is exitError, which stays what it
+// has always been: holdfast could not run.
 func resolveBound(cfg *config.Config, f boundFlags, stderr io.Writer) (engine.Bound, classifyScope, int) {
 	var b engine.Bound
 	var scope classifyScope
 
-	if raw := strings.TrimSpace(*f.limit); raw != "" {
-		n, err := strconv.Atoi(raw)
+	// A flag is ABSENT only when it carries the empty value the flag set defaults it to.
+	// Anything else was typed and must mean something: `--limit " "` is a value that is
+	// not a count, never a caller asking for no bound at all, because reading it as no
+	// bound would turn a request for two files into a run over the library.
+	if *f.limit != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(*f.limit))
 		if err != nil || n < 1 {
 			// The same code a missing --config returns, because it is the same kind of
 			// fault: the invocation could not be read, and nothing about the host or the
@@ -82,9 +87,13 @@ func resolveBound(cfg *config.Config, f boundFlags, stderr io.Writer) (engine.Bo
 		b.Limit = n
 	}
 
+	if *f.file == "" {
+		return b, scope, exitOK
+	}
 	target := strings.TrimSpace(*f.file)
 	if target == "" {
-		return b, scope, exitOK
+		fmt.Fprintln(stderr, "holdfast: --file: no path was given")
+		return b, scope, exitUsage
 	}
 	// A relative path is anchored against the working directory before anything judges
 	// it, exactly as `restore` and `requeue` anchor the path they are given: an operator
