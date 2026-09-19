@@ -511,11 +511,11 @@ func TestRunExitCodes_TheTableIsTheOnlySourceOfTruth(t *testing.T) {
 	// cannot cover: a code spelled as a named constant and returned by name is no integer
 	// literal, so it would otherwise reach the command with nothing in the table and
 	// nothing in the help.
-	named := exitConstants(pkg)
+	named := exitConstants(pkg.Files)
 	if !named["exitRefused"] {
 		t.Fatal("no exit* constants were found, so this leg grades nothing")
 	}
-	inTable := identsIn(pkg, "runExitCodes")
+	inTable := identsIn(pkg.Files, "runExitCodes")
 	if len(inTable) == 0 {
 		t.Fatal("runExitCodes was not found, so this leg grades nothing")
 	}
@@ -528,9 +528,9 @@ func TestRunExitCodes_TheTableIsTheOnlySourceOfTruth(t *testing.T) {
 }
 
 // exitConstants is every constant in the package whose name declares it an exit code.
-func exitConstants(pkg *ast.Package) map[string]bool {
+func exitConstants(files map[string]*ast.File) map[string]bool {
 	out := map[string]bool{}
-	for _, f := range pkg.Files {
+	for _, f := range files {
 		for _, d := range f.Decls {
 			gd, ok := d.(*ast.GenDecl)
 			if !ok || gd.Tok != token.CONST {
@@ -555,9 +555,9 @@ func exitConstants(pkg *ast.Package) map[string]bool {
 // identsIn is every identifier named in the value of the package-level variable v - here
 // the table itself, so what it declares is read from the declaration rather than from a
 // second list a test would have to maintain.
-func identsIn(pkg *ast.Package, v string) map[string]bool {
+func identsIn(files map[string]*ast.File, v string) map[string]bool {
 	out := map[string]bool{}
-	for _, f := range pkg.Files {
+	for _, f := range files {
 		for _, d := range f.Decls {
 			gd, ok := d.(*ast.GenDecl)
 			if !ok || gd.Tok != token.VAR {
