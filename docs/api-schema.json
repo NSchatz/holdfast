@@ -1,7 +1,7 @@
 {
   "schema": "holdfast.http-surface",
   "schema_version": "1",
-  "holdfast_version": "v0.2.0-47-gec9f57f",
+  "holdfast_version": "v0.3.0",
   "endpoints": [
     {
       "method": "GET",
@@ -594,6 +594,38 @@
                         }
                       },
                       {
+                        "name": "downscaled",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "downscale_scaler",
+                        "required": true,
+                        "type": {
+                          "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "vmaf_scored_width",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "vmaf_scored_height",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
                         "name": "selection_not_applied",
                         "required": false,
                         "type": {
@@ -1054,6 +1086,38 @@
                         "required": true,
                         "type": {
                           "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "downscaled",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "downscale_scaler",
+                        "required": true,
+                        "type": {
+                          "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "vmaf_scored_width",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "vmaf_scored_height",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
                           "nullable": true
                         }
                       },
@@ -2252,6 +2316,38 @@
                         "required": true,
                         "type": {
                           "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "downscaled",
+                        "required": true,
+                        "type": {
+                          "kind": "boolean",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "downscale_scaler",
+                        "required": true,
+                        "type": {
+                          "kind": "string",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "vmaf_scored_width",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
+                          "nullable": true
+                        }
+                      },
+                      {
+                        "name": "vmaf_scored_height",
+                        "required": true,
+                        "type": {
+                          "kind": "integer",
                           "nullable": true
                         }
                       },
