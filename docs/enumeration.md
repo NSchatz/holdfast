@@ -5,11 +5,16 @@ file reaches a worker while the tree is still being read, and what the scan hold
 grow with the number of files in the library. This document says which file goes first, and
 what the arrangement costs.
 
+Which file goes first is `queue_order`'s to decide, and its default - `path` - is the
+traversal described immediately below. The four other values are a sort laid over that
+traversal and are described under [a declared queue order](#declared-queue-order).
+
 ## The order files are handed out in
 
 <a id="enumeration-order"></a>
 
-A scan hands source files to its workers directory by directory, in the order the coverage
+Under `queue_order: path`, which is the default, a scan hands source files to its workers
+directory by directory, in the order the coverage
 set names them, and within one directory in entry-name order. The coverage set is the
 sequence the startup walk traversed, which is depth-first through each library root in
 entry-name order, so the whole sequence is fixed before the scan begins. An engine built
@@ -29,20 +34,78 @@ It is deliberately not a global sort of the full paths, and the difference is vi
 ordinary library: a file named `zz.mkv` sitting in a directory is handed out before
 everything inside that directory's subdirectories, where sorting the full path strings would
 put it last. A global sort cannot be produced without holding every path at once, which is
-the cost this arrangement exists to remove.
+the cost this arrangement exists to remove - and it is exactly the cost the four other
+`queue_order` values pay, in the one form that is affordable, for the one thing they buy.
 
 The read-only pass behind `holdfast plan` traverses the library the same way and reports what
 it found in that same sequence. There is one hand-out order in this repository, so a plan
-predicts the order a scan will work in as well as the set of files it will offer.
+predicts the order a scan will work in as well as the set of files it will offer. That holds
+under every `queue_order`: the order is imposed in one place, which both the scan and the
+plan drive.
 
-### What a declared queue order may build on this
+## A declared queue order
 
-An order that needs a key rather than a position - largest first, newest first - is a
-separate decision layered on this one, and it needs no change here. What this rule
-guarantees a later order is that the enumeration yields a stable, total sequence of candidate
-paths without materialising them, so an order that can be decided from a key may keep
-`(key, path)` pairs alone and state its own memory bound, and an order that is already this
-sequence keeps nothing at all.
+<a id="declared-queue-order"></a>
+
+`queue_order` names the order a scan offers its candidates in. It decides SEQUENCE and never
+membership: the coverage bound, the path filters and the record-based hold-backs settle
+which files are candidates before any ordering runs, so the same files are offered whatever
+the key says, in a different order.
+
+| value | what goes first |
+|---|---|
+| `path` | the traversal above: the default, and what this tool has always done |
+| `largest` | the biggest source, by byte count |
+| `smallest` | the smallest source |
+| `newest` | the most recently modified source |
+| `oldest` | the least recently modified source |
+
+Any other value, the empty string included, refuses to start and names the five it accepts.
+
+Each of the four keyed orders is TOTAL and deterministic in the sense the traversal is: two
+candidates carrying the same key break on the full path ascending, a path occurs once, and
+two scans over an unchanged library therefore offer the same files in the same sequence. A
+candidate whose key could not be read - it vanished between the listing and the ordering, or
+this process may not look at it - is offered after every candidate whose key WAS read, in
+path order among the others like it, with the reason recorded. It is never dropped: this
+decides sequence, and a file left out of a queue is a file that is never processed.
+
+### What a keyed order costs, and what `path` does not
+
+`path` reads no metadata at all and holds nothing per candidate. It is the traversal, so the
+figures below and every property above them are unchanged by this key existing.
+
+Each keyed order reads ONE attribute per candidate - the size and the modification time come
+out of the same read - and holds one `(key, path)` pair per candidate until the listing is
+finished, because a key cannot be sorted before every key has been seen. That is the whole
+of what it holds: not the listing, not the file information the key came out of, not the
+fingerprint. It follows that a keyed order does NOT reach its first worker before the
+library has been listed, and `path` remains the only value that does.
+
+<a id="queue-order-memory-figures"></a>
+
+Measured by `TestEnumerate_AKeyedOrderHoldsOnlyTheKeyAndThePath`, over a synthetic library
+of 100,000 candidates spread over 1,000 directories whose paths are at most 120 bytes. The
+reading is live heap above a baseline taken in the same process after the fixture was built,
+sampled 50 times across the listing.
+
+| library | held per candidate | held in total |
+|---|---|---|
+| 100,000 candidates under `largest` | 149.4 bytes | 14.94 MB |
+
+- Hardware: Intel Xeon E5-2680 v4 at 2.40 GHz, GOMAXPROCS=5, Linux amd64, in a container on
+  a shared host.
+- Build: `3385c19`, on `sdd/S0095-holdfast-queue-ordering`. Go 1.25.14.
+- Date: 2026-09-19.
+- Runs: 6, `-count=3` twice - three with the suite's own flags (`-race -covermode=atomic`)
+  and three without, because the figure has to hold under the flags the gate runs.
+- Spread: 14,938,256 to 14,943,856 bytes, which is 149.38 to 149.44 bytes per candidate.
+  The two sets of flags are inside each other's spread.
+
+There is no previous figure to state this against: nothing in this repository held a queue
+before it. The figure to compare it with is the one directly above - what the `path` order
+holds, which does not grow with the number of files at all - and the difference between
+them is the cost of being able to ask for an order at all.
 
 ## What a scan that stops early reports
 

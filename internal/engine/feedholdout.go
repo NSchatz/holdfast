@@ -40,6 +40,10 @@ type feedHoldOut struct {
 	// inputs resolves the decision inputs in force for one path WITHOUT touching the file,
 	// or reports that they cannot be resolved without one. nil disables the hold-out.
 	inputs func(path string) (store.DecisionInputs, bool)
+	// passed counts what this pass declined to spend a worker on, for the one line that
+	// says so out loud. It is written from the enumeration's own goroutine, which is the
+	// only one that asks.
+	passed int
 }
 
 // newFeedHoldOut builds the hold-out for one pass. The resolution it captures is a snapshot
@@ -94,14 +98,32 @@ func (f *feedHoldOut) declines(ctx context.Context, path string) bool {
 	now := probe.AttributesOf(fi).String()
 	for _, fingerprint := range held {
 		if fingerprint == now {
-			f.eng.Log.Info("not offering (its recorded outcome still holds under the configuration in "+
-				"force, so a worker would be turned away at the claim); the row is re-opened by a "+
-				"configuration change it can reason about, or by the local `holdfast requeue`",
-				"file", path)
+			// DEBUG per file and one INFO count per pass, exactly as the path filters
+			// report what they kept out and for the same reason: one line per file is the
+			// right detail when an operator is asking why a particular file was not
+			// touched, and the wrong volume for the steady state this exists for, which is
+			// a pass over a hundred thousand files that are all already decided.
+			f.eng.Log.Debug("not offering (its recorded outcome still holds under the configuration "+
+				"in force, so a worker would be turned away at the claim)", "file", path)
+			f.passed++
 			return true
 		}
 	}
 	return false
+}
+
+// report states what this pass declined to spend a worker on. An operator whose library is
+// mostly done sees a scan that offers almost nothing and has to be able to tell "everything
+// here is already decided" from "the scan is broken".
+func (f *feedHoldOut) report() {
+	if f == nil || f.passed == 0 {
+		return
+	}
+	f.eng.Log.Info("this pass did not spend a worker on files whose recorded outcome still holds "+
+		"under the configuration in force; each would have been turned away at the claim. A row is "+
+		"re-opened by a configuration change it can reason about, or by the local `holdfast requeue` "+
+		"(see docs/requeue.md)",
+		"files_their_recorded_outcome_still_holds", f.passed)
 }
 
 // feedInputsPerPath is the per-path decision-input resolution the FEED may use: the same

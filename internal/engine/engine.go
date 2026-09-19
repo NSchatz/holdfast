@@ -1214,6 +1214,7 @@ func (e *Engine) scanOnce(ctx context.Context, pass *listings, bud *budget) (map
 		},
 		stopped: func() bool { return stop() || bud.met() },
 	})
+	holdOut.report()
 	close(ch)
 	wg.Wait()
 

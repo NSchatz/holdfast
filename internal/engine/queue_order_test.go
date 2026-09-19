@@ -96,6 +96,25 @@ func orderingEngine(t *testing.T, root, order string) *Engine {
 	return eng
 }
 
+// coveredOrderingEngine is orderingEngine over the COVERAGE-bounded branch, with the
+// directories in the sequence a startup walk produces: a parent before its own
+// subdirectories.
+//
+// That branch is what a daemon runs, and it is the one whose hand-out order is NOT the
+// full paths in ascending order (docs/enumeration.md): a file sitting in a directory is
+// handed out before everything inside that directory's subdirectories. A case about the
+// tie-break has to be built on it, or "break ties on the path" and "leave ties in the
+// order they arrived" produce the same sequence and the assertion grades neither.
+func coveredOrderingEngine(t *testing.T, root, order string, dirs ...string) *Engine {
+	t.Helper()
+	eng := orderingEngine(t, root, order)
+	for i, d := range dirs {
+		dirs[i] = filepath.Join(root, d)
+	}
+	eng.Coverage = dirs
+	return eng
+}
+
 // enumerated is the sequence one enumeration hands out, as paths relative to root so a
 // failure message is readable.
 func enumerated(t *testing.T, eng *Engine, root string) []string {
@@ -195,28 +214,47 @@ func TestEnumerate_AnAbsentQueueOrderOffersExactlyWhatPathOffers(t *testing.T) {
 // TestEnumerate_LargestFirstIsTotalAndDeterministic is [AC-4], and it carries the name the
 // item mandated.
 //
-// THREE files share one size and one shares another, so the tie-break is exercised rather
-// than assumed, and the two sizes prove the key still outranks the path. The same library
-// is enumerated twice by two independently built engines: an order that depended on map
-// iteration, on the filesystem's own listing order or on anything else unstable passes once
-// and reds on the second reading.
+// THREE files share one size and one carries another, so the tie-break is exercised rather
+// than assumed and the second size proves the key still outranks the path.
+//
+// It is built on the COVERAGE branch, where the hand-out order is deliberately not the full
+// paths in ascending order: `movies/zulu.mkv` is handed out before everything under
+// `movies/sub/`, which a path sort puts first. So the three tied candidates ARRIVE in an
+// order the tie-break has to change, and a sort that merely left ties alone reds here. The
+// same library is then enumerated twice by two independently built engines: an order that
+// depended on map iteration, on the filesystem's own listing order or on anything else
+// unstable passes once and reds on the second reading.
 func TestEnumerate_LargestFirstIsTotalAndDeterministic(t *testing.T) {
 	root := writeLibrary(t, []orderedFile{
-		{rel: "zulu/same.mkv", bytes: 400, mtime: at(2020)},
-		{rel: "alpha/same.mkv", bytes: 400, mtime: at(2021)},
-		{rel: "mike/same.mkv", bytes: 400, mtime: at(2022)},
-		{rel: "zulu/biggest.mkv", bytes: 900, mtime: at(2019)},
+		{rel: "movies/mike.mkv", bytes: 400, mtime: at(2020)},
+		{rel: "movies/zulu.mkv", bytes: 400, mtime: at(2021)},
+		{rel: "movies/sub/alpha.mkv", bytes: 400, mtime: at(2022)},
+		{rel: "movies/sub/biggest.mkv", bytes: 900, mtime: at(2019)},
 	})
+	covered := func(order string) *Engine {
+		return coveredOrderingEngine(t, root, order, "movies", "movies/sub")
+	}
+
+	// The order the candidates ARRIVE in, which is the sequence the tie-break has to
+	// change. Asserted rather than assumed: if the traversal ever became a path sort, the
+	// case below would stop grading the tie-break and would say nothing about it.
+	arrive := enumerated(t, covered(config.QueueOrderPath), root)
+	if !slices.Equal(arrive, []string{"movies/mike.mkv", "movies/zulu.mkv",
+		"movies/sub/alpha.mkv", "movies/sub/biggest.mkv"}) {
+		t.Fatalf("the fixture arrives as %v, which is not the coverage branch's own order: the "+
+			"tie-break below would be graded against a sequence that already agrees with it", arrive)
+	}
+
 	want := []string{
 		// The distinct key first, then the three tied candidates on the FULL PATH
-		// ascending - not on the basename, and not in listing order.
-		"zulu/biggest.mkv", "alpha/same.mkv", "mike/same.mkv", "zulu/same.mkv",
+		// ascending - not on the basename, and not in the order they arrived.
+		"movies/sub/biggest.mkv", "movies/mike.mkv", "movies/sub/alpha.mkv", "movies/zulu.mkv",
 	}
-	first := enumerated(t, orderingEngine(t, root, config.QueueOrderLargest), root)
+	first := enumerated(t, covered(config.QueueOrderLargest), root)
 	if !slices.Equal(first, want) {
 		t.Errorf("largest-first offered\n  %v\nwant\n  %v", first, want)
 	}
-	second := enumerated(t, orderingEngine(t, root, config.QueueOrderLargest), root)
+	second := enumerated(t, covered(config.QueueOrderLargest), root)
 	if !slices.Equal(first, second) {
 		t.Errorf("two scans over an unchanged library offered\n  %v\nand\n  %v: a queue nobody can "+
 			"predict makes a partial run impossible to reason about", first, second)
@@ -225,8 +263,8 @@ func TestEnumerate_LargestFirstIsTotalAndDeterministic(t *testing.T) {
 	// The order is total under EVERY value, not only this one: two readings agree in all
 	// five, which is what makes a resumed pass a continuation rather than a reshuffle.
 	for _, order := range config.QueueOrders {
-		a := enumerated(t, orderingEngine(t, root, order), root)
-		b := enumerated(t, orderingEngine(t, root, order), root)
+		a := enumerated(t, covered(order), root)
+		b := enumerated(t, covered(order), root)
 		if !slices.Equal(a, b) {
 			t.Errorf("queue_order %q is not deterministic:\n  %v\nthen\n  %v", order, a, b)
 		}
@@ -496,6 +534,35 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
+// spentAWorker records every path a WORKER was actually spent on, which is the observable
+// AC-9 is about and is not the same as the set of paths that got past the claim: a file the
+// claim turns away has still cost a worker the attribute read, the hold-back re-check and
+// the claim transaction, and that cost is exactly what the feed's hold-out exists to avoid.
+//
+// PathIsExcluded is the marker because ProcessFile asks it of every file it is handed, on
+// the worker's own goroutine, and nothing else in a pass asks it at all.
+type spentAWorker struct {
+	store.Store
+	mu    sync.Mutex
+	paths []string
+}
+
+func (s *spentAWorker) PathIsExcluded(ctx context.Context, path string) (bool, error) {
+	s.mu.Lock()
+	s.paths = append(s.paths, path)
+	s.mu.Unlock()
+	return s.Store.PathIsExcluded(ctx, path)
+}
+
+// spent is the paths a worker was spent on, in the order they were handed over. The order
+// is the FEED's own as long as the pass runs one worker, which is this configuration's
+// default and is what the cases below rely on.
+func (s *spentAWorker) spent() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.paths...)
+}
+
 // TestScan_AResumedFeedPassesOverTheRowsAClaimWouldRefuse is [AC-9].
 //
 // The library is half decided: two files carry a terminal row recorded under the
@@ -516,8 +583,13 @@ func TestScan_AResumedFeedPassesOverTheRowsAClaimWouldRefuse(t *testing.T) {
 	cfg := baseCfg(root)
 	cfg.QueueOrder = config.QueueOrderLargest
 	st := newTestStore(t, root)
+	spent := &spentAWorker{Store: st}
 	logs := &lockedBuffer{}
-	eng := toollessEngine(t, cfg, st, slog.New(slog.NewTextHandler(logs, nil)))
+	// At DEBUG, because the per-file line is: one line per already-decided file is the
+	// right detail for an operator asking about one file and the wrong volume for a pass
+	// over a library of them, so the count is what an ordinary run records.
+	eng := toollessEngine(t, cfg, spent,
+		slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	ctx := context.Background()
 
 	// The two rows the configuration in force still re-derives, recorded through the same
@@ -542,44 +614,34 @@ func TestScan_AResumedFeedPassesOverTheRowsAClaimWouldRefuse(t *testing.T) {
 		}
 	}
 
-	// What a worker is actually handed. The attribute read is the first thing ProcessFile
-	// does with a path, so it is the observable for "a worker was spent on this file"; the
-	// feed's own confirming read is taken before the path is offered and is counted
-	// separately, so the two cannot be confused.
-	var mu sync.Mutex
-	var handed []string
-	eng.onClaim = func(_, p string) {
-		mu.Lock()
-		handed = append(handed, p)
-		mu.Unlock()
-	}
-
 	eng.EnsureHoldBacks(ctx)
 	if _, err := eng.scanOnce(ctx, eng.passListings(), nil); err != nil {
 		t.Fatalf("scanOnce: %v", err)
 	}
 
-	mu.Lock()
-	got := append([]string(nil), handed...)
-	mu.Unlock()
+	// The SET a worker was spent on, and the ORDER with it: largest-first puts the re-opened
+	// 700-byte file ahead of the unseen 500-byte one, so this one assertion grades both
+	// halves of the criterion. A file the claim would turn away still costs a worker its
+	// attribute read, its hold-back re-check and its claim transaction if the feed hands it
+	// over, and not spending that is the whole of what this is for.
+	got := spent.spent()
 	want := []string{path("lib/moved.mkv"), path("lib/unseen.mkv")}
 	if !slices.Equal(got, want) {
-		t.Errorf("the feed spent a worker on\n  %v\nwant\n  %v: a row whose recorded decision inputs "+
+		t.Errorf("a worker was spent on\n  %v\nwant\n  %v: a row whose recorded decision inputs "+
 			"still match is one the claim refuses, and a row whose inputs have moved is one it "+
-			"re-opens - the feed must pass over the first set and offer the second", got, want)
+			"re-opens - the feed must pass over the first set and offer the second, in the "+
+			"configured order", got, want)
 	}
 
-	// IN THE CONFIGURED ORDER, and not merely the right set: largest first puts the
-	// re-opened 700-byte file ahead of the unseen 500-byte one.
-	if len(got) == 2 && got[0] != path("lib/moved.mkv") {
-		t.Errorf("the resumed feed offered %s first; largest-first puts %s ahead of it",
-			got[0], path("lib/moved.mkv"))
-	}
-
-	// And it SAID so: a file an operator expected to be re-examined and that was passed
-	// over is otherwise invisible.
-	if !strings.Contains(logs.String(), "done-big.mkv") {
-		t.Errorf("nothing in the records names a file the feed passed over:\n%s", logs.String())
+	// And it SAID so, in both registers: the file by name at debug, and the COUNT in the
+	// line an ordinary run records. A library that is mostly done otherwise produces a scan
+	// that offers almost nothing and says nothing about why.
+	for _, want := range []string{"done-big.mkv", "done-small.mkv",
+		"files_their_recorded_outcome_still_holds=2"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("the records never say %q about the files this feed passed over:\n%s",
+				want, logs.String())
+		}
 	}
 }
 
@@ -596,7 +658,8 @@ func TestScan_AChangedFileIsStillOfferedThoughItsOldRowIsTerminal(t *testing.T) 
 
 	cfg := baseCfg(root)
 	st := newTestStore(t, root)
-	eng := toollessEngine(t, cfg, st, discardLogger())
+	spent := &spentAWorker{Store: st}
+	eng := toollessEngine(t, cfg, spent, discardLogger())
 	ctx := context.Background()
 
 	// A terminal row for the file AS IT WAS, recorded under the configuration in force.
@@ -621,15 +684,13 @@ func TestScan_AChangedFileIsStillOfferedThoughItsOldRowIsTerminal(t *testing.T) 
 		t.Fatal("the fixture did not change the file's key, so this case would prove nothing")
 	}
 
-	var handed []string
-	eng.onClaim = func(_, got string) { handed = append(handed, got) }
 	eng.EnsureHoldBacks(ctx)
 	if _, err := eng.scanOnce(ctx, eng.passListings(), nil); err != nil {
 		t.Fatalf("scanOnce: %v", err)
 	}
-	if len(handed) != 1 || handed[0] != p {
-		t.Errorf("the feed spent a worker on %v, want [%s]: the row is terminal for the file that WAS "+
-			"at this path, and the file there now has never been seen", handed, p)
+	if got := spent.spent(); !slices.Equal(got, []string{p}) {
+		t.Errorf("a worker was spent on %v, want [%s]: the row is terminal for the file that WAS "+
+			"at this path, and the file there now has never been seen", got, p)
 	}
 }
 
@@ -641,19 +702,19 @@ func TestScan_AChangedFileIsStillOfferedThoughItsOldRowIsTerminal(t *testing.T) 
 // themselves - and each is named in a record saying why.
 func TestEnumerate_ACandidateWhoseKeyCannotBeReadIsStillOfferedLast(t *testing.T) {
 	root := writeLibrary(t, []orderedFile{
-		{rel: "a/readable-small.mkv", bytes: 100, mtime: at(2020)},
-		{rel: "b/readable-big.mkv", bytes: 900, mtime: at(2021)},
-		{rel: "c/vanished.mkv", bytes: 500, mtime: at(2022)},
-		{rel: "d/refused.mkv", bytes: 700, mtime: at(2023)},
+		{rel: "movies/readable-small.mkv", bytes: 100, mtime: at(2020)},
+		{rel: "movies/sub/readable-big.mkv", bytes: 900, mtime: at(2021)},
+		// The two unreadable ones ARRIVE in the opposite order to the one they must be
+		// offered in, so the tie-break among them is graded rather than inherited.
+		{rel: "movies/vanished.mkv", bytes: 500, mtime: at(2022)},
+		{rel: "movies/sub/refused.mkv", bytes: 700, mtime: at(2023)},
 	})
-	vanished := filepath.Join(root, "c/vanished.mkv")
-	refused := filepath.Join(root, "d/refused.mkv")
+	vanished := filepath.Join(root, "movies/vanished.mkv")
+	refused := filepath.Join(root, "movies/sub/refused.mkv")
 
 	logs := &bytes.Buffer{}
-	cfg := baseCfg(root)
-	cfg.QueueOrder = config.QueueOrderLargest
-	eng := toollessEngine(t, cfg, newTestStore(t, root), slog.New(slog.NewTextHandler(logs, nil)))
-	eng.EnsureHoldBacks(context.Background())
+	eng := coveredOrderingEngine(t, root, config.QueueOrderLargest, "movies", "movies/sub")
+	eng.Log = slog.New(slog.NewTextHandler(logs, nil))
 	eng.statFn = func(path string) (os.FileInfo, error) {
 		switch path {
 		case vanished:
@@ -666,8 +727,8 @@ func TestEnumerate_ACandidateWhoseKeyCannotBeReadIsStillOfferedLast(t *testing.T
 
 	got := enumerated(t, eng, root)
 	want := []string{
-		"b/readable-big.mkv", "a/readable-small.mkv", // keyed, largest first
-		"c/vanished.mkv", "d/refused.mkv", // unreadable, after them, on the path
+		"movies/sub/readable-big.mkv", "movies/readable-small.mkv", // keyed, largest first
+		"movies/sub/refused.mkv", "movies/vanished.mkv", // unreadable, after them, on the path
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("a library with two unreadable keys was offered as\n  %v\nwant\n  %v: a candidate "+
