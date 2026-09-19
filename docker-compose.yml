@@ -25,7 +25,7 @@ services:
     #
     # The reference is read by scripts/compose-image-ref and resolved against the registry
     # by scripts/resolve-compose-image.sh on every release: docs/release.md, step 8.
-    image: ghcr.io/nschatz/holdfast:v0.2.0@sha256:cb5125e1e95c93ee05256a37a8878c30349b75bb2ee2918c6e7b0ee9b4a5ec32
+    image: ghcr.io/nschatz/holdfast:v0.3.0@sha256:7c588db698a86b1b789bed38a3916ed34b2d065c97cc5ca2a23ff66792bf9a34
     # Build it yourself instead of pulling (or if the GHCR package is not readable
     # without credentials - see docs/release.md, step 8):
     # build:
