@@ -29,6 +29,36 @@ An output that cannot be measured is rejected rather than assumed good. An ffmpe
 without libvmaf stops the tool instead of quietly downgrading the gate, and a
 score that could not be produced is never read as a score that passed.
 
+## What the gate is allowed to make faster
+
+<a id="gate-threading"></a>
+
+Scoring is the slowest phase of a job by a wide margin, and libvmaf invoked with
+no thread count runs on about one CPU however many the container was given. The
+count is therefore derived, from the CPU bandwidth limit this process is actually
+allowed rather than from the CPU count the host advertises, and divided across
+the encode workers that may score at the same time - so the gates of a run with
+four workers cannot together ask for more CPU than the container has. A quota
+that cannot be read is a warn and a stated fallback of one thread: the only
+number available to guess with is the host count, and guessing it is the
+oversubscription the derivation exists to avoid. The reader is
+`internal/cpuquota`.
+
+The count is a SPEED knob and nothing else, and two things keep it that way. It
+never changes which frames are scored - the sampling interval is operator
+configuration (`vmaf_subsample`) and is never derived from a duration, a file
+size, a CPU count or a quota, because a sampled gate bounds only the frames it
+sampled and that is a change to what [the three floors](#vmaf-pooling) mean. And
+it never changes the figures: the same pair scored at one thread and at the
+derived count must report the same mean, worst-frame pool and chroma figure to
+within 0.01 and reach the same verdict, which the suite measures on this build
+rather than assuming. The source is deleted on the strength of that verdict, so
+a faster gate that moved the number would not be an optimisation.
+
+The pixel format both streams are converted to is unchanged by any of it. What
+changed for speed is that the conversion is threaded to the same derived share,
+instead of to a libavfilter default taken from the host's CPU count.
+
 ## Why a number needs its conditions
 
 A VMAF score is a regression onto a subjective opinion scale under one viewing
