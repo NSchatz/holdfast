@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/cpuquota"
 	"github.com/NSchatz/holdfast/internal/downscale"
 	"github.com/NSchatz/holdfast/internal/fsclass"
 	"github.com/NSchatz/holdfast/internal/hdr"
@@ -329,6 +330,13 @@ type Engine struct {
 	// nested roots are refused at validate time, so exactly one root can ever contain a
 	// path and the answer needs no precedence rule.
 	roots []config.Root
+
+	// vmafThreads is how many threads every quality gate in this run asks libvmaf for,
+	// derived once in New from the CPU bandwidth this process is allowed and divided
+	// across the configured workers (see deriveVmafThreads). It is read once per run and
+	// not per file because the quota does not move under a running process, and because a
+	// per-file reading would put the same warn on every file of a library.
+	vmafThreads int
 
 	// staticMetadataIncomplete, when non-nil, replaces hdr.StaticMetadataIncomplete for the
 	// HDR10 static-metadata guard. Unexported test seam; production leaves it nil.
@@ -720,7 +728,10 @@ func New(cfg config.Config, p *probe.Prober, enc Encoder, st store.Store, log *s
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Engine{Cfg: cfg, Probe: p, Enc: enc, Store: st, Log: log, roots: cfg.RootProfiles()}
+	return &Engine{
+		Cfg: cfg, Probe: p, Enc: enc, Store: st, Log: log, roots: cfg.RootProfiles(),
+		vmafThreads: deriveVmafThreads(cpuquota.DefaultRoot, cfg.EffectiveWorkers(), log),
+	}
 }
 
 // rootFor answers the one question every decision below depends on: which library root was

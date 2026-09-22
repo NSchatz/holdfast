@@ -39,6 +39,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -125,7 +126,26 @@ type Request struct {
 	// Reference is the source it must still look like (libvmaf's second input).
 	Reference string
 	// Subsample is the frame-sampling interval; <1 is floored to 1 (every frame).
+	//
+	// It comes from operator configuration (vmaf_subsample) and from nothing else. It is
+	// never derived from the file's duration or size, from the CPU count or from the CPU
+	// quota, because an interval chosen by the machine changes WHAT THE FLOORS BOUND
+	// without the operator having asked for it: a sampled gate bounds the worst SAMPLED
+	// frame, and the unsampled ones are never seen at all. Threads is the knob that
+	// answers to the machine; this one answers to the operator.
 	Subsample int
+	// Threads is the libvmaf thread count, and it is REQUIRED on the same terms
+	// PixelFormat is: Score refuses anything below 1 rather than send a value libvmaf
+	// would read as its own default.
+	//
+	// It is a SPEED knob and must never be a measurement one. Scoring is by far the
+	// slowest phase of a job and libvmaf with no thread count runs on about one CPU, so
+	// the count is derived from the CPU bandwidth this process is actually allowed (see
+	// internal/cpuquota) and divided across the workers that may score at once. What it
+	// must not do is move the number: the score is what licenses deleting the source, so
+	// TestScore_ThreadCountDoesNotMoveTheScore (AC-3) measures the same pair at one thread
+	// and at the derived count and holds the three reported figures to 0.01 of each other.
+	Threads int
 	// Model is the libvmaf model spec, already resolved (see ResolveModel).
 	Model string
 	// PixelFormat is the format both inputs are converted to before scoring. It is
@@ -160,19 +180,12 @@ type Request struct {
 // unmeasured encode.
 var ErrUnavailable = errors.New("libvmaf is not available in this ffmpeg build")
 
-// Available reports whether the ffmpeg build exposes the libvmaf filter.
+// Available reports whether the ffmpeg build exposes the libvmaf filter. It reads the
+// same listing RequireChain reads, through the same parser, so "this build has libvmaf"
+// has one answer here.
 func Available(ctx context.Context, ffmpeg string) bool {
-	out, err := exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-filters").Output()
-	if err != nil {
-		return false
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		// filter listing columns: " .. libvmaf  VV->V  Calculate the VMAF ..."
-		if fields := strings.Fields(line); len(fields) >= 2 && fields[1] == "libvmaf" {
-			return true
-		}
-	}
-	return false
+	have, err := filterSet(ctx, ffmpeg)
+	return err == nil && have[LibvmafFilter]
 }
 
 // vmafLog is the subset of libvmaf's JSON log we consume. EVERY pooled statistic is a
@@ -238,6 +251,16 @@ func BuildFilter(req Request, logPath string) string {
 	if sub < 1 {
 		sub = 1
 	}
+	// The thread count is ALWAYS spelled, and never as 0. libvmaf's own default for
+	// n_threads is 0, which the library reads as "no thread pool" rather than as a
+	// request, so a graph that omits the option and a graph that sets it to 0 are the
+	// same one-CPU measurement. Score refuses a request below 1 before it reaches here;
+	// this floor is what keeps a direct BuildFilter caller from composing a graph that
+	// silently means the opposite of what it says.
+	threads := req.Threads
+	if threads < 1 {
+		threads = 1
+	}
 	// [0:v:0] = distorted (the encoded output), [1:v:0] = reference - stream-guard-allow.
 	// That marker exempts THIS line, which only NAMES the two labels to document the graph's
 	// shape: the format string below COMPOSES both from ScoredStream, so the comparison is
@@ -267,9 +290,9 @@ func BuildFilter(req Request, logPath string) string {
 	}
 	return fmt.Sprintf(
 		"[0:%s]%sformat=%s[dist];[1:%s]%sformat=%s[ref];"+
-			"[dist][ref]libvmaf=model=%s:feature=%s:log_fmt=json:log_path=%s:n_subsample=%d",
+			"[dist][ref]libvmaf=model=%s:feature=%s:log_fmt=json:log_path=%s:n_subsample=%d:n_threads=%d",
 		ScoredStream, dist, req.PixelFormat, ScoredStream, ref, req.PixelFormat,
-		req.Model, chromaFeature, escapeFilterValue(logPath), sub)
+		req.Model, chromaFeature, escapeFilterValue(logPath), sub, threads)
 }
 
 // Score measures distorted against reference in the request's NAMED pixel format and
@@ -284,6 +307,12 @@ func Score(ctx context.Context, ffmpeg string, req Request) (Result, error) {
 			"score a pair whose comparison format would be chosen by filter negotiation and " +
 			"recorded nowhere")
 	}
+	if req.Threads < 1 {
+		return Result{}, fmt.Errorf("vmaf: no thread count was named (Threads=%d) - refusing to "+
+			"score with a value libvmaf reads as its own default rather than as a request; the "+
+			"count is derived from the CPU quota this process is allowed (internal/cpuquota) and "+
+			"is at least 1", req.Threads)
+	}
 	logf, err := os.CreateTemp("", "holdfast-vmaf-*.json")
 	if err != nil {
 		return Result{}, fmt.Errorf("vmaf: temp log: %w", err)
@@ -292,7 +321,17 @@ func Score(ctx context.Context, ffmpeg string, req Request) (Result, error) {
 	logf.Close()
 	defer os.Remove(logPath)
 
+	// -filter_complex_threads bounds the OTHER thread pool this pass asks for. The two
+	// format conversions ahead of libvmaf are real work - both streams are converted to
+	// one named format every frame - and libavfilter threads them against the number of
+	// CPUs the HOST advertises when nothing says otherwise. That default ignores the
+	// cgroup bandwidth limit entirely, so on a limited container it is the same mistake
+	// n_threads was, and with more than one encode worker scoring at once it is that
+	// mistake multiplied by the worker count. Naming the derived share here keeps the
+	// conversion threaded and keeps every thread this gate asks for inside the quota the
+	// count was divided from.
 	cmd := exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+		"-filter_complex_threads", strconv.Itoa(req.Threads),
 		"-i", req.Distorted, "-i", req.Reference, "-lavfi", BuildFilter(req, logPath), "-f", "null", "-")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		msg := string(out)

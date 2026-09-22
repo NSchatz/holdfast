@@ -397,8 +397,19 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof
 	res, err := score(ctx, vmaf.Request{
 		Distorted: distorted,
 		Reference: reference,
+		// The sampling interval, from the profile and from nothing else. It is the
+		// operator's key (vmaf_subsample) and it changes WHAT THE FLOORS BOUND - a sampled
+		// gate bounds the worst sampled frame and never sees the rest - so it is never
+		// derived from this file's duration or size, nor from the CPU count or quota that
+		// Threads below is derived from. The startup warning that says what the floors
+		// then bound is config.Profile.warnings.
 		Subsample: prof.VmafSubsample,
-		Model:     model,
+		// The thread count, derived ONCE per run from the CPU bandwidth this process is
+		// allowed and divided across the configured workers (deriveVmafThreads). It is a
+		// speed knob only: which frames are scored is Subsample's business, and the figures
+		// that come back are held thread-invariant by the vmaf package's own proof.
+		Threads: e.vmafThreadCount(),
+		Model:   model,
 		// The comparison format, named by holdfast rather than negotiated by libavfilter.
 		PixelFormat: pixFmt,
 		// The reference's chain: the transformation the ENCODE applied, reproduced on the

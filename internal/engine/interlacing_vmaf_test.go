@@ -49,6 +49,7 @@ func scoreAgainst(t *testing.T, ffmpeg, ffprobe, distorted, reference string, fi
 		Distorted:       distorted,
 		Reference:       reference,
 		Subsample:       1,
+		Threads:         1,
 		Model:           vmaf.ResolveModel("auto", prober.Height(ctx, distorted)),
 		PixelFormat:     pixFmt,
 		ReferenceFilter: film.Spec,

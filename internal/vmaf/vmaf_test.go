@@ -525,11 +525,12 @@ func logPathIn(t *testing.T, graph string) string {
 }
 
 // req is the scoring request the older tests used implicitly: every frame, the HD
-// model, and an explicitly named comparison format (which Score now requires).
+// model, an explicitly named comparison format and an explicitly named thread count
+// (Score now requires both).
 func req(distorted, reference string) Request {
 	return Request{
 		Distorted: distorted, Reference: reference,
-		Subsample: 1, Model: "version=vmaf_v0.6.1", PixelFormat: "yuv420p10le",
+		Subsample: 1, Model: "version=vmaf_v0.6.1", PixelFormat: "yuv420p10le", Threads: 1,
 	}
 }
 

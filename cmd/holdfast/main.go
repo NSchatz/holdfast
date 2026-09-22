@@ -28,6 +28,8 @@ import (
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/deinterlace"
+	"github.com/NSchatz/holdfast/internal/downscale"
 	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/engine"
 	"github.com/NSchatz/holdfast/internal/logging"
@@ -576,6 +578,21 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope c
 		}
 	}
 
+	// The gate's CHAIN, in the same band and for the same reason as the model above. The
+	// model preflight proves libvmaf loads what it was asked to load; it says nothing
+	// about the rest of the graph the gate composes around it - the per-side conversion
+	// to the named comparison format, and the deinterlace or up-scale a configured root
+	// adds to it. A build missing one of those cannot assemble the chain for any file,
+	// and the two things it could do instead are both forbidden: compare in whatever
+	// format libavfilter negotiates, which is a measurement nobody named or recorded, or
+	// score nothing at all. So the run stops here, before the first encode.
+	if extras, gated := gateChainFilters(cfg); gated {
+		if err := vmaf.RequireChain(context.Background(), ffmpeg, extras...); err != nil {
+			fmt.Fprintf(stderr, "holdfast: %v\n", err)
+			return nil, nil, 1
+		}
+	}
+
 	prober := probe.New(ffmpeg, ffprobe)
 	enc := engine.FFmpegEncoder{FFmpeg: ffmpeg, Cfg: *cfg, Probe: prober}
 	// Belt: an explicit empty state_dir must not silently write the job DB into the
@@ -614,6 +631,44 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope c
 	// the same directories twice more.
 	eng.SetCoverage(res.Coverage, res.Entries)
 	return eng, st, 0
+}
+
+// gateChainFilters names the filters THIS configuration's scoring chains can compose on
+// top of the two the graph always carries, and says whether any root gates at all.
+//
+// The always-present pair belongs to the vmaf package and is not repeated here. What is
+// added is what the configuration asked for: a root that deinterlaces reproduces that
+// filter on the reference before the comparison, and a root with an output-height ceiling
+// scales the distorted output back up before it. Neither is checked on a configuration
+// that did not ask for it, because refusing a build over a filter no root will ever
+// compose would refuse a build this run works on.
+//
+// gated is false when no root has the perceptual gate enabled. Nothing then asks libvmaf
+// for anything, so refusing the run over the chain would be refusing a configuration that
+// cannot fail - and logConfigWarnings has already said, loudly, that there is no
+// perceptual gate at all.
+func gateChainFilters(cfg *config.Config) (extras []string, gated bool) {
+	seen := map[string]bool{}
+	add := func(name string) {
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		extras = append(extras, name)
+	}
+	for _, r := range cfg.RootProfiles() {
+		if !r.Profile.VmafGate() {
+			continue
+		}
+		gated = true
+		if f, ok := deinterlace.Lookup(r.Profile.Deinterlace); ok {
+			add(f.Name)
+		}
+		if r.Profile.MaxHeight > 0 {
+			add(downscale.FilterName)
+		}
+	}
+	return extras, gated
 }
 
 // profileUse is one distinct value a capability preflight has to check, and the roots
