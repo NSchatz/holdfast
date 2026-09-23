@@ -164,16 +164,17 @@ func verdict(pass bool) string {
 	return "REJECTED"
 }
 
-// TestS0160_AC1_TheGraphAlwaysNamesAnExplicitThreadCount: the built graph carries the
-// count it was given, spelled out, on every request.
+// TestS0160_AC1_TheGraphAlwaysNamesAnExplicitThreadCount: the built graph carries
+// libvmaf's part of the share it was given, spelled out, on every request - all of the
+// share but the filtergraph's one thread, and never less than 1.
 func TestS0160_AC1_TheGraphAlwaysNamesAnExplicitThreadCount(t *testing.T) {
-	for _, n := range []int{1, 2, 3, 6, 24} {
+	for n, libvmaf := range map[int]int{1: 1, 2: 1, 3: 2, 6: 5, 24: 23} {
 		r := Request{Distorted: "d.mkv", Reference: "r.mkv", Subsample: 1,
 			Model: "version=vmaf_v0.6.1", PixelFormat: comparisonFormat, Threads: n}
 		graph := BuildFilter(r, "/tmp/x.json")
 		// Anchored at the end of the graph, where the option is written, so a count of 16
 		// cannot satisfy an assertion about 1.
-		want := fmt.Sprintf("n_threads=%d", n)
+		want := fmt.Sprintf("n_threads=%d", libvmaf)
 		if !strings.HasSuffix(graph, want) {
 			t.Errorf("the graph does not end in %q, so libvmaf would fall back to its own default "+
 				"and score on about one CPU:\n%s", want, graph)
@@ -360,8 +361,9 @@ func limitedQuota(cpus float64) cpuquota.Quota {
 func scoredFrames(t *testing.T, bin string, r Request) []int {
 	t.Helper()
 	logPath := filepath.Join(t.TempDir(), "vmaf.json")
+	_, graphThreads := PoolThreads(r.Threads)
 	out, err := exec.Command(bin, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
-		"-filter_complex_threads", fmt.Sprint(r.Threads),
+		"-filter_complex_threads", fmt.Sprint(graphThreads),
 		"-i", r.Distorted, "-i", r.Reference, "-lavfi", BuildFilter(r, logPath),
 		"-f", "null", "-").CombinedOutput()
 	if err != nil {

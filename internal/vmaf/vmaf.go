@@ -134,17 +134,23 @@ type Request struct {
 	// frame, and the unsampled ones are never seen at all. Threads is the knob that
 	// answers to the machine; this one answers to the operator.
 	Subsample int
-	// Threads is the libvmaf thread count, and it is REQUIRED on the same terms
+	// Threads is this pass's whole thread SHARE, and it is REQUIRED on the same terms
 	// PixelFormat is: Score refuses anything below 1 rather than send a value libvmaf
 	// would read as its own default.
+	//
+	// It is the share and not the libvmaf count because a pass runs two thread pools, and
+	// both are paid for out of it (see PoolThreads). Handing the whole share to each would
+	// make every pass ask for twice what it was given, and the gates of every worker
+	// together for twice the quota the share was divided from.
 	//
 	// It is a SPEED knob and must never be a measurement one. Scoring is by far the
 	// slowest phase of a job and libvmaf with no thread count runs on about one CPU, so
 	// the count is derived from the CPU bandwidth this process is actually allowed (see
-	// internal/cpuquota) and divided across the workers that may score at once. What it
+	// internal/cpuquota) and divided across the gates that may score at once. What it
 	// must not do is move the number: the score is what licenses deleting the source, so
-	// TestScore_ThreadCountDoesNotMoveTheScore (AC-3) measures the same pair at one thread
-	// and at the derived count and holds the three reported figures to 0.01 of each other.
+	// TestS0160_AC3_ThreadCountDoesNotMoveTheGateFigures measures the same pair at one
+	// thread and at the derived count and holds the three reported figures to 0.01 of
+	// each other.
 	Threads int
 	// Model is the libvmaf model spec, already resolved (see ResolveModel).
 	Model string
@@ -220,6 +226,31 @@ const ChromaMetricName = "psnr_cb/psnr_cr min (dB)"
 // gate needs.
 const chromaFeature = "name=psnr"
 
+// PoolThreads splits ONE pass's thread share between the two thread pools a scoring pass
+// runs, and returns what each is asked for: libvmaf's own pool (n_threads), and the
+// filtergraph's (-filter_complex_threads), whose one thread carries out the per-side
+// pixel-format conversion and feeds libvmaf its frames.
+//
+// The two add up to the share, so a pass asks for what it was given and no more. The
+// filtergraph gets exactly one thread: its work per frame is the conversion, which is small
+// beside the scoring, and one is also libavfilter's own spelling of "no worker pool" - the
+// conversion runs on the graph's thread rather than being sliced across a pool the size of
+// the HOST, which is what the option left unset would give it. libvmaf gets the rest,
+// because scoring is the work the share exists to speed up.
+//
+// A share of 1 cannot be split into two pools of at least one each, and neither pool may be
+// asked for 0: libvmaf reads 0 as its own default, and libavfilter reads it as "one thread
+// per host CPU". So the floor is one each, which is the same floor cpuquota.Divide states for
+// a job: the smallest request that can be made at all.
+func PoolThreads(share int) (libvmaf, graph int) {
+	graph = 1
+	libvmaf = share - graph
+	if libvmaf < 1 {
+		libvmaf = 1
+	}
+	return libvmaf, graph
+}
+
 // ScoredStream is the video stream every comparison is made against, and the ONE place in the
 // program that spells it: BuildFilter composes both filtergraph input labels from it, and it
 // is the token recorded beside the score.
@@ -255,12 +286,10 @@ func BuildFilter(req Request, logPath string) string {
 	// n_threads is 0, which the library reads as "no thread pool" rather than as a
 	// request, so a graph that omits the option and a graph that sets it to 0 are the
 	// same one-CPU measurement. Score refuses a request below 1 before it reaches here;
-	// this floor is what keeps a direct BuildFilter caller from composing a graph that
-	// silently means the opposite of what it says.
-	threads := req.Threads
-	if threads < 1 {
-		threads = 1
-	}
+	// PoolThreads' floor is what keeps a direct BuildFilter caller from composing a graph
+	// that silently means the opposite of what it says. It is libvmaf's part of the share,
+	// not the whole of it: the filtergraph's thread is paid for out of the same share.
+	threads, _ := PoolThreads(req.Threads)
 	// [0:v:0] = distorted (the encoded output), [1:v:0] = reference - stream-guard-allow.
 	// That marker exempts THIS line, which only NAMES the two labels to document the graph's
 	// shape: the format string below COMPOSES both from ScoredStream, so the comparison is
@@ -321,17 +350,15 @@ func Score(ctx context.Context, ffmpeg string, req Request) (Result, error) {
 	logf.Close()
 	defer os.Remove(logPath)
 
-	// -filter_complex_threads bounds the OTHER thread pool this pass asks for. The two
-	// format conversions ahead of libvmaf are real work - both streams are converted to
-	// one named format every frame - and libavfilter threads them against the number of
-	// CPUs the HOST advertises when nothing says otherwise. That default ignores the
-	// cgroup bandwidth limit entirely, so on a limited container it is the same mistake
-	// n_threads was, and with more than one encode worker scoring at once it is that
-	// mistake multiplied by the worker count. Naming the derived share here keeps the
-	// conversion threaded and keeps every thread this gate asks for inside the quota the
-	// count was divided from.
+	// -filter_complex_threads bounds the OTHER thread pool this pass runs. Left unset,
+	// libavfilter slices the format conversions ahead of libvmaf across as many threads as
+	// the HOST advertises CPUs, which ignores the cgroup bandwidth limit exactly as an unset
+	// n_threads did - and does it once per gate scoring at once. It is named from the same
+	// share libvmaf's count came out of, so the two pools together ask for the share and
+	// not for twice it (PoolThreads).
+	_, graphThreads := PoolThreads(req.Threads)
 	cmd := exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
-		"-filter_complex_threads", strconv.Itoa(req.Threads),
+		"-filter_complex_threads", strconv.Itoa(graphThreads),
 		"-i", req.Distorted, "-i", req.Reference, "-lavfi", BuildFilter(req, logPath), "-f", "null", "-")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		msg := string(out)
