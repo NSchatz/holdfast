@@ -18,6 +18,7 @@ package cpuquota
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -145,6 +146,14 @@ func unlimited(source, origin string) Quota {
 // A cpu.max that is PRESENT and does not parse is an error, not a skipped file: that is
 // a layout this package does not understand, and continuing past it would report a
 // ceiling taken from some other level as if it were the whole answer.
+//
+// So is a cpu.max that is present and cannot be READ. Only a level where the file does
+// not exist is passed over - that is a level with no cpu controller delegated to it, and
+// it imposes nothing. A file that exists and refuses to be read (a permission, a
+// directory in its place, an I/O error) may be the very limit that binds this process,
+// and a minimum taken over the levels that happened to be readable is a figure that was
+// never read: on a host whose tightest ceiling is the unreadable one it is the host CPU
+// count dressed as a reading.
 func readV2(root string) (Quota, error) {
 	dir := filepath.Clean(filepath.Join(root, selfCgroupPath()))
 	if !within(root, dir) {
@@ -156,7 +165,8 @@ func readV2(root string) (Quota, error) {
 	for {
 		p := filepath.Join(dir, "cpu.max")
 		b, err := os.ReadFile(p)
-		if err == nil {
+		switch {
+		case err == nil:
 			read++
 			cpus, limited, perr := parseCPUMax(string(b))
 			if perr != nil {
@@ -168,6 +178,11 @@ func readV2(root string) (Quota, error) {
 			case !limited && unlimitedOrigin == "":
 				unlimitedOrigin = p
 			}
+		case errors.Is(err, fs.ErrNotExist):
+			// No cpu controller at this level: nothing here bounds the process.
+		default:
+			return Quota{}, fmt.Errorf("%s exists and could not be read, and it may be the limit "+
+				"that binds this process: %w", p, err)
 		}
 		if dir == root {
 			break
