@@ -109,7 +109,8 @@ func (p vmafThreadPlan) announce(log *slog.Logger) {
 	libvmafThreads, graphThreads := vmaf.PoolThreads(p.threads)
 	log.Info("libvmaf thread count derived from the CPU this process is allowed; a gate that "+
 		"starts while more files are in flight than there are workers takes a smaller share, "+
-		"and the gates scoring at once never hold more than the budget between them",
+		"and a gate whose named threads would take the gates scoring at once past the budget "+
+		"waits for one of them to finish",
 		"vmaf_threads", p.threads, "libvmaf_n_threads", libvmafThreads,
 		"filtergraph_threads", graphThreads, "gate_thread_budget", p.budget(),
 		"effective_cpus", p.quota.CPUs, "quota_limited", p.quota.Limited,
