@@ -115,6 +115,16 @@ type FFmpegEncoder struct {
 	// from.
 	Plan *StreamPlan
 
+	// X265 is the parallelism every libx265 encode this encoder builds is told to use:
+	// a worker-pool size and a frame-thread count, joined to the -x265-params string on
+	// the quality-targeted and the bitrate-targeted path alike. The run derives it once,
+	// from the CPU quota or the x265_cpus key (see DeriveX265), and hands it here.
+	//
+	// The zero value passes neither figure, which leaves libx265's own defaults in force
+	// and keeps the argv byte for byte what an encoder without this field built. No other
+	// encoder reads it: pools and frame-threads are libx265 mechanisms.
+	X265 encoder.X265Parallelism
+
 	// newProgressPipe, when non-nil, replaces os.Pipe when opening the channel ffmpeg
 	// writes -progress reports to. Unexported test seam (the engine tests are in this
 	// package): returning an error from it is how a test drives the "progress collection
@@ -292,8 +302,12 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 	// is the right one and not an accident - a deinterlacer interpolates from the fields the
 	// source carried, so it has to see them at the resolution they were shot at, and a
 	// resampler run first would have blended two fields into every line it produced.
+	//
+	// The libx265 parallelism joins the same -x265-params string as the colour block, ahead
+	// of it, and is "" when this encoder carries none. Every other family ignores the
+	// string, so their argv cannot move with it.
 	body = append(body, withDeinterlace(
-		withDownscale(buildArgs(spec, ts, pixFmt, colorArgs, x265Color), shrink), film)...)
+		withDownscale(buildArgs(spec, ts, pixFmt, colorArgs, e.X265.Params()+x265Color), shrink), film)...)
 
 	var pre []string
 	if spec.Key == "vaapi" {
@@ -442,8 +456,9 @@ func closeProgressPipe(r, w *os.File) {
 // source fidelity independent of which codec/encoder produces the bytes. Beyond
 // that each encoder family has its own quality-knob shape:
 //
-//   - libx265 (cpu): -preset/-crf plus x265Params (HDR10 static-metadata
-//     master-display/max-cll — a libx265-only mechanism).
+//   - libx265 (cpu): -preset/-crf plus -x265-params, which carries x265Extra: the
+//     encode's pool size and frame-thread count when it has them, then the HDR10
+//     static-metadata master-display/max-cll block (both libx265-only mechanisms).
 //   - libsvtav1 (svtav1): -preset (numeric 0-13, mapped from the config Preset
 //     word — see svtav1Preset) + -crf. No x265Params: AV1 HDR10 static-metadata
 //     carriage would need svt-av1-params mastering-display/content-light options,
@@ -469,15 +484,15 @@ func closeProgressPipe(r, w *os.File) {
 // instructions and passing both leaves which one wins to the encoder's own
 // precedence rules rather than to the operator. Everything else is unchanged: the
 // pixel format, the colour tags, -fps_mode passthrough and the libx265 preset and
-// x265Color block are the same on both paths, so a bitrate-targeted encode carries
-// exactly the same source fidelity as a quality-targeted one.
-func buildArgs(spec encoder.Spec, ts config.Transcode, pixFmt string, colorArgs []string, x265Color string) []string {
+// x265Extra block are the same on both paths, so a bitrate-targeted encode carries
+// exactly the same source fidelity, and the same parallelism, as a quality-targeted one.
+func buildArgs(spec encoder.Spec, ts config.Transcode, pixFmt string, colorArgs []string, x265Extra string) []string {
 	args := []string{"-pix_fmt", pixFmt}
 	args = append(args, colorArgs...)
 	args = append(args, "-fps_mode", "passthrough") // a VFR source is not forced to CFR
 
 	if ts.TargetsBitrate() {
-		return append(args, bitrateArgs(spec, ts, x265Color)...)
+		return append(args, bitrateArgs(spec, ts, x265Extra)...)
 	}
 
 	switch spec.Key {
@@ -485,7 +500,7 @@ func buildArgs(spec encoder.Spec, ts config.Transcode, pixFmt string, colorArgs 
 		args = append(args,
 			"-preset", ts.Preset,
 			"-crf", strconv.Itoa(ts.CRF),
-			"-x265-params", "log-level=error"+x265Color,
+			"-x265-params", "log-level=error"+x265Extra,
 		)
 	case "svtav1":
 		args = append(args,
@@ -580,7 +595,8 @@ func withHeadFilter(args []string, spec string) []string {
 // otherwise ignore the target:
 //
 //   - libx265 (cpu): -b:v alone selects libx265's ABR mode. -preset and the
-//     -x265-params HDR10 block stay exactly as they are on the quality path.
+//     -x265-params string - the parallelism and the HDR10 block - stay exactly as
+//     they are on the quality path.
 //   - libsvtav1 (svtav1): -b:v alone selects SVT-AV1's VBR mode; the numeric
 //     preset stays.
 //   - hevc_nvenc/av1_nvenc: -rc vbr with a real -b:v. The quality path passes
@@ -592,7 +608,7 @@ func withHeadFilter(args []string, spec string) []string {
 //     the quality path is.
 //   - hevc_amf: -rc vbr_peak with the target, in place of -rc cqp and the two QP
 //     values. AMF's cqp is a fixed-quantiser mode that ignores -b:v outright.
-func bitrateArgs(spec encoder.Spec, ts config.Transcode, x265Color string) []string {
+func bitrateArgs(spec encoder.Spec, ts config.Transcode, x265Extra string) []string {
 	rate := strconv.Itoa(ts.BitrateKbps) + "k"
 	var args []string
 	switch spec.Key {
@@ -600,7 +616,7 @@ func bitrateArgs(spec encoder.Spec, ts config.Transcode, x265Color string) []str
 		args = []string{
 			"-preset", ts.Preset,
 			"-b:v", rate,
-			"-x265-params", "log-level=error" + x265Color,
+			"-x265-params", "log-level=error" + x265Extra,
 		}
 	case "svtav1":
 		args = []string{

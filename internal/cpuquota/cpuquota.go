@@ -55,6 +55,33 @@ const (
 // a caller that cannot tell this from a real figure would be free to invent one.
 var ErrNoQuota = errors.New("the effective CPU quota could not be read")
 
+// ErrNoInterface reports, beside ErrNoQuota, that NEITHER layout's bandwidth file exists
+// under the root at all: no cpu.max anywhere on the v2 walk and no cpu.cfs_quota_us where
+// v1 puts it. That is a host with no CPU controller this build can see, which is an
+// ordinary state rather than a degraded one, and a caller may answer it differently from
+// a file that is there and could not be used - which is an InterfaceError instead.
+var ErrNoInterface = errors.New("no cgroup CPU bandwidth interface exists")
+
+// InterfaceError is a bandwidth file that EXISTS and could not be used: it could not be
+// read, or what it holds does not parse. It carries the file and what was read there, so
+// a caller stating the failure can name both rather than re-deriving them from a message.
+type InterfaceError struct {
+	// Path is the interface file that was tried.
+	Path string
+	// Content is what the file held, trimmed, and "" where it could not be read at all.
+	Content string
+	err     error
+}
+
+func (e *InterfaceError) Error() string { return e.err.Error() }
+
+func (e *InterfaceError) Unwrap() error { return e.err }
+
+// errAbsent marks a layout whose bandwidth file does not exist at all. It stays inside
+// this package: Read turns "absent under both layouts" into ErrNoInterface, and absent
+// under ONE layout says nothing on its own.
+var errAbsent = errors.New("interface file absent")
+
 // Quota is the CPU bandwidth this process may use, in whole-and-fractional CPUs.
 type Quota struct {
 	// CPUs is the effective bandwidth. Where Limited is false it carries the number of
@@ -78,7 +105,9 @@ var selfCgroup = "/proc/self/cgroup"
 
 // Read returns the effective CPU quota under the cgroup hierarchy mounted at root, trying
 // cgroup v2 first and cgroup v1 second, or an error wrapping ErrNoQuota when neither
-// layout can be read.
+// layout can be read. That error also wraps ErrNoInterface when neither layout's file
+// exists at all, and wraps the InterfaceError of each file that exists and could not be
+// used, so a caller can name the file and what it held.
 //
 // Which layout a host exposes is the host's choice and not something this process can
 // influence, so both are read and neither is assumed. Anything else - a hybrid mount
@@ -98,7 +127,11 @@ func Read(root string) (Quota, error) {
 	if v1 == nil {
 		return q, nil
 	}
-	return Quota{}, fmt.Errorf("%w under %s: cgroup v2: %v; cgroup v1: %v", ErrNoQuota, root, v2, v1)
+	if errors.Is(v2, errAbsent) && errors.Is(v1, errAbsent) {
+		return Quota{}, fmt.Errorf("%w under %s (%w): cgroup v2: %w; cgroup v1: %w",
+			ErrNoQuota, root, ErrNoInterface, v2, v1)
+	}
+	return Quota{}, fmt.Errorf("%w under %s: cgroup v2: %w; cgroup v1: %w", ErrNoQuota, root, v2, v1)
 }
 
 // Divide splits a quota across the jobs that may run at once and returns the whole-CPU
@@ -170,7 +203,8 @@ func readV2(root string) (Quota, error) {
 			read++
 			cpus, limited, perr := parseCPUMax(string(b))
 			if perr != nil {
-				return Quota{}, fmt.Errorf("%s: %w", p, perr)
+				return Quota{}, &InterfaceError{Path: p, Content: strings.TrimSpace(string(b)),
+					err: fmt.Errorf("%s: %w", p, perr)}
 			}
 			switch {
 			case limited && cpus < limit:
@@ -181,8 +215,8 @@ func readV2(root string) (Quota, error) {
 		case errors.Is(err, fs.ErrNotExist):
 			// No cpu controller at this level: nothing here bounds the process.
 		default:
-			return Quota{}, fmt.Errorf("%s exists and could not be read, and it may be the limit "+
-				"that binds this process: %w", p, err)
+			return Quota{}, &InterfaceError{Path: p, err: fmt.Errorf("%s exists and could not be read, "+
+				"and it may be the limit that binds this process: %w", p, err)}
 		}
 		if dir == root {
 			break
@@ -194,8 +228,8 @@ func readV2(root string) (Quota, error) {
 		dir = parent
 	}
 	if read == 0 {
-		return Quota{}, fmt.Errorf("no readable cpu.max between %s and %s",
-			filepath.Join(root, selfCgroupPath()), root)
+		return Quota{}, fmt.Errorf("no readable cpu.max between %s and %s: %w",
+			filepath.Join(root, selfCgroupPath()), root, errAbsent)
 	}
 	if math.IsInf(limit, 1) {
 		return unlimited(SourceAffinity, unlimitedOrigin), nil
@@ -216,6 +250,11 @@ func readV1(root string) (Quota, error) {
 	quotaPath := filepath.Join(dir, "cpu.cfs_quota_us")
 	periodPath := filepath.Join(dir, "cpu.cfs_period_us")
 	quota, err := readInt(quotaPath)
+	// Only the QUOTA file's absence is an absent layout. A quota with no period beside it
+	// is a layout that exists and cannot be used, and readInt already says so.
+	if errors.Is(err, fs.ErrNotExist) {
+		return Quota{}, fmt.Errorf("%s: %w", quotaPath, errAbsent)
+	}
 	if err != nil {
 		return Quota{}, err
 	}
@@ -228,20 +267,27 @@ func readV1(root string) (Quota, error) {
 		return Quota{}, err
 	}
 	if quota == 0 || period <= 0 {
-		return Quota{}, fmt.Errorf("%s/%s: quota %d period %d is not a bandwidth this build can read",
-			quotaPath, filepath.Base(periodPath), quota, period)
+		return Quota{}, &InterfaceError{Path: quotaPath,
+			Content: fmt.Sprintf("quota %d period %d", quota, period),
+			err: fmt.Errorf("%s/%s: quota %d period %d is not a bandwidth this build can read",
+				quotaPath, filepath.Base(periodPath), quota, period)}
 	}
 	return Quota{CPUs: float64(quota) / float64(period), Limited: true, Source: SourceCgroupV1, Origin: quotaPath}, nil
 }
 
+// readInt reads one v1 integer file. Every failure is an InterfaceError naming the file,
+// with what it held where anything could be read; a file that does not exist is one too,
+// and still answers errors.Is(err, fs.ErrNotExist) for the caller that has to tell an
+// absent layout from a broken one.
 func readInt(path string) (int64, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return 0, err
+		return 0, &InterfaceError{Path: path, err: err}
 	}
-	n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	s := strings.TrimSpace(string(b))
+	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("%s: %q is not an integer", path, strings.TrimSpace(string(b)))
+		return 0, &InterfaceError{Path: path, Content: s, err: fmt.Errorf("%s: %q is not an integer", path, s)}
 	}
 	return n, nil
 }
