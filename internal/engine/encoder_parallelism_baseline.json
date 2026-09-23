@@ -1,0 +1,88 @@
+{
+  "measures": "CFS bandwidth throttling of ONE libx265 encode, taken from the cgroup's own cpu.stat around the encode, with libx265 at its own host-sized default parallelism (before) and at the pool size and frame-thread count derived from the cgroup CPU quota (after)",
+  "criterion": "S0161-holdfast-x265-pool-from-cgroup AC-13",
+  "how_to_read": "A figure here means something only against the figure beside it, taken the same way on the same machine. It is NEVER a build gate: an absolute threshold on a shared runner false-positives at roughly 45% (performance PB5), so a regression is argued by re-running the same encode and comparing to these numbers, not by a check that reds. The CFS counters are cgroup-wide, so they include anything else that ran in this container's cgroup during the encode; idle_window is the same counters with nothing encoding, and sizes that noise.",
+  "machine": {
+    "cpu": "Intel(R) Xeon(R) CPU E5-2680 v4 @ 2.40GHz",
+    "logical_cpus_visible": 56,
+    "cgroup": "v2; the process sits at 0::/ of its own namespace, so the limit is the one at /sys/fs/cgroup/cpu.max",
+    "cpu_max": "500000 100000",
+    "quota_usec": 500000,
+    "period_usec": 100000,
+    "quota_cpus": 5,
+    "note": "a shared container carrying a real, finite CPU bandwidth limit: 5 CPUs of a 56-CPU host. The counters below are non-zero on both arms, so this is not a pair taken where they are always zero."
+  },
+  "build": {
+    "ffmpeg": "N-125875-g5d4d3bdc61 linux64-gpl, the Dockerfile's FFMPEG_VERSION pin as installed by scripts/install-ffmpeg.sh",
+    "libx265": "HEVC encoder version 4.2+37-b81f650e, 8bit+10bit+12bit",
+    "go": "go1.25.14 linux/amd64"
+  },
+  "commit": "4b40941d390b0801edb11cbce0436d7764afce87",
+  "commit_note": "the commit the measurement was taken AT, an ancestor of the commit carrying this file. The before arm is the argv the builder emits at 5c10f15 (origin/main before this change), which is the same argv with no parallelism in -x265-params. holdfast's own rules forbid dates in its files, and the commit identifies the tree more exactly than a date does.",
+  "encode": {
+    "source": "lavfi testsrc2=duration=5:size=1920x1080:rate=24, written as libx264 ultrafast at 20 Mb/s yuv420p (120 frames)",
+    "knobs": "the shipped defaults: encoder cpu, preset slow, crf 22, pixel_format auto (yuv420p10le for this 8-bit source)",
+    "argv": "ffmpeg -hide_banner -nostdin -loglevel error -y -i <source> -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -fps_mode passthrough -preset slow -crf 22 -x265-params <x265_params> -- <out>",
+    "before_x265_params": "log-level=error",
+    "after_x265_params": "log-level=error:pools=5:frame-threads=2",
+    "after_derived_by": "engine.DeriveX265(0, \"\") on this machine: source cgroup, 5 whole CPUs from cpu.max",
+    "method": "the two arms interleaved, alternating which goes first, 3 seconds apart; each sample is the difference of /sys/fs/cgroup/cpu.stat read immediately before and after one encode"
+  },
+  "runs": 5,
+  "idle_window": {
+    "wall_sec": 20.02,
+    "nr_periods": 175,
+    "nr_throttled": 0,
+    "throttled_usec": 0,
+    "usage_usec": 1036689,
+    "avg_cores": 0.05
+  },
+  "before": {
+    "nr_periods": { "min": 211, "median": 218, "max": 229 },
+    "nr_throttled": { "min": 190, "median": 194, "max": 196 },
+    "throttled_periods_pct": { "min": 85.2, "median": 88.8, "max": 90.0 },
+    "throttled_usec": { "min": 47927822, "median": 53478086, "max": 57733569 },
+    "wall_sec": { "min": 21.12, "median": 21.78, "max": 22.88 },
+    "usage_usec": { "min": 102526542, "median": 104831148, "max": 109787012 },
+    "avg_cores": { "min": 4.80, "median": 4.81, "max": 4.85 },
+    "samples": [
+      { "run": 1, "nr_periods": 229, "nr_throttled": 195, "throttled_usec": 47927822, "wall_sec": 22.88, "usage_usec": 109787012 },
+      { "run": 2, "nr_periods": 223, "nr_throttled": 196, "throttled_usec": 51805446, "wall_sec": 22.26, "usage_usec": 107164428 },
+      { "run": 3, "nr_periods": 218, "nr_throttled": 194, "throttled_usec": 53478086, "wall_sec": 21.78, "usage_usec": 104831148 },
+      { "run": 4, "nr_periods": 215, "nr_throttled": 191, "throttled_usec": 55627668, "wall_sec": 21.52, "usage_usec": 103992069 },
+      { "run": 5, "nr_periods": 211, "nr_throttled": 190, "throttled_usec": 57733569, "wall_sec": 21.12, "usage_usec": 102526542 }
+    ]
+  },
+  "after": {
+    "nr_periods": { "min": 196, "median": 211, "max": 233 },
+    "nr_throttled": { "min": 15, "median": 65, "max": 75 },
+    "throttled_periods_pct": { "min": 6.4, "median": 32.7, "max": 35.5 },
+    "throttled_usec": { "min": 101170, "median": 1398641, "max": 1763317 },
+    "wall_sec": { "min": 19.57, "median": 21.11, "max": 23.38 },
+    "usage_usec": { "min": 91192282, "median": 97967044, "max": 103600214 },
+    "avg_cores": { "min": 4.43, "median": 4.64, "max": 4.66 },
+    "samples": [
+      { "run": 1, "nr_periods": 233, "nr_throttled": 15, "throttled_usec": 101170, "wall_sec": 23.38, "usage_usec": 103600214 },
+      { "run": 2, "nr_periods": 214, "nr_throttled": 63, "throttled_usec": 679525, "wall_sec": 21.42, "usage_usec": 98526032 },
+      { "run": 3, "nr_periods": 211, "nr_throttled": 75, "throttled_usec": 1450701, "wall_sec": 21.11, "usage_usec": 97967044 },
+      { "run": 4, "nr_periods": 199, "nr_throttled": 65, "throttled_usec": 1763317, "wall_sec": 19.90, "usage_usec": 92454115 },
+      { "run": 5, "nr_periods": 196, "nr_throttled": 68, "throttled_usec": 1398641, "wall_sec": 19.57, "usage_usec": 91192282 }
+    ]
+  },
+  "after_against_before": "Against the stored before-figure, taken the same way on this machine in the same session: throttled periods fell from a median of 194 of 218 (88.8%, range 85.2-90.0%) to 65 of 211 (32.7%, range 6.4-35.5%), and time spent throttled from a median of 53.5 s per encode (range 47.9-57.7 s) to 1.4 s (range 0.1-1.8 s); the two ranges do not overlap on either counter. Wall time moved from a median of 21.78 s to 21.11 s and CPU consumed from 104.8 to 98.0 CPU-seconds, but both ranges overlap (21.12-22.88 against 19.57-23.38 s; 102.5-109.8 against 91.2-103.6 CPU-s), so this record claims the throttling drop and not a speed-up. libx265 at its default built a 56-thread pool and 5 frame threads here, against 5 and 2 after.",
+  "vmaf_ac11": {
+    "test": "internal/vmaf TestS0161_AC11_ParallelismDoesNotMoveTheGatesVerdict",
+    "source": "lavfi testsrc2=duration=5:size=320x240:rate=24, written as libx264 ultrafast at 12 Mb/s yuv420p",
+    "knobs": "libx265 crf 22, preset slow, yuv420p10le; scored by internal/vmaf Score with vmaf_v0.6.1, subsample 1, 1 thread, comparison format yuv420p10le",
+    "floors": { "min_vmaf": 95.0, "vmaf_min_pool": 60.0, "vmaf_min_chroma": 30.0 },
+    "runs": 3,
+    "spread_across_runs": "0 on every score of every candidate: the three runs produced identical figures",
+    "candidates": [
+      { "setting": "single frame thread", "x265_params": "log-level=error:pools=1:frame-threads=1", "harmonic_mean": 99.5382, "min": 96.6499, "chroma": 43.7953, "verdict": "PASSED" },
+      { "setting": "derived quota figure", "x265_params": "log-level=error:pools=5:frame-threads=2", "harmonic_mean": 99.5299, "min": 96.6499, "chroma": 43.7988, "verdict": "PASSED" },
+      { "setting": "libx265 host default", "x265_params": "log-level=error", "harmonic_mean": 99.5299, "min": 96.6499, "chroma": 43.7988, "verdict": "PASSED" }
+    ],
+    "spread_across_candidates": { "harmonic_mean": 0.0084, "min": 0.0, "chroma": 0.0035 },
+    "note": "the three candidates are different files (195200, 195554 and 195541 bytes); the derived and host-default ones score the same to four places. The closest any score comes to its floor is chroma at 43.80 against 30."
+  }
+}
