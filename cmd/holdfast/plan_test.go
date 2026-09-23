@@ -1028,7 +1028,14 @@ func TestPlan_NoPerFileEstimateOrScoreProjection(t *testing.T) {
 		if !strings.Contains(strings.ToLower(got), "estimat") {
 			t.Fatalf("%s carries no projection at all, so this proves nothing:\n%s", what, got)
 		}
-		lower := strings.ToLower(got)
+		// The PATHS are removed before the banned words are looked for, for the reason the
+		// per-line check below already removes them: a path is not a projection. The report
+		// prints the library root and the ledger, both of which live under the temporary
+		// directory this process was given, and that directory is named after whatever
+		// started it - so a grader reading the whole output would fire on a word that
+		// appears only in the name of a scratch directory and nowhere in the report's own
+		// figures.
+		lower := strings.ToLower(withoutPaths(got, lib, state, cfgPath, os.TempDir()))
 		for _, banned := range []string{"vmaf", "perceptual"} {
 			if strings.Contains(lower, banned) {
 				t.Fatalf("%s carries a %q projection for files nothing has encoded:\n%s", what, banned, got)
@@ -1052,6 +1059,20 @@ func TestPlan_NoPerFileEstimateOrScoreProjection(t *testing.T) {
 			}
 		}
 	}
+}
+
+// withoutPaths blanks each given path wherever it appears in s, longest first so a path
+// that contains another is removed whole rather than left in pieces. It is how a grader
+// reads what an output SAYS rather than where this process happened to put its files.
+func withoutPaths(s string, paths ...string) string {
+	sort.Slice(paths, func(i, j int) bool { return len(paths[i]) > len(paths[j]) })
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		s = strings.ReplaceAll(s, p, " ")
+	}
+	return s
 }
 
 // TestPlan_UnreadableFileIsCountedNotFatal is AC-13: a file or directory that cannot be read

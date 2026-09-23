@@ -475,7 +475,7 @@ func TestDownscale_ScoresAgainstTheSourceResolution(t *testing.T) {
 		t.Fatalf("no comparison pixel format for the pair")
 	}
 	req := vmaf.Request{
-		Distorted: out, Reference: src, Subsample: 1,
+		Distorted: out, Reference: src, Subsample: 1, Threads: 1,
 		Model:           vmaf.ResolveModel("auto", shrink.ScoredHeight()),
 		PixelFormat:     pixFmt,
 		DistortedFilter: shrink.ScoreSpec(),
@@ -504,7 +504,7 @@ func TestDownscale_ScoresAgainstTheSourceResolution(t *testing.T) {
 			"number or the number cannot be interpreted", right.DistortedFilter, shrink.ScoreSpec())
 	}
 	backwards, err := vmaf.Score(ctx, ffmpeg, vmaf.Request{
-		Distorted: out, Reference: src, Subsample: 1,
+		Distorted: out, Reference: src, Subsample: 1, Threads: 1,
 		Model:           vmaf.ResolveModel("auto", 240),
 		PixelFormat:     pixFmt,
 		ReferenceFilter: "scale=320:240:flags=" + downscale.Scaler,

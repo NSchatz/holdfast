@@ -75,7 +75,7 @@ func TestChromaOnlyDamageIsInvisibleToTheLumaGate(t *testing.T) {
 		"-x265-params", "log-level=error", "-pix_fmt", comparisonPixFmt, damaged)
 
 	req := func(dist string) Request {
-		return Request{Distorted: dist, Reference: ref, Subsample: 1,
+		return Request{Distorted: dist, Reference: ref, Subsample: 1, Threads: 1,
 			Model: "version=vmaf_v0.6.1", PixelFormat: comparisonPixFmt}
 	}
 	good, err := Score(context.Background(), bin, req(honest))

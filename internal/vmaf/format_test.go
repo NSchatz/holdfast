@@ -112,7 +112,7 @@ func TestScore_NamedFormatIsWhatLibvmafCompares(t *testing.T) {
 		"yuv420p12le", "yuv422p12le", "yuv444p12le",
 	} {
 		if n := conversionsAfterFormat(t, bin, Request{
-			Distorted: dist, Reference: ref, Subsample: 1,
+			Distorted: dist, Reference: ref, Subsample: 1, Threads: 1,
 			Model: "version=vmaf_v0.6.1", PixelFormat: f,
 		}); n != 0 {
 			t.Errorf("comparison format %q: ffmpeg auto-inserted %d conversion(s) between the "+
@@ -125,7 +125,7 @@ func TestScore_NamedFormatIsWhatLibvmafCompares(t *testing.T) {
 	// the conversion the assertion above forbids. If this ever reads 0 the check has
 	// stopped being able to detect the failure it exists for.
 	if n := conversionsAfterFormat(t, bin, Request{
-		Distorted: dist, Reference: ref, Subsample: 1,
+		Distorted: dist, Reference: ref, Subsample: 1, Threads: 1,
 		Model: "version=vmaf_v0.6.1", PixelFormat: "gbrp",
 	}); n == 0 {
 		t.Error("the mutation control saw no auto-inserted conversion for a format libvmaf " +
@@ -178,7 +178,8 @@ func TestScore_RecordsAndHonoursTheNamedFormat(t *testing.T) {
 		t.Fatalf("fixture drifted: comparison format is %q, want yuv420p10le", named)
 	}
 
-	base := Request{Distorted: dist, Reference: ref, Subsample: 1, Model: "version=vmaf_v0.6.1", PixelFormat: named}
+	base := Request{Distorted: dist, Reference: ref, Subsample: 1, Threads: 1,
+		Model: "version=vmaf_v0.6.1", PixelFormat: named}
 	first, err := Score(context.Background(), bin, base)
 	if err != nil {
 		t.Fatalf("Score: %v", err)
