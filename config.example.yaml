@@ -461,9 +461,10 @@ dry_run: false
 # unavailable (or the measurement fails), the encode is rejected — never accept an
 # unmeasured output. VMAF is a second full decode, and it is the slowest phase of a job:
 # it runs on a thread count derived from the CPU quota this process is allowed, divided
-# across `workers`, so a big library is paid for in CPU rather than in floors. Raising
-# vmaf_subsample buys speed by measuring fewer frames, which weakens both worst-frame
-# floors - reach for it only after the CPU the container is given is already in use.
+# across the files being processed at once, so a big library is paid for in CPU rather
+# than in floors. Raising vmaf_subsample buys speed by measuring fewer frames, which
+# weakens both worst-frame floors - reach for it only after the CPU the container is
+# given is already in use.
 #
 # THE GATE IS THREE NUMBERS, AND YOU NEED ALL OF THEM.
 #   min_vmaf        bounds the AVERAGE quality of the encode.

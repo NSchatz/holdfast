@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/cpuquota"
@@ -49,6 +50,58 @@ func TestS0160_AC2_TheQuotaIsDividedAcrossTheConfiguredWorkers(t *testing.T) {
 			t.Errorf("%d workers at %d threads each would ask for %d against a quota of 12",
 				tc.workers, got, got*tc.workers)
 		}
+	}
+}
+
+// TestS0160_AC2_AGateThatWouldTakeTheSumOverTheQuotaWaits is the bound the divided share
+// cannot give on its own. A gate sizes itself when it starts, so one that started with a
+// single file in flight holds the whole quota; a second file claimed after it divides the
+// quota by two, and its share still does not fit beside the first. It must wait for the
+// first to hand its threads back rather than run over the quota, and a run cancelled while
+// it waits must come back as an error rather than as a share.
+func TestS0160_AC2_AGateThatWouldTakeTheSumOverTheQuotaWaits(t *testing.T) {
+	eng := &Engine{Log: discardLogger(), vmafThreads: deriveVmafThreads(quotaRoot(t, 4), 1)}
+	ctx := context.Background()
+
+	// Both files stay in flight to the end, so the share the second gate takes once it is
+	// admitted is the one two files in flight divide the quota into.
+	defer eng.enterGateFlight()()
+	a, releaseA, err := eng.takeGateThreads(ctx, "a.mkv")
+	if err != nil || a != 4 {
+		t.Fatalf("a lone gate on a 4-CPU quota took %d threads (err %v), want 4", a, err)
+	}
+	defer eng.enterGateFlight()()
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if n, _, err := eng.takeGateThreads(cancelled, "b.mkv"); err == nil {
+		t.Errorf("a gate that could not fit beside a running one took %d threads, so the two "+
+			"together hold %d of a 4-CPU quota", n, a+n)
+	}
+
+	got := make(chan int, 1)
+	go func() {
+		n, release, err := eng.takeGateThreads(ctx, "b.mkv")
+		if err != nil {
+			t.Error(err)
+		}
+		got <- n
+		release()
+	}()
+	select {
+	case n := <-got:
+		t.Fatalf("the second gate took %d threads while the first still held 4 of a 4-CPU quota", n)
+	case <-time.After(200 * time.Millisecond):
+	}
+	releaseA()
+	select {
+	case n := <-got:
+		if n != 2 {
+			t.Errorf("the second gate took %d threads with two files in flight on a 4-CPU quota, "+
+				"want 2", n)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second gate never started after the first handed its threads back")
 	}
 }
 

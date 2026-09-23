@@ -398,6 +398,16 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof
 		}
 	}
 
+	// This gate's share of the quota, taken out of what the gates scoring right now hold
+	// and handed back when it returns (takeGateThreads). The only way it fails is the run
+	// being cancelled while it waits, which is a measurement that did not happen and is
+	// refused on the same terms as one that failed.
+	threads, release, err := e.takeGateThreads(ctx, reference)
+	if err != nil {
+		return vmafProof{}, GateVmafUnmeasured, store.FailureTransient, fmt.Errorf("VMAF measurement did not start (refusing to accept an unmeasured encode): %w", err)
+	}
+	defer release()
+
 	res, err := score(ctx, vmaf.Request{
 		Distorted: distorted,
 		Reference: reference,
@@ -408,11 +418,11 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof
 		// Threads below is derived from. The startup warning that says what the floors
 		// then bound is config.Profile.warnings.
 		Subsample: prof.VmafSubsample,
-		// The thread count, derived ONCE per run from the CPU bandwidth this process is
-		// allowed and divided across the configured workers (deriveVmafThreads). It is a
+		// The thread share, from the CPU bandwidth this process is allowed divided across
+		// the files in flight, and held inside the quota with every other gate's. It is a
 		// speed knob only: which frames are scored is Subsample's business, and the figures
 		// that come back are held thread-invariant by the vmaf package's own proof.
-		Threads: e.vmafThreadCount(),
+		Threads: threads,
 		Model:   model,
 		// The comparison format, named by holdfast rather than negotiated by libavfilter.
 		PixelFormat: pixFmt,

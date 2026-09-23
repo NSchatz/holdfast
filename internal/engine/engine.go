@@ -331,15 +331,22 @@ type Engine struct {
 	// path and the answer needs no precedence rule.
 	roots []config.Root
 
-	// vmafThreads is how many threads every quality gate in this run asks libvmaf for,
-	// derived once in New from the CPU bandwidth this process is allowed and divided
-	// across the configured workers (see deriveVmafThreads). It is read once per run and
-	// not per file because the quota does not move under a running process, and because a
-	// per-file reading would put the same warn on every file of a library.
+	// vmafThreads is the CPU bandwidth the quality gates in this run share, read once in
+	// New (see deriveVmafThreads). It is read once per run and not per file because the
+	// quota does not move under a running process, and because a per-file reading would
+	// put the same warn on every file of a library.
 	vmafThreads vmafThreadPlan
 	// vmafThreadsSaid guards the one announcement of that derivation. The workers reach
 	// the gate concurrently, so the guard is a Once and not a flag.
 	vmafThreadsSaid sync.Once
+	// gateFlight counts the files this engine has claimed under a root with the perceptual
+	// gate on and whose gates have not yet ruled, across EVERY pool that feeds ProcessFile -
+	// the scan's workers, the submission queue's and the watch's alike. It is what a gate divides the quota by when more files are in
+	// flight than the configured workers (see vmafThreadCount).
+	gateFlight atomic.Int64
+	// gateThreads is the account of the thread shares the gates scoring right now hold,
+	// and the bound that keeps their sum inside the quota (see takeGateThreads).
+	gateThreads gateBudget
 
 	// staticMetadataIncomplete, when non-nil, replaces hdr.StaticMetadataIncomplete for the
 	// HDR10 static-metadata guard. Unexported test seam; production leaves it nil.
@@ -1756,6 +1763,16 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	if e.onClaim != nil {
 		e.onClaim(worker, f)
 	}
+	// From the claim until its gates have ruled, a file under a root with the perceptual
+	// gate on is one the gate may be asked to score, so every gate that starts meanwhile
+	// divides the quota with it in mind. Every way out of this function lets go of it; the
+	// ordinary path lets go as soon as the gates return, because the swap that follows
+	// scores nothing.
+	leaveGateFlight := func() {}
+	if prof.VmafGate() {
+		leaveGateFlight = e.enterGateFlight()
+	}
+	defer leaveGateFlight()
 	// The claim moved this row to probing: surface it as a live "started" signal carrying
 	// the worker, so the UI shows the file entering the pipeline immediately.
 	e.emit(Event{Path: f, Status: store.Probing, Worker: worker})
@@ -2033,6 +2050,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 
 	e.advance(ctx, f, key, store.Verifying)
 	proof, gate, class, reason := e.verifyOutput(ctx, f, work, prof, targetCodec, plan, film, shrink)
+	leaveGateFlight()
 	// Record whatever VMAF measured, on the reject path too: the numbers that rejected an
 	// encode are exactly the ones an operator wants to see.
 	out.VmafMean, out.VmafMin, out.VmafModel = proof.Mean, proof.Min, proof.Model
