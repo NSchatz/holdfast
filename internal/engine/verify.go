@@ -384,6 +384,10 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof
 			e.Probe.PixFmt(ctx, reference), e.Probe.PixFmt(ctx, distorted))
 	}
 
+	// The one statement of how the thread count below was arrived at, made the first time
+	// the gate is used and never again.
+	e.announceVmafThreads()
+
 	score := e.vmafScore
 	if score == nil {
 		if !vmaf.Available(ctx, e.Probe.FFmpeg) {

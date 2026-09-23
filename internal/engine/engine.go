@@ -336,7 +336,10 @@ type Engine struct {
 	// across the configured workers (see deriveVmafThreads). It is read once per run and
 	// not per file because the quota does not move under a running process, and because a
 	// per-file reading would put the same warn on every file of a library.
-	vmafThreads int
+	vmafThreads vmafThreadPlan
+	// vmafThreadsSaid guards the one announcement of that derivation. The workers reach
+	// the gate concurrently, so the guard is a Once and not a flag.
+	vmafThreadsSaid sync.Once
 
 	// staticMetadataIncomplete, when non-nil, replaces hdr.StaticMetadataIncomplete for the
 	// HDR10 static-metadata guard. Unexported test seam; production leaves it nil.
@@ -730,7 +733,10 @@ func New(cfg config.Config, p *probe.Prober, enc Encoder, st store.Store, log *s
 	}
 	return &Engine{
 		Cfg: cfg, Probe: p, Enc: enc, Store: st, Log: log, roots: cfg.RootProfiles(),
-		vmafThreads: deriveVmafThreads(cpuquota.DefaultRoot, cfg.EffectiveWorkers(), log),
+		// Derived here and announced at the gate, not here: `plan` and `analyze` build an
+		// Engine to enumerate and never score one file, and a scoring thread count stated
+		// on their output is a line about work that is not going to happen.
+		vmafThreads: deriveVmafThreads(cpuquota.DefaultRoot, cfg.EffectiveWorkers()),
 	}
 }
 

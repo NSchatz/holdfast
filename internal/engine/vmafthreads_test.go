@@ -40,7 +40,7 @@ func TestS0160_AC2_TheQuotaIsDividedAcrossTheConfiguredWorkers(t *testing.T) {
 	}{
 		{1, 12}, {2, 6}, {3, 4}, {4, 3}, {5, 2}, {12, 1}, {24, 1},
 	} {
-		got := deriveVmafThreads(root, tc.workers, discardLogger())
+		got := deriveVmafThreads(root, tc.workers).threads
 		if got != tc.want {
 			t.Errorf("a 12-CPU quota across %d workers derived %d threads, want %d",
 				tc.workers, got, tc.want)
@@ -60,10 +60,10 @@ func TestS0160_AC1_NewWiresTheDerivedCountIntoTheEngine(t *testing.T) {
 		cfg := baseCfg(t.TempDir())
 		cfg.Workers = workers
 		eng := New(cfg, nil, nil, nil, discardLogger())
-		want := deriveVmafThreads(cpuquota.DefaultRoot, workers, discardLogger())
-		if eng.vmafThreads != want {
+		want := deriveVmafThreads(cpuquota.DefaultRoot, workers).threads
+		if eng.vmafThreads.threads != want {
 			t.Errorf("New with workers=%d carries %d threads, want the %d this host's quota derives",
-				workers, eng.vmafThreads, want)
+				workers, eng.vmafThreads.threads, want)
 		}
 		if eng.vmafThreadCount() < 1 {
 			t.Errorf("the gate would ask libvmaf for %d threads, which the library reads as its "+
@@ -90,7 +90,7 @@ func TestS0160_AC1_TheGateAsksForTheDerivedCount(t *testing.T) {
 		c.VmafEnable = boolPtr(true)
 		c.MinVmaf = 95
 	})
-	eng.vmafThreads = 7
+	eng.vmafThreads = vmafThreadPlan{threads: 7}
 	var asked []int
 	eng.vmafScore = func(ctx context.Context, req vmaf.Request) (vmaf.Result, error) {
 		asked = append(asked, req.Threads)
@@ -121,7 +121,8 @@ func TestS0160_AC5_AnUnreadableQuotaWarnsAndFallsBackWithoutFailingTheJob(t *tes
 	} {
 		t.Run(name, func(t *testing.T) {
 			var buf bytes.Buffer
-			got := deriveVmafThreads(root, 4, jsonLogger(&buf))
+			plan := deriveVmafThreads(root, 4)
+			got := plan.threads
 			if got != cpuquota.FallbackShare {
 				t.Errorf("an unreadable quota derived %d threads, want the stated fallback of %d",
 					got, cpuquota.FallbackShare)
@@ -129,6 +130,11 @@ func TestS0160_AC5_AnUnreadableQuotaWarnsAndFallsBackWithoutFailingTheJob(t *tes
 			if got < 1 {
 				t.Error("the fallback is below 1, which libvmaf reads as its own default")
 			}
+			// Announced through the Engine's own guard, twice, because the announcement is
+			// made once per run and the workers reach it concurrently.
+			eng := &Engine{Log: jsonLogger(&buf), vmafThreads: plan}
+			eng.announceVmafThreads()
+			eng.announceVmafThreads()
 			warns := 0
 			for _, r := range logRecords(t, &buf) {
 				if r["level"] != "WARN" {
@@ -173,7 +179,7 @@ func TestS0160_AC5_TheGateStillRunsOnAnUnreadableQuota(t *testing.T) {
 		c.MinVmaf = 95
 	})
 	// What an unreadable quota leaves behind.
-	eng.vmafThreads = deriveVmafThreads(t.TempDir(), 1, discardLogger())
+	eng.vmafThreads = deriveVmafThreads(t.TempDir(), 1)
 	ts := eng.Store.(*testStore)
 	scored := 0
 	eng.vmafScore = func(ctx context.Context, req vmaf.Request) (vmaf.Result, error) {
@@ -247,7 +253,7 @@ func TestS0160_AC11_TheDerivedCountNeverChangesTheSamplingInterval(t *testing.T)
 				c.MinVmaf = 95
 				c.VmafSubsample = configured
 			})
-			eng.vmafThreads = threads
+			eng.vmafThreads = vmafThreadPlan{threads: threads}
 			var asked []int
 			eng.vmafScore = func(ctx context.Context, req vmaf.Request) (vmaf.Result, error) {
 				asked = append(asked, req.Subsample)
