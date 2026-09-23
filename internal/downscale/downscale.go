@@ -46,11 +46,6 @@ import "strconv"
 // - so changing it changes what an old row means.
 const Scaler = "lanczos"
 
-// FilterName is the ffmpeg filter every expression here is built on, spelled once so the
-// startup check that asks whether this build PROVIDES it and the code that composes it
-// cannot name two different filters.
-const FilterName = "scale"
-
 // MinHeight is the smallest ceiling this build will target. It is 2 because a scaled
 // dimension has to be EVEN (see Resolve) and zero is not a picture; below that there is no
 // encode to gate.
@@ -113,7 +108,7 @@ func (s Scale) ScoredHeight() int { return s.SourceHeight }
 
 // spec renders one scale filter at the named scaler.
 func spec(w, h int) string {
-	return FilterName + "=" + strconv.Itoa(w) + ":" + strconv.Itoa(h) + ":flags=" + Scaler
+	return "scale=" + strconv.Itoa(w) + ":" + strconv.Itoa(h) + ":flags=" + Scaler
 }
 
 // Resolve is the WHOLE decision: what happens to a source of these dimensions under this

@@ -18,6 +18,15 @@ const ConversionFilter = "format"
 // LibvmafFilter is the measuring filter itself.
 const LibvmafFilter = "libvmaf"
 
+// ScaleFilter is the filter that actually PERFORMS every pixel-format conversion the chain
+// asks for. `format` only constrains what libavfilter negotiates; where a stream does not
+// already carry the named format, libavfilter satisfies the constraint by auto-inserting a
+// scale filter in front of it, and refuses the whole graph when the build has none. On the
+// default path that is every gated job - `pixel_format: auto` produces a 10-bit output, so
+// an 8-bit source always has to be converted - which is why the chain needs this filter
+// whether or not any root scales a picture.
+const ScaleFilter = "scale"
+
 // ErrChainFilterMissing reports that this ffmpeg build does not provide a filter the
 // gate's chain composes.
 //
@@ -29,12 +38,15 @@ const LibvmafFilter = "libvmaf"
 // gate, so neither is a degradation this tool is allowed to choose.
 var ErrChainFilterMissing = errors.New("the ffmpeg build does not provide a filter the quality gate's chain needs")
 
-// ChainFilters is every filter the SCORING graph composes on its own, whatever the
-// configuration: the per-side conversion to the named comparison format and libvmaf. A
-// run may add more - a deinterlace on the reference, an up-scale on the distorted output -
-// and those reach RequireChain as extras, because they come from the configuration and
-// refusing a build over a filter no root asked for would refuse a build that works.
-func ChainFilters() []string { return []string{ConversionFilter, LibvmafFilter} }
+// ChainFilters is every filter the SCORING graph needs on its own, whatever the
+// configuration: the per-side constraint to the named comparison format, the scaler that
+// carries out the conversion that constraint demands, and libvmaf. The scaler is listed
+// although the graph string never spells it, because libavfilter inserts it itself and a
+// build without it cannot convert at all (see ScaleFilter). A run may add more - a
+// deinterlace on the reference - and those reach RequireChain as extras, because they come
+// from the configuration and refusing a build over a filter no root asked for would refuse
+// a build that works.
+func ChainFilters() []string { return []string{ConversionFilter, ScaleFilter, LibvmafFilter} }
 
 // RequireChain proves this ffmpeg build provides every filter the gate's chain composes,
 // and returns a loud error naming the missing one when it does not.
@@ -52,10 +64,12 @@ func RequireChain(ctx context.Context, ffmpeg string, extras ...string) error {
 			"listed, so holdfast cannot prove the gate's chain can be assembled: %w", err)
 	}
 	var missing []string
+	asked := map[string]bool{}
 	for _, f := range append(ChainFilters(), extras...) {
-		if f == "" || have[f] {
+		if f == "" || have[f] || asked[f] {
 			continue
 		}
+		asked[f] = true
 		missing = append(missing, f)
 	}
 	if len(missing) == 0 {
