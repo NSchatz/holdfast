@@ -1,6 +1,9 @@
 package engine
 
-// S0160 impl-gate 1, F4 (AC-2). Refuter artifact.
+// S0160 impl-gate 1, F4 (AC-2). Refuter artifact. Its overlap precondition was withdrawn
+// by impl-gate 2 (F2): a budget that queues the second gate satisfies AC-2 as well as one
+// that runs it alongside, so the hold is bounded and the precondition is that both files
+// were gated, not that their gates overlapped.
 
 import (
 	"context"
@@ -26,11 +29,11 @@ func TestRegress_0160_F4_DaemonPoolsOutrunTheDividedShare(t *testing.T) {
 	eng.vmafThreads = deriveVmafThreads(quotaRoot(t, quota), eng.Cfg.EffectiveWorkers())
 
 	var mu sync.Mutex
-	var gates, threads, peak, peakGates int
+	var calls, gates, threads, peak, peakGates int
 	release, once := make(chan struct{}), sync.Once{}
 	eng.vmafScore = func(ctx context.Context, req vmaf.Request) (vmaf.Result, error) {
 		mu.Lock()
-		gates, threads = gates+1, threads+req.Threads
+		calls, gates, threads = calls+1, gates+1, threads+req.Threads
 		if threads > peak {
 			peak, peakGates = threads, gates
 		}
@@ -40,7 +43,7 @@ func TestRegress_0160_F4_DaemonPoolsOutrunTheDividedShare(t *testing.T) {
 		mu.Unlock()
 		select {
 		case <-release:
-		case <-time.After(90 * time.Second):
+		case <-time.After(3 * time.Second):
 		}
 		mu.Lock()
 		gates, threads = gates-1, threads-req.Threads
@@ -69,8 +72,8 @@ func TestRegress_0160_F4_DaemonPoolsOutrunTheDividedShare(t *testing.T) {
 	<-done
 	mu.Lock()
 	defer mu.Unlock()
-	if peakGates < 2 {
-		t.Fatalf("precondition: the pools never overlapped (peak %d gate)", peakGates)
+	if calls != 2 {
+		t.Fatalf("precondition: %d gate(s) scored, want both files gated", calls)
 	}
 	if peak > quota {
 		t.Errorf("workers 1, quota %d, share %d: scan + submission pools ran %d gates asking for "+

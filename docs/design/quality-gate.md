@@ -39,10 +39,12 @@ count is therefore derived, from the CPU bandwidth limit this process is actuall
 allowed rather than from the CPU count the host advertises, and divided across
 the gates that may score at the same time: the configured `workers`, or the
 files in flight when more are - the daemon runs its scan, its submission queue
-and its watch side by side over one engine. Each gate's share is also taken out
-of an account of what the gates scoring right now hold, capped at the quota, so
-a gate that would take the sum over it waits for one to finish rather than
-running beside it. A quota that cannot be read is a warn and a stated fallback
+and its watch side by side over one engine. Every thread a gate's invocation
+names is also taken out of an account of what the gates scoring right now hold,
+capped at the quota, so a gate that would take the sum over it waits for one to
+finish rather than running beside it. That is the named threads and not the
+share, because the two part at the floor: a share of one still names libvmaf's
+thread and the filtergraph's, so it is charged two. A quota that cannot be read is a warn and a stated fallback
 of one thread: the only number available to guess with is the host count, and
 guessing it is the oversubscription the derivation exists to avoid. The reader
 is `internal/cpuquota`.

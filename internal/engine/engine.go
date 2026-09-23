@@ -344,8 +344,8 @@ type Engine struct {
 	// the scan's workers, the submission queue's and the watch's alike. It is what a gate divides the quota by when more files are in
 	// flight than the configured workers (see vmafThreadCount).
 	gateFlight atomic.Int64
-	// gateThreads is the account of the thread shares the gates scoring right now hold,
-	// and the bound that keeps their sum inside the quota (see takeGateThreads).
+	// gateThreads is the account of the threads the gates scoring right now name, and the
+	// bound that keeps their sum inside the quota (see takeGateThreads).
 	gateThreads gateBudget
 
 	// staticMetadataIncomplete, when non-nil, replaces hdr.StaticMetadataIncomplete for the

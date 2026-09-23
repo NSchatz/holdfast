@@ -71,6 +71,20 @@ func (p vmafThreadPlan) bounded() bool { return p.err == nil && p.quota.CPUs > 0
 // in whole CPUs, and never below 1, so a single gate can always run.
 func (p vmafThreadPlan) budget() int { return cpuquota.Divide(p.quota, 1) }
 
+// namedThreads is what a gate scoring at this share is charged against the budget: every
+// thread its invocation names, libvmaf's pool and the filtergraph's together, and not the
+// share it was handed.
+//
+// The two are the same figure for a share of 2 or more, because vmaf.PoolThreads spends
+// the share across the two pools and no more. They part at a share of 1, which cannot be
+// split into two pools of at least one each: that gate names two threads, the same ffmpeg
+// invocation a share of 2 builds, and charging it 1 would admit a second one beside it and
+// put two threads per CPU on the quota the share was divided from.
+func namedThreads(share int) int {
+	libvmaf, graph := vmaf.PoolThreads(share)
+	return libvmaf + graph
+}
+
 // announce states the derivation once, at the level that matches what happened: a quota
 // that could not be read is a WARN naming the dependency, what was attempted and what was
 // done instead (observability O4), because the run continues in a degraded state and that
@@ -166,10 +180,16 @@ type gateBudget struct {
 // waits until a running gate hands threads back. Waiting costs nothing the host had: the
 // gates already scoring hold the whole budget, so the CPU is busy either way.
 //
-// A lone gate is always admitted, and its share never exceeds the budget, so nothing waits
-// on a gate that cannot start. A plan with no readable quota is not held to a budget at
-// all: its ceiling is unknown, and each gate asks for the fallback of one, which is what
-// every gate of the build before this one asked for.
+// What a gate is charged is every thread its invocation names (namedThreads), not its
+// share, because the two differ at the floor: a gate at a share of 1 names two pools of one.
+//
+// A lone gate is always admitted, so nothing waits on a gate that cannot start. On a quota
+// of two CPUs or more its charge never exceeds the budget. Below two CPUs the smallest
+// invocation there is - libvmaf on one thread, which it may not be asked for 0 of, beside
+// the filtergraph's own thread - names two, so that one gate runs alone and no second one
+// is admitted beside it. A plan with no readable quota is not held to a budget at all: its
+// ceiling is unknown, and each gate asks for the fallback of one, which is what every gate
+// of the build before this one asked for.
 func (e *Engine) takeGateThreads(ctx context.Context, file string) (int, func(), error) {
 	b := &e.gateThreads
 	said := false
@@ -178,12 +198,13 @@ func (e *Engine) takeGateThreads(ctx context.Context, file string) (int, func(),
 		if !e.vmafThreads.bounded() {
 			return n, func() {}, nil
 		}
+		cost := namedThreads(n)
 		b.mu.Lock()
-		if b.held == 0 || b.held+n <= e.vmafThreads.budget() {
-			b.held += n
+		if b.held == 0 || b.held+cost <= e.vmafThreads.budget() {
+			b.held += cost
 			b.mu.Unlock()
 			var once sync.Once
-			return n, func() { once.Do(func() { b.give(n) }) }, nil
+			return n, func() { once.Do(func() { b.give(cost) }) }, nil
 		}
 		if b.freed == nil {
 			b.freed = make(chan struct{})
@@ -198,7 +219,7 @@ func (e *Engine) takeGateThreads(ctx context.Context, file string) (int, func(),
 			}
 			log.Info("the quality gate is waiting for CPU: the gates already scoring hold the "+
 				"thread budget, and this one starts as soon as one of them hands threads back",
-				"file", file, "vmaf_threads", n, "gate_threads_held", held,
+				"file", file, "vmaf_threads", n, "gate_threads_named", cost, "gate_threads_held", held,
 				"gate_thread_budget", e.vmafThreads.budget())
 		}
 		select {
