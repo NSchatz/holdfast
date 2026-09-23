@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/NSchatz/holdfast/internal/cpuquota"
+	"github.com/NSchatz/holdfast/internal/vmaf"
 )
 
 // vmafThreadPlan is the CPU bandwidth the quality gates of this run share, together with
@@ -91,10 +92,12 @@ func (p vmafThreadPlan) announce(log *slog.Logger) {
 			"err", p.err)
 		return
 	}
+	libvmafThreads, graphThreads := vmaf.PoolThreads(p.threads)
 	log.Info("libvmaf thread count derived from the CPU this process is allowed; a gate that "+
 		"starts while more files are in flight than there are workers takes a smaller share, "+
 		"and the gates scoring at once never hold more than the budget between them",
-		"vmaf_threads", p.threads, "gate_thread_budget", p.budget(),
+		"vmaf_threads", p.threads, "libvmaf_n_threads", libvmafThreads,
+		"filtergraph_threads", graphThreads, "gate_thread_budget", p.budget(),
 		"effective_cpus", p.quota.CPUs, "quota_limited", p.quota.Limited,
 		"quota_source", p.quota.Source, "quota_origin", p.quota.Origin, "workers", p.workers)
 }
