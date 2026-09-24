@@ -311,7 +311,7 @@ func (v *ownerVerdict) temp() string {
 }
 
 // close drops the lock this decision took. clear also removes the record first, which is
-// for a record whose temp is gone: it no longer describes anything.
+// for a record whose temp the sweep has just removed: it no longer describes anything.
 func (v *ownerVerdict) close(clear bool) {
 	if v.held == nil {
 		return
@@ -375,8 +375,11 @@ func (o *tempOwners) inspect(path, want string) *ownerVerdict {
 	v.rec, v.parsed = rec, true
 	if class := fsclass.Of(o.lookup, o.dir); !class.IsLocal() {
 		v.state = ownerUndecided
-		v.why = "the owner record is on storage classified " + class.String() +
-			", where a lock this process can take is not evidence that no other process holds one"
+		v.why = "the owner record is on storage classified " + class.String()
+		if class.Reason != "" {
+			v.why += " (" + class.Reason + ")"
+		}
+		v.why += ", where a lock this process can take is not evidence that no other process holds one"
 		return v
 	}
 	v.state = ownerDead

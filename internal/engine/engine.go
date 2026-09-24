@@ -1155,20 +1155,20 @@ const (
 )
 
 // sweepTemp decides ONE temp a sweep found, by the owner record of its temp (ownerKey), and
-// reports whether it removed it. Its record is cleared once the temp it names is gone.
+// reports whether it removed it. The record is cleared with the temp it names.
 func (e *Engine) sweepTemp(ctx context.Context, path string, mode sweepMode) bool {
 	v := e.ownerOf(path)
-	removed, gone := e.decideTemp(ctx, path, mode, v)
+	removed := e.decideTemp(ctx, path, mode, v)
 	// Cleared only on the account of the record's OWN temp, never of a picture file named
 	// after it, which goes first and would otherwise strand the working file record-less.
-	v.close(gone && ownerKey(path) == path)
+	v.close(removed && ownerKey(path) == path)
 	return removed
 }
 
 // decideTemp is THE ONE PLACE every sweep decides a temp's fate - the bounded run's and the
 // whole-library pass's alike, found from an owner record or from a listing - so the two
-// cannot disagree about any of it. It reports whether it removed path, and whether path is
-// gone (removed now, or not there at all).
+// cannot disagree about any of it. It reports whether it removed path; a path with nothing
+// at it is removed by nobody and recorded by nobody.
 //
 // The owner is asked FIRST. A temp whose recorded owner is alive is another job's work in
 // progress and no sweep takes it. A bounded run takes nothing whose owner is not provably
@@ -1182,26 +1182,26 @@ func (e *Engine) sweepTemp(ctx context.Context, path string, mode sweepMode) boo
 // survived to name (AC15i, strayReplacementHold). The second is asked even when the first
 // says nothing, because the case it exists for is the one where the store write that would
 // have made the record is what failed. A dead owner licenses nothing past them.
-func (e *Engine) decideTemp(ctx context.Context, path string, mode sweepMode, v *ownerVerdict) (removed, gone bool) {
+func (e *Engine) decideTemp(ctx context.Context, path string, mode sweepMode, v *ownerVerdict) bool {
 	switch v.state {
 	case ownerAlive:
 		e.logLeftTemp(mode, "leaving a temp file in place: its recorded owner is alive", path, v)
-		return false, false
+		return false
 	case ownerNoRecord, ownerUndecided:
 		if mode == sweepBounded {
 			e.logLeftTemp(mode, "leaving a temp file in place: its owner is not provably dead", path, v)
-			return false, false
+			return false
 		}
 	}
 	if why, ok := e.heldBack(path); ok {
 		e.Log.Warn("leaving a file holdfast wrote in place (not an orphaned temp)", "file", path, "why", why)
-		return false, false
+		return false
 	}
 	if why := e.strayReplacementHold(ctx, path); why != "" {
 		e.Log.Warn("leaving a file holdfast wrote in place - NO RECORD of it survives, so it is held back on its name and its content alone: "+
 			"it is never enumerated, encoded, swapped or swept, in this run or any later one, and removing it is an operator's call",
 			"file", path, "why", why)
-		return false, false
+		return false
 	}
 	switch err := os.Remove(path); {
 	case err == nil:
@@ -1210,12 +1210,12 @@ func (e *Engine) decideTemp(ctx context.Context, path string, mode sweepMode, v 
 			args = append(args, "owner_pid", v.rec.PID, "owner_host", v.rec.Host)
 		}
 		e.Log.Info("removed an orphaned temp file", args...)
-		return true, true
+		return true
 	case errors.Is(err, fs.ErrNotExist):
-		return false, true
+		return false
 	default:
 		e.Log.Warn("an orphaned temp file could not be removed; it stays for a later sweep", "file", path, "err", err)
-		return false, false
+		return false
 	}
 }
 
