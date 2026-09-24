@@ -78,8 +78,10 @@ buffering without bound while the video encoder was starved.
   "Without the bounds" is the same argv with the three options removed.
 - **Machine**: Intel Xeon E5-2680 v4 at 2.40 GHz, 56 logical CPUs visible, 157 GiB host
   memory, Linux 6.12.107, inside a container whose cgroup allows 5 CPUs and 16 GiB.
-- **Build**: ffmpeg `N-125875-g5d4d3bdc61-20260731`, the pinned build.
+- **Build**: ffmpeg `N-125875-g5d4d3bdc61`, the build the Dockerfile pins.
 - **Commit**: `68db9f7`. Every argv replayed is byte for byte the one that commit builds.
+- **Previous figure**: none. This is the first measurement of this kind in this repository,
+  so it is the figure a later one is compared against, taken the same way.
 
 ### Figures
 
