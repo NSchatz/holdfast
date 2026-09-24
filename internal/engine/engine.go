@@ -2050,7 +2050,17 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			_ = os.Remove(tmp)
 			return ctx.Err()
 		}
-		e.Log.Warn("FAIL (encode error, source untouched)", "file", f, "err", err)
+		// An encode the memory watchdog aborted leaves through this same branch, and says so
+		// in its own one record with the figures it was aborted on. Its class is transient
+		// on purpose: the next attempt may run beside less, so max_failures decides the retries.
+		var mem *MemoryAbortError
+		if errors.As(err, &mem) {
+			e.Log.Warn("FAIL (encode aborted for memory, source untouched)", "file", f,
+				"rss_bytes", mem.RSS, "memory_limit_bytes", mem.Limit, "memory_threshold_bytes", mem.Threshold)
+			out.FailureClass = store.FailureTransient
+		} else {
+			e.Log.Warn("FAIL (encode error, source untouched)", "file", f, "err", err)
+		}
 		_ = os.Remove(tmp)
 		out.Reason = err.Error() // the failure error — previously computed and dropped
 		e.fail(ctx, f, key, GateEncode, out)
