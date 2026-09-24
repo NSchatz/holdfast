@@ -3929,3 +3929,519 @@ func TestScan_StoreErrorInTheClaimPathRetriesNextPass(t *testing.T) {
 			"for has to come back, or one bad moment excludes it for ever", got, f)
 	}
 }
+
+// ---- S0156: a damaged container is decided at decision time -------------------------
+
+// taskmasterName is the operator's damaged file, the named case the container-damage guard
+// is graded on.
+func taskmasterName() string { return "Taskmaster - 15x01 - The Curse of Politeness.mkv" }
+
+// injectedDemuxerLine is a Matroska demuxer error in the shape ffmpeg prints it - the
+// operator's reported diagnostic - for the fake ffprobe below to add to an intact file's
+// snapshot probe.
+func injectedDemuxerLine() string {
+	return "[matroska,webm @ 0x55d5c3c0a2c0] 0x00 at pos 1807026693 (0x6bb5a445) invalid as first byte of an EBML number"
+}
+
+// injectedDecoderLines are h264 DECODER errors in the shape ffmpeg prints them: what the
+// pinned ffprobe prints about the frames of the zeroed fixture.
+func injectedDecoderLines() string {
+	return "[h264 @ 0x55d5c3c0b100] Invalid level prefix\n[h264 @ 0x55d5c3c0b100] error while decoding MB 15 12"
+}
+
+// mkShortMatroska writes a five-frame h264 Matroska clip, optionally carrying a JPEG cover as
+// an image attachment (which ffprobe reports as a video stream with the attached_pic
+// disposition).
+//
+// Five frames is what puts the file's tail where the snapshot probe reads. ffprobe reads a
+// source until it has decoded enough of it to settle the stream's parameters, and against
+// the pinned build a two-second clip is not read to its end while a five-frame one is -
+// which is where the operator's 1.8 GB file had its zeroed bytes read too. The damage
+// preconditions assert that against the pinned ffprobe rather than trust this comment.
+func mkShortMatroska(t *testing.T, ffmpeg, path string, cover bool) {
+	t.Helper()
+	args := []string{"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=0.5:size=320x240:rate=10",
+		"-c:v", "libx264", "-preset", "ultrafast", "-b:v", "8M", "-pix_fmt", "yuv420p"}
+	if cover {
+		pic := filepath.Join(t.TempDir(), "cover.jpg")
+		ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x120",
+			"-frames:v", "1", "-c:v", "mjpeg", "-pix_fmt", "yuvj420p", "-f", "image2", "--", pic)
+		args = append(args, "-attach", pic,
+			"-metadata:s:t:0", "mimetype=image/jpeg", "-metadata:s:t:0", "filename=cover.jpg")
+	}
+	ff(t, ffmpeg, append(args, "--", path)...)
+}
+
+// zeroTail overwrites the last 256 bytes of path with zeros - the damage the operator's file
+// carries - leaving its size and every byte before them as they were.
+func zeroTail(t *testing.T, path string) {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if len(b) <= 256 {
+		t.Fatalf("%s is %d bytes, too small to have a tail zeroed", path, len(b))
+	}
+	clear(b[len(b)-256:])
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// ffprobeCodec asks the pinned ffprobe for the first video stream's codec and returns it with
+// everything the probe wrote to stderr. It reads ffprobe directly rather than through
+// internal/probe, so no parser under test can satisfy a precondition built on it.
+func ffprobeCodec(t *testing.T, ffprobe, path string) (codec, stderr string) {
+	t.Helper()
+	cmd := exec.Command(ffprobe, "-v", "error", "-select_streams", "v:0",
+		"-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1", "--", path)
+	var out, errOut bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("precondition: ffprobe did not run to completion on %s: %v (%s)", path, err, errOut.String())
+	}
+	return strings.TrimSpace(out.String()), errOut.String()
+}
+
+// assertContainerDamaged is AC-6's precondition: the pinned ffprobe both reports a video
+// codec for path AND emits a Matroska demuxer error for it. It returns that error's message,
+// which is the diagnostic the decision has to carry.
+func assertContainerDamaged(t *testing.T, ffprobe, path string) string {
+	t.Helper()
+	codec, stderr := ffprobeCodec(t, ffprobe, path)
+	if codec == "" {
+		t.Fatalf("precondition: the pinned ffprobe reports no video codec for %s, so the fixture is "+
+			"unreadable rather than damaged (stderr %q)", path, stderr)
+	}
+	for _, line := range strings.Split(stderr, "\n") {
+		if rest, ok := strings.CutPrefix(line, "[matroska,webm @ "); ok {
+			if _, msg, found := strings.Cut(rest, "] "); found {
+				return msg
+			}
+		}
+	}
+	t.Fatalf("precondition: the pinned ffprobe emitted no Matroska demuxer error for %s (stderr %q) - "+
+		"the zeroed tail is not where the probe reads, so this fixture is not damaged as far as it can tell",
+		path, stderr)
+	return ""
+}
+
+// assertContainerIntact is the controls' precondition: the pinned ffprobe reports a video
+// codec for path and prints nothing at all to stderr.
+func assertContainerIntact(t *testing.T, ffprobe, path string) {
+	t.Helper()
+	if codec, stderr := ffprobeCodec(t, ffprobe, path); codec == "" || stderr != "" {
+		t.Fatalf("precondition: the intact fixture %s reads as codec %q with stderr %q", path, codec, stderr)
+	}
+}
+
+// damagedTaskmaster writes the named case into dir - the five-frame clip under the operator's
+// file name with its tail zeroed - asserts it is damaged, and returns its path, the demuxer's
+// message about it and the bytes it had before the tail was zeroed.
+func damagedTaskmaster(t *testing.T, ffmpeg, ffprobe, dir string, cover bool) (src, diagnostic string, intact []byte) {
+	t.Helper()
+	src = filepath.Join(dir, taskmasterName())
+	mkShortMatroska(t, ffmpeg, src, cover)
+	intact, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeroTail(t, src)
+	return src, assertContainerDamaged(t, ffprobe, src), intact
+}
+
+// damageEngine builds an engine over one library root whose ffmpeg is COUNTED - the encoder
+// and the VMAF gate both run through it - and whose records are captured as JSON. It returns
+// the engine, its store, how many times ffmpeg has run so far and the records logged so far.
+func damageEngine(t *testing.T, ffmpeg, ffprobe, root string, mutate func(*config.Config)) (
+	*Engine, *testStore, func() int, func() []map[string]any) {
+	t.Helper()
+	cfg := baseCfg(root)
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	counted, calls := countingWrapper(t, t.TempDir(), "ffmpeg", ffmpeg)
+	prober := probe.New(counted, ffprobe)
+	ts, log := newTestStore(t, root), &lockedBuffer{}
+	eng := New(cfg, prober, FFmpegEncoder{FFmpeg: counted, Cfg: cfg, Probe: prober}, ts,
+		slog.New(slog.NewJSONHandler(log, nil)))
+	records := func() []map[string]any {
+		var b bytes.Buffer
+		b.WriteString(log.String())
+		return logRecords(t, &b)
+	}
+	return eng, ts, func() int { return countCalls(t, calls) }, records
+}
+
+// oneshot runs one pass of eng.
+func oneshot(t *testing.T, eng *Engine) {
+	t.Helper()
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+}
+
+func dryRun(c *config.Config) { c.DryRun = true }
+
+// TestSourceDamaged_AC6_RealRunSkipsTheTaskmasterFile grades [AC-6]: a real run decides the
+// named damaged file `skipped` under `source-damaged`, starts no encode, runs no VMAF pass and
+// leaves the source and its directory exactly as they were. The VMAF gate is ON, so a file
+// that got as far as the gate would be scored, and ffmpeg - which the encode and the VMAF pass
+// both are - is counted and must never have run.
+func TestSourceDamaged_AC6_RealRunSkipsTheTaskmasterFile(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src, _, _ := damagedTaskmaster(t, ffmpeg, ffprobe, d, false)
+	before, listBefore := md5f(t, src), dirListing(t, d)
+
+	eng, ts, ffmpegCalls, _ := damageEngine(t, ffmpeg, ffprobe, d, func(c *config.Config) {
+		c.VmafEnable = boolPtr(true)
+		c.MinVmaf, c.VmafMinPool, c.VmafMinChroma = 90, 50, 25
+	})
+	oneshot(t, eng)
+
+	if !ledgerHas(t, ts, store.Skipped, taskmasterName()) {
+		t.Errorf("the damaged source was not recorded skipped")
+	}
+	if got := skipReason(t, ts, taskmasterName()); got != SkipSourceDamaged {
+		t.Errorf("skip reason = %q, want %q", got, SkipSourceDamaged)
+	}
+	if n := ffmpegCalls(); n != 0 {
+		t.Errorf("ffmpeg ran %d time(s) for a source the probe already found damaged - an encode or a "+
+			"VMAF pass was started", n)
+	}
+	if md5f(t, src) != before {
+		t.Error("the damaged source changed")
+	}
+	if got := dirListing(t, d); !equalStrings(got, listBefore) {
+		t.Errorf("the directory changed: before %v, after %v", listBefore, got)
+	}
+}
+
+// TestSourceDamaged_AC7_DryRunRecordsTheSkipNotWouldTranscode grades [AC-7].
+func TestSourceDamaged_AC7_DryRunRecordsTheSkipNotWouldTranscode(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	damagedTaskmaster(t, ffmpeg, ffprobe, d, false)
+
+	ts := run(t, ffmpeg, ffprobe, d, nil, dryRun)
+
+	if got := skipReason(t, ts, taskmasterName()); got != SkipSourceDamaged {
+		t.Errorf("skip reason = %q, want %q", got, SkipSourceDamaged)
+	}
+	if ledgerHas(t, ts, store.WouldTranscode, taskmasterName()) {
+		t.Error("the dry run recorded the damaged source would-transcode")
+	}
+}
+
+// TestSourceDamaged_AC8_PlanReportsTheGuardAndCountsNoBytes grades [AC-8]: the read-only plan
+// pass reports the damaged file stopped by `source-damaged`, and neither it nor its bytes are
+// eligible. An intact copy of the same clip sits beside it and IS eligible, so the eligible
+// figure below is one the pass really computes.
+func TestSourceDamaged_AC8_PlanReportsTheGuardAndCountsNoBytes(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src, _, intact := damagedTaskmaster(t, ffmpeg, ffprobe, d, false)
+	control := filepath.Join(d, "control.mkv")
+	if err := os.WriteFile(control, intact, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	assertContainerIntact(t, ffprobe, control)
+
+	eng := buildEngine(t, ffmpeg, ffprobe, d, nil, nil)
+	eng.SetCoverage([]string{d}, nil)
+	pass := eng.Plan(context.Background(), PlanOptions{})
+
+	var eligibleBytes int64
+	seen := map[string]PlanFile{}
+	for _, f := range pass.Files {
+		seen[f.Path] = f
+		if f.Eligible() {
+			eligibleBytes += f.Bytes
+		}
+	}
+	if got := seen[src]; got.Guard != SkipSourceDamaged || got.Eligible() {
+		t.Errorf("the damaged file is reported with guard %q, eligible=%v; want %q and not eligible",
+			got.Guard, got.Eligible(), SkipSourceDamaged)
+	}
+	if !seen[control].Eligible() {
+		t.Fatalf("the intact copy is not eligible (guard %q), so the eligible figure proves nothing",
+			seen[control].Guard)
+	}
+	if eligibleBytes != int64(len(intact)) {
+		t.Errorf("eligible bytes = %d, want %d (the intact copy's alone)", eligibleBytes, len(intact))
+	}
+}
+
+// TestSourceDamaged_AC9_TheFixtureBeforeZeroingWouldTranscode grades [AC-9], the
+// anti-vacuity control for AC-6 to AC-8: the same clip under the same name, before its tail is
+// zeroed, is decided would-transcode.
+func TestSourceDamaged_AC9_TheFixtureBeforeZeroingWouldTranscode(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, taskmasterName())
+	mkShortMatroska(t, ffmpeg, src, false)
+	assertContainerIntact(t, ffprobe, src)
+
+	ts := run(t, ffmpeg, ffprobe, d, nil, dryRun)
+
+	if !ledgerHas(t, ts, store.WouldTranscode, taskmasterName()) {
+		t.Errorf("the intact fixture was not recorded would-transcode: reason=%q", skipReason(t, ts, taskmasterName()))
+	}
+}
+
+// TestSourceDamaged_AC10_OneErrorRecordSaysTheFileNeedsReplacing grades [AC-10]: the decision
+// is logged in exactly one structured record at `error` - a human has to replace the file -
+// carrying the path, the token, the diagnostic the pinned ffprobe printed and a message saying
+// the file needs replacing.
+func TestSourceDamaged_AC10_OneErrorRecordSaysTheFileNeedsReplacing(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src, diagnostic, _ := damagedTaskmaster(t, ffmpeg, ffprobe, d, false)
+
+	eng, _, _, records := damageEngine(t, ffmpeg, ffprobe, d, nil)
+	oneshot(t, eng)
+
+	var errorRecords, tokenRecords []map[string]any
+	for _, rec := range records() {
+		if rec["file"] != src {
+			continue
+		}
+		if rec["level"] == "ERROR" {
+			errorRecords = append(errorRecords, rec)
+		}
+		if rec["guard"] == SkipSourceDamaged {
+			tokenRecords = append(tokenRecords, rec)
+		}
+	}
+	if len(errorRecords) != 1 || len(tokenRecords) != 1 {
+		t.Fatalf("%d error record(s) and %d record(s) carrying %q name the file, want exactly one of "+
+			"each: %v", len(errorRecords), len(tokenRecords), SkipSourceDamaged, errorRecords)
+	}
+	rec := errorRecords[0]
+	if rec["guard"] != SkipSourceDamaged {
+		t.Errorf("the error record carries guard %v, want %q", rec["guard"], SkipSourceDamaged)
+	}
+	if rec["diagnostic"] != diagnostic {
+		t.Errorf("the error record carries diagnostic %v, want what ffprobe reported: %q", rec["diagnostic"], diagnostic)
+	}
+	if msg, _ := rec["msg"].(string); !strings.Contains(msg, "needs replacing") {
+		t.Errorf("the error record's message does not say the file needs replacing: %q", msg)
+	}
+}
+
+// TestSourceDamaged_AC11_DamageOutranksCoverArt grades [AC-11]: a damaged source that also
+// carries an attached picture is recorded `source-damaged`, the verdict the operator has to
+// act on.
+func TestSourceDamaged_AC11_DamageOutranksCoverArt(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src, _, _ := damagedTaskmaster(t, ffmpeg, ffprobe, d, true)
+	assertVideoStreamShape(t, ffprobe, src, []bool{false, true})
+
+	ts := run(t, ffmpeg, ffprobe, d, nil, dryRun)
+
+	if got := skipReason(t, ts, taskmasterName()); got != SkipSourceDamaged {
+		t.Errorf("skip reason = %q, want %q", got, SkipSourceDamaged)
+	}
+}
+
+// TestSourceDamaged_AC12_AReplacedFileIsDecidedAfresh grades [AC-12]: once the damaged file
+// is replaced at the same path by an intact one with a different modification time, the next
+// pass decides it again and a dry run records would-transcode, with no requeue in between.
+func TestSourceDamaged_AC12_AReplacedFileIsDecidedAfresh(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src, _, intact := damagedTaskmaster(t, ffmpeg, ffprobe, d, false)
+
+	eng, ts, _, _ := damageEngine(t, ffmpeg, ffprobe, d, dryRun)
+	oneshot(t, eng)
+	if got := skipReason(t, ts, taskmasterName()); got != SkipSourceDamaged {
+		t.Fatalf("first pass: skip reason = %q, want %q", got, SkipSourceDamaged)
+	}
+
+	damaged := probe.Fingerprint(src)
+	if err := os.WriteFile(src, intact, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(src, later, later); err != nil {
+		t.Fatal(err)
+	}
+	if probe.Fingerprint(src) == damaged {
+		t.Fatalf("precondition: the replacement carries the damaged file's fingerprint %q", damaged)
+	}
+	assertContainerIntact(t, ffprobe, src)
+
+	oneshot(t, eng)
+	if !ledgerHas(t, ts, store.WouldTranscode, taskmasterName()) {
+		t.Errorf("the replacement was not decided afresh as would-transcode: reason=%q",
+			skipReason(t, ts, taskmasterName()))
+	}
+}
+
+// stderrFFprobe writes a fake ffprobe that hands every question to the real one and, on the
+// snapshot probe alone (the one call whose -show_entries starts `stream=codec_name,`), writes
+// lines to stderr after the real answer and then ends as `then` says: `exit 0` for a probe
+// that ran to completion, `kill -9 $$` for one killed by a signal, or a command that waits to
+// be cancelled.
+func stderrFFprobe(t *testing.T, realFFprobe, lines, then string) string {
+	t.Helper()
+	fake := filepath.Join(t.TempDir(), "stderr-ffprobe.sh")
+	script := "#!/bin/sh\n" +
+		"snap=0\n" +
+		"for a in \"$@\"; do\n" +
+		"  case \"$a\" in stream=codec_name,*) snap=1 ;; esac\n" +
+		"done\n" +
+		"[ \"$snap\" = 1 ] || exec \"" + realFFprobe + "\" \"$@\"\n" +
+		"\"" + realFFprobe + "\" \"$@\" || exit $?\n" +
+		"printf '%s\\n' '" + lines + "' >&2\n" +
+		then + "\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake ffprobe: %v", err)
+	}
+	return fake
+}
+
+// decideWithInjectedStderr dry-runs an intact h264 Matroska source whose snapshot probe also
+// writes lines to stderr and ends as then says, and returns the store.
+func decideWithInjectedStderr(t *testing.T, lines, then string) *testStore {
+	t.Helper()
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+	assertContainerIntact(t, ffprobe, src)
+	return run(t, ffmpeg, stderrFFprobe(t, ffprobe, lines, then), d, nil, dryRun)
+}
+
+// TestSourceDamaged_AC13_AProbeThatDidNotFinishIsNotDamage grades [AC-13]: a snapshot probe
+// that wrote the demuxer's error line and was then killed by a signal, or had its context
+// cancelled, does not get the file recorded `source-damaged`. The first arm is the control:
+// the same line from the same fake, on a probe allowed to finish, IS damage, so the other two
+// pass because the probe did not finish and not because the line never arrived.
+func TestSourceDamaged_AC13_AProbeThatDidNotFinishIsNotDamage(t *testing.T) {
+	t.Run("the same probe run to completion", func(t *testing.T) {
+		ts := decideWithInjectedStderr(t, injectedDemuxerLine(), "exit 0")
+		if got := skipReason(t, ts, "movie.mkv"); got != SkipSourceDamaged {
+			t.Fatalf("control: skip reason = %q, want %q - the injected line does not reach the guard, "+
+				"so the arms below prove nothing", got, SkipSourceDamaged)
+		}
+	})
+
+	t.Run("killed by a signal after writing the line", func(t *testing.T) {
+		ts := decideWithInjectedStderr(t, injectedDemuxerLine(), "kill -9 $$")
+		if got := skipReason(t, ts, "movie.mkv"); got == SkipSourceDamaged {
+			t.Errorf("a probe killed by a signal got the file recorded %q", got)
+		}
+	})
+
+	t.Run("its context cancelled after writing the line", func(t *testing.T) {
+		ffmpeg, ffprobe := tools(t)
+		d := t.TempDir()
+		src := filepath.Join(d, "movie.mkv")
+		mkH264(t, ffmpeg, src, "8M")
+		written := filepath.Join(t.TempDir(), "line-written")
+		fake := stderrFFprobe(t, ffprobe, injectedDemuxerLine(), ": > '"+written+"'\nexec sleep 30")
+
+		eng := buildEngine(t, ffmpeg, fake, d, nil, nil)
+		eng.SetCoverage([]string{d}, nil)
+		// The snapshot's context is cancelled the moment the fake has written its line, so
+		// what is graded is a probe that said "damaged" and was then stopped.
+		pass := eng.Plan(context.Background(), PlanOptions{Snapshot: func(ctx context.Context, p string) *probe.VideoProps {
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			go func() {
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(10 * time.Millisecond):
+						if exists(written) {
+							cancel()
+							return
+						}
+					}
+				}
+			}()
+			return eng.Probe.VideoProps(ctx, p)
+		}})
+		if !exists(written) {
+			t.Fatal("the fake never wrote its line, so this arm proves nothing")
+		}
+		if len(pass.Files) != 1 {
+			t.Fatalf("the plan covered %d file(s), want 1", len(pass.Files))
+		}
+		if got := pass.Files[0].Guard; got == SkipSourceDamaged {
+			t.Errorf("a probe whose context was cancelled got the file reported %q", got)
+		}
+	})
+}
+
+// TestSourceDamaged_AC14_ADecoderErrorIsNotDamage grades [AC-14]: decoder-level error lines
+// (context `h264`, not the `matroska,webm` demuxer) on an intact container leave the file
+// would-transcode. The second arm is the control: the demuxer's line through the same fake is
+// damage, so the first passes because of whose line it was.
+func TestSourceDamaged_AC14_ADecoderErrorIsNotDamage(t *testing.T) {
+	t.Run("a decoder's lines", func(t *testing.T) {
+		ts := decideWithInjectedStderr(t, injectedDecoderLines(), "exit 0")
+		if !ledgerHas(t, ts, store.WouldTranscode, "movie.mkv") {
+			t.Errorf("an intact container with decoder errors was not recorded would-transcode: reason=%q",
+				skipReason(t, ts, "movie.mkv"))
+		}
+	})
+
+	t.Run("the demuxer's line through the same fake", func(t *testing.T) {
+		ts := decideWithInjectedStderr(t, injectedDemuxerLine(), "exit 0")
+		if got := skipReason(t, ts, "movie.mkv"); got != SkipSourceDamaged {
+			t.Fatalf("control: skip reason = %q, want %q", got, SkipSourceDamaged)
+		}
+	})
+}
+
+// TestSourceDamaged_AC15_RequeueReOffersItsRows grades [AC-15]: `source-damaged` is in the
+// whole skip vocabulary and in the requeue guard list, and `requeue --guard source-damaged`
+// re-opens the rows it wrote. "Re-offered" is observed at the claim: before the requeue the
+// row holds the file out of the next pass, after it the next pass takes the file again.
+func TestSourceDamaged_AC15_RequeueReOffersItsRows(t *testing.T) {
+	inVocabulary := false
+	for _, tok := range SkipVocabulary {
+		inVocabulary = inVocabulary || tok == SkipSourceDamaged
+	}
+	if !inVocabulary {
+		t.Errorf("%q is not in SkipVocabulary, so the metrics surface has no bucket for it", SkipSourceDamaged)
+	}
+	if !KnownGuard(SkipSourceDamaged) {
+		t.Errorf("KnownGuard(%q) = false, so `requeue --guard %s` is refused", SkipSourceDamaged, SkipSourceDamaged)
+	}
+
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src, _, _ := damagedTaskmaster(t, ffmpeg, ffprobe, d, false)
+	eng, ts, _, _ := damageEngine(t, ffmpeg, ffprobe, d, dryRun)
+	oneshot(t, eng)
+	if got := skipReason(t, ts, taskmasterName()); got != SkipSourceDamaged {
+		t.Fatalf("skip reason = %q, want %q", got, SkipSourceDamaged)
+	}
+
+	claims := watchClaims(eng)
+	oneshot(t, eng)
+	if got := claims.taken(); len(got) != 0 {
+		t.Fatalf("the skipped row did not hold the file out of the next pass (claimed %v), so a "+
+			"requeue has nothing to prove", got)
+	}
+
+	res, err := Requeue(context.Background(), ts, RequeueSelector{Guard: SkipSourceDamaged}, 3)
+	if err != nil {
+		t.Fatalf("requeue --guard %s: %v", SkipSourceDamaged, err)
+	}
+	if len(res.Reopened) != 1 || res.Reopened[0] != src {
+		t.Errorf("requeue --guard %s re-opened %v, want [%s]", SkipSourceDamaged, res.Reopened, src)
+	}
+	oneshot(t, eng)
+	if got := claims.taken(); len(got) != 1 || got[0] != src {
+		t.Errorf("after the requeue the next pass claimed %v, want [%s]", got, src)
+	}
+}
