@@ -435,6 +435,11 @@ type Engine struct {
 	// filesystems.
 	room roomHolds
 
+	// owners is where this engine records which process owns each temp it writes beside a
+	// source, and how that record's storage is classified (TrackTempOwners, tempowner.go).
+	// nil writes no record, which is what an engine that `run` and `serve` did not build is.
+	owners *tempOwners
+
 	// undoNow, when non-nil, replaces the clock the undo window reads, so a test can place
 	// a retention's expiry in the past and exercise the release sweep for real.
 	undoNow func() time.Time
@@ -894,8 +899,8 @@ func (e *Engine) runPass(ctx context.Context, b Bound) error {
 	e.ownershipNoticeGiven.Store(false)
 
 	// What this pass is bounded by and what that costs, said out loud BEFORE any of it
-	// happens: the two passes below that will not run are the operator-visible difference
-	// between this and an ordinary scan (S0100 AC-11).
+	// happens: the pass below that will not run, and the sweep that runs in a narrower form,
+	// are the operator-visible difference between this and an ordinary scan (S0100 AC-11).
 	if b.bounded() {
 		e.reportBound(b)
 	}
@@ -916,6 +921,14 @@ func (e *Engine) runPass(ctx context.Context, b Bound) error {
 	// setting governs whether a NEW retention is taken, nothing else.
 	e.undo().ReleaseExpired(ctx)
 
+	// A bounded run's stale-temp sweep, BEFORE any file is offered: every temp whose owner
+	// record shows its owner provably dead, found from the records and never from a listing,
+	// so it reaches a temp wherever it is and whatever this bound would list (bounded.go).
+	var decided map[string]bool
+	if b.bounded() {
+		decided = e.sweepOrphanedTemps(ctx)
+	}
+
 	// A single named file is carried straight to the pipeline's own door: nothing is
 	// listed, so nothing below needs this pass's listings (see processOne).
 	if b.File != "" {
@@ -927,11 +940,12 @@ func (e *Engine) runPass(ctx context.Context, b Bound) error {
 	// startup walk's own where this is the first scan after that walk, this scan's where not.
 	pass := e.passListings()
 
-	// THE TWO WHOLE-LIBRARY PASSES, and a bounded run runs neither (S0100 AC-10). Both
-	// reason from "this pass looked at the whole library": the sweep decides a file
-	// holdfast wrote is orphaned, and the retention pass decides a row's file is gone. A
-	// partial pass has no evidence for either, and the retention pass's mistake is an
-	// irreversible delete of audit history that no re-run restores.
+	// THE TWO WHOLE-LIBRARY PASSES, and a bounded run runs neither in this form (S0100
+	// AC-10). Both reason from "this pass looked at the whole library": the listing sweep
+	// decides a temp is orphaned on finding it, and the retention pass decides a row's file
+	// is gone. A partial pass has no evidence for either, and the retention pass's mistake is
+	// an irreversible delete of audit history that no re-run restores. A bounded run's own
+	// sweep ran above, on owner evidence instead of on a listing.
 	if !b.bounded() {
 		e.sweepStaleTemps(ctx, pass)
 		// The configured working location is swept here and not by sweepStaleTemps, and
@@ -943,6 +957,9 @@ func (e *Engine) runPass(ctx context.Context, b Bound) error {
 		e.cleanScratch(ctx)
 	}
 	bud := e.budgetFor(b)
+	if bud != nil {
+		bud.decided = decided
+	}
 	observed, err := e.scanOnce(ctx, pass, bud)
 	if err != nil {
 		return err
@@ -1062,6 +1079,9 @@ func (e *Engine) Restore(ctx context.Context, path string) (RestoreResult, error
 //   - a temp path holding a FINISHED replacement with no record at all, which is what a
 //     library that went read-only leaves behind: the same failure denies the swap, the move
 //     to the retained name and the incident write alike (strayReplacementHold).
+//
+// And one kind of temp it leaves however orphaned it looks: one whose owner record says
+// its owner is alive (tempowner.go), which is another job's work in progress.
 func (e *Engine) cleanStaleTemps(ctx context.Context) { e.sweepStaleTemps(ctx, e.passListings()) }
 
 // sweepStaleTemps is the sweep as a pass runs it: over the listings that pass already has,
@@ -1089,7 +1109,7 @@ func (e *Engine) sweepStaleTemps(ctx context.Context, pass *listings) {
 				}
 				// The kind the LISTING reported, links not followed: a symbolic link is a
 				// name to remove here, never a directory to step into.
-				if !ent.IsDir && isTempName(ent.Name) && e.sweepTemp(ctx, filepath.Join(dir, ent.Name)) {
+				if !ent.IsDir && isTempName(ent.Name) && e.sweepTemp(ctx, filepath.Join(dir, ent.Name), sweepUnbounded) {
 					n++
 				}
 			}
@@ -1110,7 +1130,7 @@ func (e *Engine) sweepStaleTemps(ctx context.Context, pass *listings) {
 			if d.IsDir() || !isTempName(filepath.Base(path)) {
 				return nil
 			}
-			if e.sweepTemp(ctx, path) {
+			if e.sweepTemp(ctx, path, sweepUnbounded) {
 				n++
 			}
 			return nil
@@ -1121,25 +1141,102 @@ func (e *Engine) sweepStaleTemps(ctx context.Context, pass *listings) {
 	}
 }
 
-// sweepTemp discards ONE work-in-progress temp, and reports whether it did. It is the single
-// place the sweep's two independent exceptions live, so the coverage-bounded branch and the
-// walking branch cannot disagree about them: a temp path a live RECORD names as a job's
-// replacement (AC15d), and a temp path holding a finished replacement that no record
+// sweepMode is which sweep is deciding a temp's fate.
+type sweepMode string
+
+const (
+	// sweepUnbounded is a whole-library pass's listing sweep: it removes a temp unless its
+	// recorded owner is alive or a hold-back applies, which for a temp with no owner record
+	// is exactly what it did before owner records existed.
+	sweepUnbounded sweepMode = "unbounded"
+	// sweepBounded is a bounded run's sweep: it removes a temp only where its recorded owner
+	// is provably dead and no hold-back applies, and names every temp it leaves.
+	sweepBounded sweepMode = "bounded"
+)
+
+// sweepTemp decides ONE temp a sweep found, by the owner record of its temp (ownerKey), and
+// reports whether it removed it. Its record is cleared once the temp it names is gone.
+func (e *Engine) sweepTemp(ctx context.Context, path string, mode sweepMode) bool {
+	v := e.ownerOf(path)
+	removed, gone := e.decideTemp(ctx, path, mode, v)
+	// Cleared only on the account of the record's OWN temp, never of a picture file named
+	// after it, which goes first and would otherwise strand the working file record-less.
+	v.close(gone && ownerKey(path) == path)
+	return removed
+}
+
+// decideTemp is THE ONE PLACE every sweep decides a temp's fate - the bounded run's and the
+// whole-library pass's alike, found from an owner record or from a listing - so the two
+// cannot disagree about any of it. It reports whether it removed path, and whether path is
+// gone (removed now, or not there at all).
+//
+// The owner is asked FIRST. A temp whose recorded owner is alive is another job's work in
+// progress and no sweep takes it. A bounded run takes nothing whose owner is not provably
+// dead, and names each temp it leaves at `warn`: the run carried on, and the next pass may
+// still remove it. A whole-library pass keeps its old licence over a temp with no owner
+// record, which is every temp an older build wrote, and over one whose owner it cannot
+// decide.
+//
+// Then the two hold-back exceptions, whatever the owner: a temp path a live RECORD names as
+// a job's replacement (AC15d), and a temp path holding a finished replacement that no record
 // survived to name (AC15i, strayReplacementHold). The second is asked even when the first
 // says nothing, because the case it exists for is the one where the store write that would
-// have made the record is what failed.
-func (e *Engine) sweepTemp(ctx context.Context, path string) bool {
+// have made the record is what failed. A dead owner licenses nothing past them.
+func (e *Engine) decideTemp(ctx context.Context, path string, mode sweepMode, v *ownerVerdict) (removed, gone bool) {
+	switch v.state {
+	case ownerAlive:
+		e.logLeftTemp(mode, "leaving a temp file in place: its recorded owner is alive", path, v)
+		return false, false
+	case ownerNoRecord, ownerUndecided:
+		if mode == sweepBounded {
+			e.logLeftTemp(mode, "leaving a temp file in place: its owner is not provably dead", path, v)
+			return false, false
+		}
+	}
 	if why, ok := e.heldBack(path); ok {
 		e.Log.Warn("leaving a file holdfast wrote in place (not an orphaned temp)", "file", path, "why", why)
-		return false
+		return false, false
 	}
 	if why := e.strayReplacementHold(ctx, path); why != "" {
 		e.Log.Warn("leaving a file holdfast wrote in place - NO RECORD of it survives, so it is held back on its name and its content alone: "+
 			"it is never enumerated, encoded, swapped or swept, in this run or any later one, and removing it is an operator's call",
 			"file", path, "why", why)
-		return false
+		return false, false
 	}
-	return os.Remove(path) == nil
+	switch err := os.Remove(path); {
+	case err == nil:
+		args := []any{"file", path, "sweep", string(mode), "owner", v.state.String()}
+		if v.parsed {
+			args = append(args, "owner_pid", v.rec.PID, "owner_host", v.rec.Host)
+		}
+		e.Log.Info("removed an orphaned temp file", args...)
+		return true, true
+	case errors.Is(err, fs.ErrNotExist):
+		return false, true
+	default:
+		e.Log.Warn("an orphaned temp file could not be removed; it stays for a later sweep", "file", path, "err", err)
+		return false, false
+	}
+}
+
+// logLeftTemp names a temp a sweep left because of its owner, with the reason and where the
+// owner's record is. A bounded run says it at `warn` (observability O3: it carried on, in a
+// state an operator may want to see, and a later pass may still remove the temp); a
+// whole-library pass leaving a live owner's work in progress is ordinary and says it at
+// `info`.
+func (e *Engine) logLeftTemp(mode sweepMode, msg, path string, v *ownerVerdict) {
+	args := []any{"file", path, "why", v.why, "sweep", string(mode), "owner", v.state.String()}
+	if v.record != "" {
+		args = append(args, "owner_record", v.record)
+	}
+	if v.parsed {
+		args = append(args, "owner_pid", v.rec.PID, "owner_host", v.rec.Host)
+	}
+	if mode == sweepBounded {
+		e.Log.Warn(msg, args...)
+		return
+	}
+	e.Log.Info(msg, args...)
 }
 
 // scanOnce walks the roots and fans what it finds out to a pool of workers
@@ -1235,7 +1332,27 @@ func (e *Engine) scanOnce(ctx context.Context, pass *listings, bud *budget) (map
 	// decides NOTHING about the file - see feedHoldOut.
 	holdOut := e.newFeedHoldOut()
 
+	// A BOUNDED pass (bud is its count bound; an unbounded pass has none) decides every temp
+	// it lists by the bounded sweep's rule, so a temp its owner-record sweep never saw - one
+	// an older build wrote, whose record is unreadable, whose owner cannot be decided - is
+	// still named where this run lists it. A temp that sweep already decided is not decided
+	// twice. An unbounded pass's sweep ran over these same listings before the scan began.
+	var sawTemp func(string)
+	if bud != nil {
+		sawTemp = func(p string) {
+			if bud.decided == nil {
+				bud.decided = map[string]bool{}
+			}
+			if bud.decided[p] {
+				return
+			}
+			bud.decided[p] = true
+			e.sweepTemp(ctx, p, sweepBounded)
+		}
+	}
+
 	observed := e.enumerateOrdered(pass, sink{
+		temp: sawTemp,
 		offer: func(f string) bool {
 			if stop() {
 				return false
@@ -1290,6 +1407,18 @@ type sink struct {
 	// it is crossing a run of directories that hold no source at all stops there rather than
 	// listing the rest of the library for nothing. nil is never stopped.
 	stopped func() bool
+
+	// temp, when non-nil, is told of every work-in-progress temp in a directory the
+	// enumeration listed, as it lists it. A bounded pass decides each one there; nothing
+	// else sets it.
+	temp func(path string)
+}
+
+// sawTemp tells the sink of a temp the enumeration listed.
+func (s sink) sawTemp(path string) {
+	if s.temp != nil {
+		s.temp(path)
+	}
 }
 
 // halted reports whether this sink has asked the enumeration to stop.
@@ -1402,6 +1531,10 @@ func (e *Engine) enumerateStream(pass *listings, to sink) map[string]bool {
 					}
 					continue
 				}
+				if isTempName(ent.Name) {
+					to.sawTemp(filepath.Join(dir, ent.Name))
+					continue
+				}
 				if source {
 					p := filepath.Join(dir, ent.Name)
 					// The filter is asked AFTER this directory was listed and marked
@@ -1464,6 +1597,10 @@ func (e *Engine) enumerateStream(pass *listings, to sink) map[string]bool {
 				if IsSourceName(d.Name(), e.Cfg.VideoExts) {
 					e.skipSourceNamedDirectory(path)
 				}
+				return nil
+			}
+			if isTempName(filepath.Base(path)) {
+				to.sawTemp(path)
 				return nil
 			}
 			if IsSourceName(filepath.Base(path), e.Cfg.VideoExts) {
@@ -2002,6 +2139,22 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		// Held until this job exits, by EVERY way out of this function: swapped, skipped,
 		// failed, or its context cancelled.
 		defer release()
+		// WHO OWNS THE WORKING FILE, recorded before the encoder writes a byte of it, so a
+		// later run - a bounded one included - can prove this process dead if it dies with
+		// the file still here (tempowner.go). A job whose ownership cannot be recorded does
+		// not start: its working file would be one no bounded run could ever reclaim, or
+		// worse, one a stale record could name.
+		owned, err := e.ownTemp(work, f)
+		if err != nil {
+			e.Log.Warn("FAIL (could not record which process owns the working file, source untouched)",
+				"file", f, "working_file", work, "err", err)
+			e.fail(ctx, f, key, GateOther, withSourceDimensions(
+				&store.Outcome{Reason: err.Error(), Profile: ts.Profile, Decision: by}, props))
+			return nil
+		}
+		// Cleared by EVERY way out of this function this process lives through, after
+		// whatever that way did to the working file.
+		defer owned.release()
 	} else {
 		// The per-job free-space pre-check, taken at the moment this job is about to encode
 		// and BEFORE the encoder has written a byte. The startup floor cannot do this job: it
@@ -2207,6 +2360,17 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			e.fail(ctx, f, key, GateSwap, out)
 			return nil
 		}
+		// The copy is a temp beside the source like the working file of a job with no
+		// scratch_dir, so it is owned the same way, recorded before its first byte.
+		owned, err := e.ownTemp(t, f)
+		if err != nil {
+			e.Log.Warn("FAIL (could not record which process owns the copy beside the source, source untouched)",
+				"file", f, "copy", t, "err", err)
+			out.Reason = err.Error()
+			e.fail(ctx, f, key, GateSwap, out)
+			return nil
+		}
+		defer owned.release()
 		if err := e.copyBackBesideSource(work, t); err != nil {
 			// Nothing is renamed and the source is untouched. The copy is removed:
 			// it is at a temp name, never at an ordinary media name, so no reader

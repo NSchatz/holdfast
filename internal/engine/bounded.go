@@ -17,19 +17,28 @@ package engine
 //
 //   - WHAT IS OFFERED. A file bound offers exactly the named path; a count bound offers
 //     until that many files have reached a terminal outcome.
-//   - THE TWO WHOLE-LIBRARY PASSES ARE NOT RUN. The stale-temp sweep decides a file
-//     holdfast wrote is orphaned, and the ledger retention pass decides a row's file is
-//     gone; both reason from "this pass listed the whole library", which a bounded pass
-//     did not. The retention pass's mistake is the sharp one: it is an irreversible delete
-//     of audit history that no re-run restores. So a bounded run REMOVES an irreversible
-//     act rather than adding one, and errs safe.
-//   - IT SAYS SO. Which bound, its value, and the two passes it skipped, as structured
-//     fields, because "the run I just watched did less than a scan does" is exactly the
-//     thing an operator must not have to infer.
+//   - THE WHOLE-LIBRARY PASSES ARE NOT RUN AS THEY ARE ON A SCAN. The ledger retention pass
+//     decides a row's file is gone, reasoning from "this pass listed the whole library",
+//     which a bounded pass did not, and its mistake is an irreversible delete of audit
+//     history that no re-run restores - so a bounded run does not run it at all. The
+//     whole-library stale-temp sweep reasons the same way, deciding a temp is orphaned on
+//     finding it in a listing, and a bounded run does not run that either. What it runs
+//     instead is the OWNER-CHECKED sweep: before any file is offered it removes each temp
+//     whose owner record (tempowner.go) shows its owner provably dead, found from those
+//     records rather than from a listing, so a bounded run killed by SIGKILL or the OOM
+//     killer leaves nothing a later bounded run cannot reach. An owner record is evidence
+//     about the TEMP, not about the library, which is why the old reason for skipping the
+//     sweep does not apply to it. A temp whose owner it cannot prove dead - no record, as
+//     every temp an older build wrote has none; a record it cannot read; storage where a
+//     lock is not evidence - it leaves, and names at `warn` wherever it sees one.
+//   - IT SAYS SO. Which bound, its value, what became of the stale-temp sweep and that the
+//     retention pass was skipped, as structured fields, because "the run I just watched did
+//     less than a scan does" is exactly the thing an operator must not have to infer.
 
 import (
 	"context"
 	"errors"
+	"os"
 	"sync"
 )
 
@@ -51,7 +60,7 @@ type Bound struct {
 	Limit int
 }
 
-// bounded reports whether this run is bounded at all, which is the question the two
+// bounded reports whether this run is bounded at all, which is the question the
 // whole-library passes turn on.
 func (b Bound) bounded() bool { return b.File != "" || b.Limit > 0 }
 
@@ -59,22 +68,99 @@ func (b Bound) bounded() bool { return b.File != "" || b.Limit > 0 }
 // caller that has not decided yet has one function to call rather than a branch to write.
 func (e *Engine) RunBounded(ctx context.Context, b Bound) error { return e.runPass(ctx, b) }
 
+// staleTempSweepOwnerChecked is the bounded-run report's value for its stale-temp sweep: it
+// runs, and removes only a temp whose recorded owner is provably dead.
+const staleTempSweepOwnerChecked = "owner-checked"
+
 // reportBound states what this pass is bounded by and what that costs, as fields rather
 // than as a sentence, before any of it happens (AC-11, observability O1/O3). It is `info`:
-// nothing here needs a human to act, and a bounded run is the operator's own request.
+// nothing here needs a human to act, and a bounded run is the operator's own request. It
+// comes before the sweep; the sweep's own records say what it removed.
 func (e *Engine) reportBound(b Bound) {
 	which, value := "limit", any(b.Limit)
 	if b.File != "" {
 		which, value = "file", any(b.File)
 	}
+	sweep, sweepRemoves := staleTempSweepOwnerChecked, "only temps whose recorded owner is provably dead"
+	if e.owners == nil {
+		sweep, sweepRemoves = "skipped", "nothing: this engine keeps no owner records, so no temp's owner can be proved dead"
+	}
 	e.Log.Info("bounded run: this pass carries a bound, so it does not list the whole library",
 		"bounded", true,
 		"bound", which,
 		"bound_value", value,
-		"stale_temp_sweep", "skipped",
+		"stale_temp_sweep", sweep,
+		"stale_temp_sweep_removes", sweepRemoves,
 		"ledger_retention_pass", "skipped",
-		"why_skipped", "this pass did not list the whole library, and both of those passes conclude "+
+		"why_skipped", "this pass did not list the whole library, and the retention pass concludes "+
 			"from an absence that only a whole-library pass is evidence for")
+}
+
+// sweepOrphanedTemps is a bounded run's stale-temp sweep, and it runs before any file is
+// offered. It reads the owner records rather than the library: each record whose owner is
+// provably dead has its temp removed - the attached-picture files named after it first -
+// unless a hold-back applies, and every removal is recorded with its path (cli L6). A
+// record whose owner is alive, or that cannot be decided, leaves its temp where it is and
+// names it. It returns the temps it decided, so the enumeration does not decide them again.
+func (e *Engine) sweepOrphanedTemps(ctx context.Context) map[string]bool {
+	decided := map[string]bool{}
+	if e.owners == nil {
+		return decided
+	}
+	records, err := e.owners.ownerRecords()
+	if err != nil {
+		e.Log.Warn("the owner records could not be listed, so this bounded run removes no temp",
+			"owner_records", e.owners.dir, "operation", "list the owner-record directory", "err", err,
+			"next", "every temp stays where it is for a later bounded run or an unbounded pass")
+		return decided
+	}
+	removed := 0
+	for _, rec := range records {
+		if ctx.Err() != nil {
+			break
+		}
+		v := e.owners.inspect(rec, "")
+		temp := v.temp()
+		if v.state == ownerNoRecord {
+			// Cleared between the listing and the open: its owner finished with it.
+			continue
+		}
+		if temp == "" {
+			e.Log.Warn("leaving an owner record, and any temp it names, in place: its owner is not provably dead",
+				"owner_record", rec, "why", v.why, "sweep", string(sweepBounded))
+			v.close(false)
+			continue
+		}
+		pictures := picturesBeside(temp)
+		for _, p := range pictures {
+			decided[p] = true
+		}
+		decided[temp] = true
+		if v.state != ownerDead {
+			// Named only where there is a temp to name: a live owner's record is written a
+			// moment before its temp exists.
+			for _, p := range append(pictures, temp) {
+				if _, err := os.Lstat(p); err == nil {
+					e.decideTemp(ctx, p, sweepBounded, v)
+				}
+			}
+			v.close(false)
+			continue
+		}
+		for _, p := range pictures {
+			if r, _ := e.decideTemp(ctx, p, sweepBounded, v); r {
+				removed++
+			}
+		}
+		r, gone := e.decideTemp(ctx, temp, sweepBounded, v)
+		if r {
+			removed++
+		}
+		v.close(gone)
+	}
+	e.Log.Info("bounded run: the owner-checked stale-temp sweep is done",
+		"owner_records", len(records), "temps_removed", removed)
+	return decided
 }
 
 // processOne carries a single named path to a terminal outcome, through the same exported
@@ -116,6 +202,12 @@ func (e *Engine) processOne(ctx context.Context, path string) error {
 type budget struct {
 	e     *Engine
 	limit int
+
+	// decided is every temp this bounded pass has already decided, so the enumeration does
+	// not decide or name one twice: the owner-record sweep's before the scan began, and
+	// each one the enumeration then lists. It is only touched on the enumeration's own
+	// goroutine, after the sweep has returned.
+	decided map[string]bool
 	// start is the engine's terminal count when this pass began, so the pass measures
 	// ITSELF rather than the lifetime of the process.
 	start int64

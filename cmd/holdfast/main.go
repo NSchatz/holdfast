@@ -644,6 +644,11 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope c
 	// first scan reads the entries that walk already read rather than paying for
 	// the same directories twice more.
 	eng.SetCoverage(res.Coverage, res.Entries)
+	// Every temp this engine writes beside a source carries a record of the process that
+	// owns it, under the same state directory as the job store, classified by the same
+	// filesystem-type lookup the startup check used. It is what lets a bounded run remove a
+	// temp a killed run left, and what keeps every sweep off a live run's in-flight file.
+	eng.TrackTempOwners(filepath.Join(stateDirPath(cfg), engine.TempOwnersDirName), startupPlatform().FSType)
 	return eng, st, 0
 }
 
