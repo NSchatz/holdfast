@@ -766,7 +766,8 @@ func renderArgv(calls [][]string) string {
 }
 
 // The base commit's invocations for the no-picture report-shaped source, captured through
-// argvLoggingFFmpeg from that tree. decodeCheck and the two stream hashes are the gate's own
+// argvLoggingFFmpeg from that tree, with the mux-queue bounds every encode invocation now
+// carries ahead of the output path. decodeCheck and the two stream hashes are the gate's own
 // invocations; the first entry of each sequence is the encode.
 var (
 	ac10DecodeCheck = []string{"-hide_banner", "-nostdin", "-v", "error", "-xerror", "-err_detect", "+explode",
@@ -777,13 +778,18 @@ var (
 			"-map", "0", "-map", "-0:d?", "-c", "copy", "-c:v", "libx265",
 			"-pix_fmt", "yuv420p10le", "-color_range", "tv", "-fps_mode", "passthrough",
 			"-preset", "ultrafast", "-crf", "22", "-x265-params", "log-level=error",
+			"-max_muxing_queue_size", "128", "-muxing_queue_data_threshold", "52428800",
+			"-thread_queue_size", "8",
 			"--", "<ROOT>/movie.__transcoding__.mkv"},
 		ac10DecodeCheck,
 	}
 
 	ac10RemuxOnly = [][]string{
 		{"-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", "<ROOT>/movie.mkv",
-			"-map", "0", "-map", "-0:d?", "-c", "copy", "--", "<ROOT>/movie.__transcoding__.mkv"},
+			"-map", "0", "-map", "-0:d?", "-c", "copy",
+			"-max_muxing_queue_size", "128", "-muxing_queue_data_threshold", "52428800",
+			"-thread_queue_size", "8",
+			"--", "<ROOT>/movie.__transcoding__.mkv"},
 		ac10DecodeCheck,
 		{"-hide_banner", "-nostdin", "-v", "error", "-i", "<ROOT>/movie.mkv",
 			"-map", "0:v", "-c", "copy", "-f", "streamhash", "-hash", "md5", "-"},
@@ -797,6 +803,8 @@ var (
 			"-map", "0:6", "-map", "0:7", "-map", "0:8", "-c", "copy", "-c:v", "libx265",
 			"-pix_fmt", "yuv420p10le", "-color_range", "tv", "-fps_mode", "passthrough",
 			"-preset", "ultrafast", "-crf", "22", "-x265-params", "log-level=error",
+			"-max_muxing_queue_size", "128", "-muxing_queue_data_threshold", "52428800",
+			"-thread_queue_size", "8",
 			"--", "<ROOT>/movie.__transcoding__.mkv"},
 		ac10DecodeCheck,
 	}
