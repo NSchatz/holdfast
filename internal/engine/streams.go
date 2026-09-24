@@ -275,6 +275,30 @@ func (p *StreamPlan) MapArgs() []string {
 // that is what the output's `v:N` addresses. A single carried video stream yields none,
 // so a source with no cover art produces the argv it always did.
 func (p *StreamPlan) AttachedPictureIndexes() []int {
+	var idx []int
+	for i, s := range p.intendedVideo() {
+		if s.AttachedPicture {
+			idx = append(idx, i)
+		}
+	}
+	return idx
+}
+
+// Pictures are the attached pictures this plan carries, in container order: the same
+// streams AttachedPictureIndexes addresses, as the source's probe described them.
+func (p *StreamPlan) Pictures() []probe.Stream {
+	var pics []probe.Stream
+	for _, s := range p.intendedVideo() {
+		if s.AttachedPicture {
+			pics = append(pics, s)
+		}
+	}
+	return pics
+}
+
+// intendedVideo is the intended video streams, or none when there is at most one: a lone
+// video stream is the file's picture, whatever its disposition, and is never set aside.
+func (p *StreamPlan) intendedVideo() []probe.Stream {
 	if p == nil {
 		return nil
 	}
@@ -287,13 +311,51 @@ func (p *StreamPlan) AttachedPictureIndexes() []int {
 	if len(video) <= 1 {
 		return nil
 	}
-	var idx []int
-	for i, s := range video {
-		if s.AttachedPicture {
-			idx = append(idx, i)
+	return video
+}
+
+// MapArgsWithoutPictures is MapArgs with every picture in Pictures left out, for an output
+// that carries the pictures by another route than the map. With nothing selected away it
+// is MapArgs plus one negative map per picture; otherwise the spelled-out map minus them.
+// A plan carrying no picture gets MapArgs exactly.
+func (p *StreamPlan) MapArgsWithoutPictures() []string {
+	pics := p.Pictures()
+	if len(pics) == 0 {
+		return p.MapArgs()
+	}
+	if len(p.dropped) == 0 {
+		args := p.MapArgs()
+		for _, s := range pics {
+			args = append(args, "-map", "-0:"+strconv.Itoa(s.Index))
+		}
+		return args
+	}
+	aside := make(map[int]bool, len(pics))
+	for _, s := range pics {
+		aside[s.Index] = true
+	}
+	args := make([]string, 0, 2*len(p.intended))
+	for _, s := range p.intended {
+		if !aside[s.Index] {
+			args = append(args, "-map", "0:"+strconv.Itoa(s.Index))
 		}
 	}
-	return idx
+	return args
+}
+
+// MappedAttachments is how many ATTACHMENT streams the map carries, which is where an
+// attachment added to the output after them starts counting (`-metadata:s:t:N`).
+func (p *StreamPlan) MappedAttachments() int {
+	if p == nil {
+		return 0
+	}
+	n := 0
+	for _, s := range p.intended {
+		if s.Type == probe.TypeAttachment {
+			n++
+		}
+	}
+	return n
 }
 
 // CheckOutput is the intended-map gate: the output carries EXACTLY the streams this plan
