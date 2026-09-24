@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/probe"
@@ -383,6 +384,31 @@ func TestCoverArt_AC1_ReportShapedMatroskaSwapsWithItsPictures(t *testing.T) {
 	assertPicturesCarried(t, wantPics, picturesOf(t, ffmpeg, ffprobe, src, side, "output"))
 	if got := nonPictureKinds(t, ffprobe, src); !equalStrings(got, wantOthers) {
 		t.Fatalf("the output's non-picture streams are %v, the source carried %v", got, wantOthers)
+	}
+}
+
+// [AC-1] A working output whose name leaves no room for the picture suffix still gets a
+// picture file the filesystem accepts: a temp name the stray-replacement hold never holds,
+// no character split, and a different file for two working outputs sharing their first 234
+// bytes, so two long-named jobs in one directory never copy their pictures to one file.
+func TestCoverArt_AC1_PictureFileFitsALongWorkingName(t *testing.T) {
+	dir := t.TempDir()
+	for _, stem := range []string{strings.Repeat("x", 235), strings.Repeat("é", 117) + "x"} {
+		var got []string
+		for _, last := range []string{"a", "b"} {
+			p := picturePath(filepath.Join(dir, stem[:234]+last+"."+TempMarker+".mkv"), 0)
+			base := filepath.Base(p)
+			if filepath.Dir(p) != dir || !isTempName(base) || IsTempConstructionName(base) || !utf8.ValidString(base) {
+				t.Fatalf("picture file %q: want a valid-UTF-8 temp name in %s outside the temp construction", base, dir)
+			}
+			if err := os.WriteFile(p, nil, 0o600); err != nil {
+				t.Fatalf("the picture file for a %d-byte stem cannot be created: %v", len(stem), err)
+			}
+			got = append(got, p)
+		}
+		if got[0] == got[1] {
+			t.Fatalf("two working outputs sharing their first 234 bytes share the picture file %q", got[0])
+		}
 	}
 }
 

@@ -3,12 +3,15 @@ package engine
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/deinterlace"
@@ -406,7 +409,7 @@ func (e FFmpegEncoder) matroskaPictures(out string) ([]matroskaPicture, error) {
 		}
 		pics = append(pics, matroskaPicture{
 			source:   s,
-			file:     out + ".picture" + strconv.Itoa(i),
+			file:     picturePath(out, i),
 			mimeType: mime,
 			filename: name,
 		})
@@ -414,15 +417,52 @@ func (e FFmpegEncoder) matroskaPictures(out string) ([]matroskaPicture, error) {
 	return pics, nil
 }
 
+// picturePath is the file the i-th attached picture of the job writing out is copied to:
+// the working output's own name plus ".picture<i>", in the working output's directory, so
+// it is unique exactly as the working output is and carries the temp marker the sweeps
+// recognise.
+//
+// Where that suffix would take the name past NAME_MAX (maxBaseName) - a long source name
+// already fills it, and a scratch working name is cut to fill it exactly - the part of the
+// name ahead of the temp marker is cut instead, at a character boundary, and a digest of
+// the whole working name stands in for what was cut, so two long names sharing a beginning
+// still get two files. A job whose working output fits always gets a picture file that fits.
+func picturePath(out string, i int) string {
+	dir, base := filepath.Split(out)
+	tail := ".picture" + strconv.Itoa(i)
+	if len(base)+len(tail) <= maxBaseName {
+		return out + tail
+	}
+	sum := sha256.Sum256([]byte(base))
+	tag := "." + hex.EncodeToString(sum[:scratchTagBytes])
+	head, rest := base, ""
+	if m := strings.Index(base, "."+TempMarker+"."); m > 0 {
+		head, rest = base[:m], base[m:]
+	}
+	// The name was over the limit before tag was added, so keep is below len(head). It is
+	// held at one byte or more so a stem remains ahead of the marker, which a Matroska
+	// working name (a marker and an extension, a few dozen bytes) never comes near needing.
+	keep := max(maxBaseName-len(tag)-len(rest)-len(tail), 1)
+	for keep > 1 && !utf8.RuneStart(head[keep]) {
+		keep--
+	}
+	return filepath.Join(dir, head[:keep]+tag+rest+tail)
+}
+
 // runCarrying runs a job's encode, and where the job carries pictures as Matroska
 // attachments it first copies each one out of the source to its file and then attaches
 // them all to the encode.
 //
-// The picture files sit beside the working output, named after it, so they live where the
-// working output lives: in the scratch directory when one is set, beside the source
-// otherwise, and under the temp marker either way, which is what lets the startup sweep take
-// one a killed run left behind. They are removed on every return from here, the failed
-// ones included: once the encode has exited nothing reads them again.
+// The picture files sit beside the working output, named after it (picturePath), so they
+// live where the working output lives: in the scratch directory when one is set, beside the
+// source otherwise, and under the temp marker either way, which is what lets the startup
+// sweep take one a killed run left behind. They are removed on every return from here, the
+// failed ones included: once the encode has exited nothing reads them again.
+//
+// The copy runs the image2 muxer with -update 1. Without it image2 reads its output name as
+// an image-sequence pattern, so a `%d` anywhere in the path (a source, a library directory
+// or a scratch directory named with one) sends the picture to a different name: one this
+// function never removes, and one a sibling job may own.
 func (e FFmpegEncoder) runCarrying(ctx context.Context, in, out string, sink ProgressSink,
 	pre, body []string, pics []matroskaPicture) error {
 	if len(pics) == 0 {
@@ -437,9 +477,10 @@ func (e FFmpegEncoder) runCarrying(ctx context.Context, in, out string, sink Pro
 	first := e.Plan.MappedAttachments()
 	for i, p := range pics {
 		// One packet, copied: an attached picture is exactly one, and the image2 muxer
-		// writes the packet's bytes as they are.
+		// writes the packet's bytes as they are, to exactly the name it is given.
 		if err := e.runFFmpeg(ctx, in, p.file, nil, nil, []string{
-			"-map", "0:" + strconv.Itoa(p.source.Index), "-c", "copy", "-frames:v", "1", "-f", "image2",
+			"-map", "0:" + strconv.Itoa(p.source.Index), "-c", "copy", "-frames:v", "1",
+			"-f", "image2", "-update", "1",
 		}); err != nil {
 			return fmt.Errorf("copying out the attached picture at source stream %d, to carry it as a "+
 				"Matroska attachment: %w", p.source.Index, err)
