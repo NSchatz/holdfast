@@ -434,7 +434,7 @@ func (r *s0157Rig) assertSourceUntouched(t *testing.T, before s0157Identity, dir
 
 // s0157Bounds are AC-1's ceilings, per option.
 var s0157Bounds = map[string]int64{
-	"-max_muxing_queue_size":      128,
+	"-max_muxing_queue_size":       128,
 	"-muxing_queue_data_threshold": 52428800,
 	"-thread_queue_size":           8,
 }
@@ -721,7 +721,10 @@ func TestS0157_AC10_ACancelledEncodeIsAnInterruptionNotAMemoryAbort(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		for ctx.Err() == nil && len(r.markTimes(t, "grown")) == 0 {
+		for ctx.Err() == nil {
+			if b, _ := os.ReadFile(r.marks); strings.Contains(string(b), "grown ") {
+				break
+			}
 			time.Sleep(50 * time.Millisecond)
 		}
 		// Past at least one sample of a running, watched encode.

@@ -50,6 +50,7 @@ func TestS0157_AC3_TheThresholdIs85PercentOfTheSmallestLimitOnTheWalk(t *testing
 		{"one level", []string{"8589934592\n"}, 8589934592, 7301444403, 0},
 		{"the parent is tighter", []string{"8589934592\n", "max\n", "4294967296\n"}, 4294967296, 3650722201, 2},
 		{"the child is tighter", []string{"1000\n", "2000\n"}, 1000, 850, 0},
+		{"an equal parent leaves the nearest level the origin", []string{"1000\n", "1000\n"}, 1000, 850, 0},
 		{"a level with no file imposes nothing", []string{"-", "99\n"}, 99, 84, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

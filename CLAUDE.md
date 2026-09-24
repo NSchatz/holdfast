@@ -133,4 +133,6 @@ counts, what was retired for grading presentation rather than behaviour, and why
 coverage is not assertion ·
 `docs/mutation-testing.md` the mutation score floor, the figure it is applied to, which
 packages are in the mutation domain and why each exclusion is there, what a pull request
-runs against what the schedule runs, and how to reproduce either by hand.
+runs against what the schedule runs, and how to reproduce either by hand ·
+`docs/encode-memory.md` the encode memory watchdog, the mux-queue bounds on every ffmpeg
+argv, and the reproduction attempt behind them.
