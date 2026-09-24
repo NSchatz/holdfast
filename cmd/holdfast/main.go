@@ -593,8 +593,16 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope c
 		}
 	}
 
+	// The parallelism every libx265 encode of this run is told to use, derived ONCE, here,
+	// and stated once: the x265_cpus key where it names a figure, otherwise the CPU quota
+	// of this process's own cgroup, otherwise nothing and libx265's own defaults. It is
+	// derived here rather than in engine.New because `plan` and `analyze` build an engine
+	// too, and neither encodes a file for a parallelism line to be about.
+	x265 := engine.DeriveX265(cfg.X265CPUs, envOr(engine.CgroupRootEnv, ""))
+	x265.Announce(log)
+
 	prober := probe.New(ffmpeg, ffprobe)
-	enc := engine.FFmpegEncoder{FFmpeg: ffmpeg, Cfg: *cfg, Probe: prober}
+	enc := engine.FFmpegEncoder{FFmpeg: ffmpeg, Cfg: *cfg, Probe: prober, X265: x265.Parallelism}
 	// Belt: an explicit empty state_dir must not silently write the job DB into the
 	// process CWD (Load defaults it to "state"; this covers `state_dir: ""`). The
 	// defaulting lives in ONE function so `export` reads the database `run` wrote.

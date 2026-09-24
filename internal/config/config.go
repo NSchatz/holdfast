@@ -66,6 +66,7 @@ var knownKeys = map[string]bool{
 	deinterlaceKey:  true,
 	maxHeightKey:    true,
 	downscaleAckKey: true,
+	x265CPUsKey:     true,
 }
 
 // profileKeys are the keys accepted inside one `encode_profiles` entry. The
@@ -149,6 +150,9 @@ func defaultLayer() map[string]any {
 		// which is what lets the shipped documentation be graded against it.
 		maxHeightKey:    0,
 		downscaleAckKey: false,
+		// No configured libx265 parallelism: the run derives it from the CPU quota of its
+		// own cgroup, or passes none where there is no quota to read.
+		x265CPUsKey: 0,
 	}
 }
 
@@ -521,6 +525,18 @@ type Config struct {
 	// 1 is an explicit opt-in (e.g. many small/low-resolution files, or a hardware
 	// encoder in a later phase). Use EffectiveWorkers() to read the resolved value.
 	Workers int `yaml:"workers"`
+
+	// X265CPUs is the whole-CPU budget ONE libx265 encode is sized for: its worker-pool
+	// size, and the frame-thread count derived from it (internal/encoder.X265ParallelismFor).
+	// 0 (absent/default) derives the budget from the CPU bandwidth limit of the process's
+	// own cgroup at start, and passes nothing where there is no limit, leaving libx265's own
+	// defaults in force. A positive value wins over the cgroup reading.
+	//
+	// It describes the PROCESS, not a library: it is refused inside a library_roots entry
+	// and is not a profile knob, so changing it moves no root's profile digest and re-opens
+	// no terminal row. It is per encode and never divided by Workers. Range 0-1024, whole
+	// numbers only; anything else refuses to load.
+	X265CPUs int `yaml:"x265_cpus"`
 
 	// QueueOrder is the order a scan offers its candidate files to those workers in:
 	// path (the default), largest, smallest, newest or oldest. It decides SEQUENCE and
@@ -1047,6 +1063,12 @@ func Load(path string) (*Config, error) {
 	if err := requireWholeKbps(k.Get(scratchFloorKey), scratchFloorKey, "gibibytes", path); err != nil {
 		return nil, err
 	}
+	// x265_cpus is a whole number of CPUs for the same reason: 2.5 would decode as 2, a
+	// budget nobody wrote on the knob that sizes every encode. Its range is checked after
+	// the decode, below.
+	if err := requireWholeKbps(k.Get(x265CPUsKey), x265CPUsKey, "CPUs", path); err != nil {
+		return nil, err
+	}
 	for i, raw := range profileMaps(kf.Get("encode_profiles")) {
 		if v, ok := raw["bitrate_kbps"]; ok {
 			key := fmt.Sprintf("encode_profiles[%d].bitrate_kbps", i)
@@ -1077,6 +1099,10 @@ func Load(path string) (*Config, error) {
 	c.VideoExts = normalizeExts(c.VideoExts)
 	c.Roots = roots
 
+	if err := checkX265CPUs(c.X265CPUs); err != nil {
+		return nil, fmt.Errorf("%w, in %s", err, path)
+	}
+
 	return &c, nil
 }
 
@@ -1100,6 +1126,25 @@ const (
 	bitrateKey      = "bitrate_kbps"
 	scratchFloorKey = "scratch_min_free_gb"
 )
+
+// x265CPUsKey is the one place the libx265 parallelism key is spelled: knownKeys,
+// defaultLayer and its refusals all read it from here.
+const x265CPUsKey = "x265_cpus"
+
+// maxX265CPUs is the largest whole-CPU budget x265_cpus accepts, the same ceiling workers
+// has: a figure past it is a typo on any host this build runs on, not a budget.
+const maxX265CPUs = 1024
+
+// checkX265CPUs refuses an x265_cpus value outside 0..maxX265CPUs, naming the key. Load
+// runs it before the first unit of work, and Validate runs it again for a Config assembled
+// by hand.
+func checkX265CPUs(n int) error {
+	if n < 0 || n > maxX265CPUs {
+		return fmt.Errorf("%s %d out of range (0-%d; 0 derives it from the cgroup CPU quota)",
+			x265CPUsKey, n, maxX265CPUs)
+	}
+	return nil
+}
 
 // profileMaps returns the raw `encode_profiles` entries as they were AUTHORED,
 // before the weakly-typed decoder has seen them. Anything that is not a list of
@@ -1353,6 +1398,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Workers < 0 || c.Workers > 1024 {
 		return fmt.Errorf("workers %d out of range (0-1024; 0 means the default of 1)", c.Workers)
+	}
+	if err := checkX265CPUs(c.X265CPUs); err != nil {
+		return err
 	}
 	// The order those workers are fed in. A written value outside the accepted set refuses
 	// at START and names both halves (cli L7): the alternative is a daemon that resolves an

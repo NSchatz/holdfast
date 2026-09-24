@@ -33,9 +33,9 @@
 # vmaf_min_pool, vmaf_min_chroma, vmaf_subsample, vmaf_model, audio_languages,
 # subtitle_languages, keep_commentary, remux_only, deinterlace, max_height,
 # downscale_acknowledged. Anything else inside an entry refuses to start: workers,
-# state_dir, server_*, undo_window_hours, history_retention_rows, run_window, max_load
-# and the notification keys describe the PROCESS, not a library, and stay at the top
-# level.
+# x265_cpus, state_dir, server_*, undo_window_hours, history_retention_rows, run_window,
+# max_load and the notification keys describe the PROCESS, not a library, and stay at
+# the top level.
 #
 # An entry may also carry exclude_paths / include_paths (which files it offers at all),
 # `rules` (per-resolution-band overrides of the height-sensitive knobs above, named in
@@ -668,6 +668,17 @@ dry_run: false
 # workers: 1                 # concurrent encode workers (default 1 = sequential;
 #                             # CPU libx265 already saturates cores per encode, so
 #                             # raising this is an opt-in for many small/low-res files)
+# x265_cpus: 0               # the whole CPUs ONE libx265 encode is sized for: its
+#                            #   worker-pool size (x265 `pools`) and a frame-thread
+#                            #   count derived from it. 0 (the default) reads the CPU
+#                            #   bandwidth limit of this process's own cgroup at start -
+#                            #   quota over period, rounded down, at least 1 - and passes
+#                            #   nothing where there is none, which leaves libx265 sizing
+#                            #   itself from the host. A positive value wins over the
+#                            #   cgroup. It is per encode and never divided by workers.
+#                            #   Whole numbers 0-1024; anything else refuses to start.
+#                            #   The figure in force, and where it came from, is logged
+#                            #   once at start.
 # queue_order: path          # the order those workers are fed in. One of
 #                            #   path|largest|smallest|newest|oldest; any other value,
 #                            #   including an empty one, is a startup REFUSAL.
