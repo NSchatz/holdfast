@@ -73,9 +73,9 @@ buffering without bound while the video encoder was starved.
   `pools` or `frame-threads` were passed, which is the argv the reporting build produced;
   libx265 therefore sized itself from the host's CPU count.
 - **CPU constraint**: `taskset -c 2`, one core for the whole ffmpeg process.
-- **Measurement**: `VmRSS` sampled once a second for 75 seconds, then the process killed;
-  the peak is the largest sample. "Without the bounds" is the same argv with the three
-  options removed.
+- **Measurement**: `VmRSS` sampled once a second for a fixed window (75 seconds, and one run
+  of 240), then the process killed; the peak is the largest sample. Runs were one at a time.
+  "Without the bounds" is the same argv with the three options removed.
 - **Machine**: Intel Xeon E5-2680 v4 at 2.40 GHz, 56 logical CPUs visible, 157 GiB host
   memory, Linux 6.12.107, inside a container whose cgroup allows 5 CPUs and 16 GiB.
 - **Build**: ffmpeg `N-125875-g5d4d3bdc61-20260731`, the pinned build.
@@ -89,18 +89,23 @@ buffering without bound while the video encoder was starved.
 | without the bounds | 3 | 4157 MiB | 6 MiB | 0 bytes |
 | with the bounds, decoder at `-threads 1` | 1 | 4153 MiB | single run | 0 bytes |
 | with the bounds, libx265 `pools=1:frame-threads=1` | 1 | 2650 MiB | single run | 0 bytes |
+| with the bounds, 240-second window | 1 | 4407 MiB | single run | 10.7 MB |
 
-In every run the resident memory rose steeply from the start (about 2.1 GiB at 5 seconds,
-2.85 GiB at 10) and reached 98% of its peak between 40 and 44 seconds, after which it grew by
-tens of MiB over the rest of the window. The process used the whole of its one core
-throughout, and libx265 had not produced a packet by the end of any run, so nothing was
-written to the output.
+The first four rows are 75-second windows. In every run the resident memory rose steeply from
+the start (about 2.1 GiB at 5 seconds, 2.85 GiB at 10) and reached 98% of its 75-second peak
+between 40 and 44 seconds. The process used the whole of its one core throughout, and libx265
+had not produced a packet by the end of any of those runs, so nothing was written to the
+output.
+
+The 240-second run follows the same curve and keeps flattening: 4139 MiB at 60 seconds, 4317
+at 120, 4400 at 180 and 4407 at 235. Its first output appeared between 60 and 90 seconds, and
+the file was 10.7 MB after four minutes, a few MB a minute.
 
 ### Verdict
 
-**The reported growth did not reproduce.** A starved 4K encode does reach several GiB, but it
-levels off, it does so before any output is written, and it does not grow with time the way
-7.1 GB and 440 MB a minute of output describe.
+**The reported growth did not reproduce.** A starved 4K encode does reach several GiB, but
+most of it is there before any output is written, it levels off near 4.4 GiB, and neither the
+memory nor the output grows with time the way 7.1 GB and 440 MB a minute of output describe.
 
 **No mux or demux queue grew.** Removing the three bounds changed the peak by 11 MiB, inside
 the spread between runs, and single-threading the decoder changed nothing. What moved the
