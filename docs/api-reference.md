@@ -80,6 +80,7 @@ build can record is here, and a token with no row fails the documentation check.
 | `exotic-pixel-format` | the source's pixel format is one this build will not map, rather than silently subsample it |
 | `multi-video-stream` | the source carries a moving-picture stream beyond the first, or its stream shape could not be established: every decision here reads `v:0` |
 | `unreadable-stream-list` | ffprobe could not enumerate the source's streams at all, so the intended stream map cannot be derived |
+| `source-damaged` | while ffprobe read the source, its demuxer reported the container as damaged (for Matroska, `0x00 at pos ... invalid as first byte of an EBML number`). Nothing is encoded and the file needs replacing: it is logged at `error` with the demuxer's own message, and a replacement at the same path is decided afresh by the next scan |
 | `undetermined-source-height` | this root needs the source's height - it bands its thresholds by it, or it sets a `max_height` output ceiling - and the probe could not establish one |
 | `downscale-unacknowledged` | this file would be scaled down by `max_height`, the undo window is disabled so the swap would be final, and the root did not set `downscale_acknowledged`. Set that key, or set `undo_window_hours` |
 | `target-already-exists` | the output container differs from the source's and a distinct file is already at the target name |
@@ -95,7 +96,7 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | Field | On | What it is |
 |---|---|---|
 | `reason` | failed | the error that rejected it (the encode error, or **which gate** refused the output) |
-| `reason` | skipped | **which guard** fired - `already-at-target-codec`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `multi-video-stream`, `unreadable-stream-list`, `undetermined-source-height`, `downscale-unacknowledged`, `unknown-field-order`, `telecine-cadence`, `target-already-exists`, `undo-retention-failed`, `restored-original`, `operator-excluded` |
+| `reason` | skipped | **which guard** fired - `already-at-target-codec`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `multi-video-stream`, `unreadable-stream-list`, `source-damaged`, `undetermined-source-height`, `downscale-unacknowledged`, `unknown-field-order`, `telecine-cadence`, `target-already-exists`, `undo-retention-failed`, `restored-original`, `operator-excluded` |
 | `encoder` | any job that reached the encoder | the encoder that ran (`cpu`, `svtav1`, `nvenc`, …) - a skip, or a file with no readable video stream, never gets that far and records none |
 | `profile` | every terminal row | the `encode_profiles` entry that supplied this job's settings, `""` for the top-level ones. `encoder` alone stops answering "what ran" once two encoders can run in one scan, and a **skip** carries it too - the profile is what decided the file was already at its target codec. `""` is a **real value**, not a missing measurement, so the key is always present |
 | `vmaf_mean`, `vmaf_min` | done, and a VMAF-rejected failure | the pooled harmonic mean **and the worst frame** |

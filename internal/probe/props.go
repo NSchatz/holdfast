@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"bytes"
 	"context"
 	"os/exec"
 	"strconv"
@@ -55,6 +56,21 @@ type VideoProps struct {
 
 	cadenceOnce sync.Once
 	cadence     Cadence // what a bounded decode found the source's interlacing to be
+
+	// demuxErr is what the DEMUXER reported at error level while the eager probe ran, read
+	// off the same process's stderr (see ContainerDamage).
+	demuxErr ContainerDiagnostic
+}
+
+// ContainerDiagnostic is what a source's demuxer reported at error level while the snapshot
+// probe read it: the container named, the first message it logged and how many it logged.
+type ContainerDiagnostic struct {
+	// Demuxer is the demuxer that logged, as ffprobe names it (format_name).
+	Demuxer string
+	// First is the first message it logged, without ffmpeg's context prefix.
+	First string
+	// Count is how many error-level lines it logged in all.
+	Count int
 }
 
 // scalarStreamEntries are every scalar video-stream field a source skip-guard or the
@@ -78,7 +94,11 @@ const scalarStreamEntries = "codec_name,bit_rate,field_order,codec_tag_string,pi
 // preference Prober.DurationSec applies. A container that reports no duration therefore
 // leaves the snapshot's duration UNKNOWN rather than guessed, which the reporting
 // surface renders as unknown progress (never as zero, never as a fabricated fraction).
-const snapshotEntries = "stream=" + scalarStreamEntries + ":format=duration"
+//
+// `format=format_name` rides along for the same reason: it names the demuxer, which is how a
+// line on this process's stderr is attributed to the container rather than to a decoder (see
+// ContainerDamage). No stream section prints that key, so it overwrites nothing.
+const snapshotEntries = "stream=" + scalarStreamEntries + ":format=duration,format_name"
 
 // VideoProps takes one snapshot of f's source properties. The constructor runs a
 // single ffprobe (all scalar stream fields at once); the side-data probes and the
@@ -93,7 +113,9 @@ func (p *Prober) VideoProps(ctx context.Context, f string) *VideoProps {
 	// needs anyway). The bit_rate container fallback and the side-data probes are
 	// deferred to first access — an already-target-codec file returns at the codec
 	// guard having paid exactly this one probe.
-	return &VideoProps{p: p, ctx: ctx, f: f, fields: p.scalarFields(ctx, f)}
+	fields, diag := p.scalarFields(ctx, f)
+	return &VideoProps{p: p, ctx: ctx, f: f, fields: fields,
+		demuxErr: diag.fromDemuxer(fields["format_name"], fields["codec_name"])}
 }
 
 // scalarFields fetches every scalar stream entry (plus the container duration) in one
@@ -102,13 +124,24 @@ func (p *Prober) VideoProps(ctx context.Context, f string) *VideoProps {
 // `default=nw=1:nk=1` probes returned — the same ffprobe formatting, just batched. A
 // field the stream does not carry is simply absent from the map (lookup yields ""),
 // matching a single-field probe's empty result on a non-zero exit / unknown value.
-func (p *Prober) scalarFields(ctx context.Context, f string) map[string]string {
+//
+// It also returns what the same process wrote to stderr, which at `-v error` is every
+// error-level line ffmpeg logged while it opened and analysed the file. A process that did
+// not run to completion - a non-zero exit, killed by a signal, its context cancelled -
+// yields no fields and NO diagnostics: a line a probe wrote before it was stopped is not an
+// answer about the file, and reporting it would call a file damaged on the strength of a
+// probe nobody let finish.
+func (p *Prober) scalarFields(ctx context.Context, f string) (map[string]string, *diagnostics) {
 	m := map[string]string{}
-	out, err := exec.CommandContext(ctx, p.FFprobe, "-v", "error", "-select_streams", "v:0",
-		"-show_entries", snapshotEntries, "-of", "default=nw=1", "--", f).Output()
+	diag := &diagnostics{}
+	cmd := exec.CommandContext(ctx, p.FFprobe, "-v", "error", "-select_streams", "v:0",
+		"-show_entries", snapshotEntries, "-of", "default=nw=1", "--", f)
+	cmd.Stderr = diag
+	out, err := cmd.Output()
 	if err != nil {
-		return m
+		return m, &diagnostics{}
 	}
+	diag.flush()
 	for _, line := range strings.Split(string(out), "\n") {
 		k, v, ok := strings.Cut(line, "=")
 		if !ok {
@@ -116,7 +149,118 @@ func (p *Prober) scalarFields(ctx context.Context, f string) map[string]string {
 		}
 		m[strings.TrimSpace(k)] = strings.TrimSpace(v)
 	}
-	return m
+	return m, diag
+}
+
+// ContainerDamage returns what the source's DEMUXER reported at error level while the
+// snapshot probe read it, and whether it reported anything.
+//
+// It costs no probe: it is read off the stderr of the eager probe every file already pays
+// for. A line counts only where ffmpeg attributed it to the demuxer, and ffmpeg names the
+// context that logged each line - `[matroska,webm @ 0x...]` for the Matroska demuxer, the
+// same string ffprobe reports as format_name. A decoder's line names the DECODER
+// (`[h264 @ 0x...]`), and decoders complain about healthy files routinely: a broadcast
+// capture that starts mid-GOP prints decoding errors for its first frames and is a perfectly
+// good source. So a decoder's line is never read as damage to the container.
+//
+// Where the demuxer's name is also the name of the decoder of the probed video stream, the
+// prefix alone cannot say which of the two logged a line (a raw `.h264` elementary stream is
+// read by the `h264` demuxer and decoded by the `h264` decoder), and such a line is not
+// attributed to the demuxer. An unestablished answer here sends the file on to the encode and
+// the full gate, which is where it went before this signal existed.
+func (vp *VideoProps) ContainerDamage() (ContainerDiagnostic, bool) {
+	return vp.demuxErr, vp.demuxErr.Count > 0
+}
+
+// decoderNamedAsDemuxer maps a video codec to the name its ffmpeg decoder logs under, for
+// the codecs whose decoder carries a DEMUXER's name without carrying the codec's own: FLV1
+// video is decoded by the decoder named `flv`, which is also the FLV demuxer's name.
+var decoderNamedAsDemuxer = map[string]string{"flv1": "flv"}
+
+// maxDiagnosticLine bounds how much of one stderr line is kept, so a line with no newline in
+// it cannot grow without limit.
+const maxDiagnosticLine = 4096
+
+// diagnostics is what an ffprobe process wrote to stderr, read line by line as it is
+// written and kept only as the first message and the line count per logging context. What it
+// holds grows with the number of distinct contexts that logged, never with the number of
+// lines, so a source that makes ffmpeg complain on every packet costs no more to hold than
+// one that complains once.
+type diagnostics struct {
+	partial []byte
+	first   map[string]string
+	count   map[string]int
+}
+
+// Write takes stderr as ffprobe writes it; it never fails, so the probe is never stopped by
+// what it had to say.
+func (d *diagnostics) Write(b []byte) (int, error) {
+	n := len(b)
+	for {
+		i := bytes.IndexByte(b, '\n')
+		if i < 0 {
+			d.keep(b)
+			return n, nil
+		}
+		d.keep(b[:i])
+		d.flush()
+		b = b[i+1:]
+	}
+}
+
+// keep appends to the line being read, up to maxDiagnosticLine.
+func (d *diagnostics) keep(b []byte) {
+	if room := maxDiagnosticLine - len(d.partial); room > 0 {
+		d.partial = append(d.partial, b[:min(len(b), room)]...)
+	}
+}
+
+// flush records the line being read, if there is one.
+func (d *diagnostics) flush() {
+	if len(d.partial) == 0 {
+		return
+	}
+	name, msg, ok := logContext(string(d.partial))
+	d.partial = d.partial[:0]
+	if !ok {
+		return
+	}
+	if d.count == nil {
+		d.first, d.count = map[string]string{}, map[string]int{}
+	}
+	if d.count[name] == 0 {
+		d.first[name] = msg
+	}
+	d.count[name]++
+}
+
+// fromDemuxer is what the context named format logged, when that context can only be the
+// demuxer (see ContainerDamage), and nothing otherwise.
+func (d *diagnostics) fromDemuxer(format, codec string) ContainerDiagnostic {
+	if format == "" || format == codec || format == decoderNamedAsDemuxer[codec] || d.count[format] == 0 {
+		return ContainerDiagnostic{}
+	}
+	return ContainerDiagnostic{Demuxer: format, First: d.first[format], Count: d.count[format]}
+}
+
+// logContext splits one line of ffmpeg's log into the name of the context that logged it and
+// the message. ffmpeg prefixes a line with `[name @ 0xADDR] ` for the context, preceded by
+// the same for its parent where it has one, so the LAST prefix names the context that logged.
+// ok is false for a line that names no context at all.
+func logContext(line string) (name, msg string, ok bool) {
+	rest := line
+	for strings.HasPrefix(rest, "[") {
+		end := strings.Index(rest, "] ")
+		if end < 0 {
+			break
+		}
+		n, _, isContext := strings.Cut(rest[1:end], " @ ")
+		if !isContext {
+			break
+		}
+		name, rest, ok = n, rest[end+2:], true
+	}
+	return name, strings.TrimSpace(rest), ok
 }
 
 // Codec returns codec_name, or "" for an unreadable file / no video stream — the
