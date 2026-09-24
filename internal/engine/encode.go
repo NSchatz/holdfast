@@ -145,6 +145,11 @@ type FFmpegEncoder struct {
 	// visible - and it is the real argv the production encoder assembled, not a
 	// re-derivation of it.
 	argvObserver func(args []string)
+
+	// workDir is the directory an invocation runs in, "" for the process's own. Only the
+	// picture carriage sets it (runningIn): the working output's directory, so a picture
+	// file is named relative to it and its path never has to fit PATH_MAX whole.
+	workDir string
 }
 
 // ForProfile returns this encoder built from prof's knobs. The receiver is a VALUE, so
@@ -358,10 +363,12 @@ var pictureExtensions = map[string]string{
 }
 
 // matroskaPicture is one attached picture as the output will carry it: an attachment
-// written from a file holding the source picture's bytes, under its description.
+// written from a file holding the source picture's bytes, under its description. name is
+// that file's name in the working output's directory (picturePath); it is only ever used
+// relative to that directory (runCarrying).
 type matroskaPicture struct {
 	source   probe.Stream
-	file     string
+	name     string
 	mimeType string
 	filename string
 }
@@ -409,7 +416,7 @@ func (e FFmpegEncoder) matroskaPictures(out string) ([]matroskaPicture, error) {
 		}
 		pics = append(pics, matroskaPicture{
 			source:   s,
-			file:     picturePath(out, i),
+			name:     filepath.Base(picturePath(out, i)),
 			mimeType: mime,
 			filename: name,
 		})
@@ -426,7 +433,10 @@ func (e FFmpegEncoder) matroskaPictures(out string) ([]matroskaPicture, error) {
 // already fills it, and a scratch working name is cut to fill it exactly - the part of the
 // name ahead of the temp marker is cut instead, at a character boundary, and a digest of
 // the whole working name stands in for what was cut, so two long names sharing a beginning
-// still get two files. A job whose working output fits always gets a picture file that fits.
+// still get two files. A job whose working output's NAME fits always gets a picture file
+// whose name fits. The PATH is the other limit: it is at least the working output's path
+// plus the suffix, which can pass PATH_MAX where the working output's does not, and that is
+// why the picture file is only ever reached relative to its directory (runCarrying).
 func picturePath(out string, i int) string {
 	dir, base := filepath.Split(out)
 	tail := ".picture" + strconv.Itoa(i)
@@ -463,22 +473,31 @@ func picturePath(out string, i int) string {
 // an image-sequence pattern, so a `%d` anywhere in the path (a source, a library directory
 // or a scratch directory named with one) sends the picture to a different name: one this
 // function never removes, and one a sibling job may own.
+//
+// Every access to a picture file is relative to the working output's directory: the copy
+// and the encode run IN that directory and name the file "./<name>", and the removal goes
+// through a handle on the directory. A picture file's full path is its working output's
+// plus the suffix, so where the working output's path fits PATH_MAX with fewer bytes to
+// spare than that, the full path of the picture file does not, and a job the engine could
+// otherwise swap would fail on its cover art. Relative to the directory the path is the
+// name, which picturePath holds to NAME_MAX. The "./" also keeps ffmpeg from reading a name
+// with a colon in it as a protocol.
 func (e FFmpegEncoder) runCarrying(ctx context.Context, in, out string, sink ProgressSink,
 	pre, body []string, pics []matroskaPicture) error {
 	if len(pics) == 0 {
 		return e.runFFmpeg(ctx, in, out, sink, pre, body)
 	}
-	defer func() {
-		for _, p := range pics {
-			_ = os.Remove(p.file)
-		}
-	}()
+	in, out = absolutePath(in), absolutePath(out)
+	dir := filepath.Dir(out)
+	defer removePictures(dir, pics)
+	e = e.runningIn(dir)
 	body = append([]string(nil), body...)
 	first := e.Plan.MappedAttachments()
 	for i, p := range pics {
+		file := "./" + p.name
 		// One packet, copied: an attached picture is exactly one, and the image2 muxer
 		// writes the packet's bytes as they are, to exactly the name it is given.
-		if err := e.runFFmpeg(ctx, in, p.file, nil, nil, []string{
+		if err := e.runFFmpeg(ctx, in, file, nil, nil, []string{
 			"-map", "0:" + strconv.Itoa(p.source.Index), "-c", "copy", "-frames:v", "1",
 			"-f", "image2", "-update", "1",
 		}); err != nil {
@@ -486,13 +505,55 @@ func (e FFmpegEncoder) runCarrying(ctx context.Context, in, out string, sink Pro
 				"Matroska attachment: %w", p.source.Index, err)
 		}
 		spec := "-metadata:s:t:" + strconv.Itoa(first+i)
-		body = append(body, "-attach", p.file,
+		body = append(body, "-attach", file,
 			spec, "mimetype="+p.mimeType, spec, "filename="+p.filename)
 		if p.source.Title != "" {
 			body = append(body, spec, "title="+p.source.Title)
 		}
 	}
 	return e.runFFmpeg(ctx, in, out, sink, pre, body)
+}
+
+// runningIn returns this encoder with its invocations run in dir. Every other path an
+// invocation is handed has to keep meaning what it meant in the process's own directory:
+// the caller makes the input and the output absolute, and a binary named by a relative
+// path is made absolute here, because exec resolves a relative binary path against the
+// directory the child runs in.
+func (e FFmpegEncoder) runningIn(dir string) FFmpegEncoder {
+	e.workDir = dir
+	if strings.ContainsRune(e.FFmpeg, filepath.Separator) {
+		e.FFmpeg = absolutePath(e.FFmpeg)
+	}
+	return e
+}
+
+// absolutePath is p made absolute against the process's working directory, or p itself
+// when it already is one or cannot be made one.
+func absolutePath(p string) string {
+	if filepath.IsAbs(p) {
+		return p
+	}
+	if a, err := filepath.Abs(p); err == nil {
+		return a
+	}
+	return p
+}
+
+// removePictures removes the job's picture files from dir, by name through a handle on dir,
+// so a picture file whose full path is past PATH_MAX goes as surely as it was written. A
+// directory that cannot be opened as a handle falls back to the full paths.
+func removePictures(dir string, pics []matroskaPicture) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		for _, p := range pics {
+			_ = os.Remove(filepath.Join(dir, p.name))
+		}
+		return
+	}
+	defer func() { _ = root.Close() }()
+	for _, p := range pics {
+		_ = root.Remove(p.name)
+	}
 }
 
 // streamArgs is the stream-selection half of the argv: which source streams are mapped,
@@ -550,6 +611,7 @@ func (e FFmpegEncoder) runFFmpeg(ctx context.Context, in, out string, sink Progr
 	}
 
 	cmd := exec.CommandContext(ctx, e.FFmpeg, args...)
+	cmd.Dir = e.workDir
 	// exec.Cmd.CombinedOutput is exactly this: one buffer behind both streams, then
 	// Run (= Start + Wait). It is spelled out rather than called because the progress
 	// drain has to happen BETWEEN Start and Wait — the captured bytes, the returned
