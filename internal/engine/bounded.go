@@ -148,15 +148,18 @@ func (e *Engine) sweepOrphanedTemps(ctx context.Context) map[string]bool {
 			continue
 		}
 		for _, p := range pictures {
-			if r, _ := e.decideTemp(ctx, p, sweepBounded, v); r {
+			if e.decideTemp(ctx, p, sweepBounded, v) {
 				removed++
 			}
 		}
-		r, gone := e.decideTemp(ctx, temp, sweepBounded, v)
+		// The record goes with its temp. A record whose temp is not there is left exactly
+		// as it is: nothing is removed on its account, and the next job to pick that path
+		// takes it over.
+		r := e.decideTemp(ctx, temp, sweepBounded, v)
 		if r {
 			removed++
 		}
-		v.close(gone)
+		v.close(r)
 	}
 	e.Log.Info("bounded run: the owner-checked stale-temp sweep is done",
 		"owner_records", len(records), "temps_removed", removed)
