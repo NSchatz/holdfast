@@ -170,9 +170,13 @@ source with its encode and to delete the original. The two bounds below make it 
 ONE file, or on a handful, with every guard, gate and swap intact - so the pipeline can be
 watched deciding a real file before it is pointed at a library.
 
-A bounded run is narrower, never weaker. It runs neither the stale-temp sweep nor the
-ledger retention pass, because both conclude from an absence that only a whole-library
-pass is evidence for, and it removes no ledger row at all.
+A bounded run is narrower, never weaker. Before it offers any file it removes the
+work-in-progress temps (*.__transcoding__.*) a killed run left beside a source, wherever
+they are, but only those whose recorded owner is provably dead: a temp whose owner is
+alive, or cannot be proved dead, stays where it is and is named at warn wherever the run
+sees it, and every temp it removes is logged by path. It does not run the ledger
+retention pass, which concludes from an absence that only a whole-library pass is
+evidence for, and it removes no ledger row at all.
 
 Flags:
   -config <path>   path to the YAML config file (required)

@@ -11,6 +11,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -22,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
 )
 
@@ -530,10 +532,11 @@ func TestBoundedRun_AnExhaustedLibraryIsACompleteRun(t *testing.T) {
 	}
 }
 
-// TestBoundedRun_SaysItIsBoundedAndWhatItSkipped grades AC-11: a bounded run records at
-// `info`, as structured fields rather than only as prose, that it was bounded, which bound
-// applied with its value, and that the stale-temp sweep and the retention pass were both
-// skipped because the pass did not list the whole library.
+// TestBoundedRun_SaysItIsBoundedAndWhatItSkipped grades S0100 AC-11 as S0159 AC-2 moved
+// it: a bounded run records at `info`, as structured fields rather than only as prose, that
+// it was bounded, which bound applied with its value, that its stale-temp sweep is the
+// owner-checked one rather than skipped, and that the retention pass was skipped because
+// the pass did not list the whole library.
 func TestBoundedRun_SaysItIsBoundedAndWhatItSkipped(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
 
@@ -541,14 +544,14 @@ func TestBoundedRun_SaysItIsBoundedAndWhatItSkipped(t *testing.T) {
 		root := t.TempDir()
 		mkHevc(t, ffmpeg, filepath.Join(root, "one.mkv"), "800k")
 		var buf bytes.Buffer
-		eng := buildEngine(t, ffmpeg, ffprobe, root, nil, nil)
+		eng, _ := ownedEngine(t, ffmpeg, ffprobe, root, "ext4")
 		eng.Log = captureLogger(&buf)
 		if err := eng.RunBounded(context.Background(), Bound{Limit: 1}); err != nil {
 			t.Fatalf("RunBounded: %v", err)
 		}
 		mustRecordFields(t, buf.String(), []string{
 			"level=INFO", "bounded=true", "bound=limit", "bound_value=1",
-			"stale_temp_sweep=skipped", "ledger_retention_pass=skipped",
+			"stale_temp_sweep=owner-checked", "ledger_retention_pass=skipped",
 		})
 	})
 
@@ -557,14 +560,14 @@ func TestBoundedRun_SaysItIsBoundedAndWhatItSkipped(t *testing.T) {
 		target := filepath.Join(root, "one.mkv")
 		mkHevc(t, ffmpeg, target, "800k")
 		var buf bytes.Buffer
-		eng := buildEngine(t, ffmpeg, ffprobe, root, nil, nil)
+		eng, _ := ownedEngine(t, ffmpeg, ffprobe, root, "ext4")
 		eng.Log = captureLogger(&buf)
 		if err := eng.RunBounded(context.Background(), Bound{File: target}); err != nil {
 			t.Fatalf("RunBounded: %v", err)
 		}
 		mustRecordFields(t, buf.String(), []string{
 			"level=INFO", "bounded=true", "bound=file", "bound_value=" + target,
-			"stale_temp_sweep=skipped", "ledger_retention_pass=skipped",
+			"stale_temp_sweep=owner-checked", "ledger_retention_pass=skipped",
 		})
 	})
 
@@ -630,5 +633,542 @@ func TestBoundedRun_AFileBoundReachesTheHoldBacks(t *testing.T) {
 	rows := rowsByName(t, ts)
 	if row, ok := rows["withheld.mkv"]; ok && row.Status != store.Skipped {
 		t.Errorf("a withheld file recorded %q; a --file run must reach the same verdict a scan does", row.Status)
+	}
+}
+
+// ---- S0159: the owner-checked stale-temp sweep ------------------------------------------
+//
+// Every temp holdfast writes beside a source now carries an owner record (tempowner.go),
+// and a bounded run removes a temp only where that record proves its owner dead. These
+// cases take the record through the engine's own code (ownTemp) and then do to it exactly
+// what a SIGKILL does - the file stays on disk and the lock goes with the process's last
+// descriptor on it - so the record the sweep decides is the record a killed run leaves.
+// Killing a real process is graded at the command surface (cmd/holdfast/run_bounded_test.go).
+
+// ownedEngine is buildEngine with owner records turned on, in a directory of their own on
+// storage the filesystem-type lookup answers fsType for. The gate hands out temp
+// directories on tmpfs or overlay, which fsclass rightly calls undetermined, so the local
+// case is a substituted type NAME that fsclass still classifies.
+func ownedEngine(t *testing.T, ffmpeg, ffprobe, root, fsType string) (*Engine, string) {
+	t.Helper()
+	eng := buildEngine(t, ffmpeg, ffprobe, root, nil, nil)
+	dir := filepath.Join(t.TempDir(), TempOwnersDirName)
+	eng.TrackTempOwners(dir, lookups(fsType))
+	return eng, dir
+}
+
+// killedOwner takes the owner record for temp through the engine's own code and then does
+// what a SIGKILL does to it: the record stays, and its lock is dropped with the last
+// descriptor on it. It returns the record's path.
+func killedOwner(t *testing.T, eng *Engine, temp, source string) string {
+	t.Helper()
+	h, err := eng.ownTemp(temp, source)
+	if err != nil || h == nil {
+		t.Fatalf("take the owner record for %s: %v (handle %v)", temp, err, h)
+	}
+	if err := h.f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return h.path
+}
+
+// writeTemp puts a half-written encode at path.
+func writeTemp(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("half an encode"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// hasField reports whether one text-handler record carries key=value as a field of its own.
+func hasField(line, key, value string) bool {
+	for _, form := range []string{key + "=" + value, key + "=" + strconv.Quote(value)} {
+		for from := 0; ; {
+			i := strings.Index(line[from:], form)
+			if i < 0 {
+				break
+			}
+			i += from
+			end := i + len(form)
+			if (i == 0 || line[i-1] == ' ') && (end == len(line) || line[end] == ' ') {
+				return true
+			}
+			from = i + 1
+		}
+	}
+	return false
+}
+
+// removalsOf counts the records in logged that say path was removed.
+func removalsOf(logged, path string) int {
+	n := 0
+	for _, line := range strings.Split(logged, "\n") {
+		if strings.Contains(line, `msg="removed an orphaned temp file"`) && hasField(line, "file", path) {
+			n++
+		}
+	}
+	return n
+}
+
+// treeMD5 is every regular file under root, hashed.
+func treeMD5(t *testing.T, root string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() {
+			out[p] = md5f(t, p)
+		}
+		return nil
+	})
+	return out
+}
+
+// sameTree fails on every file removed, changed or created between two treeMD5 readings.
+func sameTree(t *testing.T, before, after map[string]string) {
+	t.Helper()
+	for p, sum := range before {
+		if got, ok := after[p]; !ok {
+			t.Errorf("%s was removed", p)
+		} else if got != sum {
+			t.Errorf("%s changed", p)
+		}
+	}
+	for p := range after {
+		if _, ok := before[p]; !ok {
+			t.Errorf("%s was created", p)
+		}
+	}
+}
+
+// TestBoundedRun_RemovesATempWhoseOwnerIsProvablyDeadAndRecordsEachPath grades AC-2, and
+// the engine half of AC-1: a `--file` run whose bound never lists the temp's directory
+// removes the temp a dead owner left there - and the attached-picture file named after it -
+// recording each removal with the removed temp's full path as a field, while the record
+// that says the run is bounded carries a stale_temp_sweep that is not `skipped` beside
+// ledger_retention_pass=skipped.
+func TestBoundedRun_RemovesATempWhoseOwnerIsProvablyDeadAndRecordsEachPath(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	root := t.TempDir()
+	killed := filepath.Join(root, "killed", "film.mkv")
+	mustWrite(t, killed)
+	target := filepath.Join(root, "elsewhere", "one.mkv")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mkHevc(t, ffmpeg, target, "800k")
+
+	eng, _ := ownedEngine(t, ffmpeg, ffprobe, root, "ext4")
+	var buf bytes.Buffer
+	eng.Log = captureLogger(&buf)
+
+	temp := tempPath(filepath.Dir(killed), "film", "mkv", 0)
+	picture := picturePath(temp, 0)
+	record := killedOwner(t, eng, temp, killed)
+	writeTemp(t, temp)
+	writeTemp(t, picture)
+	sourceBefore := md5f(t, killed)
+
+	if err := eng.RunBounded(context.Background(), Bound{File: target}); err != nil {
+		t.Fatalf("RunBounded(file): %v", err)
+	}
+	logged := buf.String()
+	for _, p := range []string{temp, picture} {
+		if exists(p) {
+			t.Errorf("the bounded run left %s, whose owner is provably dead", p)
+		}
+		if n := removalsOf(logged, p); n != 1 {
+			t.Errorf("the bounded run recorded %d removal(s) of %s, want exactly one carrying its path:\n%s", n, p, logged)
+		}
+	}
+	if exists(record) {
+		t.Errorf("the owner record %s outlived the temp it names", record)
+	}
+	if md5f(t, killed) != sourceBefore {
+		t.Error("the killed run's source changed")
+	}
+	mustRecordFields(t, logged, []string{"bounded=true", "stale_temp_sweep=owner-checked", "ledger_retention_pass=skipped"})
+	if strings.Contains(logged, "stale_temp_sweep=skipped") {
+		t.Errorf("the bounded run still says its stale-temp sweep was skipped:\n%s", logged)
+	}
+}
+
+// TestSweep_AnUnboundedSweepLeavesATempWhoseRecordedOwnerIsAlive grades AC-4 at the sweep
+// itself (sweepStaleTemps): a temp whose owner record was written, through the engine's own
+// code, by THIS process - which is alive, and holds the record's lock through its own
+// descriptor - is left in place with no removal recorded, and so is the attached-picture
+// file named after it. The last half is the anti-vacuity arm: the same owner dying makes
+// the same sweep take both, so what kept them was the owner and nothing else.
+func TestSweep_AnUnboundedSweepLeavesATempWhoseRecordedOwnerIsAlive(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	source := filepath.Join(root, "live.mkv")
+	mustWrite(t, source)
+	temp := tempPath(root, "live", "mkv", 0)
+	picture := picturePath(temp, 0)
+
+	eng, _ := ownedEngine(t, ffmpeg, ffprobe, root, "ext4")
+	var buf bytes.Buffer
+	eng.Log = captureLogger(&buf)
+	owned, err := eng.ownTemp(temp, source)
+	if err != nil || owned == nil {
+		t.Fatalf("take the owner record: %v", err)
+	}
+	writeTemp(t, temp)
+	writeTemp(t, picture)
+
+	eng.held.Store(eng.loadHoldBacks(ctx))
+	eng.sweepStaleTemps(ctx, eng.passListings())
+	for _, p := range []string{temp, picture} {
+		if !exists(p) {
+			t.Errorf("an unbounded sweep removed %s while its recorded owner is alive", p)
+		}
+		if removalsOf(buf.String(), p) != 0 {
+			t.Errorf("an unbounded sweep recorded a removal of %s, whose owner is alive:\n%s", p, buf.String())
+		}
+	}
+
+	if err := owned.f.Close(); err != nil { // the owner dies: the lock goes, the record stays
+		t.Fatal(err)
+	}
+	eng.sweepStaleTemps(ctx, eng.passListings())
+	for _, p := range []string{temp, picture} {
+		if exists(p) {
+			t.Errorf("the anti-vacuity arm: %s survived the same sweep once its owner was dead, "+
+				"so the first half did not prove the owner kept it", p)
+		}
+	}
+}
+
+// TestBoundedRun_LeavesATempWhoseOwnerIsNotProvablyDeadAndNamesIt grades AC-5: every way
+// a temp's owner can fail to be provably dead leaves the temp where it is under a bounded
+// run, and - the temp lying in a directory the run lists - a `warn` record carries the
+// temp's full path and why it was left.
+//
+// The liveness check is reached through its own seam, the filesystem-type lookup the
+// record's storage is classified by: an error from it is the check that errors, and a
+// network type is the check that cannot decide. In both of those the record itself is a
+// dead owner's, which AC-2 shows IS removed on local storage - so what keeps the temp is the
+// check and nothing else.
+func TestBoundedRun_LeavesATempWhoseOwnerIsNotProvablyDeadAndNamesIt(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	writeRecordFile := func(t *testing.T, eng *Engine, temp, body string) {
+		t.Helper()
+		p := eng.owners.recordPath(temp)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name    string
+		fsType  string
+		arrange func(t *testing.T, eng *Engine, temp, source string)
+		why     string
+	}{
+		{"no owner record, as every temp an older build wrote", "ext4",
+			func(*testing.T, *Engine, string, string) {}, "no owner record"},
+		{"an owner record that cannot be read", "ext4", func(t *testing.T, eng *Engine, temp, _ string) {
+			if err := os.MkdirAll(eng.owners.recordPath(temp), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, "could not be opened"},
+		{"a malformed owner record", "ext4", func(t *testing.T, eng *Engine, temp, _ string) {
+			writeRecordFile(t, eng, temp, "{not a record")
+		}, "malformed"},
+		{"an owner record at a format version this build does not read", "ext4", func(t *testing.T, eng *Engine, temp, source string) {
+			body, err := json.Marshal(map[string]any{
+				"format": tempOwnerFormat, "version": 2, "temp": temp, "source": source,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeRecordFile(t, eng, temp, string(body))
+		}, "format version 2"},
+		{"a liveness check that errors", "", func(t *testing.T, eng *Engine, temp, source string) {
+			killedOwner(t, eng, temp, source)
+		}, "lookup failed"},
+		{"a liveness check that cannot decide", "nfs", func(t *testing.T, eng *Engine, temp, source string) {
+			killedOwner(t, eng, temp, source)
+		}, "non-local (nfs)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, "film.mkv")
+			mkHevc(t, ffmpeg, source, "800k")
+			temp := tempPath(root, "film", "mkv", 0)
+			eng, _ := ownedEngine(t, ffmpeg, ffprobe, root, c.fsType)
+			var buf bytes.Buffer
+			eng.Log = captureLogger(&buf)
+			c.arrange(t, eng, temp, source)
+			writeTemp(t, temp)
+			before := md5f(t, temp)
+
+			if err := eng.RunBounded(context.Background(), Bound{Limit: 1}); err != nil {
+				t.Fatalf("RunBounded(limit 1): %v", err)
+			}
+			logged := buf.String()
+			if !exists(temp) {
+				t.Fatalf("a bounded run removed %s, whose owner is not provably dead", temp)
+			}
+			if md5f(t, temp) != before {
+				t.Errorf("a bounded run changed %s", temp)
+			}
+			if removalsOf(logged, temp) != 0 {
+				t.Errorf("a bounded run recorded a removal of %s:\n%s", temp, logged)
+			}
+			named := false
+			for _, line := range strings.Split(logged, "\n") {
+				if strings.Contains(line, "level=WARN") && hasField(line, "file", temp) && strings.Contains(line, c.why) {
+					named = true
+				}
+			}
+			if !named {
+				t.Errorf("no warn record names %s with the reason it was left (%q):\n%s", temp, c.why, logged)
+			}
+		})
+	}
+}
+
+// TestSweeps_ADeadOwnerLicensesNothingAHoldBackKeeps grades AC-6: a temp whose recorded
+// owner is provably dead is still left by BOTH sweeps, byte-identical, where either rule
+// that holds at the pin applies - a live ledger record naming it as a job's replacement, or
+// a finished replacement at it that no record names (strayReplacementHold).
+func TestSweeps_ADeadOwnerLicensesNothingAHoldBackKeeps(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	cases := []struct {
+		name    string
+		arrange func(t *testing.T, eng *Engine, source, temp string)
+	}{
+		{"a live ledger record names it as a job's replacement", func(t *testing.T, eng *Engine, source, temp string) {
+			mustWrite(t, source)
+			writeTemp(t, temp)
+			if err := eng.Store.(*testStore).RecordSwapIncident(context.Background(), store.SwapIncident{
+				SourcePath: source, SourceFingerprint: "1:1", ReplacementPath: temp,
+				SourceAttrs: "1:1", ReplacementAttrs: "2:2", Outcome: store.Indeterminate,
+			}); err != nil {
+				t.Fatalf("record incident: %v", err)
+			}
+		}},
+		{"it holds a finished replacement no record names", func(t *testing.T, _ *Engine, source, temp string) {
+			mkH264(t, ffmpeg, source, "8M")
+			mkHevcFrom(t, ffmpeg, source, temp, "")
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			source := filepath.Join(root, "kept", "film.mkv")
+			if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(root, "elsewhere", "one.mkv")
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			mkHevc(t, ffmpeg, target, "800k")
+			temp := tempPath(filepath.Dir(source), "film", "mkv", 0)
+			eng, _ := ownedEngine(t, ffmpeg, ffprobe, root, "ext4")
+			c.arrange(t, eng, source, temp)
+			killedOwner(t, eng, temp, source)
+			before := md5f(t, temp)
+
+			if err := eng.RunBounded(ctx, Bound{File: target}); err != nil {
+				t.Fatalf("RunBounded(file): %v", err)
+			}
+			if !exists(temp) || md5f(t, temp) != before {
+				t.Fatalf("the bounded sweep removed or changed %s, which a hold-back keeps", temp)
+			}
+
+			eng.held.Store(eng.loadHoldBacks(ctx))
+			eng.sweepStaleTemps(ctx, eng.passListings())
+			if !exists(temp) || md5f(t, temp) != before {
+				t.Fatalf("the unbounded sweep removed or changed %s, which a hold-back keeps", temp)
+			}
+		})
+	}
+}
+
+// TestSweep_AnUnboundedPassStillRemovesATempWithNoOwnerRecord grades AC-9 on an engine that
+// keeps owner records: a whole-library pass removes a temp that has none, as every temp an
+// older build wrote has none, exactly as at the pin - and a hold-back still keeps one.
+func TestSweep_AnUnboundedPassStillRemovesATempWithNoOwnerRecord(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "old.mkv"))
+	orphan := staleTemp(t, root, "old")
+	parked := filepath.Join(root, "parked.mkv")
+	mustWrite(t, parked)
+	held := staleTemp(t, root, "parked")
+
+	eng, _ := ownedEngine(t, ffmpeg, ffprobe, root, "ext4")
+	var buf bytes.Buffer
+	eng.Log = captureLogger(&buf)
+	if err := eng.Store.(*testStore).RecordSwapIncident(context.Background(), store.SwapIncident{
+		SourcePath: parked, SourceFingerprint: "1:1", ReplacementPath: held,
+		SourceAttrs: "1:1", ReplacementAttrs: "2:2", Outcome: store.Indeterminate,
+	}); err != nil {
+		t.Fatalf("record incident: %v", err)
+	}
+
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+	if exists(orphan) {
+		t.Errorf("an unbounded pass left %s, a temp with no owner record", orphan)
+	}
+	if removalsOf(buf.String(), orphan) != 1 {
+		t.Errorf("the removal of %s was not recorded with its path:\n%s", orphan, buf.String())
+	}
+	if !exists(held) {
+		t.Errorf("an unbounded pass removed %s, which a live record names as a job's replacement", held)
+	}
+}
+
+// TestBoundedRun_ARecordWithNothingToRemoveRemovesNothing grades AC-10: an owner record
+// naming a dead owner with nothing at the temp path it names, and the records of owners
+// that completed their jobs - by a swap, by a gate failure and by a graceful stop - cost a
+// later bounded run nothing: it returns cleanly, removes no file and records no removal.
+//
+// The completed jobs run through the real ProcessFile of an engine keeping owner records,
+// so each one's record is written and cleared by the code a run uses; that none is left
+// behind is asserted directly, since it is what leaves a later run nothing to act on.
+func TestBoundedRun_ARecordWithNothingToRemoveRemovesNothing(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+
+	laterRun := func(t *testing.T, eng *Engine, root, target string) {
+		t.Helper()
+		var buf bytes.Buffer
+		eng.Log = captureLogger(&buf)
+		before := treeMD5(t, root)
+		if err := eng.RunBounded(context.Background(), Bound{File: target}); err != nil {
+			t.Fatalf("the later bounded run: %v", err)
+		}
+		sameTree(t, before, treeMD5(t, root))
+		if strings.Contains(buf.String(), `msg="removed an orphaned temp file"`) {
+			t.Errorf("the later bounded run recorded a removal:\n%s", buf.String())
+		}
+	}
+	fixture := func(t *testing.T) (root, target string) {
+		t.Helper()
+		root = t.TempDir()
+		target = filepath.Join(root, "elsewhere", "one.mkv")
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		mkHevc(t, ffmpeg, target, "800k")
+		return root, target
+	}
+
+	t.Run("a dead owner with nothing at the temp path", func(t *testing.T) {
+		root, target := fixture(t)
+		source := filepath.Join(root, "killed", "film.mkv")
+		mustWrite(t, source)
+		mustWrite(t, filepath.Join(root, "killed", "notes.txt"))
+		eng, _ := ownedEngine(t, ffmpeg, ffprobe, root, "ext4")
+		killedOwner(t, eng, tempPath(filepath.Dir(source), "film", "mkv", 0), source)
+		laterRun(t, eng, root, target)
+	})
+
+	// ownerAliveNow fails unless path's owner record reads alive at this moment. Asked from
+	// inside the job, the owner is this very process, holding its lock.
+	ownerAliveNow := func(t *testing.T, eng *Engine, path string) {
+		t.Helper()
+		v := eng.ownerOf(path)
+		defer v.close(false)
+		if v.state != ownerAlive {
+			t.Errorf("while the job holds %s its owner record reads %s (%s), want alive", path, v.state, v.why)
+		}
+	}
+
+	jobs := []struct {
+		name    string
+		scratch bool
+		enc     func(t *testing.T, eng *Engine, started chan<- struct{}) Encoder
+		stop    bool
+	}{
+		{"an owner that swapped", false, nil, false},
+		{"an owner that swapped from a scratch_dir", true, nil, false},
+		{"an owner whose encode a gate rejected", false, func(t *testing.T, eng *Engine, _ chan<- struct{}) Encoder {
+			return EncoderFunc(func(_ context.Context, _, out string, _ *probe.VideoProps) error {
+				ownerAliveNow(t, eng, out) // recorded before the first byte of the temp
+				return os.WriteFile(out, []byte("not a video"), 0o600)
+			})
+		}, false},
+		{"an owner stopped gracefully mid-encode", false, func(t *testing.T, eng *Engine, started chan<- struct{}) Encoder {
+			return EncoderFunc(func(ctx context.Context, _, out string, _ *probe.VideoProps) error {
+				ownerAliveNow(t, eng, out)
+				if err := os.WriteFile(out, []byte("half an encode"), 0o600); err != nil {
+					return err
+				}
+				close(started)
+				<-ctx.Done()
+				return ctx.Err()
+			})
+		}, true},
+	}
+	for _, j := range jobs {
+		t.Run(j.name, func(t *testing.T) {
+			root, target := fixture(t)
+			source := filepath.Join(root, "done", "film.mkv")
+			if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			mkH264(t, ffmpeg, source, "8M")
+			scratch := ""
+			if j.scratch {
+				scratch = t.TempDir()
+			}
+			eng := buildEngine(t, ffmpeg, ffprobe, root, nil, func(c *config.Config) { c.ScratchDir = scratch })
+			eng.TrackTempOwners(filepath.Join(t.TempDir(), TempOwnersDirName), lookups("ext4"))
+			started := make(chan struct{})
+			if j.enc != nil {
+				eng.Enc = j.enc(t, eng, started)
+			}
+			// The fsync the swap takes of the temp beside the source - the working file, or
+			// the copy made there from a scratch_dir - is the last moment that temp is
+			// holdfast's, complete and not yet renamed: its record must still say so.
+			held := 0
+			eng.fsyncPath = func(p string) error {
+				if filepath.Dir(p) == filepath.Dir(source) && isTempName(filepath.Base(p)) {
+					held++
+					ownerAliveNow(t, eng, p)
+				}
+				f, err := os.Open(p)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = f.Close() }()
+				return f.Sync()
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if j.stop {
+				go func() { <-started; cancel() }()
+			}
+			eng.held.Store(eng.loadHoldBacks(ctx))
+			err := eng.ProcessFile(ctx, "w0", source)
+			if j.stop != (err != nil) {
+				t.Fatalf("ProcessFile returned %v", err)
+			}
+			if j.enc == nil && (held == 0 || codecOf(t, ffprobe, source) != "hevc") {
+				t.Fatalf("the job did not swap through a temp beside the source (fsyncs of one: %d), "+
+					"so this arm proved nothing", held)
+			}
+			if n := nTemp(t, root); n != 0 {
+				t.Fatalf("the job left %d temp(s) behind", n)
+			}
+			if records, err := eng.owners.ownerRecords(); err != nil || len(records) != 0 {
+				t.Fatalf("the job left owner record(s) %v behind (%v): its owner lived through its exit", records, err)
+			}
+			laterRun(t, eng, root, target)
+		})
 	}
 }
