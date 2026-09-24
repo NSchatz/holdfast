@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/deinterlace"
@@ -191,13 +193,23 @@ func (e FFmpegEncoder) Encode(ctx context.Context, in, out string, props *probe.
 // pipe cannot be opened at all, the -progress option is simply not passed and the encode
 // runs precisely as it did before this existed.
 func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, props *probe.VideoProps, sink ProgressSink) error {
+	// Where the output is Matroska, the plan's attached pictures travel as attachments
+	// rather than through the map (see matroskaPictures); nil everywhere else.
+	pics, err := e.matroskaPictures(out)
+	if err != nil {
+		return err
+	}
+
 	// A REMUX-ONLY job re-encodes nothing, so it needs none of what follows: no encoder
 	// spec, no pixel format, no colour derivation and no quality knob, because there is no
 	// encode for any of them to describe. It is the intended stream map and `-c copy`, and
 	// every structural gate an encode is held to still runs against what it produces.
 	if e.Plan.RemuxOnly() {
-		return e.runFFmpeg(ctx, in, out, sink, nil,
-			append(e.Plan.MapArgs(), "-c", "copy"))
+		mapArgs := e.Plan.MapArgs()
+		if len(pics) > 0 {
+			mapArgs = e.Plan.MapArgsWithoutPictures()
+		}
+		return e.runCarrying(ctx, in, out, sink, nil, append(mapArgs, "-c", "copy"), pics)
 	}
 
 	// THIS JOB's settings: the profile of the root the engine handed this encoder,
@@ -290,6 +302,10 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 	if errStreams != nil {
 		return errStreams
 	}
+	if len(pics) > 0 {
+		// The pictures are not in the map, so there is no mapped picture to pin to copy.
+		mapArgs, pictures = e.Plan.MapArgsWithoutPictures(), nil
+	}
 
 	body := append([]string(nil), mapArgs...)
 	body = append(body, "-c", "copy", "-c:v", spec.FFmpegCodec)
@@ -315,6 +331,125 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 		// filter (added by buildArgs) has a device to target. Every other Spec has no
 		// such ordering requirement.
 		pre = []string{"-vaapi_device", "/dev/dri/renderD128"}
+	}
+	return e.runCarrying(ctx, in, out, sink, pre, body, pics)
+}
+
+// matroskaPictureMimeTypes are the attachment mimetypes the pinned ffmpeg's Matroska
+// demuxer reads back as an attached picture, keyed by the codec it then reports. An
+// attachment under any other mimetype reads back as a plain attachment, which is not the
+// stream the intended map carries; bmp is the MP4 cover codec that has no entry.
+var matroskaPictureMimeTypes = map[string]string{
+	"mjpeg": "image/jpeg",
+	"png":   "image/png",
+	"gif":   "image/gif",
+	"tiff":  "image/tiff",
+}
+
+// pictureExtensions name a picture that arrived with no filename, by its mimetype.
+var pictureExtensions = map[string]string{
+	"image/jpeg": ".jpg",
+	"image/png":  ".png",
+	"image/gif":  ".gif",
+	"image/tiff": ".tif",
+}
+
+// matroskaPicture is one attached picture as the output will carry it: an attachment
+// written from a file holding the source picture's bytes, under its description.
+type matroskaPicture struct {
+	source   probe.Stream
+	file     string
+	mimeType string
+	filename string
+}
+
+// matroskaPictures decides how this job carries its attached pictures when the output is
+// Matroska, and returns nil when there is nothing to decide: an output of any other
+// container, a plan carrying no picture, or no plan at all.
+//
+// The Matroska muxer writes a mapped picture as an ordinary video track, which reads back
+// as plain video, so the intended-stream check rejects the output after the whole encode;
+// it does not honour an attached_pic disposition either. What reads back as an attached
+// picture is an ATTACHMENT under an image mimetype, which is how a Matroska source stores
+// its cover art in the first place. So each picture is copied out of the source to a file
+// beside the working output and attached from there, under the source's own filename,
+// mimetype and title where it has them.
+//
+// A picture whose mimetype cannot be established is refused here, before anything is
+// written: an attachment under a mimetype the demuxer does not map reads back as something
+// other than the picture the plan intends.
+func (e FFmpegEncoder) matroskaPictures(out string) ([]matroskaPicture, error) {
+	if !strings.EqualFold(filepath.Ext(out), ".mkv") {
+		return nil, nil
+	}
+	sources := e.Plan.Pictures()
+	if len(sources) == 0 {
+		return nil, nil
+	}
+	pics := make([]matroskaPicture, 0, len(sources))
+	for i, s := range sources {
+		mime := s.MimeType
+		if mime == "" {
+			mime = matroskaPictureMimeTypes[s.Codec]
+		}
+		if mime == "" {
+			return nil, fmt.Errorf("cannot carry the attached picture at source stream %d (codec %q) "+
+				"into a Matroska output: no attachment mimetype reads back as a picture in that codec",
+				s.Index, s.Codec)
+		}
+		name := s.Filename
+		if name == "" {
+			name = "cover" + pictureExtensions[mime]
+			if i > 0 {
+				name = "cover-" + strconv.Itoa(i+1) + pictureExtensions[mime]
+			}
+		}
+		pics = append(pics, matroskaPicture{
+			source:   s,
+			file:     out + ".picture" + strconv.Itoa(i),
+			mimeType: mime,
+			filename: name,
+		})
+	}
+	return pics, nil
+}
+
+// runCarrying runs a job's encode, and where the job carries pictures as Matroska
+// attachments it first copies each one out of the source to its file and then attaches
+// them all to the encode.
+//
+// The picture files sit beside the working output, named after it, so they live where the
+// working output lives: in the scratch directory when one is set, beside the source
+// otherwise, and under the temp marker either way, which is what lets the startup sweep take
+// one a killed run left behind. They are removed on every return from here, the failed
+// ones included: once the encode has exited nothing reads them again.
+func (e FFmpegEncoder) runCarrying(ctx context.Context, in, out string, sink ProgressSink,
+	pre, body []string, pics []matroskaPicture) error {
+	if len(pics) == 0 {
+		return e.runFFmpeg(ctx, in, out, sink, pre, body)
+	}
+	defer func() {
+		for _, p := range pics {
+			_ = os.Remove(p.file)
+		}
+	}()
+	body = append([]string(nil), body...)
+	first := e.Plan.MappedAttachments()
+	for i, p := range pics {
+		// One packet, copied: an attached picture is exactly one, and the image2 muxer
+		// writes the packet's bytes as they are.
+		if err := e.runFFmpeg(ctx, in, p.file, nil, nil, []string{
+			"-map", "0:" + strconv.Itoa(p.source.Index), "-c", "copy", "-frames:v", "1", "-f", "image2",
+		}); err != nil {
+			return fmt.Errorf("copying out the attached picture at source stream %d, to carry it as a "+
+				"Matroska attachment: %w", p.source.Index, err)
+		}
+		spec := "-metadata:s:t:" + strconv.Itoa(first+i)
+		body = append(body, "-attach", p.file,
+			spec, "mimetype="+p.mimeType, spec, "filename="+p.filename)
+		if p.source.Title != "" {
+			body = append(body, spec, "title="+p.source.Title)
+		}
 	}
 	return e.runFFmpeg(ctx, in, out, sink, pre, body)
 }

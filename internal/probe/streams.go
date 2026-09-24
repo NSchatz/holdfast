@@ -9,12 +9,14 @@ import (
 
 // Stream is ONE stream of a container as a stream SELECTION needs to see it: where it
 // sits, what kind it is, what language the source tagged it with, and the two
-// dispositions that decide whether it is artwork or a commentary track.
+// dispositions that decide whether it is artwork or a commentary track - plus what an
+// encode needs to carry an attached picture into a Matroska output as an attachment.
 //
 // It is what an intended stream map is derived from, so every field here is a FACT THE
 // SOURCE CARRIES and never an interpretation of one. In particular Commentary is the
 // container's own `comment` disposition: a title, a stream name or a filename is not a
-// commentary flag, and nothing in this package reads one.
+// commentary flag, and nothing selects on one. The filename, mimetype and title tags are
+// read only so a picture can be written back out with the description it came in with.
 type Stream struct {
 	// Index is the stream's absolute index in the container, which is what an ffmpeg
 	// `-map 0:<index>` addresses and what an operator reading a probe sees.
@@ -39,6 +41,14 @@ type Stream struct {
 	// AttachedPicture is the container's own `attached_pic` disposition: cover art
 	// carried as a one-frame video stream.
 	AttachedPicture bool
+	// Codec is ffprobe's codec_name verbatim ("mjpeg", "png", ...).
+	Codec string
+	// Filename, MimeType and Title are the `filename`, `mimetype` and `title` stream tags,
+	// trimmed, "" where absent. A Matroska demuxer sets them on every attachment, an
+	// attached picture included; an MP4 cover carries none of them.
+	Filename string
+	MimeType string
+	Title    string
 }
 
 // The codec_type values this build names. They are ffprobe's own spelling and are
@@ -56,7 +66,8 @@ const (
 // spelled once and exported so nothing has to restate it: a caller that needed to name the
 // probe (a test driving the unenumerable path, say) names THIS rather than a copy that
 // would go on matching after the probe itself moved.
-const StreamEntries = "stream=index,codec_type:stream_disposition=attached_pic,comment:stream_tags=language"
+const StreamEntries = "stream=index,codec_type,codec_name:stream_disposition=attached_pic,comment:" +
+	"stream_tags=language,filename,mimetype,title"
 
 // probeStreams is the JSON shape ffprobe answers with. It is JSON and not the csv the
 // scalar probes use for one reason: a csv row omits an entry the stream does not carry,
@@ -67,6 +78,7 @@ type probeStreams struct {
 	Streams []struct {
 		Index       int    `json:"index"`
 		CodecType   string `json:"codec_type"`
+		CodecName   string `json:"codec_name"`
 		Disposition struct {
 			AttachedPic int `json:"attached_pic"`
 			Comment     int `json:"comment"`
@@ -113,6 +125,10 @@ func (p *Prober) Streams(ctx context.Context, f string) (streams []Stream, estab
 			SourceLanguageTag: tag,
 			Commentary:        s.Disposition.Comment == 1,
 			AttachedPicture:   s.Disposition.AttachedPic == 1,
+			Codec:             strings.TrimSpace(s.CodecName),
+			Filename:          strings.TrimSpace(s.Tags["filename"]),
+			MimeType:          strings.TrimSpace(s.Tags["mimetype"]),
+			Title:             strings.TrimSpace(s.Tags["title"]),
 		})
 	}
 	return streams, true
