@@ -70,6 +70,12 @@ var SkipGuards = []string{
 	// of its rows back, and an ffprobe that can now enumerate a container the one before
 	// it could not is a change only an operator can see.
 	SkipUnreadableStreamList,
+	// The CONTAINER-DAMAGE guard, here for the reasons the two shape guards above are: it
+	// reads no configuration key, so no configuration change will ever offer one of its rows
+	// back. A REPLACED file needs no requeue - it is a new fingerprint and a new row - so this
+	// is the lever for the file that did not change: an ffprobe that now reads a container
+	// the one before it reported damaged.
+	SkipSourceDamaged,
 	// The BAND guard. It reads the rule list, so removing the `when`-carrying rules from
 	// that root does offer its rows back - but a re-muxed source, or an ffprobe that can
 	// now read a height the one before it could not, is a change no configuration edit

@@ -76,6 +76,24 @@ const (
 	// them.
 	SkipUnreadableStreamList = "unreadable-stream-list"
 
+	// SkipSourceDamaged is the CONTAINER-DAMAGE guard: the probe every file already pays for
+	// ran to completion and reported a video codec, and while it read the file the DEMUXER
+	// logged an error - the container itself is damaged (a zeroed or overwritten stretch of a
+	// Matroska file reads as `0x00 at pos ... invalid as first byte of an EBML number`).
+	//
+	// It is a SKIP and not a failure because nothing was attempted: a failure would count
+	// toward max_failures and read as this tool's fault, where the file is what is wrong. It
+	// is decided here rather than learned from the gate because the gate would reject the
+	// encode only after paying for all of it and a VMAF pass besides, and because the one
+	// action it asks for - replacing the file - is a human's, so it is the one skip logged at
+	// `error`. A replaced file is a new size or modification time, so a new fingerprint and a
+	// new row: the next scan decides it afresh with nothing to requeue.
+	//
+	// It reads no configuration key - whether a container is damaged is a property of the
+	// file - so its rows record nothing read and `requeue --guard source-damaged` is the one
+	// lever for them, for an ffprobe that can now read what the one before it could not.
+	SkipSourceDamaged = "source-damaged"
+
 	// SkipUndoRetentionFailed is the undo window's own guard (UNDO-6): the original could
 	// not be retained, so the swap that would have destroyed it does not run. It is a
 	// MUTABLE guard, like the hardlink one, so ProcessFile clears a stale one before the
@@ -218,6 +236,7 @@ var SkipVocabulary = []string{
 	SkipSymlink,
 	SkipMultiVideoStream,
 	SkipUnreadableStreamList,
+	SkipSourceDamaged,
 	SkipUndoRetentionFailed,
 	SkipUndeterminedSourceHeight,
 	SkipDownscaleUnacknowledged,
@@ -1785,7 +1804,11 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// banded root costs the same single ffprobe an unbanded one does.
 	props, v := e.guardSource(ctx, f, root, prof, ts, targetCodec, reuse(pre, e.Probe.VideoProps))
 	if v.stopped() {
-		e.Log.Info(v.log, append([]any{"file", f}, v.logArgs...)...)
+		logVerdict := e.Log.Info
+		if v.humanMustAct {
+			logVerdict = e.Log.Error
+		}
+		logVerdict(v.log, append([]any{"file", f}, v.logArgs...)...)
 		out := e.because(v.guard, by, prof, ts, props, v.inputs...)
 		if v.failed {
 			// The one source-side verdict that FAILS rather than skips: the probe reported
@@ -2479,6 +2502,9 @@ type sourceVerdict struct {
 	// the file, which every one of them names first.
 	log     string
 	logArgs []any
+	// humanMustAct logs the verdict at `error` rather than `info`: the file is skipped and
+	// only a person can do anything about it (observability O3).
+	humanMustAct bool
 
 	// codec is the source codec the snapshot read, and outExt/target are what the swap would
 	// publish. All three come off the same snapshot the guards read, so nothing past them
@@ -2535,6 +2561,23 @@ func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, pr
 		return props, sourceVerdict{guard: FailUnreadable, failed: true,
 			log: "skip (unreadable / no video stream)"}
 	}
+
+	// Container-damage guard, and it stands as early as the snapshot allows: straight after
+	// the one question that has to be answered first (is there a video stream at all), and in
+	// front of every guard that reads a property OF the stream. A damaged container is the
+	// one verdict here an operator has to act on, so a file another guard would also skip
+	// still reports it, rather than hiding a file that needs replacing behind a codec it
+	// happens to be in already. It adds no probe: the demuxer's own diagnostics come off the
+	// snapshot the guards below read.
+	if dmg, damaged := props.ContainerDamage(); damaged {
+		return props, sourceVerdict{guard: SkipSourceDamaged, codec: codec, humanMustAct: true,
+			log: "skip (the demuxer reported this source's container as damaged, so this file needs " +
+				"replacing - nothing was encoded and the source is untouched; a replacement at the same " +
+				"path is decided afresh on the next scan)",
+			logArgs: []any{"guard", SkipSourceDamaged, "demuxer", dmg.Demuxer,
+				"diagnostic", dmg.First, "diagnostics", dmg.Count}}
+	}
+
 	if isAlreadyTargetCodec(targetCodec, codec) {
 		return props, sourceVerdict{guard: SkipAlreadyTargetCodec, codec: codec,
 			inputs: []string{InputTargetCodec},
