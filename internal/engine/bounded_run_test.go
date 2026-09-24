@@ -1077,19 +1077,34 @@ func TestBoundedRun_ARecordWithNothingToRemoveRemovesNothing(t *testing.T) {
 		laterRun(t, eng, root, target)
 	})
 
+	// ownerAliveNow fails unless path's owner record reads alive at this moment. Asked from
+	// inside the job, the owner is this very process, holding its lock.
+	ownerAliveNow := func(t *testing.T, eng *Engine, path string) {
+		t.Helper()
+		v := eng.ownerOf(path)
+		defer v.close(false)
+		if v.state != ownerAlive {
+			t.Errorf("while the job holds %s its owner record reads %s (%s), want alive", path, v.state, v.why)
+		}
+	}
+
 	jobs := []struct {
-		name string
-		enc  func(started chan<- struct{}) Encoder
-		stop bool
+		name    string
+		scratch bool
+		enc     func(t *testing.T, eng *Engine, started chan<- struct{}) Encoder
+		stop    bool
 	}{
-		{"an owner that swapped", func(chan<- struct{}) Encoder { return nil }, false},
-		{"an owner whose encode a gate rejected", func(chan<- struct{}) Encoder {
+		{"an owner that swapped", false, nil, false},
+		{"an owner that swapped from a scratch_dir", true, nil, false},
+		{"an owner whose encode a gate rejected", false, func(t *testing.T, eng *Engine, _ chan<- struct{}) Encoder {
 			return EncoderFunc(func(_ context.Context, _, out string, _ *probe.VideoProps) error {
+				ownerAliveNow(t, eng, out) // recorded before the first byte of the temp
 				return os.WriteFile(out, []byte("not a video"), 0o600)
 			})
 		}, false},
-		{"an owner stopped gracefully mid-encode", func(started chan<- struct{}) Encoder {
+		{"an owner stopped gracefully mid-encode", false, func(t *testing.T, eng *Engine, started chan<- struct{}) Encoder {
 			return EncoderFunc(func(ctx context.Context, _, out string, _ *probe.VideoProps) error {
+				ownerAliveNow(t, eng, out)
 				if err := os.WriteFile(out, []byte("half an encode"), 0o600); err != nil {
 					return err
 				}
@@ -1107,10 +1122,31 @@ func TestBoundedRun_ARecordWithNothingToRemoveRemovesNothing(t *testing.T) {
 				t.Fatal(err)
 			}
 			mkH264(t, ffmpeg, source, "8M")
-			eng, _ := ownedEngine(t, ffmpeg, ffprobe, root, "ext4")
+			scratch := ""
+			if j.scratch {
+				scratch = t.TempDir()
+			}
+			eng := buildEngine(t, ffmpeg, ffprobe, root, nil, func(c *config.Config) { c.ScratchDir = scratch })
+			eng.TrackTempOwners(filepath.Join(t.TempDir(), TempOwnersDirName), lookups("ext4"))
 			started := make(chan struct{})
-			if enc := j.enc(started); enc != nil {
-				eng.Enc = enc
+			if j.enc != nil {
+				eng.Enc = j.enc(t, eng, started)
+			}
+			// The fsync the swap takes of the temp beside the source - the working file, or
+			// the copy made there from a scratch_dir - is the last moment that temp is
+			// holdfast's, complete and not yet renamed: its record must still say so.
+			held := 0
+			eng.fsyncPath = func(p string) error {
+				if filepath.Dir(p) == filepath.Dir(source) && isTempName(filepath.Base(p)) {
+					held++
+					ownerAliveNow(t, eng, p)
+				}
+				f, err := os.Open(p)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = f.Close() }()
+				return f.Sync()
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -1121,6 +1157,10 @@ func TestBoundedRun_ARecordWithNothingToRemoveRemovesNothing(t *testing.T) {
 			err := eng.ProcessFile(ctx, "w0", source)
 			if j.stop != (err != nil) {
 				t.Fatalf("ProcessFile returned %v", err)
+			}
+			if j.enc == nil && (held == 0 || codecOf(t, ffprobe, source) != "hevc") {
+				t.Fatalf("the job did not swap through a temp beside the source (fsyncs of one: %d), "+
+					"so this arm proved nothing", held)
 			}
 			if n := nTemp(t, root); n != 0 {
 				t.Fatalf("the job left %d temp(s) behind", n)
