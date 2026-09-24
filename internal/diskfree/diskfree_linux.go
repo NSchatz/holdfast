@@ -4,6 +4,8 @@ package diskfree
 
 import (
 	"errors"
+	"fmt"
+	"strconv"
 	"syscall"
 )
 
@@ -34,4 +36,21 @@ func fromStatfs(st syscall.Statfs_t) (uint64, error) {
 		return 0, errNoBlockSize
 	}
 	return st.Bavail * uint64(st.Bsize), nil
+}
+
+// id prefers f_fsid, which Linux derives from the BACKING device when a filesystem
+// publishes none of its own, so one filesystem mounted twice answers once. Where f_fsid
+// is absent (zero, or statfs failed) it falls back to st_dev, which still names every
+// directory of one mount alike. The key has the same shape the startup walk gives a
+// region's filesystem half.
+func id(path string) (string, error) {
+	var fs syscall.Statfs_t
+	if err := syscall.Statfs(path, &fs); err == nil && (fs.Fsid.X__val[0] != 0 || fs.Fsid.X__val[1] != 0) {
+		return fmt.Sprintf("fsid:%d:%d", fs.Fsid.X__val[0], fs.Fsid.X__val[1]), nil
+	}
+	var st syscall.Stat_t
+	if err := syscall.Stat(path, &st); err != nil {
+		return "", err
+	}
+	return "dev:" + strconv.FormatUint(uint64(st.Dev), 10), nil
 }

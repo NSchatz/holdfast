@@ -423,10 +423,17 @@ type Engine struct {
 	// prove the re-check catches it. A guard that cannot be shown to fail is not a guard.
 	afterCopyBack func(copyPath string) error
 
-	// freeBytes, when non-nil, replaces the free-space lookup the per-job scratch pre-check
-	// makes. A CI runner cannot fill a filesystem on demand, and a check that could only be
-	// proved by filling one would not be proved at all.
+	// freeBytes, when non-nil, replaces the free-space lookup the per-job pre-checks make:
+	// the scratch one, and the one beside the source (sourceRoomFor). A CI runner cannot
+	// fill a filesystem on demand, and a check that could only be proved by filling one
+	// would not be proved at all.
 	freeBytes func(path string) (uint64, error)
+
+	// room is the bytes every in-flight job whose working file goes beside its source has
+	// claimed on that source's filesystem, from the moment it passes sourceRoomFor until it
+	// exits. It is engine-wide because every pool that feeds ProcessFile writes to the same
+	// filesystems.
+	room roomHolds
 
 	// undoNow, when non-nil, replaces the clock the undo window reads, so a test can place
 	// a retention's expiry in the past and exercise the release sweep for real.
@@ -1978,6 +1985,23 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			return nil
 		}
 		work = w
+		// The per-job free-space pre-check BESIDE THE SOURCE, the counterpart of the scratch
+		// one below, taken against the filesystem the working file is about to land on and
+		// BEFORE the encoder has written a byte. It sits after the temp path is chosen because
+		// choosing it only clears a stale temp, which creates nothing and returns that temp's
+		// blocks before they are measured. A job that cannot fit - its own source plus what
+		// the other jobs in flight there hold - fails here, names the figures, leaves the
+		// source untouched, and the scan carries on. See sourceRoomFor.
+		release, err := e.sourceRoomFor(dir, f, fi.Size())
+		if err != nil {
+			e.Log.Warn("FAIL (not enough room beside the source, source untouched)", "file", f, "err", err)
+			e.fail(ctx, f, key, GateOther, withSourceDimensions(
+				&store.Outcome{Reason: err.Error(), Profile: ts.Profile, Decision: by}, props))
+			return nil
+		}
+		// Held until this job exits, by EVERY way out of this function: swapped, skipped,
+		// failed, or its context cancelled.
+		defer release()
 	} else {
 		// The per-job free-space pre-check, taken at the moment this job is about to encode
 		// and BEFORE the encoder has written a byte. The startup floor cannot do this job: it
