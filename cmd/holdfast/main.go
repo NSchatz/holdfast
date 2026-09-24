@@ -600,9 +600,15 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope c
 	// too, and neither encodes a file for a parallelism line to be about.
 	x265 := engine.DeriveX265(cfg.X265CPUs, envOr(engine.CgroupRootEnv, ""))
 	x265.Announce(log)
+	// The resident-memory bound every encode of this run is held to, from the same cgroup
+	// mount, derived once and stated once: the limit and the threshold where one is set, and
+	// why none is otherwise, in which case every encode runs unwatched.
+	memory := engine.DeriveMemoryWatch(envOr(engine.CgroupRootEnv, ""))
+	memory.Announce(log)
 
 	prober := probe.New(ffmpeg, ffprobe)
-	enc := engine.FFmpegEncoder{FFmpeg: ffmpeg, Cfg: *cfg, Probe: prober, X265: x265.Parallelism}
+	enc := engine.FFmpegEncoder{FFmpeg: ffmpeg, Cfg: *cfg, Probe: prober, X265: x265.Parallelism,
+		Memory: memory.Bound}
 	// Belt: an explicit empty state_dir must not silently write the job DB into the
 	// process CWD (Load defaults it to "state"; this covers `state_dir: ""`). The
 	// defaulting lives in ONE function so `export` reads the database `run` wrote.

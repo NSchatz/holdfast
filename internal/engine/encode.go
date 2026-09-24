@@ -130,6 +130,21 @@ type FFmpegEncoder struct {
 	// encoder reads it: pools and frame-threads are libx265 mechanisms.
 	X265 encoder.X265Parallelism
 
+	// Memory is the resident-memory bound every invocation this encoder makes is held to:
+	// while ffmpeg runs, its resident memory is sampled, and at the threshold the process
+	// is terminated and the encode fails with a *MemoryAbortError. The run derives it once,
+	// from the cgroup memory limit (see DeriveMemoryWatch), and hands it here.
+	//
+	// The zero value watches nothing, which is the encode this package ran before the
+	// watchdog existed.
+	Memory MemoryBound
+
+	// procRoot, when non-empty, replaces /proc as the place the watchdog reads a process's
+	// resident memory from. Unexported test seam: /proc is filesystem state outside this
+	// package's boundary, and pointing it at a directory with no entry for the process is how
+	// a test drives the "the sample could not be read" path. Production leaves it "".
+	procRoot string
+
 	// newProgressPipe, when non-nil, replaces os.Pipe when opening the channel ffmpeg
 	// writes -progress reports to. Unexported test seam (the engine tests are in this
 	// package): returning an error from it is how a test drives the "progress collection
@@ -582,6 +597,28 @@ func (e FFmpegEncoder) streamArgs(in string, props *probe.VideoProps) (mapArgs [
 	return []string{"-map", "0", "-map", "-0:d?"}, attachedPictureCopyIndexes(streams), nil
 }
 
+// muxQueueBounds are the OUTPUT options that bound ffmpeg's documented mux-side queues, on
+// every invocation runFFmpeg makes. They are output options with no stream specifier, so
+// each applies to every output stream, and they sit after the job's own options and before
+// the output path.
+//
+//   - -max_muxing_queue_size: the packets buffered per stream while the muxer waits for its
+//     first packet of every stream.
+//   - -muxing_queue_data_threshold: the bytes per stream below which that packet count is
+//     not taken into account.
+//   - -thread_queue_size: the packets per stream that may be queued to the muxing thread.
+//
+// Each figure is the pinned ffmpeg's own default for that queue (128 packets, 50 MiB and 8
+// packets), so passing them never loosens a bound: it makes the bound a property of this
+// command line rather than of whichever ffmpeg build happens to run it. They do not bound
+// the encoder's own memory, which is what the resident-memory watchdog is for
+// (docs/encode-memory.md).
+var muxQueueBounds = []string{
+	"-max_muxing_queue_size", "128",
+	"-muxing_queue_data_threshold", "52428800",
+	"-thread_queue_size", "8",
+}
+
 // runFFmpeg assembles the full argv around a job's own options and runs the encoder.
 //
 // It is ONE exec path for every job this encoder performs - a re-encode and a remux
@@ -604,6 +641,7 @@ func (e FFmpegEncoder) runFFmpeg(ctx context.Context, in, out string, sink Progr
 	args = append(args, pre...)
 	args = append(args, "-i", in)
 	args = append(args, body...)
+	args = append(args, muxQueueBounds...)
 	args = append(args, "--", out)
 
 	if e.argvObserver != nil {
@@ -643,13 +681,28 @@ func (e FFmpegEncoder) runFFmpeg(ctx context.Context, in, out string, sink Progr
 		close(drained)
 	}
 
+	// The memory watchdog runs beside the process and never through ctx: a cancelled
+	// context is how the engine recognises an interruption, and an abort is a failure.
+	var dog *memoryWatchdog
+	if e.Memory.Armed() {
+		dog = startMemoryWatchdog(e.Memory, cmd.Process, e.procRoot)
+	}
+
 	err := cmd.Wait()
+	// The process has been waited for, so the watchdog has nothing left to sample; stopping
+	// it here means no sampler outlives the call.
+	abort := dog.stop()
 	// The encoder has exited, so its end of the progress pipe is closed and the drain
 	// has finished (or is about to); waiting for it keeps the reader from outliving the
 	// call and reporting progress for a job that is already terminal.
 	<-drained
 	if pr != nil {
 		_ = pr.Close()
+	}
+	// An aborted encode is a failed encode even where the process exited 0 after being
+	// asked to stop: what it wrote is a truncated file, and verification never sees it.
+	if abort != nil {
+		return fmt.Errorf("ffmpeg encode: %w: %s", abort, truncate(outb.String(), 500))
 	}
 	if err != nil {
 		return fmt.Errorf("ffmpeg encode: %w: %s", err, truncate(outb.String(), 500))

@@ -8,8 +8,9 @@ import (
 	"github.com/NSchatz/holdfast/internal/encoder"
 )
 
-// CgroupRootEnv names the environment variable that points the libx265 parallelism
-// reading at a cgroup mount other than cpuquota.DefaultRoot.
+// CgroupRootEnv names the environment variable that points the cgroup readings - the
+// libx265 parallelism and the encode memory bound - at a cgroup mount other than
+// cpuquota.DefaultRoot.
 //
 // It is an environment variable rather than a configuration key because it is not
 // something an operator configures: the cgroup mount is where the kernel put it. It exists

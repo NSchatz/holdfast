@@ -188,14 +188,10 @@ func unlimited(source, origin string) Quota {
 // never read: on a host whose tightest ceiling is the unreadable one it is the host CPU
 // count dressed as a reading.
 func readV2(root string) (Quota, error) {
-	dir := filepath.Clean(filepath.Join(root, selfCgroupPath()))
-	if !within(root, dir) {
-		dir = root
-	}
 	limit := math.Inf(1)
 	var origin, unlimitedOrigin string
 	read := 0
-	for {
+	for _, dir := range Levels(root) {
 		p := filepath.Join(dir, "cpu.max")
 		b, err := os.ReadFile(p)
 		switch {
@@ -218,14 +214,6 @@ func readV2(root string) (Quota, error) {
 			return Quota{}, &InterfaceError{Path: p, err: fmt.Errorf("%s exists and could not be read, "+
 				"and it may be the limit that binds this process: %w", p, err)}
 		}
-		if dir == root {
-			break
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
 	}
 	if read == 0 {
 		return Quota{}, fmt.Errorf("no readable cpu.max between %s and %s: %w",
@@ -311,6 +299,34 @@ func parseCPUMax(s string) (cpus float64, limited bool, err error) {
 		return 0, false, fmt.Errorf("quota %q is neither \"max\" nor a positive integer", f[0])
 	}
 	return float64(quota) / float64(period), true, nil
+}
+
+// Levels is the cgroup v2 walk every limit this package's callers read is taken over: the
+// directory of the cgroup this process is in under the hierarchy mounted at root, then each
+// of its ancestors in turn, ending at root itself. A limit on any of them binds the process,
+// so a reader keeps the most restrictive one it finds along the list.
+//
+// A cgroup path that would leave root (a "..", or a path from a namespace this process
+// cannot see into) is not followed: the walk is then root alone.
+func Levels(root string) []string {
+	if root == "" {
+		root = DefaultRoot
+	}
+	root = filepath.Clean(root)
+	dir := filepath.Clean(filepath.Join(root, selfCgroupPath()))
+	if !within(root, dir) {
+		dir = root
+	}
+	levels := []string{dir}
+	for dir != root {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+		levels = append(levels, dir)
+	}
+	return levels
 }
 
 // selfCgroupPath returns the v2 path of the cgroup this process is in, and "/" when that

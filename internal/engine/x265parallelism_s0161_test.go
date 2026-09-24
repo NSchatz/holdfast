@@ -237,6 +237,8 @@ func TestS0161_AC2_TheQuotadArgvIsPinned(t *testing.T) {
 		"-preset", "ultrafast",
 		"-crf", "22",
 		"-x265-params", "log-level=error:pools=3:frame-threads=1",
+		"-max_muxing_queue_size", "128", "-muxing_queue_data_threshold", "52428800",
+		"-thread_queue_size", "8",
 		"--", out,
 	}
 	if strings.Join(argv, "\x00") != strings.Join(want, "\x00") {
@@ -365,6 +367,8 @@ func TestS0161_AC5_NoQuotaLeavesTheLibx265ArgvAtThePinnedBytes(t *testing.T) {
 				"-preset", "ultrafast",
 				"-crf", "22",
 				"-x265-params", "log-level=error",
+				"-max_muxing_queue_size", "128", "-muxing_queue_data_threshold", "52428800",
+				"-thread_queue_size", "8",
 				"--", out,
 			}
 			if strings.Join(argv, "\x00") != strings.Join(want, "\x00") {
