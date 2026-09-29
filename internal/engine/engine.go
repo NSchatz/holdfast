@@ -2451,7 +2451,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	var retained string
 	if e.Cfg.UndoEnabled() {
 		u := e.undo()
-		r, rerr := u.retain(f, key)
+		r, rerr := u.retain(ctx, f, key)
 		if rerr != nil {
 			e.Log.Info("skip (the original could not be retained, so the swap could not be undone — source untouched)",
 				"file", f, "err", rerr)
