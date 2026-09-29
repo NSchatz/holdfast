@@ -9,8 +9,8 @@ import (
 
 // The whole-ledger aggregates (DASH-7).
 //
-// WHY THEY LIVE IN THE STORE. The dashboard's queue and history views ship at most
-// queueLimit / historyLimit rows, and any figure the browser derives from that payload
+// WHY THEY LIVE IN THE STORE. The API's queue and history views ship at most
+// queueLimit / historyLimit rows, and any figure a client derives from that payload
 // is a statistic about the most recent few hundred files while looking exactly like a
 // statistic about the operator's library. On a 300,000-file library the difference is
 // the whole meaning of the number. So every published aggregate is computed HERE, in

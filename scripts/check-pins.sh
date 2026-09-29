@@ -242,8 +242,8 @@ fi
 #
 # Scope is deliberately narrow: IDENTIFIERS only. Prose is NOT matched, because "transcode"
 # is still an ordinary English verb here ("an in-place transcode"), `transcode.conf` is the
-# Bash predecessor's config file, and the phase IDs (TRANSCODE-1 … TRANSCODE-15) are
-# historical labels that must survive — they are how git log and the roadmap name the work.
+# Bash predecessor's config file, and the phase IDs (TRANSCODE-1 to TRANSCODE-17; there is no
+# TRANSCODE-10) are historical labels that must survive - they are how git log names the work.
 # Hyphen = history, underscore = identifier. Only the underscore forms are a bug.
 #
 # The allowlist is line-level, never file-level, and git applies it (`--and --not -e`) rather
