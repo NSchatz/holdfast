@@ -12,6 +12,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -322,5 +323,69 @@ func TestS0163_AC7_TheResolvedWorkersAreStatedByValidateRunAndServe(t *testing.T
 	if s := s0163Start(t, s0163Parse(got), got); s.attrs["workers"] != "4" || s.attrs["workers_setting"] != "4" ||
 		s.attrs["cpu_quota"] != "" {
 		t.Errorf("run's pool record for workers: 4 is %s", s.raw)
+	}
+}
+
+// TestS0163_AC13_RestoreListsEveryRetentionOfConcurrentSwapsInOneDirectory grades AC-13's
+// command half: `holdfast run` with three workers over three sources in ONE directory and
+// the undo window open retains each original once; `holdfast restore` with no argument lists
+// every one of them, holding the sum of their pre-encode sizes; and restoring one puts its
+// original bytes back. The forced interleavings of the same criterion are the engine's.
+func TestS0163_AC13_RestoreListsEveryRetentionOfConcurrentSwapsInOneDirectory(t *testing.T) {
+	ffmpegBin, err := exec.LookPath(envOr("HOLDFAST_FFMPEG", "ffmpeg"))
+	if err != nil {
+		t.Fatalf("::error:: ffmpeg required for the swaps: %v", err)
+	}
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "media")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(lib, "a.mkv")
+	if out, err := exec.Command(ffmpegBin, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=2:size=320x240:rate=10", "-c:v", "libx264", "-preset", "ultrafast",
+		"-b:v", "8M", "-pix_fmt", "yuv420p", "--", first).CombinedOutput(); err != nil {
+		t.Fatalf("building the library fixture: %v\n%s", err, out)
+	}
+	body, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srcs := []string{first, filepath.Join(lib, "b.mkv"), filepath.Join(lib, "c.mkv")}
+	for _, p := range srcs[1:] {
+		if err := os.WriteFile(p, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfgBody := "library_roots:\n  - " + lib + "\nstate_dir: " + filepath.Join(dir, "state") +
+		"\nvmaf_enable: false\nmin_bitrate_kbps: 0\npreset: ultrafast\nworkers: 3\nundo_window_hours: 24\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, got := s0163Run(t, cfgPath)
+	if code != 0 {
+		t.Fatalf("run exited %d:\n%s", code, got)
+	}
+	var out, errOut bytes.Buffer
+	if code := dispatch([]string{"restore", "--config", cfgPath}, &out, &errOut); code != 0 {
+		t.Fatalf("restore (list) exited %d: %s", code, errOut.String())
+	}
+	held := strconv.Itoa(3 * len(body))
+	if !strings.Contains(out.String(), "3 retained original(s), holding "+held+" byte(s)") {
+		t.Errorf("restore does not list three retentions holding %s bytes:\n%s", held, out.String())
+	}
+	for _, p := range srcs {
+		if !strings.Contains(out.String(), "  "+p+"  "+strconv.Itoa(len(body))+" bytes") {
+			t.Errorf("restore does not list %s at its pre-encode size:\n%s", p, out.String())
+		}
+	}
+	out.Reset()
+	if code := dispatch([]string{"restore", "--config", cfgPath, srcs[2]}, &out, &errOut); code != 0 {
+		t.Fatalf("restore %s exited %d: %s", srcs[2], code, errOut.String())
+	}
+	if back, err := os.ReadFile(srcs[2]); err != nil || !bytes.Equal(back, body) {
+		t.Errorf("the restored %s is not its original bytes (err %v)", srcs[2], err)
 	}
 }
