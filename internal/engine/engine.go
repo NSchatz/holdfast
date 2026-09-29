@@ -1478,11 +1478,12 @@ func (e *Engine) enumerateIn(pass *listings) ([]string, map[string]bool) {
 // the library. See docs/enumeration.md for the order it hands them out in and for what
 // a later declared queue order may build on it.
 func (e *Engine) enumerateStream(pass *listings, to sink) map[string]bool {
-	// filtered counts the files the configured path filters kept out of this scan. It
-	// counts FILES and never directories, because the filters are applied to an entry
-	// this scan has ALREADY LISTED: what a filter changes is the set of files offered,
-	// never the set of directories listed, and the observed map below is the evidence
-	// that difference rests on (AC-10).
+	// filtered counts the files the configured path filters kept out of this scan, among
+	// the entries of the directories it listed. It counts FILES and never directories: a
+	// directory an exclude pattern reaches whole is not in the coverage set at all - the
+	// startup walk pruned it (S0168) - so this scan neither lists it nor reports it
+	// observed, and the retention pass keeps every row beneath it, because a row is only
+	// ever spent in a directory this run listed (rowIsSpent).
 	var filtered int
 	observed := map[string]bool{}
 	if e.Coverage != nil {
@@ -1538,10 +1539,10 @@ func (e *Engine) enumerateStream(pass *listings, to sink) map[string]bool {
 				}
 				if source {
 					p := filepath.Join(dir, ent.Name)
-					// The filter is asked AFTER this directory was listed and marked
-					// observed, and it is asked about the FILE. That ordering is the
-					// whole of AC-10: an excluded directory is still listed, so the
-					// retention pass has exactly the evidence it had before.
+					// The filter is asked about the FILE, after this directory was
+					// listed and marked observed: a listed directory keeps its evidence
+					// whatever a filter says about the files in it, and one the filters
+					// exclude whole never reaches this loop - the startup walk pruned it.
 					if !e.filterAllows(p) {
 						filtered++
 						continue
@@ -1612,9 +1613,9 @@ func (e *Engine) enumerateStream(pass *listings, to sink) map[string]bool {
 					e.skipSourceNamedDirectory(path)
 					return nil
 				}
-				// Asked here and not on the way into the directory, for the reason the
-				// covered branch above gives: a filter changes which FILES are offered
-				// and never which directories were listed (AC-10).
+				// Asked of the FILE here. With no startup walk there is no pruned set,
+				// and this branch lists every directory under the roots exactly as it
+				// always has: the prune is the walk's (S0168), never this fallback's.
 				if !e.filterAllows(path) {
 					filtered++
 					return nil
@@ -1673,17 +1674,20 @@ func (e *Engine) filterAllows(p string) bool {
 	return false
 }
 
-// reportFiltered states what the path filters kept out of one enumeration, and states
-// beside it the thing an operator cannot see and the ledger depends on: every directory
-// was still listed, so the retention pass has the same evidence it would have had with
-// no filter configured.
+// reportFiltered states what the path filters kept out of one enumeration: the files, in
+// the directories it listed, that a filter refused.
+//
+// It says nothing about which directories were listed, because that is no longer the same
+// with and without a filter: a directory an exclude pattern reaches whole is pruned by the
+// startup walk and listed by no pass (S0168), and the walk says how many it pruned. What an
+// operator is owed about the ledger holds either way - a terminal row beneath an excluded
+// directory is kept, since the retention pass spends a row only where this run listed the
+// directory and the file was gone.
 func (e *Engine) reportFiltered(filtered int) {
 	if filtered == 0 {
 		return
 	}
-	e.Log.Info("path filters kept files out of this scan; every directory this scan would "+
-		"have listed was still listed, so the ledger retention pass reads exactly the evidence it "+
-		"read before the filters were configured",
+	e.Log.Info("path filters kept files out of this scan",
 		"files_excluded_by_a_path_filter", filtered)
 }
 
