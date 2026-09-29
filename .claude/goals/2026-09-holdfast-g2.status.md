@@ -102,18 +102,18 @@ summed per directory):
 |---|---|---|
 | S0177 | working-file extensions | DOING (PR #105): AC-1 to AC-16 pass under the lock, AC-14 bites; CI's first run failed two S0155 regressions (long names past NAME_MAX/PATH_MAX with the suffix), fixed in `0ca25c0` (fallback to the earlier name where the suffix cannot fit) |
 | S0163 | `workers: auto` from the CPU quota; several jobs in flight safe on one drive | DOING (build agent, branch `holdfast-g2/s0163-workers` on #105's head) |
-| S0173 | `run` progress | DOING (build agent, branch `holdfast-g2/s0173-run-progress`) |
-| S0168 | prune excluded directories from the walk | TODO |
-| S0180 | census scope parity | TODO |
-| S0166 | restart survey overcount | DONE (PR #102, `02aa553`): AC-1 to AC-10 pass, and AC-1 to AC-5 red on the old resolution (33 band-decided rows counted as moved); local gate exit 0 in 31m20s on `52f96ed` (`internal/engine` 1627.4 s); CI green |
-| S0176 | log time offset (holdfast half), and the homelab PR for the `TZ` half | DOING (PR #103, with P6): AC-H1 to AC-H7 pass, AC-H9 grep empty. Homelab half: NSchatz/homelab#208 opened (never merged by a session), `NEEDS-OWNER.md` row 1 |
-| S0151 | `.github/dependabot.yml` | DOING (PR #104, `99ca634`): selftest 35/35; CI `package` green on the literal-`FROM` Dockerfile |
+| S0173 | `run` progress | DOING (PR #107): 23 tests for AC-1 to AC-13 and AC-15 pass; AC-16 and AC-17 pass with no edit; no existing test line changed |
+| S0168 | prune excluded directories from the walk | DOING (build agent, branch `holdfast-g2/census-scope`) |
+| S0180 | census scope parity | DOING (build agent, same branch, after S0168) |
+| S0166 | restart survey overcount | DONE (PR #102, `02aa553`): AC-1 to AC-10 pass, and AC-1 to AC-5 red on the old resolution (33 band-decided rows counted as moved); 22 existing test lines changed call shape only; local gate exit 0 in 31m20s on `52f96ed` (`internal/engine` 1627.4 s); CI green |
+| S0176 | log time offset (holdfast half), and the homelab PR for the `TZ` half | DONE (PR #103, `f5bb64f`): AC-H1 to AC-H7 pass (H1, H3, H5, H7 shown to red on mutations), AC-H9 grep empty; mutation-diff 100%; local gate exit 0 in 26m2s on `a74b458` (`internal/engine` 1341.0 s); CI green. Homelab half: NSchatz/homelab#208, open for the owner to merge (T32), `NEEDS-OWNER.md` row 1 |
+| S0151 | `.github/dependabot.yml` | DONE (PR #104, `901c472`): `.github/dependabot.yml` (github-actions, docker, gomod at `/`, weekly, `build(deps)` commits, no auto-merge); base images on literal `FROM` lines so Dependabot can read them; `check-pins.sh` sections 3, 7 and 9 enforce it, selftest 35/35; local gate exit 0 in 25m45s on `68902e4`; CI green |
 
 ## Phase 5 - P6 (approved option (a))
 
 | # | Item | State |
 |---|---|---|
-| P6 | `internal/corpus` skips `.claude/`, with a test | DOING (PR #103, commit `790c54d`): both new tests red with the skip removed |
+| P6 | `internal/corpus` skips `.claude/`, with a test | DONE (PR #103, `f5bb64f`): both new tests red with the skip removed |
 
 ## Phase 6 - Report
 
@@ -185,8 +185,10 @@ summed per directory):
 
 ## Resume here
 
-Merged: #100 (`ca4968b`), #101 (`cab897a`, line C), #102 (`02aa553`, S0166). Open: #106
-(`TEST_TIMEOUT` 45m; gate running since 19:52), #103 (P6 + S0176), #104 (S0151), #105 (S0177;
-fix `0ca25c0` pushed, its local tests queued). Gate order: #106, #103, #104, #105, then S0173,
-census, S0163. Build agents: S0173, S0163 (on #105's head before `0ca25c0`). The census agent
-starts when a slot frees (`/cache/tmp/holdfast-g2/prompt-census.md`).
+Merged: #100 (`ca4968b`), #101 (`cab897a`, line C), #102 (`02aa553`), #106 (`3996107`,
+`TEST_TIMEOUT` 45m; its first gate failed on a startup-scan race in
+`TestServe_AC1_TheResolvedTautulliKeyReachesItsOwnRequest`, re-run green). Open: #103 (P6 +
+S0176 + that test's hardening; gate running), #104 (S0151), #105 (S0177 + fix `0ca25c0`), #107
+(S0173). Gate order: #103, #104, #105, #107, then census, S0163. Build agents: S0163 (on
+#105's head before `0ca25c0`), census (S0168 + S0180). Audit of deleted test lines so far:
+`/cache/tmp/holdfast-g2/audit-deleted-test-lines.md`.

@@ -27,19 +27,25 @@
 #   https://packages.debian.org/trixie/libva2 , .../trixie/mesa-libgallium ,
 #   .../trixie/intel-media-va-driver-non-free (each: libc6 >= 2.38)
 #
-# Each digest below is the multi-arch index the tag resolved to when it was pinned, read
-# from the registry's v2 API with the body's own sha256 checked against it (2026-09-29).
-# The runtime digest carries libc6 2.41-12+deb13u4, libgcc-s1 14.2.0-19 and
+# Each base image is pinned ON ITS OWN FROM LINE, tag and digest together. That line is
+# what Docker pulls, and it is the only form the update bot reads: Dependabot's Docker
+# parser matches `FROM [--platform=...] <image>:<tag>@sha256:<digest>` and never resolves
+# an ARG, so a base image written through an ARG is a pin nobody is ever told has gone
+# stale (dependabot-core docker/lib/dependabot/docker/file_parser.rb, FROM_LINE, at
+# 78005a8; read 2026-09-29). scripts/check-pins.sh section 7 refuses a base image written
+# any other way.
+#
+# Each digest is the multi-arch index its tag resolved to when it was pinned, read from
+# the registry's v2 API with the body's own sha256 checked against it (2026-09-29). The
+# runtime digest carries libc6 2.41-12+deb13u4, libgcc-s1 14.2.0-19 and
 # tzdata 2026c-0+deb13u1, read from the image's own var/lib/dpkg/status.d.
-
+#
+# GO_IMAGE is the one value that has to appear twice. The build stage's FROM line is the
+# pin; this ARG is the copy the build stage's in-image toolchain check reads, because a
+# RUN cannot see the reference its own stage was built from. scripts/check-pins.sh
+# section 3 holds the two equal, so moving one without the other reds the gate instead of
+# splitting silently.
 ARG GO_IMAGE=golang:1.25.14-trixie@sha256:2c4c60ef415fbfa5e90300722293bef36c5e63fae17570ce18f580af933dbd73
-ARG FETCH_IMAGE=debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
-# distroless CC, not BASE. ffmpeg/ffprobe carry a DT_NEEDED on libgcc_s.so.1, and the
-# `base` variant ships glibc WITHOUT libgcc — so `base` builds perfectly and then dies
-# at the dynamic loader the first time the engine execs ffmpeg ("libgcc_s.so.1: cannot
-# open shared object file"). `cc` is `base` + libgcc_s + libstdc++, still no shell, still
-# nonroot. Verified against the registry: base ships libc/libm/libmvec and no libgcc.
-ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97
 
 # --- ffmpeg: a pinned static build, verified by hash before it is trusted -----
 # BtbN's builds link only glibc (>= 2.28), so they run on the distroless runtime while
@@ -51,7 +57,7 @@ ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd
 # exactly this build, so the ffmpeg the fixture safety proof runs against cannot drift
 # away from the ffmpeg the image ships. Do not copy these values anywhere; change them
 # here and everything follows.
-FROM --platform=$BUILDPLATFORM ${FETCH_IMAGE} AS ffmpeg
+FROM --platform=$BUILDPLATFORM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a AS ffmpeg
 # Unpinned apt versions are fine HERE and only here: this stage is a throwaway fetcher
 # that ships nothing into the final image, and the one artifact it does produce is
 # pinned by release tag and verified by SHA-256 below. Pinning these three would just
@@ -91,11 +97,12 @@ RUN set -eu; \
     test -x /ffmpeg/bin/ffprobe
 
 # --- build the binary --------------------------------------------------------
-FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS build
+FROM --platform=$BUILDPLATFORM golang:1.25.14-trixie@sha256:2c4c60ef415fbfa5e90300722293bef36c5e63fae17570ce18f580af933dbd73 AS build
 
 # The DIGEST is what Docker pulls; the tag beside it is a label the registry does not
 # enforce. scripts/check-pins.sh holds the Go version together across this file, ci.yml
-# and release.yml, but it can only compare the TAG it parses out of GO_IMAGE, because
+# and release.yml (and holds GO_IMAGE equal to the FROM line above), but it can only
+# compare the TAG it parses out of GO_IMAGE, because
 # nothing outside the image can see which toolchain a digest actually contains. So bump
 # the tag, leave the stale digest, and every file agrees, check-pins prints "ok", and the
 # shipped binary is built by the superseded Go. That is the same silent detachment the
@@ -156,7 +163,13 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
 # NVIDIA is different and does work: the NVIDIA Container Toolkit INJECTS
 # libnvidia-encode into the container, which is exactly what nvenc dlopens. See
 # docs/docker.md "GPU passthrough" — a documented limitation, not an oversight.
-FROM ${RUNTIME_IMAGE}
+#
+# distroless CC, not BASE. ffmpeg/ffprobe carry a DT_NEEDED on libgcc_s.so.1, and the
+# `base` variant ships glibc WITHOUT libgcc - so `base` builds perfectly and then dies
+# at the dynamic loader the first time the engine execs ffmpeg ("libgcc_s.so.1: cannot
+# open shared object file"). `cc` is `base` + libgcc_s + libstdc++, still no shell, still
+# nonroot. Verified against the registry: base ships libc/libm/libmvec and no libgcc.
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97
 
 ARG VERSION=0.0.0-dev
 ARG COMMIT=unknown
@@ -178,7 +191,8 @@ COPY --from=ffmpeg /ffmpeg/bin/ffprobe /usr/local/bin/ffprobe
 # running on UTC. Cheap insurance against a failure mode that does not announce itself.
 # The copy REPLACES the base's own zone files, so the image carries the build stage's
 # tzdata release, which can trail the base's: at these pins the build stage has 2026b
-# and the base 2026c. Refreshing the GO_IMAGE digest is what refreshes it.
+# and the base 2026c. Refreshing the build stage's digest (and GO_IMAGE with it) is what
+# refreshes it.
 COPY --from=build /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=build /out/holdfast /usr/local/bin/holdfast
 # The image redistributes prebuilt GPL ffmpeg binaries, so it ships their licence and
