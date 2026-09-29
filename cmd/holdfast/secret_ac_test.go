@@ -252,7 +252,18 @@ func TestServe_AC1_TheResolvedTautulliKeyReachesItsOwnRequest(t *testing.T) {
 	waitHTTP(t, base+"/api/summary", 10*time.Second)
 	// A rescan consults the scheduler's gate, which consults Tautulli. It is ACCEPTED
 	// (202) rather than completed, because the scan runs in the background.
-	if code := httpPostCode(t, base+"/api/rescan", tokenSentinel); code != http.StatusAccepted {
+	//
+	// serve scans once on its own at startup, and a rescan asked for while that scan still
+	// runs is refused 409 ("already scanning") - a race with the daemon's own scan that says
+	// nothing about the key, and one a busy machine loses. So a 409 is asked again until the
+	// startup scan has finished; a gate that refuses for any other reason keeps answering 409
+	// and the case still fails, after the deadline.
+	code := httpPostCode(t, base+"/api/rescan", tokenSentinel)
+	for deadline := time.Now().Add(20 * time.Second); code == http.StatusConflict && time.Now().Before(deadline); {
+		time.Sleep(100 * time.Millisecond)
+		code = httpPostCode(t, base+"/api/rescan", tokenSentinel)
+	}
+	if code != http.StatusAccepted {
 		t.Fatalf("POST /api/rescan = %d, want 202", code)
 	}
 

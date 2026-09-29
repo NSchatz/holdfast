@@ -881,7 +881,9 @@ type Store interface {
 	// current is asked PER ROW, about that row's own path, because that is how a claim
 	// asks it: the same file's inputs resolve differently under two library roots, and
 	// again under an encode profile whose match selects it. A survey measuring the whole
-	// ledger against one value would report a count no scan will act on.
+	// ledger against one value would report a count no scan will act on. It is handed the
+	// row's stored source height too, because a root that bands its files resolves each
+	// one under the band its height selects (see InputsForPath).
 	SurveyDecisionInputs(ctx context.Context, current InputsForPath) (DecisionInputsSurvey, error)
 
 	// Advance records a non-terminal state transition for a job the caller already

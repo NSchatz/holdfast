@@ -91,29 +91,29 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | `RUNTIME_IMAGE` is `gcr.io/distroless/cc-debian13:nonroot`, pinned by tag and digest | DOING (PR #101): `sha256:54df941e...`; build and fetch stages to `golang:1.25.14-trixie` and `debian:trixie-slim`; merged up to `ca4968b` (`1d79a78`), gate queued |
-| 3.2 | `scripts/check-pins.sh` sections 3 and 7 green | DOING (PR #101): green on the branch, selftest 31/31 |
-| 3.3 | The merged PR's CI `package` job green | DOING (PR #101): `package` green on the branch before merge |
-| 3.4 | `docs/docker.md` follows the image | DOING (PR #101) |
+| 3.1 | `RUNTIME_IMAGE` is `gcr.io/distroless/cc-debian13:nonroot`, pinned by tag and digest | DONE (PR #101, `cab897a`): `sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97`; build and fetch stages `golang:1.25.14-trixie`, `debian:trixie-slim` |
+| 3.2 | `scripts/check-pins.sh` sections 3 and 7 green | DONE (PR #101): green, selftest 31/31; local gate exit 0 in 27m7s on `1d79a78` (`internal/engine` 1391.0 s) |
+| 3.3 | The merged PR's CI `package` job green | DONE (PR #101): `package` pass (3m50s) on `1d79a78`, with `build` and `mutation` |
+| 3.4 | `docs/docker.md` follows the image | DONE (PR #101) |
 
 ## Phase 4 - Carried specs (line B)
 
 | # | Item | State |
 |---|---|---|
-| S0177 | working-file extensions | DOING (build agent, branch `holdfast-g2/s0177-working-names` on #100's head) |
-| S0163 | `workers: auto` from the CPU quota; several jobs in flight safe on one drive | TODO (after S0177: both change the working-path construction) |
-| S0173 | `run` progress | DOING (build agent, branch `holdfast-g2/s0173-run-progress`) |
-| S0168 | prune excluded directories from the walk | TODO |
-| S0180 | census scope parity | TODO |
-| S0166 | restart survey overcount | DOING (PR #102): AC-1 to AC-10 pass locally; existing call sites changed shape only (15 lines, reasons in the PR) |
-| S0176 | log time offset (holdfast half), and the homelab PR for the `TZ` half | DOING (PR #103, with P6): AC-H1 to AC-H7 pass, AC-H9 grep empty. Homelab half: NSchatz/homelab#208 opened (never merged by a session), `NEEDS-OWNER.md` row 1 |
-| S0151 | `.github/dependabot.yml` | DOING (local commit `2481399` on #101's commit; cherry-picked to its own PR once #101 merges) |
+| S0177 | working-file extensions | DOING (PR #105): AC-1 to AC-16 pass under the lock, AC-14 bites; CI's first run failed two S0155 regressions (long names past NAME_MAX/PATH_MAX with the suffix), fixed in `0ca25c0` (fallback to the earlier name where the suffix cannot fit) |
+| S0163 | `workers: auto` from the CPU quota; several jobs in flight safe on one drive | DOING (build agent, branch `holdfast-g2/s0163-workers` on #105's head) |
+| S0173 | `run` progress | DOING (PR #107): 23 tests for AC-1 to AC-13 and AC-15 pass; AC-16 and AC-17 pass with no edit; no existing test line changed |
+| S0168 | prune excluded directories from the walk | DOING (build agent, branch `holdfast-g2/census-scope`) |
+| S0180 | census scope parity | DOING (build agent, same branch, after S0168) |
+| S0166 | restart survey overcount | DONE (PR #102, `02aa553`): AC-1 to AC-10 pass, and AC-1 to AC-5 red on the old resolution (33 band-decided rows counted as moved); 22 existing test lines changed call shape only; local gate exit 0 in 31m20s on `52f96ed` (`internal/engine` 1627.4 s); CI green |
+| S0176 | log time offset (holdfast half), and the homelab PR for the `TZ` half | DONE (PR #103, `f5bb64f`): AC-H1 to AC-H7 pass (H1, H3, H5, H7 shown to red on mutations), AC-H9 grep empty; mutation-diff 100%; local gate exit 0 in 26m2s on `a74b458` (`internal/engine` 1341.0 s); CI green. Homelab half: NSchatz/homelab#208, open for the owner to merge (T32), `NEEDS-OWNER.md` row 1 |
+| S0151 | `.github/dependabot.yml` | DOING (PR #104, `99ca634`): selftest 35/35; CI `package` green on the literal-`FROM` Dockerfile |
 
 ## Phase 5 - P6 (approved option (a))
 
 | # | Item | State |
 |---|---|---|
-| P6 | `internal/corpus` skips `.claude/`, with a test | DOING (PR #103, commit `790c54d`): both new tests red with the skip removed |
+| P6 | `internal/corpus` skips `.claude/`, with a test | DONE (PR #103, `f5bb64f`): both new tests red with the skip removed |
 
 ## Phase 6 - Report
 
@@ -166,14 +166,29 @@ summed per directory):
 - 2026-09-29: S0168, S0180 and S0166 quote the owner's library paths and ledger counts;
   their tests use synthetic paths under `t.TempDir()` and synthetic counts of the same shape
   (T41, as P1 did).
+- 2026-09-29: `TEST_TIMEOUT` raised from 30m to 45m in a PR of its own (#106), because the
+  gate of #102 measured `internal/engine` at 1627.4 s, 90.4% of 30m, past I15's 80% line. A
+  commit inside a feature PR would be squashed into it, so it was not "its own commit" on
+  `main`. It is gated before any other PR, since each later gate risked a false timeout. Much
+  of the jump is contention: the build agents compile and run the non-encoding packages
+  outside the heavy lock, and that shares the container's 2 CPUs with the gate.
+- 2026-09-29: S0177's names are 14 bytes longer, so a source whose earlier working or
+  retained name fitted NAME_MAX or PATH_MAX within 14 bytes would fail. Those are the long
+  names S0155 made swap, and CI's two S0155 regressions caught it. The constructors fall
+  back to the earlier name only where the suffixed one cannot fit, rather than truncating
+  the stem, because the record-free hold-back and the source-beside lookup read the full
+  stem back from the name, and every reader already accepts the earlier name.
+- 2026-09-29: two test fixtures carried a real film title from the operator's report (T41).
+  They were replaced with a synthetic name of the same byte length and shape, in PR #105
+  (the PR that had to touch one of them). A search of `main` for title-shaped fixture names
+  finds no other.
 
 ## Resume here
 
-Merged: PR #100 (`ca4968b`). Open: #101 (debian13, line C; gate queued on `1d79a78`), #102
-(S0166), #103 (P6 + S0176; `mutation-diff` queued). Local: S0151 commit `2481399` on branch
-`holdfast-g2/s0151-dependabot-wip` (worktree `/cache/wt/holdfast/holdfast-g2/s0151-dependabot`),
-cherry-picked onto a fresh branch once #101 merges. Build agents: S0177 (on #100's head), S0173.
-Next agents: census (`/cache/tmp/holdfast-g2/prompt-census.md`), then S0163 after S0177 merges
-(`/cache/tmp/holdfast-g2/prompt-s0163-head.md`). `internal/engine` reached 79.5% of
-`TEST_TIMEOUT` on #100's gate: once a gate shows it above 80%, raise `TEST_TIMEOUT` in its own
-commit with that measurement (I15).
+Merged: #100 (`ca4968b`), #101 (`cab897a`, line C), #102 (`02aa553`), #106 (`3996107`,
+`TEST_TIMEOUT` 45m; its first gate failed on a startup-scan race in
+`TestServe_AC1_TheResolvedTautulliKeyReachesItsOwnRequest`, re-run green). Open: #103 (P6 +
+S0176 + that test's hardening; gate running), #104 (S0151), #105 (S0177 + fix `0ca25c0`), #107
+(S0173). Gate order: #103, #104, #105, #107, then census, S0163. Build agents: S0163 (on
+#105's head before `0ca25c0`), census (S0168 + S0180). Audit of deleted test lines so far:
+`/cache/tmp/holdfast-g2/audit-deleted-test-lines.md`.
