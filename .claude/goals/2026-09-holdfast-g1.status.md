@@ -94,8 +94,8 @@ summed per directory):
 | # | Item | State |
 |---|---|---|
 | 3.1 | Investigation: is production affected by an inherited read-only fd 3? | DONE: no. The real ffmpeg writes to fd 3 only when told `-progress pipe:3`, and `runFFmpeg` passes that only with `ExtraFiles[0]` (the pipe's write end), which `os/exec` places at fd 3 over anything inherited (`internal/engine/encode.go:629-661`) |
-| 3.2 | `progressFake` probe true only when fd 3 is actually writable, with a test that bites on the old probe | DOING (PR #97): the probe reads the access mode from `/proc/<pid>/fdinfo/3`; `TestProgressFake_OnlyAWritableFd3IsAProgressChannel` reds on the old probe with `cat: write error` |
-| 3.3 | Plain `flock` over the `FailurePathIsByteIdentical` run passes after the merge | TODO |
+| 3.2 | `progressFake` probe true only when fd 3 is actually writable, with a test that bites on the old probe | DONE (PR #97, `26d88b1`): the probe reads the access mode from `/proc/<pid>/fdinfo/3`; `TestProgressFake_OnlyAWritableFd3IsAProgressChannel` reds on the old probe with `cat: write error`; local gate exit 0 in 24m25s on `98690d7` (engine 1232.8 s), CI green |
+| 3.3 | Plain `flock` over the `FailurePathIsByteIdentical` run passes after the merge | DONE (`26d88b1`): 3 of 3 PASS under `flock` without `-o` on `main` (baseline: 3 of 3 FAIL) |
 
 ## Phase 4 - Reversals R1-R6 and the T34 cleanup (lines D, E)
 
@@ -126,12 +126,12 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| P1 | `proposal-triage.md` (T30, T33): a row per S0151, S0162-S0180 and PR #94 | DOING: drafted (21 rows: 20 keep, 1 merged), reviewed |
-| P2 | `proposal-hw-gates.md` (T10) | DOING: drafted with claims re-verified, reviewed |
-| P3 | `proposal-amd-image.md` (T45, I8, I9) | DOING: drafted with claims re-verified, reviewed |
-| P4 | `proposal-node-protocol.md` (T46) | DOING: research agent |
-| P5 | `proposal-crop-dv.md` (I7) | DOING: research agent |
-| P6 | `proposal-docs-corpus.md` (I16) | DOING: drafted |
+| P1 | `proposal-triage.md` (T30, T33): a row per S0151, S0162-S0180 and PR #94 | DOING: 21 rows (20 keep, 1 merged), adversarially verified and corrected; goes in the proposals PR |
+| P2 | `proposal-hw-gates.md` (T10) | DOING: claims re-verified, adversarially verified and corrected; goes in the proposals PR |
+| P3 | `proposal-amd-image.md` (T45, I8, I9) | DOING: claims re-verified, adversarially verified and corrected; goes in the proposals PR |
+| P4 | `proposal-node-protocol.md` (T46) | DOING: claims re-verified, adversarially verified and corrected; goes in the proposals PR |
+| P5 | `proposal-crop-dv.md` (I7) | DOING: claims re-verified and lab-tested on synthetic material, adversarially verified and corrected; goes in the proposals PR |
+| P6 | `proposal-docs-corpus.md` (I16) | DOING: adversarially verified and corrected; goes in the proposals PR |
 
 ## Phase 7 - Fresh-clone gate (line B)
 
@@ -176,9 +176,25 @@ summed per directory):
 - 2026-09-29: the read-only umbrella clone is `/cache/tmp/holdfast-super-ro` with its push URL
   `DISABLED` (§0.1).
 
+- 2026-09-29: deviations recorded, all from one agent. The adversarial verifier of the proposals
+  (a general-purpose agent) started four forks of its own at once, one per proposal P2-P5, so up
+  to five agents ran together against T40's cap of 2; its report says it had not read the cap.
+  The goal saw two of them still running at a check-in, found one already finished, and messaged
+  the verifier to spawn nothing further. Its P2 fork also ran two sub-second CPU test encodes (a
+  2-frame 128x128 lavfi clip) without the heavy lock (§0.4), and a fork's `go` command added 22
+  `/go.mod` hash lines to `go.sum` in `/workspace`; the goal restored `go.sum` (additions only,
+  nothing committed). Every later agent prompt forbids spawning agents, running encodes and
+  running `go` in `/workspace`.
+
+- 2026-09-29: the proposals' adversarial verification (§0.4) checked 54 claims across P1-P6 and
+  refuted none outright; 16 needed a correction (P5's L5 output gate, P2's VAAPI key range, P4's
+  retry-bound wording among them), and every recommendation stands. All 16 were applied before
+  commit; the report is `.claude/goals/2026-09-holdfast-research/verify-proposals.md`.
+
 ## Resume here
 
-PR #96 (identity) is merged as `33c80fc`: local gate exit 0 in 24m4s on `1b4c9c6` (engine
-1206.5 s), CI green. PRs #97 (fd-3) and #98 (reversals and cleanup) are next, each after merging
-`origin/main` into the branch and a fresh gate. Then the proposals PR (P1-P6 plus the test-mass
+PRs #96 (`33c80fc`) and #97 (`26d88b1`) are merged; line C holds on `main`. Next: #98
+(reversals and cleanup) after merging `origin/main` and a fresh gate, then the proposals PR
+(P1-P6, `verify-proposals.md`, and the test-mass record of #98's squash commit), the fresh-clone
+gate, the packet and the report. Then the proposals PR (P1-P6 plus the test-mass
 record), the plain-`flock` run for line C, the fresh-clone gate, and the packet.
