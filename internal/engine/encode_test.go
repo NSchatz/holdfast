@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -548,6 +549,20 @@ func (c *collectProgress) all() []Progress {
 // supplied one (so the same script is usable with and without progress collection),
 // writes the given stdout/stderr text, and exits with code exitCode. The payload goes
 // through a file so no shell quoting can distort the progress stream under test.
+//
+// "The caller supplied one" means fd 3 is open FOR WRITING, and the probe reads exactly
+// that. `( : >&3 )` proves only that fd 3 is OPEN: a redirection does not check the access
+// mode, so a READ-ONLY fd 3 inherited from whatever launched the test passed it. Plain
+// `flock <lock> <cmd>` is such a launcher - it hands its lock file to the child as fd 3 and
+// every descendant inherits it - and the fake then wrote the payload into a read-only
+// descriptor, so `cat: write error: Bad file descriptor` joined the no-progress failure
+// text and TestEncodeWithProgress_FailurePathIsByteIdentical went red for a reason that
+// was not about the code. The access mode is the low two bits of the octal flags in the
+// shell's own /proc/<pid>/fdinfo/3: 1 is O_WRONLY and 2 is O_RDWR. With no fd 3 there is no
+// such file, the flags are empty, and the block is skipped. Production is not affected:
+// the real ffmpeg writes to fd 3 only when told `-progress pipe:3`, and runFFmpeg passes
+// that only with ExtraFiles[0], the pipe's write end, which os/exec places at fd 3 over
+// anything inherited (TestProgressFake_OnlyAWritableFd3IsAProgressChannel).
 func progressFake(t *testing.T, dir, name, progressPayload, stdoutText, stderrText string, exitCode int) string {
 	t.Helper()
 	payload := filepath.Join(dir, name+".progress")
@@ -555,9 +570,8 @@ func progressFake(t *testing.T, dir, name, progressPayload, stdoutText, stderrTe
 		t.Fatalf("write progress payload: %v", err)
 	}
 	script := "#!/bin/sh\n" +
-		// `( : >&3 ) 2>/dev/null` is a portable "is fd 3 open for writing?" test: with no
-		// -progress option there is no fd 3 and the block is simply skipped.
-		"if ( : >&3 ) 2>/dev/null; then cat \"" + payload + "\" >&3; fi\n" +
+		"fd3flags=$(sed -n 's/^flags:[[:space:]]*//p' /proc/$$/fdinfo/3 2>/dev/null)\n" +
+		"case $(( ${fd3flags:-0} & 3 )) in 1|2) cat \"" + payload + "\" >&3 ;; esac\n" +
 		"printf '%s' '" + stdoutText + "'\n" +
 		"printf '%s' '" + stderrText + "' >&2\n" +
 		fmt.Sprintf("exit %d\n", exitCode)
@@ -735,6 +749,91 @@ func TestEncodeWithProgress_ReportsRealPositionsAgainstTheSource(t *testing.T) {
 			t.Errorf("report %d has a negative position %v", i, r.PositionSec)
 		}
 	}
+}
+
+// TestProgressFake_OnlyAWritableFd3IsAProgressChannel proves the fixture the progress
+// tests stand on. progressFake must write its payload to fd 3 when fd 3 is the progress
+// channel - a pipe's write end, which is how runFFmpeg hands it over - and must leave fd 3
+// alone when it is anything else, above all a READ-ONLY fd 3 inherited from a launcher
+// (plain `flock <lock> <cmd>` gives every descendant its lock file as fd 3). The fake's
+// stdout, stderr and exit status must not change with what fd 3 is, because the tests built
+// on it compare failure text byte for byte. No ffmpeg is involved, and the inherited
+// read-only fd is built here rather than borrowed from a launcher, so this reds on the
+// probe itself wherever the engine tests run.
+func TestProgressFake_OnlyAWritableFd3IsAProgressChannel(t *testing.T) {
+	d := t.TempDir()
+	const payload = "out_time_us=1000000\nprogress=continue\n"
+	const stdoutText = "a line on stdout"
+	const stderrText = "a line on stderr"
+	fake := progressFake(t, d, "probe", payload, stdoutText, stderrText, 3)
+
+	// run executes the fake with fd3 at fd 3 (nil: no ExtraFiles at all) and returns what it
+	// printed on stdout and on stderr, separately.
+	run := func(t *testing.T, fd3 *os.File) (stdout, stderr string) {
+		t.Helper()
+		cmd := exec.Command(fake)
+		var o, e strings.Builder
+		cmd.Stdout, cmd.Stderr = &o, &e
+		if fd3 != nil {
+			cmd.ExtraFiles = []*os.File{fd3}
+		}
+		err := cmd.Run()
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 {
+			t.Fatalf("the fake must exit 3 whatever fd 3 is, got %v (stderr %q)", err, e.String())
+		}
+		return o.String(), e.String()
+	}
+	unchanged := func(t *testing.T, stdout, stderr string) {
+		t.Helper()
+		if stdout != stdoutText || stderr != stderrText {
+			t.Errorf("the fake's own output changed with what fd 3 is.\n stdout: %q, want %q\n stderr: %q, want %q",
+				stdout, stdoutText, stderr, stderrText)
+		}
+	}
+
+	t.Run("a pipe's write end at fd 3 receives the payload", func(t *testing.T) {
+		pr, pw, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pr.Close()
+		got := make(chan string, 1)
+		go func() {
+			b, _ := io.ReadAll(pr)
+			got <- string(b)
+		}()
+		stdout, stderr := run(t, pw)
+		// The child has exited, so ours is the last write end: closing it is the reader's EOF.
+		_ = pw.Close()
+		if g := <-got; g != payload {
+			t.Errorf("fd 3 received %q, want the payload %q", g, payload)
+		}
+		unchanged(t, stdout, stderr)
+	})
+
+	t.Run("a read-only fd 3 is not a progress channel", func(t *testing.T) {
+		// What plain `flock <lock> <cmd>` hands a child: a file opened for READING, at fd 3.
+		lock := filepath.Join(d, "heavy.lock")
+		if err := os.WriteFile(lock, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ro, err := os.Open(lock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ro.Close()
+		stdout, stderr := run(t, ro)
+		unchanged(t, stdout, stderr)
+	})
+
+	t.Run("no ExtraFiles changes nothing, whatever the test process inherited", func(t *testing.T) {
+		// With no ExtraFiles the child has no fd 3 - or, under a launcher such as plain
+		// flock, the test process's own inherited read-only one. Either way it is not a
+		// progress channel.
+		stdout, stderr := run(t, nil)
+		unchanged(t, stdout, stderr)
+	})
 }
 
 // TestEncodeWithProgress_FailurePathIsByteIdentical is AC4, and it is the blast-radius
