@@ -123,12 +123,21 @@ replacement of it. Read this before you switch.
   the result back is a copy, which is a different safety argument from the one this tool makes.
   Use more of the one machine with `workers` instead (default 1, and
   [docs/docker.md](docker.md) says why); running a second holdfast process against one
-  `state_dir` is not supported.
+  `state_dir` is not supported. **Reversed - decided 2026-09-29 by the owner (T14, T16, T17):**
+  worker nodes are to come, on terms that keep the swap argument whole - a worker only encodes,
+  the server that owns the library re-runs every gate and makes the same-filesystem rename
+  itself, and each node reaches media through a shared mount or over HTTP from the server. Until
+  the release that ships them, this build is single-host as described above.
 - **Filters as a pipeline.** No cropping, no black-bar removal, no aspect-ratio changes, no
-  remuxing-as-a-feature, no audio/subtitle mangling, no library management. The two
-  transformations this tool will make on request are deinterlacing and an output height
-  ceiling, each off by default and each stated in full in the
-  [README's non-goals](../README.md#non-goals).
+  audio re-encode, no library management. What a root CAN say about streams is which to carry:
+  `audio_languages`, `subtitle_languages` and `keep_commentary` select streams and
+  `remux_only` copies the video as well, and whatever is kept is stream-copied untouched
+  ([docs/profiles.md](profiles.md#stream-selection)). The two transformations this tool will
+  make on request are deinterlacing and an output height ceiling, each off by default and each
+  stated in full in the [README's non-goals](../README.md#non-goals). **Reversed for audio -
+  decided 2026-09-29 by the owner (T13, T19, T20):** audio re-encoding, a stereo downmix track
+  and EBU R128 loudness normalisation are to come as features; until the release that ships
+  them, audio is only ever selected and copied.
 
 ### What you get
 

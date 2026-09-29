@@ -9,8 +9,12 @@ Nothing in this repository proves the workflow still has the shape this document
 the mechanical gate over the shape of `release.yml` is retired, and `docs/test-mass.md`
 carries the register and the reason. This runbook, and whoever reviews a change to
 `release.yml`, are what hold it - see "What holds the release path" below for the properties
-that review covers. Dispatching a workflow, renaming a repository, flipping its visibility
-and pushing a tag were never machine acts here either. Those four are yours.
+that review covers. Renaming the repository and flipping its visibility were never machine
+acts here, and they stay the owner's. Pushing a minor `v*` tag and dispatching the release
+dry run are no longer the owner's alone - decided 2026-09-29 by the owner (T37; the scope,
+minor `v*` tags and the dry-run dispatch only, is inferred as I2): the program that plans this
+repository may cut a minor release by this runbook once a goal's work is merged and CI is
+green.
 
 ## Where this repository actually stands
 

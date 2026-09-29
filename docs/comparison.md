@@ -10,24 +10,29 @@ project's own licence text or project page. Other tools move: re-check before yo
 *Migrate from Tdarr* guide. If you are choosing between us, choose on the difference, not on a claim of
 uniqueness we would not be able to defend - and the difference does not run one way.
 
-**Where Alchemist is ahead.** Seven capabilities it has and holdfast does not, two of them capabilities
+**Where Alchemist is ahead.** Seven capabilities it has and holdfast does not, four of them capabilities
 holdfast only half has, said plainly rather than left out:
 
 - **Per-library profiles**, giving movies, TV and home videos different behaviour per library. holdfast
   half has this: a library root or a path glob overrides the encode settings and the gates, and no
   more ([profiles.md](profiles.md)).
 - **Audio stream rules** - commentary stripping, language filtering, default-track retention. holdfast
-  has none, by design: audio, subtitles and attachments are stream-copied untouched.
+  half has this: a root keeps audio and subtitle streams by language and can drop the tracks the
+  container marks as commentary (`audio_languages`, `subtitle_languages`, `keep_commentary` -
+  [profiles.md](profiles.md#stream-selection)), and has no rule about which track is the default.
+  Whatever it keeps is stream-copied untouched.
 - **Sonarr/Radarr webhook intake**, through a narrowed webhook token with optional container path
   translations. holdfast has no webhook receiver at all; an *arr calls the generic scan endpoint behind
-  the one control token ([api-reference.md](api-reference.md)).
+  the control token ([api-reference.md](api-reference.md)).
 - **A Jellyfin integration** - a narrowed plugin token for enqueue, completion events, job details and
   library refresh. holdfast ships nothing of the kind.
-- **Named API tokens with access classes** - read-only, webhook, plugin, full access. holdfast has one
-  bearer token at one access level, the known limitation recorded in
-  [the README](../README.md#running-a-modified-holdfast-on-a-network).
-- **An off-peak scheduler with a priority queue.** holdfast half has this: a daily `run_window` and a
-  per-core load cap, and no priority queue - work is taken in the order the scan finds it.
+- **Named API tokens with access classes** - read-only, webhook, plugin, full access. holdfast half has
+  this: two bearer tokens at two access levels, `server_read_token` for the read endpoints and
+  `server_auth_token` for control ([api-reference.md](api-reference.md)), and nothing narrower, such as
+  a token that may only enqueue.
+- **An off-peak scheduler with a priority queue.** holdfast half has this: a daily `run_window`, a
+  per-core load cap and a `queue_order` (path, largest, smallest, newest or oldest first), and no
+  priority queue.
 - **Automatic hardware selection with CPU fallback** across NVIDIA, Intel, AMD and Apple. holdfast will
   not guess: `encoder:` is configured, and a hardware encoder with no usable device stops the run
   rather than quietly falling back to CPU.

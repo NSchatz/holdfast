@@ -7,15 +7,19 @@ to reclaim disk space, and - the whole point - **never destroys a source until a
 faithful**. It is configured entirely by **YAML** (config-as-code), so what it does is reviewable and
 reproducible from git, not hidden in a UI database.
 
-> **Status: `v0.1.0` released (2026-07-18); major version zero, so anything MAY change.** This repository
+> **Status: major version zero, so anything MAY change. The newest release and its notes are on the
+> [releases page](https://github.com/NSchatz/holdfast/releases).** This repository
 > was built phase by phase from a mature, battle-tested Bash predecessor (see _Provenance_). **The
 > data-safety core (`TRANSCODE-1`)** is the heart of it: `holdfast run` performs one oneshot scan of the
 > library roots - skip guards → same-directory temp encode → the full verify gate → atomic swap → delete
 > - proven by a real-ffmpeg fixture suite that reds on the specific regression. Colour/HDR preservation,
 > the VMAF perceptual gate, a crash-safe queue and worker pool, hardware/AV1 encoders, the REST/SSE API,
-> observability, host-fair scheduling and a multi-arch non-root image are built on top of it; the roadmap
-> names each phase. Cutting a tag is a deliberate human act:
-> [`docs/release.md`](docs/release.md) is the ordered runbook and says which of its steps can be undone.
+> observability, host-fair scheduling and a multi-arch non-root image are built on top of it. The plan of
+> record is the program brief, [`.claude/goals/2026-09-holdfast.md`](.claude/goals/2026-09-holdfast.md) -
+> decided 2026-09-29 by the owner (T2, T8). A minor `v*` tag is cut by that program or by the owner -
+> decided 2026-09-29 by the owner (T37) - and renaming the repository or flipping its visibility stays
+> the owner's act: [`docs/release.md`](docs/release.md) is the ordered runbook and says which of its steps
+> can be undone.
 
 ## Why another transcoder?
 
@@ -73,10 +77,12 @@ own licence text or project page.
 ## Non-goals
 
 Four boundaries, each stated in full below - three settled, and the Dolby Vision / HDR10+ skip
-[DEFERRED](#dynamic-hdr-deferred) rather than settled. Exotic-chroma and `multi-video-stream` sources
-are **skipped, not converted**. Two things are NOT boundaries - they are the transformations this tool
-makes on request, each **off by default**: [interlacing](#interlacing-posture) and
-[the resolution ceiling](#downscaling-posture).
+[DEFERRED](#dynamic-hdr-deferred) rather than settled. Two of the settled three, audio transcoding and
+distributed processing, are reversed by the owner's decisions of 2026-09-29; the note under each says
+what changes, and until a release ships it each paragraph still describes this build. Exotic-chroma
+and `multi-video-stream` sources are **skipped, not converted**. Two things are NOT boundaries - they
+are the transformations this tool makes on request, each **off by default**:
+[interlacing](#interlacing-posture) and [the resolution ceiling](#downscaling-posture).
 
 <a id="interlacing-posture"></a>
 
@@ -110,12 +116,26 @@ replacements carry (`audio_languages`, `subtitle_languages`, `keep_commentary`, 
 downmix, no re-encode, no AAC companion track. Transcoding audio reopens the fidelity question for a
 second medium, and would need its own gate argument first.
 
+> **Reversed - decided 2026-09-29 by the owner (T13, T19, T20).** Audio transcoding stops being a
+> non-goal: lossless or bulky tracks can be re-encoded to a configured codec, a re-encoded track
+> replacing its source track unless `keep_original_audio: true` keeps both; a stereo downmix can be
+> added, always as an extra track; EBU R128 loudness normalisation applies to the tracks added or
+> re-encoded; and the whole file must still pass strictly-smaller. None of it is in this build: the release that ships it
+> rewrites the paragraph above, which until then is what holdfast does.
+
 **Distributed or remote processing is a non-goal by design, not a missing feature.** holdfast is one
 process: no server/node split, no remote workers. The no-loss argument rests on an atomic
 same-filesystem `rename(2)` - it either happened or it did not, so a failure never leaves a partial file
 where the source was. A remote worker encoding to its own disk and shipping the result back is a
 **copy**, not a rename, and every gate here would have to be re-argued for it. To use more of one
 machine, raise `workers` (default 1 - see **[docs/docker.md](docs/docker.md)**).
+
+> **Reversed - decided 2026-09-29 by the owner (T14, T16, T17).** Distributed worker nodes stop being a
+> non-goal, without re-arguing the swap: a worker only encodes, and the server that owns the library
+> re-runs every gate and makes the same-filesystem rename itself. Each node reaches media either
+> through a shared mount (with path mapping) or by the server streaming source and output over HTTP,
+> chosen per node. None of it is in this build: the release that ships it rewrites the paragraph above,
+> which until then is what holdfast does.
 
 <a id="dynamic-hdr-deferred"></a>
 
@@ -125,6 +145,13 @@ watches the file, so those sources are skipped rather than quietly flattened. Li
 external RPU toolchain beside the bundled ffmpeg to extract and reinject that metadata - and then the
 other half: the gate compares pixels, an RPU is not pixels, and holdfast will not delete a source on
 the strength of a step it did not check.
+
+> **Note - decided 2026-09-29 by the owner (T13, T25).** The deferral has an owner's answer: Dolby
+> Vision profile 8 and HDR10+ are to be carried through libx265 with their dynamic metadata, and
+> profile 7 converted to 8.1 on request only (dropping the enhancement layer); profile 5 stays
+> skipped; `dovi_tool` and `hdr10plus_tool` are pinned into the image. The skip above holds in this
+> build until the release that ships those tools and the metadata gates, which rewrites this
+> statement.
 
 <a id="non-goal-library-manager"></a>
 
@@ -263,7 +290,9 @@ re-encoding; `holdfast requeue` is the LOCAL lever for the rest - **[docs/requeu
 
 `holdfast serve` runs a REST API + [SSE](https://developer.mozilla.org/docs/Web/API/Server-sent_events)
 live stream. **holdfast currently ships no frontend: the HTTP JSON API is the interface**, and the root
-path serves a plain-text page naming the endpoints. It is
+path serves a plain-text page naming the endpoints. (Reversed -
+decided 2026-09-29 by the owner (T14, T18): a web UI, a single-page application with its own Node
+build, is to ship on top of this API; until that release, this paragraph is what holdfast does.) It is
 a **read-and-control** surface on top of the config-as-code engine: the YAML file stays the source of
 truth and the SQLite store stays the source of job state. The API can only **read the store, start a
 scan, and pause/resume the feeding of new files** - it never touches a media file, so the data-safety
@@ -326,7 +355,9 @@ missing rather than skipping, because a skipped safety proof is a false green.
 life as a Bash script inside a private homelab repo. That predecessor already proved the no-loss contract
 (verify-then-swap-then-delete, HDR-aware, crash-safe) against a real-ffmpeg fixture suite; this project
 ports it to Go and grows it into a production application (persistent queue, worker pool, hardware-encoder
-matrix, observability). The phased plan and its research live in the umbrella that tracks this repo.
+matrix, observability). The plan of record and the research behind it are the program brief and its
+research in [`.claude/goals/`](.claude/goals/) - decided 2026-09-29 by the owner (T2, T8); the umbrella's
+spec pipeline no longer plans holdfast, and its `S0NNN` numbers stay in the history.
 
 ## License
 
