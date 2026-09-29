@@ -176,9 +176,10 @@ whichever process is making the load.
 **`max_load`, `run_window` and pause gate only the hand-out of NEW files.** The scan feeds every
 worker from one queue, and while any of the three says stop, it hands no new file to ANY worker;
 every encode already in flight runs to its end, gates and swap included. Nothing is interrupted
-and nothing is lost: the files not handed out wait for the next scan. A file submitted through
-`POST /api/scan`, or offered by a root's `watch`, reaches the pipeline through its own pool rather
-than the scan's feed, and is not held by them.
+and nothing is lost: the files not handed out wait for the next scan. Two routes into the
+pipeline are not the scan's feed and are gated differently: `POST /api/scan` refuses a
+submission while holdfast is paused, but neither `run_window` nor `max_load` holds one back, and
+a file a root's `watch` offers is held back by none of the three.
 
 **Memory scales with workers.** Each worker is a concurrent encode plus, after it, a VMAF
 measurement, so `N` workers need about `N` of each in memory at once. The encode memory watchdog
