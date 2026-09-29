@@ -32,7 +32,7 @@ server_addr: 0.0.0.0:8080   # see "The control surface" below before you change 
 
 | | |
 |---|---|
-| Base | `gcr.io/distroless/cc-debian12:nonroot` — glibc **+ libgcc_s/libstdc++** + CA certs, **no shell, no package manager**. It must be `cc`, not `base`: ffmpeg has a `DT_NEEDED` on `libgcc_s.so.1`, which `base` does not ship, so `base` builds fine and then cannot exec ffmpeg at all. |
+| Base | `gcr.io/distroless/cc-debian13:nonroot` (Debian 13, trixie; glibc 2.41), pinned by tag and digest: glibc **+ libgcc_s/libstdc++** + CA certs, **no shell, no package manager**. It must be `cc`, not `base`: ffmpeg has a `DT_NEEDED` on `libgcc_s.so.1`, which `base` does not ship, so `base` builds fine and then cannot exec ffmpeg at all. It is Debian 13 because trixie's VA-API stack (`libva2`, Mesa's gallium drivers, Intel's iHD driver) needs glibc 2.38 or later, which the Debian 12 base (glibc 2.36) does not have; the build stages are Debian 13 as well. Sources, read 2026-09-29: [trixie libc6](https://packages.debian.org/trixie/libc6), [bookworm libc6](https://packages.debian.org/bookworm/libc6), [libva2](https://packages.debian.org/trixie/libva2), [mesa-libgallium](https://packages.debian.org/trixie/mesa-libgallium), [intel-media-va-driver-non-free](https://packages.debian.org/trixie/intel-media-va-driver-non-free), [distroless](https://github.com/GoogleContainerTools/distroless/blob/main/README.md). |
 | Platforms | `linux/amd64`, `linux/arm64` |
 | User | non-root by default (`nonroot`, uid 65532); override with `user:` |
 | ffmpeg | pinned by release tag **and verified by SHA-256** before it is trusted |

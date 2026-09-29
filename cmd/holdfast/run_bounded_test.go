@@ -20,7 +20,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/engine"
@@ -627,4 +629,326 @@ func returnedIntLiterals(fd *ast.FuncDecl, at int) []int {
 		return true
 	})
 	return out
+}
+
+// ---- S0159: a killed bounded run's temp, and the runs after it ---------------------------
+//
+// Every case here kills, stops or signals a REAL holdfast process mid-encode, because the
+// property is about what survives a process: a temp a SIGKILL leaves, an owner record the
+// kernel's lock release turns into evidence, a live process a second one must not trample.
+// The process is this test binary re-executed as the CLI (TestMain), in a process group of
+// its own so the encoder it runs goes with it.
+
+// orphanLayout builds a library root with one source a run will really transcode, alone in
+// slow/, an empty fast/ the later runs work in, and a state directory. The source is long
+// enough that its encode is still under way when its temp is first seen, and a run over it
+// is the only thing in the library until the case adds more.
+func orphanLayout(t *testing.T) (cfgPath, lib, src string) {
+	t.Helper()
+	ffmpeg := envOr("HOLDFAST_FFMPEG", "ffmpeg")
+	if _, err := exec.LookPath(ffmpeg); err != nil {
+		t.Fatalf("::error:: ffmpeg is required here: a run that never encoded proves nothing: %v", err)
+	}
+	cfgPath, lib, _ = boundedLayout(t, "min_bitrate_kbps: 0\nvmaf_enable: false\nworkers: 1\n")
+	src = filepath.Join(lib, "slow", "film.mkv")
+	for _, d := range []string{filepath.Dir(src), filepath.Join(lib, "fast")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=20:size=640x360:rate=24",
+		"-c:v", "libx264", "-preset", "ultrafast", "-b:v", "8M", "-pix_fmt", "yuv420p", "--", src).CombinedOutput()
+	if err != nil {
+		t.Fatalf("build fixture %s: %v\n%s", src, err, out)
+	}
+	return cfgPath, lib, src
+}
+
+// hevcFixture writes a source already at the target codec, which a run decides - a skip -
+// without encoding anything.
+func hevcFixture(t *testing.T, path string) string {
+	t.Helper()
+	ffmpeg := envOr("HOLDFAST_FFMPEG", "ffmpeg")
+	out, err := exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=2:size=320x240:rate=10",
+		"-c:v", "libx265", "-x265-params", "log-level=error", "-b:v", "800k", "-pix_fmt", "yuv420p",
+		"--", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("build fixture %s: %v\n%s", path, err, out)
+	}
+	return path
+}
+
+// tempFor is the working file a run with no scratch_dir writes for src.
+func tempFor(src string) string {
+	stem := strings.TrimSuffix(filepath.Base(src), filepath.Ext(src))
+	return filepath.Join(filepath.Dir(src), stem+"."+engine.TempMarker+".mkv")
+}
+
+// child is a holdfast process started from this test binary and not yet waited for.
+type child struct {
+	cmd  *exec.Cmd
+	out  bytes.Buffer
+	done chan struct{}
+	err  error
+}
+
+// startChild starts one command in a real child process, in a process group of its own,
+// and leaves it running. Whatever is left of the group when the test ends is killed.
+func startChild(t *testing.T, args ...string) *child {
+	t.Helper()
+	c := &child{done: make(chan struct{})}
+	c.cmd = exec.Command(os.Args[0], args...)
+	c.cmd.Env = append(os.Environ(), subprocessEnv+"=1")
+	c.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	c.cmd.Stdout, c.cmd.Stderr = &c.out, &c.out
+	if err := c.cmd.Start(); err != nil {
+		t.Fatalf("start %v: %v", args, err)
+	}
+	go func() {
+		c.err = c.cmd.Wait()
+		close(c.done)
+	}()
+	t.Cleanup(func() {
+		_ = syscall.Kill(-c.cmd.Process.Pid, syscall.SIGKILL)
+		<-c.done
+	})
+	return c
+}
+
+// waitFor polls until path exists, and fails if the child exits first: the case acts on
+// the moment the temp is there, never on a guess at how long that takes.
+func (c *child) waitFor(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		if _, err := os.Lstat(path); err == nil {
+			return
+		}
+		select {
+		case <-c.done:
+			t.Fatalf("the child exited (%v) before %s appeared:\n%s", c.err, path, c.out.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never appeared", path)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// signalGroup signals the child and every process in its group - its encoder included.
+func (c *child) signalGroup(t *testing.T, sig syscall.Signal) {
+	t.Helper()
+	if err := syscall.Kill(-c.cmd.Process.Pid, sig); err != nil {
+		t.Fatalf("signal %v to the child's group: %v", sig, err)
+	}
+}
+
+// exit waits for the child and returns its exit code and everything it wrote.
+func (c *child) exit(t *testing.T) (int, string) {
+	t.Helper()
+	<-c.done
+	var ee *exec.ExitError
+	if c.err != nil && !errorsAs(c.err, &ee) {
+		t.Fatalf("waiting for the child: %v", c.err)
+	}
+	if ee != nil {
+		return ee.ExitCode(), c.out.String()
+	}
+	return 0, c.out.String()
+}
+
+// killedMidEncode runs `holdfast run --limit 1` in a child over src's library and SIGKILLs
+// it - and its encoder - the moment src's temp exists, returning the temp it left.
+func killedMidEncode(t *testing.T, cfgPath, src string) string {
+	t.Helper()
+	c := startChild(t, "run", "--config", cfgPath, "--limit", "1")
+	temp := tempFor(src)
+	c.waitFor(t, temp)
+	c.signalGroup(t, syscall.SIGKILL)
+	c.exit(t)
+	if _, err := os.Lstat(temp); err != nil {
+		t.Fatalf("precondition: the killed run left no temp at %s: %v", temp, err)
+	}
+	return temp
+}
+
+// removalRecorded reports whether one log record in out says path was removed, carrying the
+// path as a field of its own.
+func removalRecorded(out, path string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, `msg="removed an orphaned temp file"`) {
+			continue
+		}
+		for _, form := range []string{"file=" + path, "file=" + strconv.Quote(path)} {
+			if i := strings.Index(line, form); i > 0 && line[i-1] == ' ' &&
+				(i+len(form) == len(line) || line[i+len(form)] == ' ') {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestRunBounded_ALaterBoundedRunRemovesTheTempAKilledRunLeft grades AC-1: a `run --limit
+// 1` child SIGKILLed while its temp exists beside the source leaves that temp, and a later
+// bounded run over the same configuration removes it and records the removal with the
+// temp's path - once as `run --limit 1`, and once as `run --file` naming a different file
+// in a different directory, so that run's bound never lists the temp's directory and only
+// the owner records can have led it there. The killed run's source is byte-identical to
+// what it was before the first run, after the kill and, in the `--file` case, after the
+// later run too (in the `--limit` case the later run may legitimately take that source).
+func TestRunBounded_ALaterBoundedRunRemovesTheTempAKilledRunLeft(t *testing.T) {
+	for _, later := range []string{"--limit", "--file"} {
+		t.Run(later, func(t *testing.T) {
+			cfgPath, lib, src := orphanLayout(t)
+			before := sha256File(t, src)
+			temp := killedMidEncode(t, cfgPath, src)
+			if sha256File(t, src) != before {
+				t.Fatal("the source changed across the SIGKILL")
+			}
+			other := hevcFixture(t, filepath.Join(lib, "fast", "other.mkv"))
+
+			args := []string{"run", "--config", cfgPath, "--limit", "1"}
+			if later == "--file" {
+				args = []string{"run", "--config", cfgPath, "--file", other}
+			}
+			code, out := cliProcess(t, args...)
+			if code != exitOK {
+				t.Fatalf("the later run exited %d:\n%s", code, out)
+			}
+			if _, err := os.Lstat(temp); err == nil {
+				t.Errorf("the later %s run left %s, the temp a killed run left:\n%s", later, temp, out)
+			}
+			if !removalRecorded(out, temp) {
+				t.Errorf("the later %s run recorded no removal of %s:\n%s", later, temp, out)
+			}
+			if later == "--file" && sha256File(t, src) != before {
+				t.Error("the later --file run changed the killed run's source")
+			}
+		})
+	}
+}
+
+// TestRunBounded_ALiveRunsTempSurvivesASecondBoundedRun grades AC-3: while a `run --limit
+// 1` child is alive with its temp beside the source - held stopped, so it stays alive and
+// its temp stays there for exactly as long as this case needs - a second child's `run
+// --file` over a different file leaves that temp in place. The temp is looked at after the
+// second child has exited and before the first has exited or been killed.
+func TestRunBounded_ALiveRunsTempSurvivesASecondBoundedRun(t *testing.T) {
+	cfgPath, lib, src := orphanLayout(t)
+	first := startChild(t, "run", "--config", cfgPath, "--limit", "1")
+	temp := tempFor(src)
+	first.waitFor(t, temp)
+	first.signalGroup(t, syscall.SIGSTOP)
+
+	other := hevcFixture(t, filepath.Join(lib, "fast", "other.mkv"))
+	code, out := cliProcess(t, "run", "--config", cfgPath, "--file", other)
+	if code != exitOK {
+		t.Fatalf("the second run exited %d:\n%s", code, out)
+	}
+	if _, err := os.Lstat(temp); err != nil {
+		t.Errorf("the second run removed %s, the temp of a run that is still alive: %v\n%s", temp, err, out)
+	}
+	if removalRecorded(out, temp) {
+		t.Errorf("the second run recorded a removal of a live run's temp:\n%s", out)
+	}
+	select {
+	case <-first.done:
+		t.Fatalf("the first run exited before the temp was looked at, so this case proved nothing:\n%s", first.out.String())
+	default:
+	}
+}
+
+// TestRunBounded_TheSweepTouchesNothingButTheOrphanedTemp grades AC-7: a bounded run's
+// sweep over a library holding, beside the orphaned temp, its source, a retained
+// replacement and an unrelated file leaves every file under the root that does not carry
+// the temp marker byte-identical. The run's own bounded file is at the target codec, so it
+// produces nothing, and the whole tree after is the tree before less the one temp.
+func TestRunBounded_TheSweepTouchesNothingButTheOrphanedTemp(t *testing.T) {
+	cfgPath, lib, src := orphanLayout(t)
+	temp := killedMidEncode(t, cfgPath, src)
+	dir := filepath.Dir(src)
+	if err := os.WriteFile(filepath.Join(dir, "film."+engine.RetainedMarker+".mkv"),
+		[]byte("a replacement holdfast kept"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("not holdfast's"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	other := hevcFixture(t, filepath.Join(lib, "fast", "other.mkv"))
+	before := treeHashes(t, lib)
+
+	code, out := cliProcess(t, "run", "--config", cfgPath, "--file", other)
+	if code != exitOK {
+		t.Fatalf("the bounded run exited %d:\n%s", code, out)
+	}
+	if !removalRecorded(out, temp) {
+		t.Fatalf("the bounded run did not remove the orphaned temp, so this case proved nothing:\n%s", out)
+	}
+	delete(before, temp)
+	after := treeHashes(t, lib)
+	for path, sum := range before {
+		if got, ok := after[path]; !ok {
+			t.Errorf("the sweep removed %s, which is not a temp", path)
+		} else if got != sum {
+			t.Errorf("the sweep changed %s", path)
+		}
+	}
+	for path := range after {
+		if _, ok := before[path]; !ok {
+			t.Errorf("%s is under the root after the run and was not before", path)
+		}
+	}
+}
+
+// TestRunBounded_ASIGTERMStillStopsSafely grades AC-8: a `run --limit 1` child that
+// receives SIGTERM while its temp exists behaves as at the pin - it exits 0, logs that it
+// stopped safely, leaves no temp under the root, and leaves the source byte-identical.
+func TestRunBounded_ASIGTERMStillStopsSafely(t *testing.T) {
+	cfgPath, lib, src := orphanLayout(t)
+	before := sha256File(t, src)
+	c := startChild(t, "run", "--config", cfgPath, "--limit", "1")
+	c.waitFor(t, tempFor(src))
+	if err := c.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM: %v", err)
+	}
+	code, out := c.exit(t)
+	if code != exitOK {
+		t.Fatalf("the run exited %d after SIGTERM, want %d:\n%s", code, exitOK, out)
+	}
+	if !strings.Contains(out, "stopped safely") {
+		t.Errorf("the run did not log that it stopped safely:\n%s", out)
+	}
+	_ = filepath.WalkDir(lib, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.Contains(d.Name(), "."+engine.TempMarker+".") {
+			t.Errorf("a temp is left under the root after a graceful stop: %s", p)
+		}
+		return nil
+	})
+	if sha256File(t, src) != before {
+		t.Error("the source changed across a graceful stop")
+	}
+}
+
+// TestRunHelp_SaysABoundedRunRemovesOnlyTempsWhoseOwnerIsProvablyDead grades AC-11: `run
+// --help` no longer says a bounded run skips the stale-temp sweep, and says it removes only
+// temps whose recorded owner is provably dead.
+func TestRunHelp_SaysABoundedRunRemovesOnlyTempsWhoseOwnerIsProvablyDead(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if code := dispatch([]string{"run", "--help"}, &out, &errOut); code != exitOK {
+		t.Fatalf("run --help exited %d, want %d", code, exitOK)
+	}
+	help := strings.Join(strings.Fields(out.String()), " ")
+	for _, skipped := range []string{"neither the stale-temp sweep", "skips the stale-temp sweep",
+		"skip the stale-temp sweep", "stale-temp sweep is skipped", "stale-temp sweep nor"} {
+		if strings.Contains(strings.ToLower(help), skipped) {
+			t.Errorf("the help still says a bounded run skips the stale-temp sweep (%q):\n%s", skipped, out.String())
+		}
+	}
+	if !strings.Contains(help, "only those whose recorded owner is provably dead") {
+		t.Errorf("the help does not say a bounded run removes only temps whose recorded owner is provably dead:\n%s", out.String())
+	}
 }
