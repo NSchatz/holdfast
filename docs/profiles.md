@@ -236,6 +236,10 @@ other, so exclude it by its own path as well.
 each list and how many patterns it holds. The count is a count OF PATTERNS - `validate`
 describes a configuration and walks no library, so it never counts matching files.
 
+`holdfast plan` is where the files are counted: per library root it publishes the patterns in
+force, the source-named library under the root before any filter, and the part of it a path
+filter kept out (`excluded_by_path_filter`), beside what is covered and eligible after them.
+
 ## `rules` - per-resolution-band overrides inside one library root
 
 <a id="resolution-rules"></a>

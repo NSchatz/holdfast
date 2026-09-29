@@ -245,6 +245,17 @@ holdfast plan --config config.yaml --json     # the same plan as one JSON docume
 Every skip token this build records has a row in
 **[the guard table](docs/api-reference.md#skip-guards)**.
 
+Per library root, `plan` also publishes that root's **scope** (`roots` in the JSON document): the
+`exclude_paths` and `include_paths` in force for it, the whole source-named `library` under it before
+any filter, what a path filter kept out (`excluded_by_path_filter`), what a parked job's record held
+back (`held_back_by_record`), what is `covered` and `eligible` after them, and the directories it read
+and could not read. So "how big is this library, and how much of it will holdfast consider" has one
+answer with the difference named, rather than a gap between this report and a census that applies no
+filter. A directory an exclude pattern reaches whole is not listed at all, so the files beneath it are
+in no figure and it is counted among the directories not read; no reclaim is projected per root.
+`holdfast analyze` withholds a filtered file from its sources under the mechanism `path filter`, so
+the two commands agree.
+
 The reclaim figure is an **estimate and says so wherever it appears**, derived from the size ratios of
 encodes **this install has already completed** and published with the sample size and the spread it came
 from. On an install that has never completed one, it is **refused outright with the reason** rather than
