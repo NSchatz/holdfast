@@ -91,23 +91,23 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | `RUNTIME_IMAGE` is `gcr.io/distroless/cc-debian13:nonroot`, pinned by tag and digest | DOING (PR #101): `sha256:54df941e...`; build and fetch stages to `golang:1.25.14-trixie` and `debian:trixie-slim`; merged up to `ca4968b` (`1d79a78`), gate queued |
-| 3.2 | `scripts/check-pins.sh` sections 3 and 7 green | DOING (PR #101): green on the branch, selftest 31/31 |
-| 3.3 | The merged PR's CI `package` job green | DOING (PR #101): `package` green on the branch before merge |
-| 3.4 | `docs/docker.md` follows the image | DOING (PR #101) |
+| 3.1 | `RUNTIME_IMAGE` is `gcr.io/distroless/cc-debian13:nonroot`, pinned by tag and digest | DONE (PR #101, `cab897a`): `sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97`; build and fetch stages `golang:1.25.14-trixie`, `debian:trixie-slim` |
+| 3.2 | `scripts/check-pins.sh` sections 3 and 7 green | DONE (PR #101): green, selftest 31/31; local gate exit 0 in 27m7s on `1d79a78` (`internal/engine` 1391.0 s) |
+| 3.3 | The merged PR's CI `package` job green | DONE (PR #101): `package` pass (3m50s) on `1d79a78`, with `build` and `mutation` |
+| 3.4 | `docs/docker.md` follows the image | DONE (PR #101) |
 
 ## Phase 4 - Carried specs (line B)
 
 | # | Item | State |
 |---|---|---|
-| S0177 | working-file extensions | DOING (build agent, branch `holdfast-g2/s0177-working-names` on #100's head) |
-| S0163 | `workers: auto` from the CPU quota; several jobs in flight safe on one drive | TODO (after S0177: both change the working-path construction) |
+| S0177 | working-file extensions | DOING (PR #105): AC-1 to AC-16 pass under the lock, AC-14 bites; merged up to `cab897a` and verified equal to main plus S0177's own diff |
+| S0163 | `workers: auto` from the CPU quota; several jobs in flight safe on one drive | DOING (build agent, branch `holdfast-g2/s0163-workers` on #105's head) |
 | S0173 | `run` progress | DOING (build agent, branch `holdfast-g2/s0173-run-progress`) |
 | S0168 | prune excluded directories from the walk | TODO |
 | S0180 | census scope parity | TODO |
 | S0166 | restart survey overcount | DOING (PR #102): AC-1 to AC-10 pass locally; existing call sites changed shape only (15 lines, reasons in the PR) |
 | S0176 | log time offset (holdfast half), and the homelab PR for the `TZ` half | DOING (PR #103, with P6): AC-H1 to AC-H7 pass, AC-H9 grep empty. Homelab half: NSchatz/homelab#208 opened (never merged by a session), `NEEDS-OWNER.md` row 1 |
-| S0151 | `.github/dependabot.yml` | DOING (local commit `2481399` on #101's commit; cherry-picked to its own PR once #101 merges) |
+| S0151 | `.github/dependabot.yml` | DOING (PR #104, `99ca634`): selftest 35/35; CI `package` green on the literal-`FROM` Dockerfile |
 
 ## Phase 5 - P6 (approved option (a))
 
@@ -169,11 +169,9 @@ summed per directory):
 
 ## Resume here
 
-Merged: PR #100 (`ca4968b`). Open: #101 (debian13, line C; gate queued on `1d79a78`), #102
-(S0166), #103 (P6 + S0176; `mutation-diff` queued). Local: S0151 commit `2481399` on branch
-`holdfast-g2/s0151-dependabot-wip` (worktree `/cache/wt/holdfast/holdfast-g2/s0151-dependabot`),
-cherry-picked onto a fresh branch once #101 merges. Build agents: S0177 (on #100's head), S0173.
-Next agents: census (`/cache/tmp/holdfast-g2/prompt-census.md`), then S0163 after S0177 merges
-(`/cache/tmp/holdfast-g2/prompt-s0163-head.md`). `internal/engine` reached 79.5% of
-`TEST_TIMEOUT` on #100's gate: once a gate shows it above 80%, raise `TEST_TIMEOUT` in its own
-commit with that measurement (I15).
+Merged: #100 (`ca4968b`), #101 (`cab897a`, line C). Open: #102 (S0166; gate running on
+`52f96ed`), #103 (P6 + S0176; mutation 100%), #104 (S0151), #105 (S0177). Gate order: #102,
+#103, #104, #105, then S0173, census, S0163. Build agents: S0173, S0163 (on #105's head). The
+census agent (`/cache/tmp/holdfast-g2/prompt-census.md`) starts when a slot frees. When a
+gate shows `internal/engine` above 80% of `TEST_TIMEOUT` (#105 is expected to), the next PR
+carries a commit of its own raising it, with that measurement (I15).
