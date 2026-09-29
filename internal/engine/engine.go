@@ -3440,6 +3440,12 @@ func (e *Engine) pickTempPath(ctx context.Context, dir, stem, ext string) (strin
 			continue
 		}
 		_ = os.Remove(p) // clear any stale temp for this file
+		if !strings.HasSuffix(p, TempSuffix) {
+			e.Log.Info("the working file beside this source carries no "+TempSuffix+" suffix: with it, the "+
+				"name would pass the filesystem's name or path limit, so it takes the earlier name, which "+
+				"ends in a video extension a media server scanning the folder may list while it encodes",
+				"path", p)
+		}
 		return p, nil
 	}
 	return "", fmt.Errorf("no free temp path beside %s after %d candidates", filepath.Join(dir, stem+"."+ext), maxPathCandidates)

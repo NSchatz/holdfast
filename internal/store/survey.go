@@ -73,9 +73,16 @@ func SurveyLedgerDecisionInputs(ctx context.Context, path string, current Inputs
 	if !cols[column] {
 		column = "NULL"
 	}
+	// The source height on the same terms: a ledger older than the column stored no height
+	// for any row, which is exactly what a NULL decodes to, so its rows on a root that bands
+	// its files are counted as the upper bound they are rather than refused.
+	height := "source_height"
+	if !cols[height] {
+		height = "NULL"
+	}
 
 	rows, err := db.QueryContext(ctx,
-		`SELECT path, `+column+` FROM jobs WHERE `+where, args...)
+		`SELECT path, `+column+`, `+height+` FROM jobs WHERE `+where, args...)
 	if err != nil {
 		return out, fmt.Errorf("store: survey %q: %w", path, err)
 	}

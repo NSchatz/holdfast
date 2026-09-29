@@ -297,6 +297,7 @@ func logLedgerAgainstConfig(log *slog.Logger, dbPath string, survey store.Decisi
 		"rows_recording_no_decision_inputs", survey.NotRecorded,
 		"rows_this_scan_reopens", survey.Reopening(),
 		"rows_still_matching", survey.Matching,
+		"rows_on_banded_roots_with_no_source_height", survey.NoSourceHeight,
 		"rows_under_no_configured_library_root", survey.Unrooted)
 	for _, line := range decisionInputsLines(survey) {
 		log.Info(line)

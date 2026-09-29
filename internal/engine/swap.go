@@ -69,8 +69,31 @@ const maxPathCandidates = 64
 //
 // The n suffix exists so a second retained replacement for the same source need not
 // overwrite the first; n == 0 is the bare form.
+//
+// WHERE THE SUFFIX CANNOT FIT, the earlier name is written instead. A source whose name is
+// within len(TempSuffix) bytes of NAME_MAX, or whose directory leaves the working path
+// within that of PATH_MAX, has a working name that fits without the suffix and not with
+// it - and those are exactly the long names S0155 made swap. Failing them now would trade
+// a file that swapped for one that cannot, to spare a media server a partial encode it may
+// or may not list; the earlier name is the one every build before this wrote, and every
+// reader of a working name still accepts it (splitTempConstruction), so nothing that
+// recognises, sweeps or holds back a working file loses sight of it.
 func tempPath(dir, stem, ext string, n int) string {
-	return filepath.Join(dir, stem+"."+TempMarker+suffix(n)+"."+ext+TempSuffix)
+	earlier := filepath.Join(dir, stem+"."+TempMarker+suffix(n)+"."+ext)
+	if p := earlier + TempSuffix; nameFits(p) {
+		return p
+	}
+	return earlier
+}
+
+// maxPathLen bounds a constructed path: Linux's PATH_MAX is 4096 bytes and counts the
+// terminating NUL, so the longest path the kernel takes is 4095 bytes.
+const maxPathLen = 4095
+
+// nameFits reports whether a constructed path fits the kernel's limits: its last element
+// within NAME_MAX (maxBaseName) and the whole within PATH_MAX.
+func nameFits(p string) bool {
+	return len(filepath.Base(p)) <= maxBaseName && len(p) <= maxPathLen
 }
 
 func retainedReplacementPath(dir, stem, ext string, n int) string {

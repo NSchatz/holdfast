@@ -1,6 +1,7 @@
 package docscheck_test
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -93,6 +94,41 @@ func TestUndocumented_BitesOnAMetricNobodyDocumented(t *testing.T) {
 	// And it refuses an empty corpus rather than passing everything through it.
 	if _, err := docscheck.Undocumented([]string{invented}, nil); err == nil {
 		t.Error("Undocumented accepted an empty corpus, which passes every name there is")
+	}
+}
+
+// TestUndocumented_AProgramFileDocumentsNothing grades P6's false green: a metric name
+// written only in a program file under .claude is NOT documented, because nobody reading
+// the shipped documents is ever shown it. The corpus comes from the same walk every check
+// reads, over a tree where the program file is the only place the name appears; before
+// the walk skipped .claude, this reported the name documented.
+func TestUndocumented_AProgramFileDocumentsNothing(t *testing.T) {
+	root := t.TempDir()
+	const name = "holdfast_named_only_in_a_program_file_total"
+	for rel, body := range map[string]string{
+		filepath.Join("docs", "api-reference.md"):      "# API\n\nNo metric is named here.\n",
+		filepath.Join(".claude", "goals", "ledger.md"): "The ledger names `" + name + "`.\n",
+	} {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	docs, err := corpus.Markdown(root)
+	if err != nil {
+		t.Fatalf("list the fixture's Markdown: %v", err)
+	}
+	missing, err := docscheck.Undocumented([]string{name}, docs)
+	if err != nil {
+		t.Fatalf("read the fixture's documents: %v", err)
+	}
+	if len(missing) != 1 || missing[0] != name {
+		t.Errorf("Undocumented reported %v over %v, want exactly [%s]: a name that only a "+
+			"program file under .claude carries is being counted as documented", missing, docs, name)
 	}
 }
 

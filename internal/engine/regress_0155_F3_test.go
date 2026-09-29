@@ -23,7 +23,7 @@ import (
 // picture carriage.
 func TestRegress0155F3_PathThatFitsTheWorkingOutputSwapsWithPictures(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
-	const name = "The Secret Agent (2025).mkv"
+	const name = "A Synthetic Film (2025).mkv"
 
 	deepDir := func(t *testing.T, depth int) string {
 		t.Helper()

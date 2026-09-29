@@ -94,3 +94,55 @@ func TestMarkdown_IsAWalkAndNotAList(t *testing.T) {
 		}
 	}
 }
+
+// TestMarkdown_SkipsTheProgramDirectory grades P6: the agent program's own files under
+// `.claude` are not documents this repository ships, at the root or at any depth, while a
+// shipped document beside them still is. Delete the `.claude` case from the walk and this
+// test reds on all three program files.
+func TestMarkdown_SkipsTheProgramDirectory(t *testing.T) {
+	dir := t.TempDir()
+	for _, rel := range []string{
+		filepath.Join("docs", "a.md"),
+		"CLAUDE.md",
+		filepath.Join(".claude", "goals", "b.md"),
+		filepath.Join(".claude", "c.md"),
+		filepath.Join("x", ".claude", "d.md"),
+	} {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("# hi\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := Markdown(dir)
+	if err != nil {
+		t.Fatalf("Markdown: %v", err)
+	}
+	want := []string{
+		filepath.Join(dir, "CLAUDE.md"),
+		filepath.Join(dir, "docs", "a.md"),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Markdown walked to %v, want %v - a program file under .claude is in the "+
+			"shipped set, or a shipped document beside it was dropped", got, want)
+	}
+
+	// The same rule over the repository itself, which does carry a .claude directory.
+	root, err := RepoRoot(".")
+	if err != nil {
+		t.Fatalf("RepoRoot(.): %v", err)
+	}
+	shipped, err := Markdown(root)
+	if err != nil {
+		t.Fatalf("Markdown(%s): %v", root, err)
+	}
+	sep := string(os.PathSeparator)
+	for _, f := range shipped {
+		if strings.Contains(f, sep+".claude"+sep) {
+			t.Errorf("%s is in the shipped corpus, and it is a program file under .claude", f)
+		}
+	}
+}

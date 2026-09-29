@@ -39,6 +39,12 @@ server_addr: 0.0.0.0:8080   # see "The control surface" below before you change 
 | Config | **nothing is baked in** — see below |
 | Licences | `/usr/share/doc/holdfast/` (AGPL-3.0 + the bundled-ffmpeg NOTICE) |
 
+**How the pins stay current.** Every base image is pinned by tag and digest on its own `FROM`
+line, and `.github/dependabot.yml` has GitHub's Dependabot open a pull request when one moves
+upstream - weekly, together with the workflow actions and the Go modules. Nothing merges on
+its own: each such pull request runs the full gate and the image smoke, and waits for a human
+review. The bundled ffmpeg is watched separately, by `.github/workflows/pin-health.yml`.
+
 **The image sets no `HOLDFAST_*` environment variables, on purpose.** An env var *beats* the
 YAML file, so a baked-in default would silently override your config-as-code — and for
 `server_addr` it would quietly widen a deliberate `127.0.0.1` fail-safe. The compose file sets
@@ -207,6 +213,12 @@ reserved. See [docs/scratch.md](scratch.md).
 `run_window` is evaluated in **local time**. The image carries the zone database, but a
 container with no `TZ` is **UTC** — set `TZ` or your "encode overnight" window will run at the
 wrong hours, silently and correctly, on the wrong clock.
+
+Every log line's `time=` field ends in the process's numeric UTC offset, so the clock a line
+was written on is stated on the line itself: a container with no `TZ` logs `+00:00`, never a
+bare `Z`, and a one-shot `docker run ... restore` whose `TZ` differs from the service's shows
+a different offset beside the service's lines rather than a clock that only looks different.
+Give every `docker run` the same `TZ` as the service and the two read as one timeline.
 
 ## The control surface
 

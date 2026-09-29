@@ -49,12 +49,13 @@ need_dir() {
   fi
 }
 
-need_file "Dockerfile"                     "read the ffmpeg pin, the Go toolchain pin and every base-image ARG"
+need_file "Dockerfile"                     "read the ffmpeg pin, the Go toolchain pin and every base image"
 need_file "NOTICE"                         "confirm the GPL source offer names the ffmpeg the image bundles"
 need_file "docker-compose.yml"             "confirm the example deployment pins the image it pulls"
 need_dir  ".github/workflows"              "confirm every action is pinned to a commit SHA"
 need_file ".github/workflows/ci.yml"       "confirm the gate runs on the Go the shipped binary is built with"
 need_file ".github/workflows/release.yml"  "confirm the release runs on the Go the shipped binary is built with"
+need_file ".github/dependabot.yml"         "confirm the update bot watches every pin class it can read"
 
 if [ "$fail" -ne 0 ]; then
   printf '::error::%s\n' "check-pins: a file this gate depends on could not be read (named above). Refusing to report green." >&2
@@ -230,6 +231,29 @@ else
        whatever the registry serves today, and the in-image assertion cannot catch that
        because a floating tag agrees with itself.
        Dockerfile GO_IMAGE: $go_image"
+fi
+
+# GO_IMAGE is a COPY. The pin is the build stage's own FROM line: that is what Docker pulls,
+# and it is the only form the update bot reads (section 7). The ARG exists because the build
+# stage's in-image toolchain assertion cannot see the reference its own stage was built
+# from. A value that genuinely has to appear twice is held equal HERE, so whoever moves one
+# of the two - a bot's pull request included - is told, instead of the image being built
+# from one toolchain while the assertion checks the other.
+build_from="$(awk 'toupper($1) == "FROM" && NF >= 4 && toupper($(NF-1)) == "AS" && $NF == "build" {
+    for (i = 2; i < NF - 1; i++) if ($i !~ /^--/) { print $i; exit }
+  }' "$here/Dockerfile")"
+if [ -z "$build_from" ]; then
+  bad "the Dockerfile has no 'FROM <image> AS build' stage this check could read, so nothing
+       says which toolchain image the shipped binary is built with. A check that could not
+       run has not passed."
+elif [ "$build_from" != "$go_image" ]; then
+  bad "GO_IMAGE disagrees with the build stage it is a copy of.
+       build stage FROM: $build_from
+       ARG GO_IMAGE:     $go_image
+       The binary is built FROM the first, and the in-image toolchain assertion reads the
+       second. Move both together; a Go bump moves every workflow's GO_VERSION as well."
+else
+  note "ok: GO_IMAGE is the build stage's own FROM reference ($build_from)"
 fi
 
 # --- 4. No pre-rename identifier survives (TRANSCODE-12) ---------------------------
@@ -483,16 +507,18 @@ elif [ "$compose_bad" -eq 0 ]; then
   note "ok: all $compose_imgs docker-compose.yml image reference(s) are pinned (tag + digest, or a local build)"
 fi
 
-# --- 7. Every base image is pinned by tag AND digest (P2) --------------------------
-# A `FROM` line is an image reference like any other, and section 3 above guards exactly
-# one of them: GO_IMAGE. FETCH_IMAGE and RUNTIME_IMAGE could lose their digests silently,
-# and RUNTIME_IMAGE is the worst of the three to lose - it is the base the shipped image
-# IS, and the in-image toolchain assertion that backstops GO_IMAGE cannot see it at all,
-# because nothing in the runtime stage runs.
+# --- 7. Every base image is pinned by tag AND digest, on its FROM line (P2) -------
+# A `FROM` line is an image reference like any other. The fetch and runtime bases could
+# lose their digests silently, and the runtime base is the worst of them to lose - it is
+# the base the shipped image IS, and the in-image toolchain assertion that backstops the
+# build stage cannot see it at all, because nothing in the runtime stage runs.
 #
-# The FROM lines here reference ARGs, not literals, so a check that reads `FROM` lines
-# alone finds no digest anywhere and is wrong in BOTH directions: it would red on a
-# correctly pinned tree and pass a tree whose ARG default had been gutted. Resolve the ARG.
+# The reference must also be WRITTEN on the FROM line. The update bot reads FROM lines and
+# nothing else - Dependabot's Docker parser matches `FROM [--platform=...] <image>:<tag>
+# @sha256:<digest>` and never resolves an ARG (dependabot-core docker/lib/dependabot/docker/
+# file_parser.rb, FROM_LINE, at 78005a8; read 2026-09-29) - so a base written through an
+# ARG is a pin nobody is ever told has gone stale. That is refused here, which is what makes
+# "the bot watches every base image" true of a Dockerfile edited after this line was written.
 stages=" "
 from_seen=0
 from_bad=0
@@ -507,27 +533,23 @@ while IFS=: read -r lineno content; do
     | awk '{ for (i = 1; i <= NF; i++) if ($i !~ /^--/) { print $i; exit } }')"
   [ -n "$imgtok" ] || continue
 
-  argname=""
   case "$imgtok" in
-    '${'*'}') argname="${imgtok#\$\{}"; argname="${argname%\}}" ;;
-    '$'*)     argname="${imgtok#\$}" ;;
+    '$'*)
+      from_seen=$((from_seen + 1))
+      from_bad=$((from_bad + 1))
+      bad "BASE IMAGE THE UPDATE BOT CANNOT READ - Dockerfile line $lineno builds FROM $imgtok.
+       The update bot reads the image reference written on a FROM line and never resolves
+       an ARG, so this base would go stale with nobody told. Write the reference on the
+       FROM line itself, tag and digest together:
+         FROM <image>:<tag>@sha256:<64 hex>"
+      continue
+      ;;
   esac
 
-  if [ -n "$argname" ]; then
-    resolved="$(arg "$argname")"
-    label="ARG $argname (Dockerfile line $lineno)"
-    if [ -z "$resolved" ]; then
-      from_bad=$((from_bad + 1))
-      bad "UNRESOLVABLE BASE IMAGE: Dockerfile line $lineno builds FROM \$$argname, but ARG $argname has no default in this Dockerfile. The base image would be whatever the caller passed, or nothing - neither is a pin."
-      continue
-    fi
-  else
-    # A reference to an earlier build stage is not an image reference.
-    case "$prev_stages" in *" $imgtok "*) continue ;; esac
-    resolved="$imgtok"
-    label="the literal base image on Dockerfile line $lineno"
-    argname="(literal)"
-  fi
+  # A reference to an earlier build stage is not an image reference.
+  case "$prev_stages" in *" $imgtok "*) continue ;; esac
+  resolved="$imgtok"
+  label="the base image on Dockerfile line $lineno"
 
   from_seen=$((from_seen + 1))
   digest=""
@@ -540,16 +562,16 @@ while IFS=: read -r lineno content; do
   if ! printf '%s' "$digest" | grep -qE '^sha256:[0-9a-f]{64}$'; then
     from_bad=$((from_bad + 1))
     bad "UNPINNED BASE IMAGE - $label carries no \`@sha256:\` digest: '$resolved'
-       $argname names a TAG, and a tag is moved by its publisher, so this base floats to
+       It names a TAG, and a tag is moved by its publisher, so this base floats to
        whatever the registry serves on the day of the build. Pin both:
-         ARG $argname=${namepart}@sha256:<64 hex>
+         FROM ${namepart}@sha256:<64 hex>
        Resolve one with: docker buildx imagetools inspect $namepart"
   elif [ -z "$tag" ]; then
     from_bad=$((from_bad + 1))
     bad "UNREADABLE BASE IMAGE PIN - $label has a digest but no tag: '$resolved'
        The digest is what resolves; the tag is what tells a human which base this is. P2
        requires both:
-         ARG $argname=<image>:<tag>@$digest"
+         FROM <image>:<tag>@$digest"
   elif [ "$tag" = "latest" ]; then
     from_bad=$((from_bad + 1))
     bad "FLOATING BASE IMAGE TAG - $label is tagged \`latest\`: '$resolved'
@@ -561,7 +583,7 @@ done < <(grep -nE '^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]' "$here/Dockerfile" 
 if [ "$from_seen" -eq 0 ]; then
   bad "the Dockerfile declares no base image this check could resolve - it just asserted nothing. A parser that stopped understanding the Dockerfile is a refusal, not a green build."
 elif [ "$from_bad" -eq 0 ]; then
-  note "ok: all $from_seen base image(s) the Dockerfile's FROM lines resolve are pinned by tag AND digest"
+  note "ok: all $from_seen base image(s) are written on the Dockerfile's FROM lines, each pinned by tag AND digest"
 fi
 
 # --- 8. A node manifest must carry a lifecycle-script decision (P4) ----------------
@@ -622,6 +644,43 @@ else
        Then commit it: a decision that is not in the repository is not a decision."
     fi
   done
+fi
+
+# --- 9. The update bot watches every pin class it can read (S0151) -----------------
+# A pin does not report its own staleness: a fix in a base image, an action or a module can
+# sit unadopted for as long as nobody looks. .github/dependabot.yml is what looks - decided
+# by the owner at Checkpoint T (S0151) - and it opens a pull request when a pin has moved
+# upstream, which merges only through a human review of a green gate. It can only watch
+# what it is configured to watch, so each class it can read is required here, at the
+# repository root where the pins live:
+#   github-actions  every `uses:` reference (section 5 keeps each SHA-pinned with a comment)
+#   docker          every base image (section 7 keeps each written on its FROM line)
+#   gomod           the module requirements in go.mod
+# The ffmpeg pin is not one of them - no ecosystem reads a GitHub release tag out of an ARG -
+# and it stays with .github/workflows/pin-health.yml. Nothing here asks the network anything.
+#
+# The file is read one `updates` entry at a time, and an entry's keys may come in any
+# order. A shape this reader does not understand (a `directories:` list, say) reads as a
+# missing entry: a refusal to vouch, never a pass.
+dep_entries="$(awk '
+  function flush() { if (eco != "") print eco "|" dir; eco = ""; dir = "" }
+  /^[[:space:]]*-[[:space:]]/ { flush() }
+  /^[^[:space:]#]/ { flush() }
+  /package-ecosystem:/ { v = $0; sub(/.*package-ecosystem:[[:space:]]*/, "", v); sub(/[[:space:]]*#.*/, "", v); gsub(/["\047[:space:]]/, "", v); eco = v }
+  /^[[:space:]]*(-[[:space:]]*)?directory:/ { v = $0; sub(/.*directory:[[:space:]]*/, "", v); sub(/[[:space:]]*#.*/, "", v); gsub(/["\047[:space:]]/, "", v); dir = v }
+  END { flush() }
+' "$here/.github/dependabot.yml")"
+dep_blind=()
+for eco in github-actions docker gomod; do
+  printf '%s\n' "$dep_entries" | grep -qxF "$eco|/" || dep_blind+=("$eco")
+done
+if [ "${#dep_blind[@]}" -ne 0 ]; then
+  bad "UPDATE BOT BLIND SPOT - .github/dependabot.yml has no entry watching the repository
+       root (package-ecosystem plus directory: \"/\") for: ${dep_blind[*]}
+       A pin class nobody watches goes stale with nobody told. The entries it read were:
+$(printf '%s\n' "$dep_entries" | sed 's/^/         /')"
+else
+  note "ok: .github/dependabot.yml watches github-actions, docker and gomod at the repository root"
 fi
 
 [ "$fail" -eq 0 ] || exit 1
