@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -431,5 +432,82 @@ func TestConfig_TheOptInIsPartOfTheDeclarativeConfiguration(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
+	}
+}
+
+// TestS0168AC2_AnExcludedTrashDirectoryThatCannotBeListedStartsWithoutAWarning is S0168
+// [AC-2], the report that seeded the item, on a real directory tree: a library root holding a
+// `.Trash-0` the process may not list, with `**/.Trash-*/**` in exclude_paths, STARTS at row 6
+// and reports no directory-could-not-be-read or directory-could-not-be-traversed notice naming
+// that directory or anything beneath it - through the one start-or-refuse construction `run`,
+// `serve` and `analyze` all take - and the startup log a daemon writes carries no warn record
+// naming it either. The same library with no exclude list is the anti-vacuity half: there the
+// directory IS reported unreadable, so its absence above is the prune.
+func TestS0168AC2_AnExcludedTrashDirectoryThatCannotBeListedStartsWithoutAWarning(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a mode-000 directory is still readable, so there is nothing to deny")
+	}
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "plex")
+	trash := filepath.Join(lib, ".Trash-0")
+	writeCensusFile(t, filepath.Join(lib, "Film.mkv"), "not probed at startup\n")
+	writeCensusFile(t, filepath.Join(trash, "files", "Deleted.mkv"), "a file somebody binned\n")
+	if err := os.Chmod(trash, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(trash, 0o755) })
+	substitute(t, fixedType("ext4"))
+
+	load := func(extra string) *config.Config {
+		t.Helper()
+		cfgPath := filepath.Join(dir, "config.yaml")
+		body := "library_roots:\n  - " + lib + "\nstate_dir: " + filepath.Join(dir, "state") + "\n" + extra
+		if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+	namesTrash := func(p string) bool { return p == trash || strings.HasPrefix(p, trash+string(filepath.Separator)) }
+
+	cfg := load("exclude_paths:\n  - \"**/.Trash-*/**\"\n")
+	res := startupDecision(cfg)
+	if !res.Start || res.Row != 6 {
+		t.Fatalf("an excluded directory the process may not list decided the run: row %d, causes %+v", res.Row, res.Causes)
+	}
+	for _, n := range res.Notices {
+		if (n.Kind == startup.NoticeUnreadable || n.Kind == startup.NoticeListingFailed) && namesTrash(n.Path) {
+			t.Errorf("the excluded directory was reported as %s: %+v", n.Kind, n)
+		}
+	}
+
+	// What a starting daemon writes: the check taken and logged exactly as run and serve take it.
+	var logs bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	if _, code := startupCheck(cfg, log, io.Discard, classifyScope{}); code != 0 {
+		t.Fatalf("startupCheck refused: code %d", code)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if strings.Contains(line, `"level":"WARN"`) && strings.Contains(line, trash) {
+			t.Errorf("a warn record names the excluded directory: %s", line)
+		}
+	}
+
+	plain := startupDecision(load(""))
+	unreadable := false
+	for _, n := range plain.Notices {
+		if n.Kind == startup.NoticeUnreadable && n.Path == trash {
+			unreadable = true
+		}
+	}
+	if !unreadable {
+		t.Fatalf("with no exclude list the directory is not reported unreadable, so this case proves nothing: %+v",
+			plain.Notices)
 	}
 }
