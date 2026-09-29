@@ -877,9 +877,18 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// How far each encode in flight has got, on the stderr this command was handed, for as
+	// long as the pass runs (S0173). It starts after the signal context exists so that an
+	// interrupt silences it at once.
+	stopProgress := startRunProgress(ctx, eng, stderr)
+
 	// One call for both shapes: an unbounded Bound is the whole-library pass this command
 	// has always run, so there is no second route into the engine to keep in step.
-	if err := eng.RunBounded(ctx, bound); err != nil {
+	err := eng.RunBounded(ctx, bound)
+	// The reporter has stopped, and finished writing, before anything else is said: no progress
+	// line follows the interrupt notice, the error or the command's return.
+	stopProgress()
+	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			log.Warn("interrupted — stopped safely; in-flight temp discarded, source untouched")
 			return exitOK
