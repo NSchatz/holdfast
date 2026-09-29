@@ -79,6 +79,8 @@ func (e *Engine) enumerateOrdered(pass *listings, to sink) map[string]bool {
 		// feeds the workers directly: a scan paused while it is collecting keys stops
 		// collecting, and the directories it never reached are never reported as observed.
 		stopped: to.stopped,
+		// A temp is told of as it is listed, in either order: it is never queued.
+		temp: to.temp,
 	})
 
 	sortQueue(queue, order)
