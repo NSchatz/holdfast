@@ -84,14 +84,14 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 2.1 | Cherry-pick #94's four commits onto `holdfast-g2/s0159-temp-sweep`, gate, merge as a new PR | DOING (PR #100): four commits cherry-picked with `-x`, applied cleanly, 10 files +1673/-40 as in #94; CI green; local gate running |
-| 2.2 | Close #94 with a link to the new PR; its old branch is left and listed as a follow-up | TODO |
+| 2.1 | Cherry-pick #94's four commits onto `holdfast-g2/s0159-temp-sweep`, gate, merge as a new PR | DONE (PR #100, `ca4968b`): four commits cherry-picked with `-x`, applied cleanly, 10 files +1673/-40 as in #94; local gate exit 0 in 28m20s on `0a8efb8` (`internal/engine` 1431.1 s, 79.5% of `TEST_TIMEOUT`); CI build, mutation, package green |
+| 2.2 | Close #94 with a link to the new PR; its old branch is left and listed as a follow-up | DONE: #94 closed with a comment linking #100 and `ca4968b`; branch `sdd/S0159-holdfast-bounded-run-temp-sweep` left at `9b016d4` (follow-up: the owner may delete it; T35's list does not name it) |
 
 ## Phase 3 - The debian13 base (line C, foundation)
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | `RUNTIME_IMAGE` is `gcr.io/distroless/cc-debian13:nonroot`, pinned by tag and digest | DOING (PR #101): `sha256:54df941e...`; build and fetch stages to `golang:1.25.14-trixie` and `debian:trixie-slim` |
+| 3.1 | `RUNTIME_IMAGE` is `gcr.io/distroless/cc-debian13:nonroot`, pinned by tag and digest | DOING (PR #101): `sha256:54df941e...`; build and fetch stages to `golang:1.25.14-trixie` and `debian:trixie-slim`; merged up to `ca4968b` (`1d79a78`), gate queued |
 | 3.2 | `scripts/check-pins.sh` sections 3 and 7 green | DOING (PR #101): green on the branch, selftest 31/31 |
 | 3.3 | The merged PR's CI `package` job green | DOING (PR #101): `package` green on the branch before merge |
 | 3.4 | `docs/docker.md` follows the image | DOING (PR #101) |
@@ -105,15 +105,15 @@ summed per directory):
 | S0173 | `run` progress | DOING (build agent, branch `holdfast-g2/s0173-run-progress`) |
 | S0168 | prune excluded directories from the walk | TODO |
 | S0180 | census scope parity | TODO |
-| S0166 | restart survey overcount | DOING (branch `holdfast-g2/s0166-survey-bands`): resolver carries each row's stored height; store survey tests pass; engine and cmd tests queued for the lock |
-| S0176 | log time offset (holdfast half), and the homelab PR for the `TZ` half | DOING (branch `holdfast-g2/corpus-log-offset`, with P6): `internal/logging` tests pass and bite; cmd tests queued for the lock. Homelab half: NSchatz/homelab#208 opened (never merged by a session), `NEEDS-OWNER.md` row 1 |
+| S0166 | restart survey overcount | DOING (PR #102): AC-1 to AC-10 pass locally; existing call sites changed shape only (15 lines, reasons in the PR) |
+| S0176 | log time offset (holdfast half), and the homelab PR for the `TZ` half | DOING (PR #103, with P6): AC-H1 to AC-H7 pass, AC-H9 grep empty. Homelab half: NSchatz/homelab#208 opened (never merged by a session), `NEEDS-OWNER.md` row 1 |
 | S0151 | `.github/dependabot.yml` | DOING (local commit `2481399` on #101's commit; cherry-picked to its own PR once #101 merges) |
 
 ## Phase 5 - P6 (approved option (a))
 
 | # | Item | State |
 |---|---|---|
-| P6 | `internal/corpus` skips `.claude/`, with a test | DOING (branch `holdfast-g2/corpus-log-offset`, commit `790c54d`): both new tests red with the skip removed |
+| P6 | `internal/corpus` skips `.claude/`, with a test | DOING (PR #103, commit `790c54d`): both new tests red with the skip removed |
 
 ## Phase 6 - Report
 
@@ -169,9 +169,11 @@ summed per directory):
 
 ## Resume here
 
-Baseline done (exit 0, 26m5s). Open: PR #100 (S0159; CI green, local gate running), PR #101
-(debian13; CI `package` green, gate after #100 merges). Local work: worktree
-`/cache/wt/holdfast/holdfast-g2/corpus-log-offset` (P6 `790c54d`, S0176 uncommitted, cmd tests
-queued), worktree `/cache/wt/holdfast/holdfast-g2/s0151-dependabot` (local `2481399`, branch
-`holdfast-g2/s0151-dependabot-wip`, to cherry-pick onto a fresh branch after #101). Build
-agents: S0177, S0173. Gate runner: `/cache/tmp/holdfast-g2/gate.sh <worktree> <log-name>`.
+Merged: PR #100 (`ca4968b`). Open: #101 (debian13, line C; gate queued on `1d79a78`), #102
+(S0166), #103 (P6 + S0176; `mutation-diff` queued). Local: S0151 commit `2481399` on branch
+`holdfast-g2/s0151-dependabot-wip` (worktree `/cache/wt/holdfast/holdfast-g2/s0151-dependabot`),
+cherry-picked onto a fresh branch once #101 merges. Build agents: S0177 (on #100's head), S0173.
+Next agents: census (`/cache/tmp/holdfast-g2/prompt-census.md`), then S0163 after S0177 merges
+(`/cache/tmp/holdfast-g2/prompt-s0163-head.md`). `internal/engine` reached 79.5% of
+`TEST_TIMEOUT` on #100's gate: once a gate shows it above 80%, raise `TEST_TIMEOUT` in its own
+commit with that measurement (I15).
