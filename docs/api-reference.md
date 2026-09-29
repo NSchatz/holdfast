@@ -9,14 +9,15 @@ per-field reference `README.md` points at rather than restates.
 
 | Method & path | Auth | Purpose |
 |---|---|---|
-| `GET /` | - | a plain-text page naming the endpoints and carrying the AGPL section 13 source offer. holdfast ships no frontend. Never gated: it holds no library datum |
-| `GET /api/summary` | read | counts per status + bytes reclaimed (**lifetime** and this-run) + `bytes_held_by_undo_window` (space a retained original still holds, never folded into either reclaimed figure; `null` = unreadable) + paused/scanning + the **whole-ledger aggregates** (see below) |
+| `GET /` | - | a plain-text page naming the endpoints and carrying the AGPL section 13 source offer. holdfast ships no frontend yet (a web UI is to ship on this API - decided 2026-09-29 by the owner (T14, T18)). Never gated: it holds no library datum |
+| `GET /api/summary` | read | counts per status + bytes reclaimed (**lifetime** and this-run) + paused/scanning + the **whole-ledger aggregates** (see below). It does not carry `bytes_held_by_undo_window`: that figure rides the SSE snapshot and the `/metrics` gauge only |
 | `GET /api/queue` | read | pending + active jobs, capped, with `queue_total` - see *The total behind a cap* |
 | `GET /api/history?limit=N` | read | recent terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, capped, with `history_total` - see below |
 | `GET /api/events` | read | SSE: a fresh snapshot on every state change |
 | `GET /api/schema` | - | a machine-readable document of this surface, GENERATED from the router and the response types this build actually serves. Never gated: it carries endpoint paths, methods, status codes, media types, field names and field types, and no value of any kind - see below |
 | `GET /metrics` | - | Prometheus metrics (when `metrics_enable`, default on). Never gated: it names no file |
 | `POST /api/rescan` | control | start a library scan (409 if paused / scanning / outside the run window) |
+| `POST /api/scan` | control | look at exactly the paths in the body now, rather than the whole library - see *`POST /api/scan`* below |
 | `POST /api/pause` | control | stop feeding **new** files (in-flight encodes finish safely) |
 | `POST /api/resume` | control | clear the pause flag |
 | `GET /api/search?path=TERM` | control | terminal rows whose path contains TERM, over the **whole ledger** rather than the capped view, with the match count. In the control group because it serves per-file rows the capped reads never have |

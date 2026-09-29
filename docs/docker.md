@@ -175,7 +175,8 @@ services:
 ```
 
 **It does not gate the root path.** holdfast ships no frontend, so `/` is a plain-text page
-naming the endpoints and carrying the Corresponding Source offer. It is still served with no
+naming the endpoints and carrying the Corresponding Source offer. (A web UI is to ship on this
+API - decided 2026-09-29 by the owner (T14, T18); until that release, `/` is this page.) It is still served with no
 credential when a read token is set, and it holds no library datum for a credential to
 protect - every media path is behind `/api/queue`, `/api/history` and `/api/events`, which
 the key does gate. holdfast says so at startup rather than leaving you to find it.

@@ -334,7 +334,7 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 		// allowed to transcode would take this file"; the run that is allowed to must
 		// therefore be able to take it, or turning dry_run off would leave every file the
 		// dry run examined excluded for ever - the library never transcoded and nothing on
-		// the dashboard saying why. A LATER DRY RUN re-claims it for the same reason, which
+		// the API saying why. A LATER DRY RUN re-claims it for the same reason, which
 		// is also what keeps two successive dry runs reporting ONE candidate row for a file
 		// rather than two.
 		//
@@ -1088,7 +1088,7 @@ func (s *SQLite) List(ctx context.Context, statuses []Status, limit int) ([]Job,
 		}
 		q += " WHERE status IN (" + strings.Join(ph, ", ") + ")"
 	}
-	// Newest transition first — the API/UI shows the most recent activity at the top.
+	// Newest transition first - the API shows the most recent activity at the top.
 	q += " ORDER BY updated_at DESC, path ASC"
 	if limit > 0 {
 		q += " LIMIT ?"

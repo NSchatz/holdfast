@@ -91,6 +91,14 @@ subject. The section after the table names them and says where each is asserted 
 | `internal/config.TestConfigExample_DocumentsTheReadToken` | the comment text of `config.example.yaml` - that the shipped example spelled out what the read token gates and how to supply it | 39 raw |
 | `make release-shape`, `make release-shape-selftest`, and the CI step that ran the self-test | the invocations that put the two above on the gate | - |
 
+**The first row's package NAME came back; its contents did not.** `internal/docscheck` exists again
+and runs under `go test` like any package: specs after this retirement added new checks under the
+same name - the published metric names (`docscheck.go`, S0104), the dynamic-HDR statement
+(`dynamichdr.go`, S0106), the interlacing statement (`interlacing.go`, S0107), the `max_height`
+statement (`downscale.go`, S0118), the enumeration statements (`enumeration.go`, S0099) and the
+quick start's order (`quickstart.go`, S0100). None of the 57 functions the row names is among them;
+the row records the package as it stood when it was retired.
+
 ## What did not retire, and where it is asserted now
 
 `testing` T2 reaches prose, styling, comment density, document shape and release shape. It
@@ -141,8 +149,8 @@ EXECUTION, not ASSERTION: a test that runs a function and asserts nothing about 
 returned covers every line it touched, and a suite can sit at high coverage while missing
 most of the faults a mutation would introduce.
 
-Nothing here closes that gap. **`S0133-holdfast-mutation-score-floor` is the item that
-measures assertion quality**, and it owns the mutation runner and whatever floor it sets.
-This document defines no mutation-score threshold, adds no mutation runner, and neither does
-anything else in this change: the gap is stated so that the coverage figures are read for
-what they are.
+Nothing here closes that gap. The mutation score is what measures assertion quality, and
+[docs/mutation-testing.md](mutation-testing.md) owns it: the floor, the figure it is applied
+to, and which packages are in the mutation domain. This document defines no mutation-score
+threshold of its own: the gap is stated so that the coverage figures are read for what they
+are.

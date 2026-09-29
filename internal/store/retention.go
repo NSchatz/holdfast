@@ -362,7 +362,7 @@ func coverageFor(statuses []Status) Coverage {
 // reason it is not List(ctx, terminal, 0).
 //
 // OLDEST FIRST, unlike List: this is an audit record read from the top, not the "most
-// recent activity" the dashboard shows, and appending to a chronological export is the
+// recent activity" the API shows, and appending to a chronological export is the
 // shape a consumer expects.
 func (s *SQLite) EachTerminal(ctx context.Context, fn func(Job) error) error {
 	rows, err := s.db.QueryContext(ctx,

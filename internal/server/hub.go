@@ -14,7 +14,7 @@ import (
 
 // Reporting caps. A library can hold hundreds of thousands of rows; the API never
 // ships an unbounded payload. The queue (pending+active) and history (terminal)
-// views are capped — documented as a known limitation (the UI shows the most
+// views are capped - documented as a known limitation (the API shows the most
 // recent activity, not the entire ledger).
 const (
 	queueLimit   = 500
@@ -52,7 +52,7 @@ var terminal = []store.Status{
 // The numeric outcome fields are POINTERS and are deliberately NOT `omitempty`: they
 // serialize as an explicit JSON `null` when the fact was never recorded, so a client
 // can tell "not recorded" from a real 0 and render it as such. Dropping the key (or
-// emitting 0) would hand the UI a fabricated fidelity score — precisely the overclaim
+// emitting 0) would hand a client a fabricated fidelity score - precisely the overclaim
 // the whole fidelity track exists to prevent.
 type jobDTO struct {
 	Path      string `json:"path"`
