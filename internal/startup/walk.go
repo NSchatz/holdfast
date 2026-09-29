@@ -37,10 +37,22 @@ const NoticeMountInfoUnavailable NoticeKind = "mount-information-unavailable"
 // would be had this root been the first spelling to reach that storage. Without
 // it AC4b would be reachable or not by declaration order alone: the same two
 // roots over the same layout in the other order refuse.
+//
+// A region PRUNED earlier in the walk was never entered, so none of the above
+// applies to it either. A root exposing that storage is a spelling no exclude
+// pattern reaches - a configured root is never pruned itself - so it is declined,
+// refusing nothing, and is told which excluded spelling reached it first (S0168
+// AC-7): walking it would offer the very files the filter keeps out under their
+// other name.
 func (r *checkRun) walkRoot(root string, info Info) {
 	prev, entered := r.entered[info.Region]
 	if !entered {
 		r.descend(root, info, true)
+		return
+	}
+	if prev.pruned {
+		r.declined[root] = true
+		r.notice(NoticeRegionExcluded, root, prev.describeExcluded("this configured library root"))
 		return
 	}
 	if prev.err != nil {
@@ -61,10 +73,15 @@ func (r *checkRun) walkRoot(root string, info Info) {
 // marked on entry and never on a listing that completes (AC2b2), so "entered" is
 // not "traversed successfully", and this is what tells the two apart wherever a
 // later exposure of that region is declined.
+//
+// A region can also be marked without being entered at all: pruned records that
+// the walk met this storage first under a spelling an exclude pattern reaches and
+// did not list it, so a later spelling of it is declined rather than descended.
 type regionEntry struct {
 	path   string
 	err    error
 	denied bool
+	pruned bool
 }
 
 func (e regionEntry) noticeKind() NoticeKind {
@@ -72,6 +89,14 @@ func (e regionEntry) noticeKind() NoticeKind {
 		return NoticeUnreadable
 	}
 	return NoticeListingFailed
+}
+
+// describeExcluded is the report for a later spelling of pruned storage. It names
+// the excluded spelling that reached it first and never says the sources are
+// enumerated from there, because they are enumerated from nowhere.
+func (e regionEntry) describeExcluded(what string) string {
+	return fmt.Sprintf("not descended: %s exposes storage this run reached first under %s, which an "+
+		"exclude_paths pattern excludes, so no source is enumerated from it under either spelling", what, e.path)
 }
 
 func (e regionEntry) describeAsRoot(root string) string {
@@ -207,6 +232,16 @@ func (r *checkRun) descend(dir string, info Info, isRoot bool) {
 			// look. It is reported and nothing is taken from it, which is what
 			// keeps it safe: a path no source is enumerated from is a path no
 			// swap can happen under.
+			//
+			// One an exclude pattern reaches would not have been listed either,
+			// so it is reported as what it is - excluded - with the failure
+			// beside it, and never as the unreadable directory an operator's
+			// filter already keeps out of the run (S0168).
+			if r.excluded(child) {
+				r.notice(NoticeExcluded, child, fmt.Sprintf(
+					"not listed: an exclude_paths pattern reaches it, and it could not be inspected either: %v", cerr))
+				continue
+			}
 			kind := NoticeListingFailed
 			if errors.Is(cerr, fs.ErrPermission) {
 				kind = NoticeUnreadable
@@ -250,9 +285,27 @@ func (r *checkRun) considerDirectory(child string, ci, parent Info) {
 		}
 	}
 
+	// The prune is decided AFTER the mount record and before anything else, so a
+	// pruned mount point keeps its record and every refusal that record carries
+	// (S0168 AC-6), while nothing beneath it - a mount point included - is ever
+	// met. It is not one of this region's kids either: a root whose only media
+	// lies beneath pruned directories holds none this run would enumerate.
+	if r.excluded(child) {
+		r.prune(child, ci.Region)
+		return
+	}
+
 	r.regionKids[parent.Region] = append(r.regionKids[parent.Region], ci.Region)
 
 	if prev, ok := r.entered[ci.Region]; ok {
+		if prev.pruned {
+			// Pruned storage met again under a spelling no exclude pattern
+			// reaches: declined, never descended (S0168 AC-7). Descending it would
+			// enumerate, under this name, exactly the files the excluded name
+			// keeps out of the run.
+			r.notice(NoticeRegionExcluded, child, prev.describeExcluded("this path"))
+			return
+		}
 		// Never enter a region entered earlier in THIS run, and skip exactly the
 		// already-walked PART: a mount exposing a region the walk covered only
 		// in part is descended and only the walked part is skipped, so nothing
@@ -272,6 +325,44 @@ func (r *checkRun) considerDirectory(child string, ci, parent Info) {
 		return
 	}
 	r.descend(child, ci, false)
+}
+
+// excluded reports whether the path filters exclude dir whole (Check.Excluded).
+//
+// A configured library root is never excluded, wherever the walk meets it (S0168
+// AC-5): a root is listed, classified and walked whatever a pattern says about it,
+// and that includes a root an EARLIER root's pattern reaches - two nested roots,
+// which Validate refuses. The walk then meets it inside the outer root and walks it
+// there, and the outer root's patterns prune what lies beneath it.
+func (r *checkRun) excluded(dir string) bool {
+	return r.c.Excluded != nil && !r.isConfiguredRoot(dir) && r.c.Excluded(dir)
+}
+
+// isConfiguredRoot reports whether dir is one of the configured library roots, as
+// cleaned.
+func (r *checkRun) isConfiguredRoot(dir string) bool {
+	clean := cleanPath(dir)
+	for _, root := range r.roots {
+		if root == clean {
+			return true
+		}
+	}
+	return false
+}
+
+// prune records a directory the walk does not list because an exclude pattern
+// reaches it. Its region is marked - unless an earlier spelling already entered
+// it, whose record stands - so the same storage met later under a spelling no
+// pattern reaches is declined rather than walked (AC-7). Nothing is added to the
+// coverage or to the carried listings, which is what keeps every scan pass, the
+// orphaned-temp sweep and the watch out of it: all three are bounded by them.
+func (r *checkRun) prune(dir string, reg Region) {
+	if _, seen := r.entered[reg]; !seen {
+		r.entered[reg] = regionEntry{path: dir, pruned: true}
+	}
+	r.notice(NoticeExcluded, dir, "not listed: an exclude_paths pattern in force for its library root "+
+		"reaches it, so nothing beneath it is enumerated, swept or watched, and the ledger retention "+
+		"pass draws no conclusion about a file beneath it")
 }
 
 // isMountPoint reports whether child is the root of a mounted filesystem.

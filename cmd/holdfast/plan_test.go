@@ -1387,3 +1387,692 @@ func sortedSet(s map[string]bool) []string {
 	sort.Strings(out)
 	return out
 }
+
+// ---- S0180: the scope of each library root -------------------------------------------
+
+// scopeFixture is one library laid out for S0180: three roots and every way a source-named
+// file under a root can end up - covered and eligible, covered and unreadable, excluded by a
+// root-relative and by an absolute pattern, excluded by an inherited top-level pattern,
+// beneath a directory the walk prunes, declined outright, and (when asked for) held back by a
+// parked job's record. Root c names an EMPTY exclude list, so the top-level pattern that
+// excludes b's sample does not reach c's.
+type scopeFixture struct {
+	dir, cfgPath, state string
+	a, b, c             string
+
+	eligible, unreadable, excludedRel, excludedAbs, pruned, declined, parked string
+	bFilm, bSample, cSample                                                  string
+}
+
+func newScopeFixture(t *testing.T, withParkedRecord bool) *scopeFixture {
+	t.Helper()
+	dir := t.TempDir()
+	f := &scopeFixture{dir: dir, state: filepath.Join(dir, "state"),
+		a: filepath.Join(dir, "a"), b: filepath.Join(dir, "b"), c: filepath.Join(dir, "c")}
+	f.eligible = filepath.Join(f.a, "movie.mkv")
+	f.unreadable = filepath.Join(f.a, "show", "ep.mkv")
+	f.excludedRel = filepath.Join(f.a, "movies", "4k", "d.mkv")
+	f.excludedAbs = filepath.Join(f.a, "import", "e.mkv")
+	f.pruned = filepath.Join(f.a, ".Trash-0", "old.mkv")
+	f.declined = filepath.Join(f.a, "two\tnames.mkv")
+	f.parked = filepath.Join(f.a, "parked.mkv")
+	f.bFilm = filepath.Join(f.b, "film.mkv")
+	f.bSample = filepath.Join(f.b, "film.sample.mkv")
+	f.cSample = filepath.Join(f.c, "clip.sample.mkv")
+
+	encodeFixture(t, f.eligible, "libx264", "256x144", "yuv420p")
+	// Distinct sizes, so no byte figure below can add up by accident.
+	for i, p := range []string{f.unreadable, f.excludedRel, f.excludedAbs, f.pruned, f.declined,
+		f.parked, f.bFilm, f.bSample, f.cSample} {
+		writeCensusFile(t, p, strings.Repeat("x", 100*(i+1)))
+	}
+	if _, err := os.Stat(f.declined); err != nil {
+		t.Skipf("this filesystem will not hold a tab in a file name: %v", err)
+	}
+	f.cfgPath = filepath.Join(dir, "config.yaml")
+	body := "exclude_paths: [\"**/*.sample.*\"]\n" +
+		"library_roots:\n" +
+		"  - path: " + f.a + "\n" +
+		"    exclude_paths: [\"movies/4k/*\", \"" + f.a + "/import/*\", \"**/.Trash-*/**\"]\n" +
+		"  - path: " + f.b + "\n" +
+		"  - path: " + f.c + "\n" +
+		"    exclude_paths: []\n" +
+		"state_dir: " + f.state + "\nmin_bitrate_kbps: 0\nvmaf_enable: false\n"
+	if err := os.WriteFile(f.cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	substitute(t, fixedType("ext4"))
+	if withParkedRecord {
+		seedParkedSource(t, f.state, f.parked)
+	}
+	return f
+}
+
+// seedParkedSource parks one job in a real ledger: its source and its replacement are then
+// the two recorded paths the enumeration holds back.
+func seedParkedSource(t *testing.T, state, source string) {
+	t.Helper()
+	if err := os.MkdirAll(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(state, "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+	const fp = "31:1700000000"
+	if ok, err := st.Claim(ctx, source, fp, "w0", 3, store.DecisionInputs{}); err != nil || !ok {
+		t.Fatalf("Claim: ok=%v err=%v", ok, err)
+	}
+	if err := st.RecordSwapIncident(ctx, store.SwapIncident{
+		SourcePath: source, SourceFingerprint: fp,
+		ReplacementPath: strings.TrimSuffix(source, ".mkv") + "." + engine.TempMarker + ".mkv",
+		SourceAttrs:     fp, ReplacementAttrs: "37:1700000001", ObservedAttrs: fp,
+		Outcome: store.Indeterminate, SwapError: "swap failed: simulated",
+		StorageClass: "local", StorageType: "ext4",
+	}); err != nil {
+		t.Fatalf("RecordSwapIncident: %v", err)
+	}
+}
+
+// sizeOf is the entry's own size, as every figure counts it.
+func sizeOf(t *testing.T, p string) int64 {
+	t.Helper()
+	fi, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Size()
+}
+
+// figureOf is the figure a set of files makes.
+func figureOf(t *testing.T, paths ...string) figure {
+	t.Helper()
+	var f figure
+	for _, p := range paths {
+		f.Files++
+		f.Bytes += sizeOf(t, p)
+	}
+	return f
+}
+
+// sameCount compares a published figure's numbers, not the set it names.
+func sameCount(a, b figure) bool { return a.Files == b.Files && a.Bytes == b.Bytes }
+
+// rootEntry is the entry for root, failing when there is none.
+func rootEntry(t *testing.T, p *plan, root string) *planRoot {
+	t.Helper()
+	for _, r := range p.Roots {
+		if r.Root == root {
+			return r
+		}
+	}
+	t.Fatalf("the plan publishes no entry for %s: %+v", root, p.Roots)
+	return nil
+}
+
+// TestS0180AC1_EveryConfiguredRootHasItsOwnEntryInOrder is S0180 [AC-1]: `plan --json` carries
+// a top-level `roots` array with exactly one entry per configured root, in configuration
+// order, each naming its cleaned path - including roots whose resolved profiles are
+// identical, which share ONE profile group and so had no figure of their own before.
+func TestS0180AC1_EveryConfiguredRootHasItsOwnEntryInOrder(t *testing.T) {
+	f := newScopeFixture(t, false)
+	// Spell one root with a trailing separator: the entry names the CLEANED path.
+	body, err := os.ReadFile(f.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spelled := strings.Replace(string(body), "  - path: "+f.b+"\n", "  - path: "+f.b+"/\n", 1)
+	if spelled == string(body) {
+		t.Fatal("the fixture's root b was not respelled")
+	}
+	if err := os.WriteFile(f.cfgPath, []byte(spelled), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	p := planJSON(t, f.cfgPath)
+	if len(p.Profiles) != 1 || len(p.Profiles[0].LibraryRoots) != 3 {
+		t.Fatalf("the three roots do not share one profile group, so this case proves nothing: %+v", p.Profiles)
+	}
+	var got []string
+	for _, r := range p.Roots {
+		got = append(got, r.Root)
+	}
+	if want := []string{f.a, f.b, f.c}; strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("roots = %v, want exactly %v in configuration order", got, want)
+	}
+}
+
+// TestS0180AC2_EachEntryCarriesThePatternsInForceForItsRoot is S0180 [AC-2]: exclude_paths and
+// include_paths are exactly the lists in force for the root - its own where its entry names
+// the key (an explicit empty list included), the top-level list where it does not, and `[]`,
+// never null and never omitted, where neither names it.
+func TestS0180AC2_EachEntryCarriesThePatternsInForceForItsRoot(t *testing.T) {
+	f := newScopeFixture(t, false)
+	var out, errOut bytes.Buffer
+	if code := dispatch([]string{"plan", "--json", "--config", f.cfgPath}, &out, &errOut); code != 0 {
+		t.Fatalf("plan --json code = %d (stderr: %s)", code, errOut.String())
+	}
+	var doc struct {
+		Roots []map[string]json.RawMessage `json:"roots"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	want := []struct{ exclude, include string }{
+		{`["movies/4k/*","` + f.a + `/import/*","**/.Trash-*/**"]`, `[]`}, // its own list
+		{`["**/*.sample.*"]`, `[]`},                                       // the top-level list
+		{`[]`, `[]`},                                                      // an explicit empty list
+	}
+	if len(doc.Roots) != len(want) {
+		t.Fatalf("%d root entries, want %d", len(doc.Roots), len(want))
+	}
+	for i, w := range want {
+		for key, raw := range map[string]string{"exclude_paths": w.exclude, "include_paths": w.include} {
+			got, ok := doc.Roots[i][key]
+			if !ok {
+				t.Fatalf("root %d omits %s", i, key)
+			}
+			var compact bytes.Buffer
+			if err := json.Compact(&compact, got); err != nil {
+				t.Fatal(err)
+			}
+			if compact.String() != raw {
+				t.Errorf("root %d %s = %s, want %s", i, key, compact.String(), raw)
+			}
+		}
+	}
+
+	// And with no top-level list at all, a root that names none has `[]`, not null.
+	bare := newScopeFixture(t, false)
+	body, err := os.ReadFile(bare.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bare.cfgPath, []byte(strings.Replace(string(body),
+		"exclude_paths: [\"**/*.sample.*\"]\n", "", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := rootEntry(t, planJSON(t, bare.cfgPath), bare.b); r.ExcludePaths == nil || len(r.ExcludePaths) != 0 {
+		t.Fatalf("a root no layer names a list for carries %#v, want an empty list", r.ExcludePaths)
+	}
+}
+
+// TestS0180AC3_AFilteredFileIsExcludedAndInNoOtherFigure is S0180 [AC-3]: a source-named file
+// a path filter keeps out - one by a root-relative pattern, one by an absolute pattern, one by
+// the inherited top-level pattern - is counted in its root's excluded_by_path_filter and
+// library figures and in NO covered, eligible, skipped, unaccounted or declined figure of any
+// root entry, profile group or the total.
+//
+// The walk prunes a directory an exclude pattern reaches whole, and a file beneath one is in no
+// figure at all (AC-6), so the two directories here are excluded by patterns naming what is IN
+// them (`movies/4k/*`, `<root>/import/*`): each directory is listed and each file in it is
+// kept out by the filter.
+func TestS0180AC3_AFilteredFileIsExcludedAndInNoOtherFigure(t *testing.T) {
+	f := newScopeFixture(t, false)
+	p := planJSON(t, f.cfgPath)
+	excluded := []string{f.excludedRel, f.excludedAbs, f.bSample}
+
+	if a := rootEntry(t, p, f.a); !sameCount(a.ExcludedByPathFilter, figureOf(t, f.excludedRel, f.excludedAbs)) {
+		t.Errorf("a excluded_by_path_filter = %+v, want the two files its patterns name", a.ExcludedByPathFilter)
+	}
+	if b := rootEntry(t, p, f.b); !sameCount(b.ExcludedByPathFilter, figureOf(t, f.bSample)) {
+		t.Errorf("b excluded_by_path_filter = %+v, want the one file the inherited pattern names", b.ExcludedByPathFilter)
+	}
+	if c := rootEntry(t, p, f.c); !sameCount(c.ExcludedByPathFilter, figure{}) {
+		t.Errorf("c excluded_by_path_filter = %+v, want nothing: its own list is empty", c.ExcludedByPathFilter)
+	}
+
+	// In no other figure: the covered set is exactly the files no filter excluded, and no
+	// per-path list names an excluded file.
+	covered := []string{f.eligible, f.unreadable, f.parked, f.bFilm, f.cSample}
+	if !sameCount(p.Total.Covered, figureOf(t, covered...)) {
+		t.Errorf("total covered = %+v, want exactly the files no filter excluded", p.Total.Covered)
+	}
+	if !sameCount(p.Total.Eligible, figureOf(t, f.eligible)) || p.Total.Skipped != 0 ||
+		p.Total.Unaccounted.Files != int64(len(covered)-1) {
+		t.Errorf("eligible %+v, skipped %d, unaccounted %d: an excluded file reached a figure",
+			p.Total.Eligible, p.Total.Skipped, p.Total.Unaccounted.Files)
+	}
+	for _, g := range append(append([]*planGroup{}, p.Profiles...), p.Total) {
+		for _, b := range g.SkippedByGuard {
+			if b.Count != 0 {
+				t.Errorf("a guard skipped %d file(s) in a library with nothing to skip: %+v", b.Count, g.SkippedByGuard)
+			}
+		}
+		for _, u := range g.Unaccounted.Reasons {
+			for _, x := range excluded {
+				if u.Path == x {
+					t.Errorf("the excluded %s is counted unaccounted for", x)
+				}
+			}
+		}
+	}
+	for _, d := range p.Declined.Paths {
+		for _, x := range excluded {
+			if d.Path == x {
+				t.Errorf("the excluded %s is published as declined", x)
+			}
+		}
+	}
+	// And in the library figure of its own root, which is counted BEFORE the filters.
+	if a := rootEntry(t, p, f.a); !sameCount(a.Library,
+		figureOf(t, f.eligible, f.unreadable, f.parked, f.excludedRel, f.excludedAbs, f.declined)) {
+		t.Errorf("root a library = %+v; it does not carry the files its filters excluded", a.Library)
+	}
+	if b := rootEntry(t, p, f.b); !sameCount(b.Library, figureOf(t, f.bFilm, f.bSample)) {
+		t.Errorf("root b library = %+v; it does not carry the file the inherited filter excluded", b.Library)
+	}
+}
+
+// TestS0180AC4_EachRootsLibraryIsExactlyItsFourParts is S0180 [AC-4]: per root, in files and
+// in bytes, library = covered + excluded_by_path_filter + held_back_by_record + the declined
+// paths under it; and the entries' covered and eligible sum to the total group's. Root a holds
+// a path declined outright and a path a parked job's record holds back, so no term of the
+// identity is zero by construction - and library is also held to the files the fixture put
+// there, so the identity cannot hold by every term being wrong together.
+func TestS0180AC4_EachRootsLibraryIsExactlyItsFourParts(t *testing.T) {
+	f := newScopeFixture(t, true)
+	p := planJSON(t, f.cfgPath)
+
+	declinedUnder := func(root string) figure {
+		var fig figure
+		for _, d := range p.Declined.Paths {
+			if strings.HasPrefix(d.Path, root+string(filepath.Separator)) {
+				fig.Files++
+				fig.Bytes += sizeOf(t, d.Path)
+			}
+		}
+		return fig
+	}
+	var covered, eligible figure
+	for _, r := range p.Roots {
+		d := declinedUnder(r.Root)
+		sum := figure{
+			Files: r.Covered.Files + r.ExcludedByPathFilter.Files + r.HeldBackByRecord.Files + d.Files,
+			Bytes: r.Covered.Bytes + r.ExcludedByPathFilter.Bytes + r.HeldBackByRecord.Bytes + d.Bytes,
+		}
+		if !sameCount(r.Library, sum) {
+			t.Errorf("root %s: library %+v != covered %+v + excluded %+v + held back %+v + declined %+v",
+				r.Root, r.Library, r.Covered, r.ExcludedByPathFilter, r.HeldBackByRecord, d)
+		}
+		covered.Files, covered.Bytes = covered.Files+r.Covered.Files, covered.Bytes+r.Covered.Bytes
+		eligible.Files, eligible.Bytes = eligible.Files+r.Eligible.Files, eligible.Bytes+r.Eligible.Bytes
+	}
+	if !sameCount(covered, p.Total.Covered) || !sameCount(eligible, p.Total.Eligible) {
+		t.Errorf("the entries sum to covered %+v and eligible %+v; the total group says %+v and %+v",
+			covered, eligible, p.Total.Covered, p.Total.Eligible)
+	}
+
+	a := rootEntry(t, p, f.a)
+	for name, pair := range map[string][2]figure{
+		"library": {a.Library, figureOf(t, f.eligible, f.unreadable, f.excludedRel, f.excludedAbs, f.declined, f.parked)},
+		"covered": {a.Covered, figureOf(t, f.eligible, f.unreadable)},
+		"held":    {a.HeldBackByRecord, figureOf(t, f.parked)},
+		"decl":    {declinedUnder(f.a), figureOf(t, f.declined)},
+	} {
+		if !sameCount(pair[0], pair[1]) {
+			t.Errorf("root a %s = %+v, want %+v from the files the fixture put there", name, pair[0], pair[1])
+		}
+	}
+	if b := rootEntry(t, p, f.b); !sameCount(b.Library, figureOf(t, f.bFilm, f.bSample)) {
+		t.Errorf("root b library = %+v", b.Library)
+	}
+	if c := rootEntry(t, p, f.c); !sameCount(c.Library, figureOf(t, f.cSample)) {
+		t.Errorf("root c library = %+v", c.Library)
+	}
+}
+
+// TestS0180AC5_ADaemonPassOffersExactlyThePlansCoveredSetWithFiltersInForce is S0180 [AC-5],
+// the criterion that holds the one outcome this reporting change could make irreversible: the
+// existing plan-equals-daemon-pass comparison, with path filters in force, holds path for
+// path, and the daemon pass offers, claims and records NOTHING for a path the plan counts in
+// excluded_by_path_filter.
+func TestS0180AC5_ADaemonPassOffersExactlyThePlansCoveredSetWithFiltersInForce(t *testing.T) {
+	f := newScopeFixture(t, false)
+	pass, planned := planEqualsDaemonPass(t, f.cfgPath)
+	if !sameSet(planned, setOf([]string{f.eligible, f.unreadable, f.parked, f.bFilm, f.cSample})) {
+		t.Fatalf("the covered set is not the library's unfiltered sources: %v", sortedSet(planned))
+	}
+	var excluded []string
+	for _, k := range pass.Excluded {
+		excluded = append(excluded, k.Path)
+	}
+	if !sameSet(setOf(excluded), setOf([]string{f.excludedRel, f.excludedAbs, f.bSample})) {
+		t.Fatalf("the pass counts %v as excluded by a path filter", excluded)
+	}
+	rows := daemonPassPaths(t, f.cfgPath)
+	for _, x := range append(excluded, f.pruned) {
+		if st, ok := rows[x]; ok {
+			t.Errorf("the daemon pass recorded a %s row for %s, which the filters exclude", st, x)
+		}
+	}
+	// The published figure is the same set the pass heard, file for file.
+	var total int64
+	for _, r := range planJSON(t, f.cfgPath).Roots {
+		total += r.ExcludedByPathFilter.Files
+	}
+	if total != int64(len(excluded)) {
+		t.Fatalf("the document counts %d excluded file(s), the pass heard %d", total, len(excluded))
+	}
+}
+
+// TestS0180AC6_AnUnlistedDirectoryIsNotReadAndItsFilesAreInNoFigure is S0180 [AC-6]: each
+// entry's directories_read and directories_not_read sum to the document's coverage figures; a
+// directory under one root the process may not list is counted in THAT root's
+// directories_not_read and nowhere else, leaves every other root's coverage figures as they
+// were, and the file inside it is in no figure of any entry rather than counted as a zero. The
+// walk prunes filter-excluded directories on this tree, so the same holds for the pruned one.
+func TestS0180AC6_AnUnlistedDirectoryIsNotReadAndItsFilesAreInNoFigure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a mode-000 directory is still readable, so there is nothing to deny")
+	}
+	f := newScopeFixture(t, false)
+	open := planJSON(t, f.cfgPath)
+
+	locked := filepath.Join(f.b, "locked")
+	hidden := filepath.Join(locked, "hidden.mkv")
+	writeCensusFile(t, hidden, "a source nobody can list\n")
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	shut := planJSON(t, f.cfgPath)
+
+	for _, p := range []*plan{open, shut} {
+		var read, notRead int64
+		for _, r := range p.Roots {
+			read += r.DirectoriesRead
+			notRead += r.DirectoriesNotRead
+		}
+		if read != p.Coverage.DirectoriesRead || notRead != p.Coverage.DirectoriesNotRead {
+			t.Fatalf("the entries' directories sum to %d read and %d not read; the document says %d and %d",
+				read, notRead, p.Coverage.DirectoriesRead, p.Coverage.DirectoriesNotRead)
+		}
+	}
+	if b := rootEntry(t, shut, f.b); b.DirectoriesNotRead != rootEntry(t, open, f.b).DirectoriesNotRead+1 {
+		t.Errorf("root b does not count the directory it could not list: %d not read, was %d",
+			b.DirectoriesNotRead, rootEntry(t, open, f.b).DirectoriesNotRead)
+	}
+	for _, root := range []string{f.a, f.c} {
+		before, after := rootEntry(t, open, root), rootEntry(t, shut, root)
+		if before.DirectoriesRead != after.DirectoriesRead || before.DirectoriesNotRead != after.DirectoriesNotRead {
+			t.Errorf("root %s's coverage moved over another root's unreadable directory: %+v -> %+v", root, before, after)
+		}
+	}
+	// The files in either unlisted directory are in no figure: every entry's library is
+	// exactly what the fixture put in the directories that were listed.
+	for _, p := range []*plan{open, shut} {
+		if b := rootEntry(t, p, f.b); !sameCount(b.Library, figureOf(t, f.bFilm, f.bSample)) {
+			t.Errorf("root b library = %+v; the unlisted directory's file was counted", b.Library)
+		}
+		a := rootEntry(t, p, f.a)
+		if !sameCount(a.Library, figureOf(t, f.eligible, f.unreadable, f.excludedRel, f.excludedAbs, f.declined, f.parked)) {
+			t.Errorf("root a library = %+v; the pruned directory's file was counted", a.Library)
+		}
+		// The pruned directory is the one directory under a that was not read.
+		if a.DirectoriesNotRead != 1 {
+			t.Errorf("root a counts %d director(ies) not read, want the one the walk pruned", a.DirectoriesNotRead)
+		}
+	}
+}
+
+// TestS0180AC7_TheWrittenReportCarriesEachRootsScopeAsTheDocumentDoes is S0180 [AC-7]: without
+// --json, the report writes for each root its path, its resolved patterns, and the library,
+// excluded, held-back, covered and eligible file and byte figures - each equal to what the
+// document carries for the same library and configuration.
+func TestS0180AC7_TheWrittenReportCarriesEachRootsScopeAsTheDocumentDoes(t *testing.T) {
+	f := newScopeFixture(t, true)
+	p := planJSON(t, f.cfgPath)
+	report := planReport(t, f.cfgPath)
+	for i, r := range p.Roots {
+		start := strings.Index(report, "  library root "+r.Root+"\n")
+		if start < 0 {
+			t.Fatalf("the report has no section for root %s:\n%s", r.Root, report)
+		}
+		block := report[start:]
+		if i+1 < len(p.Roots) {
+			if end := strings.Index(block, "  library root "+p.Roots[i+1].Root+"\n"); end > 0 {
+				block = block[:end]
+			}
+		}
+		exclude, _ := json.Marshal(r.ExcludePaths)
+		include, _ := json.Marshal(r.IncludePaths)
+		want := []string{
+			"    exclude_paths " + string(exclude) + "\n",
+			"    include_paths " + string(include) + "\n",
+		}
+		for _, fig := range []struct {
+			label string
+			f     figure
+		}{
+			{"library", r.Library}, {"excluded_by_path_filter", r.ExcludedByPathFilter},
+			{"held_back_by_record", r.HeldBackByRecord}, {"covered", r.Covered}, {"eligible", r.Eligible},
+		} {
+			want = append(want, fmt.Sprintf("    %-24s %8d file(s)  %16d byte(s)\n", fig.label, fig.f.Files, fig.f.Bytes))
+		}
+		for _, line := range want {
+			if !strings.Contains(block, line) {
+				t.Errorf("root %s: the report does not carry %q:\n%s", r.Root, line, block)
+			}
+		}
+	}
+	// Anti-vacuity: the figures compared are not all zeros.
+	if a := rootEntry(t, p, f.a); a.HeldBackByRecord.Files == 0 || a.ExcludedByPathFilter.Files == 0 {
+		t.Fatalf("root a held back %d and excluded %d file(s); the comparison proves little", a.HeldBackByRecord.Files,
+			a.ExcludedByPathFilter.Files)
+	}
+}
+
+// TestS0180AC8_AnalyzeWithholdsAFilteredFileUnderThePathFilterMechanism is S0180 [AC-8]:
+// `analyze` withholds a filter-excluded file from its root's sources under a mechanism named
+// `path filter`, and its total sources equal plan's total covered, in files and in bytes -
+// the existing plan-agrees-with-analyze comparison, with filters in force.
+func TestS0180AC8_AnalyzeWithholdsAFilteredFileUnderThePathFilterMechanism(t *testing.T) {
+	f := newScopeFixture(t, false)
+	c, _ := planAndAnalyzeAgree(t, f.cfgPath)
+	byRoot := map[string]*rootCensus{}
+	for _, rc := range c.Roots {
+		byRoot[rc.Root] = rc
+	}
+	for root, want := range map[string]figure{
+		f.a: figureOf(t, f.excludedRel, f.excludedAbs),
+		f.b: figureOf(t, f.bSample),
+		f.c: {},
+	} {
+		rc := byRoot[root]
+		if rc == nil {
+			t.Fatalf("analyze reports no root %s", root)
+		}
+		var got *mechanism
+		for i := range rc.Withheld {
+			if rc.Withheld[i].Name == "path filter" {
+				got = &rc.Withheld[i]
+			}
+		}
+		if got == nil {
+			t.Fatalf("root %s publishes no `path filter` mechanism: %+v", root, rc.Withheld)
+		}
+		if got.Files != want.Files || got.Bytes != want.Bytes {
+			t.Errorf("root %s: `path filter` withheld %d file(s) %d byte(s), want %d and %d",
+				root, got.Files, got.Bytes, want.Files, want.Bytes)
+		}
+	}
+}
+
+// TestS0180AC9_PlanWithFiltersInForceChangesNothingAnywhere is S0180 [AC-9]: plan, in either
+// form, with path filters in force, leaves every file and directory under the state directory
+// and under every root - the excluded and pruned directories included - byte for byte and
+// entry for entry as it was, and creates no ledger where there was none.
+func TestS0180AC9_PlanWithFiltersInForceChangesNothingAnywhere(t *testing.T) {
+	for _, form := range []struct {
+		name string
+		args []string
+	}{
+		{"the report", []string{"plan", "--config"}},
+		{"the json document", []string{"plan", "--json", "--config"}},
+	} {
+		t.Run(form.name, func(t *testing.T) {
+			withLedger := newScopeFixture(t, true)
+			bare := newScopeFixture(t, false)
+			for _, f := range []*scopeFixture{withLedger, bare} {
+				before := map[string]map[string]string{}
+				for _, root := range []string{f.a, f.b, f.c} {
+					before[root] = treeSnapshot(t, root)
+				}
+				var stateBefore map[string]string
+				if _, err := os.Stat(f.state); err == nil {
+					stateBefore = treeSnapshot(t, f.state)
+				}
+				var out, errOut bytes.Buffer
+				if code := dispatch(append(form.args, f.cfgPath), &out, &errOut); code != 0 {
+					t.Fatalf("plan code = %d (stderr: %s)", code, errOut.String())
+				}
+				for root, snap := range before {
+					assertSameTree(t, "the library root "+root, snap, treeSnapshot(t, root))
+				}
+				if stateBefore != nil {
+					assertSameTree(t, "the state directory", stateBefore, treeSnapshot(t, f.state))
+				} else if _, err := os.Stat(f.state); err == nil {
+					t.Fatalf("plan created the state directory %s", f.state)
+				}
+			}
+		})
+	}
+}
+
+// TestS0180AC10_ARootNoPatternReachesStillPublishesItsEntry is S0180 [AC-10]: a root with no
+// source-named file at all, and a root whose exclude patterns match nothing under it - one of
+// them anchored under ANOTHER root - still get an entry with excluded_by_path_filter of zero
+// files and zero bytes and every such pattern listed, and plan exits 0.
+func TestS0180AC10_ARootNoPatternReachesStillPublishesItsEntry(t *testing.T) {
+	dir := t.TempDir()
+	empty, other := filepath.Join(dir, "empty"), filepath.Join(dir, "other")
+	if err := os.MkdirAll(empty, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeCensusFile(t, filepath.Join(other, "kept.mkv"), "no pattern reaches this\n")
+	patterns := []string{empty + "/nothing/**", "no-such-directory/**"}
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := "library_roots:\n  - path: " + empty + "\n  - path: " + other + "\n" +
+		"    exclude_paths: [\"" + patterns[0] + "\", \"" + patterns[1] + "\"]\n" +
+		"state_dir: " + filepath.Join(dir, "state") + "\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	substitute(t, fixedType("ext4"))
+
+	p := planJSON(t, cfgPath) // fails unless the exit code is 0
+	for _, root := range []string{empty, other} {
+		r := rootEntry(t, p, root)
+		if !sameCount(r.ExcludedByPathFilter, figure{}) {
+			t.Errorf("root %s excluded %+v, want 0 files and 0 bytes", root, r.ExcludedByPathFilter)
+		}
+	}
+	if r := rootEntry(t, p, other); strings.Join(r.ExcludePaths, "|") != strings.Join(patterns, "|") {
+		t.Errorf("root %s lists %v, want every configured pattern %v", other, r.ExcludePaths, patterns)
+	}
+	if r := rootEntry(t, p, other); r.Covered.Files != 1 || r.Library.Files != 1 {
+		t.Errorf("root %s: covered %+v library %+v, want its one file in both", other, r.Covered, r.Library)
+	}
+	if r := rootEntry(t, p, empty); r.Library.Files != 0 || r.DirectoriesRead != 1 {
+		t.Errorf("the empty root's entry = %+v, want no file and its one directory read", r)
+	}
+}
+
+// TestS0180AC11_ARefusedPlanWritesNoRootsSection is S0180 [AC-11]: a configuration that cannot
+// be loaded, one that does not validate (a malformed path filter), and a library root that
+// cannot be read each exit 1 with NOTHING on stdout, in either form - exactly as plan refused
+// before this section existed, and never with a partial `roots` section.
+func TestS0180AC11_ARefusedPlanWritesNoRootsSection(t *testing.T) {
+	dir := t.TempDir()
+	lib := filepath.Join(dir, "media")
+	writeCensusFile(t, filepath.Join(lib, "a.mkv"), "x\n")
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	cases := map[string]string{
+		"a configuration that cannot be loaded": filepath.Join(dir, "absent.yaml"),
+		"a configuration that does not validate": write("invalid.yaml", "library_roots:\n  - "+lib+
+			"\nexclude_paths: [\"movies/[4k/**\"]\nstate_dir: "+filepath.Join(dir, "state")+"\n"),
+	}
+	if os.Geteuid() != 0 {
+		locked := filepath.Join(dir, "locked")
+		writeCensusFile(t, filepath.Join(locked, "b.mkv"), "x\n")
+		if err := os.Chmod(locked, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+		cases["a library root that cannot be read"] = write("locked.yaml", "library_roots:\n  - "+locked+
+			"\nexclude_paths: [\"**/Extras\"]\nstate_dir: "+filepath.Join(dir, "state")+"\n")
+	}
+	substitute(t, fixedType("ext4"))
+	for name, cfgPath := range cases {
+		for _, args := range [][]string{{"plan", "--json", "--config", cfgPath}, {"plan", "--config", cfgPath}} {
+			var out, errOut bytes.Buffer
+			if code := dispatch(args, &out, &errOut); code != 1 {
+				t.Errorf("%s (%v): exit %d, want 1", name, args[1], code)
+			}
+			if out.Len() != 0 {
+				t.Errorf("%s (%v): wrote to stdout: %q", name, args[1], out.String())
+			}
+			if errOut.Len() == 0 {
+				t.Errorf("%s (%v): said nothing on stderr", name, args[1])
+			}
+		}
+	}
+}
+
+// TestS0180AC12_ARootEntryCarriesExactlyItsKeysAndNoReclaim is S0180 [AC-12]: a root entry
+// carries exactly the keys the spec defines - no reclaim, saving or projection key - and with
+// no completed encode in the ledger the document carries no reclaim bytes anywhere, so no
+// figure in it can be a fixed fraction of the eligible bytes.
+func TestS0180AC12_ARootEntryCarriesExactlyItsKeysAndNoReclaim(t *testing.T) {
+	f := newScopeFixture(t, true) // a ledger, and no completed encode in it
+	var out, errOut bytes.Buffer
+	if code := dispatch([]string{"plan", "--json", "--config", f.cfgPath}, &out, &errOut); code != 0 {
+		t.Fatalf("plan --json code = %d (stderr: %s)", code, errOut.String())
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	roots, ok := doc["roots"].([]any)
+	if !ok || len(roots) != 3 {
+		t.Fatalf("roots = %#v", doc["roots"])
+	}
+	want := []string{"covered", "directories_not_read", "directories_read", "eligible", "exclude_paths",
+		"excluded_by_path_filter", "held_back_by_record", "include_paths", "library", "root"}
+	for _, raw := range roots {
+		entry := raw.(map[string]any)
+		var keys []string
+		for k := range entry {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		if strings.Join(keys, ",") != strings.Join(want, ",") {
+			t.Errorf("a root entry carries %v, want exactly %v", keys, want)
+		}
+	}
+	// No reclaim bytes anywhere in the document: every projection is refused.
+	if strings.Contains(out.String(), "estimated_reclaim") {
+		t.Fatalf("a document over a ledger with no completed encode carries a reclaim:\n%s", out.String())
+	}
+	var p plan
+	if err := json.Unmarshal(out.Bytes(), &p); err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range append(append([]*planGroup{}, p.Profiles...), p.Total) {
+		if g.Projection.Made || g.Projection.Reclaim != nil {
+			t.Errorf("a projection was made with no completed encode: %+v", g.Projection)
+		}
+	}
+	if p.Total.Eligible.Bytes == 0 {
+		t.Fatal("nothing is eligible, so a fixed fraction of it would be zero and this case proves nothing")
+	}
+}

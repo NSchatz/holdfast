@@ -160,6 +160,61 @@ func (f PathFilters) offers(rootClean, p string) bool {
 	return matchesAny(f.Include, rootClean, rel, abs)
 }
 
+// ExcludesDirectory reports whether an exclude_paths pattern in force for this root reaches
+// dir - matches dir itself, or a directory containing it within this root. It is the startup
+// walk's prune decision (S0168), and it is sound because it is the file-level rule asked of a
+// directory: Offers weighs every pattern against a file's own path AND every directory
+// containing it, so a pattern that reaches dir reaches every path beneath it, and every file
+// there is one Offers refuses.
+//
+// It is the EXCLUDE half alone. include_paths never prunes, because a directory no include
+// pattern names may still hold a file one does. The root itself is never reached: dir must
+// lie strictly beneath it, so a pattern naming the root keeps every file out without the root
+// ceasing to be walked.
+//
+// A pattern that is not well formed is passed over rather than matched. Validate refuses one
+// at start, so meeting one here means this decision was reached without that refusal, and
+// the reading of "cannot decide" that costs nothing is to list the directory and leave each
+// file in it to Offers.
+func (r Root) ExcludesDirectory(dir string) bool {
+	return r.Filters.excludesDirectory(r.Clean, filepath.Clean(dir))
+}
+
+// excludesDirectory is that decision, over a cleaned root and a cleaned directory.
+func (f PathFilters) excludesDirectory(rootClean, dir string) bool {
+	rel, ok := relUnder(rootClean, dir)
+	if !ok {
+		return false
+	}
+	abs := path.Join(filepath.ToSlash(rootClean), rel)
+	for _, pattern := range f.Exclude {
+		if validPattern(pattern) && matchesOne(pattern, rootClean, rel, abs) {
+			return true
+		}
+	}
+	return false
+}
+
+// DirectoryExcluded returns the startup walk's prune decision over this configuration: dir
+// is excluded when the exclude patterns of the root a scan assigns it to reach it
+// (Root.ExcludesDirectory). That root is the FIRST in configuration order containing dir,
+// which is the rule the engine applies to every file it enumerates, so the walk and the scan
+// cannot disagree about whose filters decide a path - nested roots included, which Validate
+// refuses but this does not rely on. The roots are resolved once, here, because the walk
+// asks this of every directory it meets.
+func (c *Config) DirectoryExcluded() func(dir string) bool {
+	roots := c.RootProfiles()
+	return func(dir string) bool {
+		d := filepath.Clean(dir)
+		for _, r := range roots {
+			if r.Contains(d) {
+				return r.ExcludesDirectory(d)
+			}
+		}
+		return false
+	}
+}
+
 // relUnder returns p's path relative to rootClean, `/`-separated, and whether p really
 // is beneath the root. The root ITSELF is not beneath itself: there is no file there to
 // offer, and a relative path of "." would be weighed against every pattern.
@@ -175,17 +230,23 @@ func relUnder(rootClean, p string) (string, bool) {
 // matchesAny reports whether any pattern matches, each weighed against the spelling its
 // own anchoring selects.
 func matchesAny(patterns []string, rootClean, rel, abs string) bool {
-	rootSlash := filepath.ToSlash(rootClean)
 	for _, pattern := range patterns {
-		target, stop := rel, "."
-		if strings.HasPrefix(pattern, "/") {
-			target, stop = abs, rootSlash
-		}
-		if matchesSelfOrAncestor(pattern, target, stop) {
+		if matchesOne(pattern, rootClean, rel, abs) {
 			return true
 		}
 	}
 	return false
+}
+
+// matchesOne weighs one pattern against the spelling its anchoring selects: the path
+// relative to the root for a pattern that does not begin with `/`, the absolute path for one
+// that does.
+func matchesOne(pattern, rootClean, rel, abs string) bool {
+	target, stop := rel, "."
+	if strings.HasPrefix(pattern, "/") {
+		target, stop = abs, filepath.ToSlash(rootClean)
+	}
+	return matchesSelfOrAncestor(pattern, target, stop)
 }
 
 // matchesSelfOrAncestor reports whether pattern matches the whole of target, or the

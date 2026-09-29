@@ -201,23 +201,44 @@ that does not exist yet.
 
 ### What a filter does NOT change
 
-An excluded directory is still **listed**. The scan lists exactly the directories it
-would have listed with no filter configured and records exactly the same evidence about
-where it looked - because the ledger's retention pass may only remove a terminal row when
-this run LISTED the directory the file should be in and the file was not there. A filter
-that skipped the directory instead of its files would make every row beneath it read as a
-file that had been deleted, which would discard audit history irreversibly and hand the
-excluded subtree back to the encoder on the next scan.
+A filter decides which files are offered, and nothing about how a file is judged. The one
+thing it changes about the startup walk is visible, so it is stated here: the walk
+**does not list** a directory an `exclude_paths` pattern reaches - a pattern that matches
+the directory, or a directory containing it within its root - and nothing beneath it is
+enumerated, swept for orphaned temp files or watched, by the first scan or by any later
+one. That is the file rule asked of a directory: a pattern weighed against a file's own
+path and every directory containing it reaches every file beneath such a directory, so
+not listing it keeps out exactly the files the filter keeps out. Startup reports each one
+at `debug` and their count at `info`, and never as a directory that could not be read.
 
-So an excluded file that already has a terminal row keeps it, and `holdfast export` still
-carries its record. Excluding a path is not a request to forget what was done to it.
+A library root is always listed, whatever a pattern says about it, and `include_paths`
+never keeps a directory from being listed: a directory no include pattern names may still
+hold a file one does. The walk still inspects an excluded directory, so a mount point there
+keeps its classification record and refuses a run exactly as it would with no filter
+configured. A mount point BENEATH one is no longer a checked path, because nothing under it
+is offered, swept, watched or swapped.
 
-Filtering is not a way to make a scan faster: the walk is unchanged, and only the set of
-files offered to the pipeline is narrower.
+An excluded file that already has a terminal row **keeps it**, and `holdfast export` still
+carries its record. The ledger's retention pass may only remove a terminal row when this run
+LISTED the directory the file should be in and the file was not there, so it
+draws no conclusion from a directory this run did not list: a row beneath an excluded
+directory is kept whether or not its file is still there, which is retained audit history
+and the safe direction. Excluding a path is not a request to forget what was done to it.
+
+The same storage reached again under a path no pattern reaches - a symbolic link or a bind
+mount of an excluded directory, or a later library root exposing it - is not descended
+either, and startup names the excluded path that reached it first: walking it would offer,
+under a second name, the files the first name keeps out. A bind mount exposing only a
+SUBDIRECTORY of an excluded directory is a path to different storage and is walked like any
+other, so exclude it by its own path as well.
 
 `holdfast validate` prints, per library root, the patterns in force, which layer supplied
 each list and how many patterns it holds. The count is a count OF PATTERNS - `validate`
 describes a configuration and walks no library, so it never counts matching files.
+
+`holdfast plan` is where the files are counted: per library root it publishes the patterns in
+force, the source-named library under the root before any filter, and the part of it a path
+filter kept out (`excluded_by_path_filter`), beside what is covered and eligible after them.
 
 ## `rules` - per-resolution-band overrides inside one library root
 

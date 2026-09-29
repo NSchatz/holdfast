@@ -6,6 +6,7 @@ import (
 	"io"
 	"sort"
 
+	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/engine"
 	"github.com/NSchatz/holdfast/internal/store"
 )
@@ -34,8 +35,12 @@ type plan struct {
 	Storage  storageVerdict `json:"storage"`
 	Ledger   string         `json:"ledger"`
 	Coverage planCoverage   `json:"coverage"`
-	Profiles []*planGroup   `json:"profiles"`
-	Total    *planGroup     `json:"total"`
+	// Roots is the scope of each configured library root, one entry per root in
+	// configuration order: what the library under it is before any filter, and what of it
+	// the filters and the record hold-backs kept out (S0180).
+	Roots    []*planRoot  `json:"roots"`
+	Profiles []*planGroup `json:"profiles"`
+	Total    *planGroup   `json:"total"`
 	// Declined is every enumerated path the pipeline refuses outright, which is in no
 	// figure above because a run claims, probes and records nothing about one either.
 	Declined planDeclinedPaths `json:"declined"`
@@ -53,6 +58,59 @@ type planCoverage struct {
 	DirectoriesNotRead int64    `json:"directories_not_read"`
 	NotReadWhy         []bucket `json:"not_read_reasons,omitempty"`
 	Boundary           string   `json:"boundary"`
+}
+
+// planRoot is one configured library root's SCOPE: the path filters in force for it, the
+// whole source-named library under it BEFORE those filters, the record hold-backs or the
+// outright refusals, what the filters kept out, what a record held back, and what is
+// covered and eligible after them - with the directory coverage it was all read from.
+//
+// It exists so "how big is this library, and how much of it is in this tool's scope" has
+// one answer with the difference named: library = covered + excluded_by_path_filter +
+// held_back_by_record + the declined paths under this root, in files and in bytes. A
+// directory the startup walk did not list - one it could not read, or one an exclude
+// pattern reaches whole, which it prunes - is counted in directories_not_read and its files
+// are in NO figure here, because nobody listed them.
+//
+// It carries these keys and no others, and deliberately no reclaim: a saving is projected
+// only from this install's own completed encodes, per resolved profile, never as a fixed
+// fraction of a root's eligible bytes.
+type planRoot struct {
+	Root                 string   `json:"root"`
+	ExcludePaths         []string `json:"exclude_paths"`
+	IncludePaths         []string `json:"include_paths"`
+	Library              figure   `json:"library"`
+	ExcludedByPathFilter figure   `json:"excluded_by_path_filter"`
+	HeldBackByRecord     figure   `json:"held_back_by_record"`
+	Covered              figure   `json:"covered"`
+	Eligible             figure   `json:"eligible"`
+	DirectoriesRead      int64    `json:"directories_read"`
+	DirectoriesNotRead   int64    `json:"directories_not_read"`
+}
+
+// newPlanRoot starts one root's entry, each figure already carrying the set it covers and
+// each pattern list non-nil, because an absent list and an empty one must print the same.
+func newPlanRoot(r config.Root) *planRoot {
+	under := " under " + r.Clean
+	return &planRoot{
+		Root:         r.Clean,
+		ExcludePaths: append([]string{}, r.Filters.Exclude...),
+		IncludePaths: append([]string{}, r.Filters.Include...),
+		Library: figure{Set: "every source-named file in a directory the startup walk listed" + under +
+			", before path filters, record hold-backs and outright refusals"},
+		ExcludedByPathFilter: figure{Set: "the part of the library a path filter in force for this root " +
+			"kept out of the pass"},
+		HeldBackByRecord: figure{Set: "the part of the library a parked job's record or a recorded " +
+			"replacement path held back, among files no path filter excluded"},
+		Covered:  figure{Set: "every file a scan would enumerate" + under + ", whatever the guards then concluded"},
+		Eligible: figure{Set: "the covered files" + under + " a run would transcode"},
+	}
+}
+
+// add counts one file into a figure.
+func (f *figure) add(bytes int64) {
+	f.Files++
+	f.Bytes += bytes
 }
 
 // planDeclinedPaths is every enumerated path the pipeline refuses OUTRIGHT, with the rule
@@ -299,6 +357,14 @@ func (p *plan) writeReport(w io.Writer) {
 	}
 	fmt.Fprintf(w, "          %s\n", wrapAt(p.Coverage.Boundary, 88, "          "))
 
+	// The scope of each root, before the profiles: what the library under it is, and what of
+	// it the filters and the record hold-backs kept out, so the part of a library this tool
+	// does not consider is a named figure rather than a gap between two reports.
+	fmt.Fprintf(w, "\nlibrary roots - what each holds before the path filters, and what of it is in scope\n")
+	for _, r := range p.Roots {
+		r.writeReport(w)
+	}
+
 	// Per profile FIRST and the total last, because the per-profile figures are the ones an
 	// operator acts on: a total across roots that would be encoded differently is a summary,
 	// never the number to plan by.
@@ -317,6 +383,37 @@ func (p *plan) writeReport(w io.Writer) {
 
 	fmt.Fprintf(w, "\nprobe snapshots taken this invocation: %d. One invocation is one pass over the library.\n",
 		p.Probes)
+}
+
+// writeReport writes one root's scope. The patterns are printed as the JSON document spells
+// them, and every figure carries the label and the numbers the document carries, so the two
+// forms cannot say different things about the same root.
+func (r *planRoot) writeReport(w io.Writer) {
+	fmt.Fprintf(w, "  library root %s\n", r.Root)
+	fmt.Fprintf(w, "    exclude_paths %s\n", patternsText(r.ExcludePaths))
+	fmt.Fprintf(w, "    include_paths %s\n", patternsText(r.IncludePaths))
+	for _, f := range []struct {
+		label string
+		fig   figure
+	}{
+		{"library", r.Library},
+		{"excluded_by_path_filter", r.ExcludedByPathFilter},
+		{"held_back_by_record", r.HeldBackByRecord},
+		{"covered", r.Covered},
+		{"eligible", r.Eligible},
+	} {
+		fmt.Fprintf(w, "    %-24s %8d file(s)  %16d byte(s)\n", f.label, f.fig.Files, f.fig.Bytes)
+	}
+	fmt.Fprintf(w, "    directories  %d read, %d not read\n", r.DirectoriesRead, r.DirectoriesNotRead)
+}
+
+// patternsText renders a pattern list exactly as the JSON document does.
+func patternsText(patterns []string) string {
+	b, err := json.Marshal(patterns)
+	if err != nil {
+		return fmt.Sprint(patterns)
+	}
+	return string(b)
 }
 
 func (g *planGroup) writeReport(w io.Writer, heading string) {

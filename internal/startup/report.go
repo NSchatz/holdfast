@@ -57,9 +57,20 @@ func (res Result) Log(log *slog.Logger) {
 		}
 	}
 
+	excluded := 0
 	for _, n := range res.Notices {
 		attrs := []any{"path", n.Path, "detail", n.Detail}
 		switch n.Kind {
+		case NoticeExcluded:
+			// One line per directory is the detail an operator asking about ONE
+			// directory wants, and the wrong volume for `**/@eaDir/**` over a
+			// library with one in every folder, so it is debug and the count
+			// below is info. Never warn (observability O3): nothing degraded, the
+			// operator's own filter did exactly what it says.
+			excluded++
+			log.Debug("directory not listed: a path filter excludes it", attrs...)
+		case NoticeRegionExcluded:
+			log.Info("storage not descended: it was reached first under a path a path filter excludes", attrs...)
 		case NoticeEmptyRoot:
 			log.Info("library root is present and empty", attrs...)
 		case NoticeReducedGuarantee:
@@ -74,6 +85,10 @@ func (res Result) Log(log *slog.Logger) {
 		default:
 			log.Warn(string(n.Kind), attrs...)
 		}
+	}
+	if excluded > 0 {
+		log.Info("the startup walk did not list the directories the path filters exclude, or anything beneath them",
+			"directories_excluded_by_a_path_filter", excluded)
 	}
 }
 

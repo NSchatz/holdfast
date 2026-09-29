@@ -797,6 +797,11 @@ func startupDecisionScoped(cfg *config.Config, scope classifyScope) startup.Resu
 		StateDir:     stateDirPath(cfg),
 		Declarations: cfg.AllowNonLocal,
 		IsMediaFile:  func(base string) bool { return engine.IsSourceName(base, cfg.VideoExts) },
+		// The path filters' exclude half, per root and from the path alone: a directory
+		// one reaches is inspected and never listed, so every scan pass, the orphaned-temp
+		// sweep and the watch - all bounded by this walk's coverage - never list it either
+		// (S0168). It is the root the scan assigns a path to whose patterns decide.
+		Excluded: cfg.DirectoryExcluded(),
 		// The configured working location, checked in the same decision and before
 		// anything is encoded: a scratch directory that is missing, is not a
 		// directory, is unwritable, is short of the floor or overlaps a library

@@ -329,6 +329,7 @@ func buildPlan(ctx context.Context, cfg *config.Config, res startup.Result, pass
 			"file it decided, and plan records none.",
 	}
 	p.Coverage = planCoverageOf(cfg, res)
+	p.Roots = planRootsOf(cfg, res, pass)
 	p.Declined = planDeclinedPaths{Note: "paths the pipeline refuses outright. A run claims, probes " +
 		"and records NOTHING about one, so they are in no figure above: counting one among the files " +
 		"a run would transcode would promise something no run will do."}
@@ -426,4 +427,77 @@ func planCoverageOf(cfg *config.Config, res startup.Result) planCoverage {
 	}
 	c.NotReadWhy = sortedBuckets(notRead)
 	return c
+}
+
+// planRootsOf is the scope of every configured root, in configuration order, built from the
+// resolved roots and the one pass the rest of the report is built from.
+//
+// Each file is placed under the root the ENGINE enumerated it under (engine.PlanFile.Root and
+// its kin), and each directory under the first root containing it, which is the same rule -
+// so the entries' covered and eligible figures sum to the total group's, and their directory
+// figures to the document's coverage figures. library is the sum of the four things a
+// source-named file in a listed directory can become, which is what makes the identity it
+// states true of the pass rather than of this function: covered, excluded by a path filter,
+// held back by a record, or declined outright.
+func planRootsOf(cfg *config.Config, res startup.Result, pass *engine.PlanPass) []*planRoot {
+	roots := cfg.RootProfiles()
+	out := make([]*planRoot, 0, len(roots))
+	byRoot := map[string]*planRoot{}
+	for _, r := range roots {
+		pr := newPlanRoot(r)
+		out = append(out, pr)
+		if _, dup := byRoot[r.Clean]; !dup {
+			byRoot[r.Clean] = pr
+		}
+	}
+	owning := func(path string) *planRoot {
+		for i, r := range roots {
+			if r.Contains(path) {
+				return out[i]
+			}
+		}
+		return nil
+	}
+
+	for _, f := range pass.Files {
+		if pr := byRoot[f.Root]; pr != nil {
+			pr.Library.add(f.Bytes)
+			pr.Covered.add(f.Bytes)
+			if f.Eligible() {
+				pr.Eligible.add(f.Bytes)
+			}
+		}
+	}
+	for _, k := range pass.Excluded {
+		if pr := byRoot[k.Root]; pr != nil {
+			pr.Library.add(k.Bytes)
+			pr.ExcludedByPathFilter.add(k.Bytes)
+		}
+	}
+	for _, k := range pass.HeldBack {
+		if pr := byRoot[k.Root]; pr != nil {
+			pr.Library.add(k.Bytes)
+			pr.HeldBackByRecord.add(k.Bytes)
+		}
+	}
+	for _, d := range pass.Declined {
+		if pr := byRoot[d.Root]; pr != nil {
+			pr.Library.add(d.Bytes)
+		}
+	}
+
+	for _, dir := range res.Coverage {
+		if pr := owning(dir); pr != nil {
+			pr.DirectoriesRead++
+		}
+	}
+	for _, n := range res.Notices {
+		if !notTraversed[n.Kind] {
+			continue
+		}
+		if pr := owning(n.Path); pr != nil {
+			pr.DirectoriesNotRead++
+		}
+	}
+	return out
 }

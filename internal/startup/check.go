@@ -75,6 +75,18 @@ const (
 	// enumerated from THIS spelling - the sources are enumerated exactly once,
 	// under the spelling the walk reached first.
 	NoticeRegionWalked NoticeKind = "storage-already-walked-under-another-path"
+	// NoticeExcluded: a directory beneath a library root that an exclude_paths
+	// pattern in force for that root reaches (Check.Excluded). Not listed, and
+	// nothing beneath it is enumerated, swept or watched: every file there is one
+	// the path filters refuse. It is a report about the operator's own filter,
+	// never a failure, so it is logged below warn.
+	NoticeExcluded NoticeKind = "directory-excluded-by-a-path-filter"
+	// NoticeRegionExcluded: this path exposes storage the walk reached first
+	// under a spelling an exclude_paths pattern excludes. Not descended, and no
+	// source is enumerated from it under EITHER spelling - the storage is never
+	// enumerated from anywhere, which is what keeps a second spelling from
+	// offering files the first spelling's filter excludes.
+	NoticeRegionExcluded NoticeKind = "storage-excluded-under-another-path"
 	// NoticeUnreadable: the process may not list or enter this directory.
 	NoticeUnreadable NoticeKind = "directory-could-not-be-read"
 	// NoticeListingFailed: listing or entering this directory failed for some
@@ -250,6 +262,15 @@ type Check struct {
 	// enumerate as a source. Deciding it needs no read of any file, which is why
 	// the walk's cost is bounded by the directory tree and not by the library.
 	IsMediaFile func(base string) bool
+	// Excluded reports whether a directory the walk meets strictly beneath a
+	// configured library root is one the exclude_paths patterns in force for the
+	// root it is assigned to reach, decided from the path alone. Such a directory
+	// is PRUNED: inspected - so a mount point there keeps its record and its
+	// refusal - and never listed, so nothing beneath it is covered and nothing is
+	// enumerated, swept or watched there. A configured root is never pruned,
+	// wherever the walk meets it. nil prunes nothing, which is the walk as it was
+	// before path filters reached it.
+	Excluded func(dir string) bool
 	// ClassifyOnly, when non-empty, narrows the library roots this check INSPECTS
 	// and WALKS to the ones it names. It exists for a run that acts under ONE
 	// root - `holdfast run --file` - where classifying a root the run provably
