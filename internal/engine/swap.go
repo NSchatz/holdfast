@@ -57,13 +57,43 @@ const maxPathCandidates = 64
 
 // tempPath and retainedReplacementPath ARE the build's own construction of a replacement
 // path, and they are the whole of it. Everything that holds a path back on its NAME rather
-// than on a record matches exactly what these produce and nothing else, never a widened
-// "looks temporary" pattern that would hold back files holdfast did not write.
+// than on a record matches exactly what these produce, and what the builds before S0177
+// produced in tempPath's place, and nothing else - never a widened "looks temporary"
+// pattern that would hold back files holdfast did not write.
+//
+// The earlier construction is `<stem>.__transcoding__[.<n>].<ext>`, which is this one
+// without TempSuffix. It is still matched because a gate-passed replacement an earlier
+// build stranded at that name is no less the only copy of a film for having been written
+// before the suffix existed (data-migration M1: writers write the new shape, every reader
+// accepts both).
 //
 // The n suffix exists so a second retained replacement for the same source need not
 // overwrite the first; n == 0 is the bare form.
+//
+// WHERE THE SUFFIX CANNOT FIT, the earlier name is written instead. A source whose name is
+// within len(TempSuffix) bytes of NAME_MAX, or whose directory leaves the working path
+// within that of PATH_MAX, has a working name that fits without the suffix and not with
+// it - and those are exactly the long names S0155 made swap. Failing them now would trade
+// a file that swapped for one that cannot, to spare a media server a partial encode it may
+// or may not list; the earlier name is the one every build before this wrote, and every
+// reader of a working name still accepts it (splitTempConstruction), so nothing that
+// recognises, sweeps or holds back a working file loses sight of it.
 func tempPath(dir, stem, ext string, n int) string {
-	return filepath.Join(dir, stem+"."+TempMarker+suffix(n)+"."+ext)
+	earlier := filepath.Join(dir, stem+"."+TempMarker+suffix(n)+"."+ext)
+	if p := earlier + TempSuffix; nameFits(p) {
+		return p
+	}
+	return earlier
+}
+
+// maxPathLen bounds a constructed path: Linux's PATH_MAX is 4096 bytes and counts the
+// terminating NUL, so the longest path the kernel takes is 4095 bytes.
+const maxPathLen = 4095
+
+// nameFits reports whether a constructed path fits the kernel's limits: its last element
+// within NAME_MAX (maxBaseName) and the whole within PATH_MAX.
+func nameFits(p string) bool {
+	return len(filepath.Base(p)) <= maxBaseName && len(p) <= maxPathLen
 }
 
 func retainedReplacementPath(dir, stem, ext string, n int) string {
@@ -82,7 +112,8 @@ func suffix(n int) string {
 // construction could have produced: a non-empty stem, the marker, an optional all-digit
 // ordinal, and a simple extension.
 //
-// It is the whole of the RECORD-FREE basis, for BOTH markers. That basis exists because the
+// It is the whole of the RECORD-FREE basis, for BOTH markers; the temp construction reaches
+// it through splitTempConstruction, which takes TempSuffix off first. That basis exists because the
 // case that most needs holding back is the one where no record could be written - the job
 // store was unwritable, which is precisely what denied the record - so a hold-back that
 // depended on a record would be absent exactly when it matters. Nothing else in the library
@@ -119,15 +150,32 @@ func IsRetainedReplacementName(base string) bool {
 	return ok
 }
 
+// splitTempConstruction is splitConstruction for the temp construction, which has two
+// generations: tempPath's own name, `<stem>.__transcoding__[.<n>].<ext>.holdfast-part`,
+// and the name every build before S0177 wrote, the same without TempSuffix. It recovers
+// the SAME stem and extension from both, and those are what the hold-back looks for a
+// source beside the file by, so a stranded replacement is measured against its source
+// whichever build stranded it.
+//
+// Nothing else is accepted. Only the exact suffix is stripped, and what is left must still
+// be the earlier construction exactly, so `.part`, `.holdfast-part` twice or anything after
+// the suffix is not a construction name. A new-form name this failed to recognise would be
+// no hold at all: strayReplacementHold answers "" for it and the sweep's os.Remove takes a
+// gate-passed replacement.
+func splitTempConstruction(base string) (stem, ext string, ok bool) {
+	return splitConstruction(strings.TrimSuffix(base, TempSuffix), TempMarker)
+}
+
 // IsTempConstructionName reports whether base is EXACTLY a name tempPath could have
-// produced. It is the SECOND half of the record-free basis and is deliberately narrower
+// produced, or the name a build before S0177 produced in its place (splitTempConstruction).
+// It is the SECOND half of the record-free basis and is deliberately narrower
 // than isTempName, which decides what the stale-temp SWEEP looks at and has to stay wide: a
 // temp with an odd name is still work in progress and still has to be reclaimed. This one
 // decides what may be HELD BACK on its name, which withholds it from the library for as
 // long as the file is there, so the two questions get two matchers rather than one loose
 // one shared between them.
 func IsTempConstructionName(base string) bool {
-	_, _, ok := splitConstruction(base, TempMarker)
+	_, _, ok := splitTempConstruction(base)
 	return ok
 }
 
@@ -153,7 +201,8 @@ func IsTempConstructionName(base string) bool {
 //
 // THE RULE THAT DECIDES IT, and the direction each half fails in:
 //
-//  1. its NAME must be exactly what tempPath could have produced - never a widened
+//  1. its NAME must be exactly what tempPath could have produced, or what the builds
+//     before it produced in its place (splitTempConstruction) - never a widened
 //     temp-or-dotfile pattern (AC15i bounds the record-free basis to the construction).
 //     A name outside the construction is not this rule's business at all.
 //  2. AN UNANSWERED QUESTION IS NOT A "NO". Every question past 3 costs an ffprobe
@@ -219,7 +268,7 @@ func (e *Engine) strayReplacementHold(ctx context.Context, path string) string {
 	if fi, err := os.Lstat(path); err != nil || !fi.Mode().IsRegular() {
 		return ""
 	}
-	stem, ext, ok := splitConstruction(filepath.Base(path), TempMarker)
+	stem, ext, ok := splitTempConstruction(filepath.Base(path))
 	if !ok {
 		return ""
 	}
@@ -325,7 +374,8 @@ func couldThisBuildHaveWrittenIt(codec string) bool {
 // sourceBeside finds the source a stray temp was being encoded FROM: the sibling sharing
 // its stem that carries a video extension. tempPath puts the temp in the source's own
 // directory under the source's own stem, so this is that construction read backwards and
-// not a search. The temp's own extension is tried first because it IS the source's
+// not a search. The temp's own extension - the container extension its name carries,
+// ahead of TempSuffix where it has one - is tried first because it IS the source's
 // whenever the output container matches the source (the default); the configured
 // extensions cover a forced container_ext, where the two differ.
 func (e *Engine) sourceBeside(dir, stem, tempExt string) (string, bool) {

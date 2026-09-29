@@ -519,7 +519,7 @@ func TestScratch_TheCopyBackTempIsTheExistingConstructionAndTheExistingRulesCove
 		leftover := tempPath(d2, "film", "mkv", 0)
 		ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", s2,
 			"-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error",
-			"-crf", "35", "-pix_fmt", "yuv420p", "--", leftover)
+			"-crf", "35", "-pix_fmt", "yuv420p", "-f", "matroska", "--", leftover)
 
 		e2 := buildEngine(t, ffmpeg, ffprobe, d2, nil, nil)
 		e2.held.Store(e2.loadHoldBacks(ctx))

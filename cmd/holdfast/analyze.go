@@ -546,16 +546,22 @@ func (rc *rootCensus) finish() {
 // nameMechanism explains why a name is not a source. engine.IsSourceName has already
 // DECIDED that it is not; this only says which of its clauses fired, so the mechanism
 // table adds up without ever being the thing that decides membership.
+//
+// holdfast's own markers are asked BEFORE the extension, as the engine asks them. A
+// working file beside a source ends in engine.TempSuffix, and a retained original in
+// engine.UndoSuffix, neither of which is a video extension, and reporting either as
+// merely "not a video extension" would say nothing about what it is; the marker is also
+// what keeps it out whatever video_exts lists.
 func nameMechanism(base string, exts []string) string {
 	switch {
-	case !matchesConfiguredExt(base, exts):
-		return mechExt
 	case strings.Contains(base, "."+engine.TempMarker+"."):
 		return mechTemp
 	case engine.IsRetainedReplacementName(base):
 		return mechRetained
 	case strings.Contains(base, "."+engine.UndoMarker):
 		return mechUndoName
+	case !matchesConfiguredExt(base, exts):
+		return mechExt
 	default:
 		return mechOther
 	}

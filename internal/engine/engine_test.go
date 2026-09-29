@@ -975,7 +975,7 @@ func TestCase16_TruncatedUnknownDurationRejected(t *testing.T) {
 	// packet-count parity can reject it (source has ~20 frames).
 	enc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
 		return exec.Command(ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-y", "-i", in,
-			"-c:v", "libx265", "-frames:v", "3", "-x265-params", "log-level=error", "--", out).Run()
+			"-c:v", "libx265", "-frames:v", "3", "-x265-params", "log-level=error", "-f", "matroska", "--", out).Run()
 	})
 	led := run(t, ffmpeg, ffprobe, d, enc, func(c *config.Config) { c.VideoExts = []string{"h264"} })
 	if !exists(raw) || md5f(t, raw) != before {
@@ -1009,7 +1009,7 @@ func TestCase17_DroppedAudioTrackRejected(t *testing.T) {
 	enc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
 		return exec.Command(ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-y", "-i", in,
 			"-map", "0:v:0", "-c:v", "libx265", "-x265-params", "log-level=error",
-			"-pix_fmt", "yuv420p10le", "--", out).Run()
+			"-pix_fmt", "yuv420p10le", "-f", "matroska", "--", out).Run()
 	})
 	led := run(t, ffmpeg, ffprobe, d, enc, nil)
 	if md5f(t, src) != before {
@@ -1356,7 +1356,7 @@ func degradedEncoder(ffmpeg string) EncoderFunc {
 		return exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-y", "-i", in,
 			"-vf", "scale=64:48,scale=320:240:flags=neighbor",
 			"-c:v", "libx265", "-crf", "45", "-x265-params", "log-level=error",
-			"-pix_fmt", "yuv420p10le", "--", out).Run()
+			"-pix_fmt", "yuv420p10le", "-f", "matroska", "--", out).Run()
 	}
 }
 
@@ -1430,7 +1430,7 @@ func locallyBrokenEncoder(ffmpeg string) EncoderFunc {
 				"[cl][bad]overlay=enable='between(n,100,103)'[v]",
 			"-map", "[v]",
 			"-c:v", "libx265", "-crf", "18", "-preset", "veryfast", "-x265-params", "log-level=error",
-			"-pix_fmt", "yuv420p10le", "--", out).Run()
+			"-pix_fmt", "yuv420p10le", "-f", "matroska", "--", out).Run()
 	}
 }
 

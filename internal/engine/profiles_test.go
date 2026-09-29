@@ -283,7 +283,7 @@ func TestProfiles_TheOutputCodecCheckIsDecidedAgainstTheJobsOwnTarget(t *testing
 		writesHevc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
 			ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", in,
 				"-c:v", "libx265", "-x265-params", "log-level=error", "-preset", "ultrafast",
-				"-crf", "35", "-pix_fmt", "yuv420p", "--", out)
+				"-crf", "35", "-pix_fmt", "yuv420p", "-f", "matroska", "--", out)
 			return nil
 		})
 
@@ -322,7 +322,7 @@ func TestProfiles_TheOutputCodecCheckIsDecidedAgainstTheJobsOwnTarget(t *testing
 		writesHevc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
 			ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", in,
 				"-c:v", "libx265", "-x265-params", "log-level=error", "-preset", "ultrafast",
-				"-crf", "35", "-pix_fmt", "yuv420p", "--", out)
+				"-crf", "35", "-pix_fmt", "yuv420p", "-f", "matroska", "--", out)
 			return nil
 		})
 

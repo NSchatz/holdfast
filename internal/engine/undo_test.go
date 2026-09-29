@@ -219,7 +219,7 @@ func TestUndo_RetentionCostsNoSpace(t *testing.T) {
 
 	u := NewUndoWindow(undoCfg(d, 24), nil, discardLogger())
 	before := treeUsage(t, d)
-	retained, err := u.retain(src, probe.Fingerprint(src))
+	retained, err := u.retain(context.Background(), src, probe.Fingerprint(src))
 	if err != nil {
 		t.Fatalf("retain: %v", err)
 	}
@@ -481,7 +481,7 @@ func TestUndo_OurOwnRetainedLinkDoesNotTripTheHardlinkGuard(t *testing.T) {
 			// Leave the state an interrupted run leaves: the source present, a second
 			// link to it in the retention area.
 			u := eng.undo()
-			retained, err := u.retain(src, probe.Fingerprint(src))
+			retained, err := u.retain(context.Background(), src, probe.Fingerprint(src))
 			if err != nil {
 				t.Fatalf("retain: %v", err)
 			}
@@ -595,10 +595,20 @@ func TestUndo_ARetainedOriginalIsNeverEnumerated(t *testing.T) {
 
 			eng, ts := undoEngine(t, ffmpeg, ffprobe, d, 24, spy)
 			u := eng.undo()
-			retained, err := u.retain(src, probe.Fingerprint(src))
+			retained, err := u.retain(context.Background(), src, probe.Fingerprint(src))
 			if err != nil {
 				t.Fatalf("retain: %v", err)
 			}
+			// Held under the name every build before S0177 gave a retained original, which
+			// ends in the source's own extension: a library upgraded from one of those builds
+			// still holds retentions named so, and they are the sharpest form of this hazard.
+			// This build's own name is refused on its marker too, with its suffix configured
+			// as a video extension (TestS0177AC15_).
+			earlier := legacyRetainedPathFor(src, probe.Fingerprint(src))
+			if err := os.Rename(retained, earlier); err != nil {
+				t.Fatalf("move the retention to its earlier name: %v", err)
+			}
+			retained = earlier
 			if err := u.record(context.Background(), src, src, retained, probe.FileSize(src)); err != nil {
 				t.Fatalf("record: %v", err)
 			}

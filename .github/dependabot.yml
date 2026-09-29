@@ -1,0 +1,52 @@
+# Dependabot version updates: a pull request when a pin has moved upstream. Decided by the
+# owner at Checkpoint T (S0151): GitHub's built-in bot, driven by this file, with no app to
+# install.
+#
+# Nothing merges on its own. Every pull request this opens runs the full gate (`make check`
+# and the image smoke) in CI and waits for a human review; nothing in this repository turns
+# auto-merge on. Version updates wait out GitHub's default 3-day cooldown after a release
+# (https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference
+# , "cooldown"; read 2026-09-29).
+#
+# What it watches, and what keeps each class readable to it (scripts/check-pins.sh):
+#   github-actions  every `uses:` reference, SHA-pinned with its version comment (section 5)
+#   docker          every base image, written on its own FROM line (section 7)
+#   gomod           the module requirements in go.mod
+# Section 9 refuses this file if any of the three stops watching the repository root.
+#
+# What it does NOT watch: the ffmpeg pin (the FFMPEG_* ARGs and NOTICE), which no ecosystem
+# reads; .github/workflows/pin-health.yml watches that one. A Go toolchain update arrives as
+# a docker update of the build stage's FROM line alone, and stays red until a human moves
+# ARG GO_IMAGE and every workflow's GO_VERSION with it (section 3): one Go everywhere is the
+# rule the gate holds, and a bot does not get to split it.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "build"
+      include: "scope"
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "build"
+      include: "scope"
+
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "build"
+      include: "scope"
+    groups:
+      go-modules:
+        patterns: ["*"]
