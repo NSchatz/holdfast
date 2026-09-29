@@ -117,9 +117,7 @@ func resolveAutoWorkers(coresPerWorker int, root string, cpus int) WorkerPlan {
 	if root == "" {
 		root = cpuquota.DefaultRoot
 	}
-	if cpus < 1 {
-		cpus = 1
-	}
+	cpus = max(cpus, 1)
 	p := WorkerPlan{Auto: true, Setting: WorkersAuto, CoresPerWorker: coresPerWorker,
 		CPUs: cpus, Root: root, Quota: float64(cpus), QuotaSource: QuotaFromCPUCount}
 	q, err := cpuquota.Read(root)
@@ -151,14 +149,7 @@ func autoWorkers(q float64, coresPerWorker int) int {
 	if coresPerWorker < 1 {
 		coresPerWorker = DefaultCoresPerWorker
 	}
-	n := math.Floor(q / float64(coresPerWorker))
-	switch {
-	case n < 1:
-		return 1
-	case n > maxWorkers:
-		return maxWorkers
-	}
-	return int(n)
+	return int(min(max(math.Floor(q/float64(coresPerWorker)), 1), maxWorkers))
 }
 
 // quotaSourceOf names the file a limited reading came from.
@@ -187,12 +178,7 @@ func (c *Config) WorkerPlan() WorkerPlan {
 
 // numericWorkers is a whole-number workers setting as it has always resolved: 0 (absent) or
 // a negative value is 1.
-func (c *Config) numericWorkers() int {
-	if c.Workers < 1 {
-		return 1
-	}
-	return c.Workers
-}
+func (c *Config) numericWorkers() int { return max(c.Workers, 1) }
 
 // EffectiveCoresPerWorker is the divisor `auto` uses: the configured value, or the default
 // where a Config carries none.

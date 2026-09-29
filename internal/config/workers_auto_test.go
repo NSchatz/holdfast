@@ -130,6 +130,10 @@ func TestS0163_AC2_AutoDividesTheCPUQuotaByCoresPerWorker(t *testing.T) {
 		{"max, 56 CPUs, 16", "max 100000", 56, "16", 3, 56, QuotaFromCPUCount},
 		{"4800000/100000, 8 CPUs, 4", "4800000 100000", 8, "4", 2, 8, QuotaFromCPUCount},
 		{"the cap: max on 4096 CPUs at 1 per worker", "max 100000", 4096, "1", 1024, 4096, QuotaFromCPUCount},
+		// A quota exactly the CPU count binds no harder than the count, so the count is
+		// named: only a quota BELOW it is where Q came from.
+		{"800000/100000 on exactly 8 CPUs, 4", "800000 100000", 8, "4", 2, 8, QuotaFromCPUCount},
+		{"700000/100000 on 8 CPUs, 1", "700000 100000", 8, "1", 7, 7, QuotaFromCgroup},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s0163Cgroup(t, map[string]string{"cpu.max": tc.cpuMax + "\n"})
@@ -175,8 +179,10 @@ func TestS0163_AC2_AutoDividesTheCPUQuotaByCoresPerWorker(t *testing.T) {
 	if got := (&Config{}).EffectiveCoresPerWorker(); got != 16 {
 		t.Errorf("a Config with no cores_per_worker divides by %d, want 16", got)
 	}
-	if got := (&Config{CoresPerWorker: 5}).EffectiveCoresPerWorker(); got != 5 {
-		t.Errorf("a Config carrying cores_per_worker 5 divides by %d", got)
+	for _, n := range []int{1, 5} {
+		if got := (&Config{CoresPerWorker: n}).EffectiveCoresPerWorker(); got != n {
+			t.Errorf("a Config carrying cores_per_worker %d divides by %d", n, got)
+		}
 	}
 	// The floor is taken AFTER the division and before nothing else: 31.9 CPUs at 16 is
 	// one worker, 32 is two, and a quota under one worker's worth is still one.
@@ -188,6 +194,17 @@ func TestS0163_AC2_AutoDividesTheCPUQuotaByCoresPerWorker(t *testing.T) {
 		if got := autoWorkers(tc.q, tc.cores); got != tc.want {
 			t.Errorf("autoWorkers(%v, %d) = %d, want %d", tc.q, tc.cores, got, tc.want)
 		}
+	}
+	// `auto` is resolved ONCE, at load: a hierarchy that changes afterwards moves nothing a
+	// loaded Config (or a copy of it) says.
+	s0163Cgroup(t, map[string]string{"cpu.max": "4800000 100000\n"})
+	s0163CPUs(t, 56)
+	once := loadYAML(t, "library_roots:\n  - /mnt/tv\nworkers: auto\n")
+	copied := *once
+	s0163Cgroup(t, map[string]string{"cpu.max": "200000 100000\n"})
+	if once.EffectiveWorkers() != 3 || copied.EffectiveWorkers() != 3 || once.WorkerPlan().Quota != 48 {
+		t.Errorf("a loaded auto Config re-read the quota after load: workers %d (copy %d), Q %v; want 3 and 48",
+			once.EffectiveWorkers(), copied.EffectiveWorkers(), once.WorkerPlan().Quota)
 	}
 	// A Config assembled by hand with WorkersAuto set resolves from the live hierarchy.
 	s0163Cgroup(t, map[string]string{"cpu.max": "3200000 100000\n"})
