@@ -213,3 +213,30 @@ Its fixtures are **composed at runtime and never committed**. A fixture that sat
 scanned tree would make `make secret-scan` red by construction, and the only ways out of
 that would be an allowlist that grows until the scanner stops scanning, or deleting the
 proof.
+
+# The identity scan
+
+This repository is public. The owner's name and email appear in `LICENSE` and `NOTICE` and
+nowhere else in a tracked file; every other place that needs a person - a fixture, an
+example, a test header - uses a synthetic one. `make identity-scan` enforces it inside
+`make check`, so CI and the release workflow run it too.
+
+**Whose identity.** The scan reads it at run time from the author of the repository's
+**first commit**, and it is written down nowhere, so the guard carries no copy of what it
+guards. Not the configured git identity (that is whoever runs the gate, and in CI nobody),
+and not HEAD's author (on a pull request, a merge commit GitHub made). A **shallow clone**
+does not have the first commit, so the scan refuses one (exit 4) rather than look for
+whoever authored its cut-off commit; that is why the workflow jobs that run `make check`
+check out with `fetch-depth: 0`.
+
+**What matches.** Each word of the name (two characters or more), the email, and the
+email's local part: whole words, ignoring case, in every tracked file including binary
+ones. Whole words is what keeps the GitHub account name in URLs and the Go module path out
+of it. A finding prints the path, the line and which part matched, and never the matched
+text or the identity: a public repository's CI log is public. A clean run prints a
+12-digit fingerprint of the identity it derived, so a local run and a CI run can be seen
+to have looked for the same person.
+
+The exit codes are the secret scanner's: 0 clean, 3 **FOUND**, 4 **COULD NOT RUN**, 2 a
+wrong invocation. `make identity-scan-selftest` proves it bites against throwaway
+repositories whose first commit a synthetic owner made.
