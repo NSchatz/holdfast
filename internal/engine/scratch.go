@@ -116,12 +116,18 @@ func scratchWorkPath(scratch, source, ext string, n int) string {
 // costs an encode and never the only copy.
 //
 // The record-based hold-backs still apply: a path a live record names is left alone
-// wherever it is.
+// wherever it is. So does a job in flight: the path is HELD for the job that picked it
+// (holdWorkingPath), the caller releases it on every way out, and a path another job in this
+// process holds is skipped rather than cleared.
 func (e *Engine) pickScratchPath(scratch, source, ext string) (string, error) {
 	for n := 0; n < maxPathCandidates; n++ {
 		p := scratchWorkPath(scratch, source, ext, n)
 		if why, ok := e.heldBack(p); ok {
 			e.Log.Info("not using a scratch working path a record holds back", "path", p, "why", why)
+			continue
+		}
+		if !holdWorkingPath(p) {
+			e.Log.Info("not using a scratch working path another job in flight is writing", "path", p)
 			continue
 		}
 		_ = os.Remove(p)
@@ -141,7 +147,10 @@ func (e *Engine) free(path string) (uint64, error) {
 }
 
 // scratchRoomFor refuses a job whose source will not fit in what is left of the
-// scratch filesystem, BEFORE the encoder writes a byte.
+// scratch filesystem, BEFORE the encoder writes a byte, and otherwise reserves the
+// source's size there until the returned release runs (reserveRoom): a job that fits only
+// in what the jobs already in flight on that filesystem have not reserved WAITS for one of
+// them to end rather than failing.
 //
 // The source's own size is the bar, and it is a deliberately conservative one: a
 // transcode is only ever taken when the output is SMALLER than the source (that is
@@ -154,19 +163,19 @@ func (e *Engine) free(path string) (uint64, error) {
 // already leaves the source untouched and records the error - so refusing here on
 // the strength of a broken statfs would cost an operator every file in the run to
 // protect them from an outcome that is already safe.
-func (e *Engine) scratchRoomFor(scratch, source string, sourceBytes int64) error {
-	free, err := e.free(scratch)
-	if err != nil {
-		e.Log.Warn("could not establish the free space on the scratch filesystem (continuing: a scratch write that fails is an ordinary encode failure, and leaves the source untouched)",
-			"scratch_dir", scratch, "err", err)
-		return nil
-	}
-	if sourceBytes >= 0 && free < uint64(sourceBytes) {
-		return fmt.Errorf("not enough room in the scratch directory %s for %s: %d byte(s) available, the source is %d byte(s). "+
-			"Free space there, point scratch_dir at a larger device, or unset scratch_dir to encode beside the source",
-			scratch, source, free, sourceBytes)
-	}
-	return nil
+func (e *Engine) scratchRoomFor(ctx context.Context, scratch, source string, sourceBytes int64) (release func(), err error) {
+	return e.reserveRoom(ctx, source, sourceBytes, roomCheck{
+		dir: scratch,
+		refuse: func(avail, size uint64) error {
+			return fmt.Errorf("not enough room in the scratch directory %s for %s: %d byte(s) available, the source is %d byte(s). "+
+				"Free space there, point scratch_dir at a larger device, or unset scratch_dir to encode beside the source",
+				scratch, source, avail, size)
+		},
+		lookupFailed: func(err error) {
+			e.Log.Warn("could not establish the free space on the scratch filesystem (continuing: a scratch write that fails is an ordinary encode failure, and leaves the source untouched)",
+				"scratch_dir", scratch, "err", err)
+		},
+	})
 }
 
 // copyBackBesideSource puts the ACCEPTED encode into the source's own directory and

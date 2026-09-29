@@ -31,6 +31,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -128,6 +129,11 @@ type UndoWindow struct {
 	// now is a test seam for the clock. Production leaves it nil and uses time.Now;
 	// a test uses it to place a retention's expiry in the past without sleeping.
 	now func() time.Time
+
+	// afterArea, when non-nil, is called with the retention area immediately after retain
+	// has created it and before it links into it - the window in which a sibling's prune
+	// can remove it. Production leaves it nil.
+	afterArea func(area string)
 }
 
 // NewUndoWindow builds the undo surface over a store.
@@ -143,6 +149,7 @@ func NewUndoWindow(cfg config.Config, st store.Store, log *slog.Logger) *UndoWin
 func (e *Engine) undo() *UndoWindow {
 	u := NewUndoWindow(e.Cfg, e.Store, e.Log)
 	u.now = e.undoNow
+	u.afterArea = e.hookUndoArea
 	return u
 }
 
@@ -184,17 +191,36 @@ func (u *UndoWindow) Enabled() bool { return u.Cfg.UndoEnabled() }
 // first crash would park the file for as long as the record lived. A leftover an earlier
 // build left under the earlier name is carried to this build's name first (carryEarlierLink),
 // so the swap ends with one retained name for the original, not two.
+//
+// The area is SHARED by every job whose source sits in the same directory, and a job that
+// abandons or releases its retention prunes the area when that leaves it empty
+// (pruneUndoDir). A sibling's prune landing between this job creating the area and linking
+// into it removes the directory the link names, so a link that fails for want of the area -
+// the area gone, not the source - creates it again and links again (S0163). That is bounded:
+// each retry needs another sibling to empty the area in the same instant, and a retention
+// that still cannot be taken is the ordinary skip.
 func (u *UndoWindow) retain(ctx context.Context, src, fingerprint string) (string, error) {
 	dst := retainedPathFor(src, fingerprint)
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return "", fmt.Errorf("create the retention area: %w", err)
-	}
-	if err := u.carryEarlierLink(ctx, src, fingerprint, dst); err != nil {
-		return "", err
-	}
-	err := os.Link(src, dst)
-	if err == nil {
-		return dst, nil
+	area := filepath.Dir(dst)
+	var err error
+	for attempt := 1; ; attempt++ {
+		if err := os.MkdirAll(area, 0o755); err != nil {
+			return "", fmt.Errorf("create the retention area: %w", err)
+		}
+		if u.afterArea != nil {
+			u.afterArea(area)
+		}
+		if err := u.carryEarlierLink(ctx, src, fingerprint, dst); err != nil {
+			return "", err
+		}
+		err = os.Link(src, dst)
+		if err == nil {
+			return dst, nil
+		}
+		if attempt < retainAttempts && errors.Is(err, fs.ErrNotExist) && areaGone(area) {
+			continue
+		}
+		break
 	}
 	if !errors.Is(err, os.ErrExist) {
 		// EXDEV lands here when the retention area is not on the source's filesystem,
@@ -212,6 +238,18 @@ func (u *UndoWindow) retain(ctx context.Context, src, fingerprint string) (strin
 		return dst, nil
 	}
 	return "", errRetentionExists
+}
+
+// retainAttempts bounds how many times a retention creates its area and links into it,
+// when a sibling's prune removed the area in between (retain).
+const retainAttempts = 3
+
+// areaGone reports whether the retention area no longer exists, which is what tells a link
+// that failed because a sibling pruned the area from one that failed because the SOURCE
+// went away: the second is not retried, it is the ordinary failure.
+func areaGone(area string) bool {
+	_, err := os.Lstat(area)
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // carryEarlierLink moves the link an earlier build took for this same original - at its
@@ -307,7 +345,9 @@ func (u *UndoWindow) discard(path string) {
 
 // pruneUndoDir removes the retention area when it is empty. os.Remove on a directory
 // fails unless it is empty, which is exactly the test wanted - so this needs no
-// listing and cannot race a concurrent worker's retention into deletion.
+// listing and cannot race a concurrent worker's retention into deletion. It CAN land
+// between a concurrent worker creating the area and linking into it, which is why retain
+// creates it again when its link finds the area gone.
 func pruneUndoDir(dir string) {
 	if filepath.Base(dir) != UndoDirName {
 		return

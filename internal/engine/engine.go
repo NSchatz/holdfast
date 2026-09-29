@@ -443,11 +443,27 @@ type Engine struct {
 	// would not be proved at all.
 	freeBytes func(path string) (uint64, error)
 
+	// fsID, when non-nil, replaces the filesystem-identity read those checks key their
+	// reservations by (diskfree.ID). A CI runner has one filesystem under its temp
+	// directory, and "two sources on two filesystems" cannot be arranged any other way.
+	fsID func(path string) (string, error)
+
+	// hookRoomWait, when non-nil, is called once when a job starts waiting for room
+	// (reserveRoom), carrying its source. It is how a test knows a job is waiting rather
+	// than inferring it from how long nothing happened.
+	hookRoomWait func(source string)
+
 	// room is the bytes every in-flight job whose working file goes beside its source has
 	// claimed on that source's filesystem, from the moment it passes sourceRoomFor until it
 	// exits. It is engine-wide because every pool that feeds ProcessFile writes to the same
 	// filesystems.
 	room roomHolds
+
+	// hookTargetWait, when non-nil, is called when a job finds another job of this process
+	// between its pre-swap target check and the end of its swap for the same target, just
+	// before it waits for it (lockSwapTarget). It is how a test observes the wait instead of
+	// inferring it from timing.
+	hookTargetWait func(final string)
 
 	// owners is where this engine records which process owns each temp it writes beside a
 	// source, and how that record's storage is classified (TrackTempOwners, tempowner.go).
@@ -457,6 +473,11 @@ type Engine struct {
 	// undoNow, when non-nil, replaces the clock the undo window reads, so a test can place
 	// a retention's expiry in the past and exercise the release sweep for real.
 	undoNow func() time.Time
+
+	// hookUndoArea, when non-nil, is called with the retention area right after a
+	// retention has created it and before it links into it (UndoWindow.retain), so a test
+	// can land a sibling's prune in exactly that window.
+	hookUndoArea func(area string)
 
 	// Observer, when non-nil, receives an Event on every job-state transition. It is a
 	// fire-and-forget NOTIFICATION beside the store writes, never a substitute for them and
@@ -919,11 +940,9 @@ func (e *Engine) runPass(ctx context.Context, b Bound) error {
 		e.reportBound(b)
 	}
 
-	if _, err := e.Store.RecoverStale(ctx); err != nil {
-		// Fail safe: a stuck "active" row means one file is skipped this pass (Claim treats
-		// it as held), never a false completion, so log and continue.
-		e.Log.Warn("recover stale jobs failed (continuing)", "err", err)
-	}
+	// The rows a previous process left active are reset here - and only those: a row a job
+	// of this process still holds is left to it (recoverStale).
+	e.recoverStale(ctx)
 	// The undo window closes here (UNDO-6), at the START of the pass and before anything is
 	// encoded, so the figure an operator sees covers the whole pass and the disk this run is
 	// about to write to has had back whatever the last one held.
@@ -1921,8 +1940,13 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// one of them is cleared there, where the answer is known, instead of by a DELETE per
 	// guard per file per pass that matches nothing on every file of a processed library.
 	// What it decides is unchanged; what it costs is a write only where there is a row.
-	claimed, err := e.Store.Claim(ctx, f, key, worker, e.Cfg.MaxFailures,
-		e.inputsFor(prof, ts), mutableGuardSkips...)
+	//
+	// It is taken through takeClaim, which counts the job live from here until it returns, so
+	// a pass starting meanwhile - another pool's, or another engine's on this ledger - does
+	// not reset this row and hand the source to a second claimant (S0163).
+	claimed, leaveClaim, err := e.takeClaim(func(st store.Store) (bool, error) {
+		return st.Claim(ctx, f, key, worker, e.Cfg.MaxFailures, e.inputsFor(prof, ts), mutableGuardSkips...)
+	})
 	if err != nil {
 		// Fail safe: a store error must never be treated as "done", and it must never be
 		// treated as a verdict about the file either. Nothing about the file is touched,
@@ -1937,6 +1961,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	if !claimed {
 		return nil
 	}
+	defer leaveClaim()
 	if e.onClaim != nil {
 		e.onClaim(worker, f)
 	}
@@ -2136,15 +2161,24 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			return nil
 		}
 		work = w
+		// Held for this job until it exits, by every way out, after whatever that way did
+		// to the working file: no other job in flight may pick it meanwhile.
+		defer releaseWorkingPath(work)
 		// The per-job free-space pre-check BESIDE THE SOURCE, the counterpart of the scratch
 		// one below, taken against the filesystem the working file is about to land on and
 		// BEFORE the encoder has written a byte. It sits after the temp path is chosen because
 		// choosing it only clears a stale temp, which creates nothing and returns that temp's
-		// blocks before they are measured. A job that cannot fit - its own source plus what
-		// the other jobs in flight there hold - fails here, names the figures, leaves the
-		// source untouched, and the scan carries on. See sourceRoomFor.
-		release, err := e.sourceRoomFor(dir, f, fi.Size())
+		// blocks before they are measured. A job whose source cannot fit even with nothing
+		// reserved fails here, names the figures, leaves the source untouched, and the scan
+		// carries on; one that fits only without what the other jobs in flight there have
+		// reserved waits for one of them to end (S0163). See sourceRoomFor.
+		release, err := e.sourceRoomFor(ctx, dir, f, fi.Size())
 		if err != nil {
+			if ctx.Err() != nil {
+				// Cancelled while it waited for room: nothing was encoded, nothing is
+				// recorded against the file, and the source is untouched.
+				return ctx.Err()
+			}
 			e.Log.Warn("FAIL (not enough room beside the source, source untouched)", "file", f, "err", err)
 			e.fail(ctx, f, key, GateOther, withSourceDimensions(
 				&store.Outcome{Reason: err.Error(), Profile: ts.Profile, Decision: by}, props))
@@ -2174,13 +2208,21 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		// and BEFORE the encoder has written a byte. The startup floor cannot do this job: it
 		// has no per-file size to check against, and a filesystem can fill from outside
 		// holdfast at any point after a run begins. A job that cannot fit fails here, names
-		// the figures, leaves the source untouched, and the scan carries on.
-		if err := e.scratchRoomFor(scratch, f, fi.Size()); err != nil {
+		// the figures, leaves the source untouched, and the scan carries on. One that fits
+		// only beside what the other jobs in flight on the scratch filesystem have reserved
+		// waits for one of them to end (reserveRoom), and holds its own reservation until
+		// it exits, by every way out.
+		release, err := e.scratchRoomFor(ctx, scratch, f, fi.Size())
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			e.Log.Warn("FAIL (not enough room in the scratch directory, source untouched)", "file", f, "err", err)
 			e.fail(ctx, f, key, GateOther, withSourceDimensions(
 				&store.Outcome{Reason: err.Error(), Profile: ts.Profile, Decision: by}, props))
 			return nil
 		}
+		defer release()
 		w, err := e.pickScratchPath(scratch, f, outExt)
 		if err != nil {
 			e.Log.Warn("FAIL (no free working path in the scratch directory, source untouched)", "file", f, "err", err)
@@ -2189,6 +2231,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			return nil
 		}
 		work = w
+		defer releaseWorkingPath(work)
 		// The scratch working file is disposable by construction and goes on EVERY exit path:
 		// it never becomes the file the swap reads (that is always a copy beside the source),
 		// so no outcome is protected by keeping it. A run killed before this runs leaves it
@@ -2338,7 +2381,14 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 
 	// Re-check the collision guard right before the swap: an encode can take hours, and a
 	// distinct file that appeared at `final` in that window is never overwritten.
+	//
+	// The check and the swap are one step for every job in this process with the same
+	// target (lockSwapTarget): two sources that share a stem encode to one target, and two
+	// jobs that both passed this check would both rename onto it, the second replacing the
+	// first's replacement after the first had removed its source.
 	if final != f {
+		unlockTarget := e.lockSwapTarget(final)
+		defer unlockTarget()
 		if _, err := os.Lstat(final); err == nil {
 			e.Log.Warn("FAIL (target appeared during encode — refusing to clobber)", "file", f, "target", final)
 			_ = os.Remove(tmp)
@@ -2374,6 +2424,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			e.fail(ctx, f, key, GateSwap, out)
 			return nil
 		}
+		defer releaseWorkingPath(t)
 		// The copy is a temp beside the source like the working file of a job with no
 		// scratch_dir, so it is owned the same way, recorded before its first byte.
 		owned, err := e.ownTemp(t, f)
@@ -3336,8 +3387,9 @@ func isTempName(base string) bool {
 	return strings.Contains(base, "."+TempMarker+".")
 }
 
-// pickTempPath returns a free temp path from this build's own construction and clears
-// any stale temp sitting at it.
+// pickTempPath returns a free temp path from this build's own construction, HOLDS it for the
+// job that asked (holdWorkingPath), and clears any stale temp sitting at it. The caller
+// releases the hold (releaseWorkingPath) on every way out of the job.
 //
 // The candidate at n == 0 is the name this repo has always used, so the ordinary case
 // is unchanged. A candidate is SKIPPED rather than cleared when a file holdfast wrote is
@@ -3347,6 +3399,12 @@ func isTempName(base string) bool {
 // this function, and the replacement of the failed attempt may be sitting at exactly the
 // path it is about to pick. Running out of candidates is a loud failure, never a silent
 // walk.
+//
+// It is skipped too when ANOTHER JOB IN FLIGHT is writing there (S0163): one in this process,
+// which holds it, or one in another process, whose owner record is locked by a live owner.
+// Two sources that share a stem and an output container construct the same name, and
+// clearing it would remove a working file its encoder is still writing. They are told apart
+// by the ordinal, which every reader of the construction already accepts.
 func (e *Engine) pickTempPath(ctx context.Context, dir, stem, ext string) (string, error) {
 	for n := 0; n < maxPathCandidates; n++ {
 		p := tempPath(dir, stem, ext, n)
@@ -3354,7 +3412,20 @@ func (e *Engine) pickTempPath(ctx context.Context, dir, stem, ext string) (strin
 			e.Log.Info("not using a temp path a record holds back", "path", p, "why", why)
 			continue
 		}
+		if !holdWorkingPath(p) {
+			e.Log.Info("not using a temp path another job in flight is writing", "path", p)
+			continue
+		}
+		v := e.ownerOf(p)
+		v.close(false)
+		if v.state == ownerAlive {
+			releaseWorkingPath(p)
+			e.Log.Info("not using a temp path whose owner record a live process holds", "path", p,
+				"owner_record", v.record)
+			continue
+		}
 		if why := e.strayReplacementHold(ctx, p); why != "" {
+			releaseWorkingPath(p)
 			e.Log.Info("not using a temp path a file holdfast wrote is sitting at (no record of it survives)", "path", p, "why", why)
 			continue
 		}
