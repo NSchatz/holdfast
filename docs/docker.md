@@ -115,13 +115,91 @@ process: raise `workers`.
 workers: 1   # concurrent encode workers inside the one daemon; the default
 ```
 
-`workers` is 1 by default on purpose: a CPU libx265 encode already **saturates the available
-cores** by itself, so a second concurrent encode mostly takes cores from the first and the pair
-finishes no sooner. Raising it is an opt-in for a library of many small or low-resolution files,
-or for a hardware encoder - the cases where one encode does not use the whole machine. It buys
-concurrency **inside the one daemon**: holdfast is a single process whatever you set it to, which
-is the point. That is a design decision, not an unbuilt feature, and the README's
-[non-goal](../README.md#non-goals) says why.
+`workers` is 1 by default on purpose, and raising it - to a number, or to `auto` - is an opt-in.
+It buys concurrency **inside the one daemon**: holdfast is a single process whatever you set it
+to, which is the point. That is a design decision, not an unbuilt feature, and the README's
+[non-goal](../README.md#non-goals) says why. How it interacts with the container's `cpus:` limit
+and with `max_load` is the next section.
+
+<a id="workers-cpus-and-max-load"></a>
+
+## Workers, `cpus` and `max_load`
+
+Three settings decide how hard holdfast works a host, and each acts somewhere different:
+`workers` is how many files are in flight at once, the compose `cpus:` limit is how much CPU the
+container may use, and `max_load` is when the feed of new files pauses.
+
+**`workers`.** The default is 1: one file is probed, encoded, measured and swapped at a time. A
+whole number from 1 to 1024 runs exactly that many, and `0` or no key at all means 1, whatever
+the CPU quota reads. `workers: auto` (or `HOLDFAST_WORKERS=auto`) sizes the pool from the CPU
+quota the process runs under instead:
+
+```text
+workers = max(1, floor(Q / cores_per_worker)), at most 1024
+```
+
+where `Q` is the smaller of the cgroup's `cpu.max` bandwidth (its quota over its period) and the
+number of CPUs the process may run on, and `cores_per_worker` (a whole number from 1 to 1024) is
+16 by default. It is resolved once, at start. `holdfast validate` prints the count, `Q`, where
+`Q` came from (`cgroup cpu.max` or `cpu count`) and `cores_per_worker`, and `run` and `serve`
+record the same values at start. A `cpu.max` that cannot be read or parsed never refuses a start:
+`Q` falls back to the CPU count and a warning names the file. `cores_per_worker` beside a numeric
+`workers` has no effect, and holdfast says so.
+
+**The compose `cpus:` limit is the quota `auto` reads as `Q`.** Docker implements `cpus` as a CFS
+bandwidth limit - `--cpus="1.5"` is the equivalent of a `--cpu-period` of 100000 and a
+`--cpu-quota` of 150000 ([Docker: resource constraints](https://docs.docker.com/engine/containers/resource_constraints/),
+read 2026-09-23) - and the kernel publishes that limit inside the container as its cgroup's
+`cpu.max`, `$MAX $PERIOD`, with `max` for no limit
+([cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html), read 2026-09-23). A worked
+example on a 56-thread host with the default `cores_per_worker: 16`:
+
+| compose `cpus:` | `cpu.max` in the container | `Q` | `workers: auto` |
+|---|---|---|---|
+| `"4.0"` | `400000 100000` | 4, from `cgroup cpu.max` | max(1, floor(4 / 16)) = **1** |
+| no limit | `max 100000` | 56, from `cpu count` | floor(56 / 16) = **3** |
+
+At `cpus: "4.0"`, a smaller `cores_per_worker` is what buys a second worker: `cores_per_worker: 2`
+gives floor(4 / 2) = 2.
+
+**`max_load` is the host's load, divided by the CPUs the process may run on - not by the
+quota.** It reads the 1-minute load average, the first field of `/proc/loadavg`, and divides it
+by the number of CPUs the process may be scheduled on (its affinity set), then pauses the feed
+while the result is above `max_load`. Inside a container that load average is the HOST's: read
+in a container limited to 2 CPUs of quota on a host with many more, it stood several times higher
+than 2 CPUs of work could make it, and its fourth field counted thousands of tasks where the
+container ran fewer than a hundred. And in a container given a `cpus:` limit but no CPU set, the
+divisor is every CPU of the host. So on the 56-thread host above, `max_load: 0.8` pauses the feed
+when the whole host's load passes about 45 (0.8 x 56), whatever `cpus:` gives holdfast and
+whichever process is making the load.
+
+**`max_load`, `run_window` and pause gate only the hand-out of NEW files.** The scan feeds every
+worker from one queue, and while any of the three says stop, it hands no new file to ANY worker;
+every encode already in flight runs to its end, gates and swap included. Nothing is interrupted
+and nothing is lost: the files not handed out wait for the next scan. A file submitted through
+`POST /api/scan`, or offered by a root's `watch`, reaches the pipeline through its own pool rather
+than the scan's feed, and is not held by them.
+
+**Memory scales with workers.** Each worker is a concurrent encode plus, after it, a VMAF
+measurement, so `N` workers need about `N` of each in memory at once. The encode memory watchdog
+holds each encode to 85% of the container's limit on its own, not the pool to it in total
+([docs/encode-memory.md](encode-memory.md)), so size `mem_limit` for `N` encodes together.
+
+**Each encode brings its own threads.** The libx265 pool of every encode is sized to the whole
+quota, `Q` rounded down (or to `x265_cpus`), and is never divided by `workers`; with no quota it
+sizes itself from the host. `N` workers therefore run up to `N` pools of that size against the
+same `Q`, and the scheduler shares the quota between them. The VMAF measurement is the other way
+round: each one's threads are the quota divided by the files in flight, and the measurements
+running at once are held to the quota between them. A load average read while `N` workers encode
+reflects all of that, plus every other process on the host.
+
+**The free-space reservation can hold a worker waiting.** Before a job encodes, its source's
+size is reserved against the filesystem its working file is written on - the scratch
+filesystem, or the source's own - and a job whose source fits the free space but not beside
+what the other jobs in flight there have reserved waits for one of them to finish, then checks
+again, rather than failing. A worker can therefore sit idle on a nearly full filesystem while
+another encodes; it says so once, at info, naming the file, the free space and the bytes
+reserved. See [docs/scratch.md](scratch.md).
 
 ## Timezone
 

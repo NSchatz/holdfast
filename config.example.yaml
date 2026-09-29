@@ -33,9 +33,9 @@
 # vmaf_min_pool, vmaf_min_chroma, vmaf_subsample, vmaf_model, audio_languages,
 # subtitle_languages, keep_commentary, remux_only, deinterlace, max_height,
 # downscale_acknowledged. Anything else inside an entry refuses to start: workers,
-# x265_cpus, state_dir, server_*, undo_window_hours, history_retention_rows, run_window,
-# max_load and the notification keys describe the PROCESS, not a library, and stay at
-# the top level.
+# cores_per_worker, x265_cpus, state_dir, server_*, undo_window_hours,
+# history_retention_rows, run_window, max_load and the notification keys describe the
+# PROCESS, not a library, and stay at the top level.
 #
 # An entry may also carry exclude_paths / include_paths (which files it offers at all),
 # `rules` (per-resolution-band overrides of the height-sensitive knobs above, named in
@@ -623,9 +623,16 @@ dry_run: false
 #                            # floor and NOT a prediction - startup has no per-file
 #                            # size to check against - so each job also re-checks,
 #                            # immediately before it encodes, that its source will
-#                            # fit, and fails THAT job (naming the path, the free
-#                            # space and the source size, source untouched) if it
-#                            # will not. Ignored entirely when scratch_dir is unset.
+#                            # fit, and RESERVES its source's size on that filesystem
+#                            # until the job ends. A job whose source fits the free
+#                            # space but not beside what the other jobs in flight
+#                            # there have reserved WAITS for one of them to end and
+#                            # checks again (it says so once, and records no failure);
+#                            # one that will not fit even with nothing reserved fails
+#                            # THAT job (naming the path, the free space and the
+#                            # source size, source untouched). Ignored entirely when
+#                            # scratch_dir is unset (the same per-job check and
+#                            # reservation then run beside the source).
 #
 # history_retention_rows: 0  # THE LEDGER'S SIZE BOUND, AND IT SHIPS DISABLED.
 #                            #   0 (the default, and what an absent key means) keeps EVERY
@@ -670,9 +677,28 @@ dry_run: false
 #                            #   The bound is a row count only: there is no age-based or
 #                            #   per-status policy, and pruning does not shrink jobs.db on
 #                            #   disk (no VACUUM) - it bounds the rows, not the file.
-# workers: 1                 # concurrent encode workers (default 1 = sequential;
-#                             # CPU libx265 already saturates cores per encode, so
-#                             # raising this is an opt-in for many small/low-res files)
+# workers: 1                 # concurrent encode workers: how many files are in flight
+#                            #   at once. A whole number 0-1024 runs exactly that many
+#                            #   (0 and an absent key mean the default of 1, one file at
+#                            #   a time), whatever the CPU quota reads. Or `auto`, which
+#                            #   sizes the pool from the CPU quota this process runs
+#                            #   under, once at start:
+#                            #     max(1, floor(Q / cores_per_worker)), at most 1024
+#                            #   where Q is the smaller of the cgroup cpu.max bandwidth
+#                            #   (the compose `cpus:` limit) and the CPUs the process may
+#                            #   run on. A cpu.max that cannot be read never refuses a
+#                            #   start: Q falls back to the CPU count, with a warning.
+#                            #   `holdfast validate` prints the count and where Q came
+#                            #   from. Anything else (Auto, 2.5, -1, 1025) refuses to
+#                            #   start. Each worker is a concurrent encode plus VMAF, in
+#                            #   CPU and in memory: read the "Workers, cpus and max_load"
+#                            #   section of docs/docker.md before raising it.
+# cores_per_worker: 16       # the CPUs of quota ONE worker is sized for under
+#                            #   `workers: auto` (whole numbers 1-1024; default 16). It
+#                            #   has no effect unless workers is auto, and holdfast says
+#                            #   so if you set it beside a number. Like workers it
+#                            #   describes the process, so a library_roots entry naming
+#                            #   it refuses to start.
 # x265_cpus: 0               # the whole CPUs ONE libx265 encode is sized for: its
 #                            #   worker-pool size (x265 `pools`) and a frame-thread
 #                            #   count derived from it. 0 (the default) reads the CPU
@@ -785,7 +811,9 @@ dry_run: false
 #                              #   Outside it, serve stops feeding NEW files (an
 #                              #   in-flight encode always finishes) — it only DELAYS.
 # max_load: 0                  # per-core 1-min load-average cap; while the host is
-#                              #   above it, stop feeding new files. 0 disables.
+#                              #   above it, stop feeding new files. 0 disables. The
+#                              #   load is the HOST's, divided by the CPUs holdfast may
+#                              #   run on, not by its cpus: quota - see docs/docker.md.
 # tautulli_url: ""             # optional Plex-aware pause: while Tautulli reports an
 # tautulli_api_key: ""         #   active stream, stop feeding new files. Both required
 #                              #   to enable; a Tautulli outage fails OPEN (never halts
