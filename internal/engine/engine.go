@@ -1210,12 +1210,22 @@ func (e *Engine) sweepTemp(ctx context.Context, path string, mode sweepMode) boo
 // record, which is every temp an older build wrote, and over one whose owner it cannot
 // decide.
 //
+// A temp a job in flight in this process holds (holdWorkingPath) is left before any of that.
+//
 // Then the two hold-back exceptions, whatever the owner: a temp path a live RECORD names as
 // a job's replacement (AC15d), and a temp path holding a finished replacement that no record
 // survived to name (AC15i, strayReplacementHold). The second is asked even when the first
 // says nothing, because the case it exists for is the one where the store write that would
 // have made the record is what failed. A dead owner licenses nothing past them.
 func (e *Engine) decideTemp(ctx context.Context, path string, mode sweepMode, v *ownerVerdict) bool {
+	// A working file a job in flight in THIS process holds is work in progress whatever its
+	// owner record says or whether it has one (S0163): an engine keeping no records, or a
+	// platform without the locks, must not have a pass's sweep remove it under its encoder.
+	if workingPathHeld(ownerKey(path)) {
+		e.Log.Info("leaving a temp file in place: a job in flight in this process is writing it",
+			"file", path, "sweep", string(mode))
+		return false
+	}
 	switch v.state {
 	case ownerAlive:
 		e.logLeftTemp(mode, "leaving a temp file in place: its recorded owner is alive", path, v)

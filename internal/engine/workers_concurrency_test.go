@@ -847,7 +847,13 @@ func TestS0163_AC12_EveryWayOutOfAJobReleasesItsReservation(t *testing.T) {
 	if held := holdsNow(eng); len(held) != 0 {
 		t.Fatalf("after the pass %v bytes are still reserved", held)
 	}
-	s0163Copies(t, ffmpeg, srcs["after"])
+	// Exactly the size the check reads as free: a copy of a source the pass left untouched.
+	if err := os.MkdirAll(filepath.Dir(srcs["after"]), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyInto(srcs["pass1"], srcs["after"]); err != nil {
+		t.Fatal(err)
+	}
 	mu.Lock()
 	waited = map[string]bool{}
 	mu.Unlock()
@@ -982,4 +988,33 @@ func TestS0163_AC13_ConcurrentSwapsInOneDirectoryKeepTheUndoAccountingWhole(t *t
 			t.Fatalf("the prune landed %d time(s), want once", pruned)
 		}
 	})
+}
+
+// TestS0163_AC9_ASweepLeavesAWorkingFileAJobOfThisProcessHolds grades the sweep's half of
+// AC-9's isolation: where no owner record speaks for a temp (an engine that keeps none, or a
+// platform without the locks), a pass's sweep still leaves a working file a job in flight in
+// this process holds, rather than removing it under that job's encoder.
+func TestS0163_AC9_ASweepLeavesAWorkingFileAJobOfThisProcessHolds(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	root := t.TempDir()
+	src := filepath.Join(root, "film.mkv")
+	s0163Copies(t, ffmpeg, src)
+	eng := buildEngine(t, ffmpeg, ffprobe, root, nil, nil)
+	w, err := eng.pickTempPath(context.Background(), root, "film", "mkv")
+	if err != nil {
+		t.Fatalf("pickTempPath: %v", err)
+	}
+	if err := os.WriteFile(w, []byte("an encode in progress"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	eng.cleanStaleTemps(context.Background())
+	if !exists(w) {
+		t.Fatalf("the sweep removed %s while a job of this process held it", w)
+	}
+	// Anti-vacuity: released, the same file is an ordinary orphan and is swept.
+	releaseWorkingPath(w)
+	eng.cleanStaleTemps(context.Background())
+	if exists(w) {
+		t.Fatalf("an orphan nobody holds was not swept, so the case above proves nothing")
+	}
 }
