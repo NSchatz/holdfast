@@ -143,7 +143,7 @@ func (c FailureClass) Final() bool { return c.Class() == FailureDeterministic }
 // Absence is REPRESENTABLE, and must stay that way. Every numeric field is a POINTER
 // for one reason: 0 is a legal value for all of them, so a plain zero cannot mean
 // "nobody measured this". A VMAF of 0.0 is a destroyed frame, not a missing
-// measurement. nil means NOT RECORDED, and a reader (the API, the UI) is required to
+// measurement. nil means NOT RECORDED, and a reader (the API, a client) is required to
 // render it as such — never as 0, never as a fabricated score. The string fields use
 // "" for the same purpose, unambiguously: an empty reason/encoder/model carries no
 // meaning of its own.
@@ -522,7 +522,7 @@ type Spread struct {
 	Err      error
 }
 
-// Aggregates is the whole-ledger report the dashboard publishes: the figures the queue and
+// Aggregates is the whole-ledger report the API publishes: the figures the queue and
 // history views cannot give, because those ship at most a few hundred rows while a library
 // holds hundreds of thousands. Every field is computed INDEPENDENTLY and carries its own
 // Err, so one unreadable figure cannot blank the live page.
@@ -982,7 +982,7 @@ type Store interface {
 
 	// RecordSkip persists a Skipped row carrying reason for a guard that fires BEFORE
 	// Claim — today only the hardlink guard, whose decision must stay unclaimed (it
-	// never enters the encode pipeline) yet must still be visible as a skip in the UI
+	// never enters the encode pipeline) yet must still be visible as a skip in the history
 	// (TRANSCODE-14: "which guard fired"). It INSERTs a fresh skipped row, or converts
 	// a pending row; it deliberately does NOT overwrite a row that already carries a
 	// terminal outcome (done/failed/another skip), so a real proof is never clobbered

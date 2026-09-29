@@ -192,7 +192,8 @@ const (
 	// file re-enters the ordinary path. That is what keeps a wrongly recorded withholding
 	// from being a file that silently stops being worked on for ever, and it is why this
 	// token is not in SkipGuards - there is nothing for a requeue to re-open, because
-	// removing the withholding is the lever and the dashboard offers it beside the record.
+	// removing the withholding is the lever, and the control API offers it
+	// (`DELETE /api/exclusions`).
 	SkipOperatorExcluded = "operator-excluded"
 
 	// SkipRestoredOriginal marks a file an operator has deliberately put back through the
@@ -1682,7 +1683,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	//
 	// It is read here, per file, rather than off a snapshot taken when the run began, so a
 	// path withheld while a scan is under way is withheld for the rest of it - which is
-	// exactly the case an operator watching the dashboard creates.
+	// exactly the case an operator watching the live stream creates.
 	//
 	// A store error fails SAFE IN THE WITHHOLDING DIRECTION: a store that cannot say
 	// whether an operator withheld this path is not one this pass may hand the file to, so
@@ -1800,7 +1801,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	}
 	defer leaveGateFlight()
 	// The claim moved this row to probing: surface it as a live "started" signal carrying
-	// the worker, so the UI shows the file entering the pipeline immediately.
+	// the worker, so the live stream shows the file entering the pipeline immediately.
 	e.emit(Event{Path: f, Status: store.Probing, Worker: worker})
 
 	// Every source-side guard, in one call, off one probe snapshot and writing nothing.
@@ -2040,7 +2041,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 
 	// out is the PROOF, accumulated as the pipeline learns each fact (TRANSCODE-13). Every
 	// terminal path below hands this same value to the store and to the Observer, so the
-	// ledger and the live UI cannot disagree about what happened. From here on the file has
+	// ledger and the live stream cannot disagree about what happened. From here on the file has
 	// reached the encoder, so the encoder is attributable - on a failure as much as on a
 	// success - and so is the encode profile that chose it.
 	out := withSourceDimensions(&store.Outcome{Encoder: ts.Encoder, Profile: ts.Profile, Decision: by}, props)

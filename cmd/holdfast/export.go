@@ -110,7 +110,7 @@ func effectiveStateDir(cfg *config.Config) string {
 // Then temp-then-rename, in the destination's OWN directory so the rename is same
 // filesystem and atomic: a failure at any point removes the temp and leaves NO partial
 // export, and a reader never sees a half-written file under the name they asked for. It is
-// the same discipline the engine's swap and the dashboard generator both use.
+// the same discipline the engine's swap uses.
 func exportToFile(ctx context.Context, st store.Store, path string) error {
 	if _, err := os.Lstat(path); err == nil {
 		return fmt.Errorf("refusing to overwrite the existing export destination %q "+

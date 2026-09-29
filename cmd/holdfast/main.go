@@ -6,8 +6,9 @@
 // `run` performs a single oneshot scan of the configured library roots (the
 // TRANSCODE-1 data-safety core: skip guards → same-dir temp encode → verify → atomic
 // swap → delete). The persistent queue + worker pool (TRANSCODE-5), colour/HDR
-// (TRANSCODE-3), VMAF (TRANSCODE-4), and the API/UI (TRANSCODE-7) build on it — see
-// operations/roadmaps/holdfast.md in the umbrella.
+// (TRANSCODE-3), VMAF (TRANSCODE-4), and the HTTP API (TRANSCODE-7) build on it. The
+// plan of record is the program brief, .claude/goals/2026-09-holdfast.md, and no longer
+// a roadmap in the umbrella - decided by the owner (T2, T8).
 package main
 
 import (
@@ -56,7 +57,7 @@ Usage:
 
 Commands:
   run        Load config and run one transcode scan over the library roots
-  serve      Run the HTTP API + web UI (scan on demand / on an interval)
+  serve      Run the HTTP API (scan on demand / on an interval)
   analyze    Census the library roots: file counts, bytes and distributions (reads only)
   plan       Report what this configuration would do to the library and what it would save
   resolve    Report and resolve a job whose swap outcome could not be established
@@ -890,7 +891,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
-// cmdServe runs the HTTP API + embedded web UI (TRANSCODE-7). It builds the same
+// cmdServe runs the HTTP API (TRANSCODE-7). It builds the same
 // engine as `run`, wires it to a Controller (scan/pause) and an SSE Hub (live
 // state), then serves until SIGINT/SIGTERM. The API is a read-and-control surface:
 // it can start a scan and pause new-file feeding, but nothing here ever touches a
@@ -991,9 +992,9 @@ func logPathFilters(cfg *config.Config, log *slog.Logger) {
 func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr io.Writer) int {
 	// THE source-URL refusal site (LICENSE-3), and it is deliberately the first
 	// statement in the function. Every listener this program can create is created
-	// below, and both branches that can serve the root path - the embedded dashboard
-	// and the API-only page - are behind it, so a build whose Corresponding Source
-	// URL is unusable serves neither.
+	// below, and the one handler that serves the root path - the plain-text API page -
+	// is behind it, so a build whose Corresponding Source URL is unusable serves no
+	// page at all.
 	//
 	// It sits AHEAD of buildEngine, which is where the whole-run start-or-refuse
 	// decision over the filesystem lives (FILESYSTEM-1). Same shape, same exit
