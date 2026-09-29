@@ -273,9 +273,11 @@ func TestS0163_AC8_EachSourceIsAdmittedOnceAcrossWorkersAndAcrossTwoEngines(t *t
 	}
 }
 
-// twoJobEncoder is the AC-9 forced interleaving: the FIRST job to reach it writes its encode,
-// then waits until the SECOND job has entered it - which is after the second picked its
-// working path - and checks its own working file is still there with the bytes it wrote.
+// twoJobEncoder is the AC-9 forced interleaving: the FIRST job to reach it writes PART of its
+// output - an encode in progress, which nothing may take for a finished replacement - then
+// waits until the SECOND job has entered it, which is after the second picked its working
+// path, checks its own working file is still there with the bytes it wrote, and only then
+// finishes its encode.
 type twoJobEncoder struct {
 	t       *testing.T
 	encoded map[string]string // source -> the reference encode this job writes
@@ -296,16 +298,24 @@ func (g *twoJobEncoder) Encode(ctx context.Context, in, out string, props *probe
 	g.order = append(g.order, in)
 	first := len(g.order) == 1
 	g.mu.Unlock()
-	if err := copyInto(g.encoded[in], out); err != nil {
+	finish := func() error {
+		if err := copyInto(g.encoded[in], out); err != nil {
+			return err
+		}
+		sum := sha256f(g.t, out)
+		g.mu.Lock()
+		g.written[in] = sum
+		g.mu.Unlock()
+		return nil
+	}
+	if !first {
+		err := finish()
+		g.second.close()
 		return err
 	}
-	sum := sha256f(g.t, out)
-	g.mu.Lock()
-	g.written[in] = sum
-	g.mu.Unlock()
-	if !first {
-		g.second.close()
-		return nil
+	partial := []byte("an encode of " + in + " in progress")
+	if err := os.WriteFile(out, partial, 0o644); err != nil {
+		return err
 	}
 	select {
 	case <-g.second.ch:
@@ -317,12 +327,12 @@ func (g *twoJobEncoder) Encode(ctx context.Context, in, out string, props *probe
 		g.mu.Lock()
 		g.damaged = append(g.damaged, "gone: "+err.Error())
 		g.mu.Unlock()
-	} else if got := sha256f(g.t, out); got != sum || len(b) == 0 {
+	} else if string(b) != string(partial) {
 		g.mu.Lock()
 		g.damaged = append(g.damaged, "its bytes changed")
 		g.mu.Unlock()
 	}
-	return nil
+	return finish()
 }
 
 // TestS0163_AC9_TwoSourcesSharingAStemAndAContainerGetDistinctWorkingFiles grades AC-9: two
