@@ -14,15 +14,32 @@
 # Every stage that RUNs anything is pinned to $BUILDPLATFORM, and the Go binary is
 # cross-compiled (CGO_ENABLED=0 — pure-Go SQLite, no cgo), so the arm64 image needs no
 # QEMU: its runtime stage only COPYs.
+#
+# Every stage is Debian 13 (trixie). The runtime has to be: trixie's VA-API stack (libva2,
+# Mesa's gallium drivers, Intel's iHD driver) needs glibc 2.38 or later, and the debian12
+# base ships 2.36, so this base comes first among the image changes. distroless documents
+# only its debian13 images now. The build and fetch stages follow it, so the zone
+# database the runtime stage copies from the build stage comes from the same Debian
+# release as the base. Read 2026-09-29:
+#   https://github.com/GoogleContainerTools/distroless/blob/main/README.md
+#   https://packages.debian.org/trixie/libc6 (2.41-12+deb13u4)
+#   https://packages.debian.org/bookworm/libc6 (2.36-9+deb12u14)
+#   https://packages.debian.org/trixie/libva2 , .../trixie/mesa-libgallium ,
+#   .../trixie/intel-media-va-driver-non-free (each: libc6 >= 2.38)
+#
+# Each digest below is the multi-arch index the tag resolved to when it was pinned, read
+# from the registry's v2 API with the body's own sha256 checked against it (2026-09-29).
+# The runtime digest carries libc6 2.41-12+deb13u4, libgcc-s1 14.2.0-19 and
+# tzdata 2026c-0+deb13u1, read from the image's own var/lib/dpkg/status.d.
 
-ARG GO_IMAGE=golang:1.25.14-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437
-ARG FETCH_IMAGE=debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
+ARG GO_IMAGE=golang:1.25.14-trixie@sha256:2c4c60ef415fbfa5e90300722293bef36c5e63fae17570ce18f580af933dbd73
+ARG FETCH_IMAGE=debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 # distroless CC, not BASE. ffmpeg/ffprobe carry a DT_NEEDED on libgcc_s.so.1, and the
 # `base` variant ships glibc WITHOUT libgcc — so `base` builds perfectly and then dies
 # at the dynamic loader the first time the engine execs ffmpeg ("libgcc_s.so.1: cannot
 # open shared object file"). `cc` is `base` + libgcc_s + libstdc++, still no shell, still
 # nonroot. Verified against the registry: base ships libc/libm/libmvec and no libgcc.
-ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot@sha256:ce0d66bc0f64aae46e6a03add867b07f42cc7b8799c949c2e898057b7f75a151
+ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97
 
 # --- ffmpeg: a pinned static build, verified by hash before it is trusted -----
 # BtbN's builds link only glibc (>= 2.28), so they run on the distroless runtime while
@@ -159,6 +176,9 @@ COPY --from=ffmpeg /ffmpeg/bin/ffprobe /usr/local/bin/ffprobe
 # COPY pins that fact down rather than depending on it, because if a base change ever
 # dropped it, the failure is silent: no error, no wrong result, just an overnight window
 # running on UTC. Cheap insurance against a failure mode that does not announce itself.
+# The copy REPLACES the base's own zone files, so the image carries the build stage's
+# tzdata release, which can trail the base's: at these pins the build stage has 2026b
+# and the base 2026c. Refreshing the GO_IMAGE digest is what refreshes it.
 COPY --from=build /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=build /out/holdfast /usr/local/bin/holdfast
 # The image redistributes prebuilt GPL ffmpeg binaries, so it ships their licence and

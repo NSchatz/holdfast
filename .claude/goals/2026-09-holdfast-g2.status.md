@@ -46,7 +46,10 @@ Measured at the goal-start SHA in this container (2 CPUs by cgroup quota). Logs 
 
 | Gate | Value at goal start | Wall-clock |
 |---|---|---|
-| `make check` under `flock -o` (detached worktree at `3bfd423`; log `gate-baseline.log`) | running | - |
+| `make check` under `flock -o` (detached worktree at `3bfd423`; log `gate-baseline.log`) | exit 0 | 1565 s (26m5s) |
+| `internal/engine` under `go test -race` (from that run) | ok, 87.1% coverage | 1314.6 s (73% of `TEST_TIMEOUT` 30m) |
+| `cmd/holdfast` under `go test -race` (from that run) | ok, 88.1% coverage | 387.8 s |
+| `scripts/check-pins.sh`, `make check-pins-selftest` | exit 0, "pins agree"; 31/31 cases bite | under 1 min |
 | `func Test` count, all packages | 1201 in 25 packages (table below) | - |
 | `docs/design/swap.md`, `docs/design/quality-gate.md` lines (`wc -l`) | 58, 76 | - |
 
@@ -74,43 +77,43 @@ summed per directory):
 | # | Item | State |
 |---|---|---|
 | 1.1 | Precondition checked (header above) | DONE (`3bfd423`): both files on `origin/main`; verification printed |
-| 1.2 | Ledger created as the goal's first commit, straight to `main` | DOING |
-| 1.3 | Baselines with timings | DOING |
+| 1.2 | Ledger created as the goal's first commit, straight to `main` | DONE (`3c57336`) |
+| 1.3 | Baselines with timings | DONE (`3bfd423`): the table above; `make check` exit 0 in 26m5s |
 
 ## Phase 2 - PR #94 (S0159), by cherry-pick (I12)
 
 | # | Item | State |
 |---|---|---|
-| 2.1 | Cherry-pick #94's four commits onto `holdfast-g2/s0159-temp-sweep`, gate, merge as a new PR | TODO |
-| 2.2 | Close #94 with a link to the new PR; its old branch is left and listed as a follow-up | TODO |
+| 2.1 | Cherry-pick #94's four commits onto `holdfast-g2/s0159-temp-sweep`, gate, merge as a new PR | DONE (PR #100, `ca4968b`): four commits cherry-picked with `-x`, applied cleanly, 10 files +1673/-40 as in #94; local gate exit 0 in 28m20s on `0a8efb8` (`internal/engine` 1431.1 s, 79.5% of `TEST_TIMEOUT`); CI build, mutation, package green |
+| 2.2 | Close #94 with a link to the new PR; its old branch is left and listed as a follow-up | DONE: #94 closed with a comment linking #100 and `ca4968b`; branch `sdd/S0159-holdfast-bounded-run-temp-sweep` left at `9b016d4` (follow-up: the owner may delete it; T35's list does not name it) |
 
 ## Phase 3 - The debian13 base (line C, foundation)
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | `RUNTIME_IMAGE` is `gcr.io/distroless/cc-debian13:nonroot`, pinned by tag and digest | TODO |
-| 3.2 | `scripts/check-pins.sh` sections 3 and 7 green | TODO |
-| 3.3 | The merged PR's CI `package` job green | TODO |
-| 3.4 | `docs/docker.md` follows the image | TODO |
+| 3.1 | `RUNTIME_IMAGE` is `gcr.io/distroless/cc-debian13:nonroot`, pinned by tag and digest | DOING (PR #101): `sha256:54df941e...`; build and fetch stages to `golang:1.25.14-trixie` and `debian:trixie-slim`; merged up to `ca4968b` (`1d79a78`), gate queued |
+| 3.2 | `scripts/check-pins.sh` sections 3 and 7 green | DOING (PR #101): green on the branch, selftest 31/31 |
+| 3.3 | The merged PR's CI `package` job green | DOING (PR #101): `package` green on the branch before merge |
+| 3.4 | `docs/docker.md` follows the image | DOING (PR #101) |
 
 ## Phase 4 - Carried specs (line B)
 
 | # | Item | State |
 |---|---|---|
-| S0177 | working-file extensions | TODO |
-| S0163 | `workers: auto` from the CPU quota; several jobs in flight safe on one drive | TODO |
-| S0173 | `run` progress | TODO |
+| S0177 | working-file extensions | DOING (build agent, branch `holdfast-g2/s0177-working-names` on #100's head) |
+| S0163 | `workers: auto` from the CPU quota; several jobs in flight safe on one drive | TODO (after S0177: both change the working-path construction) |
+| S0173 | `run` progress | DOING (build agent, branch `holdfast-g2/s0173-run-progress`) |
 | S0168 | prune excluded directories from the walk | TODO |
 | S0180 | census scope parity | TODO |
-| S0166 | restart survey overcount | TODO |
-| S0176 | log time offset (holdfast half), and the homelab PR for the `TZ` half | TODO |
-| S0151 | `.github/dependabot.yml` | TODO |
+| S0166 | restart survey overcount | DOING (PR #102): AC-1 to AC-10 pass locally; existing call sites changed shape only (15 lines, reasons in the PR) |
+| S0176 | log time offset (holdfast half), and the homelab PR for the `TZ` half | DOING (PR #103, with P6): AC-H1 to AC-H7 pass, AC-H9 grep empty. Homelab half: NSchatz/homelab#208 opened (never merged by a session), `NEEDS-OWNER.md` row 1 |
+| S0151 | `.github/dependabot.yml` | DOING (local commit `2481399` on #101's commit; cherry-picked to its own PR once #101 merges) |
 
 ## Phase 5 - P6 (approved option (a))
 
 | # | Item | State |
 |---|---|---|
-| P6 | `internal/corpus` skips `.claude/`, with a test | TODO |
+| P6 | `internal/corpus` skips `.claude/`, with a test | DOING (PR #103, commit `790c54d`): both new tests red with the skip removed |
 
 ## Phase 6 - Report
 
@@ -124,9 +127,53 @@ summed per directory):
 - 2026-09-29: the goal-start baseline gate runs in a detached worktree
   (`/cache/wt/holdfast/g2-baseline`) so edits in `/workspace` cannot touch what it measures.
   Reasoning: §0.1 step 5 and §0.4 (worktrees for anything that writes).
+- 2026-09-29: tracks and PRs. PR #100 carries #94 (S0159); PR #101 is the debian13 base
+  (line C); `holdfast-g2/corpus-log-offset` carries P6 and S0176 together (both small, both
+  in the mutation domain); `holdfast-g2/s0151-dependabot` carries S0151 after #101, because
+  it rewrites the same Dockerfile lines; build agents take S0177 (on #100's head, since it
+  renames the temps #94's sweep guards) and S0173; S0163 follows S0177 (both change the
+  working-path construction); S0168, S0180 and S0166 follow as the census track.
+  Reasoning: T52 batching against a 26-minute gate, and P1's suggested order.
+- 2026-09-29: every image stage moves to Debian 13, not only the runtime. The zone database
+  the runtime copies from the build stage then comes from the same release as the base, and
+  the fetch stage is the one later goals extend with trixie packages. The Go toolchain and
+  the ffmpeg pin are unchanged. Reasoning: PR #101's body and the Dockerfile comment.
+- 2026-09-29: the zoneinfo `COPY` from the build stage replaces the base's own zone files:
+  at these pins the golang image has tzdata 2026b (every layer checked) and the distroless
+  base 2026c. That predates this goal (the bookworm golang image also carries 2026b), so it
+  is documented in the Dockerfile rather than changed. Reasoning: PR #101.
+- 2026-09-29: S0151 as amended (Dependabot). Dependabot's Docker parser reads only an image
+  written on a `FROM` line and never resolves an `ARG` (dependabot-core
+  `docker/lib/dependabot/docker/file_parser.rb`, `FROM_LINE`, at `78005a8`, read
+  2026-09-29; a Python port of the regex matched none of the three `ARG`-form lines and all
+  three literal ones), so the approval's "covers the Docker base images" needs the base
+  images on literal `FROM` lines. `ARG GO_IMAGE` stays as the copy the in-image toolchain
+  check reads; `scripts/check-pins.sh` holds the two equal (section 3), refuses a base image
+  behind an `ARG` (section 7) and refuses a configuration that stops watching a class
+  (section 9). The spec's Renovate-era "no edit to the Dockerfile or check-pins" applied to
+  a mechanism the owner replaced.
+- 2026-09-29: S0176 in this public repository tests the daylight-saving offset with
+  `Europe/Berlin`, not the zone the spec names (the owner's; P1 treats it as private). `New`
+  installs the process-wide default logger (it writes to the process's own stderr); `To`
+  over a caller's writer does not, so a test buffer never becomes the process default.
+- 2026-09-29: S0176's homelab half. The runbook changed after the spec was written: its four
+  inline `docker run` blocks became one `IMG`/`HF` shorthand every step uses, and the check
+  script its AC-L2 names is gone (the merge gate is `make ci`). So the flag goes on `HF`
+  (covering all four invocations), the spec's AC-L1 awk, which now matches no block, is shown
+  beside an adapted check (1 block, 0 without the flag), and `make ci` is left to the owner:
+  every validator in it is a container and this container has no Docker daemon. PR
+  NSchatz/homelab#208, never merged by a session (T32); `NEEDS-OWNER.md` row 1.
+- 2026-09-29: S0168, S0180 and S0166 quote the owner's library paths and ledger counts;
+  their tests use synthetic paths under `t.TempDir()` and synthetic counts of the same shape
+  (T41, as P1 did).
 
 ## Resume here
 
-Start-up: the ledger is committed and the baseline gate is running at `3bfd423`. Next: read the
-eight specs in the read-only umbrella clone (`/cache/tmp/holdfast-super-ro`, push URL
-`DISABLED`), decide the tracks, cherry-pick PR #94.
+Merged: PR #100 (`ca4968b`). Open: #101 (debian13, line C; gate queued on `1d79a78`), #102
+(S0166), #103 (P6 + S0176; `mutation-diff` queued). Local: S0151 commit `2481399` on branch
+`holdfast-g2/s0151-dependabot-wip` (worktree `/cache/wt/holdfast/holdfast-g2/s0151-dependabot`),
+cherry-picked onto a fresh branch once #101 merges. Build agents: S0177 (on #100's head), S0173.
+Next agents: census (`/cache/tmp/holdfast-g2/prompt-census.md`), then S0163 after S0177 merges
+(`/cache/tmp/holdfast-g2/prompt-s0163-head.md`). `internal/engine` reached 79.5% of
+`TEST_TIMEOUT` on #100's gate: once a gate shows it above 80%, raise `TEST_TIMEOUT` in its own
+commit with that measurement (I15).
