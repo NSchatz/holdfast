@@ -101,18 +101,18 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 4.1 | R1 audio (`README.md`, `docs/migration.md`) | DOING (PR #98) |
-| 4.2 | R2 worker nodes (`README.md`, `docs/migration.md`) | DOING (PR #98) |
-| 4.3 | R3 frontend (`README.md`, `CLAUDE.md`, `docs/api-reference.md`, `docs/docker.md`) | DOING (PR #98) |
-| 4.4 | R4 Dolby Vision / HDR10+ note under the `README.md` anchor | DOING (PR #98) |
-| 4.5 | R5 release acts (`docs/release.md`, `README.md`) | DOING (PR #98) |
-| 4.6 | R6 plan of record (`CLAUDE.md`, `README.md`, `cmd/holdfast/main.go`) | DOING (PR #98) |
-| 4.7 | `README.md` status line: no stale date, points at the releases page | DOING (PR #98) |
-| 4.8 | `CLAUDE.md` Layout: every `internal/` package, `analyze` and `plan`, no "API and UI", the TRANSCODE label range the code uses (and the `check-pins.sh` comment) | DOING (PR #98) |
-| 4.9 | Web-UI and dashboard wording in `cmd/` and `internal/` | DOING (PR #98) |
-| 4.10 | `docs/test-mass.md` and `scripts/test-mass.sh -check` agree | DOING: prose in PR #98; the measurement block is re-recorded in the proposals PR, after the last `*.go` change is on `main` |
-| 4.11 | `scripts/regress_0057_*.js` deleted | DOING (PR #98) |
-| 4.12 | `docs/comparison.md`, `docs/migration.md`, `docs/api-reference.md` match the code | DOING (PR #98) |
+| 4.1 | R1 audio (`README.md`, `docs/migration.md`) | DONE (PR #98, `213258f`) |
+| 4.2 | R2 worker nodes (`README.md`, `docs/migration.md`) | DONE (PR #98, `213258f`) |
+| 4.3 | R3 frontend (`README.md`, `CLAUDE.md`, `docs/api-reference.md`, `docs/docker.md`) | DONE (PR #98, `213258f`) |
+| 4.4 | R4 Dolby Vision / HDR10+ note under the `README.md` anchor | DONE (PR #98, `213258f`) |
+| 4.5 | R5 release acts (`docs/release.md`, `README.md`) | DONE (PR #98, `213258f`) |
+| 4.6 | R6 plan of record (`CLAUDE.md`, `README.md`, `cmd/holdfast/main.go`) | DONE (PR #98, `213258f`) |
+| 4.7 | `README.md` status line: no stale date, points at the releases page | DONE (PR #98, `213258f`) |
+| 4.8 | `CLAUDE.md` Layout: every `internal/` package, `analyze` and `plan`, no "API and UI", the TRANSCODE label range the code uses (and the `check-pins.sh` comment) | DONE (PR #98, `213258f`) |
+| 4.9 | Web-UI and dashboard wording in `cmd/` and `internal/` | DONE (PR #98, `213258f`) |
+| 4.10 | `docs/test-mass.md` and `scripts/test-mass.sh -check` agree | DOING: prose DONE in PR #98 (`213258f`); the measurement block, re-recorded at `213258f` (`-check` exit 0 on the branch), rides PR #99 |
+| 4.11 | `scripts/regress_0057_*.js` deleted | DONE (PR #98, `213258f`) |
+| 4.12 | `docs/comparison.md`, `docs/migration.md`, `docs/api-reference.md` match the code | DONE (PR #98, `213258f`) |
 
 ## Phase 5 - GitHub deletions (T35; line F)
 
@@ -193,8 +193,8 @@ summed per directory):
 
 ## Resume here
 
-PRs #96 (`33c80fc`) and #97 (`26d88b1`) are merged; line C holds on `main`. Next: #98
-(reversals and cleanup) after merging `origin/main` and a fresh gate, then the proposals PR
-(P1-P6, `verify-proposals.md`, and the test-mass record of #98's squash commit), the fresh-clone
-gate, the packet and the report. Then the proposals PR (P1-P6 plus the test-mass
+PRs #96 (`33c80fc`), #97 (`26d88b1`) and #98 (`213258f`: local gate exit 0 in 23m39s on
+`098fac6`, engine 1189.9 s, CI green) are merged. PR #99 (P1-P6, `verify-proposals.md`, and the
+test-mass record at `213258f`) is open with its local gate running. Then the fresh-clone gate, the
+final ledger commit with its COMPLETE line, the adversarial review of the report, and the report. Then the proposals PR (P1-P6 plus the test-mass
 record), the plain-`flock` run for line C, the fresh-clone gate, and the packet.
