@@ -110,7 +110,7 @@ summed per directory):
 | 4.7 | `README.md` status line: no stale date, points at the releases page | DONE (PR #98, `213258f`) |
 | 4.8 | `CLAUDE.md` Layout: every `internal/` package, `analyze` and `plan`, no "API and UI", the TRANSCODE label range the code uses (and the `check-pins.sh` comment) | DONE (PR #98, `213258f`) |
 | 4.9 | Web-UI and dashboard wording in `cmd/` and `internal/` | DONE (PR #98, `213258f`) |
-| 4.10 | `docs/test-mass.md` and `scripts/test-mass.sh -check` agree | DOING: prose DONE in PR #98 (`213258f`); the measurement block, re-recorded at `213258f` (`-check` exit 0 on the branch), rides PR #99 |
+| 4.10 | `docs/test-mass.md` and `scripts/test-mass.sh -check` agree | DONE (PR #98 `213258f` for the prose, PR #99 `d4d70a6` for the measurement block recorded at `213258f`): `scripts/test-mass.sh -check` exits 0 on `d4d70a6` |
 | 4.11 | `scripts/regress_0057_*.js` deleted | DONE (PR #98, `213258f`) |
 | 4.12 | `docs/comparison.md`, `docs/migration.md`, `docs/api-reference.md` match the code | DONE (PR #98, `213258f`) |
 
@@ -126,26 +126,47 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| P1 | `proposal-triage.md` (T30, T33): a row per S0151, S0162-S0180 and PR #94 | DOING: 21 rows (20 keep, 1 merged), adversarially verified and corrected; goes in the proposals PR |
-| P2 | `proposal-hw-gates.md` (T10) | DOING: claims re-verified, adversarially verified and corrected; goes in the proposals PR |
-| P3 | `proposal-amd-image.md` (T45, I8, I9) | DOING: claims re-verified, adversarially verified and corrected; goes in the proposals PR |
-| P4 | `proposal-node-protocol.md` (T46) | DOING: claims re-verified, adversarially verified and corrected; goes in the proposals PR |
-| P5 | `proposal-crop-dv.md` (I7) | DOING: claims re-verified and lab-tested on synthetic material, adversarially verified and corrected; goes in the proposals PR |
-| P6 | `proposal-docs-corpus.md` (I16) | DOING: adversarially verified and corrected; goes in the proposals PR |
+| P1 | `proposal-triage.md` (T30, T33): a row per S0151, S0162-S0180 and PR #94 | DONE (PR #99, `d4d70a6`): 21 rows (20 keep, 1 merged), adversarially verified and corrected |
+| P2 | `proposal-hw-gates.md` (T10) | DONE (PR #99, `d4d70a6`): claims re-verified, adversarially verified and corrected |
+| P3 | `proposal-amd-image.md` (T45, I8, I9) | DONE (PR #99, `d4d70a6`): claims re-verified, adversarially verified and corrected |
+| P4 | `proposal-node-protocol.md` (T46) | DONE (PR #99, `d4d70a6`): claims re-verified, adversarially verified and corrected |
+| P5 | `proposal-crop-dv.md` (I7) | DONE (PR #99, `d4d70a6`): claims re-verified and lab-tested on synthetic material, adversarially verified and corrected |
+| P6 | `proposal-docs-corpus.md` (I16) | DONE (PR #99, `d4d70a6`): adversarially verified and corrected |
 
 ## Phase 7 - Fresh-clone gate (line B)
 
 | # | Item | State |
 |---|---|---|
-| 7.1 | Clone `origin/main` to `/cache/tmp/holdfast-g1-fresh` and run the full gate there | TODO |
+| 7.1 | Clone `origin/main` to `/cache/tmp/holdfast-g1-fresh` and run the full gate there | DONE (`d4d70a6`): `timeout 10800 flock -o /cache/locks/holdfast-heavy.lock mise exec go@1.25.14 -- make check` in a fresh clone at `d4d70a6` (= `origin/main`), exit 0 in 25m14s (1514 s); `internal/engine` 1280.2 s (71% of `TEST_TIMEOUT` 30m, under I15's 80% line, so `TEST_TIMEOUT` stays), `cmd/holdfast` 394.4 s; the identity scan clean (first commit `bfd3a01`, fingerprint `ac8ffad005da`) and its selftest 18/18 |
 
 ## Phase 8 - Checkpoint T packet and the report (lines H-K)
 
 | # | Item | State |
 |---|---|---|
-| 8.1 | Checkpoint T packet printed | TODO |
-| 8.2 | Gate integrity counted from the goal-start SHA | TODO |
-| 8.3 | Adversarial review of the report | TODO |
+| 8.1 | Checkpoint T packet printed | DONE: its parts are the six proposals (table below), the reversal diff hunks (`git diff 4ac983a origin/main`: 15 marker lines in 7 files), I1-I20 (brief §1), the fresh-clone gate (7.1), this ledger's path and SHA, and `NEEDS-OWNER.md` (no row); the GOAL REPORT's line H prints them |
+| 8.2 | Gate integrity counted from the goal-start SHA | DONE (`d4d70a6`): 8 test lines deleted, each with its reason: 5 in `internal/server/server_test.go` (the owner's identity in the proxy-header fixture, replaced by a synthetic one, PR #96) and 3 in `internal/engine/encode_test.go` (the old fd-3 probe and its two comment lines, replaced by the writability probe, PR #97); `func Test` 1200 -> 1201, no package fell (`internal/engine` 422 -> 423); 0 lines removed from `docs/design/swap.md` and `docs/design/quality-gate.md` |
+| 8.3 | Adversarial review of the report | DONE: a fresh subagent reviews the report against the repositories after this commit, as §21 requires before the report is printed; its verdict is the report's line K |
+
+## Proposals awaiting the owner (Checkpoint T)
+
+All in `.claude/goals/2026-09-holdfast-research/`, merged in PR #99 (`d4d70a6`); the adversarial
+verification of their claims is `verify-proposals.md`.
+
+| # | File | Recommendation (one line) |
+|---|---|---|
+| P1 | `proposal-triage.md` | 20 keep, 1 merged (S0179 into goal 10), 0 drop; PR #94 cherry-picked first in goal 2 (I12); five items flagged for the owner (the S0178 default flip, S0164's value name, S0151's app install, S0176's homelab half, goal 2's size) |
+| P2 | `proposal-hw-gates.md` | the same gates and floors for every encoder, plus per-encoder quality keys and an additive output fidelity gate, built in goal 4. Flag: "same gates, no exceptions" was not chosen as a final answer in T10, so approving it is a deliberate choice |
+| P3 | `proposal-amd-image.md` | the VAAPI/QSV runtime in the default amd64 image (about 255 MB), AMD through Mesa `radeonsi` with `encoder: vaapi`, `amf` kept for host installs and refused in the image (AMD's EULA grants no redistribution); a `-hw` tag is the named alternative. Flag: VAAPI-only was not chosen as a final answer in T45 |
+| P4 | `proposal-node-protocol.md` | HTTP+JSON leases on the existing server (`/api/node/v1`, `node_token` only) with a pulling `holdfast worker`; durable lease rows fenced by an epoch, sha-256 `Content-Digest`, uploads restart from zero, caps and a free-space reservation, optional built-in TLS |
+| P5 | `proposal-crop-dv.md` | crop a Dolby Vision source only to the active area its own RPU names, zero L5 with `dovi_tool -c` in the pre-pass and gate one all-zero L5 record per output frame; every other DV source keeps the I7 refusal |
+| P6 | `proposal-docs-corpus.md` | `internal/corpus` skips `.claude/` as it skips `.git`, `vendor` and `node_modules`, with a test; the root `CLAUDE.md` stays in the corpus |
+
+## NEEDS-OWNER (this goal)
+
+None. No goal-1 step needs real GPU hardware, a live Plex, Sonarr or Radarr, the homelab merge or a
+hardware report (§0.6), so `NEEDS-OWNER.md` gains no row. The owner's acts this goal leads to are
+the Checkpoint T approval (§20) and, inside P1, the S0151 app-install decision; neither is a
+NEEDS-OWNER kind.
 
 ## Decisions taken
 
@@ -193,8 +214,10 @@ summed per directory):
 
 ## Resume here
 
-PRs #96 (`33c80fc`), #97 (`26d88b1`) and #98 (`213258f`: local gate exit 0 in 23m39s on
-`098fac6`, engine 1189.9 s, CI green) are merged. PR #99 (P1-P6, `verify-proposals.md`, and the
-test-mass record at `213258f`) is open with its local gate running. Then the fresh-clone gate, the
-final ledger commit with its COMPLETE line, the adversarial review of the report, and the report. Then the proposals PR (P1-P6 plus the test-mass
-record), the plain-`flock` run for line C, the fresh-clone gate, and the packet.
+Goal 1 is complete. Merged: PR #96 (`33c80fc`, identity scan), #97 (`26d88b1`, fd-3 fixture), #98
+(`213258f`, reversals and cleanup) and #99 (`d4d70a6`, proposals and the test-mass record); the
+T35 refs are deleted; the fresh-clone gate passed on `d4d70a6`. Next is Checkpoint T (§20): the
+owner reads the packet, then adds `.claude/goals/CHECKPOINT-T.approved` with any amendments. No goal
+writes that file. Goal 2's precondition needs it and this ledger's COMPLETE line.
+
+COMPLETE (goal 1): 2026-09-29
