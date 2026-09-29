@@ -17,6 +17,36 @@ scratch_dir: /mnt/cache/holdfast
 scratch_min_free_gb: 50
 ```
 
+## What the working file is called
+
+Beside the source the working file is `<stem>.__transcoding__.<ext>.holdfast-part`
+(`<stem>.__transcoding__.<n>.<ext>.holdfast-part` when an earlier file already holds that
+name), where `<ext>` is the extension of the container the encode writes: the source's own,
+or `container_ext` where that forces one. It ends in `.holdfast-part` so that a media server
+or an *arr app scanning the folder by extension does not offer a half-written encode as an
+extra version of the film or as a duplicate. The name still carries the container extension
+ahead of that suffix, and the `__transcoding__` marker, which is how holdfast itself
+recognises the file.
+
+A name ending in `.holdfast-part` gives ffmpeg nothing to choose a container from, so the
+encode NAMES its container: the one ffmpeg itself chooses for a file called `x.<ext>`. That is
+not always the container the extension looks like - `m4v` is ffmpeg's `ipod` muxer, `wmv` and
+`asf` are `asf`, `vob` is `svcd`, and `m2ts` is `mpegts` in its 192-byte BDAV packet mode - and
+where ffmpeg refuses the job's own arguments for `x.<ext>` (an HEVC stream in `m4v` or `wmv`,
+for one) the job fails, with the source untouched, rather than succeeding in some other
+container. holdfast knows ffmpeg's choice for `mkv`, `mp4`, `avi`, `mov`, `m4v`, `ts`, `m2ts`,
+`wmv`, `flv`, `webm`, `mpg`, `mpeg`, `vob`, `mts`, `m2t`, `3gp`, `3g2`, `asf` and `ogv`,
+whatever their case. A job whose output extension is none of those fails with a reason naming it,
+before ffmpeg runs or anything is written beside the source; set `container_ext` to one of them
+for such files, or take the extension out of `video_exts`.
+
+A working file a build before the suffix existed left behind is named
+`<stem>.__transcoding__.<ext>` and is still recognised: it is never a source, the stale-temp
+sweep takes it when it is a killed run's partial encode, and it is held back, and reported,
+when it is a finished encode no record names.
+
+The working file inside `scratch_dir` is not in a library folder and keeps the name below.
+
 ## What actually happens
 
 1. The encoder writes its output into `scratch_dir` under a per-job working name
@@ -27,7 +57,8 @@ scratch_min_free_gb: 50
    worst-frame floor and chroma floor. Nothing at all has been written under the
    source's directory yet.
 3. **Only once the gates have accepted**, the result is copied into a temp beside
-   the source, built by exactly the same construction as the in-place temp.
+   the source, built by exactly the same construction as the in-place temp
+   (`<stem>.__transcoding__.<ext>.holdfast-part`).
 4. The copy is made durable and then **read back off disk and re-digested**. If the
    bytes beside the source are not byte-for-byte the bytes the gates accepted, no
    rename happens, the job records a failure naming the mismatch, and the source is

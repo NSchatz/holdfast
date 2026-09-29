@@ -74,10 +74,33 @@ location guaranteed to work is the one the source is already on. There is delibe
 no configurable retention path and no cross-filesystem trash directory - either would
 be a setting that works until the day somebody's library spans two mounts.
 
+**The retained original is named so a library scanner passes it by.** It is held at
+`.holdfast-undo/<stem>.<fingerprint>.__undo__.<ext>.holdfast-undo`: the source's own name
+and extension, the fingerprint of the file it was, the `__undo__` marker, and a final
+`.holdfast-undo`. It is a complete, playable copy of the film for the whole window, and the
+final extension is there so that a media server or an *arr app scanning the folder by
+extension does not show it as a second copy of the film; whether one of them skips a
+dot-directory is that app's behaviour, not something holdfast controls. The source's
+extension is still in the name, ahead of the suffix, so you can see what it is if you want to
+look at it before deciding. `holdfast restore` does not read the name at all: it renames the
+file back to the original's own path and name, as the retention record names them.
+
+**A retention an earlier build took keeps its name.** Builds before the suffix existed named
+the retained original `<stem>.<fingerprint>.__undo__.<ext>`. Such a retention is not renamed:
+it keeps its name and its expiry, `holdfast restore` restores it, the release at the start of
+a pass releases it on its own schedule, and the hardlink guard counts it as holdfast's own.
+Two leftovers are handled when a new retention of the same original is taken. A second link
+an interrupted earlier run left at that name, with no record behind it, is moved to the new
+name, so the original ends with one retained name. One a live record still names is an
+earlier retention in its own right: it is left alone, the new retention is not taken - the
+file is skipped as `undo-retention-failed` - and the file is swapped on the first scan after
+that record's window has closed.
+
 **A retained original is never a source.** The scan does not enumerate the retention
-area, and a retained original is excluded by name whatever extension it carries. Feeding
-one back to the encoder would re-encode the bytes you were given a window to recover and
-swap the result over them.
+area, and a retained original is excluded by name whatever extension it carries - the
+earlier name ends in a video extension, and adding `holdfast-undo` to `video_exts` changes
+nothing either. Feeding one back to the encoder would re-encode the bytes you were given a
+window to recover and swap the result over them.
 
 **A retained original does not trip the hardlink guard.** holdfast skips a file with
 more than one hard link (an *arr import that is also an active seed), and a retention is
