@@ -74,11 +74,17 @@ func sourceTag(source string) string {
 //
 // It carries TempMarker, so everything that already recognises a work-in-progress
 // temp on its name recognises this one too: isTempName for the sweep,
-// splitConstruction (and therefore IsTempConstructionName) for the record-free
+// splitTempConstruction (and therefore IsTempConstructionName) for the record-free
 // hold-back, and the retained-replacement construction stays distinct from it by
 // carrying a different marker. The source tag sits in the stem, where
-// splitConstruction reads it as part of the stem and nothing has to learn a second
+// splitTempConstruction reads it as part of the stem and nothing has to learn a second
 // shape.
+//
+// It does NOT carry TempSuffix. The suffix exists for a working file inside a library
+// folder, where a media server scanning by extension would find it, and the scratch
+// directory is never under a library root (a scratch directory that overlapped one
+// refuses the run at startup). The copy the gates' accepted bytes make beside the source
+// is built by tempPath, and carries it.
 func scratchWorkPath(scratch, source, ext string, n int) string {
 	base := filepath.Base(source)
 	stem := strings.TrimSuffix(base, filepath.Ext(base))

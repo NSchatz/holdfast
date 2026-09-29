@@ -287,6 +287,11 @@ dry_run: false
 #                         # clobber a distinct existing file at the target name)
 #                         # still applies whenever the effective extension differs
 #                         # from the source's own.
+#                         # Whichever it is, the encode names the container it
+#                         # writes as the one ffmpeg itself picks for a file with
+#                         # that extension (m4v is ipod, wmv is asf), and an
+#                         # extension holdfast knows no container for fails the
+#                         # job, naming it (docs/scratch.md).
 
 # bitrate_kbps: 0        # 0 (the DEFAULT) keeps the crf/quality target above,
 #                         # which is this tool's archival posture. A positive value

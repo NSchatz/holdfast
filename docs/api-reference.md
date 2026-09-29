@@ -495,7 +495,9 @@ alone by every later run, whether or not a record of them survived.
 Moving a replacement to that name is itself a write into the media directory, and the failure that
 strands a replacement is often the same failure that denies the write - a library that has gone
 read-only refuses the swap, the move to the held-back name and the record in the job store alike. So a
-replacement can end up left at its `*.__transcoding__.*` working path with nothing recorded about it.
+replacement can end up left at its `*.__transcoding__.*` working path with nothing recorded about it:
+`<stem>.__transcoding__.<ext>.holdfast-part`, or `<stem>.__transcoding__.<ext>` where a build before
+that suffix existed left it.
 holdfast still will not touch it. The stale-temp sweep that reclaims a killed run's half-written encodes
 **examines** each one rather than assuming it is disposable: a file at that path whose content is a
 finished encode at the target codec, the length of the source beside it, is kept, reported at every

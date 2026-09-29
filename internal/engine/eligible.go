@@ -190,9 +190,11 @@ func (e *Engine) Eligibility() Eligibility {
 // enumerate as a source? nil means yes. It opens nothing, which is what lets the scan and
 // the startup walk decide an entry from a listing.
 //
-// The order is deliberate. A working file is reported as a working file even though it
+// The order is deliberate. A working file is reported as a working file even where it
 // also carries a video extension, because that is the informative answer: a retained
-// original IS a .mkv, and telling an operator their .mkv is not a .mkv would be a lie.
+// original an earlier build wrote IS a .mkv, and telling an operator their .mkv is not a
+// .mkv would be a lie. It is also what refuses this build's own names - which end in
+// TempSuffix or UndoSuffix - whatever video_exts lists, those suffixes included.
 func (el Eligibility) Name(base string) *Ineligible {
 	switch {
 	case isTempName(base):
@@ -215,8 +217,9 @@ func (el Eligibility) Name(base string) *Ineligible {
 // IsSourceName reports whether a file BASENAME is one a scan would enumerate as a source:
 // it carries one of the configured video extensions and is not one of this tool's own
 // working files. Three things are excluded and each is a file holdfast itself wrote, none
-// of which is ever anybody's source even though each is itself a *.mkv (or whatever the
-// source was):
+// of which is ever anybody's source even where it carries the source's own extension (an
+// earlier build's work-in-progress temp and retained original end in it; this build's end
+// in TempSuffix and UndoSuffix, and are excluded on the same marker):
 //
 //   - a work-in-progress temp;
 //   - an original the undo window is holding (UNDO-6). A retention area whose files were

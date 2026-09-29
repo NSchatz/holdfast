@@ -37,7 +37,7 @@ func TestRegress0049F3_OurOwnRetainedLinkTripsTheHardlinkGuardOnceTheWindowIsOff
 	// favourable of the two shapes the AC6 grader drives.
 	eng, ts := undoEngine(t, ffmpeg, ffprobe, d, 24, nil)
 	u := eng.undo()
-	retained, err := u.retain(src, probe.Fingerprint(src))
+	retained, err := u.retain(context.Background(), src, probe.Fingerprint(src))
 	if err != nil {
 		t.Fatalf("retain: %v", err)
 	}
