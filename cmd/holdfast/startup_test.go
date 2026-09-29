@@ -448,7 +448,7 @@ func TestS0168AC2_AnExcludedTrashDirectoryThatCannotBeListedStartsWithoutAWarnin
 		t.Skip("running as root: a mode-000 directory is still readable, so there is nothing to deny")
 	}
 	dir := t.TempDir()
-	lib := filepath.Join(dir, "plex")
+	lib := filepath.Join(dir, "library")
 	trash := filepath.Join(lib, ".Trash-0")
 	writeCensusFile(t, filepath.Join(lib, "Film.mkv"), "not probed at startup\n")
 	writeCensusFile(t, filepath.Join(trash, "files", "Deleted.mkv"), "a file somebody binned\n")
