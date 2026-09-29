@@ -27,8 +27,9 @@ host installs; approving it is the owner's deliberate choice, not a default the 
 - **Image:** runtime base `gcr.io/distroless/cc-debian12:nonroot` pinned by digest
   (`Dockerfile:25`); it deliberately carries no vendor GPU userspace (`Dockerfile:135-141`), and
   `docs/docker.md:362-375` and `:412-414` say QSV, VAAPI and AMF do not work in the image.
-- **The pinned ffmpeg** (`Dockerfile:55-58`) is built with `--enable-vaapi`, `--enable-libvpl` and
-  `--enable-amf` (`ffmpeg -buildconf`). At the pin tag, BtbN's recipe builds libvpl static and not
+- **The pinned ffmpeg** (`Dockerfile:55-58`) is built, on amd64, with `--enable-vaapi`,
+  `--enable-libvpl` and `--enable-amf` (`ffmpeg -buildconf`); the arm64 build has no VAAPI at all
+  (BtbN `scripts.d/50-vaapi/50-libva.sh:16` returns early for `linuxarm64`). At the pin tag, BtbN's recipe builds libvpl static and not
   at all for arm64 (`scripts.d/50-onevpl.sh:7,19`), compiles libva's driver directory as
   `/usr/lib/x86_64-linux-gnu/dri` (`scripts.d/50-vaapi/50-libva.sh:43`), and takes only AMF's
   public headers (`scripts.d/50-amf.sh`). libva and libdrm are loaded lazily and a missing one aborts
@@ -71,7 +72,7 @@ host installs; approving it is the owner's deliberate choice, not a default the 
 | `intel-media-va-driver-non-free` (full-feature build) | 25.2.3+ds1-1 | non-free | 40,457 kB | Expat, BSD-3-clause |
 | `libigdgmm12` | 22.7.2+ds1-1 | main | 858 kB | Expat, BSD-3-clause |
 | `libmfx-gen1.2` (QSV GPU runtime, Tiger Lake and newer) | 25.1.4-1 | main, amd64 only | 8,496 kB | MIT |
-| `libvpl2` (dispatcher; ffmpeg links it statically, not needed) | 1:2.14.0-1 | main | 415 kB | MIT, BSD-3-clause, Apache-2.0 |
+| `libvpl2` (dispatcher; ffmpeg links it statically, not needed) | 1:2.14.0-1+b1 (amd64) | main | 415 kB | MIT, BSD-3-clause, Apache-2.0 |
 | `libmfx1` (legacy Media SDK runtime) | not in trixie | - | - | - |
 
 - Debian's trixie Mesa build enables VA for gallium with `-Dvideo-codecs="all"` and builds
@@ -85,9 +86,13 @@ host installs; approving it is the owner's deliberate choice, not a default the 
   the licence is still Expat and BSD-3-clause and Debian redistributes it.
 - QSV on Intel older than Tiger Lake has no runtime in trixie (`libmfx1` absent); VAAPI through
   iHD still covers those parts.
-- libvpl's dispatcher finds the runtime through `LD_LIBRARY_PATH`, `/etc/ld.so.cache`, then default
-  paths, "On Debian: /usr/lib/x86_64-linux-gnu".
-- **glibc:** every trixie package above needs `libc6 (>= 2.38)` (and iHD `libstdc++6 (>= 14)`);
+- The Intel VPL dispatcher finds the runtime on Linux through `LD_LIBRARY_PATH`, then the default
+  paths ("On Debian: /usr/lib/x86_64-linux-gnu"), then `ONEVPL_SEARCH_PATH`, with no
+  `/etc/ld.so.cache` step (that step belongs to the legacy dispatcher), so `libmfx-gen1.2` at the
+  multiarch path is found without a loader cache.
+- **glibc:** most trixie packages above need `libc6 (>= 2.38)` (`libva-drm2` and `libigdgmm12` need
+  only `>= 2.34`, `mesa-va-drivers` declares none; iHD, `libmfx-gen1.2` and `libz3-4` also need
+  `libstdc++6 (>= 14)`);
   trixie ships glibc 2.41-12+deb13u4 and libstdc++6 14.2.0-19, while bookworm ships glibc
   2.36-9+deb12u14, so the goal-2 move to `cc-debian13` is a prerequisite. Distroless says its images
   "are based on Debian 13 (trixie)", lists `gcr.io/distroless/cc-debian13` with `nonroot`, and states
@@ -107,13 +112,16 @@ Mesa was an underestimate (corrected).
 
 The research recommendation and I9. The default image carries libva, libva-drm, libdrm, Intel iHD
 (non-free), `libigdgmm12`, `libmfx-gen1.2` and Mesa `radeonsi` VA with its closure on amd64; arm64
-stays without a hardware runtime (no Intel GPUs, libvpl not built for arm64, rare AMD boards) and
-says so. `amf` stays a valid key: on a host install it works as today; in the image `Available()`
+stays without a hardware runtime and says so: the pinned arm64 ffmpeg is built without VAAPI
+(`50-libva.sh:16`), libvpl is not built for arm64 either, and arm64 boards with Intel or AMD
+encode hardware are rare. `amf` stays a valid key: on a host install it works as today; in the image `Available()`
 refuses it at start, naming the EULA and pointing at `encoder: vaapi`. It is never aliased to
 `vaapi`: they are different encoders, so different measuring conditions.
 
 Costs: about +255 MB on amd64 for every user, including CPU-only ones; a larger third-party surface
 (LLVM, Mesa, X client libraries) to pin, update and list in `NOTICE` with each copyright file; a
+corresponding-source duty for the LGPL or GPL members of the closure (`libsensors5`, `libelf1t64`),
+which a published image must honour; a
 DFSG non-free component (iHD kernels without source) inside an AGPL project's image, stated in
 `NOTICE`; Debian's drivers lag the newest GPUs (iHD 25.2.3, Mesa 25.0.7); CI can prove only that the
 libraries resolve, never an encode. T12 asked for AMF "working in the shipped image": this delivers
@@ -189,9 +197,9 @@ stay behind the `hwlive` build tag (`rg -n hwlive .github Makefile` prints nothi
 | Mesa adds "roughly +100-150 MB" | https://packages.debian.org/trixie/libllvm19 ; https://packages.debian.org/trixie/mesa-libgallium ; https://packages.debian.org/trixie/libz3-4 | corrected: about 205 MB installed on amd64 |
 | Free vs non-free iHD, versions, sections, licences | https://packages.debian.org/trixie/intel-media-va-driver ; https://packages.debian.org/trixie/intel-media-va-driver-non-free ; https://metadata.ftp-master.debian.org/changelogs//non-free/i/intel-media-driver-non-free/intel-media-driver-non-free_25.2.3+ds1-1_copyright ; https://github.com/intel/media-driver/blob/master/README.md | confirmed |
 | `libmfx-gen1.2` amd64-only, Tiger Lake and newer; `libmfx1` absent from trixie | https://packages.debian.org/trixie/libmfx-gen1.2 ; https://packages.debian.org/trixie/libmfx1 ; https://github.com/intel/vpl-gpu-rt/blob/main/README.md | confirmed |
-| libvpl dispatcher search order | https://intel.github.io/libvpl/latest/programming_guide/VPL_prg_session.html | confirmed |
-| libvpl static and arm64-disabled; libva driver dir | https://github.com/BtbN/FFmpeg-Builds/blob/autobuild-2026-07-31-14-10/scripts.d/50-onevpl.sh ; https://github.com/BtbN/FFmpeg-Builds/blob/autobuild-2026-07-31-14-10/scripts.d/50-vaapi/50-libva.sh | confirmed at the pin tag (the research read master) |
-| trixie packages need glibc >= 2.38; trixie glibc and libstdc++ versions | https://packages.debian.org/trixie/libc6 ; https://packages.debian.org/bookworm/libc6 ; https://packages.debian.org/trixie/libstdc++6 | confirmed: trixie 2.41, bookworm 2.36, libstdc++6 14.2.0 |
+| libvpl dispatcher search order | https://intel.github.io/libvpl/latest/programming_guide/VPL_prg_session.html | corrected by the adversarial verification: the Intel VPL dispatcher's Linux order has no `ld.so.cache` step; the quoted list was the legacy dispatcher's |
+| libvpl static and arm64-disabled; libva driver dir | https://github.com/BtbN/FFmpeg-Builds/blob/autobuild-2026-07-31-14-10/scripts.d/50-onevpl.sh ; https://github.com/BtbN/FFmpeg-Builds/blob/autobuild-2026-07-31-14-10/scripts.d/50-vaapi/50-libva.sh | confirmed at the pin tag (the research read master); the adversarial verification added that `50-libva.sh:16` builds arm64 without VAAPI |
+| trixie packages need glibc >= 2.38; trixie glibc and libstdc++ versions | https://packages.debian.org/trixie/libc6 ; https://packages.debian.org/bookworm/libc6 ; https://packages.debian.org/trixie/libstdc++6 | confirmed: trixie 2.41, bookworm 2.36, libstdc++6 14.2.0; corrected by the adversarial verification: most, not every, package needs 2.38 (`libva-drm2` and `libigdgmm12` need 2.34) |
 | distroless is Debian 13 based, `cc-debian13` exists, UsrMerge | https://github.com/GoogleContainerTools/distroless/blob/main/README.md | confirmed; UsrMerge is new relative to the research |
 | AV1 encode on AMD needs RDNA3 or newer | none fetched | not verified (ASSUMED) |
 | `libz3-4`, X client and other small dependency licences | none fetched | not verified; goal 5 reads each copyright file |
@@ -230,3 +238,4 @@ stay behind the `hwlive` build tag (`rg -n hwlive .github Makefile` prints nothi
   https://github.com/BtbN/FFmpeg-Builds/tree/autobuild-2026-07-31-14-10/scripts.d
 - holdfast at `30d245f`: `Dockerfile`, `docs/docker.md`, `internal/encoder/encoder.go`,
   `internal/engine/encode.go`; the pinned ffmpeg's `-buildconf`, run 2026-09-29.
+- The adversarial verification of this proposal: `verify-proposals.md` (read 2026-09-29).

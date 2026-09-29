@@ -142,8 +142,9 @@ are unmeasured and stay marked until a report replaces them.
 1. **Surface and auth.** One new group, `/api/node/v1`, behind `requireNodeToken`, which accepts
    ONLY `node_token` (constant time, never echoed). The read and control groups do not accept
    `node_token`, and `requireNodeToken` accepts neither the read nor the control token, so a stolen
-   node token can lease and upload but cannot pause, exclude, search or scan, and no token opens two
-   roles. With `node_token` unset the group answers 403 naming the key, the way control does today.
+   node token can lease and upload but cannot pause, exclude, search or scan: the node token opens
+   only the node role and no other token opens it (the control token keeps the read access it has
+   today, `internal/server/server.go:445-449`). With `node_token` unset the group answers 403 naming the key, the way control does today.
    No node endpoint restores, requeues, resolves or re-opens anything: those stay local commands.
    `node_token` is by reference (`file:` or `cmd:`), joins `config.SecretBearingKeys`, and a literal
    refuses start; the worker reads its own `node_token` the same way. Endpoints (JSON bodies):
@@ -156,7 +157,9 @@ are unmeasured and stay marked until a report replaces them.
    - `POST /api/node/v1/leases/{id}/heartbeat` with `epoch` and progress: `200` with the renewed TTL,
      or `410`.
    - `GET /api/node/v1/leases/{id}/source` (http mode): served with `http.ServeContent`, which
-     handles `Range`.
+     handles `Range`; the handler sets `Content-Type` first, because `ServeContent` otherwise reads
+     512 bytes to sniff it and seeks back, which would count those bytes twice in a digest taken by
+     wrapping its reader.
    - `PUT /api/node/v1/leases/{id}/output` with `Content-Length`, `Content-Digest` and the epoch.
    - `POST /api/node/v1/leases/{id}/complete` (output digest, source digest, size, encode stats) and
      `POST /api/node/v1/leases/{id}/fail` (typed reason).
@@ -168,12 +171,15 @@ are unmeasured and stay marked until a report replaces them.
    the reserved byte count, and the recorded digests. `epoch` is the **fencing token**: it rises by
    one at every grant of the same job, and every call carries lease id and epoch. The server checks
    both against the current row inside the same transaction that acts on the call; an expired lease
-   or a lower epoch gets `410 Gone` and its bytes are discarded, never written into a library
+   or a lower epoch gets `410 Gone` (sent with `Cache-Control: no-store`, since RFC 9110 makes 410
+   heuristically cacheable) and its bytes are discarded, never written into a library
    directory, so a stale worker can never contribute an output to a swap. Expiry is judged by the
    server's clock only. TTL 60 s and heartbeat every 15 s (TTL/4) are `ASSUMED`.
 3. **Retry bound.** An expiry, a `fail`, or a refused upload increments the job's attempt count
-   through the existing `max_failures` machinery (`Claim` already takes it); at the bound (3,
-   `ASSUMED`) the job SKIPS with a logged reason, so a poison job cannot loop across nodes.
+   through the existing `max_failures` machinery (`Claim` already takes it); at the bound (the
+   shipped `max_failures` default of 3, `internal/config/config.go:101`) the existing `Claim` parks
+   the row as `failed` (`internal/store/sqlite.go:347-350`), so a poison job cannot loop across
+   nodes. A logged reason naming the node attempts is new behaviour goal 11 adds to that park.
 4. **Where the output lands.** The server names it, never the worker: a temp in the source's own
    directory built by the engine's own construction (`tempPath`) and recorded on the lease row, so
    the existing startup sweep covers a partial upload exactly as it covers a killed local encode;
@@ -220,7 +226,10 @@ are unmeasured and stay marked until a report replaces them.
 9. **Failure handling.**
    - Worker crash: heartbeats stop, the lease expires after one TTL, the server deletes only the temp
      it named for that lease, releases the reservation, and requeues with attempt+1.
-   - Server restart mid-lease: live lease rows survive. At start, before any new grant, the server
+   - Server restart mid-lease: live lease rows survive. (Today's sweep keeps a record-less temp that
+     has the target codec and passes length parity, `strayReplacementHold` in
+     `internal/engine/swap.go:134-216`, so a complete upload admitted but not yet gated stays on disk
+     across a restart; goal 11's restart fixture asserts that and re-runs it from its lease.) At start, before any new grant, the server
      re-takes the free-space holds of live leases (the in-memory account starts empty), leaves every
      temp a lease recorded to the existing startup sweep exactly as it treats a killed local
      encode's temp (an upload admitted but not yet gated is re-run from its lease, never gated
@@ -334,3 +343,4 @@ All fakes, loopback and synthetic media; never a live node, never a GPU (T9, T49
 - https://www.rfc-editor.org/rfc/rfc9110.html (read 2026-09-29)
 - https://datatracker.ietf.org/doc/draft-ietf-httpbis-resumable-upload/ (read 2026-09-29)
 - LEAD: tus (https://tus.io/), named only as an alternative, not read today
+- The adversarial verification of this proposal: `verify-proposals.md` (read 2026-09-29).

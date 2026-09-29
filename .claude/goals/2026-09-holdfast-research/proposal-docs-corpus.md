@@ -31,14 +31,16 @@ Read on `main` at `30d245f`, 2026-09-29.
     back (`CheckRetired`, `internal/docscheck/interlacing.go:307`), and no document may claim
     that a scratch location spares the source drive work (`CheckNoSourceDriveClaim` over
     `ScratchCorpus`, `internal/startup/scratchdocs.go:140` and `:169`).
-- `.claude/` holds 29 Markdown-or-text files today (the brief, 15 goal files, the research, this
-  ledger and `NEEDS-OWNER.md`), and the program adds a ledger per goal. All of it is public
-  and rendered by GitHub, and `README.md` now links the brief as the plan of record (R6), but
-  none of it states what the build does: it states what the owner decided and what goals will
-  build.
+- `.claude/` held 27 Markdown-or-text files at `30d245f` (plus `settings.json`); only its 12 `.md`
+  files are in the corpus (the brief, the ledger, `NEEDS-OWNER.md` and 9 research files), since the
+  walk admits `.md` only and the 15 `.goal.txt` files never were in it. The program adds a ledger
+  per goal and these six proposals. All of it is public and rendered by GitHub, and `README.md`
+  now links the brief as the plan of record (R6), but none of it states what the build does: it
+  states what the owner decided and what goals will build.
 - The mechanical guards that are NOT corpus-based keep scanning `.claude/` whatever this
-  decides: the rename guard (`scripts/check-pins.sh` section 4), `make secret-scan` and
-  `make identity-scan` all read every tracked file.
+  decides: the rename guard (`scripts/check-pins.sh` section 4) and `make secret-scan` read every
+  tracked file, and so does `make identity-scan` (added by goal 1 in `33c80fc`), apart from
+  `LICENSE` and `NOTICE`.
 
 The two failure modes the current walk has:
 
@@ -81,6 +83,8 @@ The two failure modes the current walk has:
 Adopt option (a): `internal/corpus` skips `.claude/` exactly as it skips `.git`, `vendor` and
 `node_modules`, with a test that proves a `.claude/` document is out and a `docs/` document is
 in, and the corpus's doc comment and `docs/test-mass.md` (which describes the corpus) say so.
+The root `CLAUDE.md` stays in the corpus: it is agent-facing but it is not under `.claude/`, so
+the vocabulary discipline keeps applying to it.
 The checks exist to grade what a stranger is told about the build, and the program's files are
 decisions and plans; letting them satisfy a presence check is the false green M4 named, and
 making them trip an absence check taxes every goal for no reader's benefit. Goal 2 carries it,
@@ -93,8 +97,8 @@ the owner approves, nothing changes and the §4 rule holds.
   and `x/.claude/d.md`; `Markdown` returns `docs/a.md` only among them; the existing depth and
   VCS-exclusion cases keep passing. The test fails if the `.claude` case is deleted.
 - `internal/docscheck` and `internal/startup`: the corpus-based tests keep passing on the real
-  tree, and each bite test keeps failing on its old wording (they build their inputs in memory,
-  so the change cannot weaken them).
+  tree, and each bite test keeps failing on its old wording (they pass explicit files written
+  under `t.TempDir()` and bypass the walk, so the change cannot weaken them).
 - A regression proof for the false green: a presence test fed a corpus in which only a
   `.claude/` file names a metric reports it undocumented.
 - `make mutation-diff REF=origin/main` under the heavy lock before the PR is pushed; the PR's
@@ -108,7 +112,7 @@ the owner approves, nothing changes and the §4 rule holds.
 | The walk is of the filesystem, not of tracked files | `internal/corpus/corpus.go:39-61` (`filepath.WalkDir`) | confirmed |
 | The metric-name presence check reads `corpus.Markdown` | `internal/docscheck/docscheck_test.go:23` | confirmed |
 | The scratch-claim absence check reads the same walk | `internal/startup/scratchdocs.go:169-175` | confirmed |
-| The rename guard, secret scan and identity scan read every tracked file, not the corpus | `scripts/check-pins.sh` section 4 (`git grep`), `scripts/secret-scan.sh`, `scripts/identity-scan.sh` | confirmed |
+| The rename guard, secret scan and identity scan read every tracked file, not the corpus | `scripts/check-pins.sh` section 4 (`git grep`), `internal/secretscan/secretscan.go` (`git ls-files`), `scripts/identity-scan.sh` | confirmed; corrected by the adversarial verification: the identity scan arrived in `33c80fc`, after `30d245f`, and exempts `LICENSE` and `NOTICE` |
 | `.github/` holds no Markdown today | `git ls-files .github` at `30d245f` | confirmed |
 
 ## Sources
@@ -120,3 +124,4 @@ the owner approves, nothing changes and the §4 rule holds.
   2026-09-29.
 - The brief `.claude/goals/2026-09-holdfast.md` §4 (program Markdown is scanned too), I16, and
   §23 finding M4; `review-brief-v1.md` finding M4. Read 2026-09-29.
+- The adversarial verification of this proposal: `verify-proposals.md` (read 2026-09-29).

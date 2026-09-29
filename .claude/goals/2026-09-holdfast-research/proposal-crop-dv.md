@@ -73,7 +73,13 @@ happens to its L5 and what proves the result.
    `export -d level5` writes the L5 of every frame as an editor config (presets plus frame-range
    edits), which serves both as the input for computing new offsets and as the reader for a gate.
    Quirk found: that export sets `"crop": true` even when its presets are non-zero, so a gate must
-   compare the presets and the edits, never the flag.
+   compare the presets and the edits, never the flag. The adversarial verification found a second
+   quirk that decides the gate's shape: `export -d level5` writes a frame that has NO L5 block as
+   0/0/0/0 (`src/dovi/exporter.rs:154,165` at 2.3.4), exactly like a zeroed one, while
+   `export -l level5 -f json` returns no record for it. And `--edit-config` exits 0 without applying
+   anything when its file is missing or malformed or when it asks for frame ranges on an HEVC
+   command, and any edit config switches `-m` and `-c` off (`src/main.rs:84-88`,
+   `src/dovi/mod.rs:96-107`).
 5. **The only route for an edited RPU into the encode is the source bitstream.** libx265 takes the
    RPU from each decoded frame's `AV_FRAME_DATA_DOVI_METADATA` (`libavcodec/libx265.c:848-860`), and
    raw HEVC cannot be stream-copied into mkv with this ffmpeg (verify claim 6), so injecting after
@@ -164,8 +170,9 @@ frame; every other DV source falls back to (a) and encodes uncropped with the re
   (`crop refused: Dolby Vision L5 varies by shot`, `... L5 is zero or absent`, `... L5 disagrees
   with the picture`, `... odd L5 offset for 4:2:0`, `... variable frame rate`, `... dovi_tool
   failed`).
-- The output gate reads L5 with `dovi_tool extract-rpu` and `export -d level5`, requires one preset
-  of 0/0/0/0 whose edits cover every frame, and runs beside goal 8's RPU-count gate; a failure
+- The output gate reads L5 with `dovi_tool extract-rpu` and `export -l level5 -f json`, requires
+  exactly one all-zero L5 record per frame (the record count equals the frame count, so a dropped
+  L5 cannot pass as a zeroed one), and runs beside goal 8's RPU-count gate; a failure
   discards the output like any gate failure, and the next attempt encodes uncropped.
 - No new config key: `crop` keeps its T26 opt-in, and the DV rule applies whenever it is on.
 - T26 is kept, not bent: the sampled consensus must still agree or there is no crop, and the
@@ -204,9 +211,13 @@ never a GPU (T9, T41). Encodes run under the heavy lock; the pure decision funct
     omits L5, gives a named refusal, never a crop.
 - **Golden argv:** the pre-pass for profile 8 (`-m 0 -c convert`) and profile 7
   (`-m 2 -c convert --discard`), the raw HEVC input (`-f hevc -framerate`), and the gate's
-  `extract-rpu` and `export` calls.
-- **Profile 7 limit:** `dovi_tool generate` makes profile 8.1 or 8.4 RPUs only (`docs/generator.md`),
-  so a synthetic profile 7 dual-layer source cannot be built this way; profile 7 with crop is proven
+  `extract-rpu` and `export -l level5 -f json` calls; no argv ever pairs `--edit-config` with the
+  `-m`/`-c` pre-pass, which it would silently switch off.
+- **The dropped-L5 bite:** an RPU with L5 removed by the `editor` subcommand (`drop_l5`) is refused by
+  the output gate, although `export -d level5` shows it as 0/0/0/0.
+- **Profile 7 limit:** `dovi_tool generate` makes profile 5, 8.1 or 8.4 RPUs (the 2.3.4 code,
+  `src/dovi/generator.rs:17-23`; `docs/generator.md` still says 8.1 or 8.4) and never 7, so a
+  synthetic profile 7 dual-layer source cannot be built this way; profile 7 with crop is proven
   at the argv level with the fake, and the real pipeline on profile 8.
 
 ## Claims re-verified
@@ -217,8 +228,8 @@ never a GPU (T9, T41). Encodes run under the heavy lock; the pure decision funct
 | `hdr10plus_tool` latest release is 1.7.2 (2025-12-27) | https://github.com/quietvoid/hdr10plus_tool/releases/tag/1.7.2 | confirmed (not relied on here) |
 | `-c` / `--crop` sets the active area offsets to 0 | https://github.com/quietvoid/dovi_tool/blob/2.3.4/README.md and `dovi_tool --help` | confirmed; re-run: 40/40 became 0/0/0/0 on 24 of 24 frames |
 | `docs/editor.md` has an `active_area` block with `crop`, `drop_l5`, `presets` and `edits` (verify claim 7) | https://github.com/quietvoid/dovi_tool/blob/2.3.4/docs/editor.md | confirmed; additions: `--edit-config` on HEVC operations supports only the `"all"` active-area edit, an absent L5 is inserted, and `drop_l5` produces non-conformant RPUs |
-| `dovi_tool generate` takes `level5` offsets from JSON | https://github.com/quietvoid/dovi_tool/blob/2.3.4/docs/generator.md | confirmed; it generates profile 8.1 or 8.4 only, so no synthetic profile 7 |
-| `export -d level5` writes L5 as an editor config | README at 2.3.4 and `dovi_tool export --help` | confirmed; quirk: `"crop": true` is set even when presets are non-zero |
+| `dovi_tool generate` takes `level5` offsets from JSON | https://github.com/quietvoid/dovi_tool/blob/2.3.4/docs/generator.md | confirmed; corrected by the adversarial verification: the 2.3.4 code generates profile 5, 8.1 or 8.4, never 7, so still no synthetic profile 7 |
+| `export -d level5` writes L5 as an editor config | README at 2.3.4 and `dovi_tool export --help` | confirmed; quirk: `"crop": true` is set even when presets are non-zero; corrected by the adversarial verification: a missing L5 exports as 0/0/0/0 (`exporter.rs:154,165`), so the gate uses `export -l level5 -f json` |
 | "Use `dovi_tool --crop` in the pre-pass" suffices (research section 1 implications) | the lab and `docs/editor.md` | corrected: `--crop` is right only when the crop removes the whole letterbox; a partial crop needs presets, and frame ranges need the `editor` subcommand |
 | Crop leaves stale L5 (verify claim 7) | the verifier's output RPU re-read with `dovi_tool info -s`; https://github.com/FFmpeg/FFmpeg/blob/master/libavfilter/vf_crop.c at `d85cdd2597` | confirmed |
 | `dovi_rpuenc.c` writes L5 verbatim | https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/dovi_rpuenc.c (lines 497-500 at `d85cdd2597`) | confirmed |
@@ -240,10 +251,12 @@ never a GPU (T9, T41). Encodes run under the heavy lock; the pure decision funct
 - https://github.com/quietvoid/dovi_tool/blob/2.3.4/docs/generator.md (read 2026-09-29)
 - https://github.com/quietvoid/hdr10plus_tool/releases/tag/1.7.2 (read 2026-09-29)
 - https://github.com/FFmpeg/FFmpeg/blob/master/libavfilter/vf_crop.c (read 2026-09-29, master at
-  `d85cdd2597`)
+  `d85cdd2597`; the adversarial verification found every FFmpeg line cited here identical at the
+  pinned build's `5d4d3bdc61`)
 - https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/dovi_rpuenc.c (read 2026-09-29)
 - https://github.com/FFmpeg/FFmpeg/blob/master/libavutil/dovi_meta.h (read 2026-09-29)
 - https://github.com/FFmpeg/FFmpeg/blob/master/libavutil/side_data.c (read 2026-09-29)
 - https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/bsf/dovi_rpu.c (read 2026-09-29)
 - https://github.com/FFmpeg/FFmpeg/blob/master/fftools/ffprobe.c (read 2026-09-29)
 - https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/libx265.c (read 2026-09-29)
+- The adversarial verification of this proposal: `verify-proposals.md` (read 2026-09-29).
