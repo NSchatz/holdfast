@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -171,11 +172,12 @@ min_bitrate_kbps: 0
 	}
 
 	// container_ext is the fifth knob and it decides the OUTPUT PATH rather than a flag,
-	// so it is asserted on the argv's trailing operand.
-	if got := movieArgs[len(movieArgs)-1]; filepath.Ext(got) != ".mp4" {
+	// so it is asserted on the argv's trailing operand: the container extension that path
+	// carries, ahead of the working file's own suffix (S0177).
+	if got := movieArgs[len(movieArgs)-1]; filepath.Ext(strings.TrimSuffix(got, TempSuffix)) != ".mp4" {
 		t.Errorf("the encode of %s wrote to %q - its root forces container_ext: mp4", filepath.Base(movieSrc), got)
 	}
-	if got := tvArgs[len(tvArgs)-1]; filepath.Ext(got) != ".mkv" {
+	if got := tvArgs[len(tvArgs)-1]; filepath.Ext(strings.TrimSuffix(got, TempSuffix)) != ".mkv" {
 		t.Errorf("the encode of %s wrote to %q - its root forces container_ext: mkv", filepath.Base(tvSrc), got)
 	}
 

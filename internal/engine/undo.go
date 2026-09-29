@@ -49,34 +49,61 @@ import (
 // never mistaken for library media, whatever extension they carry.
 const UndoMarker = "__undo__"
 
+// UndoSuffix is the final extension of a retained original's name (S0177), the
+// counterpart of TempSuffix: a retained original is a complete, playable copy of a film
+// sitting in a library folder for the whole window, and a media server or an *arr app
+// scanning by extension would otherwise offer it as a duplicate. Whether one of them skips
+// a dot-directory is that app's behaviour, and not something holdfast controls.
+const UndoSuffix = ".holdfast-undo"
+
 // UndoDirName is the per-directory retention area. It lives INSIDE the source's own
 // directory because a hard link cannot cross a filesystem boundary, and a directory
 // beside the file is the only location guaranteed to be on the same one.
 const UndoDirName = ".holdfast-undo"
 
-// isUndoName reports whether a basename is a retained original.
+// isUndoName reports whether a basename is a retained original, of either generation
+// (retainedPathFor, legacyRetainedPathFor): both carry the marker.
 func isUndoName(base string) bool { return strings.Contains(base, "."+UndoMarker) }
 
 // undoDirFor returns the retention area for files in dir.
 func undoDirFor(dir string) string { return filepath.Join(dir, UndoDirName) }
 
-// retainedPathFor is the retained original's full path: `<stem>.<fingerprint>.__undo__.<ext>`,
-// in the retention area beside the source. It mirrors the temp file's shape exactly,
-// including KEEPING THE SOURCE'S EXTENSION - a retained original is a playable copy of
-// the operator's file and they may well want to look at it before deciding, which an
-// extension of `.__undo__` would take away from them.
+// retainedPathFor is the retained original's full path:
+// `<stem>.<fingerprint>.__undo__.<ext>.holdfast-undo`, in the retention area beside the
+// source.
 //
-// That is also what makes the scan's exclusion real rather than incidental: the
-// retained name ends in `.mkv`, so it IS a name the scan would otherwise enumerate,
-// and only the marker keeps it out. An exclusion that worked because the name happened
-// to carry no video extension would be one nobody could rely on, and nobody would
-// notice it had stopped working.
+// It ends in UndoSuffix rather than in the source's extension, so no scan of a library
+// folder that goes by extension - holdfast's own included, whatever video_exts says - takes
+// it for a film. The source's extension is still IN the name, ahead of the suffix, so the
+// name says what the file is and an operator who wants to look at it before deciding can
+// see what to open it as; a restore does not read it at all, but renames the file back to
+// the path its record names. And the scan's exclusion does not rest on the suffix: the
+// marker is what keeps a retained original out (Eligibility.Name), with any extension
+// configured, as it is for a retention an earlier build named `.mkv`.
 //
 // The fingerprint is in the name so two retentions of the same path (a swap, a
 // restore, a later swap) can never collide, and so a caller can compute the name a
 // given source WOULD get without consulting the ledger - which is how a retained link
 // left by a run that died before its ledger write is still recognised as ours.
+//
+// Where the suffix would take the name past NAME_MAX, or the path past PATH_MAX, the
+// earlier name (legacyRetainedPathFor) is the retained name instead, for the reason
+// tempPath gives: a source whose retention fitted before this suffix existed must still
+// be retainable, and every reader of a retained name accepts both generations.
 func retainedPathFor(src, fingerprint string) string {
+	earlier := legacyRetainedPathFor(src, fingerprint)
+	if p := earlier + UndoSuffix; nameFits(p) {
+		return p
+	}
+	return earlier
+}
+
+// legacyRetainedPathFor is the name every build before S0177 gave a retained original,
+// `<stem>.<fingerprint>.__undo__.<ext>`: retainedPathFor without UndoSuffix. Retentions
+// already on disk keep it. Their records name it, so a restore and a release act on it as
+// they always did, and the hardlink guard and the retention both still recognise it as
+// holdfast's own (heldLinksIn, retain).
+func legacyRetainedPathFor(src, fingerprint string) string {
 	base := filepath.Base(src)
 	ext := filepath.Ext(base)
 	stem := strings.TrimSuffix(base, ext)
@@ -89,6 +116,14 @@ func retainedPathFor(src, fingerprint string) string {
 // the tool does not know what those other bytes are, and overwriting them would be
 // destroying something to make room for a safety net.
 var errRetentionExists = errors.New("a different file already occupies the retained name")
+
+// errEarlierRetentionRecorded is returned when a live retention record, one an earlier
+// build wrote, names the link that build took for this same original. That retention keeps
+// its name and its expiry and is released on its own schedule; a second retention of the
+// same bytes taken beside it would outlive the record the swap then rewrites, holding the
+// space for good. So this one waits, as any retention that cannot be taken does, and the
+// file is taken on the first scan after that record's window has closed.
+var errEarlierRetentionRecorded = errors.New("a retention an earlier build recorded still holds this original under its earlier name")
 
 // UndoWindow is the retention/restore/release surface, over the same store the engine
 // writes through. It is deliberately separable from Engine: a restore needs the config
@@ -155,11 +190,16 @@ func (u *UndoWindow) Enabled() bool { return u.Cfg.UndoEnabled() }
 // It is idempotent against its own leftovers. An interrupted run can leave a retained
 // link on disk (and a record beside it) for a source that was never swapped; retaining
 // again must then REUSE that link rather than fail on `os.Link`'s EEXIST, or the very
-// first crash would park the file for as long as the record lived.
-func (u *UndoWindow) retain(src, fingerprint string) (string, error) {
+// first crash would park the file for as long as the record lived. A leftover an earlier
+// build left under the earlier name is carried to this build's name first (carryEarlierLink),
+// so the swap ends with one retained name for the original, not two.
+func (u *UndoWindow) retain(ctx context.Context, src, fingerprint string) (string, error) {
 	dst := retainedPathFor(src, fingerprint)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return "", fmt.Errorf("create the retention area: %w", err)
+	}
+	if err := u.carryEarlierLink(ctx, src, fingerprint, dst); err != nil {
+		return "", err
 	}
 	err := os.Link(src, dst)
 	if err == nil {
@@ -181,6 +221,86 @@ func (u *UndoWindow) retain(src, fingerprint string) (string, error) {
 		return dst, nil
 	}
 	return "", errRetentionExists
+}
+
+// carryEarlierLink moves the link an earlier build took for this same original - at its
+// earlier name, legacyRetainedPathFor - to this build's name, dst, when no record names
+// it: the state a run interrupted between the link and the swap leaves, and the one a
+// retention most often meets. A same-directory rename is the whole move. Afterwards the
+// original has one retained name, this build's, which the swap then records.
+//
+// It touches nothing it cannot prove is that leftover. A file at the earlier name that is
+// NOT this original (another inode, a symbolic link, or nothing at all) is left exactly as
+// it is, and the retention goes ahead under this build's name beside it. A leftover a live
+// record names is an earlier build's retention and keeps its name and its expiry, so the
+// retention waits (errEarlierRetentionRecorded); so it does where the ledger cannot say
+// whether one does, because an unanswered question is not a licence to move a retained
+// original.
+func (u *UndoWindow) carryEarlierLink(ctx context.Context, src, fingerprint, dst string) error {
+	earlier := legacyRetainedPathFor(src, fingerprint)
+	if earlier == dst {
+		// This build's name IS the earlier one here (retainedPathFor: the suffix did not
+		// fit), so there is nothing to carry; the link below reuses a leftover as it always has.
+		return nil
+	}
+	if !sameRegularFile(src, earlier) {
+		return nil
+	}
+	recorded, err := u.recordNames(ctx, earlier)
+	if err != nil {
+		return fmt.Errorf("could not establish whether a retention record names %s, the link an earlier build "+
+			"took for this original, so it is left where it is: %w", earlier, err)
+	}
+	if recorded {
+		return fmt.Errorf("%w (%s): it is released at its recorded expiry, and this file is taken on the scan after that",
+			errEarlierRetentionRecorded, earlier)
+	}
+	switch _, err := os.Lstat(dst); {
+	case errors.Is(err, os.ErrNotExist):
+		if err := os.Rename(earlier, dst); err != nil {
+			return fmt.Errorf("move the link an earlier build took for this original from %s to %s: %w", earlier, dst, err)
+		}
+		return nil
+	case err != nil:
+		return fmt.Errorf("inspect %s before moving the link an earlier build took for this original: %w", dst, err)
+	case sameRegularFile(src, dst):
+		// Both names already hold the original. rename(2) does nothing at all when its
+		// two paths are links to one file, so the earlier name is removed instead: the
+		// original keeps this build's name, and loses nothing.
+		if err := os.Remove(earlier); err != nil {
+			return fmt.Errorf("remove %s, a second retained name for this original: %w", earlier, err)
+		}
+		return nil
+	default:
+		// This build's name holds something else. The earlier name stays exactly as it
+		// is, and the link below decides on what is there.
+		return nil
+	}
+}
+
+// sameRegularFile is sameFile for a path b that is itself a regular file: a hard link to
+// a's inode, never a symbolic link that resolves to it. It is what licenses moving or
+// removing b as a second name for a's bytes.
+func sameRegularFile(a, b string) bool {
+	fi, err := os.Lstat(b)
+	return err == nil && fi.Mode().IsRegular() && sameFile(a, b)
+}
+
+// recordNames reports whether a live retention record names path as its retained file.
+func (u *UndoWindow) recordNames(ctx context.Context, path string) (bool, error) {
+	if u.Store == nil {
+		return false, errors.New("there is no ledger to ask")
+	}
+	rows, err := u.Store.ListRetained(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, r := range rows {
+		if filepath.Clean(r.RetainedPath) == filepath.Clean(path) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // discard removes a retained link this run took but will not use, because the swap it
@@ -275,8 +395,10 @@ func heldLinksIn(ctx context.Context, f, fingerprint string, r LedgerReader, log
 	// run killed between the link and that write leaves a real retained link with no
 	// row behind it. The name is proof enough on its own: it carries this tool's
 	// marker and the source's own fingerprint, and it is only counted when it is
-	// literally another name for this inode.
+	// literally another name for this inode. Both generations of that name are asked,
+	// because the run that was killed may have been an earlier build's.
 	count(retainedPathFor(f, fingerprint))
+	count(legacyRetainedPathFor(f, fingerprint))
 
 	if r == nil {
 		// No ledger to ask: discount only what the name proved, which is the same

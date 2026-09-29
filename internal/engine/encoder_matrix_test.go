@@ -109,7 +109,7 @@ func TestSVTAV1_VmafRejectsDegradedOutput(t *testing.T) {
 		return exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-y", "-i", in,
 			"-vf", "scale=64:48,scale=320:240:flags=neighbor",
 			"-c:v", "libsvtav1", "-preset", "10", "-crf", "55",
-			"-pix_fmt", "yuv420p10le", "--", out).Run()
+			"-pix_fmt", "yuv420p10le", "-f", "matroska", "--", out).Run()
 	})
 
 	led := run(t, ffmpeg, ffprobe, d, degradedAV1, func(c *config.Config) {

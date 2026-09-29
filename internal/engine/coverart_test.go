@@ -356,7 +356,7 @@ func (s *substitutedEncoder) wrote() []string {
 
 // hevcBody is the encode half of a substituted encoder's argv.
 var hevcBody = []string{"-pix_fmt", "yuv420p10le", "-preset", "ultrafast", "-crf", "22",
-	"-x265-params", "log-level=error"}
+	"-x265-params", "log-level=error", "-f", "matroska"}
 
 func ffArgs(in string, body []string, out string) []string {
 	args := []string{"-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", in}
@@ -370,7 +370,7 @@ func ffArgs(in string, body []string, out string) []string {
 func TestCoverArt_AC1_ReportShapedMatroskaSwapsWithItsPictures(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
 	d, side := t.TempDir(), t.TempDir()
-	src := filepath.Join(d, "The Secret Agent (2025).mkv")
+	src := filepath.Join(d, "A Synthetic Film (2025).mkv")
 	mkReportMatroska(t, ffmpeg, ffprobe, src, reportShape{pictures: true})
 	wantPics := picturesOf(t, ffmpeg, ffprobe, src, side, "source")
 	wantOthers := nonPictureKinds(t, ffprobe, src)
@@ -767,33 +767,36 @@ func renderArgv(calls [][]string) string {
 
 // The base commit's invocations for the no-picture report-shaped source, captured through
 // argvLoggingFFmpeg from that tree, with the mux-queue bounds every encode invocation now
-// carries ahead of the output path. decodeCheck and the two stream hashes are the gate's own
-// invocations; the first entry of each sequence is the encode.
+// carries ahead of the output path, and the working file's name and the container the encode
+// names since S0177. decodeCheck and the two stream hashes are the gate's own invocations;
+// the first entry of each sequence is the encode.
 var (
 	ac10DecodeCheck = []string{"-hide_banner", "-nostdin", "-v", "error", "-xerror", "-err_detect", "+explode",
-		"-i", "<ROOT>/movie.__transcoding__.mkv", "-map", "0:v", "-f", "null", "-"}
+		"-i", "<ROOT>/movie.__transcoding__.mkv.holdfast-part", "-map", "0:v", "-f", "null", "-"}
 
 	ac10ReEncode = [][]string{
 		{"-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", "<ROOT>/movie.mkv",
 			"-map", "0", "-map", "-0:d?", "-c", "copy", "-c:v", "libx265",
 			"-pix_fmt", "yuv420p10le", "-color_range", "tv", "-fps_mode", "passthrough",
 			"-preset", "ultrafast", "-crf", "22", "-x265-params", "log-level=error",
+			"-f", "matroska",
 			"-max_muxing_queue_size", "128", "-muxing_queue_data_threshold", "52428800",
 			"-thread_queue_size", "8",
-			"--", "<ROOT>/movie.__transcoding__.mkv"},
+			"--", "<ROOT>/movie.__transcoding__.mkv.holdfast-part"},
 		ac10DecodeCheck,
 	}
 
 	ac10RemuxOnly = [][]string{
 		{"-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", "<ROOT>/movie.mkv",
 			"-map", "0", "-map", "-0:d?", "-c", "copy",
+			"-f", "matroska",
 			"-max_muxing_queue_size", "128", "-muxing_queue_data_threshold", "52428800",
 			"-thread_queue_size", "8",
-			"--", "<ROOT>/movie.__transcoding__.mkv"},
+			"--", "<ROOT>/movie.__transcoding__.mkv.holdfast-part"},
 		ac10DecodeCheck,
 		{"-hide_banner", "-nostdin", "-v", "error", "-i", "<ROOT>/movie.mkv",
 			"-map", "0:v", "-c", "copy", "-f", "streamhash", "-hash", "md5", "-"},
-		{"-hide_banner", "-nostdin", "-v", "error", "-i", "<ROOT>/movie.__transcoding__.mkv",
+		{"-hide_banner", "-nostdin", "-v", "error", "-i", "<ROOT>/movie.__transcoding__.mkv.holdfast-part",
 			"-map", "0:v", "-c", "copy", "-f", "streamhash", "-hash", "md5", "-"},
 	}
 
@@ -803,9 +806,10 @@ var (
 			"-map", "0:6", "-map", "0:7", "-map", "0:8", "-c", "copy", "-c:v", "libx265",
 			"-pix_fmt", "yuv420p10le", "-color_range", "tv", "-fps_mode", "passthrough",
 			"-preset", "ultrafast", "-crf", "22", "-x265-params", "log-level=error",
+			"-f", "matroska",
 			"-max_muxing_queue_size", "128", "-muxing_queue_data_threshold", "52428800",
 			"-thread_queue_size", "8",
-			"--", "<ROOT>/movie.__transcoding__.mkv"},
+			"--", "<ROOT>/movie.__transcoding__.mkv.holdfast-part"},
 		ac10DecodeCheck,
 	}
 )

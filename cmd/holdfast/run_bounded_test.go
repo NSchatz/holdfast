@@ -683,7 +683,7 @@ func hevcFixture(t *testing.T, path string) string {
 // tempFor is the working file a run with no scratch_dir writes for src.
 func tempFor(src string) string {
 	stem := strings.TrimSuffix(filepath.Base(src), filepath.Ext(src))
-	return filepath.Join(filepath.Dir(src), stem+"."+engine.TempMarker+".mkv")
+	return filepath.Join(filepath.Dir(src), stem+"."+engine.TempMarker+".mkv"+engine.TempSuffix)
 }
 
 // child is a holdfast process started from this test binary and not yet waited for.
