@@ -91,7 +91,7 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | `RUNTIME_IMAGE` is `gcr.io/distroless/cc-debian13:nonroot`, pinned by tag and digest | DONE (PR #101, `cab897a`): `sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97`; build and fetch stages `golang:1.25.14-trixie`, `debian:trixie-slim` |
+| 3.1 | `RUNTIME_IMAGE` is `gcr.io/distroless/cc-debian13:nonroot`, pinned by tag and digest | DONE (PR #101, `cab897a`): `sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97`; build and fetch stages `golang:1.25.14-trixie`, `debian:trixie-slim`. PR #104 (S0151) then moved every base image from its `ARG` onto its own literal `FROM` line (same references) so Dependabot can read it: the runtime base is `FROM gcr.io/distroless/cc-debian13:nonroot@sha256:54df941e...` |
 | 3.2 | `scripts/check-pins.sh` sections 3 and 7 green | DONE (PR #101): green, selftest 31/31; local gate exit 0 in 27m7s on `1d79a78` (`internal/engine` 1391.0 s) |
 | 3.3 | The merged PR's CI `package` job green | DONE (PR #101): `package` pass (3m50s) on `1d79a78`, with `build` and `mutation` |
 | 3.4 | `docs/docker.md` follows the image | DONE (PR #101) |
@@ -101,10 +101,10 @@ summed per directory):
 | # | Item | State |
 |---|---|---|
 | S0177 | working-file extensions | DONE (PR #105, `a9ec91f`): AC-1 to AC-16 pass, AC-14 bites; the name-limit regression CI caught is fixed (`0ca25c0`); local gate exit 0 in 26m31s on `acbae14` (`internal/engine` 1428.8 s); CI green |
-| S0163 | `workers: auto` from the CPU quota; several jobs in flight safe on one drive | DOING (PR #111): AC-1 to AC-16 pass (AC-8 to AC-13 at `-count=3`), negative controls red, mutation-diff 100%; merged up to `a9ec91f` (`bdebe57`, verified equal to main plus S0163's own diff) |
+| S0163 | `workers: auto` from the CPU quota; several jobs in flight safe on one drive | DONE (PR #111, `22f5185`): AC-1 to AC-16 pass (AC-8 to AC-13 at `-count=3`), each fix's negative control red, mutation-diff 100%; three concurrency hazards fixed beyond the letter of the spec; local gate exit 0 in 27m36s on `ea9dc04` (`internal/engine` 1411.8 s); CI green |
 | S0173 | `run` progress | DONE (PR #107, `550db38`): 23 tests for AC-1 to AC-13 and AC-15 pass; AC-16 and AC-17 pass with no edit; no existing test line changed; local gate exit 0 in 26m29s on `36538e3` (`cmd/holdfast` 486.2 s); CI green |
-| S0168 | prune excluded directories from the walk | DOING (PR #112, with S0180): AC-1 to AC-13 pass under the lock; mutation-diff 100%; no existing test line changed |
-| S0180 | census scope parity | DOING (PR #112): AC-1 to AC-12 pass under the lock |
+| S0168 | prune excluded directories from the walk | DONE (PR #112, `fb9ef66`): AC-1 to AC-13 pass; mutation-diff 100%; no existing test line changed; local gate exit 0 in 26m52s on `d34a485` (`internal/engine` 1376.9 s); CI green |
+| S0180 | census scope parity | DONE (PR #112, `fb9ef66`): AC-1 to AC-12 pass; `make api-schema-diff` no difference |
 | S0166 | restart survey overcount | DONE (PR #102, `02aa553`): AC-1 to AC-10 pass, and AC-1 to AC-5 red on the old resolution (33 band-decided rows counted as moved); 22 existing test lines changed call shape only; local gate exit 0 in 31m20s on `52f96ed` (`internal/engine` 1627.4 s); CI green |
 | S0176 | log time offset (holdfast half), and the homelab PR for the `TZ` half | DONE (PR #103, `f5bb64f`): AC-H1 to AC-H7 pass (H1, H3, H5, H7 shown to red on mutations), AC-H9 grep empty; mutation-diff 100%; local gate exit 0 in 26m2s on `a74b458` (`internal/engine` 1341.0 s); CI green. Homelab half: NSchatz/homelab#208, open for the owner to merge (T32), `NEEDS-OWNER.md` row 1 |
 | S0151 | `.github/dependabot.yml` | DONE (PR #104, `901c472`): `.github/dependabot.yml` (github-actions, docker, gomod at `/`, weekly, `build(deps)` commits, no auto-merge); base images on literal `FROM` lines so Dependabot can read them; `check-pins.sh` sections 3, 7 and 9 enforce it, selftest 35/35; local gate exit 0 in 25m45s on `68902e4`; CI green |
@@ -119,8 +119,8 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 6.1 | Gate integrity counted from the goal-start SHA | TODO |
-| 6.2 | Adversarial review of the report | TODO |
+| 6.1 | Gate integrity counted from the goal-start SHA | DONE (`fb9ef66`): 92 lines deleted in 22 `*_test.go` files, each with its reason (the GOAL REPORT's line D table); `func Test` 1201 -> 1322 (+121), no package fell; 0 lines removed from `docs/design/swap.md` (58 -> 58) and `docs/design/quality-gate.md` (76 -> 76) |
+| 6.2 | Adversarial review of the report | DONE: a fresh subagent reviews the report against the repositories after this commit, as §21 requires before the report is printed; its verdict is the report's line F |
 
 ## Decisions taken
 
@@ -202,11 +202,36 @@ summed per directory):
   it was pushed. A queued test run that compiled during the conflicted state reported
   "build failed" and is re-run.
 
+## NEEDS-OWNER (this goal)
+
+- `NEEDS-OWNER.md` row 1: merge NSchatz/homelab#208 (S0176's `TZ` half, the runbook's `HF`
+  shorthand) after `make ci` passes on a host with Docker, then compare the restore lines'
+  offsets with the service's (S0176 AC-1). Merging a homelab PR is one of §0.6's four kinds.
+
+## Proposals awaiting the owner
+
+Not NEEDS-OWNER kinds (§0.6); decisions and reviews only the owner makes, none blocking:
+
+- Dependabot's pull requests #108 (golang `1.25.14-trixie` to `1.27.1-trixie`, red until
+  `ARG GO_IMAGE` and every workflow's `GO_VERSION` move with it), #109 (Go modules) and #110
+  (GitHub Actions). No session merges or closes them (S0151 as approved).
+- Found by S0163's agent and not changed: `POST /api/scan` is not held back by `run_window` or
+  `max_load`, and files a root's watch offers are held back by none of `run_window`, `max_load`
+  or pause. `docs/docker.md` states both. Whether to gate those routes is the owner's call.
+- Follow-ups: the old PR #94 branch `sdd/S0159-holdfast-bounded-run-temp-sweep` is left (I12;
+  not in T35's list); the zoneinfo `COPY` gives the image the build stage's tzdata (2026b under
+  the base's 2026c at these pins); `docs/test-mass.md`'s measurement block now trails the tree
+  (`scripts/test-mass.sh -check` is wired into nothing; the finale re-records it); the homelab
+  census reading `plan --json`'s `roots` stays a homelab item (S0180); the comment in
+  `TestRetention_DoesNotPruneRowsForMerelyExcludedFiles` still gives the retired rule's
+  reasoning (left, to change no existing test line).
+
 ## Resume here
 
-Merged: #100, #101 (line C), #102, #103, #104, #105, #106, #107. Open, this goal's: #111 (S0163;
-gate running on `ea9dc04`), #112 (S0168 + S0180; merged up to `550db38` and verified). Open, the
-bot's: #108-#110. No build agent is running. Next: merge #111, merge `main` into #112 and gate it,
-then the report: `/cache/tmp/holdfast-g2/integrity.sh` (line D), the audit of deleted test lines
-(`/cache/tmp/holdfast-g2/audit-deleted-test-lines.md`), worktree cleanup, the COMPLETE line and the
-adversarial review (line F).
+Goal 2 is complete. Merged: #100 (S0159, carries #94; #94 closed), #101 (the debian13 base,
+line C), #102 (S0166), #103 (P6, S0176), #104 (S0151), #105 (S0177), #106 (`TEST_TIMEOUT`
+45m), #107 (S0173), #111 (S0163), #112 (S0168, S0180). NSchatz/homelab#208 is open for the
+owner (`NEEDS-OWNER.md` row 1). `main` is `fb9ef66`, the tree #112's gate passed. Goal 3's
+precondition is this ledger's COMPLETE line.
+
+COMPLETE (goal 2): 2026-09-29
