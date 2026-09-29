@@ -292,6 +292,7 @@ const (
 	mechTemp      = engine.TempMarker
 	mechRetained  = engine.RetainedMarker
 	mechUndoName  = engine.UndoMarker
+	mechFilter    = "path filter"
 	mechRecord    = "parked-job record hold-back"
 	mechIrregular = "not a regular file"
 	mechDeclined  = engine.RuleUnsupportedCharacters
@@ -299,7 +300,7 @@ const (
 )
 
 var mechanismOrder = []string{
-	mechExt, mechUndoDir, mechTemp, mechRetained, mechUndoName, mechRecord, mechIrregular,
+	mechExt, mechUndoDir, mechTemp, mechRetained, mechUndoName, mechFilter, mechRecord, mechIrregular,
 	mechDeclined, mechOther,
 }
 
@@ -309,7 +310,10 @@ var mechanismDetail = map[string]string{
 	mechTemp:     "a work-in-progress temp this tool wrote",
 	mechRetained: "a replacement this tool retained because its job did not complete cleanly",
 	mechUndoName: "an original the undo window is holding",
-	mechRecord:   "a path a parked job's record, or a recorded replacement, holds back",
+	mechFilter: "a path the exclude_paths or include_paths in force for its library root keep out of " +
+		"every run. A directory an exclude pattern reaches whole is not listed at all, so the files " +
+		"beneath one are in no figure here, and it is counted among the directories not read",
+	mechRecord: "a path a parked job's record, or a recorded replacement, holds back",
 	mechIrregular: "a symbolic link onto a directory, or onto nothing at all: there is no file at the " +
 		"other end, so a run claims, probes and records nothing about it and it is in neither figure. " +
 		"What is NOT here is any entry a run does act on, whatever kind of entry it is - a symbolic link " +
@@ -328,12 +332,18 @@ var mechanismDetail = map[string]string{
 // that covers nothing, a reduced guarantee, mount information that could not be read -
 // and counting one of those as a directory nobody read would inflate the one figure an
 // operator uses to decide how much of their library this census actually saw.
+//
+// A directory an exclude pattern reaches whole is one of them: the walk prunes it and lists
+// nothing beneath it (S0168), so what is inside it is unknown here exactly as it is behind a
+// directory that could not be read - and so is a second spelling of that storage.
 var notTraversed = map[startup.NoticeKind]bool{
 	startup.NoticeUnreadable:      true,
 	startup.NoticeListingFailed:   true,
 	startup.NoticeUnresolvable:    true,
 	startup.NoticeLinkLeavesRoots: true,
 	startup.NoticeRegionWalked:    true,
+	startup.NoticeExcluded:        true,
+	startup.NoticeRegionExcluded:  true,
 }
 
 // censusOverWalk builds the census from the startup walk's own listings. It opens no
@@ -347,6 +357,7 @@ func censusOverWalk(ctx context.Context, cfg *config.Config, res startup.Result)
 		Storage: storageVerdictOf(res),
 	}
 	c.readLedgerHoldBacks(ctx, cfg)
+	offered := filterAnswer(cfg)
 
 	roots := make([]string, 0, len(cfg.LibraryRoots))
 	for _, r := range cfg.LibraryRoots {
@@ -412,6 +423,13 @@ func censusOverWalk(ctx context.Context, cfg *config.Config, res startup.Result)
 				rc.withhold(nameMechanism(ent.Name, cfg.VideoExts), size)
 				continue
 			}
+			// The path filters, asked where the enumeration asks them: of a source-named file,
+			// before the outright refusal and the record hold-back, so a file both would keep
+			// out is named by the filter - as `holdfast plan` names it (S0180).
+			if !offered(p) {
+				rc.withhold(mechFilter, size)
+				continue
+			}
 			// A path the pipeline refuses OUTRIGHT is not a source, whatever its name: the
 			// daemon declines it before it claims, probes or records anything, and so does
 			// the read-only plan pass. The only refusal that reaches here is the one about
@@ -445,6 +463,23 @@ func censusOverWalk(ctx context.Context, cfg *config.Config, res startup.Result)
 		rc.finish()
 	}
 	return c
+}
+
+// filterAnswer is the path filters' own answer for a path, config.Root.Offers, asked of the
+// root the engine assigns it to: the first configured root containing it. It is not a second
+// spelling of the match rules - it is the one the scan asks - and a path under no root is
+// left alone, as the scan leaves it. The roots are resolved once, because this is asked of
+// every entry of the library.
+func filterAnswer(cfg *config.Config) func(path string) bool {
+	roots := cfg.RootProfiles()
+	return func(path string) bool {
+		for _, r := range roots {
+			if r.Contains(path) {
+				return r.Offers(path)
+			}
+		}
+		return true
+	}
 }
 
 // newRootCensus starts one root's figures, each already carrying the set it covers.
