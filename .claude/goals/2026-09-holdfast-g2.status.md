@@ -106,14 +106,14 @@ summed per directory):
 | S0168 | prune excluded directories from the walk | DOING (build agent, branch `holdfast-g2/census-scope`) |
 | S0180 | census scope parity | DOING (build agent, same branch, after S0168) |
 | S0166 | restart survey overcount | DONE (PR #102, `02aa553`): AC-1 to AC-10 pass, and AC-1 to AC-5 red on the old resolution (33 band-decided rows counted as moved); 22 existing test lines changed call shape only; local gate exit 0 in 31m20s on `52f96ed` (`internal/engine` 1627.4 s); CI green |
-| S0176 | log time offset (holdfast half), and the homelab PR for the `TZ` half | DOING (PR #103, with P6): AC-H1 to AC-H7 pass, AC-H9 grep empty. Homelab half: NSchatz/homelab#208 opened (never merged by a session), `NEEDS-OWNER.md` row 1 |
+| S0176 | log time offset (holdfast half), and the homelab PR for the `TZ` half | DONE (PR #103, `f5bb64f`): AC-H1 to AC-H7 pass (H1, H3, H5, H7 shown to red on mutations), AC-H9 grep empty; mutation-diff 100%; local gate exit 0 in 26m2s on `a74b458` (`internal/engine` 1341.0 s); CI green. Homelab half: NSchatz/homelab#208, open for the owner to merge (T32), `NEEDS-OWNER.md` row 1 |
 | S0151 | `.github/dependabot.yml` | DOING (PR #104, `99ca634`): selftest 35/35; CI `package` green on the literal-`FROM` Dockerfile |
 
 ## Phase 5 - P6 (approved option (a))
 
 | # | Item | State |
 |---|---|---|
-| P6 | `internal/corpus` skips `.claude/`, with a test | DOING (PR #103, commit `790c54d`): both new tests red with the skip removed |
+| P6 | `internal/corpus` skips `.claude/`, with a test | DONE (PR #103, `f5bb64f`): both new tests red with the skip removed |
 
 ## Phase 6 - Report
 
