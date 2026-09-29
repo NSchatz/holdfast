@@ -85,6 +85,11 @@ extension is still in the name, ahead of the suffix, so you can see what it is i
 look at it before deciding. `holdfast restore` does not read the name at all: it renames the
 file back to the original's own path and name, as the retention record names them.
 
+A source whose name leaves no room for the final `.holdfast-undo` (it would take the retained
+name past the filesystem's 255-byte name limit, or its path past 4095 bytes) is held under
+the name earlier builds used, `<stem>.<fingerprint>.__undo__.<ext>`, rather than not held at
+all; restore and release act on the recorded path either way.
+
 **A retention an earlier build took keeps its name.** Builds before the suffix existed named
 the retained original `<stem>.<fingerprint>.__undo__.<ext>`. Such a retention is not renamed:
 it keeps its name and its expiry, `holdfast restore` restores it, the release at the start of

@@ -370,7 +370,7 @@ func ffArgs(in string, body []string, out string) []string {
 func TestCoverArt_AC1_ReportShapedMatroskaSwapsWithItsPictures(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
 	d, side := t.TempDir(), t.TempDir()
-	src := filepath.Join(d, "The Secret Agent (2025).mkv")
+	src := filepath.Join(d, "A Synthetic Film (2025).mkv")
 	mkReportMatroska(t, ffmpeg, ffprobe, src, reportShape{pictures: true})
 	wantPics := picturesOf(t, ffmpeg, ffprobe, src, side, "source")
 	wantOthers := nonPictureKinds(t, ffprobe, src)

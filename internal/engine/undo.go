@@ -85,8 +85,17 @@ func undoDirFor(dir string) string { return filepath.Join(dir, UndoDirName) }
 // restore, a later swap) can never collide, and so a caller can compute the name a
 // given source WOULD get without consulting the ledger - which is how a retained link
 // left by a run that died before its ledger write is still recognised as ours.
+//
+// Where the suffix would take the name past NAME_MAX, or the path past PATH_MAX, the
+// earlier name (legacyRetainedPathFor) is the retained name instead, for the reason
+// tempPath gives: a source whose retention fitted before this suffix existed must still
+// be retainable, and every reader of a retained name accepts both generations.
 func retainedPathFor(src, fingerprint string) string {
-	return legacyRetainedPathFor(src, fingerprint) + UndoSuffix
+	earlier := legacyRetainedPathFor(src, fingerprint)
+	if p := earlier + UndoSuffix; nameFits(p) {
+		return p
+	}
+	return earlier
 }
 
 // legacyRetainedPathFor is the name every build before S0177 gave a retained original,
@@ -229,6 +238,11 @@ func (u *UndoWindow) retain(ctx context.Context, src, fingerprint string) (strin
 // original.
 func (u *UndoWindow) carryEarlierLink(ctx context.Context, src, fingerprint, dst string) error {
 	earlier := legacyRetainedPathFor(src, fingerprint)
+	if earlier == dst {
+		// This build's name IS the earlier one here (retainedPathFor: the suffix did not
+		// fit), so there is nothing to carry; the link below reuses a leftover as it always has.
+		return nil
+	}
 	if !sameRegularFile(src, earlier) {
 		return nil
 	}

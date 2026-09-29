@@ -28,6 +28,12 @@ extra version of the film or as a duplicate. The name still carries the containe
 ahead of that suffix, and the `__transcoding__` marker, which is how holdfast itself
 recognises the file.
 
+The one exception is a name with no room for the suffix: where `.holdfast-part` would take
+the name past the filesystem's 255-byte name limit, or the path past its 4095-byte path
+limit, the working file takes the name every earlier build wrote,
+`<stem>.__transcoding__.<ext>`, and the run logs that it did. Such a file swaps exactly as it
+always has; the cost is that a scanner may list that one working file while it encodes.
+
 A name ending in `.holdfast-part` gives ffmpeg nothing to choose a container from, so the
 encode NAMES its container: the one ffmpeg itself chooses for a file called `x.<ext>`. That is
 not always the container the extension looks like - `m4v` is ffmpeg's `ipod` muxer, `wmv` and
