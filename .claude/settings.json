@@ -1,0 +1,10 @@
+{
+  "env": {
+    "GOFLAGS": "-p=2",
+    "GOMAXPROCS": "2"
+  },
+  "autoMemoryEnabled": false,
+  "attribution": {
+    "commit": ""
+  }
+}
