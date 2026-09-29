@@ -34,6 +34,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The identity scan in `make check` reads the owner's identity from the
+          # repository's FIRST commit, which a shallow checkout does not have (it
+          # refuses one, exit 4, rather than scan for the wrong person).
+          fetch-depth: 0
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:

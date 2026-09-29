@@ -1538,12 +1538,12 @@ type identityHeaderSet struct {
 // allProxyIdentityHeaders is the Authelia Remote-* set plus the X-Forwarded-*
 // equivalents, as one request would carry them.
 var allProxyIdentityHeaders = map[string]string{
-	"Remote-User":        "noah",
+	"Remote-User":        "rowan",
 	"Remote-Groups":      "admins,media",
-	"Remote-Email":       "noah@example.invalid",
-	"Remote-Name":        "Noah Schatz",
-	"X-Forwarded-User":   "noah",
-	"X-Forwarded-Email":  "noah@example.invalid",
+	"Remote-Email":       "rowan@example.invalid",
+	"Remote-Name":        "Rowan Vale",
+	"X-Forwarded-User":   "rowan",
+	"X-Forwarded-Email":  "rowan@example.invalid",
 	"X-Forwarded-Proto":  "https",
 	"X-Forwarded-Host":   "holdfast.example.invalid",
 	"X-Forwarded-For":    "192.168.0.10",

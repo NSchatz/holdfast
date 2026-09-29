@@ -54,7 +54,8 @@ PLATFORM ?= linux/amd64
 
 .PHONY: build test check fmt vet staticcheck govulncheck govulncheck-selftest \
         check-pins check-pins-selftest install-ffmpeg-selftest check-pin-live \
-        secret-scan secret-scan-selftest install-hooks snapshot-bench \
+        secret-scan secret-scan-selftest identity-scan identity-scan-selftest \
+        install-hooks snapshot-bench \
         check-enumeration-memory \
         api-schema api-schema-baseline api-schema-diff api-schema-diff-selftest \
         happy-path-log-selftest \
@@ -151,6 +152,22 @@ secret-scan:
 # A guard nobody tries to defeat is a guard nobody knows works.
 secret-scan-selftest:
 	./scripts/secret-scan-selftest.sh
+
+# The repository is public, and the owner's name and email appear in no tracked file but
+# LICENSE and NOTICE. The identity is READ FROM THE FIRST COMMIT at run time and never
+# written down, so the guard carries no copy of what it guards; a shallow clone, which does
+# not have that commit, is refused rather than scanned for whoever authored its cut-off
+# commit. A finding names the path, the line and which part of the identity matched, never
+# the text: a public repository's CI log is public.
+identity-scan:
+	./scripts/identity-scan.sh
+
+# Proves the identity scan still BITES, against throwaway repositories whose first commit a
+# synthetic owner made: every part of the identity, whole words only, the LICENSE and NOTICE
+# exemption, binary files, the refusals (shallow clone, no repository, no usable name), and
+# the wiring that puts the scan in `check` on a full-history checkout.
+identity-scan-selftest:
+	./scripts/identity-scan-selftest.sh
 
 # --- the self-describing HTTP surface (S0128) ---------------------------------
 # The document the running server serves at GET /api/schema, printed. It is GENERATED from
@@ -274,7 +291,7 @@ install-hooks:
 # the two places it runs. What is hermetic - that .gremlins.yaml and
 # docs/mutation-testing.md still agree about the floor and the domain, and that the
 # workflow still plans an unscoped run with no diff scope - rides the gate.
-check: check-pins check-pins-selftest install-ffmpeg-selftest secret-scan secret-scan-selftest api-schema-diff mutation-shape fmt vet build test staticcheck govulncheck govulncheck-selftest
+check: check-pins check-pins-selftest install-ffmpeg-selftest secret-scan secret-scan-selftest identity-scan identity-scan-selftest api-schema-diff mutation-shape fmt vet build test staticcheck govulncheck govulncheck-selftest
 
 # Asks UPSTREAM whether the pinned ffmpeg release is still served. Deliberately NOT part
 # of `check`: the PR gate must not red because a third party had a bad afternoon. CI runs
