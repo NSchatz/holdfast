@@ -224,11 +224,11 @@ func TestRequeueInputs_TheSurveyAsksAboutEachRowsOwnPath(t *testing.T) {
 
 	// The same record, resolved differently for the two paths: one is selected by something
 	// that moved, the other is not.
-	perPath := func(path string) (DecisionInputs, bool) {
+	perPath := func(path string, _ *int) (DecisionInputs, bool, bool) {
 		if path == "/lib/selected.mkv" {
-			return movedConfig, true
+			return movedConfig, true, true
 		}
-		return sameConfig, true
+		return sameConfig, true, true
 	}
 	got, err := s.SurveyDecisionInputs(ctx, perPath)
 	if err != nil {
@@ -255,8 +255,8 @@ func TestRequeueInputs_ARowUnderNoConfiguredRootIsCountedAndNamed(t *testing.T) 
 	terminalRow(t, s, "/gone/b.mkv", "20:200", Skipped, "already-at-target-codec", sameConfig)
 	terminalRow(t, s, "/lib/here.mkv", "30:300", Skipped, "already-at-target-codec", sameConfig)
 
-	rooted := func(path string) (DecisionInputs, bool) {
-		return sameConfig, path == "/lib/here.mkv"
+	rooted := func(path string, _ *int) (DecisionInputs, bool, bool) {
+		return sameConfig, path == "/lib/here.mkv", true
 	}
 	got, err := s.SurveyDecisionInputs(ctx, rooted)
 	if err != nil {
@@ -282,8 +282,8 @@ func TestRequeueInputs_AnUnrootedRowIsNamedWhateverTheRowRecorded(t *testing.T) 
 	seedTwoTerminalRows(t, dbPath)
 	windBackBeforeDecisionInputs(t, dbPath)
 
-	rooted := func(path string) (DecisionInputs, bool) {
-		return sameConfig, path == "/lib/b.mkv"
+	rooted := func(path string, _ *int) (DecisionInputs, bool, bool) {
+		return sameConfig, path == "/lib/b.mkv", true
 	}
 	got, err := SurveyLedgerDecisionInputs(context.Background(), dbPath, rooted)
 	if err != nil {
@@ -354,9 +354,9 @@ func TestRequeueInputs_TheSurveyCostPerTerminalRowIsMeasured(t *testing.T) {
 	// Every path resolves, which is the expensive arm: the engine's resolver memoizes on
 	// (library root, encode profile) and answers a rooted path with a map hit and a match.
 	calls := 0
-	perPath := func(string) (DecisionInputs, bool) {
+	perPath := func(string, *int) (DecisionInputs, bool, bool) {
 		calls++
-		return sameConfig, true
+		return sameConfig, true, true
 	}
 
 	started := time.Now()

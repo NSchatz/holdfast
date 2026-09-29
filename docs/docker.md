@@ -135,6 +135,12 @@ is the point. That is a design decision, not an unbuilt feature, and the README'
 container with no `TZ` is **UTC** — set `TZ` or your "encode overnight" window will run at the
 wrong hours, silently and correctly, on the wrong clock.
 
+Every log line's `time=` field ends in the process's numeric UTC offset, so the clock a line
+was written on is stated on the line itself: a container with no `TZ` logs `+00:00`, never a
+bare `Z`, and a one-shot `docker run ... restore` whose `TZ` differs from the service's shows
+a different offset beside the service's lines rather than a clock that only looks different.
+Give every `docker run` the same `TZ` as the service and the two read as one timeline.
+
 ## The control surface
 
 `holdfast serve` exposes the HTTP JSON API. Its default bind is `127.0.0.1`, which inside a
