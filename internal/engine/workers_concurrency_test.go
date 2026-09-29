@@ -191,6 +191,10 @@ func TestS0163_AC1_TheEnginePoolRunsExactlyTheConfiguredWorkers(t *testing.T) {
 // workers over 3 sources per worker - and again with two engines over one shared store and one
 // library running passes at once - every source is started exactly once, encoded at most once
 // and ends with exactly one terminal ledger row. -race reports any data race either way.
+//
+// The two-engine case is forced: the second engine's pass STARTS while the first engine holds
+// a job inside the encoder, which is the moment a pass resetting the rows it finds active
+// would hand that job's source to a second claimant.
 func TestS0163_AC8_EachSourceIsAdmittedOnceAcrossWorkersAndAcrossTwoEngines(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
 	for _, engines := range []int{1, 2} {
@@ -203,9 +207,22 @@ func TestS0163_AC8_EachSourceIsAdmittedOnceAcrossWorkersAndAcrossTwoEngines(t *t
 			}
 			s0163Copies(t, ffmpeg, srcs...)
 			count := &inflight{}
+			inside := newCloseOnce() // the first engine holds a job inside the encoder
+			second := newCloseOnce() // the second engine's pass has returned
+			var firstCall sync.Once
 			enc := EncoderFunc(func(ctx context.Context, in, out string, props *probe.VideoProps) error {
 				count.enter(in)
 				defer count.leave()
+				held := false
+				firstCall.Do(func() { held = engines == 2 })
+				if held {
+					inside.close()
+					select {
+					case <-second.ch:
+					case <-time.After(s0163Guard):
+						return errors.New("the second engine's pass never finished")
+					}
+				}
 				return errFake
 			})
 			var mu sync.Mutex
@@ -233,20 +250,24 @@ func TestS0163_AC8_EachSourceIsAdmittedOnceAcrossWorkersAndAcrossTwoEngines(t *t
 				e.Observer = observe(fmt.Sprintf("engine%d", i))
 				engs = append(engs, e)
 			}
-			// Both passes start together, so the claims race for every file.
-			var wg sync.WaitGroup
-			begin := make(chan struct{})
+			// The first engine's pass runs; with a second engine, that one's whole pass runs
+			// while the first holds a job inside the encoder, and only then is it let go.
 			errs := make([]error, len(engs))
-			for i, e := range engs {
-				wg.Add(1)
-				go func(i int, e *Engine) {
-					defer wg.Done()
-					<-begin
-					errs[i] = e.RunOneshot(context.Background())
-				}(i, e)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				errs[0] = engs[0].RunOneshot(context.Background())
+			}()
+			if engines == 2 {
+				select {
+				case <-inside.ch:
+				case <-time.After(s0163Guard):
+					t.Fatal("the first engine never reached the encoder")
+				}
+				errs[1] = engs[1].RunOneshot(context.Background())
+				second.close()
 			}
-			close(begin)
-			wg.Wait()
+			<-done
 			for i, err := range errs {
 				if err != nil {
 					t.Fatalf("engine %d: RunOneshot: %v", i, err)
@@ -737,8 +758,15 @@ func TestS0163_AC11_AJobThatFitsOnlyWithoutTheReservationsWaitsAndOneThatNeverFi
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		eng.hookRoomWait = func(string) { cancel() }
-		if err := eng.ProcessFile(ctx, "w0", src); !errors.Is(err, context.Canceled) {
-			t.Fatalf("ProcessFile = %v, want the cancellation", err)
+		returned := make(chan error, 1)
+		go func() { returned <- eng.ProcessFile(ctx, "w0", src) }()
+		select {
+		case err := <-returned:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("ProcessFile = %v, want the cancellation", err)
+			}
+		case <-time.After(s0163Guard):
+			t.Fatal("a job cancelled while it waited for room never returned")
 		}
 		if count.callsFor(src) != 0 || sha256f(t, src) != sum || nTemp(t, root) != 0 {
 			t.Errorf("a job cancelled while it waited encoded %d time(s), left the source intact %v and %d temp(s)",
@@ -817,7 +845,8 @@ func TestS0163_AC12_EveryWayOutOfAJobReleasesItsReservation(t *testing.T) {
 			t.Errorf("%s: ProcessFile = %v", route, err)
 		}
 		if held := holdsNow(eng); len(held) != 0 {
-			t.Errorf("after the %s route %v bytes are still reserved", route, held)
+			// Fatal, not an error: a leaked hold would keep every later job here waiting.
+			t.Fatalf("after the %s route %v bytes are still reserved", route, held)
 		}
 		if w := tempPath(filepath.Join(root, route), route, "mkv", 0); workingPathHeld(w) {
 			t.Errorf("after the %s route its working path %s is still held", route, w)
