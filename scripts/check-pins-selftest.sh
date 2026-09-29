@@ -10,8 +10,11 @@
 # read by name; cases
 # 19-29 (S0057) defeat the SUPPLY-CHAIN pin guards - a mutable action reference, an
 # unreadable one, a compose image that lost its digest or gained a `latest` tag, a base
-# image ARG that lost its digest or its tag, a node manifest with no lifecycle-script
-# decision, and a file the gate reads going missing. Two of those cases assert a PASS
+# image that lost its digest or its tag, a node manifest with no lifecycle-script
+# decision, and a file the gate reads going missing; cases 31-34 (S0151) defeat the UPDATE
+# BOT guards - a build stage that drifted from its GO_IMAGE copy, a base image hidden behind
+# an ARG where the bot cannot read it, and a bot configuration that stopped watching a pin
+# class or went missing. Two of the S0057 cases assert a PASS
 # rather than a bite (the local-action exemption, and a manifest whose decision is
 # recorded), because a guard that refuses everything is indistinguishable from a guard
 # that works and is impossible to comply with. One asserts that publishing `:latest` is
@@ -50,7 +53,7 @@ OLD_ENV="TRANSCODE""_SERVER_AUTH_TOKEN"
 OLD_CRF="TRANSCODE""_CRF"
 OLD_METRIC="transcode""_files_total"
 
-declared=31
+declared=35
 pass=0; failed=0
 repo="$work/repo"
 
@@ -301,24 +304,25 @@ sed -i 's|^    image: .*|    image: ghcr.io/nschatz/holdfast:latest@sha256:30224
 expect 1 "a compose image tagged latest is caught even WITH a digest" "FLOATING ':latest' IMAGE"
 reset
 
-# --- 24. RUNTIME_IMAGE with its digest dropped. Section 3 guards GO_IMAGE alone, and
-#         GO_IMAGE is the one base with a second line of defence (the build stage asks the
-#         pulled image its own `go env GOVERSION`). RUNTIME_IMAGE has none: nothing RUNs
+# --- 24. The runtime base with its digest dropped. Section 3 guards the build stage, and
+#         that is the one base with a second line of defence (the build stage asks the
+#         pulled image its own `go env GOVERSION`). The runtime base has none: nothing RUNs
 #         in the runtime stage, so an in-image assertion is impossible and this check is
-#         the only thing standing between the shipped image and a floating base.
-sed -i 's|^\(ARG RUNTIME_IMAGE=[^@]*\)@sha256:[0-9a-f]*$|\1|' "$repo/Dockerfile"
-grep -qE '^ARG RUNTIME_IMAGE=[^@]+$' "$repo/Dockerfile" \
-  || { echo "::error::selftest: could not strip the RUNTIME_IMAGE digest, so this case did NOT run" >&2; exit 1; }
-expect 1 "a RUNTIME_IMAGE whose digest was dropped is caught (not just GO_IMAGE)" "UNPINNED BASE IMAGE"
+#         the only thing standing between the shipped image and a floating base. It is the
+#         one FROM line naming no stage.
+sed -i -E '/^FROM [^ ]+$/ s/@sha256:[0-9a-f]{64}$//' "$repo/Dockerfile"
+grep -qE '^FROM [^ @$]+$' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not strip the runtime base's digest, so this case did NOT run" >&2; exit 1; }
+expect 1 "a runtime base whose digest was dropped is caught (not just the build stage)" "UNPINNED BASE IMAGE"
 reset
 
-# --- 25. The other half of a base pin, on the third ARG: a digest with no tag. It
+# --- 25. The other half of a base pin, on a third FROM line: a digest with no tag. It
 #         resolves correctly for ever, so nothing breaks - but no human reading the
 #         Dockerfile can tell which Debian they are shipping.
-sed -i 's|^ARG FETCH_IMAGE=\([^:]*\):[^@]*@|ARG FETCH_IMAGE=\1@|' "$repo/Dockerfile"
-grep -qE '^ARG FETCH_IMAGE=[^:]+@sha256:[0-9a-f]{64}$' "$repo/Dockerfile" \
-  || { echo "::error::selftest: could not strip the FETCH_IMAGE tag, so this case did NOT run" >&2; exit 1; }
-expect 1 "a FETCH_IMAGE with a digest but no tag is caught" "UNREADABLE BASE IMAGE PIN"
+sed -i -E 's|^(FROM --platform=[^ ]+ [^:@ ]+):[^@ ]+(@sha256:[0-9a-f]{64} AS ffmpeg)$|\1\2|' "$repo/Dockerfile"
+grep -qE '^FROM --platform=[^ ]+ [^:@ ]+@sha256:[0-9a-f]{64} AS ffmpeg$' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not strip the fetch stage's tag, so this case did NOT run" >&2; exit 1; }
+expect 1 "a fetch-stage base with a digest but no tag is caught" "UNREADABLE BASE IMAGE PIN"
 reset
 
 # --- 26. A node manifest arriving with no lifecycle-script decision. Deliberately
@@ -374,6 +378,48 @@ sed -i 's/^  GO_VERSION: ".*"$/  GO_VERSION: "1.25.0"/' "$repo/.github/workflows
 grep -q '^  GO_VERSION: "1.25.0"$' "$repo/.github/workflows/mutation.yml" \
   || { echo "::error::selftest: could not move mutation.yml's GO_VERSION, so this case did NOT run" >&2; exit 1; }
 expect 1 "a Go pin drifting in a workflow that is neither ci.yml nor release.yml is caught" "Go version drift - .github/workflows/mutation.yml"
+reset
+
+# =====================================================================================
+# The update-bot guards (S0151). The bot is Dependabot, and it reads only what is written
+# where it looks: a FROM line, a `uses:` reference, go.mod. Each case below hides a pin
+# from it, or splits the one value that has to appear twice, in a way that still builds.
+# =====================================================================================
+
+# --- 31. The build stage's FROM line moved without GO_IMAGE. This is exactly the shape of
+#         the bot's own toolchain pull request: it rewrites the FROM line and nothing
+#         else. The image would build FROM one digest while the in-image assertion reads
+#         another, so it must red here, naming the split.
+sed -i -E 's|^(FROM --platform=[^ ]+ golang:[^@ ]+@sha256:)[0-9a-f]{64}( AS build)$|\1'"$(printf 'a%.0s' $(seq 64))"'\2|' "$repo/Dockerfile"
+grep -qE '^FROM --platform=[^ ]+ golang:[^@ ]+@sha256:a{64} AS build$' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not move the build stage's digest, so this case did NOT run" >&2; exit 1; }
+expect 1 "a build stage that moved without its GO_IMAGE copy is caught" "GO_IMAGE disagrees with the build stage"
+reset
+
+# --- 32. A base image put back behind an ARG. Pinned by tag and digest, so section 7's
+#         other refusals have nothing to say - the only thing wrong is that the bot can no
+#         longer see it, and that is what has to be named.
+rt="$(sed -n -E 's|^FROM ([^ ]+)$|\1|p' "$repo/Dockerfile" | head -1)"
+[ -n "$rt" ] || { echo "::error::selftest: found no runtime FROM line, so this case did NOT run" >&2; exit 1; }
+sed -i -E 's|^FROM [^ ]+$|FROM ${RUNTIME_IMAGE}|' "$repo/Dockerfile"
+sed -i "0,/^ARG GO_IMAGE=/s||ARG RUNTIME_IMAGE=$rt\nARG GO_IMAGE=|" "$repo/Dockerfile"
+grep -qxF "ARG RUNTIME_IMAGE=$rt" "$repo/Dockerfile" && grep -qxF 'FROM ${RUNTIME_IMAGE}' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not move the runtime base behind an ARG, so this case did NOT run" >&2; exit 1; }
+expect 1 "a base image pinned through an ARG, where the bot cannot read it, is caught" "BASE IMAGE THE UPDATE BOT CANNOT READ"
+reset
+
+# --- 33. The bot told to stop watching the base images. The file is still there and
+#         still valid - it just no longer looks at the Dockerfile.
+sed -i '/^  - package-ecosystem: "docker"$/,/^$/d' "$repo/.github/dependabot.yml"
+! grep -q 'package-ecosystem: "docker"' "$repo/.github/dependabot.yml" \
+  || { echo "::error::selftest: could not remove the docker entry, so this case did NOT run" >&2; exit 1; }
+expect 1 "a bot configuration that stopped watching the base images is caught" "UPDATE BOT BLIND SPOT.*"
+reset
+
+# --- 34. The bot's configuration, gone. Nothing would ever say a pin went stale again,
+#         and nothing about the build would change - the same invisible vacuity as case 28.
+rm -f "$repo/.github/dependabot.yml"
+expect 1 "a missing .github/dependabot.yml is named, not silently skipped" "MISSING: .github/dependabot.yml"
 reset
 
 echo
