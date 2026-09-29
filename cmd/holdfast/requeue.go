@@ -172,7 +172,7 @@ func decisionInputsReport(ctx context.Context, st store.Store, cfg *config.Confi
 // attempted - so the zero is printed rather than summarised away. The one case with no
 // figures is an empty ledger, where the two counts would describe a set that is not there.
 func decisionInputsLines(s store.DecisionInputsSurvey) []string {
-	if s.Reopening() == 0 && s.Matching == 0 {
+	if s.Reopening() == 0 && s.Matching == 0 && s.NoSourceHeight == 0 {
 		return []string{"the ledger holds no terminal row a configuration change could re-open"}
 	}
 	lines := []string{
@@ -188,7 +188,24 @@ func decisionInputsLines(s store.DecisionInputsSurvey) []string {
 			"re-decision, not a re-encode - a file that reaches the same verdict reaches it with nothing "+
 			"encoded", s.Reopening()))
 	}
+	lines = append(lines, noSourceHeightLine(s)...)
 	return append(lines, unrootedLine(s)...)
+}
+
+// noSourceHeightLine states the rows no figure above could place: rows on a library root whose
+// rules band on the source height that stored no height, so which band decided them is not on
+// the row. The scan reads each file's own height and re-opens only those whose band moved, so
+// the count is an UPPER BOUND and is said to be one - it is never added to the count of files
+// the next scan offers, which states only what the scan will do. Nothing is printed when there
+// are none.
+func noSourceHeightLine(s store.DecisionInputsSurvey) []string {
+	if s.NoSourceHeight == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("up to %d further terminal row(s) lie on a library root whose rules band "+
+		"on the source height and store no source height, so whether the next scan re-opens them turns "+
+		"on the source height it reads off each file; they are in none of the figures above",
+		s.NoSourceHeight)}
 }
 
 // unrootedLine states the rows the figures above describe least well: the ones lying under

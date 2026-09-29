@@ -76,7 +76,7 @@ func TestRegressS0079F10_ADoneRowRecordsTheInputsItsReDerivationCompares(t *test
 	// the next scan leaves the file alone and `validate` reports it as moved zero times.
 	// This is symmetry, and it is what a per-path record would cost if only one side of the
 	// comparison had been moved.
-	current, rooted := DecisionInputsPerPath(cfg)(path)
+	current, rooted, _ := DecisionInputsPerPath(cfg)(path, nil)
 	if !rooted {
 		t.Fatalf("%s resolved to no configured library root, so this case is not asking about the "+
 			"resolution it says it is", path)

@@ -21,11 +21,11 @@ func TestRegressS0122F1_ValidateSaysNothingAboutAnUnrootedRowThatRecordedNothing
 	cfg := loadConfigFile(t, cfgPath)
 	perPath := engine.DecisionInputsPerPath(*cfg)
 
-	here, rooted := perPath(filepath.Join(lib, "here.mkv"))
+	here, rooted, _ := perPath(filepath.Join(lib, "here.mkv"), nil)
 	if !rooted {
 		t.Fatal("the library root resolved nothing, so this fixture is not the one described")
 	}
-	if _, rooted := perPath("/gone/film.mkv"); rooted {
+	if _, rooted, _ := perPath("/gone/film.mkv", nil); rooted {
 		t.Fatal("/gone/film.mkv resolved to a configured root, so this case is not about an unrooted row")
 	}
 	seedLedger(t, state, func(st *store.SQLite) {

@@ -166,32 +166,37 @@ func DecisionInputsFor(cfg config.Config) store.DecisionInputs {
 // compared the whole ledger against one value with no path in hand, so no encode profile
 // could move either side and a row decided under one was counted as still matching for ever.
 //
-// The resolution is memoized on (library root, encode profile NAME), which is the whole of
-// what it depends on, so a 300,000-row ledger costs a handful of resolutions and one match
-// per row. The name identifies the profile only because Config.validateProfiles refuses an
-// empty or duplicated one; a Config that has never been through Validate (which the engine's
-// own tests assemble freely) can therefore collapse two same-named profiles into one cached
-// resolution. The closure is stateful and is called row by row from the survey's one goroutine.
+// The resolution is memoized on (library root, source height where the root bands on it,
+// encode profile NAME), which is the whole of what it depends on, so a 300,000-row ledger
+// costs a handful of resolutions and one match per row. The name identifies the profile only
+// because Config.validateProfiles refuses an empty or duplicated one; a Config that has never
+// been through Validate (which the engine's own tests assemble freely) can therefore collapse
+// two same-named profiles into one cached resolution. The closure is stateful and is called
+// row by row from the survey's one goroutine.
 //
-// # What it cannot resolve, and why that is a report and never a decision
+// # A root that bands its files
 //
-// A resolution rule whose band selects on the source height needs that height, and this
-// read has a PATH and nothing else - no probe, and often no file, since the source of a
-// done row was deleted by the swap that wrote it. So for a root whose rules are all
-// unbounded the rules are applied here exactly as the scan applies them, and for a root
-// that bands its files this answers with the root's own resolved profile.
+// A resolution rule whose band selects on the source height needs that height, and the scan
+// reads it off the file. This read has no file - the source of a done row was deleted by the
+// swap that wrote it - but it has the ROW, and the row stored the height the scan read
+// (store.Outcome.SourceHeight, from the same probe snapshot the band was chosen from). So a
+// banded root's row is resolved against the band its stored height selects, exactly as the
+// scan resolved the file, and a row decided under a band's floor is compared with that
+// band's floor rather than with the root's own.
 //
-// The consequence is bounded and is in one direction: a banded root's rows can be COUNTED
-// as moved when the next scan will find them still matching. This survey writes nothing,
-// re-opens nothing and gates nothing - it is the two figures a run and `validate` print
-// before a scan - so an over-count is a number an operator reads, never a file the engine
-// touches. The under-count, which would tell an operator nothing will move when the scan is
-// about to re-encode a library, cannot happen: every key the scan compares is offered here.
+// A banded root's row that stored NO height cannot be placed in a band, and this answers
+// determined=false for it rather than guessing one: the survey counts it as an upper bound of
+// its own and never as moved or as matching. Guessing the root's own profile, which is what
+// this read did before, announced every row decided under a band's floor as about to be
+// re-decided. The scan it describes reads each file's height and re-opens only the rows whose
+// band moved, so the bound is honest in the one direction that matters: nothing a scan will
+// re-open is left out of the figures (moved, not recorded, or no source height), and nothing
+// the survey counts as moved is a row the scan would leave alone.
 func DecisionInputsPerPath(cfg config.Config) store.InputsForPath {
 	roots := cfg.RootProfiles()
 	top := cfg.TopLevelProfile()
 	cached := map[string]store.DecisionInputs{}
-	return func(path string) (store.DecisionInputs, bool) {
+	return func(path string, sourceHeight *int) (store.DecisionInputs, bool, bool) {
 		prof, rooted, key := top, false, ""
 		for _, r := range roots {
 			if r.Contains(path) {
@@ -201,15 +206,21 @@ func DecisionInputsPerPath(cfg config.Config) store.InputsForPath {
 		}
 		if !prof.Rules.NeedsSourceHeight() {
 			prof = prof.WithRules(0)
+		} else {
+			if sourceHeight == nil {
+				return store.DecisionInputs{}, rooted, false
+			}
+			prof = prof.WithRules(*sourceHeight)
+			key += "\x00" + strconv.Itoa(*sourceHeight)
 		}
 		ts := cfg.TranscodeIn(prof, path)
 		key += "\x00" + ts.Profile
 		if in, ok := cached[key]; ok {
-			return in, rooted
+			return in, rooted, true
 		}
 		in := DecisionInputsForJob(cfg, prof, ts)
 		cached[key] = in
-		return in, rooted
+		return in, rooted, true
 	}
 }
 

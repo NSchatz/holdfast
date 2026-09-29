@@ -84,36 +84,36 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 2.1 | Cherry-pick #94's four commits onto `holdfast-g2/s0159-temp-sweep`, gate, merge as a new PR | DOING (PR #100): four commits cherry-picked with `-x`, applied cleanly, 10 files +1673/-40 as in #94; CI green; local gate running |
-| 2.2 | Close #94 with a link to the new PR; its old branch is left and listed as a follow-up | TODO |
+| 2.1 | Cherry-pick #94's four commits onto `holdfast-g2/s0159-temp-sweep`, gate, merge as a new PR | DONE (PR #100, `ca4968b`): four commits cherry-picked with `-x`, applied cleanly, 10 files +1673/-40 as in #94; local gate exit 0 in 28m20s on `0a8efb8` (`internal/engine` 1431.1 s, 79.5% of `TEST_TIMEOUT`); CI build, mutation, package green |
+| 2.2 | Close #94 with a link to the new PR; its old branch is left and listed as a follow-up | DONE: #94 closed with a comment linking #100 and `ca4968b`; branch `sdd/S0159-holdfast-bounded-run-temp-sweep` left at `9b016d4` (follow-up: the owner may delete it; T35's list does not name it) |
 
 ## Phase 3 - The debian13 base (line C, foundation)
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | `RUNTIME_IMAGE` is `gcr.io/distroless/cc-debian13:nonroot`, pinned by tag and digest | DOING (PR #101): `sha256:54df941e...`; build and fetch stages to `golang:1.25.14-trixie` and `debian:trixie-slim` |
-| 3.2 | `scripts/check-pins.sh` sections 3 and 7 green | DOING (PR #101): green on the branch, selftest 31/31 |
-| 3.3 | The merged PR's CI `package` job green | DOING (PR #101): `package` green on the branch before merge |
-| 3.4 | `docs/docker.md` follows the image | DOING (PR #101) |
+| 3.1 | `RUNTIME_IMAGE` is `gcr.io/distroless/cc-debian13:nonroot`, pinned by tag and digest | DONE (PR #101, `cab897a`): `sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97`; build and fetch stages `golang:1.25.14-trixie`, `debian:trixie-slim` |
+| 3.2 | `scripts/check-pins.sh` sections 3 and 7 green | DONE (PR #101): green, selftest 31/31; local gate exit 0 in 27m7s on `1d79a78` (`internal/engine` 1391.0 s) |
+| 3.3 | The merged PR's CI `package` job green | DONE (PR #101): `package` pass (3m50s) on `1d79a78`, with `build` and `mutation` |
+| 3.4 | `docs/docker.md` follows the image | DONE (PR #101) |
 
 ## Phase 4 - Carried specs (line B)
 
 | # | Item | State |
 |---|---|---|
-| S0177 | working-file extensions | DOING (build agent, branch `holdfast-g2/s0177-working-names` on #100's head) |
-| S0163 | `workers: auto` from the CPU quota; several jobs in flight safe on one drive | TODO (after S0177: both change the working-path construction) |
+| S0177 | working-file extensions | DOING (PR #105): AC-1 to AC-16 pass under the lock, AC-14 bites; CI's first run failed two S0155 regressions (long names past NAME_MAX/PATH_MAX with the suffix), fixed in `0ca25c0` (fallback to the earlier name where the suffix cannot fit) |
+| S0163 | `workers: auto` from the CPU quota; several jobs in flight safe on one drive | DOING (build agent, branch `holdfast-g2/s0163-workers` on #105's head) |
 | S0173 | `run` progress | DOING (build agent, branch `holdfast-g2/s0173-run-progress`) |
 | S0168 | prune excluded directories from the walk | TODO |
 | S0180 | census scope parity | TODO |
-| S0166 | restart survey overcount | DOING (branch `holdfast-g2/s0166-survey-bands`): resolver carries each row's stored height; store survey tests pass; engine and cmd tests queued for the lock |
-| S0176 | log time offset (holdfast half), and the homelab PR for the `TZ` half | DOING (branch `holdfast-g2/corpus-log-offset`, with P6): `internal/logging` tests pass and bite; cmd tests queued for the lock. Homelab half: NSchatz/homelab#208 opened (never merged by a session), `NEEDS-OWNER.md` row 1 |
-| S0151 | `.github/dependabot.yml` | DOING (local commit `2481399` on #101's commit; cherry-picked to its own PR once #101 merges) |
+| S0166 | restart survey overcount | DONE (PR #102, `02aa553`): AC-1 to AC-10 pass, and AC-1 to AC-5 red on the old resolution (33 band-decided rows counted as moved); local gate exit 0 in 31m20s on `52f96ed` (`internal/engine` 1627.4 s); CI green |
+| S0176 | log time offset (holdfast half), and the homelab PR for the `TZ` half | DOING (PR #103, with P6): AC-H1 to AC-H7 pass, AC-H9 grep empty. Homelab half: NSchatz/homelab#208 opened (never merged by a session), `NEEDS-OWNER.md` row 1 |
+| S0151 | `.github/dependabot.yml` | DOING (PR #104, `99ca634`): selftest 35/35; CI `package` green on the literal-`FROM` Dockerfile |
 
 ## Phase 5 - P6 (approved option (a))
 
 | # | Item | State |
 |---|---|---|
-| P6 | `internal/corpus` skips `.claude/`, with a test | DOING (branch `holdfast-g2/corpus-log-offset`, commit `790c54d`): both new tests red with the skip removed |
+| P6 | `internal/corpus` skips `.claude/`, with a test | DOING (PR #103, commit `790c54d`): both new tests red with the skip removed |
 
 ## Phase 6 - Report
 
@@ -166,12 +166,27 @@ summed per directory):
 - 2026-09-29: S0168, S0180 and S0166 quote the owner's library paths and ledger counts;
   their tests use synthetic paths under `t.TempDir()` and synthetic counts of the same shape
   (T41, as P1 did).
+- 2026-09-29: `TEST_TIMEOUT` raised from 30m to 45m in a PR of its own (#106), because the
+  gate of #102 measured `internal/engine` at 1627.4 s, 90.4% of 30m, past I15's 80% line. A
+  commit inside a feature PR would be squashed into it, so it was not "its own commit" on
+  `main`. It is gated before any other PR, since each later gate risked a false timeout. Much
+  of the jump is contention: the build agents compile and run the non-encoding packages
+  outside the heavy lock, and that shares the container's 2 CPUs with the gate.
+- 2026-09-29: S0177's names are 14 bytes longer, so a source whose earlier working or
+  retained name fitted NAME_MAX or PATH_MAX within 14 bytes would fail. Those are the long
+  names S0155 made swap, and CI's two S0155 regressions caught it. The constructors fall
+  back to the earlier name only where the suffixed one cannot fit, rather than truncating
+  the stem, because the record-free hold-back and the source-beside lookup read the full
+  stem back from the name, and every reader already accepts the earlier name.
+- 2026-09-29: two test fixtures carried a real film title from the operator's report (T41).
+  They were replaced with a synthetic name of the same byte length and shape, in PR #105
+  (the PR that had to touch one of them). A search of `main` for title-shaped fixture names
+  finds no other.
 
 ## Resume here
 
-Baseline done (exit 0, 26m5s). Open: PR #100 (S0159; CI green, local gate running), PR #101
-(debian13; CI `package` green, gate after #100 merges). Local work: worktree
-`/cache/wt/holdfast/holdfast-g2/corpus-log-offset` (P6 `790c54d`, S0176 uncommitted, cmd tests
-queued), worktree `/cache/wt/holdfast/holdfast-g2/s0151-dependabot` (local `2481399`, branch
-`holdfast-g2/s0151-dependabot-wip`, to cherry-pick onto a fresh branch after #101). Build
-agents: S0177, S0173. Gate runner: `/cache/tmp/holdfast-g2/gate.sh <worktree> <log-name>`.
+Merged: #100 (`ca4968b`), #101 (`cab897a`, line C), #102 (`02aa553`, S0166). Open: #106
+(`TEST_TIMEOUT` 45m; gate running since 19:52), #103 (P6 + S0176), #104 (S0151), #105 (S0177;
+fix `0ca25c0` pushed, its local tests queued). Gate order: #106, #103, #104, #105, then S0173,
+census, S0163. Build agents: S0173, S0163 (on #105's head before `0ca25c0`). The census agent
+starts when a slot frees (`/cache/tmp/holdfast-g2/prompt-census.md`).

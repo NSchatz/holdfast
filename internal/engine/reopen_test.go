@@ -263,8 +263,8 @@ func TestPathFilters_EditingAFilterReopensNoTerminalRow(t *testing.T) {
 			edit.with(&edited)
 			current := DecisionInputsPerPath(edited)
 			for _, p := range paths {
-				recorded, _ := recordedUnder(p)
-				now, _ := current(p)
+				recorded, _, _ := recordedUnder(p, nil)
+				now, _, _ := current(p, nil)
 				if !recorded.StillMatches(now) {
 					t.Errorf("%s: a row decided before the filter edit no longer matches, so the next "+
 						"scan would re-open it\n  recorded: %s\n  now:      %s", p, recorded.Encode(), now.Encode())
@@ -278,8 +278,8 @@ func TestPathFilters_EditingAFilterReopensNoTerminalRow(t *testing.T) {
 	// never fires.
 	moved := base
 	moved.CRF = 23
-	recorded, _ := recordedUnder(paths[0])
-	now, _ := DecisionInputsPerPath(moved)(paths[0])
+	recorded, _, _ := recordedUnder(paths[0], nil)
+	now, _, _ := DecisionInputsPerPath(moved)(paths[0], nil)
 	if recorded.StillMatches(now) {
 		t.Fatal("a crf edit re-opened nothing either, so this test could not detect a filter doing it")
 	}

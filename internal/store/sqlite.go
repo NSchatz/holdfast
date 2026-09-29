@@ -583,7 +583,7 @@ func (s *SQLite) TerminalHolds(ctx context.Context, path string, current Decisio
 func (s *SQLite) SurveyDecisionInputs(ctx context.Context, current InputsForPath) (DecisionInputsSurvey, error) {
 	where, args := surveyedRows(true)
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT path, decision_inputs FROM jobs WHERE `+where, args...)
+		`SELECT path, decision_inputs, source_height FROM jobs WHERE `+where, args...)
 	if err != nil {
 		return DecisionInputsSurvey{}, fmt.Errorf("store: survey decision inputs: %w", err)
 	}
@@ -609,7 +609,7 @@ func surveyedRows(hasReason bool) (string, []any) {
 	return where, args
 }
 
-// classifyRecordedInputs turns (path, decision_inputs) rows into the survey. It is the one
+// classifyRecordedInputs turns (path, decision_inputs, source_height) rows into the survey. It is the one
 // place the three-way reading of a stored record lives, so the startup report and
 // `validate` cannot classify the same row differently - and it is the one place the survey
 // resolves the configuration in force, so neither of them can classify a row differently
@@ -622,13 +622,19 @@ func surveyedRows(hasReason bool) (string, []any) {
 // row too - and that row is not an edge, it is every row of a ledger an earlier build wrote,
 // which is the population these figures are read for. The row's own classification is
 // untouched by the resolution: not recorded stays not recorded.
+//
+// The row's stored source height goes to the resolver with its path, because a root that
+// bands its files decides each one under the band its height selects. A row there that
+// stored no height cannot be placed in a band, so it is neither moved nor matching: it is
+// NoSourceHeight, an upper bound stated as one.
 func classifyRecordedInputs(rows *sql.Rows, current InputsForPath) (DecisionInputsSurvey, error) {
 	var out DecisionInputsSurvey
 	parsed := map[string]DecisionInputs{}
 	for rows.Next() {
 		var path string
 		var recorded sql.NullString
-		if err := rows.Scan(&path, &recorded); err != nil {
+		var height sql.NullInt64
+		if err := rows.Scan(&path, &recorded, &height); err != nil {
 			return DecisionInputsSurvey{}, fmt.Errorf("store: survey decision inputs scan: %w", err)
 		}
 		in, ok := parsed[recorded.String]
@@ -636,7 +642,12 @@ func classifyRecordedInputs(rows *sql.Rows, current InputsForPath) (DecisionInpu
 			in = ParseDecisionInputs(recorded.String)
 			parsed[recorded.String] = in
 		}
-		now, rooted := current(path)
+		var stored *int
+		if height.Valid {
+			h := int(height.Int64)
+			stored = &h
+		}
+		now, rooted, determined := current(path, stored)
 		if !rooted {
 			out.Unrooted++
 			if out.UnrootedExample == "" || path < out.UnrootedExample {
@@ -646,6 +657,8 @@ func classifyRecordedInputs(rows *sql.Rows, current InputsForPath) (DecisionInpu
 		switch {
 		case !in.Recorded():
 			out.NotRecorded++
+		case !determined:
+			out.NoSourceHeight++
 		case in.StillMatches(now):
 			out.Matching++
 		default:
