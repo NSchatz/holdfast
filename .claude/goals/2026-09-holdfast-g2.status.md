@@ -102,9 +102,9 @@ summed per directory):
 |---|---|---|
 | S0177 | working-file extensions | DONE (PR #105, `a9ec91f`): AC-1 to AC-16 pass, AC-14 bites; the name-limit regression CI caught is fixed (`0ca25c0`); local gate exit 0 in 26m31s on `acbae14` (`internal/engine` 1428.8 s); CI green |
 | S0163 | `workers: auto` from the CPU quota; several jobs in flight safe on one drive | DOING (PR #111): AC-1 to AC-16 pass (AC-8 to AC-13 at `-count=3`), negative controls red, mutation-diff 100%; merged up to `a9ec91f` (`bdebe57`, verified equal to main plus S0163's own diff) |
-| S0173 | `run` progress | DOING (PR #107): 23 tests for AC-1 to AC-13 and AC-15 pass; AC-16 and AC-17 pass with no edit; no existing test line changed |
-| S0168 | prune excluded directories from the walk | DOING (build agent, branch `holdfast-g2/census-scope`) |
-| S0180 | census scope parity | DOING (build agent, same branch, after S0168) |
+| S0173 | `run` progress | DONE (PR #107, `550db38`): 23 tests for AC-1 to AC-13 and AC-15 pass; AC-16 and AC-17 pass with no edit; no existing test line changed; local gate exit 0 in 26m29s on `36538e3` (`cmd/holdfast` 486.2 s); CI green |
+| S0168 | prune excluded directories from the walk | DOING (PR #112, with S0180): AC-1 to AC-13 pass under the lock; mutation-diff 100%; no existing test line changed |
+| S0180 | census scope parity | DOING (PR #112): AC-1 to AC-12 pass under the lock |
 | S0166 | restart survey overcount | DONE (PR #102, `02aa553`): AC-1 to AC-10 pass, and AC-1 to AC-5 red on the old resolution (33 band-decided rows counted as moved); 22 existing test lines changed call shape only; local gate exit 0 in 31m20s on `52f96ed` (`internal/engine` 1627.4 s); CI green |
 | S0176 | log time offset (holdfast half), and the homelab PR for the `TZ` half | DONE (PR #103, `f5bb64f`): AC-H1 to AC-H7 pass (H1, H3, H5, H7 shown to red on mutations), AC-H9 grep empty; mutation-diff 100%; local gate exit 0 in 26m2s on `a74b458` (`internal/engine` 1341.0 s); CI green. Homelab half: NSchatz/homelab#208, open for the owner to merge (T32), `NEEDS-OWNER.md` row 1 |
 | S0151 | `.github/dependabot.yml` | DONE (PR #104, `901c472`): `.github/dependabot.yml` (github-actions, docker, gomod at `/`, weekly, `build(deps)` commits, no auto-merge); base images on literal `FROM` lines so Dependabot can read them; `check-pins.sh` sections 3, 7 and 9 enforce it, selftest 35/35; local gate exit 0 in 25m45s on `68902e4`; CI green |
@@ -204,9 +204,9 @@ summed per directory):
 
 ## Resume here
 
-Merged: #100, #101 (line C), #102, #103, #104, #105, #106. Open, this goal's: #107 (S0173;
-gate running since 22:24), #111 (S0163; merged up to `a9ec91f` as `bdebe57`; its test re-run
-queued, log `/cache/tmp/holdfast-g2/s0163-merged-tests-r2.log`). Open, the bot's: #108-#110.
-Next: gate #107, then #111, then the census PR (agent still working). Audit of deleted test
-lines: `/cache/tmp/holdfast-g2/audit-deleted-test-lines.md`; integrity script
-`/cache/tmp/holdfast-g2/integrity.sh`.
+Merged: #100, #101 (line C), #102, #103, #104, #105, #106, #107. Open, this goal's: #111 (S0163;
+gate running on `ea9dc04`), #112 (S0168 + S0180; merged up to `550db38` and verified). Open, the
+bot's: #108-#110. No build agent is running. Next: merge #111, merge `main` into #112 and gate it,
+then the report: `/cache/tmp/holdfast-g2/integrity.sh` (line D), the audit of deleted test lines
+(`/cache/tmp/holdfast-g2/audit-deleted-test-lines.md`), worktree cleanup, the COMPLETE line and the
+adversarial review (line F).
