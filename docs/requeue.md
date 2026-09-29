@@ -105,6 +105,16 @@ roots, so it never reaches that file and never re-opens it, whatever the row rec
 Neither condition can fail a run or a `validate`; a ledger that could not be read at all
 is reported beside a configuration that is still valid.
 
+On a library root whose `rules` band on the source height, each row is read against the
+**band its own stored source height selects** - the height the scan read off that file when
+it decided it - so a row decided under a band's floor is compared with that band's floor, not
+with the root's. A row there that stored **no source height** (written before holdfast
+recorded one) cannot be placed in a band, so it is counted in neither figure above: it gets a
+line of its own saying "up to" that many rows may re-open, because whether each does turns on
+the source height the scan reads off the file. That upper bound is never added to the count
+of files the next scan offers, which states only what the scan will do. The daemon's startup
+record carries it as `rows_on_banded_roots_with_no_source_height`.
+
 A ledger an **earlier holdfast** wrote is reported too, and that is the upgrade you most
 want the figures for: no row in it records anything, so the first scan under the new build
 re-opens every terminal row it holds. Reading it needs no migration - a schema with no column
