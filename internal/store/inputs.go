@@ -164,7 +164,15 @@ func ParseDecisionInputs(s string) DecisionInputs {
 // whole ledger would describe a rule the scan does not apply, since a root decides the gates
 // and an encode profile whose match selects the path decides what the encoder produces. rooted
 // is false when no configured root contains the path; the answer is then the top-level one.
-type InputsForPath func(path string) (in DecisionInputs, rooted bool)
+//
+// sourceHeight is the source height the row stored, nil where it stored none. A root whose
+// rules band on the source height decides a file under the band that file's height selects,
+// and the height the scan reads off the file is the figure the row stored, so it selects the
+// same band here. determined is false when the answer needs a height the row does not carry:
+// the inputs are then no answer at all, and the row is counted apart
+// (DecisionInputsSurvey.NoSourceHeight) rather than classified against a band that may not
+// be the one that decided it.
+type InputsForPath func(path string, sourceHeight *int) (in DecisionInputs, rooted, determined bool)
 
 // DecisionInputsSurvey is what the ledger says about the configuration its terminal
 // decisions were taken under, over the done and skipped rows - the two statuses whose
@@ -178,6 +186,15 @@ type DecisionInputsSurvey struct {
 	Moved       int64
 	NotRecorded int64
 	Matching    int64
+
+	// NoSourceHeight is how many rows lie where the rules band on the source height and store
+	// no height, so which band decided them - and so whether the next scan re-opens them - is
+	// not on the row. It is a bucket of its own beside Moved and Matching, counted in neither,
+	// and an UPPER BOUND on what it could re-open: the scan reads each file's height and
+	// re-opens only the rows whose band moved. It is kept out of Reopening, which states what
+	// the next scan WILL re-open. A row that recorded no inputs at all is NotRecorded even
+	// here, because the rule re-opens it whatever its band.
+	NoSourceHeight int64
 
 	// Unrooted is how many of the rows above lie under no configured library root, and
 	// UnrootedExample is the lexically first of their paths. It is an ANNOTATION, not a fourth

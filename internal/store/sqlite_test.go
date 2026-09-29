@@ -41,7 +41,7 @@ var movedConfig = InputsRead(map[string]string{"encoder": "cpu", "crf": "23"})
 // or an encode profile), so a case in this package that varies it by path would be
 // asserting a resolution this package does not own.
 func everyPath(in DecisionInputs) InputsForPath {
-	return func(string) (DecisionInputs, bool) { return in, true }
+	return func(string, *int) (DecisionInputs, bool, bool) { return in, true, true }
 }
 
 func TestClaim_FreshKeyClaims(t *testing.T) {

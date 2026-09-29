@@ -66,7 +66,7 @@ func TestValidateInputs_ClassifiesEachRowByTheRuleTheScanApplies(t *testing.T) {
 	perPath := engine.DecisionInputsPerPath(*cfg)
 
 	live := func(path string) store.DecisionInputs {
-		in, rooted := perPath(path)
+		in, rooted, _ := perPath(path, nil)
 		if !rooted {
 			t.Fatalf("%s resolved to no library root, so the fixture is not the one this case describes", path)
 		}
@@ -133,8 +133,8 @@ func TestValidateInputs_ReportsWhatItCouldNotResolveAndStillPasses(t *testing.T)
 		cfgPath, state, lib := profiledLedgerConfig(t)
 		cfg := loadConfigFile(t, cfgPath)
 		perPath := engine.DecisionInputsPerPath(*cfg)
-		here, _ := perPath(filepath.Join(lib, "here.mkv"))
-		gone, rooted := perPath("/gone/film.mkv")
+		here, _, _ := perPath(filepath.Join(lib, "here.mkv"), nil)
+		gone, rooted, _ := perPath("/gone/film.mkv", nil)
 		if rooted {
 			t.Fatal("/gone/film.mkv resolved to a configured root, so this case is not about an unrooted row")
 		}

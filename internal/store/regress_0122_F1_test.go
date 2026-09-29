@@ -28,8 +28,8 @@ func TestRegressS0122F1_AnUnrootedRowThatRecordedNothingIsNeitherCountedNorNamed
 	terminalRow(t, s, "/gone/a.mkv", "10:100", Skipped, "already-at-target-codec", DecisionInputs{})
 	terminalRow(t, s, "/lib/here.mkv", "20:200", Skipped, "already-at-target-codec", sameConfig)
 
-	rooted := func(path string) (DecisionInputs, bool) {
-		return sameConfig, path == "/lib/here.mkv"
+	rooted := func(path string, _ *int) (DecisionInputs, bool, bool) {
+		return sameConfig, path == "/lib/here.mkv", true
 	}
 	got, err := s.SurveyDecisionInputs(ctx, rooted)
 	if err != nil {
