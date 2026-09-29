@@ -143,7 +143,7 @@ func TestSourceRoom_TheHostsFiguresAreARefusal(t *testing.T) {
 	t.Run("3800000 available against a 21600000000-byte source is a refusal naming both", func(t *testing.T) {
 		dir := t.TempDir()
 		eng := &Engine{Log: discardLogger(), freeBytes: func(string) (uint64, error) { return hostAvail, nil }}
-		release, err := eng.sourceRoomFor(dir, filepath.Join(dir, "film.mkv"), hostSource)
+		release, err := eng.sourceRoomFor(context.Background(), dir, filepath.Join(dir, "film.mkv"), hostSource)
 		if err == nil {
 			release()
 			t.Fatalf("a %d-byte source was let through with %d byte(s) available", int64(hostSource), hostAvail)
@@ -255,14 +255,15 @@ func TestSourceRoom_RetainedOriginalsAreNeverCreditedBack(t *testing.T) {
 }
 
 // gatedEncode lets the FIRST job to reach it through to the real encoder, but only once the
-// other job's outcome has been recorded, which is the one moment both jobs have been in
-// flight together and the second has had its answer. A second job reaching it while the
-// first still waits is the defect under test, and it releases the first rather than
-// deadlocking the pair, so the case reds instead of hanging.
+// other job has had its answer - it is waiting for room (S0163), or its outcome has been
+// recorded - which is the one moment both jobs have been in flight together. A second job
+// reaching it before the first has its outcome is the defect under test, and it releases the
+// first rather than deadlocking the pair, so the case reds instead of hanging.
 type gatedEncode struct {
 	enc      FFmpegEncoder
-	recorded chan struct{} // closed on the first terminal outcome of the run
-	second   chan struct{} // closed when a second job reaches the encoder
+	recorded chan struct{} // closed when the other job starts waiting for room
+	finished chan struct{} // closed on the first terminal outcome of the run
+	second   chan struct{} // closed when a second job reaches the encoder too soon
 	mu       sync.Mutex
 	entered  []string
 }
@@ -273,20 +274,27 @@ func (g *gatedEncode) Encode(ctx context.Context, in, out string, props *probe.V
 	n := len(g.entered)
 	g.mu.Unlock()
 	if n > 1 {
+		select {
+		case <-g.finished:
+			return g.enc.Encode(ctx, in, out, props)
+		default:
+		}
 		close(g.second)
 		return errors.New("a second job reached the encoder while the first was in flight")
 	}
 	select {
 	case <-g.recorded:
+	case <-g.finished:
 	case <-g.second:
 	}
 	return g.enc.Encode(ctx, in, out, props)
 }
 
 // [AC-6] Two workers, two sources in DIFFERENT directories of one filesystem, and an
-// available figure that fits either alone but not both: at most one reaches the encoder,
-// and the other is refused before it writes a byte, naming a need that includes the first
-// job's source bytes.
+// available figure that fits either alone but not both: at most one reaches the encoder at
+// a time, and the other WAITS before it writes a byte, held by the first job's source bytes
+// (S0163 D3: contention for free space waits rather than fails), until the first has its
+// outcome - and is then checked again, admitted and swapped.
 func TestSourceRoom_TwoJobsOnOneFilesystemCannotBothPassOnTheSameFreeBytes(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
 	root, _ := scratchDirs(t)
@@ -307,15 +315,17 @@ func TestSourceRoom_TwoJobsOnOneFilesystemCannotBothPassOnTheSameFreeBytes(t *te
 	gate := &gatedEncode{
 		enc:      FFmpegEncoder{FFmpeg: ffmpeg, Cfg: eng.Cfg, Probe: eng.Probe},
 		recorded: make(chan struct{}),
+		finished: make(chan struct{}),
 		second:   make(chan struct{}),
 	}
 	eng.Enc = gate
-	var once sync.Once
+	var once, waiting sync.Once
 	eng.Observer = func(ev Event) {
 		if ev.Status.Terminal() {
-			once.Do(func() { close(gate.recorded) })
+			once.Do(func() { close(gate.finished) })
 		}
 	}
+	eng.hookRoomWait = func(string) { waiting.Do(func() { close(gate.recorded) }) }
 	eng.freeBytes = func(path string) (uint64, error) {
 		if path != dirA && path != dirB {
 			t.Errorf("the free-space lookup was asked about %s, want a source's directory", path)
@@ -329,31 +339,24 @@ func TestSourceRoom_TwoJobsOnOneFilesystemCannotBothPassOnTheSameFreeBytes(t *te
 	gate.mu.Lock()
 	entered := append([]string(nil), gate.entered...)
 	gate.mu.Unlock()
-	if len(entered) != 1 {
-		t.Fatalf("%d jobs reached the encoder (%v) on free bytes that fit only one of them", len(entered), entered)
+	if len(entered) != 2 {
+		t.Fatalf("%d jobs reached the encoder (%v), want both - the second only once the first had its outcome",
+			len(entered), entered)
 	}
-	through, refused := entered[0], a
-	if refused == through {
-		refused = b
+	through, waited := entered[0], entered[1]
+	if sums[through] == "" || sums[waited] == "" || through == waited {
+		t.Fatalf("the encoder was asked about %v, want each source once", entered)
 	}
 	if codecOf(t, ffprobe, through) != "hevc" {
 		t.Errorf("the job that passed the check was not swapped: %s is %q", through, codecOf(t, ffprobe, through))
 	}
-
-	if got := sha256f(t, refused); got != sums[refused] {
-		t.Fatalf("the refused source %s was modified", refused)
-	}
-	if got := listDir(t, filepath.Dir(refused)); !equalStrings(got, []string{filepath.Base(refused)}) {
-		t.Fatalf("the refused job's directory holds %v, want only its source - it wrote before it was refused", got)
-	}
-	out, status, ok := outcomeFor(t, ts, refused)
-	if !ok || status != store.Failed {
-		t.Fatalf("%s: status = %q (found=%v), want failed", refused, status, ok)
-	}
-	for _, want := range []string{filepath.Dir(refused), fmt.Sprint(avail), fmt.Sprint(sizeA + sizeB)} {
-		if !strings.Contains(out.Reason, want) {
-			t.Errorf("the refusal does not name %q (the need must include the other job's source bytes): %q", want, out.Reason)
-		}
+	// The job that waited wrote nothing while the first was in flight (the gate would have
+	// failed it), and was never refused: once the first released its bytes it was checked
+	// again, admitted and swapped. A failure would have counted toward max_failures for a
+	// condition the first job finishing cleared.
+	if codecOf(t, ffprobe, waited) != "hevc" || !ledgerHas(t, ts, store.Done, filepath.Base(waited)) {
+		t.Errorf("the job that waited for room was not swapped once the first exited: %s is %q",
+			waited, codecOf(t, ffprobe, waited))
 	}
 }
 

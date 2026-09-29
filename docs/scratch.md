@@ -21,8 +21,13 @@ scratch_min_free_gb: 50
 
 Beside the source the working file is `<stem>.__transcoding__.<ext>.holdfast-part`
 (`<stem>.__transcoding__.<n>.<ext>.holdfast-part` when an earlier file already holds that
-name), where `<ext>` is the extension of the container the encode writes: the source's own,
-or `container_ext` where that forces one. It ends in `.holdfast-part` so that a media server
+name, or another job in flight is writing it), where `<ext>` is the extension of the
+container the encode writes: the source's own, or `container_ext` where that forces one. Two
+sources in one directory that share a stem and encode to one container - `ep.mp4` and
+`ep.avi` under `container_ext: mkv` - therefore get two working files, and neither job ever
+clears, reads or renames the other's. They share one swap target too, and the two swaps onto
+it are taken one at a time: whichever job reaches it second finds the first one's replacement
+there and refuses to overwrite it. It ends in `.holdfast-part` so that a media server
 or an *arr app scanning the folder by extension does not offer a half-written encode as an
 extra version of the film or as a duplicate. The name still carries the container extension
 ahead of that suffix, and the `__transcoding__` marker, which is how holdfast itself
@@ -137,9 +142,25 @@ Two honest limits, stated rather than papered over:
 
 - **The floor is a floor, not a prediction.** Startup has no per-file size to check
   against, so `scratch_min_free_gb` is all it can enforce. Backing it up, each job
-  re-checks the free space immediately before it encodes and fails **that job** -
-  naming the scratch path, the free space and the source size, leaving the source
-  untouched and continuing the scan - if the source will not fit.
+  re-checks the free space immediately before it encodes and **reserves** its source's
+  size on the scratch filesystem until it ends, by whatever route. What a job compares
+  its source against is the free space less what the jobs already in flight there have
+  reserved, because a free-space reading cannot see bytes an encode is about to write:
+  - a source that fits even beside those reservations is encoded;
+  - a source that fits the free space but **not beside the reservations waits**: it is
+    held without encoding and without a failure recorded, says so once (naming the file,
+    the free space and the bytes reserved), and checks again each time a job on that
+    filesystem ends. A run cancelled meanwhile stops it with nothing recorded and the
+    source untouched;
+  - a source that will not fit **even with nothing reserved** fails **that job** -
+    naming the scratch path, the free space and the source size, leaving the source
+    untouched and continuing the scan.
+
+  The same check and the same reservation run beside the source when `scratch_dir` is
+  unset, against the source's own filesystem, and the two share one account wherever
+  they share a filesystem. The reservation is conservative: a job's whole source size
+  stays reserved even after part of its output has been written, so a nearly full
+  filesystem runs fewer jobs at once than it could, never more than fit.
 - **A filesystem can fill from outside holdfast** after a run begins. A scratch write
   that fails anyway is an ordinary encode failure, which already discards the working
   file and leaves the source byte-for-byte intact.

@@ -33,6 +33,17 @@ import (
 // how the unreadable, malformed and unlimited paths get exercised without a second host.
 const DefaultRoot = "/sys/fs/cgroup"
 
+// RootEnv names the environment variable that points every cgroup reading this build
+// takes - the libx265 parallelism, the encode memory bound and the `workers: auto` pool
+// size - at a mount other than DefaultRoot. It is spelled once, here, because the readers
+// live in packages that cannot import one another, and two spellings of it would be two
+// readings of two different hierarchies.
+//
+// It is not a configuration key: the cgroup mount is where the kernel put it. It exists so
+// the reading can be steered from OUTSIDE the process - a test that runs the real program
+// in a child process has no other way to hand it a fixture hierarchy.
+const RootEnv = "HOLDFAST_CGROUP_ROOT"
+
 // FallbackShare is the share a caller uses when Read returns an error: one CPU, which is
 // what an unthreaded consumer already got. It is deliberately the SMALLEST defensible
 // number rather than a derived one. A fallback taken from the host CPU count would be the
