@@ -186,7 +186,7 @@ holds each encode to 85% of the container's limit on its own, not the pool to it
 ([docs/encode-memory.md](encode-memory.md)), so size `mem_limit` for `N` encodes together.
 
 **Each encode brings its own threads.** The libx265 pool of every encode is sized to the whole
-quota, `Q` rounded down (or to `x265_cpus`), and is never divided by `workers`; with no quota it
+CPU quota, rounded down (or to `x265_cpus`), and is never divided by `workers`; with no quota it
 sizes itself from the host. `N` workers therefore run up to `N` pools of that size against the
 same `Q`, and the scheduler shares the quota between them. The VMAF measurement is the other way
 round: each one's threads are the quota divided by the files in flight, and the measurements
