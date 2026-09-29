@@ -105,8 +105,8 @@ summed per directory):
 | S0173 | `run` progress | DOING (build agent, branch `holdfast-g2/s0173-run-progress`) |
 | S0168 | prune excluded directories from the walk | TODO |
 | S0180 | census scope parity | TODO |
-| S0166 | restart survey overcount | TODO |
-| S0176 | log time offset (holdfast half), and the homelab PR for the `TZ` half | DOING (branch `holdfast-g2/corpus-log-offset`, with P6): `internal/logging` tests pass and bite; cmd tests queued for the lock |
+| S0166 | restart survey overcount | DOING (branch `holdfast-g2/s0166-survey-bands`): resolver carries each row's stored height; store survey tests pass; engine and cmd tests queued for the lock |
+| S0176 | log time offset (holdfast half), and the homelab PR for the `TZ` half | DOING (branch `holdfast-g2/corpus-log-offset`, with P6): `internal/logging` tests pass and bite; cmd tests queued for the lock. Homelab half: NSchatz/homelab#208 opened (never merged by a session), `NEEDS-OWNER.md` row 1 |
 | S0151 | `.github/dependabot.yml` | DOING (local commit `2481399` on #101's commit; cherry-picked to its own PR once #101 merges) |
 
 ## Phase 5 - P6 (approved option (a))
@@ -156,6 +156,13 @@ summed per directory):
   `Europe/Berlin`, not the zone the spec names (the owner's; P1 treats it as private). `New`
   installs the process-wide default logger (it writes to the process's own stderr); `To`
   over a caller's writer does not, so a test buffer never becomes the process default.
+- 2026-09-29: S0176's homelab half. The runbook changed after the spec was written: its four
+  inline `docker run` blocks became one `IMG`/`HF` shorthand every step uses, and the check
+  script its AC-L2 names is gone (the merge gate is `make ci`). So the flag goes on `HF`
+  (covering all four invocations), the spec's AC-L1 awk, which now matches no block, is shown
+  beside an adapted check (1 block, 0 without the flag), and `make ci` is left to the owner:
+  every validator in it is a container and this container has no Docker daemon. PR
+  NSchatz/homelab#208, never merged by a session (T32); `NEEDS-OWNER.md` row 1.
 - 2026-09-29: S0168, S0180 and S0166 quote the owner's library paths and ledger counts;
   their tests use synthetic paths under `t.TempDir()` and synthetic counts of the same shape
   (T41, as P1 did).
