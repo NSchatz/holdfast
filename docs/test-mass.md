@@ -129,7 +129,7 @@ gone. Each is asserted now in the package whose behaviour it is about.
   of them is on a production path, since `internal/startup`'s `ScratchCorpus` reads the set
   `Markdown` produces. They are `internal/corpus/corpus_test.go` (96 raw): the root is the
   module root from any directory inside it, and the corpus is a walk that reaches a document
-  at depth and leaves a vendored or VCS tree out.
+  at depth and leaves a vendored or VCS tree, and the program directory `.claude`, out.
 
 Two things that look like graders and are NOT, so they stayed:
 

@@ -34,8 +34,15 @@ func RepoRoot(dir string) (string, error) {
 }
 
 // Markdown returns every Markdown file under root, sorted, skipping VCS and vendor
-// directories. It is a WALK and not a list, so a document that did not exist when a
-// caller was written is still in the set.
+// directories and the program directory `.claude`. It is a WALK and not a list, so a
+// document that did not exist when a caller was written is still in the set.
+//
+// `.claude` holds the agent program's own files - its brief, ledgers and proposals. Those
+// are decisions and plans, not documents shipped to a reader, and inside the set they
+// would do harm both ways: a presence check would be satisfied by a statement no reader
+// is ever shown, and an absence check would be tripped by vocabulary no reader is ever
+// told. It is skipped at any depth, as `.git` is. The root CLAUDE.md is not under it and
+// stays in the set. Decided by the owner at Checkpoint T (P6).
 func Markdown(root string) ([]string, error) {
 	var out []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -44,7 +51,7 @@ func Markdown(root string) ([]string, error) {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", "vendor", "node_modules":
+			case ".git", "vendor", "node_modules", ".claude":
 				return filepath.SkipDir
 			}
 			return nil
