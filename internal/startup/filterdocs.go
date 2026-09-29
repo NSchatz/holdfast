@@ -62,9 +62,21 @@ var pathFilterParts = []struct {
 		Needs: []string{"startup refusal", "covering nothing"},
 	},
 	{
-		Name:  "that an excluded directory is still listed, so a terminal row for a merely excluded file survives",
-		Needs: []string{"still", "listed", "keeps it", "holdfast export"},
+		Name: "that the walk does not list a directory an exclude pattern reaches, and that a terminal row " +
+			"beneath one survives because the retention pass draws no conclusion from a directory this run " +
+			"did not list",
+		Needs: []string{"does not list", "keeps it", "holdfast export", "draws no conclusion", "did not list"},
 	},
+}
+
+// pathFilterForbids are the claims the statement may no longer make, in the form the check
+// compares them: lowercased, whitespace collapsed and markdown emphasis removed. Both are the
+// retired rule (S0168): an excluded directory was once listed so the retention pass would keep
+// the rows beneath it, and the walk now prunes it instead. A statement that kept either
+// sentence beside the new one would be describing two walks, one of which no longer exists.
+var pathFilterForbids = []string{
+	"excluded directory is still listed",
+	"the walk is unchanged",
 }
 
 // CheckPathFilterStatement reports whether one shipped document states what the path
@@ -85,6 +97,13 @@ func CheckPathFilterStatement(doc string) error {
 				return fmt.Errorf("%s: the path filter statement does not say %s (missing %q)",
 					PathFilterDocFile, part.Name, need)
 			}
+		}
+	}
+	plain := normalise(strings.NewReplacer("*", "", "`", "").Replace(body))
+	for _, claim := range pathFilterForbids {
+		if strings.Contains(plain, claim) {
+			return fmt.Errorf("%s: the path filter statement still claims %q, which the walk no longer does: "+
+				"a directory an exclude pattern reaches is not listed", PathFilterDocFile, claim)
 		}
 	}
 	return nil

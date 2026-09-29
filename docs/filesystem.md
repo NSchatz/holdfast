@@ -32,7 +32,11 @@ record at startup:
 - the state directory (`state_dir`), or - where it does not exist yet - the
   storage it would be created on;
 - every distinct mounted filesystem the startup walk finds beneath a configured
-  library root, at any depth, whether or not a source lies on it;
+  library root, at any depth, whether or not a source lies on it. A directory an
+  `exclude_paths` pattern reaches is inspected and not listed, so a mount point
+  there is checked like any other while one beneath it is not a checked path:
+  nothing under it is offered, swept, watched or swapped
+  ([path filters](profiles.md#path-filters));
 - the working location (`scratch_dir`), when one is configured. It is inspected,
   classified and reported exactly like the paths above, and it is refused for its
   own reasons - it does not exist, it is not a directory, it cannot be inspected,
@@ -227,7 +231,7 @@ appeared in between is enumerated by the next scan, not that one: every later
 scan in a `serve` process lists for itself, so the wait is until the next scan
 rather than until the next restart.
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
 - On a cold cache over a slow network mount, startup can take a while. That is
   the traversal, not the encoder.
@@ -236,3 +240,5 @@ Two consequences worth knowing:
   again, and a bind loop or a symlink cycle terminates instead of running for
   ever. The same bound applies to the scan that follows: a source is enumerated
   only from a directory that this run's startup walk traversed successfully.
+- A directory an `exclude_paths` pattern reaches is not listed at all, so the
+  walk pays nothing beneath it - and neither does any scan after it.
