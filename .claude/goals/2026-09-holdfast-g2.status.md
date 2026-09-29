@@ -107,7 +107,7 @@ summed per directory):
 | S0180 | census scope parity | DOING (build agent, same branch, after S0168) |
 | S0166 | restart survey overcount | DONE (PR #102, `02aa553`): AC-1 to AC-10 pass, and AC-1 to AC-5 red on the old resolution (33 band-decided rows counted as moved); 22 existing test lines changed call shape only; local gate exit 0 in 31m20s on `52f96ed` (`internal/engine` 1627.4 s); CI green |
 | S0176 | log time offset (holdfast half), and the homelab PR for the `TZ` half | DONE (PR #103, `f5bb64f`): AC-H1 to AC-H7 pass (H1, H3, H5, H7 shown to red on mutations), AC-H9 grep empty; mutation-diff 100%; local gate exit 0 in 26m2s on `a74b458` (`internal/engine` 1341.0 s); CI green. Homelab half: NSchatz/homelab#208, open for the owner to merge (T32), `NEEDS-OWNER.md` row 1 |
-| S0151 | `.github/dependabot.yml` | DOING (PR #104, `99ca634`): selftest 35/35; CI `package` green on the literal-`FROM` Dockerfile |
+| S0151 | `.github/dependabot.yml` | DONE (PR #104, `901c472`): `.github/dependabot.yml` (github-actions, docker, gomod at `/`, weekly, `build(deps)` commits, no auto-merge); base images on literal `FROM` lines so Dependabot can read them; `check-pins.sh` sections 3, 7 and 9 enforce it, selftest 35/35; local gate exit 0 in 25m45s on `68902e4`; CI green |
 
 ## Phase 5 - P6 (approved option (a))
 
