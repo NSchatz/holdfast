@@ -131,8 +131,12 @@ tool proves its unhappy paths.
   `secret.Value`, which renders as `<redacted>` through `fmt`, `slog`, JSON and text;
   `Expose()` is the only route to the plaintext, so grep for it to find every site
   that reads one. `docs/secrets.md` is the reference.
-- Commit as `Noah Schatz <noah.lane.schatz@gmail.com>`; no `Co-Authored-By` and
-  no AI co-author trailer.
+- Commit as the repository's configured git identity; no `Co-Authored-By` and no AI
+  co-author trailer.
+- No owner identity in a tracked file: the owner's name and email appear only in `LICENSE`
+  and `NOTICE`, and synthetic identities stand in everywhere else. `make identity-scan`
+  enforces it in `check`, reading the identity from the repository's first commit at run
+  time, so the rule carries no copy of what it guards.
 - Conventional Commits.
 - Plain hyphens only - no en or em dashes, anywhere.
 - No dates and no narrated history in this file. Git holds that, and the plan of
@@ -142,7 +146,7 @@ tool proves its unhappy paths.
 ## References
 
 `docs/secrets.md` the reference forms, the resolver contract and its documented timeout
-bound, and the scanner's ruleset, exit codes and one setup step ·
+bound, the scanner's ruleset, exit codes and one setup step, and the identity scan ·
 `docs/docker.md` deployment (volumes, permissions, TZ, GPU passthrough, security
 posture) · `docs/migration.md` the cutover from the Bash transcoder and Tdarr ·
 `docs/requeue.md` what a terminal row

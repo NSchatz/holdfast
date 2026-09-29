@@ -66,6 +66,11 @@ jobs:
       prerelease: ${{ steps.plan.outputs.prerelease }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The identity scan in `make check` reads the owner's identity from the
+          # repository's FIRST commit, which a shallow checkout does not have (it
+          # refuses one, exit 4, rather than scan for the wrong person).
+          fetch-depth: 0
 
       - name: plan (publish? version? image?)
         id: plan
