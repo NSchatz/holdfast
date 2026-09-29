@@ -76,10 +76,27 @@ func (f PlanFile) Eligible() bool { return f.Guard == "" && !f.Unreadable }
 
 // PlanDeclined is one enumerated path the pipeline refuses OUTRIGHT (Declined): a run
 // claims, probes and records nothing about it, so it is in no figure of the plan either.
+//
+// Root and Bytes place it in the library it was found in: the root it was enumerated under
+// (empty for none) and the entry's own size, read as a covered file's is, 0 where that read
+// failed.
 type PlanDeclined struct {
 	Path   string
 	Rule   string
 	Detail string
+	Root   string
+	Bytes  int64
+}
+
+// PlanKeptOut is one source-named file the enumeration found in a directory it listed and
+// did NOT offer: what kept it out is the slice it is in (PlanPass.Excluded or
+// PlanPass.HeldBack). Root is the root it was found under, empty for none, and Bytes is the
+// entry's own size, read as a covered file's is - a symbolic link counts its own - and 0
+// where that read failed.
+type PlanKeptOut struct {
+	Path  string
+	Root  string
+	Bytes int64
 }
 
 // PlanPass is what one read-only pass found: every covered file with its verdict, and how
@@ -91,6 +108,14 @@ type PlanPass struct {
 	// Declined is every enumerated path the pipeline refuses outright, reported rather than
 	// dropped: a path missing from a report about a library reads as one that is not there.
 	Declined []PlanDeclined
+	// Excluded is every source-named file a path filter kept out of the pass, and HeldBack
+	// every one a record-based hold-back kept out (a parked job's two recorded paths and the
+	// recorded replacement paths still excluded). The filter is asked first, so no file is in
+	// both. Neither is offered, probed or in Files: they are what the scope of a library root
+	// is made of beside what the pass covers (S0180). A file beneath a directory the startup
+	// walk pruned is in no listing, and so in none of these.
+	Excluded []PlanKeptOut
+	HeldBack []PlanKeptOut
 	// Probes is how many probe snapshots the pass took. It is reported rather than assumed
 	// because "one invocation is one pass over the library" is a property an operator is
 	// owed evidence of, on a tool that may be pointed at a library of 300,000 files.
@@ -129,7 +154,16 @@ func (e *Engine) Plan(ctx context.Context, opt PlanOptions) *PlanPass {
 	e.held.Store(holdBacksFrom(ctx, opt.Ledger, e.Log))
 
 	pass := &PlanPass{}
-	files, _ := e.enumerate()
+	// The daemon's own enumeration, in its own order, driven through a sink that also HEARS
+	// what the filters and the hold-backs kept out. Hearing is all it does: the two reports
+	// are called after each decision is taken, so the files collected below are the set a
+	// scan offers, in the order it offers them.
+	var files []string
+	e.enumerateOrdered(e.passListings(), sink{
+		offer:    func(p string) bool { files = append(files, p); return true },
+		excluded: func(p string) { pass.Excluded = append(pass.Excluded, e.keptOut(p)) },
+		held:     func(p string) { pass.HeldBack = append(pass.HeldBack, e.keptOut(p)) },
+	})
 	for _, f := range files {
 		if ctx.Err() != nil {
 			return pass
@@ -137,12 +171,27 @@ func (e *Engine) Plan(ctx context.Context, opt PlanOptions) *PlanPass {
 		// Asked where ProcessFile asks it, before the hardlink guard and before anything is
 		// probed, so no guard of this pass answers for a path a run never reaches.
 		if rule, detail, yes := DeclinedPath(f); yes {
-			pass.Declined = append(pass.Declined, PlanDeclined{Path: f, Rule: rule, Detail: detail})
+			kept := e.keptOut(f)
+			pass.Declined = append(pass.Declined, PlanDeclined{Path: f, Rule: rule, Detail: detail,
+				Root: kept.Root, Bytes: kept.Bytes})
 			continue
 		}
 		pass.Files = append(pass.Files, e.planFile(ctx, f, opt.Ledger, snapshot, &pass.Probes))
 	}
 	return pass
+}
+
+// keptOut places one path the pass did not cover in the library it was found in: the root
+// the engine assigns it to and the entry's own size, read of the entry rather than of what
+// it points at, exactly as a covered file's bytes are. A size that could not be read counts
+// nothing rather than a guess.
+func (e *Engine) keptOut(p string) PlanKeptOut {
+	root, _ := e.rootFor(p)
+	k := PlanKeptOut{Path: p, Root: root.Clean}
+	if fi, err := os.Lstat(p); err == nil {
+		k.Bytes = fi.Size()
+	}
+	return k
 }
 
 // planFile judges one covered file the way ProcessFile judges it, minus every write: the

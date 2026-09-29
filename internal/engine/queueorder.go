@@ -81,6 +81,10 @@ func (e *Engine) enumerateOrdered(pass *listings, to sink) map[string]bool {
 		stopped: to.stopped,
 		// A temp is told of as it is listed, in either order: it is never queued.
 		temp: to.temp,
+		// So is a source the filters or a hold-back kept out: neither is a candidate, and
+		// what a keyed order sorts is only ever the set the enumeration offered.
+		excluded: to.excluded,
+		held:     to.held,
 	})
 
 	sortQueue(queue, order)

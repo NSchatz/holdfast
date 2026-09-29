@@ -1413,12 +1413,34 @@ type sink struct {
 	// enumeration listed, as it lists it. A bounded pass decides each one there; nothing
 	// else sets it.
 	temp func(path string)
+
+	// excluded and held, when non-nil, are told of every source-named file the enumeration
+	// met and did NOT offer: excluded where a path filter kept it out, held where a
+	// record-based hold-back did. They are REPORTS, called after the decision was taken
+	// and with no say in it, so the set offered and its order are the same with or without
+	// them. The read-only plan pass sets them (S0180); no scan does.
+	excluded func(path string)
+	held     func(path string)
 }
 
 // sawTemp tells the sink of a temp the enumeration listed.
 func (s sink) sawTemp(path string) {
 	if s.temp != nil {
 		s.temp(path)
+	}
+}
+
+// sawExcluded tells the sink of a source a path filter kept out.
+func (s sink) sawExcluded(path string) {
+	if s.excluded != nil {
+		s.excluded(path)
+	}
+}
+
+// sawHeld tells the sink of a source a record-based hold-back kept out.
+func (s sink) sawHeld(path string) {
+	if s.held != nil {
+		s.held(path)
 	}
 }
 
@@ -1545,12 +1567,17 @@ func (e *Engine) enumerateStream(pass *listings, to sink) map[string]bool {
 					// exclude whole never reaches this loop - the startup walk pruned it.
 					if !e.filterAllows(p) {
 						filtered++
+						to.sawExcluded(p)
 						continue
 					}
 					// offered() is the record-based hold-back and it is asked HERE, on
 					// the last step before a path leaves the enumeration, exactly where
 					// it was asked when this loop filled a slice instead.
-					if e.offered(p) && !to.offer(p) {
+					if !e.offered(p) {
+						to.sawHeld(p)
+						continue
+					}
+					if !to.offer(p) {
 						break covered
 					}
 				}
@@ -1618,9 +1645,14 @@ func (e *Engine) enumerateStream(pass *listings, to sink) map[string]bool {
 				// always has: the prune is the walk's (S0168), never this fallback's.
 				if !e.filterAllows(path) {
 					filtered++
+					to.sawExcluded(path)
 					return nil
 				}
-				if e.offered(path) && !to.offer(path) {
+				if !e.offered(path) {
+					to.sawHeld(path)
+					return nil
+				}
+				if !to.offer(path) {
 					return fs.SkipAll
 				}
 			}
