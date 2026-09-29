@@ -366,7 +366,7 @@ func TestVerify_RejectsAnOutputMissingAVideoStream(t *testing.T) {
 		encodes++
 		cmd := exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
 			"-i", in, "-map", "0:v:0", "-c:v", "libx265", "-preset", "ultrafast",
-			"-x265-params", "log-level=error", "-pix_fmt", "yuv420p10le", "--", out)
+			"-x265-params", "log-level=error", "-pix_fmt", "yuv420p10le", "-f", "mp4", "--", out)
 		if o, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("fixture encode: %v: %s", err, o)
 		}
@@ -1269,7 +1269,7 @@ func TestRemuxOnly_RejectsAnOutputWhoseVideoIsNotIdentical(t *testing.T) {
 	sneaky := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
 		return exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
 			"-i", in, "-map", "0:v", "-map", "0:a:0", "-c:v", "libx264", "-preset", "ultrafast",
-			"-b:v", "200k", "-pix_fmt", "yuv420p", "-c:a", "copy", "--", out).Run()
+			"-b:v", "200k", "-pix_fmt", "yuv420p", "-c:a", "copy", "-f", "matroska", "--", out).Run()
 	})
 	run := runSelection(t, ffmpeg, ffprobe,
 		selectionCfg(t, roots[0], "    remux_only: true\n    audio_languages: [eng]\n"), sneaky)

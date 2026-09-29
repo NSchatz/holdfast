@@ -51,7 +51,7 @@ func mkHevcFrom(t *testing.T, ffmpeg, src, path, seconds string) {
 		args = append(args, "-t", seconds)
 	}
 	args = append(args, "-c:v", "libx265", "-x265-params", "log-level=error", "-crf", "30",
-		"-preset", "ultrafast", "-pix_fmt", "yuv420p10le", "--", path)
+		"-preset", "ultrafast", "-pix_fmt", "yuv420p10le", "-f", "matroska", "--", path)
 	ff(t, ffmpeg, args...)
 }
 
@@ -61,7 +61,7 @@ func mkHevcFrom(t *testing.T, ffmpeg, src, path, seconds string) {
 func mkH264From(t *testing.T, ffmpeg, src, path string) {
 	t.Helper()
 	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", src,
-		"-c:v", "libx264", "-crf", "30", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "--", path)
+		"-c:v", "libx264", "-crf", "30", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-f", "matroska", "--", path)
 }
 
 // TestStrayTemp_TheSweepKeepsAFinishedReplacementAndStillTakesAPartialEncode is the

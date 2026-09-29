@@ -51,7 +51,7 @@ func mkH264Mandelbrot(t *testing.T, ffmpeg, path, bitrate string) {
 func realHEVCEncode(ctx context.Context, ffmpeg, in, out string) error {
 	return exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-y", "-i", in,
 		"-c:v", "libx265", "-crf", "22", "-preset", "veryfast", "-x265-params", "log-level=error",
-		"-pix_fmt", "yuv420p10le", "--", out).Run()
+		"-pix_fmt", "yuv420p10le", "-f", "matroska", "--", out).Run()
 }
 
 // failReason returns the recorded Outcome.Reason for the first FAILED row whose path

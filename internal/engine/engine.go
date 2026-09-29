@@ -32,8 +32,21 @@ import (
 
 // TempMarker is the fixed infix in a work-in-progress temp file's name, so a
 // leftover temp from a killed run is always identifiable and discardable regardless
-// of which file/pid produced it: `<name>.__transcoding__.<ext>`.
+// of which file/pid produced it: `<name>.__transcoding__.<ext>.holdfast-part` beside a
+// source (see TempSuffix), `<name>.__transcoding__.<ext>` from a build before it.
 const TempMarker = "__transcoding__"
+
+// TempSuffix is the final extension of the working file beside a source (S0177). The
+// file is a complete, playable encode for most of its life, and a media server or an
+// *arr app scanning the library by extension would otherwise offer it as an extra
+// version of the film or as a duplicate; whether one of them skips an unusual stem is
+// that app's behaviour, and not something holdfast controls. The container extension
+// stays AHEAD of the suffix, so the name still says what the file is: the encode reads
+// its container from it (the name no longer lets ffmpeg choose one; see
+// outputContainerFor), and the record-free hold-back recovers the source's stem and
+// extension from it exactly as it did from a name without the suffix. The marker stays
+// too, so every rule that reads a name by its marker recognises both generations.
+const TempSuffix = ".holdfast-part"
 
 // The reasons a job reaches a terminal state, recorded on the row (TRANSCODE-13).
 //

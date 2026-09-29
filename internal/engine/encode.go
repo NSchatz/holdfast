@@ -216,6 +216,15 @@ func (e FFmpegEncoder) Encode(ctx context.Context, in, out string, props *probe.
 // pipe cannot be opened at all, the -progress option is simply not passed and the encode
 // runs precisely as it did before this existed.
 func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, props *probe.VideoProps, sink ProgressSink) error {
+	// THE CONTAINER, named rather than left to ffmpeg to infer from out's name, which beside
+	// a source ends in TempSuffix and names none (see container.go). It is decided before
+	// anything else, so an output extension with no known container is refused before a
+	// single subprocess has run or a byte has been written.
+	container, err := outputContainerFor(out)
+	if err != nil {
+		return err
+	}
+
 	// Where the output is Matroska, the plan's attached pictures travel as attachments
 	// rather than through the map (see matroskaPictures); nil everywhere else.
 	pics, err := e.matroskaPictures(out)
@@ -232,7 +241,7 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 		if len(pics) > 0 {
 			mapArgs = e.Plan.MapArgsWithoutPictures()
 		}
-		return e.runCarrying(ctx, in, out, sink, nil, append(mapArgs, "-c", "copy"), pics)
+		return e.runCarrying(ctx, in, out, container, sink, nil, append(mapArgs, "-c", "copy"), pics)
 	}
 
 	// THIS JOB's settings: the profile of the root the engine handed this encoder,
@@ -355,7 +364,7 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 		// such ordering requirement.
 		pre = []string{"-vaapi_device", "/dev/dri/renderD128"}
 	}
-	return e.runCarrying(ctx, in, out, sink, pre, body, pics)
+	return e.runCarrying(ctx, in, out, container, sink, pre, body, pics)
 }
 
 // matroskaPictureMimeTypes are the attachment mimetypes the pinned ffmpeg's Matroska
@@ -403,8 +412,11 @@ type matroskaPicture struct {
 // A picture whose mimetype cannot be established is refused here, before anything is
 // written: an attachment under a mimetype the demuxer does not map reads back as something
 // other than the picture the plan intends.
+//
+// Whether the output is Matroska is read from the container extension out's name carries
+// (containerExtOf), never from its last extension, which beside a source is TempSuffix.
 func (e FFmpegEncoder) matroskaPictures(out string) ([]matroskaPicture, error) {
-	if !strings.EqualFold(filepath.Ext(out), ".mkv") {
+	if !strings.EqualFold(containerExtOf(out), "mkv") {
 		return nil, nil
 	}
 	sources := e.Plan.Pictures()
@@ -497,8 +509,13 @@ func picturePath(out string, i int) string {
 // otherwise swap would fail on its cover art. Relative to the directory the path is the
 // name, which picturePath holds to NAME_MAX. The "./" also keeps ffmpeg from reading a name
 // with a colon in it as a protocol.
-func (e FFmpegEncoder) runCarrying(ctx context.Context, in, out string, sink ProgressSink,
-	pre, body []string, pics []matroskaPicture) error {
+//
+// It is the one funnel every encode's output goes through, re-encode and remux alike, so it
+// is where the output's container is named: container's options join the job's own, and
+// only the encode's - a picture's copy names its own muxer, image2.
+func (e FFmpegEncoder) runCarrying(ctx context.Context, in, out string, container outputContainer,
+	sink ProgressSink, pre, body []string, pics []matroskaPicture) error {
+	body = append(append([]string(nil), body...), container.args()...)
 	if len(pics) == 0 {
 		return e.runFFmpeg(ctx, in, out, sink, pre, body)
 	}
@@ -506,7 +523,6 @@ func (e FFmpegEncoder) runCarrying(ctx context.Context, in, out string, sink Pro
 	dir := filepath.Dir(out)
 	defer removePictures(dir, pics)
 	e = e.runningIn(dir)
-	body = append([]string(nil), body...)
 	first := e.Plan.MappedAttachments()
 	for i, p := range pics {
 		file := "./" + p.name
