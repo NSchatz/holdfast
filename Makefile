@@ -80,7 +80,13 @@ build:
 # that are not about the code, and every fixture anyone adds to the engine after it
 # inherits the problem. The answer is the clock, not the coverage: deleting a proof to
 # fit a timeout is exactly the trade a data-safety tool must not make.
-TEST_TIMEOUT ?= 30m
+#
+# Raised from 30m to 45m when a full `make check` in a container with a 2-CPU quota
+# measured internal/engine at 1627.4 s under -race - 90% of 30m, past the 80% line at
+# which the clock is moved rather than waited on - on the gate of 52f96ed (goal 2 of the
+# program, PR #102). It is raised HERE and never by an environment override, so CI and a
+# release run the identical gate.
+TEST_TIMEOUT ?= 45m
 
 test:
 	go test -race -covermode=atomic -timeout $(TEST_TIMEOUT) ./...
