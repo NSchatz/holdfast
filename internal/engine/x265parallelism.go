@@ -16,8 +16,9 @@ import (
 // something an operator configures: the cgroup mount is where the kernel put it. It exists
 // so the reading can be steered from OUTSIDE the process - a test that runs the real
 // program in a child process has no other way to hand it a fixture hierarchy - and it is
-// read in the same place, and the same way, as HOLDFAST_FFMPEG and HOLDFAST_FFPROBE.
-const CgroupRootEnv = "HOLDFAST_CGROUP_ROOT"
+// read in the same place, and the same way, as HOLDFAST_FFMPEG and HOLDFAST_FFPROBE. The
+// spelling is cpuquota.RootEnv's, which the `workers: auto` resolution reads too.
+const CgroupRootEnv = cpuquota.RootEnv
 
 // The three places a run's libx265 parallelism can come from, as the startup record
 // names them. An operator reading "pools=8" cannot tell a configured 8 from a quota of
