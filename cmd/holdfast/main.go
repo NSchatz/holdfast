@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -173,6 +174,10 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	// default rather than as nothing at all.
 	fmt.Fprintf(stdout, "queue order: %s - the order in which this configuration offers files "+
 		"to its workers (one of %s)\n", cfg.EffectiveQueueOrder(), config.QueueOrderList())
+	// And how many workers there are, beside it and for the same reason: `auto` is resolved
+	// from a quota the operator cannot see from the file, so the count, the quota it came
+	// from and where that quota came from are printed before the first file goes.
+	fmt.Fprintln(stdout, workersLine(cfg.WorkerPlan()))
 	printResolvedProfiles(stdout, cfg)
 	// What this configuration MEANS, before what it has weakened. A disabled undo
 	// window is the shipped default and not a weakened gate, but it is the setting in
@@ -194,6 +199,29 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "warning: %s\n", u)
 	}
 	return 0
+}
+
+// workersLine is `validate`'s statement of the worker pool: the resolved count always, and
+// for `auto` the quota it was divided from, where that quota came from (the cgroup's cpu.max
+// or the CPU count), the divisor, and - where the quota could not be used - why.
+func workersLine(p config.WorkerPlan) string {
+	if !p.Auto {
+		return fmt.Sprintf("workers: %d - the number of files this configuration encodes at once "+
+			"(workers: %s)", p.Workers, p.Setting)
+	}
+	q := strconv.FormatFloat(p.Quota, 'f', -1, 64)
+	line := fmt.Sprintf("workers: %d - auto: floor(Q %s / cores_per_worker %d), where Q is %s CPU(s) "+
+		"from %s (%d CPU(s) available to this process)", p.Workers, q, p.CoresPerWorker, q,
+		p.QuotaSource, p.CPUs)
+	switch {
+	case p.Err != nil:
+		line += "; the cgroup cpu.max could not be used, so Q is the cpu count: " + p.Err.Error()
+	case p.Absent:
+		line += "; no cgroup CPU quota applies"
+	case p.Unlimited:
+		line += "; the cgroup names no CPU ceiling"
+	}
+	return line
 }
 
 // reportLedgerAgainstConfig prints what the ledger says about the configuration it was
@@ -607,6 +635,10 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope c
 	// why none is otherwise, in which case every encode runs unwatched.
 	memory := engine.DeriveMemoryWatch(envOr(engine.CgroupRootEnv, ""))
 	memory.Announce(log)
+	// How many workers this run has and, under `auto`, what they were sized from: resolved
+	// once when the configuration loaded, stated once here, where `run` and `serve` both
+	// come through - with the quota record first where one is owed.
+	cfg.WorkerPlan().Announce(log)
 
 	prober := probe.New(ffmpeg, ffprobe)
 	enc := engine.FFmpegEncoder{FFmpeg: ffmpeg, Cfg: *cfg, Probe: prober, X265: x265.Parallelism,

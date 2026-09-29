@@ -72,7 +72,11 @@ the source's own directory. That is not a preference, it is a constraint: a hard
 **cannot cross a mounted filesystem** (`link(2)` fails with `EXDEV`), so the only
 location guaranteed to work is the one the source is already on. There is deliberately
 no configurable retention path and no cross-filesystem trash directory - either would
-be a setting that works until the day somebody's library spans two mounts.
+be a setting that works until the day somebody's library spans two mounts. Every file of
+one directory shares that one area, and with several workers several of them can be
+retaining into it at once: the area is removed only when it is empty, and a job that finds
+it removed by another job's release between creating it and linking into it creates it
+again, rather than skipping its file.
 
 **The retained original is named so a library scanner passes it by.** It is held at
 `.holdfast-undo/<stem>.<fingerprint>.__undo__.<ext>.holdfast-undo`: the source's own name

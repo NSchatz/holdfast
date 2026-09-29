@@ -27,6 +27,7 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
 
+	"github.com/NSchatz/holdfast/internal/cpuquota"
 	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/schedule"
 	"github.com/NSchatz/holdfast/internal/secret"
@@ -67,6 +68,10 @@ var knownKeys = map[string]bool{
 	maxHeightKey:    true,
 	downscaleAckKey: true,
 	x265CPUsKey:     true,
+	// The divisor `workers: auto` sizes the pool by. It describes the PROCESS, so a
+	// library_roots entry naming it is refused as a daemon-level key, exactly as one
+	// naming workers is.
+	coresPerWorkerKey: true,
 }
 
 // profileKeys are the keys accepted inside one `encode_profiles` entry. The
@@ -153,6 +158,9 @@ func defaultLayer() map[string]any {
 		// No configured libx265 parallelism: the run derives it from the CPU quota of its
 		// own cgroup, or passes none where there is no quota to read.
 		x265CPUsKey: 0,
+		// The CPUs of quota one worker is sized for under `workers: auto`. It is read only
+		// when workers is auto, so the default moves no configuration that does not ask.
+		coresPerWorkerKey: DefaultCoresPerWorker,
 	}
 }
 
@@ -520,11 +528,27 @@ type Config struct {
 	// --- worker pool (TRANSCODE-5) ---
 
 	// Workers is the number of concurrent encode workers RunOneshot fans out to.
-	// 0 (absent/default) means 1 — the original sequential behaviour. CPU libx265
-	// already saturates available cores for a single encode, so raising this above
-	// 1 is an explicit opt-in (e.g. many small/low-resolution files, or a hardware
-	// encoder in a later phase). Use EffectiveWorkers() to read the resolved value.
+	// 0 (absent/default) means 1 - the original sequential behaviour. Raising it is an
+	// explicit opt-in. Use EffectiveWorkers() to read the resolved value.
+	//
+	// The file and HOLDFAST_WORKERS may also say `auto`, which is not a number and so is
+	// not decoded into this field: Load sets WorkersAuto instead and leaves this 0.
 	Workers int `yaml:"workers"`
+	// WorkersAuto is `workers: auto`: the pool is sized from the CPU quota this process
+	// runs under, max(1, floor(Q / cores_per_worker)) capped at 1024 (see workers.go). It
+	// is resolved once by Load; WorkerPlan() is the account of the resolution.
+	WorkersAuto bool `yaml:"-"`
+	// CoresPerWorker is the CPUs of quota one worker is sized for when workers is `auto`
+	// (default 16, range 1-1024, whole numbers only). It has no effect otherwise, and
+	// Notices() says so when it is written beside a numeric workers. Like workers it
+	// describes the process, so a library_roots entry naming it is refused. A Config
+	// assembled by hand that carries 0 uses the default.
+	CoresPerWorker int `yaml:"cores_per_worker"`
+	// coresPerWorkerSet records that the file or the environment WROTE cores_per_worker,
+	// which the resolved value cannot say once the defaults layer has filled it.
+	coresPerWorkerSet bool
+	// autoPlan is `workers: auto` as Load resolved it, once; the zero value everywhere else.
+	autoPlan WorkerPlan
 
 	// X265CPUs is the whole-CPU budget ONE libx265 encode is sized for: its worker-pool
 	// size, and the frame-thread count derived from it (internal/encoder.X265ParallelismFor).
@@ -711,12 +735,13 @@ func isLoopbackBind(addr string) bool {
 }
 
 // EffectiveWorkers returns the number of workers to run, defaulting 0 (absent) or
-// a negative value to 1 — matching the pre-TRANSCODE-5 sequential behaviour.
+// a negative value to 1 - matching the pre-TRANSCODE-5 sequential behaviour. Under
+// `workers: auto` it is the count WorkerPlan resolved from the CPU quota.
 func (c *Config) EffectiveWorkers() int {
-	if c.Workers < 1 {
-		return 1
+	if c.WorkersAuto {
+		return c.WorkerPlan().Workers
 	}
-	return c.Workers
+	return c.numericWorkers()
 }
 
 // RetentionEnabled reports whether a bounded ledger is configured. It is false for the
@@ -1000,6 +1025,30 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
+	// workers and cores_per_worker, checked against the value the file or the environment
+	// CARRIED, for queue_order's reason: a key written with no value still shows the
+	// defaults layer's value in the merge. The decoder below would truncate `2.5` to 2 and
+	// read `true` as 1, and it cannot decode `auto` at all, so the raw value decides here
+	// and `auto` leaves the merge as 0, recorded in WorkersAuto instead.
+	workersAuto := false
+	if explicitTop[workersKey] {
+		auto, err := workersValue(carriedValue(workersKey, k, kf, ke), path)
+		if err != nil {
+			return nil, err
+		}
+		if auto {
+			workersAuto = true
+			if err := k.Set(workersKey, 0); err != nil {
+				return nil, fmt.Errorf("resolving %s: %s in %q: %w", workersKey, WorkersAuto, path, err)
+			}
+		}
+	}
+	if explicitTop[coresPerWorkerKey] {
+		if err := coresPerWorkerValue(carriedValue(coresPerWorkerKey, k, kf, ke), path); err != nil {
+			return nil, err
+		}
+	}
+
 	// max_height is a WHOLE NUMBER OF PIXELS this build must be able to target, and the
 	// decoders below would read 1080.5 as 1080, "1080" as 1080 and `true` as 1 without a
 	// word - three resolutions the operator did not write, on the knob that decides how many
@@ -1103,7 +1152,29 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("%w, in %s", err, path)
 	}
 
+	// `workers: auto`, resolved ONCE, here, so every reader of this Config - and every copy
+	// the engine takes of it - sizes from one reading of the quota. The cgroup mount is the
+	// one every other cgroup reading of this process takes (cpuquota.RootEnv).
+	c.WorkersAuto = workersAuto
+	c.coresPerWorkerSet = explicitTop[coresPerWorkerKey]
+	if c.WorkersAuto {
+		c.autoPlan = resolveAutoWorkers(c.EffectiveCoresPerWorker(), os.Getenv(cpuquota.RootEnv), numCPU())
+	}
+
 	return &c, nil
+}
+
+// carriedValue is the RAW value of a top-level key as the layer that WROTE it carried it:
+// the environment over the file, and the merge only where neither wrote it.
+func carriedValue(key string, k, kf, ke *koanf.Koanf) any {
+	raw := k.Get(key)
+	if kf.Exists(key) {
+		raw = kf.Get(key)
+	}
+	if ke.Exists(key) {
+		raw = ke.Get(key)
+	}
+	return raw
 }
 
 // topLevelKey reduces a koanf key to the top-level config key it belongs to: a
@@ -1399,6 +1470,12 @@ func (c *Config) Validate() error {
 	if c.Workers < 0 || c.Workers > 1024 {
 		return fmt.Errorf("workers %d out of range (0-1024; 0 means the default of 1)", c.Workers)
 	}
+	// 0 is a Config assembled by hand that carries none, which uses the default; Load
+	// refuses a WRITTEN 0 before it gets here.
+	if c.CoresPerWorker < 0 || c.CoresPerWorker > maxCoresPerWorker {
+		return fmt.Errorf("%s %d out of range (1-%d; the default is %d)", coresPerWorkerKey,
+			c.CoresPerWorker, maxCoresPerWorker, DefaultCoresPerWorker)
+	}
 	if err := checkX265CPUs(c.X265CPUs); err != nil {
 		return err
 	}
@@ -1664,6 +1741,10 @@ func (c *Config) Notices() []string {
 	// than the source it replaces - and that is precisely the thing somebody deleting
 	// originals should hear stated before the first one goes.
 	n = append(n, c.downscaleNotices()...)
+	// cores_per_worker beside a numeric workers is a key nothing reads, and an operator who
+	// wrote it believes the pool follows the quota. It is a NOTICE on this file's own rule:
+	// no gate is weakened, the pool runs exactly the number workers names.
+	n = append(n, c.coresPerWorkerNotice()...)
 	if strings.TrimSpace(c.ScratchDir) != "" {
 		n = append(n, "scratch_dir is set - the encoder writes its working file to "+strings.TrimSpace(c.ScratchDir)+
 			" and the accepted result is COPIED BACK into a temp beside the source before the swap. The swap itself is "+
