@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/NSchatz/holdfast/internal/config"
 )
 
 // enumerated mirrors exactly what the scan does with the walk's coverage: it
@@ -664,3 +666,494 @@ func TestWalk_IsDeterministic(t *testing.T) {
 // beyond any of these layouts; a walk still going by then is not slow, it is
 // looping, and the test says so rather than hanging the suite.
 func timeout() <-chan time.Time { return time.After(10 * time.Second) }
+
+// ---- S0168: the walk prunes a directory the path filters exclude whole ----------------
+
+// recordingFS is the fake platform with every listing it serves recorded, in order: what
+// "the walk never lists it" is asserted against. It records and forwards, and nothing else.
+type recordingFS struct {
+	*fakeFS
+	listed []string
+}
+
+func (r *recordingFS) ReadDir(p string) ([]Entry, error) {
+	r.listed = append(r.listed, cleanPath(p))
+	return r.fakeFS.ReadDir(p)
+}
+
+// pruningCheck is the walk with the path filters' exclude half in force, and the decision
+// is the real one: built by internal/config from these roots, exactly as the one
+// start-or-refuse construction builds it, so no case here passes on a predicate of its own.
+func pruningCheck(p Platform, cfg config.Config, decls ...string) Result {
+	return Run(Check{
+		Roots:        cfg.LibraryRoots,
+		StateDir:     "/var/state",
+		Declarations: decls,
+		IsMediaFile:  mediaByExt,
+		Excluded:     cfg.DirectoryExcluded(),
+		Platform:     p,
+	})
+}
+
+// atOrBeneath reports whether p is dir or lies beneath it.
+func atOrBeneath(p, dir string) bool { return p == dir || lexicallyBeneath(p, dir) }
+
+// TestS0168AC1_AnExcludedDirectoryAndEverythingBeneathItIsNeverListed is S0168 [AC-1]: a
+// directory strictly beneath a root that an exclude pattern in force for the root it is
+// assigned to reaches is not listed, nothing beneath it is listed, and it is absent from the
+// coverage and from the carried listings. The second root's own filters name nothing, so a
+// directory there spelled like an excluded one is walked: it is that root's patterns that
+// decide. The same tree walked with no decision in force is the anti-vacuity half.
+func TestS0168AC1_AnExcludedDirectoryAndEverythingBeneathItIsNeverListed(t *testing.T) {
+	build := func() *fakeFS {
+		f := newFS().setType("/", "ext4")
+		f.mkfile("/srv/media/film/Film.mkv")
+		f.mkfile("/srv/media/film/Extras/Behind.mkv")
+		f.mkfile("/srv/media/film/Extras/deep/Deeper.mkv")
+		f.mkfile("/srv/media/.Trash-0/Old.mkv")
+		f.mkfile("/srv/media/.Trash-0/sub/Older.mkv")
+		f.mkfile("/srv/media/import/New.mkv")
+		f.mkfile("/srv/tv/Extras/Show.mkv")
+		f.mkdir("/var/state")
+		return f
+	}
+	cfg := config.Config{LibraryRoots: []string{"/srv/media", "/srv/tv"}, Roots: []config.Root{
+		{Path: "/srv/media", Clean: "/srv/media", Filters: config.PathFilters{
+			Exclude: []string{"**/Extras", "**/.Trash-*/**", "/srv/media/import"}}},
+		{Path: "/srv/tv", Clean: "/srv/tv"},
+	}}
+	excluded := []string{"/srv/media/.Trash-0", "/srv/media/film/Extras", "/srv/media/import"}
+
+	f := &recordingFS{fakeFS: build()}
+	res := pruningCheck(f, cfg)
+	if !res.Start {
+		t.Fatalf("refused: row %d, %+v", res.Row, res.Causes)
+	}
+	for _, dir := range excluded {
+		for _, l := range f.listed {
+			if atOrBeneath(l, dir) {
+				t.Errorf("%s was listed, and it is %s or beneath it", l, dir)
+			}
+		}
+		for _, c := range res.Coverage {
+			if atOrBeneath(c, dir) {
+				t.Errorf("the coverage names %s, which is %s or beneath it", c, dir)
+			}
+		}
+		for k := range res.Entries {
+			if atOrBeneath(k, dir) {
+				t.Errorf("the carried listings hold %s, which is %s or beneath it", k, dir)
+			}
+		}
+		if !hasNotice(res, NoticeExcluded, dir) {
+			t.Errorf("%s was not reported as a directory the path filters exclude: %+v", dir, res.Notices)
+		}
+	}
+	// Nothing beneath a pruned directory is met at all, so nothing there is reported either.
+	if n := noticesOf(res, NoticeExcluded); len(n) != len(excluded) {
+		t.Errorf("excluded-directory reports = %+v, want exactly the %d pruned directories", n, len(excluded))
+	}
+	wantCoverage := []string{"/srv/media", "/srv/media/film", "/srv/tv", "/srv/tv/Extras"}
+	if !reflect.DeepEqual(res.Coverage, wantCoverage) {
+		t.Fatalf("coverage = %v, want %v", res.Coverage, wantCoverage)
+	}
+	if !reflect.DeepEqual(f.listed, wantCoverage) {
+		t.Fatalf("listings = %v, want exactly the covered directories %v", f.listed, wantCoverage)
+	}
+	wantEnumerated(t, f.fakeFS, res, "/srv/media/film/Film.mkv", "/srv/tv/Extras/Show.mkv")
+
+	// Anti-vacuity: with no decision in force every one of them IS listed and covered.
+	plain := &recordingFS{fakeFS: build()}
+	plainRes := Run(Check{Roots: cfg.LibraryRoots, StateDir: "/var/state", IsMediaFile: mediaByExt, Platform: plain})
+	for _, dir := range excluded {
+		if !contains(plainRes.Coverage, dir) {
+			t.Fatalf("with no filter %s is not covered either (%v), so its absence above proves nothing",
+				dir, plainRes.Coverage)
+		}
+	}
+	if len(noticesOf(plainRes, NoticeExcluded)) != 0 {
+		t.Fatalf("a walk with no path filter reported an excluded directory: %+v", plainRes.Notices)
+	}
+}
+
+func contains(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestS0168AC4_ADirectoryNoExcludePatternReachesIsWalkedExactlyAsBefore is S0168 [AC-4]: a
+// directory that no exclude pattern reaches and that lies outside every include pattern is
+// listed and descended exactly as it is with no decision in force - include never prunes, and
+// an exclude pattern that reaches only FILES prunes nothing either. Exactly is graded as
+// equality of the whole result, listing for listing.
+func TestS0168AC4_ADirectoryNoExcludePatternReachesIsWalkedExactlyAsBefore(t *testing.T) {
+	build := func() *recordingFS {
+		f := newFS().setType("/", "ext4")
+		f.mkfile("/srv/media/movies/Film.mkv")
+		f.mkfile("/srv/media/tv/Show/Ep1.mkv")
+		f.mkfile("/srv/media/tv/Show/Ep1.sample.mkv")
+		f.mkfile("/srv/media/music/Track.mkv")
+		f.mount("/srv/media/tv/nas", "ext4")
+		f.mkdir("/var/state")
+		return &recordingFS{fakeFS: f}
+	}
+	cfg := config.Config{LibraryRoots: []string{"/srv/media"},
+		IncludePaths: []string{"movies/**"},
+		ExcludePaths: []string{"**/*.sample.*", "/srv/elsewhere/**"}}
+
+	filtered, plain := build(), build()
+	got := pruningCheck(filtered, cfg)
+	want := Run(Check{Roots: cfg.LibraryRoots, StateDir: "/var/state", IsMediaFile: mediaByExt, Platform: plain})
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("a directory no exclude pattern reaches was walked differently:\n  with the filters: %+v\n"+
+			"  without:          %+v", got, want)
+	}
+	if !reflect.DeepEqual(filtered.listed, plain.listed) {
+		t.Fatalf("listings moved: %v with the filters, %v without", filtered.listed, plain.listed)
+	}
+	// And the directories outside every include pattern really were descended.
+	for _, dir := range []string{"/srv/media/tv", "/srv/media/tv/Show", "/srv/media/tv/nas", "/srv/media/music"} {
+		if !contains(got.Coverage, dir) {
+			t.Fatalf("%s, which no exclude pattern reaches, is not covered: %v", dir, got.Coverage)
+		}
+	}
+}
+
+// TestS0168AC5_ARootAPatternNamesIsStillListedClassifiedAndWalked is S0168 [AC-5]: an exclude
+// pattern that matches a configured library root - by name, by a pattern matching the
+// root-relative "." itself, or as an earlier root's pattern reaching a nested root - leaves
+// that root listed, classified and walked, and a root that cannot be listed still refuses at
+// row 3. Pruning applies only strictly beneath a root.
+func TestS0168AC5_ARootAPatternNamesIsStillListedClassifiedAndWalked(t *testing.T) {
+	build := func() *fakeFS {
+		f := newFS().setType("/", "ext4")
+		f.mkfile("/srv/media/Top.mkv")
+		f.mkfile("/srv/media/film/Film.mkv")
+		f.mkdir("/var/state")
+		return f
+	}
+	for _, tc := range []struct {
+		name    string
+		exclude []string
+	}{
+		{"an absolute pattern naming the root", []string{"/srv/media"}},
+		{"a relative pattern matching the root-relative dot", []string{"**"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &recordingFS{fakeFS: build()}
+			res := pruningCheck(f, config.Config{LibraryRoots: []string{"/srv/media"}, ExcludePaths: tc.exclude})
+			if !res.Start || res.Row != rowStart {
+				t.Fatalf("row %d, start %v: %+v", res.Row, res.Start, res.Causes)
+			}
+			if rec, ok := recordFor(res, "/srv/media"); !ok || rec.Kind != KindLibraryRoot || rec.Class != Local {
+				t.Fatalf("the root lost its classification record: %+v (found %v)", rec, ok)
+			}
+			if !contains(res.Coverage, "/srv/media") || !contains(f.listed, "/srv/media") {
+				t.Fatalf("the root was not listed and covered: coverage %v, listings %v", res.Coverage, f.listed)
+			}
+			if _, ok := res.Entries["/srv/media"]; !ok {
+				t.Fatal("the root's listing was not carried")
+			}
+			if hasNotice(res, NoticeExcluded, "/srv/media") {
+				t.Fatal("the root itself was reported excluded")
+			}
+			// Strictly beneath it, the pattern reaches everything: through the root.
+			if !hasNotice(res, NoticeExcluded, "/srv/media/film") || contains(f.listed, "/srv/media/film") {
+				t.Fatalf("a directory beneath a root the pattern names was walked: listings %v", f.listed)
+			}
+		})
+	}
+
+	t.Run("a root that cannot be listed still refuses at row 3", func(t *testing.T) {
+		f := build()
+		f.failRead("/srv/media", fs.ErrPermission)
+		res := pruningCheck(f, config.Config{LibraryRoots: []string{"/srv/media"}, ExcludePaths: []string{"/srv/media"}})
+		if res.Start || res.Row != rowUninspect || !hasCause(res, CauseUnlistable, "/srv/media") {
+			t.Fatalf("row %d, start %v, causes %+v; want the root refused as unlistable at row 3",
+				res.Row, res.Start, res.Causes)
+		}
+	})
+
+	// Nested roots are refused by Validate; the walk is asked about them anyway. The outer
+	// root's pattern reaches the inner root, which is still listed and walked - inside the
+	// outer walk, as a nested root always is - while what lies beneath it is pruned by the
+	// outer root's pattern, whose filters are the ones a scan applies there.
+	t.Run("a nested root an outer root's pattern reaches", func(t *testing.T) {
+		f := newFS().setType("/", "ext4")
+		f.mkfile("/srv/media/tv/Pilot.mkv")
+		f.mkfile("/srv/media/tv/season/Ep1.mkv")
+		f.mkdir("/var/state")
+		rf := &recordingFS{fakeFS: f}
+		res := pruningCheck(rf, config.Config{LibraryRoots: []string{"/srv/media", "/srv/media/tv"}, Roots: []config.Root{
+			{Path: "/srv/media", Clean: "/srv/media", Filters: config.PathFilters{Exclude: []string{"tv"}}},
+			{Path: "/srv/media/tv", Clean: "/srv/media/tv"},
+		}})
+		if !res.Start {
+			t.Fatalf("refused: %+v", res.Causes)
+		}
+		if _, ok := recordFor(res, "/srv/media/tv"); !ok {
+			t.Fatalf("the nested root lost its record: %v", recordPaths(res))
+		}
+		if !contains(res.Coverage, "/srv/media/tv") || !contains(rf.listed, "/srv/media/tv") {
+			t.Fatalf("the nested root was not listed: coverage %v", res.Coverage)
+		}
+		if hasNotice(res, NoticeExcluded, "/srv/media/tv") || hasNotice(res, NoticeRegionExcluded, "/srv/media/tv") {
+			t.Fatalf("a configured root was reported as excluded: %+v", res.Notices)
+		}
+		if !hasNotice(res, NoticeExcluded, "/srv/media/tv/season") || contains(rf.listed, "/srv/media/tv/season") {
+			t.Fatalf("beneath the nested root the outer root's pattern did not prune: listings %v", rf.listed)
+		}
+	})
+}
+
+// TestS0168AC6_APrunedMountKeepsItsRecordAndItsRefusal is S0168 [AC-6]: a pruned directory
+// that is itself a mount point is still inspected, still carries its classification record,
+// and still refuses the run at row 4 when it is not local and no declaration covers it -
+// cause for cause what the same tree decides with no filter. A mount point strictly beneath
+// a pruned directory carries no record and decides nothing.
+func TestS0168AC6_APrunedMountKeepsItsRecordAndItsRefusal(t *testing.T) {
+	build := func() *fakeFS {
+		f := newFS().setType("/", "ext4")
+		f.mkfile("/srv/media/Film.mkv")
+		f.mount("/srv/media/nas", "nfs")
+		f.mkfile("/srv/media/nas/Remote.mkv")
+		f.mkdir("/var/state")
+		return f
+	}
+	cfg := config.Config{LibraryRoots: []string{"/srv/media"}, ExcludePaths: []string{"nas"}}
+
+	rf := &recordingFS{fakeFS: build()}
+	res := pruningCheck(rf, cfg)
+	plain := check(build(), []string{"/srv/media"}, "/var/state")
+	if res.Start || res.Row != rowNotLocal || !hasCause(res, CauseNotLocal, "/srv/media/nas") {
+		t.Fatalf("a pruned network mount did not refuse at row 4: row %d, causes %+v", res.Row, res.Causes)
+	}
+	if !reflect.DeepEqual(res.Causes, plain.Causes) || !reflect.DeepEqual(res.Records, plain.Records) {
+		t.Fatalf("the filter moved the decision:\n  with it: %+v %+v\n  without: %+v %+v",
+			res.Records, res.Causes, plain.Records, plain.Causes)
+	}
+	if contains(rf.listed, "/srv/media/nas") || !hasNotice(res, NoticeExcluded, "/srv/media/nas") {
+		t.Fatalf("the pruned mount was listed anyway: %v", rf.listed)
+	}
+
+	// The declaration that permits it permits it exactly as before.
+	allowed := pruningCheck(build(), cfg, "/srv/media/nas")
+	if !allowed.Start || !hasNotice(allowed, NoticeReducedGuarantee, "/srv/media/nas") {
+		t.Fatalf("the declared pruned mount did not start with a reduced guarantee: %+v %+v",
+			allowed.Causes, allowed.Notices)
+	}
+
+	t.Run("a mount beneath a pruned directory decides nothing", func(t *testing.T) {
+		deep := func() *fakeFS {
+			f := newFS().setType("/", "ext4")
+			f.mkfile("/srv/media/Film.mkv")
+			f.mount("/srv/media/.Trash-0/nfs", "nfs")
+			f.mkdir("/var/state")
+			return f
+		}
+		res := pruningCheck(deep(), config.Config{LibraryRoots: []string{"/srv/media"},
+			ExcludePaths: []string{"**/.Trash-*/**"}})
+		if !res.Start || res.Row != rowStart {
+			t.Fatalf("a mount beneath a pruned directory decided the run: row %d, %+v", res.Row, res.Causes)
+		}
+		if _, ok := recordFor(res, "/srv/media/.Trash-0/nfs"); ok {
+			t.Fatalf("a mount beneath a pruned directory carries a record: %v", recordPaths(res))
+		}
+		// Anti-vacuity: without the filter that mount is met, recorded and refuses.
+		plain := check(deep(), []string{"/srv/media"}, "/var/state")
+		if plain.Start || !hasCause(plain, CauseNotLocal, "/srv/media/.Trash-0/nfs") {
+			t.Fatalf("without the filter the deep mount did not refuse, so this case proves nothing: %+v", plain.Causes)
+		}
+	})
+}
+
+// TestS0168AC7_PrunedStorageUnderAnotherSpellingIsDeclinedAndNamesTheExcludedOne is S0168
+// [AC-7]: storage the walk pruned, met later under a spelling no exclude pattern reaches - a
+// bind mount of the same directory, a symbolic link to it, a later configured root exposing
+// it - is not descended, offers no file, refuses nothing, and is reported naming the excluded
+// spelling that reached it first, never saying its sources are enumerated from there.
+func TestS0168AC7_PrunedStorageUnderAnotherSpellingIsDeclinedAndNamesTheExcludedOne(t *testing.T) {
+	build := func() *fakeFS {
+		f := newFS().setType("/", "ext4")
+		f.mkfile("/srv/media/Film.mkv")
+		f.mkfile("/srv/media/.Trash-0/Old.mkv")
+		f.mkdir("/var/state")
+		return f
+	}
+	exclude := []string{"**/.Trash-*/**"}
+	for _, tc := range []struct {
+		name  string
+		roots []string
+		alias string
+		lay   func(f *fakeFS)
+	}{
+		{"a bind mount of it", []string{"/srv/media"}, "/srv/media/zz",
+			func(f *fakeFS) { f.bind("/srv/media/zz", "/srv/media/.Trash-0") }},
+		{"a symbolic link to it", []string{"/srv/media"}, "/srv/media/zlink",
+			func(f *fakeFS) { f.symlink("/srv/media/zlink", "/srv/media/.Trash-0") }},
+		{"a later configured root exposing it", []string{"/srv/media", "/srv/alias"}, "/srv/alias",
+			func(f *fakeFS) { f.bind("/srv/alias", "/srv/media/.Trash-0") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := build()
+			tc.lay(f)
+			rf := &recordingFS{fakeFS: f}
+			res := pruningCheck(rf, config.Config{LibraryRoots: tc.roots, ExcludePaths: exclude})
+			if !res.Start || res.Row != rowStart {
+				t.Fatalf("a second spelling of pruned storage decided the run: row %d, %+v", res.Row, res.Causes)
+			}
+			for _, l := range rf.listed {
+				if atOrBeneath(l, tc.alias) || atOrBeneath(l, "/srv/media/.Trash-0") {
+					t.Fatalf("%s was listed: the pruned storage was walked under some spelling", l)
+				}
+			}
+			wantEnumerated(t, f, res, "/srv/media/Film.mkv")
+
+			var got *Notice
+			for _, n := range noticesOf(res, NoticeRegionExcluded) {
+				if n.Path == tc.alias {
+					n := n
+					got = &n
+				}
+			}
+			if got == nil {
+				t.Fatalf("%s was not reported as a spelling of excluded storage: %+v", tc.alias, res.Notices)
+			}
+			if !strings.Contains(got.Detail, "/srv/media/.Trash-0") {
+				t.Errorf("the report does not name the excluded spelling that reached it first: %q", got.Detail)
+			}
+			if strings.Contains(got.Detail, "enumerated exactly once") || strings.Contains(got.Detail, "from there") {
+				t.Errorf("the report says the sources are enumerated from the excluded spelling: %q", got.Detail)
+			}
+			if hasNotice(res, NoticeRegionWalked, tc.alias) || hasNotice(res, NoticeEmptyRoot, tc.alias) {
+				t.Errorf("the second spelling was also reported as walked storage or an empty root: %+v", res.Notices)
+			}
+		})
+	}
+}
+
+// TestS0168AC10_ARootWhoseOnlySourcesArePrunedIsPresentAndEmpty is S0168 [AC-10]: a present,
+// local root whose only source-named files lie beneath pruned directories is reported present
+// and empty - the report's own words, "holds no media file this run would enumerate", are
+// then true of it - and the run still starts.
+func TestS0168AC10_ARootWhoseOnlySourcesArePrunedIsPresentAndEmpty(t *testing.T) {
+	build := func() *fakeFS {
+		f := newFS().setType("/", "ext4")
+		f.mkfile("/srv/media/.Trash-0/Old.mkv")
+		f.mkfile("/srv/media/film/Extras/Behind.mkv")
+		f.mkfile("/srv/media/film/notes.txt")
+		f.mkdir("/var/state")
+		return f
+	}
+	res := pruningCheck(build(), config.Config{LibraryRoots: []string{"/srv/media"},
+		ExcludePaths: []string{"**/.Trash-*/**", "**/Extras"}})
+	if !res.Start || res.Row != rowStart {
+		t.Fatalf("refused: row %d, %+v", res.Row, res.Causes)
+	}
+	if !hasNotice(res, NoticeEmptyRoot, "/srv/media") {
+		t.Fatalf("a root whose only sources are pruned was not reported present and empty: %+v", res.Notices)
+	}
+	// Anti-vacuity: the same root with no filter holds media and is not called empty.
+	if plain := check(build(), []string{"/srv/media"}, "/var/state"); hasNotice(plain, NoticeEmptyRoot, "/srv/media") {
+		t.Fatal("the fixture's root is reported empty with no filter at all, so this case proves nothing")
+	}
+}
+
+// TestS0168AC12_AMalformedPatternListsTheDirectory is S0168 [AC-12]: where matching an
+// exclude pattern against a directory cannot decide - a malformed pattern reaching the walk
+// without passing config validation - the directory is listed rather than pruned. The pattern
+// is one the pinned matcher answers YES for, so a walk that trusted the answer would prune.
+func TestS0168AC12_AMalformedPatternListsTheDirectory(t *testing.T) {
+	f := newFS().setType("/", "ext4")
+	f.mkfile("/srv/media/.Trash-0/Old.mkv")
+	f.mkfile("/srv/media/film/Extras/Behind.mkv")
+	f.mkdir("/var/state")
+	rf := &recordingFS{fakeFS: f}
+	res := pruningCheck(rf, config.Config{LibraryRoots: []string{"/srv/media"},
+		ExcludePaths: []string{"{.Trash-0,[}", "**/Extras"}})
+	if !contains(rf.listed, "/srv/media/.Trash-0") || !contains(res.Coverage, "/srv/media/.Trash-0") {
+		t.Fatalf("a directory only a malformed pattern names was pruned: listings %v", rf.listed)
+	}
+	if hasNotice(res, NoticeExcluded, "/srv/media/.Trash-0") {
+		t.Fatal("a directory only a malformed pattern names was reported excluded")
+	}
+	// The well-formed pattern beside it still prunes, so the listing above is the guard.
+	if !hasNotice(res, NoticeExcluded, "/srv/media/film/Extras") || contains(rf.listed, "/srv/media/film/Extras") {
+		t.Fatalf("the well-formed pattern beside it did not prune: listings %v", rf.listed)
+	}
+}
+
+// TestS0168AC13_AFailureNoPatternCoversIsReportedAsBefore is S0168 [AC-13]: a directory no
+// exclude pattern reaches that cannot be listed is reported with the same notice kind and
+// detail as with no filter configured - permission denial as directory-could-not-be-read, any
+// other failure as directory-could-not-be-traversed - so pruning hides no failure the filters
+// do not cover. The excluded counterpart, which is never listed and so never fails, is
+// reported as excluded, including when even inspecting it fails.
+func TestS0168AC13_AFailureNoPatternCoversIsReportedAsBefore(t *testing.T) {
+	build := func() *fakeFS {
+		f := newFS().setType("/", "ext4")
+		f.mkfile("/srv/media/Film.mkv")
+		f.mkfile("/srv/media/locked/Hidden.mkv")
+		f.failRead("/srv/media/locked", fs.ErrPermission)
+		f.mkfile("/srv/media/broken/Gone.mkv")
+		f.failRead("/srv/media/broken", errors.New("input/output error"))
+		f.mkfile("/srv/media/unstatable/Lost.mkv")
+		f.failStat("/srv/media/unstatable", fs.ErrPermission)
+		f.mkfile("/srv/media/.Trash-0/Old.mkv")
+		f.failRead("/srv/media/.Trash-0", fs.ErrPermission)
+		f.mkfile("/srv/media/.Trash-1000/Old.mkv")
+		f.failStat("/srv/media/.Trash-1000", fs.ErrPermission)
+		f.mkdir("/var/state")
+		return f
+	}
+	res := pruningCheck(build(), config.Config{LibraryRoots: []string{"/srv/media"},
+		ExcludePaths: []string{"**/.Trash-*/**"}})
+	plain := check(build(), []string{"/srv/media"}, "/var/state")
+
+	for _, tc := range []struct {
+		path string
+		kind NoticeKind
+	}{
+		{"/srv/media/locked", NoticeUnreadable},
+		{"/srv/media/broken", NoticeListingFailed},
+		{"/srv/media/unstatable", NoticeUnreadable},
+	} {
+		want := noticeAt(plain, tc.path)
+		got := noticeAt(res, tc.path)
+		if want == nil || want.Kind != tc.kind {
+			t.Fatalf("with no filter %s is reported as %+v, want %s: the fixture proves nothing", tc.path, want, tc.kind)
+		}
+		if got == nil || *got != *want {
+			t.Errorf("%s: reported %+v with the filter in force, %+v without", tc.path, got, want)
+		}
+	}
+	for _, dir := range []string{"/srv/media/.Trash-0", "/srv/media/.Trash-1000"} {
+		if n := noticeAt(res, dir); n == nil || n.Kind != NoticeExcluded {
+			t.Errorf("%s is reported as %+v, want it reported as excluded", dir, n)
+		}
+		if n := noticeAt(plain, dir); n == nil || (n.Kind != NoticeUnreadable && n.Kind != NoticeListingFailed) {
+			t.Errorf("with no filter %s is reported as %+v; the fixture does not fail it", dir, n)
+		}
+	}
+	if !res.Start {
+		t.Fatalf("refused: %+v", res.Causes)
+	}
+}
+
+// noticeAt is the one notice naming path, or nil when there is none or more than one.
+func noticeAt(res Result, path string) *Notice {
+	var found *Notice
+	for i := range res.Notices {
+		if res.Notices[i].Path == path {
+			if found != nil {
+				return nil
+			}
+			found = &res.Notices[i]
+		}
+	}
+	return found
+}
