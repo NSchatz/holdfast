@@ -17,6 +17,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/downscale"
 	"github.com/NSchatz/holdfast/internal/encoder"
+	"github.com/NSchatz/holdfast/internal/hwdevice"
 	"github.com/NSchatz/holdfast/internal/probe"
 )
 
@@ -172,6 +173,11 @@ type FFmpegEncoder struct {
 	// encoder reads it: pools and frame-threads are libx265 mechanisms.
 	X265 encoder.X265Parallelism
 
+	// Devices are the render nodes this host assigned to VAAPI and QSV (hwdevice.Assign), read
+	// by a plan this encoder derives itself; a plan handed in carries the engine's. The zero
+	// value assigns /dev/dri/renderD128 to both.
+	Devices hwdevice.Assignment
+
 	// Memory is the resident-memory bound every invocation this encoder makes is held to:
 	// while ffmpeg runs, its resident memory is sampled, and at the threshold the process
 	// is terminated and the encode fails with a *MemoryAbortError. The run derives it once,
@@ -275,7 +281,7 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 		prof := e.profile()
 		derived, err := deriveEncodePlan(planInputs{
 			settings: e.Cfg.TranscodeIn(prof, in), prof: prof, source: in, output: out, streams: e.Plan,
-			snapshot: e.snapshot(ctx, in, props),
+			devices: e.Devices, snapshot: e.snapshot(ctx, in, props),
 		})
 		if err != nil {
 			return err
@@ -694,13 +700,15 @@ func closeProgressPipe(r, w *os.File) {
 //     declared ones onto the frames (hdr.Color.SetParams). Whatever an encoder fails
 //     to carry, the output fidelity gate rejects (docs/design/encode-plan.md#fidelity).
 //   - hevc_nvenc/av1_nvenc: -rc vbr -cq <quality> -b:v 0 + a preset.
-//   - hevc_qsv: -global_quality <quality>.
-//   - hevc_vaapi: -vaapi_device (the plan's device, emitted before -i - see
-//     EncodePlan.args) + -vf format=<input format>,hwupload (+ -profile:v main10
-//     for p010le) + -qp <quality>. This is the fiddliest of the set and untestable
-//     in this environment (no VAAPI device) - capability detection
-//     (internal/encoder.Available) keeps it from ever running unless a real device
-//     is present; the arg shape is reasonable but not battle-tested.
+//   - hevc_qsv: a QSV device derived from a VAAPI device on the plan's render node,
+//     opened over DRM (emitted before -i - see deviceArgs) + -global_quality <quality>.
+//   - hevc_vaapi: -vaapi_device <the plan's render node>,connection_type=drm (emitted
+//     before -i - see deviceArgs) + -vf format=<input format>,hwupload (+ -profile:v
+//     main10 for p010le) + -qp <quality>. No device is reachable here, so these shapes
+//     are proven on golden argv and a stand-in ffmpeg; the startup check
+//     (internal/encoder.Available, through this same builder) keeps them from running
+//     on a host whose device does not encode, and a hardware report (brief T43) is what
+//     shows them on a real one.
 //   - hevc_amf: -rc cqp -qp_i <quality> -qp_p <quality>.
 //
 // <quality> is the plan's Quality.Value: the job's quality.<key> on that encoder's

@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	"github.com/NSchatz/holdfast/internal/config"
-	"github.com/NSchatz/holdfast/internal/encoder"
+	"github.com/NSchatz/holdfast/internal/hwdevice"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
 	"github.com/NSchatz/holdfast/internal/vmaf"
@@ -401,7 +401,7 @@ func hpRequireCapabilities(t *testing.T, cfgPath, ffmpegBin, ffprobeBin string) 
 	}
 	ctx := context.Background()
 	for _, r := range cfg.RootProfiles() {
-		if _, err := encoder.RequireAvailable(ctx, ffmpegBin, ffprobeBin, r.Profile.Encoder); err != nil {
+		if err := requireEncoder(ctx, cfg, ffmpegBin, ffprobeBin, r.Profile.Encoder, hwdevice.Assignment{}); err != nil {
 			t.Fatalf("%s: the shipped default encoder %q does not work with this ffmpeg, and "+
 				"HP-RUN encodes for real with it: %v", hpCouldNotRun, r.Profile.Encoder, err)
 		}

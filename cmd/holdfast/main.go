@@ -33,6 +33,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/engine"
+	"github.com/NSchatz/holdfast/internal/hwdevice"
 	"github.com/NSchatz/holdfast/internal/logging"
 	"github.com/NSchatz/holdfast/internal/metrics"
 	"github.com/NSchatz/holdfast/internal/notify"
@@ -549,8 +550,13 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope c
 	// one: a root that says `encoder: nvenc` on a host with no NVIDIA device must stop
 	// the run here, exactly as a top-level nvenc does. Distinct, because the check runs
 	// a real encode and several roots usually share one encoder.
+	//
+	// The check encodes through the job's own derivation and command line, on the render
+	// node this host assigned to the encoder (docs/design/hardware.md#detection), so the
+	// devices are found first and stated once.
+	devices := discoverDevices(log)
 	for _, e := range distinctBy(cfg, func(p config.Profile) string { return p.Encoder }) {
-		if _, err := encoder.RequireAvailable(context.Background(), ffmpeg, ffprobe, e.key); err != nil {
+		if err := requireEncoder(context.Background(), cfg, ffmpeg, ffprobe, e.key, devices); err != nil {
 			fmt.Fprintf(stderr, "holdfast: %s: %v\n", e.where, err)
 			return nil, nil, 1
 		}
@@ -562,7 +568,7 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope c
 	// because "nvenc is unavailable" sends an operator to a configuration whose top-level
 	// encoder is cpu.
 	for _, e := range cfg.EncodeProfileEncoders() {
-		if _, err := encoder.RequireAvailable(context.Background(), ffmpeg, ffprobe, e.Key); err != nil {
+		if err := requireEncoder(context.Background(), cfg, ffmpeg, ffprobe, e.Key, devices); err != nil {
 			fmt.Fprintf(stderr, "holdfast: encode_profiles (%s): %v\n", e.Profile, err)
 			return nil, nil, 1
 		}
@@ -652,7 +658,7 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope c
 
 	prober := probe.New(ffmpeg, ffprobe)
 	enc := engine.FFmpegEncoder{FFmpeg: ffmpeg, Cfg: *cfg, Probe: prober, X265: x265.Parallelism,
-		Memory: memory.Bound}
+		Memory: memory.Bound, Devices: devices}
 	// Belt: an explicit empty state_dir must not silently write the job DB into the
 	// process CWD (Load defaults it to "state"; this covers `state_dir: ""`). The
 	// defaulting lives in ONE function so `export` reads the database `run` wrote.
@@ -681,6 +687,7 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope c
 	logLedgerAgainstConfig(log, filepath.Join(effectiveStateDir(cfg), "jobs.db"), survey, surveyErr)
 
 	eng := engine.New(*cfg, prober, enc, st, log)
+	eng.Devices = devices
 	// The startup walk's coverage BOUNDS the run: this scan enumerates sources
 	// from exactly the directories that walk traversed successfully, so a
 	// subtree it declined, could not read or failed to traverse yields no file
@@ -694,6 +701,55 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope c
 	// temp a killed run left, and what keeps every sweep off a live run's in-flight file.
 	eng.TrackTempOwners(filepath.Join(stateDirPath(cfg), engine.TempOwnersDirName), startupPlatform().FSType)
 	return eng, st, 0
+}
+
+// discoverDevices finds the render nodes this process can see and assigns VAAPI's and QSV's,
+// and states the result once: each node with its vendor and whether it opens, and the node
+// each encoder got or why it got none. A listing that fails is stated and read as no nodes -
+// VAAPI and QSV then have no node, and their probe refuses them if the configuration names
+// them; nothing else reads a node.
+func discoverDevices(log *slog.Logger) hwdevice.Assignment {
+	nodes, err := hwdevice.Discover("/")
+	if err != nil {
+		log.Warn("hardware: the render nodes could not be listed; VAAPI and QSV get none", "err", err)
+	}
+	for _, n := range nodes {
+		if n.OpenErr != nil {
+			log.Info("hardware: render node", "node", n.Path, "vendor", n.Vendor, "usable", false, "why", n.OpenErr.Error())
+			continue
+		}
+		log.Info("hardware: render node", "node", n.Path, "vendor", n.Vendor, "usable", n.Usable())
+	}
+	devices := hwdevice.Assign(nodes)
+	log.Info("hardware: render nodes assigned", "vaapi", orNone(devices.VAAPI, devices.Why["vaapi"]),
+		"qsv", orNone(devices.QSV, devices.Why["qsv"]))
+	return devices
+}
+
+func orNone(node, why string) string {
+	if node != "" {
+		return node
+	}
+	return "none (" + why + ")"
+}
+
+// requireEncoder is the startup check of one configured encoder: a real encode at 8 and at 10
+// bits through the job's own derivation and command line (engine.ProbeEncode), on the render
+// node this host assigned. An encoder that needs a node and got none says why beside the
+// probe's own reason, because "Device creation failed" does not tell an operator that the
+// container was never given /dev/dri, or was given it without the group that may open it.
+func requireEncoder(ctx context.Context, cfg *config.Config, ffmpeg, ffprobe, key string, devices hwdevice.Assignment) error {
+	probeWith := engine.ProbeEncode(*cfg, ffmpeg, probe.New(ffmpeg, ffprobe), devices)
+	_, _, err := encoder.RequireAvailable(ctx, ffmpeg, ffprobe, key, probeWith)
+	if err == nil {
+		return nil
+	}
+	if spec, ok := encoder.Lookup(key); ok {
+		if why := devices.Why[spec.Key]; why != "" {
+			return fmt.Errorf("%w (render node: %s)", err, why)
+		}
+	}
+	return err
 }
 
 // gateChainFilters names the filters THIS configuration's scoring chains can compose on
