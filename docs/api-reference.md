@@ -672,7 +672,7 @@ response and no `holdfast export` line carries it, and the shapes documented abo
   |---|---|---|
   | `holdfast_files_total{outcome}` | files reaching a terminal outcome | the shape of the run. A rise in `failed` or `indeterminate` against a flat `done` is the first thing to look at |
   | `holdfast_skips_total{guard}` | files skipped, by the GUARD that skipped them | which guard is holding files back. A spike in `exotic-pixel-format` or `low-bitrate` after a configuration change says the change was wrong; a rise in `hardlinked` says something started hardlinking your library |
-  | `holdfast_failures_total{gate}` | files that FAILED, by the gate or stage that rejected them | which check is rejecting encodes. A rise in `vmaf-chroma` says the encoder or the content changed in a way only the colour planes see; a rise in `size` says this configuration cannot beat the sources it is being given; a rise in `swap` is about the filesystem and not about quality |
+  | `holdfast_failures_total{gate}` | files that FAILED, by the gate or stage that rejected them | which check is rejecting encodes. A rise in `vmaf-chroma` says the encoder or the content changed in a way only the colour planes see; a rise in `size` says this configuration cannot beat the sources it is being given; a rise in `swap` is about the filesystem and not about quality; a rise in `fidelity` says outputs are losing a bit depth, a chroma plane, a colour tag or HDR10 metadata the plan declared |
   | `holdfast_bytes_reclaimed_total` | bytes of disk reclaimed by successful transcodes | the point of the tool. Flat while `holdfast_files_total{outcome="done"}` climbs means the encodes are barely smaller than their sources |
   | `holdfast_encode_duration_seconds` | wall-clock duration of successful encodes | how long the queue will take. A shift right is a slower encoder, a busier host, or larger sources |
   | `holdfast_vmaf_score` | pooled harmonic-mean VMAF of accepted outputs | the AVERAGE fidelity being accepted. A fall toward `min_vmaf` says the encodes are getting worse and the floor is about to start rejecting them |
@@ -692,7 +692,7 @@ response and no `holdfast export` line carries it, and the shapes documented abo
 
   The `guard` label set is the skip vocabulary enumerated under [the recorded outcome](#the-recorded-outcome---the-proof-a-swap-was-safe),
   plus `unclassified` for a reason this build does not recognise. The `gate` label set is
-  `probe | encode | codec | length | size | stream-parity | decode | vmaf-mean | vmaf-min | vmaf-chroma |
+  `probe | encode | codec | length | size | stream-parity | fidelity | decode | vmaf-mean | vmaf-min | vmaf-chroma |
   vmaf-unmeasured | swap | other`, decided where the rejection is made and never read off the failure's
   `reason` text. Both are CLOSED vocabularies pre-created at `0`, which is what lets an alert be written
   before the first such skip or rejection, and what keeps the number of series knowable in advance: a value

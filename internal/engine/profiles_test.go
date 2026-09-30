@@ -319,10 +319,12 @@ func TestProfiles_TheOutputCodecCheckIsDecidedAgainstTheJobsOwnTarget(t *testing
 		src := filepath.Join(d, "film.mkv")
 		mkH264(t, ffmpeg, src, "8M")
 
+		// The stand-in writes the 10-bit output this job's plan declares (the test
+		// configuration's pixel_format), so it is faithful and only the codec is in question.
 		writesHevc := EncoderFunc(func(ctx context.Context, in, out string, _ *probe.VideoProps) error {
 			ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", in,
 				"-c:v", "libx265", "-x265-params", "log-level=error", "-preset", "ultrafast",
-				"-crf", "35", "-pix_fmt", "yuv420p", "-f", "matroska", "--", out)
+				"-crf", "35", "-pix_fmt", "yuv420p10le", "-f", "matroska", "--", out)
 			return nil
 		})
 

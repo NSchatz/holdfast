@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/downscale"
+	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
 	"github.com/NSchatz/holdfast/internal/vmaf"
@@ -200,6 +202,24 @@ func (e *Engine) verifyAgainst(ctx context.Context, job *EncodePlan) (vmafProof,
 		return none, GateStreamParity, store.FailureDeterministic, err
 	}
 
+	// 5b. OUTPUT FIDELITY: the output carries what the plan declares it carries - the bit
+	// depth and chroma subsampling of the pixel format it was encoded to, the colour tags it
+	// was written with, and every HDR10 static-metadata block the source carries, with the
+	// same values (docs/design/encode-plan.md#fidelity). None of these is visible to the
+	// perceptual gate below: its model is luma-only and it scores pictures, not metadata, so
+	// an output encoded 8-bit where the plan said 10, tagged bt709 over PQ samples, or
+	// stripped of its mastering-display block can score like a faithful one and pass every
+	// other gate. It runs here, before the full decode, because it costs one probe.
+	//
+	// A REMUX is not held to it: it re-encodes nothing, and the bit-identity check below
+	// holds its video to something strictly stronger. DETERMINISTIC: the same source,
+	// configuration and ffmpeg build produce the same output, and it loses the same field.
+	if !job.Video.Copy {
+		if err := e.outputFidelity(ctx, job); err != nil {
+			return none, GateFidelity, store.FailureDeterministic, err
+		}
+	}
+
 	// 6. decode-integrity healthcheck on EVERY encode. TRANSIENT: an output that does not
 	// fully decode is a damaged FILE, and a filled disk, a killed process or a flipped bit
 	// are conditions of the run rather than properties of the source.
@@ -235,6 +255,39 @@ func (e *Engine) verifyAgainst(ctx context.Context, job *EncodePlan) (vmafProof,
 		return e.vmafGate(ctx, tmp, in, prof, job.Picture.Deinterlace, job.Picture.Downscale)
 	}
 	return none, "", "", nil
+}
+
+// FidelityError is the output fidelity gate's rejection: every field the output does not
+// carry as its plan declares, in the order the gate compares them.
+type FidelityError struct {
+	Mismatches []hdr.Mismatch
+}
+
+func (e *FidelityError) Error() string {
+	parts := make([]string, len(e.Mismatches))
+	for i, m := range e.Mismatches {
+		parts[i] = m.String()
+	}
+	return "output fidelity: the output does not carry what the encode plan declares (" +
+		strings.Join(parts, "; ") + "). The source is kept"
+}
+
+// outputFidelity holds the output to the plan's fidelity declaration. It reads the output in
+// two probes (probe.OutputFacts): its stream-level pixel format, colour tags and side data,
+// and its first decoded frame's colour tags and side data - the side data in the same flat
+// form, and in the same frame-then-stream order, the guards read a source's in.
+func (e *Engine) outputFidelity(ctx context.Context, job *EncodePlan) error {
+	out := e.Probe.OutputFacts(ctx, job.Output)
+	obs := hdr.Observed{
+		PixFmt:   out.PixFmt,
+		Stream:   hdr.Tags(out.Stream),
+		Frame:    hdr.Tags(out.Frame),
+		SideData: out.SideData,
+	}
+	if m := job.Metadata.Fidelity.Check(obs); len(m) > 0 {
+		return &FidelityError{Mismatches: m}
+	}
+	return nil
 }
 
 // videoIdentity establishes that every video stream the output carries is IDENTICAL to
