@@ -10,6 +10,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -257,9 +258,10 @@ func TestEncodePlan_RefusesWhatItCannotPerform(t *testing.T) {
 }
 
 // TestEncodePlan_EveryGateReadsThePlan: each acceptance gate's verdict moves with the plan it
-// is handed and with nothing else. One real source and one real hevc encode of it; the plan
-// the derivation produced passes every structural gate, and each case changes ONE declaration
-// and gets the rejection of the gate that reads it.
+// is handed and with nothing else - the files it measures included, which the gates take from
+// the plan too (Source, Output). One real source and one real hevc encode of it; the plan the
+// derivation produced passes every structural gate, and each case changes ONE thing the plan
+// declares and gets the rejection of the gate that reads it.
 func TestEncodePlan_EveryGateReadsThePlan(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
 	d := t.TempDir()
@@ -272,12 +274,51 @@ func TestEncodePlan_EveryGateReadsThePlan(t *testing.T) {
 	withAudio := filepath.Join(d, "with-audio.mkv")
 	mkSourceWithStreams(t, ffmpeg, withAudio, audioStream("eng"))
 
+	// The files the three gates with no job-specific expectation measure: an output that is
+	// not there to measure, a source twice the output's length, and an output whose video does
+	// not decode. The damaged one is an hevc elementary stream of the source - encoded without
+	// B-frames, so a raw stream muxes back with timestamps - with bytes in its middle flipped,
+	// muxed at its own frame rate; the same mux of the undamaged stream passes every gate, so
+	// the damage is the one thing the decode gate can be rejecting.
+	empty := filepath.Join(d, "empty.mkv")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
+		t.Fatalf("write the empty output: %v", err)
+	}
+	long := filepath.Join(d, "long.mkv")
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=4:size=320x240:rate=10", "-c:v", "libx264", "-preset", "ultrafast",
+		"-b:v", "8M", "-pix_fmt", "yuv420p", "--", long)
+	elementary := filepath.Join(d, "out.hevc")
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-map", "0:v",
+		"-c:v", "libx265", "-preset", "ultrafast", "-crf", "28", "-x265-params", "bframes=0:log-level=error",
+		"-pix_fmt", "yuv420p10le", "-f", "hevc", "--", elementary)
+	raw, err := os.ReadFile(elementary)
+	if err != nil {
+		t.Fatalf("read the elementary stream: %v", err)
+	}
+	if len(raw) < 8192 {
+		t.Fatalf("the elementary stream is %d bytes - too small to damage its middle", len(raw))
+	}
+	for i := len(raw) / 2; i < len(raw)/2+len(raw)/8; i++ {
+		raw[i] ^= 0xff
+	}
+	damagedStream := filepath.Join(d, "damaged.hevc")
+	if err := os.WriteFile(damagedStream, raw, 0o644); err != nil {
+		t.Fatalf("write the damaged elementary stream: %v", err)
+	}
+	remux := func(stream, to string) string {
+		ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-framerate", "10", "-i", stream,
+			"-c", "copy", "--", to)
+		return to
+	}
+	cleanMux, damaged := remux(elementary, filepath.Join(d, "clean.mkv")), remux(damagedStream, filepath.Join(d, "damaged.mkv"))
+
 	eng := buildEngine(t, ffmpeg, ffprobe, d, nil, nil)
 	prober := probe.New(ffmpeg, ffprobe)
 	prof := eng.Cfg.TopLevelProfile()
 	job := derivePlanFor(t, eng.Cfg, prof, prober, src, out)
 	ctx := context.Background()
-	if _, gate, _, err := eng.verifyAgainst(ctx, src, out, job); err != nil {
+	if _, gate, _, err := eng.verifyAgainst(ctx, job); err != nil {
 		t.Fatalf("the derived plan's own output was rejected by %q: %v - the cases below would prove nothing", gate, err)
 	}
 
@@ -294,12 +335,21 @@ func TestEncodePlan_EveryGateReadsThePlan(t *testing.T) {
 		{"the intended streams", func(p *EncodePlan) {
 			p.Streams = derivePlanFor(t, eng.Cfg, prof, prober, withAudio, out).Streams
 		}, GateStreamParity},
+		{"the output the plan names: nothing there", func(p *EncodePlan) { p.Output = empty }, GateEncode},
+		{"the source the plan names: twice the output's length", func(p *EncodePlan) { p.Source = long }, GateLength},
+		{"the output the plan names: a stream that does not decode", func(p *EncodePlan) { p.Output = damaged }, GateDecode},
+	}
+	clean := *job
+	clean.Output = cleanMux
+	if _, gate, _, err := eng.verifyAgainst(ctx, &clean); err != nil {
+		t.Fatalf("the undamaged remux of the same stream was rejected by %q: %v - the decode case would not be "+
+			"about the damage", gate, err)
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			changed := *job
 			tc.change(&changed)
-			_, gate, _, err := eng.verifyAgainst(ctx, src, out, &changed)
+			_, gate, _, err := eng.verifyAgainst(ctx, &changed)
 			if err == nil || gate != tc.wantGate {
 				t.Fatalf("with %s changed the gates returned gate %q (%v), want a %q rejection: that gate does "+
 					"not read the plan", tc.name, gate, err, tc.wantGate)
@@ -322,7 +372,7 @@ func TestEncodePlan_EveryGateReadsThePlan(t *testing.T) {
 
 		scored := *job
 		scored.Profile.VmafEnable, scored.Profile.MinVmaf = boolPtr(true), 1
-		if _, gate, _, err := eng.verifyAgainst(ctx, src, out, &scored); err != nil {
+		if _, gate, _, err := eng.verifyAgainst(ctx, &scored); err != nil {
 			t.Fatalf("the plan with the perceptual gate on was rejected by %q: %v", gate, err)
 		}
 		if got.ReferenceFilter != "" || got.DistortedFilter != "" {
@@ -332,7 +382,7 @@ func TestEncodePlan_EveryGateReadsThePlan(t *testing.T) {
 
 		scored.Picture = PictureOps{Deinterlace: yadif, Downscale: shrink}
 		got = vmaf.Request{}
-		_, _, _, _ = eng.verifyAgainst(ctx, src, out, &scored)
+		_, _, _, _ = eng.verifyAgainst(ctx, &scored)
 		if got.ReferenceFilter != yadif.Spec {
 			t.Errorf("the reference was produced through %q, want the plan's deinterlace %q", got.ReferenceFilter, yadif.Spec)
 		}

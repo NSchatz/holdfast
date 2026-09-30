@@ -89,11 +89,15 @@ type vmafProof struct {
 //
 // job is THIS JOB's encode plan - the SAME value the encode's command line was built from,
 // handed in rather than derived here - and every gate below reads what it checks off it: the
-// codec the output must be in, the streams it must carry, the deinterlace and the scale the
-// perceptual gate reproduces, and the profile every floor comes from. That is the whole of
-// why it is the one parameter: a gate that resolved any of those for itself would be
-// answering a different question than the encoder was asked, and the two answers would
-// differ on exactly the file nobody tested (docs/design/encode-plan.md#encode-plan).
+// source and the output it compares (job.Source, job.Output), the codec the output must be
+// in, the streams it must carry, the deinterlace and the scale the perceptual gate
+// reproduces, and the profile every floor comes from. That is the whole of why it is the one
+// parameter: a gate that resolved any of those for itself - down to which file it measured -
+// would be answering a different question than the encoder was asked, and the two answers
+// would differ on exactly the file nobody tested (docs/design/encode-plan.md#encode-plan).
+// The length gate's tolerance (duration_tolerance_sec) is the one threshold not on the plan:
+// it is a run-wide setting, read from the engine's configuration exactly as the stray-temp
+// sweep that asks the same question reads it.
 //
 // job.Profile is the profile of the root the source was enumerated under: every threshold
 // comes from it, so a film library and a grainy-anime library each meet the bar their
@@ -122,8 +126,9 @@ type vmafProof struct {
 // and scales the OUTPUT back up to the resolution of the file that is about to be deleted.
 // A disabled filter and a disabled scale are the ordinary case and leave every gate below
 // exactly as it was.
-func (e *Engine) verifyAgainst(ctx context.Context, in, tmp string, job *EncodePlan) (vmafProof, string, store.FailureClass, error) {
+func (e *Engine) verifyAgainst(ctx context.Context, job *EncodePlan) (vmafProof, string, store.FailureClass, error) {
 	var none vmafProof
+	in, tmp := job.Source, job.Output
 	prof, plan := job.Profile, job.Streams
 
 	// THE SEAMS, announced before any gate runs: this is the plan the checks below read, and

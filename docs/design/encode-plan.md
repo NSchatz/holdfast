@@ -13,9 +13,10 @@ command line and every acceptance gate read that plan and derive nothing of thei
 plan is derived in one place (`deriveEncodePlan` in `internal/engine/encodeplan.go`), from the
 profile that decides the file, the job's effective encode settings (resolved once per job,
 before the guards read them, and handed to the derivation), the working path, the intended
-stream map and the probe snapshot the guards already read. The encoder builds its command
-line from it; the gates check the output against it; the terminal row records the picture
-operations it declares. None of them resolves any part of that answer for itself.
+stream map and the probe snapshot the guards already read. The encoder takes every
+job-specific argument of its command line from it; the gates take from it the source and the
+output they measure and every expectation they hold the output to; the terminal row records
+the picture operations it declares. None of them resolves any part of that answer for itself.
 
 ## Why one plan
 
@@ -51,6 +52,7 @@ that proves it happened, from the same value.
 | `Metadata` | the colour description (`hdr.Color`): the source's tags and, for HDR10, its mastering display and content light level; HDR10+ and Dolby Vision are not carried, because the guards skip a source that has either before a plan is derived | the command line (`-color_*` and the libx265 parameters) |
 | `Profile`, `Settings` | the effective library profile, whose floors every gate applies, and the job's effective encode settings with the encode profile that supplied them | every gate's floors (`Profile`); the quality value (`Settings`) |
 | container | the muxer the output is written in, named from the working file's name | the command line |
+| `Source`, `Output` | the file the encode reads and the working file it writes: the two paths the plan was derived for | the command line (`-i` and the output); every gate, for the files it measures |
 
 ## Declared, then built or refused
 
@@ -78,7 +80,9 @@ the encoder's own refusal always recorded, and the encoder is then never called.
 The plan says what the output is. How the encode is scheduled on this machine is not part of
 that: the libx265 thread pools, the resident-memory watchdog, the progress channel, the mux
 queue bounds and the ffmpeg binary are execution parameters of the run, joined to the command
-line by the encoder and read by no gate. The guards are not part of it either: they decide
+line by the encoder and read by no gate. The length gate's tolerance (`duration_tolerance_sec`)
+is not on the plan either: it is a run-wide setting, read from the engine's configuration
+exactly as the stray-temp sweep that asks the same question reads it. The guards are not part of it either: they decide
 whether a file is encoded at all, run before a plan exists, and read the same probe snapshot
 the derivation reads.
 
