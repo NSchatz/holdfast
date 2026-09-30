@@ -94,3 +94,34 @@ func TestOutputFacts_ReadsBothLevels(t *testing.T) {
 		t.Errorf("OutputFacts of a missing file = %+v, want nothing", none)
 	}
 }
+
+// TestVideoProps_SideDataAnswered: a file ffprobe reads answers, with or without side data; a
+// file it cannot read does not, and its empty SideData is then "unknown", never "none".
+func TestVideoProps_SideDataAnswered(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Fatalf("the pinned ffmpeg is required: %v", err)
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Fatalf("the pinned ffprobe is required: %v", err)
+	}
+	f := filepath.Join(t.TempDir(), "sdr.mkv")
+	if out, err := exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=1:size=64x48:rate=5", "-c:v", "libx264", "-preset", "ultrafast",
+		"--", f).CombinedOutput(); err != nil {
+		t.Fatalf("make fixture: %v\n%s", err, out)
+	}
+	p := New(ffmpeg, ffprobe)
+	ctx := context.Background()
+	if vp := p.VideoProps(ctx, f); !vp.SideDataAnswered() {
+		t.Fatal("a readable file's side-data probes did not answer")
+	}
+	missing := p.VideoProps(ctx, filepath.Join(t.TempDir(), "missing.mkv"))
+	if missing.SideDataAnswered() {
+		t.Fatal("a missing file's side-data probes reported an answer")
+	}
+	if strings.Contains(missing.SideData(), "side_data_type") {
+		t.Fatalf("a missing file yielded side data: %q", missing.SideData())
+	}
+}

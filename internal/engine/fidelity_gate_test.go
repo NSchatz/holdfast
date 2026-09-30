@@ -351,3 +351,52 @@ func TestFidelityGate_EveryEncoderCarriesTheDeclaredPrimariesAndTransfer(t *test
 		})
 	}
 }
+
+// TestFidelityGate_AnUnreadSourceSideDataIsRefusedNotDeclaredAbsent: the declaration names
+// every HDR10 block the source carries, read from its side data. When the side-data probe does
+// not answer, "no block" would hold the output to nothing and an output that lost the source's
+// mastering display would pass; so the plan is refused and the source kept. The stand-in for
+// ffprobe fails exactly the side-data queries and answers every other one with the real binary.
+func TestFidelityGate_AnUnreadSourceSideDataIsRefusedNotDeclaredAbsent(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	realFFprobe, err := exec.LookPath(ffprobe)
+	if err != nil {
+		t.Fatalf("look up ffprobe: %v", err)
+	}
+	root := t.TempDir()
+	src := filepath.Join(root, "movie.mkv")
+	mkFidelitySource(t, ffmpeg, src)
+	// Only the SOURCE's side-data queries fail (the file is ffprobe's last argument); the
+	// output's are answered, so without the refusal the job would reach the gate holding the
+	// output to a declaration that names no HDR10 block - and pass an output that lost both.
+	standIn := filepath.Join(t.TempDir(), "ffprobe-stand-in")
+	script := "#!/bin/sh\nfor last in \"$@\"; do :; done\n" +
+		"case \"$*\" in *side_data_list*) [ \"$last\" = '" + src + "' ] && exit 1;; esac\n" +
+		"exec '" + realFFprobe + "' \"$@\"\n"
+	if err := os.WriteFile(standIn, []byte(script), 0o755); err != nil {
+		t.Fatalf("write the stand-in: %v", err)
+	}
+	before := md5f(t, src)
+
+	cfg := baseCfg(root)
+	cfg.PixelFormat = "auto"
+	st := newTestStore(t, root)
+	prober := probe.New(ffmpeg, standIn)
+	// The encoder loses both HDR10 blocks: the output an unread declaration would let through.
+	lossy := lossyEncoder(ffmpeg, "-vf",
+		"sidedata=mode=delete:type=MASTERING_DISPLAY_METADATA,sidedata=mode=delete:type=CONTENT_LIGHT_LEVEL")
+	eng := New(cfg, prober, lossy, st, discardLogger())
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatalf("RunOneshot: %v", err)
+	}
+	row := rowFor(t, st, src)
+	if row.Status != store.Failed || !strings.Contains(row.Outcome.Reason, "cannot read the side data") {
+		t.Fatalf("row %q %q, want failed naming the unread side data", row.Status, row.Outcome.Reason)
+	}
+	if md5f(t, src) != before {
+		t.Fatal("the source changed")
+	}
+	if n := nTemp(t, root); n != 0 {
+		t.Errorf("%d temp file(s) left behind", n)
+	}
+}

@@ -160,7 +160,11 @@ options change neither level where the frames carry the tag, and leave the Matro
 unset where they do not, while `-colorspace` and `-color_range` take effect), and libx265
 writes them into the bitstream from its own parameters. Anything the gate cannot establish -
 an output pixel format it cannot take apart, a plan's format it cannot, a block present on the
-source whose values could not be read - is a mismatch, never a pass.
+source whose values could not be read - is a mismatch, never a pass. The declaration itself is
+held to the same rule: a source whose side-data probe did not answer is not declared to carry
+no HDR10 block (which would hold the output to nothing); the plan is refused and the source
+kept (`probe.VideoProps.SideDataAnswered`,
+`TestFidelityGate_AnUnreadSourceSideDataIsRefusedNotDeclaredAbsent`).
 
 The same measurement is why the command line stamps the declared primaries and transfer
 onto the frames (`hdr.Color.SetParams`, a `setparams` filter at the head of the chain, after
