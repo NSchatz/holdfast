@@ -15,7 +15,7 @@ profile that decides the file, the job's effective encode settings (resolved onc
 before the guards read them, and handed to the derivation), the working path, the intended
 stream map and the probe snapshot the guards already read. The encoder takes every
 job-specific argument of its command line from it; the gates take from it the source and the
-output they measure and every expectation they hold the output to; the terminal row records
+output they measure and every job-specific expectation they hold the output to; the terminal row records
 the picture operations it declares. None of them resolves any part of that answer for itself.
 
 ## Why one plan
@@ -80,9 +80,10 @@ the encoder's own refusal always recorded, and the encoder is then never called.
 The plan says what the output is. How the encode is scheduled on this machine is not part of
 that: the libx265 thread pools, the resident-memory watchdog, the progress channel, the mux
 queue bounds and the ffmpeg binary are execution parameters of the run, joined to the command
-line by the encoder and read by no gate. The length gate's tolerance (`duration_tolerance_sec`)
-is not on the plan either: it is a run-wide setting, read from the engine's configuration
-exactly as the stray-temp sweep that asks the same question reads it. The guards are not part of it either: they decide
+line by the encoder and read by no gate. The length gate's two thresholds
+are not on the plan either: its tolerance (`duration_tolerance_sec`) is a run-wide setting,
+read from the engine's configuration exactly as the stray-temp sweep that asks the same
+question reads it, and its packet-count bound is a constant. The guards are not part of it either: they decide
 whether a file is encoded at all, run before a plan exists, and read the same probe snapshot
 the derivation reads.
 
@@ -101,13 +102,16 @@ command lines under `internal/engine/testdata/golden-argv` were written by the b
 the refactor and are read back unchanged after it (`TestGoldenArgv`): through the encoder
 directly, every registry encoder over every option combination the existing fixtures drive,
 and the refusals; through a whole pass of the engine, each of those combinations for the
-default encoder and the core ones for every registry encoder, with the row each pass
-recorded. The tests written against the builder and the
+default encoder and the core ones for every registry encoder, with the terminal row's status
+and reason each pass recorded. The tests written against the builder and the
 gates before the plan still grade them, through adapters that assemble the facts they hand in
 into a plan; no assertion was removed or relaxed. The identity of the plan the command line
 was built from and the plan the gates read is checked on a real job
-(`TestEncodePlan_TheCommandLineAndTheGatesReadOneDerivation`), and each gate's verdict is
-shown to move with the plan it is handed (`TestEncodePlan_EveryGateReadsThePlan`).
+(`TestEncodePlan_TheCommandLineAndTheGatesReadOneDerivation`). Every gate's verdict is shown
+to move with the plan it is handed (`TestEncodePlan_EveryGateReadsThePlan`): the exists, codec,
+length, size, stream-parity and decode gates, the perceptual gate's three floors, and the
+video-identity check a stream copy is held to. The perceptual gate is also shown to build its
+comparison through the plan's picture operations.
 
 One recorded fact changed, deliberately, and it is not a decision or a command line. A
 remux-only job under a `max_height` below its source used to record that its picture was

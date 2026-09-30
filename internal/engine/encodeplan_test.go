@@ -258,10 +258,15 @@ func TestEncodePlan_RefusesWhatItCannotPerform(t *testing.T) {
 }
 
 // TestEncodePlan_EveryGateReadsThePlan: each acceptance gate's verdict moves with the plan it
-// is handed and with nothing else - the files it measures included, which the gates take from
-// the plan too (Source, Output). One real source and one real hevc encode of it; the plan the
-// derivation produced passes every structural gate, and each case changes ONE thing the plan
-// declares and gets the rejection of the gate that reads it.
+// is handed - the files it measures included, which the gates take from the plan too (Source,
+// Output). One real source and one real hevc encode of it; the plan the derivation produced
+// passes every gate, and each case changes ONE thing the plan declares and gets the rejection
+// of the gate that reads it: the exists, codec, length, size, stream-parity and decode gates,
+// the perceptual gate's three floors (with the measurement stubbed, since the floors are what
+// is under test), and - on a plan for a stream copy - the video-identity check that stands in
+// for the perceptual gate. The perceptual gate is also shown to build its comparison through
+// the plan's picture operations. The only thresholds not on the plan are the length gate's
+// run-wide tolerance and its packet-count bound, a constant.
 func TestEncodePlan_EveryGateReadsThePlan(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
 	d := t.TempDir()
@@ -357,7 +362,7 @@ func TestEncodePlan_EveryGateReadsThePlan(t *testing.T) {
 		})
 	}
 
-	t.Run("the perceptual gate reproduces the plan's picture operations", func(t *testing.T) {
+	t.Run("the perceptual gate takes its floors and its comparison from the plan", func(t *testing.T) {
 		yadif, ok := config.Profile{Deinterlace: "yadif"}.DeinterlaceFilter()
 		if !ok || !yadif.Enabled() {
 			t.Fatal("yadif did not resolve to a filter; the case would prove nothing")
@@ -380,6 +385,26 @@ func TestEncodePlan_EveryGateReadsThePlan(t *testing.T) {
 				got.ReferenceFilter, got.DistortedFilter)
 		}
 
+		// The three floors, each set just above the stubbed measurement on the plan's own
+		// profile and nowhere else.
+		m := passing()
+		for _, fl := range []struct {
+			name     string
+			raise    func(*config.Profile)
+			wantGate string
+		}{
+			{"the mean floor", func(p *config.Profile) { p.MinVmaf = m.HarmonicMean + 1 }, GateVmafMean},
+			{"the worst-frame floor", func(p *config.Profile) { p.VmafMinPool = m.Min + 1 }, GateVmafMin},
+			{"the chroma floor", func(p *config.Profile) { p.VmafMinChroma = m.ChromaMin + 1 }, GateVmafChroma},
+		} {
+			floored := scored
+			fl.raise(&floored.Profile)
+			if _, gate, _, err := eng.verifyAgainst(ctx, &floored); err == nil || gate != fl.wantGate {
+				t.Errorf("with %s raised on the plan's profile the gates returned %q (%v), want a %q rejection",
+					fl.name, gate, err, fl.wantGate)
+			}
+		}
+
 		scored.Picture = PictureOps{Deinterlace: yadif, Downscale: shrink}
 		got = vmaf.Request{}
 		_, _, _, _ = eng.verifyAgainst(ctx, &scored)
@@ -388,6 +413,41 @@ func TestEncodePlan_EveryGateReadsThePlan(t *testing.T) {
 		}
 		if got.DistortedFilter != shrink.ScoreSpec() {
 			t.Errorf("the output was scaled back up through %q, want the plan's %q", got.DistortedFilter, shrink.ScoreSpec())
+		}
+	})
+
+	t.Run("a plan for a stream copy is held to video identity with the source it names", func(t *testing.T) {
+		// Two different encodes of the same picture, each muxed with index padding a remux does
+		// not reproduce, so a stream copy of either comes out smaller than both and the size
+		// gate passes; the copy is of the first.
+		padded := func(name, bitrate string) string {
+			path := filepath.Join(d, name)
+			ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+				"-i", "testsrc2=duration=2:size=320x240:rate=10", "-c:v", "libx264", "-preset", "ultrafast",
+				"-b:v", bitrate, "-pix_fmt", "yuv420p", "-reserve_index_space", "65536", "--", path)
+			return path
+		}
+		first, other := padded("first.mkv", "3M"), padded("other.mkv", "5M")
+		copied := filepath.Join(d, "copied.mkv")
+		ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", first, "-map", "0", "-c", "copy", "--", copied)
+
+		remux := eng.Cfg
+		remux.RemuxOnly = boolPtr(true)
+		copyJob := derivePlanFor(t, remux, remux.TopLevelProfile(), prober, first, copied)
+		if !copyJob.Video.Copy {
+			t.Fatalf("a remux-only profile derived a plan that re-encodes (%+v)", copyJob.Video)
+		}
+		proof, gate, _, err := eng.verifyAgainst(ctx, copyJob)
+		if err != nil || proof.Skipped != VmafSkippedRemuxOnly {
+			t.Fatalf("a stream copy of the plan's own source was rejected by %q (%v) or not held to identity "+
+				"(skipped %q) - the case below would prove nothing", gate, err, proof.Skipped)
+		}
+		changed := *copyJob
+		changed.Source = other
+		if _, gate, _, err := eng.verifyAgainst(ctx, &changed); err == nil || gate != GateOther ||
+			!strings.Contains(err.Error(), "NOT identical") {
+			t.Fatalf("a copy checked against a different source the plan names returned %q (%v), want the "+
+				"video-identity rejection", gate, err)
 		}
 	})
 }

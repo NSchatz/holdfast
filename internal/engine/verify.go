@@ -95,9 +95,10 @@ type vmafProof struct {
 // parameter: a gate that resolved any of those for itself - down to which file it measured -
 // would be answering a different question than the encoder was asked, and the two answers
 // would differ on exactly the file nobody tested (docs/design/encode-plan.md#encode-plan).
-// The length gate's tolerance (duration_tolerance_sec) is the one threshold not on the plan:
-// it is a run-wide setting, read from the engine's configuration exactly as the stray-temp
-// sweep that asks the same question reads it.
+// The length gate's two thresholds are the only ones not on the plan: its tolerance
+// (duration_tolerance_sec) is a run-wide setting, read from the engine's configuration exactly
+// as the stray-temp sweep that asks the same question reads it, and its packet-count bound is
+// a constant (lengthParity).
 //
 // job.Profile is the profile of the root the source was enumerated under: every threshold
 // comes from it, so a film library and a grainy-anime library each meet the bar their
