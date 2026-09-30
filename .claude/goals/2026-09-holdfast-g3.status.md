@@ -72,7 +72,7 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 2.1 | Golden argv tests for every registry encoder and every option combination the existing fixtures use, merged BEFORE any refactor commit | DOING (PR #113): 1573 cases in 15 files under `internal/engine/testdata/golden-argv`; two compare runs after the writing run passed (fresh temp directories each time); local gate running |
+| 2.1 | Golden argv tests for every registry encoder and every option combination the existing fixtures use, merged BEFORE any refactor commit | DOING (PR #113): 1611 cases in 15 files under `internal/engine/testdata/golden-argv` (encoder layer 202 per registry encoder plus 3 alias cases each, and 4 that name no encoder; engine layer 76 for `cpu` and 16 core for each other encoder); compare runs after each writing run passed; local gate exit 0 in 1642 s on `62f1824` (`internal/engine` 1511.2 s, `cmd/holdfast` 537.7 s); CI green on `62f1824`, re-running on `38966f7` (a ledger-only merge of #114) |
 
 ## Phase 3 - The encode plan (line C, foundation)
 
@@ -106,8 +106,8 @@ summed per directory):
   listed each argv input's values and their co-occurrences; the golden cases take all of them,
   plus combinations no test drove but the refactor touches (deinterlace with `max_height`,
   filters under VAAPI, HDR10 or a filter with a bitrate target, PQ, HLG and full-range
-  sources). The ENCODER layer runs every case for every registry encoder (194 each, plus the
-  raw-codec aliases). The ENGINE layer (a whole pass per case) runs every case for the default
+  sources). The ENCODER layer runs every case for every registry encoder (202 each, plus 3
+  through the raw-codec alias). The ENGINE layer (a whole pass per case) runs every case for the default
   encoder and 16 core cases - those whose resolution meets an encoder-specific part of the
   command line - for every registry encoder. Reasoning: a pass costs about 0.4 s under the race
   detector, all cases for all 7 encoders would add about 4 minutes to every gate, and the
@@ -131,6 +131,35 @@ summed per directory):
 - 2026-09-30: `deinterlace: yadif=send_field` is not an engine-layer case: `config.Validate`
   refuses it at load, so no validated configuration reaches an engine with it. The encoder
   layer grades the backstop refusal.
+
+- 2026-09-30: a read-only adversarial review of the refactor draft (a subagent, 18 min) found
+  no difference in any command line, in any refusal's text or order on the direct path, or in
+  `DeriveColorArgsFrom`'s output, and no concurrency hazard. Its findings and what was done:
+  (1) a remux-only job under a `max_height` below its source recorded `downscaled: true` and a
+  scaler for a copy that scaled nothing, and the plan makes it record false - kept as a
+  deliberate correction of a false record (not a decision, not a command line), held by a new
+  test and stated in `docs/design/encode-plan.md`; the older guard that skips such a remux as
+  if it would scale is unchanged and listed as a follow-up; (2) an encoder handed a plan
+  ignores its own `Cfg` - documented (production shares one configuration); (3) a wrapper
+  that forwards `ForProfile`/`ForStreamPlan` but not `ForEncodePlan` leaves its encoder to
+  derive its own plan - documented on the interface, no existing test changed; (4) the design
+  record over-claimed (the row, the settings, attached pictures) and `TranscodeIn` ran twice
+  per job - the derivation now takes the job's resolved settings and the record was corrected;
+  (5) two refusals were not pinned by the goldens - 38 cases added to PR #113 before it merged
+  (every earlier golden line byte-identical), and the gate started on its first commit was
+  stopped; (6)-(8) edges no running holdfast reaches (a stand-in encoder no longer called for
+  an underivable plan, no prober needed with a plan, the encode seam not announced for an
+  underivable plan) - documented; (9) `buildable` now refuses a picture operation on a copy
+  and a plan no derivation made, and `SameEncodePlan` no longer equates two underived plans;
+  (10) stale comments refreshed.
+- 2026-09-30: `main` moved by the owner's PR #114 (`4c9143f`, authored and merged by the owner's
+  account from another session): `.claude/goals/` only (goal files 4-15 and brief §0.1/§0.11 for
+  the maker container; it says goal 3 runs in the standalone container, where `/workspace` is
+  right). Ledger-only under §0.3, so #113's gate on `62f1824` stands; the branch was brought up
+  to date by merge (`38966f7`) and CI re-run. Its squash message carries a `Co-authored-by`
+  trailer, so `git log 9e27c1a..origin/main --format=%B` counts one this goal did not write.
+  No goal may rewrite history (T7), so it stays; the GOAL REPORT counts this goal's own commits
+  separately and lists it for the owner.
 
 ## NEEDS-OWNER (this goal)
 
