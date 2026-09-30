@@ -82,21 +82,21 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | Output fidelity gate: bit depth, chroma subsampling, primaries, transfer, matrix, range, HDR10 mastering and content-light side data equal the source's or what the plan declares it changes | DONE (PR #120, `41c44bd`): `hdr.Fidelity` declared on the plan (`MetadataPlan.Fidelity`), gate 5b `GateFidelity` in `verifyAgainst`, output read by `probe.OutputFacts` at stream and first-frame level; round 1 red (5 engine tests: probe ceiling, pre-plan adapter, an 8-bit stand-in), fixed in `5838884`; round 2 exit 0 on `73bcfaa` (`internal/engine` 1422.9 s, `cmd/holdfast` 453.9 s; wall-clock 55m36s incl. about 22 min waiting for the lock); mutation-diff 100% (39 killed); CI green |
+| 3.1 | Output fidelity gate: bit depth, chroma subsampling, primaries, transfer, matrix, range, HDR10 mastering and content-light side data equal the source's or what the plan declares it changes | DONE (PR #120, `41c44bd`): `hdr.Fidelity` declared on the plan (`MetadataPlan.Fidelity`), gate 5b `GateFidelity` in `verifyAgainst`, output read by `probe.OutputFacts` at stream and first-frame level; round 1 red (5 engine tests: probe ceiling, pre-plan adapter, an 8-bit stand-in), fixed in `5838884`; round 2 exit 0 on `73bcfaa` (`internal/engine` 1422.9 s, `cmd/holdfast` 453.9 s; wall-clock 55m36s incl. about 22 min waiting for the lock); mutation-diff 100% of covered mutants (39 killed, 0 lived, 2 not covered); CI green |
 | 3.2 | One fixture per field reds when that field is lost; the source is byte-identical afterwards | DONE (PR #120, `41c44bd`): `TestFidelityGate_RedsWhen{BitDepth,ChromaSubsampling,Primaries,Transfer,Matrix,Range,MasteringDisplay,ContentLightLevel}IsLost` and `TestFidelityGate_RedsAFakeHardwareEncodeThatWrites8Bit`, with three passing controls |
 
 ## Phase 4 - Explicit pixel formats and per-encoder quality (line D)
 
 | # | Item | State |
 |---|---|---|
-| 4.1 | Every argv sets its pixel format explicitly (golden argv) | DONE (PR #122, `90b8ed8`): `VideoPlan.InputFormat` from `encoder.Spec.InputFormat` (the plan's format where the encoder lists it, else the planar or semi-planar spelling of the same chroma and depth, else refused); `-pix_fmt` for every encoder but VAAPI, which uploads `format=nv12|p010le,hwupload` (`-profile:v main10` for p010le) and gets no `-pix_fmt`; the engine's `exotic-pixel-format` guard also skips a plan the encoder cannot carry (inputs `pixel_format`, `encoder`); `TestGoldenArgv_EveryArgvNamesItsPixelFormat`; recorded argv change in the hardware and forced-`nv12` goldens only; gate exit 0 in 33m27s on `a5cb382` (`internal/engine` 1433.7 s); mutation-diff 100% (17 killed); CI green |
+| 4.1 | Every argv sets its pixel format explicitly (golden argv) | DONE (PR #122, `90b8ed8`): `VideoPlan.InputFormat` from `encoder.Spec.InputFormat` (the plan's format where the encoder lists it, else the planar or semi-planar spelling of the same chroma and depth, else refused); `-pix_fmt` for every encoder but VAAPI, which uploads `format=nv12|p010le,hwupload` (`-profile:v main10` for p010le) and gets no `-pix_fmt`; the engine's `exotic-pixel-format` guard also skips a plan the encoder cannot carry (inputs `pixel_format`, `encoder`); `TestGoldenArgv_EveryArgvNamesItsPixelFormat`; recorded argv change in the hardware and forced-`nv12` goldens only; gate exit 0 in 33m27s on `a5cb382` (`internal/engine` 1433.7 s); mutation-diff 100% of covered mutants (17 killed, 0 lived, 10 not covered: constant string joins in the format and scale tables); CI green |
 | 4.2 | Per-encoder quality keys replace the CRF reused as `-cq`/`-global_quality`/`-qp`; unmeasured defaults marked `ASSUMED` | DONE (PR #122, `90b8ed8`): top-level `quality.<key>` for `nvenc` (-cq 1-51), `av1_nvenc` (-cq 1-63), `qsv` (-global_quality 1-51), `vaapi` (-qp 1-52), `amf` (-qp_i/-qp_p 0-51); `crf` stays for `cpu` and `svtav1`; an absent key inherits the job's crf (byte-identical argv), marked `ASSUMED` in `internal/encoder/quality.go` pending a hardware report; `HOLDFAST_QUALITY_<KEY>` supported; values off an encoder's scale refused by `validate` and at plan derivation |
 
 ## Phase 4b - The declared colour tags reach every encoder (found by the fidelity gate)
 
 | # | Item | State |
 |---|---|---|
-| 4b.1 | Stamp the declared primaries and transfer onto the frames (`setparams`) for every encoder but libx265 | DONE (PR #123, `3dc9132`): `hdr.Color.SetParams` at the head of the video chain, before any hwupload; 156 golden lines of the non-libx265 encoders each the old line plus the filter (checked by script), no `cpu` line moved; `TestFidelityGate_EveryEncoderCarriesTheDeclaredPrimariesAndTransfer` red for svtav1 without it; gate exit 0 in 26m54s (`internal/engine` 1513.6 s, 56% of `TEST_TIMEOUT` 45m); mutation-diff 100% (6 killed); CI green |
+| 4b.1 | Stamp the declared primaries and transfer onto the frames (`setparams`) for every encoder but libx265 | DONE (PR #123, `3dc9132`): `hdr.Color.SetParams` at the head of the video chain, before any hwupload; 156 golden lines of the non-libx265 encoders each the old line plus the filter (checked by script), no `cpu` line moved; `TestFidelityGate_EveryEncoderCarriesTheDeclaredPrimariesAndTransfer` red for svtav1 without it; gate exit 0 in 26m54s (`internal/engine` 1513.6 s, 56% of `TEST_TIMEOUT` 45m); mutation-diff 100% (6 killed, 0 lived, 0 not covered); CI green |
 
 ## Phase 5 - Design record (line E)
 
@@ -104,12 +104,18 @@ summed per directory):
 |---|---|---|
 | 5.1 | `docs/design/encode-plan.md` gains the fidelity anchor; `CLAUDE.md` links it | DONE (PR #120, `41c44bd`): anchor `fidelity`; `CLAUDE.md` Design rationale links `docs/design/encode-plan.md#fidelity`; `docs/design/swap.md` +4 lines, none removed |
 
+## Phase 5b - Corrections from the report's review
+
+| # | Item | State |
+|---|---|---|
+| 5b.1 | The `videoArgs` comment's svtav1 claims and `CLAUDE.md`'s invariant gate list | DONE (PR #124, `bb66d7e`): comments and docs only; `CLAUDE.md` 167 lines; gate exit 0 in 26m25s on `d8622a0` (`internal/engine` 1476.8 s); CI green |
+
 ## Phase 6 - Report
 
 | # | Item | State |
 |---|---|---|
-| 6.1 | Gate integrity counted from the goal-start SHA | DONE (`3dc9132`): `func Test` 1330 -> 1386, no package fell (config 99 -> 107, encoder 12 -> 20, engine 467 -> 485, hdr 10 -> 20, probe 17 -> 20, vmaf 30 -> 39, every other package unchanged); `docs/design/swap.md` 58 -> 62 (+4 -0), `docs/design/quality-gate.md` 76 -> 76 (+0 -0); 15 lines deleted in `*_test.go` (`git diff --numstat 9bde81d origin/main`: +2554 -15), each with its reason below |
-| 6.2 | Adversarial review of the report | TODO |
+| 6.1 | Gate integrity counted from the goal-start SHA | DONE (`3dc9132`, recounted unchanged at `bb66d7e`): `func Test` 1330 -> 1386, no package fell (config 99 -> 107, encoder 12 -> 20, engine 467 -> 485, hdr 10 -> 20, probe 17 -> 20, vmaf 30 -> 39, every other package unchanged); `docs/design/swap.md` 58 -> 62 (+4 -0), `docs/design/quality-gate.md` 76 -> 76 (+0 -0); 15 lines deleted in `*_test.go` (`git diff --numstat 9bde81d origin/main`: +2554 -15), each with its reason below |
+| 6.2 | Adversarial review of the report | DONE: round 1 (a fresh subagent, 2026-09-30) found lines A-G true on the repositories and asked for corrections: the 5 in-goal deleted lines of `fidelity_gate_test.go` (added above), the not-covered mutant counts (added to rows 3.1, 4.1, 4b.1), stale local remote-tracking refs (pruned with `git fetch --prune`), the `videoArgs` comment still crediting `-color_*` with svtav1's primaries and transfer, and `CLAUDE.md`'s invariant gate list lacking the fidelity gate (both fixed by PR #124). A fresh subagent checks the report and the repositories after this commit; its verdict is the report's line H |
 
 ### The 15 deleted `*_test.go` lines and why
 
@@ -130,6 +136,11 @@ summed per directory):
 - `internal/engine/profiles_test.go` (1, PR #120): a stand-in encoder's `-pix_fmt yuv420p` became
   `yuv420p10le`, the format its job's plan declares; the fidelity gate caught the 8-bit output,
   and the assertion is unchanged.
+- Not in the net count: PR #122 deleted 5 lines of `internal/engine/fidelity_gate_test.go`, a
+  file #120 added inside this goal - a fixture refactor (`mkFidelitySourceAs`,
+  `fidelityRunFrom`) and the fake-hardware stand-in moved from 8-bit 4:2:2 to 8-bit 4:2:0 on a
+  4:2:0 10-bit source, because #122's guard skips a 4:2:2 plan on VAAPI before any encode (now
+  its own subtest); no assertion removed. Found by the report's adversarial review.
 
 ## Decisions taken
 
@@ -187,6 +198,9 @@ NSchatz/homelab#208) stays `OPEN`; the PR is still open (checked 2026-09-30).
 
 ## Resume here
 
-Merged: #121 (S0162), #120 (the fidelity gate), #122 (explicit pixel formats and quality keys),
-#123 (the declared colour tags). No branch, worktree or open PR of this goal remains. Next: the
-adversarial review of the report (6.2), then the COMPLETE line.
+Goal 4 is complete. Merged: #121 (S0162), #120 (the fidelity gate), #122 (explicit pixel formats
+and quality keys), #123 (the declared colour tags reach every encoder), #124 (the review's
+corrections). No branch, worktree or open PR of this goal remains. Goal 5's precondition is this
+ledger's COMPLETE line.
+
+COMPLETE (goal 4): 2026-09-30
