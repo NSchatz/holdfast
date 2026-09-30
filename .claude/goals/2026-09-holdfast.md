@@ -141,7 +141,8 @@ the source's own directory. Every capability below is additive to the gate set.
 
 - The owner opted in to Workflows and subagents for parallel tracks, research and adversarial
   review (this brief and every goal file restate it).
-- **At most 2 agents at once** (T40). The container has 2 CPUs and the host is shared.
+- **At most 4 agents at once** (T40, raised 2026-09-30). The maker container has 28 CPUs, shared by its
+  9 Claude sessions, and the host is shared.
 - **One heavy job at a time** under `flock -o /cache/locks/holdfast-heavy.lock` (`make check`,
   `make mutation-diff`, any real encode loop, `pnpm build`). **Always `-o`** (I10): plain
   `flock <lock> <cmd>` hands the lock file to the child as a read-only fd 3.
@@ -250,7 +251,7 @@ the source's own directory. Every capability below is additive to the gate set.
 ### 0.10 Preconditions, BLOCKED, INCOMPLETE, and evidence for the evaluator
 
 - **Preconditions:** goal 1 needs this brief and its goal files on up-to-date `origin/main`,
-  plus the environment check that `echo "$GOFLAGS $GOMAXPROCS"` prints `-p=2 2` in the session.
+  plus the environment check that `echo "$GOFLAGS $GOMAXPROCS"` prints `-p=4 12` in the session.
   Goal 1 never commits the brief or the settings itself. Goal 2 needs the goal-1 ledger's
   `COMPLETE (goal 1)` line and `.claude/goals/CHECKPOINT-T.approved` on `origin/main`, and prints
   the approval commit's verification (I19). Goals 3-15 need the previous ledger's `COMPLETE`
@@ -275,7 +276,7 @@ the source's own directory. Every capability below is additive to the gate set.
 
 | Fact | Consequence |
 |---|---|
-| CPU quota 28 in the maker container, shared by its 9 Claude sessions (2 in the standalone container); `nproc` says 56 | `.claude/settings.json` commits `GOFLAGS=-p=2` and `GOMAXPROCS=2`; at most 2 agents; one heavy job under the lock |
+| CPU quota 28 in the maker container, shared by its 9 Claude sessions (2 in the standalone container); `nproc` says 56 | `.claude/settings.json` commits `GOFLAGS=-p=4` and `GOMAXPROCS=12` (T40); at most 4 agents; one heavy job under the lock |
 | Memory limit 48 GiB in the maker container, shared by its 9 Claude sessions (16 GiB standalone) | the encode memory watchdog (85% of the limit) applies to test encodes; the limit is shared, so keep test encodes far below it |
 | The maker container has the host's GPU (a Quadro P2200 shared with Plex, through `claude-gpu`); no `/dev/dri` | hardware only on fakes and golden argv (T9), unchanged: every real hardware run stays a NEEDS-OWNER item |
 | `/cache` and `/workspace` on one filesystem, about 640G free; in the maker container `/scratch` (`TMPDIR`) is an 8 GiB RAM tmpfs counted against memory | fixtures and worktrees fit; keep large temporary files out of `TMPDIR` |
@@ -294,8 +295,8 @@ the source's own directory. Every capability below is additive to the gate set.
 
 ### 0.12 Long-run hygiene
 
-- The worker variables live in the committed `.claude/settings.json` `env` (`GOFLAGS=-p=2`,
-  `GOMAXPROCS=2`) with `autoMemoryEnabled: false` and `attribution.commit` "" (I18). They stay
+- The worker variables live in the committed `.claude/settings.json` `env` (`GOFLAGS=-p=4`,
+  `GOMAXPROCS=12`) with `autoMemoryEnabled: false` and `attribution.commit` "" (I18). They stay
   after the finale (I4); the finale report lists them for the owner to remove.
 - `timeout` on everything that can hang (`make check` 10800 s, `gh pr checks --watch` 3600 s,
   a single encode test 1800 s).
@@ -363,7 +364,7 @@ questions of I7 and I16).
 | T37 | Releases | **The program may cut minor releases** (v0.4.0, v0.5.0, ...) per docs/release.md after a goal's work is merged and CI is green; tags + GitHub releases + the ghcr images release.yml publishes are allowed. Amends the contract's "nothing created on GitHub beyond branches and PRs" for `v*` minor tags only. Not chosen: never (NEEDS-OWNER), pre-releases only. |
 | T38 | Attribution | **CLAUDE.md wins**: Conventional Commits authored as the owner, no Co-Authored-By or AI trailer in commits; PR bodies may carry the session link. Not chosen: harness trailer. |
 | T39 | Gate budget | **No ceiling; timings recorded** in every ledger baseline and PR. Not chosen: <=20 min, <=35 min. |
-| T40 | Machine | **At most 2 agents at once; `.claude/settings.json` env commits `GOFLAGS=-p=2` and `GOMAXPROCS=2`; one heavy job (`make check`, real encodes, SPA build) at a time under `flock /cache/locks/holdfast-heavy.lock`**. (Inferred: the option named HOLDFAST_GATE_JOBS, but HOLDFAST_* is the config env prefix, internal/config/config.go:36, so the variable was renamed; shown at Checkpoint T.) Not chosen: 3 agents, 1 agent. |
+| T40 | Machine | **At most 4 agents at once; `.claude/settings.json` env commits `GOFLAGS=-p=4` and `GOMAXPROCS=12` (raised 2026-09-30 from 2 agents, `-p=2` and 2, when holdfast moved into the 28-CPU maker container; `-p` stays low because one package dominates `make check` and encode tests are memory-heavy); one heavy job (`make check`, real encodes, SPA build) at a time under `flock /cache/locks/holdfast-heavy.lock`**. (Inferred: the option named HOLDFAST_GATE_JOBS, but HOLDFAST_* is the config env prefix, internal/config/config.go:36, so the variable was renamed; shown at Checkpoint T.) Not chosen: 3 agents, 1 agent. |
 | T41 | Private data (public AGPL repo) | **Never in the repo: LAN addresses/hostnames/media paths/service URLs; real library titles or filenames; account IDs/tokens/API keys; the owner's name/email beyond git author fields and existing LICENSE/NOTICE lines.** Fixtures are synthetic. |
 | T42 | NEEDS-OWNER | **`.claude/goals/NEEDS-OWNER.md` in holdfast**; the owner acts within days, so the chain never waits: hardware/live-service work proceeds on fakes and a later goal re-checks for results. Not chosen: GitHub issues, same-day. |
 | T43 | Real-hardware results | **The program ships a script (e.g. `scripts/hw-report.sh`) that runs the check and writes a redacted `testdata/hw-reports/<encoder>-<date>.json`; the owner commits it to main.** Not chosen: paste into a session, research and propose. |
@@ -579,7 +580,7 @@ SDD pipeline is superseded for holdfast by this program (T2, T8); S-numbers stay
 
 **Precondition:** this brief and `2026-09-holdfast-g1.goal.txt` through `-g15.goal.txt` are on
 up-to-date `origin/main` (`git ls-tree --name-only origin/main .claude/goals/`), and
-`echo "$GOFLAGS $GOMAXPROCS"` prints `-p=2 2`. Research: all of §22.
+`echo "$GOFLAGS $GOMAXPROCS"` prints `-p=4 12`. Research: all of §22.
 
 1. **Start-up.** The first actions of §0.1; the ledger; the Baselines table.
 2. **Identity (T41, I1), first.** Replace `CLAUDE.md`'s commit-identity line with "commit as the
