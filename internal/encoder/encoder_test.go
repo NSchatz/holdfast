@@ -114,8 +114,8 @@ func TestAvailable_CPURealEncoderIsTrue(t *testing.T) {
 	if !ok {
 		t.Fatal("Lookup(cpu) failed")
 	}
-	if !Available(context.Background(), ffmpeg, ffprobe, spec) {
-		t.Error("Available(cpu/libx265) = false, want true — libx265 always works")
+	if c := Available(context.Background(), ffmpeg, ffprobe, spec, standIn(ffmpeg)); !c.EightBit || !c.TenBit {
+		t.Errorf("Available(cpu/libx265) = %+v, want usable at 8 and 10 bits — libx265 always works", c)
 	}
 }
 
@@ -127,8 +127,8 @@ func TestAvailable_SVTAV1RealEncoderIsTrue(t *testing.T) {
 	if !ok {
 		t.Fatal("Lookup(svtav1) failed")
 	}
-	if !Available(context.Background(), ffmpeg, ffprobe, spec) {
-		t.Error("Available(svtav1/libsvtav1) = false, want true — libsvtav1 runs on CPU")
+	if c := Available(context.Background(), ffmpeg, ffprobe, spec, standIn(ffmpeg)); !c.EightBit || !c.TenBit {
+		t.Errorf("Available(svtav1/libsvtav1) = %+v, want usable at 8 and 10 bits — libsvtav1 runs on CPU", c)
 	}
 }
 
@@ -139,8 +139,8 @@ func TestAvailable_SVTAV1RealEncoderIsTrue(t *testing.T) {
 func TestAvailable_BogusCodecIsFalse(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
 	spec := Spec{Key: "bogus", FFmpegCodec: "definitely_not_a_codec", TargetCodec: "hevc"}
-	if Available(context.Background(), ffmpeg, ffprobe, spec) {
-		t.Error("Available(bogus codec) = true, want false")
+	if c := Available(context.Background(), ffmpeg, ffprobe, spec, standIn(ffmpeg)); c.Usable() {
+		t.Errorf("Available(bogus codec) = %+v, want unusable", c)
 	}
 }
 
@@ -148,7 +148,7 @@ func TestAvailable_BogusCodecIsFalse(t *testing.T) {
 // with a clear error rather than silently doing nothing.
 func TestRequireAvailable_UnknownKeyErrors(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
-	if _, err := RequireAvailable(context.Background(), ffmpeg, ffprobe, "not_a_real_encoder"); err == nil {
+	if _, _, err := RequireAvailable(context.Background(), ffmpeg, ffprobe, "not_a_real_encoder", standIn(ffmpeg)); err == nil {
 		t.Error("RequireAvailable(unknown key) = nil error, want an error")
 	}
 }
@@ -157,7 +157,7 @@ func TestRequireAvailable_UnknownKeyErrors(t *testing.T) {
 // encoder resolves cleanly with no error.
 func TestRequireAvailable_CPUSucceeds(t *testing.T) {
 	ffmpeg, ffprobe := tools(t)
-	spec, err := RequireAvailable(context.Background(), ffmpeg, ffprobe, "cpu")
+	spec, _, err := RequireAvailable(context.Background(), ffmpeg, ffprobe, "cpu", standIn(ffmpeg))
 	if err != nil {
 		t.Fatalf("RequireAvailable(cpu): %v", err)
 	}

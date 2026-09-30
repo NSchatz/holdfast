@@ -1,9 +1,9 @@
 // Package encoder is the TRANSCODE-6 codec matrix: a registry describing every
 // selectable encoder (CPU libx265, SVT-AV1, and the hardware encoders NVENC/QSV/
 // VAAPI/AMF) plus a robust runtime capability check. Nothing here assumes an
-// encoder works — Available actually exercises it against a tiny real clip and
-// inspects the output, because a hardware encoder can exit 0 while writing nothing
-// when no device is present (see Available's doc comment).
+// encoder works — Available actually exercises it against a tiny real clip, through the
+// command line a job would run, and inspects the output, because a hardware encoder can
+// exit 0 while writing nothing when no device is present (see Available's doc comment).
 package encoder
 
 import (
@@ -14,7 +14,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 
+	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/probe"
 )
 
@@ -120,41 +123,137 @@ func Known() []string {
 	return keys
 }
 
-// Available is the ROBUST capability check for spec: it actually encodes a tiny
-// real clip with spec.FFmpegCodec to a temp file and ffprobes the RESULT, rather
-// than trusting ffmpeg's exit code. This matters specifically for hardware
-// encoders: in a container with no GPU/device, `hevc_nvenc -f null -` can exit 0
-// while writing nothing at all — exit-code-only detection would report a
-// completely unusable encoder as "available" and the engine would then burn a
-// full encode attempt (or worse, silently produce nothing) on every file. Writing
-// to a real temp file and confirming ffprobe reports a video stream whose
-// codec_name matches spec.TargetCodec closes that hole: libx265/libsvtav1 (CPU,
-// always available here) return true; hevc_nvenc/av1_nvenc/hevc_qsv/hevc_vaapi/
-// hevc_amf return false in this container (no device) exactly as they would on any
-// host lacking the matching GPU.
-func Available(ctx context.Context, ffmpeg, ffprobe string, spec Spec) bool {
-	prober := probe.New(ffmpeg, ffprobe)
+// EncodeFunc encodes src to out with spec, the way a job's encode does: through the same plan
+// derivation and the same command-line builder, told the pixel format to encode at ("" leaves
+// it to the plan's derivation, as the default `pixel_format: auto` does). The engine provides
+// the production one (engine.ProbeEncode); nothing else builds a probe's command line, so a
+// probe cannot pass on an argv no job would run (docs/design/hardware.md#probe).
+type EncodeFunc func(ctx context.Context, spec Spec, pixelFormat, src, out string) error
 
+// Capability is what one probe of an encoder established on this host: whether it wrote a
+// real output of its target codec at each bit depth, and why not where it did not.
+type Capability struct {
+	Key string
+	// EightBit and TenBit report that a 4:2:0 source encoded at 8 and at 10 bits came out as
+	// a real file of the encoder's target codec at that same depth.
+	EightBit, TenBit bool
+	// Reason is why the encoder is not usable at a depth it failed at ("" when it passed at
+	// both), or the refusal that stopped the probe before it ran.
+	Reason string
+}
+
+// Usable reports whether the encoder wrote a faithful output at any depth.
+func (c Capability) Usable() bool { return c.EightBit || c.TenBit }
+
+// Carries reports whether the probe showed this encoder writing a plan of pixFmt's depth: an
+// 8-bit plan needs the 8-bit probe, a deeper one the 10-bit probe. The probes use 4:2:0; a plan
+// of another chroma subsampling is held to the depth its probe showed, and the output fidelity
+// gate stays the backstop for the layout (ASSUMED until a hardware report shows 4:2:2 and 4:4:4
+// on real devices; brief T43). An unparseable format is carried by nothing.
+func (c Capability) Carries(pixFmt string) bool {
+	layout, ok := hdr.PixelLayout(pixFmt)
+	if !ok {
+		return false
+	}
+	if layout.Depth <= 8 {
+		return c.EightBit
+	}
+	return c.TenBit
+}
+
+// probeDepths are the two formats a probe encodes: the forced 8-bit one and the 10-bit one
+// every derived plan uses (hdr.DerivePixFmt floors the depth at 10).
+var probeDepths = []struct {
+	format string
+	depth  int
+}{{"yuv420p", 8}, {"yuv420p10le", 10}}
+
+// Available is the ROBUST capability check for spec: it encodes a tiny real clip, at 8 and at
+// 10 bits, through encode - the job's own derivation and command line, device and upload
+// included - and ffprobes each RESULT rather than trusting ffmpeg's exit code. This matters
+// for hardware encoders: in a container with no GPU or device, `hevc_nvenc -f null -` can
+// exit 0 while writing nothing, so an exit-code check would call an unusable encoder usable.
+// Each output must exist, be non-empty, carry spec.TargetCodec and carry the depth it was
+// asked for - a VAAPI encode that uploads 10-bit frames as 8-bit surfaces fails the 10-bit
+// probe here, where a codec-only check passed it.
+//
+// `amf` in the container image is refused before anything runs (RefusedInImage).
+func Available(ctx context.Context, ffmpeg, ffprobe string, spec Spec, encode EncodeFunc) Capability {
+	c := Capability{Key: spec.Key}
+	if why := RefusedInImage(spec); why != "" {
+		c.Reason = why
+		return c
+	}
+	prober := probe.New(ffmpeg, ffprobe)
 	dir, err := os.MkdirTemp("", "holdfast-cap-*")
 	if err != nil {
-		return false
+		c.Reason = "cannot make a directory for the probe: " + err.Error()
+		return c
 	}
 	defer os.RemoveAll(dir)
 
-	out := filepath.Join(dir, "probe.mkv")
-	args := []string{
-		"-hide_banner", "-nostdin", "-loglevel", "error", "-y",
-		"-f", "lavfi", "-i", "testsrc2=duration=0.2:size=160x120:rate=10",
-		"-c:v", spec.FFmpegCodec,
-		"--", out,
+	var reasons []string
+	for _, d := range probeDepths {
+		ok, why := probeDepth(ctx, ffmpeg, prober, spec, encode, dir, d.format, d.depth)
+		if d.depth == 8 {
+			c.EightBit = ok
+		} else {
+			c.TenBit = ok
+		}
+		if !ok {
+			reasons = append(reasons, strconv.Itoa(d.depth)+"-bit: "+why)
+		}
 	}
-	cmd := exec.CommandContext(ctx, ffmpeg, args...)
-	_ = cmd.Run() // exit code is unreliable for hardware encoders — see doc comment above
+	c.Reason = strings.Join(reasons, "; ")
+	return c
+}
 
-	if fi, err := os.Stat(out); err != nil || fi.Size() <= 0 {
-		return false
+// probeDepth encodes one clip of format and says whether the output is faithful to it.
+func probeDepth(ctx context.Context, ffmpeg string, prober *probe.Prober, spec Spec, encode EncodeFunc,
+	dir, format string, depth int) (bool, string) {
+	src := filepath.Join(dir, "source-"+format+".mkv")
+	// The source is lossless (FFV1), so what the encoder is handed is exactly format.
+	gen := exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "testsrc2=duration=0.2:size=320x240:rate=10",
+		"-pix_fmt", format, "-c:v", "ffv1", "--", src)
+	if out, err := gen.CombinedOutput(); err != nil {
+		return false, "cannot make the probe clip: " + firstLine(string(out), err)
 	}
-	return prober.VideoCodec(ctx, out) == spec.TargetCodec
+	out := filepath.Join(dir, "probe-"+format+".mkv")
+	encErr := encode(ctx, spec, format, src, out)
+	fi, err := os.Stat(out)
+	if err != nil || fi.Size() <= 0 {
+		if encErr != nil {
+			return false, "the encode failed: " + firstLine(encErr.Error(), nil)
+		}
+		return false, "the encode wrote no output"
+	}
+	props := prober.VideoProps(ctx, out)
+	if got := props.Codec(); got != spec.TargetCodec {
+		return false, "the output's codec is " + quoted(got) + ", not " + spec.TargetCodec
+	}
+	layout, ok := hdr.PixelLayout(props.PixFmt())
+	if !ok || layout.Depth != depth {
+		return false, "the output's pixel format is " + quoted(props.PixFmt()) + ", not " +
+			strconv.Itoa(depth) + "-bit"
+	}
+	return true, ""
+}
+
+func quoted(s string) string { return strconv.Quote(s) }
+
+// firstLine is the first non-empty line of an ffmpeg failure, which names the cause; the
+// rest is its call chain.
+func firstLine(out string, err error) string {
+	for _, l := range strings.Split(out, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			return l
+		}
+	}
+	if err != nil {
+		return err.Error()
+	}
+	return "no message"
 }
 
 // ErrUnavailable is the sentinel wrapped by RequireAvailable when the configured
@@ -162,16 +261,17 @@ func Available(ctx context.Context, ffmpeg, ffprobe string, spec Spec) bool {
 // with errors.Is). Mirrors internal/vmaf's ErrUnavailable style.
 var ErrUnavailable = errors.New("encoder not available in this ffmpeg build / on this host")
 
-// RequireAvailable looks up key and confirms it is Available, returning a clear
-// error otherwise. It never falls back to another encoder — a configured-but-
-// unavailable encoder must fail loud, never silently downgrade to cpu.
-func RequireAvailable(ctx context.Context, ffmpeg, ffprobe, key string) (Spec, error) {
+// RequireAvailable looks up key and confirms it is Available, returning a clear error
+// otherwise. It never falls back to another encoder: what a configuration does when its
+// hardware is missing is the caller's decision (hw_fallback), never this check's.
+func RequireAvailable(ctx context.Context, ffmpeg, ffprobe, key string, encode EncodeFunc) (Spec, Capability, error) {
 	spec, ok := Lookup(key)
 	if !ok {
-		return Spec{}, fmt.Errorf("unknown encoder %q (known: %v)", key, Known())
+		return Spec{}, Capability{}, fmt.Errorf("unknown encoder %q (known: %v)", key, Known())
 	}
-	if !Available(ctx, ffmpeg, ffprobe, spec) {
-		return Spec{}, fmt.Errorf("encoder %q: %w", key, ErrUnavailable)
+	c := Available(ctx, ffmpeg, ffprobe, spec, encode)
+	if !c.Usable() {
+		return spec, c, fmt.Errorf("encoder %q: %w: %s", key, ErrUnavailable, c.Reason)
 	}
-	return spec, nil
+	return spec, c, nil
 }
