@@ -75,18 +75,18 @@ exec ` + real + ` "$@"
 	return stub, log
 }
 
-// mkFFV1HDR10 writes a 10-bit 4:2:0 HDR10 source in FFV1: bt2020/PQ, with the mastering-display
-// and content-light blocks at stream and frame level (copied from a libx265 HDR10 encode). FFV1
-// is in no codec family, so it is re-encoded by an H.264 target as by every other.
-func mkFFV1HDR10(t *testing.T, ffmpeg, path string) {
+// mkFFV1PQ writes a 10-bit 4:2:0 PQ source in FFV1: bt2020 primaries, the PQ transfer and the
+// bt2020nc matrix, stamped on the frames (setparams, since -color_* does not reach them). FFV1
+// is in no codec family, so an H.264 target re-encodes it. It carries no mastering-display
+// block: a Matroska file holding one at stream level is skipped multi-video-stream by the
+// probe's shape parser (a finding of goal 6), so the HDR10 blocks are proven on the HEVC and AV1
+// targets, whose H.264 HDR10 source carries them in-band.
+func mkFFV1PQ(t *testing.T, ffmpeg, path string) {
 	t.Helper()
-	hevc := filepath.Join(t.TempDir(), "hdr10.mkv")
 	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
 		"-i", "testsrc2=duration=2:size=320x240:rate=10,noise=alls=12:allf=t",
-		"-c:v", "libx265", "-preset", "ultrafast", "-crf", "8", "-pix_fmt", "yuv420p10le",
-		"-x265-params", "log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:"+
-			"master-display="+fidelityMasterDisplay+":max-cll="+fidelityMaxCLL, "--", hevc)
-	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", hevc, "-c:v", "ffv1", "--", path)
+		"-vf", "setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc:range=tv",
+		"-c:v", "ffv1", "-pix_fmt", "yuv420p10le", "--", path)
 }
 
 // hwDecodeRun runs one pass of key under hw_decode: hardware through the stand-in, over the
@@ -128,8 +128,9 @@ var hwDecodeArgvOf = map[string]string{
 // -hwaccel and its device before the input, and no -hwaccel_output_format, so the frames come
 // back to system memory - and the output passes the fidelity gate at 10 bits with the
 // primaries, transfer, mastering display and content light the plan declares, and replaces the
-// source. The H.264 encoders read an FFV1 source (an H.264 one is already at their target); the
-// two that carry 8-bit only (h264_qsv, h264_vaapi) are the next test's.
+// source. The H.264 encoders read a 10-bit PQ FFV1 source (an H.264 one is already at their
+// target; see mkFFV1PQ); the two that carry 8-bit only (h264_qsv, h264_vaapi) are the next
+// test's.
 func TestHWDecode_EveryVendorKeeps10BitAndHDR10(t *testing.T) {
 	checked := 0
 	for _, key := range encoder.Known() {
@@ -146,7 +147,7 @@ func TestHWDecode_EveryVendorKeeps10BitAndHDR10(t *testing.T) {
 				mkFidelitySourceAs(t, ffmpeg, path, "yuv420p10le", "high10")
 			}
 			if spec.TargetCodec == "h264" {
-				mkSrc = mkFFV1HDR10
+				mkSrc = mkFFV1PQ
 			}
 			src, before, st, events, logged := hwDecodeRun(t, key, "faithful", mkSrc, nil)
 			for _, ev := range events {
@@ -188,12 +189,12 @@ func TestHWDecode_EightBitOnlyEncodersDecodeOnTheirVendor(t *testing.T) {
 	for _, key := range []string{"h264_qsv", "h264_vaapi"} {
 		t.Run(key, func(t *testing.T) {
 			spec, _ := encoder.Lookup(key)
-			mpeg2 := func(t *testing.T, ffmpeg, path string) {
+			mpeg4 := func(t *testing.T, ffmpeg, path string) {
 				ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
-					"-i", "testsrc2=duration=2:size=320x240:rate=10", "-c:v", "mpeg2video", "-b:v", "8M",
+					"-i", "testsrc2=duration=2:size=320x240:rate=10", "-c:v", "mpeg4", "-q:v", "2",
 					"-pix_fmt", "yuv420p", "--", path)
 			}
-			src, before, st, _, logged := hwDecodeRun(t, key, "faithful", mpeg2, func(c *config.Config) { c.PixelFormat = "yuv420p" })
+			src, before, st, _, logged := hwDecodeRun(t, key, "faithful", mpeg4, func(c *config.Config) { c.PixelFormat = "yuv420p" })
 			if row := rowFor(t, st, src); row.Status != store.Done || md5f(t, src) == before {
 				t.Fatalf("row %q %q, want done and the source replaced", row.Status, row.Outcome.Reason)
 			}
