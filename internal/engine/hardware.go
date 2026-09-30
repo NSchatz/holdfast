@@ -57,7 +57,9 @@ func (e *Engine) resolveEncoder(prof config.Profile, ts config.Transcode, planFm
 	}
 	c, probed := e.Hardware[spec.Key]
 	if !probed || c.Carries(planFmt) {
-		return spec.Key, sourceVerdict{}
+		// The encoder as the configuration spells it (an alias stays an alias), so a job the
+		// hardware can run records exactly what it recorded before detection existed.
+		return ts.Encoder, sourceVerdict{}
 	}
 	if software {
 		return encoder.SoftwareFallback(spec).Key, sourceVerdict{}

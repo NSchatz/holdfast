@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/engine"
 	"github.com/NSchatz/holdfast/internal/logging"
 	"github.com/NSchatz/holdfast/internal/probe"
@@ -265,9 +266,45 @@ func planEngine(ctx context.Context, cfg *config.Config, res startup.Result, std
 
 	// Store nil, deliberately. The logger writes to THIS command's stderr, so --json's
 	// stdout carries the document and nothing else whatever the caller wired up.
-	eng := engine.New(*cfg, prober, nil, nil, logging.To(stderr, cfg.LogLevel))
+	log := logging.To(stderr, cfg.LogLevel)
+	eng := engine.New(*cfg, prober, nil, nil, log)
 	eng.SetCoverage(res.Coverage, res.Entries)
+	// `encoder: auto` is decided per file from what this host's hardware probe found, so a
+	// plan that did not probe would report every such file as skipped for want of hardware
+	// (or as a cpu encode) where a run would hand it to the hardware. The plan runs the probe
+	// `run` runs - two tiny clips per hardware encoder `auto` may choose, in a temporary
+	// directory, nothing under the library or the state directory - and only where the
+	// configuration reaches `auto`: an encoder named explicitly is reported as the encoder
+	// named, as it always was.
+	if reachesAuto(cfg) {
+		checks := encoderChecks{cfg: cfg, ffmpeg: ffmpegBin, ffprobe: ffprobeBin, devices: discoverDevices(log), log: log}
+		for _, key := range encoder.AutoOrder {
+			_, _ = checks.probe(ctx, key)
+		}
+		eng.Devices, eng.Hardware = checks.devices, checks.hardware
+	}
 	return eng, ledger, note, 0
+}
+
+// reachesAuto reports whether any encoder the configuration can hand a file is `auto`: a
+// library root's, an encode profile's or a resolution rule's.
+func reachesAuto(cfg *config.Config) bool {
+	for _, r := range cfg.RootProfiles() {
+		if r.Profile.Encoder == encoder.Auto {
+			return true
+		}
+	}
+	for _, e := range cfg.EncodeProfileEncoders() {
+		if e.Key == encoder.Auto {
+			return true
+		}
+	}
+	for _, e := range cfg.RuleEncoders() {
+		if e.Key == encoder.Auto {
+			return true
+		}
+	}
+	return false
 }
 
 // planLedgerReader hands the pass a reader, or a genuinely nil interface where there is no

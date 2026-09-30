@@ -114,6 +114,10 @@ configuration that does not say `auto` runs exactly the encoder it names, as bef
   an Intel and an NVIDIA host re-encodes nothing.
 - The row records the encoder that ran (`nvenc`, `vaapi`, `cpu`, ...), never `auto`; the
   decision inputs record the configured `auto`, so an unchanged configuration re-opens nothing.
+  An encoder named explicitly is recorded as written (an alias such as `hevc_vaapi` stays the
+  alias), unless a fallback replaced it, in which case the row names the software encoder.
+- `holdfast plan` runs the same probe where the configuration reaches `auto`, so it reports a
+  file `auto` would hand to the hardware as one a run would transcode, and not as skipped.
 - The order is ASSUMED, not measured: NVENC first; QSV before VAAPI on Intel because QSV is
   Intel's own runtime; VAAPI before AMF because AMD's advice on Linux is VA-API through Mesa.
   The hardware reports (brief T43) are what would change it.
@@ -141,9 +145,12 @@ defaults to `skip`.**
 
 **Why `skip` is the default.** Three reasons, in order of weight:
 
-1. An existing configuration keeps making the same decisions and running the same command lines
+1. An existing configuration keeps its decisions and command lines as far as the probe allows
    (the program's rule for every new key, brief I5): under `skip`, a configuration that names
-   an encoder gets that encoder or the refusal it always got.
+   an encoder gets that encoder or a refusal, and never another encoder. One decision does
+   change, in the fail-safe direction: an encoder whose 8-bit probe passes and whose 10-bit
+   probe fails used to start and attempt every 10-bit plan (the fidelity gate then rejected
+   the output); it now starts and skips those plans `hardware-unavailable` before any encode.
 2. A software encode is not a quiet substitute. libx265 at the configured preset can take many
    times the wall-clock of the hardware encoder the operator chose, on a host whose CPU is
    shared; an operator who wants that trade has one key to say so.

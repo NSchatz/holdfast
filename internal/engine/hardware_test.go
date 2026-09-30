@@ -58,7 +58,9 @@ func TestResolveEncoder_AutoAndFallbackChoosePerJob(t *testing.T) {
 		{"an unusable hevc encoder falls back to cpu", none, "vaapi", "software", "yuv420p10le", "cpu", false},
 		{"an unusable av1 encoder falls back to svtav1", Hardware{"av1_nvenc": {Reason: "no CUDA"}}, "av1_nvenc",
 			"software", "yuv420p10le", "svtav1", false},
-		{"an alias resolves to its key", Hardware{"vaapi": usable(true, true)}, "hevc_vaapi", "", "yuv420p10le", "vaapi", false},
+		{"an alias runs as written", Hardware{"vaapi": usable(true, true)}, "hevc_vaapi", "", "yuv420p10le", "hevc_vaapi", false},
+		{"an alias that falls back names the software encoder", Hardware{"vaapi": {Reason: "no node"}}, "hevc_vaapi",
+			"software", "yuv420p10le", "cpu", false},
 		{"an encoder the run did not probe runs as named", Hardware{}, "nvenc", "", "yuv420p10le", "nvenc", false},
 		{"a run that probed nothing runs every encoder as named", nil, "nvenc", "", "yuv420p10le", "nvenc", false},
 		{"a software encoder is never replaced", none, "svtav1", "software", "yuv420p10le", "svtav1", false},
@@ -232,5 +234,41 @@ func TestHardwareEncodeFailure_FallsBackOnlyUnderSoftware(t *testing.T) {
 				t.Errorf("the replacement is %q, want hevc", got)
 			}
 		})
+	}
+}
+
+// The hardware-unavailable skip is re-decided when NOTHING in the configuration changed and
+// only the host did: the same configuration and ledger, a second pass on a host whose probe
+// now finds VAAPI usable, and the file is encoded with it. (The skip is a mutable guard; a
+// terminal verdict would hold the file until a requeue.)
+func TestHardwareUnavailable_IsReDecidedWhenOnlyTheHardwareChanges(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	d := t.TempDir()
+	src := filepath.Join(d, "movie.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+	stub, _ := hardwareStub(t, ffmpeg, "hevc_vaapi", "faithful")
+	var cfg config.Config
+	eng := buildEngine(t, ffmpeg, ffprobe, d, nil, func(c *config.Config) {
+		c.Encoder = encoder.Auto
+		cfg = *c
+	})
+	eng.Enc = FFmpegEncoder{FFmpeg: stub, Cfg: cfg, Probe: probe.New(ffmpeg, ffprobe)}
+	eng.Hardware = Hardware{"nvenc": {Reason: "no CUDA"}, "qsv": {Reason: "no node"}, "vaapi": {Reason: "no node"}}
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st := eng.Store.(*testStore)
+	if o, status, _ := outcomeFor(t, st, src); status != store.Skipped || o.Reason != SkipHardwareUnavailable {
+		t.Fatalf("first pass: %q %q, want skipped %s", status, o.Reason, SkipHardwareUnavailable)
+	}
+
+	next := New(cfg, eng.Probe, FFmpegEncoder{FFmpeg: stub, Cfg: cfg, Probe: eng.Probe}, st, discardLogger())
+	next.Hardware = Hardware{"nvenc": {Reason: "no CUDA"}, "qsv": {Reason: "no node"}, "vaapi": usable(true, true)}
+	if err := next.RunOneshot(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if o, status, _ := outcomeFor(t, st, src); status != store.Done || o.Encoder != "vaapi" {
+		t.Fatalf("second pass, only the hardware changed: %q encoder %q reason %q, want done by vaapi",
+			status, o.Encoder, o.Reason)
 	}
 }
