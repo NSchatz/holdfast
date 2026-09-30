@@ -105,8 +105,9 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 5.1 | Gate integrity counted from the goal-start SHA | DONE (recounted at `ef6b611`): `func Test` 1388 -> 1445, no package fell (`cmd/holdfast` 217 -> 226, `internal/config` 107 -> 123, `internal/encoder` 20 -> 29, `internal/engine` 486 -> 500, `internal/hwdevice` 0 -> 8, `internal/version` 0 -> 1, every other package unchanged); `docs/design/swap.md` 62 -> 62 and `docs/design/quality-gate.md` 76 -> 76 (`git diff --numstat bf36b9c ef6b611` empty for both); 70 lines deleted in `*_test.go` (`git diff --numstat bf36b9c ef6b611`: +2776 -70), each with its reason below |
+| 5.1 | Gate integrity counted from the goal-start SHA | DONE (recounted at `37da90c`): `func Test` 1388 -> 1446, no package fell (`cmd/holdfast` 217 -> 226, `internal/config` 107 -> 123, `internal/encoder` 20 -> 30, `internal/engine` 486 -> 500, `internal/hwdevice` 0 -> 8, `internal/version` 0 -> 1, every other package unchanged); `docs/design/swap.md` 62 -> 62 and `docs/design/quality-gate.md` 76 -> 76 (`git diff --numstat bf36b9c 37da90c` empty for both); 70 lines deleted in `*_test.go` (`git diff --numstat bf36b9c 37da90c`: +2793 -70), each with its reason below |
 | 5.2 | Adversarial review of the report | DONE: round 1 (a fresh subagent, 2026-09-30) found lines A-G true ("VERDICT: none false", E PARTLY) and asked for corrections: NEEDS-OWNER row 2's command (a tmpfs `/tmp` and a non-root image would refuse the start; fixed in `7f31678`: `$HOME/hf-probe`, `-u`); `holdfast plan` not probing under `auto`, a named alias recorded under its key, the I5 over-claim, and the mutable-skip test changing the configuration (all fixed by PR #130, `ef6b611`); row 2.1's AC-15 wording (fixed); main's CI on `8e29c42` cancelled by the next push and re-run green on `4337d13`; 7 added lines carry em dashes, each carried over from an edited or moved pre-existing line (T34 leaves existing dashes). A fresh subagent checks the report and the repositories after this commit; its verdict is the report's line H |
+| 5.3 | Corrections from the final review | DONE (PR #131, `37da90c`): a fresh subagent's review of the completed ledger found lines A-G true ("VERDICT: none false") and one defect #127 introduced - four lines of `scripts/check-pins-selftest.sh`'s header comment had lost their `#` and ran as commands in every gate since - and a probe softness (an encode that errored but left a faithful file passed); both fixed, `TestAvailable_AnEncodeThatFailsIsUnavailableEvenWithAGoodOutput`; mutation-diff 100% (2 killed); gate exit 0 in 1687 s (`internal/engine` 1580.5 s), 0 "command not found" lines; CI green. A fresh subagent checks the final state; its verdict is the report's line H |
 
 ### The 70 deleted `*_test.go` lines and why
 
@@ -221,7 +222,7 @@ summed per directory):
 ## Resume here
 
 Goal 5 is complete. Merged: #126 (argv, probe, detection, `amf` refusal), #127 (the image runtime),
-#128 (S0165), #129 (`encoder: auto`, `hw_fallback`), #130 (the review's corrections). No branch,
+#128 (S0165), #129 (`encoder: auto`, `hw_fallback`), #130 and #131 (the reviews' corrections). No branch,
 worktree or open PR of this goal remains. Goal 6's precondition is this ledger's COMPLETE line; its
 first input is `NEEDS-OWNER.md` row 2 (the start-time probe on the owner's hosts).
 
