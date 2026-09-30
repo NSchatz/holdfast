@@ -147,6 +147,31 @@ else
   ok "no hardware runtime to check on $arch (the image carries none there, by design)"
 fi
 
+# 4b. `encoder: amf` in the image, on every architecture: `holdfast validate` accepts the
+#     key, and `holdfast run` refuses it at start with its reason (AMD's EULA grants no
+#     redistribution of the AMF runtime, so the image cannot carry it; use vaapi) before
+#     anything is probed or opened (docs/design/hardware.md#amf). This is the image's own
+#     binary answering: it is built with the holdfast_image tag, and a binary without it
+#     would probe amf instead, fail for want of a device, and say nothing about the licence.
+amfdir="$(mktemp -d)"
+mkdir -p "$amfdir/media" "$amfdir/state"
+printf 'library_roots:\n  - /media\nstate_dir: /state\nencoder: amf\n' >"$amfdir/config.yaml"
+amf_mounts=(-u "$(id -u):$(id -g)" -v "$amfdir/media:/media" -v "$amfdir/state:/state"
+  -v "$amfdir/config.yaml:/config/config.yaml:ro")
+run_in_image "${amf_mounts[@]}" "$IMAGE" validate --config /config/config.yaml >/dev/null \
+  || { rm -rf "$amfdir"; fail "'holdfast validate' refused encoder: amf (the key must stay valid)"; }
+rc=0
+amf_out="$(run_in_image "${amf_mounts[@]}" "$IMAGE" run --config /config/config.yaml 2>&1)" || rc=$?
+amf_store=no; [ -f "$amfdir/state/jobs.db" ] && amf_store=yes
+rm -rf "$amfdir"
+[ "$rc" -ne 0 ] || fail "'holdfast run' started with encoder: amf in the image:
+$amf_out"
+grep -q 'AMDGPU PRO EULA' <<<"$amf_out" && grep -q 'encoder: vaapi' <<<"$amf_out" \
+  || fail "'holdfast run' refused encoder: amf (exit $rc) without naming the licence and vaapi:
+$amf_out"
+[ "$amf_store" = no ] || fail "the amf refusal left a job store behind"
+ok "encoder: amf is valid, and refused at start in the image with its reason (exit $rc)"
+
 if [ "$MODE" = "--no-encode" ]; then
   echo "== smoke: exec-only mode (skipping the encode) — image runs on ${PLATFORM:-native}"
   exit 0
