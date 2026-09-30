@@ -113,6 +113,59 @@ func TargetCodecs() []string {
 	return out
 }
 
+// Auto is the `encoder:` value that chooses, per job, among the hardware HEVC encoders this
+// host's start-time probe found usable (AutoOrder), and otherwise does what hw_fallback says.
+// It is not a registry key: Lookup does not resolve it, and a job always runs a concrete
+// encoder (docs/design/hardware.md#auto).
+const Auto = "auto"
+
+// AutoOrder is the order `auto` tries the hardware encoders in. Every one targets HEVC, as
+// the software encoder `auto` falls back to does, so a file's target codec does not depend on
+// which one a host has: the already-at-target skip and the output-codec check read the same
+// answer for every job. NVENC first and AMF last, VAAPI before AMF because AMD's own advice
+// on Linux is VA-API through Mesa (P3), QSV before VAAPI because on Intel it is the vendor's
+// own runtime: ASSUMED as a preference order, not measured, until the hardware reports
+// (brief T43) compare them.
+var AutoOrder = []string{"nvenc", "qsv", "vaapi", "amf"}
+
+// AutoTargetCodec is what every encoder `auto` can choose produces.
+const AutoTargetCodec = "hevc"
+
+// Valid reports whether key is an `encoder:` value this build accepts: a registry key, an
+// ffmpeg codec alias of one, or Auto.
+func Valid(key string) bool {
+	if key == Auto {
+		return true
+	}
+	_, ok := Lookup(key)
+	return ok
+}
+
+// TargetCodecOf is what an output under the `encoder:` value key is in: its registry
+// encoder's target codec, or AutoTargetCodec for Auto. ok is false for an unknown key.
+func TargetCodecOf(key string) (string, bool) {
+	if key == Auto {
+		return AutoTargetCodec, true
+	}
+	spec, ok := Lookup(key)
+	return spec.TargetCodec, ok
+}
+
+// SoftwareFallback is the software encoder of spec's codec: cpu (libx265) for the HEVC
+// encoders and svtav1 for AV1. A software spec is its own.
+func SoftwareFallback(spec Spec) Spec {
+	if !spec.Hardware {
+		return spec
+	}
+	if spec.TargetCodec == "av1" {
+		return registry["svtav1"]
+	}
+	return registry["cpu"]
+}
+
+// KnownWithAuto is Known plus Auto, for a refusal that lists every accepted value.
+func KnownWithAuto() []string { return append(Known(), Auto) }
+
 // Known returns every registered encoder key, sorted for stable error messages.
 func Known() []string {
 	keys := make([]string, 0, len(registry))

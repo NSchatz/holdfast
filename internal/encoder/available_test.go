@@ -238,3 +238,50 @@ func TestCapability_Carries(t *testing.T) {
 		t.Error("Usable is not EightBit || TenBit")
 	}
 }
+
+// `auto` is a value, not a registry key: Valid accepts it, Lookup does not resolve it, its
+// target codec is HEVC, and every encoder it may choose - and the software encoder it falls
+// back to - writes HEVC, so a file's target codec does not depend on the host's hardware.
+func TestAuto_IsAValueEveryChoiceOfWhichWritesHEVC(t *testing.T) {
+	if !Valid(Auto) || !Valid("cpu") || !Valid("hevc_vaapi") || Valid("automatic") || Valid("") {
+		t.Error("Valid disagrees with the registry plus auto")
+	}
+	if _, ok := Lookup(Auto); ok {
+		t.Error("Lookup resolves auto, which is not an encoder a job can run")
+	}
+	if codec, ok := TargetCodecOf(Auto); !ok || codec != "hevc" || AutoTargetCodec != "hevc" {
+		t.Errorf("TargetCodecOf(auto) = %q, %v", codec, ok)
+	}
+	if codec, ok := TargetCodecOf("av1_nvenc"); !ok || codec != "av1" {
+		t.Errorf("TargetCodecOf(av1_nvenc) = %q, %v", codec, ok)
+	}
+	if _, ok := TargetCodecOf("bogus"); ok {
+		t.Error("TargetCodecOf(bogus) is ok")
+	}
+	if strings.Join(AutoOrder, " ") != "nvenc qsv vaapi amf" {
+		t.Errorf("AutoOrder = %v", AutoOrder)
+	}
+	for _, key := range AutoOrder {
+		spec, ok := Lookup(key)
+		if !ok || !spec.Hardware || spec.TargetCodec != AutoTargetCodec {
+			t.Errorf("auto may choose %s (%+v), which is not a hardware HEVC encoder", key, spec)
+		}
+		if fb := SoftwareFallback(spec); fb.Key != "cpu" {
+			t.Errorf("SoftwareFallback(%s) = %s, want cpu", key, fb.Key)
+		}
+	}
+	av1, _ := Lookup("av1_nvenc")
+	if fb := SoftwareFallback(av1); fb.Key != "svtav1" {
+		t.Errorf("SoftwareFallback(av1_nvenc) = %s, want svtav1", fb.Key)
+	}
+	for _, key := range []string{"cpu", "svtav1"} {
+		spec, _ := Lookup(key)
+		if fb := SoftwareFallback(spec); fb.Key != key {
+			t.Errorf("SoftwareFallback(%s) = %s, want itself", key, fb.Key)
+		}
+	}
+	all := KnownWithAuto()
+	if all[len(all)-1] != Auto || len(all) != len(Known())+1 {
+		t.Errorf("KnownWithAuto = %v", all)
+	}
+}

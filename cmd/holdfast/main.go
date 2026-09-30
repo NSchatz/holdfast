@@ -555,8 +555,10 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope c
 	// node this host assigned to the encoder (docs/design/hardware.md#detection), so the
 	// devices are found first and stated once.
 	devices := discoverDevices(log)
-	for _, e := range distinctBy(cfg, func(p config.Profile) string { return p.Encoder }) {
-		if err := requireEncoder(context.Background(), cfg, ffmpeg, ffprobe, e.key, devices); err != nil {
+	checks := encoderChecks{cfg: cfg, ffmpeg: ffmpeg, ffprobe: ffprobe, devices: devices, log: log}
+	for _, e := range distinctBy(cfg, func(p config.Profile) string { return p.Encoder + "\x00" + p.HWFallbackMode() }) {
+		key, fallback, _ := strings.Cut(e.key, "\x00")
+		if err := checks.require(context.Background(), key, fallback, e.where); err != nil {
 			fmt.Fprintf(stderr, "holdfast: %s: %v\n", e.where, err)
 			return nil, nil, 1
 		}
@@ -566,10 +568,19 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope c
 	// so a preflight blind to it would deliver the fail-early guarantee for some of an
 	// operator's library and not for the rest. The account names the profile that asked,
 	// because "nvenc is unavailable" sends an operator to a configuration whose top-level
-	// encoder is cpu.
+	// encoder is cpu. An encode profile carries no hw_fallback: the root a file lives under
+	// decides it, so the profile's hardware may be missing only where EVERY root falls back
+	// to software.
+	profileFallback := config.HWFallbackSoftware
+	for _, r := range cfg.RootProfiles() {
+		if r.Profile.HWFallbackMode() != config.HWFallbackSoftware {
+			profileFallback = config.HWFallbackSkip
+		}
+	}
 	for _, e := range cfg.EncodeProfileEncoders() {
-		if err := requireEncoder(context.Background(), cfg, ffmpeg, ffprobe, e.Key, devices); err != nil {
-			fmt.Fprintf(stderr, "holdfast: encode_profiles (%s): %v\n", e.Profile, err)
+		where := "encode_profiles (" + e.Profile + ")"
+		if err := checks.require(context.Background(), e.Key, profileFallback, where); err != nil {
+			fmt.Fprintf(stderr, "holdfast: %s: %v\n", where, err)
 			return nil, nil, 1
 		}
 	}
@@ -678,6 +689,7 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope c
 
 	eng := engine.New(*cfg, prober, enc, st, log)
 	eng.Devices = devices
+	eng.Hardware = checks.hardware
 	// The startup walk's coverage BOUNDS the run: this scan enumerates sources
 	// from exactly the directories that walk traversed successfully, so a
 	// subtree it declined, could not read or failed to traverse yields no file
@@ -729,16 +741,107 @@ func orNone(node, why string) string {
 // probe's own reason, because "Device creation failed" does not tell an operator that the
 // container was never given /dev/dri, or was given it without the group that may open it.
 func requireEncoder(ctx context.Context, cfg *config.Config, ffmpeg, ffprobe, key string, devices hwdevice.Assignment) error {
+	_, err := probeEncoder(ctx, cfg, ffmpeg, ffprobe, key, devices)
+	return err
+}
+
+func probeEncoder(ctx context.Context, cfg *config.Config, ffmpeg, ffprobe, key string, devices hwdevice.Assignment) (encoder.Capability, error) {
 	probeWith := engine.ProbeEncode(*cfg, ffmpeg, probe.New(ffmpeg, ffprobe), devices)
-	_, _, err := encoder.RequireAvailable(ctx, ffmpeg, ffprobe, key, probeWith)
+	_, c, err := encoder.RequireAvailable(ctx, ffmpeg, ffprobe, key, probeWith)
 	if err == nil {
-		return nil
+		return c, nil
 	}
 	if spec, ok := encoder.Lookup(key); ok {
 		if why := devices.Why[spec.Key]; why != "" {
-			return fmt.Errorf("%w (render node: %s)", err, why)
+			return c, fmt.Errorf("%w (render node: %s)", err, why)
 		}
 	}
+	return c, err
+}
+
+// encoderChecks is the startup check of every encoder the configuration can reach, and what
+// it established about the hardware ones: each is probed once (require caches it), and the
+// run's engine reads the result (engine.Hardware) to resolve `encoder: auto` and hw_fallback
+// per job (docs/design/hardware.md#fallback).
+type encoderChecks struct {
+	cfg             *config.Config
+	ffmpeg, ffprobe string
+	devices         hwdevice.Assignment
+	log             *slog.Logger
+
+	hardware engine.Hardware
+	errs     map[string]error
+}
+
+// probe runs key's startup probe once and remembers what it found.
+func (c *encoderChecks) probe(ctx context.Context, key string) (encoder.Capability, error) {
+	if c.errs == nil {
+		c.errs = map[string]error{}
+		c.hardware = engine.Hardware{}
+	}
+	spec, known := encoder.Lookup(key)
+	if known {
+		key = spec.Key
+		if got, done := c.hardware[key]; done {
+			return got, c.errs[key]
+		}
+	}
+	got, err := probeEncoder(ctx, c.cfg, c.ffmpeg, c.ffprobe, key, c.devices)
+	if known && spec.Hardware {
+		c.hardware[key], c.errs[key] = got, err
+		c.log.Info("hardware: encoder probed", "encoder", key, "8bit", got.EightBit, "10bit", got.TenBit,
+			"why", got.Reason)
+	}
+	return got, err
+}
+
+// require decides whether the run may start with key configured at where under fallback:
+//
+//   - a software encoder must work, as it always had to;
+//   - `amf` in the container image is refused whatever the fallback, with its reason;
+//   - a hardware encoder that does not work refuses the start under skip (it would skip every
+//     file it was asked to encode, so the run says so now rather than per file), and under
+//     software is stated and left to the software encoder of its codec, which must work;
+//   - `auto` under skip needs one usable hardware encoder; under software, cpu must work.
+func (c *encoderChecks) require(ctx context.Context, key, fallback, where string) error {
+	software := fallback == config.HWFallbackSoftware
+	if key == encoder.Auto {
+		var usable []string
+		for _, k := range encoder.AutoOrder {
+			if got, _ := c.probe(ctx, k); got.Usable() {
+				usable = append(usable, k)
+			}
+		}
+		if len(usable) > 0 {
+			c.log.Info("hardware: encoder: auto chooses per job among", "where", where, "usable", strings.Join(usable, ","),
+				"hw_fallback", fallback)
+			if !software {
+				return nil
+			}
+		}
+		if !software {
+			return fmt.Errorf("encoder: auto found no usable hardware encoder on this host (%s) and hw_fallback "+
+				"is skip, so every file would be skipped; set hw_fallback: software to encode them with cpu "+
+				"(docs/design/hardware.md#fallback)", strings.Join(encoder.AutoOrder, ", "))
+		}
+		_, err := c.probe(ctx, "cpu")
+		return err
+	}
+	got, err := c.probe(ctx, key)
+	spec, known := encoder.Lookup(key)
+	if err == nil || !known || !spec.Hardware {
+		return err
+	}
+	if encoder.RefusedInImage(spec) != "" {
+		return err
+	}
+	if !software {
+		return fmt.Errorf("%w; hw_fallback is skip - set hw_fallback: software to encode this root's files "+
+			"with %s instead (docs/design/hardware.md#fallback)", err, encoder.SoftwareFallback(spec).Key)
+	}
+	c.log.Warn("hardware: encoder unavailable; hw_fallback is software, so its jobs are encoded in software",
+		"where", where, "encoder", spec.Key, "fallback", encoder.SoftwareFallback(spec).Key, "why", got.Reason)
+	_, err = c.probe(ctx, encoder.SoftwareFallback(spec).Key)
 	return err
 }
 

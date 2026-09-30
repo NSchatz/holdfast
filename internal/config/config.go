@@ -69,6 +69,7 @@ var knownKeys = map[string]bool{
 	deinterlaceKey:  true,
 	maxHeightKey:    true,
 	downscaleAckKey: true,
+	hwFallbackKey:   true,
 	x265CPUsKey:     true,
 	qualityKey:      true,
 	// The divisor `workers: auto` sizes the pool by. It describes the PROCESS, so a
@@ -158,6 +159,10 @@ func defaultLayer() map[string]any {
 		// which is what lets the shipped documentation be graded against it.
 		maxHeightKey:    0,
 		downscaleAckKey: false,
+		// A hardware encoder that is missing or fails is not replaced by another encoder:
+		// the file is left as it is (docs/design/hardware.md#fallback). A knob in
+		// profileKnobs is seeded from the top-level value of the same key.
+		hwFallbackKey: HWFallbackSkip,
 		// No configured libx265 parallelism: the run derives it from the CPU quota of its
 		// own cgroup, or passes none where there is no quota to read.
 		x265CPUsKey: 0,
@@ -303,7 +308,17 @@ type Config struct {
 	// gated behind a runtime capability check (never assumed to work; see
 	// internal/encoder.Available and cmd/holdfast's cmdRun). The raw ffmpeg -c:v
 	// codec name (e.g. "libsvtav1") is also accepted as an alias.
+	//
+	// "auto" chooses per job among the hardware HEVC encoders the start-time probe found
+	// usable (nvenc, qsv, vaapi, amf, in that order), for the job's own pixel format; where
+	// none carries it, hw_fallback decides (docs/design/hardware.md#auto).
 	Encoder string `yaml:"encoder"`
+	// HWFallback is what a job does where its hardware encoder is missing or fails:
+	// "skip" (the default) leaves the file as it is and encodes it with nothing else;
+	// "software" encodes it with the software encoder of the same codec (cpu for the HEVC
+	// encoders, svtav1 for av1_nvenc). A library root may override it. See
+	// docs/design/hardware.md#fallback.
+	HWFallback string `yaml:"hw_fallback"`
 	// CRF is the software encoders' quality knob (lower = bigger/better): libx265's
 	// and libsvtav1's constant rate factor, 0-51. Each hardware encoder's quality is
 	// set on its own scale by Quality below, and a hardware encoder with no entry there
@@ -884,6 +899,7 @@ func (c *Config) TopLevelProfile() Profile {
 		Deinterlace:       c.Deinterlace,
 		MaxHeight:         c.MaxHeight,
 		DownscaleAck:      c.DownscaleAck,
+		HWFallback:        c.HWFallback,
 	}
 }
 

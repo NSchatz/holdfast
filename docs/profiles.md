@@ -180,6 +180,21 @@ not recommendations.
   `HOLDFAST_QUALITY_NVENC=24`, `HOLDFAST_QUALITY_AV1_NVENC=30`. It is validated exactly as the
   file's value is.
 
+## `encoder: auto` and `hw_fallback` - hardware where it works
+
+`encoder: auto` (at the top level, on a library root, or in an encode profile) chooses per job
+the first hardware HEVC encoder - `nvenc`, `qsv`, `vaapi`, `amf`, in that order - that passed
+this host's start-time probe for the job's pixel format; every choice writes HEVC.
+`hw_fallback` decides what a job does where its hardware encoder (the one named, or every one
+`auto` may choose) is missing or fails: `skip` (the default) encodes it with nothing else and
+leaves the source as it is, and `software` encodes it with the software encoder of the same
+codec (`cpu`, or `svtav1` for `av1_nvenc`). It is a library root knob with a top-level default;
+an encode profile carries none, since the root a file lives under decides it. Under `skip`, a
+named hardware encoder that does not work refuses the start, as it always did, and a job
+skipped for want of hardware records `hardware-unavailable` and is re-decided on every pass.
+The reasoning, and why `skip` is the default, is in
+[`docs/design/hardware.md`](design/hardware.md#fallback).
+
 ## `exclude_paths` and `include_paths` - which paths this tool may touch
 
 <a id="path-filters"></a>
