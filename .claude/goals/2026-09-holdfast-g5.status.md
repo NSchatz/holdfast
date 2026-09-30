@@ -79,7 +79,7 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 2.1 | S0165 `per-rule-encoder-selection` | DOING (PR #128) |
+| 2.1 | S0165 `per-rule-encoder-selection` | DONE (PR #128, `075e3ba`): a resolution rule may name `encoder` (validated by `validateEncoderKey`), refused beside a resolved `remux_only`, every VMAF key in a rule refused by name, a `max_height` crossing into another codec's band refused (AC-16); AC-1..AC-16 each graded by a named test (`TestS0165_AC*` in `internal/config`, `internal/engine`, `cmd/holdfast`); AC-2 goldens from b7c26ca (byte-identical to `bf36b9c`); mutation-diff 100% (killed 83, lived 0, not covered 10); 2 test lines moved (the unknown-key fixture `encoder: svtav1` became `min_vmaf: 90`); gate exit 0 in 1661 s (`internal/engine` 1554.6 s); CI green. With #129 a rule may name `auto` (read as HEVC by the ceiling check) and its hardware follows its root's `hw_fallback` |
 
 ## Phase 3 - Runtime in the image (line C)
 
@@ -97,16 +97,36 @@ summed per directory):
 | 4.2 | `Available()` probes through the real argv builder, including a 10-bit probe | DONE (PR #126, `0fab196`): `encoder.Available` encodes a lossless 4:2:0 clip at 8 and at 10 bits through `engine.ProbeEncode` (the production encoder and plan derivation) and requires codec and depth; `TestProbeEncode_AvailableProbesThroughTheJobsOwnCommandLine` (vaapi, qsv, nvenc, av1_nvenc, amf argv), `TestProbeEncode_A10BitProbeSeesTheDepthTheUploadCarries` (an 8-bit upload fails the 10-bit probe); the device-opening table test moved behind `hwlive` |
 | 4.3 | Device discovery (`/dev/dri/renderD*`, sysfs vendor, a permission error naming `group_add`) | DONE (PR #126, `0fab196`): `internal/hwdevice` (98.6% coverage): `/dev/dri/renderD*`, sysfs vendor, open check; a permission failure names `group_add` / `--group-add` and the GID; VAAPI gets the first usable Intel or AMD node, QSV the first Intel; logged once at start; a refusal carries the node reason |
 | 4.4 | `amf` in the image refused at start with a named reason; `validate` still accepts it; never aliased to `vaapi` | DONE (PR #126, `0fab196`; image proof PR #127): `holdfast_image` build tag marks the image's binary; `amf` refused before any probe with the EULA reason; `TestAvailable_AMFInTheImageIsRefusedWithTheReasonAndNeverProbed`, `TestPreflight_AMFInTheImageIsRefusedAtStartWithTheNamedReason`; `validate` accepts `amf`; never resolves to `vaapi` |
-| 4.5 | `encoder: auto` choosing per job | DOING (branch `holdfast-g5/encoder-auto`) |
-| 4.6 | Per-library `hw_fallback: software|skip`, default stated with its reason | DOING (branch `holdfast-g5/encoder-auto`) |
-| 4.7 | `docs/docker.md` hardware section and `docs/design/hardware.md` | TODO |
+| 4.5 | `encoder: auto` choosing per job | DONE (PR #129, `8e29c42`): `encoder: auto` resolves per job at the pixel-format guard to the first of `nvenc`, `qsv`, `vaapi`, `amf` whose probe passed at the plan's depth and whose formats carry it, 4:2:0 plans only; always HEVC; the row records the encoder that ran; `TestResolveEncoder_AutoAndFallbackChoosePerJob` (17 cases), `TestAuto_ChoosesTheUsableHardwareEncoderAndRecordsIt` (a VAAPI stand-in runs the job's own VAAPI argv, every gate passes, the row says `vaapi`), `TestAuto_NoUsableHardwareSkipsThenFallsBackToSoftware`, `TestPreflight_AutoWithNoUsableHardwareFollowsHWFallback` |
+| 4.6 | Per-library `hw_fallback: software|skip`, default stated with its reason | DONE (PR #129, `8e29c42`): `hw_fallback: skip|software` per library root, top-level default `skip` (reason in "Decisions taken" and `docs/design/hardware.md#fallback`), digest-silent at `skip` (pinned to the goal-start digest `ab5f38d831b37a30`); `hardware-unavailable` a mutable skip in the metrics vocabulary and `docs/api-reference.md`; run-time fallback on a failed hardware encode under `software`; `TestHardwareEncodeFailure_FallsBackOnlyUnderSoftware`, `TestPreflight_HWFallbackIsDecidedPerLibraryRoot`, `TestPreflight_ARulesHardwareEncoderFollowsItsRootsHWFallback`, `TestHardware_*`; CI round 1 red on `TestSkipsTotal_UsesOnlyTheClosedVocabulary` (the token missing from `engine.SkipVocabulary`), fixed; mutation-diff 100% (7 killed, 0 lived); gate exit 0 in 1630 s (`internal/engine` 1522.3 s); CI green |
+| 4.7 | `docs/docker.md` hardware section and `docs/design/hardware.md` | DONE (PRs #126, #127, #129): `docs/design/hardware.md` (anchors `probe`, `detection`, `amf`, `auto`, `fallback`), linked from `CLAUDE.md` twice (173 lines); `docs/docker.md` GPU passthrough (the runtime, NVIDIA capabilities, `group_add`, `amf`, what the start-time check logs, `auto`, `hw_fallback`); `docs/profiles.md`; `config.example.yaml` |
 
 ## Phase 5 - Report
 
 | # | Item | State |
 |---|---|---|
-| 5.1 | Gate integrity counted from the goal-start SHA | TODO |
+| 5.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `8e29c42`): `func Test` 1388 -> 1443, no package fell (`cmd/holdfast` 217 -> 225, `internal/config` 107 -> 123, `internal/encoder` 20 -> 29, `internal/engine` 486 -> 499, `internal/hwdevice` 0 -> 8, `internal/version` 0 -> 1, every other package unchanged); `docs/design/swap.md` 62 -> 62 and `docs/design/quality-gate.md` 76 -> 76 (`git diff --numstat` empty for both); 70 lines deleted in `*_test.go` (`git diff --numstat bf36b9c 8e29c42`: +2663 -70), each with its reason below |
 | 5.2 | Adversarial review of the report | TODO |
+
+### The 70 deleted `*_test.go` lines and why
+
+- `internal/engine/encoder_matrix_test.go` (56, PR #126): the hardware half of the codec matrix -
+  its section banner, `TestHardwareEncoders_AvailabilityTable` and the package comment's 4 lines
+  about it, plus the `encoder` import only it used - moved whole to
+  `internal/engine/encoder_matrix_hwlive_test.go` behind `//go:build hwlive`, because in this
+  container it could run a real NVENC encode inside the gate (T9). Only its two probe lines
+  changed there, for `Available`'s new signature. `func Test` count unchanged (the test is still
+  in the package's files).
+- `internal/encoder/encoder_test.go` (8, PR #126): the five `Available`/`RequireAvailable` call
+  sites and three of their messages, for the new signature (an `EncodeFunc`, a `Capability`
+  return); each assertion kept and made stricter (usable at both depths).
+- `internal/config/rules_test.go` (2, PR #128): `TestRules_AnUnknownRuleKeyIsRefusedAgainstTheClosedEnumeration`
+  used `encoder: svtav1` as its unknown key, which S0165 makes a rule knob; the fixture became
+  `min_vmaf: 90` (still refused) and its `mentions` line followed; the test and its assertions
+  are kept (as the spec's T1 says).
+- `cmd/holdfast/happy_path_log_test.go` (2) and `cmd/holdfast/sourceoffer_test.go` (2), PR #126:
+  one call line and one import each, now calling `requireEncoder`, the function `buildEngine`
+  uses, as those tests require ("through the SAME functions buildEngine requires them with").
 
 ## Decisions taken
 
@@ -161,6 +181,17 @@ summed per directory):
   watchdog on an encode. Listed for the owner under "Proposals awaiting the owner".
 - 2026-09-30: PR #127 also gained the image smoke step for the `amf` refusal (both halves were on
   `main` by then); CI `package` green on amd64 and arm64.
+- 2026-09-30: PR #128 gate exit 0 in 1661 s after its merge-up and the rule walk moved onto
+  `requireEncoder`; merged. PR #129 brought up to `main` twice (each merge's conflicts were only
+  the files both sides added, resolved to the branch side after checking the squash commit equals
+  the merged branch's content), the rule walk routed through `encoderChecks.require`, and a
+  duplicate rule walk the merge re-added dropped; gate exit 0 in 1630 s; merged `8e29c42`.
+- 2026-09-30: a rule's encoder follows the `hw_fallback` of the roots whose rules name it,
+  `software` only where every such root says `software` (the rule walk names each encoder once);
+  one root that skips keeps the start-time refusal for all. Fail-safe direction.
+- 2026-09-30: no minor release is cut at the end of this goal (T37 makes it optional): the image
+  change is large (about 244 MiB of vendor runtime) and no real hardware has run it yet; the
+  owner's NEEDS-OWNER row 2 is the first real-hardware evidence, and a later goal can release on it.
 - 2026-09-30: `NEEDS-OWNER.md` row 2 added: the start-time hardware probe on each GPU host,
   through an image built from `main`, with the exact commands and what each answer changes.
 
@@ -179,7 +210,6 @@ summed per directory):
 
 ## Resume here
 
-#126 and #127 merged. #128 (S0165) merged up to `main` and gating (`gate-pr128-r1.log`). #129
-(`encoder: auto`, `hw_fallback`, docs) is next: after #128 lands, merge `main` in, route the rule
-encoders through `encoderChecks.require`, make S0165's `targetCodecOf` read
-`encoder.TargetCodecOf` (so `auto` is HEVC), gate, merge. Then the report (phase 5).
+All four PRs merged (#126 `0fab196`, #127 `84198b7`, #128 `075e3ba`, #129 `8e29c42`); no worktree,
+branch or open PR of this goal remains. Gate integrity counted (row 5.1). Next: the adversarial
+review of the report (row 5.2), then the COMPLETE line.
