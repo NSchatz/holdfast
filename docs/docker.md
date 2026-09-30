@@ -37,7 +37,7 @@ server_addr: 0.0.0.0:8080   # see "The control surface" below before you change 
 | User | non-root by default (`nonroot`, uid 65532); override with `user:` |
 | ffmpeg | pinned by release tag **and verified by SHA-256** before it is trusted |
 | Config | **nothing is baked in** — see below |
-| Licences | `/usr/share/doc/holdfast/` (AGPL-3.0 + the bundled-ffmpeg NOTICE) |
+| Licences | `/usr/share/doc/holdfast/` (AGPL-3.0 + the NOTICE for the bundled ffmpeg and, on amd64, the hardware runtime); each hardware-runtime package's Debian copyright file in `/usr/share/doc/<package>/` |
 
 **How the pins stay current.** Every base image is pinned by tag and digest on its own `FROM`
 line, and `.github/dependabot.yml` has GitHub's Dependabot open a pull request when one moves
@@ -434,7 +434,7 @@ Only needed if `config.yaml` sets a hardware `encoder:`. Hardware encoders are a
 which stays the archival default. The output is held to the **identical** no-loss gate either
 way, so a bad hardware encode is rejected rather than shipped.
 
-**NVIDIA (`nvenc`, `av1_nvenc`) — supported.** Needs the [NVIDIA Container
+**NVIDIA (`nvenc`, `av1_nvenc`).** Needs the [NVIDIA Container
 Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/) on the host:
 
 ```yaml
@@ -449,22 +449,79 @@ deploy:
 
 This works because the NVIDIA toolkit **injects the driver libraries** (`libnvidia-encode`) into
 the container, and the bundled ffmpeg is dynamically linked against glibc precisely so it can
-`dlopen` them (a fully-static ffmpeg could not).
+`dlopen` them (a fully-static ffmpeg could not). Which libraries it injects depends on how the
+host's Docker reaches the toolkit:
 
-**Intel Quick Sync (`qsv`), VAAPI (`vaapi`), AMD (`amf`) — NOT supported by this image.** Be clear
-about why, because the failure is otherwise baffling. ffmpeg *is* built with `--enable-vaapi` and
-`--enable-libvpl`, but each of these needs a **vendor userspace library inside the container** that
-nothing puts there: QSV/VAAPI need a VA driver (`iHD_drv_video.so` and friends), and AMF needs
-AMD's own `libamfrt64.so` (it does not go through VA-API at all). Passing `/dev/dri` supplies only
-the *kernel* device node — it is not a driver, and there is no Intel/AMD equivalent of the NVIDIA
-toolkit's library injection. The distroless base has no package manager to install one either. So
-`encoder: qsv` here fails its startup capability check and exits non-zero — loudly, never silently
-falling back to CPU, but it does not work.
+- On the **legacy runtime-hook path** the libraries are chosen by `NVIDIA_DRIVER_CAPABILITIES`,
+  and when it is unset the toolkit uses `utility,compute`, which leaves out `video`, the
+  capability "required for using the Video Codec SDK", that is `libnvidia-encode`. The image
+  therefore sets `NVIDIA_DRIVER_CAPABILITIES=compute,video,utility`. The value **replaces** the
+  default rather than adding to it, so if you set it yourself (`environment:` in compose, `-e` on
+  `docker run`), keep `video` in it. Docker sets the variable itself only when a device request
+  names an NVIDIA capability; `capabilities: [gpu]` names none, so the image's value is the one
+  the hook reads.
+- On a **CDI host** (Docker 29.2 and later with NVIDIA Container Toolkit 1.18 and later) Docker
+  injects the devices through the CDI specification the toolkit generates, and that spec carries
+  the driver's libraries with no capability filtering, so `libnvidia-encode` is there either way.
 
-If you need QSV/VAAPI/AMF: run the binary on the host with an ffmpeg that has libvmaf, or build
-your own image **on a base that carries the vendor driver stack** (not distroless — it has no
-package manager) and copy the `holdfast` binary into it. Note the fixture suite is gated against
-the pinned ffmpeg, so a different ffmpeg is a different measuring instrument.
+The image does **not** set `NVIDIA_VISIBLE_DEVICES`: Docker writes it from the device request
+above (or `--gpus`), and an image default of `all` would hand every GPU to any container started
+under the NVIDIA runtime without asking for one. Sources, read 2026-09-30: [the toolkit's
+Specialized Configurations for Docker](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/docker-specialized.html)
+(the capability list, `video`, and the `utility,compute` default) and moby's
+[`daemon/devices_nvidia_linux.go`](https://github.com/moby/moby/blob/master/daemon/devices_nvidia_linux.go)
+(which variables Docker sets on the hook path, and the CDI driver it tries first).
+
+**Intel (`vaapi`, and `qsv` on Tiger Lake and newer) and AMD (`vaapi`) - the runtime is in the
+amd64 image.** ffmpeg is built with `--enable-vaapi` and `--enable-libvpl`, and each of these needs
+a vendor userspace library inside the container, which passing `/dev/dri` does not supply: that is
+only the kernel device node. The amd64 image carries that userspace, copied out of pinned Debian 13
+(trixie) packages:
+
+| What | Package | For |
+|---|---|---|
+| `libva.so.2`, `libva-drm.so.2`, `libdrm.so.2` | `libva2`, `libva-drm2`, `libdrm2` | every VAAPI and QSV device (the bundled ffmpeg aborts without them) |
+| `iHD_drv_video.so` | `intel-media-va-driver-non-free` (the full-feature build) | VAAPI on Intel |
+| `libmfx-gen.so.1.2` | `libmfx-gen1.2` | QSV on Tiger Lake and newer |
+| `radeonsi_drv_video.so` | `mesa-va-drivers`, `mesa-libgallium` | VAAPI on AMD |
+
+and the shared libraries those need (LLVM, libz3, the X client libraries Mesa links, and others;
+`NOTICE` lists every package with its version, licence and source). It adds about 255 MB to the
+amd64 image. The VA drivers are in `/usr/lib/x86_64-linux-gnu/dri`, the directory Debian's libva
+searches. Intel parts older than Tiger Lake have no QSV runtime in Debian 13 (`libmfx1` is not in
+trixie), so on those use `encoder: vaapi`, which the iHD driver serves.
+
+The container needs the render node and permission to open it. The node is owned by a group on the
+host (usually `render`); give the container that group's **numeric** GID, because the image's
+`/etc/group` has no `render` entry and a name would not resolve:
+
+```bash
+stat -c %g /dev/dri/renderD128     # on the host; or: getent group render
+```
+
+```yaml
+devices:
+  - /dev/dri:/dev/dri
+group_add:
+  - "993"      # the number the command above printed
+```
+
+**AMD AMF (`amf`) - not available in this image, and it cannot be.** AMF does not go through
+VA-API: it needs AMD's own runtime, `libamfrt64` from the `amf-amdgpu-pro` package, whose licence
+(the AMDGPU PRO EULA, <https://repo.radeon.com/amf/copyright>, read 2026-09-29) grants the right to
+install and use it and no right to redistribute it, so a published image cannot carry it. On AMD
+hardware in this image use `encoder: vaapi`, which Mesa's `radeonsi` driver serves and which is
+AMD's own advice for Linux ("AMF users are advised to transition to VA-API / Mesa Multimedia",
+[AMD's Radeon Software for Linux 25.10.1 release notes](https://www.amd.com/en/resources/support-articles/release-notes/RN-AMDGPU-UNIFIED-LINUX-25-10-1.html),
+read 2026-09-29). `amf` keeps working in a host install that has AMD's runtime.
+
+**arm64** carries no hardware runtime: its pinned ffmpeg is built without VAAPI and without libvpl,
+and Debian builds the QSV runtime for amd64 only.
+
+CI has no GPU, so what the image smoke proves is the part that needs none: every driver and
+library above resolves all of its dependencies inside the image, and a VAAPI device init against a
+missing render node ends in ffmpeg's own device error, not an abort. An encode on real Intel or AMD
+hardware is not proven by CI.
 
 **There is no silent fallback.** If the configured encoder cannot actually encode on this host,
 `holdfast` fails loud at startup and exits non-zero. The capability check really encodes a
@@ -501,10 +558,12 @@ rejected, rather than serving an offer nobody can follow.
 
 ## Known limitations
 
-- **Only NVIDIA hardware encoding works in this image.** `qsv` / `vaapi` / `amf` each need a vendor
-  userspace library the image does not carry (a VA driver for QSV/VAAPI; `libamfrt64` for AMF) —
-  see "GPU passthrough" above for why and what to do instead. `cpu` (libx265, the archival default)
-  and `svtav1` need no device at all.
+- **Hardware encoding in this image is amd64 only, and never `amf`.** The amd64 image carries the
+  VAAPI and QSV runtime (Intel iHD, Mesa radeonsi, libmfx-gen) and NVIDIA's comes from the host's
+  toolkit; `amf` needs AMD's runtime, which its licence does not let an image carry, so AMD encodes
+  here through `vaapi`. arm64 has no hardware runtime. CI proves the libraries resolve, never an
+  encode on real hardware - see "GPU passthrough" above. `cpu` (libx265, the archival default) and
+  `svtav1` need no device at all.
 - **arm64 is built and its ffmpeg is checksum-verified, but CI only runs the full encode smoke
   test on amd64** — the arm64 image is exercised under QEMU far enough to prove it *executes*
   (binary, glibc, bundled ffmpeg), which is what a cross-built image gets wrong. A real arm64

@@ -683,5 +683,140 @@ else
   note "ok: .github/dependabot.yml watches github-actions, docker and gomod at the repository root"
 fi
 
+# --- 10. The hardware runtime's Debian packages: pinned, permanent, and in NOTICE ----
+# The amd64 image copies shared objects out of Debian packages (the Dockerfile's
+# hwruntime stage, P3). Three things make those copies what they claim to be, and each
+# is checked here, offline:
+#   - each package is pinned by exact version AND by the sha256 of its .deb, so the bytes
+#     are the ones that were read and reviewed, not whatever answered 200;
+#   - each is fetched from a snapshot.debian.org timestamp, never the live mirror: a pool
+#     file on deb.debian.org is removed when a point release supersedes it, which is the
+#     same two-week fuse as the ffmpeg daily build in section 2, and a floating `dists/`
+#     path is a pin that does not pin;
+#   - NOTICE names every package the image copies, at the version it copies, and nothing
+#     it does not. NOTICE travels inside the image as the licence record and the source
+#     offer for the GPL and LGPL members of the set, so a package added to the Dockerfile
+#     and not to NOTICE ships without either, and a version bumped in one file only leaves
+#     the record naming bytes the image does not contain. Both directions are compared.
+# The pin block is the heredoc `COPY <<'DEBPINS' /hwruntime.pins` ... `DEBPINS`, one
+# package per line: name, version, sha256, path under the snapshot's pool/.
+deb_snapshot="$(arg DEBIAN_SNAPSHOT)"
+deb_pins="$(awk '
+  /^COPY <<.?DEBPINS.? / { inblk = 1; seen = 1; next }
+  inblk && /^DEBPINS[[:space:]]*$/ { inblk = 0; closed = 1; next }
+  inblk { print }
+  END { if (!seen) print "@@NOBLOCK@@"; else if (!closed) print "@@UNCLOSED@@" }
+' "$here/Dockerfile")"
+deb_bad=0
+declare -A df_debs=()
+if printf '%s\n' "$deb_pins" | grep -qx '@@NOBLOCK@@'; then
+  deb_bad=1
+  bad "the Dockerfile has no Debian package pin block (COPY <<'DEBPINS' /hwruntime.pins ... DEBPINS), so nothing says which packages the image's hardware runtime copies or which bytes they are. A check that could not run has not passed."
+elif printf '%s\n' "$deb_pins" | grep -qx '@@UNCLOSED@@'; then
+  deb_bad=1
+  bad "the Dockerfile's Debian package pin block is never closed by a DEBPINS line, so this check cannot tell where the pins end."
+else
+  deb_n=0
+  while read -r name version sha path extra; do
+    [ -n "$name" ] || continue
+    deb_n=$((deb_n + 1))
+    if [ -n "${extra:-}" ] || [ -z "$path" ]; then
+      deb_bad=$((deb_bad + 1))
+      bad "MALFORMED DEBIAN PIN in the Dockerfile: '$name $version $sha $path${extra:+ $extra}'
+       Each line is exactly: <package> <exact version> <sha256 of the .deb> <path under pool/>"
+      continue
+    fi
+    if [[ ! "$name" =~ ^[a-z0-9][a-z0-9.+-]+$ ]]; then
+      deb_bad=$((deb_bad + 1)); bad "DEBIAN PIN with an impossible package name: '$name'"; continue
+    fi
+    if [[ ! "$version" =~ ^([0-9]+:)?[0-9][A-Za-z0-9.+~-]*$ ]]; then
+      deb_bad=$((deb_bad + 1))
+      bad "DEBIAN PIN $name has no exact version (got '$version'). A package is pinned by the version it was read at, never by a suite or a range."
+    fi
+    if [[ ! "$sha" =~ ^[0-9a-f]{64}$ ]]; then
+      deb_bad=$((deb_bad + 1))
+      bad "DEBIAN PIN $name $version carries no 64-character lowercase sha256 (got '$sha'). The build's sha256sum -c would be vacuous, and the image would copy whatever the URL served."
+    fi
+    upver="${version#*:}"
+    if [[ ! "$path" =~ ^(main|contrib|non-free|non-free-firmware)/[a-z0-9]+/[a-z0-9][a-z0-9.+-]*/[^/]+$ ]] \
+       || { [ "${path##*/}" != "${name}_${upver}_amd64.deb" ] && [ "${path##*/}" != "${name}_${upver}_all.deb" ]; }; then
+      deb_bad=$((deb_bad + 1))
+      bad "DEBIAN PIN $name $version names a pool path that is not that package at that version: '$path'
+       Expected <component>/<prefix>/<source>/${name}_${upver}_amd64.deb (or _all.deb)."
+    fi
+    if [ -n "${df_debs[$name]:-}" ]; then
+      deb_bad=$((deb_bad + 1)); bad "DEBIAN PIN $name appears twice in the Dockerfile's pin block."
+    fi
+    df_debs[$name]="$version"
+  done <<<"$deb_pins"
+  if [ "$deb_n" -eq 0 ]; then
+    deb_bad=$((deb_bad + 1))
+    bad "the Dockerfile's Debian package pin block is EMPTY. The image's hardware runtime would copy nothing, and this check would vouch for nothing."
+  fi
+fi
+
+# The URL is part of the pin. The snapshot must be a real timestamp, the fetch must go
+# through it, and no instruction in the Dockerfile may name the live mirror or a `dists/`
+# path, where the bytes behind a URL change under a green build. Comments are exempt:
+# they cite packages.debian.org pages, which are read, never fetched.
+if [[ ! "$deb_snapshot" =~ ^[0-9]{8}T[0-9]{6}Z$ ]]; then
+  deb_bad=$((deb_bad + 1))
+  bad "FLOATING DEBIAN SNAPSHOT: ARG DEBIAN_SNAPSHOT is '$deb_snapshot', not a snapshot.debian.org timestamp (YYYYMMDDTHHMMSSZ). Without one the package URLs name no fixed archive state."
+fi
+if ! grep -qF 'https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/pool/${path}' "$here/Dockerfile"; then
+  deb_bad=$((deb_bad + 1))
+  bad "FLOATING DEBIAN URL: the hwruntime stage no longer fetches its packages from https://snapshot.debian.org/archive/debian/\${DEBIAN_SNAPSHOT}/pool/\${path}. A pool file on the live mirror disappears at the next point release; only a snapshot URL is permanent."
+fi
+deb_float="$(grep -nE 'https?://[^[:space:]"]*debian\.(org|net)' "$here/Dockerfile" \
+  | grep -vE '^[0-9]+:[[:space:]]*#' \
+  | grep -vF 'https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/pool/${path}' || true)"
+if [ -n "$deb_float" ]; then
+  deb_bad=$((deb_bad + 1))
+  bad "FLOATING DEBIAN URL in a Dockerfile instruction (only the snapshot pool URL is allowed):
+$(printf '%s\n' "$deb_float" | sed 's/^/       /')"
+fi
+
+# NOTICE side: every `  deb: <package> <version>` line, each followed within its entry by
+# a `source:` line pointing at snapshot.debian.org, where the corresponding source is kept.
+declare -A no_debs=()
+while read -r name version; do
+  [ -n "$name" ] || continue
+  if [ -n "${no_debs[$name]:-}" ]; then
+    deb_bad=$((deb_bad + 1)); bad "NOTICE names Debian package $name twice."
+  fi
+  no_debs[$name]="$version"
+done < <(sed -n 's/^  deb: \([^ ]*\) \([^ ]*\)[[:space:]]*$/\1 \2/p' "$here/NOTICE")
+no_nosrc="$(awk '
+  /^  deb: / { if (cur != "" && !src) print cur; cur = $2; src = 0; next }
+  cur != "" && /^       source: .*https:\/\/snapshot\.debian\.org\/package\// { src = 1 }
+  END { if (cur != "" && !src) print cur }
+' "$here/NOTICE")"
+if [ -n "$no_nosrc" ]; then
+  deb_bad=$((deb_bad + 1))
+  bad "NOTICE names Debian package(s) with no corresponding source on snapshot.debian.org (a 'source:' line with https://snapshot.debian.org/package/...): $(printf '%s' "$no_nosrc" | tr '\n' ' ')"
+fi
+
+for name in "${!df_debs[@]}"; do
+  if [ -z "${no_debs[$name]:-}" ]; then
+    deb_bad=$((deb_bad + 1))
+    bad "Debian package $name ${df_debs[$name]} is copied into the image but MISSING FROM NOTICE. The image would ship it without its licence record or its source offer. Add a '  deb: $name ${df_debs[$name]}' entry with its licence and its snapshot.debian.org source."
+  elif [ "${no_debs[$name]}" != "${df_debs[$name]}" ]; then
+    deb_bad=$((deb_bad + 1))
+    bad "Debian package $name: VERSION DRIFT between the Dockerfile and NOTICE - the licence record names bytes the image does not contain.
+       Dockerfile: ${df_debs[$name]}
+       NOTICE:     ${no_debs[$name]}"
+  fi
+done
+for name in "${!no_debs[@]}"; do
+  if [ -z "${df_debs[$name]:-}" ]; then
+    deb_bad=$((deb_bad + 1))
+    bad "NOTICE names Debian package $name ${no_debs[$name]}, which the Dockerfile does NOT copy into the image. A licence record for something the image does not carry hides which record is real; remove it, or pin the package."
+  fi
+done
+
+if [ "$deb_bad" -eq 0 ]; then
+  note "ok: ${#df_debs[@]} Debian package(s) pinned by version and sha256 at snapshot $deb_snapshot, and NOTICE names exactly those, at those versions"
+fi
+
 [ "$fail" -eq 0 ] || exit 1
 echo "pins agree"
