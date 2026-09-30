@@ -107,11 +107,11 @@ bit-depth floor (8 to 10), a configured `pixel_format`, and the HDR10 tag defaul
 carrying HDR10 metadata but under-signalling its tags is given. A tag the plan writes nothing
 for - the source signals none - has nothing to lose and is not compared.
 
-How the output is read. The pixel format and the stream-level tags come from the same snapshot
-the guards read a source with, the side data from its first frame and its stream, and the
-tags a second time from the first decoded frame (`probe.FirstFrameColors`): the stream-level
-tags of a Matroska file are the container's colour elements, and the decoded frame's are the
-bitstream's. The two can disagree, and a player may trust either one, so a declared tag is
+How the output is read. Two probes (`probe.OutputFacts`): the stream level - the pixel
+format, the colour tags and the side data - and the first decoded frame - its colour tags and
+side data. The side data is read in the flat form, and the frame-then-stream order, the guards
+read a source's in, by the same HDR10 readers. The stream-level tags of a Matroska file are the
+container's colour elements, and the decoded frame's are the bitstream's. The two can disagree, and a player may trust either one, so a declared tag is
 carried when some level of the output signals it and no level signals anything else; an
 output that signals it at neither level has lost it. A level that signals nothing is not a
 contradiction, because on the pinned ffmpeg it is ordinary: the encoder takes its colour

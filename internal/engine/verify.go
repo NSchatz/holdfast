@@ -272,24 +272,17 @@ func (e *FidelityError) Error() string {
 		strings.Join(parts, "; ") + "). The source is kept"
 }
 
-// outputFidelity holds the output to the plan's fidelity declaration, reading it with the
-// same probe readers the guards read the source with - one snapshot of its stream fields and
-// its first frame's and stream's side data - and its first decoded frame's colour tags.
+// outputFidelity holds the output to the plan's fidelity declaration. It reads the output in
+// two probes (probe.OutputFacts): its stream-level pixel format, colour tags and side data,
+// and its first decoded frame's colour tags and side data - the side data in the same flat
+// form, and in the same frame-then-stream order, the guards read a source's in.
 func (e *Engine) outputFidelity(ctx context.Context, job *EncodePlan) error {
-	out := e.Probe.VideoProps(ctx, job.Output)
-	// The first frame's tags, as the decoder reads them out of the bitstream. A probe that
-	// did not answer leaves them unsignalled, which the comparison never reads as a match.
-	frame, _ := e.Probe.FirstFrameColors(ctx, job.Output)
+	out := e.Probe.OutputFacts(ctx, job.Output)
 	obs := hdr.Observed{
-		PixFmt: out.PixFmt(),
-		Stream: hdr.Tags{
-			Primaries: out.Color("color_primaries"),
-			Transfer:  out.Color("color_transfer"),
-			Matrix:    out.Color("color_space"),
-			Range:     out.Color("color_range"),
-		},
-		Frame:    hdr.Tags(frame),
-		SideData: out.SideData(),
+		PixFmt:   out.PixFmt,
+		Stream:   hdr.Tags(out.Stream),
+		Frame:    hdr.Tags(out.Frame),
+		SideData: out.SideData,
 	}
 	if m := job.Metadata.Fidelity.Check(obs); len(m) > 0 {
 		return &FidelityError{Mismatches: m}
