@@ -588,9 +588,26 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope c
 	// file its band admits, so it is checked here, before the job store opens, exactly as the
 	// two walks above are. The account names the root and the rule index, because the root's
 	// own encoder and every encode profile's may well be available.
+	//
+	// A rule's encoder runs under its root's hw_fallback. The walk below names each encoder
+	// once, at the first rule asking for it, so it is held to software only where EVERY root
+	// whose rules name it falls back to software; one root that skips keeps the start-time
+	// refusal for all of them.
+	ruleFallback := map[string]string{}
+	for _, r := range cfg.RootProfiles() {
+		for _, rule := range r.Profile.Rules {
+			if rule.Encoder == nil {
+				continue
+			}
+			if f, seen := ruleFallback[*rule.Encoder]; !seen || f == config.HWFallbackSoftware {
+				ruleFallback[*rule.Encoder] = r.Profile.HWFallbackMode()
+			}
+		}
+	}
 	for _, e := range cfg.RuleEncoders() {
-		if err := requireEncoder(context.Background(), cfg, ffmpeg, ffprobe, e.Key, devices); err != nil {
-			fmt.Fprintf(stderr, "holdfast: library root %s: rules[%d]: %v\n", e.Root, e.Rule, err)
+		where := fmt.Sprintf("library root %s: rules[%d]", e.Root, e.Rule)
+		if err := checks.require(context.Background(), e.Key, ruleFallback[e.Key], where); err != nil {
+			fmt.Fprintf(stderr, "holdfast: %s: %v\n", where, err)
 			return nil, nil, 1
 		}
 	}

@@ -149,3 +149,32 @@ func TestHardware_WithEncoderTakesTheChosenEncodersQuality(t *testing.T) {
 // TestHardware_HWFallbackMovesTheDigestOnlyAwayFromTheDefault, computed by the goal-start
 // build (bf36b9c), before hw_fallback existed.
 const digestBeforeHWFallback = "ab5f38d831b37a30"
+
+// A rule may name `encoder: auto` (it is judged by validateEncoderKey), and the S0165
+// ceiling check reads auto as HEVC - every choice of it writes HEVC - so a band capped into a
+// `cpu` band is one codec and accepted, and into an `svtav1` band is two and refused.
+func TestHardware_ARuleMayNameAutoAndItsCeilingCheckReadsHEVC(t *testing.T) {
+	cfg := func(root string) string {
+		return `
+library_roots:
+  - path: /mnt/tv
+    encoder: ` + root + `
+    rules:
+      - when:
+          min_source_height: 1081
+        max_height: 1080
+        encoder: auto
+`
+	}
+	c, err := load(t, cfg("cpu"))
+	if err == nil {
+		err = c.Validate()
+	}
+	if err != nil {
+		t.Errorf("auto capped into a cpu band (both HEVC) was refused: %v", err)
+	}
+	mentions(t, refusal(t, cfg("svtav1")), "rules[0]", "max_height 1080", "hevc", "av1")
+	if got := targetCodecOf("auto"); got != "hevc" {
+		t.Errorf("targetCodecOf(auto) = %q, want hevc", got)
+	}
+}

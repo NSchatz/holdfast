@@ -214,3 +214,40 @@ func TestPreflight_HWFallbackIsDecidedPerLibraryRoot(t *testing.T) {
 		t.Errorf("a root inheriting the top level's software did not start:\n%s", said)
 	}
 }
+
+// A resolution rule's hardware encoder runs under its root's hw_fallback (S0165 with this
+// goal's fallback): unusable under a skip root it refuses the start naming the root and the
+// rule, and under a software root the run starts.
+func TestPreflight_ARulesHardwareEncoderFollowsItsRootsHWFallback(t *testing.T) {
+	requireWorkingEncoder(t)
+	stub, _ := hardwareRefusingFFmpeg(t)
+	lib := filepath.Join(t.TempDir(), "banded")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(fallback string) string {
+		p, _ := hardwareConfig(t, "")
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry := "  - path: " + lib + "\n    encoder: cpu\n" + fallback +
+			"    rules:\n      - when:\n          min_source_height: 1081\n        encoder: vaapi\n"
+		if err := os.WriteFile(p, []byte(strings.Replace(string(b), "\nstate_dir:", "\n"+entry+"state_dir:", 1)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	code, said := dispatchWith(t, stub, "run", "--config", write(""))
+	if code == 0 {
+		t.Fatalf("a rule on an unusable vaapi under a skip root started:\n%s", said)
+	}
+	for _, want := range []string{"library root " + lib + ": rules[0]", `encoder "vaapi"`, "hw_fallback is skip"} {
+		if !strings.Contains(said, want) {
+			t.Errorf("the refusal does not carry %q:\n%s", want, said)
+		}
+	}
+	if code, said := dispatchWith(t, stub, "run", "--config", write("    hw_fallback: software\n")); code != 0 {
+		t.Errorf("a rule on an unusable vaapi under a software root did not start:\n%s", said)
+	}
+}
