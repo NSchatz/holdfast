@@ -1,0 +1,12 @@
+== encoder-unknown
+(no invocation)
+error: unknown encoder "not_a_real_encoder" (known: [amf av1_nvenc cpu nvenc qsv svtav1 vaapi])
+== encoder-empty
+(no invocation)
+error: unknown encoder "" (known: [amf av1_nvenc cpu nvenc qsv svtav1 vaapi])
+== prober-missing
+(no invocation)
+error: FFmpegEncoder.Probe is nil (required to derive colour/pixel-format args from the source)
+== prober-missing/probed-first
+(no invocation)
+error: FFmpegEncoder.Probe is nil (required to derive colour/pixel-format args from the source)

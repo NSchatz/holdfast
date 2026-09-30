@@ -1,0 +1,237 @@
+== base
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== crf-28/preset-ultrafast
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset ultrafast -crf 28 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== crf-30/preset-fast/pixel-format-yuv420p/container-mp4
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p -color_range tv -fps_mode passthrough -preset fast -crf 30 -x265-params log-level=error -f mp4 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mp4.holdfast-part
+row: failed temp missing or empty
+== pixel-format-yuv420p10le
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== pixel-format-yuv420p
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== progress
+-hide_banner -nostdin -loglevel error -y -progress pipe:3 -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== bitrate-1500k
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -b:v 1500k -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== bitrate-8000k/hdr10
+-hide_banner -nostdin -loglevel error -y -i <library>/hdr10.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -preset slow -b:v 8000k -x265-params log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400:hdr10-opt=1:repeat-headers=1 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/hdr10.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== x265-2cpu
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error:pools=2:frame-threads=1 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== x265-3cpu
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error:pools=3:frame-threads=1 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== x265-24cpu
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error:pools=24:frame-threads=4 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== x265-3cpu/hdr10
+-hide_banner -nostdin -loglevel error -y -i <library>/hdr10.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error:pools=3:frame-threads=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400:hdr10-opt=1:repeat-headers=1 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/hdr10.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== x265-3cpu/bitrate-1500k/progress
+-hide_banner -nostdin -loglevel error -y -progress pipe:3 -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -b:v 1500k -x265-params log-level=error:pools=3:frame-threads=1 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== container-source-mp4
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mp4 -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f mp4 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mp4.holdfast-part
+row: failed temp missing or empty
+== container-source-ts
+(no invocation)
+row: skipped multi-video-stream
+== container-source-m2ts
+(no invocation)
+row: skipped multi-video-stream
+== container-source-avi
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.avi -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f avi -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.avi.holdfast-part
+row: failed temp missing or empty
+== container-source-mov
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mov -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f mov -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mov.holdfast-part
+row: failed temp missing or empty
+== container-source-m4v
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.m4v -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f ipod -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.m4v.holdfast-part
+row: failed temp missing or empty
+== container-source-flv
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.flv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f flv -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.flv.holdfast-part
+row: failed temp missing or empty
+== container-source-wmv
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.wmv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f asf -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.wmv.holdfast-part
+row: failed temp missing or empty
+== container-mkv-to-mp4
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f mp4 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mp4.holdfast-part
+row: failed temp missing or empty
+== container-mp4-to-mkv
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mp4 -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== container-mkv-to-m2ts
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f mpegts -mpegts_m2ts_mode 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.m2ts.holdfast-part
+row: failed temp missing or empty
+== source-bt709
+-hide_banner -nostdin -loglevel error -y -i <library>/bt709.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -colorspace bt709 -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error:colormatrix=bt709 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/bt709.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-bt709-vui
+-hide_banner -nostdin -loglevel error -y -i <library>/bt709-vui.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error:colorprim=bt709:transfer=bt709:colormatrix=bt709 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/bt709-vui.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-hlg
+-hide_banner -nostdin -loglevel error -y -i <library>/hlg.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_primaries bt2020 -color_trc arib-std-b67 -colorspace bt2020nc -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error:colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/hlg.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-pq
+-hide_banner -nostdin -loglevel error -y -i <library>/pq.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:hdr10-opt=1:repeat-headers=1 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/pq.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-hdr10
+-hide_banner -nostdin -loglevel error -y -i <library>/hdr10.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400:hdr10-opt=1:repeat-headers=1 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/hdr10.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-full-range
+-hide_banner -nostdin -loglevel error -y -i <library>/full-range.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range pc -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/full-range.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-10bit
+-hide_banner -nostdin -loglevel error -y -i <library>/10bit.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/10bit.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-422
+-hide_banner -nostdin -loglevel error -y -i <library>/422.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv422p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/422.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-444
+-hide_banner -nostdin -loglevel error -y -i <library>/444.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv444p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/444.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-exotic
+(no invocation)
+row: skipped exotic-pixel-format
+== source-hdr10/pixel-format-yuv420p10le
+-hide_banner -nostdin -loglevel error -y -i <library>/hdr10.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400:hdr10-opt=1:repeat-headers=1 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/hdr10.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== deinterlace-yadif
+-hide_banner -nostdin -loglevel error -y -i <library>/interlaced.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -vf yadif=mode=send_frame:parity=auto:deint=all -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/interlaced.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== deinterlace-bwdif
+-hide_banner -nostdin -loglevel error -y -i <library>/interlaced.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -vf bwdif=mode=send_frame:parity=auto:deint=all -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/interlaced.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== deinterlace-yadif=send_frame_nospatial
+-hide_banner -nostdin -loglevel error -y -i <library>/interlaced.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -vf yadif=mode=send_frame_nospatial:parity=auto:deint=all -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/interlaced.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== deinterlace-yadif/progressive-source
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== max-height-220
+-hide_banner -nostdin -loglevel error -y -i <library>/tall.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -vf scale=294:220:flags=lanczos -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/tall.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== max-height-240
+-hide_banner -nostdin -loglevel error -y -i <library>/tall.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -vf scale=320:240:flags=lanczos -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/tall.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== max-height-480/at-the-ceiling
+-hide_banner -nostdin -loglevel error -y -i <library>/tall.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/tall.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== max-height-240/deinterlace-yadif
+-hide_banner -nostdin -loglevel error -y -i <library>/tall-interlaced.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -vf yadif=mode=send_frame:parity=auto:deint=all,scale=320:240:flags=lanczos -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/tall-interlaced.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== max-height-240/bitrate-8000k
+-hide_banner -nostdin -loglevel error -y -i <library>/tall.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -b:v 8000k -x265-params log-level=error -vf scale=320:240:flags=lanczos -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/tall.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== streams/everything
+-hide_banner -nostdin -loglevel error -y -i <library>/streams.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/streams.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== streams/audio-eng
+-hide_banner -nostdin -loglevel error -y -i <library>/streams.mkv -map 0:0 -map 0:1 -map 0:3 -map 0:4 -map 0:5 -map 0:6 -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/streams.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== streams/audio-ENG-fre
+-hide_banner -nostdin -loglevel error -y -i <library>/streams.mkv -map 0:0 -map 0:1 -map 0:3 -map 0:4 -map 0:5 -map 0:6 -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/streams.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== streams/subtitles-eng
+-hide_banner -nostdin -loglevel error -y -i <library>/streams.mkv -map 0:0 -map 0:1 -map 0:2 -map 0:3 -map 0:4 -map 0:6 -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/streams.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== streams/commentary-dropped/audio-eng/subtitles-eng
+-hide_banner -nostdin -loglevel error -y -i <library>/streams.mkv -map 0:0 -map 0:1 -map 0:4 -map 0:6 -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/streams.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== streams/no-audio-left-fallback
+-hide_banner -nostdin -loglevel error -y -i <library>/jpn-only.mkv -map 0:0 -map 0:1 -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/jpn-only.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== streams/mov-text
+-hide_banner -nostdin -loglevel error -y -i <library>/subs.mp4 -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f mp4 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/subs.__transcoding__.mp4.holdfast-part
+row: failed temp missing or empty
+== streams/mov-text/into-mkv
+-hide_banner -nostdin -loglevel error -y -i <library>/subs.mp4 -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/subs.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== remux-only
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== remux-only/audio-eng
+-hide_banner -nostdin -loglevel error -y -i <library>/streams.mkv -map 0:0 -map 0:1 -map 0:3 -map 0:4 -map 0:5 -map 0:6 -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/streams.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== remux-only/pictures-font
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures-font.mkv -map 0:10 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./pictures-font.__transcoding__.mkv.holdfast-part.picture0
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures-font.mkv -map 0:11 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./pictures-font.__transcoding__.mkv.holdfast-part.picture1
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures-font.mkv -map 0 -map -0:d? -map -0:10 -map -0:11 -c copy -f matroska -attach ./pictures-font.__transcoding__.mkv.holdfast-part.picture0 -metadata:s:t:1 mimetype=image/jpeg -metadata:s:t:1 filename=cover.jpg -attach ./pictures-font.__transcoding__.mkv.holdfast-part.picture1 -metadata:s:t:2 mimetype=image/jpeg -metadata:s:t:2 filename=cover_land.jpg -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/pictures-font.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== cover-mp4
+-hide_banner -nostdin -loglevel error -y -i <library>/cover.mp4 -map 0 -map -0:d? -c copy -c:v libx265 -c:v:1 copy -pix_fmt yuv420p10le -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f mp4 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/cover.__transcoding__.mp4.holdfast-part
+row: failed temp missing or empty
+== cover-mp4/into-mkv
+-hide_banner -nostdin -loglevel error -y -i <library>/cover.mp4 -map 0:1 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./cover.__transcoding__.mkv.holdfast-part.picture0
+-hide_banner -nostdin -loglevel error -y -i <library>/cover.mp4 -map 0 -map -0:d? -map -0:1 -c copy -c:v libx265 -pix_fmt yuv420p10le -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -attach ./cover.__transcoding__.mkv.holdfast-part.picture0 -metadata:s:t:0 mimetype=image/jpeg -metadata:s:t:0 filename=cover.jpg -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/cover.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== cover-mkv
+-hide_banner -nostdin -loglevel error -y -i <library>/cover.mkv -map 0:1 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./cover.__transcoding__.mkv.holdfast-part.picture0
+-hide_banner -nostdin -loglevel error -y -i <library>/cover.mkv -map 0 -map -0:d? -map -0:1 -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -attach ./cover.__transcoding__.mkv.holdfast-part.picture0 -metadata:s:t:0 mimetype=image/jpeg -metadata:s:t:0 filename=cover.jpg -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/cover.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== cover-mkv/into-mp4
+-hide_banner -nostdin -loglevel error -y -i <library>/cover.mkv -map 0 -map -0:d? -c copy -c:v libx265 -c:v:1 copy -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f mp4 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/cover.__transcoding__.mp4.holdfast-part
+row: failed temp missing or empty
+== pictures
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures.mkv -map 0:9 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./pictures.__transcoding__.mkv.holdfast-part.picture0
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures.mkv -map 0:10 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./pictures.__transcoding__.mkv.holdfast-part.picture1
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures.mkv -map 0 -map -0:d? -map -0:9 -map -0:10 -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -attach ./pictures.__transcoding__.mkv.holdfast-part.picture0 -metadata:s:t:0 mimetype=image/jpeg -metadata:s:t:0 filename=cover.jpg -attach ./pictures.__transcoding__.mkv.holdfast-part.picture1 -metadata:s:t:1 mimetype=image/jpeg -metadata:s:t:1 filename=cover_land.jpg -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/pictures.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== pictures-font
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures-font.mkv -map 0:10 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./pictures-font.__transcoding__.mkv.holdfast-part.picture0
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures-font.mkv -map 0:11 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./pictures-font.__transcoding__.mkv.holdfast-part.picture1
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures-font.mkv -map 0 -map -0:d? -map -0:10 -map -0:11 -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -attach ./pictures-font.__transcoding__.mkv.holdfast-part.picture0 -metadata:s:t:1 mimetype=image/jpeg -metadata:s:t:1 filename=cover.jpg -attach ./pictures-font.__transcoding__.mkv.holdfast-part.picture1 -metadata:s:t:2 mimetype=image/jpeg -metadata:s:t:2 filename=cover_land.jpg -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/pictures-font.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== pictures-font/audio-eng-fre
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures-font.mkv -map 0:10 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./pictures-font.__transcoding__.mkv.holdfast-part.picture0
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures-font.mkv -map 0:11 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./pictures-font.__transcoding__.mkv.holdfast-part.picture1
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures-font.mkv -map 0:0 -map 0:1 -map 0:2 -map 0:4 -map 0:5 -map 0:6 -map 0:7 -map 0:8 -map 0:9 -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -attach ./pictures-font.__transcoding__.mkv.holdfast-part.picture0 -metadata:s:t:1 mimetype=image/jpeg -metadata:s:t:1 filename=cover.jpg -attach ./pictures-font.__transcoding__.mkv.holdfast-part.picture1 -metadata:s:t:2 mimetype=image/jpeg -metadata:s:t:2 filename=cover_land.jpg -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/pictures-font.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== pictures/spaces-in-name
+-hide_banner -nostdin -loglevel error -y -i "<library>/A Synthetic Film (2025).mkv" -map 0:9 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- "./A Synthetic Film (2025).__transcoding__.mkv.holdfast-part.picture0"
+-hide_banner -nostdin -loglevel error -y -i "<library>/A Synthetic Film (2025).mkv" -map 0:10 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- "./A Synthetic Film (2025).__transcoding__.mkv.holdfast-part.picture1"
+-hide_banner -nostdin -loglevel error -y -i "<library>/A Synthetic Film (2025).mkv" -map 0 -map -0:d? -map -0:9 -map -0:10 -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -attach "./A Synthetic Film (2025).__transcoding__.mkv.holdfast-part.picture0" -metadata:s:t:0 mimetype=image/jpeg -metadata:s:t:0 filename=cover.jpg -attach "./A Synthetic Film (2025).__transcoding__.mkv.holdfast-part.picture1" -metadata:s:t:1 mimetype=image/jpeg -metadata:s:t:1 filename=cover_land.jpg -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- "<library>/A Synthetic Film (2025).__transcoding__.mkv.holdfast-part"
+row: failed temp missing or empty
+== pictures/percent-d-in-name
+-hide_banner -nostdin -loglevel error -y -i "<library>/The 100%d Club (2025).mkv" -map 0:9 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- "./The 100%d Club (2025).__transcoding__.mkv.holdfast-part.picture0"
+-hide_banner -nostdin -loglevel error -y -i "<library>/The 100%d Club (2025).mkv" -map 0:10 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- "./The 100%d Club (2025).__transcoding__.mkv.holdfast-part.picture1"
+-hide_banner -nostdin -loglevel error -y -i "<library>/The 100%d Club (2025).mkv" -map 0 -map -0:d? -map -0:9 -map -0:10 -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -attach "./The 100%d Club (2025).__transcoding__.mkv.holdfast-part.picture0" -metadata:s:t:0 mimetype=image/jpeg -metadata:s:t:0 filename=cover.jpg -attach "./The 100%d Club (2025).__transcoding__.mkv.holdfast-part.picture1" -metadata:s:t:1 mimetype=image/jpeg -metadata:s:t:1 filename=cover_land.jpg -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- "<library>/The 100%d Club (2025).__transcoding__.mkv.holdfast-part"
+row: failed temp missing or empty
+== pictures/long-stem
+-hide_banner -nostdin -loglevel error -y -i <library>/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.mkv -map 0:9 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.2ad727dc81e0.__transcoding__.mkv.picture0
+-hide_banner -nostdin -loglevel error -y -i <library>/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.mkv -map 0:10 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.2ad727dc81e0.__transcoding__.mkv.picture1
+-hide_banner -nostdin -loglevel error -y -i <library>/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.mkv -map 0 -map -0:d? -map -0:9 -map -0:10 -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -attach ./xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.2ad727dc81e0.__transcoding__.mkv.picture0 -metadata:s:t:0 mimetype=image/jpeg -metadata:s:t:0 filename=cover.jpg -attach ./xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.2ad727dc81e0.__transcoding__.mkv.picture1 -metadata:s:t:1 mimetype=image/jpeg -metadata:s:t:1 filename=cover_land.jpg -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.__transcoding__.mkv
+row: failed temp missing or empty
+== scratch
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <scratch>/sdr.<source-tag>.__transcoding__.mkv
+row: failed temp missing or empty
+== scratch/pictures
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures.mkv -map 0:9 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./pictures.<source-tag>.__transcoding__.mkv.picture0
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures.mkv -map 0:10 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./pictures.<source-tag>.__transcoding__.mkv.picture1
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures.mkv -map 0 -map -0:d? -map -0:9 -map -0:10 -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -attach ./pictures.<source-tag>.__transcoding__.mkv.picture0 -metadata:s:t:0 mimetype=image/jpeg -metadata:s:t:0 filename=cover.jpg -attach ./pictures.<source-tag>.__transcoding__.mkv.picture1 -metadata:s:t:1 mimetype=image/jpeg -metadata:s:t:1 filename=cover_land.jpg -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <scratch>/pictures.<source-tag>.__transcoding__.mkv
+row: failed temp missing or empty
+== encode-profile/crf-30
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 30 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== encode-profile/first-match-wins
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 10 -crf 30 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== encode-profile/bitrate-3000k
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -b:v 3000k -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== encode-profile/unmatched
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== rules/band-crf-31
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 31 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== rules/unmatched-band
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 29 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
