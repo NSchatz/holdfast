@@ -24,7 +24,7 @@ import (
 // frameSideDataFlat/streamSideDataFlat produce — so the HDR/DV classifier, which
 // substring-matches that flat text, cannot see any difference. The costly whole-file
 // checks (DecodeOK, packet count, output duration/stream counts) are deliberately NOT
-// here: they run in verifyOutput against the encoded temp, not the source.
+// here: they run in verifyAgainst against the encoded temp, not the source.
 //
 // Only the ONE cheap scalar probe is eager. The side-data probes (a first-frame
 // decode + a stream probe) and the bit_rate container fallback are LAZY — computed on

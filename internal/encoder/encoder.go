@@ -25,7 +25,7 @@ type Spec struct {
 	// FFmpegCodec is the ffmpeg -c:v value (e.g. "libx265", "hevc_nvenc").
 	FFmpegCodec string
 	// TargetCodec is what ffprobe reports codec_name as for the OUTPUT: "hevc" or
-	// "av1". Drives the engine's skip-already-target guard and verifyOutput's
+	// "av1". Drives the engine's skip-already-target guard and verifyAgainst's
 	// codec check.
 	TargetCodec string
 	// Hardware reports whether this encoder needs a GPU/device. Hardware encoders

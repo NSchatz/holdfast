@@ -3,7 +3,7 @@
 //
 // It only ever records job STATE and never touches the filesystem. The only filesystem
 // mutation in the program is the atomic same-directory rename in internal/engine, which
-// runs solely after verifyOutput passes. A crash mid-encode leaves a job stuck in an active
+// runs solely after verifyAgainst passes. A crash mid-encode leaves a job stuck in an active
 // state; RecoverStale resets it to pending on the next startup, the source untouched.
 //
 // Absence is REPRESENTABLE throughout, and must stay that way. Every numeric field that a

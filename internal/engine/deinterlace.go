@@ -12,11 +12,12 @@ import (
 // encoder that applies the filter, the perceptual gate that builds its reference through
 // the same filter, and the terminal row that records what produced the replacement.
 //
-// They agree because each of them resolves from the SAME two inputs - the library profile
-// the engine handed down and the source's own probe snapshot - through the functions below
-// and through nothing else. A site that read the configuration for itself would be a second
-// answer to "what was applied", and the perceptual gate's whole claim is that it scored
-// this encode rather than something adjacent to it.
+// They agree because none of them resolves it: the encode plan does, once per job, from the
+// library profile and the source's own probe snapshot, through the functions below
+// (deriveEncodePlan), and all three read the plan's Picture.Deinterlace. A site that read the
+// configuration for itself would be a second answer to "what was applied", and the
+// perceptual gate's whole claim is that it scored this encode rather than something
+// adjacent to it.
 
 // deinterlaceFor resolves a profile's configured deinterlace and refuses what this build
 // will not run. It answers about the CONFIGURATION alone, so it is what a caller asks

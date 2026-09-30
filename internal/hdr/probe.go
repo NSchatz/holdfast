@@ -52,53 +52,111 @@ func DeriveColorArgs(ctx context.Context, p prober, f string) (ffmpegFlags []str
 // snapshot instead of re-probing four colour fields plus the side data at encode time;
 // DeriveColorArgs is the thin prober-backed wrapper over it, so the two cannot drift
 // (the unit tests exercise both). See DeriveColorArgs for the propagation semantics.
+//
+// It is DeriveColor spelled as arguments: the description an encode writes, rendered as
+// the -color_* flags and the libx265 parameter suffix that write it.
 func DeriveColorArgsFrom(prim, trc, spc, rng, flat string) (ffmpegFlags []string, x265Params string) {
-	hasMD := strings.Contains(flat, "Mastering display metadata")
-	isHDR10 := trc == "smpte2084" || hasMD
-	if isHDR10 {
-		if prim == "" {
-			prim = "bt2020"
-		}
-		if trc == "" {
-			trc = "smpte2084"
-		}
-		if spc == "" {
-			spc = "bt2020nc"
-		}
-		if rng == "" {
-			rng = "tv"
-		}
-	}
+	c := DeriveColor(prim, trc, spc, rng, flat)
+	return c.FFmpegFlags(), c.X265Params()
+}
 
-	var x strings.Builder
-	if prim != "" {
-		ffmpegFlags = append(ffmpegFlags, "-color_primaries", prim)
-		x.WriteString(":colorprim=" + prim)
+// Color is the colour description an encode writes into its output: the source's own four
+// tags, each "" where the source signals none (and then written nowhere), with the HDR10
+// defaults filled in where the source carries HDR10 static metadata but under-signals them,
+// and that static metadata itself.
+//
+// It is a DECLARATION of what the output will carry, which is why it is a value rather than
+// a command line: the encode writes it through FFmpegFlags and X265Params, and anything that
+// later asks what the output should carry reads the same value rather than re-deriving it.
+type Color struct {
+	// Primaries, Transfer, Matrix and Range are the -color_primaries, -color_trc,
+	// -colorspace and -color_range values, in ffmpeg's spelling.
+	Primaries, Transfer, Matrix, Range string
+	// HDR10 reports that the source carries HDR10 static metadata: a PQ transfer, or a
+	// mastering-display block.
+	HDR10 bool
+	// MasterDisplay and MaxCLL are that static metadata in libx265's own spelling, each ""
+	// where the source's block is absent or cannot be read whole. Both are "" when HDR10 is
+	// false.
+	MasterDisplay, MaxCLL string
+}
+
+// DeriveColor derives the colour description an encode writes from a source's
+// already-probed colour tags (prim/trc/spc/rng, each normalised, "" meaning "not
+// signalled") and its flat side data. Passes through only tags the source actually
+// signals - EXCEPT that a source carrying HDR10 static metadata (PQ transfer or a
+// mastering-display block) is, by definition, bt2020/PQ, so those are defaulted when the
+// source under-signals them (common with H.264 HDR). SDR/HLG get their tags passed through
+// with no HDR10 metadata.
+func DeriveColor(prim, trc, spc, rng, flat string) Color {
+	hasMD := strings.Contains(flat, "Mastering display metadata")
+	c := Color{Primaries: prim, Transfer: trc, Matrix: spc, Range: rng, HDR10: trc == "smpte2084" || hasMD}
+	if !c.HDR10 {
+		return c
 	}
-	if trc != "" {
-		ffmpegFlags = append(ffmpegFlags, "-color_trc", trc)
-		x.WriteString(":transfer=" + trc)
+	if c.Primaries == "" {
+		c.Primaries = "bt2020"
 	}
-	if spc != "" {
-		ffmpegFlags = append(ffmpegFlags, "-colorspace", spc)
-		x.WriteString(":colormatrix=" + spc)
+	if c.Transfer == "" {
+		c.Transfer = "smpte2084"
 	}
-	if rng != "" {
+	if c.Matrix == "" {
+		c.Matrix = "bt2020nc"
+	}
+	if c.Range == "" {
+		c.Range = "tv"
+	}
+	c.MasterDisplay = MasterDisplay(flat)
+	c.MaxCLL = MaxCLL(flat)
+	return c
+}
+
+// FFmpegFlags are the encoder-agnostic -color_* output options that write c, in the order
+// primaries, transfer, matrix, range; a tag c does not carry is not written.
+func (c Color) FFmpegFlags() []string {
+	var flags []string
+	if c.Primaries != "" {
+		flags = append(flags, "-color_primaries", c.Primaries)
+	}
+	if c.Transfer != "" {
+		flags = append(flags, "-color_trc", c.Transfer)
+	}
+	if c.Matrix != "" {
+		flags = append(flags, "-colorspace", c.Matrix)
+	}
+	if c.Range != "" {
 		// Range is signalled via the ffmpeg -color_range flag only; bash
 		// derive_color_args deliberately sets no x265 range param (x265 infers range
 		// from the VUI / -color_range), so the asymmetry with prim/trc/spc is intended.
-		ffmpegFlags = append(ffmpegFlags, "-color_range", rng)
+		flags = append(flags, "-color_range", c.Range)
 	}
-	if isHDR10 {
-		if md := MasterDisplay(flat); md != "" {
-			x.WriteString(":master-display=" + md)
+	return flags
+}
+
+// X265Params is the ":k=v..." suffix libx265 writes c with (libx265-only): the three colour
+// tags c carries, then - for HDR10 - the mastering display and content light level it has
+// and the HDR10 signalling options.
+func (c Color) X265Params() string {
+	var x strings.Builder
+	if c.Primaries != "" {
+		x.WriteString(":colorprim=" + c.Primaries)
+	}
+	if c.Transfer != "" {
+		x.WriteString(":transfer=" + c.Transfer)
+	}
+	if c.Matrix != "" {
+		x.WriteString(":colormatrix=" + c.Matrix)
+	}
+	if c.HDR10 {
+		if c.MasterDisplay != "" {
+			x.WriteString(":master-display=" + c.MasterDisplay)
 		}
-		if cll := MaxCLL(flat); cll != "" {
-			x.WriteString(":max-cll=" + cll)
+		if c.MaxCLL != "" {
+			x.WriteString(":max-cll=" + c.MaxCLL)
 		}
 		x.WriteString(":hdr10-opt=1:repeat-headers=1")
 	}
-	return ffmpegFlags, x.String()
+	return x.String()
 }
 
 // chromaRe splits a pix_fmt into its chroma-subsampling token (420/422/444/other)

@@ -13,7 +13,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/vmaf"
 )
 
-// vmafProof is what the VMAF gate MEASURED - carried out of verifyOutput rather than
+// vmafProof is what the VMAF gate MEASURED - carried out of verifyAgainst rather than
 // discarded, so the terminal ledger row can keep it (TRANSCODE-13). Its zero value
 // means the gate did not run (VMAF disabled), which is why the scores are pointers:
 // nil is "not measured", and 0.0 is a real, terrible score. Collapsing the two is
@@ -69,7 +69,7 @@ type vmafProof struct {
 	Skipped string
 }
 
-// verifyOutput checks a freshly-encoded temp before it may replace the source, and is the
+// verifyAgainst checks a freshly-encoded temp before it may replace the source, and is the
 // heart of the no-loss contract: the source is replaced only when this returns nil. Gates run
 // cheap-to-expensive, so the full decode and VMAF (TRANSCODE-4) come last. It returns the VMAF
 // proof, the GATE that refused and the CLASS of the rejection beside the pass/fail error, the
@@ -85,9 +85,19 @@ type vmafProof struct {
 // refused was refused by no gate - and it changes nothing that is stored or decided: it
 // travels out on the Event for the surfaces that count failures per gate.
 //
-// prof is the profile of the root the source was enumerated under: every threshold comes from
-// it, and targetCodec is what its own `encoder` resolves to, so a film library and a
-// grainy-anime library each meet the bar their operator set. WHAT the gates check never moves.
+// # The plan, and why every gate reads it
+//
+// job is THIS JOB's encode plan - the SAME value the encode's command line was built from,
+// handed in rather than derived here - and every gate below reads what it checks off it: the
+// codec the output must be in, the streams it must carry, the deinterlace and the scale the
+// perceptual gate reproduces, and the profile every floor comes from. That is the whole of
+// why it is the one parameter: a gate that resolved any of those for itself would be
+// answering a different question than the encoder was asked, and the two answers would
+// differ on exactly the file nobody tested (docs/design/encode-plan.md#encode-plan).
+//
+// job.Profile is the profile of the root the source was enumerated under: every threshold
+// comes from it, so a film library and a grainy-anime library each meet the bar their
+// operator set. WHAT the gates check never moves.
 //
 // # The class, and why it is produced HERE
 //
@@ -103,32 +113,25 @@ type vmafProof struct {
 // NOT classify explicitly is transient, the fail-safe direction: an unrecognised rejection
 // costs CPU, where a wrongly-final one costs a file nobody revisits.
 //
-// targetCodec is what THIS JOB's effective encoder produces, passed in rather than derived
-// from prof: a run can carry more than one target, and a check made against any other job's
-// would reject an output that is exactly what this one's own settings asked for.
-// plan is THIS JOB's intended stream map - the SAME value the encode's argv was built
-// from, handed in rather than derived here. Gate 5 is checked against it, and that is the
-// whole of why it is a parameter: a gate that derived its own map would be answering a
-// different question than the encoder was asked, and the two answers would differ on
-// exactly the file nobody tested.
-// film is the deinterlace THIS JOB applied, resolved once by the engine and handed in for
-// the same reason plan is: the perceptual gate has to build its reference through the filter
-// the encoder actually ran, and a gate that re-derived its own would be a second answer to
-// what the output should be compared against. A disabled filter is the ordinary case and
-// leaves every gate below exactly as it was.
-// shrink is the resolution ceiling THIS JOB applied, resolved once by the engine and handed
-// in for the same reason film is: the perceptual gate has to scale the OUTPUT back up to the
-// resolution of the file that is about to be deleted, and a gate that re-derived its own
-// would be a second answer to what was compared. A disabled scale is the ordinary case and
-// leaves every gate below exactly as it was.
-func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.Profile, targetCodec string,
-	plan *StreamPlan, film deinterlace.Filter, shrink downscale.Scale) (vmafProof, string, store.FailureClass, error) {
+// job.Video.Codec is what THIS JOB's effective encoder produces - or, on a remux, what the
+// source's video already was - rather than anything derived from the profile: a run can
+// carry more than one target, and a check made against any other job's would reject an
+// output that is exactly what this one's own settings asked for. job.Streams is the intended
+// stream map gate 5 is checked against. job.Picture carries the deinterlace and the scale this
+// job applied: the perceptual gate builds its reference through the filter the encoder ran,
+// and scales the OUTPUT back up to the resolution of the file that is about to be deleted.
+// A disabled filter and a disabled scale are the ordinary case and leave every gate below
+// exactly as it was.
+func (e *Engine) verifyAgainst(ctx context.Context, in, tmp string, job *EncodePlan) (vmafProof, string, store.FailureClass, error) {
 	var none vmafProof
+	prof, plan := job.Profile, job.Streams
 
-	// THE SEAM, announced before any gate runs: this is the map the checks below read.
-	// The encode announced the map its argv was built from at its own seam, so a reader
-	// holding both can ask whether they were ONE derivation (see Engine.planObserver).
+	// THE SEAMS, announced before any gate runs: this is the plan the checks below read, and
+	// the intended stream map inside it. The encode announced the ones its command line was
+	// built from at its own seams, so a reader holding both can ask whether they were ONE
+	// derivation (see Engine.planObserver and Engine.encodePlanObserver).
 	e.observePlan(planStageVerify, plan)
+	e.observeEncodePlan(planStageVerify, job)
 
 	// 1. exists & non-empty. TRANSIENT: an empty temp is what a full disk, a killed ffmpeg
 	// or a write that never landed leaves behind, none of them properties of the source.
@@ -141,14 +144,11 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.P
 	// their own. DETERMINISTIC: the job's encoder produces the codec it produces.
 	//
 	// A REMUX produces the codec it COPIED, which is the source's - the gate is unchanged,
-	// it is the expectation that follows what the job was asked to do. Holding a remux to
-	// the configured target codec would reject every remux there is, and lowering the gate
-	// to "whatever came out" would accept anything; the source's own codec is the only
-	// expectation that is neither.
-	wantCodec := targetCodec
-	if plan.RemuxOnly() {
-		wantCodec = plan.SourceVideoCodec()
-	}
+	// it is the expectation that follows what the job was asked to do, and the plan declares
+	// it (VideoPlan.Codec). Holding a remux to the configured target codec would reject every
+	// remux there is, and lowering the gate to "whatever came out" would accept anything; the
+	// source's own codec is the only expectation that is neither.
+	wantCodec := job.Video.Codec
 	if oc := e.Probe.VideoCodec(ctx, tmp); oc != wantCodec {
 		return none, GateCodec, store.FailureDeterministic, fmt.Errorf("output codec is %q, not %s", oc, wantCodec)
 	}
@@ -210,7 +210,7 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.P
 	// detail: identity is established FIRST, the output is rejected when it cannot be, and
 	// only then is the gate skipped. An implementation that skipped first and checked
 	// loosely afterwards would have removed a gate.
-	if plan.RemuxOnly() {
+	if job.Video.Copy {
 		if err := e.videoIdentity(ctx, in, tmp); err != nil {
 			// No member of the gate vocabulary names the remux identity check: it stands in
 			// place of the perceptual gate on this path, and it is none of the three floors,
@@ -226,7 +226,7 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.P
 		return vmafProof{Skipped: VmafSkippedRemuxOnly}, "", "", nil
 	}
 	if prof.VmafGate() {
-		return e.vmafGate(ctx, tmp, in, prof, film, shrink)
+		return e.vmafGate(ctx, tmp, in, prof, job.Picture.Deinterlace, job.Picture.Downscale)
 	}
 	return none, "", "", nil
 }

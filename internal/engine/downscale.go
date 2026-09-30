@@ -10,11 +10,12 @@ import (
 // it: the encoder that scales the picture down, the perceptual gate that scales the output
 // back up to score it, and the terminal row that records what produced the replacement.
 //
-// They agree because each of them resolves from the SAME two inputs - the library profile
-// the engine handed down and the source's own probe snapshot - through the function below
-// and through nothing else. A site that read the configuration for itself would be a second
-// answer to "what was this file scaled to", and the gate's whole claim is that it scored
-// this encode at the resolution of the file it is about to delete.
+// They agree because none of them resolves it: the encode plan does, once per job, from the
+// library profile and the source's own probe snapshot, through the function below
+// (deriveEncodePlan), and all three read the plan's Picture.Downscale. A site that read the
+// configuration for itself would be a second answer to "what was this file scaled to", and
+// the gate's whole claim is that it scored this encode at the resolution of the file it is
+// about to delete.
 
 // downscaleApplied is the scale that runs for THIS source: the profile's configured ceiling
 // against the source's own dimensions, and none where the ceiling is unset, the source is

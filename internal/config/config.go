@@ -303,7 +303,7 @@ type Config struct {
 	Encoder string `yaml:"encoder"`
 	// CRF is the encoder's quality knob (lower = bigger/better): libx265/libsvtav1
 	// constant-rate-factor, or reused as the CQ/global_quality/QP target for the
-	// hardware encoders (see internal/engine.buildArgs).
+	// hardware encoders (see internal/engine.videoArgs).
 	CRF int `yaml:"crf"`
 	// Preset is the encoder's speed/quality preset: a libx265 preset word for
 	// "cpu" ("slow" etc.), or mapped to SVT-AV1's numeric 0-13 scale for "svtav1"

@@ -17,7 +17,6 @@ import (
 	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/downscale"
 	"github.com/NSchatz/holdfast/internal/encoder"
-	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/probe"
 )
 
@@ -30,11 +29,13 @@ import (
 // so an Encoder is never trusted on its word.
 //
 // props is the source's probe snapshot the engine already took for its skip guards
-// (TRANSCODE-PERF), threaded in so a production encoder reuses it instead of
-// re-spawning ffprobe for pix_fmt and the colour tags. It may be nil (a direct caller
-// — chiefly the tests — that did not pre-probe); FFmpegEncoder then takes its own
-// snapshot of the same source, so behaviour is identical, just an extra probe this
-// path avoids when the engine supplies one.
+// (TRANSCODE-PERF). The engine derives the job's encode plan from it before the encode
+// runs, so an encoder handed that plan (EncodePlanEncoder) reads nothing off it; an
+// encoder deriving its own plan - a direct caller's - reuses it instead of re-spawning
+// ffprobe for pix_fmt and the colour tags. It may be nil (a direct caller - chiefly the
+// tests - that did not pre-probe); FFmpegEncoder then takes its own snapshot of the same
+// source, so behaviour is identical, just an extra probe this path avoids when the engine
+// supplies one.
 type Encoder interface {
 	Encode(ctx context.Context, in, out string, props *probe.VideoProps) error
 }
@@ -73,6 +74,27 @@ type StreamPlanEncoder interface {
 	ForStreamPlan(plan *StreamPlan) Encoder
 }
 
+// EncodePlanEncoder is an Encoder whose command line is built from THIS JOB's encode plan -
+// the one declared description of what the encode does, derived once by the engine before
+// the encode runs (see EncodePlan).
+//
+// It is a separate optional interface for the reason StreamPlanEncoder is: an Encoder with
+// no per-job behaviour has nothing to do with a plan, and a test's deterministic fake writes
+// the bytes it was told to write. ForEncodePlan must return an Encoder equivalent to the
+// receiver in every respect but the plan, and must not mutate the receiver - the engine's
+// workers share one Encoder across goroutines.
+//
+// The plan is HANDED IN and never re-derived by an encoder that was handed one: the command
+// line and every gate the output is checked by read ONE plan, so no gate can check the
+// output against something other than what was encoded. An Encoder that WRAPS a plan-reading
+// encoder must forward ForEncodePlan as well as ForProfile and ForStreamPlan: one that does
+// not leaves the wrapped encoder to derive its own plan from its own configuration, as a
+// direct caller's does, which is the second derivation this interface exists to prevent.
+type EncodePlanEncoder interface {
+	Encoder
+	ForEncodePlan(plan *EncodePlan) Encoder
+}
+
 // EncoderFunc adapts a plain function to Encoder (used by tests).
 type EncoderFunc func(ctx context.Context, in, out string, props *probe.VideoProps) error
 
@@ -81,26 +103,34 @@ func (f EncoderFunc) Encode(ctx context.Context, in, out string, props *probe.Vi
 	return f(ctx, in, out, props)
 }
 
-// FFmpegEncoder is the production encoder. It carries every stream but data
-// streams (-map 0 -map -0:d?), stream-copies audio/subtitle/attachment, and
-// re-encodes video per the configured Cfg.Encoder (internal/encoder.Lookup) at the
-// configured CRF/preset/pixel format. Colour/HDR propagation (TRANSCODE-3) derives
-// -color_* flags from the source via internal/hdr and applies to EVERY encoder
-// (they are encoder-agnostic primaries/transfer/matrix/range tags); the x265
-// colour params (HDR10 static-metadata master-display/max-cll) are libx265-only —
-// see buildArgs. Probe is required to do the colour/pixel-format derivation, so it
-// must be set in production (a nil Probe is a programmer error).
+// FFmpegEncoder is the production encoder. It builds its command line from THIS JOB's
+// encode plan (EncodePlan): the streams the plan carries (every stream but data where no
+// intended map was derived, -map 0 -map -0:d?), copied, with the video re-encoded by the
+// plan's registry encoder at its pixel format and quality value, through its picture
+// operations, and written with its colour description - the encoder-agnostic -color_* tags
+// on EVERY encoder, the HDR10 static-metadata master-display/max-cll block on libx265 only
+// (see videoArgs).
+//
+// The engine derives the plan and hands it over (ForEncodePlan). An encoder that was handed
+// none derives it itself, from Cfg, the profile, the stream map and the source, through the
+// same derivation - which is what a direct caller of this type gets, and the only path
+// that needs Probe: a nil Probe there is a programmer error, refused rather than
+// dereferenced.
 //
 // CPU libx265 is the archival default; SVT-AV1 and the hardware encoders (NVENC/
 // QSV/VAAPI/AMF, TRANSCODE-6) are opt-in and gated behind a runtime capability
-// check (internal/encoder.Available) BEFORE the engine ever calls Encode — see
+// check (internal/encoder.Available) BEFORE the engine ever calls Encode - see
 // cmd/holdfast's cmdRun. Encode itself never re-derives availability; it trusts
-// the caller checked, and simply builds and runs the command for whatever Spec the
-// configured Cfg.Encoder resolves to.
+// the caller checked, and simply builds and runs the command for whatever registry
+// encoder the plan names.
 type FFmpegEncoder struct {
 	FFmpeg string
-	Cfg    config.Config
-	Probe  *probe.Prober
+	// Cfg is the configuration a plan this encoder derives itself is resolved from: its
+	// encode profiles and its top-level bitrate target. It is not consulted when the engine
+	// hands the encoder a plan - the engine derived that one from its own configuration, which
+	// in production is this one.
+	Cfg   config.Config
+	Probe *probe.Prober
 
 	// Prof is the LIBRARY PROFILE this encoder builds an encode from - the resolved
 	// knobs of the root the file was enumerated under. The engine sets it per file
@@ -119,6 +149,16 @@ type FFmpegEncoder struct {
 	// and the gate would then be checking a different answer than the argv was built
 	// from.
 	Plan *StreamPlan
+
+	// Job is THIS JOB's encode plan, derived once by the engine and handed here through
+	// ForEncodePlan: the command line is built from it and from nothing else about the job,
+	// and every gate reads the same value. Cfg, Prof and Plan are then not consulted at all -
+	// the plan already carries everything they would have resolved to.
+	//
+	// nil means the encoder derives the plan itself, from Cfg, the profile, Plan and the
+	// source, through the same derivation the engine uses (deriveEncodePlan) - which is what a
+	// direct caller of this exported type gets.
+	Job *EncodePlan
 
 	// X265 is the parallelism every libx265 encode this encoder builds is told to use:
 	// a worker-pool size and a frame-thread count, joined to the -x265-params string on
@@ -184,6 +224,13 @@ func (e FFmpegEncoder) ForStreamPlan(plan *StreamPlan) Encoder {
 	return e
 }
 
+// ForEncodePlan returns this encoder built from plan. The receiver is a VALUE, so the copy
+// is the whole of the isolation the engine's workers need, exactly as it is for ForProfile.
+func (e FFmpegEncoder) ForEncodePlan(plan *EncodePlan) Encoder {
+	e.Job = plan
+	return e
+}
+
 // profile is the knobs this encoder builds an encode from: the library profile the
 // engine handed it, or - for an encoder constructed without one - the top-level values
 // of the configuration it was built with.
@@ -194,9 +241,10 @@ func (e FFmpegEncoder) profile() config.Profile {
 	return e.Cfg.TopLevelProfile()
 }
 
-// Encode runs ffmpeg. It returns an error if the configured encoder is unknown, if
-// ffmpeg exits non-zero, or if colour/pixel-format derivation fails (the engine
-// then discards the temp and leaves the source untouched).
+// Encode runs ffmpeg. It returns an error if the plan cannot be built - a plan handed in for
+// another job, an operation it declares that this build cannot perform, or, on a plan this
+// encoder derives itself, any refusal of the derivation (see deriveEncodePlan) - or if
+// ffmpeg exits non-zero. The engine then discards the temp and leaves the source untouched.
 func (e FFmpegEncoder) Encode(ctx context.Context, in, out string, props *probe.VideoProps) error {
 	return e.EncodeWithProgress(ctx, in, out, props, nil)
 }
@@ -216,155 +264,47 @@ func (e FFmpegEncoder) Encode(ctx context.Context, in, out string, props *probe.
 // pipe cannot be opened at all, the -progress option is simply not passed and the encode
 // runs precisely as it did before this existed.
 func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, props *probe.VideoProps, sink ProgressSink) error {
-	// THE CONTAINER, named rather than left to ffmpeg to infer from out's name, which beside
-	// a source ends in TempSuffix and names none (see container.go). It is decided before
-	// anything else, so an output extension with no known container is refused before a
-	// single subprocess has run or a byte has been written.
-	container, err := outputContainerFor(out)
-	if err != nil {
-		return err
-	}
-
-	// Where the output is Matroska, the plan's attached pictures travel as attachments
-	// rather than through the map (see matroskaPictures); nil everywhere else.
-	pics, err := e.matroskaPictures(out)
-	if err != nil {
-		return err
-	}
-
-	// A REMUX-ONLY job re-encodes nothing, so it needs none of what follows: no encoder
-	// spec, no pixel format, no colour derivation and no quality knob, because there is no
-	// encode for any of them to describe. It is the intended stream map and `-c copy`, and
-	// every structural gate an encode is held to still runs against what it produces.
-	if e.Plan.RemuxOnly() {
-		mapArgs := e.Plan.MapArgs()
-		if len(pics) > 0 {
-			mapArgs = e.Plan.MapArgsWithoutPictures()
+	// THE PLAN this encode is built from: the engine's, handed in, or - for a direct caller
+	// that handed none - derived here from this encoder's configuration, profile and stream
+	// map by the same function the engine derives its own with. Either way there is ONE
+	// derivation and the command line reads nothing else about the job.
+	job := e.Job
+	if job == nil {
+		prof := e.profile()
+		derived, err := deriveEncodePlan(planInputs{
+			settings: e.Cfg.TranscodeIn(prof, in), prof: prof, source: in, output: out, streams: e.Plan,
+			snapshot: e.snapshot(ctx, in, props),
+		})
+		if err != nil {
+			return err
 		}
-		return e.runCarrying(ctx, in, out, container, sink, nil, append(mapArgs, "-c", "copy"), pics)
+		job = derived
+	} else if job.Source != in || job.Output != out {
+		return fmt.Errorf("the encode plan was derived for %s -> %s and this encode reads %s and writes %s: "+
+			"refusing to build a command line from another job's plan", job.Source, job.Output, in, out)
 	}
-
-	// THIS JOB's settings: the profile of the root the engine handed this encoder,
-	// overlaid with the first encode profile whose pattern matches the SOURCE path
-	// (TRANSCODE-PROFILES). It is a pure function of the configuration, that profile
-	// and the path, so the engine - which needs the same answer for the
-	// already-at-target-codec skip, the output container and the output-codec
-	// acceptance check - resolves it independently from the same three inputs and
-	// cannot disagree with what is built here. `in` is always the source: the encoder
-	// READS the source and WRITES the working file, wherever scratch_dir puts the
-	// latter.
-	ts := e.Cfg.TranscodeIn(e.profile(), in)
-	spec, ok := encoder.Lookup(ts.Encoder)
-	if !ok {
-		return fmt.Errorf("unknown encoder %q (known: %v)", ts.Encoder, encoder.Known())
-	}
-	if e.Probe == nil {
-		return fmt.Errorf("FFmpegEncoder.Probe is nil (required to derive colour/pixel-format args from the source)")
-	}
-	// The engine threads in the snapshot it already probed for its skip guards
-	// (TRANSCODE-PERF). A direct caller that did not pre-probe passes nil, so take one
-	// here — it snapshots the same source file the guards read, so a fresh snapshot is
-	// equivalent; this only avoids a duplicate probe when the engine supplies one.
-	if props == nil {
-		props = e.Probe.VideoProps(ctx, in)
-	}
-
-	pixFmt := ts.PixelFormat
-	if ts.PixelFormatAuto() {
-		derived, ok := hdr.DerivePixFmt(props.PixFmt())
-		if !ok {
-			// The engine's pix_fmt guard runs before Encode and should already have
-			// skipped an exotic source — this is a defence-in-depth backstop so the
-			// encoder itself never silently subsamples if that guard is ever bypassed.
-			return fmt.Errorf("cannot derive an output pixel format for %q (unrecognized/exotic source pix_fmt)", in)
-		}
-		pixFmt = derived
-	}
-
-	// THE DEINTERLACE, resolved from the same profile and the same probe snapshot the
-	// engine's own guards read, so the filter that runs here is the filter the perceptual
-	// gate builds its reference through and the filter the terminal row records. A
-	// configuration this build will not run is refused HERE as well as in the engine and in
-	// config.Validate, for the reason the pixel-format derivation below is: a backstop so
-	// the encoder itself can never silently transform a file when a check in front of it is
-	// bypassed.
-	film, err := deinterlaceApplied(e.profile(), props)
+	pre, body, err := job.args(e.X265)
 	if err != nil {
 		return err
 	}
+	return e.runCarrying(ctx, in, out, job, sink, pre, body)
+}
 
-	// THE RESOLUTION CEILING, resolved from the same profile and the same probe snapshot,
-	// for the same reason the deinterlace above is: the scale that runs here is the scale the
-	// perceptual gate scores the output back up through and the scale the terminal row
-	// records. A ceiling this build cannot target is refused in config.Validate and again in
-	// the engine before a temp path is chosen; a source whose dimensions the probe did not
-	// establish is skipped in front of this, and resolves to NO scale here as the backstop
-	// behind that - a filter built against a guessed source size would encode a library to a
-	// resolution nobody measured.
-	shrink := downscaleApplied(e.profile(), props)
-
-	// Colour/HDR propagation: carry the source's primaries/transfer/matrix/range
-	// forward instead of letting the encode silently drop them. These -color_* flags
-	// are encoder-agnostic and applied to every Spec. x265Color (HDR10 static
-	// master-display/max-cll) is libx265-only — see buildArgs. DV/HDR10+ were
-	// already detected-and-skipped upstream by the engine.
-	colorArgs, x265Color := hdr.DeriveColorArgsFrom(
-		props.Color("color_primaries"),
-		props.Color("color_transfer"),
-		props.Color("color_space"),
-		props.Color("color_range"),
-		props.SideData(),
-	)
-
-	// The stream map, and WHICH of the mapped video streams must be pinned back to copy.
-	//
-	// Both come from the intended stream map when the engine supplied one, and from the
-	// source's probe when a direct caller did not. They are the same question asked of one
-	// derivation or of none - never of two: an encoder that worked out its own map beside
-	// the one the gate checks would be the second answer this whole design exists to
-	// prevent.
-	//
-	// An ATTACHED PICTURE is a video stream and the blanket `-c:v` below would re-encode
-	// it, so each one is pinned back to copy by its own per-stream option, AFTER the
-	// blanket option it overrides. The map preserves stream order, so the N of an output
-	// `v:N` is the N of the video streams the output carries. A single-video-stream source
-	// yields no such option and therefore byte-identical argv to the encoder that predates
-	// this.
-	mapArgs, pictures, errStreams := e.streamArgs(in, props)
-	if errStreams != nil {
-		return errStreams
+// snapshot is how a direct caller's derivation reaches the source's probe snapshot: the one
+// the caller handed in, or one this encoder takes of the same source, which is equivalent -
+// the engine threads in the snapshot it already probed for its skip guards (TRANSCODE-PERF)
+// and this only spares a duplicate probe when it does. A nil Probe is a programmer error,
+// refused rather than dereferenced.
+func (e FFmpegEncoder) snapshot(ctx context.Context, in string, props *probe.VideoProps) func() (*probe.VideoProps, error) {
+	return func() (*probe.VideoProps, error) {
+		if e.Probe == nil {
+			return nil, fmt.Errorf("FFmpegEncoder.Probe is nil (required to derive colour/pixel-format args from the source)")
+		}
+		if props == nil {
+			props = e.Probe.VideoProps(ctx, in)
+		}
+		return props, nil
 	}
-	if len(pics) > 0 {
-		// The pictures are not in the map, so there is no mapped picture to pin to copy.
-		mapArgs, pictures = e.Plan.MapArgsWithoutPictures(), nil
-	}
-
-	body := append([]string(nil), mapArgs...)
-	body = append(body, "-c", "copy", "-c:v", spec.FFmpegCodec)
-	for _, i := range pictures {
-		body = append(body, "-c:v:"+strconv.Itoa(i), "copy")
-	}
-	// The two filters go on in this order so the CHAIN reads deinterlace, then scale, then
-	// whatever the encoder family built: each helper prepends to the head, so composing the
-	// scale first and the deinterlace second puts the deinterlace in front of it. That order
-	// is the right one and not an accident - a deinterlacer interpolates from the fields the
-	// source carried, so it has to see them at the resolution they were shot at, and a
-	// resampler run first would have blended two fields into every line it produced.
-	//
-	// The libx265 parallelism joins the same -x265-params string as the colour block, ahead
-	// of it, and is "" when this encoder carries none. Every other family ignores the
-	// string, so their argv cannot move with it.
-	body = append(body, withDeinterlace(
-		withDownscale(buildArgs(spec, ts, pixFmt, colorArgs, e.X265.Params()+x265Color), shrink), film)...)
-
-	var pre []string
-	if spec.Key == "vaapi" {
-		// -vaapi_device is a GLOBAL option that must precede -i so the hwupload
-		// filter (added by buildArgs) has a device to target. Every other Spec has no
-		// such ordering requirement.
-		pre = []string{"-vaapi_device", "/dev/dri/renderD128"}
-	}
-	return e.runCarrying(ctx, in, out, container, sink, pre, body, pics)
 }
 
 // matroskaPictureMimeTypes are the attachment mimetypes the pinned ffmpeg's Matroska
@@ -415,11 +355,11 @@ type matroskaPicture struct {
 //
 // Whether the output is Matroska is read from the container extension out's name carries
 // (containerExtOf), never from its last extension, which beside a source is TempSuffix.
-func (e FFmpegEncoder) matroskaPictures(out string) ([]matroskaPicture, error) {
+func matroskaPictures(out string, plan *StreamPlan) ([]matroskaPicture, error) {
 	if !strings.EqualFold(containerExtOf(out), "mkv") {
 		return nil, nil
 	}
-	sources := e.Plan.Pictures()
+	sources := plan.Pictures()
 	if len(sources) == 0 {
 		return nil, nil
 	}
@@ -513,9 +453,10 @@ func picturePath(out string, i int) string {
 // It is the one funnel every encode's output goes through, re-encode and remux alike, so it
 // is where the output's container is named: container's options join the job's own, and
 // only the encode's - a picture's copy names its own muxer, image2.
-func (e FFmpegEncoder) runCarrying(ctx context.Context, in, out string, container outputContainer,
-	sink ProgressSink, pre, body []string, pics []matroskaPicture) error {
-	body = append(append([]string(nil), body...), container.args()...)
+func (e FFmpegEncoder) runCarrying(ctx context.Context, in, out string, job *EncodePlan,
+	sink ProgressSink, pre, body []string) error {
+	body = append(append([]string(nil), body...), job.container.args()...)
+	pics := job.coverArt.attached
 	if len(pics) == 0 {
 		return e.runFFmpeg(ctx, in, out, sink, pre, body)
 	}
@@ -523,7 +464,7 @@ func (e FFmpegEncoder) runCarrying(ctx context.Context, in, out string, containe
 	dir := filepath.Dir(out)
 	defer removePictures(dir, pics)
 	e = e.runningIn(dir)
-	first := e.Plan.MappedAttachments()
+	first := job.Streams.MappedAttachments()
 	for i, p := range pics {
 		file := "./" + p.name
 		// One packet, copied: an attached picture is exactly one, and the image2 muxer
@@ -585,32 +526,6 @@ func removePictures(dir string, pics []matroskaPicture) {
 	for _, p := range pics {
 		_ = root.Remove(p.name)
 	}
-}
-
-// streamArgs is the stream-selection half of the argv: which source streams are mapped,
-// and the output video-relative indexes of the attached pictures among them.
-//
-// With an intended stream map it reads THAT and nothing else. Without one - a direct
-// caller of this exported type, which is chiefly a test - it falls back to the argv this
-// repository has always built and asks the source's probe which of its video streams are
-// artwork, exactly as it did before stream selection existed.
-//
-// Whether ffprobe ESTABLISHED the source's shape is not dropped on either path. An
-// encoder that could not find out what video streams its source carries cannot know
-// whether one of them is artwork that must be pinned back to copy, and an unknown shape
-// has to fail safe rather than default to the common one - the same posture the engine's
-// own source-shape guard takes, and the same one the pixel-format derivation takes for the
-// same class of unknown.
-func (e FFmpegEncoder) streamArgs(in string, props *probe.VideoProps) (mapArgs []string, pictures []int, err error) {
-	if e.Plan != nil {
-		return e.Plan.MapArgs(), e.Plan.AttachedPictureIndexes(), nil
-	}
-	streams, established := props.VideoStreams()
-	if !established {
-		return nil, nil, fmt.Errorf("cannot establish the video streams of %q (ffprobe did not answer): "+
-			"refusing to encode without knowing whether one of them is an attached picture", in)
-	}
-	return []string{"-map", "0", "-map", "-0:d?"}, attachedPictureCopyIndexes(streams), nil
 }
 
 // muxQueueBounds are the OUTPUT options that bound ffmpeg's documented mux-side queues, on
@@ -757,7 +672,7 @@ func closeProgressPipe(r, w *os.File) {
 	}
 }
 
-// buildArgs assembles the per-encoder ffmpeg args (everything after `-c:v
+// videoArgs assembles the per-encoder ffmpeg args (everything after `-c:v
 // <codec>`, before the trailing `-- <out>`). The -pix_fmt, -color_* flags and
 // -fps_mode passthrough are UNIVERSAL — every Spec gets them, since they carry
 // source fidelity independent of which codec/encoder produces the bytes. Beyond
@@ -776,8 +691,8 @@ func closeProgressPipe(r, w *os.File) {
 //   - hevc_nvenc/av1_nvenc: -rc vbr -cq <CRF> -b:v 0 (CRF reused as the CQ
 //     target) + a preset.
 //   - hevc_qsv: -global_quality <CRF>.
-//   - hevc_vaapi: -vaapi_device (emitted by Encode, before -i — see Encode's
-//     vaapi special case) + -vf format=nv12,hwupload + -qp <CRF>. This is the
+//   - hevc_vaapi: -vaapi_device (the plan's device, emitted before -i - see
+//     EncodePlan.args) + -vf format=nv12,hwupload + -qp <CRF>. This is the
 //     fiddliest of the set and untestable in this environment (no VAAPI
 //     device) — capability detection (internal/encoder.Available) keeps it from
 //     ever running unless a real device is present; the arg shape is reasonable
@@ -793,49 +708,50 @@ func closeProgressPipe(r, w *os.File) {
 // pixel format, the colour tags, -fps_mode passthrough and the libx265 preset and
 // x265Extra block are the same on both paths, so a bitrate-targeted encode carries
 // exactly the same source fidelity, and the same parallelism, as a quality-targeted one.
-func buildArgs(spec encoder.Spec, ts config.Transcode, pixFmt string, colorArgs []string, x265Extra string) []string {
-	args := []string{"-pix_fmt", pixFmt}
+func videoArgs(v VideoPlan, colorArgs []string, x265Extra string) []string {
+	args := []string{"-pix_fmt", v.PixelFormat}
 	args = append(args, colorArgs...)
 	args = append(args, "-fps_mode", "passthrough") // a VFR source is not forced to CFR
 
-	if ts.TargetsBitrate() {
-		return append(args, bitrateArgs(spec, ts, x265Extra)...)
+	q := v.Quality
+	if q.TargetsBitrate() {
+		return append(args, bitrateArgs(v, x265Extra)...)
 	}
 
-	switch spec.Key {
+	switch v.Encoder.Key {
 	case "cpu":
 		args = append(args,
-			"-preset", ts.Preset,
-			"-crf", strconv.Itoa(ts.CRF),
+			"-preset", q.Preset,
+			"-crf", strconv.Itoa(q.CRF),
 			"-x265-params", "log-level=error"+x265Extra,
 		)
 	case "svtav1":
 		args = append(args,
-			"-preset", strconv.Itoa(svtav1Preset(ts.Preset)),
-			"-crf", strconv.Itoa(ts.CRF),
+			"-preset", strconv.Itoa(svtav1Preset(q.Preset)),
+			"-crf", strconv.Itoa(q.CRF),
 		)
 	case "nvenc", "av1_nvenc":
 		args = append(args,
 			"-rc", "vbr",
-			"-cq", strconv.Itoa(ts.CRF),
+			"-cq", strconv.Itoa(q.CRF),
 			"-b:v", "0",
 			"-preset", "p5",
 		)
 	case "qsv":
-		args = append(args, "-global_quality", strconv.Itoa(ts.CRF))
+		args = append(args, "-global_quality", strconv.Itoa(q.CRF))
 	case "vaapi":
-		// -vaapi_device itself is emitted by Encode (a global option that must
-		// precede -i — see Encode's doc comment on the vaapi special case); here we
-		// only add the encode-side args that come after -c:v.
+		// -vaapi_device itself is emitted from the plan's device (a global option that
+		// must precede -i - see EncodePlan.args); here we only add the encode-side args
+		// that come after -c:v.
 		args = append(args,
 			"-vf", "format=nv12,hwupload",
-			"-qp", strconv.Itoa(ts.CRF),
+			"-qp", strconv.Itoa(q.CRF),
 		)
 	case "amf":
 		args = append(args,
 			"-rc", "cqp",
-			"-qp_i", strconv.Itoa(ts.CRF),
-			"-qp_p", strconv.Itoa(ts.CRF),
+			"-qp_i", strconv.Itoa(q.CRF),
+			"-qp_p", strconv.Itoa(q.CRF),
 		)
 	}
 	return args
@@ -892,7 +808,7 @@ func withHeadFilter(args []string, spec string) []string {
 	return append(args, "-vf", spec)
 }
 
-// bitrateArgs is the TARGET-BITRATE half of buildArgs: everything after the
+// bitrateArgs is the TARGET-BITRATE half of videoArgs: everything after the
 // universal pixel-format/colour/fps block, for a job whose effective settings carry
 // a positive BitrateKbps.
 //
@@ -915,19 +831,20 @@ func withHeadFilter(args []string, spec string) []string {
 //     the quality path is.
 //   - hevc_amf: -rc vbr_peak with the target, in place of -rc cqp and the two QP
 //     values. AMF's cqp is a fixed-quantiser mode that ignores -b:v outright.
-func bitrateArgs(spec encoder.Spec, ts config.Transcode, x265Extra string) []string {
-	rate := strconv.Itoa(ts.BitrateKbps) + "k"
+func bitrateArgs(v VideoPlan, x265Extra string) []string {
+	q := v.Quality
+	rate := strconv.Itoa(q.BitrateKbps) + "k"
 	var args []string
-	switch spec.Key {
+	switch v.Encoder.Key {
 	case "cpu":
 		args = []string{
-			"-preset", ts.Preset,
+			"-preset", q.Preset,
 			"-b:v", rate,
 			"-x265-params", "log-level=error" + x265Extra,
 		}
 	case "svtav1":
 		args = []string{
-			"-preset", strconv.Itoa(svtav1Preset(ts.Preset)),
+			"-preset", strconv.Itoa(svtav1Preset(q.Preset)),
 			"-b:v", rate,
 		}
 	case "nvenc", "av1_nvenc":

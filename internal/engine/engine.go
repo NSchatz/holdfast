@@ -2,7 +2,7 @@
 // the bash orchestrator (media/transcoder/transcode.sh). Its whole purpose is the
 // invariant the design defends: NEVER destroy a source until a replacement is
 // proven good. The only filesystem mutation is an atomic same-directory rename that
-// runs solely after the output passes every gate in verifyOutput; any failure
+// runs solely after the output passes every gate in verifyAgainst; any failure
 // discards the temp and leaves the source byte-for-byte untouched.
 package engine
 
@@ -398,6 +398,14 @@ type Engine struct {
 	// and answerable NO.
 	planObserver func(stage string, plan *StreamPlan)
 
+	// encodePlanObserver, when non-nil, receives the encode plan at each of the two points
+	// that read one: the encode its command line is built for, and the gates the output is
+	// checked by. Unexported test seam, nil in production, and it exists for the question
+	// planObserver answers about the stream map, asked of the whole plan: did the command
+	// line and the gates read ONE derivation? Announcing the plan's IDENTITY at both seams
+	// makes that answerable, and answerable NO.
+	encodePlanObserver func(stage string, plan *EncodePlan)
+
 	// vmafScore, when non-nil, replaces the real libvmaf measurement in the VMAF gate, so a
 	// test can force a low score or an unavailable-libvmaf error without a second real
 	// encode. It receives the whole vmaf.Request, comparison pixel format included, so a
@@ -716,10 +724,14 @@ const progressEmitInterval = time.Second
 // runs is an encoder built from that root's knobs rather than one told about them
 // afterwards. An Encoder that is not profile-aware encodes from what it was constructed
 // with, exactly as before.
-func (e *Engine) encode(ctx context.Context, worker, in, out string, props *probe.VideoProps, prof config.Profile, plan *StreamPlan) error {
+//
+// job is THIS JOB's encode plan, and every job-specific thing handed to the encoder comes
+// out of it: the profile, the intended stream map and - to an encoder that reads one - the
+// plan itself, which its command line is then built from and from nothing else.
+func (e *Engine) encode(ctx context.Context, worker, in, out string, props *probe.VideoProps, job *EncodePlan) error {
 	enc := e.Enc
 	if pe, ok := enc.(ProfileEncoder); ok {
-		enc = pe.ForProfile(prof)
+		enc = pe.ForProfile(job.Profile)
 	}
 	if se, ok := enc.(StreamPlanEncoder); ok {
 		// THE SEAM. The plan the argv is built from is handed over HERE and announced
@@ -727,8 +739,15 @@ func (e *Engine) encode(ctx context.Context, worker, in, out string, props *prob
 		// holding both can ask whether they are ONE derivation, which is a question that
 		// can be answered NO - and would be, if anything on either side ever derived a map
 		// of its own (see SameDerivation).
-		e.observePlan(planStageEncode, plan)
-		enc = se.ForStreamPlan(plan)
+		e.observePlan(planStageEncode, job.Streams)
+		enc = se.ForStreamPlan(job.Streams)
+	}
+	if je, ok := enc.(EncodePlanEncoder); ok {
+		// And the whole plan, on the same terms: announced here and at the gate's own seam,
+		// so "the command line and the gates read ONE plan" is a property a test can check
+		// rather than one anybody asserts (see SameEncodePlan).
+		e.observeEncodePlan(planStageEncode, job)
+		enc = je.ForEncodePlan(job)
 	}
 	pe, ok := enc.(ProgressEncoder)
 	if !ok || e.Observer == nil {
@@ -1857,7 +1876,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// WHICH PROFILE DECIDES THIS FILE, resolved ONCE, here, from the root it was enumerated
 	// under, and threaded through everything below: the hardlink guard, the bitrate floor,
 	// the pixel-format derivation, the output container, the encode's argv and every gate in
-	// verifyOutput. Re-deriving it at each use would let a file be guarded by one root's
+	// verifyAgainst. Re-deriving it at each use would let a file be guarded by one root's
 	// floor and encoded at another root's crf.
 	//
 	// The root's own profile is only half of it now. A root may carry RESOLUTION RULES, an
@@ -2310,22 +2329,38 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		out.SelectionNotApplied = SelectionNotAppliedNoAudio
 	}
 
-	// THE DEINTERLACE THIS JOB APPLIES, resolved once from the profile and this source's own
-	// snapshot. The encoder resolves the same value from the same two inputs through the same
-	// function, and the perceptual gate is HANDED this one - so the filter that ran, the
-	// filter the reference is produced by and the filter the row records are one answer. The
-	// error was already refused above, before a temp path was chosen.
-	film, _ := deinterlaceApplied(prof, props)
-
-	// THE RESOLUTION CEILING THIS JOB APPLIES, resolved once from the same profile and the
-	// same snapshot, on exactly the deinterlace's terms. The encoder resolves the same value
-	// from the same two inputs through the same function, and the perceptual gate is HANDED
-	// this one - so the scale that ran, the scale the output is measured back up through and
-	// the scale the row records are one answer.
-	shrink := downscaleApplied(prof, props)
+	// THE ENCODE PLAN: everything this job's encode does to the source, derived ONCE, here,
+	// from the profile, the settings the guards above already read (ts, resolved once for the
+	// whole job), the working path, the intended stream map and the snapshot the guards read
+	// - and the one value the encoder builds its command line from, every gate below checks
+	// the output against, and the row's picture provenance is recorded from. The deinterlace
+	// that ran, the reference the perceptual gate produces through it, the scale the output
+	// is measured back up through and the provenance the row keeps are therefore one answer,
+	// and no gate can check the output against something other than what was encoded
+	// (docs/design/encode-plan.md#encode-plan).
+	//
+	// A plan that cannot be derived fails the job exactly as the encode it describes would
+	// have: this is the point the encoder used to derive the same answer and refuse, so the
+	// row, the gate and the reason are the ones that refusal always recorded. The encoder is
+	// then never called.
+	job, err := deriveEncodePlan(planInputs{
+		settings: ts, prof: prof, source: f, output: work, streams: plan,
+		snapshot: func() (*probe.VideoProps, error) { return props, nil },
+	})
+	if err != nil {
+		if ctx.Err() != nil { // interrupted: discard temp, DON'T finish - leave active for RecoverStale
+			_ = os.Remove(tmp)
+			return ctx.Err()
+		}
+		e.Log.Warn("FAIL (encode error, source untouched)", "file", f, "err", err)
+		_ = os.Remove(tmp)
+		out.Reason = err.Error()
+		e.fail(ctx, f, key, GateEncode, out)
+		return nil
+	}
 
 	encStart := time.Now()
-	if err := e.encode(ctx, worker, f, work, props, prof, plan); err != nil {
+	if err := e.encode(ctx, worker, f, work, props, job); err != nil {
 		if ctx.Err() != nil { // interrupted: discard temp, DON'T finish — leave active for RecoverStale
 			_ = os.Remove(tmp)
 			return ctx.Err()
@@ -2362,7 +2397,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	}
 
 	e.advance(ctx, f, key, store.Verifying)
-	proof, gate, class, reason := e.verifyOutput(ctx, f, work, prof, targetCodec, plan, film, shrink)
+	proof, gate, class, reason := e.verifyAgainst(ctx, f, work, job)
 	leaveGateFlight()
 	// Record whatever VMAF measured, on the reject path too: the numbers that rejected an
 	// encode are exactly the ones an operator wants to see.
@@ -2381,7 +2416,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// what was tried. An explicit FALSE here is a statement this build ran the job and
 	// deinterlaced nothing, which is a different fact from the NULL every row written before
 	// this column carries.
-	out.Deinterlaced, out.DeinterlaceFilter = ptr(film.Enabled()), film.Spec
+	out.Deinterlaced, out.DeinterlaceFilter = ptr(job.Picture.Deinterlace.Enabled()), job.Picture.Deinterlace.Spec
 	// And WHETHER THE PICTURE WAS MADE SMALLER, recorded on the same terms and from the same
 	// place: the scale the encoder applied, not the proof, because it is true of the job
 	// whether or not the perceptual gate ran, and recorded on the reject path as much as on
@@ -2390,8 +2425,8 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// carries. The SCALER travels with it because "scaled" with no algorithm named beside it
 	// does not say what was done: two resamplers produce two different pictures from one
 	// source, and this row outlives that source.
-	out.Downscaled = ptr(shrink.Enabled())
-	if shrink.Enabled() {
+	out.Downscaled = ptr(job.Picture.Downscale.Enabled())
+	if job.Picture.Downscale.Enabled() {
 		out.DownscaleScaler = downscale.Scaler
 	}
 	// The resolution the perceptual gate MEASURED at, which on a downscaling job is the
@@ -2732,7 +2767,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		// The filter the reference was produced by, beside the format the comparison was made
 		// in, for the same reason: a score whose reference nobody can name is not a number a
 		// reader can act on, and this line is one of the surfaces the score is recorded on.
-		"deinterlace", logText(film.Spec))
+		"deinterlace", logText(job.Picture.Deinterlace.Spec))
 	// The done row is keyed under the FINAL file's own path+fingerprint (mirroring
 	// the pre-TRANSCODE-5 ledger behaviour) so a resume short-circuits on the new
 	// file's identity, not the pre-swap source's. The post-swap fingerprint is ALWAYS a
@@ -2862,7 +2897,7 @@ func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, pr
 	// encoder (TRANSCODE-PERF), in place of the ~15 separate ffprobe/ffmpeg processes a
 	// single encode-bound file used to spawn. Reading every guard off one snapshot is more
 	// self-consistent than re-probing a file mid-pipeline. The costly whole-file checks are
-	// NOT here: they run in verifyOutput against the encoded temp.
+	// NOT here: they run in verifyAgainst against the encoded temp.
 	props := snapshot(ctx, f)
 
 	codec := props.Codec()
