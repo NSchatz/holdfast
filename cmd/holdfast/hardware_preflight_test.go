@@ -251,3 +251,78 @@ func TestPreflight_ARulesHardwareEncoderFollowsItsRootsHWFallback(t *testing.T) 
 		t.Errorf("a rule on an unusable vaapi under a software root did not start:\n%s", said)
 	}
 }
+
+// vaapiStandInFFmpeg is an ffmpeg stand-in on which hevc_vaapi "works": a command line naming
+// it is run as libx265 with the VAAPI device and profile options dropped and the upload's
+// format kept, so the probe sees a real HEVC output at the depth asked for. Every other
+// hardware codec fails, and everything else runs on the real binary. No device is opened.
+func vaapiStandInFFmpeg(t *testing.T) string {
+	t.Helper()
+	real, err := exec.LookPath(envOr("HOLDFAST_FFMPEG", "ffmpeg"))
+	if err != nil {
+		t.Skipf("ffmpeg not on PATH: %v", err)
+	}
+	stub := filepath.Join(t.TempDir(), "ffmpeg")
+	script := `#!/bin/sh
+hw=
+for a in "$@"; do
+  case "$a" in
+    hevc_nvenc|av1_nvenc|hevc_qsv|hevc_amf) exit 1 ;;
+    hevc_vaapi) hw=1 ;;
+  esac
+done
+[ -z "$hw" ] && exec ` + real + ` "$@"
+skip=0; first=1
+for a in "$@"; do
+  if [ $first = 1 ]; then set --; first=0; fi
+  if [ $skip = 1 ]; then skip=0; continue; fi
+  case "$a" in
+    -vaapi_device|-profile:v|-qp) skip=1; continue ;;
+    hevc_vaapi) a=libx265 ;;
+    *,hwupload) a=${a%,hwupload} ;;
+  esac
+  set -- "$@" "$a"
+done
+exec ` + real + ` "$@"
+`
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return stub
+}
+
+// `holdfast plan` decides an `encoder: auto` file as `run` would: it runs the same hardware
+// probe, so on a host whose VAAPI works the plan reports the files a run would hand to VAAPI
+// as ones it would transcode, and on a host with no usable hardware it reports them skipped
+// hardware-unavailable (the default fallback). Before the plan probed, it reported the
+// second answer on both hosts.
+func TestPlan_AutoReadsTheSameHardwareProbeRunDoes(t *testing.T) {
+	requireWorkingEncoder(t)
+	for _, c := range []struct {
+		name   string
+		ffmpeg func(*testing.T) string
+		guard  string
+	}{
+		{"vaapi usable", vaapiStandInFFmpeg, ""},
+		{"no usable hardware", func(t *testing.T) string { s, _ := hardwareRefusingFFmpeg(t); return s }, "hardware-unavailable"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("HOLDFAST_FFMPEG", c.ffmpeg(t))
+			cfgPath, lib, _ := planLibrary(t, "encoder: auto\n")
+			pass := planPassOver(t, cfgPath)
+			seen := 0
+			for _, f := range pass.Files {
+				if f.Path != filepath.Join(lib, "movie.mkv") && f.Path != filepath.Join(lib, "show", "ep1.mkv") {
+					continue
+				}
+				seen++
+				if f.Guard != c.guard {
+					t.Errorf("%s: guard %q, want %q", f.Path, f.Guard, c.guard)
+				}
+			}
+			if seen != 2 {
+				t.Fatalf("the plan covered %d of the two h264 sources", seen)
+			}
+		})
+	}
+}
