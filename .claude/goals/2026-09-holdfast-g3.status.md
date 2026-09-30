@@ -93,7 +93,7 @@ summed per directory):
 | # | Item | State |
 |---|---|---|
 | 5.1 | Gate integrity counted from the goal-start SHA | DONE (`ba35133`): 0 lines deleted in `*_test.go` (`git diff --numstat 9e27c1a origin/main`: +1603 -0); `func Test` 1322 -> 1330, no package fell (`internal/engine` 460 -> 467, `internal/hdr` 9 -> 10); `docs/design/swap.md` 58 -> 58 and `docs/design/quality-gate.md` 76 -> 76, 0 lines removed |
-| 5.2 | Adversarial review of the report | DONE: round 1, by a fresh subagent on 2026-09-30, found lines A-F true on the repositories and 2 statements false (this row, which claimed a review not yet run; "argv built from the plan alone", when the run's execution parameters come from the encoder) and 4 overstated or stale ("every gate reads the plan", when the gates took the source and output as loose parameters; the per-commit trailer list; "with the row"; the golden-diff label). All were corrected: the gates now take the files they measure from the plan (PR #116), and the wording is fixed here and in the report. A second fresh subagent checks the corrected report against the repositories after this commit; its verdict is printed as the report's line G |
+| 5.2 | Adversarial review of the report | DONE: three rounds, each by a fresh subagent on 2026-09-30. Round 1 found lines A-F true on the repositories, and 2 statements false plus 4 overstated or stale. The false ones were this row, which claimed a review not yet run, and "argv built from the plan alone". The overstated or stale ones were "every gate reads the plan", when the gates took the source and output as loose parameters; the per-commit trailer list; "with the row"; and the golden-diff label. All were corrected: PR #116 makes the gates take the files they measure from the plan, and the wording was fixed. Round 2 found A-F true, the round-1 corrections real, and 2 sentences of the report's line C still false: "every expectation", though the length gate's tolerance is run-wide; and "moves each gate's verdict", though the perceptual gate's case shows only its reference and scale coming from the plan. The report was corrected. Round 3 checks the corrected report and the repositories after this commit; its verdict is printed as the report's line G |
 
 ## Decisions taken
 
@@ -175,6 +175,11 @@ summed per directory):
   come from `EncodePlan.Source`/`Output`, as the encoder already required, and the exists,
   length and decode gates are shown to move with the plan too. The length gate's tolerance
   (`duration_tolerance_sec`) stays a run-wide setting, as the stray-temp sweep reads it.
+- 2026-09-30: PR #116 changed 8 lines of this goal's own new tests (`encodeplan_test.go`,
+  `encodeplan_adapters_test.go`: the call sites of the new `verifyAgainst` signature and one
+  doc comment); none of those lines existed at the goal-start SHA, and no assertion was
+  removed. Stale local remote-tracking refs of merged branches were pruned (`git remote prune
+  origin`; local only).
 - 2026-09-30: PR #113 was merged while `main` was one ledger-only commit (`95301f4`) ahead of
   its last merged head (`38966f7`); under §0.3 its gate and CI stood. Later PRs were merged
   with their branch containing `origin/main`.
