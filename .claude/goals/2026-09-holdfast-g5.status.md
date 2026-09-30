@@ -85,18 +85,18 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | libva, libva-drm, libdrm, Intel iHD, `libmfx-gen1.2` (amd64) and Mesa `radeonsi` VA with their closure, pinned, each in `NOTICE` | DOING (PR #127) |
-| 3.2 | `NVIDIA_DRIVER_CAPABILITIES=compute,video,utility` and the compose/docs snippet | DOING (PR #127) |
-| 3.3 | Image smoke: a VAAPI init on a missing device prints a device error, not an abort | DOING (PR #127) |
+| 3.1 | libva, libva-drm, libdrm, Intel iHD, `libmfx-gen1.2` (amd64) and Mesa `radeonsi` VA with their closure, pinned, each in `NOTICE` | DONE (PR #127, `84198b7`): 34 pinned Debian 13 amd64 packages from snapshot.debian.org `20260929T202609Z` (version and sha256 each, checked against that snapshot's Packages index), the full closure of `iHD_drv_video.so`, `radeonsi_drv_video.so`, `libmfx-gen.so.1.2`, `libva.so.2`, `libva-drm.so.2`, `libdrm.so.2` (P3 named 12; the closure needed 22 more: `libdrm-intel1`, `libpciaccess0`, `libelf1t64`, `libsensors5`, `libexpat1`, LLVM's 7 dependencies, 10 X client libraries, `libdrm-common`); about 244 MiB; `NOTICE` names each package, version, licence and source URL (iHD flagged DFSG non-free; the GPL/LGPL members' corresponding source at snapshot.debian.org); `scripts/check-pins.sh` section for the pins with NOTICE agreement both ways, selftest 43/43 bite (8 new); arm64 carries none, by design |
+| 3.2 | `NVIDIA_DRIVER_CAPABILITIES=compute,video,utility` and the compose/docs snippet | DONE (PR #127, `84198b7`): `ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility` (legacy hook path default `utility,compute` lacks `video`; CDI hosts carry the library regardless; NVIDIA and moby sources cited); `docker-compose.yml` and `docs/docker.md` show `/dev/dri` with a numeric `group_add` |
+| 3.3 | Image smoke: a VAAPI init on a missing device prints a device error, not an abort | DONE (PR #127, `84198b7`): CI `package` (run 36757872914) on amd64: every driver and library resolves all its dependencies in the image (loader `--list`), a VAAPI init with no render node ends in a device error (exit 234, never 134), and one on `/dev/null` proves libva, libva-drm and libdrm load; on amd64 and arm64 `encoder: amf` is valid to `validate` and refused by `run` with its reason (exit 1) |
 
 ## Phase 4 - Argv and detection (lines D, E)
 
 | # | Item | State |
 |---|---|---|
-| 4.1 | Every VAAPI device opens with `connection_type=drm` | DOING (PR #126) |
-| 4.2 | `Available()` probes through the real argv builder, including a 10-bit probe | DOING (PR #126) |
-| 4.3 | Device discovery (`/dev/dri/renderD*`, sysfs vendor, a permission error naming `group_add`) | DOING (PR #126) |
-| 4.4 | `amf` in the image refused at start with a named reason; `validate` still accepts it; never aliased to `vaapi` | DOING (PR #126) |
+| 4.1 | Every VAAPI device opens with `connection_type=drm` | DONE (PR #126, `0fab196`): `-vaapi_device <node>,connection_type=drm`; QSV gets `-init_hw_device vaapi=hfva:<node>,connection_type=drm -init_hw_device qsv=hfqsv@hfva`; golden argv: 427 VAAPI/QSV lines each the old line plus the device options (checked by script), every other encoder byte-identical; `TestDeviceFor_TheAssignedNodeOrTheFirst` |
+| 4.2 | `Available()` probes through the real argv builder, including a 10-bit probe | DONE (PR #126, `0fab196`): `encoder.Available` encodes a lossless 4:2:0 clip at 8 and at 10 bits through `engine.ProbeEncode` (the production encoder and plan derivation) and requires codec and depth; `TestProbeEncode_AvailableProbesThroughTheJobsOwnCommandLine` (vaapi, qsv, nvenc, av1_nvenc, amf argv), `TestProbeEncode_A10BitProbeSeesTheDepthTheUploadCarries` (an 8-bit upload fails the 10-bit probe); the device-opening table test moved behind `hwlive` |
+| 4.3 | Device discovery (`/dev/dri/renderD*`, sysfs vendor, a permission error naming `group_add`) | DONE (PR #126, `0fab196`): `internal/hwdevice` (98.6% coverage): `/dev/dri/renderD*`, sysfs vendor, open check; a permission failure names `group_add` / `--group-add` and the GID; VAAPI gets the first usable Intel or AMD node, QSV the first Intel; logged once at start; a refusal carries the node reason |
+| 4.4 | `amf` in the image refused at start with a named reason; `validate` still accepts it; never aliased to `vaapi` | DONE (PR #126, `0fab196`; image proof PR #127): `holdfast_image` build tag marks the image's binary; `amf` refused before any probe with the EULA reason; `TestAvailable_AMFInTheImageIsRefusedWithTheReasonAndNeverProbed`, `TestPreflight_AMFInTheImageIsRefusedAtStartWithTheNamedReason`; `validate` accepts `amf`; never resolves to `vaapi` |
 | 4.5 | `encoder: auto` choosing per job | DOING (branch `holdfast-g5/encoder-auto`) |
 | 4.6 | Per-library `hw_fallback: software|skip`, default stated with its reason | DOING (branch `holdfast-g5/encoder-auto`) |
 | 4.7 | `docs/docker.md` hardware section and `docs/design/hardware.md` | TODO |
@@ -149,17 +149,37 @@ summed per directory):
   ffmpeg source (`fftools/ffmpeg_enc.c:133-175`, `libavcodec/qsvenc.c:2762-2765`), not run on a
   device; the hardware report is the proof (NEEDS-OWNER, goal 6).
 
+- 2026-09-30: PR #126 gate exit 0 in 1568 s (`internal/engine` 1456.0 s, `cmd/holdfast` 575.4 s);
+  CI green; merged while `main` was one ledger-only commit ahead (`646f016`), as §0.3 allows.
+- 2026-09-30: finding. PR #127's first gate went red (exit 2, 2787 s): `internal/engine` hit its
+  45-minute timeout because the ffmpeg child of one libx265 encode
+  (`TestObserver_EmitsTransitionsAndReclaimedBytesOnSwap`, a plain `cpu` argv byte-identical to
+  `main`) hung for 30 minutes at 0% CPU with all 81 threads in `futex_wait` - a libx265
+  thread-pool deadlock in the pinned ffmpeg, not a change of this goal (#127 changes no Go code).
+  The orphan was killed and the gate re-run unchanged (round 2: exit 0 in 1743 s). The same hang
+  in production would hold a worker forever: holdfast has a memory watchdog but no stall
+  watchdog on an encode. Listed for the owner under "Proposals awaiting the owner".
+- 2026-09-30: PR #127 also gained the image smoke step for the `amf` refusal (both halves were on
+  `main` by then); CI `package` green on amd64 and arm64.
+- 2026-09-30: `NEEDS-OWNER.md` row 2 added: the start-time hardware probe on each GPU host,
+  through an image built from `main`, with the exact commands and what each answer changes.
+
 ## NEEDS-OWNER (this goal)
 
-None yet.
+- Row 2 of `.claude/goals/NEEDS-OWNER.md`: run holdfast's start-time probe (`encoder: auto`,
+  `hw_fallback: software`, an empty library) on the Intel, AMD and NVIDIA hosts and paste back the
+  `hardware:` lines. A real GPU run is physically impossible here under T9.
 
 ## Proposals awaiting the owner
 
-None yet.
+- A stall watchdog for encodes: a libx265 encode deadlocked for 30 minutes at 0% CPU in this
+  goal's gate (see "Decisions taken"); production has no bound on an encode that stops making
+  progress. Not built here (outside §9); the progress stream (`-progress pipe:3`) already carries
+  what such a watchdog would read.
 
 ## Resume here
 
-Baseline done. PRs #126, #127, #128 open; #126's gate running (log `gate-pr126-r1.log`).
-`holdfast-g5/encoder-auto` written and tested locally, to be merged up to `main` after #126 and
-opened as its own PR. Then `docs/docker.md` hardware section, the image smoke for the `amf`
-refusal (after #127), the report.
+#126 and #127 merged. #128 (S0165) merged up to `main` and gating (`gate-pr128-r1.log`). #129
+(`encoder: auto`, `hw_fallback`, docs) is next: after #128 lands, merge `main` in, route the rule
+encoders through `encoderChecks.require`, make S0165's `targetCodecOf` read
+`encoder.TargetCodecOf` (so `auto` is HEVC), gate, merge. Then the report (phase 5).
