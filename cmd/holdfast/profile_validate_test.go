@@ -201,3 +201,59 @@ library_roots:
 			"discarded never sees them:\n%s", errOut.String())
 	}
 }
+
+// [S0165 AC-13] `holdfast validate` shows a rule's encoder key on that rule's line beside
+// its band, and a rule naming no encoder prints exactly as the pinned build prints it.
+//
+// The encoder-free lines are GOLDENS read off b7c26ca's `holdfast validate` over the same
+// rule list (and identical at this goal's start, bf36b9c), so the second half is a
+// comparison with the pinned build and not with the build under test.
+//
+// MUTATION: print the encoder on every rule (an absent one as `encoder=`) and the golden
+// lines red; leave it out of Rule.String and the first assertion reds.
+func TestS0165_AC13_ValidatePrintsARulesEncoderBesideItsBand(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(`
+library_roots:
+  - path: /mnt/tv
+    rules:
+      - when:
+          max_source_height: 576
+        min_bitrate_kbps: 800
+        min_savings_percent: 5
+      - when:
+          min_source_height: 721
+          max_source_height: 1080
+        crf: 26
+      - when:
+          min_source_height: 2160
+        crf: 18
+        max_height: 1080
+      - crf: 24
+      - when:
+          max_source_height: 720
+        encoder: svtav1
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if code := dispatch([]string{"validate", "--config", cfgPath}, &out, &errOut); code != 0 {
+		t.Fatalf("validate exited %d: %s", code, errOut.String())
+	}
+	tv := sectionFor(t, out.String(), "/mnt/tv")
+	for _, golden := range []string{
+		"  rules                5 rule(s), first match wins, no merging\n",
+		"                         [0] source height any to 576: min_bitrate_kbps=800 min_savings_percent=5\n",
+		"                         [1] source height 721 to 1080: crf=26\n",
+		"                         [2] source height 2160 to any: crf=18 max_height=1080\n",
+		"                         [3] source height any to any: crf=24\n",
+	} {
+		if !strings.Contains(tv, golden) {
+			t.Errorf("an encoder-free rule no longer prints as b7c26ca printed it; want the line %q in:\n%s", golden, tv)
+		}
+	}
+	if !strings.Contains(tv, "                         [4] source height any to 720: encoder=svtav1\n") {
+		t.Errorf("the rule naming an encoder does not print it beside its band:\n%s", tv)
+	}
+}

@@ -3,6 +3,8 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"github.com/NSchatz/holdfast/internal/encoder"
 )
 
 // S0089 - what an operator may write as a resolution rule, and what they are refused.
@@ -191,9 +193,11 @@ library_roots:
     rules:
       - when:
           max_source_height: 576
-        encoder: svtav1
+        min_vmaf: 90
 `)
-	mentions(t, msg, "encoder", "/mnt/tv", "rules[0]", "when")
+	// The fixture's key was `encoder` until S0165 made it a rule knob; it is now a VMAF key,
+	// which stays refused (S0165 AC-7), and the message still lists the closed enumeration.
+	mentions(t, msg, "min_vmaf", "/mnt/tv", "rules[0]", "when")
 	// Every knob the enumeration holds is named by the message, read from the enumeration
 	// itself rather than from a copy of it.
 	for _, knob := range RuleKnobs() {
@@ -463,5 +467,499 @@ library_roots:
 	if a, b := rootByPath(t, d, "/mnt/tv").Profile.Digest(),
 		rootByPath(t, d, "/mnt/movies").Profile.Digest(); a == b {
 		t.Errorf("two roots whose bands differ share the digest %s", a)
+	}
+}
+
+// ---- S0165: per-rule encoder selection ----
+//
+// A rule may name the `encoder` its band is written with; every VMAF key stays the root's.
+// Each test below names the S0165 criterion it grades.
+
+// s0165GoldenConfigs are the configurations whose digest and recorded rule text AC-2 pins.
+// None of them has a rule naming an encoder, and together they cover every rule knob the
+// pinned build accepted, a band bounded on each side and on both, an unconditional rule, a
+// root overriding the encoder itself, and a root with no rules at all.
+var s0165GoldenConfigs = []string{`
+library_roots:
+  - path: /mnt/tv
+    rules:
+      - when:
+          max_source_height: 576
+        min_bitrate_kbps: 800
+        min_savings_percent: 5
+      - when:
+          min_source_height: 721
+          max_source_height: 1080
+        crf: 26
+      - when:
+          min_source_height: 2160
+        crf: 18
+        max_height: 1080
+      - crf: 24
+`, `
+library_roots:
+  - path: /mnt/tv
+    encoder: svtav1
+    crf: 30
+    rules:
+      - when:
+          max_source_height: 720
+        crf: 32
+`, `
+library_roots:
+  - /mnt/tv
+`}
+
+// [S0165 AC-2] WHEN no rule names an encoder, each root's profile digest and its recorded
+// rule-list decision input text (Rules.Canonical, the InputRules value) are the ones the
+// pinned build b7c26ca produces for the identical configuration.
+//
+// The goldens were READ OFF b7c26ca (and, identically, off this goal's start bf36b9c), by
+// running the same three configurations through `Root.Profile.Digest()` and
+// `Profile.Rules.Canonical()` on that tree - never off the build under test, which would
+// only prove the code agrees with itself. A move here detaches every terminal row already in
+// the field from the profile that decided it and re-opens every banded row once.
+//
+// MUTATION: render the encoder into a rule's canonical text unconditionally (an absent one
+// as `encoder=`) and every banded golden reds; add encoder to the digest's rules line by any
+// other route and the digests red.
+func TestS0165_AC2_AnEncoderFreeRuleListDigestsAndRecordsAsThePinnedBuild(t *testing.T) {
+	golden := []struct{ digest, canonical string }{
+		{"58bf2544119bc088", "[max_source_height=576,min_bitrate_kbps=800,min_savings_percent=5];" +
+			"[min_source_height=721,max_source_height=1080,crf=26];" +
+			"[min_source_height=2160,crf=18,max_height=1080];[crf=24]"},
+		{"b6100ba709f45fec", "[max_source_height=720,crf=32]"},
+		{"270a1ea926171dfe", ""},
+	}
+	for i, y := range s0165GoldenConfigs {
+		c := loadYAML(t, y)
+		if err := c.Validate(); err != nil {
+			t.Fatalf("golden configuration %d was refused: %v", i, err)
+		}
+		p := rootByPath(t, c, "/mnt/tv").Profile
+		if got := p.Digest(); got != golden[i].digest {
+			t.Errorf("configuration %d digests %s, want b7c26ca's %s", i, got, golden[i].digest)
+		}
+		if got := p.Rules.Canonical(); got != golden[i].canonical {
+			t.Errorf("configuration %d records rules=%q, want b7c26ca's %q", i, got, golden[i].canonical)
+		}
+	}
+}
+
+// [S0165 AC-1, config half] A rule naming `encoder` and no other knob is a valid rule, and
+// the profile it resolves carries that encoder for the band while a height outside the band
+// keeps the root's. The engine half (the argv) is in internal/engine/rules_test.go.
+//
+// MUTATION: leave `encoder` out of applyTo and the in-band assertion reds; drop it from
+// ruleKnobs and the rule is refused as naming no knob.
+func TestS0165_AC1_ARuleNamingOnlyAnEncoderIsValidAndResolvesForItsBand(t *testing.T) {
+	c := loadYAML(t, `
+library_roots:
+  - path: /mnt/tv
+    encoder: cpu
+    rules:
+      - when:
+          max_source_height: 576
+        encoder: svtav1
+`)
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a rule naming only an encoder was refused: %v", err)
+	}
+	p := rootByPath(t, c, "/mnt/tv").Profile
+	if got := p.WithRules(480).Encoder; got != "svtav1" {
+		t.Errorf("a 480-line source resolves encoder %q, want the rule's svtav1", got)
+	}
+	if got := p.WithRules(1080).Encoder; got != "cpu" {
+		t.Errorf("a 1080-line source resolves encoder %q, want the root's cpu", got)
+	}
+	if got := p.Rules[0].Knobs(); len(got) != 1 || got[0] != "encoder" {
+		t.Errorf("the rule names knobs %v, want [encoder]", got)
+	}
+	// And the settings a job gets carry it: TranscodeIn is what the engine reads.
+	if ts := c.TranscodeIn(p.WithRules(480), "/mnt/tv/ep.mkv"); ts.Encoder != "svtav1" {
+		t.Errorf("the job settings carry encoder %q, want svtav1", ts.Encoder)
+	}
+}
+
+// [S0165 AC-7] IF a rule carries any VMAF key, the configuration is refused naming the root,
+// the rule index and the key. The floors are the root's: a rule may change which encoder
+// writes a band, never the floor that band is judged against. (The exit code and the
+// untouched library are graded at the command, in cmd/holdfast/preflight_test.go.)
+//
+// MUTATION: admit any of the six into ruleKnobs and its arm is accepted.
+func TestS0165_AC7_EveryVmafKeyInARuleIsRefusedByName(t *testing.T) {
+	for _, tc := range []struct{ key, value string }{
+		{"min_vmaf", "80"},
+		{"vmaf_min_pool", "40"},
+		{"vmaf_min_chroma", "20"},
+		{"vmaf_enable", "false"},
+		{"vmaf_subsample", "2"},
+		{"vmaf_model", "vmaf_v0.6.1"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			msg := refusal(t, `
+library_roots:
+  - path: /mnt/tv
+    rules:
+      - when:
+          max_source_height: 576
+        crf: 30
+      - when:
+          max_source_height: 1080
+        encoder: svtav1
+        `+tc.key+`: `+tc.value+`
+`)
+			mentions(t, msg, "/mnt/tv", "rules[1]", tc.key, "floor")
+		})
+	}
+}
+
+// [S0165 AC-8] IF a rule's `encoder` is empty, absent-valued, not text, or not a key or
+// ffmpeg-codec alias this build ships, the configuration is refused naming the root, the
+// rule index and the value, listing the known encoders; an alias is accepted and behaves
+// exactly as its key.
+//
+// The refusal is validateEncoderKey's - the function an encode profile's encoder is judged
+// by - so a rule accepts what an encode profile accepts and nothing else.
+//
+// MUTATION: judge the rule's encoder with Profile.validate (which reads "" as inherit) and
+// the empty arms are accepted; skip the check and the unknown arm is accepted.
+func TestS0165_AC8_ARuleEncoderIsJudgedAsAnEncodeProfilesIs(t *testing.T) {
+	for name, tc := range map[string]struct{ value, want string }{
+		"unknown":       {"hevc_turbo", `"hevc_turbo"`},
+		"empty":         {`""`, `""`},
+		"no value":      {"", `""`},
+		"not text":      {"5", "5"},
+		"a list":        {"[cpu]", "cpu"},
+		"top-level-ish": {"auto_detect_everything", `"auto_detect_everything"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			msg := refusal(t, `
+library_roots:
+  - path: /mnt/tv
+    rules:
+      - when:
+          max_source_height: 576
+        crf: 30
+      - when:
+          max_source_height: 720
+        encoder: `+tc.value+`
+`)
+			mentions(t, msg, "/mnt/tv", "rules[1]", "encoder", tc.want, "known")
+			for _, k := range []string{"cpu", "svtav1", "nvenc"} {
+				if !strings.Contains(msg, k) {
+					t.Errorf("the refusal does not list the known encoder %q:\n%s", k, msg)
+				}
+			}
+		})
+	}
+
+	// The alias arm: hevc_nvenc and nvenc resolve to one Spec, as they do everywhere else.
+	for _, alias := range [][2]string{{"hevc_nvenc", "nvenc"}, {"libsvtav1", "svtav1"}} {
+		c := loadYAML(t, `
+library_roots:
+  - path: /mnt/tv
+    rules:
+      - when:
+          max_source_height: 576
+        encoder: `+alias[0]+`
+`)
+		if err := c.Validate(); err != nil {
+			t.Fatalf("the alias %s was refused: %v", alias[0], err)
+		}
+		ts := c.TranscodeIn(rootByPath(t, c, "/mnt/tv").Profile.WithRules(480), "/mnt/tv/a.mkv")
+		got, ok := encoderLookup(ts.Encoder)
+		want, _ := encoderLookup(alias[1])
+		if !ok || got != want {
+			t.Errorf("the alias %s resolves to %+v (ok=%v), want the Spec of %s: %+v", alias[0], got, ok, alias[1], want)
+		}
+	}
+}
+
+// [S0165 AC-10] IF a rule names an encoder under a root whose RESOLVED remux_only is true,
+// the configuration is refused naming the root, the rule index, `encoder` and `remux_only`:
+// the rule's encoder could never run. Resolved, so a remux_only inherited from the top level
+// counts as much as one the root writes; and a root that does not remux accepts the rule.
+//
+// MUTATION: check the root's WRITTEN remux_only rather than the resolved one and the
+// inherited arm is accepted; drop the check and both refusal arms are accepted.
+func TestS0165_AC10_ARuleEncoderUnderARemuxOnlyRootIsRefused(t *testing.T) {
+	for name, cfg := range map[string]string{
+		"written on the root": `
+library_roots:
+  - path: /mnt/tv
+    remux_only: true
+    rules:
+      - when:
+          max_source_height: 576
+        encoder: svtav1
+`,
+		"inherited from the top level": `
+remux_only: true
+library_roots:
+  - path: /mnt/tv
+    rules:
+      - when:
+          max_source_height: 576
+        crf: 30
+      - encoder: svtav1
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			msg := refusal(t, cfg)
+			mentions(t, msg, "/mnt/tv", "rules[", "encoder", "remux_only")
+		})
+	}
+	c := loadYAML(t, `
+remux_only: true
+library_roots:
+  - path: /mnt/tv
+    remux_only: false
+    rules:
+      - when:
+          max_source_height: 576
+        encoder: svtav1
+`)
+	if err := c.Validate(); err != nil {
+		t.Errorf("a rule encoder under a root that resolves remux_only false was refused: %v", err)
+	}
+}
+
+// [S0165 AC-14] Two roots that differ only in the encoder one of their rules names, or in
+// whether a rule names one, carry different profile digests.
+//
+// MUTATION: leave `encoder` out of the rule's canonical text and all three digests coincide.
+func TestS0165_AC14_ARuleEncoderMovesTheDigest(t *testing.T) {
+	c := loadYAML(t, `
+library_roots:
+  - path: /mnt/a
+    rules:
+      - when:
+          max_source_height: 576
+        crf: 30
+  - path: /mnt/b
+    rules:
+      - when:
+          max_source_height: 576
+        crf: 30
+        encoder: svtav1
+  - path: /mnt/c
+    rules:
+      - when:
+          max_source_height: 576
+        crf: 30
+        encoder: cpu
+`)
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	a := rootByPath(t, c, "/mnt/a").Profile.Digest()
+	b := rootByPath(t, c, "/mnt/b").Profile.Digest()
+	d := rootByPath(t, c, "/mnt/c").Profile.Digest()
+	if a == b || a == d || b == d {
+		t.Errorf("digests a=%s b=%s c=%s: roots differing only in a rule's encoder share one", a, b, d)
+	}
+	if got := rootByPath(t, c, "/mnt/b").Profile.Rules.Canonical(); got != "[max_source_height=576,crf=30,encoder=svtav1]" {
+		t.Errorf("the rule renders %q, want the encoder after the numeric knobs", got)
+	}
+}
+
+// [S0165 AC-16] IF a ceiling in force for a band writes that band's output at a height the
+// first-match resolution puts under a different rule (or under none) AND the two resolved
+// encoders target different codecs, the configuration is refused naming the root, both
+// bands, the ceiling and both codecs.
+//
+// The output height is read off downscale.Resolve, the computation the encode's scale
+// filter is built from (verdict F4), and the edge arms sit exactly on it: an output at 1080
+// is decided by a band whose lower bound is 1080 and not by one whose lower bound is 1081, so
+// a check that took the output as the source's height, or as the ceiling plus or minus one,
+// reds one of them.
+//
+// MUTATION: skip bandCrossing and every refused arm is accepted; compare rule indexes only
+// (not codecs) and the same-codec arm is refused; take the output height as the source's
+// own and the edge arms swap.
+func TestS0165_AC16_ACeilingThatWritesIntoAnotherCodecsBandIsRefused(t *testing.T) {
+	refused := map[string]struct {
+		cfg  string
+		want []string
+	}{
+		"the spec's fixture: an av1 band capped into the root's hevc": {`
+library_roots:
+  - path: /mnt/tv
+    encoder: cpu
+    rules:
+      - when:
+          min_source_height: 1081
+        max_height: 1080
+        encoder: svtav1
+`, []string{"/mnt/tv", "rules[0]", "root's own profile", "max_height 1080", "av1", "hevc"}},
+		"the root's own ceiling writes into an av1 band": {`
+library_roots:
+  - path: /mnt/tv
+    encoder: cpu
+    max_height: 720
+    rules:
+      - when:
+          max_source_height: 720
+        encoder: svtav1
+`, []string{"/mnt/tv", "root's own profile", "rules[0]", "max_height 720", "av1", "hevc"}},
+		"edge: the output lands one line below the next band": {`
+library_roots:
+  - path: /mnt/tv
+    encoder: cpu
+    rules:
+      - when:
+          min_source_height: 1082
+        max_height: 1080
+        encoder: svtav1
+      - when:
+          min_source_height: 1081
+          max_source_height: 1081
+        encoder: svtav1
+`, []string{"rules[0]", "root's own profile", "max_height 1080", "av1", "hevc"}},
+		"a rule-to-rule crossing names both rules": {`
+library_roots:
+  - path: /mnt/tv
+    encoder: svtav1
+    rules:
+      - when:
+          min_source_height: 1500
+        max_height: 1080
+      - when:
+          min_source_height: 721
+          max_source_height: 1499
+        encoder: cpu
+`, []string{"rules[0]", "rules[1]", "max_height 1080", "av1", "hevc"}},
+	}
+	for name, tc := range refused {
+		t.Run("refused: "+name, func(t *testing.T) {
+			mentions(t, refusal(t, tc.cfg), tc.want...)
+		})
+	}
+
+	accepted := map[string]string{
+		"the spec's fixture under a root whose 1080 output resolves to av1": `
+library_roots:
+  - path: /mnt/tv
+    encoder: cpu
+    rules:
+      - when:
+          min_source_height: 1081
+        max_height: 1080
+        encoder: svtav1
+      - when:
+          min_source_height: 721
+        encoder: svtav1
+`,
+		"edge: the output lands exactly on the next band's lower bound": `
+library_roots:
+  - path: /mnt/tv
+    encoder: cpu
+    rules:
+      - when:
+          min_source_height: 1082
+        max_height: 1080
+        encoder: svtav1
+      - when:
+          min_source_height: 1080
+          max_source_height: 1081
+        encoder: svtav1
+`,
+		"a crossing into a band of the same codec": `
+library_roots:
+  - path: /mnt/tv
+    encoder: cpu
+    rules:
+      - when:
+          min_source_height: 1081
+        max_height: 1080
+        crf: 26
+`,
+		"a band whose sources never exceed its ceiling": `
+library_roots:
+  - path: /mnt/tv
+    encoder: cpu
+    rules:
+      - when:
+          max_source_height: 1080
+        max_height: 1080
+        encoder: svtav1
+`,
+		"the pinned golden configuration, ceiling and all": s0165GoldenConfigs[0],
+	}
+	for name, cfg := range accepted {
+		t.Run("accepted: "+name, func(t *testing.T) {
+			c, err := load(t, cfg)
+			if err == nil {
+				err = c.Validate()
+			}
+			if err != nil {
+				t.Errorf("refused: %v", err)
+			}
+		})
+	}
+}
+
+// [S0165 AC-16, the helper] bandName and targetCodecOf are the two renderings the refusal is
+// built from; an unresolvable key is never taken to agree with a different one.
+func TestS0165_AC16_AnUnresolvableEncoderNeverAgreesWithAnother(t *testing.T) {
+	if targetCodecOf("cpu") != "hevc" || targetCodecOf("svtav1") != "av1" {
+		t.Errorf("targetCodecOf(cpu)=%q targetCodecOf(svtav1)=%q", targetCodecOf("cpu"), targetCodecOf("svtav1"))
+	}
+	if targetCodecOf("x-one") == targetCodecOf("x-two") {
+		t.Error("two unresolvable encoder keys were taken to target one codec")
+	}
+	if !strings.Contains(targetCodecOf("x-one"), "x-one") {
+		t.Errorf("an unresolvable key's codec does not name it: %q", targetCodecOf("x-one"))
+	}
+	if bandName(-1) == bandName(0) || bandName(2) != "rules[2]" {
+		t.Errorf("bandName(-1)=%q bandName(0)=%q bandName(2)=%q", bandName(-1), bandName(0), bandName(2))
+	}
+}
+
+// encoderLookup is encoder.Lookup, named here so the AC-8 alias arm compares Specs.
+var encoderLookup = encoder.Lookup
+
+// [S0165 AC-9, config half] RuleEncoders is every encoder a rule names, deduplicated, in
+// configuration order, each with the FIRST root and rule index naming it - the list the
+// startup preflight walks. A rule naming no encoder contributes nothing.
+//
+// MUTATION: skip the dedupe and svtav1 appears twice; record the last naming rule and the
+// index reds.
+func TestS0165_AC9_RuleEncodersIsEveryEncoderARuleNames(t *testing.T) {
+	c := loadYAML(t, `
+library_roots:
+  - path: /mnt/a
+    rules:
+      - when:
+          max_source_height: 576
+        crf: 30
+      - when:
+          max_source_height: 720
+        encoder: svtav1
+  - path: /mnt/b
+    rules:
+      - encoder: svtav1
+  - path: /mnt/c
+    rules:
+      - when:
+          max_source_height: 576
+        encoder: cpu
+`)
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	got := c.RuleEncoders()
+	want := []RuleEncoder{{Key: "svtav1", Root: "/mnt/a", Rule: 1}, {Key: "cpu", Root: "/mnt/c", Rule: 0}}
+	if len(got) != len(want) {
+		t.Fatalf("RuleEncoders = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("RuleEncoders[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	if none := loadYAML(t, s0165GoldenConfigs[0]).RuleEncoders(); len(none) != 0 {
+		t.Errorf("a rule list naming no encoder yields %+v, want nothing", none)
 	}
 }
