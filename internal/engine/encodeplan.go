@@ -499,9 +499,17 @@ func (p *EncodePlan) args(x265 encoder.X265Parallelism) (pre, body []string, err
 	// The libx265 parallelism joins the same -x265-params string as the colour block, ahead
 	// of it, and is "" when the run carries none. Every other family ignores the string, so
 	// their argv cannot move with it.
-	body = append(body, withDeinterlace(withDownscale(
-		videoArgs(p.Video, p.Metadata.Color.FFmpegFlags(), x265.Params()+p.Metadata.Color.X265Params()),
-		p.Picture.Downscale), p.Picture.Deinterlace)...)
+	//
+	// Every encoder but libx265 takes its colour primaries and transfer from the frames it is
+	// handed, not from -color_primaries/-color_trc, so the declared ones are stamped onto the
+	// frames (hdr.Color.SetParams) at the head of the chain the picture operations prepend
+	// to - after them, and before any upload to a hardware surface. libx265 writes them from
+	// its own parameters, and its command line does not change.
+	video := videoArgs(p.Video, p.Metadata.Color.FFmpegFlags(), x265.Params()+p.Metadata.Color.X265Params())
+	if p.Video.Encoder.Key != "cpu" {
+		video = withHeadFilter(video, p.Metadata.Color.SetParams())
+	}
+	body = append(body, withDeinterlace(withDownscale(video, p.Picture.Downscale), p.Picture.Deinterlace)...)
 
 	if p.Video.Device != "" {
 		// -vaapi_device is a GLOBAL option that must precede -i so the hwupload filter

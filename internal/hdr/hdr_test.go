@@ -343,3 +343,24 @@ func TestDeriveColor_TheDescriptionAndBothRenderingsExactly(t *testing.T) {
 		})
 	}
 }
+
+func TestColor_SetParams(t *testing.T) {
+	for _, tc := range []struct {
+		c    Color
+		want string
+	}{
+		{Color{}, ""},
+		{Color{Matrix: "bt709", Range: "tv"}, ""},
+		{Color{Primaries: "bt2020"}, "setparams=color_primaries=bt2020"},
+		{Color{Transfer: "smpte2084"}, "setparams=color_trc=smpte2084"},
+		{Color{Primaries: "bt2020", Transfer: "smpte2084", Matrix: "bt2020nc", Range: "tv"},
+			"setparams=color_primaries=bt2020:color_trc=smpte2084"},
+		{Color{Transfer: "gamma22"}, "setparams=color_trc=bt470m"},
+		{Color{Transfer: "gamma28"}, "setparams=color_trc=bt470bg"},
+		{Color{Transfer: "arib-std-b67"}, "setparams=color_trc=arib-std-b67"},
+	} {
+		if got := tc.c.SetParams(); got != tc.want {
+			t.Errorf("%+v.SetParams() = %q, want %q", tc.c, got, tc.want)
+		}
+	}
+}

@@ -162,6 +162,15 @@ writes them into the bitstream from its own parameters. Anything the gate cannot
 an output pixel format it cannot take apart, a plan's format it cannot, a block present on the
 source whose values could not be read - is a mismatch, never a pass.
 
+The same measurement is why the command line stamps the declared primaries and transfer
+onto the frames (`hdr.Color.SetParams`, a `setparams` filter at the head of the chain, after
+the picture operations and before any upload to a hardware surface) for every encoder but
+libx265, which writes them from its own parameters and whose command line does not change.
+Before it, an `svtav1` or hardware encode of an HDR10 source whose bitstream under-signals
+those two tags - the plan declares the HDR10 defaults - wrote PQ samples tagged with neither:
+a silent loss this gate now rejects, and the stamp now prevents
+(`TestFidelityGate_EveryEncoderCarriesTheDeclaredPrimariesAndTransfer`).
+
 A remux is not held to this gate: it re-encodes nothing, and the video-identity check holds
 its video to bit-identity, which is stronger.
 
