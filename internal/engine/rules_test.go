@@ -628,3 +628,398 @@ encoder: cpu
 	}
 	var _ config.Rules = rules
 }
+
+// ---- S0165: per-rule encoder selection, where it meets a real file ----
+//
+// A rule may name the encoder its band is written with. What that decides is visible only in
+// what a run DID: the -c:v the production encoder assembled, the encoder the terminal row
+// records, the guard that fired, and whether the next scan encodes the path again. The two
+// encoders contrasted are software ones that also differ in target codec (cpu writes hevc,
+// svtav1 writes av1), so no test needs a device.
+
+// mkS0165Clip writes a one-second clip in a chosen video codec and frame size. The size
+// selects the band; the codec is what the already-at-target skip reads.
+func mkS0165Clip(t *testing.T, ffmpeg, path, vcodec, size string) {
+	t.Helper()
+	args := []string{"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=1:size=" + size + ":rate=10", "-pix_fmt", "yuv420p"}
+	switch vcodec {
+	case "h264":
+		args = append(args, "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "2M")
+	case "hevc":
+		args = append(args, "-c:v", "libx265", "-x265-params", "log-level=error", "-b:v", "2M")
+	case "av1":
+		args = append(args, "-c:v", "libsvtav1", "-preset", "12")
+	default:
+		t.Fatalf("mkS0165Clip: no recipe for %q", vcodec)
+	}
+	ff(t, ffmpeg, append(args, "--", path)...)
+}
+
+// s0165Job returns the whole row for path, fail count included, which outcomeFor does not.
+func s0165Job(t *testing.T, ts *testStore, path string) (store.Job, bool) {
+	t.Helper()
+	rows, err := ts.List(context.Background(), nil, 0)
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	for _, r := range rows {
+		if r.Path == path {
+			return r, true
+		}
+	}
+	return store.Job{}, false
+}
+
+// s0165Rescan runs one more oneshot pass over the same store and configuration, recording
+// the argv of every encode it builds.
+func s0165Rescan(t *testing.T, ffmpeg, ffprobe string, cfg config.Config, ts *testStore) *argvLog {
+	t.Helper()
+	log := newArgvLog()
+	prober := probe.New(ffmpeg, ffprobe)
+	enc := FFmpegEncoder{FFmpeg: ffmpeg, Cfg: cfg, Probe: prober, argvObserver: log.record}
+	if err := New(cfg, prober, enc, ts, discardLogger()).RunOneshot(context.Background()); err != nil {
+		t.Fatalf("rescan RunOneshot: %v", err)
+	}
+	return log
+}
+
+// [S0165 AC-1, AC-4, AC-5] One run, one root: a file in the band of a rule naming
+// `encoder: svtav1` is encoded with libsvtav1, while a file in a rule naming no encoder and a
+// file in no rule are encoded with the root's libx265. An encode profile naming an encoder
+// beats the rule's (and its name and encoder are on the row); one naming none leaves the
+// rule's. A second root's rule sets a savings floor no encode clears, so its job is
+// gate-REJECTED, and that row records the rule's encoder as well (AC-5, both row shapes).
+//
+// MUTATION: drop `encoder` from Rule.applyTo and the in-band file is encoded with libx265;
+// lay the rule over the encode profile instead of under it and the forced file is encoded
+// with libsvtav1; record the root's encoder on the row and both AC-5 arms red.
+func TestS0165_AC1_AC4_AC5_ARuleEncoderReachesTheArgvAndTheRow(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	_, roots := twoRoots(t, "tv", "strict")
+	inBand := filepath.Join(roots[0], "small.mkv")
+	crfBand := filepath.Join(roots[0], "medium.mkv")
+	noBand := filepath.Join(roots[0], "large.mkv")
+	forced := filepath.Join(roots[0], "forced-small.mkv")
+	tuned := filepath.Join(roots[0], "tuned-small.mkv")
+	rejected := filepath.Join(roots[1], "small.mkv")
+	mkS0165Clip(t, ffmpeg, inBand, "h264", "160x120")
+	mkS0165Clip(t, ffmpeg, crfBand, "h264", "320x240")
+	mkS0165Clip(t, ffmpeg, noBand, "h264", "480x360")
+	mkS0165Clip(t, ffmpeg, forced, "h264", "160x120")
+	mkS0165Clip(t, ffmpeg, tuned, "h264", "160x120")
+	mkS0165Clip(t, ffmpeg, rejected, "h264", "160x120")
+
+	cfg := profileCfg(t, `
+library_roots:
+  - path: `+roots[0]+`
+    preset: ultrafast
+    min_bitrate_kbps: 0
+    rules:
+      - when:
+          max_source_height: 150
+        encoder: svtav1
+      - when:
+          max_source_height: 250
+        crf: 30
+  - path: `+roots[1]+`
+    preset: ultrafast
+    min_bitrate_kbps: 0
+    rules:
+      - encoder: svtav1
+        min_savings_percent: 99
+encode_profiles:
+  - name: force-cpu
+    match: 'forced-*.mkv'
+    encoder: cpu
+  - name: tuned
+    match: 'tuned-*.mkv'
+    crf: 40
+encoder: cpu
+vmaf_enable: false
+`)
+	ts, log := runProfiles(t, ffmpeg, ffprobe, cfg)
+
+	for _, tc := range []struct{ path, codec, why string }{
+		{inBand, "libsvtav1", "AC-1: its band's rule names svtav1"},
+		{crfBand, "libx265", "AC-1: its band's rule names no encoder, so the root's cpu stands"},
+		{noBand, "libx265", "AC-1: no rule admits it, so the root's cpu stands"},
+		{forced, "libx265", "AC-4: the matching encode profile names cpu, which beats the rule's svtav1"},
+		{tuned, "libsvtav1", "AC-4: the matching encode profile names no encoder, so the rule's stands"},
+		{rejected, "libsvtav1", "AC-5: the rejecting root's rule names svtav1"},
+	} {
+		if args := log.forSource(t, tc.path); !hasArgPair(args, "-c:v", tc.codec) {
+			t.Errorf("%s: not encoded with -c:v %s (%s): %v", filepath.Base(tc.path), tc.codec, tc.why, args)
+		}
+	}
+	if args := log.forSource(t, tuned); !hasArgPair(args, "-crf", "40") {
+		t.Errorf("the tuned file did not take its encode profile's crf 40: %v", args)
+	}
+
+	for _, tc := range []struct {
+		path, encoder, profile string
+		status                 store.Status
+	}{
+		{inBand, "svtav1", "", store.Done},
+		{forced, "cpu", "force-cpu", store.Done},
+		{tuned, "svtav1", "tuned", store.Done},
+		{rejected, "svtav1", "", store.Failed},
+	} {
+		out, status, found := outcomeFor(t, ts, tc.path)
+		if !found {
+			t.Fatalf("no terminal row for %s", tc.path)
+		}
+		if status != tc.status {
+			t.Errorf("%s is %q (%s), want %q", filepath.Base(tc.path), status, out.Reason, tc.status)
+		}
+		if out.Encoder != tc.encoder {
+			t.Errorf("%s's row records encoder %q, want %q", filepath.Base(tc.path), out.Encoder, tc.encoder)
+		}
+		if out.Profile != tc.profile {
+			t.Errorf("%s's row records encode profile %q, want %q", filepath.Base(tc.path), out.Profile, tc.profile)
+		}
+		if v, _ := out.DecisionInputs.Value(InputEncoder); status == store.Done && v != tc.encoder {
+			t.Errorf("%s's row records encoder=%q as read, want %q", filepath.Base(tc.path), v, tc.encoder)
+		}
+	}
+	if out, _, _ := outcomeFor(t, ts, rejected); !strings.Contains(out.Reason, "min_savings=99%") {
+		t.Errorf("the rejected row's reason is %q, want the rule's savings floor", out.Reason)
+	}
+}
+
+// [S0165 AC-3] A row decided under a rule naming an encoder and left TERMINAL - done after
+// the swap, or skipped by a guard - is not encoded again when the same library is rescanned
+// under the unchanged configuration: under a root whose only rule is unbounded (the feed
+// hold-out's path-only resolution) and under a root that bands on source height alike. A
+// row a gate REJECTED under the rule's encoder is retried or parked exactly as the same
+// failure class is under a root's own encoder: pass for pass, the two rows carry the same
+// status and fail count, and are offered to the encoder alike.
+//
+// MUTATION: resolve the claim's decision inputs without the rules (or without the rule's
+// encoder) and the recorded encoder/target differ from the offered ones on every scan, so the
+// done and skipped rows are re-opened and encoded again.
+func TestS0165_AC3_ATerminalRowUnderARuleEncoderReopensNothing(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	_, roots := twoRoots(t, "banded", "unbounded", "rulefail", "rootfail")
+	bandedDone := filepath.Join(roots[0], "done.mkv")
+	bandedSkip := filepath.Join(roots[0], "skip.mkv")
+	flatDone := filepath.Join(roots[1], "done.mkv")
+	flatSkip := filepath.Join(roots[1], "skip.mkv")
+	ruleFail := filepath.Join(roots[2], "fail.mkv")
+	rootFail := filepath.Join(roots[3], "fail.mkv")
+	mkS0165Clip(t, ffmpeg, bandedDone, "h264", "160x120")
+	mkS0165Clip(t, ffmpeg, bandedSkip, "av1", "160x120")
+	mkS0165Clip(t, ffmpeg, flatDone, "h264", "160x120")
+	mkS0165Clip(t, ffmpeg, flatSkip, "av1", "160x120")
+	mkS0165Clip(t, ffmpeg, ruleFail, "h264", "160x120")
+	mkS0165Clip(t, ffmpeg, rootFail, "h264", "160x120")
+
+	cfg := profileCfg(t, `
+library_roots:
+  - path: `+roots[0]+`
+    preset: ultrafast
+    min_bitrate_kbps: 0
+    rules:
+      - when:
+          max_source_height: 150
+        encoder: svtav1
+  - path: `+roots[1]+`
+    preset: ultrafast
+    min_bitrate_kbps: 0
+    rules:
+      - encoder: svtav1
+  - path: `+roots[2]+`
+    preset: ultrafast
+    min_bitrate_kbps: 0
+    rules:
+      - encoder: svtav1
+        min_savings_percent: 99
+  - path: `+roots[3]+`
+    preset: ultrafast
+    min_bitrate_kbps: 0
+    min_savings_percent: 99
+encoder: cpu
+vmaf_enable: false
+`)
+	ts, _ := runProfiles(t, ffmpeg, ffprobe, cfg)
+	for _, tc := range []struct {
+		path   string
+		status store.Status
+		reason string
+	}{
+		{bandedDone, store.Done, ""},
+		{bandedSkip, store.Skipped, SkipAlreadyTargetCodec},
+		{flatDone, store.Done, ""},
+		{flatSkip, store.Skipped, SkipAlreadyTargetCodec},
+	} {
+		out, status, found := outcomeFor(t, ts, tc.path)
+		if !found || status != tc.status || (tc.reason != "" && out.Reason != tc.reason) {
+			t.Fatalf("after the first pass %s is %q/%q (found=%v), want %q/%q - the fixture did not "+
+				"produce the terminal row this test is about", tc.path, status, out.Reason, found, tc.status, tc.reason)
+		}
+	}
+
+	for pass := 2; pass <= 3; pass++ {
+		log := s0165Rescan(t, ffmpeg, ffprobe, cfg, ts)
+		for _, p := range []string{bandedDone, bandedSkip, flatDone, flatSkip} {
+			if _, again := log.byIn[p]; again {
+				t.Errorf("pass %d encoded %s again under an unchanged configuration", pass, p)
+			}
+		}
+		rj, _ := s0165Job(t, ts, ruleFail)
+		oj, _ := s0165Job(t, ts, rootFail)
+		if rj.Status != oj.Status || rj.FailCount != oj.FailCount {
+			t.Errorf("pass %d: the rule-encoder rejection is %q with %d failure(s), the root-encoder one "+
+				"%q with %d - one failure class must be retried or parked alike", pass, rj.Status,
+				rj.FailCount, oj.Status, oj.FailCount)
+		}
+		_, ruleAgain := log.byIn[ruleFail]
+		_, rootAgain := log.byIn[rootFail]
+		if ruleAgain != rootAgain {
+			t.Errorf("pass %d: the rule-encoder rejection was re-encoded=%v, the root-encoder one %v",
+				pass, ruleAgain, rootAgain)
+		}
+	}
+	if j, _ := s0165Job(t, ts, ruleFail); j.Status != store.Failed || j.Outcome.Encoder != "svtav1" {
+		t.Errorf("the rejected row is %q with encoder %q, want failed under svtav1", j.Status, j.Outcome.Encoder)
+	}
+}
+
+// [S0165 AC-6] Two files under one root, one per encoder, are held to ONE set of floors: the
+// root's. Under a root whose min_vmaf no encode at this crf can clear, BOTH replacements are
+// rejected, each against the root's own min_vmaf, and each source is left byte-identical;
+// under a root whose floors every encode clears, both are accepted with a score recorded.
+//
+// MUTATION: resolve the gate's floors from anything but the root-resolved profile (the
+// built-in 95, or a per-encoder value) and the rejection reasons stop naming min_vmaf=99.50;
+// score the rule's band without the gate and its accepted row carries no VMAF score.
+func TestS0165_AC6_EveryEncoderUnderARootIsHeldToTheRootsFloors(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	_, roots := twoRoots(t, "strict", "lenient")
+	type file struct{ path, codec string }
+	var files []file
+	for _, r := range roots {
+		for _, f := range []file{{filepath.Join(r, "small.mkv"), "libsvtav1"}, {filepath.Join(r, "large.mkv"), "libx265"}} {
+			size := "160x120"
+			if strings.HasSuffix(f.path, "large.mkv") {
+				size = "320x240"
+			}
+			mkS0165Clip(t, ffmpeg, f.path, "h264", size)
+			files = append(files, f)
+		}
+	}
+	strictBefore := map[string]string{files[0].path: md5f(t, files[0].path), files[1].path: md5f(t, files[1].path)}
+
+	cfg := profileCfg(t, `
+library_roots:
+  - path: `+roots[0]+`
+    preset: ultrafast
+    min_bitrate_kbps: 0
+    crf: 45
+    min_vmaf: 99.5
+    rules:
+      - when:
+          max_source_height: 150
+        encoder: svtav1
+  - path: `+roots[1]+`
+    preset: ultrafast
+    min_bitrate_kbps: 0
+    min_vmaf: 10
+    vmaf_min_pool: 5
+    vmaf_min_chroma: 5
+    rules:
+      - when:
+          max_source_height: 150
+        encoder: svtav1
+encoder: cpu
+vmaf_enable: true
+`)
+	ts, log := runProfiles(t, ffmpeg, ffprobe, cfg)
+
+	for i, f := range files {
+		if args := log.forSource(t, f.path); !hasArgPair(args, "-c:v", f.codec) {
+			t.Fatalf("%s was not encoded with %s, so this is not a two-encoder root: %v", f.path, f.codec, args)
+		}
+		out, status, found := outcomeFor(t, ts, f.path)
+		if !found {
+			t.Fatalf("no terminal row for %s", f.path)
+		}
+		if i < 2 {
+			if status != store.Failed || !strings.Contains(out.Reason, "min_vmaf=99.50") {
+				t.Errorf("%s (%s) is %q: %q - want a rejection against the ROOT's min_vmaf 99.5",
+					f.path, f.codec, status, out.Reason)
+			}
+			if got := md5f(t, f.path); got != strictBefore[f.path] {
+				t.Errorf("%s was changed by a rejected job", f.path)
+			}
+			continue
+		}
+		if status != store.Done || out.VmafMean == nil {
+			t.Errorf("%s (%s) is %q (%s) with VMAF %v - want accepted against the root's floors with a "+
+				"score recorded", f.path, f.codec, status, out.Reason, out.VmafMean)
+		}
+	}
+}
+
+// [S0165 AC-11, AC-12] The already-at-target skip and the output-codec acceptance read the
+// encoder the RULE resolved. An hevc source in an svtav1 band is transcoded, and the
+// replacement on disk is av1; an av1 source in that band is skipped as already at target;
+// an hevc source outside the band (the root's cpu) is skipped as already at target. And
+// under a `when`-bounded rule naming an encoder, a file whose height cannot be read is
+// skipped undetermined-source-height with no encode built for it.
+//
+// MUTATION: read the skip's target off the root profile rather than the rule-resolved one
+// and the in-band hevc source is skipped while the av1 one is encoded; resolve an unreadable
+// height to 0 and the truncated file is encoded under the band that admits 0.
+func TestS0165_AC11_AC12_TheAtTargetSkipReadsTheRulesEncoder(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	_, roots := twoRoots(t, "tv")
+	hevcIn := filepath.Join(roots[0], "hevc-small.mkv")
+	av1In := filepath.Join(roots[0], "av1-small.mkv")
+	hevcOut := filepath.Join(roots[0], "hevc-large.mkv")
+	unreadable := filepath.Join(roots[0], "truncated.mkv")
+	mkS0165Clip(t, ffmpeg, hevcIn, "hevc", "160x120")
+	mkS0165Clip(t, ffmpeg, av1In, "av1", "160x120")
+	mkS0165Clip(t, ffmpeg, hevcOut, "hevc", "320x240")
+	if err := os.WriteFile(unreadable, []byte("this is not a matroska file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := profileCfg(t, `
+library_roots:
+  - path: `+roots[0]+`
+    preset: ultrafast
+    min_bitrate_kbps: 0
+    rules:
+      - when:
+          max_source_height: 150
+        encoder: svtav1
+encoder: cpu
+vmaf_enable: false
+`)
+	ts, log := runProfiles(t, ffmpeg, ffprobe, cfg)
+
+	if args := log.forSource(t, hevcIn); !hasArgPair(args, "-c:v", "libsvtav1") {
+		t.Errorf("the in-band hevc source was not transcoded with libsvtav1: %v", args)
+	}
+	if out, status, _ := outcomeFor(t, ts, hevcIn); status != store.Done {
+		t.Errorf("the in-band hevc source is %q (%s), want done", status, out.Reason)
+	}
+	if got := codecOf(t, ffprobe, hevcIn); got != "av1" {
+		t.Errorf("the replacement at %s is %q, want the rule encoder's av1", hevcIn, got)
+	}
+	for _, p := range []string{av1In, hevcOut} {
+		if _, encoded := log.byIn[p]; encoded {
+			t.Errorf("%s was encoded, but it is already at its band's target codec", p)
+		}
+		if out, status, _ := outcomeFor(t, ts, p); status != store.Skipped || out.Reason != SkipAlreadyTargetCodec {
+			t.Errorf("%s is %q/%q, want skipped/%s", p, status, out.Reason, SkipAlreadyTargetCodec)
+		}
+	}
+	if _, encoded := log.byIn[unreadable]; encoded {
+		t.Error("an encode was built for a file whose source height could not be read")
+	}
+	if out, status, _ := outcomeFor(t, ts, unreadable); status != store.Skipped || out.Reason != SkipUndeterminedSourceHeight {
+		t.Errorf("the unreadable file is %q/%q, want skipped/%s", status, out.Reason, SkipUndeterminedSourceHeight)
+	}
+}
