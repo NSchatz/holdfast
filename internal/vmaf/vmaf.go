@@ -32,15 +32,18 @@
 package vmaf
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Result is the pooled VMAF over the (sub)sampled frames.
@@ -216,6 +219,198 @@ type vmafLog struct {
 	} `json:"pooled_metrics"`
 }
 
+// # Where the log goes: a pipe, never a file (S0162)
+//
+// libvmaf writes one JSON entry per scored frame, with PSNR on every one, so on a feature
+// film the log runs to tens of megabytes and more. It used to be written to a file in the
+// process temp directory and then read back whole. In the shipped container that directory is
+// a tmpfs beside a read-only root, so the file was RAM charged to the container's memory
+// limit, and reading it whole cost holdfast's own heap about as much again: enough, on a long
+// film, to run the container out of memory mid-verify and end the job with no verdict.
+//
+// The route taken is to STREAM it. Score hands ffmpeg the write end of a pipe as descriptor
+// logFD and points libvmaf's log_path at logPipePath, so there is no log file anywhere: not
+// in the temp directory, not on the state or scratch filesystem, and nothing to clean up
+// after a pass that returned or a process that was killed. decodeLog reads the pipe while
+// ffmpeg runs, walks the top-level object token by token, skips the per-frame entries one at
+// a time without keeping any, and keeps only the four pooled statistics, so what holdfast
+// holds does not grow with the number of frames. The other route the defect offered, a file
+// on a disk-backed directory holdfast owns, was not taken: it would still write the whole
+// log, it needs a directory to be validated at startup and a killed run's leftover to be
+// swept, and it would still have to be parsed without being held whole. What libvmaf itself
+// holds in memory until it writes the log is outside holdfast's reach and is not changed.
+//
+// The score is unchanged by construction: the same filtergraph, the same libvmaf, and the
+// same encoding/json number parsing of the same four fields.
+// TestS0162_AC4_RealFfmpegPipeScoreMatchesAnIndependentFileLog holds the returned figures
+// bit-identical to an independent run whose log went to a file and was decoded whole.
+
+// logFD is the descriptor number the child sees the log pipe's write end as. exec.Cmd hands
+// ExtraFiles[i] to the child as descriptor 3+i, and the pipe is ExtraFiles[0].
+const logFD = 3
+
+// logPipePath is the log_path libvmaf is given: the child's own descriptor logFD, reached
+// through procfs. libvmaf opens its log_path with fopen(path, "w") and writes it at the end
+// of the pass; opening /proc/self/fd/N re-opens the pipe that descriptor refers to, so libvmaf
+// writes into the pipe exactly as it would into a file. /proc/self/fd rather than /dev/fd
+// because /dev/fd is only a link to it: the OCI runtime spec has the runtime create /dev/fd
+// pointing at /proc/self/fd "if the source file exists after processing mounts"
+// (https://github.com/opencontainers/runtime-spec/blob/main/runtime-linux.md#dev-symbolic-links,
+// read 2026-09-30), so /proc/self/fd is what both spellings depend on. Both spellings
+// were tried against the pinned ffmpeg (N-125875-g5d4d3bdc61) with log_fmt=json and both
+// delivered the JSON log through the descriptor.
+// TestS0162_AC4_RealFfmpegPipeScoreMatchesAnIndependentFileLog is the standing proof.
+var logPipePath = "/proc/self/fd/" + strconv.Itoa(logFD)
+
+// newLogPipe creates the log channel. It is a variable only so a test can make the channel
+// impossible to set up (AC-8); nothing else assigns it.
+var newLogPipe = os.Pipe
+
+// pipeCloseDelay bounds how long a pass waits, after ffmpeg has exited or been killed, for
+// its stdout/stderr and its log pipe to reach EOF. Only a process ffmpeg spawned and left
+// holding one of them open can make that wait at all, and at most one pipe buffer is still
+// unread when ffmpeg goes, so this is a bound on a stuck descriptor and never on a parse.
+// It is well inside AC-7's "within 10 seconds of ffmpeg's exit or the cancellation".
+const pipeCloseDelay = 3 * time.Second
+
+// logDecode is what the reading goroutine hands back: the pooled statistics, or why the log
+// could not be read.
+type logDecode struct {
+	log vmafLog
+	err error
+}
+
+// errEmptyLog is a log channel that reached EOF with nothing on it: ffmpeg exited, crashed or
+// was killed without libvmaf ever writing its log.
+var errEmptyLog = errors.New("the log is empty - libvmaf wrote nothing before ffmpeg exited")
+
+// decodeLog reads a libvmaf JSON log from r without holding it: it walks the top-level
+// object key by key, decodes pooled_metrics (a few hundred bytes) into the vmafLog pointers,
+// and skips every other value - the frames array element by element - without keeping any
+// of it. What it holds is one frame entry at a time, whatever the number of frames.
+//
+// It is as strict as json.Unmarshal into vmafLog was, and stricter in one direction only:
+//   - pooled_metrics may come before or after frames (libvmaf writes it after);
+//   - an empty log, a value that is not a JSON object, a log cut off anywhere, and anything
+//     after the object's closing brace are errors, never a partial result;
+//   - a pooled statistic that is absent stays nil, so the caller's "missing a pooled
+//     statistic" refusal and a genuine 0.0 remain distinguishable;
+//   - a top-level key is matched exactly, where json.Unmarshal also accepted a key differing
+//     only in case. libvmaf writes "pooled_metrics"; any other spelling now reads as the
+//     statistics being absent, which is a refusal.
+//
+// The per-frame values never feed the result: the pooled statistics are libvmaf's own
+// pooling, and they are what the gate has always been enforced against.
+func decodeLog(r io.Reader) (vmafLog, error) {
+	var parsed vmafLog
+	dec := json.NewDecoder(r)
+	tok, err := dec.Token()
+	if err == io.EOF {
+		return vmafLog{}, errEmptyLog
+	}
+	if err != nil {
+		return vmafLog{}, err
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return vmafLog{}, fmt.Errorf("the log is not a JSON object (it starts with %v)", tok)
+	}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return vmafLog{}, err
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return vmafLog{}, fmt.Errorf("the log carries a non-string object key %v", tok)
+		}
+		switch key {
+		case "pooled_metrics":
+			if err := dec.Decode(&parsed.PooledMetrics); err != nil {
+				return vmafLog{}, fmt.Errorf("pooled_metrics: %w", err)
+			}
+		case "frames":
+			if err := skipElements(dec); err != nil {
+				return vmafLog{}, fmt.Errorf("frames: %w", err)
+			}
+		default:
+			if err := skipValue(dec); err != nil {
+				return vmafLog{}, fmt.Errorf("%s: %w", key, err)
+			}
+		}
+	}
+	if _, err := dec.Token(); err != nil { // the object's closing brace
+		return vmafLog{}, err
+	}
+	switch tok, err := dec.Token(); {
+	case err == io.EOF:
+		return parsed, nil
+	case err != nil:
+		return vmafLog{}, fmt.Errorf("after the log object: %w", err)
+	default:
+		return vmafLog{}, fmt.Errorf("the log carries data after its closing brace (%v)", tok)
+	}
+}
+
+// discardValue is a decode target that keeps nothing. The decoder still reads and
+// syntax-checks the whole value, so a malformed entry is an error, but the bytes are dropped
+// as soon as the value ends.
+type discardValue struct{}
+
+func (*discardValue) UnmarshalJSON([]byte) error { return nil }
+
+// skipElements skips an array one element at a time, so what is held is the largest single
+// element and never the array. A value that is not an array is skipped as skipValue would.
+func skipElements(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '[' {
+		return skipRest(dec, tok)
+	}
+	var discard discardValue
+	for dec.More() {
+		if err := dec.Decode(&discard); err != nil {
+			return err
+		}
+	}
+	_, err = dec.Token() // the closing bracket
+	return err
+}
+
+// skipValue skips the next value, token by token, holding nothing whatever its size.
+func skipValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	return skipRest(dec, tok)
+}
+
+// skipRest skips what is left of a value whose first token has been read: nothing for a
+// scalar, and everything up to the matching close for an object or an array. It counts depth
+// rather than recursing, so a deeply nested value costs no stack.
+func skipRest(dec *json.Decoder, first json.Token) error {
+	d, ok := first.(json.Delim)
+	if !ok || d == '}' || d == ']' {
+		return nil
+	}
+	for depth := 1; depth > 0; {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if d, ok := tok.(json.Delim); ok {
+			if d == '{' || d == '[' {
+				depth++
+			} else {
+				depth--
+			}
+		}
+	}
+	return nil
+}
+
 // ChromaMetricName is the stable token recorded beside a chroma measurement, naming what
 // was measured and in what unit. It is a WIRE FORMAT - it lands in the ledger, the event
 // and the API payload - so it is a closed vocabulary, changed only with the readers in mind.
@@ -298,6 +493,8 @@ func BuildFilter(req Request, logPath string) string {
 	// log_path lives INSIDE the -lavfi filtergraph, where ':' separates option pairs, so a
 	// path with a ':' (or other filtergraph metachar) must be escaped or ffmpeg mis-parses the
 	// filter and the gate fails every encode. The media paths are safe (separate -i argv).
+	// Score passes logPipePath, which needs no escaping; a test driving this builder directly
+	// passes a file of its own, and that is what the escaping is still for.
 	// The REFERENCE's own chain, ahead of the format conversion: where the encode applied a
 	// transformation the source did not carry, the reference is produced from the source by
 	// that same transformation at those same parameters, or the score is a measurement of
@@ -342,13 +539,15 @@ func Score(ctx context.Context, ffmpeg string, req Request) (Result, error) {
 			"count is derived from the CPU quota this process is allowed (internal/cpuquota) and "+
 			"is at least 1", req.Threads)
 	}
-	logf, err := os.CreateTemp("", "holdfast-vmaf-*.json")
+	// The log travels through a pipe and never touches a filesystem (see logPipePath). The
+	// channel is set up BEFORE ffmpeg is started, so a pass that cannot have one never runs
+	// a measurement whose result it could not read.
+	logR, logW, err := newLogPipe()
 	if err != nil {
-		return Result{}, fmt.Errorf("vmaf: temp log: %w", err)
+		return Result{}, fmt.Errorf("vmaf: log pipe: cannot set up the channel libvmaf writes its "+
+			"log through (refusing to score a pair whose measurement could not be read): %w", err)
 	}
-	logPath := logf.Name()
-	logf.Close()
-	defer os.Remove(logPath)
+	defer logR.Close()
 
 	// -filter_complex_threads bounds the OTHER thread pool this pass runs. Left unset,
 	// libavfilter slices the format conversions ahead of libvmaf across as many threads as
@@ -359,23 +558,64 @@ func Score(ctx context.Context, ffmpeg string, req Request) (Result, error) {
 	_, graphThreads := PoolThreads(req.Threads)
 	cmd := exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
 		"-filter_complex_threads", strconv.Itoa(graphThreads),
-		"-i", req.Distorted, "-i", req.Reference, "-lavfi", BuildFilter(req, logPath), "-f", "null", "-")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		msg := string(out)
+		"-i", req.Distorted, "-i", req.Reference, "-lavfi", BuildFilter(req, logPipePath), "-f", "null", "-")
+	// stdout and stderr merged into one buffer, exactly what CombinedOutput collected, so
+	// the failure text below is as informative as it always was.
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	// ExtraFiles[0] is the child's descriptor 3 (logFD), the one logPipePath names.
+	cmd.ExtraFiles = []*os.File{logW}
+	// A process that exits (or is killed on cancellation) while something it spawned still
+	// holds its output open must not hold this pass open with it.
+	cmd.WaitDelay = pipeCloseDelay
+	if err := cmd.Start(); err != nil {
+		logW.Close()
+		return Result{}, fmt.Errorf("vmaf: ffmpeg failed: %w", err)
+	}
+	// The parent's copy of the write end is closed at once, so the reader sees EOF the moment
+	// ffmpeg's copy goes - by exit, by crash or by the kill a cancelled context sends -
+	// whether or not libvmaf ever wrote a byte. That EOF is what keeps a pass whose log never
+	// comes from waiting for it.
+	logW.Close()
+
+	decoded := make(chan logDecode, 1)
+	go func() {
+		p, err := decodeLog(logR)
+		if err != nil {
+			// Keep DRAINING to EOF: libvmaf writes the whole log at the end of the pass, and
+			// a reader that stopped at the first malformed byte would leave ffmpeg blocked
+			// on a full pipe forever. The error is still the answer.
+			_, _ = io.Copy(io.Discard, logR)
+		}
+		decoded <- logDecode{log: p, err: err}
+	}()
+	runErr := cmd.Wait()
+
+	var d logDecode
+	select {
+	case d = <-decoded:
+	case <-time.After(pipeCloseDelay):
+		// ffmpeg is gone and the pipe is still open, so something ffmpeg spawned inherited
+		// the write end. At most a pipe buffer remained unread when ffmpeg exited, so this
+		// is not a slow parse; closing the read end unblocks the reader with an error.
+		logR.Close()
+		d = <-decoded
+		if d.err == nil {
+			d.err = errors.New("the log channel was still held open after ffmpeg exited")
+		}
+	}
+
+	if runErr != nil {
+		msg := out.String()
 		if strings.Contains(msg, "No such filter") || strings.Contains(msg, "libvmaf") && strings.Contains(msg, "not found") {
 			return Result{}, ErrUnavailable
 		}
-		return Result{}, fmt.Errorf("vmaf: ffmpeg failed: %w: %s", err, truncate(msg, 300))
+		return Result{}, fmt.Errorf("vmaf: ffmpeg failed: %w: %s", runErr, truncate(msg, 300))
 	}
-
-	raw, err := os.ReadFile(logPath)
-	if err != nil {
-		return Result{}, fmt.Errorf("vmaf: read log: %w", err)
+	if d.err != nil {
+		return Result{}, fmt.Errorf("vmaf: parse log: %w", d.err)
 	}
-	var parsed vmafLog
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return Result{}, fmt.Errorf("vmaf: parse log: %w", err)
-	}
+	parsed := d.log
 	// Fail CLOSED on an incomplete log: any missing pooled statistic means the measurement
 	// did not produce the numbers the gate is built on, and proceeding would either
 	// misread a zero as a real score or pass the output on the metrics that did report.
