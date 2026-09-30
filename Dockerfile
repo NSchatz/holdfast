@@ -2,7 +2,7 @@
 #
 # Production image (TRANSCODE-9). Multi-arch (linux/amd64 + linux/arm64), non-root,
 # no shell, bundling a PINNED, CHECKSUM-VERIFIED ffmpeg that carries libx265 +
-# libsvtav1 + libvmaf.
+# libsvtav1 + libvmaf, and on amd64 the pinned VAAPI/QSV runtime (hwruntime stage).
 #
 # Why the ffmpeg pin is load-bearing rather than cosmetic: a distro ffmpeg can conceal
 # HEVC corruption on decode-to-null, so VMAF is the real quality gate (roadmap §6). An
@@ -96,6 +96,128 @@ RUN set -eu; \
     test -x /ffmpeg/bin/ffmpeg; \
     test -x /ffmpeg/bin/ffprobe
 
+# --- hardware runtime: pinned Debian trixie packages, verified by hash --------
+# The userspace VAAPI and QSV need inside the container, per the approved P3 option (a)
+# (.claude/goals/2026-09-holdfast-research/proposal-amd-image.md): libva, libva-drm and
+# libdrm (the pinned ffmpeg dlopens them through implib-gen shims and ABORTS, exit 134,
+# when one is missing), Intel's full-feature iHD VA driver and libmfx-gen (the QSV
+# runtime for Tiger Lake and newer), and Mesa's radeonsi VA driver for AMD, each with the
+# shared-library closure the dynamic loader really needs. The closure was computed with
+# readelf -d on the unpacked packages, minus what the runtime base already carries
+# (libc6, libgcc-s1, libstdc++6, libzstd1, zlib1g, libssl3t64, libgomp1, read from the
+# base's own var/lib/dpkg/status.d on 2026-09-30), and the image smoke proves it: each
+# driver is listed by the dynamic loader inside the image with nothing "not found".
+#
+# Every package is pinned by exact version AND sha256, and fetched from
+# snapshot.debian.org, never from deb.debian.org: a pool file on the live mirror is
+# removed when a point release supersedes it, while a snapshot URL serves the same bytes
+# for good. Each sha256 below was read from the snapshot's own Packages index
+# (dists/trixie/{main,non-free}/binary-amd64/Packages.xz at DEBIAN_SNAPSHOT, whose own
+# sha256 the snapshot's Release file lists) and confirmed by downloading the .deb from
+# that snapshot, on 2026-09-30:
+#   https://snapshot.debian.org/archive/debian/20260929T202609Z/dists/trixie/Release
+# NOTICE names every package with its version, licence and corresponding source, and
+# scripts/check-pins.sh holds the two lists equal, both directions, and refuses a pin
+# without a version, a 64-hex sha256 or a snapshot URL.
+#
+# Only shared objects and each package's copyright file are staged: from every package
+# its usr/lib/x86_64-linux-gnu tree, from mesa-va-drivers only radeonsi_drv_video.so (the
+# one gallium VA driver P3 chose; it is a symlink into libgallium), and from
+# libdrm-common only the amdgpu.ids table libdrm_amdgpu reads to name an AMD device.
+# Libraries land on the multiarch path /usr/lib/x86_64-linux-gnu, the VA drivers in its
+# dri/ directory, which is the driver directory Debian's libva is built with (and the one
+# BtbN's recipe names, scripts.d/50-vaapi/50-libva.sh:43 at the ffmpeg pin tag).
+# Everything stays under usr/: the runtime base is UsrMerge, so /lib is a symlink into
+# /usr/lib, and a staged top-level lib/ directory would clobber it.
+#
+# arm64 gets an EMPTY runtime, on purpose: the pinned arm64 ffmpeg is built without VAAPI
+# (BtbN scripts.d/50-vaapi/50-libva.sh:16 returns early for linuxarm64) and without libvpl
+# (scripts.d/50-onevpl.sh), and Debian builds libmfx-gen1.2 for amd64 only, so there is
+# nothing on arm64 these libraries could serve. Read 2026-09-29 at
+# https://github.com/BtbN/FFmpeg-Builds/tree/autobuild-2026-07-31-14-10/scripts.d
+FROM --platform=$BUILDPLATFORM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a AS hwruntime
+# The same throwaway-fetcher reasoning as the ffmpeg stage: curl only downloads, and every
+# byte it fetches is checked against a pinned sha256 before it is unpacked.
+# hadolint ignore=DL3008
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+ARG TARGETARCH
+ARG DEBIAN_SNAPSHOT=20260929T202609Z
+# One package per line: name, exact version, sha256 of the .deb, path under the
+# snapshot's pool/. scripts/check-pins.sh section 10 parses this block.
+COPY <<'DEBPINS' /hwruntime.pins
+libva2                          2.22.0-3                                  b76bdd330de47a826698aaed10f53435b703e9a7d4415dd68269c97709f46a9b main/libv/libva/libva2_2.22.0-3_amd64.deb
+libva-drm2                      2.22.0-3                                  5dce5007ddc0ce87a61db4d71476ce1a5a135737b5185ce2e8b7067342fcafc6 main/libv/libva/libva-drm2_2.22.0-3_amd64.deb
+libdrm2                         2.4.124-2                                 fe2276901c7cd7b8079de63072d37fe1cbeb4eb001a3bc1f1d662ad89aa0890e main/libd/libdrm/libdrm2_2.4.124-2_amd64.deb
+libdrm-common                   2.4.124-2                                 9a8a6c65c165e9964f106fb4ac710959b5d33e0790227e3ab6b27c4742d1254a main/libd/libdrm/libdrm-common_2.4.124-2_all.deb
+libdrm-amdgpu1                  2.4.124-2                                 c1d97a5e32e2bc68e833b8abeae026b6306198e87ee4396a7ffecd4779caefbf main/libd/libdrm/libdrm-amdgpu1_2.4.124-2_amd64.deb
+libdrm-intel1                   2.4.124-2                                 188ab1fd74c838b3c8055d62107351e16a4bb7a25d39c30bbb9aac30ddd37238 main/libd/libdrm/libdrm-intel1_2.4.124-2_amd64.deb
+libpciaccess0                   0.17-3+b3                                 d9a0091071635a84e837051e4813005ac445071731becea28fba4d9806df5252 main/libp/libpciaccess/libpciaccess0_0.17-3+b3_amd64.deb
+intel-media-va-driver-non-free  25.2.3+ds1-1                              e0aec5839e3a6c41b7b1815ed944b85c1334d38ee744165c9788f0e0fc8803f9 non-free/i/intel-media-driver-non-free/intel-media-va-driver-non-free_25.2.3+ds1-1_amd64.deb
+libigdgmm12                     22.7.2+ds1-1                              81b668213cb59d2bcae8c66b1184277fd0228e3648ab63f4f2b3b578da291b06 main/i/intel-gmmlib/libigdgmm12_22.7.2+ds1-1_amd64.deb
+libmfx-gen1.2                   25.1.4-1                                  9dd7ff697976075941a014ee9594c494040a7b4b56b9821b35475bb80e2aaddd main/o/onevpl-intel-gpu/libmfx-gen1.2_25.1.4-1_amd64.deb
+mesa-va-drivers                 25.0.7-2+deb13u1                          708e6f7f87863605eef532f70b1f80615c1b6c00f4e2b52a2850ae90de917fbd main/m/mesa/mesa-va-drivers_25.0.7-2+deb13u1_amd64.deb
+mesa-libgallium                 25.0.7-2+deb13u1                          3e610f29321cdcc61337c86e6b4031ff60f0c9915fe19e6a862ac06480620ff4 main/m/mesa/mesa-libgallium_25.0.7-2+deb13u1_amd64.deb
+libllvm19                       1:19.1.7-3+b1                             db0d614d61345ca710fb73e75105f1ec6e38898fa7b3aa99fa7eb7d8b0a11d57 main/l/llvm-toolchain-19/libllvm19_19.1.7-3+b1_amd64.deb
+libz3-4                         4.13.3-1                                  71383373523ef62d47eccf660cf6535c3febcbb3f88e54cb7a43124014b57359 main/z/z3/libz3-4_4.13.3-1_amd64.deb
+libedit2                        3.1-20250104-1                            b002ea172b9c1e34a67bc497c523c67bb74c3f0a4e98113cb083990a1f1d3bfe main/libe/libedit/libedit2_3.1-20250104-1_amd64.deb
+libbsd0                         0.12.2-2                                  e5a85986fa6bec3307ab1bc860736b478b331882bc45e17675a7bdf88eecb43a main/libb/libbsd/libbsd0_0.12.2-2_amd64.deb
+libmd0                          1.1.0-2+b1                                7244ec3839b61fac0c1884fe08aaa040f26e8f1f35f1f5d3482eacefd30d1b44 main/libm/libmd/libmd0_1.1.0-2+b1_amd64.deb
+libtinfo6                       6.5+20250216-2                            8b9f6a7983e9418564e48a627518de4c03917b56efe68d7f3e93bd8fffa1cc10 main/n/ncurses/libtinfo6_6.5+20250216-2_amd64.deb
+libffi8                         3.4.8-2                                   0ebdc340de33333639c3c63874cd4b15ac2e83dfa1ef3053b7eefaf4919f4f68 main/libf/libffi/libffi8_3.4.8-2_amd64.deb
+libxml2                         2.12.7+dfsg+really2.9.14-2.1+deb13u3      e0c6b63ce4602a036a526f60fe5e6c1586710688058d98fc1001b9b3147b7efd main/libx/libxml2/libxml2_2.12.7+dfsg+really2.9.14-2.1+deb13u3_amd64.deb
+liblzma5                        5.8.1-1+deb13u1                           1cfcc6e0dc36f438a79b6e2189facdb9d150b08f57d190a60e01c98075c7f896 main/x/xz-utils/liblzma5_5.8.1-1+deb13u1_amd64.deb
+libelf1t64                      0.192-4                                   94497b7e17b6f574a0605b380d454e20d3f01a9c63b70c2a2263f679d30053e1 main/e/elfutils/libelf1t64_0.192-4_amd64.deb
+libsensors5                     1:3.6.2-2                                 f0a994a6d7cfa695dea5343d0d1ba7eed796c0ad920c7282998b95f60049c4f6 main/l/lm-sensors/libsensors5_3.6.2-2_amd64.deb
+libexpat1                       2.8.3-1~deb13u1                           38abe0e710a07688e9c149d74536e67cfee0364bdb64dd6d644c32a1cfad389f main/e/expat/libexpat1_2.8.3-1~deb13u1_amd64.deb
+libx11-xcb1                     2:1.8.12-1                                e05f94d21a932fba5b09b9b13d99df776b155d3bc792c0e294451df9ffe1ba25 main/libx/libx11/libx11-xcb1_1.8.12-1_amd64.deb
+libxcb1                         1.17.0-2+b1                               5c222a72d11b866447da31693254f738430726e3e065a384e82687b2fd2f978b main/libx/libxcb/libxcb1_1.17.0-2+b1_amd64.deb
+libxau6                         1:1.0.11-1                                689a9f0e0ba3e2c65431f864871e303ee904de69dd28abfc462663fae030227f main/libx/libxau/libxau6_1.0.11-1_amd64.deb
+libxdmcp6                       1:1.1.5-1                                 0740dc760916b2008b45417a42a8fd7dd5de370fb57d31373f15034cda8acf0b main/libx/libxdmcp/libxdmcp6_1.1.5-1_amd64.deb
+libxcb-dri3-0                   1.17.0-2+b1                               f446d42fb5fcebbb3e347368ba83616769fdb271d85b2f49048e337f3163d267 main/libx/libxcb/libxcb-dri3-0_1.17.0-2+b1_amd64.deb
+libxcb-present0                 1.17.0-2+b1                               db95ea4630c55bd7f3281cb60ccf75b1627ef2f4399e1939f8f6161e584a92fb main/libx/libxcb/libxcb-present0_1.17.0-2+b1_amd64.deb
+libxcb-randr0                   1.17.0-2+b1                               f5d9fe5fdf797918f81f0abf6cfd4270bd54659540cddb4da709ab7154523214 main/libx/libxcb/libxcb-randr0_1.17.0-2+b1_amd64.deb
+libxcb-sync1                    1.17.0-2+b1                               0ce4770ed1505be9ddc6473045e4662d062aff2f3077ee684265f01cfb543559 main/libx/libxcb/libxcb-sync1_1.17.0-2+b1_amd64.deb
+libxcb-xfixes0                  1.17.0-2+b1                               f9c1aafc18bf9e4662e34bbaf3bb00f1f4e8c2fc1dd786fdfb6cb9cb6c64fae7 main/libx/libxcb/libxcb-xfixes0_1.17.0-2+b1_amd64.deb
+libxshmfence1                   1.3.3-1                                   7b339e9e5b2349723d35af4df89bcc7aa456bbdf8ba1754358f9b44c3fe1f964 main/libx/libxshmfence/libxshmfence1_1.3.3-1_amd64.deb
+DEBPINS
+RUN set -eu; \
+    mkdir -p /hwroot; \
+    if [ "${TARGETARCH}" != "amd64" ]; then \
+      echo "no hardware runtime for ${TARGETARCH}: its pinned ffmpeg has no VAAPI and no libvpl"; \
+      exit 0; \
+    fi; \
+    lib=usr/lib/x86_64-linux-gnu; \
+    mkdir -p "/hwroot/${lib}" /hwroot/usr/share/doc /tmp/deb /tmp/x; \
+    while read -r name version sha path; do \
+      [ -n "${name}" ] || continue; \
+      deb="/tmp/deb/${name}.deb"; \
+      curl -fsSL --connect-timeout 30 --max-time 900 --retry 8 --retry-delay 10 --retry-all-errors \
+        -o "${deb}" "https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/pool/${path}"; \
+      printf '%s  %s\n' "${sha}" "${deb}" | sha256sum -c -; \
+      got="$(dpkg-deb -f "${deb}" Package) $(dpkg-deb -f "${deb}" Version)"; \
+      if [ "${got}" != "${name} ${version}" ]; then \
+        echo "${path} is '${got}', pinned as '${name} ${version}'" >&2; exit 1; \
+      fi; \
+      dpkg-deb -x "${deb}" "/tmp/x/${name}"; \
+      if [ -d "/tmp/x/${name}/${lib}" ]; then cp -a "/tmp/x/${name}/${lib}/." "/hwroot/${lib}/"; fi; \
+      mkdir -p "/hwroot/usr/share/doc/${name}"; \
+      cp "/tmp/x/${name}/usr/share/doc/${name}/copyright" "/hwroot/usr/share/doc/${name}/copyright"; \
+    done < /hwruntime.pins; \
+    for d in "/hwroot/${lib}/dri/"*_drv_video.so; do \
+      case "${d##*/}" in iHD_drv_video.so|radeonsi_drv_video.so) ;; *) rm -f "${d}" ;; esac; \
+    done; \
+    mkdir -p /hwroot/usr/share/libdrm; \
+    cp /tmp/x/libdrm-common/usr/share/libdrm/amdgpu.ids /hwroot/usr/share/libdrm/amdgpu.ids; \
+    for f in dri/iHD_drv_video.so dri/radeonsi_drv_video.so libmfx-gen.so.1.2 \
+             libva.so.2 libva-drm.so.2 libdrm.so.2; do \
+      test -e "/hwroot/${lib}/${f}" || { echo "hardware runtime is missing ${lib}/${f}" >&2; exit 1; }; \
+    done; \
+    test "$(ls -A /hwroot)" = "usr" || { echo "hardware runtime staged outside usr/" >&2; exit 1; }; \
+    rm -rf /tmp/deb /tmp/x; \
+    du -sh /hwroot
+
 # --- build the binary --------------------------------------------------------
 FROM --platform=$BUILDPLATFORM golang:1.25.14-trixie@sha256:2c4c60ef415fbfa5e90300722293bef36c5e63fae17570ce18f580af933dbd73 AS build
 
@@ -160,13 +282,22 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -tags
 # distroless cc: glibc + libgcc_s + ca-certificates, no shell, no package manager,
 # non-root by default. Nothing RUNs in this stage, so it cross-builds without emulation.
 #
-# NOTE what this base deliberately does NOT carry: any vendor userspace GPU library.
-# ffmpeg dlopens those at runtime — a VA driver (iHD/i965) for qsv/vaapi, and AMD's own
-# libamfrt64 for amf, which does NOT go through VA-API — and passing /dev/dri supplies
-# only the KERNEL device, not a driver. So `encoder: qsv|vaapi|amf` cannot start here.
-# NVIDIA is different and does work: the NVIDIA Container Toolkit INJECTS
-# libnvidia-encode into the container, which is exactly what nvenc dlopens. See
-# docs/docker.md "GPU passthrough" — a documented limitation, not an oversight.
+# NOTE what the image carries for hardware encoders, and what it does not. On amd64 the
+# hwruntime stage above supplies the VAAPI and QSV userspace from pinned Debian trixie
+# packages: libva, libva-drm and libdrm, Intel's iHD VA driver (VAAPI on Intel), libmfx-gen
+# (QSV on Tiger Lake and newer; older Intel parts still encode through VAAPI) and Mesa's
+# radeonsi VA driver (VAAPI on AMD). Passing /dev/dri supplies only the kernel device; the
+# drivers are what this image adds. arm64 carries none (see that stage).
+#
+# `amf` does NOT work in this image and cannot be made to: AMD's AMF runtime
+# (libamfrt64, in amf-amdgpu-pro) is licensed under the AMDGPU PRO EULA, which grants
+# "install and use" only and no redistribution, so a published image of an AGPL project
+# cannot carry it (P3; https://repo.radeon.com/amf/copyright, read 2026-09-29). AMD
+# hardware encodes here through `encoder: vaapi`, which is AMD's own advice.
+#
+# NVIDIA is supplied by the host: the NVIDIA Container Toolkit injects the driver's
+# libraries (libnvidia-encode among them) into the container, and nvenc dlopens them.
+# See NVIDIA_DRIVER_CAPABILITIES below and docs/docker.md "GPU passthrough".
 #
 # distroless CC, not BASE. ffmpeg/ffprobe carry a DT_NEEDED on libgcc_s.so.1, and the
 # `base` variant ships glibc WITHOUT libgcc - so `base` builds perfectly and then dies
@@ -186,6 +317,10 @@ LABEL org.opencontainers.image.title="holdfast" \
       org.opencontainers.image.revision="${COMMIT}" \
       org.opencontainers.image.created="${DATE}"
 
+# The hardware runtime: shared objects under /usr/lib/x86_64-linux-gnu (VA drivers in its
+# dri/), each package's copyright file under /usr/share/doc/<package>/, and the amdgpu.ids
+# table. Empty on arm64. No RUN here: the stage above staged exactly what is copied.
+COPY --from=hwruntime /hwroot/ /
 COPY --from=ffmpeg /ffmpeg/bin/ffmpeg  /usr/local/bin/ffmpeg
 COPY --from=ffmpeg /ffmpeg/bin/ffprobe /usr/local/bin/ffprobe
 # `run_window` is evaluated in LOCAL time, so the zone database has to be present for a
@@ -217,6 +352,24 @@ COPY --from=build /src/LICENSE /src/NOTICE /usr/share/doc/holdfast/
 # otherwise be whatever the container runtime decides to default it to. Pin it, and the
 # safety check has a definite answer under every uid.
 ENV HOME=/home/nonroot
+# NOT a config key either: it is read by the NVIDIA Container Toolkit, never by holdfast.
+# On the toolkit's legacy runtime-hook path the driver libraries mounted into a container
+# are chosen by capability, and "empty or unset" means the default `utility,compute`,
+# which excludes `video`, the capability "required for using the Video Codec SDK"
+# (libnvidia-encode, what nvenc dlopens). The list REPLACES the default rather than adding
+# to it, hence all three. Docker sets this variable itself only when a request names an
+# NVIDIA capability, and compose's `capabilities: [gpu]` names none, so on that path this
+# value is the one the hook reads. On a CDI host (Docker 29.2 and later with NVIDIA
+# Container Toolkit 1.18 and later) the generated spec mounts the driver's libraries with
+# no capability filtering, so it changes nothing there. NVIDIA_VISIBLE_DEVICES is
+# deliberately NOT set: Docker writes it from the device request (`--gpus`, or compose's
+# `deploy.resources.reservations.devices`), and an image default of `all` would hand every
+# GPU to any container started under the nvidia runtime without asking for one.
+# Read 2026-09-30:
+#   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/docker-specialized.html
+#   https://github.com/moby/moby/blob/master/daemon/devices_nvidia_linux.go (injectNVIDIARuntimeHook)
+#   .claude/goals/2026-09-holdfast-research/verify-hw-encode.md claim 9 (the CDI path)
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 EXPOSE 8080
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/holdfast"]

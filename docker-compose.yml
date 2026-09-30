@@ -115,8 +115,8 @@ services:
     # is held to the identical no-loss gate either way, so a bad hardware encode is
     # rejected rather than shipped — but the right default is still cpu.
     #
-    # NVIDIA (encoder: nvenc / av1_nvenc) — needs the NVIDIA Container Toolkit, which
-    # INJECTS the driver libraries ffmpeg dlopens. This is the supported GPU path:
+    # NVIDIA (encoder: nvenc / av1_nvenc) - needs the NVIDIA Container Toolkit, which
+    # INJECTS the driver libraries ffmpeg dlopens:
     # deploy:
     #   resources:
     #     reservations:
@@ -124,12 +124,22 @@ services:
     #         - driver: nvidia
     #           count: 1
     #           capabilities: [gpu]
+    # The image sets NVIDIA_DRIVER_CAPABILITIES=compute,video,utility. `video` is the one
+    # that mounts libnvidia-encode on the toolkit's legacy runtime-hook path, whose default
+    # is `utility,compute`; if you set that variable yourself, keep `video` in it.
     #
-    # Intel Quick Sync (qsv), VAAPI (vaapi) and AMD (amf) do NOT work in this image, and
-    # /dev/dri passthrough does not change that: each needs a vendor USERSPACE library in
-    # the container (a VA driver for qsv/vaapi, libamfrt64 for amf), /dev/dri is only the
-    # kernel device, and nothing injects those the way the NVIDIA toolkit does. See
-    # docs/docker.md — a documented limitation with a workaround, not an oversight.
+    # Intel (encoder: vaapi, or qsv on Tiger Lake and newer) and AMD (encoder: vaapi) -
+    # the amd64 image carries the VA drivers (Intel iHD, Mesa radeonsi) and the QSV
+    # runtime; the container needs the render node and permission to open it:
+    # devices:
+    #   - /dev/dri:/dev/dri
+    # group_add:
+    #   - "993"   # the GID that owns the render node ON THE HOST:
+    #             #   stat -c %g /dev/dri/renderD128   (or: getent group render)
+    # The GID must be numeric: the image's /etc/group has no `render` group, so a name
+    # would not resolve. `encoder: amf` does not work in this image (AMD's licence for its
+    # AMF runtime grants no redistribution); use `encoder: vaapi` on AMD. The arm64 image
+    # carries no hardware runtime. See docs/docker.md "GPU passthrough".
     #
     # There is no silent fallback: if the configured encoder cannot actually encode on
     # this host, holdfast fails loud at startup and exits non-zero. That check really
