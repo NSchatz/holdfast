@@ -259,3 +259,87 @@ func TestDerivePixFmt(t *testing.T) {
 		})
 	}
 }
+
+// TestDeriveColor_TheDescriptionAndBothRenderingsExactly grades DeriveColor field by field and
+// both of its renderings byte for byte, for each shape of source the encoder meets. The
+// rendering is what every encode's command line carried before the description existed
+// (DeriveColorArgsFrom returned exactly these strings), so a description that moved any of
+// them would move a command line; and the description is what anything asking what an output
+// should carry reads, so a field that moved would answer that question wrongly.
+func TestDeriveColor_TheDescriptionAndBothRenderingsExactly(t *testing.T) {
+	const md = "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1)"
+	cases := []struct {
+		name                string
+		prim, trc, spc, rng string
+		flat                string
+		want                Color
+		flags               string
+		x265                string
+	}{
+		{
+			name: "untagged SDR: only what the source signals, nothing invented",
+			want: Color{}, flags: "", x265: "",
+		},
+		{
+			name: "a range alone is an ffmpeg flag and no libx265 parameter",
+			rng:  "tv",
+			want: Color{Range: "tv"}, flags: "-color_range tv", x265: "",
+		},
+		{
+			name: "bt709 SDR passes through whole",
+			prim: "bt709", trc: "bt709", spc: "bt709", rng: "tv",
+			want:  Color{Primaries: "bt709", Transfer: "bt709", Matrix: "bt709", Range: "tv"},
+			flags: "-color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv",
+			x265:  ":colorprim=bt709:transfer=bt709:colormatrix=bt709",
+		},
+		{
+			name: "HLG is not HDR10: tags pass through, no static metadata",
+			prim: "bt2020", trc: "arib-std-b67", spc: "bt2020nc", rng: "tv",
+			want:  Color{Primaries: "bt2020", Transfer: "arib-std-b67", Matrix: "bt2020nc", Range: "tv"},
+			flags: "-color_primaries bt2020 -color_trc arib-std-b67 -colorspace bt2020nc -color_range tv",
+			x265:  ":colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc",
+		},
+		{
+			name:  "a PQ transfer alone is HDR10: the rest defaulted, no block to carry",
+			trc:   "smpte2084",
+			want:  Color{Primaries: "bt2020", Transfer: "smpte2084", Matrix: "bt2020nc", Range: "tv", HDR10: true},
+			flags: "-color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv",
+			x265:  ":colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:hdr10-opt=1:repeat-headers=1",
+		},
+		{
+			name: "a mastering-display block alone is HDR10 and is carried with the light level",
+			prim: "bt2020", rng: "pc", flat: sdFlat,
+			want: Color{Primaries: "bt2020", Transfer: "smpte2084", Matrix: "bt2020nc", Range: "pc", HDR10: true,
+				MasterDisplay: md, MaxCLL: "1000,400"},
+			flags: "-color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range pc",
+			x265: ":colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:master-display=" + md +
+				":max-cll=1000,400:hdr10-opt=1:repeat-headers=1",
+		},
+		{
+			name: "side data an SDR source carries is not read as HDR10 metadata",
+			prim: "bt709", trc: "bt709", flat: "Content light level metadata",
+			want:  Color{Primaries: "bt709", Transfer: "bt709"},
+			flags: "-color_primaries bt709 -color_trc bt709",
+			x265:  ":colorprim=bt709:transfer=bt709",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := DeriveColor(tc.prim, tc.trc, tc.spc, tc.rng, tc.flat)
+			if got != tc.want {
+				t.Errorf("DeriveColor = %+v, want %+v", got, tc.want)
+			}
+			if flags := strings.Join(got.FFmpegFlags(), " "); flags != tc.flags {
+				t.Errorf("FFmpegFlags = %q, want %q", flags, tc.flags)
+			}
+			if x := got.X265Params(); x != tc.x265 {
+				t.Errorf("X265Params = %q, want %q", x, tc.x265)
+			}
+			// The wrapper every encode called before the description existed renders the same.
+			flags, x := DeriveColorArgsFrom(tc.prim, tc.trc, tc.spc, tc.rng, tc.flat)
+			if strings.Join(flags, " ") != tc.flags || x != tc.x265 {
+				t.Errorf("DeriveColorArgsFrom = (%q, %q), want (%q, %q)", strings.Join(flags, " "), x, tc.flags, tc.x265)
+			}
+		})
+	}
+}

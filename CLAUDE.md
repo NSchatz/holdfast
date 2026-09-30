@@ -44,6 +44,8 @@ reasoning lives in the document, not in this file.
   [`docs/design/quality-gate.md`](docs/design/quality-gate.md#vmaf-pooling).
 - **An unreadable figure is reported as null, never as a zero** -
   [`docs/design/ledger-totals.md`](docs/design/ledger-totals.md#null-is-not-zero).
+- **Every job's encode is declared once, and the command line and every gate read that one
+  plan** - [`docs/design/encode-plan.md`](docs/design/encode-plan.md#encode-plan).
 
 ## Layout
 
