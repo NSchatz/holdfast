@@ -329,6 +329,16 @@ func goldenFixtures(t *testing.T, ffmpeg, ffprobe, dir string) map[string]string
 		"-c:v", "libx264", "-preset", "ultrafast", "-b:v", "8M", "-pix_fmt", "yuv420p", "-flags", "+ilme+ildct",
 		"--", filepath.Join(dir, "tall-interlaced.mkv"))
 	mkMP4WithCoverArt(t, ffmpeg, ffprobe, filepath.Join(dir, "cover.mp4"), "8M")
+	// An MP4 whose cover art is BMP: the one MP4 cover codec no Matroska attachment mimetype
+	// reads back as a picture, so carrying it into Matroska is refused.
+	bmp := filepath.Join(t.TempDir(), "cover.bmp")
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x120",
+		"-frames:v", "1", "-c:v", "bmp", "-f", "image2", "--", bmp)
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=1:size=320x240:rate=10", "-i", bmp, "-map", "0:v", "-map", "1:v",
+		"-c:v:0", "libx264", "-preset", "ultrafast", "-b:v:0", "8M", "-pix_fmt", "yuv420p",
+		"-c:v:1", "copy", "-disposition:v:1", "attached_pic", "--", filepath.Join(dir, "cover-bmp.mp4"))
+	assertVideoStreamShape(t, ffprobe, filepath.Join(dir, "cover-bmp.mp4"), []bool{false, true})
 	mkShortMatroska(t, ffmpeg, filepath.Join(dir, "cover.mkv"), true)
 	mkReportMatroska(t, ffmpeg, ffprobe, filepath.Join(dir, "pictures.mkv"), reportShape{pictures: true})
 	mkReportMatroska(t, ffmpeg, ffprobe, filepath.Join(dir, "pictures-font.mkv"), reportShape{pictures: true, font: true})
@@ -579,6 +589,15 @@ func encoderArgvCases() []encoderArgvCase {
 		out: strings.Repeat("x", 230) + "." + TempMarker + ".mkv" + TempSuffix, handProfile: true, streamPlan: true})
 	add(encoderArgvCase{name: "pictures/plan/long-scratch-name", source: "pictures.mkv",
 		out: strings.Repeat("x", 220) + ".0123456789ab." + TempMarker + ".mkv", handProfile: true, streamPlan: true})
+	add(encoderArgvCase{name: "cover-bmp-mp4/plan", source: "cover-bmp.mp4", out: "film.mp4", handProfile: true, streamPlan: true})
+	add(encoderArgvCase{name: "cover-bmp-mp4/plan/into-mkv", source: "cover-bmp.mp4", handProfile: true, streamPlan: true})
+	add(encoderArgvCase{name: "cover-bmp-mp4/no-plan/into-mkv", source: "cover-bmp.mp4"})
+
+	// An MPEG-TS source: ffprobe answers its video-stream question with a program section
+	// ahead of the stream, so without an intended stream map the encoder cannot establish
+	// whether one of its video streams is a picture, and refuses.
+	add(encoderArgvCase{name: "ts-source/no-plan", source: "sdr.ts", out: "film.ts"})
+	add(encoderArgvCase{name: "ts-source/plan", source: "sdr.ts", out: "film.ts", handProfile: true, streamPlan: true})
 
 	// Every container this build names, the working names it writes, and the names it refuses.
 	for _, ext := range knownContainerExts() {
@@ -818,6 +837,11 @@ func engineArgvCases() []engineArgvCase {
 	add(engineArgvCase{name: "pictures/spaces-in-name", source: "pictures.mkv", as: "A Synthetic Film (2025).mkv"})
 	add(engineArgvCase{name: "pictures/percent-d-in-name", source: "pictures.mkv", as: "The 100%d Club (2025).mkv"})
 	add(engineArgvCase{name: "pictures/long-stem", source: "pictures.mkv", as: strings.Repeat("x", 230) + ".mkv"})
+	add(engineArgvCase{name: "cover-bmp-mp4", source: "cover-bmp.mp4"})
+	add(engineArgvCase{name: "cover-bmp-mp4/into-mkv", source: "cover-bmp.mp4", root: "container_ext: mkv"})
+
+	// An extension this build knows no container for, offered through video_exts.
+	add(engineArgvCase{name: "container-unknown-divx", source: "sdr.avi", as: "sdr.divx", top: "video_exts: [divx]"})
 
 	// Where the encoder writes.
 	add(engineArgvCase{name: "scratch", scratch: true})
