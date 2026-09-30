@@ -32,19 +32,23 @@ inherited; and a source no profile matches is transcoded under the settings it i
 - never skipped, never failed. With no `encode_profiles` at all, every job resolves to
 exactly what it inherited.
 
-### What it is laid over: four layers, innermost last
+### What it is laid over: five layers, innermost last
 
 1. the built-in default
 2. the top-level configuration (the YAML file, then `HOLDFAST_*`)
 3. the profile of the **library root** the file lives under (a `library_roots` entry
    spelled as a mapping - see `config.example.yaml`)
-4. the **encode profile** whose pattern selected this file
+4. the first **resolution rule** of that root whose band admits the file, for the knobs it
+   names - `encoder` among them (see [`rules`](#resolution-rules))
+5. the **encode profile** whose pattern selected this file
 
 The last layer to mention a key decides it. So an encode profile is laid over the ROOT's
 resolved values and not over the top level: a root at `crf: 20` whose files match a
-profile that sets only `encoder` encodes at that root's 20, not at the top level's.
+profile that sets only `encoder` encodes at that root's 20, not at the top level's. And an
+encode profile that names an `encoder` beats a rule that names one, exactly as its `crf`
+beats a rule's `crf`; one that names no encoder leaves the rule's.
 `holdfast validate` prints layers 1 to 3 per root, knob by knob, with the layer each
-value came from.
+value came from, and each root's rules beneath them.
 
 An encode profile may only change what the encoder PRODUCES. The gates a library root
 carries - the VMAF floors, the savings floor, the bitrate floor, the hardlink guard -
@@ -82,11 +86,12 @@ able to move a gate that decides whether a source is destroyed.
 
 ### A profile's encoder is checked before the run starts
 
-Every distinct encoder the configuration can reach - the top-level one, and each
-profile's override - is tested against this host at startup, before anything is
-encoded and before the job store is opened. A hardware encoder with no matching
-device, or an ffmpeg build without the codec, **refuses the run** and the account
-names the profile that asked for it. That is the same loud failure the top-level
+Every distinct encoder the configuration can reach - the top-level one, each root's,
+each profile's override, and each encoder a resolution rule names - is tested against
+this host at startup, before anything is encoded and before the job store is opened. A
+hardware encoder with no matching device, or an ffmpeg build without the codec,
+**refuses the run** and the account names what asked for it: the profile, or the library
+root and the rule's index. That is the same loud failure the top-level
 encoder has always had, and it is never a silent fallback to `cpu`: some hardware
 encoders exit 0 while writing nothing, so the alternative is a library's worth of
 files failing one at a time, hours in.
@@ -361,11 +366,44 @@ rather than accepted as synonyms.
 
 ### What a rule may override
 
-Exactly four knobs: `min_bitrate_kbps`, `crf`, `min_savings_percent`, `max_height`. These are
-the ones whose right value depends on how many pixels the source has. Anything else inside a
-rule refuses to start, naming the offending key and listing what a rule may carry; a value the
-top level would refuse - a `crf` of 99, a `min_savings_percent` of 140 - is refused in the
-top level's own words, with the root and the rule's index in front of them.
+Exactly five knobs: `min_bitrate_kbps`, `crf`, `min_savings_percent`, `max_height` and
+`encoder`. The first four are the ones whose right value depends on how many pixels the source
+has. Anything else inside a rule refuses to start, naming the offending key and listing what a
+rule may carry; a value the top level would refuse - a `crf` of 99, a `min_savings_percent` of
+140 - is refused in the top level's own words, with the root and the rule's index in front of
+them.
+
+`encoder` lets one band of a library go to a different encoder from the rest - a hardware
+encoder for the band where encode time matters more than the last few percent of size, a
+software one for the others - without splitting the library into roots:
+
+```yaml
+library_roots:
+  - path: /mnt/tv
+    encoder: cpu
+    rules:
+      - when:
+          max_source_height: 720
+        encoder: nvenc      # this band on the GPU; everything else stays on cpu
+```
+
+It is judged exactly as an encode profile's `encoder` is: a key or an ffmpeg codec alias this
+build ships (`hevc_nvenc` behaves exactly as `nvenc`), never empty. It is refused beside a root
+that resolves `remux_only: true`, since that root re-encodes nothing and the rule's encoder
+could never run. An encode profile that matches the same file and names its own `encoder` still
+wins (layer 5 above). The job's terminal row records the encoder that actually ran, the
+already-at-target skip and the output-codec check read that encoder's target codec, and the
+startup check above tests it against the host.
+
+One more startup refusal belongs to it. A `max_height` makes a band's output shorter than its
+source, so that output can fall in ANOTHER band on the next scan - for example a rule for
+sources of 1081 lines and up, capped at 1080, whose 1080-line replacements the root's own
+profile then decides. When the two bands target different codecs (the rule writes av1 and the
+root hevc), that replacement would not be at its new band's target and would be encoded a
+second time after its original was already deleted. So a root where a `max_height` in force
+for a band writes that band's output into a band with a different target codec refuses to
+start, naming both bands, the ceiling and both codecs. The output height is the one the encode
+really writes.
 
 `max_height` is an OUTPUT height ceiling: a source taller than it is scaled to it in the
 source's own aspect ratio before it is encoded, and one at or below it is left alone. It is
@@ -378,9 +416,14 @@ written down; a height that is not a positive EVEN whole number of pixels is ref
 because every pixel format this build encodes to is 4:2:0 and has no representation for an odd
 dimension.
 
-A rule may not move the VMAF floors, the encoder, or anything else. A rule that could weaken
-the perceptual gate would be a rule that could weaken the thing standing between a band of
-files and the deletion of their sources.
+A rule may not move the VMAF floors or anything else about the perceptual gate: `vmaf_enable`,
+`min_vmaf`, `vmaf_min_pool`, `vmaf_min_chroma`, `vmaf_subsample` and `vmaf_model` inside a rule
+each refuse to start by name. A rule that could weaken the perceptual gate would be a rule that
+could weaken the thing standing between a band of files and the deletion of their sources, and
+a band moved to a faster encoder is exactly the band where that would be tempting. Every output
+under a root is held to that root's floors, whichever encoder produced it. The per-encoder
+`quality` map stays top-level too: a rule's encoder takes its `quality.<key>` entry from there,
+as a root's does.
 
 ### A source whose height cannot be read
 
