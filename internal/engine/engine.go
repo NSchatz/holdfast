@@ -308,6 +308,10 @@ const (
 	// GateStreamParity: the output does not carry the streams this job intended, or its
 	// streams could not be enumerated to check.
 	GateStreamParity = "stream-parity"
+	// GateFidelity: the output does not carry what its encode plan declares - its bit
+	// depth, chroma subsampling, a colour tag, or an HDR10 static-metadata block the
+	// source carries - or that could not be established.
+	GateFidelity = "fidelity"
 	// GateDecode: the decode-integrity healthcheck - the output does not fully decode.
 	GateDecode = "decode"
 	// GateVmafMean: the pooled harmonic mean fell below min_vmaf.
@@ -341,6 +345,7 @@ var GateVocabulary = []string{
 	GateLength,
 	GateSize,
 	GateStreamParity,
+	GateFidelity,
 	GateDecode,
 	GateVmafMean,
 	GateVmafMin,

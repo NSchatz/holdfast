@@ -51,7 +51,7 @@ one value it derives, and refuses a plan carrying any other (below).
 | `Streams` | the intended stream map: which source streams the output carries (the same value the row's dropped streams are recorded from) | the command line; the stream-parity gate |
 | attached pictures | how the attached pictures the map carries travel: pinned to copy in the map, or copied out of the source and carried as Matroska attachments | the command line |
 | `Picture` | the deinterlace applied, the `max_height` scale applied, and the crop (none in this build) | the filter chain; the reference and the scale the perceptual gate builds; the row's provenance |
-| `Metadata` | the colour description (`hdr.Color`): the source's tags and, for HDR10, its mastering display and content light level; HDR10+ and Dolby Vision are not carried, because the guards skip a source that has either before a plan is derived | the command line (`-color_*` and the libx265 parameters) |
+| `Metadata` | the colour description (`hdr.Color`): the source's tags and, for HDR10, its mastering display and content light level; HDR10+ and Dolby Vision are not carried, because the guards skip a source that has either before a plan is derived; and the fidelity declaration (`hdr.Fidelity`, [below](#fidelity)): the bit depth and chroma subsampling of the pixel format, the colour tags, and the HDR10 static-metadata blocks the source carries | the command line (`-color_*` and the libx265 parameters); the output fidelity gate |
 | `Profile`, `Settings` | the effective library profile, whose floors the size and perceptual gates apply, and the job's effective encode settings with the encode profile that supplied them | the size and perceptual gates (`Profile`); `Settings` is the record the plan's quality value (`Video.Quality`) was taken from, and nothing reads it after the derivation |
 | container | the muxer the output is written in, named from the working file's name | the command line |
 | `Source`, `Output` | the file the encode reads and the working file it writes: the two paths the plan was derived for | the command line (`-i` and the output); every gate, for the files it measures |
@@ -76,6 +76,64 @@ a check in front of it is bypassed.
 A plan that cannot be derived - an output container this build cannot name, an attached
 picture Matroska cannot carry, an unknown encoder - fails the job with the gate and the reason
 the encoder's own refusal always recorded, and the encoder is then never called.
+
+## The output fidelity gate
+
+<a id="fidelity"></a>
+
+**An output replaces its source only when it carries what its plan declares: the bit depth and
+chroma subsampling of the pixel format it was encoded to, every colour tag the plan writes,
+and every HDR10 static-metadata block the source carries, with the same values.** The
+declaration is part of the plan (`MetadataPlan.Fidelity`, derived once by `hdr.FidelityOf`
+from the plan's pixel format, its colour description and the source's side data), and the gate
+(`Engine.outputFidelity`, gate 5b of `verifyAgainst`, `GateFidelity`) holds the output to it
+with `hdr.Fidelity.Check`, naming every field that differs. A mismatch is a deterministic
+rejection, and the source is kept.
+
+Why a gate of its own. None of these properties is visible to the perceptual gate: the VMAF
+model extracts luma features only, and it scores pictures, not metadata
+([quality-gate](quality-gate.md#vmaf-pooling)). An output encoded 8-bit where the plan said
+10, subsampled to 4:2:0 from a 4:2:2 source, tagged bt709 over PQ samples, or stripped of its
+mastering-display block can score like a faithful one, pass every other gate, and replace a
+source this tool then deletes. Two ways it happens were known before this gate existed: every
+VAAPI job uploaded `nv12` (8-bit) whatever its plan said, and an encoder whose pixel format list
+cannot carry a plan has ffmpeg auto-select another with only a warning, which `-loglevel error`
+hides (`fftools/ffmpeg_mux_init.c` at the pinned revision,
+https://github.com/FFmpeg/FFmpeg/blob/5d4d3bdc61/fftools/ffmpeg_mux_init.c , read 2026-09-29 by
+proposal P2). The gate does not depend on the command line being right: it measures the file.
+
+What the plan declares it changes is part of the declaration, so it is never a mismatch: the
+bit-depth floor (8 to 10), a configured `pixel_format`, and the HDR10 tag defaults a source
+carrying HDR10 metadata but under-signalling its tags is given. A tag the plan writes nothing
+for - the source signals none - has nothing to lose and is not compared.
+
+How the output is read. The pixel format and the stream-level tags come from the same snapshot
+the guards read a source with, the side data from its first frame and its stream, and the
+tags a second time from the first decoded frame (`probe.FirstFrameColors`): the stream-level
+tags of a Matroska file are the container's colour elements, and the decoded frame's are the
+bitstream's. The two can disagree, and a player may trust either one, so a declared tag is
+carried when some level of the output signals it and no level signals anything else; an
+output that signals it at neither level has lost it. A level that signals nothing is not a
+contradiction, because on the pinned ffmpeg it is ordinary: the encoder takes its colour
+primaries and transfer from the decoded frames rather than from `-color_primaries` and
+`-color_trc` (measured here, 2026-09-30, with the pinned `N-125875-g5d4d3bdc61`: those two
+options change neither level where the frames carry the tag, and leave the Matroska elements
+unset where they do not, while `-colorspace` and `-color_range` take effect), and libx265
+writes them into the bitstream from its own parameters. Anything the gate cannot establish -
+an output pixel format it cannot take apart, a plan's format it cannot, a block present on the
+source whose values could not be read - is a mismatch, never a pass.
+
+A remux is not held to this gate: it re-encodes nothing, and the video-identity check holds
+its video to bit-identity, which is stronger.
+
+The proofs, one fixture per field, are in `internal/engine/fidelity_gate_test.go`: a 4:2:2
+10-bit HDR10 source is encoded by an encoder faithful in every field but one - bit depth,
+chroma subsampling, primaries, transfer, matrix, range, the mastering-display block, the
+content-light block - and each is rejected by this gate naming exactly that field, with the
+source byte-identical; holdfast's own encoder over the same source passes, and a stand-in for a
+hardware encoder's ffmpeg that writes 8-bit for a 10-bit plan is rejected by bit depth.
+`TestEncodePlan_EveryGateReadsThePlan` shows the verdict moving with the plan's declaration
+alone.
 
 ## What the plan does not declare
 

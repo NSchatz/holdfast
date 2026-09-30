@@ -18,6 +18,7 @@ import (
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/encoder"
+	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
 	"github.com/NSchatz/holdfast/internal/vmaf"
@@ -340,6 +341,12 @@ func TestEncodePlan_EveryGateReadsThePlan(t *testing.T) {
 		{"the intended streams", func(p *EncodePlan) {
 			p.Streams = derivePlanFor(t, eng.Cfg, prof, prober, withAudio, out).Streams
 		}, GateStreamParity},
+		{"the declared bit depth", func(p *EncodePlan) { p.Metadata.Fidelity.Depth = 12 }, GateFidelity},
+		{"the declared chroma subsampling", func(p *EncodePlan) { p.Metadata.Fidelity.Chroma = "444" }, GateFidelity},
+		{"a declared colour tag", func(p *EncodePlan) { p.Metadata.Fidelity.Transfer = "smpte2084" }, GateFidelity},
+		{"a declared HDR10 block", func(p *EncodePlan) {
+			p.Metadata.Fidelity.ContentLight = hdr.Block{Present: true, Value: "1000,400"}
+		}, GateFidelity},
 		{"the output the plan names: nothing there", func(p *EncodePlan) { p.Output = empty }, GateEncode},
 		{"the source the plan names: twice the output's length", func(p *EncodePlan) { p.Source = long }, GateLength},
 		{"the output the plan names: a stream that does not decode", func(p *EncodePlan) { p.Output = damaged }, GateDecode},
