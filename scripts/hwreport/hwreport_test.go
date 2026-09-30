@@ -14,6 +14,7 @@ package hwreport
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"math/big"
@@ -24,6 +25,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NSchatz/holdfast/internal/corpus"
 )
@@ -146,12 +148,20 @@ func scriptEnv(p planted, pathFirst ...string) []string {
 
 func runScript(t *testing.T, root string, env []string, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
-	cmd := exec.Command(filepath.Join(root, "scripts", "hw-report.sh"), args...)
+	// A hang is a failure with a message, never a package timeout: the whole script run is
+	// bounded well inside the test binary's own clock.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, filepath.Join(root, "scripts", "hw-report.sh"), args...)
+	cmd.WaitDelay = 10 * time.Second
 	cmd.Env = env
 	cmd.Dir = t.TempDir()
 	var o, e bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &o, &e
 	err := cmd.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("hw-report.sh %v did not finish within its bound:\n%s", args, e.String())
+	}
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			return o.String(), e.String(), ee.ExitCode()
@@ -220,6 +230,7 @@ type clipReport struct {
 	} `json:"source"`
 	Outcome struct {
 		Status      string   `json:"status"`
+		Reason      string   `json:"reason"`
 		EncoderRan  string   `json:"encoder_ran"`
 		VmafMean    *float64 `json:"vmaf_mean"`
 		VmafMinPool *float64 `json:"vmaf_min_pool"`
@@ -314,7 +325,7 @@ func TestHWReport_CPUReportCarriesTheFiguresAndNoHostIdentity(t *testing.T) {
 			t.Errorf("%s: source = %+v, want an FFV1 clip with a size", c.Clip, c.Source)
 		}
 		if o.Status != "done" || o.EncoderRan != "cpu" {
-			t.Errorf("%s: outcome status %q encoder %q, want done by cpu", c.Clip, o.Status, o.EncoderRan)
+			t.Errorf("%s: outcome status %q (%s) encoder %q, want done by cpu", c.Clip, o.Status, o.Reason, o.EncoderRan)
 		}
 		if o.VmafMean == nil || *o.VmafMean <= 0 || o.VmafMinPool == nil || *o.VmafMinPool <= 0 {
 			t.Errorf("%s: VMAF mean %v min pool %v, want both measured", c.Clip, o.VmafMean, o.VmafMinPool)
@@ -436,7 +447,7 @@ func TestHWReport_UnavailableEncoderWritesNoReport(t *testing.T) {
 	fakes := fakeTools(t, p)
 	writeExec(t, filepath.Join(fakes, "ffmpeg"), "#!/bin/sh\n"+
 		"for a in \"$@\"; do case \"$a\" in *vaapi*) echo 'No VA display found (stand-in: no render node)' >&2; exit 1;; esac; done\n"+
-		"exec '"+realFFmpeg+"' \"$@\"\n")
+		"PATH='"+os.Getenv("PATH")+"' exec '"+realFFmpeg+"' \"$@\"\n")
 	out := filepath.Join(t.TempDir(), "vaapi-report.json")
 
 	_, stderr, code := runScript(t, root, scriptEnv(p, fakes), "--encoder", "vaapi", "--holdfast", bin, "--out", out)
