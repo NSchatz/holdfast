@@ -87,8 +87,11 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
 
-    # Hardening. The engine writes only to the media tree, /state, and /tmp (ffmpeg's
-    # VMAF log + the encoder capability probe), so the root filesystem can be read-only.
+    # Hardening. The engine writes only to the media tree, /state, and /tmp (the encoder
+    # capability probe's small scratch files), so the root filesystem can be read-only.
+    # The VMAF per-frame log is not written to /tmp or anywhere else: libvmaf hands it to
+    # holdfast through a pipe, which reads it as it streams (internal/vmaf), so a long film
+    # puts no log-sized file in this RAM-backed tmpfs.
     read_only: true
     tmpfs:
       - /tmp
