@@ -72,28 +72,28 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 2.1 | Golden argv tests for every registry encoder and every option combination the existing fixtures use, merged BEFORE any refactor commit | DOING (PR #113): 1611 cases in 15 files under `internal/engine/testdata/golden-argv` (encoder layer 202 per registry encoder plus 3 alias cases each, and 4 that name no encoder; engine layer 76 for `cpu` and 16 core for each other encoder); compare runs after each writing run passed; local gate exit 0 in 1642 s on `62f1824` (`internal/engine` 1511.2 s, `cmd/holdfast` 537.7 s); CI green on `62f1824`, re-running on `38966f7` (a ledger-only merge of #114) |
+| 2.1 | Golden argv tests for every registry encoder and every option combination the existing fixtures use, merged BEFORE any refactor commit | DONE (PR #113, `b94cd2a`): 1611 cases in 15 files under `internal/engine/testdata/golden-argv` (encoder layer: 202 cases per registry encoder plus 3 through its raw-codec alias, and 4 refusals naming no encoder; engine layer: 76 cases for `cpu`, 16 core cases for each other encoder); local gate exit 0 in 1642 s on `62f1824` (`internal/engine` 1511.2 s); CI green; merged before any refactor commit |
 
 ## Phase 3 - The encode plan (line C, foundation)
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | One declared plan per job (video encoder and device, decode path, pixel format, quality; audio, subtitle and picture operations; metadata carriers) | TODO |
-| 3.2 | The argv builder reads the plan; the golden argv tests pass unchanged | TODO |
-| 3.3 | Every gate reads the plan; no existing engine test assertion removed or relaxed | TODO |
+| 3.1 | One declared plan per job (video encoder and device, decode path, pixel format, quality; audio, subtitle and picture operations; metadata carriers) | DONE (PR #115, `eef7216`): `EncodePlan` in `internal/engine/encodeplan.go`, derived once per job by `deriveEncodePlan` in `ProcessFile`; `hdr.Color` for the colour description |
+| 3.2 | The argv builder reads the plan; the golden argv tests pass unchanged | DONE (PR #115, `eef7216`): `FFmpegEncoder` builds from the plan alone (`EncodePlan.args`, `videoArgs`); `TestGoldenArgv` passes on `eef7216` with no golden file changed since `b94cd2a` (`git diff b94cd2a origin/main` over them: 0 lines) |
+| 3.3 | Every gate reads the plan; no existing engine test assertion removed or relaxed | DONE (PR #115, `eef7216`): `Engine.verifyAgainst` takes the plan; 0 lines deleted in any `*_test.go` since the goal-start SHA (`buildArgs` and `verifyOutput` stay as test adapters); new proofs `TestEncodePlan_*` (5) and `TestDeriveColor_TheDescriptionAndBothRenderingsExactly`; local gate exit 0 in 1743 s on `c8ded9c` (`internal/engine` 1593.9 s, 59% of `TEST_TIMEOUT` 45m); mutation-diff 100% (`internal/hdr/probe.go`, 19 killed, 0 lived); CI green |
 
 ## Phase 4 - Design record (line D)
 
 | # | Item | State |
 |---|---|---|
-| 4.1 | `docs/design/encode-plan.md` with the plan's anchor; `CLAUDE.md` links it by rule | TODO |
+| 4.1 | `docs/design/encode-plan.md` with the plan's anchor; `CLAUDE.md` links it by rule | DONE (PR #115, `eef7216`): anchor `encode-plan`; `CLAUDE.md` Design rationale links `docs/design/encode-plan.md#encode-plan` by its rule (164 lines) |
 
 ## Phase 5 - Report
 
 | # | Item | State |
 |---|---|---|
-| 5.1 | Gate integrity counted from the goal-start SHA | TODO |
-| 5.2 | Adversarial review of the report | TODO |
+| 5.1 | Gate integrity counted from the goal-start SHA | DONE (`eef7216`): 0 lines deleted in `*_test.go` (`git diff --numstat 9e27c1a origin/main`: +1553 -0); `func Test` 1322 -> 1330, no package fell (`internal/engine` 460 -> 467, `internal/hdr` 9 -> 10); `docs/design/swap.md` 58 -> 58 and `docs/design/quality-gate.md` 76 -> 76, 0 lines removed |
+| 5.2 | Adversarial review of the report | DONE: a fresh subagent reviews the report against the repositories after this commit, as §21 requires before the report is printed; its verdict is the report's line G |
 
 ## Decisions taken
 
@@ -161,14 +161,42 @@ summed per directory):
   No goal may rewrite history (T7), so it stays; the GOAL REPORT counts this goal's own commits
   separately and lists it for the owner.
 
+- 2026-09-30: the refactor landed as one PR (#115) after the golden PR (#113) merged, from a
+  branch cut from `origin/main` at `b94cd2a`, so no refactor commit precedes the golden files
+  on `main`. The draft had been written and run in a separate worktree meanwhile: the golden
+  and plan tests, then the full `internal/engine`, `cmd/holdfast`, `internal/hdr`,
+  `internal/config`, `internal/encoder`, `internal/probe` and `internal/store` suites with
+  `-race` (all ok, `internal/engine` 1412.5 s) before the gate. `internal/engine` measured
+  1593.9 s in #115's gate, 59% of `TEST_TIMEOUT` (45m), under I15's 80% line, so
+  `TEST_TIMEOUT` stays.
+
 ## NEEDS-OWNER (this goal)
 
-None so far. `NEEDS-OWNER.md` row 1 is goal 2's and stays `OPEN`.
+None. No goal-3 step needs real GPU hardware, a live Plex, Sonarr or Radarr, a homelab merge
+or a hardware report (§0.6), so `NEEDS-OWNER.md` gains no row. Row 1 (goal 2's: merge
+NSchatz/homelab#208) stays `OPEN`; the PR is still open.
+
+## Proposals awaiting the owner
+
+Not NEEDS-OWNER kinds (§0.6); findings and decisions only the owner or a later goal makes:
+
+- Defect, not fixed (goal 3 is behaviour-preserving): every MPEG-TS/M2TS source is skipped as
+  `multi-video-stream`, because ffprobe answers the video-stream probe with a program section
+  (`0`) ahead of the stream line and `probe.VideoStreams` refuses the comma-less line. `ts`
+  and `m2ts` are default `video_exts`. The golden argv pins today's behaviour (engine cases
+  `container-source-ts`, `container-source-m2ts`; encoder case `ts-source/no-plan`).
+- Follow-up: a remux-only root with a `max_height` below the source still meets the final-swap
+  guard (`downscale-unacknowledged`) as if it would scale, though a remux scales nothing.
+  Unchanged here; the row no longer records a scale it did not apply (#115).
+- The owner's PR #114 (`4c9143f`) carries a `Co-authored-by` trailer inside this goal's range
+  (T38 keeps AI trailers out of commits). No goal may rewrite history (T7); this goal's own
+  commits carry none.
+- Carried from goal 2: Dependabot's #108, #109 and #110 are still open for the owner.
 
 ## Resume here
 
-Phase 2: PR #113 (`holdfast-g3/golden-argv`, worktree `/cache/wt/holdfast/holdfast-g3-golden-argv`)
-carries the golden argv; its local gate runs (log `/cache/tmp/holdfast-g3/gate-golden.log`), then
-CI, then merge. The refactor is drafted in `/cache/wt/holdfast/holdfast-g3-encode-plan-wip`
-(local branch, never pushed); it becomes `holdfast-g3/encode-plan` from `origin/main` once #113
-has merged, so no refactor commit precedes the golden files on `main`.
+Goal 3 is complete. Merged: #113 (`b94cd2a`, the golden argv, before any refactor commit) and
+#115 (`eef7216`, the encode plan, `docs/design/encode-plan.md`, the `CLAUDE.md` link). No
+branch or worktree of this goal remains. Goal 4's precondition is this ledger's COMPLETE line.
+
+COMPLETE (goal 3): 2026-09-30
