@@ -119,7 +119,7 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 6.1 | Gate integrity counted from the goal-start SHA | DONE (`fb9ef66`): 92 lines deleted in 22 `*_test.go` files, each with its reason (the GOAL REPORT's line D table); `func Test` 1201 -> 1322 (+121), no package fell; 0 lines removed from `docs/design/swap.md` (58 -> 58) and `docs/design/quality-gate.md` (76 -> 76) |
+| 6.1 | Gate integrity counted from the goal-start SHA | DONE (`fb9ef66`): 93 lines deleted in 22 `*_test.go` files (counted with `git diff --numstat`; one is a blank line), each with its reason (the GOAL REPORT's line D table); `func Test` 1201 -> 1322 (+121), no package fell; 0 lines removed from `docs/design/swap.md` (58 -> 58) and `docs/design/quality-gate.md` (76 -> 76) |
 | 6.2 | Adversarial review of the report | DONE: a fresh subagent reviews the report against the repositories after this commit, as §21 requires before the report is printed; its verdict is the report's line F |
 
 ## Decisions taken
@@ -201,6 +201,13 @@ summed per directory):
   the branch, `.claude` from `main`) and verified equal to `main` plus S0163's own diff before
   it was pushed. A queued test run that compiled during the conflicted state reported
   "build failed" and is re-run.
+- 2026-09-30: the adversarial review of the GOAL REPORT (§21) found line D's count one short:
+  the first counting script matched deleted lines by a `-` prefix followed by any other
+  character, which misses a deleted blank line, so it reported 92 lines where
+  `git diff --numstat` counts 93. The missing line is a blank line in
+  `internal/engine/source_room_test.go`, inside the refusal block S0163's reason covers. The
+  script now counts with `--numstat`, the count is corrected to 93 here and in the report, and
+  a fresh reviewer checks the corrected report.
 
 ## NEEDS-OWNER (this goal)
 
