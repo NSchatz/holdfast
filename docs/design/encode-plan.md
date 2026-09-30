@@ -77,6 +77,45 @@ A plan that cannot be derived - an output container this build cannot name, an a
 picture Matroska cannot carry, an unknown encoder - fails the job with the gate and the reason
 the encoder's own refusal always recorded, and the encoder is then never called.
 
+## The explicit pixel format and the per-encoder quality
+
+<a id="explicit-pixel-format"></a>
+
+**The plan names the format the encoder is handed, from the encoder's own list, and a plan
+the encoder cannot carry exactly is never derived.** `Video.PixelFormat` is what the output
+is meant to be (the source's chroma subsampling, depth floored at 10, or a forced
+`pixel_format`); `Video.InputFormat` is the format the encoder receives: that format where
+the encoder lists it, else the planar or semi-planar spelling of the same chroma and depth
+that it lists (`yuv420p10le` is `p010le` on NVENC, QSV and AMF), chosen once by
+`encoder.Spec.InputFormat` from the registry's copy of the pinned binary's "Supported pixel
+formats" line. The command line names it explicitly: `-pix_fmt` for every encoder but VAAPI,
+whose encoder takes only hardware surfaces, so its format is the software layout uploaded
+(`format=p010le,hwupload` with the Main 10 profile, or `nv12`) and it gets no `-pix_fmt`.
+
+Before this, the command line said `-pix_fmt <plan format>` to every encoder. An encoder that
+does not list it makes ffmpeg pick the least-lossy format it does list, with a warning that
+`-loglevel error` hides; that is harmless where a listed format carries the same chroma and
+depth, and a silent subsample or depth cut where none does (4:2:2 into libsvtav1 becomes
+4:2:0). VAAPI uploaded 8-bit `nv12` whatever the plan said. Now the engine's pixel-format
+guard skips such a file (`exotic-pixel-format`, recording `pixel_format` and `encoder`) before
+a plan is derived, the derivation refuses it again as a backstop, and the builder refuses a
+plan whose input format is not the one the encoder's list gives for its pixel format.
+
+<a id="encoder-quality"></a>
+
+**The plan's quality value is on the encoder's own scale.** `Video.Quality.Value` is the
+job's `quality.<key>` for a hardware encoder that has one, and its `crf` otherwise;
+`Video.Quality.CRF` stays the job's `crf`. Each scale - its option, its range and the key
+that sets it - lives on the registry's `encoder.Spec.Quality`, and the derivation refuses a
+value off it naming `quality.<key>` and the scale (an inherited `crf: 0` is NVENC's
+"automatic" and VAAPI's "unset", neither a quality target). An absent key keeps the value
+the command line always carried, so its argv does not move.
+
+Both are recorded argv changes, not refactors: the golden command lines of the hardware
+encoders moved to name their input format (and VAAPI to upload `p010le`), and every one is
+held by `TestGoldenArgv_EveryArgvNamesItsPixelFormat` to name a format its encoder lists.
+libx265 and libsvtav1 are handed every format they list unchanged.
+
 ## What the plan does not declare
 
 The plan says what the output is. How the encode is scheduled on this machine is not part of

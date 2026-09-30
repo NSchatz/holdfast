@@ -303,6 +303,12 @@ func goldenFixtures(t *testing.T, ffmpeg, ffprobe, dir string) map[string]string
 	clip("10bit.mkv", "-pix_fmt", "yuv420p10le", "-profile:v", "high10")
 	clip("422.mkv", "-pix_fmt", "yuv422p")
 	clip("444.mkv", "-pix_fmt", "yuv444p")
+	// A 12-bit 4:2:0 source: the pinned build's libx264 is 8/10-bit, so it is written
+	// losslessly with ffv1, which carries yuv420p12le. Its plan keeps 12 bits, which only
+	// some encoders list.
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=1:size=320x240:rate=10", "-c:v", "ffv1", "-pix_fmt", "yuv420p12le",
+		"--", filepath.Join(dir, "12bit.mkv"))
 	// The pinned build's libx264 writes only the matrix of -color_primaries, -color_trc and
 	// -colorspace into the stream (the other two probe as unknown, which is the shape the
 	// existing bt709 fixture has), so a source that really signals its primaries and transfer
@@ -475,6 +481,53 @@ func encoderArgvCases() []encoderArgvCase {
 	}
 	add(encoderArgvCase{name: "source-exotic", source: "exotic.mkv"})
 	add(encoderArgvCase{name: "source-exotic/pixel-format-yuv420p10le", source: "exotic.mkv", cfg: pixFmt("yuv420p10le")})
+
+	// The explicit pixel format: every chroma and depth a plan can carry, derived and forced,
+	// in its planar and semi-planar spellings. Each encoder is handed the format it lists for
+	// that chroma and depth, or - where it lists none - the plan is refused, never left to
+	// ffmpeg's silent auto-selection.
+	add(encoderArgvCase{name: "source-12bit", source: "12bit.mkv"})
+	for _, p := range []string{"yuv420p12le", "yuv422p", "yuv422p10le", "yuv422p12le", "yuv444p", "yuv444p10le",
+		"yuv444p12le", "yuvj420p", "p010le", "nv16", "p410le", "yuv420p10be", "gray"} {
+		add(encoderArgvCase{name: "pixel-format-" + p, cfg: pixFmt(p)})
+	}
+	add(encoderArgvCase{name: "pixel-format-yuv422p10le/bitrate-8000k", cfg: both(pixFmt("yuv422p10le"), bitrate(8000))})
+	add(encoderArgvCase{name: "pixel-format-yuv420p/bitrate-8000k", cfg: both(pixFmt("yuv420p"), bitrate(8000))})
+
+	// Per-encoder quality. Every hardware encoder's quality.<key> set to a value of its own,
+	// so each file shows its encoder reading its OWN entry and no other; the software
+	// encoders, which have none, keep crf. Then each scale's two edges, the value off each
+	// scale (refused by the derivation, which validate would have refused first), the crf
+	// that is off NVENC's and VAAPI's scales inherited by them, a target bitrate (which
+	// passes no quality at all), and the encoder named by its ffmpeg alias.
+	qualityAll := func(c *config.Config) {
+		c.Quality = map[string]int{"nvenc": 24, "av1_nvenc": 40, "qsv": 25, "vaapi": 26, "amf": 27}
+	}
+	qualityEdge := func(pick func(encoder.QualityScale) int) func(*config.Config) {
+		return func(c *config.Config) {
+			c.Quality = map[string]int{}
+			for _, k := range encoder.QualityKeys() {
+				spec, _ := encoder.Lookup(k)
+				c.Quality[k] = pick(spec.Quality)
+			}
+		}
+	}
+	add(encoderArgvCase{name: "quality-set", cfg: qualityAll})
+	add(encoderArgvCase{name: "quality-set/crf-30", cfg: both(qualityAll, crf(30))})
+	add(encoderArgvCase{name: "quality-set/bitrate-8000k", cfg: both(qualityAll, bitrate(8000))})
+	add(encoderArgvCase{name: "quality-set/stream-plan-handed", cfg: qualityAll, handProfile: true, streamPlan: true})
+	add(encoderArgvCase{name: "quality-set/alias", cfg: both(qualityAll, func(c *config.Config) {
+		if spec, ok := encoder.Lookup(c.Encoder); ok {
+			c.Encoder = spec.FFmpegCodec
+		}
+	})})
+	add(encoderArgvCase{name: "quality-min", cfg: qualityEdge(func(q encoder.QualityScale) int { return q.Min })})
+	add(encoderArgvCase{name: "quality-max", cfg: qualityEdge(func(q encoder.QualityScale) int { return q.Max })})
+	add(encoderArgvCase{name: "quality-below-scale", cfg: qualityEdge(func(q encoder.QualityScale) int { return q.Min - 1 })})
+	add(encoderArgvCase{name: "quality-above-scale", cfg: qualityEdge(func(q encoder.QualityScale) int { return q.Max + 1 })})
+	add(encoderArgvCase{name: "crf-0", cfg: crf(0)})
+	add(encoderArgvCase{name: "crf-0/bitrate-8000k", cfg: both(crf(0), bitrate(8000))})
+	add(encoderArgvCase{name: "crf-51", cfg: crf(51)})
 
 	// Colour, and HDR10 static metadata.
 	for _, src := range []string{"bt709", "bt709-vui", "hlg", "pq", "hdr10"} {
@@ -796,6 +849,24 @@ func engineArgvCases() []engineArgvCase {
 	for _, src := range []string{"bt709", "bt709-vui", "hlg", "pq", "hdr10", "full-range", "10bit", "422", "444", "exotic"} {
 		add(engineArgvCase{name: "source-" + src, source: src + ".mkv"})
 	}
+	// Every chroma and depth a plan carries, through the engine's own guard, for every
+	// encoder: the ones an encoder lists no format for are SKIPPED under
+	// exotic-pixel-format before anything is encoded, derived or forced.
+	for _, src := range []string{"422", "444", "12bit"} {
+		add(engineArgvCase{name: "source-" + src + "/every-encoder", source: src + ".mkv", core: true})
+	}
+	add(engineArgvCase{name: "pixel-format-yuv422p10le/every-encoder", root: "pixel_format: yuv422p10le", core: true})
+	add(engineArgvCase{name: "pixel-format-yuv420p/every-encoder", root: "pixel_format: yuv420p", core: true})
+	add(engineArgvCase{name: "source-422/remux-only", source: "422.mkv", root: "remux_only: true", core: true})
+
+	// Per-encoder quality, through the configuration file.
+	quality := "quality:\n  nvenc: 24\n  av1_nvenc: 40\n  qsv: 25\n  vaapi: 26\n  amf: 27"
+	add(engineArgvCase{name: "quality-set", top: quality, core: true})
+	add(engineArgvCase{name: "quality-set/encode-profile-crf-30", top: quality +
+		"\nencode_profiles:\n  - name: bulk\n    match: \"*.mkv\"\n    crf: 30", core: true})
+	add(engineArgvCase{name: "quality-set/encode-profile-to-nvenc", top: quality +
+		"\nencode_profiles:\n  - name: gpu\n    match: \"*.mkv\"\n    encoder: nvenc", core: true})
+	add(engineArgvCase{name: "crf-0", root: "crf: 0", core: true})
 	add(engineArgvCase{name: "source-hdr10/pixel-format-yuv420p10le", source: "hdr10.mkv", root: "pixel_format: yuv420p10le"})
 
 	// Picture operations.
@@ -1017,4 +1088,115 @@ func TestGoldenArgv_CoversEveryRegistryEncoder(t *testing.T) {
 			t.Errorf("%s/%s is missing: an encoder in the registry has no golden command lines", goldenArgvDir, name)
 		}
 	}
+}
+
+// TestGoldenArgv_EveryArgvNamesItsPixelFormat reads every command line the golden files
+// record - which TestGoldenArgv proves is what this build assembles - and holds every one
+// that re-encodes the video to the explicit-pixel-format rule: it names the format the encoder
+// is handed, and that format is one the encoder lists. For every encoder but VAAPI that is
+// exactly one `-pix_fmt X` with X in the encoder's "Supported pixel formats" line (the
+// registry's copy, which internal/encoder re-reads from the pinned binary); for VAAPI, which
+// lists only hardware surfaces, it is exactly one `format=X,hwupload` chain with X one of the
+// formats this build uploads, and NO -pix_fmt, which would contradict the chain. A command
+// line that leaves the format to ffmpeg's auto-selection fails here.
+//
+// It is walked from the files rather than from a list of cases, so a case added later is held
+// to the rule the moment it is recorded; and each file must hold at least one re-encode, so
+// the test cannot pass by finding nothing to check.
+func TestGoldenArgv_EveryArgvNamesItsPixelFormat(t *testing.T) {
+	entries, err := os.ReadDir(goldenArgvDir)
+	if err != nil {
+		t.Fatalf("read %s: %v", goldenArgvDir, err)
+	}
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(goldenArgvDir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		blocks, err := parseGoldenBlocks(data)
+		if err != nil {
+			t.Fatalf("parse %s: %v", e.Name(), err)
+		}
+		checked := 0
+		for _, name := range blocks.order {
+			for _, line := range blocks.lines[name] {
+				if !strings.HasPrefix(line, "-hide_banner") {
+					continue
+				}
+				args := strings.Fields(line)
+				codec := goldenValueAfter(args, "-c:v")
+				if codec == "" || codec == "copy" {
+					continue // a stream copy hands no encoder anything
+				}
+				spec, ok := encoder.Lookup(codec)
+				if !ok {
+					t.Errorf("%s: case %q runs -c:v %q, which is no registry encoder", e.Name(), name, codec)
+					continue
+				}
+				checked++
+				if msg := explicitPixelFormatProblem(spec, args); msg != "" {
+					t.Errorf("%s: case %q (%s): %s\n  %s", e.Name(), name, spec.FFmpegCodec, msg, line)
+				}
+			}
+		}
+		if checked == 0 && e.Name() != "encoder-none.txt" {
+			t.Errorf("%s records no re-encode at all: nothing was held to the explicit-pixel-format rule", e.Name())
+		}
+	}
+}
+
+// explicitPixelFormatProblem says what is wrong with one re-encoding command line's pixel
+// format, or "" when it names one its encoder lists, exactly once.
+func explicitPixelFormatProblem(spec encoder.Spec, args []string) string {
+	var pixFmts, uploads []string
+	for i, a := range args {
+		if a == "-pix_fmt" && i+1 < len(args) {
+			pixFmts = append(pixFmts, args[i+1])
+		}
+		if a == "-vf" && i+1 < len(args) {
+			for _, f := range strings.Split(args[i+1], ",") {
+				if strings.HasPrefix(f, "format=") {
+					uploads = append(uploads, strings.TrimPrefix(f, "format="))
+				}
+			}
+		}
+	}
+	if spec.Uploads() {
+		switch {
+		case len(pixFmts) != 0:
+			return fmt.Sprintf("a -pix_fmt %v beside an upload chain", pixFmts)
+		case len(uploads) != 1:
+			return fmt.Sprintf("want exactly one uploaded format, got %v", uploads)
+		case !strings.Contains(goldenValueAfter(args, "-vf"), "format="+uploads[0]+",hwupload"):
+			return "the uploaded format is not what hwupload receives"
+		case !goldenListed(spec.UploadFormats, uploads[0]):
+			return fmt.Sprintf("uploads %q, which is not one of %q", uploads[0], spec.UploadFormats)
+		}
+		return ""
+	}
+	switch {
+	case len(pixFmts) != 1:
+		return fmt.Sprintf("want exactly one -pix_fmt, got %v", pixFmts)
+	case !goldenListed(spec.PixelFormats, pixFmts[0]):
+		return fmt.Sprintf("-pix_fmt %q is not in the encoder's list %q", pixFmts[0], spec.PixelFormats)
+	}
+	return ""
+}
+
+func goldenValueAfter(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func goldenListed(list, f string) bool {
+	for _, l := range strings.Fields(list) {
+		if l == f {
+			return true
+		}
+	}
+	return false
 }

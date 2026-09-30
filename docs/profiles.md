@@ -122,7 +122,8 @@ bitrate_kbps: 0            # the default: keep the crf/quality target
 
 A positive value, top-level or per-profile, selects a **target-bitrate rate control** at
 that many kbps for the affected jobs, and then **no quality target is passed to the
-encoder at all** - no `-crf`, `-cq`, `-global_quality`, `-qp` and no `-rc cqp`. A rate
+encoder at all** - no `-crf`, `-cq`, `-global_quality`, `-qp`, `-qp_i`/`-qp_p` and no `-rc cqp`,
+whatever `crf` or [`quality`](#quality---each-hardware-encoders-quality-on-its-own-scale) says. A rate
 control and a quality target are two different instructions, and passing both would
 leave which one wins to the encoder rather than to you.
 
@@ -134,6 +135,50 @@ before this setting existed produces byte-identical encoder arguments.
 The value must be a whole number of kbps. `8000.5`, a quoted string with a unit, a
 boolean, a list, a negative, or the key with no value at all is a startup refusal naming
 the key and the value, never a silently truncated bitrate.
+
+## `quality` - each hardware encoder's quality on its own scale
+
+```yaml
+crf: 22                    # libx265 and libsvtav1, unchanged
+quality:                   # optional, top-level only, keyed by registry key
+  nvenc: 24                # -cq, 1-51
+  av1_nvenc: 30            # -cq, 1-63
+  qsv: 24                  # -global_quality (ICQ), 1-51
+  vaapi: 24                # -qp (constant QP), 1-52
+  amf: 24                  # -qp_i and -qp_p under -rc cqp, 0-51
+```
+
+`crf` is a libx265 and libsvtav1 rate factor. Before this key, the same number was also
+passed as NVENC's `-cq`, QSV's `-global_quality`, VAAPI's `-qp` and AMF's `-qp_i`/`-qp_p`:
+five different instructions - a rate factor, a constant-quality target, an ICQ level and
+two fixed quantisers - on scales that do not even share a range. `quality.<key>` sets a
+hardware encoder's value on **that encoder's own scale**. The values above are placeholders,
+not recommendations.
+
+- **An absent key inherits the job's effective `crf` unchanged**, which is what the
+  encoder was always handed, so a configuration written before this key produces
+  byte-identical encoder arguments. That default is not measured to mean anything
+  comparable on any hardware encoder (ASSUMED): it is kept only so nothing moves, and a
+  hardware report per encoder is what will calibrate it.
+- **Each scale is the encoder's own**, read from the pinned ffmpeg (`ffmpeg -h
+  encoder=<name>`) and its source, and narrowed only past the values the encoder does not
+  read as a target: NVENC's `-cq 0` means "automatic" and VAAPI's `-qp 0` means "unset", so
+  both scales start at 1. `internal/encoder/quality.go` holds each scale with its sources.
+- **`holdfast validate` refuses** a value off its encoder's scale naming the key and the
+  scale (`quality.vaapi 53 is outside hevc_vaapi's scale (-qp 1-52)`), `quality.cpu` and
+  `quality.svtav1` (those are set by `crf`), an ffmpeg codec name in place of the registry key
+  (`quality.hevc_nvenc`), any other key, and a value that is not a whole number.
+- **An inherited `crf` off a scale fails that job** when its encode plan is derived, naming
+  `quality.<key>` and the scale: `crf: 0` under `encoder: nvenc` would be `-cq 0`, which is not
+  a quality target, and nothing is encoded. Set the encoder's own key.
+- **A job reads its own encoder's key.** An encode profile that switches a job to `nvenc`
+  gets `quality.nvenc`; a job named by an ffmpeg alias (`encoder: hevc_nvenc`) reads the
+  registry key's entry. A target bitrate (`bitrate_kbps`) passes no quality value at all, so
+  none is read.
+- **Top-level only.** A library root or an encode profile carrying `quality` is refused as
+  the unknown key it is there. The environment sets one entry as `HOLDFAST_QUALITY_<KEY>`:
+  `HOLDFAST_QUALITY_NVENC=24`, `HOLDFAST_QUALITY_AV1_NVENC=30`. It is validated exactly as the
+  file's value is.
 
 ## `exclude_paths` and `include_paths` - which paths this tool may touch
 

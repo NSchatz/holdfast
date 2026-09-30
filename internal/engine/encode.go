@@ -688,16 +688,33 @@ func closeProgressPipe(r, w *os.File) {
 //     PRIMARIES/TRANSFER/MATRIX/RANGE tags still carry via the universal
 //     -color_* flags, just not the mastering-display block. This mirrors the
 //     existing NVENC limitation the bash transcoder already documented.
-//   - hevc_nvenc/av1_nvenc: -rc vbr -cq <CRF> -b:v 0 (CRF reused as the CQ
-//     target) + a preset.
-//   - hevc_qsv: -global_quality <CRF>.
+//   - hevc_nvenc/av1_nvenc: -rc vbr -cq <quality> -b:v 0 + a preset.
+//   - hevc_qsv: -global_quality <quality>.
 //   - hevc_vaapi: -vaapi_device (the plan's device, emitted before -i - see
-//     EncodePlan.args) + -vf format=nv12,hwupload + -qp <CRF>. This is the
-//     fiddliest of the set and untestable in this environment (no VAAPI
-//     device) — capability detection (internal/encoder.Available) keeps it from
-//     ever running unless a real device is present; the arg shape is reasonable
-//     but not battle-tested.
-//   - hevc_amf: -rc cqp -qp_i <CRF> -qp_p <CRF>.
+//     EncodePlan.args) + -vf format=<input format>,hwupload (+ -profile:v main10
+//     for p010le) + -qp <quality>. This is the fiddliest of the set and untestable
+//     in this environment (no VAAPI device) - capability detection
+//     (internal/encoder.Available) keeps it from ever running unless a real device
+//     is present; the arg shape is reasonable but not battle-tested.
+//   - hevc_amf: -rc cqp -qp_i <quality> -qp_p <quality>.
+//
+// <quality> is the plan's Quality.Value: the job's quality.<key> on that encoder's
+// own scale, or its crf where the configuration carries none (internal/encoder's
+// QualityScale).
+//
+// THE PIXEL FORMAT is the plan's InputFormat, named explicitly: a format the encoder
+// lists that carries the plan's chroma and depth (encoder.Spec.InputFormat), so ffmpeg
+// never auto-selects one behind -loglevel error. Every encoder takes it as -pix_fmt
+// except VAAPI, whose encoder accepts only `vaapi` surfaces: its format is the
+// software layout uploaded (`format=<fmt>,hwupload`), and it gets NO -pix_fmt. Without
+// one, fftools constrains the filter graph's output to the encoder's own list
+// (fftools/ffmpeg_mux_init.c:907-911 reads it into the output filter's pix_fmts,
+// fftools/ffmpeg_filter.c:865-868 applies it), which for hevc_vaapi is `vaapi`, what
+// hwupload produces; that is also the form of every encode example in
+// https://trac.ffmpeg.org/wiki/Hardware/VAAPI (read 2026-09-30, Wayback capture of
+// 2026-01-22). A software -pix_fmt there would name a format the chain does not end
+// in, and the command line would contradict itself. Sources at
+// https://github.com/FFmpeg/FFmpeg/tree/5d4d3bdc61 , read 2026-09-30.
 //
 // A job whose effective settings carry a positive BitrateKbps takes the
 // TARGET-BITRATE shape instead, per family (see bitrateArgs). The quality knob is
@@ -709,7 +726,10 @@ func closeProgressPipe(r, w *os.File) {
 // x265Extra block are the same on both paths, so a bitrate-targeted encode carries
 // exactly the same source fidelity, and the same parallelism, as a quality-targeted one.
 func videoArgs(v VideoPlan, colorArgs []string, x265Extra string) []string {
-	args := []string{"-pix_fmt", v.PixelFormat}
+	var args []string
+	if !v.Encoder.Uploads() {
+		args = []string{"-pix_fmt", v.InputFormat}
+	}
 	args = append(args, colorArgs...)
 	args = append(args, "-fps_mode", "passthrough") // a VFR source is not forced to CFR
 
@@ -718,41 +738,54 @@ func videoArgs(v VideoPlan, colorArgs []string, x265Extra string) []string {
 		return append(args, bitrateArgs(v, x265Extra)...)
 	}
 
+	value := strconv.Itoa(q.Value)
 	switch v.Encoder.Key {
 	case "cpu":
 		args = append(args,
 			"-preset", q.Preset,
-			"-crf", strconv.Itoa(q.CRF),
+			"-crf", value,
 			"-x265-params", "log-level=error"+x265Extra,
 		)
 	case "svtav1":
 		args = append(args,
 			"-preset", strconv.Itoa(svtav1Preset(q.Preset)),
-			"-crf", strconv.Itoa(q.CRF),
+			"-crf", value,
 		)
 	case "nvenc", "av1_nvenc":
 		args = append(args,
 			"-rc", "vbr",
-			"-cq", strconv.Itoa(q.CRF),
+			"-cq", value,
 			"-b:v", "0",
 			"-preset", "p5",
 		)
 	case "qsv":
-		args = append(args, "-global_quality", strconv.Itoa(q.CRF))
+		args = append(args, "-global_quality", value)
 	case "vaapi":
 		// -vaapi_device itself is emitted from the plan's device (a global option that
 		// must precede -i - see EncodePlan.args); here we only add the encode-side args
 		// that come after -c:v.
-		args = append(args,
-			"-vf", "format=nv12,hwupload",
-			"-qp", strconv.Itoa(q.CRF),
-		)
+		args = append(args, vaapiUpload(v.InputFormat)...)
+		args = append(args, "-qp", value)
 	case "amf":
 		args = append(args,
 			"-rc", "cqp",
-			"-qp_i", strconv.Itoa(q.CRF),
-			"-qp_p", strconv.Itoa(q.CRF),
+			"-qp_i", value,
+			"-qp_p", value,
 		)
+	}
+	return args
+}
+
+// vaapiUpload is a VAAPI encode's carrier: the software frames converted to the plan's input
+// format and uploaded to a surface of the same layout, and - for 10-bit (p010le) - the HEVC
+// Main 10 profile, since hevc_vaapi's default profile is chosen for 8-bit. `main10` is a named
+// value of hevc_vaapi's -profile on the pinned binary (`ffmpeg -h encoder=hevc_vaapi`, run
+// 2026-09-30), and the wiki's own 10-bit HEVC encode uploads p010 with profile 2, which is
+// main10 (https://trac.ffmpeg.org/wiki/Hardware/VAAPI, read 2026-09-30).
+func vaapiUpload(format string) []string {
+	args := []string{"-vf", "format=" + format + ",hwupload"}
+	if format == "p010le" {
+		args = append(args, "-profile:v", "main10")
 	}
 	return args
 }
@@ -856,10 +889,7 @@ func bitrateArgs(v VideoPlan, x265Extra string) []string {
 	case "qsv":
 		args = []string{"-b:v", rate}
 	case "vaapi":
-		args = []string{
-			"-vf", "format=nv12,hwupload",
-			"-b:v", rate,
-		}
+		args = append(vaapiUpload(v.InputFormat), "-b:v", rate)
 	case "amf":
 		args = []string{
 			"-rc", "vbr_peak",

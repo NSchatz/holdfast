@@ -111,15 +111,26 @@ type VideoPlan struct {
 	// or the one derived from the source's so that its chroma subsampling is kept and its
 	// bit depth is floored at 10.
 	PixelFormat string
+	// InputFormat is the format the encoder is handed, named explicitly on the command
+	// line: a format the encoder lists that carries PixelFormat's chroma subsampling and
+	// bit depth exactly (encoder.Spec.InputFormat) - the -pix_fmt, or for an encoder that
+	// takes only hardware surfaces (VAAPI) the software format uploaded before it. A plan
+	// whose PixelFormat the encoder cannot carry is never derived.
+	InputFormat string
 	// Quality is the rate control the encode runs under.
 	Quality Quality
 }
 
 // Quality is the rate control of one video encode.
 type Quality struct {
-	// CRF is the quality target. Each encoder family reads it in its own spelling (-crf,
-	// -cq, -global_quality, -qp), and none reads it where BitrateKbps is set.
+	// CRF is the job's effective crf: the software encoders' quality target, and what a
+	// hardware encoder with no quality.<key> of its own inherits.
 	CRF int
+	// Value is the quality target the encoder is handed, on its own scale
+	// (Encoder.Quality): the job's quality.<key> for a hardware encoder that has one, and
+	// CRF otherwise. Every encoder family reads it in its own spelling (-crf, -cq,
+	// -global_quality, -qp, -qp_i/-qp_p), and none reads it where BitrateKbps is set.
+	Value int
 	// BitrateKbps is the target bitrate, and 0 where the encode is quality-targeted.
 	BitrateKbps int
 	// Preset is the speed and efficiency word, in libx265's spelling.
@@ -130,10 +141,28 @@ type Quality struct {
 // quality target.
 func (q Quality) TargetsBitrate() bool { return q.BitrateKbps > 0 }
 
-// qualityOf is the rate control a job's effective settings resolve to, and the one place
-// they are read for it.
-func qualityOf(ts config.Transcode) Quality {
-	return Quality{CRF: ts.CRF, BitrateKbps: ts.BitrateKbps, Preset: ts.Preset}
+// qualityOf is the rate control a job's effective settings resolve to on spec's scale, and
+// the one place they are read for it. The value is the job's quality.<key> where the
+// configuration carries one for this encoder, and its crf otherwise. A value off the
+// encoder's scale is refused naming the key that sets it and the scale - crf 0 inherited by
+// NVENC would be -cq 0, "automatic", and by VAAPI -qp 0, "unset": neither is a quality
+// target, and neither is sent. A target-bitrate encode passes no quality value at all, so
+// nothing is checked for one.
+func qualityOf(ts config.Transcode, spec encoder.Spec) (Quality, error) {
+	q := Quality{CRF: ts.CRF, Value: ts.CRF, BitrateKbps: ts.BitrateKbps, Preset: ts.Preset}
+	scale := spec.Quality
+	key, from := scale.ConfigKey, "inherited from crf"
+	if scale.PerEncoder() && ts.EncoderQualitySet {
+		q.Value, from = ts.EncoderQuality, "as configured"
+	}
+	if !scale.PerEncoder() {
+		from = "as configured"
+	}
+	if !q.TargetsBitrate() && !scale.Contains(q.Value) {
+		return Quality{}, fmt.Errorf("%s resolves to %d (%s), outside %s's scale (%s): set %s to a value on that scale",
+			key, q.Value, from, spec.FFmpegCodec, scale, key)
+	}
+	return q, nil
 }
 
 // PictureOps are the operations on the picture itself, in the order the filter chain runs
@@ -220,8 +249,9 @@ type planInputs struct {
 // cannot name, an attached picture Matroska cannot carry, then - for anything that
 // re-encodes the video - an unknown encoder, a snapshot that cannot be taken (a direct
 // caller's encoder with no prober), a source pixel format with no faithful derivation, a
-// deinterlace this build refuses to run, and a source whose video streams the probe could
-// not establish.
+// deinterlace this build refuses to run, a source whose video streams the probe could
+// not establish, and - last, so every refusal above keeps the reason it always had - a pixel
+// format the encoder cannot carry and a quality value off the encoder's scale.
 func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 	container, err := outputContainerFor(in.output)
 	if err != nil {
@@ -270,7 +300,6 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 		}
 		pixFmt = derived
 	}
-
 	// The deinterlace and the scale, resolved from the profile and the source's own snapshot:
 	// the filters the encode runs, the reference the perceptual gate builds and the provenance
 	// the terminal row records are all read off these two fields. A deinterlace this build
@@ -302,18 +331,40 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 		pinned = nil
 	}
 
+	// The format the encoder is handed, chosen from its own list. The same guard skips a
+	// plan the encoder cannot carry before any plan is derived; this is its backstop, so
+	// ffmpeg is never left to auto-select a format that subsamples or cuts depth silently.
+	inputFmt, ok := spec.InputFormat(pixFmt)
+	if !ok {
+		return nil, fmt.Errorf("encoder %q (%s) cannot carry the pixel format %s of %q: it lists no format of that chroma "+
+			"subsampling and bit depth (supported: %s)", spec.Key, spec.FFmpegCodec, pixFmt, in.source, carriedList(spec))
+	}
+	quality, err := qualityOf(ts, spec)
+	if err != nil {
+		return nil, err
+	}
+
 	p.Video = VideoPlan{
 		Codec:       spec.TargetCodec,
 		Encoder:     spec,
 		Device:      deviceFor(spec),
 		Decode:      DecodeSoftware,
 		PixelFormat: pixFmt,
-		Quality:     qualityOf(ts),
+		InputFormat: inputFmt,
+		Quality:     quality,
 	}
 	p.Picture = PictureOps{Deinterlace: film, Downscale: shrink}
 	p.Metadata = MetadataPlan{Color: color}
 	p.coverArt.pinned = pinned
 	return p, nil
+}
+
+// carriedList is the list an encoder's input format is chosen from, for a refusal.
+func carriedList(spec encoder.Spec) string {
+	if spec.Uploads() {
+		return spec.UploadFormats + " uploaded to " + spec.PixelFormats + " surfaces"
+	}
+	return spec.PixelFormats
 }
 
 // vaapiDevice is the render node a VAAPI encode opens.
@@ -390,6 +441,13 @@ func (p *EncodePlan) buildable() error {
 		return &UnbuildablePlanError{What: fmt.Sprintf("the decode path %q", p.Video.Decode)}
 	case p.Video.Device != deviceFor(p.Video.Encoder):
 		return &UnbuildablePlanError{What: fmt.Sprintf("the device %q for encoder %q", p.Video.Device, p.Video.Encoder.Key)}
+	}
+	// The input format is the one the encoder's own list gives for the plan's pixel format,
+	// and nothing else: a plan naming another would hand the encoder a format that does not
+	// carry what the plan says the output is.
+	if want, ok := p.Video.Encoder.InputFormat(p.Video.PixelFormat); !ok || want != p.Video.InputFormat {
+		return &UnbuildablePlanError{What: fmt.Sprintf("the input format %q for the pixel format %q on encoder %q",
+			p.Video.InputFormat, p.Video.PixelFormat, p.Video.Encoder.Key)}
 	}
 	return nil
 }

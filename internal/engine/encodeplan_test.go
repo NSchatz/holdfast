@@ -226,6 +226,10 @@ func TestEncodePlan_RefusesWhatItCannotPerform(t *testing.T) {
 			p.Picture.Downscale = config.Profile{MaxHeight: 120}.DownscaleFor(320, 240)
 		}, "a picture operation on a stream copy"},
 		{"a plan no derivation made", false, func(p *EncodePlan) { p.id = 0 }, "no derivation this build made"},
+		{"an input format the encoder's list does not give for the plan", false,
+			func(p *EncodePlan) { p.Video.InputFormat = "nv12" }, `input format "nv12"`},
+		{"a pixel format the encoder cannot carry", false,
+			func(p *EncodePlan) { p.Video.PixelFormat = "yuv411p" }, `pixel format "yuv411p"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

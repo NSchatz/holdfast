@@ -83,6 +83,15 @@ type Transcode struct {
 	PixelFormat  string
 	ContainerExt string
 	BitrateKbps  int
+
+	// EncoderQuality is the `quality.<key>` entry the configuration carries for THIS
+	// job's encoder (its registry key, whatever alias the encoder was named by), and
+	// EncoderQualitySet reports whether there is one. Where there is none, the encoder
+	// takes CRF unchanged; the engine's encode plan resolves which, and refuses a value
+	// off the encoder's scale. Two fields rather than a pointer so the settings stay a
+	// comparable value.
+	EncoderQuality    int
+	EncoderQualitySet bool
 }
 
 // ContainerMatchesSource reports whether ContainerExt is the "match the source"
@@ -120,14 +129,26 @@ func (t Transcode) TargetsBitrate() bool { return t.BitrateKbps > 0 }
 // bitrate_kbps comes from the top level because it is not a per-root knob: a library
 // root's profile may not carry it, so there is no per-root value for this to read.
 func (c *Config) BaseTranscode(prof Profile) Transcode {
-	return Transcode{
+	return c.withEncoderQuality(Transcode{
 		Encoder:      prof.Encoder,
 		CRF:          prof.CRF,
 		Preset:       prof.Preset,
 		PixelFormat:  prof.PixelFormat,
 		ContainerExt: prof.ContainerExt,
 		BitrateKbps:  c.BitrateKbps,
+	})
+}
+
+// withEncoderQuality sets t's EncoderQuality from the top-level quality map, for the
+// encoder t resolved to. It runs after every layer that can change the encoder, so an
+// encode profile that switches a job to nvenc gets quality.nvenc, not the root encoder's.
+// quality is top-level only, so no other layer can carry an entry.
+func (c *Config) withEncoderQuality(t Transcode) Transcode {
+	t.EncoderQuality, t.EncoderQualitySet = 0, false
+	if spec, ok := encoder.Lookup(t.Encoder); ok {
+		t.EncoderQuality, t.EncoderQualitySet = c.Quality[spec.Key]
 	}
+	return t
 }
 
 // TranscodeIn resolves the effective settings for one source path under one library
@@ -175,7 +196,7 @@ func (c *Config) TranscodeIn(prof Profile, sourcePath string) Transcode {
 		if p.BitrateKbps != nil {
 			t.BitrateKbps = *p.BitrateKbps
 		}
-		return t
+		return c.withEncoderQuality(t)
 	}
 	return t
 }

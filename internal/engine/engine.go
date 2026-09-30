@@ -23,6 +23,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/cpuquota"
 	"github.com/NSchatz/holdfast/internal/downscale"
+	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/fsclass"
 	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/probe"
@@ -3029,13 +3030,33 @@ func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, pr
 	// Chroma/bit-depth guard. Preserve the source's chroma subsampling and floor bit-depth
 	// at 10; an exotic pix_fmt is SKIPPED rather than silently subsampled or guessed. A
 	// forced (non-"auto") PixelFormat bypasses derivation entirely.
+	planFmt := ts.PixelFormat
 	if ts.PixelFormatAuto() {
 		srcPixFmt := props.PixFmt()
-		if _, ok := hdr.DerivePixFmt(srcPixFmt); !ok {
+		derived, ok := hdr.DerivePixFmt(srcPixFmt)
+		if !ok {
 			return props, sourceVerdict{guard: SkipExoticPixelFormat, codec: codec,
 				inputs:  []string{InputPixelFormat},
 				log:     "skip (unrecognized/exotic pixel format — refusing to silently subsample)",
 				logArgs: []any{"pix_fmt", srcPixFmt}}
+		}
+		planFmt = derived
+	}
+	// The same guard, for the encoder: the output pixel format - derived or forced - must be
+	// one the job's encoder can be handed EXACTLY, in a format it lists with the same chroma
+	// subsampling and bit depth (encoder.Spec.InputFormat). Where it lists none, ffmpeg would
+	// auto-select a lossier format behind -loglevel error (a 4:2:2 plan into libsvtav1 becomes
+	// 4:2:0), so the file is SKIPPED under the same reason. The verdict read both the pixel
+	// format and the encoder, so it records both: changing either re-derives it. The plan
+	// derivation refuses the same plan again as a backstop. A job that re-encodes nothing
+	// hands the encoder nothing and is not held to it, and an unknown encoder is left to the
+	// derivation's own refusal.
+	if spec, known := encoder.Lookup(ts.Encoder); known && !prof.RemuxOnlyEnabled() {
+		if _, ok := spec.InputFormat(planFmt); !ok {
+			return props, sourceVerdict{guard: SkipExoticPixelFormat, codec: codec,
+				inputs:  []string{InputPixelFormat, InputEncoder},
+				log:     "skip (the encoder lists no pixel format carrying this chroma subsampling and bit depth - refusing to let ffmpeg silently subsample or cut depth)",
+				logArgs: []any{"pix_fmt", planFmt, "encoder", spec.Key, "ffmpeg_encoder", spec.FFmpegCodec}}
 		}
 	}
 

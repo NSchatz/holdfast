@@ -31,19 +31,37 @@ type Spec struct {
 	// Hardware reports whether this encoder needs a GPU/device. Hardware encoders
 	// are gated behind Available at run time — never assumed to work.
 	Hardware bool
+	// PixelFormats is the encoder's "Supported pixel formats:" line from the pinned
+	// ffmpeg, verbatim and space-separated (see formats.go for the source and the test
+	// that re-reads it from the binary). It is what InputFormat chooses from.
+	PixelFormats string
+	// UploadFormats is, for an encoder that accepts only hardware surfaces (VAAPI), the
+	// software formats this build uploads to it through `format=<fmt>,hwupload`; "" for
+	// every encoder that takes software frames directly (see formats.go).
+	UploadFormats string
+	// Quality is the scale this encoder's quality-targeted rate control is set on: the
+	// option, its range and the configuration key that sets it (see quality.go).
+	Quality QualityScale
 }
 
 // registry is the source of truth for every selectable encoder, keyed by its
 // config value. Keyed also by the raw ffmpeg codec name as a convenience alias
 // (see init) so `encoder: libsvtav1` works the same as `encoder: svtav1`.
 var registry = map[string]Spec{
-	"cpu":       {Key: "cpu", FFmpegCodec: "libx265", TargetCodec: "hevc", Hardware: false},
-	"svtav1":    {Key: "svtav1", FFmpegCodec: "libsvtav1", TargetCodec: "av1", Hardware: false},
-	"nvenc":     {Key: "nvenc", FFmpegCodec: "hevc_nvenc", TargetCodec: "hevc", Hardware: true},
-	"av1_nvenc": {Key: "av1_nvenc", FFmpegCodec: "av1_nvenc", TargetCodec: "av1", Hardware: true},
-	"qsv":       {Key: "qsv", FFmpegCodec: "hevc_qsv", TargetCodec: "hevc", Hardware: true},
-	"vaapi":     {Key: "vaapi", FFmpegCodec: "hevc_vaapi", TargetCodec: "hevc", Hardware: true},
-	"amf":       {Key: "amf", FFmpegCodec: "hevc_amf", TargetCodec: "hevc", Hardware: true},
+	"cpu": {Key: "cpu", FFmpegCodec: "libx265", TargetCodec: "hevc", Hardware: false,
+		PixelFormats: pixFmtsLibx265, Quality: scaleCRF},
+	"svtav1": {Key: "svtav1", FFmpegCodec: "libsvtav1", TargetCodec: "av1", Hardware: false,
+		PixelFormats: pixFmtsLibsvtav1, Quality: scaleCRF},
+	"nvenc": {Key: "nvenc", FFmpegCodec: "hevc_nvenc", TargetCodec: "hevc", Hardware: true,
+		PixelFormats: pixFmtsNVENC, Quality: scaleNVENC},
+	"av1_nvenc": {Key: "av1_nvenc", FFmpegCodec: "av1_nvenc", TargetCodec: "av1", Hardware: true,
+		PixelFormats: pixFmtsNVENC, Quality: scaleAV1NVENC},
+	"qsv": {Key: "qsv", FFmpegCodec: "hevc_qsv", TargetCodec: "hevc", Hardware: true,
+		PixelFormats: pixFmtsQSV, Quality: scaleQSV},
+	"vaapi": {Key: "vaapi", FFmpegCodec: "hevc_vaapi", TargetCodec: "hevc", Hardware: true,
+		PixelFormats: pixFmtsVAAPI, UploadFormats: uploadFormatsVAAPI, Quality: scaleVAAPI},
+	"amf": {Key: "amf", FFmpegCodec: "hevc_amf", TargetCodec: "hevc", Hardware: true,
+		PixelFormats: pixFmtsAMF, Quality: scaleAMF},
 }
 
 // aliases maps the raw ffmpeg -c:v codec name to its registry key, so
