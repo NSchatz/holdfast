@@ -397,13 +397,14 @@ func carriedList(spec encoder.Spec) string {
 const defaultRenderNode = "/dev/dri/renderD128"
 
 // deviceFor is the render node an encoder opens: the node the host assigned to VAAPI or to
-// QSV, which have to be told one, and none for every other encoder.
+// QSV, which have to be told one, and none for every other encoder. It reads the encoder's
+// API, so the H.264 and AV1 encoders of those two open the node their HEVC sibling does.
 func deviceFor(spec encoder.Spec, devices hwdevice.Assignment) string {
 	node := ""
-	switch spec.Key {
-	case "vaapi":
+	switch spec.API {
+	case encoder.APIVAAPI:
 		node = devices.VAAPI
-	case "qsv":
+	case encoder.APIQSV:
 		node = devices.QSV
 	default:
 		return ""
@@ -441,10 +442,10 @@ func deviceArgs(v VideoPlan) []string {
 		return nil
 	}
 	drm := v.Device + ",connection_type=drm"
-	switch v.Encoder.Key {
-	case "vaapi":
+	switch v.Encoder.API {
+	case encoder.APIVAAPI:
 		return []string{"-vaapi_device", drm}
-	case "qsv":
+	case encoder.APIQSV:
 		return []string{"-init_hw_device", "vaapi=hfva:" + drm, "-init_hw_device", "qsv=hfqsv@hfva"}
 	}
 	return nil
@@ -571,7 +572,7 @@ func (p *EncodePlan) args(x265 encoder.X265Parallelism) (pre, body []string, err
 	// to - after them, and before any upload to a hardware surface. libx265 writes them from
 	// its own parameters, and its command line does not change.
 	video := videoArgs(p.Video, p.Metadata.Color.FFmpegFlags(), x265.Params()+p.Metadata.Color.X265Params())
-	if p.Video.Encoder.Key != "cpu" {
+	if p.Video.Encoder.FFmpegCodec != "libx265" {
 		video = withHeadFilter(video, p.Metadata.Color.SetParams())
 	}
 	body = append(body, withDeinterlace(withDownscale(video, p.Picture.Downscale), p.Picture.Deinterlace)...)

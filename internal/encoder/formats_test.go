@@ -165,6 +165,35 @@ func TestInputFormat_Table(t *testing.T) {
 		{"vaapi", "yuv422p10le", ""},
 		{"vaapi", "yuv444p", ""},
 		{"vaapi", "vaapi", ""},
+		// libx264 lists planar 4:2:0, 4:2:2 and 4:4:4 at 8 and 10 bits, no 12-bit.
+		{"x264", "yuv420p10le", "yuv420p10le"},
+		{"x264", "yuv420p", "yuv420p"},
+		{"x264", "yuv422p10le", "yuv422p10le"},
+		{"x264", "yuv444p", "yuv444p"},
+		{"x264", "p010le", "yuv420p10le"},
+		{"x264", "yuv420p12le", ""},
+		// h264_nvenc lists what hevc_nvenc does; whether the device encodes 10-bit H.264 is
+		// the probe's to say, not the list's.
+		{"h264_nvenc", "yuv420p10le", "p010le"},
+		{"h264_nvenc", "yuv420p", "yuv420p"},
+		// h264_qsv lists nv12 only: no 10-bit, no 4:2:2 or 4:4:4.
+		{"h264_qsv", "yuv420p", "nv12"},
+		{"h264_qsv", "yuv420p10le", ""},
+		{"h264_qsv", "yuv422p", ""},
+		// av1_qsv lists nv12 and p010le.
+		{"av1_qsv", "yuv420p10le", "p010le"},
+		{"av1_qsv", "yuv420p", "nv12"},
+		{"av1_qsv", "yuv420p12le", ""},
+		// h264_vaapi uploads nv12 only; av1_vaapi uploads what vaapi does.
+		{"h264_vaapi", "yuv420p", "nv12"},
+		{"h264_vaapi", "yuv420p10le", ""},
+		{"av1_vaapi", "yuv420p10le", "p010le"},
+		{"av1_vaapi", "yuv420p", "nv12"},
+		{"av1_vaapi", "yuv422p10le", ""},
+		// h264_amf and av1_amf list what amf does.
+		{"h264_amf", "yuv420p10le", "p010le"},
+		{"av1_amf", "yuv420p10le", "p010le"},
+		{"av1_amf", "yuv422p10le", ""},
 	}
 	for _, c := range cases {
 		spec, _ := Lookup(c.key)
@@ -175,12 +204,12 @@ func TestInputFormat_Table(t *testing.T) {
 	}
 }
 
-// TestUploads_OnlyVAAPI: VAAPI is the one registry encoder that takes only hardware surfaces,
-// so it is the one whose format is uploaded rather than named by -pix_fmt.
+// TestUploads_OnlyVAAPI: the VAAPI encoders are the ones that take only hardware surfaces,
+// so they are the ones whose format is uploaded rather than named by -pix_fmt.
 func TestUploads_OnlyVAAPI(t *testing.T) {
 	for _, key := range Known() {
 		spec, _ := Lookup(key)
-		if spec.Uploads() != (key == "vaapi") {
+		if spec.Uploads() != (spec.API == APIVAAPI) {
 			t.Errorf("%s.Uploads() = %v", key, spec.Uploads())
 		}
 	}
@@ -216,6 +245,11 @@ func TestQualityScales_MatchThePinnedBinary(t *testing.T) {
 		{"vaapi", "-qp", 0},
 		{"amf", "-qp_i", -1},
 		{"amf", "-qp_p", -1},
+		{"h264_nvenc", "-cq", 0},
+		{"h264_amf", "-qp_i", -1},
+		{"h264_amf", "-qp_p", -1},
+		{"av1_amf", "-qp_i", -1},
+		{"av1_amf", "-qp_p", -1},
 	} {
 		spec, _ := Lookup(c.key)
 		lo, hi := optionRange(t, encoderHelp(t, ffmpeg, spec.FFmpegCodec), c.option)
@@ -232,18 +266,51 @@ func TestQualityScales_MatchThePinnedBinary(t *testing.T) {
 	if q := registry["qsv"].Quality; q.Min != 1 || q.Max != 51 {
 		t.Errorf("qsv scale %v, want 1-51 (doc/encoders.texi:3739-3740)", q)
 	}
+	// h264_vaapi's -qp is 0-52 on the binary, and the encoder clips it to 1-51
+	// (vaapi_encode_h264.c:885), so the scale stops one below the binary's top.
+	h264VAAPI := registry["h264_vaapi"]
+	if lo, hi := optionRange(t, encoderHelp(t, ffmpeg, "h264_vaapi"), "-qp"); lo != 0 || hi != 52 ||
+		h264VAAPI.Quality.Min != 1 || h264VAAPI.Quality.Max != 51 {
+		t.Errorf("h264_vaapi: binary -qp %d-%d, scale %v; want 0-52 and 1-51", lo, hi, h264VAAPI.Quality)
+	}
+	// av1_vaapi has no -qp: its target is -global_quality under -rc_mode CQP, a generic option
+	// the binary prints no range for, and the encoder reads it as the AV1 q_idx, 0-255
+	// (vaapi_encode_av1.c:34, 140); 0 means "not set". The binary must still offer CQP.
+	av1Help := encoderHelp(t, ffmpeg, "av1_vaapi")
+	if regexp.MustCompile(`(?m)^\s+-qp\s`).MatchString(av1Help) {
+		t.Error("av1_vaapi now prints a -qp option: re-read its scale")
+	}
+	if !regexp.MustCompile(`(?m)^\s+CQP\s+1\s`).MatchString(av1Help) {
+		t.Error("av1_vaapi's -rc_mode no longer offers CQP")
+	}
+	if q := registry["av1_vaapi"].Quality; q.Min != 1 || q.Max != 255 || q.Option != "-global_quality" {
+		t.Errorf("av1_vaapi scale %v, want -global_quality 1-255", q)
+	}
+	for _, key := range []string{"h264_qsv", "av1_qsv"} {
+		if q := registry[key].Quality; q.Min != 1 || q.Max != 51 || q.Option != "-global_quality" {
+			t.Errorf("%s scale %v, want -global_quality 1-51 (qsvenc.c:957 clips every QSV codec's ICQ there)", key, q)
+		}
+	}
 }
 
 // TestQualityScales_EveryEncoder pins each encoder's key, option and range.
 func TestQualityScales_EveryEncoder(t *testing.T) {
 	want := map[string]QualityScale{
-		"cpu":       {ConfigKey: "crf", Option: "-crf", Min: 0, Max: 51},
-		"svtav1":    {ConfigKey: "crf", Option: "-crf", Min: 0, Max: 51},
-		"nvenc":     {ConfigKey: "quality.nvenc", Option: "-cq", Min: 1, Max: 51},
-		"av1_nvenc": {ConfigKey: "quality.av1_nvenc", Option: "-cq", Min: 1, Max: 63},
-		"qsv":       {ConfigKey: "quality.qsv", Option: "-global_quality", Min: 1, Max: 51},
-		"vaapi":     {ConfigKey: "quality.vaapi", Option: "-qp", Min: 1, Max: 52},
-		"amf":       {ConfigKey: "quality.amf", Option: "-qp_i/-qp_p", Min: 0, Max: 51},
+		"cpu":        {ConfigKey: "crf", Option: "-crf", Min: 0, Max: 51},
+		"svtav1":     {ConfigKey: "crf", Option: "-crf", Min: 0, Max: 51},
+		"nvenc":      {ConfigKey: "quality.nvenc", Option: "-cq", Min: 1, Max: 51},
+		"av1_nvenc":  {ConfigKey: "quality.av1_nvenc", Option: "-cq", Min: 1, Max: 63},
+		"qsv":        {ConfigKey: "quality.qsv", Option: "-global_quality", Min: 1, Max: 51},
+		"vaapi":      {ConfigKey: "quality.vaapi", Option: "-qp", Min: 1, Max: 52},
+		"amf":        {ConfigKey: "quality.amf", Option: "-qp_i/-qp_p", Min: 0, Max: 51},
+		"x264":       {ConfigKey: "crf", Option: "-crf", Min: 0, Max: 51},
+		"h264_nvenc": {ConfigKey: "quality.h264_nvenc", Option: "-cq", Min: 1, Max: 51},
+		"h264_qsv":   {ConfigKey: "quality.h264_qsv", Option: "-global_quality", Min: 1, Max: 51},
+		"h264_vaapi": {ConfigKey: "quality.h264_vaapi", Option: "-qp", Min: 1, Max: 51},
+		"h264_amf":   {ConfigKey: "quality.h264_amf", Option: "-qp_i/-qp_p", Min: 0, Max: 51},
+		"av1_qsv":    {ConfigKey: "quality.av1_qsv", Option: "-global_quality", Min: 1, Max: 51},
+		"av1_vaapi":  {ConfigKey: "quality.av1_vaapi", Option: "-global_quality", Min: 1, Max: 255},
+		"av1_amf":    {ConfigKey: "quality.av1_amf", Option: "-qp_i/-qp_p", Min: 0, Max: 255},
 	}
 	if len(want) != len(Known()) {
 		t.Fatalf("the registry ships %v; this table covers %d", Known(), len(want))
@@ -254,7 +321,8 @@ func TestQualityScales_EveryEncoder(t *testing.T) {
 			t.Errorf("%s scale = %+v, want %+v", key, spec.Quality, w)
 		}
 	}
-	if got := strings.Join(QualityKeys(), " "); got != "amf av1_nvenc nvenc qsv vaapi" {
+	if got := strings.Join(QualityKeys(), " "); got != "amf av1_amf av1_nvenc av1_qsv av1_vaapi h264_amf h264_nvenc "+
+		"h264_qsv h264_vaapi nvenc qsv vaapi" {
 		t.Errorf("QualityKeys() = %q", got)
 	}
 }
@@ -287,7 +355,9 @@ func TestValidateQualityKey_RedsAtEachScalesEdges(t *testing.T) {
 	for _, c := range []struct {
 		key string
 		v   int
-	}{{"nvenc", 0}, {"av1_nvenc", 64}, {"vaapi", 0}, {"vaapi", 53}, {"qsv", 0}, {"qsv", 52}, {"amf", -1}, {"amf", 52}} {
+	}{{"nvenc", 0}, {"av1_nvenc", 64}, {"vaapi", 0}, {"vaapi", 53}, {"qsv", 0}, {"qsv", 52}, {"amf", -1}, {"amf", 52},
+		{"h264_nvenc", 0}, {"h264_nvenc", 52}, {"h264_qsv", 52}, {"h264_vaapi", 52}, {"h264_amf", 52},
+		{"av1_qsv", 52}, {"av1_vaapi", 0}, {"av1_vaapi", 256}, {"av1_amf", -1}, {"av1_amf", 256}} {
 		if ValidateQualityKey(c.key, c.v) == nil {
 			t.Errorf("quality.%s %d accepted", c.key, c.v)
 		}
@@ -296,6 +366,8 @@ func TestValidateQualityKey_RedsAtEachScalesEdges(t *testing.T) {
 		{"cpu", "set by crf"},
 		{"svtav1", "set by crf"},
 		{"libx265", "set by crf"},
+		{"x264", "set by crf"},
+		{"libx264", "set by crf"},
 		{"hevc_nvenc", "write quality.nvenc"},
 		{"nvidia", "names no encoder"},
 		{"", "names no encoder"},

@@ -779,7 +779,9 @@ func probeEncoder(ctx context.Context, cfg *config.Config, ffmpeg, ffprobe, key 
 		return c, nil
 	}
 	if spec, ok := encoder.Lookup(key); ok {
-		if why := devices.Why[spec.Key]; why != "" {
+		// The node reasons are keyed by the API that opens the node, so the H.264 and AV1
+		// encoders of VAAPI and QSV name the same reason their HEVC sibling does.
+		if why := devices.Why[spec.API]; why != "" {
 			return c, fmt.Errorf("%w (render node: %s)", err, why)
 		}
 	}

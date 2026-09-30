@@ -11,7 +11,7 @@ The `holdfast` container image does not merely depend on ffmpeg — it REDISTRIB
 prebuilt ffmpeg and ffprobe binaries, so it carries their licence and their source
 offer with it.
 
-  Component : ffmpeg + ffprobe (static builds carrying libx265, libsvtav1, libvmaf)
+  Component : ffmpeg + ffprobe (static builds carrying libx265, libx264, libsvtav1, libvmaf)
   Source of : https://github.com/BtbN/FFmpeg-Builds
   Build tag : autobuild-2026-07-31-14-10
   Version   : N-125875-g5d4d3bdc61
@@ -40,6 +40,15 @@ trusting it, so the ffmpeg in any given image is the exact one named here.
 
 The ffmpeg binaries are invoked as separate programs (`exec`), not linked into the
 `holdfast` binary; `holdfast` itself is AGPL-3.0-only and contains no ffmpeg code.
+
+libx264, the H.264 encoder behind `encoder: x264` (alias `libx264`), is one of the
+libraries statically linked into those ffmpeg binaries, so it travels under their
+source offer above. Its own licence is GPL-2.0-or-later: every x264 source file
+carries "either version 2 of the License, or (at your option) any later version"
+(https://code.videolan.org/videolan/x264/-/blob/master/x264.c, lines 14-16, and
+COPYING, GPL version 2; read 2026-09-30), which the build's GPL-3.0 licence satisfies.
+x264 is also offered under a commercial licence by its authors; this image uses it
+under the GPL.
 
 --------------------------------------------------------------------------------
 

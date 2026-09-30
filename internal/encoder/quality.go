@@ -93,6 +93,42 @@ var (
 	// libavcodec/amfenc_hevc.c:107-108), where -1 is the option's default, "not set". The
 	// scale is 0-51. ASSUMED default: the job's crf, unchanged (see above; T43).
 	scaleAMF = QualityScale{ConfigKey: QualityMapKey + ".amf", Option: "-qp_i/-qp_p", Min: 0, Max: 51}
+
+	// THE T27 SCALES, read on the same terms from the same binary and source on 2026-09-30.
+	// Each ASSUMED default is the job's crf, unchanged, exactly as above (T43). H.264 shares
+	// its HEVC sibling's option and bounds except where the encoder says otherwise; AV1 on
+	// QSV, VAAPI and AMF is on the AV1 quantiser index where the option reaches it.
+
+	// scaleH264NVENC is h264_nvenc -cq: "0 to 51, 0 means automatic" (pinned binary), read
+	// by the shared nvenc.c exactly as hevc_nvenc's is; 0 excluded.
+	scaleH264NVENC = QualityScale{ConfigKey: QualityMapKey + ".h264_nvenc", Option: "-cq", Min: 1, Max: 51}
+
+	// scaleH264QSV and scaleAV1QSV are -global_quality under ICQ, which qsvenc.c sets for every
+	// QSV codec as ICQQuality = av_clip(global_quality, 1, 51) (libavcodec/qsvenc.c:957; the
+	// same ICQ selection at 623-625), so AV1 on QSV is on the 1-51 scale too, not a quantiser
+	// index.
+	scaleH264QSV = QualityScale{ConfigKey: QualityMapKey + ".h264_qsv", Option: "-global_quality", Min: 1, Max: 51}
+	scaleAV1QSV  = QualityScale{ConfigKey: QualityMapKey + ".av1_qsv", Option: "-global_quality", Min: 1, Max: 51}
+
+	// scaleH264VAAPI is h264_vaapi -qp, 0-52 on the pinned binary, taken only above 0
+	// (libavcodec/vaapi_encode_h264.c:1048-1049) and then clipped to 1-51 as the P-frame QP
+	// (vaapi_encode_h264.c:885): 52 would be sent and encoded as 51, so the scale stops at
+	// 51, H.264's own ceiling.
+	scaleH264VAAPI = QualityScale{ConfigKey: QualityMapKey + ".h264_vaapi", Option: "-qp", Min: 1, Max: 51}
+
+	// scaleAV1VAAPI is av1_vaapi's quantiser index. The encoder has no -qp option; under
+	// `-rc_mode CQP` the generic -global_quality is the rate-control quality
+	// (libavcodec/vaapi_encode.c:1419-1425), which the AV1 encoder clips to 0-255 as the
+	// P-frame q_idx (vaapi_encode_av1.c:34, 140). A value of 0 is "no quality level set"
+	// there (vaapi_encode.c:1426-1429 falls back to the codec default), so the scale starts
+	// at 1.
+	scaleAV1VAAPI = QualityScale{ConfigKey: QualityMapKey + ".av1_vaapi", Option: "-global_quality", Min: 1, Max: 255}
+
+	// scaleH264AMF is h264_amf -qp_i and -qp_p under -rc cqp, each "-1 to 51" (pinned binary),
+	// -1 the unset default, as hevc_amf's. scaleAV1AMF is av1_amf's, each "-1 to 255" (pinned
+	// binary; the AV1 q_index), -1 excluded for the same reason.
+	scaleH264AMF = QualityScale{ConfigKey: QualityMapKey + ".h264_amf", Option: "-qp_i/-qp_p", Min: 0, Max: 51}
+	scaleAV1AMF  = QualityScale{ConfigKey: QualityMapKey + ".av1_amf", Option: "-qp_i/-qp_p", Min: 0, Max: 255}
 )
 
 // QualityKeys are the registry keys a `quality.<key>` entry may name, sorted: every encoder
