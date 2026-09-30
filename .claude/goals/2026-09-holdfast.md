@@ -54,8 +54,9 @@ the source's own directory. Every capability below is additive to the gate set.
 
 ### 0.1 Where to start
 
-- **Launch directory:** `/workspace` (the `NSchatz/holdfast` checkout; clone it there if
-  missing). The session must have been started after `git pull` brought in
+- **Launch directory:** the `NSchatz/holdfast` checkout: `/workspace/holdfast` in the maker container
+  (one session per repo, since 2026-09-30), or `/workspace` in a standalone holdfast container (clone
+  it there if missing). The session must have been started after `git pull` brought in
   `.claude/settings.json`, so its `env` is loaded. Sibling repos and access:
   - `NSchatz/holdfast` - read and write (branches, PRs, self-merge, the T35 deletions, T37 minor
     releases).
@@ -67,7 +68,7 @@ the source's own directory. Every capability below is additive to the gate set.
     (T32). Clone to `/cache/wt/homelab/holdfast-g<n>` only when a goal opens its PR.
   - Every other repo: never touched.
 - **First actions of every goal**, in order:
-  1. `git -C /workspace pull --rebase` (and in any sibling clone this goal uses).
+  1. `git pull --rebase` in the launch directory (§0.1) (and in any sibling clone this goal uses).
   2. Check the precondition (the goal's own section). If it fails, print only the BLOCKED
      report (§21) and stop.
   3. Read the earlier goals' ledgers (`.claude/goals/2026-09-holdfast-g*.status.md`), the
@@ -270,14 +271,14 @@ the source's own directory. Every capability below is additive to the gate set.
   the red tails), never for a (foundation) line; PROPOSED only where this brief marks the
   decision research-and-propose.
 
-### 0.11 Environment facts (verified 2026-09-29)
+### 0.11 Environment facts (verified 2026-09-29; container rows updated 2026-09-30 for the move into maker)
 
 | Fact | Consequence |
 |---|---|
-| CPU quota 2 (`/sys/fs/cgroup/cpu.max` = `200000 100000`); `nproc` says 56 | `.claude/settings.json` commits `GOFLAGS=-p=2` and `GOMAXPROCS=2`; at most 2 agents; one heavy job under the lock |
-| Memory limit 16 GiB (`memory.max` = 17179869184) | the encode memory watchdog (85% of the limit) applies to test encodes |
-| No GPU (`claude-gpu status`: off), no `/dev/dri` | hardware only on fakes and golden argv (T9) |
-| `/cache`, `/scratch`, `/workspace` on one filesystem, about 640G free | fixtures and worktrees fit |
+| CPU quota 28 in the maker container, shared by its 9 Claude sessions (2 in the standalone container); `nproc` says 56 | `.claude/settings.json` commits `GOFLAGS=-p=2` and `GOMAXPROCS=2`; at most 2 agents; one heavy job under the lock |
+| Memory limit 48 GiB in the maker container, shared by its 9 Claude sessions (16 GiB standalone) | the encode memory watchdog (85% of the limit) applies to test encodes; the limit is shared, so keep test encodes far below it |
+| The maker container has the host's GPU (a Quadro P2200 shared with Plex, through `claude-gpu`); no `/dev/dri` | hardware only on fakes and golden argv (T9), unchanged: every real hardware run stays a NEEDS-OWNER item |
+| `/cache` and `/workspace` on one filesystem, about 640G free; in the maker container `/scratch` (`TMPDIR`) is an 8 GiB RAM tmpfs counted against memory | fixtures and worktrees fit; keep large temporary files out of `TMPDIR` |
 | No global Go; mise has go 1.23.12, 1.25.12 and 1.25.14 | run Go as `mise exec go@1.25.14 -- ...` |
 | `ffmpeg` on PATH is the pinned BtbN `N-125875-g5d4d3bdc61` (autobuild-2026-07-31) with libx264, libx265, libsvtav1, libvpl, vaapi, amf, nvenc; hwaccels cuda/vaapi/qsv/drm/opencl/vulkan/amf; filters loudnorm, cropdetect | every encoder name T27 needs exists in the pinned build; only vendor runtimes are missing from the image |
 | A `docker` CLI is on PATH but there is no daemon or socket; no `sudo`; `apt` needs root | image builds and smokes happen only in CI (T36); rootless installs only |
