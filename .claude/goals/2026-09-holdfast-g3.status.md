@@ -72,7 +72,7 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 2.1 | Golden argv tests for every registry encoder and every option combination the existing fixtures use, merged BEFORE any refactor commit | DONE (PR #113, `b94cd2a`): 1611 cases in 15 files under `internal/engine/testdata/golden-argv` (encoder layer: 202 cases per registry encoder plus 3 through its raw-codec alias, and 4 refusals naming no encoder; engine layer: 76 cases for `cpu`, 16 core cases for each other encoder); local gate exit 0 in 1642 s on `62f1824` (`internal/engine` 1511.2 s); CI green; merged before any refactor commit |
+| 2.1 | Golden argv tests for every registry encoder and every option combination the existing fixtures use, merged BEFORE any refactor commit | DONE (PR #113, `b94cd2a`): 1611 cases in 15 files under `internal/engine/testdata/golden-argv` (encoder layer: 202 cases per registry encoder plus 3 through its raw-codec alias, and 4 refusals of a direct call - an unknown and an empty encoder key, and an encoder built without a prober, with and without a snapshot; engine layer: 76 cases for `cpu`, 16 core cases for each other encoder); local gate exit 0 in 1642 s on `62f1824` (`internal/engine` 1511.2 s); CI green; merged before any refactor commit |
 
 ## Phase 3 - The encode plan (line C, foundation)
 
@@ -80,7 +80,7 @@ summed per directory):
 |---|---|---|
 | 3.1 | One declared plan per job (video encoder and device, decode path, pixel format, quality; audio, subtitle and picture operations; metadata carriers) | DONE (PR #115, `eef7216`): `EncodePlan` in `internal/engine/encodeplan.go`, derived once per job by `deriveEncodePlan` in `ProcessFile`; `hdr.Color` for the colour description |
 | 3.2 | The argv builder reads the plan; the golden argv tests pass unchanged | DONE (PR #115, `eef7216`): `FFmpegEncoder` takes every job-specific argument of its command line from the plan (`EncodePlan.args`, `videoArgs`); the run's execution parameters (the libx265 thread pools, `-progress`, the mux queue bounds, the global flags) come from the encoder; `TestGoldenArgv` passes on `eef7216` with no golden file changed since `b94cd2a` (`git diff b94cd2a origin/main` over them: 0 lines) |
-| 3.3 | Every gate reads the plan; no existing engine test assertion removed or relaxed | DONE (PR #115, `eef7216`; PR #116, `ba35133`): `Engine.verifyAgainst` takes only the plan and reads from it the source and the output it measures (#116) and every job-specific expectation; `TestEncodePlan_EveryGateReadsThePlan` moves every gate's verdict (exists, codec, length, size, streams, decode, the perceptual gate's reference and scale) by changing only the plan; #116's gate exit 0 in 1733 s on `6f85ca9` (`internal/engine` 1568.9 s), CI green; 0 lines deleted in any `*_test.go` since the goal-start SHA (`buildArgs` and `verifyOutput` stay as test adapters); new proofs `TestEncodePlan_*` (5) and `TestDeriveColor_TheDescriptionAndBothRenderingsExactly`; #115's gate exit 0 in 1743 s on `c8ded9c` (`internal/engine` 1593.9 s, 59% of `TEST_TIMEOUT` 45m); mutation-diff 100% (`internal/hdr/probe.go`, 19 killed, 0 lived); CI green |
+| 3.3 | Every gate reads the plan; no existing engine test assertion removed or relaxed | DONE (PR #115, `eef7216`; PR #116, `ba35133`; PR #117, `518fe8e`): `Engine.verifyAgainst` takes only the plan and reads from it the source and the output it measures (#116) and every job-specific expectation (the length gate's tolerance and packet-count bound are the only thresholds not on it); `TestEncodePlan_EveryGateReadsThePlan` moves the verdict of every gate by changing only the plan - exists, codec, length, size, stream parity, decode, the perceptual gate's three floors and the video-identity check a stream copy is held to (#117) - and shows the perceptual gate's reference and scale coming from the plan; 0 lines deleted in any `*_test.go` since the goal-start SHA (`buildArgs` and `verifyOutput` stay as test adapters); new proofs `TestEncodePlan_*` (5) and `TestDeriveColor_TheDescriptionAndBothRenderingsExactly`; gates: #115 exit 0 in 1743 s on `c8ded9c` (`internal/engine` 1593.9 s), #116 exit 0 in 1733 s on `6f85ca9` (`internal/engine` 1568.9 s), #117 exit 0 in 1717 s on `a00aab3` (`internal/engine` 1569.7 s); mutation-diff 100% for #115 (`internal/hdr/probe.go`, 19 killed, 0 lived); CI green on all three |
 
 ## Phase 4 - Design record (line D)
 
@@ -92,8 +92,8 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 5.1 | Gate integrity counted from the goal-start SHA | DONE (`ba35133`): 0 lines deleted in `*_test.go` (`git diff --numstat 9e27c1a origin/main`: +1603 -0); `func Test` 1322 -> 1330, no package fell (`internal/engine` 460 -> 467, `internal/hdr` 9 -> 10); `docs/design/swap.md` 58 -> 58 and `docs/design/quality-gate.md` 76 -> 76, 0 lines removed |
-| 5.2 | Adversarial review of the report | DONE: three rounds, each by a fresh subagent on 2026-09-30. Round 1 found lines A-F true on the repositories, and 2 statements false plus 4 overstated or stale. The false ones were this row, which claimed a review not yet run, and "argv built from the plan alone". The overstated or stale ones were "every gate reads the plan", when the gates took the source and output as loose parameters; the per-commit trailer list; "with the row"; and the golden-diff label. All were corrected: PR #116 makes the gates take the files they measure from the plan, and the wording was fixed. Round 2 found A-F true, the round-1 corrections real, and 2 sentences of the report's line C still false: "every expectation", though the length gate's tolerance is run-wide; and "moves each gate's verdict", though the perceptual gate's case shows only its reference and scale coming from the plan. The report was corrected. Round 3 checks the corrected report and the repositories after this commit; its verdict is printed as the report's line G |
+| 5.1 | Gate integrity counted from the goal-start SHA | DONE (`518fe8e`): 0 lines deleted in `*_test.go` (`git diff --numstat 9e27c1a origin/main`: +1663 -0); `func Test` 1322 -> 1330, no package fell (`internal/engine` 460 -> 467, `internal/hdr` 9 -> 10); `docs/design/swap.md` 58 -> 58 and `docs/design/quality-gate.md` 76 -> 76, 0 lines removed |
+| 5.2 | Adversarial review of the report | DONE: rounds 1-3 ran, each a fresh subagent on 2026-09-30, and each found lines A-F true on the repositories. Round 1 found 2 statements false and 4 overstated or stale; round 2, 2 sentences of line C false; round 3, 5 statements false (the refusals' description, this row's count of rounds, row 3.3's and the design record's "every gate's verdict" and "every expectation"). Each was corrected by rewording or, where the proof fell short of the claim, by code: PR #116 (the gates take the files they measure from the plan) and PR #117 (the perceptual floors and the copy check moved by the plan). A fresh subagent checks the report and the repositories after this commit, and its verdict is printed as the report's line G |
 
 ## Decisions taken
 
@@ -175,10 +175,14 @@ summed per directory):
   come from `EncodePlan.Source`/`Output`, as the encoder already required, and the exists,
   length and decode gates are shown to move with the plan too. The length gate's tolerance
   (`duration_tolerance_sec`) stays a run-wide setting, as the stray-temp sweep reads it.
+- 2026-09-30: round 3 of the report's review found the design record, a comment and row 3.3
+  still claiming every gate's verdict moves with the plan while no case moved the perceptual
+  floors or reached the copy check; PR #117 (`518fe8e`, tests, comments and docs only) adds those
+  cases and names the length gate's two thresholds as the only ones not on the plan.
 - 2026-09-30: PR #116 changed 8 lines of this goal's own new tests (`encodeplan_test.go`,
   `encodeplan_adapters_test.go`: the call sites of the new `verifyAgainst` signature and one
-  doc comment); none of those lines existed at the goal-start SHA, and no assertion was
-  removed. Stale local remote-tracking refs of merged branches were pruned (`git remote prune
+  doc comment) and PR #117 changed 5 (`encodeplan_test.go`: a doc comment and one subtest's
+  name); none of those lines existed at the goal-start SHA, and no assertion was removed. Stale local remote-tracking refs of merged branches were pruned (`git remote prune
   origin`; local only).
 - 2026-09-30: PR #113 was merged while `main` was one ledger-only commit (`95301f4`) ahead of
   its last merged head (`38966f7`); under §0.3 its gate and CI stood. Later PRs were merged
@@ -194,13 +198,14 @@ NSchatz/homelab#208) stays `OPEN`; the PR is still open.
 
 Not NEEDS-OWNER kinds (§0.6); findings and decisions only the owner or a later goal makes:
 
-- Defect, not fixed (goal 3 is behaviour-preserving): every MPEG-TS/M2TS source is skipped as
+- Defect, not fixed (goal 3 is behaviour-preserving; `internal/probe/probe.go` `VideoStreams`,
+  default `video_exts` in `internal/config/config.go`): every MPEG-TS/M2TS source is skipped as
   `multi-video-stream`, because ffprobe answers the video-stream probe with a program section
   (`0`) ahead of the stream line and `probe.VideoStreams` refuses the comma-less line. `ts`
   and `m2ts` are default `video_exts`. The golden argv pins today's behaviour (engine cases
   `container-source-ts`, `container-source-m2ts`; encoder case `ts-source/no-plan`).
-- Follow-up: a remux-only root with a `max_height` below the source still meets the final-swap
-  guard (`downscale-unacknowledged`) as if it would scale, though a remux scales nothing.
+- Follow-up (`internal/engine/downscale.go` `downscaleRefused`): a remux-only root with a
+  `max_height` below the source still meets the final-swap guard (`downscale-unacknowledged`) as if it would scale, though a remux scales nothing.
   Unchanged here; the row no longer records a scale it did not apply (#115).
 - The owner's PR #114 (`4c9143f`) carries a `Co-authored-by` trailer inside this goal's range
   (T38 keeps AI trailers out of commits). No goal may rewrite history (T7); this goal's own
@@ -211,7 +216,7 @@ Not NEEDS-OWNER kinds (§0.6); findings and decisions only the owner or a later 
 
 Goal 3 is complete. Merged: #113 (`b94cd2a`, the golden argv, before any refactor commit),
 #115 (`eef7216`, the encode plan, `docs/design/encode-plan.md`, the `CLAUDE.md` link) and #116
-(`ba35133`, the gates take the files they measure from the plan). No branch or worktree of
-this goal remains. Goal 4's precondition is this ledger's COMPLETE line.
+(`ba35133`, the gates take the files they measure from the plan) and #117 (`518fe8e`, every gate's
+verdict proven to move with the plan). No branch or worktree of this goal remains. Goal 4's precondition is this ledger's COMPLETE line.
 
 COMPLETE (goal 3): 2026-09-30
