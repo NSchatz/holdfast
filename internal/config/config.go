@@ -70,6 +70,7 @@ var knownKeys = map[string]bool{
 	maxHeightKey:    true,
 	downscaleAckKey: true,
 	hwFallbackKey:   true,
+	hwDecodeKey:     true,
 	x265CPUsKey:     true,
 	qualityKey:      true,
 	// The divisor `workers: auto` sizes the pool by. It describes the PROCESS, so a
@@ -163,6 +164,9 @@ func defaultLayer() map[string]any {
 		// the file is left as it is (docs/design/hardware.md#fallback). A knob in
 		// profileKnobs is seeded from the top-level value of the same key.
 		hwFallbackKey: HWFallbackSkip,
+		// A source is decoded in software, as every job always was: hardware decode is off
+		// until configured (docs/design/hardware.md#decode).
+		hwDecodeKey: HWDecodeSoftware,
 		// No configured libx265 parallelism: the run derives it from the CPU quota of its
 		// own cgroup, or passes none where there is no quota to read.
 		x265CPUsKey: 0,
@@ -321,6 +325,12 @@ type Config struct {
 	// encoders, svtav1 for av1_nvenc). A library root may override it. See
 	// docs/design/hardware.md#fallback.
 	HWFallback string `yaml:"hw_fallback"`
+	// HWDecode is how a job's source is decoded: "software" (the default) by ffmpeg's
+	// software decoders, as always; "hardware" on the vendor hardware of the job's hardware
+	// encoder, with the frames downloaded to system memory before any filter or encoder
+	// reads them. A job encoded in software decodes in software. A library root may override
+	// it. See docs/design/hardware.md#decode.
+	HWDecode string `yaml:"hw_decode"`
 	// CRF is the software encoders' quality knob (lower = bigger/better): libx265's
 	// and libsvtav1's constant rate factor, 0-51. Each hardware encoder's quality is
 	// set on its own scale by Quality below, and a hardware encoder with no entry there
@@ -902,6 +912,7 @@ func (c *Config) TopLevelProfile() Profile {
 		MaxHeight:         c.MaxHeight,
 		DownscaleAck:      c.DownscaleAck,
 		HWFallback:        c.HWFallback,
+		HWDecode:          c.HWDecode,
 	}
 }
 

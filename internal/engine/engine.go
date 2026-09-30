@@ -2399,6 +2399,12 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		return nil
 	}
 
+	if job.Video.Decode != DecodeSoftware {
+		// Said only where it is not the default, so a job under hw_decode: software logs
+		// exactly what it always did (docs/design/hardware.md#decode).
+		e.Log.Info("hardware decode", "file", f, "decode", job.Video.Decode,
+			"decode_device", job.Video.DecodeDevice, "encoder", job.Video.Encoder.Key)
+	}
 	encStart := time.Now()
 	err = e.encode(ctx, worker, f, work, props, job)
 	// A HARDWARE ENCODE THAT FAILED, under a root whose hw_fallback is software, is encoded

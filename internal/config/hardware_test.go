@@ -126,8 +126,83 @@ func TestHardware_HWFallbackMovesTheDigestOnlyAwayFromTheDefault(t *testing.T) {
 		t.Errorf("the default's digest = %s, want %s (the pre-key digest)", got, digestBeforeHWFallback)
 	}
 	vals := software.values()
-	if vals[len(vals)-1] != HWFallbackSoftware || profileKnobs[len(profileKnobs)-1] != hwFallbackKey {
-		t.Errorf("hw_fallback is not the last knob rendered: %v", vals)
+	at := len(profileKnobs) - 2 // hw_decode follows it
+	if vals[at] != HWFallbackSoftware || profileKnobs[at] != hwFallbackKey {
+		t.Errorf("hw_fallback is not the knob rendered before hw_decode: %v", vals)
+	}
+}
+
+// A root that sets no hw_decode, or sets the default, digests as it did before the key
+// existed; a root that decodes on hardware digests apart. It is the last knob rendered.
+func TestHardware_HWDecodeMovesTheDigestOnlyAwayFromTheDefault(t *testing.T) {
+	base := Profile{Encoder: "cpu", CRF: 22, Preset: "slow", PixelFormat: "auto", ContainerExt: "mkv"}
+	software, hardware := base, base
+	software.HWDecode, hardware.HWDecode = HWDecodeSoftware, HWDecodeHardware
+	if base.Digest() != software.Digest() {
+		t.Error("an explicit software digests apart from the default")
+	}
+	if base.Digest() == hardware.Digest() {
+		t.Error("hardware digests like software")
+	}
+	// Pinned: the digest of this profile before either hardware key existed.
+	if got := base.Digest(); got != digestBeforeHWFallback {
+		t.Errorf("the default's digest = %s, want %s (the pre-key digest)", got, digestBeforeHWFallback)
+	}
+	if got := base.HWDecodeMode(); got != HWDecodeSoftware {
+		t.Errorf("an unset hw_decode resolves to %q, want software", got)
+	}
+	vals := hardware.values()
+	if vals[len(vals)-1] != HWDecodeHardware || profileKnobs[len(profileKnobs)-1] != hwDecodeKey {
+		t.Errorf("hw_decode is not the last knob rendered: %v", vals)
+	}
+}
+
+// hw_decode accepts its two values, and an empty one as the default, and refuses anything
+// else naming the key, the value and both accepted values, at the top level and on a root.
+func TestHardware_HWDecodeIsValidatedAtEveryLayer(t *testing.T) {
+	for _, v := range []string{"", HWDecodeSoftware, HWDecodeHardware} {
+		if err := validateHWDecode(v); err != nil {
+			t.Errorf("hw_decode %q refused: %v", v, err)
+		}
+	}
+	for _, v := range []string{"on", "true", "cuda", "vaapi", "Hardware", "auto"} {
+		err := validateHWDecode(v)
+		if err == nil {
+			t.Errorf("hw_decode %q accepted", v)
+			continue
+		}
+		for _, part := range []string{"hw_decode", `"` + v + `"`, "software", "hardware"} {
+			if !strings.Contains(err.Error(), part) {
+				t.Errorf("the refusal of %q does not name %q: %v", v, part, err)
+			}
+		}
+	}
+	a, b, state := hwRoots(t)
+	for name, body := range map[string]string{
+		"top level": "hw_decode: cuda\nlibrary_roots:\n  - " + a + "\n",
+		"a root":    "library_roots:\n  - " + a + "\n  - path: " + b + "\n    hw_decode: cuda\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, err := load(t, "state_dir: "+state+"\n"+body)
+			if err == nil {
+				err = c.Validate()
+			}
+			if err == nil || !strings.Contains(err.Error(), `hw_decode "cuda"`) {
+				t.Errorf("an unknown hw_decode: %v, want its refusal", err)
+			}
+		})
+	}
+	c := loadYAML(t, "state_dir: "+state+"\nhw_decode: software\nlibrary_roots:\n  - "+a+"\n"+
+		"  - path: "+b+"\n    hw_decode: hardware\n")
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	got := map[string]string{}
+	for _, r := range c.RootProfiles() {
+		got[r.Clean] = r.Profile.HWDecodeMode()
+	}
+	if got[a] != HWDecodeSoftware || got[b] != HWDecodeHardware {
+		t.Errorf("per-root hw_decode = %v, want %s software and %s hardware", got, a, b)
 	}
 }
 

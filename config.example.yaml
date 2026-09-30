@@ -295,6 +295,15 @@ dry_run: false
 #                         # svtav1 for the AV1 ones, x264 for the H.264 ones). A
 #                         # library root may override it.
 #                         # See docs/design/hardware.md#fallback.
+# hw_decode: software    # how a job's source is decoded. software (default): by
+#                         # ffmpeg's software decoders, as always. hardware: on the
+#                         # vendor hardware of the job's hardware encoder (CUDA for
+#                         # the NVENC ones, VAAPI on the render node for VAAPI, QSV
+#                         # and AMF), every frame downloaded to system memory before
+#                         # the filters, the encoder or a gate reads it, so depth and
+#                         # HDR10 metadata are what a software decode gives. A job
+#                         # encoded in software decodes in software. A library root
+#                         # may override it. See docs/design/hardware.md#decode.
 # crf: 22                # quality knob (lower = bigger/better): libx265/libsvtav1
 #                         # constant-rate-factor, 0-51. A hardware encoder with no
 #                         # quality.<key> below takes this value unchanged as its

@@ -94,6 +94,7 @@ deinterlace: off
 max_height: 1080
 downscale_acknowledged: true
 hw_fallback: software
+hw_decode: hardware
 workers: 4
 state_dir: /var/lib/holdfast
 undo_window_hours: 24
@@ -130,6 +131,7 @@ max_load: 1.5
 		MaxHeight:         1080,
 		DownscaleAck:      &yes,
 		HWFallback:        "software",
+		HWDecode:          "hardware",
 	}
 	roots := c.RootProfiles()
 	if len(roots) != 2 {
@@ -374,6 +376,10 @@ func TestProfileKnobSetIsClosedAndSingleSourced(t *testing.T) {
 		// encoder writes a replacement, or whether one is written at all, so it is a knob;
 		// digested conditionally, so a root that sets nothing digests as it always did.
 		"hw_fallback",
+		// How a job's source is decoded. It decides which hardware reads the source, so it
+		// is a knob; digested conditionally, so a root that sets nothing digests as it
+		// always did.
+		"hw_decode",
 	}
 	if !reflect.DeepEqual(knobs, want) {
 		t.Fatalf("ProfileKnobs() = %v, want %v", knobs, want)

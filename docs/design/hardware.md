@@ -161,3 +161,58 @@ defaults to `skip`.**
 The fallback never relaxes a gate: a software output is held to exactly the gates a hardware
 one is, against the plan it was encoded from, and the VMAF floors stay the root's whichever
 encoder wrote the file.
+
+<a id="decode"></a>
+
+## `hw_decode`: decoding on the encoder's hardware
+
+**`hw_decode` is set per library root (or at the top level), is `software` or `hardware`, and
+defaults to `software`.** Under `hardware`, a job whose encoder is a hardware one decodes its
+source on that encoder's vendor hardware, and every decoded frame comes back to system memory
+before any filter, the encoder or a gate reads it. A job encoded in software - a software
+encoder, or a hardware job `hw_fallback` handed to software - decodes in software: there is no
+hardware in that job to decode on.
+
+| Encoder API | Decode | Global options before `-i` |
+|---|---|---|
+| NVENC (`nvenc`, `av1_nvenc`, `h264_nvenc`) | CUDA | `-hwaccel cuda` |
+| VAAPI (`vaapi`, `av1_vaapi`, `h264_vaapi`) | VAAPI on the encoder's node | `-init_hw_device vaapi=hfva:<node>,connection_type=drm -filter_hw_device hfva -hwaccel vaapi -hwaccel_device hfva` |
+| QSV (`qsv`, `av1_qsv`, `h264_qsv`) | VAAPI on the encoder's node | `-init_hw_device vaapi=hfva:<node>,connection_type=drm -init_hw_device qsv=hfqsv@hfva -hwaccel vaapi -hwaccel_device hfva` |
+| AMF (`amf`, `av1_amf`, `h264_amf`) | VAAPI on the VAAPI node | `-init_hw_device vaapi=hfva:<node>,connection_type=drm -hwaccel vaapi -hwaccel_device hfva` |
+
+**Why the frames are always downloaded.** No `-hwaccel_output_format` is given, so ffmpeg
+transfers each decoded frame to system memory in the frames' own software layout - p010 for a
+10-bit 4:2:0 source, nv12 for 8-bit - and copies the frame's properties onto it, its colour
+description and its side data (the HDR10 mastering-display and content-light blocks) among them
+(`fftools/ffmpeg_demux.c:1687-1688` leaves the output format unset; `ffmpeg_dec.c:389-393`
+downloads a hardware frame and line 370 copies its properties, at the pinned
+[5d4d3bdc61](https://github.com/FFmpeg/FFmpeg/tree/5d4d3bdc61), read 2026-09-30). Everything
+after the decoder is then exactly what a software decode feeds: the colour stamp every non-libx265
+encoder needs (`encode-plan.md#fidelity`), a deinterlace and a scale are software filters that
+run on the source's own samples, and a VAAPI encode uploads them as it always did. Keeping the
+frames on the device would need the hardware equivalents of those filters, each a different
+picture from the software reference the perceptual gate is scored against
+(`quality-gate.md`), so it is not done. Hardware decode is a throughput option only; it changes
+no decision and no declaration a gate reads.
+
+**Keeping 10-bit and HDR.** The depth, the chroma and the HDR10 blocks a replacement carries
+are what its plan declares and what the output fidelity gate checks (`encode-plan.md#fidelity`);
+a decode path that lost any of them - a download at 8 bits, a frame without its side data - is
+rejected by that gate like any other lossy encode, and the source is kept. The fakes in
+`internal/engine/hwdecode_test.go` run each vendor's command line, prove a faithful path
+replaces a 10-bit HDR10 source, and prove a path that cut the depth or dropped the
+mastering-display block is rejected.
+
+**When the device cannot decode.** A decoder with no hardware configuration for the device (an
+FFV1 source), or a profile the device does not support, falls through to software decoding:
+ffmpeg's `get_format` returns the first software format when no hardware format of the device's
+type is offered (`ffmpeg_dec.c:1329-1376`). A decode device that cannot be opened fails the
+decoder and so the job (`ffmpeg_dec.c:1451-1535`, the refusal at 1531), which `hw_fallback` then
+decides like any failed hardware encode. The start-time probe runs under the top level's `hw_decode`, so a
+top-level `hardware` also proves the decode device opens before the run starts; a root that sets
+it alone meets its device at its first job. AMF's decode through VAAPI is ASSUMED (on Linux,
+AMD's decode is Mesa's `radeonsi` VA driver), until the AMF hardware report shows it.
+
+The default is `software` because a new transformation is off until configured (brief I5): a
+configuration that does not name the key produces the command lines it always did, and its
+digest does not move.

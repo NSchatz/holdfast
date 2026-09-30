@@ -38,9 +38,16 @@ import (
 // derivation.
 var encodePlanID atomic.Int64
 
-// DecodeSoftware is the one decode path this build declares: the source is decoded by
-// ffmpeg's software decoders, and no -hwaccel reaches a command line.
-const DecodeSoftware = "software"
+// The decode paths a plan declares (VideoPlan.Decode). DecodeSoftware is every job's unless
+// its root asks for hw_decode: hardware and its encoder is a hardware one; then the source is
+// decoded on that encoder's vendor hardware - DecodeCUDA for NVENC, DecodeVAAPI on a render
+// node for VAAPI, QSV and AMF - and every decoded frame is downloaded to system memory before
+// any filter or the encoder reads it (docs/design/hardware.md#decode).
+const (
+	DecodeSoftware = "software"
+	DecodeCUDA     = "cuda"
+	DecodeVAAPI    = "vaapi"
+)
 
 // StreamAction is what an encode does to every carried stream of one type.
 type StreamAction string
@@ -110,8 +117,12 @@ type VideoPlan struct {
 	// none for: VAAPI and QSV are told which node to use (hwdevice.Assign), and NVENC reaches
 	// its device through the CUDA driver.
 	Device string
-	// Decode is how the source is decoded: DecodeSoftware.
+	// Decode is how the source is decoded: DecodeSoftware, or - under hw_decode: hardware,
+	// for a hardware encoder - DecodeCUDA or DecodeVAAPI (decodeFor).
 	Decode string
+	// DecodeDevice is the render node a VAAPI decode opens, and "" for every other decode:
+	// the encoder's own node for VAAPI and QSV, the node assigned to VAAPI for AMF.
+	DecodeDevice string
 	// PixelFormat is the pixel format the video is encoded to: the one the settings force,
 	// or the one derived from the source's so that its chroma subsampling is kept and its
 	// bit depth is floored at 10.
@@ -359,14 +370,16 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 		return nil, err
 	}
 
+	decode, decodeNode := decodeFor(spec, in.prof, in.devices)
 	p.Video = VideoPlan{
-		Codec:       spec.TargetCodec,
-		Encoder:     spec,
-		Device:      deviceFor(spec, in.devices),
-		Decode:      DecodeSoftware,
-		PixelFormat: pixFmt,
-		InputFormat: inputFmt,
-		Quality:     quality,
+		Codec:        spec.TargetCodec,
+		Encoder:      spec,
+		Device:       deviceFor(spec, in.devices),
+		Decode:       decode,
+		DecodeDevice: decodeNode,
+		PixelFormat:  pixFmt,
+		InputFormat:  inputFmt,
+		Quality:      quality,
 	}
 	p.Picture = PictureOps{Deinterlace: film, Downscale: shrink}
 	// The fidelity declaration names every HDR10 block the source carries, read from its side
@@ -415,6 +428,37 @@ func deviceFor(spec encoder.Spec, devices hwdevice.Assignment) string {
 	return node
 }
 
+// decodeFor is how a job decodes its source, and the render node a VAAPI decode opens: in
+// software unless the root's hw_decode is hardware and the encoder is a hardware one, and then
+// on that encoder's own vendor hardware. NVENC decodes through CUDA (NVIDIA's documented
+// full-hardware form is `-hwaccel cuda` before the input:
+// https://docs.nvidia.com/video-technologies/video-codec-sdk/13.0/ffmpeg-with-nvidia-gpu/index.html ,
+// read 2026-09-30). VAAPI and QSV decode through VAAPI on the node their encoder opens: QSV's
+// device is derived from that very VAAPI device, and the native decoders reach Intel's decode
+// through VAAPI (the pinned build's QSV decode is the separate *_qsv decoders, which a
+// generic -hwaccel does not select). AMF decodes through VAAPI on the node assigned to VAAPI:
+// on Linux AMD's decode is Mesa's radeonsi VA driver (ASSUMED for a host install carrying
+// AMF, until the AMF hardware report shows it; brief T43). A software encoder decodes in
+// software: there is no hardware in the job to decode on.
+func decodeFor(spec encoder.Spec, prof config.Profile, devices hwdevice.Assignment) (string, string) {
+	if prof.HWDecodeMode() != config.HWDecodeHardware {
+		return DecodeSoftware, ""
+	}
+	switch spec.API {
+	case encoder.APINVENC:
+		return DecodeCUDA, ""
+	case encoder.APIVAAPI, encoder.APIQSV:
+		return DecodeVAAPI, deviceFor(spec, devices)
+	case encoder.APIAMF:
+		node := devices.VAAPI
+		if node == "" {
+			node = defaultRenderNode
+		}
+		return DecodeVAAPI, node
+	}
+	return DecodeSoftware, ""
+}
+
 // deviceArgs are the global options, before -i, that open an encoder's render node.
 //
 // Every VAAPI device is opened with connection_type=drm. Without it, a node that fails to
@@ -438,6 +482,9 @@ func deviceFor(spec encoder.Spec, devices hwdevice.Assignment) string {
 // (libavcodec/qsv.c), which is the X11 fallthrough again. Sources at
 // https://github.com/FFmpeg/FFmpeg/tree/5d4d3bdc61 , read 2026-09-30.
 func deviceArgs(v VideoPlan) []string {
+	if v.Decode != DecodeSoftware {
+		return hwDecodeArgs(v)
+	}
 	if v.Device == "" {
 		return nil
 	}
@@ -447,6 +494,45 @@ func deviceArgs(v VideoPlan) []string {
 		return []string{"-vaapi_device", drm}
 	case encoder.APIQSV:
 		return []string{"-init_hw_device", "vaapi=hfva:" + drm, "-init_hw_device", "qsv=hfqsv@hfva"}
+	}
+	return nil
+}
+
+// hwDecodeArgs are the global options of a hardware decode: the encoder's device where it
+// opens one, the decode device, and -hwaccel naming it. No -hwaccel_output_format is given, so
+// ffmpeg downloads every decoded frame to system memory in the frames' own software layout
+// (p010 for a 10-bit 4:2:0 source) with its properties - colour description and side data,
+// the HDR10 blocks among them - copied onto it (fftools/ffmpeg_demux.c:1687-1688 leaves the
+// output format unset; ffmpeg_dec.c:389-393 downloads a hardware frame and 370 copies its
+// props). The filter chain and the encoder therefore see exactly the frames a software decode
+// hands them, in depth, chroma and metadata: the colour stamp, a deinterlace, a scale and a
+// VAAPI upload run on them unchanged, and no gate ever reads a hardware frame.
+//
+// A decoder with no hardware configuration for the device (an FFV1 source, say), or a profile
+// the device cannot decode, is decoded in software instead: get_format falls through to the
+// first software format when no hardware format of the device's type is offered
+// (ffmpeg_dec.c:1329-1376). A device that cannot be opened fails the decoder, and so the job
+// (ffmpeg_dec.c:1451-1535, the refusal at 1531), which hw_fallback then decides like any
+// failed hardware encode.
+//
+// Every VAAPI device is named (hfva) and opened with connection_type=drm, for the reason
+// deviceArgs gives; a VAAPI encode's upload is pointed at it with -filter_hw_device, since a
+// decode device is otherwise indistinguishable from the one hwupload should use. Sources at
+// https://github.com/FFmpeg/FFmpeg/tree/5d4d3bdc61 , read 2026-09-30.
+func hwDecodeArgs(v VideoPlan) []string {
+	vaapi := []string{"-hwaccel", "vaapi", "-hwaccel_device", "hfva"}
+	switch v.Decode {
+	case DecodeCUDA:
+		return []string{"-hwaccel", "cuda"}
+	case DecodeVAAPI:
+		va := []string{"-init_hw_device", "vaapi=hfva:" + v.DecodeDevice + ",connection_type=drm"}
+		switch v.Encoder.API {
+		case encoder.APIVAAPI:
+			return append(append(va, "-filter_hw_device", "hfva"), vaapi...)
+		case encoder.APIQSV:
+			return append(append(va, "-init_hw_device", "qsv=hfqsv@hfva"), vaapi...)
+		}
+		return append(va, vaapi...)
 	}
 	return nil
 }
@@ -500,6 +586,7 @@ func (p *EncodePlan) buildable() error {
 	case p.Metadata.DolbyVision:
 		return &UnbuildablePlanError{What: "a Dolby Vision RPU carried into the output"}
 	}
+	wantDecode, wantNode := decodeFor(p.Video.Encoder, p.Profile, p.devices)
 	if p.Video.Copy {
 		// A copy re-encodes nothing, so no picture operation can run on it: a plan claiming
 		// one would be a replacement recorded as transformed that is the source's picture.
@@ -509,8 +596,9 @@ func (p *EncodePlan) buildable() error {
 		return nil
 	}
 	switch {
-	case p.Video.Decode != DecodeSoftware:
-		return &UnbuildablePlanError{What: fmt.Sprintf("the decode path %q", p.Video.Decode)}
+	case p.Video.Decode != wantDecode || p.Video.DecodeDevice != wantNode:
+		return &UnbuildablePlanError{What: fmt.Sprintf("the decode path %q on %q for encoder %q",
+			p.Video.Decode, p.Video.DecodeDevice, p.Video.Encoder.Key)}
 	case p.Video.Device != deviceFor(p.Video.Encoder, p.devices):
 		return &UnbuildablePlanError{What: fmt.Sprintf("the device %q for encoder %q", p.Video.Device, p.Video.Encoder.Key)}
 	}
