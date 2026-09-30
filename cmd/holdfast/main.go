@@ -611,16 +611,6 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope c
 			return nil, nil, 1
 		}
 	}
-	// And every encoder a resolution RULE names (S0165): a rule's encoder is reached by every
-	// file its band admits, so it is checked here, before the job store opens, exactly as the
-	// two walks above are. The account names the root and the rule index, because the root's
-	// own encoder and every encode profile's may well be available.
-	for _, e := range cfg.RuleEncoders() {
-		if err := requireEncoder(context.Background(), cfg, ffmpeg, ffprobe, e.Key, devices); err != nil {
-			fmt.Fprintf(stderr, "holdfast: library root %s: rules[%d]: %v\n", e.Root, e.Rule, err)
-			return nil, nil, 1
-		}
-	}
 
 	// VMAF model preflight (GATE-4), in the same band and for the same reason as the
 	// encoder check above: a capability that will not work must stop the run HERE, not
