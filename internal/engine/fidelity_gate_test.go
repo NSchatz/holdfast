@@ -43,11 +43,17 @@ const (
 // from the stream rather than left unset.
 func mkFidelitySource(t *testing.T, ffmpeg, path string) {
 	t.Helper()
+	mkFidelitySourceAs(t, ffmpeg, path, "yuv422p10le", "high422")
+}
+
+// mkFidelitySourceAs is mkFidelitySource at another 10-bit pixel format and H.264 profile.
+func mkFidelitySourceAs(t *testing.T, ffmpeg, path, pixFmt, profile string) {
+	t.Helper()
 	raw := filepath.Join(t.TempDir(), "fidelity.h264")
 	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
 		"-i", "testsrc2=duration=2:size=320x240:rate=10,noise=alls=12:allf=t",
 		"-c:v", "libx264", "-preset", "ultrafast", "-qp", "4",
-		"-pix_fmt", "yuv422p10le", "-profile:v", "high422",
+		"-pix_fmt", pixFmt, "-profile:v", profile,
 		"-x264-params", "mastering-display="+fidelityMasterDisplay+":cll="+fidelityMaxCLL,
 		"-bsf:v", "h264_metadata=colour_primaries=9:transfer_characteristics=16:matrix_coefficients=9:video_full_range_flag=0",
 		"--", raw)
@@ -81,10 +87,17 @@ func lossyEncoder(ffmpeg string, change ...string) Encoder {
 // run emitted.
 func fidelityRun(t *testing.T, mkEnc func(config.Config, *probe.Prober) Encoder, mutate func(*config.Config)) (src, before string, st *testStore, events []Event) {
 	t.Helper()
+	return fidelityRunFrom(t, mkFidelitySource, mkEnc, mutate)
+}
+
+// fidelityRunFrom is fidelityRun over the source mkSrc writes.
+func fidelityRunFrom(t *testing.T, mkSrc func(t *testing.T, ffmpeg, path string), mkEnc func(config.Config, *probe.Prober) Encoder,
+	mutate func(*config.Config)) (src, before string, st *testStore, events []Event) {
+	t.Helper()
 	ffmpeg, ffprobe := tools(t)
 	root := t.TempDir()
 	src = filepath.Join(root, "movie.mkv")
-	mkFidelitySource(t, ffmpeg, src)
+	mkSrc(t, ffmpeg, src)
 	before = md5f(t, src)
 
 	cfg := baseCfg(root)
@@ -264,11 +277,13 @@ func TestFidelityGate_RedsAFakeHardwareEncodeThatWrites8Bit(t *testing.T) {
 		t.Fatalf("look up ffmpeg: %v", err)
 	}
 	// The stand-in takes the input after -i and the output as the last argument, exactly
-	// where FFmpegEncoder puts them, and encodes 8-bit 4:2:2 whatever it was asked.
+	// where FFmpegEncoder puts them, and encodes 8-bit 4:2:0 whatever it was asked. The source
+	// is 4:2:0 10-bit, a plan every hardware encoder here carries (p010le), so the job reaches
+	// the gate; a 4:2:2 plan VAAPI cannot carry is skipped before any encode (below).
 	script := "#!/bin/sh\n" +
 		"in=''; prev=''; for a in \"$@\"; do if [ \"$prev\" = '-i' ]; then in=\"$a\"; fi; prev=\"$a\"; out=\"$a\"; done\n" +
 		"exec '" + realFFmpeg + "' -hide_banner -nostdin -v error -y -i \"$in\" -c:v libx265 -preset ultrafast -crf 30 " +
-		"-pix_fmt yuv422p -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv " +
+		"-pix_fmt yuv420p -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv " +
 		"-x265-params log-level=error -f matroska -- \"$out\"\n"
 	standIn := filepath.Join(t.TempDir(), "ffmpeg-hw-stand-in")
 	if err := os.WriteFile(standIn, []byte(script), 0o755); err != nil {
@@ -280,8 +295,27 @@ func TestFidelityGate_RedsAFakeHardwareEncodeThatWrites8Bit(t *testing.T) {
 			standInEncoder := func(cfg config.Config, prober *probe.Prober) Encoder {
 				return FFmpegEncoder{FFmpeg: standIn, Cfg: cfg, Probe: prober}
 			}
-			src, before, st, events := fidelityRun(t, standInEncoder, func(c *config.Config) { c.Encoder = key })
+			src420 := func(t *testing.T, ffmpeg, path string) {
+				mkFidelitySourceAs(t, ffmpeg, path, "yuv420p10le", "high10")
+			}
+			src, before, st, events := fidelityRunFrom(t, src420, standInEncoder, func(c *config.Config) { c.Encoder = key })
 			requireFidelityReject(t, hdr.FieldBitDepth, src, before, st, events)
 		})
 	}
+
+	// VAAPI uploads only nv12 and p010le, so a 4:2:2 plan is one it cannot carry: the job is
+	// skipped before anything is encoded, and the stand-in never runs.
+	t.Run("vaapi/4:2:2 is skipped before any encode", func(t *testing.T) {
+		standInEncoder := func(cfg config.Config, prober *probe.Prober) Encoder {
+			return FFmpegEncoder{FFmpeg: standIn, Cfg: cfg, Probe: prober}
+		}
+		src, before, st, _ := fidelityRun(t, standInEncoder, func(c *config.Config) { c.Encoder = "vaapi" })
+		row := rowFor(t, st, src)
+		if row.Status != store.Skipped || row.Outcome.Reason != SkipExoticPixelFormat {
+			t.Fatalf("row %q %q, want skipped %q", row.Status, row.Outcome.Reason, SkipExoticPixelFormat)
+		}
+		if md5f(t, src) != before {
+			t.Fatal("the source changed")
+		}
+	})
 }
