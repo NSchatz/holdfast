@@ -35,7 +35,7 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.P
 	if plan.RemuxOnly() {
 		video = VideoPlan{Copy: true, Codec: plan.SourceVideoCodec()}
 	}
-	return e.verifyAgainst(ctx, in, tmp, &EncodePlan{
+	return e.verifyAgainst(ctx, &EncodePlan{
 		Source: in, Output: tmp,
 		Profile: prof, Streams: plan, Video: video,
 		Audio: CopyStreams, Subtitles: CopyStreams,

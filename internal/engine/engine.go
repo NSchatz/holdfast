@@ -2397,7 +2397,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	}
 
 	e.advance(ctx, f, key, store.Verifying)
-	proof, gate, class, reason := e.verifyAgainst(ctx, f, work, job)
+	proof, gate, class, reason := e.verifyAgainst(ctx, job)
 	leaveGateFlight()
 	// Record whatever VMAF measured, on the reject path too: the numbers that rejected an
 	// encode are exactly the ones an operator wants to see.
