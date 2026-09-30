@@ -266,7 +266,11 @@ ARG DATE=unknown
 # render time, never rejected for being unclean, so the build path has to carry the same
 # values the served page does.
 ARG SOURCE_URL=https://github.com/NSchatz/holdfast
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
+# -tags holdfast_image marks this binary as the image's (internal/version.Packaging): the
+# image does not carry AMD's AMF runtime, whose EULA grants no redistribution, so this
+# binary refuses `encoder: amf` at start with that reason instead of probing it
+# (docs/design/hardware.md#amf). A host build carries no tag and keeps amf.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -tags holdfast_image \
     -ldflags="-s -w \
       -X github.com/NSchatz/holdfast/internal/version.Version=${VERSION} \
       -X github.com/NSchatz/holdfast/internal/version.Commit=${COMMIT} \

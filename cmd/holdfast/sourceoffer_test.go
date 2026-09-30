@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
-	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/fsclass"
+	"github.com/NSchatz/holdfast/internal/hwdevice"
 	"github.com/NSchatz/holdfast/internal/server"
 	"github.com/NSchatz/holdfast/internal/sourceoffer"
 	"github.com/NSchatz/holdfast/internal/version"
@@ -93,7 +93,8 @@ func requireWorkingEncoder(t *testing.T) {
 	if _, err := exec.LookPath(ffmpeg); err != nil {
 		t.Skip("ffmpeg not on PATH")
 	}
-	if _, err := encoder.RequireAvailable(context.Background(), ffmpeg, ffprobe, "cpu"); err != nil {
+	if err := requireEncoder(context.Background(), &config.Config{Encoder: "cpu", CRF: 28, Preset: "ultrafast", PixelFormat: "auto"},
+		ffmpeg, ffprobe, "cpu", hwdevice.Assignment{}); err != nil {
 		t.Skipf("this host's ffmpeg cannot encode with the default encoder, so `serve` cannot start: %v", err)
 	}
 }

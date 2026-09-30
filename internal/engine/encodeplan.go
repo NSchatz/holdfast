@@ -10,6 +10,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/downscale"
 	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/hdr"
+	"github.com/NSchatz/holdfast/internal/hwdevice"
 	"github.com/NSchatz/holdfast/internal/probe"
 )
 
@@ -90,6 +91,9 @@ type EncodePlan struct {
 	container outputContainer
 	// coverArt is how the attached pictures the map carries reach the output.
 	coverArt coverArtCarriage
+	// devices are the render-node assignment the plan's device was chosen from, so the
+	// command-line builder can refuse a plan whose device is not the one assigned.
+	devices hwdevice.Assignment
 }
 
 // VideoPlan is what one encode does to the video.
@@ -102,8 +106,9 @@ type VideoPlan struct {
 	Codec string
 	// Encoder is the registry encoder that produces the video.
 	Encoder encoder.Spec
-	// Device is the device node the encoder opens, and "" for every encoder this build opens
-	// none for: only VAAPI is told which device to use.
+	// Device is the render node the encoder opens, and "" for every encoder this build opens
+	// none for: VAAPI and QSV are told which node to use (hwdevice.Assign), and NVENC reaches
+	// its device through the CUDA driver.
 	Device string
 	// Decode is how the source is decoded: DecodeSoftware.
 	Decode string
@@ -239,6 +244,9 @@ type planInputs struct {
 	// streams is the intended stream map; nil where a direct caller of the encoder handed
 	// none.
 	streams *StreamPlan
+	// devices are the render nodes this host assigned to the encoders that open one; the zero
+	// value assigns the first render node, /dev/dri/renderD128, to both.
+	devices hwdevice.Assignment
 	// snapshot returns the source's probe snapshot. It is called at the one point the
 	// derivation first needs the source's properties, so a plan refused before then never
 	// probes, and it is how the engine hands in the snapshot its guards already read.
@@ -275,6 +283,7 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 		Streams: in.streams,
 		Audio:   CopyStreams, Subtitles: CopyStreams,
 		container: container,
+		devices:   in.devices,
 		coverArt:  coverArtCarriage{attached: attached},
 	}
 
@@ -353,7 +362,7 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 	p.Video = VideoPlan{
 		Codec:       spec.TargetCodec,
 		Encoder:     spec,
-		Device:      deviceFor(spec),
+		Device:      deviceFor(spec, in.devices),
 		Decode:      DecodeSoftware,
 		PixelFormat: pixFmt,
 		InputFormat: inputFmt,
@@ -381,16 +390,64 @@ func carriedList(spec encoder.Spec) string {
 	return spec.PixelFormats
 }
 
-// vaapiDevice is the render node a VAAPI encode opens.
-const vaapiDevice = "/dev/dri/renderD128"
+// defaultRenderNode is the render node an encoder opens where the host assigned none: the
+// first one, which is the only one on most hosts. A host whose detection found no usable node
+// never runs VAAPI or QSV at all (their probe fails), so this is the node of an encoder handed
+// a plan directly - a test, or a caller that did no detection.
+const defaultRenderNode = "/dev/dri/renderD128"
 
-// deviceFor is the device node an encoder opens: the render node for VAAPI, which has to be
-// told, and none for every other encoder.
-func deviceFor(spec encoder.Spec) string {
-	if spec.Key == "vaapi" {
-		return vaapiDevice
+// deviceFor is the render node an encoder opens: the node the host assigned to VAAPI or to
+// QSV, which have to be told one, and none for every other encoder.
+func deviceFor(spec encoder.Spec, devices hwdevice.Assignment) string {
+	node := ""
+	switch spec.Key {
+	case "vaapi":
+		node = devices.VAAPI
+	case "qsv":
+		node = devices.QSV
+	default:
+		return ""
 	}
-	return ""
+	if node == "" {
+		node = defaultRenderNode
+	}
+	return node
+}
+
+// deviceArgs are the global options, before -i, that open an encoder's render node.
+//
+// Every VAAPI device is opened with connection_type=drm. Without it, a node that fails to
+// open (missing, or not passed to the container) falls through to an X11 display
+// (libavutil/hwcontext_vaapi.c:1753-1880 at 5d4d3bdc61: the DRM attempt breaks out and
+// XOpenDisplay runs), and the pinned ffmpeg loads libX11 lazily through a stub that ABORTS
+// the process when the library is missing, as it is in the image: exit 134 in place of an
+// error naming the node (verify-hw-encode.md claim 1, measured 2026-09-29; with
+// connection_type=drm the same run is a clean "No VA display found").
+//
+// VAAPI: -vaapi_device is `-init_hw_device vaapi:<arg>` (fftools/ffmpeg_opt.c:700-712), and
+// the device string takes options after a comma (fftools/ffmpeg_hw.c:90-100); hwupload uses
+// the one device defined.
+//
+// QSV: the encoder is handed software frames (nv12 or p010le, which hevc_qsv takes with a
+// device context: HW_CONFIG_ENCODER_DEVICE(NV12, QSV) and (P010, QSV),
+// libavcodec/qsvenc.c:2762-2765), and fftools hands it a QSV device of the matching type
+// (hw_device_setup_for_encode, fftools/ffmpeg_enc.c:133-175), which is derived from a VAAPI
+// device opened here on the assigned node, with connection_type=drm for the same reason.
+// Without a device the encoder opens its own VAAPI display with no node named
+// (libavcodec/qsv.c), which is the X11 fallthrough again. Sources at
+// https://github.com/FFmpeg/FFmpeg/tree/5d4d3bdc61 , read 2026-09-30.
+func deviceArgs(v VideoPlan) []string {
+	if v.Device == "" {
+		return nil
+	}
+	drm := v.Device + ",connection_type=drm"
+	switch v.Encoder.Key {
+	case "vaapi":
+		return []string{"-vaapi_device", drm}
+	case "qsv":
+		return []string{"-init_hw_device", "vaapi=hfva:" + drm, "-init_hw_device", "qsv=hfqsv@hfva"}
+	}
+	return nil
 }
 
 // pinnedPictures are the output video-relative indexes of the attached pictures a job's map
@@ -453,7 +510,7 @@ func (p *EncodePlan) buildable() error {
 	switch {
 	case p.Video.Decode != DecodeSoftware:
 		return &UnbuildablePlanError{What: fmt.Sprintf("the decode path %q", p.Video.Decode)}
-	case p.Video.Device != deviceFor(p.Video.Encoder):
+	case p.Video.Device != deviceFor(p.Video.Encoder, p.devices):
 		return &UnbuildablePlanError{What: fmt.Sprintf("the device %q for encoder %q", p.Video.Device, p.Video.Encoder.Key)}
 	}
 	// The input format is the one the encoder's own list gives for the plan's pixel format,
@@ -519,12 +576,9 @@ func (p *EncodePlan) args(x265 encoder.X265Parallelism) (pre, body []string, err
 	}
 	body = append(body, withDeinterlace(withDownscale(video, p.Picture.Downscale), p.Picture.Deinterlace)...)
 
-	if p.Video.Device != "" {
-		// -vaapi_device is a GLOBAL option that must precede -i so the hwupload filter
-		// (added by videoArgs) has a device to target. No other encoder is told a device.
-		pre = []string{"-vaapi_device", p.Video.Device}
-	}
-	return pre, body, nil
+	// The device options are GLOBAL and must precede -i, so the hwupload filter (added by
+	// videoArgs for VAAPI) and the QSV encoder have a device to target.
+	return deviceArgs(p.Video), body, nil
 }
 
 // observeEncodePlan announces the encode plan one stage is about to read. Production leaves
