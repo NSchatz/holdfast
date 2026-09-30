@@ -21,6 +21,11 @@ $ echo "$GOFLAGS $GOMAXPROCS"
 -p=2 2
 ```
 
+- Re-run to finish (the owner's PR #119 says "goal 3 re-runs to finish"), 2026-09-30, from
+  `/workspace/holdfast` in the maker container, on `origin/main` `60e39d8`: `git pull --rebase`
+  said `Already up to date.`; the goal-2 COMPLETE line is still at line 244 of the goal-2 ledger
+  at `9e27c1a`, an ancestor of `origin/main`; `echo "$GOFLAGS $GOMAXPROCS"` printed `-p=4 12`.
+
 ## What the approval assigns to this goal
 
 P1 (`.claude/goals/2026-09-holdfast-research/proposal-triage.md` at `9e27c1a`, "Per goal"):
@@ -86,14 +91,14 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 4.1 | `docs/design/encode-plan.md` with the plan's anchor; `CLAUDE.md` links it by rule | DONE (PR #115, `eef7216`): anchor `encode-plan`; `CLAUDE.md` Design rationale links `docs/design/encode-plan.md#encode-plan` by its rule (164 lines) |
+| 4.1 | `docs/design/encode-plan.md` with the plan's anchor; `CLAUDE.md` links it by rule | DONE (PR #115, `eef7216`; precision pass PR #118, `c401660`): anchor `encode-plan`; `CLAUDE.md` Design rationale links `docs/design/encode-plan.md#encode-plan` by its rule (164 lines). #118 (docs and comments only) corrects the over-statements review round 4 found; its gate exit 0 in 1512 s on `6f4d182` (`internal/engine` 1401.2 s), CI green |
 
 ## Phase 5 - Report
 
 | # | Item | State |
 |---|---|---|
-| 5.1 | Gate integrity counted from the goal-start SHA | DONE (`518fe8e`): 0 lines deleted in `*_test.go` (`git diff --numstat 9e27c1a origin/main`: +1663 -0); `func Test` 1322 -> 1330, no package fell (`internal/engine` 460 -> 467, `internal/hdr` 9 -> 10); `docs/design/swap.md` 58 -> 58 and `docs/design/quality-gate.md` 76 -> 76, 0 lines removed |
-| 5.2 | Adversarial review of the report | DONE: rounds 1-3 ran, each a fresh subagent on 2026-09-30, and each found lines A-F true on the repositories. Round 1 found 2 statements false and 4 overstated or stale; round 2, 2 sentences of line C false; round 3, 5 statements false (the refusals' description, this row's count of rounds, row 3.3's and the design record's "every gate's verdict" and "every expectation"). Each was corrected by rewording or, where the proof fell short of the claim, by code: PR #116 (the gates take the files they measure from the plan) and PR #117 (the perceptual floors and the copy check moved by the plan). A fresh subagent checks the report and the repositories after this commit, and its verdict is printed as the report's line G |
+| 5.1 | Gate integrity counted from the goal-start SHA | DONE (`518fe8e`, recounted unchanged at `c401660`): 0 lines deleted in `*_test.go` (`git diff --numstat 9e27c1a origin/main`: +1663 -0); `func Test` 1322 -> 1330, no package fell (`internal/engine` 460 -> 467, `internal/hdr` 9 -> 10); `docs/design/swap.md` 58 -> 58 and `docs/design/quality-gate.md` 76 -> 76, 0 lines removed |
+| 5.2 | Adversarial review of the report | DONE: rounds 1-3 ran, each a fresh subagent on 2026-09-30, and each found lines A-F true on the repositories. Round 1 found 2 statements false and 4 overstated or stale; round 2, 2 sentences of line C false; round 3, 5 statements false (the refusals' description, this row's count of rounds, row 3.3's and the design record's "every gate's verdict" and "every expectation"). Each was corrected by rewording or, where the proof fell short of the claim, by code: PR #116 (the gates take the files they measure from the plan) and PR #117 (the perceptual floors and the copy check moved by the plan). Round 4 found `docs/design/encode-plan.md` calling the ffmpeg binary "read by no gate" and more of the same class; PR #118 corrected them (it had been left open by the earlier session and was gated and merged in the re-run). A fresh subagent checks the report and the repositories after this commit, and its verdict is printed as the report's line G |
 
 ## Decisions taken
 
@@ -187,6 +192,22 @@ summed per directory):
 - 2026-09-30: PR #113 was merged while `main` was one ledger-only commit (`95301f4`) ahead of
   its last merged head (`38966f7`); under §0.3 its gate and CI stood. Later PRs were merged
   with their branch containing `origin/main`.
+- 2026-09-30 (re-run): the earlier session left PR #118 open (CI green, no local gate) and the
+  remote branch `holdfast-g3/golden-argv` re-created at `62f1824` after #113 merged (an ancestor
+  of #113's merged head `38966f7`, so nothing of it was unmerged); neither was in this ledger.
+  #118 was brought up to date by merge (`6f4d182`), gated, and merged (`c401660`); the stale
+  branch was deleted by full refname, as `--delete-branch` would have done.
+- 2026-09-30 (re-run): the first gate of #118 in the maker container failed only `TestWatch_*`
+  in `internal/engine`: `TMPDIR` there is `/scratch`, a RAM tmpfs, `t.TempDir()` roots sat on it,
+  and `fsclass` refuses tmpfs as local storage, so the watcher fell back to the interval scan as
+  designed. The gate now runs with `TMPDIR=/cache/tmp/holdfast-g3/tmp` (ext4, as `/tmp` was in
+  the standalone container and is on CI's runner) and passed on the same head. Reasoning: §0.11
+  says to keep large temporary files out of `TMPDIR`; no code or test changed. Listed for the
+  owner and the next goal below.
+- 2026-09-30 (re-run): the owner's PR #119 (`60e39d8`, `.claude/` only, authored and merged by
+  the owner's account from another session) also carries a `Co-authored-by` trailer, so
+  `git log 9e27c1a..origin/main --format=%B` now counts 2 (#114 and #119); this goal's own
+  commits carry none. T7 forbids the rewrite that would remove them.
 
 ## NEEDS-OWNER (this goal)
 
@@ -210,13 +231,19 @@ Not NEEDS-OWNER kinds (§0.6); findings and decisions only the owner or a later 
 - The owner's PR #114 (`4c9143f`) carries a `Co-authored-by` trailer inside this goal's range
   (T38 keeps AI trailers out of commits). No goal may rewrite history (T7); this goal's own
   commits carry none.
+- Environment (maker container): `make check` fails `TestWatch_*` when `TMPDIR` is the `/scratch`
+  tmpfs; later goals run the gate with `TMPDIR` on `/cache` (this goal used
+  `/cache/tmp/holdfast-g3/tmp`). The brief's gate command in §0.3 could say so.
+- The owner's PR #119 (`60e39d8`) carries a second `Co-authored-by` trailer inside this goal's
+  range, like #114.
 - Carried from goal 2: Dependabot's #108, #109 and #110 are still open for the owner.
 
 ## Resume here
 
 Goal 3 is complete. Merged: #113 (`b94cd2a`, the golden argv, before any refactor commit),
 #115 (`eef7216`, the encode plan, `docs/design/encode-plan.md`, the `CLAUDE.md` link) and #116
-(`ba35133`, the gates take the files they measure from the plan) and #117 (`518fe8e`, every gate's
-verdict proven to move with the plan). No branch or worktree of this goal remains. Goal 4's precondition is this ledger's COMPLETE line.
+(`ba35133`, the gates take the files they measure from the plan), #117 (`518fe8e`, every gate's
+verdict proven to move with the plan) and #118 (`c401660`, the design record's precision pass,
+merged in the re-run). No branch, worktree or open PR of this goal remains. Goal 4's precondition is this ledger's COMPLETE line.
 
 COMPLETE (goal 3): 2026-09-30
