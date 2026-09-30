@@ -319,3 +319,35 @@ func TestFidelityGate_RedsAFakeHardwareEncodeThatWrites8Bit(t *testing.T) {
 		}
 	})
 }
+
+// TestFidelityGate_EveryEncoderCarriesTheDeclaredPrimariesAndTransfer: an HDR10 H.264 source
+// whose bitstream signals only its matrix (mkH264HDR10: the pinned libx264 writes no primaries
+// or transfer) is declared bt2020/PQ by the plan. libx265 writes those from its own parameters;
+// libsvtav1 writes what its frames say, and on the pinned ffmpeg -color_primaries/-color_trc do
+// not change the frames - so before the plan stamped them with setparams, this encode lost both
+// tags and the fidelity gate rejected it. Now it carries them and replaces the source.
+func TestFidelityGate_EveryEncoderCarriesTheDeclaredPrimariesAndTransfer(t *testing.T) {
+	for _, key := range []string{"cpu", "svtav1"} {
+		t.Run(key, func(t *testing.T) {
+			hdr10 := func(t *testing.T, ffmpeg, path string) { mkH264HDR10(t, ffmpeg, path, "8M") }
+			src, _, st, events := fidelityRunFrom(t, hdr10, nil, func(c *config.Config) {
+				c.Encoder = key
+				c.PixelFormat = "yuv420p10le"
+			})
+			for _, ev := range events {
+				if ev.Gate == GateFidelity {
+					t.Fatalf("the fidelity gate refused the %s encode: %+v", key, ev)
+				}
+			}
+			if row := rowFor(t, st, src); row.Status != store.Done {
+				t.Fatalf("row status %q, want %q (reason %q)", row.Status, store.Done, row.Outcome.Reason)
+			}
+			_, ffprobe := tools(t)
+			got := probe.New("", ffprobe).OutputFacts(context.Background(), src)
+			if got.Frame.Primaries != "bt2020" || got.Frame.Transfer != "smpte2084" {
+				t.Fatalf("the replacement's bitstream says primaries %q, transfer %q; want bt2020, smpte2084",
+					got.Frame.Primaries, got.Frame.Transfer)
+			}
+		})
+	}
+}

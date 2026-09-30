@@ -133,6 +133,46 @@ func (c Color) FFmpegFlags() []string {
 	return flags
 }
 
+// SetParams is the setparams filter that stamps c's primaries and transfer onto every frame
+// before the encoder sees it, and "" where c carries neither.
+//
+// The pinned ffmpeg (N-125875-g5d4d3bdc61) gives an encoder the colour primaries and transfer
+// of the frames it is handed, not the -color_primaries and -color_trc options: measured
+// 2026-09-30, those two options change neither the bitstream nor the container where the
+// decoded frames carry a tag, and leave both unset where they do not (-colorspace and
+// -color_range do take effect, through the filter graph's own negotiation). libx265 writes
+// all three tags from X265Params regardless; every other encoder writes what its frames say.
+// So a declared tag the source's frames do not carry - the HDR10 defaults for a source that
+// under-signals them - reaches such an encoder only when the frames are relabelled, which is
+// what setparams does (it relabels and converts nothing; see
+// https://ffmpeg.org/ffmpeg-filters.html#setparams , read 2026-09-30).
+func (c Color) SetParams() string {
+	var kv []string
+	if c.Primaries != "" {
+		kv = append(kv, "color_primaries="+c.Primaries)
+	}
+	if c.Transfer != "" {
+		kv = append(kv, "color_trc="+setparamsTransfer(c.Transfer))
+	}
+	if len(kv) == 0 {
+		return ""
+	}
+	return "setparams=" + strings.Join(kv, ":")
+}
+
+// setparamsTransfer spells a transfer the way the setparams filter names it: ffmpeg's older
+// names for the two gamma curves (gamma22, gamma28) are bt470m and bt470bg there, and every
+// other name is the same.
+func setparamsTransfer(trc string) string {
+	switch trc {
+	case "gamma22":
+		return "bt470m"
+	case "gamma28":
+		return "bt470bg"
+	}
+	return trc
+}
+
 // X265Params is the ":k=v..." suffix libx265 writes c with (libx265-only): the three colour
 // tags c carries, then - for HDR10 - the mastering display and content light level it has
 // and the HDR10 signalling options.
