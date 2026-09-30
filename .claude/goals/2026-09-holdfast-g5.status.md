@@ -105,8 +105,8 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 5.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `8e29c42`): `func Test` 1388 -> 1443, no package fell (`cmd/holdfast` 217 -> 225, `internal/config` 107 -> 123, `internal/encoder` 20 -> 29, `internal/engine` 486 -> 499, `internal/hwdevice` 0 -> 8, `internal/version` 0 -> 1, every other package unchanged); `docs/design/swap.md` 62 -> 62 and `docs/design/quality-gate.md` 76 -> 76 (`git diff --numstat` empty for both); 70 lines deleted in `*_test.go` (`git diff --numstat bf36b9c 8e29c42`: +2663 -70), each with its reason below |
-| 5.2 | Adversarial review of the report | DOING: round 1 (a fresh subagent, 2026-09-30) found lines A-G true ("VERDICT: none false", E PARTLY) and asked for corrections: NEEDS-OWNER row 2's command (a tmpfs `/tmp` and a non-root image would refuse the start; fixed: `$HOME/hf-probe`, `-u`); `holdfast plan` not probing under `auto`, a named alias recorded under its key, the I5 over-claim, the mutable-skip test changing the configuration (all fixed by PR #130); row 2.1's AC-15 wording (fixed); main's CI on `8e29c42` cancelled by the next push and re-run on `4337d13`; 7 added lines carry em dashes, each carried over from an edited or moved pre-existing line (T34 leaves existing dashes) |
+| 5.1 | Gate integrity counted from the goal-start SHA | DONE (recounted at `ef6b611`): `func Test` 1388 -> 1445, no package fell (`cmd/holdfast` 217 -> 226, `internal/config` 107 -> 123, `internal/encoder` 20 -> 29, `internal/engine` 486 -> 500, `internal/hwdevice` 0 -> 8, `internal/version` 0 -> 1, every other package unchanged); `docs/design/swap.md` 62 -> 62 and `docs/design/quality-gate.md` 76 -> 76 (`git diff --numstat bf36b9c ef6b611` empty for both); 70 lines deleted in `*_test.go` (`git diff --numstat bf36b9c ef6b611`: +2776 -70), each with its reason below |
+| 5.2 | Adversarial review of the report | DONE: round 1 (a fresh subagent, 2026-09-30) found lines A-G true ("VERDICT: none false", E PARTLY) and asked for corrections: NEEDS-OWNER row 2's command (a tmpfs `/tmp` and a non-root image would refuse the start; fixed in `7f31678`: `$HOME/hf-probe`, `-u`); `holdfast plan` not probing under `auto`, a named alias recorded under its key, the I5 over-claim, and the mutable-skip test changing the configuration (all fixed by PR #130, `ef6b611`); row 2.1's AC-15 wording (fixed); main's CI on `8e29c42` cancelled by the next push and re-run green on `4337d13`; 7 added lines carry em dashes, each carried over from an edited or moved pre-existing line (T34 leaves existing dashes). A fresh subagent checks the report and the repositories after this commit; its verdict is the report's line H |
 
 ### The 70 deleted `*_test.go` lines and why
 
@@ -127,6 +127,10 @@ summed per directory):
 - `cmd/holdfast/happy_path_log_test.go` (2) and `cmd/holdfast/sourceoffer_test.go` (2), PR #126:
   one call line and one import each, now calling `requireEncoder`, the function `buildEngine`
   uses, as those tests require ("through the SAME functions buildEngine requires them with").
+- Not in the net count: PR #130 changed 1 line of `internal/engine/hardware_test.go`, a file #129
+  added inside this goal - the alias case of `TestResolveEncoder_AutoAndFallbackChoosePerJob`
+  now expects the alias as written (`hevc_vaapi`), and a case for an alias that falls back was
+  added; no assertion removed.
 
 ## Decisions taken
 
@@ -191,6 +195,10 @@ summed per directory):
 - 2026-09-30: a rule's encoder follows the `hw_fallback` of the roots whose rules name it,
   `software` only where every such root says `software` (the rule walk names each encoder once);
   one root that skips keeps the start-time refusal for all. Fail-safe direction.
+- 2026-09-30: PR #130 (the review's corrections): gate exit 0 in 1627 s (`internal/engine`
+  1518.6 s, 56% of `TEST_TIMEOUT` 45m, `cmd/holdfast` 630.0 s); CI green; merged `ef6b611` with
+  `main` one ledger-only commit ahead. `holdfast plan` now probes the encoders `auto` may choose
+  where the configuration reaches `auto`, so it agrees with `run`.
 - 2026-09-30: no minor release is cut at the end of this goal (T37 makes it optional): the image
   change is large (about 244 MiB of vendor runtime) and no real hardware has run it yet; the
   owner's NEEDS-OWNER row 2 is the first real-hardware evidence, and a later goal can release on it.
@@ -212,6 +220,9 @@ summed per directory):
 
 ## Resume here
 
-All four PRs merged (#126 `0fab196`, #127 `84198b7`, #128 `075e3ba`, #129 `8e29c42`); no worktree,
-branch or open PR of this goal remains. Gate integrity counted (row 5.1). Next: the adversarial
-review of the report (row 5.2), then the COMPLETE line.
+Goal 5 is complete. Merged: #126 (argv, probe, detection, `amf` refusal), #127 (the image runtime),
+#128 (S0165), #129 (`encoder: auto`, `hw_fallback`), #130 (the review's corrections). No branch,
+worktree or open PR of this goal remains. Goal 6's precondition is this ledger's COMPLETE line; its
+first input is `NEEDS-OWNER.md` row 2 (the start-time probe on the owner's hosts).
+
+COMPLETE (goal 5): 2026-09-30
