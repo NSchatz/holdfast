@@ -243,7 +243,7 @@ const (
 // a verdict the next pass clears and re-derives by itself. Those guards fire in ordinary
 // operation, so a consumer that has to account for every skip this engine can record -
 // the /metrics label set is the standing one - reads THIS list. One built on SkipGuards
-// would silently have no bucket for three live guards.
+// would silently have no bucket for the live mutable guards (hardware-unavailable among them).
 //
 // Adding a Skip* constant means adding it here. The metrics surface asserts this list
 // against the constants themselves (parsed out of this package), so a token added above
@@ -257,6 +257,7 @@ var SkipVocabulary = []string{
 	SkipHDR10Plus,
 	SkipIncompleteHDRMetadata,
 	SkipExoticPixelFormat,
+	SkipHardwareUnavailable,
 	SkipTargetExists,
 	SkipSymlink,
 	SkipMultiVideoStream,
