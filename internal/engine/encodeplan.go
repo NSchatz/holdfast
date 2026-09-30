@@ -212,8 +212,8 @@ type planInputs struct {
 
 // deriveEncodePlan is THE derivation of an encode plan, and the only one in this build. The
 // engine derives each job's plan here and hands the one value to the encoder and to the
-// gates; a direct caller of the encoder that hands none gets its plan derived here too, from
-// the same inputs by the same function.
+// gates; a direct caller of the encoder that hands none gets its plan derived here too, by the
+// same function, from the configuration, profile and stream map that encoder holds.
 //
 // The refusals come in the order the encoder has always met them, so a job that could not
 // be encoded fails with the reason it always failed with: an output container this build
@@ -394,11 +394,12 @@ func (p *EncodePlan) buildable() error {
 	return nil
 }
 
-// args is the plan's command line between the input and the output, read off the plan and
-// nothing else: pre carries the global options that must precede -i, body everything after
-// it. x265 is the run's libx265 parallelism, which the plan does not declare: it decides how
-// the encode is scheduled on this machine and nothing about what the output carries, exactly
-// as the progress channel and the mux queue bounds do.
+// args is the plan's command line between the input and the output: every job-specific
+// option is read off the plan, and the one other input is x265, the run's libx265
+// parallelism, which the plan does not declare - it decides how the encode is scheduled on
+// this machine and nothing about what the output carries, exactly as the progress channel and
+// the mux queue bounds do. pre carries the global options that must precede -i, body
+// everything after it.
 func (p *EncodePlan) args(x265 encoder.X265Parallelism) (pre, body []string, err error) {
 	if err := p.buildable(); err != nil {
 		return nil, nil, err

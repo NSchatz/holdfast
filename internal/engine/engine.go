@@ -2332,8 +2332,9 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// THE ENCODE PLAN: everything this job's encode does to the source, derived ONCE, here,
 	// from the profile, the settings the guards above already read (ts, resolved once for the
 	// whole job), the working path, the intended stream map and the snapshot the guards read
-	// - and the one value the encoder builds its command line from, every gate below checks
-	// the output against, and the row's picture provenance is recorded from. The deinterlace
+	// - and the one value the encoder takes every job-specific argument of its command line
+	// from, every gate below checks the output against, and the row's picture provenance is
+	// recorded from. The deinterlace
 	// that ran, the reference the perceptual gate produces through it, the scale the output
 	// is measured back up through and the provenance the row keeps are therefore one answer,
 	// and no gate can check the output against something other than what was encoded

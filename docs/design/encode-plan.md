@@ -24,8 +24,9 @@ holdfast deletes a source on the strength of its gates. A gate is only worth tha
 what it checks is what was encoded, and "what was encoded" is decided by the same handful of
 inputs every time: the encoder and its quality value, the pixel format, the streams carried,
 the deinterlace, the `max_height` scale, the colour description. Before the plan, the encoder
-resolved those for itself and the engine resolved them again for the gates, through the same
-helpers from the same inputs. Two resolutions that agree today are two answers waiting to
+resolved all of those for itself, and the engine resolved the ones its gates check - the target
+codec, the deinterlace, the scale - again, through the same helpers from the same inputs. Two
+resolutions that agree today are two answers waiting to
 disagree, and the disagreement lands where it costs most: a gate that checks an output
 against something other than what was encoded, passes it, and licenses the deletion of the
 source.
@@ -35,10 +36,11 @@ the command line and the stream-parity gate, and a test proves the two read one 
 rather than two that happen to agree. The plan extends that rule from which streams are
 carried to everything the encode does.
 
-A plan is also where every later transformation lands. A hardware decode path, a device
-chosen at run time, an audio re-encode, a subtitle sidecar, a crop and dynamic HDR metadata
-each add a declaration to the plan, and each is then read by the command line and by the gate
-that proves it happened, from the same value.
+A plan is also where later transformations are meant to land. A hardware decode path, a
+device chosen at run time, an audio re-encode, a subtitle sidecar, a crop and dynamic HDR
+metadata would each add a declaration to the plan, to be read by the command line and by the
+gate that proves it happened, from the same value. This build declares each such slot with the
+one value it derives, and refuses a plan carrying any other (below).
 
 ## What the plan declares
 
@@ -50,7 +52,7 @@ that proves it happened, from the same value.
 | attached pictures | how the attached pictures the map carries travel: pinned to copy in the map, or copied out of the source and carried as Matroska attachments | the command line |
 | `Picture` | the deinterlace applied, the `max_height` scale applied, and the crop (none in this build) | the filter chain; the reference and the scale the perceptual gate builds; the row's provenance |
 | `Metadata` | the colour description (`hdr.Color`): the source's tags and, for HDR10, its mastering display and content light level; HDR10+ and Dolby Vision are not carried, because the guards skip a source that has either before a plan is derived | the command line (`-color_*` and the libx265 parameters) |
-| `Profile`, `Settings` | the effective library profile, whose floors every gate applies, and the job's effective encode settings with the encode profile that supplied them | every gate's floors (`Profile`); the quality value (`Settings`) |
+| `Profile`, `Settings` | the effective library profile, whose floors the size and perceptual gates apply, and the job's effective encode settings with the encode profile that supplied them | the size and perceptual gates (`Profile`); `Settings` is the record the plan's quality value (`Video.Quality`) was taken from, and nothing reads it after the derivation |
 | container | the muxer the output is written in, named from the working file's name | the command line |
 | `Source`, `Output` | the file the encode reads and the working file it writes: the two paths the plan was derived for | the command line (`-i` and the output); every gate, for the files it measures |
 
@@ -58,8 +60,8 @@ that proves it happened, from the same value.
 
 The plan declares; the command-line builder (`EncodePlan.args`) performs what it declares
 and refuses what it cannot. A plan declaring an operation this build has no way to perform -
-an audio action other than copy, a crop, a hardware decode path, a device an encoder does not
-open, dynamic HDR metadata carried - is refused with an `UnbuildablePlanError` before any
+an audio or subtitle action other than copy, a crop, a hardware decode path, a device an
+encoder does not open, dynamic HDR metadata carried - is refused with an `UnbuildablePlanError` before any
 subprocess runs. An operation silently left out would be an output that is not what its plan
 says, checked by gates that believe the plan.
 
@@ -78,9 +80,11 @@ the encoder's own refusal always recorded, and the encoder is then never called.
 ## What the plan does not declare
 
 The plan says what the output is. How the encode is scheduled on this machine is not part of
-that: the libx265 thread pools, the resident-memory watchdog, the progress channel, the mux
-queue bounds and the ffmpeg binary are execution parameters of the run, joined to the command
-line by the encoder and read by no gate. The length gate's two thresholds
+that. The libx265 thread pools, the progress channel and the mux queue bounds are execution
+parameters of the run: the encoder joins them to the command line, and no gate reads them. The
+resident-memory watchdog and the ffmpeg binary the encoder runs are the run's too, and are not
+on the plan; the gates take their measurements through the prober, whatever the encoder ran.
+The length gate's two thresholds
 are not on the plan either: its tolerance (`duration_tolerance_sec`) is a run-wide setting,
 read from the engine's configuration exactly as the stray-temp sweep that asks the same
 question reads it, and its packet-count bound is a constant. The guards are not part of it either: they decide
@@ -101,9 +105,10 @@ The plan changed how a command line is derived and nothing about what it says. T
 command lines under `internal/engine/testdata/golden-argv` were written by the build before
 the refactor and are read back unchanged after it (`TestGoldenArgv`): through the encoder
 directly, every registry encoder over every option combination the existing fixtures drive,
-and the refusals; through a whole pass of the engine, each of those combinations for the
-default encoder and the core ones for every registry encoder, with the terminal row's status
-and reason each pass recorded. The tests written against the builder and the
+and the refusals; through a whole pass of the engine, 76 combinations the engine resolves
+(root and band profiles, encode profiles, the guards' snapshot, the intended stream map, the
+working path, scratch, progress) for the default encoder and 16 core ones for every registry
+encoder, with the terminal row's status and reason each pass recorded. The tests written against the builder and the
 gates before the plan still grade them, through adapters that assemble the facts they hand in
 into a plan; no assertion was removed or relaxed. The identity of the plan the command line
 was built from and the plan the gates read is checked on a real job
