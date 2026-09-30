@@ -78,7 +78,7 @@ build can record is here, and a token with no row fails the documentation check.
 | `dolby-vision` | a Dolby Vision RPU cannot survive a generic re-encode |
 | `hdr10-plus` | HDR10+ dynamic metadata cannot survive a generic re-encode |
 | `incomplete-hdr-metadata` | HDR10 static metadata is present but this build cannot fully parse it, so re-encoding would silently drop part of it |
-| `exotic-pixel-format` | the source's pixel format is one this build will not map, rather than silently subsample it |
+| `exotic-pixel-format` | the source's pixel format is one this build will not map, rather than silently subsample it; or the output pixel format (derived or a forced `pixel_format`) is one the job's encoder lists no format for with the same chroma subsampling and bit depth (4:2:2 into `svtav1`, 12-bit into `vaapi`), rather than let ffmpeg silently subsample or cut depth |
 | `multi-video-stream` | the source carries a moving-picture stream beyond the first, or its stream shape could not be established: every decision here reads `v:0` |
 | `unreadable-stream-list` | ffprobe could not enumerate the source's streams at all, so the intended stream map cannot be derived |
 | `source-damaged` | while ffprobe read the source, its demuxer reported the container as damaged (for Matroska, `0x00 at pos ... invalid as first byte of an EBML number`). Nothing is encoded and the file needs replacing: it is logged at `error` with the demuxer's own message, and a replacement at the same path is decided afresh by the next scan |

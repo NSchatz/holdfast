@@ -93,7 +93,7 @@
 == pixel-format-yuv420p
 -hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == pixel-format-nv12
--hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt nv12 -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == source-full-range
 -hide_banner -nostdin -loglevel error -y -i <fixtures>/full-range.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range pc -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == source-full-range/pixel-format-yuv420p10le
@@ -115,6 +115,62 @@
 error: cannot derive an output pixel format for "<fixtures>/exotic.mkv" (unrecognized/exotic source pix_fmt)
 == source-exotic/pixel-format-yuv420p10le
 -hide_banner -nostdin -loglevel error -y -i <fixtures>/exotic.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== source-12bit
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/12bit.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p12le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-yuv420p12le
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p12le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-yuv422p
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv422p -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-yuv422p10le
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv422p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-yuv422p12le
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv422p12le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-yuv444p
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv444p -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-yuv444p10le
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv444p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-yuv444p12le
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv444p12le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-yuvj420p
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuvj420p -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-p010le
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-nv16
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv422p -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-p410le
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv444p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-yuv420p10be
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-gray
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt gray -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-yuv422p10le/bitrate-8000k
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv422p10le -color_range tv -fps_mode passthrough -preset slow -b:v 8000k -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-yuv420p/bitrate-8000k
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p -color_range tv -fps_mode passthrough -preset slow -b:v 8000k -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-set
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-set/crf-30
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 30 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-set/bitrate-8000k
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -b:v 8000k -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-set/stream-plan-handed
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-set/alias
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-min
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-max
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-below-scale
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-above-scale
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== crf-0
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 0 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== crf-0/bitrate-8000k
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -b:v 8000k -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== crf-51
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 51 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == colour-bt709
 -hide_banner -nostdin -loglevel error -y -i <fixtures>/bt709.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -colorspace bt709 -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error:colormatrix=bt709 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == colour-bt709/probes-itself

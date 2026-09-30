@@ -16,6 +16,36 @@ row: failed temp missing or empty
 == container-mkv-to-mp4
 -hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f mp4 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mp4.holdfast-part
 row: failed temp missing or empty
+== source-422/every-encoder
+(no invocation)
+row: skipped exotic-pixel-format
+== source-444/every-encoder
+(no invocation)
+row: skipped exotic-pixel-format
+== source-12bit/every-encoder
+(no invocation)
+row: skipped exotic-pixel-format
+== pixel-format-yuv422p10le/every-encoder
+(no invocation)
+row: skipped exotic-pixel-format
+== pixel-format-yuv420p/every-encoder
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-422/remux-only
+-hide_banner -nostdin -loglevel error -y -i <library>/422.mkv -map 0 -map -0:d? -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/422.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== quality-set
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== quality-set/encode-profile-crf-30
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 30 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== quality-set/encode-profile-to-nvenc
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_nvenc -pix_fmt p010le -color_range tv -fps_mode passthrough -rc vbr -cq 24 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== crf-0
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 0 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
 == deinterlace-yadif
 -hide_banner -nostdin -loglevel error -y -i <library>/interlaced.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -vf yadif=mode=send_frame:parity=auto:deint=all -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/interlaced.__transcoding__.mkv.holdfast-part
 row: failed temp missing or empty

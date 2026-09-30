@@ -16,6 +16,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/NSchatz/holdfast/internal/cpuquota"
 	"github.com/NSchatz/holdfast/internal/deinterlace"
+	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/schedule"
 	"github.com/NSchatz/holdfast/internal/secret"
 )
@@ -68,6 +70,7 @@ var knownKeys = map[string]bool{
 	maxHeightKey:    true,
 	downscaleAckKey: true,
 	x265CPUsKey:     true,
+	qualityKey:      true,
 	// The divisor `workers: auto` sizes the pool by. It describes the PROCESS, so a
 	// library_roots entry naming it is refused as a daemon-level key, exactly as one
 	// naming workers is.
@@ -301,10 +304,31 @@ type Config struct {
 	// internal/encoder.Available and cmd/holdfast's cmdRun). The raw ffmpeg -c:v
 	// codec name (e.g. "libsvtav1") is also accepted as an alias.
 	Encoder string `yaml:"encoder"`
-	// CRF is the encoder's quality knob (lower = bigger/better): libx265/libsvtav1
-	// constant-rate-factor, or reused as the CQ/global_quality/QP target for the
-	// hardware encoders (see internal/engine.videoArgs).
+	// CRF is the software encoders' quality knob (lower = bigger/better): libx265's
+	// and libsvtav1's constant rate factor, 0-51. Each hardware encoder's quality is
+	// set on its own scale by Quality below, and a hardware encoder with no entry there
+	// takes this value unchanged, as its -cq/-global_quality/-qp/-qp_i/-qp_p (see
+	// internal/engine.videoArgs), which is what it always did.
 	CRF int `yaml:"crf"`
+	// Quality sets a hardware encoder's quality target on that encoder's OWN scale,
+	// keyed by registry key (internal/encoder.QualityScale holds each scale, its
+	// option and its sources):
+	//
+	//	nvenc      -cq, 1-51 (0 is NVENC's "automatic", not a target)
+	//	av1_nvenc  -cq, 1-63
+	//	qsv        -global_quality (ICQ), 1-51
+	//	vaapi      -qp (constant QP), 1-52 (0 is VAAPI's "unset")
+	//	amf        -qp_i and -qp_p under -rc cqp, 0-51
+	//
+	// cpu and svtav1 are set by crf and are refused here, as is any other key, and a
+	// value outside its encoder's scale is refused by Validate naming the scale. An
+	// ABSENT key inherits the job's effective crf unchanged, which keeps every
+	// configuration written before this key byte-identical on the command line; that
+	// crf must then lie on the encoder's scale, or the job is refused when its encode
+	// plan is derived (crf 0 is off NVENC's and VAAPI's scales). Top-level only: a
+	// library root or an encode profile cannot carry it. The environment sets one
+	// entry as HOLDFAST_QUALITY_<KEY> (HOLDFAST_QUALITY_AV1_NVENC=30).
+	Quality map[string]int `yaml:"quality"`
 	// Preset is the encoder's speed/quality preset: a libx265 preset word for
 	// "cpu" ("slow" etc.), or mapped to SVT-AV1's numeric 0-13 scale for "svtav1"
 	// (see internal/engine.svtav1Preset). Ignored by the hardware encoders.
@@ -962,9 +986,7 @@ func Load(path string) (*Config, error) {
 	// instance first, for the same reason the file is: what it CARRIED has to be
 	// readable, not merely what it left behind.
 	ke := koanf.New(".")
-	err := ke.Load(koanfenv.Provider(envPrefix, ".", func(s string) string {
-		return strings.ToLower(strings.TrimPrefix(s, envPrefix))
-	}), nil)
+	err := ke.Load(koanfenv.Provider(envPrefix, ".", envKey), nil)
 	if err != nil {
 		return nil, fmt.Errorf("load env overrides: %w", err)
 	}
@@ -1118,6 +1140,11 @@ func Load(path string) (*Config, error) {
 	if err := requireWholeKbps(k.Get(x265CPUsKey), x265CPUsKey, "CPUs", path); err != nil {
 		return nil, err
 	}
+	// Each quality.<key> is a whole number on its encoder's scale, for the same reason:
+	// the decoder would read 20.5 as 20, a quality nobody wrote.
+	if err := requireWholeQuality(k.Get(qualityKey), path); err != nil {
+		return nil, err
+	}
 	for i, raw := range profileMaps(kf.Get("encode_profiles")) {
 		if v, ok := raw["bitrate_kbps"]; ok {
 			key := fmt.Sprintf("encode_profiles[%d].bitrate_kbps", i)
@@ -1196,6 +1223,15 @@ const retentionKey = "history_retention_rows"
 const (
 	bitrateKey      = "bitrate_kbps"
 	scratchFloorKey = "scratch_min_free_gb"
+)
+
+// qualityKey is the top-level key whose entries set each hardware encoder's quality on
+// its own scale (Config.Quality); qualityEnvPrefix is how the environment spells one entry
+// once envPrefix is stripped and the name lower-cased: HOLDFAST_QUALITY_NVENC ->
+// quality_nvenc -> quality.nvenc.
+const (
+	qualityKey       = encoder.QualityMapKey
+	qualityEnvPrefix = qualityKey + "_"
 )
 
 // x265CPUsKey is the one place the libx265 parallelism key is spelled: knownKeys,
@@ -1440,6 +1476,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("bitrate_kbps %d must be >= 0 (0 keeps the crf/quality target; a positive value is a target bitrate in kbps)", c.BitrateKbps)
 	}
 	if err := c.validateProfiles(); err != nil {
+		return err
+	}
+	if err := c.validateQuality(); err != nil {
 		return err
 	}
 	if err := c.validateScratch(); err != nil {
@@ -1827,4 +1866,60 @@ func (c *Config) Warnings() []string {
 		w = append(w, r.Profile.warnings(r.Clean)...)
 	}
 	return w
+}
+
+// envKey maps one HOLDFAST_* variable to the configuration key it overrides: the prefix
+// stripped and the name lower-cased (HOLDFAST_CRF -> crf). A variable name carries no "."
+// to nest with, so a quality entry is spelled with an underscore after the map's name and
+// mapped to the nested key here: HOLDFAST_QUALITY_NVENC -> quality.nvenc, and
+// HOLDFAST_QUALITY_AV1_NVENC -> quality.av1_nvenc (only the first underscore nests, since
+// a registry key may carry one of its own).
+func envKey(s string) string {
+	k := strings.ToLower(strings.TrimPrefix(s, envPrefix))
+	if rest, ok := strings.CutPrefix(k, qualityEnvPrefix); ok && rest != "" {
+		return qualityKey + "." + rest
+	}
+	return k
+}
+
+// requireWholeQuality refuses a quality entry whose value is not a whole number, naming
+// the entry and the value, and a `quality` key that is not a mapping at all.
+func requireWholeQuality(raw any, path string) error {
+	if raw == nil {
+		return nil
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return fmt.Errorf("%s must be a mapping of registry encoder key to that encoder's quality (e.g. %s: {nvenc: 24}): %#v in %s is not one",
+			qualityKey, qualityKey, raw, path)
+	}
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if !isWholeNumber(m[key]) {
+			return fmt.Errorf("%s.%s must be a whole number on that encoder's scale: %#v in %s is not one",
+				qualityKey, key, m[key], path)
+		}
+	}
+	return nil
+}
+
+// validateQuality refuses every quality entry that names no encoder with a scale of its
+// own, or whose value is outside that encoder's scale, in key order so the first refusal
+// is the same on every run.
+func (c *Config) validateQuality() error {
+	keys := make([]string, 0, len(c.Quality))
+	for key := range c.Quality {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := encoder.ValidateQualityKey(key, c.Quality[key]); err != nil {
+			return err
+		}
+	}
+	return nil
 }

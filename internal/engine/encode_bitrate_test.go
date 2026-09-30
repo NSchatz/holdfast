@@ -18,6 +18,13 @@ import (
 // however buildArgs changes, which is the one thing AC-A1 needs it not to do. These
 // are the strings a config file that predates this item has always produced, and if
 // a future edit changes one of them, this table is what says so.
+//
+// One such edit is recorded here: the explicit pixel format (encoder.Spec.InputFormat).
+// A plan of yuv420p10le is handed to NVENC, QSV and AMF as p010le - the format each
+// lists for 4:2:0 10-bit, which ffmpeg used to auto-select behind -loglevel error - and
+// to VAAPI as the p010le software frames it uploads, with the Main 10 profile and no
+// contradicting -pix_fmt, where it used to upload 8-bit nv12. libx265 and libsvtav1 list
+// yuv420p10le and are handed it unchanged.
 var pinArgs = map[string][]string{
 	"cpu": {
 		"-pix_fmt", "yuv420p10le", "-fps_mode", "passthrough",
@@ -28,23 +35,23 @@ var pinArgs = map[string][]string{
 		"-preset", "6", "-crf", "22",
 	},
 	"nvenc": {
-		"-pix_fmt", "yuv420p10le", "-fps_mode", "passthrough",
+		"-pix_fmt", "p010le", "-fps_mode", "passthrough",
 		"-rc", "vbr", "-cq", "22", "-b:v", "0", "-preset", "p5",
 	},
 	"av1_nvenc": {
-		"-pix_fmt", "yuv420p10le", "-fps_mode", "passthrough",
+		"-pix_fmt", "p010le", "-fps_mode", "passthrough",
 		"-rc", "vbr", "-cq", "22", "-b:v", "0", "-preset", "p5",
 	},
 	"qsv": {
-		"-pix_fmt", "yuv420p10le", "-fps_mode", "passthrough",
+		"-pix_fmt", "p010le", "-fps_mode", "passthrough",
 		"-global_quality", "22",
 	},
 	"vaapi": {
-		"-pix_fmt", "yuv420p10le", "-fps_mode", "passthrough",
-		"-vf", "format=nv12,hwupload", "-qp", "22",
+		"-fps_mode", "passthrough",
+		"-vf", "format=p010le,hwupload", "-profile:v", "main10", "-qp", "22",
 	},
 	"amf": {
-		"-pix_fmt", "yuv420p10le", "-fps_mode", "passthrough",
+		"-pix_fmt", "p010le", "-fps_mode", "passthrough",
 		"-rc", "cqp", "-qp_i", "22", "-qp_p", "22",
 	},
 }
@@ -147,8 +154,9 @@ func TestBitrateKbps_TargetsTheBitrateAndPassesNoQualityTarget_ForEveryEncoder(t
 			}
 			// The universal source-fidelity args are unchanged on this path: a
 			// bitrate-targeted encode carries the same colour and frame-timing
-			// fidelity as a quality-targeted one.
-			if !hasArgPair(got, "-pix_fmt", "yuv420p10le") || !hasArgPair(got, "-fps_mode", "passthrough") {
+			// fidelity as a quality-targeted one - the same explicit pixel format
+			// the quality path names (pinArgs), for every encoder.
+			if !hasPixelFormatOf(got, pinArgs[key]) || !hasArgPair(got, "-fps_mode", "passthrough") {
 				t.Errorf("%s: a target-bitrate encode lost a universal fidelity arg: %v", key, got)
 			}
 		})
@@ -198,4 +206,20 @@ func valueAfter(args []string, i int) string {
 		return args[i+1]
 	}
 	return "<nothing>"
+}
+
+// hasPixelFormatOf reports whether got names the pixel format pin names, in pin's own
+// spelling: the -pix_fmt value, or the uploaded format of a VAAPI chain.
+func hasPixelFormatOf(got, pin []string) bool {
+	for i, a := range pin {
+		if (a == "-pix_fmt" || a == "-vf") && i+1 < len(pin) && !hasArgPair(got, a, pin[i+1]) {
+			return false
+		}
+	}
+	for i, a := range got {
+		if a == "-pix_fmt" && !hasArgPair(pin, a, valueAfter(got, i)) {
+			return false
+		}
+	}
+	return true
 }

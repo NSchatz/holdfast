@@ -93,7 +93,7 @@
 == pixel-format-yuv420p
 -hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == pixel-format-nv12
--hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt nv12 -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == source-full-range
 -hide_banner -nostdin -loglevel error -y -i <fixtures>/full-range.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range pc -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == source-full-range/pixel-format-yuv420p10le
@@ -103,11 +103,13 @@
 == source-10bit/pixel-format-yuv420p10le
 -hide_banner -nostdin -loglevel error -y -i <fixtures>/10bit.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == source-422
--hide_banner -nostdin -loglevel error -y -i <fixtures>/422.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv422p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+(no invocation)
+error: encoder "svtav1" (libsvtav1) cannot carry the pixel format yuv422p10le of "<fixtures>/422.mkv": it lists no format of that chroma subsampling and bit depth (supported: yuv420p yuv420p10le)
 == source-422/pixel-format-yuv420p10le
 -hide_banner -nostdin -loglevel error -y -i <fixtures>/422.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == source-444
--hide_banner -nostdin -loglevel error -y -i <fixtures>/444.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv444p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+(no invocation)
+error: encoder "svtav1" (libsvtav1) cannot carry the pixel format yuv444p10le of "<fixtures>/444.mkv": it lists no format of that chroma subsampling and bit depth (supported: yuv420p yuv420p10le)
 == source-444/pixel-format-yuv420p10le
 -hide_banner -nostdin -loglevel error -y -i <fixtures>/444.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == source-exotic
@@ -115,6 +117,74 @@
 error: cannot derive an output pixel format for "<fixtures>/exotic.mkv" (unrecognized/exotic source pix_fmt)
 == source-exotic/pixel-format-yuv420p10le
 -hide_banner -nostdin -loglevel error -y -i <fixtures>/exotic.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== source-12bit
+(no invocation)
+error: encoder "svtav1" (libsvtav1) cannot carry the pixel format yuv420p12le of "<fixtures>/12bit.mkv": it lists no format of that chroma subsampling and bit depth (supported: yuv420p yuv420p10le)
+== pixel-format-yuv420p12le
+(no invocation)
+error: encoder "svtav1" (libsvtav1) cannot carry the pixel format yuv420p12le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: yuv420p yuv420p10le)
+== pixel-format-yuv422p
+(no invocation)
+error: encoder "svtav1" (libsvtav1) cannot carry the pixel format yuv422p of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: yuv420p yuv420p10le)
+== pixel-format-yuv422p10le
+(no invocation)
+error: encoder "svtav1" (libsvtav1) cannot carry the pixel format yuv422p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: yuv420p yuv420p10le)
+== pixel-format-yuv422p12le
+(no invocation)
+error: encoder "svtav1" (libsvtav1) cannot carry the pixel format yuv422p12le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: yuv420p yuv420p10le)
+== pixel-format-yuv444p
+(no invocation)
+error: encoder "svtav1" (libsvtav1) cannot carry the pixel format yuv444p of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: yuv420p yuv420p10le)
+== pixel-format-yuv444p10le
+(no invocation)
+error: encoder "svtav1" (libsvtav1) cannot carry the pixel format yuv444p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: yuv420p yuv420p10le)
+== pixel-format-yuv444p12le
+(no invocation)
+error: encoder "svtav1" (libsvtav1) cannot carry the pixel format yuv444p12le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: yuv420p yuv420p10le)
+== pixel-format-yuvj420p
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-p010le
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-nv16
+(no invocation)
+error: encoder "svtav1" (libsvtav1) cannot carry the pixel format nv16 of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: yuv420p yuv420p10le)
+== pixel-format-p410le
+(no invocation)
+error: encoder "svtav1" (libsvtav1) cannot carry the pixel format p410le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: yuv420p yuv420p10le)
+== pixel-format-yuv420p10be
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-gray
+(no invocation)
+error: encoder "svtav1" (libsvtav1) cannot carry the pixel format gray of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: yuv420p yuv420p10le)
+== pixel-format-yuv422p10le/bitrate-8000k
+(no invocation)
+error: encoder "svtav1" (libsvtav1) cannot carry the pixel format yuv422p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: yuv420p yuv420p10le)
+== pixel-format-yuv420p/bitrate-8000k
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p -color_range tv -fps_mode passthrough -preset 6 -b:v 8000k -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-set
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-set/crf-30
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 30 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-set/bitrate-8000k
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -b:v 8000k -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-set/stream-plan-handed
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-set/alias
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-min
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-max
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-below-scale
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-above-scale
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== crf-0
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 0 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== crf-0/bitrate-8000k
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -b:v 8000k -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== crf-51
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 51 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == colour-bt709
 -hide_banner -nostdin -loglevel error -y -i <fixtures>/bt709.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -colorspace bt709 -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == colour-bt709/probes-itself

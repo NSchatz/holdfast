@@ -250,8 +250,25 @@ dry_run: false
 #                         # A hardware/av1 encode that fails any gate is rejected
 #                         # and the source is kept — no encoder is special-cased.
 # crf: 22                # quality knob (lower = bigger/better): libx265/libsvtav1
-#                         # constant-rate-factor, or reused as the CQ/
-#                         # global_quality/QP target for nvenc/qsv/vaapi/amf.
+#                         # constant-rate-factor, 0-51. A hardware encoder with no
+#                         # quality.<key> below takes this value unchanged as its
+#                         # own quality target, which is what it always did.
+# quality:               # a hardware encoder's quality on ITS OWN scale, keyed by
+#                         # registry key (top-level only; absent keys inherit crf):
+#   nvenc: 24            #   -cq, 1-51 (0 is NVENC's "automatic", refused)
+#   av1_nvenc: 30        #   -cq, 1-63
+#   qsv: 24              #   -global_quality (ICQ), 1-51
+#   vaapi: 24            #   -qp (constant QP), 1-52 (0 is VAAPI's "unset", refused)
+#   amf: 24              #   -qp_i and -qp_p under -rc cqp, 0-51
+#                         # cpu and svtav1 are set by crf, and quality.cpu,
+#                         # quality.svtav1 or any other key is refused, as is a value
+#                         # off its encoder's scale. An inherited crf off a scale
+#                         # (crf 0 on nvenc or vaapi) fails that job naming
+#                         # quality.<key>. The numbers above are placeholders, not
+#                         # recommendations: what each hardware scale's values mean
+#                         # against libx265's crf is not yet measured. The
+#                         # environment sets one entry as HOLDFAST_QUALITY_<KEY>
+#                         # (HOLDFAST_QUALITY_AV1_NVENC=30). See docs/profiles.md.
 # preset: slow           # speed/quality preset. A libx265 preset word for cpu;
 #                         # mapped to SVT-AV1's numeric 0-13 scale for svtav1
 #                         # (slow -> 6, medium -> 8, fast -> 10; unrecognized
@@ -275,6 +292,13 @@ dry_run: false
 #                         # SKIPPED, never silently subsampled. Set a literal value
 #                         # (e.g. yuv420p10le) to force that pix_fmt for every
 #                         # source instead (TRANSCODE-1 back-compat behaviour).
+#                         # Derived or forced, the encoder is handed a format IT
+#                         # lists with exactly that chroma and depth (yuv420p10le is
+#                         # p010le on nvenc/qsv/amf, an uploaded p010le with the
+#                         # Main 10 profile on vaapi); where it lists none (4:2:2
+#                         # on svtav1/qsv/amf/vaapi, 12-bit on svtav1/amf/vaapi) the
+#                         # file is SKIPPED as exotic-pixel-format, never left to
+#                         # ffmpeg to subsample or cut depth silently.
 
 # container_ext: source  # "source" or "auto" (default, equivalent): output
 #                         # container = the SOURCE file's own extension, so the

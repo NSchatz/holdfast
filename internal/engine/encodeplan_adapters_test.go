@@ -17,14 +17,27 @@ import (
 // one argument at a time. Production now hands each of them the plan instead, and the tests
 // that grade them are unchanged: each adapter below assembles the facts a test hands it into
 // the part of a plan the production function reads, through the same conversions the
-// derivation uses (qualityOf), and calls the production function. What those tests assert is
+// derivation uses (qualityOf, encoder.Spec.InputFormat), and calls the production function. What those tests assert is
 // therefore still asserted of the one builder and the one gate the engine runs - no assertion
 // was removed or relaxed to fit the plan, and none of those tests changed.
 
 // buildArgs is videoArgs under its signature before the plan: the encoder, the job's
 // settings and the pixel format, as a VideoPlan.
+//
+// The input format and the quality value are resolved exactly as the derivation resolves
+// them; a pixel format the encoder cannot carry, or a quality off its scale, is a fixture the
+// derivation would have refused, and panics here rather than building a command line the
+// production path never could.
 func buildArgs(spec encoder.Spec, ts config.Transcode, pixFmt string, colorArgs []string, x265Extra string) []string {
-	return videoArgs(VideoPlan{Encoder: spec, PixelFormat: pixFmt, Quality: qualityOf(ts)}, colorArgs, x265Extra)
+	input, ok := spec.InputFormat(pixFmt)
+	if !ok {
+		panic("buildArgs: encoder " + spec.Key + " cannot carry " + pixFmt + ", which the derivation refuses")
+	}
+	q, err := qualityOf(ts, spec)
+	if err != nil {
+		panic("buildArgs: " + err.Error())
+	}
+	return videoArgs(VideoPlan{Encoder: spec, PixelFormat: pixFmt, InputFormat: input, Quality: q}, colorArgs, x265Extra)
 }
 
 // verifyOutput is verifyAgainst under its signature before the plan: the profile, the target
