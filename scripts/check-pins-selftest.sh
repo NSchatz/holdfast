@@ -15,10 +15,10 @@
 # BOT guards - a build stage that drifted from its GO_IMAGE copy, a base image hidden behind
 # an ARG where the bot cannot read it, and a bot configuration that stopped watching a pin
 # class or went missing; cases 35-42 (goal 5) defeat the HARDWARE RUNTIME's Debian package
-guards - a package the image copies that NOTICE omits, one NOTICE names that the image
-does not carry, a version drifted between the two, a shortened sha256, a fetch from the
-live mirror or a floating snapshot, a missing pin block, and a NOTICE entry with no source
-offer. Two of the S0057 cases assert a PASS
+# guards - a package the image copies that NOTICE omits, one NOTICE names that the image
+# does not carry, a version drifted between the two, a shortened sha256, a fetch from the
+# live mirror or a floating snapshot, a missing pin block, and a NOTICE entry with no source
+# offer. Two of the S0057 cases assert a PASS
 # rather than a bite (the local-action exemption, and a manifest whose decision is
 # recorded), because a guard that refuses everything is indistinguishable from a guard
 # that works and is impossible to comply with. One asserts that publishing `:latest` is

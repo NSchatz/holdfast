@@ -285,3 +285,20 @@ func TestAuto_IsAValueEveryChoiceOfWhichWritesHEVC(t *testing.T) {
 		t.Errorf("KnownWithAuto = %v", all)
 	}
 }
+
+// A failed encode is not a working encoder even where it left a faithful-looking file behind:
+// the probe requires the encode to succeed AND its output to be faithful.
+func TestAvailable_AnEncodeThatFailsIsUnavailableEvenWithAGoodOutput(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	spec, _ := Lookup("cpu")
+	failsAfterWriting := func(ctx context.Context, spec Spec, pixelFormat, src, out string) error {
+		if err := standIn(ffmpeg)(ctx, spec, pixelFormat, src, out); err != nil {
+			t.Fatalf("the stand-in encode itself failed: %v", err)
+		}
+		return errors.New("exit status 1\nthe device went away")
+	}
+	c := Available(context.Background(), ffmpeg, ffprobe, spec, failsAfterWriting)
+	if c.Usable() || !strings.Contains(c.Reason, "the encode failed: exit status 1") {
+		t.Errorf("an encode that failed after writing a good file = %+v, want unusable", c)
+	}
+}

@@ -273,12 +273,15 @@ func probeDepth(ctx context.Context, ffmpeg string, prober *probe.Prober, spec S
 		return false, "cannot make the probe clip: " + firstLine(string(out), err)
 	}
 	out := filepath.Join(dir, "probe-"+format+".mkv")
-	encErr := encode(ctx, spec, format, src, out)
+	// Both halves are required. An exit status of 0 proves nothing (a hardware encoder with no
+	// device can exit 0 and write nothing), and a failed encode proves the encoder did not
+	// work even where it left a plausible file behind: a probe passes only an encode that
+	// succeeded AND wrote a faithful output.
+	if encErr := encode(ctx, spec, format, src, out); encErr != nil {
+		return false, "the encode failed: " + firstLine(encErr.Error(), nil)
+	}
 	fi, err := os.Stat(out)
 	if err != nil || fi.Size() <= 0 {
-		if encErr != nil {
-			return false, "the encode failed: " + firstLine(encErr.Error(), nil)
-		}
 		return false, "the encode wrote no output"
 	}
 	props := prober.VideoProps(ctx, out)
