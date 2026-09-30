@@ -578,7 +578,7 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope c
 	// two walks above are. The account names the root and the rule index, because the root's
 	// own encoder and every encode profile's may well be available.
 	for _, e := range cfg.RuleEncoders() {
-		if _, err := encoder.RequireAvailable(context.Background(), ffmpeg, ffprobe, e.Key); err != nil {
+		if err := requireEncoder(context.Background(), cfg, ffmpeg, ffprobe, e.Key, devices); err != nil {
 			fmt.Fprintf(stderr, "holdfast: library root %s: rules[%d]: %v\n", e.Root, e.Rule, err)
 			return nil, nil, 1
 		}
