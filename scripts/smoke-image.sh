@@ -77,12 +77,107 @@ user="$(docker inspect -f '{{.Config.User}}' "$IMAGE")"
   || fail "image default user is root ('$user')"
 ok "image default user is non-root ($user)"
 
+# 4. The hardware runtime (amd64 only). The image carries the VAAPI and QSV userspace
+#    (libva, libva-drm, libdrm, Intel iHD, libmfx-gen, Mesa radeonsi VA) as pinned Debian
+#    packages. The bundled ffmpeg dlopens libva, libva-drm and libdrm through implib-gen
+#    shims and ABORTS (exit 134) when one is missing, and a VA driver whose closure is
+#    incomplete fails only on the host that has the hardware, where nobody can see why.
+#    CI has no GPU, so this proves the half that can be proven without one: every object
+#    resolves every dependency inside the image, and a VAAPI init against a missing
+#    render node ends in a device error rather than an abort.
+#
+#    arm64 carries no hardware runtime (its pinned ffmpeg has no VAAPI and no libvpl; see
+#    the Dockerfile's hwruntime stage), so there is nothing there to prove.
+arch="$(docker image inspect -f '{{.Architecture}}' "$IMAGE")" || fail "could not read the image's architecture"
+if [ "$arch" = "amd64" ]; then
+  hwlib=/usr/lib/x86_64-linux-gnu
+  # The dynamic loader's list mode is the entrypoint: the image has no shell and no ldd,
+  # and this is what ldd itself runs. Its answer is the image's own, with no
+  # LD_LIBRARY_PATH: the default search path of the base's glibc, and no ld.so.cache.
+  for obj in dri/iHD_drv_video.so dri/radeonsi_drv_video.so libmfx-gen.so.1.2 \
+             libva.so.2 libva-drm.so.2 libdrm.so.2; do
+    deps="$(run_in_image --entrypoint /lib64/ld-linux-x86-64.so.2 "$IMAGE" --list "$hwlib/$obj" 2>&1)" \
+      || fail "the dynamic loader could not load $hwlib/$obj inside the image:
+$deps"
+    if grep -q 'not found' <<<"$deps"; then
+      fail "$hwlib/$obj has an unresolved dependency inside the image:
+$(grep 'not found' <<<"$deps")"
+    fi
+    ok "$obj resolves all $(grep -c '=>' <<<"$deps") of its dependencies inside the image"
+  done
+
+  # No device is passed, so the render node is missing. connection_type=drm keeps the
+  # failure on the DRM path: without it a node that fails to open falls through to
+  # XOpenDisplay, and libX11 is not in the image, so that path aborts in the shim. What
+  # must come back is ffmpeg's own device error, never exit 134 and never a shim line.
+  rc=0
+  va_out="$(run_in_image --entrypoint /usr/local/bin/ffmpeg "$IMAGE" -hide_banner \
+    -init_hw_device vaapi=va:/dev/dri/renderD128,connection_type=drm \
+    -f lavfi -i nullsrc -frames:v 1 -f null - 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a VAAPI init with no render node exited 0:
+$va_out"
+  [ "$rc" -ne 134 ] || fail "a VAAPI init with no render node ABORTED (exit 134): a library the shim loads is missing:
+$va_out"
+  if grep -q 'implib-gen' <<<"$va_out"; then
+    fail "a VAAPI init with no render node reached an implib-gen shim failure (exit $rc):
+$va_out"
+  fi
+  grep -qE 'Failed to open /dev/dri/renderD128|No VA display found' <<<"$va_out" \
+    || fail "a VAAPI init with no render node failed (exit $rc) without naming the device:
+$va_out"
+  ok "a VAAPI init with no render node ends in a device error (exit $rc), not an abort"
+
+  # The missing node fails at open(), BEFORE ffmpeg touches a shim, so the check above
+  # passes on an image with no libva at all. /dev/null opens, so this one really calls
+  # vaGetDisplayDRM: libva-drm, libva and libdrm are loaded, and it is the libva-drm call
+  # that refuses a node that is not a DRM device. On an image missing any of the three
+  # this is the shim abort (exit 134) the runtime exists to prevent.
+  rc=0
+  va_out="$(run_in_image --entrypoint /usr/local/bin/ffmpeg "$IMAGE" -hide_banner -v verbose \
+    -init_hw_device vaapi=va:/dev/null,connection_type=drm \
+    -f lavfi -i nullsrc -frames:v 1 -f null - 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] && [ "$rc" -ne 134 ] && ! grep -q 'implib-gen' <<<"$va_out" \
+    || fail "a VAAPI init on a node that is not a DRM device did not end in a clean refusal (exit $rc):
+$va_out"
+  grep -q 'Cannot open a VA display from DRM device /dev/null' <<<"$va_out" \
+    || fail "a VAAPI init on /dev/null failed (exit $rc) without reaching libva-drm:
+$va_out"
+  ok "libva-drm, libva and libdrm load inside the image and refuse a node that is not a DRM device (exit $rc)"
+else
+  ok "no hardware runtime to check on $arch (the image carries none there, by design)"
+fi
+
+# 4b. `encoder: amf` in the image, on every architecture: `holdfast validate` accepts the
+#     key, and `holdfast run` refuses it at start with its reason (AMD's EULA grants no
+#     redistribution of the AMF runtime, so the image cannot carry it; use vaapi) before
+#     anything is probed or opened (docs/design/hardware.md#amf). This is the image's own
+#     binary answering: it is built with the holdfast_image tag, and a binary without it
+#     would probe amf instead, fail for want of a device, and say nothing about the licence.
+amfdir="$(mktemp -d)"
+mkdir -p "$amfdir/media" "$amfdir/state"
+printf 'library_roots:\n  - /media\nstate_dir: /state\nencoder: amf\n' >"$amfdir/config.yaml"
+amf_mounts=(-u "$(id -u):$(id -g)" -v "$amfdir/media:/media" -v "$amfdir/state:/state"
+  -v "$amfdir/config.yaml:/config/config.yaml:ro")
+run_in_image "${amf_mounts[@]}" "$IMAGE" validate --config /config/config.yaml >/dev/null \
+  || { rm -rf "$amfdir"; fail "'holdfast validate' refused encoder: amf (the key must stay valid)"; }
+rc=0
+amf_out="$(run_in_image "${amf_mounts[@]}" "$IMAGE" run --config /config/config.yaml 2>&1)" || rc=$?
+amf_store=no; [ -f "$amfdir/state/jobs.db" ] && amf_store=yes
+rm -rf "$amfdir"
+[ "$rc" -ne 0 ] || fail "'holdfast run' started with encoder: amf in the image:
+$amf_out"
+grep -q 'AMDGPU PRO EULA' <<<"$amf_out" && grep -q 'encoder: vaapi' <<<"$amf_out" \
+  || fail "'holdfast run' refused encoder: amf (exit $rc) without naming the licence and vaapi:
+$amf_out"
+[ "$amf_store" = no ] || fail "the amf refusal left a job store behind"
+ok "encoder: amf is valid, and refused at start in the image with its reason (exit $rc)"
+
 if [ "$MODE" = "--no-encode" ]; then
   echo "== smoke: exec-only mode (skipping the encode) — image runs on ${PLATFORM:-native}"
   exit 0
 fi
 
-# 4. The real thing: a oneshot encode inside the image, on a real file.
+# 5. The real thing: a oneshot encode inside the image, on a real file.
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/media" "$work/state"

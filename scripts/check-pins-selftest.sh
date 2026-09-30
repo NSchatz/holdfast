@@ -2,7 +2,7 @@
 # Prove the guards in check-pins.sh still BITE: the rename guard and the pin assertions.
 # Part of `make check`.
 #
-# Four families of case live here. Cases 0-6 defeat the RENAME guard; cases 7-17 (S0022)
+# Five families of case live here. Cases 0-6 defeat the RENAME guard; cases 7-17 (S0022)
 # defeat the FFMPEG PIN guard - the floating alias, the short-retention daily build, a
 # blanked digest, and a NOTICE that has drifted from the Dockerfile it is supposed to be
 # the source offer for; case 18 (S0024) defeats the GO TOOLCHAIN pin's digest half and case
@@ -14,7 +14,11 @@
 # decision, and a file the gate reads going missing; cases 31-34 (S0151) defeat the UPDATE
 # BOT guards - a build stage that drifted from its GO_IMAGE copy, a base image hidden behind
 # an ARG where the bot cannot read it, and a bot configuration that stopped watching a pin
-# class or went missing. Two of the S0057 cases assert a PASS
+# class or went missing; cases 35-42 (goal 5) defeat the HARDWARE RUNTIME's Debian package
+guards - a package the image copies that NOTICE omits, one NOTICE names that the image
+does not carry, a version drifted between the two, a shortened sha256, a fetch from the
+live mirror or a floating snapshot, a missing pin block, and a NOTICE entry with no source
+offer. Two of the S0057 cases assert a PASS
 # rather than a bite (the local-action exemption, and a manifest whose decision is
 # recorded), because a guard that refuses everything is indistinguishable from a guard
 # that works and is impossible to comply with. One asserts that publishing `:latest` is
@@ -53,7 +57,7 @@ OLD_ENV="TRANSCODE""_SERVER_AUTH_TOKEN"
 OLD_CRF="TRANSCODE""_CRF"
 OLD_METRIC="transcode""_files_total"
 
-declared=35
+declared=43
 pass=0; failed=0
 repo="$work/repo"
 
@@ -420,6 +424,72 @@ reset
 #         and nothing about the build would change - the same invisible vacuity as case 28.
 rm -f "$repo/.github/dependabot.yml"
 expect 1 "a missing .github/dependabot.yml is named, not silently skipped" "MISSING: .github/dependabot.yml"
+reset
+
+# =====================================================================================
+# The hardware runtime's Debian package guards (goal 5, P3). The amd64 image copies shared
+# objects out of Debian packages, and NOTICE is their licence record and source offer.
+# Each case below breaks one half of that in a way that still builds: a package the
+# image carries with no record, a record for a package it does not carry, a version
+# moved in one file only, a hash that no longer pins the bytes, a URL that floats, and
+# a record whose source offer points nowhere.
+# =====================================================================================
+
+# --- 35. A package copied into the image, missing from NOTICE.
+sed -i '/^  deb: libva2 /,/^$/d' "$repo/NOTICE"
+! grep -q '^  deb: libva2 ' "$repo/NOTICE" \
+  || { echo "::error::selftest: could not remove libva2 from NOTICE, so this case did NOT run" >&2; exit 1; }
+expect 1 "a Debian package the image copies but NOTICE omits is caught" "libva2 .* MISSING FROM NOTICE"
+reset
+
+# --- 36. A package NOTICE names that the Dockerfile does not copy.
+sed -i '/^libxshmfence1 /d' "$repo/Dockerfile"
+! grep -q '^libxshmfence1 ' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not remove libxshmfence1 from the pin block, so this case did NOT run" >&2; exit 1; }
+expect 1 "a Debian package NOTICE names but the Dockerfile does not copy is caught" "NOTICE names Debian package libxshmfence1 .*does NOT copy"
+reset
+
+# --- 37. A version moved in NOTICE only: the record names bytes the image lacks.
+sed -i 's/^  deb: libva2 2\.22\.0-3$/  deb: libva2 2.22.0-4/' "$repo/NOTICE"
+grep -qx '  deb: libva2 2.22.0-4' "$repo/NOTICE" \
+  || { echo "::error::selftest: could not move libva2's version in NOTICE, so this case did NOT run" >&2; exit 1; }
+expect 1 "a Debian package version that drifted between the Dockerfile and NOTICE is caught" "libva2: VERSION DRIFT"
+reset
+
+# --- 38. A hash cut short: the build's sha256sum -c would no longer pin the bytes.
+sed -i -E 's/^(libva2 +[^ ]+ +)[0-9a-f]([0-9a-f]{63}) /\1\2 /' "$repo/Dockerfile"
+grep -qE '^libva2 +[^ ]+ +[0-9a-f]{63} ' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not shorten libva2's sha256, so this case did NOT run" >&2; exit 1; }
+expect 1 "a Debian pin without a full sha256 is caught" "libva2 .* carries no 64-character lowercase sha256"
+reset
+
+# --- 39. The fetch moved to the live mirror, where a pool file vanishes at the next point
+#         release. The hashes still verify today, which is exactly why it has to red.
+sed -i 's|https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/pool/${path}|https://deb.debian.org/debian/pool/${path}|' "$repo/Dockerfile"
+grep -qF 'https://deb.debian.org/debian/pool/${path}' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not move the fetch to the live mirror, so this case did NOT run" >&2; exit 1; }
+expect 1 "a Debian package fetched from the live mirror is caught" "FLOATING DEBIAN URL"
+reset
+
+# --- 40. The snapshot itself floating.
+sed -i 's/^ARG DEBIAN_SNAPSHOT=.*/ARG DEBIAN_SNAPSHOT=latest/' "$repo/Dockerfile"
+grep -qx 'ARG DEBIAN_SNAPSHOT=latest' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not float the snapshot, so this case did NOT run" >&2; exit 1; }
+expect 1 "a Debian snapshot that is not a timestamp is caught" "FLOATING DEBIAN SNAPSHOT"
+reset
+
+# --- 41. The pin block gone: an empty comparison would agree with an empty NOTICE.
+sed -i "/^COPY <<'DEBPINS' /,/^DEBPINS\$/d" "$repo/Dockerfile"
+! grep -q 'DEBPINS' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not remove the pin block, so this case did NOT run" >&2; exit 1; }
+expect 1 "a Dockerfile without its Debian pin block is named, not silently skipped" "no Debian package pin block"
+reset
+
+# --- 42. A NOTICE entry whose source offer points nowhere.
+sed -i '/^       source:  lm-sensors /d' "$repo/NOTICE"
+! grep -q '^       source:  lm-sensors ' "$repo/NOTICE" \
+  || { echo "::error::selftest: could not remove libsensors5's source line, so this case did NOT run" >&2; exit 1; }
+expect 1 "a Debian package in NOTICE with no corresponding source is caught" "no corresponding source on snapshot.debian.org.*libsensors5"
 reset
 
 echo

@@ -43,5 +43,184 @@ The ffmpeg binaries are invoked as separate programs (`exec`), not linked into t
 
 --------------------------------------------------------------------------------
 
+--------------------------------------------------------------------------------
+Hardware encoder runtime (container image, linux/amd64 only)
+--------------------------------------------------------------------------------
+
+The amd64 image also REDISTRIBUTES the VAAPI and QSV userspace, copied out of
+Debian 13 (trixie) binary packages: libva, libva-drm and libdrm (which the bundled
+ffmpeg loads for any VAAPI or QSV device), Intel's iHD VA driver and libmfx-gen
+(the QSV runtime), Mesa's radeonsi VA driver for AMD, and the shared libraries
+those need. The arm64 image carries none of it.
+
+Each package below is pinned in the Dockerfile (hwruntime stage) by this exact
+version and by the sha256 of its .deb, and fetched from snapshot.debian.org at
+the snapshot the Dockerfile names. Only its shared objects are copied (from
+mesa-va-drivers only radeonsi_drv_video.so; from libdrm-common only
+/usr/share/libdrm/amdgpu.ids), together with its Debian copyright file, which the
+image carries at /usr/share/doc/<package>/copyright. That file is the complete
+licence statement; the licence named here is a summary of it, read from the file
+of the pinned version on 2026-09-30. scripts/check-pins.sh fails when the
+packages below and the Dockerfile's pins disagree, in name or version, in either
+direction.
+
+  Corresponding source: every package below was built by Debian from the source
+  package named on its "source:" line, at that version, and snapshot.debian.org
+  keeps that source (the .dsc, the upstream tarball and the Debian changes) at
+  the URL on the same line, permanently. That is the corresponding source for the
+  GPL- and LGPL-licensed members of this set (libelf1t64, libsensors5, and the
+  GPL-licensed files other copyright files list), and for every other package too.
+
+  Non-free: intel-media-va-driver-non-free is in Debian's non-free section. Its
+  licence is Expat and BSD-3-clause and Debian redistributes it; it is non-free
+  under the Debian Free Software Guidelines because it contains prebuilt GPU
+  kernels without their source ("we have to move those kernels to non-free as
+  they come without source", its Debian copyright file). It is the full-feature
+  build of the Intel driver; the free build lacks HEVC encode on parts older than
+  Ice Lake. The source package linked below is what Debian distributes; it
+  contains those kernels as binaries.
+
+  Not carried: AMD's AMF runtime (libamfrt64). Its licence, the AMDGPU PRO EULA,
+  grants no redistribution, so `encoder: amf` cannot work in this image; AMD
+  hardware encodes here through `encoder: vaapi`.
+
+  deb: libva2 2.22.0-3
+       licence: Expat (Files: *)
+       source:  libva 2.22.0-3, https://snapshot.debian.org/package/libva/2.22.0-3/
+
+  deb: libva-drm2 2.22.0-3
+       licence: Expat (Files: *)
+       source:  libva 2.22.0-3, https://snapshot.debian.org/package/libva/2.22.0-3/
+
+  deb: libdrm2 2.4.124-2
+       licence: MIT-style X11 permission notice
+       source:  libdrm 2.4.124-2, https://snapshot.debian.org/package/libdrm/2.4.124-2/
+
+  deb: libdrm-common 2.4.124-2
+       licence: MIT-style X11 permission notice (the amdgpu.ids table only)
+       source:  libdrm 2.4.124-2, https://snapshot.debian.org/package/libdrm/2.4.124-2/
+
+  deb: libdrm-amdgpu1 2.4.124-2
+       licence: MIT-style X11 permission notice
+       source:  libdrm 2.4.124-2, https://snapshot.debian.org/package/libdrm/2.4.124-2/
+
+  deb: libdrm-intel1 2.4.124-2
+       licence: MIT-style X11 permission notice
+       source:  libdrm 2.4.124-2, https://snapshot.debian.org/package/libdrm/2.4.124-2/
+
+  deb: libpciaccess0 0.17-3+b3
+       licence: MIT-style X11 permission notice (Debian packaging: GPL)
+       source:  libpciaccess 0.17-3, https://snapshot.debian.org/package/libpciaccess/0.17-3/
+
+  deb: intel-media-va-driver-non-free 25.2.3+ds1-1
+       licence: Expat and BSD-3-clause; Debian section non-free, see below
+       source:  intel-media-driver-non-free 25.2.3+ds1-1, https://snapshot.debian.org/package/intel-media-driver-non-free/25.2.3%2Bds1-1/
+
+  deb: libigdgmm12 22.7.2+ds1-1
+       licence: Expat and BSD-3-clause
+       source:  intel-gmmlib 22.7.2+ds1-1, https://snapshot.debian.org/package/intel-gmmlib/22.7.2%2Bds1-1/
+
+  deb: libmfx-gen1.2 25.1.4-1
+       licence: MIT
+       source:  onevpl-intel-gpu 25.1.4-1, https://snapshot.debian.org/package/onevpl-intel-gpu/25.1.4-1/
+
+  deb: mesa-va-drivers 25.0.7-2+deb13u1
+       licence: MIT (Files: *; other files carry other licences, listed in the copyright file)
+       source:  mesa 25.0.7-2+deb13u1, https://snapshot.debian.org/package/mesa/25.0.7-2%2Bdeb13u1/
+
+  deb: mesa-libgallium 25.0.7-2+deb13u1
+       licence: MIT (Files: *; other files carry other licences, listed in the copyright file)
+       source:  mesa 25.0.7-2+deb13u1, https://snapshot.debian.org/package/mesa/25.0.7-2%2Bdeb13u1/
+
+  deb: libllvm19 1:19.1.7-3+b1
+       licence: Apache-2.0 with LLVM exceptions (Files: *)
+       source:  llvm-toolchain-19 1:19.1.7-3, https://snapshot.debian.org/package/llvm-toolchain-19/1%3A19.1.7-3/
+
+  deb: libz3-4 4.13.3-1
+       licence: Expat (Files: *)
+       source:  z3 4.13.3-1, https://snapshot.debian.org/package/z3/4.13.3-1/
+
+  deb: libedit2 3.1-20250104-1
+       licence: BSD-3-clause
+       source:  libedit 3.1-20250104-1, https://snapshot.debian.org/package/libedit/3.1-20250104-1/
+
+  deb: libbsd0 0.12.2-2
+       licence: BSD-2-clause, BSD-3-clause, ISC, Expat, Beerware and public domain, per file
+       source:  libbsd 0.12.2-2, https://snapshot.debian.org/package/libbsd/0.12.2-2/
+
+  deb: libmd0 1.1.0-2+b1
+       licence: BSD-2-clause, BSD-3-clause, ISC, Beerware and public domain, per file
+       source:  libmd 1.1.0-2, https://snapshot.debian.org/package/libmd/1.1.0-2/
+
+  deb: libtinfo6 6.5+20250216-2
+       licence: MIT/X11 (Files: *)
+       source:  ncurses 6.5+20250216-2, https://snapshot.debian.org/package/ncurses/6.5%2B20250216-2/
+
+  deb: libffi8 3.4.8-2
+       licence: Expat (Files: *)
+       source:  libffi 3.4.8-2, https://snapshot.debian.org/package/libffi/3.4.8-2/
+
+  deb: libxml2 2.12.7+dfsg+really2.9.14-2.1+deb13u3
+       licence: MIT (Files: *; ISC for trio, hash.c and list.c)
+       source:  libxml2 2.12.7+dfsg+really2.9.14-2.1+deb13u3, https://snapshot.debian.org/package/libxml2/2.12.7%2Bdfsg%2Breally2.9.14-2.1%2Bdeb13u3/
+
+  deb: liblzma5 5.8.1-1+deb13u1
+       licence: 0BSD (Files: *)
+       source:  xz-utils 5.8.1-1+deb13u1, https://snapshot.debian.org/package/xz-utils/5.8.1-1%2Bdeb13u1/
+
+  deb: libelf1t64 0.192-4
+       licence: GPL-3+ (Files: *), LGPL-3+ or GPL-2+ (backends/*), LGPL-2.1+ (libelf/dl-hash.h, libelf/elf.h)
+       source:  elfutils 0.192-4, https://snapshot.debian.org/package/elfutils/0.192-4/
+
+  deb: libsensors5 1:3.6.2-2
+       licence: LGPL-2.1+ (lib/*, the library); GPL-2+ (Files: *)
+       source:  lm-sensors 1:3.6.2-2, https://snapshot.debian.org/package/lm-sensors/1%3A3.6.2-2/
+
+  deb: libexpat1 2.8.3-1~deb13u1
+       licence: MIT
+       source:  expat 2.8.3-1~deb13u1, https://snapshot.debian.org/package/expat/2.8.3-1~deb13u1/
+
+  deb: libx11-xcb1 2:1.8.12-1
+       licence: MIT-style X.Org permission notice
+       source:  libx11 2:1.8.12-1, https://snapshot.debian.org/package/libx11/2%3A1.8.12-1/
+
+  deb: libxcb1 1.17.0-2+b1
+       licence: MIT-style permission notice
+       source:  libxcb 1.17.0-2, https://snapshot.debian.org/package/libxcb/1.17.0-2/
+
+  deb: libxau6 1:1.0.11-1
+       licence: MIT-style X11 permission notice (The Open Group)
+       source:  libxau 1:1.0.11-1, https://snapshot.debian.org/package/libxau/1%3A1.0.11-1/
+
+  deb: libxdmcp6 1:1.1.5-1
+       licence: MIT-style X11 permission notice (The Open Group)
+       source:  libxdmcp 1:1.1.5-1, https://snapshot.debian.org/package/libxdmcp/1%3A1.1.5-1/
+
+  deb: libxcb-dri3-0 1.17.0-2+b1
+       licence: MIT-style permission notice
+       source:  libxcb 1.17.0-2, https://snapshot.debian.org/package/libxcb/1.17.0-2/
+
+  deb: libxcb-present0 1.17.0-2+b1
+       licence: MIT-style permission notice
+       source:  libxcb 1.17.0-2, https://snapshot.debian.org/package/libxcb/1.17.0-2/
+
+  deb: libxcb-randr0 1.17.0-2+b1
+       licence: MIT-style permission notice
+       source:  libxcb 1.17.0-2, https://snapshot.debian.org/package/libxcb/1.17.0-2/
+
+  deb: libxcb-sync1 1.17.0-2+b1
+       licence: MIT-style permission notice
+       source:  libxcb 1.17.0-2, https://snapshot.debian.org/package/libxcb/1.17.0-2/
+
+  deb: libxcb-xfixes0 1.17.0-2+b1
+       licence: MIT-style permission notice
+       source:  libxcb 1.17.0-2, https://snapshot.debian.org/package/libxcb/1.17.0-2/
+
+  deb: libxshmfence1 1.3.3-1
+       licence: MIT-style permission notice
+       source:  libxshmfence 1.3.3-1, https://snapshot.debian.org/package/libxshmfence/1.3.3-1/
+
+--------------------------------------------------------------------------------
+
 Go module dependencies are listed in go.mod and are fetched, not vendored; each
 carries its own licence.
