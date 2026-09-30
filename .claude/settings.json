@@ -1,7 +1,7 @@
 {
   "env": {
-    "GOFLAGS": "-p=2",
-    "GOMAXPROCS": "2"
+    "GOFLAGS": "-p=4",
+    "GOMAXPROCS": "12"
   },
   "autoMemoryEnabled": false,
   "attribution": {
