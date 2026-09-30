@@ -19,7 +19,8 @@ git.
 **Never mutate a source until a replacement passed every gate.** The swap is an
 atomic same-filesystem `rename()` from a path in the SOURCE's own directory, and
 it runs only after the output passes: correct codec, duration and packet parity,
-strictly-smaller, per-type stream-count parity, full decode-integrity, and VMAF.
+strictly-smaller, per-type stream-count parity, output fidelity (bit depth, chroma, colour
+tags and HDR10 metadata as the plan declares), full decode-integrity, and VMAF.
 Where the encode is WRITTEN is configurable and the swap is not.
 
 Fail-safe rule: ambiguous, malformed or unsupported input SKIPS with a logged

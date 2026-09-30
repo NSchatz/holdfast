@@ -682,12 +682,13 @@ func closeProgressPipe(r, w *os.File) {
 //     encode's pool size and frame-thread count when it has them, then the HDR10
 //     static-metadata master-display/max-cll block (both libx265-only mechanisms).
 //   - libsvtav1 (svtav1): -preset (numeric 0-13, mapped from the config Preset
-//     word — see svtav1Preset) + -crf. No x265Params: AV1 HDR10 static-metadata
-//     carriage would need svt-av1-params mastering-display/content-light options,
-//     which is OUT OF SCOPE here (see the package doc / CLAUDE.md) — colour
-//     PRIMARIES/TRANSFER/MATRIX/RANGE tags still carry via the universal
-//     -color_* flags, just not the mastering-display block. This mirrors the
-//     existing NVENC limitation the bash transcoder already documented.
+//     word - see svtav1Preset) + -crf. No x265Params. On the pinned ffmpeg the
+//     encoder takes the HDR10 mastering-display and content-light blocks from the
+//     frames' side data (measured 2026-09-30: both reach the output), and the matrix
+//     and range from the -color_* flags; the primaries and transfer it takes from the
+//     frames, NOT from -color_primaries/-color_trc, so EncodePlan.args stamps the
+//     declared ones onto the frames (hdr.Color.SetParams). Whatever an encoder fails
+//     to carry, the output fidelity gate rejects (docs/design/encode-plan.md#fidelity).
 //   - hevc_nvenc/av1_nvenc: -rc vbr -cq <quality> -b:v 0 + a preset.
 //   - hevc_qsv: -global_quality <quality>.
 //   - hevc_vaapi: -vaapi_device (the plan's device, emitted before -i - see
