@@ -80,3 +80,21 @@ row: failed temp missing or empty
 == rules/band-crf-31
 -hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_vaapi -color_range tv -fps_mode passthrough -vf format=p010le,hwupload -profile:v main10 -qp 31 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
 row: failed temp missing or empty
+== source-mpeg4/every-encoder
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v hevc_vaapi -color_range tv -fps_mode passthrough -vf format=p010le,hwupload -profile:v main10 -qp 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-mpeg4/pixel-format-yuv420p/every-encoder
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v hevc_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -qp 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-hevc/every-encoder
+(no invocation)
+row: skipped already-at-target-codec
+== source-av1/every-encoder
+(no invocation)
+row: skipped better-codec-family
+== source-ffv1-pq/every-encoder
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/ffv1-pq.mkv -map 0 -map -0:d? -c copy -c:v hevc_vaapi -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -vf setparams=color_primaries=bt2020:color_trc=smpte2084,format=p010le,hwupload -profile:v main10 -qp 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/ffv1-pq.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-mpeg4/quality-set-t27
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v hevc_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -qp 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
