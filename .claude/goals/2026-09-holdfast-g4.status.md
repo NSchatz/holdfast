@@ -89,8 +89,14 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 4.1 | Every argv sets its pixel format explicitly (golden argv) | TODO |
-| 4.2 | Per-encoder quality keys replace the CRF reused as `-cq`/`-global_quality`/`-qp`; unmeasured defaults marked `ASSUMED` | TODO |
+| 4.1 | Every argv sets its pixel format explicitly (golden argv) | DONE (PR #122, `90b8ed8`): `VideoPlan.InputFormat` from `encoder.Spec.InputFormat` (the plan's format where the encoder lists it, else the planar or semi-planar spelling of the same chroma and depth, else refused); `-pix_fmt` for every encoder but VAAPI, which uploads `format=nv12|p010le,hwupload` (`-profile:v main10` for p010le) and gets no `-pix_fmt`; the engine's `exotic-pixel-format` guard also skips a plan the encoder cannot carry (inputs `pixel_format`, `encoder`); `TestGoldenArgv_EveryArgvNamesItsPixelFormat`; recorded argv change in the hardware and forced-`nv12` goldens only; gate exit 0 in 33m27s on `a5cb382` (`internal/engine` 1433.7 s); mutation-diff 100% (17 killed); CI green |
+| 4.2 | Per-encoder quality keys replace the CRF reused as `-cq`/`-global_quality`/`-qp`; unmeasured defaults marked `ASSUMED` | DONE (PR #122, `90b8ed8`): top-level `quality.<key>` for `nvenc` (-cq 1-51), `av1_nvenc` (-cq 1-63), `qsv` (-global_quality 1-51), `vaapi` (-qp 1-52), `amf` (-qp_i/-qp_p 0-51); `crf` stays for `cpu` and `svtav1`; an absent key inherits the job's crf (byte-identical argv), marked `ASSUMED` in `internal/encoder/quality.go` pending a hardware report; `HOLDFAST_QUALITY_<KEY>` supported; values off an encoder's scale refused by `validate` and at plan derivation |
+
+## Phase 4b - The declared colour tags reach every encoder (found by the fidelity gate)
+
+| # | Item | State |
+|---|---|---|
+| 4b.1 | Stamp the declared primaries and transfer onto the frames (`setparams`) for every encoder but libx265 | DONE (PR #123, `3dc9132`): `hdr.Color.SetParams` at the head of the video chain, before any hwupload; 156 golden lines of the non-libx265 encoders each the old line plus the filter (checked by script), no `cpu` line moved; `TestFidelityGate_EveryEncoderCarriesTheDeclaredPrimariesAndTransfer` red for svtav1 without it; gate exit 0 in 26m54s (`internal/engine` 1513.6 s, 56% of `TEST_TIMEOUT` 45m); mutation-diff 100% (6 killed); CI green |
 
 ## Phase 5 - Design record (line E)
 
@@ -102,8 +108,28 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 6.1 | Gate integrity counted from the goal-start SHA | TODO |
+| 6.1 | Gate integrity counted from the goal-start SHA | DONE (`3dc9132`): `func Test` 1330 -> 1386, no package fell (config 99 -> 107, encoder 12 -> 20, engine 467 -> 485, hdr 10 -> 20, probe 17 -> 20, vmaf 30 -> 39, every other package unchanged); `docs/design/swap.md` 58 -> 62 (+4 -0), `docs/design/quality-gate.md` 76 -> 76 (+0 -0); 15 lines deleted in `*_test.go` (`git diff --numstat 9bde81d origin/main`: +2554 -15), each with its reason below |
 | 6.2 | Adversarial review of the report | TODO |
+
+### The 15 deleted `*_test.go` lines and why
+
+- `internal/engine/encode_bitrate_test.go` (8, PR #122): five `pinArgs` lines that pinned
+  `-pix_fmt yuv420p10le` for the hardware encoders and one that pinned VAAPI's
+  `-vf format=nv12,hwupload` - the recorded argv change of the explicit pixel format (now
+  `p010le`, and for VAAPI `format=p010le,hwupload` with Main 10 and no `-pix_fmt`); the
+  bitrate-path check `hasArgPair(got, "-pix_fmt", "yuv420p10le")` and its comment line, replaced
+  by `hasPixelFormatOf(got, pinArgs[key])`, which requires the exact explicit format for every
+  encoder and refuses any other `-pix_fmt` (stricter; the old one accepted VAAPI's contradictory
+  `-pix_fmt`).
+- `internal/engine/encodeplan_adapters_test.go` (4): the `buildArgs` adapter body and its comment
+  line now resolve the input format and quality through the production functions (#122); the
+  `verifyOutput` adapter's `return e.verifyAgainst(ctx, &EncodePlan{` and `})` became a
+  `job :=` literal plus a fidelity declaration made as `deriveEncodePlan` would (#120).
+- `internal/engine/engine_test.go` (2, PR #120): the probe-budget constant 11 -> 13 and the
+  comment's figure, moved in the commit that moved the cost, as that test requires.
+- `internal/engine/profiles_test.go` (1, PR #120): a stand-in encoder's `-pix_fmt yuv420p` became
+  `yuv420p10le`, the format its job's plan declares; the fidelity gate caught the 8-bit output,
+  and the assertion is unchanged.
 
 ## Decisions taken
 
@@ -143,7 +169,12 @@ summed per directory):
 
 ## NEEDS-OWNER (this goal)
 
-None yet.
+None added. The physical steps this goal's work points at - calibrating the `ASSUMED`
+per-encoder quality defaults and confirming the explicit hardware formats (above all VAAPI's
+`format=p010le,hwupload`) on real hardware - are the per-encoder hardware reports that P2's
+test plan and brief §10 assign to goal 6's `scripts/hw-report.sh` (T43); that script does not
+exist yet, so there is no exact command to write (§0.6). Goal 6 adds those rows. Row 1 (merge
+NSchatz/homelab#208) stays `OPEN`; the PR is still open (checked 2026-09-30).
 
 ## Proposals awaiting the owner
 
@@ -156,6 +187,6 @@ None yet.
 
 ## Resume here
 
-Merged: #121 (S0162), #120 (the fidelity gate). Open: #122 (explicit pixel formats and quality
-keys; worktree `/cache/wt/holdfast/holdfast-g4-encoder-formats-quality`), merged up to
-`41c44bd` and being re-gated. Next: the `setparams` colour track, then the report.
+Merged: #121 (S0162), #120 (the fidelity gate), #122 (explicit pixel formats and quality keys),
+#123 (the declared colour tags). No branch, worktree or open PR of this goal remains. Next: the
+adversarial review of the report (6.2), then the COMPLETE line.
