@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/NSchatz/holdfast/internal/config"
@@ -1329,5 +1331,76 @@ func TestRemuxOnly_HoldsTheOutputToEveryStructuralGate(t *testing.T) {
 	}
 	if md5f(t, src) != before {
 		t.Fatal("the source changed on a rejected remux")
+	}
+}
+
+// TestS0162_AC8_ScorePassErrorIsUnmeasuredAndSourceIntact is S0162 [AC-8]'s engine half:
+// when the score pass returns an error because the channel its log travels through could not
+// be set up, the job is recorded as VMAF-unmeasured and never as passed, and the source is
+// byte-for-byte unchanged. The error is the one vmaf.Score returns in that case (proven in
+// vmaf.TestS0162_AC8_LogChannelSetupFailureIsAnError), reproduced here through the engine's
+// e.vmafScore seam because the vmaf package's pipe seam is not reachable from this package.
+func TestS0162_AC8_ScorePassErrorIsUnmeasuredAndSourceIntact(t *testing.T) {
+	ffmpeg, ffprobe := tools(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "movie.mkv")
+	mkH264(t, ffmpeg, src, "8M")
+	before := md5f(t, src)
+
+	pipeErr := fmt.Errorf("vmaf: log pipe: cannot set up the channel libvmaf writes its log through "+
+		"(refusing to score a pair whose measurement could not be read): %w", syscall.EMFILE)
+	eng := buildEngine(t, ffmpeg, ffprobe, dir, nil, func(c *config.Config) {
+		c.VmafEnable = boolPtr(true)
+		c.MinVmaf, c.VmafMinPool, c.VmafMinChroma = 95, 60, 30
+	})
+	ts := eng.Store.(*testStore)
+	var (
+		mu     sync.Mutex
+		events []Event
+		calls  int
+	)
+	eng.Observer = func(ev Event) { mu.Lock(); events = append(events, ev); mu.Unlock() }
+	eng.vmafScore = func(context.Context, vmaf.Request) (vmaf.Result, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return vmaf.Result{}, pipeErr
+	}
+	if err := eng.RunOneshot(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls == 0 {
+		t.Fatal("the score pass never ran - the case proves nothing")
+	}
+	if md5f(t, src) != before {
+		t.Error("the source changed although its replacement was never measured")
+	}
+	if codecOf(t, ffprobe, src) != "h264" {
+		t.Error("the source was swapped for an unmeasured encode")
+	}
+	if n := nTemp(t, dir); n != 0 {
+		t.Errorf("%d temp file(s) left behind", n)
+	}
+	if ledgerHas(t, ts, store.Done, "movie.mkv") {
+		t.Error("the job was recorded as passed")
+	}
+	if !ledgerHas(t, ts, store.Failed, "movie.mkv") {
+		t.Error("expected a failed row for an unmeasured encode")
+	}
+	var failed []Event
+	for _, ev := range events {
+		if ev.Status == store.Failed {
+			failed = append(failed, ev)
+		}
+		if ev.Status == store.Done {
+			t.Errorf("a done event was emitted for an unmeasured encode: %+v", ev)
+		}
+	}
+	if len(failed) != 1 || failed[0].Gate != GateVmafUnmeasured {
+		t.Fatalf("failed events %+v, want exactly one naming gate %q", failed, GateVmafUnmeasured)
+	}
+	if o := failed[0].Outcome; o == nil || !strings.Contains(o.Reason, "VMAF measurement failed") ||
+		!strings.Contains(o.Reason, "log pipe") {
+		t.Errorf("the recorded reason must say the measurement failed and why; got %+v", o)
 	}
 }
