@@ -231,8 +231,8 @@ func DecisionInputsPerPath(cfg config.Config) store.InputsForPath {
 // not a live path). It takes the KEY and not a profile because each job's guard has to ask
 // about the encoder THAT JOB uses, which an encode profile may have overridden.
 func targetCodecFor(key string) string {
-	if spec, ok := encoder.Lookup(key); ok {
-		return spec.TargetCodec
+	if codec, ok := encoder.TargetCodecOf(key); ok {
+		return codec
 	}
 	return "hevc"
 }

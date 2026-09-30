@@ -523,10 +523,28 @@ library above resolves all of its dependencies inside the image, and a VAAPI dev
 missing render node ends in ffmpeg's own device error, not an abort. An encode on real Intel or AMD
 hardware is not proven by CI.
 
-**There is no silent fallback.** If the configured encoder cannot actually encode on this host,
-`holdfast` fails loud at startup and exits non-zero. The capability check really encodes a
-clip and probes the result, because a hardware encoder can exit 0 while writing nothing when no
-device is present.
+**What holdfast checks at start.** It lists the render nodes under `/dev/dri`, reads each one's
+vendor, and gives VAAPI the first Intel or AMD node it can open and QSV the first Intel one; each
+node and the assignment are logged once (`hardware: render node`, `hardware: render nodes
+assigned`). A node it cannot open is logged with the reason: permission denied names the node's
+GID and the `group_add` line above. Then every encoder the configuration can reach is probed: two
+tiny clips, one at 8 bits and one at 10, are encoded through the command line a job would run -
+every VAAPI device opened with `connection_type=drm`, 10-bit uploaded as `p010` with Main 10 -
+and each output must be real, of the right codec and of the depth asked for
+(`hardware: encoder probed ... 8bit=... 10bit=... why=...`).
+[`docs/design/hardware.md`](design/hardware.md#probe) has the reasoning.
+
+**No silent fallback, unless you ask for one.** If a configured hardware encoder cannot encode on
+this host, `holdfast` refuses to start and exits non-zero, naming the encoder, the library root,
+the reason and the lever - as it always has, because the default `hw_fallback: skip` never
+substitutes another encoder. Set `hw_fallback: software` (at the top level or on one library
+root) to have such a root's jobs encoded by the software encoder of the same codec instead (`cpu`,
+or `svtav1` for `av1_nvenc`), at start and whenever a hardware encode fails; the row records the
+encoder that ran. `encoder: auto` picks, per job, the first of `nvenc`, `qsv`, `vaapi`, `amf`
+whose probe passed for that job's pixel format, and always writes HEVC; with no usable hardware
+it refuses to start under `skip` and uses `cpu` under `software`. A job no probed encoder can
+carry is skipped `hardware-unavailable` under `skip`, and offered again on every pass. See
+[`docs/design/hardware.md`](design/hardware.md#fallback), including why `skip` is the default.
 
 ## Building and verifying it yourself
 

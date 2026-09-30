@@ -254,6 +254,10 @@ dry_run: false
 #                         #                                   vaapi on AMD there)
 #                         # The raw ffmpeg -c:v codec name (e.g. libsvtav1) also
 #                         # works as an alias for its short key.
+#                         #   auto       the first of nvenc, qsv, vaapi, amf that
+#                         #              passed this host's start-time probe for
+#                         #              the job's pixel format (always HEVC);
+#                         #              where none did, hw_fallback decides.
 #                         #
 #                         # CAPABILITY CHECK: at `run` startup the configured
 #                         # encoder is actually exercised against a tiny real clip,
@@ -270,6 +274,14 @@ dry_run: false
 #                         # stream-count parity, full decode-integrity, and VMAF.
 #                         # A hardware/av1 encode that fails any gate is rejected
 #                         # and the source is kept — no encoder is special-cased.
+# hw_fallback: skip      # what a job does where its hardware encoder (the one
+#                         # named, or every one `auto` may choose) is missing or
+#                         # fails. skip (default): nothing else encodes it, the
+#                         # source stays as it is, and a named hardware encoder
+#                         # that does not work refuses the start. software: the
+#                         # software encoder of the same codec runs instead (cpu;
+#                         # svtav1 for av1_nvenc). A library root may override it.
+#                         # See docs/design/hardware.md#fallback.
 # crf: 22                # quality knob (lower = bigger/better): libx265/libsvtav1
 #                         # constant-rate-factor, 0-51. A hardware encoder with no
 #                         # quality.<key> below takes this value unchanged as its

@@ -66,8 +66,17 @@ const (
 	SkipHDR10Plus             = "hdr10-plus"
 	SkipIncompleteHDRMetadata = "incomplete-hdr-metadata"
 	SkipExoticPixelFormat     = "exotic-pixel-format"
-	SkipTargetExists          = "target-already-exists"
-	SkipSymlink               = "symlinked-source"
+
+	// SkipHardwareUnavailable: the job's hardware encoder - the one the configuration names,
+	// or every one `encoder: auto` may choose - did not pass this host's start-time probe
+	// at the depth the job's plan needs, and the root's hw_fallback is skip, so no other
+	// encoder is used and the file stays as it is. It is a CONDITION of this host rather
+	// than a verdict about the file, so it is re-derived on every pass (mutableGuardSkips):
+	// the file is offered again once the hardware is there or the fallback changes
+	// (docs/design/hardware.md#fallback).
+	SkipHardwareUnavailable = "hardware-unavailable"
+	SkipTargetExists        = "target-already-exists"
+	SkipSymlink             = "symlinked-source"
 
 	// SkipMultiVideoStream is the source-SHAPE guard: the source carries a video stream
 	// beyond the first that is not an attached picture, or ffprobe could not establish what
@@ -234,7 +243,7 @@ const (
 // a verdict the next pass clears and re-derives by itself. Those guards fire in ordinary
 // operation, so a consumer that has to account for every skip this engine can record -
 // the /metrics label set is the standing one - reads THIS list. One built on SkipGuards
-// would silently have no bucket for three live guards.
+// would silently have no bucket for the live mutable guards (hardware-unavailable among them).
 //
 // Adding a Skip* constant means adding it here. The metrics surface asserts this list
 // against the constants themselves (parsed out of this package), so a token added above
@@ -248,6 +257,7 @@ var SkipVocabulary = []string{
 	SkipHDR10Plus,
 	SkipIncompleteHDRMetadata,
 	SkipExoticPixelFormat,
+	SkipHardwareUnavailable,
 	SkipTargetExists,
 	SkipSymlink,
 	SkipMultiVideoStream,
@@ -280,7 +290,7 @@ var SkipVocabulary = []string{
 // `restored-original` row is refused by that rule outright and must never appear here:
 // re-opening it would feed an operator's rescued bytes back to the very gates that passed
 // the encode they rejected.
-var mutableGuardSkips = []string{SkipUndoRetentionFailed, SkipOperatorExcluded, SkipHardlinked}
+var mutableGuardSkips = []string{SkipUndoRetentionFailed, SkipOperatorExcluded, SkipHardlinked, SkipHardwareUnavailable}
 
 // The GATE vocabulary: WHICH gate or stage refused a job that failed. Like the skip
 // tokens above it is a closed, stable wire format - it is published as a metric label,
@@ -369,6 +379,10 @@ type Engine struct {
 	// start); every plan the engine derives opens the node assigned here. The zero value
 	// assigns /dev/dri/renderD128 to both.
 	Devices hwdevice.Assignment
+
+	// Hardware is what this run's start-time probes established about each hardware
+	// encoder (cmd/holdfast sets it); nil probed nothing. See Hardware.
+	Hardware Hardware
 
 	// roots are the library roots with their RESOLVED profiles, read from Cfg once in
 	// New. A file's profile comes from the root it was enumerated under (rootFor), and
@@ -2063,6 +2077,12 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// The snapshot is the one the rule resolution already took where it took one, so a
 	// banded root costs the same single ffprobe an unbanded one does.
 	props, v := e.guardSource(ctx, f, root, prof, ts, targetCodec, reuse(pre, e.Probe.VideoProps))
+	if v.encoder != "" {
+		// The encoder that runs this job is not the one its settings name (`auto`, or a
+		// hardware fallback): from here on the job's settings are that encoder's, its quality
+		// included, so the plan, the argv and the row all read the encoder that ran.
+		ts = e.Cfg.WithEncoder(ts, v.encoder)
+	}
 	if v.stopped() {
 		logVerdict := e.Log.Info
 		if v.humanMustAct {
@@ -2373,7 +2393,31 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	}
 
 	encStart := time.Now()
-	if err := e.encode(ctx, worker, f, work, props, job); err != nil {
+	err = e.encode(ctx, worker, f, work, props, job)
+	// A HARDWARE ENCODE THAT FAILED, under a root whose hw_fallback is software, is encoded
+	// once more with the software encoder of the same codec, from a plan derived for that
+	// encoder (docs/design/hardware.md#fallback). Nothing about the source has moved - the
+	// failed attempt wrote only the working file, which is removed first - and the gates
+	// below judge whichever output exists, against the plan it was encoded from. An encode
+	// the memory watchdog aborted is not a hardware failure and is not retried here.
+	if fb := e.encodeFallback(ctx, prof, job, err); fb != "" {
+		e.Log.Warn("hardware encode failed; hw_fallback is software, so this job is encoded again with the "+
+			"software encoder (source untouched)", "file", f, "encoder", job.Video.Encoder.Key, "fallback", fb, "err", err)
+		_ = os.Remove(work)
+		ts = e.Cfg.WithEncoder(ts, fb)
+		out.Encoder = ts.Encoder
+		again, derr := deriveEncodePlan(planInputs{
+			settings: ts, prof: prof, source: f, output: work, streams: plan, devices: e.Devices,
+			snapshot: func() (*probe.VideoProps, error) { return props, nil },
+		})
+		if derr != nil {
+			err = derr
+		} else {
+			job = again
+			err = e.encode(ctx, worker, f, work, props, job)
+		}
+	}
+	if err != nil {
 		if ctx.Err() != nil { // interrupted: discard temp, DON'T finish — leave active for RecoverStale
 			_ = os.Remove(tmp)
 			return ctx.Err()
@@ -2869,6 +2913,11 @@ type sourceVerdict struct {
 	codec  string
 	outExt string
 	target string
+
+	// encoder is the registry encoder this job runs, where it is not the one its settings
+	// name: what `encoder: auto` chose, or the software encoder hw_fallback substituted. ""
+	// where the settings' own encoder runs.
+	encoder string
 }
 
 // stopped reports whether a guard refused the file.
@@ -3062,7 +3111,20 @@ func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, pr
 	// derivation refuses the same plan again as a backstop. A job that re-encodes nothing
 	// hands the encoder nothing and is not held to it, and an unknown encoder is left to the
 	// derivation's own refusal.
-	if spec, known := encoder.Lookup(ts.Encoder); known && !prof.RemuxOnlyEnabled() {
+	//
+	// Before it, the encoder that will run is resolved: `encoder: auto` chooses among the
+	// hardware encoders this host's probe found usable for this plan's format, and a hardware
+	// encoder the probe did not find usable for it gives way to hw_fallback. The pixel-format
+	// guard then asks about the encoder that will actually run.
+	runs := ts.Encoder
+	if !prof.RemuxOnlyEnabled() {
+		key, hv := e.resolveEncoder(prof, ts, planFmt, codec)
+		if hv.stopped() {
+			return props, hv
+		}
+		runs = key
+	}
+	if spec, known := encoder.Lookup(runs); known && !prof.RemuxOnlyEnabled() {
 		if _, ok := spec.InputFormat(planFmt); !ok {
 			return props, sourceVerdict{guard: SkipExoticPixelFormat, codec: codec,
 				inputs:  []string{InputPixelFormat, InputEncoder},
@@ -3114,7 +3176,11 @@ func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, pr
 		}
 	}
 
-	return props, sourceVerdict{codec: codec, outExt: outExt, target: final}
+	v := sourceVerdict{codec: codec, outExt: outExt, target: final}
+	if runs != ts.Encoder {
+		v.encoder = runs
+	}
+	return props, v
 }
 
 // interlacedVerdict answers what happens to a source ffprobe reported as interlaced, and

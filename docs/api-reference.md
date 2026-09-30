@@ -87,6 +87,7 @@ build can record is here, and a token with no row fails the documentation check.
 | `target-already-exists` | the output container differs from the source's and a distinct file is already at the target name |
 | `undo-retention-failed` | the original could not be retained for the undo window, so the swap that would have destroyed it did not run |
 | `operator-excluded` | an operator withheld this path from the pipeline |
+| `hardware-unavailable` | the job's hardware encoder (the one configured, or every one `encoder: auto` may choose) did not pass this host's start-time probe at the depth the job needs, and the library root's `hw_fallback` is `skip`; re-decided on every pass, so the file is offered again once the hardware or the fallback allows it |
 | `restored-original` | an operator put this original back through the undo window; it is never re-encoded by a later scan |
 
 ### The recorded outcome - the proof a swap was safe
@@ -97,7 +98,7 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | Field | On | What it is |
 |---|---|---|
 | `reason` | failed | the error that rejected it (the encode error, or **which gate** refused the output) |
-| `reason` | skipped | **which guard** fired - `already-at-target-codec`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `multi-video-stream`, `unreadable-stream-list`, `source-damaged`, `undetermined-source-height`, `downscale-unacknowledged`, `unknown-field-order`, `telecine-cadence`, `target-already-exists`, `undo-retention-failed`, `restored-original`, `operator-excluded` |
+| `reason` | skipped | **which guard** fired - `already-at-target-codec`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `multi-video-stream`, `unreadable-stream-list`, `source-damaged`, `undetermined-source-height`, `downscale-unacknowledged`, `unknown-field-order`, `telecine-cadence`, `target-already-exists`, `undo-retention-failed`, `restored-original`, `operator-excluded`, `hardware-unavailable` |
 | `encoder` | any job that reached the encoder | the encoder that ran (`cpu`, `svtav1`, `nvenc`, …) - a skip, or a file with no readable video stream, never gets that far and records none |
 | `profile` | every terminal row | the `encode_profiles` entry that supplied this job's settings, `""` for the top-level ones. `encoder` alone stops answering "what ran" once two encoders can run in one scan, and a **skip** carries it too - the profile is what decided the file was already at its target codec. `""` is a **real value**, not a missing measurement, so the key is always present |
 | `vmaf_mean`, `vmaf_min` | done, and a VMAF-rejected failure | the pooled harmonic mean **and the worst frame** |

@@ -21,6 +21,10 @@ var mutableSkipGuards = map[string]bool{
 	// A token in SkipGuards would offer a second lever that cannot move the row the first
 	// one is holding.
 	"SkipOperatorExcluded": true,
+	// A condition of this host (its hardware, or the root's hw_fallback), re-derived on
+	// every pass: the lever is the hardware or the fallback, and a requeue would re-open
+	// nothing the next pass does not already re-decide.
+	"SkipHardwareUnavailable": true,
 }
 
 // TestSkipGuards_EveryTerminalSkipTokenIsRequeueable grades [AC-9] of S0150: every

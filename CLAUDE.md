@@ -51,6 +51,8 @@ reasoning lives in the document, not in this file.
   HDR10 metadata its plan declares** - [`docs/design/encode-plan.md`](docs/design/encode-plan.md#fidelity).
 - **A hardware encoder runs only after a real encode through a job's own command line came out
   faithful at each bit depth** - [`docs/design/hardware.md`](docs/design/hardware.md#probe).
+- **A job whose hardware is missing or fails is encoded by nothing else unless its root says
+  `hw_fallback: software`** - [`docs/design/hardware.md`](docs/design/hardware.md#fallback).
 
 ## Layout
 

@@ -93,3 +93,64 @@ The image's binary knows it is the image's: the Dockerfile builds it with the
 happens before any probe, so no AMF library is ever looked for there. `amf` stays a valid key
 (`holdfast validate` accepts it) and is never read as `vaapi`: they are different encoders with
 different quality scales, and a configuration that says one is never run as the other.
+
+<a id="auto"></a>
+
+## `encoder: auto`
+
+**`encoder: auto` chooses, per job, the first hardware HEVC encoder that passed this host's
+start-time probe for the job's plan, in the order `nvenc`, `qsv`, `vaapi`, `amf`, and where none
+does, `hw_fallback` decides.** It is opt-in, like every new transformation in this program: a
+configuration that does not say `auto` runs exactly the encoder it names, as before.
+
+- It chooses **per job**, at the pixel-format guard, because the answer depends on the job's
+  own plan: an encoder whose 10-bit probe failed may still carry an 8-bit plan (a forced
+  `pixel_format`), and a plan the encoder's pixel-format list cannot carry is not handed to it.
+- It hands hardware **only 4:2:0 plans**, the layout the probe encodes. A 4:2:2 or 4:4:4 plan
+  goes to the fallback: `auto` is a choice made on evidence, and there is none for those.
+- Every encoder it may choose, and the software encoder it falls back to, writes **HEVC**, so a
+  file's target codec does not depend on which hardware a host has: the already-at-target skip
+  and the output codec check read the same answer on every host, and moving a library between
+  an Intel and an NVIDIA host re-encodes nothing.
+- The row records the encoder that ran (`nvenc`, `vaapi`, `cpu`, ...), never `auto`; the
+  decision inputs record the configured `auto`, so an unchanged configuration re-opens nothing.
+- The order is ASSUMED, not measured: NVENC first; QSV before VAAPI on Intel because QSV is
+  Intel's own runtime; VAAPI before AMF because AMD's advice on Linux is VA-API through Mesa.
+  The hardware reports (brief T43) are what would change it.
+
+<a id="fallback"></a>
+
+## `hw_fallback`: what a job does without its hardware
+
+**`hw_fallback` is set per library root (or at the top level), is `skip` or `software`, and
+defaults to `skip`.**
+
+- `skip`: no other encoder is used. A hardware encoder the start-time probe found unusable
+  refuses the start, naming the root and the lever, as a configured encoder that does not work
+  always has - it would skip every file it was asked to encode, and a run that says so at start
+  is better than a run that says so per file. A job whose plan the probe did not show the
+  encoder carrying (an 8-bit-only device and a 10-bit plan), or that `auto` finds no hardware
+  for, is skipped `hardware-unavailable`, re-decided on every pass, and the source stays as it
+  is. A hardware encode that fails at run time fails the job, as it always has: the source is
+  untouched and `max_failures` decides the retries.
+- `software`: the software encoder of the same codec runs instead - `cpu` (libx265) for the HEVC
+  encoders and `auto`, `svtav1` for `av1_nvenc`. An unusable hardware encoder is stated at start
+  and the run proceeds; a hardware encode that fails at run time is encoded once more in
+  software, from a plan derived for that encoder, before any gate runs; the row records the
+  software encoder.
+
+**Why `skip` is the default.** Three reasons, in order of weight:
+
+1. An existing configuration keeps making the same decisions and running the same command lines
+   (the program's rule for every new key, brief I5): under `skip`, a configuration that names
+   an encoder gets that encoder or the refusal it always got.
+2. A software encode is not a quiet substitute. libx265 at the configured preset can take many
+   times the wall-clock of the hardware encoder the operator chose, on a host whose CPU is
+   shared; an operator who wants that trade has one key to say so.
+3. Nothing is lost by skipping: the source is never touched, the skip is logged, counted
+   (`holdfast_skips_total{guard="hardware-unavailable"}`) and re-decided on every pass, so the
+   file is encoded once the hardware is there or the fallback changes.
+
+The fallback never relaxes a gate: a software output is held to exactly the gates a hardware
+one is, against the plan it was encoded from, and the VMAF floors stay the root's whichever
+encoder wrote the file.

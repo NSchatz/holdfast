@@ -125,3 +125,129 @@ func TestPreflight_AVAAPIRefusalSaysWhyTheEncoderHasNoRenderNode(t *testing.T) {
 		t.Errorf("the VAAPI probe did not open its node with connection_type=drm:\n%s", b)
 	}
 }
+
+// `encoder: auto` and hw_fallback at start, on a host where no hardware encoder works (every
+// hardware codec is refused by the stand-in ffmpeg; no device is opened):
+//
+//   - under the default (skip), auto has nothing to choose and every file would be skipped,
+//     so the run refuses to start and names the lever;
+//   - under software, the run starts, and the probe tried every encoder auto may choose.
+func TestPreflight_AutoWithNoUsableHardwareFollowsHWFallback(t *testing.T) {
+	requireWorkingEncoder(t)
+	stub, log := hardwareRefusingFFmpeg(t)
+
+	skip, state := hardwareConfig(t, "encoder: auto\n")
+	if code, said := dispatchWith(t, stub, "validate", "--config", skip); code != 0 {
+		t.Fatalf("validate refused encoder: auto:\n%s", said)
+	}
+	code, said := dispatchWith(t, stub, "run", "--config", skip)
+	if code == 0 {
+		t.Fatalf("run started with encoder: auto, no usable hardware and hw_fallback skip:\n%s", said)
+	}
+	for _, want := range []string{"encoder: auto found no usable hardware encoder", "hw_fallback: software",
+		"nvenc, qsv, vaapi, amf"} {
+		if !strings.Contains(said, want) {
+			t.Errorf("the refusal does not carry %q:\n%s", want, said)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(state, "jobs.db")); err == nil {
+		t.Error("a refused run left a job store behind")
+	}
+	b, _ := os.ReadFile(log)
+	for _, codec := range []string{"hevc_nvenc", "hevc_qsv", "hevc_vaapi", "hevc_amf"} {
+		if n := strings.Count(string(b), codec); n != 2 {
+			t.Errorf("auto's probe ran %s %d times, want 2 (8 and 10 bits)", codec, n)
+		}
+	}
+
+	software, _ := hardwareConfig(t, "encoder: auto\nhw_fallback: software\n")
+	if code, said := dispatchWith(t, stub, "run", "--config", software); code != 0 {
+		t.Fatalf("run refused encoder: auto under hw_fallback software:\n%s", said)
+	}
+}
+
+// hw_fallback is per library: a root naming a hardware encoder that does not work refuses the
+// start under skip, naming the root and the lever, and starts under software; the root's own
+// value beats the top level's.
+func TestPreflight_HWFallbackIsDecidedPerLibraryRoot(t *testing.T) {
+	requireWorkingEncoder(t)
+	stub, _ := hardwareRefusingFFmpeg(t)
+	other := filepath.Join(t.TempDir(), "other")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entry := func(fallback string) string {
+		s := "  - path: " + other + "\n    encoder: vaapi\n"
+		if fallback != "" {
+			s += "    hw_fallback: " + fallback + "\n"
+		}
+		return s
+	}
+	write := func(top, root string) string {
+		p, _ := hardwareConfig(t, top)
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(strings.Replace(string(b), "\nstate_dir:", "\n"+root+"state_dir:", 1)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	code, said := dispatchWith(t, stub, "run", "--config", write("", entry("")))
+	if code == 0 {
+		t.Fatalf("a root on an unusable vaapi under the default skip started:\n%s", said)
+	}
+	for _, want := range []string{"library root " + other, `encoder "vaapi"`, "hw_fallback is skip",
+		"hw_fallback: software", "with cpu instead"} {
+		if !strings.Contains(said, want) {
+			t.Errorf("the refusal does not carry %q:\n%s", want, said)
+		}
+	}
+	if code, said := dispatchWith(t, stub, "run", "--config", write("", entry("software"))); code != 0 {
+		t.Errorf("the root's own hw_fallback: software did not let the run start:\n%s", said)
+	}
+	if code, said := dispatchWith(t, stub, "run", "--config", write("hw_fallback: software\n", entry("skip"))); code == 0 {
+		t.Errorf("the root's own skip did not beat the top level's software:\n%s", said)
+	}
+	if code, said := dispatchWith(t, stub, "run", "--config", write("hw_fallback: software\n", entry(""))); code != 0 {
+		t.Errorf("a root inheriting the top level's software did not start:\n%s", said)
+	}
+}
+
+// A resolution rule's hardware encoder runs under its root's hw_fallback (S0165 with this
+// goal's fallback): unusable under a skip root it refuses the start naming the root and the
+// rule, and under a software root the run starts.
+func TestPreflight_ARulesHardwareEncoderFollowsItsRootsHWFallback(t *testing.T) {
+	requireWorkingEncoder(t)
+	stub, _ := hardwareRefusingFFmpeg(t)
+	lib := filepath.Join(t.TempDir(), "banded")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(fallback string) string {
+		p, _ := hardwareConfig(t, "")
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry := "  - path: " + lib + "\n    encoder: cpu\n" + fallback +
+			"    rules:\n      - when:\n          min_source_height: 1081\n        encoder: vaapi\n"
+		if err := os.WriteFile(p, []byte(strings.Replace(string(b), "\nstate_dir:", "\n"+entry+"state_dir:", 1)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	code, said := dispatchWith(t, stub, "run", "--config", write(""))
+	if code == 0 {
+		t.Fatalf("a rule on an unusable vaapi under a skip root started:\n%s", said)
+	}
+	for _, want := range []string{"library root " + lib + ": rules[0]", `encoder "vaapi"`, "hw_fallback is skip"} {
+		if !strings.Contains(said, want) {
+			t.Errorf("the refusal does not carry %q:\n%s", want, said)
+		}
+	}
+	if code, said := dispatchWith(t, stub, "run", "--config", write("    hw_fallback: software\n")); code != 0 {
+		t.Errorf("a rule on an unusable vaapi under a software root did not start:\n%s", said)
+	}
+}

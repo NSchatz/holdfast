@@ -95,6 +95,10 @@ var profileKnobs = []string{
 	// a digest with one that does not.
 	maxHeightKey,
 	downscaleAckKey,
+	// What a job does where its hardware encoder is missing or fails, appended on the
+	// deinterlace knob's terms: it contributes to the digest only where it is not the
+	// shipped `skip`, so a root that sets nothing digests as it did before the key existed.
+	hwFallbackKey,
 }
 
 // ProfileKnobs returns the closed set of knobs a library_roots entry may override, in
@@ -180,6 +184,11 @@ type Profile struct {
 	// key rather than a second reading of the first.
 	MaxHeight    int   `yaml:"max_height"`
 	DownscaleAck *bool `yaml:"downscale_acknowledged"`
+
+	// HWFallback is what a job under this root does where its hardware encoder is missing
+	// or fails: HWFallbackSkip or HWFallbackSoftware. "" is the default, skip, which is
+	// what a Profile assembled in Go carries. See Config.HWFallback.
+	HWFallback string `yaml:"hw_fallback"`
 
 	// Rules are this root's ordered, first-match resolution bands (see rules.go). They are
 	// NOT a knob and carry no `yaml` tag of their own: they are resolved out of the entry
@@ -268,6 +277,7 @@ func (p Profile) values() []string {
 		renderDeinterlace(p.Deinterlace),
 		renderMaxHeight(p.MaxHeight),
 		strconv.FormatBool(p.DownscaleAcknowledged()),
+		p.HWFallbackMode(),
 	}
 }
 
@@ -356,6 +366,8 @@ func digestSilent(knob, value string) bool {
 		return value == noCeiling
 	case downscaleAckKey:
 		return value == "false"
+	case hwFallbackKey:
+		return value == HWFallbackSkip
 	}
 	return false
 }
@@ -369,10 +381,11 @@ func digestSilent(knob, value string) bool {
 // the root when it is checking a root's profile, so the top level's refusal reads
 // exactly as it always has.
 func (p Profile) validate() error {
-	if p.Encoder != "" {
-		if _, ok := encoder.Lookup(p.Encoder); !ok {
-			return fmt.Errorf("encoder %q is not supported (known: %v)", p.Encoder, encoder.Known())
-		}
+	if p.Encoder != "" && !encoder.Valid(p.Encoder) {
+		return fmt.Errorf("encoder %q is not supported (known: %v)", p.Encoder, encoder.KnownWithAuto())
+	}
+	if err := validateHWFallback(p.HWFallback); err != nil {
+		return err
 	}
 	if p.CRF < 0 || p.CRF > 51 {
 		return fmt.Errorf("crf %d out of range (0-51)", p.CRF)

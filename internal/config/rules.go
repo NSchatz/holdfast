@@ -752,12 +752,13 @@ func bandName(i int) string {
 	return fmt.Sprintf("%s[%d]", rulesKey, i)
 }
 
-// targetCodecOf is the codec an encoder key writes. A key the registry does not resolve (one
-// validation has not reached, or a selection made per job) is its own codec name, so two
+// targetCodecOf is the codec an encoder key writes: its registry encoder's, or HEVC for
+// `encoder: auto`, every choice of which writes HEVC (encoder.TargetCodecOf). A key the
+// registry does not resolve (one validation has not reached) is its own codec name, so two
 // different such keys are never taken to agree.
 func targetCodecOf(key string) string {
-	if spec, ok := encoder.Lookup(key); ok {
-		return spec.TargetCodec
+	if codec, ok := encoder.TargetCodecOf(key); ok {
+		return codec
 	}
 	return "unresolved encoder " + strconv.Quote(key)
 }

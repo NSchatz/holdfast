@@ -151,6 +151,15 @@ func (c *Config) withEncoderQuality(t Transcode) Transcode {
 	return t
 }
 
+// WithEncoder is t with its encoder resolved to key - the encoder `auto` or a hardware
+// fallback chose for one job - and the quality that encoder takes from the configuration
+// (quality.<key>, or the job's crf), exactly as TranscodeIn would have resolved them had the
+// configuration named key. Every other setting is t's.
+func (c *Config) WithEncoder(t Transcode, key string) Transcode {
+	t.Encoder = key
+	return c.withEncoderQuality(t)
+}
+
 // TranscodeIn resolves the effective settings for one source path under one library
 // root's profile: that profile overlaid with the FIRST matching encode profile's
 // overrides, or the profile alone when nothing matches.
@@ -309,12 +318,12 @@ func validateSegments(pat []string) error {
 // unknown encoder is refused at LOAD, by AC-A8, so that `holdfast validate` answers for
 // the same configurations `holdfast run` will start on.
 func validateEncoderKey(key string) error {
-	if _, ok := encoder.Lookup(key); !ok {
+	if !encoder.Valid(key) {
 		if key == "" {
 			return fmt.Errorf("encoder %q is not an encoder this build ships (known: %v); "+
-				"omit the key to inherit the encoder the library root resolved", key, encoder.Known())
+				"omit the key to inherit the encoder the library root resolved", key, encoder.KnownWithAuto())
 		}
-		return fmt.Errorf("encoder %q is not supported (known: %v)", key, encoder.Known())
+		return fmt.Errorf("encoder %q is not supported (known: %v)", key, encoder.KnownWithAuto())
 	}
 	return nil
 }
