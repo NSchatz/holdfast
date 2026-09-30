@@ -184,6 +184,12 @@ type MetadataPlan struct {
 	// Color is the colour description written into the output, with the HDR10 static
 	// metadata where the source carries it.
 	Color hdr.Color
+	// Fidelity is what the output must carry to be a faithful replacement: the bit depth
+	// and chroma subsampling of PixelFormat, the colour tags of Color, and the HDR10
+	// static-metadata blocks the source carries. The output fidelity gate holds the output
+	// to it (docs/design/encode-plan.md#fidelity). It is zero on a stream copy, which is
+	// held to bit-identity instead.
+	Fidelity hdr.Fidelity
 	// HDR10Plus and DolbyVision report whether the output carries that dynamic metadata.
 	// This build carries neither - the guards skip a source that has either before a plan
 	// is derived - so both are false, and a plan claiming either is refused rather than
@@ -354,7 +360,7 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 		Quality:     quality,
 	}
 	p.Picture = PictureOps{Deinterlace: film, Downscale: shrink}
-	p.Metadata = MetadataPlan{Color: color}
+	p.Metadata = MetadataPlan{Color: color, Fidelity: hdr.FidelityOf(pixFmt, color, props.SideData())}
 	p.coverArt.pinned = pinned
 	return p, nil
 }

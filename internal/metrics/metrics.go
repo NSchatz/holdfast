@@ -81,7 +81,7 @@ func New(st store.Store, log *slog.Logger) *Metrics {
 		}, []string{"guard"}),
 		failuresTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "holdfast_failures_total",
-			Help: "Total files that FAILED, by the gate or stage that rejected them (probe|encode|codec|length|size|stream-parity|decode|vmaf-mean|vmaf-min|vmaf-chroma|vmaf-unmeasured|swap|other). Decided where the rejection is made, never read off the error text, so the sum equals holdfast_files_total{outcome=\"failed\"}.",
+			Help: "Total files that FAILED, by the gate or stage that rejected them (probe|encode|codec|length|size|stream-parity|fidelity|decode|vmaf-mean|vmaf-min|vmaf-chroma|vmaf-unmeasured|swap|other). Decided where the rejection is made, never read off the error text, so the sum equals holdfast_files_total{outcome=\"failed\"}.",
 		}, []string{"gate"}),
 		bytesReclaimed: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "holdfast_bytes_reclaimed_total",

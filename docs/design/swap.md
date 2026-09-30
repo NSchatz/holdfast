@@ -15,6 +15,10 @@ same-directory temp, and the swap itself is the only filesystem mutation there
 is: an atomic same-filesystem rename(2) out of that temp onto the source. This is
 the exact fix for Tdarr's documented replace-before-verify data loss.
 
+The output fidelity gate joins them by addition: the replacement must carry the bit depth,
+chroma subsampling, colour tags and HDR10 static metadata its encode plan declares
+([encode-plan](encode-plan.md#fidelity)).
+
 Any gate failure discards the temp and leaves the source byte-for-byte intact.
 There is no half-written state left behind to clean up, and no moment at which the
 source is gone and the replacement is not yet in place.

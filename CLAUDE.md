@@ -46,6 +46,8 @@ reasoning lives in the document, not in this file.
   [`docs/design/ledger-totals.md`](docs/design/ledger-totals.md#null-is-not-zero).
 - **Every job's encode is declared once, and the command line and every gate read that one
   plan** - [`docs/design/encode-plan.md`](docs/design/encode-plan.md#encode-plan).
+- **An output replaces its source only when it carries the bit depth, chroma, colour tags and
+  HDR10 metadata its plan declares** - [`docs/design/encode-plan.md`](docs/design/encode-plan.md#fidelity).
 
 ## Layout
 

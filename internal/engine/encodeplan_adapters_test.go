@@ -7,6 +7,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/downscale"
 	"github.com/NSchatz/holdfast/internal/encoder"
+	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/store"
 )
 
@@ -48,10 +49,31 @@ func (e *Engine) verifyOutput(ctx context.Context, in, tmp string, prof config.P
 	if plan.RemuxOnly() {
 		video = VideoPlan{Copy: true, Codec: plan.SourceVideoCodec()}
 	}
-	return e.verifyAgainst(ctx, &EncodePlan{
+	job := &EncodePlan{
 		Source: in, Output: tmp,
 		Profile: prof, Streams: plan, Video: video,
 		Audio: CopyStreams, Subtitles: CopyStreams,
 		Picture: PictureOps{Deinterlace: film, Downscale: shrink},
-	})
+	}
+	if !video.Copy {
+		job.Metadata.Fidelity = e.adapterFidelity(ctx, in)
+	}
+	return e.verifyAgainst(ctx, job)
+}
+
+// adapterFidelity is the output fidelity declaration the derivation makes for a re-encode of
+// in under this engine's configuration: the configured pixel format, or the one derived from
+// the source's; the colour description derived from the source's tags and side data; and the
+// source's HDR10 blocks. The signature before the plan carried no pixel format or colour
+// description, so the adapter declares what deriveEncodePlan would, from the same inputs,
+// rather than hand the gate an empty declaration it would rightly refuse.
+func (e *Engine) adapterFidelity(ctx context.Context, in string) hdr.Fidelity {
+	props := e.Probe.VideoProps(ctx, in)
+	pixFmt := e.Cfg.PixelFormat
+	if e.Cfg.PixelFormatAuto() {
+		pixFmt, _ = hdr.DerivePixFmt(props.PixFmt())
+	}
+	color := hdr.DeriveColor(props.Color("color_primaries"), props.Color("color_transfer"),
+		props.Color("color_space"), props.Color("color_range"), props.SideData())
+	return hdr.FidelityOf(pixFmt, color, props.SideData())
 }
