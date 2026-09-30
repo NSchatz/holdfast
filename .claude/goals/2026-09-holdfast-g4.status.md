@@ -39,7 +39,9 @@ Logs under `/cache/tmp/holdfast-g4/`.
 
 | Gate | Value at goal start | Wall-clock |
 |---|---|---|
-| `make check` under `flock -o` (log `gate-baseline.log`) | running | - |
+| `make check` under `flock -o` (log `gate-baseline.log`) | exit 0 | 1429 s (23m49s) |
+| `internal/engine` under `go test -race` (from that run) | ok, 87.5% coverage | 1330.3 s (49% of `TEST_TIMEOUT` 45m) |
+| `cmd/holdfast` under `go test -race` (from that run) | ok, 89.4% coverage | 461.0 s |
 | `func Test` count, all packages | 1330 in 25 packages (table below) | - |
 | `docs/design/swap.md`, `docs/design/quality-gate.md` lines (`wc -l`) | 58, 76 | - |
 
@@ -67,21 +69,21 @@ summed per directory):
 | # | Item | State |
 |---|---|---|
 | 1.1 | Precondition checked (header above) | DONE (`9bde81d`): goal 3's COMPLETE line is on `origin/main` |
-| 1.2 | Ledger created as the goal's first commit, straight to `main` | DOING |
-| 1.3 | Baselines with timings | DOING |
+| 1.2 | Ledger created as the goal's first commit, straight to `main` | DONE (`eab9418`) |
+| 1.3 | Baselines with timings | DONE (`9bde81d`): the table above; `make check` exit 0 in 23m49s |
 
 ## Phase 2 - Triage (line B)
 
 | # | Item | State |
 |---|---|---|
-| 2.1 | S0162 `vmaf-log-off-tmpfs` | TODO |
+| 2.1 | S0162 `vmaf-log-off-tmpfs` | DONE (PR #121, `169583b`): stream route - libvmaf writes its JSON log to a pipe handed to ffmpeg as fd 3 (`log_path=/proc/self/fd/3`) and `decodeLog` streams it token by token, keeping only the four pooled statistics; no log file exists, so AC-9's second half and AC-10 do not apply; tests AC-1..AC-9 in `internal/vmaf/logpipe_s0162_test.go` and AC-8 in `internal/engine/verify_test.go`, with the F1 control (whole-file decode of a 200,000-frame log +154 MB vs +14 KB streamed) and the F2 control (10,181,551 bytes under `$TMPDIR` the old way vs 0); AC-4 bit-identical against the pinned ffmpeg; `docker-compose.yml` comment corrected; gate exit 0 in 1765 s (`internal/engine` 1469.6 s); CI green; 0 test lines deleted |
 
 ## Phase 3 - The fidelity gate (line C, foundation)
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | Output fidelity gate: bit depth, chroma subsampling, primaries, transfer, matrix, range, HDR10 mastering and content-light side data equal the source's or what the plan declares it changes | TODO |
-| 3.2 | One fixture per field reds when that field is lost; the source is byte-identical afterwards | TODO |
+| 3.1 | Output fidelity gate: bit depth, chroma subsampling, primaries, transfer, matrix, range, HDR10 mastering and content-light side data equal the source's or what the plan declares it changes | DONE (PR #120, `41c44bd`): `hdr.Fidelity` declared on the plan (`MetadataPlan.Fidelity`), gate 5b `GateFidelity` in `verifyAgainst`, output read by `probe.OutputFacts` at stream and first-frame level; round 1 red (5 engine tests: probe ceiling, pre-plan adapter, an 8-bit stand-in), fixed in `5838884`; round 2 exit 0 on `73bcfaa` (`internal/engine` 1422.9 s, `cmd/holdfast` 453.9 s; wall-clock 55m36s incl. about 22 min waiting for the lock); mutation-diff 100% (39 killed); CI green |
+| 3.2 | One fixture per field reds when that field is lost; the source is byte-identical afterwards | DONE (PR #120, `41c44bd`): `TestFidelityGate_RedsWhen{BitDepth,ChromaSubsampling,Primaries,Transfer,Matrix,Range,MasteringDisplay,ContentLightLevel}IsLost` and `TestFidelityGate_RedsAFakeHardwareEncodeThatWrites8Bit`, with three passing controls |
 
 ## Phase 4 - Explicit pixel formats and per-encoder quality (line D)
 
@@ -94,7 +96,7 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 5.1 | `docs/design/encode-plan.md` gains the fidelity anchor; `CLAUDE.md` links it | TODO |
+| 5.1 | `docs/design/encode-plan.md` gains the fidelity anchor; `CLAUDE.md` links it | DONE (PR #120, `41c44bd`): anchor `fidelity`; `CLAUDE.md` Design rationale links `docs/design/encode-plan.md#fidelity`; `docs/design/swap.md` +4 lines, none removed |
 
 ## Phase 6 - Report
 
@@ -112,11 +114,48 @@ summed per directory):
   installed here, so every `grep` prints an install error; goal shells use `command grep`, `rg`
   or `git grep` (brief §0.11 names this).
 
+- 2026-09-30: S0162 takes the spec's stream route (no log directory), chosen by the lead: a
+  pipe needs no new configuration key, directory validation or startup sweep, and leaves
+  nothing on disk after a killed run. Reasoning: PR #121's body and the `vmaf.go` section
+  "Where the log goes".
+- 2026-09-30: finding (measured with the pinned `N-125875-g5d4d3bdc61`): `-color_primaries`
+  and `-color_trc` do not reach an encode's output; the encoder takes those two tags from the
+  decoded frames (the frames win where they carry them; a Matroska output's container elements
+  stay unset where they do not). `-colorspace` and `-color_range` do take effect, and libx265
+  writes all three tags into the bitstream from `-x265-params`. So the fidelity gate reads the
+  tags at both levels (stream and first decoded frame) and a declared tag must be signalled at
+  some level and contradicted at none. Reasoning: `docs/design/encode-plan.md#fidelity`.
+- 2026-09-30: consequence of that finding: an `svtav1` (or hardware) encode of an HDR10 source
+  whose bitstream under-signals primaries and transfer (the plan declares the HDR10 defaults)
+  writes PQ samples with no primaries or transfer tag at all - a silent loss on `main` before
+  this goal. The fidelity gate now rejects it and keeps the source. `-vf setparams=...` was
+  measured to carry the tags; the argv fix is its own track after the pixel-format track
+  merges (it moves golden argv).
+- 2026-09-30: the output is read in two ffprobe runs (`probe.OutputFacts`), not the four the
+  first draft used; the per-job probe ceiling in `TestProbeBudget_ProgressAddsNoSubprocess`
+  moves 11 -> 13 in the commit that moved the cost, as that test's own comment requires (the
+  precedent is S0089's 10 -> 11). Two test lines change for it (the constant and the comment's
+  figure); no assertion is removed.
+- 2026-09-30: a zero fidelity declaration is refused by the gate, never read as "nothing to
+  check": a plan the derivation did not make would otherwise be a fail-open path. The pre-plan
+  `verifyOutput` test adapter therefore declares what `deriveEncodePlan` would
+  (`adapterFidelity`).
+
 ## NEEDS-OWNER (this goal)
 
 None yet.
 
+## Proposals awaiting the owner
+
+- Follow-up (PR #122): terminal rows record `crf`, not `quality.<key>`, as a decision input, so
+  changing a per-encoder quality key does not re-open rows decided under the old value (the
+  `requeue` lever still does). Fail-safe: nothing is re-encoded unasked.
+- Follow-up (PR #122): `holdfast validate` does not statically refuse `crf: 0` inherited by a
+  hardware encoder whose scale excludes 0 (`nvenc`, `av1_nvenc`, `qsv`, `vaapi`); such a job
+  fails at plan derivation with a message naming `quality.<key>`, before anything runs.
+
 ## Resume here
 
-Phase 1: the baseline gate is running in `/cache/wt/holdfast/g4-baseline`. Next: read the S0162
-spec (super, read-only), the plan, the gates and the encoder; plan the tracks.
+Merged: #121 (S0162), #120 (the fidelity gate). Open: #122 (explicit pixel formats and quality
+keys; worktree `/cache/wt/holdfast/holdfast-g4-encoder-formats-quality`), merged up to
+`41c44bd` and being re-gated. Next: the `setparams` colour track, then the report.
