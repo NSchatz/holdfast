@@ -107,9 +107,11 @@ func (f EncoderFunc) Encode(ctx context.Context, in, out string, props *probe.Vi
 // encode plan (EncodePlan): the streams the plan carries (every stream but data where no
 // intended map was derived, -map 0 -map -0:d?), copied, with the video re-encoded by the
 // plan's registry encoder at its pixel format and quality value, through its picture
-// operations, and written with its colour description - the encoder-agnostic -color_* tags
-// on EVERY encoder, the HDR10 static-metadata master-display/max-cll block on libx265 only
-// (see videoArgs).
+// operations, and written with its colour description - the -color_* tags on every encoder,
+// the declared primaries and transfer stamped onto the frames for every encoder but libx265,
+// and the HDR10 static-metadata master-display/max-cll parameters on libx265, where every
+// other encoder takes those blocks from the frames' side data (see videoArgs); the output
+// fidelity gate holds whatever comes out to the plan (docs/design/encode-plan.md#fidelity).
 //
 // The engine derives the plan and hands it over (ForEncodePlan). An encoder that was handed
 // none derives it itself, from Cfg, the profile, the stream map and the source, through the
@@ -673,10 +675,12 @@ func closeProgressPipe(r, w *os.File) {
 }
 
 // videoArgs assembles the per-encoder ffmpeg args (everything after `-c:v
-// <codec>`, before the trailing `-- <out>`). The -pix_fmt, -color_* flags and
-// -fps_mode passthrough are UNIVERSAL — every Spec gets them, since they carry
-// source fidelity independent of which codec/encoder produces the bytes. Beyond
-// that each encoder family has its own quality-knob shape:
+// <codec>`, before the trailing `-- <out>`). Every Spec gets the -color_* flags and
+// -fps_mode passthrough, and every Spec but VAAPI an explicit -pix_fmt (VAAPI names its
+// format in the upload chain instead). Of the -color_* flags only -colorspace and
+// -color_range take effect on the pinned ffmpeg: the encoder takes primaries and transfer
+// from the frames, which is why EncodePlan.args stamps them (hdr.Color.SetParams) for every
+// encoder but libx265. Beyond that each encoder family has its own quality-knob shape:
 //
 //   - libx265 (cpu): -preset/-crf plus -x265-params, which carries x265Extra: the
 //     encode's pool size and frame-thread count when it has them, then the HDR10

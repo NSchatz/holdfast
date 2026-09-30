@@ -45,6 +45,7 @@ type VideoProps struct {
 	sideOnce sync.Once
 	frameSD  string // frame-level side data, flat=s=. (== frameSideDataFlat)
 	streamSD string // stream-level side data, flat=s=. (== streamSideDataFlat)
+	sideOK   bool   // both side-data probes ran to completion
 
 	vsOnce      sync.Once
 	videoStream []VideoStream // the file's video streams, in container order
@@ -362,9 +363,21 @@ func (vp *VideoProps) Color(field string) string { return normColorValue(vp.fiel
 // past the cheap early skip guards — ever read it.
 func (vp *VideoProps) loadSideData() {
 	vp.sideOnce.Do(func() {
-		vp.frameSD = vp.p.frameSideDataFlat(vp.ctx, vp.f)
-		vp.streamSD = vp.p.streamSideDataFlat(vp.ctx, vp.f)
+		var frameOK, streamOK bool
+		vp.frameSD, frameOK = vp.p.frameSideData(vp.ctx, vp.f)
+		vp.streamSD, streamOK = vp.p.streamSideData(vp.ctx, vp.f)
+		vp.sideOK = frameOK && streamOK
 	})
+}
+
+// SideDataAnswered reports whether both side-data probes behind SideData ran to completion.
+// An empty SideData from probes that answered means the file carries no side data; from
+// probes that did not, it means nothing is known - and a caller that declares what an output
+// must carry from it (the output fidelity gate's declaration) must not read the second as the
+// first.
+func (vp *VideoProps) SideDataAnswered() bool {
+	vp.loadSideData()
+	return vp.sideOK
 }
 
 // SideData returns the frame-level side data concatenated with the stream-level side

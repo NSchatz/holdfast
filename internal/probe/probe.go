@@ -430,10 +430,17 @@ func (p *Prober) FieldOrder(ctx context.Context, f string) string {
 // mastering-display, content-light and HDR10+ dynamic metadata surface here. First
 // frame only: HDR side data repeats per-frame. Port of bash hdr_sidedata_flat.
 func (p *Prober) frameSideDataFlat(ctx context.Context, f string) string {
-	out, _ := exec.CommandContext(ctx, p.FFprobe, "-v", "error", "-select_streams", "v:0",
+	out, _ := p.frameSideData(ctx, f)
+	return out
+}
+
+// frameSideData is frameSideDataFlat with whether ffprobe answered: ok=false when it did not
+// run to completion, and then out is whatever it printed before it stopped.
+func (p *Prober) frameSideData(ctx context.Context, f string) (out string, ok bool) {
+	b, err := exec.CommandContext(ctx, p.FFprobe, "-v", "error", "-select_streams", "v:0",
 		"-read_intervals", "%+#1", "-show_frames",
 		"-show_entries", "frame=side_data_list", "-of", "flat=s=.", "--", f).Output()
-	return string(out)
+	return string(b), err == nil
 }
 
 // streamSideDataFlat returns the flat STREAM-level side-data of the video stream.
@@ -441,9 +448,15 @@ func (p *Prober) frameSideDataFlat(ctx context.Context, f string) string {
 // dvcC/dvvC box), NOT frame-level, so DV detection must look here too. Port of
 // bash hdr_stream_sidedata_flat.
 func (p *Prober) streamSideDataFlat(ctx context.Context, f string) string {
-	out, _ := exec.CommandContext(ctx, p.FFprobe, "-v", "error",
+	out, _ := p.streamSideData(ctx, f)
+	return out
+}
+
+// streamSideData is streamSideDataFlat with whether ffprobe answered (see frameSideData).
+func (p *Prober) streamSideData(ctx context.Context, f string) (out string, ok bool) {
+	b, err := exec.CommandContext(ctx, p.FFprobe, "-v", "error",
 		"-show_entries", "stream_side_data_list", "-of", "flat=s=.", "--", f).Output()
-	return string(out)
+	return string(b), err == nil
 }
 
 // SideDataFlat returns the frame-level side data (first frame only) concatenated

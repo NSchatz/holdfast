@@ -360,6 +360,14 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 		Quality:     quality,
 	}
 	p.Picture = PictureOps{Deinterlace: film, Downscale: shrink}
+	// The fidelity declaration names every HDR10 block the source carries, read from its side
+	// data. A side-data probe that did not answer would read as "no block", and the output
+	// would then be held to nothing where the source may carry a mastering display: an
+	// unknown is refused rather than declared as absent, and the source is kept.
+	if !props.SideDataAnswered() {
+		return nil, fmt.Errorf("cannot read the side data of %q (ffprobe did not answer): refusing to "+
+			"encode without knowing which HDR10 metadata the output must carry", in.source)
+	}
 	p.Metadata = MetadataPlan{Color: color, Fidelity: hdr.FidelityOf(pixFmt, color, props.SideData())}
 	p.coverArt.pinned = pinned
 	return p, nil
