@@ -79,8 +79,8 @@ summed per directory):
 | # | Item | State |
 |---|---|---|
 | 3.1 | One declared plan per job (video encoder and device, decode path, pixel format, quality; audio, subtitle and picture operations; metadata carriers) | DONE (PR #115, `eef7216`): `EncodePlan` in `internal/engine/encodeplan.go`, derived once per job by `deriveEncodePlan` in `ProcessFile`; `hdr.Color` for the colour description |
-| 3.2 | The argv builder reads the plan; the golden argv tests pass unchanged | DONE (PR #115, `eef7216`): `FFmpegEncoder` builds from the plan alone (`EncodePlan.args`, `videoArgs`); `TestGoldenArgv` passes on `eef7216` with no golden file changed since `b94cd2a` (`git diff b94cd2a origin/main` over them: 0 lines) |
-| 3.3 | Every gate reads the plan; no existing engine test assertion removed or relaxed | DONE (PR #115, `eef7216`): `Engine.verifyAgainst` takes the plan; 0 lines deleted in any `*_test.go` since the goal-start SHA (`buildArgs` and `verifyOutput` stay as test adapters); new proofs `TestEncodePlan_*` (5) and `TestDeriveColor_TheDescriptionAndBothRenderingsExactly`; local gate exit 0 in 1743 s on `c8ded9c` (`internal/engine` 1593.9 s, 59% of `TEST_TIMEOUT` 45m); mutation-diff 100% (`internal/hdr/probe.go`, 19 killed, 0 lived); CI green |
+| 3.2 | The argv builder reads the plan; the golden argv tests pass unchanged | DONE (PR #115, `eef7216`): `FFmpegEncoder` takes every job-specific argument of its command line from the plan (`EncodePlan.args`, `videoArgs`); the run's execution parameters (the libx265 thread pools, `-progress`, the mux queue bounds, the global flags) come from the encoder; `TestGoldenArgv` passes on `eef7216` with no golden file changed since `b94cd2a` (`git diff b94cd2a origin/main` over them: 0 lines) |
+| 3.3 | Every gate reads the plan; no existing engine test assertion removed or relaxed | DONE (PR #115, `eef7216`; PR #116, `ba35133`): `Engine.verifyAgainst` takes only the plan and reads from it the source and the output it measures (#116) and every job-specific expectation; `TestEncodePlan_EveryGateReadsThePlan` moves every gate's verdict (exists, codec, length, size, streams, decode, the perceptual gate's reference and scale) by changing only the plan; #116's gate exit 0 in 1733 s on `6f85ca9` (`internal/engine` 1568.9 s), CI green; 0 lines deleted in any `*_test.go` since the goal-start SHA (`buildArgs` and `verifyOutput` stay as test adapters); new proofs `TestEncodePlan_*` (5) and `TestDeriveColor_TheDescriptionAndBothRenderingsExactly`; #115's gate exit 0 in 1743 s on `c8ded9c` (`internal/engine` 1593.9 s, 59% of `TEST_TIMEOUT` 45m); mutation-diff 100% (`internal/hdr/probe.go`, 19 killed, 0 lived); CI green |
 
 ## Phase 4 - Design record (line D)
 
@@ -92,8 +92,8 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 5.1 | Gate integrity counted from the goal-start SHA | DONE (`eef7216`): 0 lines deleted in `*_test.go` (`git diff --numstat 9e27c1a origin/main`: +1553 -0); `func Test` 1322 -> 1330, no package fell (`internal/engine` 460 -> 467, `internal/hdr` 9 -> 10); `docs/design/swap.md` 58 -> 58 and `docs/design/quality-gate.md` 76 -> 76, 0 lines removed |
-| 5.2 | Adversarial review of the report | DONE: a fresh subagent reviews the report against the repositories after this commit, as §21 requires before the report is printed; its verdict is the report's line G |
+| 5.1 | Gate integrity counted from the goal-start SHA | DONE (`ba35133`): 0 lines deleted in `*_test.go` (`git diff --numstat 9e27c1a origin/main`: +1603 -0); `func Test` 1322 -> 1330, no package fell (`internal/engine` 460 -> 467, `internal/hdr` 9 -> 10); `docs/design/swap.md` 58 -> 58 and `docs/design/quality-gate.md` 76 -> 76, 0 lines removed |
+| 5.2 | Adversarial review of the report | DONE: round 1, by a fresh subagent on 2026-09-30, found lines A-F true on the repositories and 2 statements false (this row, which claimed a review not yet run; "argv built from the plan alone", when the run's execution parameters come from the encoder) and 4 overstated or stale ("every gate reads the plan", when the gates took the source and output as loose parameters; the per-commit trailer list; "with the row"; the golden-diff label). All were corrected: the gates now take the files they measure from the plan (PR #116), and the wording is fixed here and in the report. A second fresh subagent checks the corrected report against the repositories after this commit; its verdict is printed as the report's line G |
 
 ## Decisions taken
 
@@ -170,6 +170,15 @@ summed per directory):
   1593.9 s in #115's gate, 59% of `TEST_TIMEOUT` (45m), under I15's 80% line, so
   `TEST_TIMEOUT` stays.
 
+- 2026-09-30: round 1 of the report's adversarial review (5.2) and its corrections. PR #116
+  (`ba35133`) makes `verifyAgainst` take only the plan: the source and the output it measures
+  come from `EncodePlan.Source`/`Output`, as the encoder already required, and the exists,
+  length and decode gates are shown to move with the plan too. The length gate's tolerance
+  (`duration_tolerance_sec`) stays a run-wide setting, as the stray-temp sweep reads it.
+- 2026-09-30: PR #113 was merged while `main` was one ledger-only commit (`95301f4`) ahead of
+  its last merged head (`38966f7`); under §0.3 its gate and CI stood. Later PRs were merged
+  with their branch containing `origin/main`.
+
 ## NEEDS-OWNER (this goal)
 
 None. No goal-3 step needs real GPU hardware, a live Plex, Sonarr or Radarr, a homelab merge
@@ -195,8 +204,9 @@ Not NEEDS-OWNER kinds (§0.6); findings and decisions only the owner or a later 
 
 ## Resume here
 
-Goal 3 is complete. Merged: #113 (`b94cd2a`, the golden argv, before any refactor commit) and
-#115 (`eef7216`, the encode plan, `docs/design/encode-plan.md`, the `CLAUDE.md` link). No
-branch or worktree of this goal remains. Goal 4's precondition is this ledger's COMPLETE line.
+Goal 3 is complete. Merged: #113 (`b94cd2a`, the golden argv, before any refactor commit),
+#115 (`eef7216`, the encode plan, `docs/design/encode-plan.md`, the `CLAUDE.md` link) and #116
+(`ba35133`, the gates take the files they measure from the plan). No branch or worktree of
+this goal remains. Goal 4's precondition is this ledger's COMPLETE line.
 
 COMPLETE (goal 3): 2026-09-30
