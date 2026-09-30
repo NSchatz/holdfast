@@ -49,6 +49,8 @@ reasoning lives in the document, not in this file.
   plan** - [`docs/design/encode-plan.md`](docs/design/encode-plan.md#encode-plan).
 - **An output replaces its source only when it carries the bit depth, chroma, colour tags and
   HDR10 metadata its plan declares** - [`docs/design/encode-plan.md`](docs/design/encode-plan.md#fidelity).
+- **A hardware encoder runs only after a real encode through a job's own command line came out
+  faithful at each bit depth** - [`docs/design/hardware.md`](docs/design/hardware.md#probe).
 
 ## Layout
 
@@ -73,6 +75,8 @@ reasoning lives in the document, not in this file.
   row all read.
 - `internal/vmaf` - libvmaf via ffmpeg; the perceptual gate.
 - `internal/encoder` - the codec matrix registry.
+- `internal/hwdevice` - the render nodes a hardware encoder can open, and the one VAAPI and QSV
+  are each assigned.
 - `internal/store` - the persistent job and outcome state.
 - `internal/fsclass` - the one enumeration of what this build calls local.
 - `internal/diskfree` - free space on a path's filesystem, the one answer the startup

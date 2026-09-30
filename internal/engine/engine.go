@@ -26,6 +26,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/fsclass"
 	"github.com/NSchatz/holdfast/internal/hdr"
+	"github.com/NSchatz/holdfast/internal/hwdevice"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
 	"github.com/NSchatz/holdfast/internal/vmaf"
@@ -363,6 +364,11 @@ type Engine struct {
 	Enc   Encoder
 	Store store.Store
 	Log   *slog.Logger
+
+	// Devices are the render nodes this host assigned to VAAPI and QSV (hwdevice.Assign at
+	// start); every plan the engine derives opens the node assigned here. The zero value
+	// assigns /dev/dri/renderD128 to both.
+	Devices hwdevice.Assignment
 
 	// roots are the library roots with their RESOLVED profiles, read from Cfg once in
 	// New. A file's profile comes from the root it was enumerated under (rootFor), and
@@ -2351,7 +2357,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// row, the gate and the reason are the ones that refusal always recorded. The encoder is
 	// then never called.
 	job, err := deriveEncodePlan(planInputs{
-		settings: ts, prof: prof, source: f, output: work, streams: plan,
+		settings: ts, prof: prof, source: f, output: work, streams: plan, devices: e.Devices,
 		snapshot: func() (*probe.VideoProps, error) { return props, nil },
 	})
 	if err != nil {

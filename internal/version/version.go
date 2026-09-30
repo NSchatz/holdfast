@@ -18,3 +18,14 @@ var (
 func String() string {
 	return fmt.Sprintf("holdfast %s (commit %s, built %s)", Version, Commit, Date)
 }
+
+// Packaging is how this binary is distributed: PackagingImage in the container image, "" for
+// any other build. The image's build sets it through the holdfast_image build tag
+// (packaging_image.go), which the Dockerfile's go build passes and nothing else does. It
+// decides one thing: the image cannot carry AMD's AMF runtime, so `encoder: amf` is refused
+// there with the reason (internal/encoder.RefusedInImage), and works as before on a host
+// install.
+var Packaging = packaging
+
+// PackagingImage is the Packaging of the container image's binary.
+const PackagingImage = "image"
