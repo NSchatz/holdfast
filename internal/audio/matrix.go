@@ -106,15 +106,18 @@ func FamilyOf(layout string) (Family, bool) {
 // reads back from both Matroska and MP4 (measured 2026-10-01).
 //
 //   - aac and libopus: mono, stereo, 5.1, 7.1. A 5.1(side) source is written 5.1: the side
-//     pair is mapped to the back pair at unity gain by swresample, and each encoder writes
-//     only the back form (libopus refuses 5.1(side) outright).
+//     pair is copied to the back pair at unity gain by swresample where the input has no
+//     back pair (libswresample/rematrix.c:236-245), and each encoder writes only the back
+//     form (libopus refuses 5.1(side) outright).
 //   - ac3 and eac3: mono, stereo, 5.1(side), and NOT 7.1. The pinned build's encoders list
 //     layouts up to 5.1 only (ff_ac3_ch_layouts, libavcodec/ac3enc.c:152-190) and, with no
 //     -ch_layout, fold a 7.1 source to 5.1 with exit 0 and no warning
-//     (verify-streams-hdr.md claim 8). A 5.1 source in either spelling reads back 5.1(side).
+//     (verify-streams-hdr.md claim 8). A 5.1 source in either spelling reads back 5.1(side);
+//     a back pair goes to the side pair at unity gain where the input has no side pair
+//     (libswresample/rematrix.c:206-212).
 //
-// Sources: https://github.com/FFmpeg/FFmpeg/tree/5d4d3bdc61 libavcodec/ac3enc.c, read
-// 2026-10-01.
+// Sources: https://github.com/FFmpeg/FFmpeg/tree/5d4d3bdc61 libavcodec/ac3enc.c and
+// libswresample/rematrix.c, read 2026-10-01.
 func OutputLayout(codec string, f Family) (string, bool) {
 	switch f {
 	case Mono, Stereo:
