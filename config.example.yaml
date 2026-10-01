@@ -901,9 +901,9 @@ dry_run: false
 #                              #   HOLDFAST_SERVER_AUTH_TOKEN, REFUSES TO START.
 #                              #     server_auth_token: file:/run/secrets/holdfast-token
 # server_read_token: ""        # A SECRET REFERENCE to the bearer token the READ endpoints
-#                              #   (/api/summary, /api/queue, /api/history, /api/events)
-#                              #   require. EMPTY IS THE DEFAULT AND MEANS THE READ SURFACE
-#                              #   IS OPEN: those four answer any caller, and they carry the
+#                              #   (/api/summary, /api/queue, /api/history, /api/events,
+#                              #   /api/health) require. EMPTY IS THE DEFAULT AND MEANS THE
+#                              #   READ SURFACE IS OPEN: those five answer any caller, and they carry the
 #                              #   full path of every file holdfast has seen, so on a
 #                              #   non-loopback server_addr that is your whole library
 #                              #   served without a credential. Set it and they need
@@ -950,6 +950,18 @@ dry_run: false
 #                              #   above it, stop feeding new files. 0 disables. The
 #                              #   load is the HOST's, divided by the CPUs holdfast may
 #                              #   run on, not by its cpus: quota - see docs/docker.md.
+# health_sweep_interval_hours: 0  # the library health sweep, OFF at 0 (the default).
+#                              #   >0 = every N hours after the last sweep finished,
+#                              #   serve fully decodes every source the enumeration
+#                              #   offers and REPORTS each as ok, corrupt or unreadable
+#                              #   (GET /api/health, the holdfast_health_sweep_* metrics,
+#                              #   one notification per sweep that found a problem). It
+#                              #   NEVER moves, renames, deletes or repairs a file. It
+#                              #   starts no decode outside run_window, over max_load,
+#                              #   while streaming or while paused, and resumes after a
+#                              #   restart. 0-87660. See docs/design/health-sweep.md.
+# health_sweep_workers: 1      # sweep decodes at once, at the lowest CPU priority
+#                              #   (0-16; 0 means the default of 1).
 # tautulli_url: ""             # optional Plex-aware pause: while Tautulli reports an
 # tautulli_api_key: ""         #   active stream, stop feeding new files. Both required
 #                              #   to enable; a Tautulli outage fails OPEN (never halts
