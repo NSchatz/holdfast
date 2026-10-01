@@ -165,7 +165,8 @@ const (
 // Reasons is the whole refusal vocabulary, in the order it is documented.
 var Reasons = []string{ReasonNoBars, ReasonTooFewSamples, ReasonSamplesDisagree, ReasonUnknownFrame,
 	ReasonUnknownPixelFormat, ReasonUnaligned, ReasonDolbyVision, ReasonBarsNotBlack, ReasonDetectFailed,
-	ReasonRemuxOnly}
+	ReasonRemuxOnly, ReasonL5Unreadable, ReasonL5FrameRate, ReasonL5Absent, ReasonL5Varies, ReasonL5Odd,
+	ReasonL5Disagrees, ReasonL5ZeroingFailed, ReasonL5GateFailed}
 
 // edgesOfBox turns one sample's box into the edges it would remove, and reports whether the
 // sample is VALID: a box with nothing in it (the negative crop of all-black frames), a box
@@ -226,17 +227,15 @@ func Agree(boxes []Box, f Frame) Consensus {
 
 // DolbyVision is what the decision knows of a source's Dolby Vision.
 //
-// THE PHASE-2 SEAM. Proposal P5 was approved as option (c): a DV source is cropped only to the
-// active area its own RPU names (level 5), with L5 zeroed by `dovi_tool -m 0 -c convert` and an
-// output gate proving 0/0/0/0 on every frame. That needs the source's exported L5, which this
-// build does not read yet; L5 is where it arrives, and Decide is where it is compared with the
-// consensus. Until it is built, every DV source is refused (brief I7).
+// Proposal P5 was approved as option (c): a DV source is cropped only to the active area its
+// own RPU names (level 5), with L5 zeroed in the pre-pass and gated on the output
+// (docs/design/crop.md#dolby-vision). L5 is the reading that decision rests on; where none was
+// taken - a DV source the engine does not carry, or one it never read - the crop is refused.
 type DolbyVision struct {
 	// Present: the source carries Dolby Vision (hdr.ClassFrom answered ClassDV).
 	Present bool
-	// L5 is the active area every frame's RPU names, where one was read and is one rectangle
-	// for the whole file; nil where none was read (always, in this build).
-	L5 *Edges
+	// L5 is what was read of the source's RPU, nil where nothing was (decideDolbyVision).
+	L5 *L5Reading
 }
 
 // DolbyVisionOf classifies a source from the same three probe strings the engine's DV guard
@@ -271,10 +270,16 @@ type Decision struct {
 	Reason string
 	// Detail says why in words.
 	Detail string
+	// FromL5 is true where Rect is a Dolby Vision source's own L5 active area.
+	FromL5 bool
 }
 
 // Applied reports whether this decision crops anything.
 func (d Decision) Applied() bool { return d.Reason == "" && !d.Rect.Empty() }
+
+// ZeroesL5 reports whether this decision crops a Dolby Vision source to its RPU's own active
+// area, so the pre-pass must zero L5 and the L5 gate must hold the output to it.
+func (d Decision) ZeroesL5() bool { return d.Applied() && d.FromL5 }
 
 // Refuse is a decision of no crop for a reason.
 func Refuse(f Frame, reason, detail string) Decision {
@@ -311,12 +316,7 @@ func Alignment(pixFmt string) (ax, ay int, ok bool) {
 func Decide(in Inputs) Decision {
 	f := in.Frame
 	if in.DolbyVision.Present {
-		// Phase 2 (P5 option (c)) lands here: with in.DolbyVision.L5 read, a non-zero L5 that is
-		// one rectangle for the whole file, aligned, and within TolerancePx of the consensus on
-		// every side becomes the rectangle, and the pre-pass zeroes L5. Until then: refused.
-		return Refuse(f, ReasonDolbyVision, "the source carries Dolby Vision, whose RPU names its own active "+
-			"area (level 5): a crop would leave that metadata describing bars that are no longer there, so "+
-			"the file is encoded uncropped")
+		return decideDolbyVision(in)
 	}
 	if !f.Known() {
 		return Refuse(f, ReasonUnknownFrame, "the source's dimensions were not established")
