@@ -36,14 +36,17 @@ server_addr: 0.0.0.0:8080   # see "The control surface" below before you change 
 | Platforms | `linux/amd64`, `linux/arm64` |
 | User | non-root by default (`nonroot`, uid 65532); override with `user:` |
 | ffmpeg | pinned by release tag **and verified by SHA-256** before it is trusted |
+| Dynamic-HDR tools | `dovi_tool` and `hdr10plus_tool` at `/usr/local/bin/`, on both architectures: upstream's static musl release builds (MIT), each pinned in the Dockerfile by release version **and a per-architecture SHA-256**, verified before it is unpacked. CI installs the same builds with `scripts/install-dynhdr-tools.sh`, which parses that pin, and the image smoke runs both inside the image. The versions are the Dockerfile's `DOVI_TOOL_VERSION` and `HDR10PLUS_TOOL_VERSION`, which NOTICE names and `scripts/check-pins.sh` holds equal. Upstream: [dovi_tool](https://github.com/quietvoid/dovi_tool), [hdr10plus_tool](https://github.com/quietvoid/hdr10plus_tool) |
 | Config | **nothing is baked in** — see below |
-| Licences | `/usr/share/doc/holdfast/` (AGPL-3.0 + the NOTICE for the bundled ffmpeg and, on amd64, the hardware runtime); each hardware-runtime package's Debian copyright file in `/usr/share/doc/<package>/` |
+| Licences | `/usr/share/doc/holdfast/` (AGPL-3.0 + the NOTICE for the bundled ffmpeg, the two dynamic-HDR tools and, on amd64, the hardware runtime); each hardware-runtime package's Debian copyright file in `/usr/share/doc/<package>/` |
 
 **How the pins stay current.** Every base image is pinned by tag and digest on its own `FROM`
 line, and `.github/dependabot.yml` has GitHub's Dependabot open a pull request when one moves
 upstream - weekly, together with the workflow actions and the Go modules. Nothing merges on
 its own: each such pull request runs the full gate and the image smoke, and waits for a human
-review. The bundled ffmpeg is watched separately, by `.github/workflows/pin-health.yml`.
+review. The bundled ffmpeg, `dovi_tool` and `hdr10plus_tool` are watched separately, by
+`.github/workflows/pin-health.yml`, which asks upstream every week whether each pinned release
+asset is still served.
 
 **The image sets no `HOLDFAST_*` environment variables, on purpose.** An env var *beats* the
 YAML file, so a baked-in default would silently override your config-as-code — and for

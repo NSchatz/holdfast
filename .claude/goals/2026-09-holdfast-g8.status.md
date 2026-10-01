@@ -59,7 +59,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g8-ba
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | `dovi_tool` and `hdr10plus_tool` pinned per arch by version and sha256 in the Dockerfile and a CI installer; `check-pins.sh` and its selftest cover them; `NOTICE` names them (MIT) | TODO |
+| 3.1 | `dovi_tool` and `hdr10plus_tool` pinned per arch by version and sha256 in the Dockerfile and a CI installer; `check-pins.sh` and its selftest cover them; `NOTICE` names them (MIT) | DONE (PR #138, `3968508`): `dynhdr` fetch stage with six ARGs (sha256 before unpack, ELF machine check, `--version` on the build arch); `scripts/install-dynhdr-tools.sh` + selftest (18 cases) in `check`; `check-pins.sh` section 11 + selftest cases 43-57; NOTICE `tool:` entries with the MIT text; ci/mutation/release workflows install both; image smoke runs both on amd64 and arm64; `check-pin-live.sh` asks for the four assets. Gate exit 0 (3399.9 s under contention, `internal/engine` 1945.0 s, 72%); CI green (runs 36839707142, 36839707151) |
 
 ## Phase 4 - Dynamic HDR (lines D, E)
 

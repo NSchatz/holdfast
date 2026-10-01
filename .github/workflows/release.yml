@@ -170,6 +170,15 @@ jobs:
           ./scripts/install-ffmpeg.sh /opt/ffmpeg
           echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
 
+      - name: install dovi_tool and hdr10plus_tool (the pins the image ships) - the fixture suite needs them
+        id: install-dynhdr-tools
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /opt/dynhdr-tools
+          sudo chown "$USER" /opt/dynhdr-tools
+          ./scripts/install-dynhdr-tools.sh /opt/dynhdr-tools
+          echo "/opt/dynhdr-tools/bin" >> "$GITHUB_PATH"
+
       - name: the full gate (make check)
         id: full-gate
         run: make check

@@ -76,6 +76,17 @@ jobs:
           ./scripts/install-ffmpeg.sh /opt/ffmpeg
           echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
 
+      # The dynamic-HDR tools the image bundles, by the same route ci.yml takes, so a suite
+      # in the domain that drives them is runnable here too. The pin is parsed out of the
+      # Dockerfile by the installer rather than restated.
+      - name: install dovi_tool and hdr10plus_tool (the pins the image ships)
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /opt/dynhdr-tools
+          sudo chown "$USER" /opt/dynhdr-tools
+          ./scripts/install-dynhdr-tools.sh /opt/dynhdr-tools
+          echo "/opt/dynhdr-tools/bin" >> "$GITHUB_PATH"
+
       # THE PLANNING STEP. Which run happens, and what it is scoped to, is decided HERE
       # and nowhere else - scripts/mutation-shape decides this workflow's shape by
       # EXECUTING this block with an event name in hand, rather than by matching its text,
