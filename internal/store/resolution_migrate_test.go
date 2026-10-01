@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -146,7 +147,7 @@ func TestResolution_AMigrationThatCannotCompleteRefusesToOpenAndMovesNothing(t *
 	// this package tracks the end of the migrations slice: a step appended after this line
 	// moves it, and pre-adding a column an EARLIER step already created would break the
 	// fixture rather than the migration under test.
-	execRaw(t, dbPath, `ALTER TABLE jobs ADD COLUMN downscaled INTEGER`)
+	execRaw(t, dbPath, `ALTER TABLE jobs ADD COLUMN audio_tracks TEXT`)
 
 	st, err := Open(dbPath)
 	if err == nil {
@@ -165,8 +166,14 @@ func TestResolution_AMigrationThatCannotCompleteRefusesToOpenAndMovesNothing(t *
 	}
 	// The other half of "rather than run against a half-migrated database": the columns the
 	// step would have added are not there, so nothing wrote into a shape that half exists.
-	if columnExists(t, dbPath, "downscale_scaler") {
-		t.Error("the failed step left downscale_scaler behind: the transaction did not roll back")
+	// Every column the newest step adds after the one pre-added above, read off the step's
+	// own SQL so the check follows the end of the migrations slice. A one-column step (v21,
+	// audio_tracks) has none, and the stamp and row checks above are then the proof.
+	added := regexp.MustCompile(`ADD COLUMN (\w+)`).FindAllStringSubmatch(migrations[len(migrations)-1].sql, -1)
+	for i, m := range added {
+		if i > 0 && columnExists(t, dbPath, m[1]) {
+			t.Errorf("the failed step left %s behind: the transaction did not roll back", m[1])
+		}
 	}
 }
 
