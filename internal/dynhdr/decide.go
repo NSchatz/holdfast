@@ -61,13 +61,22 @@ type Intent struct {
 	Convert       bool
 	// HDR10Plus is true where the output carries HDR10+.
 	HDR10Plus bool
+	// ZeroL5 is true where the job crops a Dolby Vision source to the active area its RPU
+	// names (docs/design/crop.md#dolby-vision): the pre-pass rewrites the RPU with L5 zeroed
+	// into a raw stream the encode reads, as a converted profile 7 stream is read, and the L5
+	// gate holds every output frame to 0/0/0/0. Set by the engine's crop decision, never here.
+	ZeroL5 bool
 }
+
+// Rewrites reports whether the pre-pass writes a raw stream the encode reads in place of the
+// source's video: a profile 7 conversion, or an L5 zeroing.
+func (i Intent) Rewrites() bool { return i.Convert || (i.DolbyVision && i.ZeroL5) }
 
 // Carries reports whether the intent carries anything.
 func (i Intent) Carries() bool { return i.DolbyVision || i.HDR10Plus }
 
 // NeedsDoviTool and NeedsHDR10PlusTool name the tools the intent's pre-pass runs.
-func (i Intent) NeedsDoviTool() bool      { return i.Convert }
+func (i Intent) NeedsDoviTool() bool      { return i.Rewrites() }
 func (i Intent) NeedsHDR10PlusTool() bool { return i.HDR10Plus }
 
 // Inputs are the configuration keys a verdict read, as the engine records them

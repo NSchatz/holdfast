@@ -49,8 +49,8 @@ func cropNotice(p Profile, root string) []string {
 	}
 	return []string{where + cropKey + " is " + crop.Auto + " - THE REPLACEMENT IS NO LONGER THE SAME CONTENT AS " +
 		"THE SOURCE where a file is cropped. Each source's black bars are sampled and cut away before it is " +
-		"encoded, only where the samples agree, the area removed is black on every frame and the source is not " +
-		"Dolby Vision; the rows and columns removed cannot be recovered from the replacement, and the swap " +
+		"encoded, only where the samples agree and the area removed is black on every frame, and a Dolby Vision " +
+		"source only to its RPU's own active area, zeroed and gated; the rows and columns removed cannot be recovered from the replacement, and the swap " +
 		"deletes the original. Every gate still applies at full strength - the perceptual gate scores the " +
 		"encode against the source put through the SAME crop, and a crop gate holds the output to its declared " +
 		"size and the removed area to black. Set " + cropKey + ": " + crop.Off + " (the default) to keep every frame whole."}

@@ -117,10 +117,11 @@ measured at. Keys: [docs/profiles.md](docs/profiles.md#resolution-rules).
 **Black bars are cropped on request, and kept otherwise.** `crop` is **off by default**. Set
 `crop: auto` on a root and each source's bars are found by sampling it at ten points and cut away
 before encoding, so **the replacement is no longer the same content as the source**: those rows
-are gone and the swap deletes the original. It is cut only where the samples agree, the area
-removed is black on **every frame**, and the source is not Dolby Vision; samples that disagree (a
-mixed aspect ratio), bars with anything in them, and every case it cannot decide encode the whole
-frame, and the row says why. No floor moves: the gate scores the encode against the source put
+are gone and the swap deletes the original. It is cut only where the samples agree and the area
+removed is black on **every frame**; a Dolby Vision source is cut only to the active area its own
+RPU names, with that metadata zeroed and gated in the replacement. Samples that disagree (a mixed
+aspect ratio), bars with anything in them, an RPU that disagrees with the picture, and every case
+it cannot decide encode the whole frame, and the row says why. No floor moves: the gate scores the encode against the source put
 through the **same crop**, and a crop gate holds the output to the declared size and the removed
 area to black. Key: [docs/profiles.md](docs/profiles.md#crop); the reasoning:
 [docs/design/crop.md](docs/design/crop.md).

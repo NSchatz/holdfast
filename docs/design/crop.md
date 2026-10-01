@@ -14,8 +14,9 @@ was ([`docs/design/swap.md`](swap.md)), and to one more.
 <a id="crop"></a>
 
 **Under `crop: auto`, a source's black bars are cut away only where spread samples agree on
-them, the area removed is black on every frame of the source, and the source is not Dolby
-Vision; anything else encodes the whole frame and the row says why.** With the key at `off` (the
+them, the area removed is black on every frame of the source, and - for a Dolby Vision source -
+its RPU names that same rectangle as its active area, zeroed and gated in the replacement;
+anything else encodes the whole frame and the row says why.** With the key at `off` (the
 default) none of this runs: nothing is sampled, the command line and every gate are what they
 were, the row records nothing about a crop, and the profile digest is the one a build without
 the key computed.
@@ -158,16 +159,82 @@ existing gate moves.
 
 <a id="dolby-vision"></a>
 
-**A Dolby Vision source is never cropped in this build.** Its RPU names the active area of the
-picture (level 5); ffmpeg's crop does not touch it, so a cropped replacement would carry metadata
-describing bars that are no longer there (proposal P5, finding 2, re-run on the pinned build).
-The decision reads the source's own Dolby Vision class from its probe (`crop.DolbyVisionOf`,
-the same reading as the engine's Dolby Vision guard) and refuses (`dolby-vision`) before it
-reads a sample, whatever the guards in front of it did; the file is encoded uncropped wherever
-it is encoded at all. Approved P5, option (c), is the next phase: crop a DV source only to the
-rectangle its own RPU names, with L5 zeroed by `dovi_tool -m 0 -c convert` and a gate proving
-0/0/0/0 on every output frame. The decision's `DolbyVision.L5` input is where that rectangle
-arrives.
+**A Dolby Vision source is cropped only to the active area its own RPU names, only where the
+picture agrees, and with that metadata zeroed and gated; every other Dolby Vision source is
+encoded uncropped with its Dolby Vision carried.** This is approved proposal P5, option (c). An
+RPU's level 5 (L5) states the active area as offsets from each edge; ffmpeg's crop does not
+touch it, so a cropped replacement that kept it would describe bars that are no longer there
+(P5 finding 2, re-run on the pinned build). So two independent witnesses must agree before a
+row of a Dolby Vision picture is cut: the mastering-side metadata and the pixels.
+
+- **Reading L5.** Only for a source whose Dolby Vision this job carries (the `cpu` encoder,
+  [dynamic-hdr](dynamic-hdr.md)), before the dynamic-HDR pre-pass: the video piped as Annex B
+  HEVC from ffmpeg into `dovi_tool extract-rpu - -o <rpu>` (dovi_tool picks its demuxer by the
+  file's extension, and reads the engine's `.holdfast-part` working file as raw HEVC and fails),
+  then `dovi_tool export -i <rpu> -l level5=<json> -f json`, which writes one record per frame
+  that HAS an L5 block. `export -d level5` is never used: it writes a frame with
+  no L5 as 0/0/0/0, exactly like a zeroed one (dovi_tool 2.3.4 `src/dovi/exporter.rs` lines 154
+  and 165, read for P5 on 2026-09-29; the difference re-run by
+  `TestRealFixture_ADroppedL5IsRefusedAlthoughExportDReadsZero`). The source's frame count and
+  frame rate are read with it.
+- **The decision** (`crop.Decide`, its Dolby Vision half). A crop is made only where every
+  frame carries one identical, non-zero L5, its offsets are aligned to the chroma subsampling,
+  and the cropdetect consensus (taken exactly as for any source) agrees with it within 2 px on
+  every side (`L5TolerancePx`, `ASSUMED` from P5 and calibrated on the 10-bit fixture, whose
+  libx265 ringing keeps one row of each 40-row bar above cropdetect's limit: the consensus reads
+  39 where L5 says 40). The rectangle is then **L5's own**, not the consensus'. The refusals,
+  each encoding the file uncropped with its Dolby Vision carried and the token on its row:
+  - `dolby-vision` - no L5 was read (the source's Dolby Vision is not carried by this job);
+  - `dolby-vision-l5-unreadable` - dovi_tool failed, or its export did not parse;
+  - `dolby-vision-variable-frame-rate` - the frame rate is not one constant rate starting at
+    zero, which the raw stream the zeroing writes is read at;
+  - `dolby-vision-l5-zero-or-absent` - some frame carries no L5, or every frame's L5 is zero
+    (the RPU names no bars, while the pixels may show some: ambiguous, so not acted on);
+  - `dolby-vision-l5-varies` - frames carry different rectangles (a shot-varying active area);
+  - `dolby-vision-l5-odd-offset` - an offset the chroma subsampling cannot cut at;
+  - `dolby-vision-l5-disagrees` - L5 and the picture differ by more than 2 px on a side, or L5
+    names no picture inside the frame;
+  - the consensus' own refusals (`samples-disagree` and the rest), and `bars-not-black` from the
+    blackness check, which runs on the L5 rectangle before the pre-pass;
+  - `dolby-vision-l5-zeroing-failed` - the pre-pass that zeroes L5 did not complete; the source
+    is prepared again as it is;
+  - `dolby-vision-l5-gate-failed` - an earlier attempt's cropped output failed the L5 gate.
+- **The pre-pass.** A crop asks the dynamic-HDR pre-pass to rewrite the source's video into a
+  raw stream with L5 zeroed, through dovi_tool's global `-c` ("Set active area offsets to 0
+  (meaning no letterbox bars)", `dovi_tool --help` on the pinned 2.3.4): `dovi_tool -m 0 -c
+  convert - -o <raw>` for profile 8.1, and `dovi_tool -m 2 -c convert --discard - -o <raw>` for
+  an opted-in profile 7 source, the conversion that path already runs plus the one flag. The
+  encode then reads the raw stream exactly as a converted profile 7 encode does (`-f hevc
+  -framerate <source rate>`, the audio and subtitles mapped from the original, variable frame
+  rate refused, the working file counted by the room check and removed on every way out of the
+  job; [dynamic-hdr](dynamic-hdr.md#profile-7)). `--edit-config` is never paired with `-m` or
+  `-c`: any edit config switches them off (`src/main.rs` lines 84-88 at 2.3.4, P5 finding 4).
+  The derivation takes the crop decision again from the same inputs and refuses a plan where a
+  crop and the zeroing do not go together: a crop without it would carry stale L5, the zeroing
+  without the crop would strip an L5 that is true.
+
+<a id="l5-gate"></a>
+
+**The L5 gate.** A Dolby Vision output cropped this way replaces its source only when it carries
+exactly one L5 record per decoded frame and every one is 0/0/0/0 (`dynhdr.CheckZeroL5`, gate
+label `dolby-vision-l5`), read with the same `extract-rpu` and `export -l level5` on the output.
+The count is what keeps a DROPPED L5 from passing as a zeroed one: a frame without L5 has no
+record. It runs beside the dynamic-HDR gates, which prove the DOVI record and an RPU on every
+frame but cannot see what an RPU says, and the crop gate and the perceptual gate still run. A
+failure is transient: the source is kept, the source is remembered by the process, and its next
+attempt in that process is encoded uncropped with its Dolby Vision carried
+(`dolby-vision-l5-gate-failed`). A restart forgets it; the next attempt then crops and is gated
+again, bounded by `max_failures`. Without `-c` the cropped output's L5 stays at the source's
+40/40, and the gate refuses it (`TestRealFixture_TheL5ZeroingCropsAndItsGateRedsWithoutTheFlag`,
+`TestCropDV_TheL5GateRefusesAStaleL5AndTheNextAttemptIsUncropped`).
+
+**The same limit as Dolby Vision carriage.** Every Dolby Vision profile 7 and 8 source is HEVC,
+and the `cpu` encoder writes HEVC, so under this build's guards such a source is skipped
+`already-at-target-codec` before the HDR guard and never reaches the crop at all
+([dynamic-hdr](dynamic-hdr.md#reach)). What is described here is what a Dolby Vision source that
+DOES reach the carriage gets; the engine fixtures reach it as the dynamic-HDR ones do, by
+answering the guards' snapshot probe with an h264 codec and every other probe with the real
+ffprobe.
 
 ## Which files the key reaches
 

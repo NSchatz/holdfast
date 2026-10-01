@@ -372,6 +372,9 @@ type planInputs struct {
 	// crop is recorded. The crop DECISION is taken here, by crop.Decide, from it and the
 	// snapshot (docs/design/crop.md#crop).
 	crop *crop.Consensus
+	// cropL5 is what was read of a Dolby Vision source's L5 for its crop, nil where nothing
+	// was: then a Dolby Vision source is refused a crop (docs/design/crop.md#dolby-vision).
+	cropL5 *crop.L5Reading
 	// dynamic is the job's dynamic-HDR pre-pass, nil where the source carries none or the
 	// guards skipped it. Only a libx265 re-encode with an intended map takes one.
 	dynamic *dynhdr.Prepared
@@ -460,7 +463,7 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 	// frame, its pixel format and its Dolby Vision, read here whatever the guards did - and
 	// the format the encoder is handed. The scale is then resolved against the picture the
 	// crop leaves, so a job that does both scales the picture it kept.
-	cut := cropApplied(in.crop, props, pixFmt)
+	cut := cropApplied(in.crop, in.cropL5, props, pixFmt)
 	shrink := downscaleApplied(in.prof, props)
 	if cut.Applied() {
 		shrink = in.prof.DownscaleFor(cut.Rect.W, cut.Rect.H)
@@ -523,6 +526,15 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 	if err := p.deriveDynamic(in); err != nil {
 		return nil, err
 	}
+	// A Dolby Vision crop and the pre-pass that zeroes L5 are one decision, taken twice: the
+	// engine asked for the zeroing on the decision it took before the pre-pass, and this one
+	// must be the same. A crop without the zeroing would carry stale L5; a zeroing without the
+	// crop would strip an L5 that is true (docs/design/crop.md#dolby-vision).
+	zeroed := in.dynamic != nil && in.dynamic.Intent.ZeroL5 && in.dynamic.RawVideo != ""
+	if cut.ZeroesL5() != zeroed {
+		return nil, fmt.Errorf("the crop decision (%s) and the Dolby Vision pre-pass (L5 zeroed: %t) disagree on %q: "+
+			"refusing to encode", cut, zeroed, in.source)
+	}
 	p.coverArt.pinned = pinned
 	// The audio last: its first loudness passes are the one costly step of a derivation, so
 	// every refusal above is met before any runs.
@@ -578,7 +590,7 @@ func (p *EncodePlan) dynamicBuildable() error {
 		return &UnbuildablePlanError{What: "a Dolby Vision RPU without its VBV ceiling or mastering display"}
 	case d.Intent.HDR10Plus && d.HDR10PlusJSON == "":
 		return &UnbuildablePlanError{What: "HDR10+ dynamic metadata without its metadata file"}
-	case d.Intent.Convert != (d.RawVideo != "") || (d.RawVideo != "" && (!d.FrameRate.Valid() || p.Streams == nil)):
+	case d.Intent.Rewrites() != (d.RawVideo != "") || (d.RawVideo != "" && (!d.FrameRate.Valid() || p.Streams == nil)):
 		return &UnbuildablePlanError{What: "a profile 7 conversion without its converted stream, its rate or its map"}
 	}
 	return nil

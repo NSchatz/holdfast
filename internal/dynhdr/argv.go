@@ -52,7 +52,8 @@ func (p *Prepared) InputArgs() []string {
 }
 
 // Expect is what the gate holds the output to: profile 8 with compatibility id 1 where Dolby
-// Vision is carried (profile 7 is converted to exactly that), and HDR10+ where it is.
+// Vision is carried (profile 7 is converted to exactly that), and HDR10+ where it is. The L5
+// gate is the engine's, on ZeroL5.
 func (p *Prepared) Expect() Expectation {
 	if p == nil {
 		return Expectation{}

@@ -242,6 +242,15 @@ func (e *Engine) verifyAgainst(ctx context.Context, job *EncodePlan) (vmafProof,
 			return none, gate, class, err
 		}
 	}
+	// 6a'. THE L5 GATE, on a job that cropped a Dolby Vision source to its RPU's own active
+	// area and on no other: every output frame carries exactly one L5 and it is 0/0/0/0
+	// (docs/design/crop.md#l5-gate). Beside the RPU-count gate above, which counts RPUs and
+	// cannot see what an RPU says.
+	if job.Picture.Crop.ZeroesL5() {
+		if gate, class, err := e.l5Gate(ctx, job); err != nil {
+			return none, gate, class, err
+		}
+	}
 
 	// 6b. THE AUDIO GATES, on a plan that transforms audio and on no other: a full decode of
 	// every output audio stream, and every transformed track held to its declaration - codec,

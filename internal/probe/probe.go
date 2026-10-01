@@ -513,12 +513,27 @@ func (p *Prober) Height(ctx context.Context, f string) int {
 func (p *Prober) Dimensions(ctx context.Context, f string) (width, height int, established bool) {
 	out := firstLine(ctx, p.FFprobe, "-v", "error", "-select_streams", "v:0",
 		"-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", "--", f)
-	w, h, ok := strings.Cut(strings.TrimSpace(out), "x")
-	if !ok {
+	return parseDimensions(out)
+}
+
+// parseDimensions reads the csv `WxH` line Dimensions asks ffprobe for. ffprobe prints one
+// more field per section the stream entry carries, and a stream carrying side data (the DOVI
+// configuration record of every Dolby Vision stream) ends the line with an EMPTY trailing
+// field: `320x240x` (observed on the pinned 5d4d3bdc61, 2026-10-01). Empty trailing fields are
+// that section and nothing else, so they are ignored; anything else after the height - a
+// third number, text - is not a size this reader knows, and is not established.
+func parseDimensions(out string) (width, height int, established bool) {
+	fields := strings.Split(strings.TrimSpace(out), "x")
+	if len(fields) < 2 {
 		return 0, 0, false
 	}
-	wi, wok := positiveInt(w)
-	hi, hok := positiveInt(h)
+	for _, extra := range fields[2:] {
+		if extra != "" {
+			return 0, 0, false
+		}
+	}
+	wi, wok := positiveInt(fields[0])
+	hi, hok := positiveInt(fields[1])
 	if !wok || !hok {
 		return 0, 0, false
 	}

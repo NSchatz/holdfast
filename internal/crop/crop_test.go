@@ -212,10 +212,11 @@ func TestDecide_ADolbyVisionSourceIsRefusedWhateverItsPicture(t *testing.T) {
 		if d.Applied() || d.Reason != ReasonDolbyVision {
 			t.Errorf("DV source %+v: %+v, want refused %s", s, d, ReasonDolbyVision)
 		}
-		// The phase-2 seam: an L5 handed in does not, in this build, license a crop.
-		in.DolbyVision.L5 = &Edges{Top: 140, Bottom: 140}
-		if d := Decide(in); d.Applied() {
-			t.Errorf("DV source %+v with an L5 was cropped in phase 1: %+v", s, d)
+		// Phase 2 (P5 option (c)): an L5 read off the RPU that agrees with the picture crops to
+		// L5's own rectangle, and the decision says L5 must be zeroed.
+		in.DolbyVision.L5 = uniformL5(24, Edges{Top: 140, Bottom: 140})
+		if d := Decide(in); !d.ZeroesL5() || d.Rect.String() != "1920:800:0:140" {
+			t.Errorf("DV source %+v with an agreeing L5: %+v, want the L5 rectangle 1920:800:0:140", s, d)
 		}
 	}
 	// HDR10 and HDR10+ are not Dolby Vision, and their crop is decided on the picture.

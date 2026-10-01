@@ -62,7 +62,7 @@ reasoning lives in the document, not in this file.
 - **A transformed audio track replaces nothing until its length, layout, rate and loudness match its
   plan and every audio stream decodes** - [`docs/design/audio.md`](docs/design/audio.md#audio-gates).
 - **A subtitle sidecar is published only after the swap commits and its parse-back gate passes, and never over an existing file** - [`docs/design/subtitles.md`](docs/design/subtitles.md#sidecars).
-- **A picture is cropped only where spread samples agree on its bars, the area removed is black on every frame, and the source is not Dolby Vision** - [`docs/design/crop.md`](docs/design/crop.md#crop).
+- **A picture is cropped only where spread samples agree on its bars and the area removed is black on every frame; a Dolby Vision picture only to its RPU's own active area, zeroed and gated** - [`docs/design/crop.md`](docs/design/crop.md#crop).
 - **Dynamic HDR is carried only through libx265, and its output replaces the source only when its DOVI record and every frame's RPU and HDR10+ match its plan** - [`docs/design/dynamic-hdr.md`](docs/design/dynamic-hdr.md#dynamic-hdr).
 
 ## Layout

@@ -17,6 +17,9 @@ type CropRecord struct {
 	Rect string `json:"rect,omitempty"`
 	// Frame is the source's frame the rectangle was taken from, as `WxH`.
 	Frame string `json:"frame,omitempty"`
+	// L5Zeroed says the source was Dolby Vision, the rectangle is its RPU's own active area
+	// (level 5), and the output's L5 was zeroed and gated (docs/design/crop.md#dolby-vision).
+	L5Zeroed bool `json:"l5_zeroed,omitempty"`
 	// Reason is the token saying why nothing was cropped (crop.Reasons).
 	Reason string `json:"reason,omitempty"`
 	// Detail says the same in words.
