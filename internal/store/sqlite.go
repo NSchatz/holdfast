@@ -391,7 +391,8 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 			downscaled = NULL, downscale_scaler = NULL,
 			vmaf_scored_width = NULL, vmaf_scored_height = NULL,
 			subtitle_sidecars = NULL,
-			audio_tracks = NULL
+			audio_tracks = NULL,
+			crop = NULL
 		 WHERE path = ? AND fingerprint = ?`,
 		string(Probing), worker, now(), currentStamp(), path, fingerprint); err != nil {
 		return false, fmt.Errorf("store: claim update: %w", err)
@@ -742,7 +743,8 @@ func finishQuery(st Status, o *Outcome, maxFailures int) string {
 		downscaled = ?, downscale_scaler = ?,
 		vmaf_scored_width = ?, vmaf_scored_height = ?,
 		subtitle_sidecars = ?,
-		audio_tracks = ?`
+		audio_tracks = ?,
+		crop = ?`
 	switch {
 	case st != Failed:
 	case o.FailureClass.Final() && maxFailures > 0:
@@ -787,6 +789,7 @@ func finishArgs(st Status, o *Outcome, path, fingerprint string) []any {
 		nullPixels(o.VmafScoredWidth), nullPixels(o.VmafScoredHeight),
 		nullString(o.SubtitleSidecars.Encode()),
 		nullString(o.AudioTracks.Encode()),
+		nullString(o.Crop.Encode()),
 		path, fingerprint,
 	}
 }
@@ -886,7 +889,8 @@ const outcomeColumns = `reason, encoder, vmaf_mean, vmaf_min, vmaf_model,
 	deinterlaced, deinterlace_filter,
 	downscaled, downscale_scaler, vmaf_scored_width, vmaf_scored_height,
 	subtitle_sidecars,
-	audio_tracks`
+	audio_tracks,
+	crop`
 
 // outcomeScan holds one row's outcome columns on the way out of the driver. Every
 // field is a sql.Null* because every column is nullable: NULL is "not recorded" and
@@ -982,6 +986,10 @@ type outcomeScan struct {
 	// column existed, and every job whose configuration transformed no audio, recorded
 	// nothing, and nothing is not an empty list.
 	audioTracks sql.NullString
+
+	// What the job did about its crop. NULL is not recorded: the root does not crop, or the
+	// row predates the column.
+	crop sql.NullString
 }
 
 // dest returns the scan destinations in outcomeColumns order.
@@ -1000,6 +1008,7 @@ func (s *outcomeScan) dest() []any {
 		&s.vmafScoredWidth, &s.vmafScoredHeight,
 		&s.sidecars,
 		&s.audioTracks,
+		&s.crop,
 	}
 }
 
@@ -1034,6 +1043,7 @@ func (s *outcomeScan) outcome() Outcome {
 		DownscaleScaler:     s.downscaleScaler.String,
 		SubtitleSidecars:    ParseSidecars(s.sidecars.String),
 		AudioTracks:         ParseAudioTracks(s.audioTracks.String),
+		Crop:                ParseCrop(s.crop.String),
 		Decision: Decision{
 			LibraryRoot:   s.libraryRoot.String,
 			ProfileDigest: s.profileDigest.String,
@@ -1369,7 +1379,8 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 			downscaled = NULL, downscale_scaler = NULL,
 			vmaf_scored_width = NULL, vmaf_scored_height = NULL,
 			subtitle_sidecars = NULL,
-			audio_tracks = NULL
+			audio_tracks = NULL,
+			crop = NULL
 		 WHERE jobs.status = ?`,
 		path, fingerprint, string(Skipped), now(), nullString(reason),
 		nullString(by.LibraryRoot), nullString(by.ProfileDigest), currentStamp(), nullString(profile),
