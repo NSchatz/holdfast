@@ -87,7 +87,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g8-ba
 | # | Item | State |
 |---|---|---|
 | 6.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `3bf286d`): `func Test` 1542 -> 1634, no package fell (`internal/crop` 0 -> 31, `internal/dynhdr` 0 -> 31, `internal/engine` 521 -> 543, `internal/config` 131 -> 136, `internal/docscheck` 29 -> 30, `internal/probe` 24 -> 25, `internal/store` 154 -> 155, every other package unchanged); `docs/design/swap.md` 62 -> 66 and `docs/design/quality-gate.md` 76 -> 80 lines, `git diff --numstat 0d752f6 3bf286d` +4 -0 for each; 17 lines deleted in `*_test.go` (+4074 -17), each with its reason below |
-| 6.2 | Adversarial review of the report | TODO |
+| 6.2 | Adversarial review of the report | DONE: a fresh subagent (2026-10-01) checked lines A-H against `17cdb91` and GitHub, re-running check-pins (rc 0), its selftest (58/58), the installer selftest (18/18), the dynhdr, crop, config, probe and docscheck packages and 22 engine tests under the lock, and recounting `func Test` and the design-doc diffs: "VERDICT: none false". Its medium findings, both disclosed: profile 7 is converted only over a record rewritten to 7 (no real profile 7 stream can be generated), and the carry and the DV crop are unreachable for HEVC sources on the `cpu` encoder. Low: check-pins checks digest form, not upstream (the installer and `check-pin-live` do); the record-gate red fixture uses a profile 8.4 source; the in-memory uncropped retry after an L5 gate failure; main CI on `62f1c9c` and `6fa5379` cancelled by later pushes, green on `3bf286d` |
 
 ### The 17 deleted `*_test.go` lines and why
 
@@ -167,5 +167,6 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g8-ba
 ## Resume here
 
 All PRs merged: #138, #140, #139, #141; main CI green on `3bf286d` (run 36870359915). No branch,
-worktree or open PR of this goal remains. Next: the adversarial review of the report (6.2), then
-the COMPLETE line.
+worktree or open PR of this goal remains. The adversarial review found none false. Goal complete.
+
+COMPLETE (goal 8): 2026-10-01
