@@ -374,7 +374,15 @@ func (p *StreamPlan) MappedAttachments() int {
 // establish one must REJECT rather than call this: an unknown shape is never read as the
 // common one.
 func (p *StreamPlan) CheckOutput(out []probe.Stream) error {
-	want := streamTally(p.Intended())
+	return p.CheckOutputAdding(out, nil)
+}
+
+// CheckOutputAdding is CheckOutput for an output the encode plan declares ADDITIONAL streams
+// in - an audio re-encode kept beside its original, a stereo downmix - each tallied by the
+// language and commentary disposition it will carry, exactly as an intended stream is. A plan
+// that declares none checks exactly what CheckOutput always did.
+func (p *StreamPlan) CheckOutputAdding(out, added []probe.Stream) error {
+	want := streamTally(append(p.Intended(), added...))
 	got := streamTally(out)
 	for key, n := range want {
 		if got[key] < n {

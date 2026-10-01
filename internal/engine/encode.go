@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/NSchatz/holdfast/internal/audio"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -282,6 +283,9 @@ func (e FFmpegEncoder) EncodeWithProgress(ctx context.Context, in, out string, p
 		derived, err := deriveEncodePlan(planInputs{
 			settings: e.Cfg.TranscodeIn(prof, in), prof: prof, source: in, output: out, streams: e.Plan,
 			devices: e.Devices, snapshot: e.snapshot(ctx, in, props),
+			measureLoudness: func(src audio.Source, pre string) (audio.Stats, error) {
+				return audio.MeasureLoudness(ctx, e.FFmpeg, in, src.Index, pre)
+			},
 		})
 		if err != nil {
 			return err
@@ -466,7 +470,7 @@ func (e FFmpegEncoder) runCarrying(ctx context.Context, in, out string, job *Enc
 	body = append(append([]string(nil), body...), job.container.args()...)
 	pics := job.coverArt.attached
 	if len(pics) == 0 {
-		return e.runFFmpeg(ctx, in, out, sink, pre, body)
+		return e.runEncode(ctx, in, out, job, sink, pre, body)
 	}
 	in, out = absolutePath(in), absolutePath(out)
 	dir := filepath.Dir(out)
@@ -491,7 +495,31 @@ func (e FFmpegEncoder) runCarrying(ctx context.Context, in, out string, job *Enc
 			body = append(body, spec, "title="+p.source.Title)
 		}
 	}
-	return e.runFFmpeg(ctx, in, out, sink, pre, body)
+	return e.runEncode(ctx, in, out, job, sink, pre, body)
+}
+
+// runEncode runs the encode itself, with one report channel per loudness-normalised audio
+// track (audio.Reports), and leaves what came back on each on the plan for the terminal row:
+// the second pass's mode is read off the encoder's own report, never inferred. A plan that
+// normalises nothing opens none, and the encode runs exactly as runFFmpeg always ran it. A
+// channel that cannot be opened fails the encode before it starts: a normalisation whose
+// report has nowhere to go would have loudnorm fail to open it, and nothing has been written.
+func (e FFmpegEncoder) runEncode(ctx context.Context, in, out string, job *EncodePlan,
+	sink ProgressSink, pre, body []string) error {
+	n := len(job.AudioTracks.Normalised())
+	if n == 0 {
+		return e.runFFmpeg(ctx, in, out, sink, pre, body)
+	}
+	rep, err := audio.OpenReports(n)
+	if err != nil {
+		return fmt.Errorf("opening the loudness report channels: %w", err)
+	}
+	defer rep.Close()
+	if err := e.runFFmpegWith(ctx, in, out, sink, pre, body, rep); err != nil {
+		return err
+	}
+	job.recordReports(rep.Collect())
+	return nil
 }
 
 // runningIn returns this encoder with its invocations run in dir. Every other path an
@@ -565,6 +593,13 @@ var muxQueueBounds = []string{
 // wrapping cannot drift between them. pre carries the GLOBAL options that must precede
 // `-i` (today only the VAAPI device); body is everything between the input and the output.
 func (e FFmpegEncoder) runFFmpeg(ctx context.Context, in, out string, sink ProgressSink, pre, body []string) error {
+	return e.runFFmpegWith(ctx, in, out, sink, pre, body, nil)
+}
+
+// runFFmpegWith is runFFmpeg with the encode's loudness report channels, if it has any,
+// handed to the child after its progress channel (audio.FirstStatsFD on).
+func (e FFmpegEncoder) runFFmpegWith(ctx context.Context, in, out string, sink ProgressSink, pre, body []string,
+	reports *audio.Reports) error {
 	// Open the progress channel BEFORE the argv is assembled: the -progress option is
 	// only ever passed when there is a reader for it. A sink-less call, or a pipe we
 	// could not open, produces byte-identical argv to the pre-progress encoder.
@@ -599,11 +634,15 @@ func (e FFmpegEncoder) runFFmpeg(ctx context.Context, in, out string, sink Progr
 	if pr != nil {
 		cmd.ExtraFiles = []*os.File{pw}
 	}
+	if reports != nil {
+		cmd.ExtraFiles = reports.ExtraFiles(pw)
+	}
 
 	if err := cmd.Start(); err != nil {
 		closeProgressPipe(pr, pw)
 		return fmt.Errorf("ffmpeg encode: %w: %s", err, truncate(outb.String(), 500))
 	}
+	reports.Started()
 
 	drained := make(chan struct{})
 	if pr != nil {

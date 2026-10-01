@@ -2,8 +2,11 @@ package engine
 
 import (
 	"context"
+
 	"fmt"
+	"github.com/NSchatz/holdfast/internal/audio"
 	"math"
+	"strconv"
 	"strings"
 
 	"github.com/NSchatz/holdfast/internal/config"
@@ -198,7 +201,7 @@ func (e *Engine) verifyAgainst(ctx context.Context, job *EncodePlan) (vmafProof,
 				"accept an output whose stream map cannot be checked against the %d stream(s) this job "+
 				"intended to carry", len(plan.Intended()))
 	}
-	if err := plan.CheckOutput(outStreams); err != nil {
+	if err := plan.CheckOutputAdding(outStreams, job.addedStreams()); err != nil {
 		return none, GateStreamParity, store.FailureDeterministic, err
 	}
 
@@ -225,6 +228,19 @@ func (e *Engine) verifyAgainst(ctx context.Context, job *EncodePlan) (vmafProof,
 	// are conditions of the run rather than properties of the source.
 	if !e.Probe.DecodeOK(ctx, tmp) {
 		return none, GateDecode, store.FailureTransient, fmt.Errorf("decode-integrity check failed (output does not fully decode)")
+	}
+
+	// 6b. THE AUDIO GATES, on a plan that transforms audio and on no other: a full decode of
+	// every output audio stream, and every transformed track held to its declaration - codec,
+	// channels, layout and sample rate, a decoded length within two codec frames of its
+	// source track's, and its integrated loudness within R 128's tolerance where it was
+	// normalised (docs/design/audio.md#audio-gates). A plan that copies its audio is not
+	// held to them: copied tracks are the source's bytes, and adding a decode here would
+	// change decisions on configurations that never asked for audio.
+	if job.AudioTracks.Transforms() {
+		if gate, class, err := e.audioGates(ctx, job, outStreams); err != nil {
+			return none, gate, class, err
+		}
 	}
 
 	// 7. VMAF perceptual-quality gate, last because it costs a second full decode. The
@@ -255,6 +271,95 @@ func (e *Engine) verifyAgainst(ctx context.Context, job *EncodePlan) (vmafProof,
 		return e.vmafGate(ctx, tmp, in, prof, job.Picture.Deinterlace, job.Picture.Downscale)
 	}
 	return none, "", "", nil
+}
+
+// addedStreams are the streams the plan's audio adds after every carried one, each as the
+// intended-map gate tallies it: an audio stream in its source track's language, carrying the
+// commentary disposition only where it is a commentary track's kept re-encode.
+func (p *EncodePlan) addedStreams() []probe.Stream {
+	var added []probe.Stream
+	for _, o := range p.AudioTracks.Ops {
+		if !o.Appended() {
+			continue
+		}
+		added = append(added, probe.Stream{Type: probe.TypeAudio, Language: o.Source.Language,
+			Commentary: o.Source.Commentary && o.Action == audio.ActionAdded})
+	}
+	return added
+}
+
+// measureAudio is one full decode of one audio stream, through the test seam where one is set.
+func (e *Engine) measureAudio(ctx context.Context, file, spec string, loudness bool) (audio.Measurement, error) {
+	if e.audioMeasure != nil {
+		return e.audioMeasure(ctx, file, spec, loudness)
+	}
+	return audio.Measure(ctx, e.Probe.FFmpeg, file, spec, loudness)
+}
+
+// audioGates hold every output audio stream of a job that transforms audio to its plan. The
+// probe checks run first, then one decode per output stream. Classes: a stream that does not
+// decode is TRANSIENT, as the video's decode-integrity check is; a track that is not what its
+// plan declares, or decodes too short or too long, or misses the loudness target, is
+// DETERMINISTIC - the same source, configuration and ffmpeg make the same track; a figure
+// that could not be established is transient.
+func (e *Engine) audioGates(ctx context.Context, job *EncodePlan, outStreams []probe.Stream) (string, store.FailureClass, error) {
+	var observed []audio.Observed
+	for _, s := range outStreams {
+		if s.Type == probe.TypeAudio {
+			observed = append(observed, audio.Observed{Codec: s.Codec, Channels: s.Channels, Layout: s.ChannelLayout, SampleRate: s.SampleRate})
+		}
+	}
+	outputs := job.AudioTracks.Outputs()
+	if len(observed) != len(outputs) {
+		return GateAudio, store.FailureDeterministic, fmt.Errorf("the output carries %d audio stream(s) and its plan "+
+			"declares %d. The source is kept", len(observed), len(outputs))
+	}
+	for _, o := range outputs {
+		if !o.Transformed() {
+			continue
+		}
+		if err := audio.CheckLayout(o, observed[o.Output]); err != nil {
+			return GateAudio, store.FailureDeterministic, fmt.Errorf("audio channel check failed: %w. The source is kept", err)
+		}
+		if err := audio.CheckSampleRate(o, observed[o.Output]); err != nil {
+			return GateAudio, store.FailureDeterministic, fmt.Errorf("audio sample-rate check failed: %w. The source is kept", err)
+		}
+	}
+	sourceLen := map[int]float64{}
+	for _, o := range outputs {
+		spec := "0:a:" + strconv.Itoa(o.Output)
+		m, err := e.measureAudio(ctx, job.Output, spec, o.Loudness != nil)
+		if err != nil {
+			if audio.IsDecodeError(err) {
+				return GateDecode, store.FailureTransient, fmt.Errorf("audio decode-integrity check failed: %w. The source is kept", err)
+			}
+			return GateAudio, store.FailureTransient, fmt.Errorf("audio stream %s could not be measured: %w. The source is kept", spec, err)
+		}
+		if !o.Transformed() {
+			continue
+		}
+		want, ok := sourceLen[o.Source.Index]
+		if !ok {
+			sm, err := e.measureAudio(ctx, job.Source, "0:"+strconv.Itoa(o.Source.Index), false)
+			if err != nil {
+				return GateAudio, store.FailureTransient, fmt.Errorf("the length of source stream %d could not be "+
+					"established, so the length of its encode cannot be checked: %w. The source is kept", o.Source.Index, err)
+			}
+			want = sm.DurationSec
+			sourceLen[o.Source.Index] = want
+		}
+		if err := audio.CheckDuration(o, want, m.DurationSec); err != nil {
+			return GateAudio, store.FailureDeterministic, fmt.Errorf("audio duration check failed: %w. The source is kept", err)
+		}
+		if o.Loudness != nil {
+			job.recordAchieved(o.Output, m.Loudness.InputI)
+			if err := audio.CheckLoudness(m.Loudness.InputI); err != nil {
+				return GateLoudness, store.FailureDeterministic, fmt.Errorf("loudness check failed on audio a:%d: %w. "+
+					"The source is kept", o.Output, err)
+			}
+		}
+	}
+	return "", "", nil
 }
 
 // FidelityError is the output fidelity gate's rejection: every field the output does not

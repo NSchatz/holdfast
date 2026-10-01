@@ -239,6 +239,56 @@ type jobDTO struct {
 	// exactly as swap_cause is.
 	SelectionNotApplied string `json:"selection_not_applied,omitempty"`
 	VmafSkipped         string `json:"vmaf_skipped,omitempty"`
+
+	// What this job did to each audio track (docs/design/audio.md): re-encoded, kept,
+	// added, a downmix added or not, or copied and why. A POINTER TO A SLICE and not
+	// omitempty, on dropped_streams' terms: `null` is NOT RECORDED - every row of a job whose
+	// configuration transformed no audio, and every row written before this field - and `[]`
+	// is a job the audio keys applied to whose source carried no audio track.
+	AudioTracks *[]audioTrackDTO `json:"audio_tracks"`
+}
+
+// audioTrackDTO is one audio track on the wire. Every field a track may not have is an
+// explicit null, never "" or 0: output_index is null for a downmix that was not added; codec,
+// layout, sample_rate and bitrate_kbps for a track that was copied; loudness and the two LUFS
+// figures for a track that was not normalised, achieved_lufs also where the gate did not get
+// as far as measuring it. loudness is "linear" or "dynamic" as the encoder's own loudness
+// report named it, or "not-recorded" where the filter ran and no report was read back.
+type audioTrackDTO struct {
+	SourceIndex  int      `json:"source_index"`
+	OutputIndex  *int     `json:"output_index"`
+	Action       string   `json:"action"`
+	Reason       *string  `json:"reason"`
+	Codec        *string  `json:"codec"`
+	Layout       *string  `json:"layout"`
+	SampleRate   *int     `json:"sample_rate"`
+	BitrateKbps  *int     `json:"bitrate_kbps"`
+	Loudness     *string  `json:"loudness"`
+	MeasuredLUFS *float64 `json:"measured_lufs"`
+	AchievedLUFS *float64 `json:"achieved_lufs"`
+}
+
+// audioTracksDTO carries the store's recorded/not-recorded distinction onto the wire.
+func audioTracksDTO(a store.AudioTracks) *[]audioTrackDTO {
+	if !a.Recorded() {
+		return nil
+	}
+	positive := func(v int) *int {
+		if v <= 0 {
+			return nil
+		}
+		return &v
+	}
+	out := make([]audioTrackDTO, 0, len(a.Tracks()))
+	for _, t := range a.Tracks() {
+		out = append(out, audioTrackDTO{
+			SourceIndex: t.SourceIndex, OutputIndex: t.OutputIndex, Action: t.Action,
+			Reason: nullableText(t.Reason), Codec: nullableText(t.Codec), Layout: nullableText(t.Layout),
+			SampleRate: positive(t.SampleRate), BitrateKbps: positive(t.BitrateKbps),
+			Loudness: nullableText(t.Loudness), MeasuredLUFS: t.MeasuredLUFS, AchievedLUFS: t.AchievedLUFS,
+		})
+	}
+	return &out
 }
 
 // droppedStreamDTO is one dropped stream on the wire. `language` is the tag AS THE SOURCE
@@ -313,6 +363,7 @@ func toDTOs(jobs []store.Job) []jobDTO {
 			DroppedStreams:      droppedStreamsDTO(j.Outcome.DroppedStreams),
 			SelectionNotApplied: j.Outcome.SelectionNotApplied,
 			VmafSkipped:         j.Outcome.VmafSkipped,
+			AudioTracks:         audioTracksDTO(j.Outcome.AudioTracks),
 		})
 	}
 	return out
