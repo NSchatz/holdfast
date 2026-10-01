@@ -389,7 +389,8 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 			source_width = NULL, source_height = NULL, output_width = NULL, output_height = NULL,
 			deinterlaced = NULL, deinterlace_filter = NULL,
 			downscaled = NULL, downscale_scaler = NULL,
-			vmaf_scored_width = NULL, vmaf_scored_height = NULL
+			vmaf_scored_width = NULL, vmaf_scored_height = NULL,
+			subtitle_sidecars = NULL
 		 WHERE path = ? AND fingerprint = ?`,
 		string(Probing), worker, now(), currentStamp(), path, fingerprint); err != nil {
 		return false, fmt.Errorf("store: claim update: %w", err)
@@ -738,7 +739,8 @@ func finishQuery(st Status, o *Outcome, maxFailures int) string {
 		source_width = ?, source_height = ?, output_width = ?, output_height = ?,
 		deinterlaced = ?, deinterlace_filter = ?,
 		downscaled = ?, downscale_scaler = ?,
-		vmaf_scored_width = ?, vmaf_scored_height = ?`
+		vmaf_scored_width = ?, vmaf_scored_height = ?,
+		subtitle_sidecars = ?`
 	switch {
 	case st != Failed:
 	case o.FailureClass.Final() && maxFailures > 0:
@@ -781,6 +783,7 @@ func finishArgs(st Status, o *Outcome, path, fingerprint string) []any {
 		nullBool(o.Deinterlaced), nullString(o.DeinterlaceFilter),
 		nullBool(o.Downscaled), nullString(o.DownscaleScaler),
 		nullPixels(o.VmafScoredWidth), nullPixels(o.VmafScoredHeight),
+		nullString(o.SubtitleSidecars.Encode()),
 		path, fingerprint,
 	}
 }
@@ -878,7 +881,8 @@ const outcomeColumns = `reason, encoder, vmaf_mean, vmaf_min, vmaf_model,
 	dropped_streams, selection_not_applied, vmaf_skipped,
 	source_width, source_height, output_width, output_height,
 	deinterlaced, deinterlace_filter,
-	downscaled, downscale_scaler, vmaf_scored_width, vmaf_scored_height`
+	downscaled, downscale_scaler, vmaf_scored_width, vmaf_scored_height,
+	subtitle_sidecars`
 
 // outcomeScan holds one row's outcome columns on the way out of the driver. Every
 // field is a sql.Null* because every column is nullable: NULL is "not recorded" and
@@ -966,6 +970,10 @@ type outcomeScan struct {
 	downscaleScaler  sql.NullString
 	vmafScoredWidth  sql.NullInt64
 	vmafScoredHeight sql.NullInt64
+
+	// What the job did about its subtitle sidecars. NULL is not recorded: the key was off,
+	// or the row predates the column.
+	sidecars sql.NullString
 }
 
 // dest returns the scan destinations in outcomeColumns order.
@@ -982,6 +990,7 @@ func (s *outcomeScan) dest() []any {
 		&s.deinterlaced, &s.deintFilter,
 		&s.downscaled, &s.downscaleScaler,
 		&s.vmafScoredWidth, &s.vmafScoredHeight,
+		&s.sidecars,
 	}
 }
 
@@ -1014,6 +1023,7 @@ func (s *outcomeScan) outcome() Outcome {
 		VmafSkipped:         s.vmafSkipped.String,
 		DeinterlaceFilter:   s.deintFilter.String,
 		DownscaleScaler:     s.downscaleScaler.String,
+		SubtitleSidecars:    ParseSidecars(s.sidecars.String),
 		Decision: Decision{
 			LibraryRoot:   s.libraryRoot.String,
 			ProfileDigest: s.profileDigest.String,
@@ -1347,7 +1357,8 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 			source_width = NULL, source_height = NULL, output_width = NULL, output_height = NULL,
 			deinterlaced = NULL, deinterlace_filter = NULL,
 			downscaled = NULL, downscale_scaler = NULL,
-			vmaf_scored_width = NULL, vmaf_scored_height = NULL
+			vmaf_scored_width = NULL, vmaf_scored_height = NULL,
+			subtitle_sidecars = NULL
 		 WHERE jobs.status = ?`,
 		path, fingerprint, string(Skipped), now(), nullString(reason),
 		nullString(by.LibraryRoot), nullString(by.ProfileDigest), currentStamp(), nullString(profile),

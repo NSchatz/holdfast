@@ -95,6 +95,7 @@ max_height: 1080
 downscale_acknowledged: true
 hw_fallback: software
 hw_decode: hardware
+subtitle_sidecars: text
 workers: 4
 state_dir: /var/lib/holdfast
 undo_window_hours: 24
@@ -132,6 +133,7 @@ max_load: 1.5
 		DownscaleAck:      &yes,
 		HWFallback:        "software",
 		HWDecode:          "hardware",
+		SubtitleSidecars:  "text",
 	}
 	roots := c.RootProfiles()
 	if len(roots) != 2 {
@@ -372,6 +374,10 @@ func TestProfileKnobSetIsClosedAndSingleSourced(t *testing.T) {
 		// that would drop some may run into a final swap at all. Both are digested
 		// conditionally, so a root that sets neither digests as it always did.
 		"max_height", "downscale_acknowledged",
+		// Whether text subtitles are also copied to sidecars. It decides whether a job writes
+		// files beside its replacement, so it is a knob; digested conditionally, so a root
+		// that sets nothing digests as it always did.
+		"subtitle_sidecars",
 		// What a job does where its hardware encoder is missing or fails. It decides which
 		// encoder writes a replacement, or whether one is written at all, so it is a knob;
 		// digested conditionally, so a root that sets nothing digests as it always did.

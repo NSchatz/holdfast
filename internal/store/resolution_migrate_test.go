@@ -146,7 +146,7 @@ func TestResolution_AMigrationThatCannotCompleteRefusesToOpenAndMovesNothing(t *
 	// this package tracks the end of the migrations slice: a step appended after this line
 	// moves it, and pre-adding a column an EARLIER step already created would break the
 	// fixture rather than the migration under test.
-	execRaw(t, dbPath, `ALTER TABLE jobs ADD COLUMN downscaled INTEGER`)
+	execRaw(t, dbPath, `ALTER TABLE jobs ADD COLUMN subtitle_sidecars TEXT`)
 
 	st, err := Open(dbPath)
 	if err == nil {
@@ -163,10 +163,11 @@ func TestResolution_AMigrationThatCannotCompleteRefusesToOpenAndMovesNothing(t *
 	if after := rowCountOf(t, dbPath, "jobs"); after != before {
 		t.Errorf("the failed migration left %d row(s), was %d", after, before)
 	}
-	// The other half of "rather than run against a half-migrated database": the columns the
-	// step would have added are not there, so nothing wrote into a shape that half exists.
-	if columnExists(t, dbPath, "downscale_scaler") {
-		t.Error("the failed step left downscale_scaler behind: the transaction did not roll back")
+	// The newest step adds a single column, so there is no second column whose absence
+	// would show the step's transaction rolled back; the unmoved stamp and row count above are
+	// that proof. What was already there is still there: the failed step moved nothing.
+	if !columnExists(t, dbPath, "subtitle_sidecars") {
+		t.Error("the failed step removed a column it did not create")
 	}
 }
 

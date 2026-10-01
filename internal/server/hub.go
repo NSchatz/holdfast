@@ -239,6 +239,43 @@ type jobDTO struct {
 	// exactly as swap_cause is.
 	SelectionNotApplied string `json:"selection_not_applied,omitempty"`
 	VmafSkipped         string `json:"vmaf_skipped,omitempty"`
+
+	// What this job did about its carried subtitle streams under `subtitle_sidecars: text`
+	// (docs/design/subtitles.md#sidecars): per stream, the sidecar it published or the token
+	// saying why it published none. Same null rule as dropped_streams: `null` is NOT
+	// RECORDED (the key was off, or the row predates the field), `[]` a job whose source
+	// carried no subtitle stream.
+	SubtitleSidecars *[]sidecarDTO `json:"subtitle_sidecars"`
+}
+
+// sidecarDTO is one carried subtitle stream's sidecar record on the wire. Exactly one of
+// `path` and `skipped` is non-null; `language` is null where the source wrote no tag;
+// `events` is null where no count was established.
+type sidecarDTO struct {
+	Index     int     `json:"index"`
+	Codec     string  `json:"codec"`
+	Language  *string `json:"language"`
+	Forced    bool    `json:"forced"`
+	Path      *string `json:"path"`
+	Skipped   *string `json:"skipped"`
+	Detail    *string `json:"detail"`
+	Events    *int    `json:"events"`
+	FontsLost bool    `json:"fonts_lost"`
+}
+
+// sidecarsDTO carries the store's recorded/not-recorded distinction onto the wire.
+func sidecarsDTO(s store.Sidecars) *[]sidecarDTO {
+	if !s.Recorded() {
+		return nil
+	}
+	list := s.List()
+	out := make([]sidecarDTO, 0, len(list))
+	for _, r := range list {
+		out = append(out, sidecarDTO{Index: r.Index, Codec: r.Codec, Language: nullableText(r.Language),
+			Forced: r.Forced, Path: nullableText(r.Path), Skipped: nullableText(r.Skipped),
+			Detail: nullableText(r.Detail), Events: r.Events, FontsLost: r.FontsLost})
+	}
+	return &out
 }
 
 // droppedStreamDTO is one dropped stream on the wire. `language` is the tag AS THE SOURCE
@@ -313,6 +350,8 @@ func toDTOs(jobs []store.Job) []jobDTO {
 			DroppedStreams:      droppedStreamsDTO(j.Outcome.DroppedStreams),
 			SelectionNotApplied: j.Outcome.SelectionNotApplied,
 			VmafSkipped:         j.Outcome.VmafSkipped,
+
+			SubtitleSidecars: sidecarsDTO(j.Outcome.SubtitleSidecars),
 		})
 	}
 	return out

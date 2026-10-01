@@ -29,6 +29,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/hwdevice"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
+	"github.com/NSchatz/holdfast/internal/subtitle"
 	"github.com/NSchatz/holdfast/internal/vmaf"
 )
 
@@ -457,6 +458,11 @@ type Engine struct {
 	// aborts before the delete exactly as a crashed process would, leaving BOTH files on
 	// disk (a duplicate, never a loss) for the next scan to reconcile.
 	hookAfterRename func() error
+
+	// hookAfterSidecarExtract, when non-nil, is called with each subtitle sidecar temp after
+	// its extraction and before its parse-back gate, so a test can damage the file the gate
+	// reads (subtitle.Request.AfterExtract). nil in production.
+	hookAfterSidecarExtract func(temp string)
 
 	// hookBeforeDryRunRecord, when non-nil, is called immediately before a dry run's
 	// decision is recorded, carrying the path. It drives the one condition under which the
@@ -2601,6 +2607,26 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		tmp = t
 	}
 
+	// SUBTITLE SIDECARS (docs/design/subtitles.md#sidecars), only under
+	// `subtitle_sidecars: text`: with the key off nothing here runs, probes or writes. Every
+	// carried text subtitle stream is copied out of the SOURCE to a temp named after tmp, in
+	// the source's directory, and held there through its parse-back gate. Nothing appears
+	// under a sidecar's own name until the swap below has committed (publishSidecars), and
+	// every way out of this job that does not reach it removes the temps. A sidecar is never
+	// a gate on the swap: it is an added copy of a stream the replacement still carries.
+	var sidecars *subtitle.Prepared
+	if prof.SubtitleSidecarsMode() == config.SubtitleSidecarsText {
+		swapTmp := tmp
+		sidecars = subtitle.Prepare(ctx, subtitle.Request{
+			FFmpeg: e.Probe.FFmpeg, FFprobe: e.Probe.FFprobe, Source: f, Dir: dir,
+			Stem:         strings.TrimSuffix(filepath.Base(final), filepath.Ext(final)),
+			Streams:      plan.Intended(),
+			TempPath:     func(i int) string { return sidecarTempPath(swapTmp, i) },
+			AfterExtract: e.hookAfterSidecarExtract,
+		})
+		defer sidecars.Discard()
+	}
+
 	// Carry the SOURCE's metadata onto the replacement (S0085); see metadata.go for what is
 	// carried, what is not, and why a failure here is a FAILED SWAP with one narrow
 	// exemption absorbed inside carrySourceMetadata.
@@ -2801,6 +2827,10 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		// here cannot lose data, it only means the swap's durability isn't guaranteed
 		// across a power loss. There is nothing to roll back; log and proceed.
 		e.Log.Warn("swap durability unproven (parent dir fsync failed) — in-place swap already applied", "file", f, "err", dirErr)
+	}
+	// The swap has committed, so the gated sidecars may now appear under their own names.
+	if sidecars != nil {
+		out.SubtitleSidecars = store.RecordSidecars(e.publishSidecars(f, dir, sidecars, fi.Mode().Perm()&^0o111))
 	}
 	// The sizes either side of the swap. fi was stat'd at entry (the pre-encode
 	// source), so SourceBytes is accurate even though f may already be gone (a
