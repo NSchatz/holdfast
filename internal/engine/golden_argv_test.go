@@ -358,10 +358,7 @@ func goldenFixtures(t *testing.T, ffmpeg, ffprobe, dir string) map[string]string
 	// target skips an HEVC or AV1 source, an HEVC target an AV1 one, and a codec this build
 	// does not write (MPEG-4 Part 2, FFV1) is re-encoded by every encoder. The 10-bit source
 	// outside the families is FFV1 tagged bt2020/PQ on its frames (setparams, since -color_*
-	// does not reach them), so an H.264 target has a 10-bit PQ source it does not skip. It
-	// carries no mastering-display block: a Matroska file holding one at stream level, like an
-	// MPEG-2 stream's CPB properties, makes ffprobe print a trailing empty field the probe's
-	// shape parser refuses (skipped multi-video-stream; a finding of goal 6, not changed here).
+	// does not reach them), so an H.264 target has a 10-bit PQ source it does not skip.
 	lavfi := []string{"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=duration=1:size=320x240:rate=10"}
 	ff(t, ffmpeg, append(lavfi, "-c:v", "mpeg4", "-q:v", "2", "-pix_fmt", "yuv420p",
 		"--", filepath.Join(dir, "mpeg4.mkv"))...)

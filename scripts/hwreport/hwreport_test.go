@@ -243,6 +243,7 @@ type clipReport struct {
 		MasteringDisplay bool   `json:"mastering_display"`
 		ContentLight     bool   `json:"content_light"`
 	} `json:"output"`
+	Decode string `json:"decode"`
 	Timing struct {
 		WallMs int64 `json:"wall_ms"`
 	} `json:"timing"`
@@ -253,6 +254,8 @@ type report struct {
 		Requested string   `json:"requested"`
 		Ran       []string `json:"ran"`
 	} `json:"encoder"`
+	HWDecode        string `json:"hw_decode"`
+	PixelFormat     string `json:"pixel_format"`
 	HoldfastVersion string `json:"holdfast_version"`
 	FFmpeg          string `json:"ffmpeg"`
 	Device          struct {
@@ -480,4 +483,70 @@ func TestHWReport_RefusesWithoutJqAndNamesIt(t *testing.T) {
 	if code == 0 || !strings.Contains(stderr, "required tool 'jq' is not on PATH") {
 		t.Errorf("without jq the script exited %d, want a refusal naming jq:\n%s", code, stderr)
 	}
+}
+
+// TestHWReport_HWDecodeAddsTheH264ClipAndRecordsEachDecode: --hw-decode runs the configuration
+// with hw_decode: hardware, adds an 8-bit H.264 clip (a source every vendor's hardware decodes),
+// records each clip's declared decode path and names the report <encoder>-hw-decode-<date>.json
+// by default. On the software encoder every job decodes in software - there is no hardware in
+// it to decode on - so every clip says software, all three are replaced, and the report carries
+// none of the planted identities. No device is opened.
+func TestHWReport_HWDecodeAddsTheH264ClipAndRecordsEachDecode(t *testing.T) {
+	for _, tool := range []string{"bash", "jq", "ffmpeg", "ffprobe"} {
+		needTool(t, tool)
+	}
+	root := repoRoot(t)
+	bin := buildHoldfast(t, root)
+	p := newPlanted(t)
+	fakes := fakeTools(t, p)
+	out := filepath.Join(t.TempDir(), "cpu-hw-decode-report.json")
+
+	_, stderr, code := runScript(t, root, scriptEnv(p, fakes), "--encoder", "cpu", "--hw-decode", "--pixel-format", "yuv420p",
+		"--holdfast", bin, "--out", out)
+	if code != 0 {
+		t.Fatalf("hw-report.sh --hw-decode exited %d:\n%s", code, stderr)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("no report was written: %v\n%s", err, stderr)
+	}
+	var r report
+	if err := json.Unmarshal(raw, &r); err != nil {
+		t.Fatalf("the report is not JSON: %v\n%s", err, raw)
+	}
+	if r.HWDecode != "hardware" || r.PixelFormat != "yuv420p" {
+		t.Errorf("hw_decode %q pixel_format %q, want hardware and yuv420p", r.HWDecode, r.PixelFormat)
+	}
+	if len(r.Clips) != 3 || r.Clips[2].Clip != "h264" || r.Clips[2].Source.Codec != "h264" || r.Clips[2].Source.PixFmt != "yuv420p" {
+		t.Fatalf("clips = %+v, want sdr8, hdr10 and an 8-bit H.264 clip", r.Clips)
+	}
+	for _, c := range r.Clips {
+		if c.Decode != "software" {
+			t.Errorf("%s: decode %q, want software (a software encoder decodes in software)", c.Clip, c.Decode)
+		}
+		if c.Outcome.Status != "done" || c.Outcome.EncoderRan != "cpu" {
+			t.Errorf("%s: outcome %q (%s) by %q, want done by cpu", c.Clip, c.Outcome.Status, c.Outcome.Reason, c.Outcome.EncoderRan)
+		}
+		// pixel_format yuv420p reached the configuration: every output is 8-bit 4:2:0.
+		if c.Output == nil || c.Output.PixFmt != "yuv420p" {
+			t.Errorf("%s: output %+v, want yuv420p (the configured pixel_format)", c.Clip, c.Output)
+		}
+	}
+	assertAbsent(t, raw, forbidden(t, p, bin, filepath.Dir(bin), fakes, root))
+	assertNoWorkDirLeft(t, p.home)
+
+	// The default name says what was run.
+	if !strings.Contains(scriptText(t, root), `$ENCODER${HW_DECODE:+-hw-decode}${PIXEL_FORMAT:+-$PIXEL_FORMAT}-$stamp.json`) {
+		t.Error("the default report name no longer marks a hardware-decode report")
+	}
+}
+
+// scriptText is the script itself, for the assertions about its defaults.
+func scriptText(t *testing.T, root string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, "scripts", "hw-report.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
