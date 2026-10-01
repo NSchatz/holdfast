@@ -334,3 +334,21 @@ row: failed temp missing or empty
 == audio/top-level-codec/root-reencode
 -hide_banner -nostdin -loglevel error -y -i <library>/audio.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -c:a:0 aac -b:a:0 384k -ch_layout:a:0 5.1 -ar:a:0 48000 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/audio.__transcoding__.mkv.holdfast-part
 row: failed temp missing or empty
+== crop/key-unset/letterbox
+-hide_banner -nostdin -loglevel error -y -i <library>/letterbox.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/letterbox.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== crop/auto/letterbox
+-hide_banner -nostdin -loglevel error -y -i <library>/letterbox.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -vf crop=320:160:0:40:exact=1 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/letterbox.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== crop/auto/letterbox/max-height-120
+-hide_banner -nostdin -loglevel error -y -i <library>/letterbox.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -vf crop=320:160:0:40:exact=1,scale=240:120:flags=lanczos -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/letterbox.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== crop/auto/no-bars
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== crop/auto/letterbox/remux-only
+-hide_banner -nostdin -loglevel error -y -i <library>/letterbox.mkv -map 0 -map -0:d? -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/letterbox.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== crop/top-level-auto/root-off
+-hide_banner -nostdin -loglevel error -y -i <library>/letterbox.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/letterbox.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty

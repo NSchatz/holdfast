@@ -23,6 +23,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/audio"
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/cpuquota"
+	"github.com/NSchatz/holdfast/internal/crop"
 	"github.com/NSchatz/holdfast/internal/downscale"
 	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/fsclass"
@@ -343,6 +344,10 @@ const (
 	// GateLoudness: a loudness-normalised track's measured integrated loudness is outside
 	// the EBU R 128 tolerance of the target, or could not be measured.
 	GateLoudness = "loudness"
+	// GateCrop: a job that crops produced an output of another size than its plan declares,
+	// or the area its crop removes from the source is not black, or that could not be
+	// established (docs/design/crop.md#crop-gate).
+	GateCrop = "crop"
 	// GateVmafMean: the pooled harmonic mean fell below min_vmaf.
 	GateVmafMean = "vmaf-mean"
 	// GateVmafMin: the worst (sub)sampled frame fell below vmaf_min_pool - the encode is
@@ -384,6 +389,7 @@ var GateVocabulary = []string{
 	GateOther,
 	GateAudio,
 	GateLoudness,
+	GateCrop,
 }
 
 // Engine drives the transcode over a set of library roots.
@@ -673,6 +679,14 @@ type Engine struct {
 	// of one audio stream. Unexported test seam (a fixture drives a decode the pinned ffmpeg
 	// would never fail on demand through it); production leaves it nil.
 	audioMeasure func(ctx context.Context, file, spec string, loudness bool) (audio.Measurement, error)
+
+	// cropDetect, when non-nil, replaces crop.Detect: the cropdetect samples of a source whose
+	// root sets `crop: auto`. cropBlackness, when non-nil, replaces the blackness check run
+	// BEFORE the encode (never the crop gate's, which always measures the source). Unexported
+	// test seams: a fixture hands the plan a crop whose bars carry content past the pre-check,
+	// so the gate's own refusal is what is proved. Production leaves both nil.
+	cropDetect    func(ctx context.Context, source string, props *probe.VideoProps) crop.Consensus
+	cropBlackness func(ctx context.Context, source string, d crop.Decision, pixFmt string) error
 }
 
 // EnsureHoldBacks publishes a snapshot when none has been published yet: the
@@ -2410,11 +2424,42 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	measureLoudness := func(src audio.Source, pre string) (audio.Stats, error) {
 		return audio.MeasureLoudness(ctx, e.Probe.FFmpeg, f, src.Index, pre)
 	}
+	// THE CROP's samples, taken only where the root sets `crop: auto` (docs/design/crop.md):
+	// a root that does not runs no detection and hands the derivation nothing, so its plan,
+	// its command line and its row are what they always were.
+	var cropIn *crop.Consensus
+	if prof.CropEnabled() {
+		cropIn = e.cropConsensus(ctx, f, props, plan.RemuxOnly())
+	}
 	job, err := deriveEncodePlan(planInputs{
 		settings: ts, prof: prof, source: f, output: work, streams: plan, devices: e.Devices,
 		snapshot:        func() (*probe.VideoProps, error) { return props, nil },
-		measureLoudness: measureLoudness,
+		measureLoudness: measureLoudness, crop: cropIn,
 	})
+	// A crop whose bars are not black is refused BEFORE anything is encoded, and the file is
+	// encoded uncropped in this same attempt from a plan derived again with the refusal: the
+	// crop gate measures the same thing again after the encode, so this check only spares an
+	// encode whose crop the gate would refuse.
+	if err == nil && job.Picture.Crop.Applied() {
+		if berr := e.cropPrecheck(ctx, job, props); berr != nil {
+			if ctx.Err() != nil {
+				_ = os.Remove(tmp)
+				return ctx.Err()
+			}
+			e.Log.Info("crop refused: the area it would remove is not black; encoding uncropped", "file", f,
+				"crop", job.Picture.Crop.Rect.String(), "err", berr)
+			cropIn = &crop.Consensus{Reason: crop.ReasonBarsNotBlack, Detail: berr.Error()}
+			sameAudio := job.AudioTracks
+			job, err = deriveEncodePlan(planInputs{
+				settings: ts, prof: prof, source: f, output: work, streams: plan, devices: e.Devices,
+				snapshot:        func() (*probe.VideoProps, error) { return props, nil },
+				measureLoudness: measureLoudness, audio: &sameAudio, crop: cropIn,
+			})
+		}
+	}
+	if err == nil && cropIn != nil {
+		e.Log.Info("crop", "file", f, "decision", job.Picture.Crop.String(), "detail", job.Picture.Crop.Detail)
+	}
 	if err != nil {
 		if ctx.Err() != nil { // interrupted: discard temp, DON'T finish - leave active for RecoverStale
 			_ = os.Remove(tmp)
@@ -2453,7 +2498,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		again, derr := deriveEncodePlan(planInputs{
 			settings: ts, prof: prof, source: f, output: work, streams: plan, devices: e.Devices,
 			snapshot:        func() (*probe.VideoProps, error) { return props, nil },
-			measureLoudness: measureLoudness, audio: &sameAudio,
+			measureLoudness: measureLoudness, audio: &sameAudio, crop: cropIn,
 		})
 		if derr != nil {
 			err = derr
@@ -2536,6 +2581,10 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// because it is a fact about the measurement: a job whose gate did not run records
 	// nothing here, exactly as it records no score.
 	out.VmafScoredWidth, out.VmafScoredHeight = proof.ScaledWidth, proof.ScaledHeight
+	// WHAT THIS JOB DID ABOUT ITS BARS, from the plan the command line was built from, on the
+	// reject path as much as the accept path: the rectangle kept, or why the whole frame was.
+	// Nothing on a job whose root does not crop, so its row is what it always was.
+	out.Crop = job.Picture.cropRecord()
 	// Why the gate did not run, when it did not. It travels beside the figures rather than
 	// instead of them: every VMAF field above is "" or nil on such a row, so what a reader
 	// gets is "not measured, and here is why" - never a zero, which would be a fabricated

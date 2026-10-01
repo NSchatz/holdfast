@@ -166,8 +166,9 @@ type Request struct {
 	//
 	// It is a filter EXPRESSION and rides into the filtergraph unescaped, which is what lets
 	// it carry its own options (`yadif=mode=send_frame:parity=auto:deint=all`). Its value
-	// comes from this build's own closed registry (internal/deinterlace) and never from a
-	// path, a filename or anything else a library can influence.
+	// comes from this build's own closed registry (internal/deinterlace), followed where the
+	// encode cropped by the crop's own expression (internal/crop, integers it measured), and
+	// never from a path, a filename or anything else a library can influence.
 	//
 	// A SCALE NEVER BELONGS HERE. See the package comment: a reference resampled down to
 	// meet a smaller output is a reference that lost the detail the gate exists to measure.

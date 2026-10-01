@@ -253,6 +253,31 @@ type jobDTO struct {
 	// RECORDED (the key was off, or the row predates the field), `[]` a job whose source
 	// carried no subtitle stream.
 	SubtitleSidecars *[]sidecarDTO `json:"subtitle_sidecars"`
+
+	// What this job did about its source's black bars under `crop: auto`
+	// (docs/design/crop.md#crop): the rectangle kept, or the token saying why the whole frame
+	// was. `null` is NOT RECORDED: the root does not crop, or the row predates the field.
+	Crop *cropDTO `json:"crop"`
+}
+
+// cropDTO is one job's crop on the wire. `rect` (`W:H:X:Y`) and `frame` (`WxH`) are non-null
+// where `applied` is true; `reason` and `detail` where it is false.
+type cropDTO struct {
+	Applied bool    `json:"applied"`
+	Rect    *string `json:"rect"`
+	Frame   *string `json:"frame"`
+	Reason  *string `json:"reason"`
+	Detail  *string `json:"detail"`
+}
+
+// cropRecordDTO carries the store's recorded/not-recorded distinction onto the wire.
+func cropRecordDTO(c store.Crop) *cropDTO {
+	if !c.Recorded() {
+		return nil
+	}
+	r := c.Record()
+	return &cropDTO{Applied: r.Applied, Rect: nullableText(r.Rect), Frame: nullableText(r.Frame),
+		Reason: nullableText(r.Reason), Detail: nullableText(r.Detail)}
 }
 
 // audioTrackDTO is one audio track on the wire. Every field a track may not have is an
@@ -403,6 +428,7 @@ func toDTOs(jobs []store.Job) []jobDTO {
 			AudioTracks:         audioTracksDTO(j.Outcome.AudioTracks),
 
 			SubtitleSidecars: sidecarsDTO(j.Outcome.SubtitleSidecars),
+			Crop:             cropRecordDTO(j.Outcome.Crop),
 		})
 	}
 	return out

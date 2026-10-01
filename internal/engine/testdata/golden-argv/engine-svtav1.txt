@@ -116,3 +116,6 @@ row: failed temp missing or empty
 == hw-decode/remux-only
 -hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
 row: failed temp missing or empty
+== crop/auto/letterbox
+-hide_banner -nostdin -loglevel error -y -i <library>/letterbox.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -vf crop=320:160:0:40:exact=1 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/letterbox.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty

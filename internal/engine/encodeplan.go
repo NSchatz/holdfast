@@ -8,6 +8,7 @@ import (
 
 	"github.com/NSchatz/holdfast/internal/audio"
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/crop"
 	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/downscale"
 	"github.com/NSchatz/holdfast/internal/encoder"
@@ -254,17 +255,34 @@ func qualityOf(ts config.Transcode, spec encoder.Spec) (Quality, error) {
 }
 
 // PictureOps are the operations on the picture itself, in the order the filter chain runs
-// them: the deinterlace at the source's own resolution, then the scale.
+// them: the deinterlace at the source's own resolution, then the crop, then the scale
+// (docs/design/crop.md#order).
 type PictureOps struct {
 	// Deinterlace is the deinterlace applied: the profile's filter where the source reports
 	// an interlaced field order, and none otherwise.
 	Deinterlace deinterlace.Filter
-	// Downscale is the resolution ceiling applied: a scale where the source is taller than
-	// the profile's max_height, and none otherwise.
+	// Downscale is the resolution ceiling applied: a scale where the picture the encoder is
+	// handed - the cropped one, on a job that crops - is taller than the profile's
+	// max_height, and none otherwise.
 	Downscale downscale.Scale
-	// Crop is the crop applied, as a filter expression. This build derives none, so it is
-	// always "", and a plan carrying one is refused rather than encoded uncropped.
-	Crop string
+	// Crop is the crop decision (docs/design/crop.md#crop): the rectangle of the source kept,
+	// or why none is. It is the zero Decision on every job whose root does not set
+	// `crop: auto`, which crops nothing and records nothing.
+	Crop crop.Decision
+}
+
+// OutputSize is the picture size the encoder is handed, and so the size the output must
+// have: the scale's target where there is one, else the crop's rectangle where there is one,
+// else the frame the crop decision was taken over. ok is false where none of those is known,
+// which is every job that neither crops nor scales.
+func (o PictureOps) OutputSize() (w, h int, ok bool) {
+	switch {
+	case o.Downscale.Enabled():
+		return o.Downscale.Width, o.Downscale.Height, true
+	case o.Crop.Applied():
+		return o.Crop.Rect.W, o.Crop.Rect.H, true
+	}
+	return 0, 0, false
 }
 
 // MetadataPlan is the colour description and the metadata the output carries.
@@ -341,6 +359,11 @@ type planInputs struct {
 	// made - the software retry of a failed hardware encode - so the first passes are not
 	// run twice. It is checked against this derivation's map like any other.
 	audio *audio.Plan
+	// crop is what the source's cropdetect samples agreed on, where the root sets
+	// `crop: auto`, and nil where it does not: then nothing is cropped and nothing about a
+	// crop is recorded. The crop DECISION is taken here, by crop.Decide, from it and the
+	// snapshot (docs/design/crop.md#crop).
+	crop *crop.Consensus
 }
 
 // deriveEncodePlan is THE derivation of an encode plan, and the only one in this build. The
@@ -382,6 +405,10 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 	// encode for any of them to describe. Its video is what the source's was.
 	if in.streams.RemuxOnly() {
 		p.Video = VideoPlan{Copy: true, Codec: in.streams.SourceVideoCodec()}
+		if in.crop != nil {
+			p.Picture.Crop = crop.Refuse(crop.Frame{}, crop.ReasonRemuxOnly, "a remux-only root re-encodes nothing, "+
+				"so nothing can be cropped")
+		}
 		return p, p.deriveAudio(in)
 	}
 
@@ -414,7 +441,15 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The crop, decided from the samples the engine took, the source's own snapshot - its
+	// frame, its pixel format and its Dolby Vision, read here whatever the guards did - and
+	// the format the encoder is handed. The scale is then resolved against the picture the
+	// crop leaves, so a job that does both scales the picture it kept.
+	cut := cropApplied(in.crop, props, pixFmt)
 	shrink := downscaleApplied(in.prof, props)
+	if cut.Applied() {
+		shrink = in.prof.DownscaleFor(cut.Rect.W, cut.Rect.H)
+	}
 
 	// The colour description the output is written with: the source's own tags and, for
 	// HDR10, its static metadata. Dynamic metadata (Dolby Vision, HDR10+) is not carried;
@@ -460,7 +495,7 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 		InputFormat:  inputFmt,
 		Quality:      quality,
 	}
-	p.Picture = PictureOps{Deinterlace: film, Downscale: shrink}
+	p.Picture = PictureOps{Deinterlace: film, Downscale: shrink, Crop: cut}
 	// The fidelity declaration names every HDR10 block the source carries, read from its side
 	// data. A side-data probe that did not answer would read as "no block", and the output
 	// would then be held to nothing where the source may carry a mastering display: an
@@ -738,8 +773,9 @@ func (p *EncodePlan) buildable() error {
 		return &UnbuildablePlanError{What: fmt.Sprintf("the audio action %q", p.Audio)}
 	case p.Subtitles != CopyStreams:
 		return &UnbuildablePlanError{What: fmt.Sprintf("the subtitle action %q", p.Subtitles)}
-	case p.Picture.Crop != "":
-		return &UnbuildablePlanError{What: fmt.Sprintf("the crop %q", p.Picture.Crop)}
+	case p.Picture.Crop.Reason != "" && !p.Picture.Crop.Rect.Empty():
+		return &UnbuildablePlanError{What: fmt.Sprintf("the crop %q beside its own refusal %q",
+			p.Picture.Crop.Rect, p.Picture.Crop.Reason)}
 	case p.Metadata.HDR10Plus:
 		return &UnbuildablePlanError{What: "HDR10+ dynamic metadata carried into the output"}
 	case p.Metadata.DolbyVision:
@@ -752,10 +788,13 @@ func (p *EncodePlan) buildable() error {
 	if p.Video.Copy {
 		// A copy re-encodes nothing, so no picture operation can run on it: a plan claiming
 		// one would be a replacement recorded as transformed that is the source's picture.
-		if p.Picture.Deinterlace.Enabled() || p.Picture.Downscale.Enabled() {
+		if p.Picture.Deinterlace.Enabled() || p.Picture.Downscale.Enabled() || p.Picture.Crop.Applied() {
 			return &UnbuildablePlanError{What: "a picture operation on a stream copy of the video"}
 		}
 		return nil
+	}
+	if err := p.Picture.cropBuildable(p.Video.PixelFormat); err != nil {
+		return err
 	}
 	switch {
 	case p.Video.Decode != wantDecode || p.Video.DecodeDevice != wantNode:
@@ -825,7 +864,11 @@ func (p *EncodePlan) args(x265 encoder.X265Parallelism) (pre, body []string, err
 	if p.Video.Encoder.FFmpegCodec != "libx265" {
 		video = withHeadFilter(video, p.Metadata.Color.SetParams())
 	}
-	body = append(body, withDeinterlace(withDownscale(video, p.Picture.Downscale), p.Picture.Deinterlace)...)
+	// The crop goes between the two (docs/design/crop.md#order): after the deinterlace, which
+	// needs the fields at their own positions, and before the scale, which then resizes only
+	// the picture that is kept. Composed in reverse for the reason above.
+	body = append(body, withDeinterlace(withCrop(withDownscale(video, p.Picture.Downscale), p.Picture.Crop),
+		p.Picture.Deinterlace)...)
 	// The audio tracks the plan transforms, after everything else: the zero plan adds
 	// nothing, so a job whose configuration sets no audio key builds the command line it
 	// always did.
