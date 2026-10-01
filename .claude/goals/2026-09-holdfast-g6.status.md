@@ -96,7 +96,7 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 5.1 | `scripts/hw-report.sh` writes a redacted `testdata/hw-reports/<encoder>-<date>.json`; a test proves the redaction | TODO |
+| 5.1 | `scripts/hw-report.sh` writes a redacted `testdata/hw-reports/<encoder>-<date>.json`; a test proves the redaction | DONE (PR #133, `a956f4c`): built by a build agent; `TestHWReport_CPUReportCarriesTheFiguresAndNoHostIdentity` (a real run on `cpu` through stand-in `hostname`/`nvidia-smi`/`vainfo` printing planted host, user, home, GPU UUID, serial and MAC: none survives, nor the real host name, user, HOME or temp paths), `TestHWReport_VerifyRefusesAReportCarryingAForbiddenToken`, `TestHWReport_UnavailableEncoderWritesNoReport`, `TestHWReport_RefusesWithoutJqAndNamesIt`; with the `probe.VideoStreams` trailing-field fix; gate exit 0 on `92c3dd2` (run 1883 s, `internal/engine` 1733.5 s, 64%); mutation-diff 100% (5 killed); CI green |
 | 5.2 | `NEEDS-OWNER.md`: one entry each for NVENC, QSV, VAAPI on Intel, VAAPI on AMD, AMF on a host | TODO |
 
 ## Phase 6 - Report
@@ -172,6 +172,11 @@ summed per directory):
   holds it), fixed by reading MPEG-4 Part 2 with every assertion kept; round 2 exit 0
   (`internal/engine` 1612.5 s, 60% of `TEST_TIMEOUT`); mutation-diff 100% (18 killed, 0 lived);
   CI green.
+- 2026-10-01: PR #133 merged as `a956f4c` after a re-gate on the branch merged up to `0d8fce0`
+  (two re-gate attempts were cut off by container restarts and left no result; the third exit 0).
+  PR #134 (`holdfast-g6/hw-decode`) opened; it adds `--hw-decode` and `--pixel-format` to the
+  report script (an 8-bit-only H.264 encoder would otherwise report only skips, since every
+  derived plan is at least 10-bit).
 - 2026-10-01: the stream-side-data finding above is FIXED after all, in PR #133. The hw-report
   agent's HDR10 clip (FFV1 carrying the mastering-display block in its Matroska Colour element,
   as real HDR10 Matroska files do) hit it, and it fixed `probe.VideoStreams` to accept trailing
