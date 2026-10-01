@@ -575,7 +575,24 @@ ALTER TABLE jobs ADD COLUMN vmaf_scored_height INTEGER;
 `,
 	},
 	{
-		// v21 - what a job did to its AUDIO (docs/design/audio.md): per output track, the
+		// v21 - what a job did about its subtitle sidecars under `subtitle_sidecars: text`
+		// (docs/design/subtitles.md#sidecars): per carried subtitle stream, the sidecar it
+		// published or the reason it published none, as one JSON array.
+		//
+		// NULLABLE with NO DEFAULT, the rule every step since v2 has kept: a row written with
+		// the key off, and every row already in the field, recorded nothing about sidecars,
+		// and must read as NOT RECORDED rather than as "published none".
+		//
+		// No index: nothing queries BY it, and every reader has the row in hand.
+		name: "subtitle sidecars",
+		// One nullable column: ADD COLUMN rewrites no row and creates none.
+		rows: noRowChange,
+		sql: `
+ALTER TABLE jobs ADD COLUMN subtitle_sidecars TEXT;
+`,
+	},
+	{
+		// v22 - what a job did to its AUDIO (docs/design/audio.md): per output track, the
 		// source stream, whether it was re-encoded, kept, added or copied and why, what it was
 		// written as, and the loudness mode the encoder reported.
 		//

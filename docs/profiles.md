@@ -258,6 +258,26 @@ job, which `hw_fallback` then decides. It is a library root knob with a top-leve
 `hw_fallback`; the start-time probe runs under the top level's value. The reasoning, and the
 exact command lines, are in
 [docs/design/hardware.md](design/hardware.md#decode).
+## `subtitle_sidecars` - text subtitles copied beside the replacement
+
+<a id="subtitle-sidecars"></a>
+
+```yaml
+subtitle_sidecars: off        # the default: nothing is written beside a replacement
+# subtitle_sidecars: text     # also copy each carried SubRip, ASS and WebVTT stream to a sidecar
+```
+
+Under `text`, once a job's swap has committed, every subtitle stream the replacement carries (after
+`subtitle_languages` and `keep_commentary`) that is SubRip, ASS or WebVTT is also copied, in its own
+format, to `<name>.<lang>[.forced].<ext>` beside the replacement: `film.eng.srt`,
+`film.fre.forced.ass`, `film.und.vtt`. The embedded streams stay in the replacement exactly as
+before. Picture-based subtitles (PGS, VobSub, DVB) and MP4 timed text (`mov_text`) get no sidecar
+and are recorded with the reason; an existing file at a sidecar's name is never overwritten; a
+sidecar is published only after it parses back with the source stream's event count, and one that
+does not is recorded and does not stop the swap. It is a library root knob with a top-level
+default, like `hw_decode`. The rules, the names and the gate, with their reasoning, are in
+[docs/design/subtitles.md](design/subtitles.md#sidecars).
+
 ## `exclude_paths` and `include_paths` - which paths this tool may touch
 
 <a id="path-filters"></a>

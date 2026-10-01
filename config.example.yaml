@@ -328,6 +328,14 @@ dry_run: false
 #                         # HDR10 metadata are what a software decode gives. A job
 #                         # encoded in software decodes in software. A library root
 #                         # may override it. See docs/design/hardware.md#decode.
+# subtitle_sidecars: off # off (default): nothing is written beside a replacement.
+#                         # text: once a job's swap has committed, each carried
+#                         # SubRip, ASS and WebVTT stream is also copied, in its own
+#                         # format, to <name>.<lang>[.forced].<ext> beside it; never
+#                         # over an existing file, and only after it parses back
+#                         # with the source stream's event count. Picture-based and
+#                         # mov_text subtitles are skipped with a reason. A library
+#                         # root may override it. See docs/design/subtitles.md.
 # crf: 22                # quality knob (lower = bigger/better): libx265/libsvtav1
 #                         # constant-rate-factor, 0-51. A hardware encoder with no
 #                         # quality.<key> below takes this value unchanged as its

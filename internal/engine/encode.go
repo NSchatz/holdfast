@@ -416,9 +416,21 @@ func matroskaPictures(out string, plan *StreamPlan) ([]matroskaPicture, error) {
 // whose name fits. The PATH is the other limit: it is at least the working output's path
 // plus the suffix, which can pass PATH_MAX where the working output's does not, and that is
 // why the picture file is only ever reached relative to its directory (runCarrying).
-func picturePath(out string, i int) string {
+func picturePath(out string, i int) string { return auxTempPath(out, ".picture"+strconv.Itoa(i)) }
+
+// sidecarTempPath is the temp the i-th subtitle sidecar of the job whose swap reads out is
+// extracted to, on picturePath's terms: the working file's own name plus ".subtitle<i>", in
+// its directory (the source's, so the sidecar's link(2) to its final name never crosses a
+// filesystem), under the temp marker the sweeps recognise, and never a name a media server
+// reads as a subtitle or a video. See docs/design/subtitles.md#sidecars.
+func sidecarTempPath(out string, i int) string {
+	return auxTempPath(out, ".subtitle"+strconv.Itoa(i))
+}
+
+// auxTempPath is out plus tail, shortened as picturePath describes where that would pass
+// NAME_MAX.
+func auxTempPath(out, tail string) string {
 	dir, base := filepath.Split(out)
-	tail := ".picture" + strconv.Itoa(i)
 	if len(base)+len(tail) <= maxBaseName {
 		return out + tail
 	}

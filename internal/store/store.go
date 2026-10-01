@@ -281,6 +281,13 @@ type Outcome struct {
 	VmafScoredWidth  *int
 	VmafScoredHeight *int
 
+	// SubtitleSidecars is what this job did about its carried subtitle streams under
+	// `subtitle_sidecars: text`: per stream, the sidecar it published or the reason it
+	// published none (docs/design/subtitles.md#sidecars). Its zero value is NOT RECORDED,
+	// which is what a job with the key off, and every row written before the column
+	// existed, carries.
+	SubtitleSidecars Sidecars
+
 	// SourceCodec is the video codec the SOURCE was in when this job was decided, as
 	// ffprobe named it. It is recorded on a dry-run decision, whose whole purpose is to say
 	// what a real run WOULD do to that file: an operator sizing the job needs to know what

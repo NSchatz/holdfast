@@ -131,7 +131,7 @@ func (e *Engine) sweepOrphanedTemps(ctx context.Context) map[string]bool {
 			v.close(false)
 			continue
 		}
-		pictures := picturesBeside(temp)
+		pictures := append(picturesBeside(temp), subtitleTempsBeside(temp)...)
 		for _, p := range pictures {
 			decided[p] = true
 		}

@@ -65,15 +65,15 @@ var knownKeys = map[string]bool{
 	queueOrderKey:   true,
 	excludePathsKey: true, includePathsKey: true,
 	audioLanguagesKey: true, subtitleLanguagesKey: true,
-	keepCommentaryKey: true, remuxOnlyKey: true,
+	keepCommentaryKey: true, remuxOnlyKey: true, subtitleSidecarsKey: true,
+	audioReencodeKey: true, audioCodecKey: true, audioMonoKbpsKey: true, audioStereoKbpsKey: true,
+	audio51KbpsKey: true, audio71KbpsKey: true, keepOriginalAudioKey: true, audioDownmixKey: true,
+	audioLoudnessKey: true,
 	deinterlaceKey:   true,
 	maxHeightKey:     true,
 	downscaleAckKey:  true,
 	hwFallbackKey:    true,
 	hwDecodeKey:      true,
-	audioReencodeKey: true, audioCodecKey: true, audioMonoKbpsKey: true, audioStereoKbpsKey: true,
-	audio51KbpsKey: true, audio71KbpsKey: true, keepOriginalAudioKey: true, audioDownmixKey: true,
-	audioLoudnessKey: true,
 	x265CPUsKey:      true,
 	qualityKey:       true,
 	// The divisor `workers: auto` sizes the pool by. It describes the PROCESS, so a
@@ -170,6 +170,8 @@ func defaultLayer() map[string]any {
 		// A source is decoded in software, as every job always was: hardware decode is off
 		// until configured (docs/design/hardware.md#decode).
 		hwDecodeKey: HWDecodeSoftware,
+		// No sidecar is written until configured (docs/design/subtitles.md#sidecars).
+		subtitleSidecarsKey: SubtitleSidecarsOff,
 		// No configured libx265 parallelism: the run derives it from the CPU quota of its
 		// own cgroup, or passes none where there is no quota to read.
 		x265CPUsKey: 0,
@@ -351,6 +353,10 @@ type Config struct {
 	KeepOriginalAudio *bool  `yaml:"keep_original_audio"`
 	AudioDownmix      string `yaml:"audio_downmix"`
 	AudioLoudness     string `yaml:"audio_loudness"`
+	// SubtitleSidecars is whether a job also copies its carried text subtitle streams to
+	// sidecar files beside the replacement: "off" (the default) or "text". A library root may
+	// override it. See docs/design/subtitles.md#sidecars.
+	SubtitleSidecars string `yaml:"subtitle_sidecars"`
 	// CRF is the software encoders' quality knob (lower = bigger/better): libx265's
 	// and libsvtav1's constant rate factor, 0-51. Each hardware encoder's quality is
 	// set on its own scale by Quality below, and a hardware encoder with no entry there
@@ -942,6 +948,7 @@ func (c *Config) TopLevelProfile() Profile {
 		KeepOriginalAudio: c.KeepOriginalAudio,
 		AudioDownmix:      c.AudioDownmix,
 		AudioLoudness:     c.AudioLoudness,
+		SubtitleSidecars:  c.SubtitleSidecars,
 	}
 }
 

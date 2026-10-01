@@ -101,6 +101,9 @@ var profileKnobs = []string{
 	// their conditional rule makes the position immaterial to every existing digest.
 	audioReencodeKey, audioCodecKey, audioMonoKbpsKey, audioStereoKbpsKey, audio51KbpsKey,
 	audio71KbpsKey, keepOriginalAudioKey, audioDownmixKey, audioLoudnessKey,
+	// Whether text subtitles are also copied to sidecars, on the deinterlace knob's terms:
+	// it contributes to the digest only where it is not the shipped `off`.
+	subtitleSidecarsKey,
 	// What a job does where its hardware encoder is missing or fails, appended on the
 	// deinterlace knob's terms: it contributes to the digest only where it is not the
 	// shipped `skip`, so a root that sets nothing digests as it did before the key existed.
@@ -205,6 +208,10 @@ type Profile struct {
 	KeepOriginalAudio *bool  `yaml:"keep_original_audio"`
 	AudioDownmix      string `yaml:"audio_downmix"`
 	AudioLoudness     string `yaml:"audio_loudness"`
+	// SubtitleSidecars is whether a job under this root writes text subtitle sidecars:
+	// SubtitleSidecarsOff or SubtitleSidecarsText. "" is the default, off. See
+	// Config.SubtitleSidecars.
+	SubtitleSidecars string `yaml:"subtitle_sidecars"`
 
 	// HWFallback is what a job under this root does where its hardware encoder is missing
 	// or fails: HWFallbackSkip or HWFallbackSoftware. "" is the default, skip, which is
@@ -304,7 +311,7 @@ func (p Profile) values() []string {
 		strconv.FormatBool(p.DownscaleAcknowledged()),
 	}
 	vals = append(vals, p.audioValues()...)
-	return append(vals, p.HWFallbackMode(), p.HWDecodeMode())
+	return append(vals, p.SubtitleSidecarsMode(), p.HWFallbackMode(), p.HWDecodeMode())
 }
 
 // renderDeinterlace is the deinterlace knob as `validate` prints it and as the digest reads
@@ -399,6 +406,8 @@ func digestSilent(knob, value string) bool {
 		return value == HWFallbackSkip
 	case hwDecodeKey:
 		return value == HWDecodeSoftware
+	case subtitleSidecarsKey:
+		return value == SubtitleSidecarsOff
 	}
 	return false
 }
@@ -422,6 +431,9 @@ func (p Profile) validate() error {
 		return err
 	}
 	if err := p.validateAudio(); err != nil {
+		return err
+	}
+	if err := validateSubtitleSidecars(p.SubtitleSidecars); err != nil {
 		return err
 	}
 	if p.CRF < 0 || p.CRF > 51 {

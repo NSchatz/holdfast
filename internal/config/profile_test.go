@@ -104,6 +104,7 @@ audio_downmix: stereo
 audio_loudness: ebu_r128
 hw_fallback: software
 hw_decode: hardware
+subtitle_sidecars: text
 workers: 4
 state_dir: /var/lib/holdfast
 undo_window_hours: 24
@@ -149,6 +150,7 @@ max_load: 1.5
 		AudioLoudness:     "ebu_r128",
 		HWFallback:        "software",
 		HWDecode:          "hardware",
+		SubtitleSidecars:  "text",
 	}
 	roots := c.RootProfiles()
 	if len(roots) != 2 {
@@ -394,6 +396,10 @@ func TestProfileKnobSetIsClosedAndSingleSourced(t *testing.T) {
 		// as it always did (docs/design/audio.md).
 		"audio_reencode", "audio_codec", "audio_mono_kbps", "audio_stereo_kbps", "audio_51_kbps",
 		"audio_71_kbps", "keep_original_audio", "audio_downmix", "audio_loudness",
+		// Whether text subtitles are also copied to sidecars. It decides whether a job writes
+		// files beside its replacement, so it is a knob; digested conditionally, so a root
+		// that sets nothing digests as it always did.
+		"subtitle_sidecars",
 		// What a job does where its hardware encoder is missing or fails. It decides which
 		// encoder writes a replacement, or whether one is written at all, so it is a knob;
 		// digested conditionally, so a root that sets nothing digests as it always did.

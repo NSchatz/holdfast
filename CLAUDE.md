@@ -61,6 +61,7 @@ reasoning lives in the document, not in this file.
   encoder's report** - [`docs/design/audio.md`](docs/design/audio.md#loudness).
 - **A transformed audio track replaces nothing until its length, layout, rate and loudness match its
   plan and every audio stream decodes** - [`docs/design/audio.md`](docs/design/audio.md#audio-gates).
+- **A subtitle sidecar is published only after the swap commits and its parse-back gate passes, and never over an existing file** - [`docs/design/subtitles.md`](docs/design/subtitles.md#sidecars).
 
 ## Layout
 
@@ -86,6 +87,7 @@ reasoning lives in the document, not in this file.
 - `internal/vmaf` - libvmaf via ffmpeg; the perceptual gate.
 - `internal/audio` - the audio plan: which tracks are re-encoded or downmixed, the codec and layout
   matrix, two-pass loudness, and the audio gates' arithmetic.
+- `internal/subtitle` - the text subtitle sidecars `subtitle_sidecars: text` writes, and their gate.
 - `internal/encoder` - the codec matrix registry.
 - `internal/hwdevice` - the render nodes a hardware encoder can open, and the one VAAPI and QSV
   are each assigned.

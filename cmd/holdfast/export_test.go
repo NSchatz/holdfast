@@ -668,7 +668,7 @@ func bumpSchemaVersion(t *testing.T, dbPath string, version int) {
 // cmd/holdfast cannot see the store's unexported version counter - and
 // TestExport_TheDaemonsDoorIsWhatMigratesAndThatIsWhyTheExportDoesNotUseIt keeps the literal
 // honest by asserting store.Open really does move a fixture built from it.
-const olderSchemaVersion = 20
+const olderSchemaVersion = 21
 
 // seedOlderLedger builds a real ledger with rows and then removes exactly what the NEWEST
 // migration added, restoring the previous version stamp. Not a current database wearing an

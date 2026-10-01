@@ -66,8 +66,8 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g7-ba
 
 | # | Item | State |
 |---|---|---|
-| 4.1 | SubRip, ASS, WebVTT to `<name>.<lang>[.forced].<ext>` sidecars, exclusive create; bitmap and mov_text skipped with a reason; ASS fonts logged | TODO |
-| 4.2 | Sidecar parse-back event-count gate, red on a truncated sidecar | TODO |
+| 4.1 | SubRip, ASS, WebVTT to `<name>.<lang>[.forced].<ext>` sidecars, exclusive create; bitmap and mov_text skipped with a reason; ASS fonts logged | DONE (PR #135, `eb424d5`): `subtitle_sidecars: off|text`, `internal/subtitle`; extracted from the source after the gates to `<working file>.subtitle<n>` temps beside it, published by `link(2)` only after the swap commits; `TestSidecar_SRTASSWebVTTNamedByLanguageAndForced`, `TestSidecar_EngineWritesSidecarsBesideTheReplacement`, `TestSidecar_ExistingSidecarIsNeverOverwritten`, `TestSidecar_ANameTakenByAnEarlierStreamIsSkipped`, `TestSidecar_BitmapSkipsWithItsReason` (stream-list entries: the pinned ffmpeg cannot make a bitmap subtitle), `TestSidecar_MovTextSkipsWithItsReason` (a real MP4), `TestSidecar_EngineKeyUnsetWritesNothing`; gate round 1 exit 0 (run 1887 s, `internal/engine` 1773.3 s, 66%); mutation-diff 100% (43 killed, 0 lived); CI green |
+| 4.2 | Sidecar parse-back event-count gate, red on a truncated sidecar | DONE (PR #135): `TestSidecar_TruncatedSidecarFailsTheCountGate`, `TestSidecar_EngineTruncatedSidecarIsRefusedAndTheSwapStands` (nothing published, no temp left, the swap stands) |
 
 ## Phase 5 - Docs (line F)
 
@@ -127,6 +127,13 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g7-ba
   cannot be written, is not published and is recorded, and does not fail the job or block the
   swap: it is an added convenience copy of a stream the replacement still carries, and the swap's
   gates are about the replacement.
+
+- 2026-10-01: PR #135 (subtitles) merged as `eb424d5`. Its own decisions: a language tag must match
+  `^[a-z]{2,3}(-[a-z0-9]{1,8})*$` or the stream is skipped `language-tag-not-a-name` (no tag
+  becomes a path segment); a name is taken once computed even if the earlier sidecar later fails;
+  sidecars are recorded on `done` rows only; a filesystem without hard links records
+  `sidecar-publish-failed`; store schema v21. Its agent once ran `go test ./cmd/holdfast/` outside
+  the heavy lock, then re-ran it under the lock (a slip, recorded).
 
 ## Resume here
 

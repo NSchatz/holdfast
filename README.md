@@ -127,6 +127,12 @@ sample rate, a full decode of every audio stream, and loudness within tolerance 
 must still be strictly smaller. Keys: [docs/profiles.md](docs/profiles.md#audio); the reasoning:
 [docs/design/audio.md](docs/design/audio.md).
 
+Text subtitles can also be copied out beside a replacement: with `subtitle_sidecars: text`, each
+carried SubRip, ASS and WebVTT stream is written, unconverted, to `<name>.<lang>[.forced].<ext>`
+once the swap has committed, never over an existing file and only after it parses back complete;
+the embedded streams stay in the replacement, and picture-based and `mov_text` subtitles are skipped
+with a reason. See [docs/design/subtitles.md](docs/design/subtitles.md#sidecars).
+
 **Distributed or remote processing is a non-goal by design, not a missing feature.** holdfast is one
 process: no server/node split, no remote workers. The no-loss argument rests on an atomic
 same-filesystem `rename(2)` - it either happened or it did not, so a failure never leaves a partial file

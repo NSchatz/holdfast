@@ -390,6 +390,7 @@ func (s *SQLite) Claim(ctx context.Context, path, fingerprint, worker string, ma
 			deinterlaced = NULL, deinterlace_filter = NULL,
 			downscaled = NULL, downscale_scaler = NULL,
 			vmaf_scored_width = NULL, vmaf_scored_height = NULL,
+			subtitle_sidecars = NULL,
 			audio_tracks = NULL
 		 WHERE path = ? AND fingerprint = ?`,
 		string(Probing), worker, now(), currentStamp(), path, fingerprint); err != nil {
@@ -740,6 +741,7 @@ func finishQuery(st Status, o *Outcome, maxFailures int) string {
 		deinterlaced = ?, deinterlace_filter = ?,
 		downscaled = ?, downscale_scaler = ?,
 		vmaf_scored_width = ?, vmaf_scored_height = ?,
+		subtitle_sidecars = ?,
 		audio_tracks = ?`
 	switch {
 	case st != Failed:
@@ -783,6 +785,7 @@ func finishArgs(st Status, o *Outcome, path, fingerprint string) []any {
 		nullBool(o.Deinterlaced), nullString(o.DeinterlaceFilter),
 		nullBool(o.Downscaled), nullString(o.DownscaleScaler),
 		nullPixels(o.VmafScoredWidth), nullPixels(o.VmafScoredHeight),
+		nullString(o.SubtitleSidecars.Encode()),
 		nullString(o.AudioTracks.Encode()),
 		path, fingerprint,
 	}
@@ -882,6 +885,7 @@ const outcomeColumns = `reason, encoder, vmaf_mean, vmaf_min, vmaf_model,
 	source_width, source_height, output_width, output_height,
 	deinterlaced, deinterlace_filter,
 	downscaled, downscale_scaler, vmaf_scored_width, vmaf_scored_height,
+	subtitle_sidecars,
 	audio_tracks`
 
 // outcomeScan holds one row's outcome columns on the way out of the driver. Every
@@ -971,6 +975,9 @@ type outcomeScan struct {
 	vmafScoredWidth  sql.NullInt64
 	vmafScoredHeight sql.NullInt64
 
+	// What the job did about its subtitle sidecars. NULL is not recorded: the key was off,
+	// or the row predates the column.
+	sidecars sql.NullString
 	// What this job did to its audio. Nullable like the rest: a row written before the
 	// column existed, and every job whose configuration transformed no audio, recorded
 	// nothing, and nothing is not an empty list.
@@ -991,6 +998,7 @@ func (s *outcomeScan) dest() []any {
 		&s.deinterlaced, &s.deintFilter,
 		&s.downscaled, &s.downscaleScaler,
 		&s.vmafScoredWidth, &s.vmafScoredHeight,
+		&s.sidecars,
 		&s.audioTracks,
 	}
 }
@@ -1024,6 +1032,7 @@ func (s *outcomeScan) outcome() Outcome {
 		VmafSkipped:         s.vmafSkipped.String,
 		DeinterlaceFilter:   s.deintFilter.String,
 		DownscaleScaler:     s.downscaleScaler.String,
+		SubtitleSidecars:    ParseSidecars(s.sidecars.String),
 		AudioTracks:         ParseAudioTracks(s.audioTracks.String),
 		Decision: Decision{
 			LibraryRoot:   s.libraryRoot.String,
@@ -1359,6 +1368,7 @@ func (s *SQLite) RecordSkip(ctx context.Context, path, fingerprint, reason strin
 			deinterlaced = NULL, deinterlace_filter = NULL,
 			downscaled = NULL, downscale_scaler = NULL,
 			vmaf_scored_width = NULL, vmaf_scored_height = NULL,
+			subtitle_sidecars = NULL,
 			audio_tracks = NULL
 		 WHERE jobs.status = ?`,
 		path, fingerprint, string(Skipped), now(), nullString(reason),
