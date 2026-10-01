@@ -548,6 +548,12 @@ it refuses to start under `skip` and uses `cpu` under `software`. A job no probe
 carry is skipped `hardware-unavailable` under `skip`, and offered again on every pass. See
 [`docs/design/hardware.md`](design/hardware.md#fallback), including why `skip` is the default.
 
+`hw_decode: hardware` (top level or per library root; off by default) also decodes each source on
+the job's hardware encoder's vendor hardware, through the same passthrough as the encoder: the
+NVIDIA runtime for CUDA, and `/dev/dri` with its `group_add` for VAAPI. Nothing else is needed in
+the container. Every frame comes back to system memory before the filters, the encoder and the
+gates read it; see [`docs/design/hardware.md`](design/hardware.md#decode).
+
 ## Building and verifying it yourself
 
 ```bash

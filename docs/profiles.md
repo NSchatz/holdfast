@@ -237,6 +237,27 @@ skipped for want of hardware records `hardware-unavailable` and is re-decided on
 The reasoning, and why `skip` is the default, is in
 [`docs/design/hardware.md`](design/hardware.md#fallback).
 
+
+## `hw_decode` - decoding on the encoder's hardware
+
+```yaml
+hw_decode: software        # the default: every source is decoded in software, as always
+# hw_decode: hardware      # decode on the job's hardware encoder's vendor hardware
+```
+
+Under `hardware`, a job whose encoder is a hardware one decodes its source on that vendor's
+hardware: CUDA (`-hwaccel cuda`) for `nvenc`, `av1_nvenc` and `h264_nvenc`; VAAPI on the
+encoder's own render node for the VAAPI and QSV encoders; VAAPI on the VAAPI node for the AMF
+ones. Every decoded frame comes back to system memory before anything reads it, so the colour
+stamp, a `deinterlace`, a `max_height` scale, the VAAPI upload and every gate see exactly the
+frames a software decode would, at the source's own depth and with its HDR10 metadata: it is a
+throughput option and changes no decision. A job encoded in software (a software encoder, or a
+job `hw_fallback: software` handed to one) decodes in software. A source the device cannot
+decode is decoded in software by ffmpeg itself; a decode device that cannot be opened fails the
+job, which `hw_fallback` then decides. It is a library root knob with a top-level default, like
+`hw_fallback`; the start-time probe runs under the top level's value. The reasoning, and the
+exact command lines, are in
+[docs/design/hardware.md](design/hardware.md#decode).
 ## `exclude_paths` and `include_paths` - which paths this tool may touch
 
 <a id="path-filters"></a>

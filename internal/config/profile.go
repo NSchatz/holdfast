@@ -99,6 +99,9 @@ var profileKnobs = []string{
 	// deinterlace knob's terms: it contributes to the digest only where it is not the
 	// shipped `skip`, so a root that sets nothing digests as it did before the key existed.
 	hwFallbackKey,
+	// How a job's source is decoded, on the same terms: it contributes only where it is not
+	// the shipped `software`.
+	hwDecodeKey,
 }
 
 // ProfileKnobs returns the closed set of knobs a library_roots entry may override, in
@@ -190,6 +193,10 @@ type Profile struct {
 	// what a Profile assembled in Go carries. See Config.HWFallback.
 	HWFallback string `yaml:"hw_fallback"`
 
+	// HWDecode is how a job under this root decodes its source: HWDecodeSoftware or
+	// HWDecodeHardware. "" is the default, software. See Config.HWDecode.
+	HWDecode string `yaml:"hw_decode"`
+
 	// Rules are this root's ordered, first-match resolution bands (see rules.go). They are
 	// NOT a knob and carry no `yaml` tag of their own: they are resolved out of the entry
 	// before the knob map is decoded, and a rule supplies a subset of the knobs above for
@@ -278,6 +285,7 @@ func (p Profile) values() []string {
 		renderMaxHeight(p.MaxHeight),
 		strconv.FormatBool(p.DownscaleAcknowledged()),
 		p.HWFallbackMode(),
+		p.HWDecodeMode(),
 	}
 }
 
@@ -368,6 +376,8 @@ func digestSilent(knob, value string) bool {
 		return value == "false"
 	case hwFallbackKey:
 		return value == HWFallbackSkip
+	case hwDecodeKey:
+		return value == HWDecodeSoftware
 	}
 	return false
 }
@@ -385,6 +395,9 @@ func (p Profile) validate() error {
 		return fmt.Errorf("encoder %q is not supported (known: %v)", p.Encoder, encoder.KnownWithAuto())
 	}
 	if err := validateHWFallback(p.HWFallback); err != nil {
+		return err
+	}
+	if err := validateHWDecode(p.HWDecode); err != nil {
 		return err
 	}
 	if p.CRF < 0 || p.CRF > 51 {

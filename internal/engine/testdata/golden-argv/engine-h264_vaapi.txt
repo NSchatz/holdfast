@@ -94,3 +94,21 @@ row: skipped exotic-pixel-format
 == source-mpeg4/quality-set-t27
 -hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -qp 31 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
 row: failed temp missing or empty
+== hw-decode/source-ffv1-pq/every-encoder
+(no invocation)
+row: skipped exotic-pixel-format
+== hw-decode/source-mpeg4/pixel-format-yuv420p/every-encoder
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -filter_hw_device hfva -hwaccel vaapi -hwaccel_device hfva -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -qp 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== hw-decode/top-level/source-hdr10
+(no invocation)
+row: skipped already-at-target-codec
+== hw-decode/top-level/root-software
+(no invocation)
+row: skipped already-at-target-codec
+== hw-decode/max-height-240/deinterlace-yadif
+(no invocation)
+row: skipped already-at-target-codec
+== hw-decode/remux-only
+(no invocation)
+row: skipped already-at-target-codec

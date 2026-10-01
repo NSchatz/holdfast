@@ -674,6 +674,32 @@ error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le o
 -hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
 == encode-profile/to-cpu
 -hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 26 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== hw-decode
+(no invocation)
+error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
+== hw-decode/stream-plan-handed
+(no invocation)
+error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
+== hw-decode/source-hdr10
+(no invocation)
+error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/hdr10.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
+== hw-decode/source-ffv1-pq
+(no invocation)
+error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/ffv1-pq.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
+== hw-decode/pixel-format-yuv420p
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -init_hw_device qsv=hfqsv@hfva -hwaccel vaapi -hwaccel_device hfva -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_qsv -pix_fmt nv12 -color_range tv -fps_mode passthrough -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== hw-decode/bitrate-8000k
+(no invocation)
+error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
+== hw-decode/deinterlace-yadif/max-height-240
+(no invocation)
+error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/tall-interlaced.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
+== hw-decode/remux-only
+(no invocation)
+error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
+== hw-decode/software
+(no invocation)
+error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)
 == alias-h264_qsv
 (no invocation)
 error: encoder "h264_qsv" (h264_qsv) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 qsv)

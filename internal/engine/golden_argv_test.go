@@ -358,10 +358,7 @@ func goldenFixtures(t *testing.T, ffmpeg, ffprobe, dir string) map[string]string
 	// target skips an HEVC or AV1 source, an HEVC target an AV1 one, and a codec this build
 	// does not write (MPEG-4 Part 2, FFV1) is re-encoded by every encoder. The 10-bit source
 	// outside the families is FFV1 tagged bt2020/PQ on its frames (setparams, since -color_*
-	// does not reach them), so an H.264 target has a 10-bit PQ source it does not skip. It
-	// carries no mastering-display block: a Matroska file holding one at stream level, like an
-	// MPEG-2 stream's CPB properties, makes ffprobe print a trailing empty field the probe's
-	// shape parser refuses (skipped multi-video-stream; a finding of goal 6, not changed here).
+	// does not reach them), so an H.264 target has a 10-bit PQ source it does not skip.
 	lavfi := []string{"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=duration=1:size=320x240:rate=10"}
 	ff(t, ffmpeg, append(lavfi, "-c:v", "mpeg4", "-q:v", "2", "-pix_fmt", "yuv420p",
 		"--", filepath.Join(dir, "mpeg4.mkv"))...)
@@ -711,6 +708,22 @@ func encoderArgvCases() []encoderArgvCase {
 		c.EncodeProfiles = []config.EncodeProfile{{Name: "to-hevc", Match: "*.mkv", Encoder: strPtrGolden("cpu"),
 			CRF: intPtrGolden(26)}}
 	}})
+
+	// Hardware decode: each vendor's decode pipeline before the input, and no change at all for
+	// a software encoder. With the colour stamp, a deinterlace and a scale on the frames it
+	// downloads, a 10-bit HDR10 source, a target bitrate, the 8-bit plan, and a remux (which
+	// decodes nothing).
+	hwDecode := func(c *config.Config) { c.HWDecode = config.HWDecodeHardware }
+	add(encoderArgvCase{name: "hw-decode", cfg: hwDecode})
+	add(encoderArgvCase{name: "hw-decode/stream-plan-handed", cfg: hwDecode, handProfile: true, streamPlan: true})
+	add(encoderArgvCase{name: "hw-decode/source-hdr10", source: "hdr10.mkv", cfg: hwDecode})
+	add(encoderArgvCase{name: "hw-decode/source-ffv1-pq", source: "ffv1-pq.mkv", cfg: hwDecode})
+	add(encoderArgvCase{name: "hw-decode/pixel-format-yuv420p", cfg: both(hwDecode, pixFmt("yuv420p"))})
+	add(encoderArgvCase{name: "hw-decode/bitrate-8000k", cfg: both(hwDecode, bitrate(8000))})
+	add(encoderArgvCase{name: "hw-decode/deinterlace-yadif/max-height-240", source: "tall-interlaced.mkv",
+		cfg: both(hwDecode, deint("yadif"), ceiling(240))})
+	add(encoderArgvCase{name: "hw-decode/remux-only", cfg: both(hwDecode, remux)})
+	add(encoderArgvCase{name: "hw-decode/software", cfg: func(c *config.Config) { c.HWDecode = config.HWDecodeSoftware }})
 	return cs
 }
 
@@ -962,6 +975,19 @@ func engineArgvCases() []engineArgvCase {
 	add(engineArgvCase{name: "source-mpeg4/quality-set-t27", source: "mpeg4.mkv", root: "pixel_format: yuv420p",
 		top: "quality:\n  h264_nvenc: 28\n  h264_qsv: 29\n  h264_vaapi: 31\n  h264_amf: 32\n" +
 			"  av1_qsv: 33\n  av1_vaapi: 120\n  av1_amf: 130", core: true})
+
+	// Hardware decode through the engine's own resolution: a root's hw_decode, a top-level one
+	// a root inherits, one a root turns off, and the picture operations on downloaded frames.
+	add(engineArgvCase{name: "hw-decode/source-ffv1-pq/every-encoder", source: "ffv1-pq.mkv",
+		root: "hw_decode: hardware", core: true})
+	add(engineArgvCase{name: "hw-decode/source-mpeg4/pixel-format-yuv420p/every-encoder", source: "mpeg4.mkv",
+		root: "hw_decode: hardware\npixel_format: yuv420p", core: true})
+	add(engineArgvCase{name: "hw-decode/top-level/source-hdr10", source: "hdr10.mkv", top: "hw_decode: hardware", core: true})
+	add(engineArgvCase{name: "hw-decode/top-level/root-software", top: "hw_decode: hardware",
+		root: "hw_decode: software", core: true})
+	add(engineArgvCase{name: "hw-decode/max-height-240/deinterlace-yadif", source: "tall-interlaced.mkv",
+		root: ceiling(240) + "\ndeinterlace: yadif\nhw_decode: hardware", core: true})
+	add(engineArgvCase{name: "hw-decode/remux-only", root: "remux_only: true\nhw_decode: hardware", core: true})
 	return cs
 }
 

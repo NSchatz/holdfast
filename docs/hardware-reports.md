@@ -17,7 +17,8 @@ run by the owner on the host that has it and committed under `testdata/hw-report
    `hw_fallback: skip`, so a missing device is a refusal and never a quiet software encode.
 3. Runs `holdfast validate`, then `holdfast run --file` once per clip, so every gate runs and
    each clip has its own wall-clock, then reads the ledger back with `holdfast export`.
-4. Writes `testdata/hw-reports/<encoder>-<date>.json` (UTC date), or `--out`. An existing report
+4. Writes `testdata/hw-reports/<encoder>-<date>.json` (UTC date; `<encoder>-hw-decode-<date>.json`
+   with `--hw-decode`, below), or `--out`. An existing report
    is never overwritten, and the throwaway library is removed whatever happens.
 
 An encoder the start-time probe cannot use ends the script with `encoder '<key>' is unavailable`,
@@ -80,6 +81,34 @@ make build && scripts/hw-report.sh --encoder amf --holdfast ./holdfast
 ```
 
 Any key `holdfast validate` accepts can be named; the script keeps no list of its own.
+
+## The pixel format
+
+The configuration's `pixel_format` is `auto` by default, which plans every job at 10 bits or more
+(the derivation floors the depth at 10), so an encoder that carries 8-bit only - `h264_qsv`,
+`h264_vaapi`, or an `h264_nvenc` on a card without 10-bit H.264 - would only report skips.
+`--pixel-format yuv420p` sets the configuration's `pixel_format`, is recorded as `pixel_format`,
+and adds `-yuv420p` to the report's name:
+
+```bash
+scripts/hw-report.sh --encoder h264_qsv --pixel-format yuv420p --image holdfast:hw --docker-arg=--device=/dev/dri --docker-arg=--group-add="$g"
+```
+
+## Hardware decode
+
+`--hw-decode` reports on `hw_decode: hardware` ([`docs/design/hardware.md`](design/hardware.md#decode)):
+the configuration says `hw_decode: hardware`, a third clip joins the set - `h264`, 8-bit 4:2:0
+H.264 High, a source every vendor's hardware decodes (FFV1 has no hardware decoder, so the other
+two clips decode in software whatever the key says, which ffmpeg does by itself) - each clip
+records the decode path its job declared (`decode`: `cuda`, `vaapi` or `software`, read from
+holdfast's `hardware decode` log line), and the report is
+`testdata/hw-reports/<encoder>-hw-decode-<date>.json`. An H.264 encoder skips the `h264` clip as
+already at its codec, and the report says so. The same commands as above, with `--hw-decode`
+added:
+
+```bash
+scripts/hw-report.sh --encoder nvenc --hw-decode --image holdfast:hw --docker-arg=--gpus --docker-arg=all
+```
 
 ## Sources
 

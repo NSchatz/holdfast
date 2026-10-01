@@ -53,6 +53,8 @@ reasoning lives in the document, not in this file.
   faithful at each bit depth** - [`docs/design/hardware.md`](docs/design/hardware.md#probe).
 - **A job whose hardware is missing or fails is encoded by nothing else unless its root says
   `hw_fallback: software`** - [`docs/design/hardware.md`](docs/design/hardware.md#fallback).
+- **A hardware decode hands the filters, the encoder and every gate the frames a software decode
+  would** - [`docs/design/hardware.md`](docs/design/hardware.md#decode).
 
 ## Layout
 

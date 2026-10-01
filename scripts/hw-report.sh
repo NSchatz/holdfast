@@ -6,6 +6,7 @@
 #   scripts/hw-report.sh --encoder vaapi --image holdfast:dev \
 #       --docker-arg=--device=/dev/dri --docker-arg=--group-add="$(stat -c %g /dev/dri/renderD128)"
 #   scripts/hw-report.sh --encoder amf --holdfast /usr/local/bin/holdfast     # a host install
+#   scripts/hw-report.sh --encoder vaapi --hw-decode --image holdfast:dev ...  # hw_decode: hardware
 #   scripts/hw-report.sh --verify testdata/hw-reports/nvenc-2026-09-30.json   # re-check a report
 #
 # What it does, in order: builds two small lossless FFV1 clips (8-bit SDR 4:2:0 and 10-bit
@@ -13,7 +14,10 @@
 # a throwaway library under $HOME, writes a config naming the encoder with `hw_fallback: skip`,
 # runs `holdfast run --file` once per clip (so every gate runs, and each clip has its own
 # wall-clock), reads the ledger back with `holdfast export`, and writes
-# testdata/hw-reports/<encoder>-<date>.json.
+# testdata/hw-reports/<encoder>-<date>.json. With --hw-decode the configuration also says
+# `hw_decode: hardware`, a third clip (8-bit H.264, which every vendor's hardware decodes) joins
+# the set, each clip records the decode path its job declared, and the report is
+# <encoder>-hw-decode-<date>.json.
 #
 # What it refuses: a missing tool (named), an encoder `holdfast validate` rejects, an encoder
 # the start-time probe finds unusable (hw_fallback is skip, so that is a refusal and never a
@@ -38,10 +42,15 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
   cat <<'EOF'
-usage: hw-report.sh --encoder KEY [--holdfast PATH | --image REF [--docker-arg ARG]...] [--out PATH]
+usage: hw-report.sh --encoder KEY [--hw-decode] [--pixel-format FMT] [--holdfast PATH | --image REF [--docker-arg ARG]...] [--out PATH]
        hw-report.sh --verify REPORT
 
   --encoder KEY     the encoder to report on; any key `holdfast validate` accepts (required)
+  --hw-decode       also decode on the encoder's hardware (hw_decode: hardware), with an
+                    8-bit H.264 clip added; the report is <encoder>-hw-decode-<date>.json
+  --pixel-format FMT  the configuration's pixel_format (default auto: every plan at least
+                    10-bit); yuv420p for an encoder that carries 8-bit only (h264_qsv,
+                    h264_vaapi); the report name gains -FMT
   --holdfast PATH   host mode: the holdfast binary (default: holdfast on PATH), with the
                     host's ffmpeg and ffprobe on PATH
   --image REF       image mode: run holdfast, ffmpeg and ffprobe inside this image
@@ -57,12 +66,15 @@ EOF
 die() { printf 'hw-report: %s\n' "$*" >&2; exit 1; }
 say() { printf 'hw-report: %s\n' "$*" >&2; }
 
-ENCODER=""; HOLDFAST=""; IMAGE=""; OUT=""; VERIFY=""
+ENCODER=""; HOLDFAST=""; IMAGE=""; OUT=""; VERIFY=""; HW_DECODE=""; PIXEL_FORMAT=""
 DOCKER_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --encoder)       [ $# -ge 2 ] || { usage >&2; exit 2; }; ENCODER="$2"; shift 2 ;;
     --encoder=*)     ENCODER="${1#*=}"; shift ;;
+    --hw-decode)     HW_DECODE=1; shift ;;
+    --pixel-format)  [ $# -ge 2 ] || { usage >&2; exit 2; }; PIXEL_FORMAT="$2"; shift 2 ;;
+    --pixel-format=*) PIXEL_FORMAT="${1#*=}"; shift ;;
     --holdfast)      [ $# -ge 2 ] || { usage >&2; exit 2; }; HOLDFAST="$2"; shift 2 ;;
     --holdfast=*)    HOLDFAST="${1#*=}"; shift ;;
     --image)         [ $# -ge 2 ] || { usage >&2; exit 2; }; IMAGE="$2"; shift 2 ;;
@@ -180,6 +192,8 @@ fi
 # The key names the report's file, so it must be a plain token; whether it is an encoder at
 # all is `holdfast validate`'s answer, below, and no list is kept here.
 [[ "$ENCODER" =~ ^[A-Za-z0-9_]+$ ]] || die "--encoder '$ENCODER' is not a plain encoder key (letters, digits, underscore)"
+# Like the key, a plain token; whether holdfast accepts it is `holdfast validate`'s answer.
+[ -z "$PIXEL_FORMAT" ] || [[ "$PIXEL_FORMAT" =~ ^[a-z0-9]+$ ]] || die "--pixel-format '$PIXEL_FORMAT' is not a plain pixel format name"
 if [ -n "$IMAGE" ] && [ -n "$HOLDFAST" ]; then die "--image and --holdfast are two different modes; name one"; fi
 if [ -z "$IMAGE" ] && [ "${#DOCKER_ARGS[@]}" -gt 0 ]; then die "--docker-arg needs --image"; fi
 
@@ -203,7 +217,7 @@ fi
 stamp="$(date -u +%Y-%m-%d)"
 if [ -z "$OUT" ]; then
   [ -d "$here/testdata/hw-reports" ] || die "no testdata/hw-reports directory in '$here'"
-  OUT="$here/testdata/hw-reports/$ENCODER-$stamp.json"
+  OUT="$here/testdata/hw-reports/$ENCODER${HW_DECODE:+-hw-decode}${PIXEL_FORMAT:+-$PIXEL_FORMAT}-$stamp.json"
 fi
 out_dir="$(dirname -- "$OUT")"
 [ -d "$out_dir" ] || die "the report's directory does not exist: $out_dir"
@@ -257,6 +271,21 @@ ff -hide_banner -nostdin -loglevel error -y -i "$M/.hdr10-intermediate.mkv" \
   -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv \
   -f matroska -- "$M/hdr10.mkv" || die "could not build the HDR10 clip"
 rm -f -- "$work/media/.hdr10-intermediate.mkv"
+CLIPS=(sdr8 hdr10)
+if [ -n "$HW_DECODE" ]; then
+  # A source the hardware decodes: 8-bit 4:2:0 H.264 High, which NVDEC, Intel's and AMD's VA
+  # drivers all take. FFV1 has no hardware decoder, so the two clips above decode in software
+  # even under hw_decode: hardware (ffmpeg falls back by itself). An H.264 target skips this
+  # clip as already at its codec, and the report says so.
+  ff -hide_banner -nostdin -loglevel error -y -f lavfi -i "$src" \
+    -c:v libx264 -preset ultrafast -qp 0 -pix_fmt yuv420p -profile:v high444 \
+    -f matroska -- "$M/.h264-intermediate.mkv" || die "could not build the H.264 intermediate"
+  ff -hide_banner -nostdin -loglevel error -y -i "$M/.h264-intermediate.mkv" \
+    -c:v libx264 -preset ultrafast -crf 4 -pix_fmt yuv420p -profile:v high \
+    -f matroska -- "$M/h264.mkv" || die "could not build the H.264 clip"
+  rm -f -- "$work/media/.h264-intermediate.mkv"
+  CLIPS+=(h264)
+fi
 
 # facts NAME: one JSON object of what ffprobe reads from $M/NAME - the codec, pixel format and
 # colour tags, and whether the HDR10 blocks are present in stream or first-frame side data.
@@ -284,6 +313,13 @@ jq -e '.codec == "ffv1" and .pix_fmt == "yuv420p10le" and .color_primaries == "b
   || die "the HDR10 clip does not carry what it must (FFV1 yuv420p10le, BT.2020, PQ, mastering display, content light): $hdr_src"
 sdr_bytes="$(stat -c %s "$work/media/sdr8.mkv")"
 hdr_bytes="$(stat -c %s "$work/media/hdr10.mkv")"
+if [ -n "$HW_DECODE" ]; then
+  h264_src="$(facts h264.mkv)" || die "could not inspect the H.264 clip"
+  jq -e '.codec == "h264" and .pix_fmt == "yuv420p"' <<<"$h264_src" >/dev/null \
+    || die "the H.264 clip is not H.264 yuv420p: $h264_src"
+  h264_bytes="$(stat -c %s "$work/media/h264.mkv")"
+fi
+HW_DECODE_MODE=software; [ -n "$HW_DECODE" ] && HW_DECODE_MODE=hardware
 
 # --- the configuration -----------------------------------------------------------------------
 cat >"$work/config.yaml" <<EOF
@@ -292,6 +328,8 @@ library_roots:
 state_dir: $S
 encoder: $ENCODER
 hw_fallback: skip
+hw_decode: $HW_DECODE_MODE
+pixel_format: ${PIXEL_FORMAT:-auto}
 log_level: info
 EOF
 hf validate --config "$C" >"$work/validate.log" 2>&1 \
@@ -299,8 +337,8 @@ hf validate --config "$C" >"$work/validate.log" 2>&1 \
 
 # --- the runs: one per clip, each timed ----------------------------------------------------------
 now_ms() { local n; n="$(date +%s%N)"; printf '%s' "$((n / 1000000))"; }
-declare -A WALL_MS
-for clip in sdr8 hdr10; do
+declare -A WALL_MS DECODE
+for clip in "${CLIPS[@]}"; do
   say "running holdfast over the $clip clip with encoder '$ENCODER'"
   t0="$(now_ms)"
   rc=0
@@ -313,6 +351,10 @@ for clip in sdr8 hdr10; do
     fi
     die "holdfast run exited $rc over the $clip clip (the log is above). No report was written."
   fi
+  # The decode path the job's plan declared: holdfast logs a "hardware decode" line naming it
+  # only where it is not software.
+  DECODE[$clip]="$(sed -n 's/.*hardware decode.* decode=\([a-z]*\).*/\1/p' "$work/run-$clip.log" | head -n1)"
+  [ -n "${DECODE[$clip]}" ] || DECODE[$clip]=software
 done
 
 hf export --config "$C" >"$work/export.ndjson" 2>"$work/export.log" \
@@ -379,7 +421,7 @@ clip_json() {
     outfacts="$(facts "$name.mkv")" || die "could not inspect the $name output"
   fi
   jq -n --arg name "$name" --argjson src "$srcfacts" --argjson bytes "$bytes" --argjson row "$row" \
-        --argjson out "$outfacts" --argjson wall "${WALL_MS[$name]}" '
+        --argjson out "$outfacts" --argjson wall "${WALL_MS[$name]}" --arg decode "${DECODE[$name]}" '
     { clip: $name,
       source: ($src + {bytes: $bytes}),
       outcome: {
@@ -399,27 +441,35 @@ clip_json() {
         output_width: $row.output_width, output_height: $row.output_height,
         encode_ms: $row.encode_ms },
       output: $out,
+      decode: $decode,
       timing: { wall_ms: $wall } }'
 }
 
 sdr_clip="$(clip_json sdr8 "$sdr_src" "$sdr_bytes")"
 hdr_clip="$(clip_json hdr10 "$hdr_src" "$hdr_bytes")"
+clips_json="$(jq -n --argjson a "$sdr_clip" --argjson b "$hdr_clip" '[$a, $b]')"
+if [ -n "$HW_DECODE" ]; then
+  clips_json="$(jq --argjson c "$(clip_json h264 "$h264_src" "$h264_bytes")" '. + [$c]' <<<"$clips_json")"
+fi
 
 jq -n --argjson schema "$REPORT_SCHEMA" --arg date "$stamp" --arg enc "$ENCODER" --arg mode "$MODE" \
       --arg hv "$holdfast_version" --arg fv "$ffmpeg_pin" --argjson probe "$probe_json" \
       --argjson nv "$nvidia_json" --arg vainfo "$vainfo_driver" --argjson nodes "$nodes_json" \
-      --argjson c1 "$sdr_clip" --argjson c2 "$hdr_clip" \
+      --argjson clips "$clips_json" --arg hwd "$HW_DECODE_MODE" --arg pf "${PIXEL_FORMAT:-auto}" \
       --arg secs "$CLIP_SECONDS" --arg size "$CLIP_SIZE" --arg rate "$CLIP_RATE" '
   { schema: $schema,
     date: $date,
-    encoder: { requested: $enc, ran: ([$c1, $c2] | map(.outcome.encoder_ran) | map(select(. != null)) | unique),
+    encoder: { requested: $enc, ran: ($clips | map(.outcome.encoder_ran) | map(select(. != null)) | unique),
                start_probe: $probe },
     mode: $mode,
+    hw_decode: $hwd,
+    pixel_format: $pf,
     holdfast_version: $hv,
     ffmpeg: $fv,
     device: { nvidia: $nv, vainfo_driver: (if $vainfo == "" then null else $vainfo end), render_nodes: $nodes },
-    clip_set: { seconds: ($secs | tonumber), size: $size, rate: ($rate | tonumber), source_codec: "ffv1" },
-    clips: [$c1, $c2] }' | redact >"$work/report.json" || die "could not assemble the report"
+    clip_set: { seconds: ($secs | tonumber), size: $size, rate: ($rate | tonumber),
+                source_codecs: ($clips | map(.source.codec) | unique) },
+    clips: $clips }' | redact >"$work/report.json" || die "could not assemble the report"
 
 check_report "$work/report.json" || die "refusing to write the report: a forbidden token survived the redaction pass (above)"
 
