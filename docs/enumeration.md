@@ -6,8 +6,9 @@ grow with the number of files in the library. This document says which file goes
 what the arrangement costs.
 
 Which file goes first is `queue_order`'s to decide, and its default - `path` - is the
-traversal described immediately below. The four other values are a sort laid over that
-traversal and are described under [a declared queue order](#declared-queue-order).
+traversal described immediately below. The five other values are a sort laid over that
+traversal and are described under [a declared queue order](#declared-queue-order), as is a
+queue `priority`, which orders ahead of any of them.
 
 ## The order files are handed out in
 
@@ -34,7 +35,7 @@ It is deliberately not a global sort of the full paths, and the difference is vi
 ordinary library: a file named `zz.mkv` sitting in a directory is handed out before
 everything inside that directory's subdirectories, where sorting the full path strings would
 put it last. A global sort cannot be produced without holding every path at once, which is
-the cost this arrangement exists to remove - and it is exactly the cost the four other
+the cost this arrangement exists to remove - and it is exactly the cost the five other
 `queue_order` values pay, in the one form that is affordable, for the one thing they buy.
 
 The read-only pass behind `holdfast plan` traverses the library the same way and reports what
@@ -59,8 +60,14 @@ the key says, in a different order.
 | `smallest` | the smallest source |
 | `newest` | the most recently modified source |
 | `oldest` | the least recently modified source |
+| `savings_per_hour` | the source whose encode is estimated to reclaim the most bytes per hour of encode plus verify work ([the estimate](design/queue-order.md#savings-per-hour)) |
 
-Any other value, the empty string included, refuses to start and names the five it accepts.
+Any other value, the empty string included, refuses to start and names the six it accepts.
+
+A queue `priority` written on a library root, a resolution rule or an encode profile orders
+AHEAD of the declared order: higher priority first, then the order above, then the full path
+([priority](design/queue-order.md#priority)). It too decides sequence and never membership.
+With no priority written anywhere, every order above is exactly what it was without the key.
 
 `holdfast run --queue-order <order>` overrides the configured value for that one run. It
 accepts exactly the values the key accepts, and a value the key does not accept is a usage
@@ -84,18 +91,22 @@ on whatever sub-second stamps the filesystem happens to keep - which is what a b
 an archive extraction produces, and it is the one library where these two values have less
 to say than an operator might expect.
 
-Each of the four keyed orders is TOTAL and deterministic in the sense the traversal is: two
+Each of the five keyed orders is TOTAL and deterministic in the sense the traversal is: two
 candidates carrying the same key break on the full path ascending, a path occurs once, and
 two scans over an unchanged library therefore offer the same files in the same sequence. A
-candidate whose key could not be read - it vanished between the listing and the ordering, or
-this process may not look at it - is offered after every candidate whose key WAS read, in
+candidate whose key could not be read - it vanished between the listing and the ordering, this
+process may not look at it, or under `savings_per_hour` the probe established no video
+bitrate, dimensions or duration - is offered after every candidate whose key WAS read, in
 path order among the others like it, with the reason recorded. It is never dropped: this
 decides sequence, and a file left out of a queue is a file that is never processed.
 
 ### What a keyed order costs, and what `path` does not
 
 `path` reads no metadata at all and holds nothing per candidate. It is the traversal, so the
-figures below and every property above them are unchanged by this key existing.
+figures below and every property above them are unchanged by this key existing. That holds
+while no `priority` is written anywhere; with one, `path` holds a `(priority, position, path)`
+candidate per file until the listing is finished, because the highest-priority file may be the
+last one listed.
 
 Read that as the cost of ORDERING and not as the whole of what a pass reads. A scan still
 makes stat-family calls for reasons that have nothing to do with sequence - resolving a
@@ -103,12 +114,22 @@ path's form while a record-based hold-back is in force, and telling a symbolic l
 a source name from a directory - and those are what they were before `queue_order` existed.
 The figures here count the reads the ordering itself takes.
 
-Each keyed order reads ONE attribute per candidate - the size and the modification time come
-out of the same read - and holds one `(key, path)` pair per candidate until the listing is
-finished, because a key cannot be sorted before every key has been seen. That is the whole
+Each of the four attribute orders (`largest`, `smallest`, `newest`, `oldest`) reads ONE
+attribute per candidate - the size and the modification time come out of the same read - and
+holds one `(key, path)` pair per candidate until the listing is finished, because a key cannot be sorted before every key has been seen. That is the whole
 of what it holds: not the listing, not the file information the key came out of, not the
 fingerprint. It follows that a keyed order does NOT reach its first worker before the
 library has been listed, and `path` remains the only value that does.
+
+`savings_per_hour` reads no attribute for ordering and instead PROBES every candidate once -
+the snapshot probe every job takes, for its video bitrate, dimensions and duration - before
+the first worker is fed. So it reaches its first worker only after the library has been listed
+AND every candidate probed, which on a large library is minutes; it logs a progress record at
+least once per 1,000 candidates and, before the first file is offered, how many keys were read
+and how many could not be. It holds the same `(key, path)` pair per candidate as the attribute
+orders. No figure for that probing time is stated here: none has been measured the way the
+figures below were. A banded resolution rule that names a priority needs the source height,
+and under any other order that is the same one probe, of that root's candidates alone.
 
 <a id="queue-order-memory-figures"></a>
 

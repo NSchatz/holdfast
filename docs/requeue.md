@@ -203,6 +203,15 @@ It is a **local** command and never an HTTP endpoint, for the reason `restore` i
 it changes what the engine will do to a media file, and a mutating endpoint opens an
 authorization question the read-and-control API does not answer.
 
+## What re-opens nothing: the queue
+
+`queue_order` and `priority` decide only the ORDER files are offered in. Neither is a decision
+input: no row records either, no profile digest covers either, and no guard reads either. So
+changing the order, or adding, changing or removing a `priority` on a root, a rule or an
+encode profile, re-opens no row - a library half processed under one queue is finished under
+the next without one file being decided again
+([docs/design/queue-order.md](design/queue-order.md#priority)).
+
 ## The three rows nothing re-opens
 
 Not by a configuration change, not by `requeue`. `requeue` names each one it leaves alone

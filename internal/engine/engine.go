@@ -668,6 +668,13 @@ type Engine struct {
 	// scan must survive, so both are injected here.
 	statFn func(path string) (os.FileInfo, error)
 
+	// orderFactsFn, when non-nil, replaces the ONE probe the queue ordering takes of a
+	// candidate (queueorder.go): its source facts under `savings_per_hour`, and its source
+	// height where a resolution rule's priority bands on it. A case counts the calls through
+	// it (each candidate at most once per pass, none at all under any other order with no
+	// priority) and supplies facts no fixture file could carry.
+	orderFactsFn func(ctx context.Context, path string, withBitrate bool) sourceFacts
+
 	// --- the four S0085 metadata seams ---------------------------------------------
 	//
 	// The swap carries the SOURCE's mode, ownership and modification time onto the
@@ -1549,6 +1556,7 @@ func (e *Engine) scanOnce(ctx context.Context, pass *listings, bud *budget) (map
 	}
 
 	observed := e.enumerateOrdered(pass, sink{
+		ctx:  ctx,
 		temp: sawTemp,
 		offer: func(f string) bool {
 			if stop() {
@@ -1617,6 +1625,14 @@ type sink struct {
 	// them. The read-only plan pass sets them (S0180); no scan does.
 	excluded func(path string)
 	held     func(path string)
+
+	// ctx is the pass's context, which a probe the queue ordering takes runs under. nil is
+	// context.Background(): an enumeration a case drives directly.
+	ctx context.Context
+	// probed, when non-nil, is told each time the queue ordering takes a probe snapshot. It
+	// is a REPORT, with no say in anything: the read-only plan pass counts it into the
+	// snapshots it publishes, so that figure stays the whole of what the pass cost.
+	probed func()
 }
 
 // sawTemp tells the sink of a temp the enumeration listed.

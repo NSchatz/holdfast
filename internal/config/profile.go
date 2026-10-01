@@ -144,7 +144,7 @@ func isProfileKnob(key string) bool {
 func entryKeyList() string {
 	keys := append(append([]string(nil), profileKnobs...), filterKeys...)
 	keys = append(keys, watchKeys...)
-	return strings.Join(append(keys, rulesKey), ", ")
+	return strings.Join(append(keys, rulesKey, priorityKey), ", ")
 }
 
 // rootPathKey is the one key inside an entry that is not a knob: which tree the profile
@@ -614,6 +614,12 @@ type Root struct {
 	// see watch.go. The zero value is what every entry that stays silent resolves to.
 	Watch Watch
 
+	// Priority is the queue priority this root's entry names (priority.go), nil where it
+	// names none. Like the filters and the watch it is NOT part of the profile: it decides
+	// only the order the root's files are offered in, so it is in no digest and no
+	// decision input, and editing it re-opens no row.
+	Priority *int
+
 	// Layers says which of the three layers supplied each knob's resolved value, keyed
 	// by the knob's config key. It is what `holdfast validate` prints beside each value,
 	// so the printed configuration states not only what the inheritance produced but
@@ -687,6 +693,10 @@ type rootEntry struct {
 	// watch is the entry's resolved watch state, parsed out of the entry for the same
 	// reason rules is: it inherits from nothing, so the knob resolver never sees it.
 	watch Watch
+
+	// priority is the entry's queue priority, nil where it names none. Parsed out of the
+	// entry for rules' reason: it inherits from nothing.
+	priority *int
 }
 
 // parseRootEntries turns the raw library_roots value into entries, refusing anything
@@ -782,8 +792,19 @@ func parseRootMapping(i int, m map[string]any, file string) (rootEntry, error) {
 	// settle period is a value nothing reads depends on the opt-in beside it, and a map
 	// iteration reaches the two keys in either order.
 	watchRaw := map[string]any{}
+	var priority *int
 	for key, val := range m {
 		if key == rootPathKey {
+			continue
+		}
+		// `priority` orders this root's files and decides nothing about them, so it is read
+		// here, as written, and never reaches the knob map the digest is taken over.
+		if key == priorityKey {
+			v, err := priorityValue(where, val)
+			if err != nil {
+				return rootEntry{}, err
+			}
+			priority = &v
 			continue
 		}
 		// `rules` is neither a knob nor a filter: it is a LIST of per-band overrides, so it
@@ -847,6 +868,7 @@ func parseRootMapping(i int, m map[string]any, file string) (rootEntry, error) {
 	}
 	e.rules = rules
 	e.watch = w
+	e.priority = priority
 	return e, nil
 }
 
@@ -908,12 +930,13 @@ func resolveRoots(k *koanf.Koanf, entries []rootEntry, explicitTop map[string]bo
 		// than joining them: a rule has no top-level counterpart and no layer of its own.
 		p.Rules = e.rules
 		roots = append(roots, Root{
-			Path:    e.path,
-			Clean:   filepath.Clean(e.path),
-			Profile: p,
-			Filters: resolveFilters(k, e, explicitTop),
-			Watch:   e.watch,
-			Layers:  layers,
+			Path:     e.path,
+			Clean:    filepath.Clean(e.path),
+			Profile:  p,
+			Filters:  resolveFilters(k, e, explicitTop),
+			Watch:    e.watch,
+			Priority: e.priority,
+			Layers:   layers,
 		})
 	}
 	return roots, nil

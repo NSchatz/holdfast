@@ -5,8 +5,9 @@ The top-level `encoder`, `crf`, `preset`, `pixel_format`, `container_ext` and
 is how you say something different for part of a library: different encode settings
 (`encode_profiles`), a target bitrate instead of a quality target (`bitrate_kbps`),
 different thresholds for a band of source resolutions (`rules`), or nothing at all for part
-of a root (`exclude_paths` and `include_paths`). One key here is not about what is done to a
-file but about how it is FOUND: `watch` turns on a filesystem watch for that root.
+of a root (`exclude_paths` and `include_paths`). Two keys here are not about what is done to a
+file: `watch` is about how it is FOUND (a filesystem watch for that root), and `priority` is
+about how EARLY it is offered ([queue priority](#queue-priority)).
 
 Everything here is reachable from the config file and its `HOLDFAST_*` environment
 override, and from nowhere else: `run`, `serve` and `validate` gain no flags.
@@ -72,7 +73,8 @@ for the files that happen to fall out of the scan early.
 ### What a profile may carry, and what it may not
 
 A profile accepts exactly `name`, `match`, `encoder`, `crf`, `preset`, `pixel_format`,
-`container_ext` and `bitrate_kbps`. **Any other key is a startup refusal naming the
+`container_ext`, `bitrate_kbps` and `priority` (which orders the files it decides and is not an
+encode setting - see [queue priority](#queue-priority)). **Any other key is a startup refusal naming the
 profile and the key** - the unknown-key check bites inside a profile, not only at the
 top level, because `encodr: svtav1` nested in one is the same typo with the same
 consequence. So is an unknown encoder, a `crf` outside 0-51, a `container_ext` carrying
@@ -469,8 +471,10 @@ encoded at a quality target from another, with no line of your file saying so, o
 that deletes the source of every file it accepts. The cost is that an early broad rule
 SHADOWS a later specific one, so:
 
-- a rule that names no knob at all is **refused at start**: it would match, win, and change
-  nothing, making every rule after it unreachable for the files it took; and
+- a rule that names no knob at all - and no `priority` - is **refused at start**: it would
+  match, win, and change nothing, making every rule after it unreachable for the files it
+  took. A rule naming only a `priority` is accepted, because it does something: it orders the
+  files it takes (and, like any rule, takes them from every rule after it); and
 - `holdfast validate` prints each root's rules **in list order**, with the band and the
   knobs each overrides, so a shadow is visible without running the library.
 
@@ -495,6 +499,10 @@ has. Anything else inside a rule refuses to start, naming the offending key and 
 rule may carry; a value the top level would refuse - a `crf` of 99, a `min_savings_percent` of
 140 - is refused in the top level's own words, with the root and the rule's index in front of
 them.
+
+Beside the knobs a rule may name a `priority`, which is not a knob: it decides only how early
+the band's files are offered, and is in no digest and no decision input
+([queue priority](#queue-priority)).
 
 `encoder` lets one band of a library go to a different encoder from the rest - a hardware
 encoder for the band where encode time matters more than the last few percent of size, a
@@ -711,6 +719,49 @@ count and layout, sample rate and, where normalised, loudness - and every output
 must decode in full; the whole file must still pass every other gate, strictly-smaller included.
 The row's `audio_tracks` lists what was done to each track and why. The reasoning, the cited
 figures and the tolerances are in [docs/design/audio.md](design/audio.md).
+
+## `priority` - which files are offered first
+
+<a id="queue-priority"></a>
+
+```yaml
+library_roots:
+  - path: /mnt/films
+    priority: 10              # this library before the others
+    rules:
+      - when:
+          max_source_height: 576
+        priority: 50          # its SD rips before anything else
+  - /mnt/tv
+encode_profiles:
+  - name: bulk-tv
+    match: "**/TV/**/*.mkv"
+    bitrate_kbps: 3000
+    priority: -5              # after the rest of the library
+```
+
+A whole number from -1000 to 1000, default 0. **Higher is offered first**; files of equal
+priority follow `queue_order`, then the full path. It may be written on a `library_roots`
+entry (beside `path`), on a rule inside one, and on an `encode_profiles` entry, and a file's
+priority is its matching rule's, else its matching encode profile's, else its root's, else 0.
+First match wins for it as for every knob: a matching rule or encode profile that names no
+priority passes the question on to the next PLACE, never to a later rule or profile.
+
+It decides the SEQUENCE files are offered in and nothing else: never which files are offered,
+never a guard, a gate, the encode's command line or the terminal row. It is in no profile
+digest and no decision input, so adding, changing or removing a priority re-opens no row
+([docs/requeue.md](requeue.md)). Adding a RULE is another matter, even one naming only a
+priority: it takes its band's files from the rules after it, which is a change to the rule list. With no priority written anywhere every queue is exactly what
+it was, and `queue_order: path` still hands the first file out while the library is being
+listed; with one, the queue is held until the listing is finished.
+
+A `priority` at the top level (or `HOLDFAST_PRIORITY`) refuses to start, saying where it goes;
+so does a value out of range, a fraction, a word, or the key with no value, naming the key and
+where it was written. A rule's priority under a banded `when` needs the source height, read
+once per file per scan before the first file is offered; a file whose height cannot be read is
+offered last, with a warning, never dropped. `holdfast validate` prints a root's priority in
+its block, a rule's on its rule line and an encode profile's beside the queue order. The
+design is [docs/design/queue-order.md](design/queue-order.md#priority).
 
 ## `watch` and `watch_settle_sec` - how a new file under this root is found
 

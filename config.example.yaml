@@ -39,8 +39,9 @@
 #
 # An entry may also carry exclude_paths / include_paths (which files it offers at all),
 # `rules` (per-resolution-band overrides of the height-sensitive knobs above, named in
-# the commented block below), and `watch` / `watch_settle_sec` (how files under that root
-# are DISCOVERED). See the commented blocks below and docs/profiles.md.
+# the commented block below), `watch` / `watch_settle_sec` (how files under that root
+# are DISCOVERED) and `priority` (how early its files are OFFERED). See the commented
+# blocks below and docs/profiles.md.
 #
 # NO ROOT MAY CONTAIN ANOTHER. Nesting is refused rather than resolved by a precedence
 # rule, because a file under two roots would have two answers to what may be done to it.
@@ -113,6 +114,28 @@ library_roots:
   #       min_bitrate_kbps: 12000
   #       min_savings_percent: 20
   #       max_height: 1080
+  #
+  # QUEUE PRIORITY, commented out because the shipped configuration carries none and a
+  # configuration with none is offered in exactly the order it always was.
+  #
+  # `priority` is a whole number from -1000 to 1000, default 0; HIGHER IS OFFERED FIRST.
+  # It decides only the SEQUENCE files are offered in - never which files are offered, never
+  # any decision, gate or encoder argument, and it is recorded on no terminal row - so adding,
+  # changing or removing one re-opens nothing. Files of equal priority follow queue_order
+  # (below), then the path. It may be written on a library_roots entry (beside `path`), on a
+  # rule inside one, and on an encode_profiles entry; a file's priority is its matching
+  # rule's, else its matching encode profile's, else its root's, else 0 - first match wins
+  # for it as for every knob, and a rule may name ONLY a priority. A `priority` at the top
+  # level (or HOLDFAST_PRIORITY) refuses to start and says where it goes. A rule's priority
+  # under a `when` band needs the source height, so each such file is probed once per scan
+  # before the first is offered. See docs/design/queue-order.md#priority.
+  #
+  # - path: /mnt/films
+  #   priority: 10             # this library before the others
+  #   rules:
+  #     - when:
+  #         max_source_height: 576
+  #       priority: 50         # its SD rips before anything else
   #
   # THE FILESYSTEM WATCH, commented out because it is OFF unless a root asks for it and
   # a configuration that says nothing about it behaves exactly as it always has.
@@ -525,7 +548,9 @@ dry_run: false
 #                               reached by what no earlier profile matched).
 #
 # A profile accepts exactly: name, match, encoder, crf, preset, pixel_format,
-# container_ext, bitrate_kbps. Any other key is a startup REFUSAL naming the
+# container_ext, bitrate_kbps, priority. `priority` orders the files the profile decides
+# (higher first, -1000 to 1000, default 0) and nothing else: it is not an encode setting
+# and is on no row - see QUEUE PRIORITY under library_roots above. Any other key is a startup REFUSAL naming the
 # profile and the key - a typo inside a profile is caught, not silently ignored.
 # The name is recorded on every terminal ledger row the profile decided, and on
 # the `holdfast export` NDJSON row, so "what ran" stays answerable.
@@ -545,6 +570,7 @@ dry_run: false
 #     match: "**/TV/**/*.mkv"
 #     bitrate_kbps: 3000   # this profile's jobs run at a target bitrate; the
 #                           # rest of the library keeps the crf above
+#     priority: -5         # offered after the rest of the library
 
 # --- HDR / colour + source-property fidelity (TRANSCODE-3; not separately
 # configurable — always on) ---
@@ -847,8 +873,9 @@ dry_run: false
 #                            #   The figure in force, and where it came from, is logged
 #                            #   once at start.
 # queue_order: path          # the order those workers are fed in. One of
-#                            #   path|largest|smallest|newest|oldest; any other value,
-#                            #   including an empty one, is a startup REFUSAL.
+#                            #   path|largest|smallest|newest|oldest|savings_per_hour;
+#                            #   any other value, including an empty one, is a startup
+#                            #   REFUSAL.
 #                            #   It decides SEQUENCE and never membership: the same files
 #                            #   are offered whatever it says, in a different order.
 #                            #     path      the library's own traversal order (the
@@ -856,15 +883,26 @@ dry_run: false
 #                            #               It is the only value that holds nothing and
 #                            #               reads nothing: the first file reaches a worker
 #                            #               while the library is still being listed.
-#                            #     largest   biggest source first - the most reclaimed
-#                            #               bytes per hour of CPU.
+#                            #     largest   biggest source first.
 #                            #     smallest  smallest first - the most complete verdicts
 #                            #               per hour, for validating a new configuration.
 #                            #     newest    most recently modified first.
 #                            #     oldest    least recently modified first.
-#                            #   The four keyed orders read each candidate's size or
+#                            #     savings_per_hour  the source whose encode is ESTIMATED
+#                            #               to reclaim the most bytes per hour of encode
+#                            #               plus verify work first: excess bitrate for its
+#                            #               picture, over work proportional to pixels x
+#                            #               frames. It PROBES every candidate once before
+#                            #               the first is offered (minutes on a large
+#                            #               library, with progress logged). The estimate
+#                            #               only orders; it is never published.
+#                            #               docs/design/queue-order.md#savings-per-hour
+#                            #   The four attribute orders read each candidate's size or
 #                            #   modification time ONCE and hold that key and the path
 #                            #   until the listing is finished; see docs/enumeration.md.
+#                            #   A `priority` (on a root, rule or encode profile, see
+#                            #   library_roots) orders ahead of this: higher priority
+#                            #   first, then this order, then the path.
 #                            #   `holdfast run --queue-order <order>` overrides it for
 #                            #   one run and leaves this file as it is.
 

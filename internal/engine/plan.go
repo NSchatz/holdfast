@@ -163,6 +163,10 @@ func (e *Engine) Plan(ctx context.Context, opt PlanOptions) *PlanPass {
 		offer:    func(p string) bool { files = append(files, p); return true },
 		excluded: func(p string) { pass.Excluded = append(pass.Excluded, e.keptOut(p)) },
 		held:     func(p string) { pass.HeldBack = append(pass.HeldBack, e.keptOut(p)) },
+		// The ordering's own probe, under `savings_per_hour` or a height-banded priority,
+		// is part of what this pass cost and is counted with the guard chain's.
+		probed: func() { pass.Probes++ },
+		ctx:    ctx,
 	})
 	for _, f := range files {
 		if ctx.Err() != nil {

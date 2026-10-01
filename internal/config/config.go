@@ -93,6 +93,7 @@ var profileKeys = map[string]bool{
 	"name": true, "match": true,
 	"encoder": true, "crf": true, "preset": true,
 	"pixel_format": true, "container_ext": true, "bitrate_kbps": true,
+	priorityKey: true,
 }
 
 // defaultLayer is the built-in default configuration, loaded as koanf's base layer.
@@ -1051,6 +1052,9 @@ func Load(path string) (*Config, error) {
 		if top == rulesKey {
 			return nil, misplacedRulesError(path)
 		}
+		if top == priorityKey {
+			return nil, misplacedPriorityError(path)
+		}
 		// The watch keys are per library root and have no top-level counterpart, so one
 		// written here is the same misplacement `rules` is and is refused in the same
 		// shape: a build that ignored it would start and watch nothing while the file
@@ -1093,6 +1097,11 @@ func Load(path string) (*Config, error) {
 		// believing a band is in force that nothing reads.
 		if top == rulesKey {
 			return nil, misplacedRulesError(envPrefix + "RULES")
+		}
+		// HOLDFAST_PRIORITY is the same misplacement: a priority selects files, and the
+		// environment is a top-level layer with nothing to select.
+		if top == priorityKey {
+			return nil, misplacedPriorityError(envPrefix + "PRIORITY")
 		}
 		// The environment is a TOP-LEVEL layer, so HOLDFAST_WATCH is the same
 		// misplacement the file's own top level is. A watch is per root, and a value
@@ -1246,6 +1255,13 @@ func Load(path string) (*Config, error) {
 				return nil, err
 			}
 		}
+		// A profile's priority is read RAW, for the same reason: the decoder would read 2.5
+		// as 2 and `true` as 1, priorities nobody wrote.
+		if v, ok := raw[priorityKey]; ok {
+			if _, err := priorityValue(fmt.Sprintf("encode_profiles[%d] in %s", i, path), v); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	var c Config
@@ -1376,7 +1392,7 @@ func checkProfileKeys(raw any, path string) error {
 		for key := range m {
 			if !profileKeys[key] {
 				return fmt.Errorf("unknown config key %q in encode_profiles[%d] in %s (typo?): "+
-					"a profile accepts name, match, encoder, crf, preset, pixel_format, container_ext, bitrate_kbps",
+					"a profile accepts name, match, encoder, crf, preset, pixel_format, container_ext, bitrate_kbps, priority",
 					key, i, path)
 			}
 		}
@@ -1702,7 +1718,11 @@ func (c *Config) Validate() error {
 	// misconfiguration as a crf of 99 beside it and is refused in the same words - with the
 	// root and the rule's index in front of them, because that is where the operator has to
 	// go to fix it.
-	return c.validateRules()
+	if err := c.validateRules(); err != nil {
+		return err
+	}
+	// Every queue priority, root, rule and encode profile alike, held to one range.
+	return c.validatePriorities()
 }
 
 // misplacedRulesError is the refusal for `rules` written where no rule lives. where names

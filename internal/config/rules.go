@@ -125,7 +125,7 @@ func isGateKey(key string) bool {
 // ruleKeyList renders everything a rule may carry, for the refusal that tells an operator
 // what is accepted. Derived from the one enumeration rather than restated.
 func ruleKeyList() string {
-	return strings.Join(append([]string{whenKey}, ruleKnobs...), ", ")
+	return strings.Join(append(append([]string{whenKey}, ruleKnobs...), priorityKey), ", ")
 }
 
 // Band is the range of SOURCE heights, in pixels, a rule applies to. A nil bound leaves
@@ -182,6 +182,12 @@ type Rule struct {
 	// codec alias resolves exactly as its key does, through encoder.Lookup, just as it does
 	// at the top level, in a root and in an encode profile). nil is "the root's own".
 	Encoder *string
+
+	// Priority is the queue priority of the files this rule decides (priority.go), nil where
+	// the rule names none. It is NOT a knob: it is not in ruleKnobs, so it is in neither the
+	// canonical text nor the digest nor any decision input, and it decides only the order a
+	// file is offered in. It is printed by String, beside the knobs, so `validate` shows it.
+	Priority *int
 }
 
 // knob returns the value this rule supplies for key, and whether it supplies one. It is
@@ -265,6 +271,9 @@ func (r Rule) String() string {
 		if v, ok := r.render(k); ok {
 			parts = append(parts, k+"="+v)
 		}
+	}
+	if r.Priority != nil {
+		parts = append(parts, fmt.Sprintf("%s=%d", priorityKey, *r.Priority))
 	}
 	if len(parts) == 0 {
 		// Unreachable from a loaded configuration (such a rule is refused at start), and
@@ -455,6 +464,12 @@ func parseRule(where string, item any) (Rule, error) {
 			case maxHeightKey:
 				r.MaxHeight = &v
 			}
+		case key == priorityKey:
+			v, err := priorityValue(where, val)
+			if err != nil {
+				return Rule{}, err
+			}
+			r.Priority = &v
 		case isGateKey(key):
 			return Rule{}, fmt.Errorf("%s carries %q, which a rule may NOT carry: the VMAF gate's settings "+
 				"are the library root's own, and every output under a root is held to that root's floors "+
@@ -466,11 +481,14 @@ func parseRule(where string, item any) (Rule, error) {
 				where, key, ruleKeyList())
 		}
 	}
-	if len(r.Knobs()) == 0 {
+	// A rule naming only a priority is accepted: it does something (it orders the files it
+	// takes), and what it shadows under first match is stated by `validate`, which prints it
+	// in list order like every other rule.
+	if len(r.Knobs()) == 0 && r.Priority == nil {
 		return Rule{}, fmt.Errorf("%s names no knob at all: a rule that overrides nothing still "+
 			"MATCHES, so under first-match it would silently shadow every rule after it and change "+
-			"nothing about the files it took. Give it one of %s, or remove it",
-			where, strings.Join(ruleKnobs, ", "))
+			"nothing about the files it took. Give it one of %s (or a %s), or remove it",
+			where, strings.Join(ruleKnobs, ", "), priorityKey)
 	}
 	return r, nil
 }

@@ -307,6 +307,18 @@ both default to empty, exclude wins over include, and none of the three is reach
 moves the encode's **working file** elsewhere and nothing else - the accepted result is still copied
 back beside the source and finalized by the same atomic rename: **[docs/scratch.md](docs/scratch.md)**.
 
+### The order files are offered in
+
+`queue_order` picks which candidate a scan offers its workers first: `path` (the default, the
+library's own traversal, the only order that streams), `largest`, `smallest`, `newest`, `oldest`, or
+`savings_per_hour` - the source whose encode is estimated to reclaim the most bytes per hour of encode
+plus verify work, which probes every candidate once before the first is offered. That estimate is an
+ordering key and nothing more: it is published nowhere, in keeping with there being no per-file
+estimated saving. A `priority` on a library root, a resolution rule or an encode profile orders ahead
+of it, higher first. Both decide **sequence only** - never which files are offered, never any guard,
+gate or recorded decision input, so changing either re-opens no row:
+**[docs/design/queue-order.md](docs/design/queue-order.md#queue-order)**.
+
 ### The undo window (`restore`) - off by default
 
 The swap is the one irreversible thing holdfast does, and every gate in front of it is an **estimate**.

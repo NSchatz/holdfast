@@ -177,6 +177,7 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	// default rather than as nothing at all.
 	fmt.Fprintf(stdout, "queue order: %s - the order in which this configuration offers files "+
 		"to its workers (one of %s)\n", cfg.EffectiveQueueOrder(), config.QueueOrderList())
+	printPriorities(stdout, cfg)
 	// And how many workers there are, beside it and for the same reason: `auto` is resolved
 	// from a quota the operator cannot see from the file, so the count, the quota it came
 	// from and where that quota came from are printed before the first file goes.
@@ -339,7 +340,28 @@ func printResolvedProfiles(w io.Writer, cfg *config.Config) {
 			fmt.Fprintf(w, "  %-20s %-24s from %s\n", k.Knob, k.Value, k.Layer)
 		}
 		printPathFilters(w, r)
+		if r.Priority != nil {
+			fmt.Fprintf(w, "  %-20s %-24d from this root's entry (orders its files only)\n", "priority", *r.Priority)
+		}
 		printRules(w, r)
+	}
+}
+
+// printPriorities states, beside the queue order, that a priority is in force and how a
+// file's is chosen, and lists the encode profiles that name one (a root's is printed in its
+// block and a rule's on its rule line). With no priority written anywhere it prints nothing,
+// so the output of every configuration written before the key existed is unchanged.
+func printPriorities(w io.Writer, cfg *config.Config) {
+	if !cfg.PriorityConfigured() {
+		return
+	}
+	fmt.Fprintln(w, "priority: files are offered highest priority first, then in the queue order, then by "+
+		"path; a file's priority is its matching rule's, else its matching encode profile's, else its "+
+		"root's, else 0. It orders files and decides nothing about them")
+	for i, p := range cfg.EncodeProfiles {
+		if p.Priority != nil {
+			fmt.Fprintf(w, "priority: encode_profiles[%d] (%s) priority %d\n", i, p.Name, *p.Priority)
+		}
 	}
 }
 
