@@ -391,6 +391,10 @@ const (
 	// GateHDR10Plus: fewer of the output's frames carry HDR10+ metadata than it has frames,
 	// on a job carrying HDR10+.
 	GateHDR10Plus = dynhdr.GateHDR10Plus
+	// GateDolbyVisionL5: a Dolby Vision source cropped to its RPU's own active area produced
+	// an output whose frames do not each carry exactly one zeroed L5, or whose L5 could not be
+	// read (docs/design/crop.md#l5-gate).
+	GateDolbyVisionL5 = dynhdr.GateDoviL5
 	// GateVmafMean: the pooled harmonic mean fell below min_vmaf.
 	GateVmafMean = "vmaf-mean"
 	// GateVmafMin: the worst (sub)sampled frame fell below vmaf_min_pool - the encode is
@@ -436,6 +440,7 @@ var GateVocabulary = []string{
 	GateDolbyVisionRecord,
 	GateDolbyVisionRPU,
 	GateHDR10Plus,
+	GateDolbyVisionL5,
 }
 
 // Engine drives the transcode over a set of library roots.
@@ -739,6 +744,12 @@ type Engine struct {
 	// so the gate's own refusal is what is proved. Production leaves both nil.
 	cropDetect    func(ctx context.Context, source string, props *probe.VideoProps) crop.Consensus
 	cropBlackness func(ctx context.Context, source string, d crop.Decision, pixFmt string) error
+
+	// cropL5Failed holds, by source path, why a Dolby Vision crop's output failed the L5
+	// gate in this process, so that source's next attempt is encoded uncropped
+	// (docs/design/crop.md#l5-gate). It lives as long as the process; a restart forgets it,
+	// and the next attempt crops - and is gated - again.
+	cropL5Failed sync.Map
 }
 
 // EnsureHoldBacks publishes a snapshot when none has been published yet: the
@@ -2364,7 +2375,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		// reserved fails here, names the figures, leaves the source untouched, and the scan
 		// carries on; one that fits only without what the other jobs in flight there have
 		// reserved waits for one of them to end (S0163). See sourceRoomFor.
-		release, err := e.sourceRoomFor(ctx, dir, f, dynamicRoom(fi.Size(), v.dynamic))
+		release, err := e.sourceRoomFor(ctx, dir, f, dynamicRoom(fi.Size(), roomIntent(v.dynamic, prof)))
 		if err != nil {
 			if ctx.Err() != nil {
 				// Cancelled while it waited for room: nothing was encoded, nothing is
@@ -2404,7 +2415,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		// only beside what the other jobs in flight on the scratch filesystem have reserved
 		// waits for one of them to end (reserveRoom), and holds its own reservation until
 		// it exits, by every way out.
-		release, err := e.scratchRoomFor(ctx, scratch, f, dynamicRoom(fi.Size(), v.dynamic))
+		release, err := e.scratchRoomFor(ctx, scratch, f, dynamicRoom(fi.Size(), roomIntent(v.dynamic, prof)))
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -2438,9 +2449,31 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// been encoded and the source is untouched, and a source whose metadata cannot be read is
 	// never encoded without it.
 	var dynamic *dynhdr.Prepared
-	if v.dynamic.Carries() {
+	intent := v.dynamic
+	if intent.Carries() {
 		defer removeDynamicTemps(work)
-		prep, reason, read, err := e.prepareDynamic(ctx, f, work, v.dynamic)
+	}
+	// THE CROP's samples, taken only where the root sets `crop: auto` (docs/design/crop.md):
+	// a root that does not runs no detection and hands the derivation nothing, so its plan,
+	// its command line and its row are what they always were. They are taken BEFORE the
+	// dynamic-HDR pre-pass, because a Dolby Vision crop is decided on the source's own L5 and
+	// the pre-pass is what zeroes it (docs/design/crop.md#dolby-vision).
+	var cropIn *crop.Consensus
+	var cropL5 *crop.L5Reading
+	if prof.CropEnabled() {
+		cropIn, cropL5, intent = e.cropBeforePrePass(ctx, f, work, props, ts, plan.RemuxOnly(), intent)
+	}
+	if intent.Carries() {
+		prep, reason, read, err := e.prepareDynamic(ctx, f, work, intent)
+		if err != nil && intent.ZeroL5 && ctx.Err() == nil {
+			// The L5 zeroing could not complete: the crop is refused, and the source's Dolby
+			// Vision is prepared again exactly as it is, to be encoded uncropped.
+			e.Log.Info("crop refused: the Dolby Vision L5 could not be zeroed; encoding uncropped", "file", f, "err", err)
+			cropIn = &crop.Consensus{Reason: crop.ReasonL5ZeroingFailed, Detail: err.Error()}
+			intent.ZeroL5 = false
+			removeDynamicTemps(work)
+			prep, reason, read, err = e.prepareDynamic(ctx, f, work, intent)
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -2500,23 +2533,16 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	measureLoudness := func(src audio.Source, pre string) (audio.Stats, error) {
 		return audio.MeasureLoudness(ctx, e.Probe.FFmpeg, f, src.Index, pre)
 	}
-	// THE CROP's samples, taken only where the root sets `crop: auto` (docs/design/crop.md):
-	// a root that does not runs no detection and hands the derivation nothing, so its plan,
-	// its command line and its row are what they always were.
-	var cropIn *crop.Consensus
-	if prof.CropEnabled() {
-		cropIn = e.cropConsensus(ctx, f, props, plan.RemuxOnly())
-	}
 	job, err := deriveEncodePlan(planInputs{
 		settings: ts, prof: prof, source: f, output: work, streams: plan, devices: e.Devices,
 		snapshot:        func() (*probe.VideoProps, error) { return props, nil },
-		measureLoudness: measureLoudness, crop: cropIn, dynamic: dynamic,
+		measureLoudness: measureLoudness, crop: cropIn, cropL5: cropL5, dynamic: dynamic,
 	})
 	// A crop whose bars are not black is refused BEFORE anything is encoded, and the file is
 	// encoded uncropped in this same attempt from a plan derived again with the refusal: the
 	// crop gate measures the same thing again after the encode, so this check only spares an
 	// encode whose crop the gate would refuse.
-	if err == nil && job.Picture.Crop.Applied() {
+	if err == nil && job.Picture.Crop.Applied() && !job.Picture.Crop.ZeroesL5() {
 		if berr := e.cropPrecheck(ctx, job, props); berr != nil {
 			if ctx.Err() != nil {
 				_ = os.Remove(tmp)
@@ -2529,7 +2555,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 			job, err = deriveEncodePlan(planInputs{
 				settings: ts, prof: prof, source: f, output: work, streams: plan, devices: e.Devices,
 				snapshot:        func() (*probe.VideoProps, error) { return props, nil },
-				measureLoudness: measureLoudness, audio: &sameAudio, crop: cropIn, dynamic: dynamic,
+				measureLoudness: measureLoudness, audio: &sameAudio, crop: cropIn, cropL5: cropL5, dynamic: dynamic,
 			})
 		}
 	}
@@ -2574,7 +2600,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		again, derr := deriveEncodePlan(planInputs{
 			settings: ts, prof: prof, source: f, output: work, streams: plan, devices: e.Devices,
 			snapshot:        func() (*probe.VideoProps, error) { return props, nil },
-			measureLoudness: measureLoudness, audio: &sameAudio, crop: cropIn, dynamic: dynamic,
+			measureLoudness: measureLoudness, audio: &sameAudio, crop: cropIn, cropL5: cropL5, dynamic: dynamic,
 		})
 		if derr != nil {
 			err = derr

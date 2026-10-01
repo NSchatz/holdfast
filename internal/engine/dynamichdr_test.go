@@ -247,8 +247,10 @@ func TestDynamicHDR_ACarriedProfile81UnderCropAutoIsEncodedUncroppedWithTheRefus
 	if row.Status != store.Done {
 		t.Fatalf("row %s %q, want done", row.Status, row.Outcome.Reason)
 	}
-	if rec := row.Outcome.Crop.Record(); !row.Outcome.Crop.Recorded() || rec.Applied || rec.Reason != crop.ReasonDolbyVision {
-		t.Errorf("the row's crop record is %s, want the dolby-vision refusal", row.Outcome.Crop)
+	// Phase 2 of P5 reads the source's L5: the generator wrote a zero L5 on every frame, and a
+	// zero L5 names no bars, so the crop is refused by name (docs/design/crop.md#dolby-vision).
+	if rec := row.Outcome.Crop.Record(); !row.Outcome.Crop.Recorded() || rec.Applied || rec.Reason != crop.ReasonL5Absent {
+		t.Errorf("the row's crop record is %s, want the %s refusal", row.Outcome.Crop, crop.ReasonL5Absent)
 	}
 	if argv := strings.Join(argvWith(calls, "libx265"), " "); strings.Contains(argv, "crop=") || !strings.Contains(argv, "-dolbyvision 1") {
 		t.Errorf("the encode cropped, or did not carry the RPU: %s", argv)

@@ -252,14 +252,14 @@ func TestCrop_ADolbyVisionSourceIsRefusedByTheDecisionItself(t *testing.T) {
 	props := prober.VideoProps(context.Background(), src)
 	agreed := crop.Consensus{Edges: crop.Edges{Top: 40, Bottom: 40}, Samples: 10, Valid: 10}
 
-	got := cropApplied(&agreed, props, "yuv420p10le")
+	got := cropApplied(&agreed, nil, props, "yuv420p10le")
 	if got.Applied() || got.Reason != crop.ReasonDolbyVision {
 		t.Fatalf("the DV source's crop decision is %+v, want refused %s", got, crop.ReasonDolbyVision)
 	}
 	// The same samples over the same picture without the tag crop: the refusal is the DV class.
 	plain := filepath.Join(d, "plain.mp4")
 	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-c", "copy", "-tag:v", "hvc1", "--", plain)
-	if d := cropApplied(&agreed, prober.VideoProps(context.Background(), plain), "yuv420p10le"); !d.Applied() || d.Rect.String() != lbRect {
+	if d := cropApplied(&agreed, nil, prober.VideoProps(context.Background(), plain), "yuv420p10le"); !d.Applied() || d.Rect.String() != lbRect {
 		t.Fatalf("the untagged copy decided %+v, want %s: the DV case would not show the class deciding", d, lbRect)
 	}
 
@@ -293,7 +293,7 @@ func TestCrop_ADolbyVisionSourceIsRefusedByTheDecisionItself(t *testing.T) {
 		t.Error("a DV source was sampled")
 		return crop.Consensus{}
 	}
-	if c := eng.cropConsensus(context.Background(), src, props, false); c == nil || c.Valid != 0 {
+	if c := eng.cropConsensus(context.Background(), src, props, false, false); c == nil || c.Valid != 0 {
 		t.Errorf("the DV source's consensus is %+v", c)
 	}
 }

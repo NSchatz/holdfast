@@ -268,6 +268,9 @@ type cropDTO struct {
 	Frame   *string `json:"frame"`
 	Reason  *string `json:"reason"`
 	Detail  *string `json:"detail"`
+	// L5Zeroed is true where a Dolby Vision source was cropped to its RPU's own active area
+	// and its L5 zeroed and gated (docs/design/crop.md#dolby-vision).
+	L5Zeroed bool `json:"l5_zeroed"`
 }
 
 // cropRecordDTO carries the store's recorded/not-recorded distinction onto the wire.
@@ -277,7 +280,7 @@ func cropRecordDTO(c store.Crop) *cropDTO {
 	}
 	r := c.Record()
 	return &cropDTO{Applied: r.Applied, Rect: nullableText(r.Rect), Frame: nullableText(r.Frame),
-		Reason: nullableText(r.Reason), Detail: nullableText(r.Detail)}
+		Reason: nullableText(r.Reason), Detail: nullableText(r.Detail), L5Zeroed: r.L5Zeroed}
 }
 
 // audioTrackDTO is one audio track on the wire. Every field a track may not have is an

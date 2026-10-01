@@ -20,9 +20,13 @@ import (
 // ".dynhdr<i>" suffix (auxTempPath): beside it, under its temp marker, owned by its owner
 // record (ownerKey reads the suffix), so a killed run's leftovers are swept with it.
 const (
-	dynamicJSON = iota // the extracted HDR10+ metadata
-	dynamicRaw         // the converted profile 8.1 stream
-	dynamicHead        // the head of a profile 7 source's RPU, read for its enhancement-layer type
+	dynamicJSON   = iota // the extracted HDR10+ metadata
+	dynamicRaw           // the converted profile 8.1 stream
+	dynamicHead          // the head of a profile 7 source's RPU, read for its enhancement-layer type
+	dynamicSrcRPU        // the source's RPU, extracted for its L5 (a Dolby Vision crop)
+	dynamicSrcL5         // the source's L5 export
+	dynamicOutRPU        // the output's RPU, extracted for the L5 gate
+	dynamicOutL5         // the output's L5 export
 )
 
 // dynamicTempPath is the i-th pre-pass file of the job writing out. The HDR10+ file ends in
@@ -43,7 +47,7 @@ func dynamicTempPath(out string, i int) string {
 // (ASSUMED: that slack covers it; a write that fails anyway is a refused pre-pass, and the
 // source is untouched).
 func dynamicRoom(sourceBytes int64, intent dynhdr.Intent) int64 {
-	if intent.Convert {
+	if intent.Rewrites() {
 		return 2 * sourceBytes
 	}
 	return sourceBytes
@@ -51,7 +55,7 @@ func dynamicRoom(sourceBytes int64, intent dynhdr.Intent) int64 {
 
 // removeDynamicTemps removes every pre-pass file of the job writing work.
 func removeDynamicTemps(work string) {
-	for i := dynamicJSON; i <= dynamicHead; i++ {
+	for i := dynamicJSON; i <= dynamicOutL5; i++ {
 		_ = os.Remove(dynamicTempPath(work, i))
 	}
 }
@@ -86,6 +90,9 @@ func (e *Engine) logDynamic(f string, prof config.Profile, p *dynhdr.Prepared) {
 	if p.Intent.DolbyVision {
 		args = append(args, "source_profile", p.Intent.SourceProfile, "vbv_level", p.VBV.Level,
 			"vbv_maxrate_kbps", p.VBV.MaxrateKbps, "vbv_bufsize_kbit", p.VBV.BufsizeKbit)
+	}
+	if p.Intent.ZeroL5 {
+		args = append(args, "zero_l5", true, "frame_rate", p.FrameRate.String())
 	}
 	if p.Intent.Convert {
 		el := p.ELType

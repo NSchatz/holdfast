@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/crop"
+	"github.com/NSchatz/holdfast/internal/dynhdr"
+	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/probe"
 	"github.com/NSchatz/holdfast/internal/store"
 )
@@ -27,14 +30,16 @@ import (
 //
 // props may be nil (a direct caller of the encoder that did not pre-probe): the decision is
 // then refused for an unknown frame, never taken against a guessed one.
-func cropApplied(consensus *crop.Consensus, props *probe.VideoProps, outPixFmt string) crop.Decision {
+func cropApplied(consensus *crop.Consensus, l5 *crop.L5Reading, props *probe.VideoProps, outPixFmt string) crop.Decision {
 	if consensus == nil {
 		return crop.Decision{}
 	}
 	if props == nil {
 		return crop.Refuse(crop.Frame{}, crop.ReasonUnknownFrame, "the source was not probed")
 	}
-	return crop.Decide(cropInputs(*consensus, props, outPixFmt))
+	in := cropInputs(*consensus, props, outPixFmt)
+	in.DolbyVision.L5 = l5
+	return crop.Decide(in)
 }
 
 // cropInputs are the decision's inputs read off a source's snapshot.
@@ -98,13 +103,15 @@ func referenceChain(film string, cut crop.Rect) string {
 // where the job re-encodes nothing: a root without `crop: auto` runs no detection, probes
 // nothing more and records nothing (brief I5). A Dolby Vision source is not sampled at all -
 // the decision refuses it before reading the samples - so it costs nothing.
-func (e *Engine) cropConsensus(ctx context.Context, f string, props *probe.VideoProps, remux bool) *crop.Consensus {
+func (e *Engine) cropConsensus(ctx context.Context, f string, props *probe.VideoProps, remux, dvCarried bool) *crop.Consensus {
 	if remux {
 		// The derivation records the remux's own refusal; nothing is sampled for a copy.
 		c := crop.Consensus{}
 		return &c
 	}
-	if crop.DolbyVisionOf(props.CodecTag(), props.SideData(), props.Color("color_transfer")).Present {
+	// A Dolby Vision source is sampled only where this job carries its Dolby Vision, the one
+	// case its crop can be decided (docs/design/crop.md#dolby-vision).
+	if !dvCarried && crop.DolbyVisionOf(props.CodecTag(), props.SideData(), props.Color("color_transfer")).Present {
 		c := crop.Consensus{}
 		return &c
 	}
@@ -120,6 +127,67 @@ func (e *Engine) cropConsensus(ctx context.Context, f string, props *probe.Video
 		c = crop.Detect(ctx, e.Probe.FFmpeg, f, dur, frame)
 	}
 	return &c
+}
+
+// cropL5 reads what the Dolby Vision crop decision rests on, for a source whose Dolby Vision
+// this job carries: its frame count and constant rate (an L5 zeroing writes a raw stream read
+// at one rate), and every frame's L5 through dovi_tool (dynhdr.ReadL5), into working files
+// beside work that removeDynamicTemps removes. Every failure is a reading the decision
+// refuses by name, never an error that stops the job.
+func (e *Engine) cropL5(ctx context.Context, f, work string) *crop.L5Reading {
+	r := &crop.L5Reading{}
+	frames, rateErr := dynhdr.RewriteFacts(ctx, e.Probe.FFprobe, absolutePath(f))
+	if rateErr != nil {
+		r.FrameRate = rateErr.Error()
+		return r
+	}
+	recs, err := dynhdr.ReadL5(ctx, e.dynamicTools(), absolutePath(f),
+		absolutePath(dynamicTempPath(work, dynamicSrcRPU)), absolutePath(dynamicTempPath(work, dynamicSrcL5)))
+	if err != nil {
+		r.Failed = err.Error()
+		return r
+	}
+	r.Frames, r.L5 = frames, map[int]crop.Edges{}
+	for _, rec := range recs {
+		r.L5[rec.Frame] = crop.Edges{Left: rec.Left, Right: rec.Right, Top: rec.Top, Bottom: rec.Bottom}
+	}
+	return r
+}
+
+// cropBlacknessOf is the pre-encode blackness check of a decision, through the test seam
+// where one is set.
+func (e *Engine) cropBlacknessOf(ctx context.Context, src string, d crop.Decision, pixFmt string) error {
+	if e.cropBlackness != nil {
+		return e.cropBlackness(ctx, src, d, pixFmt)
+	}
+	return crop.Blackness(ctx, e.Probe.FFmpeg, src, d.Rect, d.Frame, pixFmt)
+}
+
+// l5Gate is the L5 gate (docs/design/crop.md#l5-gate), run on every job that cropped a Dolby
+// Vision source to its RPU's own active area and on no other: the output carries exactly one
+// L5 record per decoded frame and every one is 0/0/0/0, read with dovi_tool's
+// `export -l level5`, which writes no record for a frame without L5, so a dropped L5 cannot
+// pass as a zeroed one. A failure is TRANSIENT and remembered for the source: the next attempt
+// in this process encodes it uncropped, its Dolby Vision carried as it is.
+func (e *Engine) l5Gate(ctx context.Context, job *EncodePlan) (string, store.FailureClass, error) {
+	fail := func(err error) (string, store.FailureClass, error) {
+		e.cropL5Failed.Store(job.Source, err.Error())
+		return GateDolbyVisionL5, store.FailureTransient, fmt.Errorf("%w. The source is kept, and its next attempt "+
+			"is encoded uncropped", err)
+	}
+	counts, err := dynhdr.Count(ctx, e.Probe.FFprobe, job.Output)
+	if err != nil {
+		return fail(&dynhdr.GateError{Gate: GateDolbyVisionL5, Why: "the output's frames could not be counted (" + err.Error() + ")"})
+	}
+	recs, err := dynhdr.ReadL5(ctx, e.dynamicTools(), absolutePath(job.Output),
+		absolutePath(dynamicTempPath(job.Output, dynamicOutRPU)), absolutePath(dynamicTempPath(job.Output, dynamicOutL5)))
+	if err != nil {
+		return fail(&dynhdr.GateError{Gate: GateDolbyVisionL5, Why: "the output's L5 could not be read (" + err.Error() + ")"})
+	}
+	if err := dynhdr.CheckZeroL5(recs, counts.Frames); err != nil {
+		return fail(err)
+	}
+	return "", "", nil
 }
 
 // cropPrecheck is the blackness check run BEFORE the encode, over the rectangle the plan
@@ -179,7 +247,57 @@ func (o PictureOps) cropRecord() store.Crop {
 	}
 	if d.Applied() {
 		return store.RecordCrop(store.CropRecord{Applied: true, Rect: d.Rect.String(),
-			Frame: fmt.Sprintf("%dx%d", d.Frame.W, d.Frame.H)})
+			Frame: fmt.Sprintf("%dx%d", d.Frame.W, d.Frame.H), L5Zeroed: d.ZeroesL5()})
 	}
 	return store.RecordCrop(store.CropRecord{Reason: d.Reason, Detail: d.Detail})
+}
+
+// roomIntent is the dynamic-HDR intent the room check sizes a job for: a Dolby Vision source
+// under `crop: auto` may have its L5 zeroed into a raw stream as large as its video, which is
+// decided only after the check, so the check counts it whenever it could happen.
+func roomIntent(in dynhdr.Intent, prof config.Profile) dynhdr.Intent {
+	if prof.CropEnabled() && in.DolbyVision {
+		in.ZeroL5 = true
+	}
+	return in
+}
+
+// cropBeforePrePass samples a source under `crop: auto` and, where this job carries its Dolby
+// Vision, reads its L5 and decides the crop then, because the pre-pass that runs next is what
+// zeroes L5: a crop to L5's own rectangle whose removed area is black asks the pre-pass for
+// the zeroing (intent.ZeroL5); anything else leaves the intent as it was and the source is
+// encoded uncropped with its Dolby Vision carried. The derivation takes the same decision
+// again from the same inputs and refuses a plan where the two differ.
+//
+// A source whose earlier attempt in this process failed the L5 gate is refused the crop.
+func (e *Engine) cropBeforePrePass(ctx context.Context, f, work string, props *probe.VideoProps, ts config.Transcode,
+	remux bool, intent dynhdr.Intent) (*crop.Consensus, *crop.L5Reading, dynhdr.Intent) {
+	cropIn := e.cropConsensus(ctx, f, props, remux, intent.DolbyVision)
+	if remux || !intent.DolbyVision {
+		return cropIn, nil, intent
+	}
+	if why, failed := e.cropL5Failed.Load(f); failed {
+		c := crop.Consensus{Reason: crop.ReasonL5GateFailed, Detail: "an earlier attempt's cropped output failed the L5 gate: " +
+			fmt.Sprint(why)}
+		return &c, e.cropL5(ctx, f, work), intent
+	}
+	l5 := e.cropL5(ctx, f, work)
+	outFmt := ts.PixelFormat
+	if ts.PixelFormatAuto() {
+		outFmt, _ = hdr.DerivePixFmt(props.PixFmt())
+	}
+	in := cropInputs(*cropIn, props, outFmt)
+	in.DolbyVision.L5 = l5
+	d := crop.Decide(in)
+	if !d.ZeroesL5() {
+		return cropIn, l5, intent
+	}
+	if err := e.cropBlacknessOf(ctx, f, d, props.PixFmt()); err != nil {
+		e.Log.Info("crop refused: the area it would remove is not black; encoding uncropped", "file", f,
+			"crop", d.Rect.String(), "err", err)
+		c := crop.Consensus{Reason: crop.ReasonBarsNotBlack, Detail: err.Error()}
+		return &c, l5, intent
+	}
+	intent.ZeroL5 = true
+	return cropIn, l5, intent
 }
