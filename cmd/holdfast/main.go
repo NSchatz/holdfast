@@ -34,6 +34,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/dynhdr"
 	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/engine"
+	"github.com/NSchatz/holdfast/internal/health"
 	"github.com/NSchatz/holdfast/internal/hwdevice"
 	"github.com/NSchatz/holdfast/internal/logging"
 	"github.com/NSchatz/holdfast/internal/metrics"
@@ -1299,8 +1300,9 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	observers := []engine.Observer{hub.Observe}
 
 	var metricsHandler http.Handler
+	var mx *metrics.Metrics
 	if cfg.MetricsEnable {
-		mx := metrics.New(st, log)
+		mx = metrics.New(st, log)
 		observers = append(observers, mx.Observe)
 		metricsHandler = mx.Handler()
 	}
@@ -1349,6 +1351,23 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	srv := server.New(ctx, *cfg, secrets.Get("server_auth_token"), secrets.Get("server_read_token"),
 		st, ctrl, hub, metricsHandler, log)
 	srv.SetSubmissions(subs)
+
+	// The library health sweep (docs/design/health-sweep.md), OFF unless
+	// health_sweep_interval_hours is set. It reads the engine's own enumeration and asks the
+	// same pause and scheduler the encode workers do before every decode it starts; it
+	// writes only its own ledger rows and never touches a library file.
+	var reporters []health.Reporter
+	if mx != nil {
+		reporters = append(reporters, mx)
+	}
+	if notifier.Enabled() {
+		reporters = append(reporters, notifier)
+	}
+	sweep := newHealthSweep(cfg, eng, st, ctrl.Paused, sched, reporters, log)
+	if sweep != nil {
+		srv.SetHealth(sweep)
+	}
+
 	var bg sync.WaitGroup
 	bg.Add(5)
 	go func() { defer bg.Done(); hub.Run(ctx) }()
@@ -1356,6 +1375,10 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	go func() { defer bg.Done(); subs.Run(ctx) }()                               // drains POST /api/scan
 	go func() { defer bg.Done(); watches.Run(ctx) }()                            // opt-in per-root filesystem watch
 	go func() { defer bg.Done(); srv.StartScanLoop(ctx, cfg.ScanIntervalSec) }() // initial scan + optional interval
+	if sweep != nil {
+		bg.Add(1)
+		go func() { defer bg.Done(); sweep.Run(ctx) }() // the report-only health sweep
+	}
 
 	addr := cfg.EffectiveServerAddr()
 	httpSrv := &http.Server{Addr: addr, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
@@ -1366,6 +1389,7 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 			"control_enabled", !secrets.Get("server_auth_token").Empty(),
 			"read_gated", !secrets.Get("server_read_token").Empty(),
 			"scan_interval_sec", cfg.ScanIntervalSec,
+			"health_sweep_interval_hours", cfg.HealthSweepIntervalHours,
 			"queue_order", cfg.EffectiveQueueOrder(),
 			"metrics", cfg.MetricsEnable,
 			"notify", notifier.Enabled(),

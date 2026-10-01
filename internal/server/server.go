@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/health"
 	"github.com/NSchatz/holdfast/internal/secret"
 	"github.com/NSchatz/holdfast/internal/sourceoffer"
 	"github.com/NSchatz/holdfast/internal/store"
@@ -55,7 +56,19 @@ type Server struct {
 	// SetSubmissions, before serving, the way the Controller's own hooks are; with none
 	// wired the endpoint refuses rather than accepting work nothing will process.
 	subs Submissions
+
+	// health is the library health sweep's live state, read by GET /api/health beside the
+	// ledger. nil is a daemon that runs no sweep; the route answers either way.
+	health HealthSource
 }
+
+// HealthSource is the health sweep's in-memory state, which the ledger does not hold.
+type HealthSource interface {
+	Live() health.Live
+}
+
+// SetHealth wires the health sweep's live state. Set it once, before serving.
+func (s *Server) SetHealth(h HealthSource) { s.health = h }
 
 // SetSubmissions wires the targeted-scan queue. Set it once, before serving. The route
 // exists either way - a surface that appeared and disappeared with a wiring detail would
@@ -145,6 +158,9 @@ func (s *Server) routes() *chi.Mux {
 			r.Get("/queue", s.handleQueue)
 			r.Get("/history", s.handleHistory)
 			r.Get("/events", s.handleEvents)
+			// The library health sweep's report (docs/design/health-sweep.md). A read,
+			// and only a read: there is no route that acts on what a sweep found.
+			r.Get("/health", s.handleHealth)
 		})
 
 		// Mutating endpoints — token required (and disabled entirely when no token
@@ -503,6 +519,21 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // newlines), so a single data: line is correct.
 func writeSSE(w http.ResponseWriter, data []byte) {
 	_, _ = fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", data)
+}
+
+// handleHealth answers GET /api/health from the reporting door: the sweep under way, the
+// last one that finished, and the files each found corrupt or unreadable.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	live := health.Live{State: health.StateOff}
+	if s.health != nil {
+		live = s.health.Live()
+	}
+	rep, err := health.BuildReport(r.Context(), s.reads(), s.cfg.HealthSweepInterval(), live)
+	if err != nil {
+		s.fail(w, "health", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
 }
 
 func (s *Server) fail(w http.ResponseWriter, what string, err error) {

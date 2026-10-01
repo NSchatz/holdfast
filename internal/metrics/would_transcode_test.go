@@ -128,6 +128,7 @@ func TestMetrics_NoNewMetricNameIsPublished(t *testing.T) {
 		t.Fatalf("Finish: %v", err)
 	}
 
+	seedFinishedHealthSweep(t, st) // so the health sweep gauges, absent until then, are published
 	m := New(st, nil)
 	src := int64(1024)
 	m.Observe(engine.Event{
