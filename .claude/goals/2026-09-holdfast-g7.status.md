@@ -79,7 +79,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g7-ba
 
 | # | Item | State |
 |---|---|---|
-| 6.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `df90fbb`): `func Test` 1463 -> 1542, no package fell (`internal/audio` 0 -> 30, `internal/subtitle` 0 -> 19, `internal/config` 125 -> 131, `internal/engine` 504 -> 521, `internal/store` 149 -> 154, every other package unchanged); `docs/design/swap.md` 62 and `docs/design/quality-gate.md` 76 lines, `git diff --numstat 3df6162 df90fbb` empty for both; 16 lines deleted in `*_test.go` (+2974 -16), each with its reason below |
+| 6.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `df90fbb`): `func Test` 1463 -> 1542, no package fell (`internal/audio` 0 -> 30, `internal/subtitle` 0 -> 19, `internal/config` 125 -> 131, `internal/engine` 504 -> 521, `internal/store` 149 -> 154, `internal/probe` 22 -> 24, every other package unchanged); `docs/design/swap.md` 62 and `docs/design/quality-gate.md` 76 lines, `git diff --numstat 3df6162 df90fbb` empty for both; 16 lines deleted in `*_test.go` (+2974 -16), each with its reason below |
 
 ### The 16 deleted `*_test.go` lines and why
 
@@ -98,7 +98,7 @@ v22 `audio_tracks`, #136); the wind-back fixtures exist to undo exactly the newe
 - `internal/startup/stream_docs_test.go` (1): a doc comment that described the stream-selection
   statement as calling audio transcoding a non-goal; that statement and its check changed together
   (R1), with a bite case proving the old wording now fails. |
-| 6.2 | Adversarial review of the report | TODO |
+| 6.2 | Adversarial review of the report | DONE: a fresh subagent (2026-10-01) checked lines A-H against `c82ce67` and GitHub, re-running the audio, sidecar and golden tests under the lock: "VERDICT: none false". Its low findings: row 6.1 omitted `internal/probe` 22 -> 24 (fixed here); the one-column v22 leaves the rollback loop checking nothing (disclosed in code); `TestAudioGate_FullDecodeReds` fakes the decode failure through a hook (real damage is proven in `internal/audio`); the bitmap skip has no end-to-end real bitmap stream (the pinned ffmpeg cannot make one); `internal/audio` labels a failed ffmpeg start as a decode error (still a rejection); CLAUDE.md links `#sidecars` for the gate rule rather than `#sidecar-gate`; main CI on the merge commits was cancelled by ledger pushes and is green on `c82ce67` (run 36830505484), which carries all the code; stale remote-tracking refs (pruned). Its claim that the sidecar link is not followed by a directory fsync is answered by `Engine.publishSidecars`, which fsyncs the directory after publishing |
 
 ## Decisions taken
 
@@ -189,6 +189,7 @@ v22 `audio_tracks`, #136); the wind-back fixtures exist to undo exactly the newe
 
 ## Resume here
 
-All PRs merged: #135, #136, #137. No branch, worktree or open PR of this goal remains but the
-ledger worktree. Next: the fresh adversarial review of the GOAL REPORT (row 6.2), then the COMPLETE
-line.
+All PRs merged: #135, #136, #137; main CI green on `c82ce67`. No branch, worktree or open PR of
+this goal remains. The adversarial review found none false. Goal complete.
+
+COMPLETE (goal 7): 2026-10-01
