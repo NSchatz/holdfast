@@ -120,6 +120,25 @@ var scenarios = map[string]cannedStream{
 		formatDuration: "120.000000",
 		videoStreams:   "0,0\nN/A,maybe\n",
 	},
+	// A Matroska HDR10 source whose mastering display and content light sit in the
+	// container's Colour element: ffprobe prints the stream's (unrequested, so empty)
+	// side-data section as a trailing field, measured with the pinned ffprobe on an FFV1
+	// clip carrying both blocks.
+	"sidedata.mkv": {
+		codecName: "ffv1", streamBitRate: "", formatBitRate: "12000000", fieldOrder: "progressive",
+		codecTag: "", pixFmt: "yuv420p10le",
+		colorPrimaries: "bt2020", colorTransfer: "smpte2084", colorSpace: "bt2020nc", colorRange: "tv",
+		formatDuration: "2.000000",
+		videoStreams:   "0,0,\n",
+	},
+	// The same trailing section with something in it: a row nobody can interpret.
+	"sidedatagarbled.mkv": {
+		codecName: "ffv1", streamBitRate: "", formatBitRate: "12000000", fieldOrder: "progressive",
+		codecTag: "", pixFmt: "yuv420p10le",
+		colorPrimaries: "bt2020", colorTransfer: "smpte2084", colorSpace: "bt2020nc", colorRange: "tv",
+		formatDuration: "2.000000",
+		videoStreams:   "0,0,1\n",
+	},
 	"hdr10.mkv": {
 		codecName: "hevc", streamBitRate: "20000000", fieldOrder: "progressive",
 		codecTag: "hev1", pixFmt: "yuv420p10le",
@@ -418,6 +437,16 @@ func TestVideoStreams_ReportsTheShapeOrSaysItCouldNotEstablishIt(t *testing.T) {
 				"index is not the video-relative one and must not be read as it",
 		},
 		{
+			file: "sidedata.mkv", wantEstablished: true,
+			want: []VideoStream{{Index: 0, AttachedPicture: false}},
+			why: "a stream carrying stream-level side data (a Matroska HDR10 source) is printed " +
+				"with an empty trailing section, and is still one moving-picture stream",
+		},
+		{
+			file: "sidedatagarbled.mkv", wantEstablished: false, want: nil,
+			why: "a trailing section that is not empty is a row nobody can interpret",
+		},
+		{
 			file: "garbled.mkv", wantEstablished: false, want: nil,
 			why: "a row nobody can interpret leaves the shape unknown, which is not the same as " +
 				"a file with nothing beyond the first stream",
@@ -447,7 +476,7 @@ func TestVideoStreams_ReportsTheShapeOrSaysItCouldNotEstablishIt(t *testing.T) {
 	// The snapshot and the direct probe must agree, for the same reason every other
 	// accessor is pinned this way: the guards read the snapshot, so a divergence here is a
 	// guard reading a different file from the one the prober describes.
-	for _, name := range []string{"sdr.mkv", "cover.mp4", "twovideo.mkv", "garbled.mkv"} {
+	for _, name := range []string{"sdr.mkv", "cover.mp4", "twovideo.mkv", "garbled.mkv", "sidedata.mkv", "sidedatagarbled.mkv"} {
 		f := "/lib/" + name
 		gotS, gotOK := p.VideoProps(ctx, f).VideoStreams()
 		wantS, wantOK := p.VideoStreams(ctx, f)

@@ -217,9 +217,23 @@ func (p *Prober) VideoStreams(ctx context.Context, f string) (streams []VideoStr
 		if line == "" {
 			continue
 		}
-		idx, disp, ok := strings.Cut(line, ",")
-		if !ok || !intRe.MatchString(idx) || (disp != "0" && disp != "1") {
+		// A stream that carries stream-level side data (a Matroska source's HDR10 mastering
+		// display and content light, stored in its Colour element) is printed with one more
+		// section, empty because none of its entries was asked for: "0,0,". Those trailing
+		// fields are read only to confirm they are empty; anything in them is a row this
+		// parser cannot read, which establishes nothing.
+		fields := strings.Split(line, ",")
+		if len(fields) < 2 {
 			return nil, false
+		}
+		idx, disp := fields[0], fields[1]
+		if !intRe.MatchString(idx) || (disp != "0" && disp != "1") {
+			return nil, false
+		}
+		for _, extra := range fields[2:] {
+			if strings.TrimSpace(extra) != "" {
+				return nil, false
+			}
 		}
 		n, cerr := strconv.Atoi(idx)
 		if cerr != nil {

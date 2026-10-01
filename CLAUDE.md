@@ -107,6 +107,9 @@ reasoning lives in the document, not in this file.
   start, and handed to exactly one consumer. `internal/secretscan` + `scripts/secret-scan`
   - the repository's own secret scanner, behind `scripts/secret-scan.sh`.
 - `internal/logging`, `internal/version` - logger construction, build stamping.
+- `scripts/hw-report.sh` + `scripts/hwreport` - the redacted hardware report the owner runs on a
+  GPU host and commits under `testdata/hw-reports/`, and the test that proves no host identity
+  survives in one.
 - `Dockerfile`, `.github/workflows/ci.yml` - the multi-arch distroless image and
   the gate.
 
@@ -171,5 +174,6 @@ coverage is not assertion ·
 `docs/mutation-testing.md` the mutation score floor, the figure it is applied to, which
 packages are in the mutation domain and why each exclusion is there, what a pull request
 runs against what the schedule runs, and how to reproduce either by hand ·
+`docs/hardware-reports.md` how a hardware report is run, what it records and what it redacts ·
 `docs/encode-memory.md` the encode memory watchdog, the mux-queue bounds on every ffmpeg
 argv, and the reproduction attempt behind them.

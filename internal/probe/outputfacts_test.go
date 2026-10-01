@@ -125,3 +125,44 @@ func TestVideoProps_SideDataAnswered(t *testing.T) {
 		t.Fatalf("a missing file yielded side data: %q", missing.SideData())
 	}
 }
+
+// TestVideoStreams_MatroskaHDR10SourceIsOneStream: a real Matroska source whose HDR10
+// mastering display and content light sit in the container's Colour element, so at stream
+// level, is one moving-picture stream and the probe establishes that. Before the parse read
+// the empty trailing section ffprobe prints for that side data, the source-shape guard
+// skipped every such file as `multi-video-stream`.
+func TestVideoStreams_MatroskaHDR10SourceIsOneStream(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Fatalf("the pinned ffmpeg is required: %v", err)
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Fatalf("the pinned ffprobe is required: %v", err)
+	}
+	dir := t.TempDir()
+	hevc, f := filepath.Join(dir, "hdr10-hevc.mkv"), filepath.Join(dir, "hdr10-ffv1.mkv")
+	for _, args := range [][]string{
+		{"-f", "lavfi", "-i", "testsrc2=duration=1:size=64x48:rate=5", "-pix_fmt", "yuv420p10le",
+			"-c:v", "libx265", "-x265-params",
+			"log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:" +
+				"master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400",
+			"--", hevc},
+		{"-i", hevc, "-c:v", "ffv1", "-pix_fmt", "yuv420p10le", "--", f},
+	} {
+		out, err := exec.Command(ffmpeg, append([]string{"-hide_banner", "-loglevel", "error", "-y"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("make fixture: %v\n%s", err, out)
+		}
+	}
+	p := New(ffmpeg, ffprobe)
+	sd, err := exec.Command(ffprobe, "-v", "error", "-select_streams", "v:0",
+		"-show_entries", "stream_side_data_list", "-of", "flat=s=.", "--", f).Output()
+	if err != nil || !strings.Contains(string(sd), "Mastering display metadata") {
+		t.Fatalf("the fixture carries no stream-level mastering display, so it proves nothing: %v\n%s", err, sd)
+	}
+	got, established := p.VideoStreams(context.Background(), f)
+	if !established || len(got) != 1 || got[0] != (VideoStream{Index: 0}) {
+		t.Errorf("VideoStreams = %+v, established %v; want one moving-picture stream, established", got, established)
+	}
+}
