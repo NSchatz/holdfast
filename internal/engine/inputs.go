@@ -4,6 +4,7 @@ import (
 	"strconv"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/dynhdr"
 	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/store"
 )
@@ -78,6 +79,13 @@ const (
 	// - so no row written for a configuration that sets no ceiling carries it. Opening the
 	// window re-opens the rows that guard held, which is one of its two remedies.
 	InputUndoWindow = "undo_window_hours"
+
+	// InputDolbyVisionP7 is the dolby_vision_p7 key, recorded by the one verdict that reads
+	// it: a Dolby Vision profile 7 source skipped under its default, skip
+	// (SkipDolbyVisionProfile7). Turning conversion on moves the value and offers the file
+	// back. It is offered on every job, and recorded by no other verdict, so no row written
+	// before the key existed changes on upgrade.
+	InputDolbyVisionP7 = dynhdr.InputP7
 )
 
 // EVERY VALUE HERE IS RESOLVED FOR ONE PATH, through the whole layering the decision that
@@ -118,6 +126,7 @@ func DecisionInputsForJob(cfg config.Config, prof config.Profile, ts config.Tran
 		InputPixelFormat:    ts.PixelFormat,
 		InputMinBitrateKbps: strconv.Itoa(prof.MinBitrateKbps),
 		InputContainerExt:   ts.ContainerExt,
+		InputDolbyVisionP7:  prof.DolbyVisionP7Mode(),
 	}
 	if len(prof.Rules) > 0 {
 		read[InputRules] = prof.Rules.Canonical()

@@ -24,6 +24,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/cpuquota"
 	"github.com/NSchatz/holdfast/internal/downscale"
+	"github.com/NSchatz/holdfast/internal/dynhdr"
 	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/fsclass"
 	"github.com/NSchatz/holdfast/internal/hdr"
@@ -64,10 +65,35 @@ const (
 	SkipLowBitrate            = "low-bitrate"
 	SkipHardlinked            = "hardlinked"
 	SkipInterlaced            = "interlaced"
-	SkipDolbyVision           = "dolby-vision"
-	SkipHDR10Plus             = "hdr10-plus"
+	SkipDolbyVision           = dynhdr.ReasonDolbyVision
+	SkipHDR10Plus             = dynhdr.ReasonHDR10Plus
 	SkipIncompleteHDRMetadata = "incomplete-hdr-metadata"
 	SkipExoticPixelFormat     = "exotic-pixel-format"
+
+	// The DYNAMIC-HDR skips (docs/design/dynamic-hdr.md), each declared AS internal/dynhdr's
+	// token so the wire format has one spelling. SkipDolbyVision and SkipHDR10Plus above are
+	// what they always were for every encoder but cpu and for a remux-only root, and for the
+	// Dolby Vision profiles this build does not carry; these are the cpu encoder's own reasons.
+	//
+	// SkipDolbyVisionProfile7: a profile 7 source under dolby_vision_p7: skip (the default).
+	// It records that key, so turning conversion on offers the file back.
+	SkipDolbyVisionProfile7 = dynhdr.ReasonProfile7
+	// SkipDolbyVisionNoMasteringDisplay: a Dolby Vision source with no complete mastering
+	// display, which x265 needs to code profile 8.1.
+	SkipDolbyVisionNoMasteringDisplay = dynhdr.ReasonNoMasteringDisplay
+	// SkipDolbyVisionFrameRate: a source whose frame rate gives no HEVC level for the VBV
+	// ceiling, or a profile 7 source to convert whose rate is not one constant rate from 0.
+	SkipDolbyVisionFrameRate = dynhdr.ReasonFrameRate
+	// SkipDynamicHDRToolMissing: the dovi_tool or hdr10plus_tool a source needs is not
+	// installed. A CONDITION of the host, so it is mutable (mutableGuardSkips): the file is
+	// offered again on the first pass that finds the tool.
+	SkipDynamicHDRToolMissing = dynhdr.ReasonToolMissing
+	// SkipHDR10PlusUnreadable: the source's HDR10+ metadata could not be extracted, or did
+	// not validate (it does not parse, or does not carry one entry per frame).
+	SkipHDR10PlusUnreadable = dynhdr.ReasonHDR10PlusUnreadable
+	// SkipDolbyVisionConversionFailed: the opted-in profile 7 to 8.1 conversion did not
+	// complete.
+	SkipDolbyVisionConversionFailed = dynhdr.ReasonConversionFailed
 
 	// SkipBetterCodecFamily: the source is already in a codec family ranked above the one
 	// this job's encoder writes (encoder.BetterFamily: H.264 < HEVC < AV1), so re-encoding
@@ -279,6 +305,12 @@ var SkipVocabulary = []string{
 	SkipTelecineCadence,
 	SkipOperatorExcluded,
 	SkipRestoredOriginal,
+	SkipDolbyVisionProfile7,
+	SkipDolbyVisionNoMasteringDisplay,
+	SkipDolbyVisionFrameRate,
+	SkipDynamicHDRToolMissing,
+	SkipHDR10PlusUnreadable,
+	SkipDolbyVisionConversionFailed,
 }
 
 // mutableGuardSkips are the skip reasons that are a CONDITION rather than a verdict about
@@ -299,7 +331,8 @@ var SkipVocabulary = []string{
 // `restored-original` row is refused by that rule outright and must never appear here:
 // re-opening it would feed an operator's rescued bytes back to the very gates that passed
 // the encode they rejected.
-var mutableGuardSkips = []string{SkipUndoRetentionFailed, SkipOperatorExcluded, SkipHardlinked, SkipHardwareUnavailable}
+var mutableGuardSkips = []string{SkipUndoRetentionFailed, SkipOperatorExcluded, SkipHardlinked, SkipHardwareUnavailable,
+	SkipDynamicHDRToolMissing}
 
 // The GATE vocabulary: WHICH gate or stage refused a job that failed. Like the skip
 // tokens above it is a closed, stable wire format - it is published as a metric label,
@@ -343,6 +376,16 @@ const (
 	// GateLoudness: a loudness-normalised track's measured integrated loudness is outside
 	// the EBU R 128 tolerance of the target, or could not be measured.
 	GateLoudness = "loudness"
+	// GateDolbyVisionRecord: the output of a job carrying Dolby Vision has no DOVI
+	// configuration record, or one naming another profile or compatibility id than its plan
+	// declares, or one that could not be read (docs/design/dynamic-hdr.md#gates).
+	GateDolbyVisionRecord = dynhdr.GateDoviRecord
+	// GateDolbyVisionRPU: fewer of that output's frames carry a Dolby Vision RPU than it has
+	// frames, or its frames could not be counted.
+	GateDolbyVisionRPU = dynhdr.GateDoviRPU
+	// GateHDR10Plus: fewer of the output's frames carry HDR10+ metadata than it has frames,
+	// on a job carrying HDR10+.
+	GateHDR10Plus = dynhdr.GateHDR10Plus
 	// GateVmafMean: the pooled harmonic mean fell below min_vmaf.
 	GateVmafMean = "vmaf-mean"
 	// GateVmafMin: the worst (sub)sampled frame fell below vmaf_min_pool - the encode is
@@ -384,6 +427,9 @@ var GateVocabulary = []string{
 	GateOther,
 	GateAudio,
 	GateLoudness,
+	GateDolbyVisionRecord,
+	GateDolbyVisionRPU,
+	GateHDR10Plus,
 }
 
 // Engine drives the transcode over a set of library roots.
@@ -402,6 +448,12 @@ type Engine struct {
 	// Hardware is what this run's start-time probes established about each hardware
 	// encoder (cmd/holdfast sets it); nil probed nothing. See Hardware.
 	Hardware Hardware
+
+	// DoviTool and HDR10PlusTool are the dovi_tool and hdr10plus_tool binaries a carried
+	// dynamic-HDR job runs (cmd/holdfast sets them from HOLDFAST_DOVI_TOOL and
+	// HOLDFAST_HDR10PLUS_TOOL); "" looks each up on PATH by its own name. A job that needs one
+	// that cannot be found skips under dynamic-hdr-tool-missing (docs/design/dynamic-hdr.md).
+	DoviTool, HDR10PlusTool string
 
 	// roots are the library roots with their RESOLVED profiles, read from Cfg once in
 	// New. A file's profile comes from the root it was enumerated under (rootFor), and
@@ -2298,7 +2350,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		// reserved fails here, names the figures, leaves the source untouched, and the scan
 		// carries on; one that fits only without what the other jobs in flight there have
 		// reserved waits for one of them to end (S0163). See sourceRoomFor.
-		release, err := e.sourceRoomFor(ctx, dir, f, fi.Size())
+		release, err := e.sourceRoomFor(ctx, dir, f, dynamicRoom(fi.Size(), v.dynamic))
 		if err != nil {
 			if ctx.Err() != nil {
 				// Cancelled while it waited for room: nothing was encoded, nothing is
@@ -2338,7 +2390,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		// only beside what the other jobs in flight on the scratch filesystem have reserved
 		// waits for one of them to end (reserveRoom), and holds its own reservation until
 		// it exits, by every way out.
-		release, err := e.scratchRoomFor(ctx, scratch, f, fi.Size())
+		release, err := e.scratchRoomFor(ctx, scratch, f, dynamicRoom(fi.Size(), v.dynamic))
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -2364,6 +2416,30 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		// for the scratch sweep.
 		defer func() { _ = os.Remove(work) }()
 	}
+	// THE DYNAMIC-HDR PRE-PASS (docs/design/dynamic-hdr.md), only for a source the guards
+	// decided to carry: the VBV ceiling a Dolby Vision encode needs, the HDR10+ metadata
+	// extracted and validated, the opted-in profile 7 stream converted. Its files sit beside
+	// the working file, counted by the room check above, and go on every way out of this job.
+	// A pre-pass that cannot complete SKIPS the file under the reason it names: nothing has
+	// been encoded and the source is untouched, and a source whose metadata cannot be read is
+	// never encoded without it.
+	var dynamic *dynhdr.Prepared
+	if v.dynamic.Carries() {
+		defer removeDynamicTemps(work)
+		prep, reason, read, err := e.prepareDynamic(ctx, f, work, v.dynamic)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			e.Log.Info("skip (the dynamic HDR this source carries could not be prepared, so it is not encoded "+
+				"without it; the source is untouched)", "file", f, "reason", reason, "err", err)
+			e.finish(ctx, f, key, store.Skipped, e.because(reason, by, prof, ts, props, read...))
+			return nil
+		}
+		dynamic = prep
+		e.logDynamic(f, prof, prep)
+	}
+
 	// tmp is the path the SWAP will read. Without a scratch directory it is the
 	// working file itself, exactly as before. With one it becomes the copy made
 	// beside the source once the gates have accepted - assigned below, never here,
@@ -2413,7 +2489,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	job, err := deriveEncodePlan(planInputs{
 		settings: ts, prof: prof, source: f, output: work, streams: plan, devices: e.Devices,
 		snapshot:        func() (*probe.VideoProps, error) { return props, nil },
-		measureLoudness: measureLoudness,
+		measureLoudness: measureLoudness, dynamic: dynamic,
 	})
 	if err != nil {
 		if ctx.Err() != nil { // interrupted: discard temp, DON'T finish - leave active for RecoverStale
@@ -2453,7 +2529,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		again, derr := deriveEncodePlan(planInputs{
 			settings: ts, prof: prof, source: f, output: work, streams: plan, devices: e.Devices,
 			snapshot:        func() (*probe.VideoProps, error) { return props, nil },
-			measureLoudness: measureLoudness, audio: &sameAudio,
+			measureLoudness: measureLoudness, audio: &sameAudio, dynamic: dynamic,
 		})
 		if derr != nil {
 			err = derr
@@ -2995,6 +3071,10 @@ type sourceVerdict struct {
 	// name: what `encoder: auto` chose, or the software encoder hw_fallback substituted. ""
 	// where the settings' own encoder runs.
 	encoder string
+
+	// dynamic is the dynamic HDR metadata this job carries (dynhdr.Decide): the zero value,
+	// carrying nothing, for every source that has none and for every one that skipped.
+	dynamic dynhdr.Intent
 }
 
 // stopped reports whether a guard refused the file.
@@ -3149,22 +3229,28 @@ func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, pr
 			logArgs: []any{"field_order", props.FieldOrderRaw()}}
 	}
 
-	// HDR/DV guard (TRANSCODE-3). A generic libx265 re-encode cannot preserve a Dolby Vision
-	// RPU or HDR10+ dynamic metadata and would SILENTLY strip it, a permanent,
-	// invisible-until-viewed loss, so detect and SKIP. HDR10 STATIC metadata IS carried
-	// through the encode (hdr.DeriveColorArgs). Probed only here, on an encode-bound file,
-	// so the cost falls on the minority actually re-encoded.
-	switch hdr.ClassFrom(props.CodecTag(), props.SideData(), props.Color("color_transfer")) {
-	case hdr.ClassDV:
-		return props, sourceVerdict{guard: SkipDolbyVision, codec: codec,
-			log: "skip (Dolby Vision — RPU cannot survive a generic re-encode)"}
-	case hdr.ClassHDR10Plus:
-		return props, sourceVerdict{guard: SkipHDR10Plus, codec: codec,
-			log: "skip (HDR10+ dynamic metadata — cannot survive a generic re-encode)"}
-	case hdr.ClassHDR10:
+	// HDR/DV guard (TRANSCODE-3). A generic re-encode cannot preserve a Dolby Vision RPU or
+	// HDR10+ dynamic metadata and would SILENTLY strip it, a permanent, invisible-until-viewed
+	// loss. The cpu encoder (libx265) now CARRIES the two this build can gate - profile 8.1,
+	// profile 7 converted where its root opts in, and HDR10+ - and every other case skips as
+	// it always did (dynamicVerdict, docs/design/dynamic-hdr.md). HDR10 STATIC metadata IS
+	// carried through the encode (hdr.DeriveColorArgs). Probed only here, on an encode-bound
+	// file, so the cost falls on the minority actually re-encoded.
+	class := hdr.ClassFrom(props.CodecTag(), props.SideData(), props.Color("color_transfer"))
+	var dynamic dynhdr.Intent
+	if class == hdr.ClassDV || class == hdr.ClassHDR10Plus {
+		dv := e.dynamicVerdict(props, prof, ts, class)
+		if dv.stopped() {
+			dv.codec = codec
+			return props, dv
+		}
+		dynamic = dv.dynamic
+	}
+	if class == hdr.ClassHDR10 || dynamic.Carries() {
 		// HDR10 static metadata IS carried through the encode, but a mastering-display or
 		// content-light block this build cannot fully parse would be silently dropped.
-		// Fail safe: SKIP rather than blind-encode.
+		// Fail safe: SKIP rather than blind-encode. A carried dynamic-HDR source is held to
+		// the same rule: its static blocks travel through the same parameters.
 		incomplete := e.staticMetadataIncomplete
 		if incomplete == nil {
 			incomplete = hdr.StaticMetadataIncomplete
@@ -3264,11 +3350,58 @@ func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, pr
 		}
 	}
 
-	v := sourceVerdict{codec: codec, outExt: outExt, target: final}
+	v := sourceVerdict{codec: codec, outExt: outExt, target: final, dynamic: dynamic}
 	if runs != ts.Encoder {
 		v.encoder = runs
 	}
 	return props, v
+}
+
+// dynamicVerdict is what happens to a source that classifies as Dolby Vision or HDR10+: the
+// metadata the cpu encoder carries through the encode, or the skip that names why it does not
+// (dynhdr.Decide), and - where it carries - the skip of a host whose dovi_tool or
+// hdr10plus_tool that carriage needs is missing. It reads the snapshot and the configuration
+// only: the pre-pass that runs the tools runs after the claim, beside the working file.
+func (e *Engine) dynamicVerdict(props *probe.VideoProps, prof config.Profile, ts config.Transcode,
+	class string) sourceVerdict {
+	color := hdr.DeriveColor(props.Color("color_primaries"), props.Color("color_transfer"),
+		props.Color("color_space"), props.Color("color_range"), props.SideData())
+	src := dynhdr.Source{
+		DolbyVision: class == hdr.ClassDV,
+		Record:      dynhdr.RecordFrom(props.SideData()),
+		HDR10Plus:   dynhdr.HasHDR10Plus(props.SideData()),
+		Primaries:   color.Primaries, Transfer: color.Transfer, Matrix: color.Matrix,
+		MasterDisplay: color.MasterDisplay,
+	}
+	verdict := dynhdr.Decide(src, dynhdr.Settings{Encoder: ts.Encoder, RemuxOnly: prof.RemuxOnlyEnabled(),
+		P7: prof.DolbyVisionP7Mode()})
+	if verdict.Skipped() {
+		return sourceVerdict{guard: verdict.Skip, inputs: verdict.Inputs,
+			log: "skip (" + verdict.Why + ")", logArgs: []any{"encoder", ts.Encoder}}
+	}
+	if bin := e.dynamicTools().Missing(verdict.Intent); bin != "" {
+		return sourceVerdict{guard: SkipDynamicHDRToolMissing,
+			log: "skip (the dynamic HDR this source carries needs a tool that is not installed; the file is " +
+				"offered again on the first pass that finds it)", logArgs: []any{"tool", bin}}
+	}
+	return sourceVerdict{dynamic: verdict.Intent}
+}
+
+// dynamicTools are the binaries the dynamic-HDR pre-pass and gate run: this engine's ffmpeg
+// and ffprobe, and the two tools as cmd/holdfast named them (HOLDFAST_DOVI_TOOL,
+// HOLDFAST_HDR10PLUS_TOOL), each looked up on PATH by its own name where none was.
+func (e *Engine) dynamicTools() dynhdr.Tools {
+	t := dynhdr.Tools{DoviTool: e.DoviTool, HDR10Plus: e.HDR10PlusTool}
+	if e.Probe != nil {
+		t.FFmpeg, t.FFprobe = e.Probe.FFmpeg, e.Probe.FFprobe
+	}
+	if t.DoviTool == "" {
+		t.DoviTool = dynhdr.DefaultDoviTool
+	}
+	if t.HDR10Plus == "" {
+		t.HDR10Plus = dynhdr.DefaultHDR10PlusTool
+	}
+	return t
 }
 
 // interlacedVerdict answers what happens to a source ffprobe reported as interlaced, and

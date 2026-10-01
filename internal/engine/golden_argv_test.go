@@ -1147,6 +1147,11 @@ func TestGoldenArgv(t *testing.T) {
 				}
 				blocks.add(t, c.name, runEngineArgvCase(t, key, c, stub, ffmpeg, ffprobe, fixtures, st, paths))
 			}
+			// The dynamic-HDR paths are the default encoder's alone (only libx265 carries the
+			// metadata), appended after every case above (docs/design/dynamic-hdr.md).
+			if key == goldenDefaultEncoder {
+				dynamicGoldenCases(t, stub, func(name string, lines []string) { blocks.add(t, name, lines) })
+			}
 			checkGolden(t, filepath.Join(goldenArgvDir, "engine-"+key+".txt"), blocks)
 		}
 	})

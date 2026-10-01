@@ -97,6 +97,18 @@ var SkipGuards = []string{
 	// file scaled without changing either key has no configuration edit that says so, and
 	// this is the lever for that.
 	SkipDownscaleUnacknowledged,
+	// The DYNAMIC-HDR skips of the cpu encoder (docs/design/dynamic-hdr.md). The profile 7
+	// one reads dolby_vision_p7, so turning conversion on re-derives its rows; the others read
+	// no key a configuration edit moves to a carry, and a source whose metadata has since been
+	// repaired, or a tool that now reads what the one before it could not, is a change only an
+	// operator can see. Rows an OLDER build wrote under dolby-vision and hdr10-plus recorded
+	// nothing read, so no configuration change re-opens them: this is their lever too
+	// (docs/requeue.md). The tool-missing skip is mutable and is not here.
+	SkipDolbyVisionProfile7,
+	SkipDolbyVisionNoMasteringDisplay,
+	SkipDolbyVisionFrameRate,
+	SkipHDR10PlusUnreadable,
+	SkipDolbyVisionConversionFailed,
 	SkipRestoredOriginal,
 }
 
