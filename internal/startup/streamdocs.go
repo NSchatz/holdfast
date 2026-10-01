@@ -24,8 +24,9 @@ import (
 //   - remux-only declines the perceptual gate, which is the single biggest thing to know
 //     about the mode and the thing an operator must be told is paid for by the identity
 //     check;
-//   - and audio transcoding is a NON-GOAL, so a reader must not go looking for a downmix
-//     key that does not exist and will not be added by this feature.
+//   - and these keys only select and copy: re-encoding, a downmix and loudness belong to
+//     the audio keys, each off by default (docs/design/audio.md), so a reader must not
+//     believe a language list transforms a track it keeps.
 const (
 	// StreamSelectionDocFile is where the statement lives today. It is named so a failure
 	// points somewhere, and the check is not narrowed to it: the statement is satisfied by
@@ -65,8 +66,8 @@ var streamSelectionParts = []struct {
 		Needs: []string{"skips the vmaf gate", "identical to the source", "rejected and the source is kept"},
 	},
 	{
-		Name:  "that audio TRANSCODING is a non-goal: these keys select and copy, and none of them re-encodes, downmixes or adds a track",
-		Needs: []string{"non-goal", "selection and copy", "downmix"},
+		Name:  "that these keys select and copy, and that re-encoding, a downmix and loudness are the audio keys', each off by default",
+		Needs: []string{"select and copy", "downmixes", "each off by default"},
 	},
 }
 
