@@ -306,10 +306,12 @@ func TestAudioPlan_CheckRefusesWhatTheDerivationCouldNotMake(t *testing.T) {
 		"a channel misnumber": func(p *Plan) []Source { p.Ops[3].LoudnessIndex = 0; return carried },
 		"a channel unused":    func(p *Plan) []Source { p.Ops[2].Loudness = nil; return carried },
 		"a skipped in place": func(p *Plan) []Source {
-			p.Ops = append(p.Ops, Op{Source: carried[0], Action: ActionReencoded, Output: -1}); return carried
+			p.Ops = append(p.Ops, Op{Source: carried[0], Action: ActionReencoded, Output: -1})
+			return carried
 		},
 		"a skipped out of place": func(p *Plan) []Source {
-			p.Ops[0].Action = ActionDownmixSkipped; return carried
+			p.Ops[0].Action = ActionDownmixSkipped
+			return carried
 		},
 	}
 	for name, mut := range cases {
