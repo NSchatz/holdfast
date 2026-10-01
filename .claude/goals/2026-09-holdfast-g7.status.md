@@ -73,13 +73,31 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g7-ba
 
 | # | Item | State |
 |---|---|---|
-| 5.1 | R1 rewritten in `README.md` and `docs/migration.md`; `docs/design/audio.md`, `docs/design/subtitles.md` anchored; `docs/profiles.md`, `config.example.yaml` keys | TODO |
+| 5.1 | R1 rewritten in `README.md` and `docs/migration.md`; `docs/design/audio.md`, `docs/design/subtitles.md` anchored; `docs/profiles.md`, `config.example.yaml` keys | DONE (PRs #136, #135, #137 `df90fbb`): `README.md:116` "Audio is re-encoded on request, and copied otherwise.", `docs/migration.md` "Filters as a pipeline" lists the audio keys as on-request transformations; anchors `audio.md#reencode`, `#loudness`, `#audio-gates`, `#which-files`, `subtitles.md#sidecars`, `#sidecar-gate`, `#which-files`; CLAUDE.md links each rule (189 lines); the stream-selection docs check changed with its bite case (`internal/startup/stream_docs_test.go`) |
 
 ## Phase 6 - Report
 
 | # | Item | State |
 |---|---|---|
-| 6.1 | Gate integrity counted from the goal-start SHA | TODO |
+| 6.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `df90fbb`): `func Test` 1463 -> 1542, no package fell (`internal/audio` 0 -> 30, `internal/subtitle` 0 -> 19, `internal/config` 125 -> 131, `internal/engine` 504 -> 521, `internal/store` 149 -> 154, every other package unchanged); `docs/design/swap.md` 62 and `docs/design/quality-gate.md` 76 lines, `git diff --numstat 3df6162 df90fbb` empty for both; 16 lines deleted in `*_test.go` (+2974 -16), each with its reason below |
+
+### The 16 deleted `*_test.go` lines and why
+
+Each tracks the newest store migration, which this goal moved twice (v21 `subtitle_sidecars`, #135;
+v22 `audio_tracks`, #136); the wind-back fixtures exist to undo exactly the newest step.
+
+- `cmd/holdfast/export_test.go` (6): the comment naming the newest step, `olderSchemaVersion`
+  19 (now 21), and the four `DROP COLUMN` lines of v20, replaced by the one of v22.
+- `internal/store/readonly_test.go` (5): the same comment and the same four `DROP COLUMN` lines.
+- `internal/store/migrate_test.go` (1): `newestStepColumn` `downscaled` -> `audio_tracks`.
+- `internal/store/resolution_migrate_test.go` (3): the forced half-applied step pre-adds the newest
+  column (`audio_tracks`, not `downscaled`); the "`downscale_scaler` left behind" check named a
+  second column of v20, which the one-column v22 has none of. It is replaced by a check reading
+  every further column off the newest step's own SQL (none today), plus "the pre-added column
+  survives"; the unmoved stamp and row count still prove the rollback.
+- `internal/startup/stream_docs_test.go` (1): a doc comment that described the stream-selection
+  statement as calling audio transcoding a non-goal; that statement and its check changed together
+  (R1), with a bite case proving the old wording now fails. |
 | 6.2 | Adversarial review of the report | TODO |
 
 ## Decisions taken
@@ -152,7 +170,25 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g7-ba
   included, since the codec guard runs before any remux. The docs now say so (`#which-files` in
   both design files, `docs/requeue.md`). Listed for the owner under proposals.
 
+- 2026-10-01: PR #137 (docs-scope) merged as `df90fbb`. Gate round 1 exit 2: `TestServeSmoke`
+  missed its 3 s readiness wait under the gate's parallel load and then passed 5/5 alone under the
+  lock; round 2 unchanged exit 0 (762 s; `internal/engine` from Go's test cache, identical inputs to
+  round 1 where it passed in 1924.7 s, 71%); CI green. Not fixed: the flake is in an existing test
+  outside this goal's scope; recorded for the owner.
+- 2026-10-01: `NEEDS-OWNER.md` unchanged by this goal: audio and sidecars need no real hardware and
+  no live service, so no step here is physically impossible for an agent. No minor release is cut
+  (T37 optional): the features are new and off by default, and a later goal can release them.
+
+## Proposals awaiting the owner
+
+- A file already in the target codec gets no audio rework and no sidecar, `remux_only` included
+  (the codec guard runs first). An audio- or sidecar-only job for such files would be a new kind of
+  job; it is not built (`docs/design/audio.md#which-files`).
+- The downmix carries its source track's title; holdfast writes no titles.
+- `TestServeSmoke`'s 3 s readiness wait can miss under gate load (seen once in this goal).
+
 ## Resume here
 
-#135 and #136 merged. The docs follow-up `holdfast-g7/docs-scope` is gating in the main checkout.
-Next: its PR and merge, docs rows 5.1, gate integrity, the adversarial review, the report.
+All PRs merged: #135, #136, #137. No branch, worktree or open PR of this goal remains but the
+ledger worktree. Next: the fresh adversarial review of the GOAL REPORT (row 6.2), then the COMPLETE
+line.
