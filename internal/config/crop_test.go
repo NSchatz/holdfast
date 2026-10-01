@@ -87,3 +87,32 @@ func TestCrop_MovesTheDigestOnlyAwayFromOff(t *testing.T) {
 		t.Error("the top-level value does not reach the top-level profile")
 	}
 }
+
+// A root that crops earns a notice naming it; a configuration that does not, none.
+func TestCrop_NoticeNamesTheRootThatCrops(t *testing.T) {
+	a, b, state := hwRoots(t)
+	c := loadYAML(t, "state_dir: "+state+"\nlibrary_roots:\n  - "+a+"\n  - path: "+b+"\n    crop: auto\n")
+	var hits []string
+	for _, n := range c.Notices() {
+		if strings.Contains(n, "crop is auto") {
+			hits = append(hits, n)
+		}
+	}
+	if len(hits) != 1 || !strings.Contains(hits[0], "library root "+b) || !strings.Contains(hits[0], "NO LONGER THE SAME CONTENT") {
+		t.Fatalf("crop notices %q, want one naming %s", hits, b)
+	}
+	plain := loadYAML(t, "state_dir: "+state+"\nlibrary_roots:\n  - "+a+"\n")
+	for _, n := range plain.Notices() {
+		if strings.Contains(n, "crop is") {
+			t.Errorf("a configuration that does not crop earned %q", n)
+		}
+	}
+	if n := cropNotice(Profile{Crop: crop.Auto}, ""); len(n) != 1 || strings.HasPrefix(n[0], "library root") {
+		t.Errorf("a rootless notice is %q", n)
+	}
+	var top Config
+	top.Crop = crop.Auto
+	if n := top.cropNotices(); len(n) != 1 {
+		t.Errorf("a configuration with no roots and a top-level crop earned %d notices", len(n))
+	}
+}

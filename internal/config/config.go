@@ -1852,6 +1852,10 @@ func (c *Config) Notices() []string {
 	// than the source it replaces - and that is precisely the thing somebody deleting
 	// originals should hear stated before the first one goes.
 	n = append(n, c.downscaleNotices()...)
+	// The crop, stated once per root that asks for one and NAMING that root, for the reason
+	// the deinterlace notice above is. A NOTICE on this file's own rule: no gate is weakened,
+	// and the crop adds one (docs/design/crop.md#crop-gate).
+	n = append(n, c.cropNotices()...)
 	// cores_per_worker beside a numeric workers is a key nothing reads, and an operator who
 	// wrote it believes the pool follows the quota. It is a NOTICE on this file's own rule:
 	// no gate is weakened, the pool runs exactly the number workers names.
