@@ -1,0 +1,96 @@
+== base
+(no invocation)
+row: skipped already-at-target-codec
+== progress
+(no invocation)
+row: skipped already-at-target-codec
+== bitrate-1500k
+(no invocation)
+row: skipped already-at-target-codec
+== bitrate-8000k/hdr10
+(no invocation)
+row: skipped already-at-target-codec
+== x265-3cpu/hdr10
+(no invocation)
+row: skipped already-at-target-codec
+== container-mkv-to-mp4
+(no invocation)
+row: skipped already-at-target-codec
+== source-422/every-encoder
+(no invocation)
+row: skipped already-at-target-codec
+== source-444/every-encoder
+(no invocation)
+row: skipped already-at-target-codec
+== source-12bit/every-encoder
+-hide_banner -nostdin -loglevel error -y -i <library>/12bit.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt p012le -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/12bit.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== pixel-format-yuv422p10le/every-encoder
+(no invocation)
+row: skipped already-at-target-codec
+== pixel-format-yuv420p/every-encoder
+(no invocation)
+row: skipped already-at-target-codec
+== source-422/remux-only
+(no invocation)
+row: skipped already-at-target-codec
+== quality-set
+(no invocation)
+row: skipped already-at-target-codec
+== quality-set/encode-profile-crf-30
+(no invocation)
+row: skipped already-at-target-codec
+== quality-set/encode-profile-to-nvenc
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_nvenc -pix_fmt p010le -color_range tv -fps_mode passthrough -rc vbr -cq 24 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== crf-0
+(no invocation)
+row: skipped already-at-target-codec
+== deinterlace-yadif
+(no invocation)
+row: skipped already-at-target-codec
+== max-height-240
+(no invocation)
+row: skipped already-at-target-codec
+== max-height-240/deinterlace-yadif
+(no invocation)
+row: skipped already-at-target-codec
+== streams/audio-eng
+(no invocation)
+row: skipped already-at-target-codec
+== remux-only
+(no invocation)
+row: skipped already-at-target-codec
+== cover-mp4
+(no invocation)
+row: skipped already-at-target-codec
+== pictures-font/audio-eng-fre
+(no invocation)
+row: skipped already-at-target-codec
+== scratch/pictures
+(no invocation)
+row: skipped already-at-target-codec
+== encode-profile/crf-30
+(no invocation)
+row: skipped already-at-target-codec
+== rules/band-crf-31
+(no invocation)
+row: skipped already-at-target-codec
+== source-mpeg4/every-encoder
+-hide_banner -nostdin -loglevel error -y -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt p010le -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-mpeg4/pixel-format-yuv420p/every-encoder
+-hide_banner -nostdin -loglevel error -y -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt yuv420p -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-hevc/every-encoder
+(no invocation)
+row: skipped better-codec-family
+== source-av1/every-encoder
+(no invocation)
+row: skipped better-codec-family
+== source-ffv1-pq/every-encoder
+-hide_banner -nostdin -loglevel error -y -i <library>/ffv1-pq.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt p010le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -rc vbr -cq 22 -b:v 0 -preset p5 -vf setparams=color_primaries=bt2020:color_trc=smpte2084 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/ffv1-pq.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-mpeg4/quality-set-t27
+-hide_banner -nostdin -loglevel error -y -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v h264_nvenc -pix_fmt yuv420p -color_range tv -fps_mode passthrough -rc vbr -cq 28 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty

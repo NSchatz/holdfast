@@ -27,7 +27,7 @@ became YAML, and the environment-variable overrides became `HOLDFAST_<KEY>`.
 |---|---|---|
 | `MEDIA_ROOT=/mnt/media` | `library_roots: [/mnt/media]` | Now a **list** — several roots are supported. |
 | `VIDEO_EXTS="mkv mp4 …"` | `video_exts: [mkv, mp4, …]` | A YAML list, not a space-separated string. |
-| `ENCODER=cpu` \| `nvenc` | `encoder: cpu` \| `nvenc` | Same keys; `svtav1`, `av1_nvenc`, `qsv`, `vaapi`, `amf` are new. |
+| `ENCODER=cpu` \| `nvenc` | `encoder: cpu` \| `nvenc` | Same keys; `svtav1`, `av1_nvenc`, `qsv`, `vaapi`, `amf`, `x264`, `h264_nvenc`, `h264_qsv`, `h264_vaapi`, `h264_amf`, `av1_qsv`, `av1_vaapi`, `av1_amf` are new. |
 | `CRF=22` | `crf: 22` | Also the CQ/QP target for the hardware encoders. |
 | `PRESET=slow` | `preset: slow` | Mapped to SVT-AV1's numeric scale for `svtav1`; ignored by the hardware encoders. |
 | `NVENC_CQ=24`, `NVENC_PRESET=p5` | *(collapsed into `crf`)* | The per-encoder quality knobs are now one knob. `NVENC_PRESET` has no equivalent. |

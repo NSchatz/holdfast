@@ -752,34 +752,43 @@ func videoArgs(v VideoPlan, colorArgs []string, x265Extra string) []string {
 	}
 
 	value := strconv.Itoa(q.Value)
-	switch v.Encoder.Key {
-	case "cpu":
+	switch {
+	case v.Encoder.FFmpegCodec == "libx265":
 		args = append(args,
 			"-preset", q.Preset,
 			"-crf", value,
 			"-x265-params", "log-level=error"+x265Extra,
 		)
-	case "svtav1":
+	case v.Encoder.FFmpegCodec == "libsvtav1":
 		args = append(args,
 			"-preset", strconv.Itoa(svtav1Preset(q.Preset)),
 			"-crf", value,
 		)
-	case "nvenc", "av1_nvenc":
+	case v.Encoder.FFmpegCodec == "libx264":
+		// libx264 takes libx265's preset words (ultrafast ... placebo are x264's own
+		// names) and its -crf. It writes the HDR10 blocks from the stream's side data
+		// (libavcodec/libx264.c:1036-1058 at 5d4d3bdc61, read 2026-09-30), so it needs no
+		// parameter string; the output fidelity gate holds it to them like any encoder.
+		args = append(args,
+			"-preset", q.Preset,
+			"-crf", value,
+		)
+	case v.Encoder.API == encoder.APINVENC:
 		args = append(args,
 			"-rc", "vbr",
 			"-cq", value,
 			"-b:v", "0",
 			"-preset", "p5",
 		)
-	case "qsv":
+	case v.Encoder.API == encoder.APIQSV:
 		args = append(args, "-global_quality", value)
-	case "vaapi":
+	case v.Encoder.API == encoder.APIVAAPI:
 		// -vaapi_device itself is emitted from the plan's device (a global option that
 		// must precede -i - see EncodePlan.args); here we only add the encode-side args
 		// that come after -c:v.
-		args = append(args, vaapiUpload(v.InputFormat)...)
-		args = append(args, "-qp", value)
-	case "amf":
+		args = append(args, vaapiUpload(v.Encoder, v.InputFormat)...)
+		args = append(args, vaapiQuality(v.Encoder, value)...)
+	case v.Encoder.API == encoder.APIAMF:
 		args = append(args,
 			"-rc", "cqp",
 			"-qp_i", value,
@@ -789,15 +798,34 @@ func videoArgs(v VideoPlan, colorArgs []string, x265Extra string) []string {
 	return args
 }
 
+// vaapiQuality is a VAAPI encoder's quality target. hevc_vaapi and h264_vaapi take an explicit
+// -qp, which selects constant-QP rate control (libavcodec/vaapi_encode_h265.c:1084-1085,
+// vaapi_encode_h264.c:1048-1049). av1_vaapi has no -qp option: constant-QP is named with
+// -rc_mode CQP, which the encoder takes first and refuses where the driver lacks it
+// (vaapi_encode.c:1318-1319), and the target is the generic -global_quality, read as the AV1
+// quantiser index (vaapi_encode.c:1419-1425, vaapi_encode_av1.c:140). Naming the mode rather
+// than leaving it to the driver keeps the value on the one scale the configuration validated
+// it for: without it a driver offering ICQ would read the same number as an ICQ factor on
+// 1-51 (vaapi_encode.c:1332-1335, 1527). Sources at
+// https://github.com/FFmpeg/FFmpeg/tree/5d4d3bdc61 , read 2026-09-30.
+func vaapiQuality(spec encoder.Spec, value string) []string {
+	if spec.TargetCodec == "av1" {
+		return []string{"-rc_mode", "CQP", "-global_quality", value}
+	}
+	return []string{"-qp", value}
+}
+
 // vaapiUpload is a VAAPI encode's carrier: the software frames converted to the plan's input
-// format and uploaded to a surface of the same layout, and - for 10-bit (p010le) - the HEVC
+// format and uploaded to a surface of the same layout, and - for 10-bit (p010le) HEVC - the
 // Main 10 profile, since hevc_vaapi's default profile is chosen for 8-bit. `main10` is a named
 // value of hevc_vaapi's -profile on the pinned binary (`ffmpeg -h encoder=hevc_vaapi`, run
 // 2026-09-30), and the wiki's own 10-bit HEVC encode uploads p010 with profile 2, which is
-// main10 (https://trac.ffmpeg.org/wiki/Hardware/VAAPI, read 2026-09-30).
-func vaapiUpload(format string) []string {
+// main10 (https://trac.ffmpeg.org/wiki/Hardware/VAAPI, read 2026-09-30). av1_vaapi names no
+// profile: AV1 Main covers 8 and 10 bits, and the encoder picks its entry by the surface's
+// depth (libavcodec/vaapi_encode_av1.c:842-844 at 5d4d3bdc61); h264_vaapi uploads only nv12.
+func vaapiUpload(spec encoder.Spec, format string) []string {
 	args := []string{"-vf", "format=" + format + ",hwupload"}
-	if format == "p010le" {
+	if spec.TargetCodec == "hevc" && format == "p010le" {
 		args = append(args, "-profile:v", "main10")
 	}
 	return args
@@ -881,29 +909,34 @@ func bitrateArgs(v VideoPlan, x265Extra string) []string {
 	q := v.Quality
 	rate := strconv.Itoa(q.BitrateKbps) + "k"
 	var args []string
-	switch v.Encoder.Key {
-	case "cpu":
+	switch {
+	case v.Encoder.FFmpegCodec == "libx265":
 		args = []string{
 			"-preset", q.Preset,
 			"-b:v", rate,
 			"-x265-params", "log-level=error" + x265Extra,
 		}
-	case "svtav1":
+	case v.Encoder.FFmpegCodec == "libsvtav1":
 		args = []string{
 			"-preset", strconv.Itoa(svtav1Preset(q.Preset)),
 			"-b:v", rate,
 		}
-	case "nvenc", "av1_nvenc":
+	case v.Encoder.FFmpegCodec == "libx264":
+		args = []string{
+			"-preset", q.Preset,
+			"-b:v", rate,
+		}
+	case v.Encoder.API == encoder.APINVENC:
 		args = []string{
 			"-rc", "vbr",
 			"-b:v", rate,
 			"-preset", "p5",
 		}
-	case "qsv":
+	case v.Encoder.API == encoder.APIQSV:
 		args = []string{"-b:v", rate}
-	case "vaapi":
-		args = append(vaapiUpload(v.InputFormat), "-b:v", rate)
-	case "amf":
+	case v.Encoder.API == encoder.APIVAAPI:
+		args = append(vaapiUpload(v.Encoder, v.InputFormat), "-b:v", rate)
+	case v.Encoder.API == encoder.APIAMF:
 		args = []string{
 			"-rc", "vbr_peak",
 			"-b:v", rate,

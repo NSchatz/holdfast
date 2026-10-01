@@ -67,6 +67,12 @@ const (
 	SkipIncompleteHDRMetadata = "incomplete-hdr-metadata"
 	SkipExoticPixelFormat     = "exotic-pixel-format"
 
+	// SkipBetterCodecFamily: the source is already in a codec family ranked above the one
+	// this job's encoder writes (encoder.BetterFamily: H.264 < HEVC < AV1), so re-encoding
+	// it would trade a more efficient codec for a less efficient one. It reads the target
+	// codec exactly as SkipAlreadyTargetCodec does.
+	SkipBetterCodecFamily = "better-codec-family"
+
 	// SkipHardwareUnavailable: the job's hardware encoder - the one the configuration names,
 	// or every one `encoder: auto` may choose - did not pass this host's start-time probe
 	// at the depth the job's plan needs, and the root's hw_fallback is skip, so no other
@@ -250,6 +256,7 @@ const (
 // and forgotten here reds that test rather than appearing unannounced at first use.
 var SkipVocabulary = []string{
 	SkipAlreadyTargetCodec,
+	SkipBetterCodecFamily,
 	SkipLowBitrate,
 	SkipHardlinked,
 	SkipInterlaced,
@@ -2988,6 +2995,17 @@ func (e *Engine) guardSource(ctx context.Context, f string, root config.Root, pr
 		return props, sourceVerdict{guard: SkipAlreadyTargetCodec, codec: codec,
 			inputs: []string{InputTargetCodec},
 			log:    "skip (already at target codec)",
+			logArgs: []any{"codec", codec, "target", targetCodec,
+				"library_root", root.Clean, "encode_profile", ts.Profile}}
+	}
+
+	// The CODEC-FAMILY guard, beside the one above and reading the same one input: a source
+	// already in a family ranked above this job's target is not re-encoded down into it (an
+	// HEVC or AV1 source under an H.264 encoder, an AV1 source under an HEVC one).
+	if encoder.BetterFamily(codec, targetCodec) {
+		return props, sourceVerdict{guard: SkipBetterCodecFamily, codec: codec,
+			inputs: []string{InputTargetCodec},
+			log:    "skip (source is already in a better codec family than the target)",
 			logArgs: []any{"codec", codec, "target", targetCodec,
 				"library_root", root.Clean, "encode_profile", ts.Profile}}
 	}

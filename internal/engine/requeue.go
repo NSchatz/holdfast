@@ -51,6 +51,7 @@ import (
 // refuses to touch them and says so.
 var SkipGuards = []string{
 	SkipAlreadyTargetCodec,
+	SkipBetterCodecFamily,
 	SkipLowBitrate,
 	SkipInterlaced,
 	SkipDolbyVision,

@@ -84,11 +84,11 @@ func TestTargetCodecs_IsEveryEncodersOutputNotTheConfiguredOne(t *testing.T) {
 			t.Fatalf("TargetCodecs() = %v is not sorted-and-deduplicated", got)
 		}
 	}
-	// Both families are really in there - the test above would pass over a one-element
+	// Every family is really in there - the test above would pass over a one-element
 	// set if the registry ever lost an encoder, and this is the case that matters:
-	// hevc and av1 are BOTH things this build writes.
-	if len(got) != 2 || got[0] != "av1" || got[1] != "hevc" {
-		t.Errorf("TargetCodecs() = %v, want exactly [av1 hevc]", got)
+	// hevc, av1 and h264 are ALL things this build writes.
+	if len(got) != 3 || got[0] != "av1" || got[1] != "h264" || got[2] != "hevc" {
+		t.Errorf("TargetCodecs() = %v, want exactly [av1 h264 hevc]", got)
 	}
 }
 
@@ -163,5 +163,77 @@ func TestRequireAvailable_CPUSucceeds(t *testing.T) {
 	}
 	if spec.TargetCodec != "hevc" {
 		t.Errorf("spec.TargetCodec = %q, want hevc", spec.TargetCodec)
+	}
+}
+
+// TestBetterFamily_RanksH264BelowHEVCBelowAV1: a source in a family ranked above the target is
+// better (H.264 < HEVC < AV1, h265 read as hevc); an equal family, a worse one, and a codec
+// this build does not write are not - so a codec with no rank is decided as it always was.
+func TestBetterFamily_RanksH264BelowHEVCBelowAV1(t *testing.T) {
+	for _, c := range []struct {
+		codec, target string
+		want          bool
+	}{
+		{"hevc", "h264", true}, {"h265", "h264", true}, {"av1", "h264", true}, {"av1", "hevc", true},
+		{"h264", "h264", false}, {"hevc", "hevc", false}, {"av1", "av1", false},
+		{"h264", "hevc", false}, {"h264", "av1", false}, {"hevc", "av1", false}, {"h265", "av1", false},
+		{"mpeg2video", "h264", false}, {"vp9", "h264", false}, {"vc1", "hevc", false}, {"", "h264", false},
+		{"av1", "", false}, {"av1", "vp9", false},
+	} {
+		if got := BetterFamily(c.codec, c.target); got != c.want {
+			t.Errorf("BetterFamily(%q, %q) = %v, want %v", c.codec, c.target, got, c.want)
+		}
+	}
+}
+
+// TestSoftwareFallback_IsTheSoftwareEncoderOfTheSameCodec: every hardware encoder falls back to
+// the software encoder that writes its codec - so a fallback never changes a job's target
+// codec - and a software encoder is its own.
+func TestSoftwareFallback_IsTheSoftwareEncoderOfTheSameCodec(t *testing.T) {
+	want := map[string]string{"hevc": "cpu", "av1": "svtav1", "h264": "x264"}
+	for _, key := range Known() {
+		spec, _ := Lookup(key)
+		fb := SoftwareFallback(spec)
+		if !spec.Hardware {
+			if fb.Key != key {
+				t.Errorf("SoftwareFallback(%s) = %s, want itself", key, fb.Key)
+			}
+			continue
+		}
+		if fb.Key != want[spec.TargetCodec] || fb.Hardware || fb.TargetCodec != spec.TargetCodec {
+			t.Errorf("SoftwareFallback(%s) = %+v, want %s", key, fb, want[spec.TargetCodec])
+		}
+	}
+}
+
+// TestRegistry_T27Encoders: the eight encoders decided by the owner (T27) are registry keys (or,
+// for libx264, the alias of one), each writing its codec through its vendor's API, and every
+// hardware encoder names an API while no software one does.
+func TestRegistry_T27Encoders(t *testing.T) {
+	for _, c := range []struct{ name, key, codec, ffmpeg, api string }{
+		{"libx264", "x264", "h264", "libx264", ""},
+		{"h264_nvenc", "h264_nvenc", "h264", "h264_nvenc", APINVENC},
+		{"h264_qsv", "h264_qsv", "h264", "h264_qsv", APIQSV},
+		{"h264_vaapi", "h264_vaapi", "h264", "h264_vaapi", APIVAAPI},
+		{"h264_amf", "h264_amf", "h264", "h264_amf", APIAMF},
+		{"av1_qsv", "av1_qsv", "av1", "av1_qsv", APIQSV},
+		{"av1_vaapi", "av1_vaapi", "av1", "av1_vaapi", APIVAAPI},
+		{"av1_amf", "av1_amf", "av1", "av1_amf", APIAMF},
+	} {
+		spec, ok := Lookup(c.name)
+		if !ok || !Valid(c.name) {
+			t.Errorf("%s is not accepted", c.name)
+			continue
+		}
+		if spec.Key != c.key || spec.TargetCodec != c.codec || spec.FFmpegCodec != c.ffmpeg || spec.API != c.api ||
+			spec.Hardware != (c.api != "") {
+			t.Errorf("Lookup(%s) = %+v, want key %s codec %s ffmpeg %s api %q", c.name, spec, c.key, c.codec, c.ffmpeg, c.api)
+		}
+	}
+	for _, key := range Known() {
+		spec, _ := Lookup(key)
+		if spec.Hardware != (spec.API != "") {
+			t.Errorf("%s: Hardware %v with API %q", key, spec.Hardware, spec.API)
+		}
 	}
 }

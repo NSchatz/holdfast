@@ -55,13 +55,15 @@ func mkHevcFrom(t *testing.T, ffmpeg, src, path, seconds string) {
 	ff(t, ffmpeg, args...)
 }
 
-// mkH264From encodes the WHOLE of src to path with libx264 - a complete, decodable file
-// of the source's own length at a codec NO encoder in this build's registry produces. It
-// is the control on the codec question: everything else about it says "finished".
-func mkH264From(t *testing.T, ffmpeg, src, path string) {
+// mkMPEG4From encodes the WHOLE of src to path as MPEG-4 Part 2 - a complete, decodable file
+// of the source's own length at a codec NO encoder in this build's registry produces. It is
+// the control on the codec question: everything else about it says "finished". (It was an
+// H.264 encode until H.264 became a codec this build writes, with the x264 and h264_*
+// encoders.)
+func mkMPEG4From(t *testing.T, ffmpeg, src, path string) {
 	t.Helper()
 	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", src,
-		"-c:v", "libx264", "-crf", "30", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-f", "matroska", "--", path)
+		"-c:v", "mpeg4", "-q:v", "8", "-pix_fmt", "yuv420p", "-f", "matroska", "--", path)
 }
 
 // TestStrayTemp_TheSweepKeepsAFinishedReplacementAndStillTakesAPartialEncode is the
@@ -666,8 +668,8 @@ func TestStrayTemp_AFileThisProcessCannotReadHoldsEvenWithItsSourceBesideIt(t *t
 // "anything the sweep could not establish HOLDS" a property of the function rather than
 // an intention about the questions inside it.
 //
-// The two arms differ in ONE way and it is not the file: both are the same h264 encode at
-// the build's own temp construction - complete, decodable, readable, with a working
+// The two arms differ in ONE way and it is not the file: both are the same MPEG-4 Part 2 encode
+// at the build's own temp construction - complete, decodable, readable, with a working
 // ffprobe answering about it, at a codec NO encoder here writes, so the codec question
 // gives a POSITIVE and well-founded "not one of ours" for both. One has its source beside
 // it and is swept; the other does not, and is held. Holding it costs disk and it is the
@@ -689,9 +691,9 @@ func TestStrayTemp_TheSourceBesideQuestionIsAskedBeforeAnythingThatCanFail(t *te
 			src := filepath.Join(dir, "movie.mkv")
 			mkH264Long(t, ffmpeg, src, "4M")
 			orphan := tempPath(dir, "movie", "mkv", 0)
-			mkH264From(t, ffmpeg, src, orphan)
-			if got := codecOf(t, ffprobe, orphan); got != "h264" {
-				t.Fatalf("precondition: %s is %q, not h264 - the codec question must answer a positive "+
+			mkMPEG4From(t, ffmpeg, src, orphan)
+			if got := codecOf(t, ffprobe, orphan); got != "mpeg4" {
+				t.Fatalf("precondition: %s is %q, not mpeg4 - the codec question must answer a positive "+
 					"'no encoder here writes this' for both arms", orphan, got)
 			}
 			if err := readableNow(orphan); err != nil {
@@ -751,12 +753,12 @@ func TestStrayTemp_ACodecNoEncoderHereWritesIsStillSwept(t *testing.T) {
 	ours := tempPath(d, "ours", "mkv", 0)
 	theirs := tempPath(d, "theirs", "mkv", 0)
 	mkHevcFrom(t, ffmpeg, oursSrc, ours, "")             // hevc: something this build writes
-	mkH264From(t, ffmpeg, theirsSrc, theirs)             // h264: nothing here writes it
+	mkMPEG4From(t, ffmpeg, theirsSrc, theirs)            // mpeg4: nothing here writes it
 	if got := codecOf(t, ffprobe, ours); got != "hevc" { // preconditions: the experiment is controlled
 		t.Fatalf("precondition: %s is %q, not hevc", ours, got)
 	}
-	if got := codecOf(t, ffprobe, theirs); got != "h264" {
-		t.Fatalf("precondition: %s is %q, not h264", theirs, got)
+	if got := codecOf(t, ffprobe, theirs); got != "mpeg4" {
+		t.Fatalf("precondition: %s is %q, not mpeg4", theirs, got)
 	}
 	for _, p := range []string{ours, theirs} {
 		if !prober.DecodeOK(ctx, p) {

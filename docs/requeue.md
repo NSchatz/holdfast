@@ -15,6 +15,7 @@ configuration values **the decision that wrote it actually read**, and no others
 |---|---|
 | `skipped / low-bitrate` | `min_bitrate_kbps` - the threshold the source was compared against |
 | `skipped / already-at-target-codec` | `target_codec` - what `encoder` resolves to (`cpu` -> `hevc`, `svtav1` -> `av1`) |
+| `skipped / better-codec-family` | `target_codec`, exactly as the row above: a new target codec offers the file back |
 | `skipped / exotic-pixel-format` | `pixel_format`; and `encoder` too where the skip was the encoder's (it lists no format carrying the plan's chroma and depth), so changing either offers the file back |
 | `skipped / target-already-exists` | `container_ext` |
 | `done` | `target_codec`, `encoder`, `crf`, `preset` - the settings the encode was taken under, resolved for the **replacement's** path |

@@ -303,8 +303,10 @@ type Config struct {
 	VideoExts []string `yaml:"video_exts"`
 	// Encoder selects the encode path — one of the internal/encoder registry keys:
 	// "cpu" (libx265/hevc, the archival default), "svtav1" (libsvtav1/av1, CPU),
-	// or the hardware encoders "nvenc" (hevc_nvenc), "av1_nvenc" (av1_nvenc),
-	// "qsv" (hevc_qsv), "vaapi" (hevc_vaapi), "amf" (hevc_amf) — all opt-in,
+	// "x264" (libx264/h264, CPU), or the hardware encoders "nvenc" (hevc_nvenc),
+	// "av1_nvenc" (av1_nvenc), "qsv" (hevc_qsv), "vaapi" (hevc_vaapi), "amf" (hevc_amf),
+	// "h264_nvenc", "h264_qsv", "h264_vaapi", "h264_amf", "av1_qsv", "av1_vaapi" and
+	// "av1_amf" (each its own ffmpeg codec name) - all opt-in,
 	// gated behind a runtime capability check (never assumed to work; see
 	// internal/encoder.Available and cmd/holdfast's cmdRun). The raw ffmpeg -c:v
 	// codec name (e.g. "libsvtav1") is also accepted as an alias.

@@ -1,9 +1,9 @@
 == encoder-unknown
 (no invocation)
-error: unknown encoder "not_a_real_encoder" (known: [amf av1_nvenc cpu nvenc qsv svtav1 vaapi])
+error: unknown encoder "not_a_real_encoder" (known: [amf av1_amf av1_nvenc av1_qsv av1_vaapi cpu h264_amf h264_nvenc h264_qsv h264_vaapi nvenc qsv svtav1 vaapi x264])
 == encoder-empty
 (no invocation)
-error: unknown encoder "" (known: [amf av1_nvenc cpu nvenc qsv svtav1 vaapi])
+error: unknown encoder "" (known: [amf av1_amf av1_nvenc av1_qsv av1_vaapi cpu h264_amf h264_nvenc h264_qsv h264_vaapi nvenc qsv svtav1 vaapi x264])
 == prober-missing
 (no invocation)
 error: FFmpegEncoder.Probe is nil (required to derive colour/pixel-format args from the source)

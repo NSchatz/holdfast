@@ -1,0 +1,685 @@
+== base
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== base/probes-itself
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== base/profile-handed
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== base/stream-plan-handed
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== base/progress
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== base/progress/stream-plan-handed
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== crf-23
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== crf-24
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== crf-26
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== crf-28
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== crf-29
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== crf-30
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== crf-31
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== crf-32
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== crf-33
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== crf-40
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== bitrate-1500k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== bitrate-3000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-ultrafast
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-ultrafast/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-superfast
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-superfast/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-veryfast
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-veryfast/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-faster
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-faster/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-fast
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-fast/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-medium
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-medium/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-slow
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-slow/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-slower
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-slower/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-veryslow
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-veryslow/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-placebo
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-placebo/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-empty
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-empty/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-unrecognised
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== preset-unrecognised/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== crf-28/preset-ultrafast
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== crf-30/preset-fast/pixel-format-yuv420p
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -qp 30 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-yuv420p10le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pixel-format-yuv420p
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -qp 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-nv12
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -qp 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== source-full-range
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/full-range.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== source-full-range/pixel-format-yuv420p10le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/full-range.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== source-10bit
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/10bit.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== source-10bit/pixel-format-yuv420p10le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/10bit.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== source-422
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv422p10le of "<fixtures>/422.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== source-422/pixel-format-yuv420p10le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/422.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== source-444
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv444p10le of "<fixtures>/444.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== source-444/pixel-format-yuv420p10le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/444.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== source-exotic
+(no invocation)
+error: cannot derive an output pixel format for "<fixtures>/exotic.mkv" (unrecognized/exotic source pix_fmt)
+== source-exotic/pixel-format-yuv420p10le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/exotic.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== source-12bit
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p12le of "<fixtures>/12bit.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pixel-format-yuv420p12le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p12le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pixel-format-yuv422p
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv422p of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pixel-format-yuv422p10le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv422p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pixel-format-yuv422p12le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv422p12le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pixel-format-yuv444p
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv444p of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pixel-format-yuv444p10le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv444p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pixel-format-yuv444p12le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv444p12le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pixel-format-yuvj420p
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -qp 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== pixel-format-p010le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format p010le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pixel-format-nv16
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format nv16 of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pixel-format-p410le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format p410le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pixel-format-yuv420p10be
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10be of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pixel-format-gray
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format gray of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pixel-format-yuv422p10le/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv422p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pixel-format-yuv420p/bitrate-8000k
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -b:v 8000k -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== quality-set
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== quality-set/crf-30
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== quality-set/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== quality-set/stream-plan-handed
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== quality-set/alias
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== quality-min
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== quality-max
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== quality-below-scale
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== quality-above-scale
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== crf-0
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== crf-0/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== crf-51
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-bt709
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/bt709.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-bt709/probes-itself
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/bt709.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-bt709/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/bt709.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-bt709/pixel-format-yuv420p10le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/bt709.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-bt709/x265-3cpu
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/bt709.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-bt709/x265-3cpu/bitrate-1500k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/bt709.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-bt709-vui
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/bt709-vui.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-bt709-vui/probes-itself
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/bt709-vui.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-bt709-vui/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/bt709-vui.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-bt709-vui/pixel-format-yuv420p10le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/bt709-vui.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-bt709-vui/x265-3cpu
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/bt709-vui.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-bt709-vui/x265-3cpu/bitrate-1500k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/bt709-vui.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-hlg
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/hlg.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-hlg/probes-itself
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/hlg.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-hlg/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/hlg.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-hlg/pixel-format-yuv420p10le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/hlg.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-hlg/x265-3cpu
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/hlg.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-hlg/x265-3cpu/bitrate-1500k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/hlg.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-pq
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/pq.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-pq/probes-itself
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/pq.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-pq/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/pq.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-pq/pixel-format-yuv420p10le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/pq.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-pq/x265-3cpu
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/pq.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-pq/x265-3cpu/bitrate-1500k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/pq.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-hdr10
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/hdr10.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-hdr10/probes-itself
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/hdr10.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-hdr10/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/hdr10.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-hdr10/pixel-format-yuv420p10le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/hdr10.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-hdr10/x265-3cpu
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/hdr10.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== colour-hdr10/x265-3cpu/bitrate-1500k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/hdr10.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== x265-1cpu
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== x265-2cpu
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== x265-3cpu
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== x265-5cpu
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== x265-24cpu
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== x265-64cpu
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== x265-3cpu/bitrate-1500k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== x265-3cpu/pixel-format-yuv420p10le
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== deinterlace-yadif
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/interlaced.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== deinterlace-bwdif
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/interlaced.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== deinterlace-yadif=send_frame
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/interlaced.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== deinterlace-yadif=send_frame_nospatial
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/interlaced.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== deinterlace-bwdif=send_frame
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/interlaced.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== deinterlace-bwdif=send_frame_nospatial
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/interlaced.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== deinterlace-off
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/interlaced.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== deinterlace-yadif=send_field
+(no invocation)
+error: deinterlace "yadif=send_field" emits one frame per FIELD, which would double the output's frame count: refusing to encode. Packet-count parity and duration parity are graded against the SOURCE's frame count, so such an output could only be accepted by weakening a gate that stands in front of the deletion of a source
+== deinterlace-yadif=send_field_nospatial
+(no invocation)
+error: deinterlace "yadif=send_field_nospatial" emits one frame per FIELD, which would double the output's frame count: refusing to encode. Packet-count parity and duration parity are graded against the SOURCE's frame count, so such an output could only be accepted by weakening a gate that stands in front of the deletion of a source
+== deinterlace-bwdif=send_field
+(no invocation)
+error: deinterlace "bwdif=send_field" emits one frame per FIELD, which would double the output's frame count: refusing to encode. Packet-count parity and duration parity are graded against the SOURCE's frame count, so such an output could only be accepted by weakening a gate that stands in front of the deletion of a source
+== deinterlace-bwdif=send_field_nospatial
+(no invocation)
+error: deinterlace "bwdif=send_field_nospatial" emits one frame per FIELD, which would double the output's frame count: refusing to encode. Packet-count parity and duration parity are graded against the SOURCE's frame count, so such an output could only be accepted by weakening a gate that stands in front of the deletion of a source
+== deinterlace-kerndeint
+(no invocation)
+error: deinterlace "kerndeint" is not a value this build can resolve to a filter (known: [off yadif yadif=<mode> bwdif bwdif=<mode>]), so nothing was encoded
+== deinterlace-yadif/progressive-source
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== deinterlace-yadif/not-handed
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/interlaced.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== deinterlace-yadif/probes-itself
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/interlaced.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== deinterlace-yadif/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/interlaced.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== deinterlace-yadif/remux-only
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/interlaced.mkv -map 0 -map -0:d? -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== max-height-220
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/tall.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== max-height-240
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/tall.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== max-height-360
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/tall.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== max-height-480/at-the-ceiling
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/tall.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== max-height-240/not-handed
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/tall.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== max-height-240/probes-itself
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/tall.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== max-height-240/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/tall.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== max-height-240/remux-only
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/tall.mkv -map 0 -map -0:d? -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== max-height-240/deinterlace-yadif
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/tall-interlaced.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== max-height-240/deinterlace-bwdif/bitrate-8000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/tall-interlaced.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== streams/no-plan
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/streams.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== streams/no-plan/probes-itself
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/streams.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== streams/plan-everything
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/streams.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== streams/audio-eng
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/streams.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== streams/audio-ENG-fre
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/streams.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== streams/subtitles-eng
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/streams.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== streams/audio-eng/subtitles-eng
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/streams.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== streams/audio-jpn/subtitles-fre
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/streams.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== streams/commentary-dropped
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/streams.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== streams/commentary-dropped/audio-eng/subtitles-eng
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/streams.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== streams/no-audio-left-fallback
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/jpn-only.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== streams/mov-text
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/subs.mp4": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== streams/mov-text/no-plan
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/subs.mp4": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== streams/mov-text/into-mkv
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/subs.mp4": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== remux-only
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== remux-only/audio-eng
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/streams.mkv -map 0:0 -map 0:1 -map 0:3 -map 0:4 -map 0:5 -map 0:6 -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== remux-only/cover-mkv
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/cover.mkv -map 0:1 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./film.mkv.picture0
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/cover.mkv -map 0 -map -0:d? -map -0:1 -c copy -f matroska -attach ./film.mkv.picture0 -metadata:s:t:0 mimetype=image/jpeg -metadata:s:t:0 filename=cover.jpg -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== remux-only/cover-mp4
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/cover.mp4 -map 0 -map -0:d? -c copy -f mp4 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mp4
+== remux-only/pictures-font
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/pictures-font.mkv -map 0:10 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./film.mkv.picture0
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/pictures-font.mkv -map 0:11 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./film.mkv.picture1
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/pictures-font.mkv -map 0 -map -0:d? -map -0:10 -map -0:11 -c copy -f matroska -attach ./film.mkv.picture0 -metadata:s:t:1 mimetype=image/jpeg -metadata:s:t:1 filename=cover.jpg -attach ./film.mkv.picture1 -metadata:s:t:2 mimetype=image/jpeg -metadata:s:t:2 filename=cover_land.jpg -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== remux-only/progress
+-hide_banner -nostdin -loglevel error -y -progress pipe:3 -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== remux-only/bitrate-8000k
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== cover-mp4/no-plan
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/cover.mp4": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== cover-mp4/plan
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/cover.mp4": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== cover-mp4/plan/into-mkv
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/cover.mp4": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== cover-mkv/no-plan
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/cover.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== cover-mkv/no-plan/probes-itself
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/cover.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== cover-mkv/plan
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/cover.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== cover-mkv/plan/into-mp4
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/cover.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== cover-mkv/plan/progress
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/cover.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== cover-mkv/plan/max-height-120
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/cover.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pictures/plan
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/pictures.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pictures/no-plan
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/pictures.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pictures-font/plan
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/pictures-font.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pictures-font/plan/audio-eng-fre
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/pictures-font.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pictures/plan/spaces-in-name
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/pictures.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pictures/plan/percent-d-in-name
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/pictures.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pictures/plan/long-working-name
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/pictures.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== pictures/plan/long-scratch-name
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/pictures.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== cover-bmp-mp4/plan
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/cover-bmp.mp4": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== cover-bmp-mp4/plan/into-mkv
+(no invocation)
+error: cannot carry the attached picture at source stream 1 (codec "bmp") into a Matroska output: no attachment mimetype reads back as a picture in that codec
+== cover-bmp-mp4/no-plan/into-mkv
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/cover-bmp.mp4": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== ts-source/no-plan
+(no invocation)
+error: cannot establish the video streams of "<fixtures>/sdr.ts" (ffprobe did not answer): refusing to encode without knowing whether one of them is an attached picture
+== ts-source/plan
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.ts": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-3g2
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-3gp
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-asf
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-avi
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-flv
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-m2t
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-m2ts
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-m4v
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-mkv
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-mov
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-mp4
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-mpeg
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-mpg
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-mts
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-ogv
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-ts
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-vob
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-webm
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-wmv
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-mkv/upper-case
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-m2ts/upper-case
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-mkv/working-name
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-m2ts/working-name
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-mp4/working-name-numbered
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-mp4/earlier-working-name
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-mkv/scratch-name
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-xyz
+(no invocation)
+error: no output container is known for the extension "xyz" (output <out>/film.xyz), so nothing was encoded: every encode names the container it writes, and this build knows ffmpeg's own choice only for 3g2, 3gp, asf, avi, flv, m2t, m2ts, m4v, mkv, mov, mp4, mpeg, mpg, mts, ogv, ts, vob, webm, wmv - set container_ext to one of those, or take the extension out of video_exts
+== container-divx
+(no invocation)
+error: no output container is known for the extension "divx" (output <out>/film.divx), so nothing was encoded: every encode names the container it writes, and this build knows ffmpeg's own choice only for 3g2, 3gp, asf, avi, flv, m2t, m2ts, m4v, mkv, mov, mp4, mpeg, mpg, mts, ogv, ts, vob, webm, wmv - set container_ext to one of those, or take the extension out of video_exts
+== container-none
+(no invocation)
+error: no output container is known for a name with no extension (output <out>/film), so nothing was encoded: every encode names the container it writes, and this build knows ffmpeg's own choice only for 3g2, 3gp, asf, avi, flv, m2t, m2ts, m4v, mkv, mov, mp4, mpeg, mpg, mts, ogv, ts, vob, webm, wmv - set container_ext to one of those, or take the extension out of video_exts
+== container-mp4/from-mkv
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== container-mkv/from-mp4
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mp4": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== encode-profile/matched
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v h264_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -qp 30 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== encode-profile/matched/bitrate-3000k
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== encode-profile/unmatched
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== encode-profile/to-svtav1
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libsvtav1 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset 6 -crf 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== encode-profile/to-cpu
+-hide_banner -nostdin -loglevel error -y -i <fixtures>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 26 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <out>/film.mkv
+== alias-h264_vaapi
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== alias/stream-plan-handed-h264_vaapi
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)
+== alias/probes-itself-h264_vaapi
+(no invocation)
+error: encoder "h264_vaapi" (h264_vaapi) cannot carry the pixel format yuv420p10le of "<fixtures>/sdr.mkv": it lists no format of that chroma subsampling and bit depth (supported: nv12 uploaded to vaapi surfaces)

@@ -175,11 +175,20 @@ func TestAvailable_AMFInTheImageIsRefusedWithTheReasonAndNeverProbed(t *testing.
 	if !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), "AMDGPU PRO EULA") || len(rec.formats) != 0 {
 		t.Errorf("RequireAvailable(amf) in the image = %v, probed %v", err, rec.formats)
 	}
-	// Only amf: every other encoder is probed in the image as anywhere else.
+	// Only the AMF encoders: every other encoder is probed in the image as anywhere else, and
+	// each AMF encoder's refusal names the VAAPI encoder of its own codec.
 	for _, key := range Known() {
 		spec, _ := Lookup(key)
-		if key != "amf" && RefusedInImage(spec) != "" {
+		if spec.API != APIAMF && RefusedInImage(spec) != "" {
 			t.Errorf("%s is refused in the image", key)
+		}
+	}
+	for key, sibling := range map[string]string{"h264_amf": "h264_vaapi", "av1_amf": "av1_vaapi"} {
+		spec, _ := Lookup(key)
+		why := RefusedInImage(spec)
+		if !strings.Contains(why, `encoder "`+key+`"`) || !strings.Contains(why, `"encoder: `+sibling+`"`) ||
+			!strings.Contains(why, "AMDGPU PRO EULA") {
+			t.Errorf("RefusedInImage(%s) in the image = %q, want its key, the EULA and %s", key, why, sibling)
 		}
 	}
 	// amf is still a key: it resolves to itself (hevc_amf), never to vaapi.

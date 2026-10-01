@@ -1,6 +1,6 @@
 // Package encoder is the TRANSCODE-6 codec matrix: a registry describing every
-// selectable encoder (CPU libx265, SVT-AV1, and the hardware encoders NVENC/QSV/
-// VAAPI/AMF) plus a robust runtime capability check. Nothing here assumes an
+// selectable encoder (the software libx265, SVT-AV1 and libx264, and the hardware encoders
+// NVENC/QSV/VAAPI/AMF for HEVC, AV1 and H.264) plus a robust runtime capability check. Nothing here assumes an
 // encoder works — Available actually exercises it against a tiny real clip, through the
 // command line a job would run, and inspects the output, because a hardware encoder can
 // exit 0 while writing nothing when no device is present (see Available's doc comment).
@@ -27,13 +27,18 @@ type Spec struct {
 	Key string
 	// FFmpegCodec is the ffmpeg -c:v value (e.g. "libx265", "hevc_nvenc").
 	FFmpegCodec string
-	// TargetCodec is what ffprobe reports codec_name as for the OUTPUT: "hevc" or
-	// "av1". Drives the engine's skip-already-target guard and verifyAgainst's
-	// codec check.
+	// TargetCodec is what ffprobe reports codec_name as for the OUTPUT: "hevc", "av1" or
+	// "h264". Drives the engine's skip-already-target guard, the codec-family guard
+	// (Family) and verifyAgainst's codec check.
 	TargetCodec string
 	// Hardware reports whether this encoder needs a GPU/device. Hardware encoders
 	// are gated behind Available at run time — never assumed to work.
 	Hardware bool
+	// API is the hardware interface the encoder runs through - APINVENC, APIQSV, APIVAAPI or
+	// APIAMF - and "" for a software encoder. The command line is built per API (the device
+	// it opens, the upload, the quality option's spelling) and then per codec, so an H.264
+	// or AV1 encoder of one vendor shares its HEVC sibling's device and rate-control shape.
+	API string
 	// PixelFormats is the encoder's "Supported pixel formats:" line from the pinned
 	// ffmpeg, verbatim and space-separated (see formats.go for the source and the test
 	// that re-reads it from the binary). It is what InputFormat chooses from.
@@ -55,17 +60,45 @@ var registry = map[string]Spec{
 		PixelFormats: pixFmtsLibx265, Quality: scaleCRF},
 	"svtav1": {Key: "svtav1", FFmpegCodec: "libsvtav1", TargetCodec: "av1", Hardware: false,
 		PixelFormats: pixFmtsLibsvtav1, Quality: scaleCRF},
-	"nvenc": {Key: "nvenc", FFmpegCodec: "hevc_nvenc", TargetCodec: "hevc", Hardware: true,
+	"nvenc": {Key: "nvenc", FFmpegCodec: "hevc_nvenc", TargetCodec: "hevc", Hardware: true, API: APINVENC,
 		PixelFormats: pixFmtsNVENC, Quality: scaleNVENC},
-	"av1_nvenc": {Key: "av1_nvenc", FFmpegCodec: "av1_nvenc", TargetCodec: "av1", Hardware: true,
+	"av1_nvenc": {Key: "av1_nvenc", FFmpegCodec: "av1_nvenc", TargetCodec: "av1", Hardware: true, API: APINVENC,
 		PixelFormats: pixFmtsNVENC, Quality: scaleAV1NVENC},
-	"qsv": {Key: "qsv", FFmpegCodec: "hevc_qsv", TargetCodec: "hevc", Hardware: true,
+	"qsv": {Key: "qsv", FFmpegCodec: "hevc_qsv", TargetCodec: "hevc", Hardware: true, API: APIQSV,
 		PixelFormats: pixFmtsQSV, Quality: scaleQSV},
-	"vaapi": {Key: "vaapi", FFmpegCodec: "hevc_vaapi", TargetCodec: "hevc", Hardware: true,
+	"vaapi": {Key: "vaapi", FFmpegCodec: "hevc_vaapi", TargetCodec: "hevc", Hardware: true, API: APIVAAPI,
 		PixelFormats: pixFmtsVAAPI, UploadFormats: uploadFormatsVAAPI, Quality: scaleVAAPI},
-	"amf": {Key: "amf", FFmpegCodec: "hevc_amf", TargetCodec: "hevc", Hardware: true,
+	"amf": {Key: "amf", FFmpegCodec: "hevc_amf", TargetCodec: "hevc", Hardware: true, API: APIAMF,
 		PixelFormats: pixFmtsAMF, Quality: scaleAMF},
+
+	// The T27 encoders (decided by the owner (T27)): H.264 in software and on every vendor,
+	// and AV1 on Intel and AMD. Each key is its ffmpeg codec name but libx264's, which is
+	// spelled like svtav1 (the codec name stays an alias of it).
+	"x264": {Key: "x264", FFmpegCodec: "libx264", TargetCodec: "h264", Hardware: false,
+		PixelFormats: pixFmtsLibx264, Quality: scaleCRF},
+	"h264_nvenc": {Key: "h264_nvenc", FFmpegCodec: "h264_nvenc", TargetCodec: "h264", Hardware: true, API: APINVENC,
+		PixelFormats: pixFmtsNVENC, Quality: scaleH264NVENC},
+	"h264_qsv": {Key: "h264_qsv", FFmpegCodec: "h264_qsv", TargetCodec: "h264", Hardware: true, API: APIQSV,
+		PixelFormats: pixFmtsH264QSV, Quality: scaleH264QSV},
+	"h264_vaapi": {Key: "h264_vaapi", FFmpegCodec: "h264_vaapi", TargetCodec: "h264", Hardware: true, API: APIVAAPI,
+		PixelFormats: pixFmtsVAAPI, UploadFormats: uploadFormatsH264VAAPI, Quality: scaleH264VAAPI},
+	"h264_amf": {Key: "h264_amf", FFmpegCodec: "h264_amf", TargetCodec: "h264", Hardware: true, API: APIAMF,
+		PixelFormats: pixFmtsAMF, Quality: scaleH264AMF},
+	"av1_qsv": {Key: "av1_qsv", FFmpegCodec: "av1_qsv", TargetCodec: "av1", Hardware: true, API: APIQSV,
+		PixelFormats: pixFmtsAV1QSV, Quality: scaleAV1QSV},
+	"av1_vaapi": {Key: "av1_vaapi", FFmpegCodec: "av1_vaapi", TargetCodec: "av1", Hardware: true, API: APIVAAPI,
+		PixelFormats: pixFmtsVAAPI, UploadFormats: uploadFormatsVAAPI, Quality: scaleAV1VAAPI},
+	"av1_amf": {Key: "av1_amf", FFmpegCodec: "av1_amf", TargetCodec: "av1", Hardware: true, API: APIAMF,
+		PixelFormats: pixFmtsAMF, Quality: scaleAV1AMF},
 }
+
+// The hardware interfaces an encoder runs through (Spec.API).
+const (
+	APINVENC = "nvenc"
+	APIQSV   = "qsv"
+	APIVAAPI = "vaapi"
+	APIAMF   = "amf"
+)
 
 // aliases maps the raw ffmpeg -c:v codec name to its registry key, so
 // `encoder: libsvtav1` (or `encoder: hevc_nvenc`, etc.) is accepted the same as
@@ -152,13 +185,16 @@ func TargetCodecOf(key string) (string, bool) {
 }
 
 // SoftwareFallback is the software encoder of spec's codec: cpu (libx265) for the HEVC
-// encoders and svtav1 for AV1. A software spec is its own.
+// encoders, svtav1 for AV1 and x264 (libx264) for H.264. A software spec is its own.
 func SoftwareFallback(spec Spec) Spec {
 	if !spec.Hardware {
 		return spec
 	}
-	if spec.TargetCodec == "av1" {
+	switch spec.TargetCodec {
+	case "av1":
 		return registry["svtav1"]
+	case "h264":
+		return registry["x264"]
 	}
 	return registry["cpu"]
 }
@@ -330,4 +366,22 @@ func RequireAvailable(ctx context.Context, ffmpeg, ffprobe, key string, encode E
 		return spec, c, fmt.Errorf("encoder %q: %w: %s", key, ErrUnavailable, c.Reason)
 	}
 	return spec, c, nil
+}
+
+// THE CODEC FAMILIES: the order this build ranks the codecs it writes in, from the least to
+// the most efficient - H.264, then HEVC, then AV1. A source already in a family ranked above
+// a job's target is not re-encoded into it (brief §10.3, decided by the owner (T27)): an
+// H.264 target leaves HEVC and AV1 sources alone, and an HEVC target leaves AV1 sources
+// alone. The order is the conventional one the brief presupposes, ASSUMED rather than
+// measured here. A codec this build does not write (MPEG-2, VC-1, MPEG-4 Part 2, VP9 and the
+// rest) has no rank, so this rule never skips it: it is decided exactly as it was before the
+// families existed. "h265" is ffprobe's legacy alias for hevc.
+var familyRank = map[string]int{"h264": 1, "hevc": 2, "h265": 2, "av1": 3}
+
+// BetterFamily reports whether a source in codec is already in a family ranked above target,
+// so re-encoding it into target would trade a more efficient codec for a less efficient one.
+// A codec with no rank, or a target with none, is never better.
+func BetterFamily(codec, target string) bool {
+	s, t := familyRank[codec], familyRank[target]
+	return s > 0 && t > 0 && s > t
 }
