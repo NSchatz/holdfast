@@ -96,8 +96,14 @@ func TestDetect_TenBitPQ_FractionalLimitCropsAndAbsoluteDoesNot(t *testing.T) {
 	ctx := context.Background()
 	c := Detect(ctx, ffmpeg, src, 4, sd)
 	d := Decide(Inputs{Frame: sd, PixelFormats: []string{"yuv420p10le"}, Consensus: c})
-	if !d.Applied() || d.Rect.String() != sdPicture {
-		t.Fatalf("the 10-bit letterbox decided %+v (consensus %+v), want %s", d, c, sdPicture)
+	// libx265's ringing lifts the row touching the picture above the limit on some frames, so
+	// the loose consensus keeps it and the rectangle is aligned outward around it: the crop
+	// keeps every picture row (40..199) and removes nearly all of each 40-row bar. That is the
+	// conservative direction, measured here on the pinned build.
+	if !d.Applied() || d.Rect.W != 320 || d.Rect.X != 0 || d.Rect.Y > 40 || d.Rect.Y+d.Rect.H < 200 ||
+		d.Rect.Y < 36 || d.Rect.Y+d.Rect.H > 204 {
+		t.Fatalf("the 10-bit letterbox decided %+v (consensus %+v), want a crop keeping rows 40..199 and "+
+			"removing all but at most 4 rows of each bar", d, c)
 	}
 	abs := detectWith(ctx, ffmpeg, src, 4, sd, "24")
 	if da := Decide(Inputs{Frame: sd, PixelFormats: []string{"yuv420p10le"}, Consensus: abs}); da.Applied() {

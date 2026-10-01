@@ -49,6 +49,9 @@ never a smaller one, and the file is then encoded exactly as it would have been 
      fractional one finds them. Both are measured on the pinned build by
      `TestDetect_TenBitPQ_FractionalLimitCropsAndAbsoluteDoesNot`, as the research measured them
      first (`research-streams-hdr.md` section 4.2, `verify-streams-hdr.md` section 12).
+     On a libx265 10-bit fixture the compression ringing in the row touching the picture
+     crosses the limit on some frames, so the loose consensus keeps that row and the crop
+     leaves one or two near-black rows of each bar: the conservative direction.
    - `round=2` asks for even dimensions ("Use 2 to get only even dimensions", filters.texi as
      above); `skip=0` because the default skips each sample's first two frames.
    - The sample count and the frames per sample are `ASSUMED` (HandBrake's scan takes 10
