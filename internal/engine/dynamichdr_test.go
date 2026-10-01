@@ -253,9 +253,14 @@ func TestDynamicHDR_ACarriedProfile81UnderCropAutoIsEncodedUncroppedWithTheRefus
 	if argv := strings.Join(argvWith(calls, "libx265"), " "); strings.Contains(argv, "crop=") || !strings.Contains(argv, "-dolbyvision 1") {
 		t.Errorf("the encode cropped, or did not carry the RPU: %s", argv)
 	}
+	// Read with default=nw=1, not Prober.Dimensions: its csv form prints an empty trailing
+	// field for the DOVI record a Dolby Vision stream carries ("320x240x") and reads as not
+	// established on every such file.
 	_, ffprobe := tools(t)
-	if w, h, ok := probe.New("ffmpeg", ffprobe).Dimensions(context.Background(), src); !ok || w != 320 || h != 240 {
-		t.Errorf("the replacement is not the whole 320x240 frame: %dx%d (%v)", w, h, ok)
+	dims, err := exec.Command(ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+		"-of", "default=nw=1", "--", src).Output()
+	if err != nil || !strings.Contains(string(dims), "width=320\n") || !strings.Contains(string(dims), "height=240\n") {
+		t.Errorf("the replacement is not the whole 320x240 frame: %q (%v)", dims, err)
 	}
 	requireCarried(t, src, dynhdr.Expectation{DolbyVision: true, Profile: 8, CompatID: 1})
 }
