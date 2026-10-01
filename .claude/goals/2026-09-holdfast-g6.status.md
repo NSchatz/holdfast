@@ -104,7 +104,7 @@ summed per directory):
 | # | Item | State |
 |---|---|---|
 | 6.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `8b52288`): `func Test` 1446 -> 1463, no package fell (`cmd/holdfast` 226 -> 228, `internal/config` 123 -> 125, `internal/encoder` 30 -> 33, `internal/engine` 500 -> 504, `internal/probe` 21 -> 22, `scripts/hwreport` 0 -> 5, every other package unchanged); `docs/design/swap.md` 62 and `docs/design/quality-gate.md` 76 lines, `git diff --numstat 7985818 8b52288` empty for both; 41 lines deleted in `*_test.go` (+1449 -41), each with its reason below |
-| 6.2 | Adversarial review of the report | DONE: a fresh subagent checks the GOAL REPORT and the repositories after this commit; its verdict is the report's line H, and any correction it asks for lands in its own commit |
+| 6.2 | Adversarial review of the report | DONE: a fresh subagent (2026-10-01) checked lines A-G against `400ff42` and GitHub, including every cited ffmpeg source line at `5d4d3bdc61`, the stand-ins (no real hardware encoder reached), the deleted-line reasons and the PR heads' CI: "VERDICT: none false". Its four low findings are fixed in the commit after `400ff42`: the Intel and AMD VAAPI rows now name distinct `--out` files (both defaulted to `vaapi-<date>.json`), row 3's expected result no longer claims a 10-bit hdr10 output from the 8-bit `h264_nvenc` report, row 2's note on the script is current, and stale `origin/holdfast-g6/*` remote-tracking refs were pruned. Its noted limit stands as stated in `docs/design/hardware.md#decode`: on fakes no hardware decode runs; rows 3-7 are the real proof |
 
 ### The 41 deleted `*_test.go` lines and why
 
@@ -223,6 +223,8 @@ Every one is replaced in the same hunk; no assertion was removed.
 
 - 2026-10-01: PR #134 (hw-decode) merged as `8b52288`: gate round 1 exit 0, mutation-diff 100%,
   CI green; `main` had moved only by the ledger-only `3b7a38e`. `NEEDS-OWNER.md` rows 3-7 added.
+- 2026-10-01: main's CI on `8b52288` was cancelled by the ledger push that followed (as in goal 5);
+  the run on the ledger-only `400ff42` carries the same code and is green (run 36808687566).
 - 2026-10-01: no minor release is cut at the end of this goal (T37 makes it optional): none of the
   new encoders or the hardware decode has run on a real device, and rows 3-7 are the first
   evidence; a later goal can release on it.
