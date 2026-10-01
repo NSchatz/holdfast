@@ -43,11 +43,17 @@ const (
 // bound says which files THIS invocation offers to the pipeline the configuration
 // already describes; it moves no knob, and a file it does offer is decided by exactly
 // the configuration a whole-library run would decide it by.
+//
+// S0174 added `run --limit-encodes`, a third bound of the same kind, and `run
+// --queue-order`, the one deliberate exception the spec rules on: queue order decides
+// SEQUENCE and never membership, and no terminal row, profile digest or decision input
+// records it, so a run under an overridden order decides every file exactly as the
+// configured one would. Its startup record names the order and where it came from.
 func TestFlags_RunServeAndValidateListExactlyTheFlagsThePinListed(t *testing.T) {
 	// The flag set per command. loadConfig is the single place --config is declared,
 	// which is why all three agree about it; `run` carries the two bounds beside it.
 	want := map[string][]string{
-		"run":      {"config", "file", "limit"},
+		"run":      {"config", "file", "limit", "limit-encodes", "queue-order"},
 		"serve":    {"config"},
 		"validate": {"config"},
 	}

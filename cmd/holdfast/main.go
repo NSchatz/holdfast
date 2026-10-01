@@ -1104,6 +1104,12 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	if code != exitOK {
 		return code
 	}
+	// `--queue-order`, applied to this run's in-memory configuration only, and only AFTER
+	// loadConfig has refused an invalid configured queue_order - see run_queue_order.go.
+	queueOrderSource, code := resolveQueueOrder(cfg, bounds, stderr)
+	if code != exitOK {
+		return code
+	}
 
 	// Every configured reference is proved resolvable BEFORE the library is walked or a
 	// single frame is encoded, even though a oneshot run consumes none of the three
@@ -1120,6 +1126,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		"encoder", cfg.Encoder, "crf", cfg.CRF, "preset", cfg.Preset,
 		"dry_run", cfg.DryRun,
 		"queue_order", cfg.EffectiveQueueOrder(),
+		"queue_order_source", queueOrderSource,
 	)
 	logResolvedProfiles(cfg, log)
 	logConfigWarnings(cfg, log)

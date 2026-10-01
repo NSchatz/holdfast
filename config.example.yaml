@@ -903,6 +903,8 @@ dry_run: false
 #                            #   A `priority` (on a root, rule or encode profile, see
 #                            #   library_roots) orders ahead of this: higher priority
 #                            #   first, then this order, then the path.
+#                            #   `holdfast run --queue-order <order>` overrides it for
+#                            #   one run and leaves this file as it is.
 
 # --- storage that is not local ---
 # holdfast's no-loss contract is stated for a LOCAL filesystem: an atomic

@@ -223,6 +223,7 @@ cp config.example.yaml config.yaml   # then edit library_roots
 holdfast validate --config config.yaml
 holdfast analyze --config config.yaml  # what is in the library, reading only (--health: what is broken)
 holdfast run --config config.yaml --file /media/tv/a.mkv  # ONE file, for real: every gate, and the swap
+holdfast run --config config.yaml --queue-order smallest --limit-encodes 5  # the proving pass: five real encodes, smallest first
 holdfast run --config config.yaml   # the whole library (--limit 5 bounds it)
 holdfast serve --config config.yaml # HTTP API (scan on demand / on an interval)
 holdfast resolve --config config.yaml  # a job whose swap outcome is unknown

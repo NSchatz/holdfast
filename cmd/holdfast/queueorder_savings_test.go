@@ -196,3 +196,23 @@ func keyPaths(v any, prefix string) []string {
 	sort.Strings(out)
 	return out
 }
+
+// TestRunQueueOrder_SavingsPerHourIsAcceptedByTheFlag: `run --queue-order savings_per_hour`
+// (S0174's one-run override) accepts the sixth value and puts it in force from the command
+// line, over a configuration whose own order is `largest`.
+func TestRunQueueOrder_SavingsPerHourIsAcceptedByTheFlag(t *testing.T) {
+	cfgPath := emptyLibraryConfig(t, "queue_order: largest\n")
+	code := -1
+	logged := captureStderr(t, func() {
+		var out, errOut bytes.Buffer
+		code = dispatch([]string{"run", "--config", cfgPath, "--queue-order", "savings_per_hour"}, &out, &errOut)
+	})
+	if code != exitOK {
+		t.Fatalf("run --queue-order savings_per_hour exited %d:\n%s", code, logged)
+	}
+	for _, want := range []string{"queue_order=savings_per_hour ", "queue_order_source=cli"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("the run's startup record does not carry %q:\n%s", want, logged)
+		}
+	}
+}
