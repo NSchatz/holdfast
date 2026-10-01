@@ -528,13 +528,15 @@ func TestHealthSweep_WorkersDecodeConcurrentlyAndCheckEachFileOnce(t *testing.T)
 	var inFlight, peak int
 	var mu sync.Mutex
 	gate := make(chan struct{})
+	opened := false // inFlight can reach 3 again after the gate opened; it is closed once
 	dec := &decodes{each: func(string) {
 		mu.Lock()
 		inFlight++
 		if inFlight > peak {
 			peak = inFlight
 		}
-		if inFlight == 3 {
+		if inFlight == 3 && !opened {
+			opened = true
 			close(gate)
 		}
 		mu.Unlock()
