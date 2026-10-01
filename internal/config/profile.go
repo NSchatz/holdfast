@@ -95,6 +95,9 @@ var profileKnobs = []string{
 	// a digest with one that does not.
 	maxHeightKey,
 	downscaleAckKey,
+	// Whether text subtitles are also copied to sidecars, on the deinterlace knob's terms:
+	// it contributes to the digest only where it is not the shipped `off`.
+	subtitleSidecarsKey,
 	// What a job does where its hardware encoder is missing or fails, appended on the
 	// deinterlace knob's terms: it contributes to the digest only where it is not the
 	// shipped `skip`, so a root that sets nothing digests as it did before the key existed.
@@ -187,6 +190,11 @@ type Profile struct {
 	// key rather than a second reading of the first.
 	MaxHeight    int   `yaml:"max_height"`
 	DownscaleAck *bool `yaml:"downscale_acknowledged"`
+
+	// SubtitleSidecars is whether a job under this root writes text subtitle sidecars:
+	// SubtitleSidecarsOff or SubtitleSidecarsText. "" is the default, off. See
+	// Config.SubtitleSidecars.
+	SubtitleSidecars string `yaml:"subtitle_sidecars"`
 
 	// HWFallback is what a job under this root does where its hardware encoder is missing
 	// or fails: HWFallbackSkip or HWFallbackSoftware. "" is the default, skip, which is
@@ -284,6 +292,7 @@ func (p Profile) values() []string {
 		renderDeinterlace(p.Deinterlace),
 		renderMaxHeight(p.MaxHeight),
 		strconv.FormatBool(p.DownscaleAcknowledged()),
+		p.SubtitleSidecarsMode(),
 		p.HWFallbackMode(),
 		p.HWDecodeMode(),
 	}
@@ -378,6 +387,8 @@ func digestSilent(knob, value string) bool {
 		return value == HWFallbackSkip
 	case hwDecodeKey:
 		return value == HWDecodeSoftware
+	case subtitleSidecarsKey:
+		return value == SubtitleSidecarsOff
 	}
 	return false
 }
@@ -398,6 +409,9 @@ func (p Profile) validate() error {
 		return err
 	}
 	if err := validateHWDecode(p.HWDecode); err != nil {
+		return err
+	}
+	if err := validateSubtitleSidecars(p.SubtitleSidecars); err != nil {
 		return err
 	}
 	if p.CRF < 0 || p.CRF > 51 {
