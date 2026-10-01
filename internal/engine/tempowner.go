@@ -144,11 +144,28 @@ func picturesBeside(temp string) []string {
 	return out
 }
 
-// pictureSuffix matches the ".picture<N>" a picture file adds to its working file's name.
-var pictureSuffix = regexp.MustCompile(`\.picture[0-9]+$`)
+// pictureSuffix matches the ".picture<N>" a picture file, or the ".subtitle<N>" a subtitle
+// sidecar temp (sidecarTempPath), adds to its working file's name.
+var pictureSuffix = regexp.MustCompile(`\.(picture|subtitle)[0-9]+$`)
+
+// subtitleTempsBeside is every subtitle sidecar temp a job whose swap reads temp names after
+// it (sidecarTempPath) that is on disk, in order. Unlike pictures they can have gaps (a
+// stream whose sidecar failed its gate has its temp removed while a later one's stays), so
+// every ordinal is looked at rather than stopping at the first missing one.
+func subtitleTempsBeside(temp string) []string {
+	var out []string
+	for i := 0; i < maxPathCandidates; i++ {
+		p := sidecarTempPath(temp, i)
+		if _, err := os.Lstat(p); err != nil {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
 
 // ownerKey is the temp whose owner record decides path's fate: the working file itself, or
-// for an attached-picture file the working file it was named after. A picture file whose
+// for an attached-picture file or a subtitle sidecar temp the working file it was named after. A picture file whose
 // name had to be shortened (picturePath's digest form) no longer carries the working file's
 // name and answers for itself, which finds no record.
 func ownerKey(path string) string {
