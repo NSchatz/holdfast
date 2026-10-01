@@ -83,7 +83,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g9-ba
 | # | Item | State |
 |---|---|---|
 | 6.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `b363b29`): `func Test` 1634 -> 1724, no package fell (`cmd/holdfast` 228 -> 244, `internal/config` 136 -> 150, `internal/engine` 543 -> 569, `internal/health` 0 -> 22, `internal/metrics` 19 -> 21, `internal/notify` 10 -> 12, `internal/queuekey` 0 -> 6, `internal/server` 105 -> 107, every other package unchanged); `git diff --numstat 5080e73 origin/main -- docs/design/swap.md docs/design/quality-gate.md` empty (66 and 80 lines, unchanged); 34 lines deleted in `*_test.go` (+4413 -34), each with its reason below |
-| 6.2 | Adversarial review of the report | DOING: a fresh subagent checks lines A-H against the repos |
+| 6.2 | Adversarial review of the report | DONE: a fresh subagent (2026-10-01) checked lines A-H against `7982c93` and GitHub, re-running the five line C/D tests (`-count=1`), recomputing the worked example in Python, the `func Test` counts and the design-doc diffs, and the merge rule of all three PRs (cached engine results valid: between the full engine run and the final head only test files outside the engine's imports changed): "VERDICT: none false". Medium, disclosed: main CI red on `529a89e` from #144's test-only double close, fixed in #143. Low: a candidate whose key or height cannot be read goes last whatever its priority (fail-safe; stated in `docs/profiles.md` and `docs/design/queue-order.md`); `savings_per_hour` is documented with `queue_order` in `docs/enumeration.md` and `config.example.yaml`, not in `docs/profiles.md`, which never documented `queue_order`; stale local tracking refs (pruned); container paths only under `.claude/goals` |
 
 ### The 34 deleted `*_test.go` lines and why
 
@@ -152,6 +152,6 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g9-ba
 ## Resume here
 
 All PRs merged: #142, #144, #143; main CI green on `b363b29` (run 36908383540). No branch, worktree
-or open PR of this goal remains. Remaining: record the adversarial review of the report.
+or open PR of this goal remains. The adversarial review found none false. Goal complete.
 
 COMPLETE (goal 9): 2026-10-01
