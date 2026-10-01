@@ -53,7 +53,7 @@ IMAGE    ?= holdfast:dev
 PLATFORM ?= linux/amd64
 
 .PHONY: build test check fmt vet staticcheck govulncheck govulncheck-selftest \
-        check-pins check-pins-selftest install-ffmpeg-selftest check-pin-live \
+        check-pins check-pins-selftest install-ffmpeg-selftest install-dynhdr-tools-selftest check-pin-live \
         secret-scan secret-scan-selftest identity-scan identity-scan-selftest \
         install-hooks snapshot-bench \
         check-enumeration-memory \
@@ -136,6 +136,13 @@ check-pins-selftest:
 # works.
 install-ffmpeg-selftest:
 	./scripts/install-ffmpeg-selftest.sh
+
+# The same proof for scripts/install-dynhdr-tools.sh, which installs the pinned dovi_tool
+# and hdr10plus_tool (the image's dynamic-HDR tools) for CI: every failure mode is driven
+# offline, each is asserted distinct and self-describing, and none leaves either tool
+# behind - including the case where one tool verified and the other did not.
+install-dynhdr-tools-selftest:
+	./scripts/install-dynhdr-tools-selftest.sh
 
 # --- secrets (S0132) ----------------------------------------------------------
 # The secret scanner (secrets K4). scripts/secret-scan.sh is the ONE invocation - this
@@ -297,9 +304,10 @@ install-hooks:
 # the two places it runs. What is hermetic - that .gremlins.yaml and
 # docs/mutation-testing.md still agree about the floor and the domain, and that the
 # workflow still plans an unscoped run with no diff scope - rides the gate.
-check: check-pins check-pins-selftest install-ffmpeg-selftest secret-scan secret-scan-selftest identity-scan identity-scan-selftest api-schema-diff mutation-shape fmt vet build test staticcheck govulncheck govulncheck-selftest
+check: check-pins check-pins-selftest install-ffmpeg-selftest install-dynhdr-tools-selftest secret-scan secret-scan-selftest identity-scan identity-scan-selftest api-schema-diff mutation-shape fmt vet build test staticcheck govulncheck govulncheck-selftest
 
-# Asks UPSTREAM whether the pinned ffmpeg release is still served. Deliberately NOT part
+# Asks UPSTREAM whether the pinned ffmpeg release, and the pinned dovi_tool and
+# hdr10plus_tool release assets, are still served. Deliberately NOT part
 # of `check`: the PR gate must not red because a third party had a bad afternoon. CI runs
 # this on a schedule (.github/workflows/pin-health.yml) so the next expiry reports itself
 # instead of surfacing as an unexplained red job on an unrelated pull request, which is

@@ -71,6 +71,25 @@ for want in libvmaf:filters libx265:encoders libsvtav1:encoders; do
   ok "bundled ffmpeg has $lib"
 done
 
+# 2b. The bundled dynamic-HDR tools run inside the image and ARE the pinned versions. They
+#     are static musl binaries, so this needs nothing from the base; it runs on every
+#     architecture this script is pointed at, including arm64 under QEMU, which is the one
+#     place an arm64 binary is ever executed (the Dockerfile's fetch stage runs on the
+#     build platform and can only check that one's ELF header). The expected versions are
+#     parsed from the Dockerfile's ARGs, never restated here.
+dockerfile="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/Dockerfile"
+for tool in dovi_tool hdr10plus_tool; do
+  prefix="$(printf '%s' "$tool" | tr '[:lower:]' '[:upper:]')"
+  want="$(sed -n "s/^ARG ${prefix}_VERSION=\\(.*\\)$/\\1/p" "$dockerfile" | head -1)"
+  [ -n "$want" ] || fail "could not read ${prefix}_VERSION from $dockerfile"
+  got="$(run_in_image --entrypoint "/usr/local/bin/$tool" "$IMAGE" --version 2>&1)" \
+    || fail "the bundled $tool does not run inside the image:
+$got"
+  got="$(head -1 <<<"$got")"
+  [ "$got" = "$tool $want" ] || fail "the bundled $tool reports '$got', the Dockerfile pins '$tool $want'"
+  ok "bundled $got runs"
+done
+
 # 3. It does not run as root by default.
 user="$(docker inspect -f '{{.Config.User}}' "$IMAGE")"
 [ -n "$user" ] && [ "$user" != "root" ] && [ "$user" != "0" ] \

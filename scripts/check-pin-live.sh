@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Ask upstream, out loud, whether the pinned ffmpeg is still there.
+# Ask upstream, out loud, whether the pinned ffmpeg is still there - and the pinned
+# dovi_tool and hdr10plus_tool release assets with it (the last section).
 #
 #   make check-pin-live      # the entry point; CI's schedule runs exactly this
 #
@@ -146,4 +147,51 @@ if [ -n "$days_left" ] && [ "$days_left" -lt 90 ]; then
   echo "::warning::the pinned ffmpeg ${build} falls out of upstream retention on ${expiry} (${days_left} days). Repin to a newer month-end build before then."
 fi
 
-echo "== pin health OK: ${build} is still served for both architectures (until ${expiry})"
+echo "   ffmpeg ${build} is still served for both architectures (until ${expiry})"
+
+# --- the dynamic-HDR tools (goal 8) -------------------------------------------------
+# dovi_tool and hdr10plus_tool are pinned to a GitHub release of each, by version and
+# per-arch sha256, and scripts/install-dynhdr-tools.sh and the Dockerfile fetch those four
+# release assets. Upstream publishes no retention policy for them (so there is no horizon
+# to report, unlike the ffmpeg pin above): a release or an asset is simply there or it was
+# deleted, and the same range GET answers that. Same classification and the same exit
+# codes as the ffmpeg probe; the pin is parsed, never restated.
+for tool in dovi_tool hdr10plus_tool; do
+  prefix="$(printf '%s' "$tool" | tr '[:lower:]' '[:upper:]')"
+  tv="$(arg "${prefix}_VERSION")"
+  for triple in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+    url="https://github.com/quietvoid/${tool}/releases/download/${tv}/${tool}-${tv}-${triple}.tar.gz"
+    delay=2
+    ok=""
+    for attempt in $(seq 1 "$ATTEMPTS"); do
+      rc=0
+      probe "$url" || rc=$?
+      case "$rc" in
+        0) ok=yes; break ;;
+        1)
+          echo "::error::the pinned ${tool} release asset is GONE upstream (HTTP ${http_code}).
+       pinned version : ${tv}
+       url probed     : ${url}
+       Repin the Dockerfile's ${prefix}_* ARGs to a release upstream serves, with its
+       sha256 digests, update NOTICE's '  tool: ${tool}' entry, and run 'make check'." >&2
+          exit "$EX_EXPIRED"
+          ;;
+        *)
+          if [ "$attempt" -ge "$ATTEMPTS" ]; then
+            echo "::error::could not REACH upstream to check the ${tool} pin after ${ATTEMPTS} attempts (last HTTP status '${http_code}').
+       url probed : ${url}
+       The pin is NOT known to be missing; this looks transient (DNS, timeout, or a 5xx)." >&2
+            exit "$EX_UNREACHABLE"
+          fi
+          echo "   attempt ${attempt}/${ATTEMPTS} for ${tool} ${triple} failed (HTTP '${http_code}'), retrying in ${delay}s"
+          sleep "$delay"
+          delay=$((delay * 2))
+          ;;
+      esac
+    done
+    [ "$ok" = "yes" ] || { echo "::error::the ${tool} probe ended without an answer: ${url}" >&2; exit "$EX_UNREACHABLE"; }
+    echo "   ok: ${tool} ${tv} ${triple} is still served (HTTP ${http_code})"
+  done
+done
+
+echo "== pin health OK: ffmpeg ${build} (until ${expiry}), dovi_tool $(arg DOVI_TOOL_VERSION) and hdr10plus_tool $(arg HDR10PLUS_TOOL_VERSION) are still served for both architectures"
