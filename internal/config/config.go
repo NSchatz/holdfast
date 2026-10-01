@@ -66,13 +66,16 @@ var knownKeys = map[string]bool{
 	excludePathsKey: true, includePathsKey: true,
 	audioLanguagesKey: true, subtitleLanguagesKey: true,
 	keepCommentaryKey: true, remuxOnlyKey: true,
-	deinterlaceKey:  true,
-	maxHeightKey:    true,
-	downscaleAckKey: true,
-	hwFallbackKey:   true,
-	hwDecodeKey:     true,
-	x265CPUsKey:     true,
-	qualityKey:      true,
+	deinterlaceKey:   true,
+	maxHeightKey:     true,
+	downscaleAckKey:  true,
+	hwFallbackKey:    true,
+	hwDecodeKey:      true,
+	audioReencodeKey: true, audioCodecKey: true, audioMonoKbpsKey: true, audioStereoKbpsKey: true,
+	audio51KbpsKey: true, audio71KbpsKey: true, keepOriginalAudioKey: true, audioDownmixKey: true,
+	audioLoudnessKey: true,
+	x265CPUsKey:      true,
+	qualityKey:       true,
 	// The divisor `workers: auto` sizes the pool by. It describes the PROCESS, so a
 	// library_roots entry naming it is refused as a daemon-level key, exactly as one
 	// naming workers is.
@@ -93,7 +96,7 @@ var profileKeys = map[string]bool{
 // defaultLayer is the built-in default configuration, loaded as koanf's base layer.
 // It is the single source of truth for defaults.
 func defaultLayer() map[string]any {
-	return map[string]interface{}{
+	d := map[string]interface{}{
 		"log_level":              "info",
 		"dry_run":                false,
 		"video_exts":             []string{"mkv", "mp4", "avi", "mov", "m4v", "ts", "m2ts", "wmv", "flv"},
@@ -174,6 +177,12 @@ func defaultLayer() map[string]any {
 		// when workers is auto, so the default moves no configuration that does not ask.
 		coresPerWorkerKey: DefaultCoresPerWorker,
 	}
+	// Every audio key off: each carried audio track is copied, as it always was
+	// (docs/design/audio.md). Each is a knob in profileKnobs, seeded from the top-level value.
+	for k, v := range audioDefaults() {
+		d[k] = v
+	}
+	return d
 }
 
 // Config is the declarative, YAML-authored configuration for the transcoder. Field
@@ -331,6 +340,17 @@ type Config struct {
 	// reads them. A job encoded in software decodes in software. A library root may override
 	// it. See docs/design/hardware.md#decode.
 	HWDecode string `yaml:"hw_decode"`
+	// The audio keys, each off until configured and each overridable per library root: see
+	// Profile and docs/design/audio.md.
+	AudioReencode     string `yaml:"audio_reencode"`
+	AudioCodec        string `yaml:"audio_codec"`
+	AudioMonoKbps     int    `yaml:"audio_mono_kbps"`
+	AudioStereoKbps   int    `yaml:"audio_stereo_kbps"`
+	Audio51Kbps       int    `yaml:"audio_51_kbps"`
+	Audio71Kbps       int    `yaml:"audio_71_kbps"`
+	KeepOriginalAudio *bool  `yaml:"keep_original_audio"`
+	AudioDownmix      string `yaml:"audio_downmix"`
+	AudioLoudness     string `yaml:"audio_loudness"`
 	// CRF is the software encoders' quality knob (lower = bigger/better): libx265's
 	// and libsvtav1's constant rate factor, 0-51. Each hardware encoder's quality is
 	// set on its own scale by Quality below, and a hardware encoder with no entry there
@@ -913,6 +933,15 @@ func (c *Config) TopLevelProfile() Profile {
 		DownscaleAck:      c.DownscaleAck,
 		HWFallback:        c.HWFallback,
 		HWDecode:          c.HWDecode,
+		AudioReencode:     c.AudioReencode,
+		AudioCodec:        c.AudioCodec,
+		AudioMonoKbps:     c.AudioMonoKbps,
+		AudioStereoKbps:   c.AudioStereoKbps,
+		Audio51Kbps:       c.Audio51Kbps,
+		Audio71Kbps:       c.Audio71Kbps,
+		KeepOriginalAudio: c.KeepOriginalAudio,
+		AudioDownmix:      c.AudioDownmix,
+		AudioLoudness:     c.AudioLoudness,
 	}
 }
 

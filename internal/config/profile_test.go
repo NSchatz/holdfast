@@ -93,6 +93,15 @@ remux_only: false
 deinterlace: off
 max_height: 1080
 downscale_acknowledged: true
+audio_reencode: on
+audio_codec: eac3
+audio_mono_kbps: 96
+audio_stereo_kbps: 224
+audio_51_kbps: 768
+audio_71_kbps: 0
+keep_original_audio: true
+audio_downmix: stereo
+audio_loudness: ebu_r128
 hw_fallback: software
 hw_decode: hardware
 workers: 4
@@ -130,6 +139,14 @@ max_load: 1.5
 		RemuxOnly:         &no,
 		MaxHeight:         1080,
 		DownscaleAck:      &yes,
+		AudioReencode:     "on",
+		AudioCodec:        "eac3",
+		AudioMonoKbps:     96,
+		AudioStereoKbps:   224,
+		Audio51Kbps:       768,
+		KeepOriginalAudio: &yes,
+		AudioDownmix:      "stereo",
+		AudioLoudness:     "ebu_r128",
 		HWFallback:        "software",
 		HWDecode:          "hardware",
 	}
@@ -372,6 +389,11 @@ func TestProfileKnobSetIsClosedAndSingleSourced(t *testing.T) {
 		// that would drop some may run into a final swap at all. Both are digested
 		// conditionally, so a root that sets neither digests as it always did.
 		"max_height", "downscale_acknowledged",
+		// The audio keys: what an encode does to the audio tracks is what happens TO a file,
+		// so each is a knob; digested conditionally, so a root that sets none of them digests
+		// as it always did (docs/design/audio.md).
+		"audio_reencode", "audio_codec", "audio_mono_kbps", "audio_stereo_kbps", "audio_51_kbps",
+		"audio_71_kbps", "keep_original_audio", "audio_downmix", "audio_loudness",
 		// What a job does where its hardware encoder is missing or fails. It decides which
 		// encoder writes a replacement, or whether one is written at all, so it is a knob;
 		// digested conditionally, so a root that sets nothing digests as it always did.
