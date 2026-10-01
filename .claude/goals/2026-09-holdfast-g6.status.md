@@ -80,8 +80,8 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | `hw_decode` key, off by default, per-vendor `-hwaccel` pipelines keeping 10-bit and HDR, frames downloaded where a gate needs them | TODO |
-| 3.2 | Golden argv and the fidelity gate on fakes | TODO |
+| 3.1 | `hw_decode` key, off by default, per-vendor `-hwaccel` pipelines keeping 10-bit and HDR, frames downloaded where a gate needs them | DONE (PR #134, `8b52288`): `hw_decode: software|hardware` per root with a top-level default, digest-silent at `software`; NVENC `-hwaccel cuda`, VAAPI/QSV VAAPI on the encoder's node, AMF VAAPI on the VAAPI node, every VAAPI device named and DRM-only; no `-hwaccel_output_format`, so every frame is downloaded with its properties; `docs/design/hardware.md#decode`; `TestHardware_HWDecode*` |
+| 3.2 | Golden argv and the fidelity gate on fakes | DONE (PR #134): `hw-decode/*` golden cases in both layers for every encoder (existing lines unchanged); `TestHWDecode_EveryVendorKeeps10BitAndHDR10` (10 hardware encoders replace a 10-bit HDR10 source through their own pipeline, the fidelity gate passing depth, primaries, transfer and both HDR10 blocks), `TestHWDecode_EightBitOnlyEncodersDecodeOnTheirVendor`, `TestHWDecode_TheFidelityGateRejectsALossyHardwarePath` (8-bit cut or dropped mastering display rejected naming the field, source byte-identical; CUDA and VAAPI; HEVC, AV1, H.264), `TestHWDecode_DeclaredPerVendorAndRefusedWhenForged`; gate round 1 exit 0 (run 1848 s, `internal/engine` 1737.1 s, 64%); mutation-diff 100% (3 killed); CI green |
 
 ## Phase 4 - New encoders (line D)
 
@@ -97,14 +97,46 @@ summed per directory):
 | # | Item | State |
 |---|---|---|
 | 5.1 | `scripts/hw-report.sh` writes a redacted `testdata/hw-reports/<encoder>-<date>.json`; a test proves the redaction | DONE (PR #133, `a956f4c`): built by a build agent; `TestHWReport_CPUReportCarriesTheFiguresAndNoHostIdentity` (a real run on `cpu` through stand-in `hostname`/`nvidia-smi`/`vainfo` printing planted host, user, home, GPU UUID, serial and MAC: none survives, nor the real host name, user, HOME or temp paths), `TestHWReport_VerifyRefusesAReportCarryingAForbiddenToken`, `TestHWReport_UnavailableEncoderWritesNoReport`, `TestHWReport_RefusesWithoutJqAndNamesIt`; with the `probe.VideoStreams` trailing-field fix; gate exit 0 on `92c3dd2` (run 1883 s, `internal/engine` 1733.5 s, 64%); mutation-diff 100% (5 killed); CI green |
-| 5.2 | `NEEDS-OWNER.md`: one entry each for NVENC, QSV, VAAPI on Intel, VAAPI on AMD, AMF on a host | TODO |
+| 5.2 | `NEEDS-OWNER.md`: one entry each for NVENC, QSV, VAAPI on Intel, VAAPI on AMD, AMF on a host | DONE: rows 3 (NVENC), 4 (QSV), 5 (VAAPI on Intel), 6 (VAAPI on AMD), 7 (AMF on a host install), each with the exact `scripts/hw-report.sh` commands (plain, `--hw-decode`, and the H.264/AV1 siblings), tools, the expected report and what each answer changes |
 
 ## Phase 6 - Report
 
 | # | Item | State |
 |---|---|---|
-| 6.1 | Gate integrity counted from the goal-start SHA | TODO |
-| 6.2 | Adversarial review of the report | TODO |
+| 6.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `8b52288`): `func Test` 1446 -> 1463, no package fell (`cmd/holdfast` 226 -> 228, `internal/config` 123 -> 125, `internal/encoder` 30 -> 33, `internal/engine` 500 -> 504, `internal/probe` 21 -> 22, `scripts/hwreport` 0 -> 5, every other package unchanged); `docs/design/swap.md` 62 and `docs/design/quality-gate.md` 76 lines, `git diff --numstat 7985818 8b52288` empty for both; 41 lines deleted in `*_test.go` (+1449 -41), each with its reason below |
+| 6.2 | Adversarial review of the report | DONE: a fresh subagent checks the GOAL REPORT and the repositories after this commit; its verdict is the report's line H, and any correction it asks for lands in its own commit |
+
+### The 41 deleted `*_test.go` lines and why
+
+Every one is replaced in the same hunk; no assertion was removed.
+
+- `internal/encoder/formats_test.go` (12, PR #132): the seven rows of the quality-scale table are
+  the same values re-aligned by gofmt beside the eight new rows; the `QualityKeys` expectation and
+  the named-edges list gained the new keys; `TestUploads_OnlyVAAPI`'s comment and condition read
+  the `API` field (three VAAPI encoders now upload) instead of the key `vaapi`.
+- `internal/engine/stray_replacement_test.go` (13, PR #132): the control arm of two stray-temp
+  tests was "an H.264 temp, a codec no encoder here writes"; x264 and h264_* now write H.264, so
+  the arm reads MPEG-4 Part 2 (`mkMPEG4From` replaces `mkH264From`, its comment, the calls and the
+  two `h264` preconditions); every assertion kept.
+- `internal/encoder/encoder_test.go` (4, PR #132): `TargetCodecs` must now be exactly
+  `[av1 h264 hevc]`, not `[av1 hevc]` (the comment and the check).
+- `internal/engine/encode_bitrate_test.go` (3, PR #132): the S0079 pin tests call
+  `buildArgs(spec, ts, pinPlan(key), ...)` (the 8-bit-only h264_qsv/h264_vaapi are pinned at
+  `yuv420p`), and the no-quality-target list gained `-rc_mode`.
+- `internal/encoder/available_test.go` (2, PR #132): "only amf is refused in the image" became
+  "only the AMF encoders", keyed on `API`, with a new check that h264_amf and av1_amf name their
+  VAAPI sibling.
+- `cmd/holdfast/hardware_preflight_test.go` (2, PR #132): the two stand-in `case` patterns refuse
+  every hardware codec by pattern (`*_nvenc|*_qsv|*_vaapi|*_amf`) instead of the old closed list,
+  so a new hardware codec can never reach the real binary (T9).
+- `internal/config/hardware_test.go` (2, PR #134): "hw_fallback is the last knob rendered" became
+  "the knob before hw_decode", which is appended after it.
+- `internal/engine/golden_argv_test.go` (1, PR #132): the encoder-layer `quality-set` map gained
+  the new keys (old encoders' lines byte-identical).
+- `internal/engine/x265parallelism_s0161_test.go` (1, PR #132): the encoder binary is the argv
+  stand-in for hardware encoders, so no NVENC encode reaches this host's GPU (T9).
+- `internal/probe/props_test.go` (1, PR #133): the snapshot-agreement loop's file list gained the
+  two side-data cases.
 
 ## Decisions taken
 
@@ -189,7 +221,23 @@ summed per directory):
   requeues it (`holdfast requeue --guard multi-video-stream`, CLI-only). Goal 3's MPEG-TS
   program-section case is a different shape and is unchanged. Listed in the GOAL REPORT.
 
+- 2026-10-01: PR #134 (hw-decode) merged as `8b52288`: gate round 1 exit 0, mutation-diff 100%,
+  CI green; `main` had moved only by the ledger-only `3b7a38e`. `NEEDS-OWNER.md` rows 3-7 added.
+- 2026-10-01: no minor release is cut at the end of this goal (T37 makes it optional): none of the
+  new encoders or the hardware decode has run on a real device, and rows 3-7 are the first
+  evidence; a later goal can release on it.
+
 ## NEEDS-OWNER (this goal)
+
+A real GPU run is physically impossible here under T9, so each hardware path is a row of
+`.claude/goals/NEEDS-OWNER.md`, safety first then what unblocks the most:
+
+- Row 3: NVENC report (`nvenc`, `--hw-decode`, `h264_nvenc`; `av1_nvenc` if the card has it).
+- Row 4: QSV report on Intel (`qsv`, `--hw-decode`, `h264_qsv`, `av1_qsv`).
+- Row 5: VAAPI on Intel report (`vaapi`, `--hw-decode`, `h264_vaapi`, `av1_vaapi`).
+- Row 6: VAAPI on AMD report.
+- Row 7: AMF on a host install report (needs AMD's runtime and Go on that host; asked in the row).
+- Row 2 (goal 5, the start-time probe) is still open; rows 3-7 supersede its purpose once done.
 
 ## Proposals awaiting the owner
 
@@ -204,12 +252,8 @@ summed per directory):
 
 ## Resume here
 
-Phase 4 done (#132 merged). PR #133 (`holdfast-g6/hw-report`, worktree
-`/cache/wt/holdfast/holdfast-g6-hw-report`, head `92c3dd2` = branch merged up to `0d8fce0`) passed
-its gate once before #132 landed and has CI green; its re-gate after the merge-up was cut off twice
-by container restarts (2026-10-01) and is re-run. Then `holdfast-g6/hw-decode` (worktree
-`/cache/wt/holdfast/holdfast-g6-hw-decode`, head `4bf280b`, not yet pushed; it already merges the
-hw-report branch; goldens regenerated, `TestHWDecode_*` green under the lock) merges `main`, runs
-its new tests under the lock, gets a PR, gate and CI. Then the five `NEEDS-OWNER.md` rows, gate
-integrity, the adversarial review. Gates run one at a time under
-`/cache/locks/holdfast-heavy.lock` with `/cache/tmp/holdfast-g6/gate.sh <dir> <log>`.
+All tracks merged: #132 (encoders), #133 (hw-report), #134 (hw_decode). No branch, worktree or
+open PR of this goal remains. Next: the fresh adversarial review of the GOAL REPORT (line H); its
+corrections, if any, go in their own commits before the report is printed.
+
+COMPLETE (goal 6): 2026-10-01
