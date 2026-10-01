@@ -865,6 +865,8 @@ dry_run: false
 #                            #   The four keyed orders read each candidate's size or
 #                            #   modification time ONCE and hold that key and the path
 #                            #   until the listing is finished; see docs/enumeration.md.
+#                            #   `holdfast run --queue-order <order>` overrides it for
+#                            #   one run and leaves this file as it is.
 
 # --- storage that is not local ---
 # holdfast's no-loss contract is stated for a LOCAL filesystem: an atomic

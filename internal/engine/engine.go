@@ -1474,11 +1474,14 @@ func (e *Engine) scanOnce(ctx context.Context, pass *listings, bud *budget) (map
 				// the call, so every way out of one file - a cancellation, an error, an
 				// ordinary return - gives the bound its slot back exactly once.
 				done := func() bool {
-					defer bud.release()
+					// The file's own slot, for an encode bound to learn whether THIS file
+					// reached an encode (S0174; see budget.track).
+					fctx, slot := bud.track(ctx)
+					defer bud.releaseSlot(slot)
 					if ctx.Err() != nil {
 						return true
 					}
-					if err := e.ProcessFile(ctx, workerID, f); err != nil {
+					if err := e.ProcessFile(fctx, workerID, f); err != nil {
 						if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 							mu.Lock()
 							if firstCancelErr == nil {
@@ -2300,6 +2303,11 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		}
 		e.Log.Info("DRY_RUN would transcode", "file", f, "codec", codec,
 			"source_bytes", logSize(out.SourceBytes), "target", final)
+		// The would-transcode decision is a dry run's stand-in for reaching an encode,
+		// because nothing encodes here: without it `--limit-encodes N` under dry_run would
+		// never reach N and would walk the whole library (S0174 AC-6). Counted at the
+		// decision, before the write, so a write that fails can only stop the bound early.
+		reachedEncode(ctx)
 		e.finish(ctx, f, key, store.WouldTranscode, out)
 		return nil
 	}
@@ -2496,6 +2504,9 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		"library_root", root.Clean, "crf", ts.CRF, "encoder", ts.Encoder,
 		"encode_profile", ts.Profile, "working_file", work)
 	e.advance(ctx, f, key, store.Encoding)
+	// The file has REACHED AN ENCODE, which is what `--limit-encodes` counts (S0174): from
+	// here its terminal row names the encoder, whatever that outcome turns out to be.
+	reachedEncode(ctx)
 
 	// out is the PROOF, accumulated as the pipeline learns each fact (TRANSCODE-13). Every
 	// terminal path below hands this same value to the store and to the Observer, so the

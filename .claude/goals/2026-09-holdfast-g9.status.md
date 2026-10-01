@@ -53,7 +53,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g9-ba
 | # | Item | State |
 |---|---|---|
 | 2.1 | S0164 `savings_per_hour` order (AC-1 to AC-15) | TODO |
-| 2.2 | S0174 `run --limit-encodes` and `run --queue-order` (AC-1 to AC-18) | TODO |
+| 2.2 | S0174 `run --limit-encodes` and `run --queue-order` (AC-1 to AC-18) | DONE (PR #142, `80501dc`): `internal/engine/limit_encodes_test.go` (`TestLimitEncodes_AC1_...` to `AC10`), `cmd/holdfast/run_limit_encodes_test.go`, `cmd/holdfast/run_queue_order_flag_test.go` (AC-7, AC-9, AC-11 to AC-16); the existing `--limit` tests' bodies untouched (AC-17); startup record `queue_order_source=cli|config`; gate exit 0 (`cmd/holdfast` 701.5 s, `internal/engine` 2176.5 s on the previous valid run, cached on the final one since engine code was unchanged); CI green (runs 36889021576, 36889021540); 1 fix round. One existing test line changed: `cmd/holdfast/flags_test.go:56`, the pinned `run` flag set gains `limit-encodes` and `queue-order` |
 
 ## Phase 3 - Priority and the savings order (line C)
 
@@ -101,6 +101,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g9-ba
 - 2026-10-01: tracks. `holdfast-g9/queue-order` (priority and `savings_per_hour`, S0164),
   `holdfast-g9/limit-encodes` (S0174) and `holdfast-g9/health-sweep`, each built by one agent in
   its own worktree and merged by the rule of §0.3.
+- 2026-10-01: PR #142 (S0174) merged as `80501dc`. Its own decisions: a per-file slot spent when the job enters the encoding state (dry run: at the would-transcode decision, before its row is written) and handed back if none was reached; both count bounds given -> the first reached stops the offer, recorded as `bound=limit,limit_encodes`; `--limit-encodes ""` refused; the `--queue-order` override is applied after `loadConfig`, so an invalid configured order still exits 1 (S0174 advisory F2), and only in memory.
 - 2026-10-01: every gate in this goal runs with `TMPDIR` under `/cache/tmp/holdfast-g9/` (a tmpfs
   `TMPDIR` is refused by `fsclass`), goal shells use `command grep`, `rg` or `git grep`, and
   commits carry no trailer (T38).
