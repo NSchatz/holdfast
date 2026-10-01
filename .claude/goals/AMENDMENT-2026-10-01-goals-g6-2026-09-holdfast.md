@@ -8,8 +8,8 @@ already running when it merged keeps the contract it started with.
 
 - **Spec version:** 1.0
 - **The spec:** spec v1.0 of the goals program (its release v1.0.0; sessions load it as the `/goals:spec` skill of the goals plugin). Its files: `contract.md` (the standing contract), `brief.md`, `goal-file.md`,
-  `ledger.md`, `lanes-manifest.md`, `checkpoint.md`, `amendment.md`, `report.md`, `needs-noah.md`,
-  `requests.md`, `locks.md`, `gates.md`.
+  `ledger.md`, `lanes-manifest.md`, `checkpoint.md`, `amendment.md`, `report.md`, the human-only
+  steps format, `requests.md`, `locks.md`, `gates.md`.
 - **What it supersedes:** the brief's rule "Where they disagree, §0-§4 win" reads "where §0-§4 and the spec
   disagree, the spec wins". The brief, its goal files, `AMENDMENT-2026-10-01-goals-g5-2026-09-holdfast.md` and every checkpoint file are otherwise unchanged.
 
@@ -42,7 +42,7 @@ they beat earlier lines where they conflict, except where a goal file wins.
    loads the spec's `contract.md`, `ledger.md` and `report.md` (the `/goals:spec` skill) at its start and
    after a compaction.
 4. **Ledgers** created after this merged follow the spec's `ledger.md`: the states `TODO`, `DOING`, `DONE`,
-   `NEEDS-NOAH`, `NEEDS-OWNER`, `PROPOSED`, `DROPPED` in every `| # | Item | State |` row (every holdfast
+   `NEEDS-OWNER`, `PROPOSED`, `DROPPED` (holdfast's `NEEDS-OWNER` stands for the spec's human-only state) in every `| # | Item | State |` row (every holdfast
    ledger already does), and no `TODO` or `DOING` row once the COMPLETE line is in.
 5. **Fan-out.** Before a fan-out a goal asks `goals admit --agents <N>` and runs at most what it allows and
    at most the brief's own cap, whichever is lower (W17, W42).
