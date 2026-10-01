@@ -49,14 +49,48 @@ func (s classifyScope) scoped() bool { return s.Root != "" }
 type boundFlags struct {
 	file  *string
 	limit *string
+	// limitEncodes is `--limit-encodes` (S0174), read as a string for --limit's reason.
+	limitEncodes *string
+	// queueOrder is `--queue-order` (S0174): this run's order, overriding the configured one.
+	queueOrder *string
+	// fs is the flag set they were declared on, asked after parsing which of them were
+	// TYPED: `--queue-order ""` is a value that is not an order, never an absent flag.
+	fs *flag.FlagSet
 }
+
+// The two flags S0174 adds, spelled once so the refusals and the was-it-typed question
+// cannot drift apart.
+const (
+	flagLimitEncodes = "limit-encodes"
+	flagQueueOrder   = "queue-order"
+)
 
 func addBoundFlags(fs *flag.FlagSet) boundFlags {
 	return boundFlags{
 		file: fs.String("file", "", "carry exactly this one file to a terminal outcome, and no other"),
 		limit: fs.String("limit", "",
 			"stop offering files once this many have reached a terminal outcome (an integer of at least 1)"),
+		limitEncodes: fs.String(flagLimitEncodes, "",
+			"stop offering files once this many have reached an encode (an integer of at least 1)"),
+		queueOrder: fs.String(flagQueueOrder, "",
+			"offer files in this order for this run only, overriding queue_order (one of "+config.QueueOrderList()+")"),
+		fs: fs,
 	}
+}
+
+// typed reports whether the named flag was given on the command line at all, whatever its
+// value - including the empty string.
+func (f boundFlags) typed(name string) bool {
+	if f.fs == nil {
+		return false
+	}
+	seen := false
+	f.fs.Visit(func(fl *flag.Flag) {
+		if fl.Name == name {
+			seen = true
+		}
+	})
+	return seen
 }
 
 // resolveBound turns the two flags into the engine's bound, or refuses the run.
@@ -85,6 +119,16 @@ func resolveBound(cfg *config.Config, f boundFlags, stderr io.Writer) (engine.Bo
 			return b, scope, exitUsage
 		}
 		b.Limit = n
+	}
+	// --limit-encodes, read exactly as --limit is, except that a TYPED empty value refuses
+	// too: there is no older invocation of this flag whose `""` meant "no bound" to keep.
+	if f.typed(flagLimitEncodes) {
+		n, err := strconv.Atoi(strings.TrimSpace(*f.limitEncodes))
+		if err != nil || n < 1 {
+			fmt.Fprintf(stderr, "holdfast: --%s: %q is not an integer of at least 1\n", flagLimitEncodes, *f.limitEncodes)
+			return b, scope, exitUsage
+		}
+		b.LimitEncodes = n
 	}
 
 	if *f.file == "" {
@@ -163,11 +207,12 @@ func runUsage() string {
 	return `holdfast run - one pass over the configured library roots
 
 Usage:
-  holdfast run --config <path> [--file <path>] [--limit <n>]
+  holdfast run --config <path> [--file <path>] [--limit <n>] [--limit-encodes <n>]
+               [--queue-order <order>]
 
 A run probes, guards, encodes, verifies and swaps for real: it is licensed to replace a
-source with its encode and to delete the original. The two bounds below make it act on
-ONE file, or on a handful, with every guard, gate and swap intact - so the pipeline can be
+source with its encode and to delete the original. The bounds below make it act on ONE
+file, or on a handful, with every guard, gate and swap intact - so the pipeline can be
 watched deciding a real file before it is pointed at a library.
 
 A bounded run is narrower, never weaker. Before it offers any file it removes the
@@ -179,15 +224,25 @@ retention pass, which concludes from an absence that only a whole-library pass i
 evidence for, and it removes no ledger row at all.
 
 Flags:
-  -config <path>   path to the YAML config file (required)
-  -file <path>     carry exactly this one file to a terminal outcome, and no other. The
-                   path must be one an ordinary scan of the configured roots would act on
-  -limit <n>       stop offering files once n have reached a terminal outcome, where a
-                   skip with a reason counts and a file merely enumerated does not
+  -config <path>         path to the YAML config file (required)
+  -file <path>           carry exactly this one file to a terminal outcome, and no other.
+                         The path must be one an ordinary scan of the configured roots
+                         would act on. It wins over both counts below
+  -limit <n>             stop offering files once n have reached a terminal outcome, where
+                         a skip with a reason counts and a file merely enumerated does not
+  -limit-encodes <n>     stop offering files once n have reached an encode: a skip does not
+                         count, and an encode counts whatever its outcome (done, failed, or
+                         a swap incident). Under dry_run a would-transcode decision counts.
+                         Every encode started finishes before the run returns. With -limit
+                         too, whichever bound is reached first stops the offer
+  -queue-order <order>   offer files in this order for this run only, overriding
+                         queue_order from the file and HOLDFAST_QUEUE_ORDER; the config
+                         file is not changed. One of ` + config.QueueOrderList() + `
 
 Examples:
   holdfast run --config config.yaml --file /media/tv/pilot.mkv   # one real file, end to end
   holdfast run --config config.yaml --limit 5                    # the first five decisions
+  holdfast run --config config.yaml --queue-order smallest --limit-encodes 5   # the proving pass
   holdfast run --config config.yaml                              # the whole library
 
 Exit codes:

@@ -32,7 +32,7 @@ const (
 	// startup refusal, a capability that is not there, a job store it cannot open.
 	exitError = 1
 	// exitUsage is a malformed invocation: an unknown flag, a missing --config, a
-	// --limit that is not a count.
+	// --limit or --limit-encodes that is not a count, a --queue-order that is not an order.
 	exitUsage = 2
 	// exitRefused is a run refused by policy: it was well formed and holdfast could have
 	// run it, and the answer is no. Nothing was probed, encoded or mutated.
@@ -51,7 +51,8 @@ var runExitCodes = []runExitCode{
 	{exitOK, "the run finished: every file it offered reached an outcome and the ledger records each one"},
 	{exitError, "holdfast could not run: an unreadable or invalid config, a startup refusal (storage, " +
 		"scratch directory, a missing binary, an encoder or VMAF capability), or a job store it could not open"},
-	{exitUsage, "the invocation was wrong: an unknown flag, no --config, or a --limit that is not a count"},
+	{exitUsage, "the invocation was wrong: an unknown flag, no --config, a --limit or --limit-encodes " +
+		"that is not a count, or a --queue-order that is not an accepted order"},
 	{exitRefused, "the run was refused: --file named a path this configuration would never act on. " +
 		"Nothing was probed, encoded or mutated, and nothing was created under the state directory"},
 }
