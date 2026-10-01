@@ -34,9 +34,9 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g9-ba
 
 | Gate | Value at goal start | Wall-clock |
 |---|---|---|
-| `make check` under `flock -o` (log `gate-baseline.log`) | running | - |
-| `internal/engine` under `go test -race` | running | - |
-| `cmd/holdfast` under `go test -race` | running | - |
+| `make check` under `flock -o`, dynhdr tools on PATH (log `gate-baseline.log`) | exit 0 | 2180 s under the lock (4560 s including the wait) |
+| `internal/engine` under `go test -race` (from that run) | ok, 88.6% coverage | 2036.9 s (75.4% of `TEST_TIMEOUT` 45m) |
+| `cmd/holdfast` under `go test -race` (from that run) | ok, 89.2% coverage | 638.2 s |
 | `func Test` count, all packages | 1634 in 32 directories (`functest-start.txt`) | - |
 | `docs/design/swap.md`, `docs/design/quality-gate.md` lines (`wc -l`) | 66, 80 | - |
 
@@ -45,8 +45,8 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g9-ba
 | # | Item | State |
 |---|---|---|
 | 1.1 | Precondition checked (header above) | DONE (`5080e73`): goal 8's COMPLETE line is on `origin/main` |
-| 1.2 | Ledger created as the goal's first commit, straight to `main` | DOING |
-| 1.3 | Baselines with timings | DOING |
+| 1.2 | Ledger created as the goal's first commit, straight to `main` | DONE (`cd5ab73`) |
+| 1.3 | Baselines with timings | DONE (`5080e73`): the table above; `make check` exit 0 in 2180 s |
 
 ## Phase 2 - Triage (line B)
 
@@ -104,6 +104,13 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g9-ba
 - 2026-10-01: every gate in this goal runs with `TMPDIR` under `/cache/tmp/holdfast-g9/` (a tmpfs
   `TMPDIR` is refused by `fsclass`), goal shells use `command grep`, `rg` or `git grep`, and
   commits carry no trailer (T38).
+- 2026-10-01: finding. The first baseline gate went red in `internal/dynhdr` and `internal/crop`
+  only because `dovi_tool` and `hdr10plus_tool` were not on this session's PATH (the fixtures
+  require them by design and refuse to skip). They were installed rootless with the repo's own
+  pinned, checksum-verifying installer: `scripts/install-dynhdr-tools.sh /cache/opt/dynhdr-tools`
+  -> "dovi_tool 2.3.4 and hdr10plus_tool 1.7.2 installed ... (checksums verified; versions
+  confirmed)". Every gate in this goal runs with `PATH=/cache/opt/dynhdr-tools/bin:$PATH`; the
+  baseline was re-run that way.
 
 ## Proposals awaiting the owner
 
@@ -111,5 +118,4 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g9-ba
 
 ## Resume here
 
-Ledger created; baseline gate running in `/cache/wt/holdfast/g9-baseline`. Next: launch the three
-track agents.
+Baseline green. Three track agents running in `/cache/wt/holdfast/holdfast-g9-{queue-order,limit-encodes,health-sweep}`; each stops at a green gate and green CI, and the lead merges.
