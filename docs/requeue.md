@@ -48,7 +48,9 @@ no guard and recorded on no row: they change what the next jobs do and re-open n
 the files the next jobs encode and re-opens no finished one. What a job did about its crop - the
 rectangle kept, or the reason it kept the whole frame - is recorded on its row as proof (`crop`),
 not as a decision input ([docs/design/crop.md](design/crop.md#which-files)); `holdfast requeue`
-is the lever for a finished file you want cropped.
+is the lever for a finished file you want cropped. A Dolby Vision file encoded uncropped before
+its crop could be decided (this build's earlier refusal, `dolby-vision`) is not re-opened by the
+upgrade either; `requeue` offers it back.
 
 Where a library root carries [resolution rules](profiles.md#resolution-rules), the value a
 row records is the **effective** one the guard compared against - the floor the file's own

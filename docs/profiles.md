@@ -290,9 +290,11 @@ crop: off        # the default: every replacement keeps the source's whole frame
 Under `auto`, each source is sampled by ffmpeg's `cropdetect` at ten points spread over the file
 (skipping its first and last 5%), and its bars are cut away before encoding only where the
 samples agree on them within 9 px, at least three samples were valid, the area removed is black on
-every frame of the source, and the source is not Dolby Vision. Anything else - samples that
+every frame of the source, and - for a Dolby Vision source - its RPU's own active area (level 5)
+names the same rectangle, which the replacement then carries zeroed. Anything else - samples that
 disagree (a mixed aspect ratio), too few valid ones, bars with text or a logo in them, a Dolby
-Vision source - encodes the whole frame, exactly as `off` would, and the row records the reason
+Vision RPU whose active area varies, is zero or disagrees with the picture - encodes the whole
+frame, exactly as `off` would, and the row records the reason
 (`crop` on the job row, [docs/api-reference.md](api-reference.md)). A crop runs after a
 deinterlace and before a `max_height` scale, which then scales the cropped picture. The
 perceptual gate scores the output against the source put through the same crop, and a crop gate
