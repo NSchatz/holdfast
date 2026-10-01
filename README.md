@@ -63,6 +63,12 @@ and fixes the trust gaps:
   mean-only gate, and passes every structural check too (it decodes fine and carries the right duration,
   packets and streams). All three floors are **on by default**. An output that cannot be *measured* is
   rejected, not assumed good.
+- **A library health sweep that only reports.** Off by default; with `health_sweep_interval_hours`
+  set, `serve` fully decodes every source on that schedule, inside the run window and below the
+  encodes, resumes after a restart, and reports each file `ok`, `corrupt` or `unreadable` over the
+  read API (`GET /api/health`), the `holdfast_health_sweep_*` metrics and a notification. It
+  **never moves, renames, deletes or repairs a file**: what to do about one is the operator's call
+  ([docs/design/health-sweep.md](docs/design/health-sweep.md#health-sweep)).
 - **Config-as-code.** YAML, validated, in git - not clickops that vanishes on rebuild.
 - **Open source** (AGPL-3.0).
 
@@ -353,7 +359,7 @@ Every endpoint, what it answers and which of them need a token:
 
 Fail-safes: the server **binds `127.0.0.1` by default**. With `server_read_token` unset -
 the shipped default - that bind is the whole of what protects the read endpoints, so a
-reverse proxy in front of them is the only barrier there is; set it and the four `/api`
+reverse proxy in front of them is the only barrier there is; set it and the five `/api`
 reads require a bearer token of their own, which makes the proxy defence in depth instead.
 It does **not** gate the root path or `/metrics`, neither of which carries a library datum
 (the reverse-proxy posture is in [docs/docker.md](docs/docker.md), and it is worth

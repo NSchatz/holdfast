@@ -63,7 +63,8 @@ var knownKeys = map[string]bool{
 	"max_load": true, "tautulli_url": true, "tautulli_api_key": true,
 	"bitrate_kbps": true, "encode_profiles": true,
 	"scratch_dir": true, "scratch_min_free_gb": true,
-	queueOrderKey:   true,
+	queueOrderKey:          true,
+	healthSweepIntervalKey: true, healthSweepWorkersKey: true,
 	excludePathsKey: true, includePathsKey: true,
 	audioLanguagesKey: true, subtitleLanguagesKey: true,
 	keepCommentaryKey: true, remuxOnlyKey: true, subtitleSidecarsKey: true, cropKey: true, dolbyVisionP7Key: true,
@@ -142,6 +143,10 @@ func defaultLayer() map[string]any {
 		"max_load":          0.0,
 		"tautulli_url":      "",
 		"tautulli_api_key":  "",
+		// The health sweep is OFF unless an interval is written (I5): an existing
+		// configuration schedules no decode it did not schedule before.
+		healthSweepIntervalKey: 0,
+		healthSweepWorkersKey:  1,
 		// Stream selection, every value reproducing what this tool did before the keys
 		// existed: carry every audio and subtitle stream, keep commentary, re-encode the
 		// video. A knob in profileKnobs is seeded from the top-level value of the same
@@ -733,6 +738,15 @@ type Config struct {
 	// startup REFUSAL.
 	TautulliURL    string `yaml:"tautulli_url"`
 	TautulliAPIKey string `yaml:"tautulli_api_key"`
+
+	// --- the library health sweep (`serve` only; docs/design/health-sweep.md) ---
+
+	// HealthSweepIntervalHours, when > 0, makes `serve` fully decode every source the
+	// enumeration offers every N hours, measured from the end of the previous sweep, and
+	// report what it found. 0 (default) = no sweep. It never changes a file.
+	HealthSweepIntervalHours int `yaml:"health_sweep_interval_hours"`
+	// HealthSweepWorkers is how many sweep decodes run at once (default 1).
+	HealthSweepWorkers int `yaml:"health_sweep_workers"`
 }
 
 // SecretBearingKeys is the closed list of configuration keys whose value is a credential,
@@ -1632,6 +1646,9 @@ func (c *Config) Validate() error {
 	}
 	if c.ScanIntervalSec < 0 {
 		return fmt.Errorf("scan_interval_sec %d must be >= 0 (0 = scan once on startup + on demand)", c.ScanIntervalSec)
+	}
+	if err := c.validateHealthSweep(); err != nil {
+		return err
 	}
 
 	// A server_read_token that is non-empty but all whitespace is refused BY NAME, ahead

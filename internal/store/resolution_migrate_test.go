@@ -143,11 +143,13 @@ func TestResolution_AMigrationThatCannotCompleteRefusesToOpenAndMovesNothing(t *
 
 	// Break the step in the only way that is faithful to a half-applied one: the shape it
 	// means to add is already partly there, while the stamp still says it never ran.
-	// It names the column the NEWEST step adds, for the reason every wind-back fixture in
+	// It names a table the NEWEST step creates, for the reason every wind-back fixture in
 	// this package tracks the end of the migrations slice: a step appended after this line
-	// moves it, and pre-adding a column an EARLIER step already created would break the
-	// fixture rather than the migration under test.
-	execRaw(t, dbPath, `ALTER TABLE jobs ADD COLUMN crop TEXT`)
+	// moves it, and pre-creating a shape an EARLIER step already created would break the
+	// fixture rather than the migration under test. The step's second table is already
+	// there WITHOUT the column its index needs, so the step's create of it is a no-op and
+	// its index cannot be built.
+	execRaw(t, dbPath, `CREATE TABLE health_checks (sweep_id INTEGER NOT NULL, path TEXT NOT NULL)`)
 
 	st, err := Open(dbPath)
 	if err == nil {
@@ -166,20 +168,23 @@ func TestResolution_AMigrationThatCannotCompleteRefusesToOpenAndMovesNothing(t *
 	}
 	// The other half of "rather than run against a half-migrated database": the columns the
 	// step would have added are not there, so nothing wrote into a shape that half exists.
-	// Every column the newest step adds after the one pre-added above, read off the step's
-	// own SQL so the check follows the end of the migrations slice. A one-column step (v23,
-	// crop) has none, and the stamp and row checks above are then the proof.
+	// Every column the newest step adds, read off the step's own SQL so the check follows
+	// the end of the migrations slice. A step that creates tables (v24, the health sweep)
+	// adds none, and the table checks below are then the proof.
 	added := regexp.MustCompile(`ADD COLUMN (\w+)`).FindAllStringSubmatch(migrations[len(migrations)-1].sql, -1)
 	for i, m := range added {
 		if i > 0 && columnExists(t, dbPath, m[1]) {
 			t.Errorf("the failed step left %s behind: the transaction did not roll back", m[1])
 		}
 	}
-	// The newest step adds a single column, so there is no second column whose absence
-	// would show the step's transaction rolled back; the unmoved stamp and row count above are
-	// that proof. What was already there is still there: the failed step moved nothing.
-	if !columnExists(t, dbPath, "crop") {
-		t.Error("the failed step removed a column it did not create")
+	// The step's FIRST table was created before its index failed, so its absence now is the
+	// proof the step's transaction rolled back. What was already there is still there: the
+	// failed step moved nothing.
+	if rawTableExists(t, dbPath, "health_sweeps") {
+		t.Error("the failed step left health_sweeps behind: the transaction did not roll back")
+	}
+	if !rawTableExists(t, dbPath, "health_checks") {
+		t.Error("the failed step removed a table it did not create")
 	}
 }
 
@@ -248,4 +253,16 @@ func rawVersion(t *testing.T, path string) int {
 		t.Fatalf("read user_version: %v", err)
 	}
 	return v
+}
+
+// rawTableExists reports whether a table of that name exists, through a handle this test
+// opens directly - the store refused to open, so there is no store to ask.
+func rawTableExists(t *testing.T, path, name string) bool {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("raw open %s: %v", path, err)
+	}
+	defer func() { _ = db.Close() }()
+	return hasTable(t, db, name)
 }

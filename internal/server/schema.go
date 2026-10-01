@@ -41,6 +41,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/health"
 	"github.com/NSchatz/holdfast/internal/secret"
 	"github.com/NSchatz/holdfast/internal/version"
 )
@@ -360,6 +361,11 @@ func declaredResponses() (map[string][]Response, error) {
 
 		"GET /api/history": append([]Response{
 			jsonOK(http.StatusOK, historyResponse{}),
+			text(http.StatusInternalServerError),
+		}, readGate...),
+
+		"GET /api/health": append([]Response{
+			jsonOK(http.StatusOK, health.Report{}),
 			text(http.StatusInternalServerError),
 		}, readGate...),
 

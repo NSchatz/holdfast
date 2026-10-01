@@ -630,6 +630,52 @@ ALTER TABLE jobs ADD COLUMN audio_tracks TEXT;
 ALTER TABLE jobs ADD COLUMN crop TEXT;
 `,
 	},
+	{
+		// v24 - the library health sweep (docs/design/health-sweep.md#health-sweep): one row
+		// per sweep, and one row per file a sweep fully decoded, keyed (sweep, path).
+		//
+		// TWO NEW TABLES and no column on jobs, because the lifetimes differ exactly as they
+		// did for the withheld paths: a jobs row is about one encode decision and Claim
+		// rewrites it, while a health check is a REPORT about the bytes at a path and has to
+		// survive whatever the encode pipeline decides about them. Nothing in either table is
+		// read by the encode pipeline, so no guard and no gate can be moved by what is here.
+		//
+		// size and mtime_ns are the fingerprint the check was taken against. A resumed sweep
+		// skips a path already checked in that sweep only while both still match, so a file
+		// replaced after it was checked is decoded again rather than reported from the old
+		// bytes. The three count columns on a sweep are NULL until it finishes: a sweep that
+		// has not finished has not counted, and a zero there would say it found nothing.
+		//
+		// The index serves the one read that is not a point lookup: the files a sweep found
+		// corrupt or unreadable.
+		name: "health sweep",
+		// Two empty tables and one index. A sweep is started by the daemon, never by a
+		// migration, and a fabricated check would report on a file nothing decoded.
+		rows: noRowChange,
+		sql: `
+CREATE TABLE IF NOT EXISTS health_sweeps (
+	id             INTEGER PRIMARY KEY,
+	started_at     INTEGER NOT NULL,
+	finished_at    INTEGER,
+	ok_count       INTEGER,
+	corrupt_count  INTEGER,
+	unreadable_count INTEGER,
+	schema_version INTEGER
+);
+CREATE TABLE IF NOT EXISTS health_checks (
+	sweep_id       INTEGER NOT NULL,
+	path           TEXT NOT NULL,
+	size           INTEGER NOT NULL,
+	mtime_ns       INTEGER NOT NULL,
+	checked_at     INTEGER NOT NULL,
+	result         TEXT NOT NULL,
+	reason         TEXT NOT NULL,
+	schema_version INTEGER,
+	PRIMARY KEY (sweep_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_health_checks_result ON health_checks(sweep_id, result);
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

@@ -65,6 +65,7 @@ reasoning lives in the document, not in this file.
 - **A picture is cropped only where spread samples agree on its bars and the area removed is black on every frame; a Dolby Vision picture only to its RPU's own active area, zeroed and gated** - [`docs/design/crop.md`](docs/design/crop.md#crop).
 - **Dynamic HDR is carried only through libx265, and its output replaces the source only when its DOVI record and every frame's RPU and HDR10+ match its plan** - [`docs/design/dynamic-hdr.md`](docs/design/dynamic-hdr.md#dynamic-hdr).
 - **The queue decides only the order files are offered in: priority, then the declared order, never which files** - [`docs/design/queue-order.md`](docs/design/queue-order.md#queue-order).
+- **The health sweep reads every source and reports; it never moves, renames, deletes or repairs a file** - [`docs/design/health-sweep.md`](docs/design/health-sweep.md#health-sweep).
 
 ## Layout
 
@@ -96,6 +97,7 @@ reasoning lives in the document, not in this file.
 - `internal/dynhdr` - which Dolby Vision and HDR10+ sources are carried, the dovi_tool and hdr10plus_tool
   pre-passes, the Dolby Vision VBV ceiling, and the dynamic-HDR gates' arithmetic.
 - `internal/queuekey` - the `savings_per_hour` ordering key: estimated bytes saved per hour of work.
+- `internal/health` - the report-only health sweep: its schedule, resumable full decode and read-API report.
 - `internal/encoder` - the codec matrix registry.
 - `internal/hwdevice` - the render nodes a hardware encoder can open, and the one VAAPI and QSV
   are each assigned.

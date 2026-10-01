@@ -864,6 +864,34 @@ digest a terminal row records its configuration by. Turning the watch on re-open
 and re-offers nothing - it is a discovery accelerator, and the ledger cannot tell the
 difference between a file the watch found and the same file found by a scan.
 
+## `health_sweep_interval_hours` and `health_sweep_workers` - the library health sweep
+
+<a id="health-sweep"></a>
+
+```yaml
+health_sweep_interval_hours: 0   # the default: no sweep. 168 = a sweep a week
+health_sweep_workers: 1          # decodes at once (1-16; 0 means the default of 1)
+```
+
+Two daemon-wide keys, read by `holdfast serve` only. With `health_sweep_interval_hours` above 0,
+the daemon fully decodes every source the enumeration offers - the set a scan would offer, path
+filters included - every that many hours, measured from the end of the previous sweep, and
+records each file as `ok`, `corrupt` or `unreadable` with the reason. It is **report only**: it
+never moves, renames, deletes, repairs or touches a file, and nothing it records changes what the
+encode pipeline does. The results are served at `GET /api/health`
+([docs/api-reference.md](api-reference.md#health)), counted by the `holdfast_health_sweep_*`
+metrics, and summarised in one notification per sweep that found a problem.
+
+The sweep starts no decode while the daemon is paused or the run window, `max_load` or the
+Tautulli pause says no (a decode already running finishes), runs its decodes at the lowest CPU
+priority, and resumes after a restart without decoding again a file it already checked unless
+the file changed. A decode still adds to the load average and reads every byte of a file, so on a
+host near its `max_load` keep `health_sweep_workers` at 1. Accepted values:
+`health_sweep_interval_hours` 0 to 87660 (ten years), `health_sweep_workers` 0 to 16; anything
+else refuses to start, naming the key. Neither is a library root knob or an encode setting, so
+neither moves a profile digest. The reasoning, and what each result means, is in
+[docs/design/health-sweep.md](design/health-sweep.md#health-sweep).
+
 ## Where the working file lives
 
 `scratch_dir` is a separate question - it moves where the encode WORKS, not what it

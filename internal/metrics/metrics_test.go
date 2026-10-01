@@ -339,6 +339,12 @@ func (s *readSeam) Summary(context.Context) (map[store.Status]int, error) {
 	return map[store.Status]int{store.Encoding: 2}, nil
 }
 
+// LastFinishedHealthSweep answers "no sweep has finished", so the health sweep's collector
+// reads nothing through the nil store this seam embeds.
+func (s *readSeam) LastFinishedHealthSweep(context.Context) (store.HealthSweep, bool, error) {
+	return store.HealthSweep{}, false, nil
+}
+
 func (s *readSeam) HeldByUndoWindow(context.Context) (int64, error) {
 	if s.heldErr != nil {
 		return 0, s.heldErr

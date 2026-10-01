@@ -48,6 +48,7 @@ type Metrics struct {
 	vmaf           prometheus.Histogram
 	vmafMin        prometheus.Histogram
 	vmafChroma     prometheus.Histogram
+	healthChecked  *prometheus.CounterVec // health sweep results, by result
 
 	// guards and gates are the label values each counter above is allowed to carry, built
 	// once from the engine's own vocabularies. A value outside the set is never used as a
@@ -112,8 +113,9 @@ func New(st store.Store, log *slog.Logger) *Metrics {
 			// healthy encode measures around 40 dB and a 15% desaturation falls to ~26.
 			Buckets: []float64{20, 25, 28, 30, 32, 35, 40, 45, 50, 60},
 		}),
-		guards: vocabulary(append(append([]string{}, engine.SkipVocabulary...), GuardUnclassified)),
-		gates:  vocabulary(engine.GateVocabulary),
+		healthChecked: newHealthChecked(),
+		guards:        vocabulary(append(append([]string{}, engine.SkipVocabulary...), GuardUnclassified)),
+		gates:         vocabulary(engine.GateVocabulary),
 	}
 	// Pre-create the outcome series so they read 0 (not absent) before the first event.
 	// The two FILESYSTEM-1 outcomes get their own series rather than being folded into
@@ -145,13 +147,14 @@ func New(st store.Store, log *slog.Logger) *Metrics {
 		m.failuresTotal.WithLabelValues(g)
 	}
 	m.reg.MustRegister(m.filesTotal, m.skipsTotal, m.failuresTotal, m.bytesReclaimed,
-		m.encodeDuration, m.vmaf, m.vmafMin, m.vmafChroma)
+		m.encodeDuration, m.vmaf, m.vmafMin, m.vmafChroma, m.healthChecked)
 	// TWO scrape-time collectors and not one, which is the whole of AC-9's independence:
 	// a collector returns on a store error and emits nothing more, so a pair of gauges
 	// behind one of them would hide each other on any read failure. Registered separately,
 	// the read that failed costs exactly the series it would have filled.
 	m.reg.MustRegister(newQueueCollector(st, log))
 	m.reg.MustRegister(newUndoWindowCollector(st, log))
+	m.reg.MustRegister(newHealthCollector(st, log))
 	m.reg.MustRegister(collectors.NewGoCollector())
 	m.reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	return m
