@@ -54,6 +54,52 @@ var pinArgs = map[string][]string{
 		"-pix_fmt", "p010le", "-fps_mode", "passthrough",
 		"-rc", "cqp", "-qp_i", "22", "-qp_p", "22",
 	},
+
+	// The T27 encoders, pinned from their first build. h264_qsv and h264_vaapi carry no
+	// 10-bit format, so they are pinned at the 8-bit plan (pinPlan).
+	"x264": {
+		"-pix_fmt", "yuv420p10le", "-fps_mode", "passthrough",
+		"-preset", "slow", "-crf", "22",
+	},
+	"h264_nvenc": {
+		"-pix_fmt", "p010le", "-fps_mode", "passthrough",
+		"-rc", "vbr", "-cq", "22", "-b:v", "0", "-preset", "p5",
+	},
+	"h264_qsv": {
+		"-pix_fmt", "nv12", "-fps_mode", "passthrough",
+		"-global_quality", "22",
+	},
+	"h264_vaapi": {
+		"-fps_mode", "passthrough",
+		"-vf", "format=nv12,hwupload", "-qp", "22",
+	},
+	"h264_amf": {
+		"-pix_fmt", "p010le", "-fps_mode", "passthrough",
+		"-rc", "cqp", "-qp_i", "22", "-qp_p", "22",
+	},
+	"av1_qsv": {
+		"-pix_fmt", "p010le", "-fps_mode", "passthrough",
+		"-global_quality", "22",
+	},
+	"av1_vaapi": {
+		"-fps_mode", "passthrough",
+		"-vf", "format=p010le,hwupload", "-rc_mode", "CQP", "-global_quality", "22",
+	},
+	"av1_amf": {
+		"-pix_fmt", "p010le", "-fps_mode", "passthrough",
+		"-rc", "cqp", "-qp_i", "22", "-qp_p", "22",
+	},
+}
+
+// pinPlan is the plan pixel format an encoder is pinned at: yuv420p10le, the one every derived
+// plan of a 4:2:0 source is, except for the encoders that list no 10-bit format, which the
+// derivation would refuse it for and which are pinned at yuv420p.
+func pinPlan(key string) string {
+	switch key {
+	case "h264_qsv", "h264_vaapi":
+		return "yuv420p"
+	}
+	return "yuv420p10le"
 }
 
 // AC-A1: a config file that predates this item - no bitrate_kbps, no
@@ -85,7 +131,7 @@ func TestPreS0079Config_ProducesTheSameArgumentsForEveryEncoderInTheRegistry(t *
 		spec, _ := encoder.Lookup(key)
 		cfg.Encoder = key
 		ts := cfg.TranscodeIn(cfg.TopLevelProfile(), "/srv/media/film.mkv")
-		got := buildArgs(spec, ts, "yuv420p10le", nil, "")
+		got := buildArgs(spec, ts, pinPlan(key), nil, "")
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("encoder %q:\n  got  %v\n  want %v (what the pin produced)", key, got, want)
 		}
@@ -121,7 +167,7 @@ func TestBitrateKbps_TargetsTheBitrateAndPassesNoQualityTarget_ForEveryEncoder(t
 	// Every spelling of a quality target this repository's own arg builder has ever
 	// used. A new encoder family's quality option would need adding here, which is
 	// the point: the list is what "no quality target" MEANS, written down.
-	qualityFlags := []string{"-crf", "-cq", "-global_quality", "-qp", "-qp_i", "-qp_p"}
+	qualityFlags := []string{"-crf", "-cq", "-global_quality", "-qp", "-qp_i", "-qp_p", "-rc_mode"}
 
 	cfg := config.Config{Encoder: "cpu", CRF: 22, Preset: "slow", BitrateKbps: 8000}
 	for _, key := range encoder.Known() {
@@ -129,7 +175,7 @@ func TestBitrateKbps_TargetsTheBitrateAndPassesNoQualityTarget_ForEveryEncoder(t
 			spec, _ := encoder.Lookup(key)
 			cfg.Encoder = key
 			ts := cfg.TranscodeIn(cfg.TopLevelProfile(), "/srv/media/film.mkv")
-			got := buildArgs(spec, ts, "yuv420p10le", nil, "")
+			got := buildArgs(spec, ts, pinPlan(key), nil, "")
 
 			if !hasArgPair(got, "-b:v", "8000k") {
 				t.Errorf("%s: no -b:v 8000k in %v", key, got)

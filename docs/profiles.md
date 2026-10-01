@@ -151,6 +151,13 @@ quality:                   # optional, top-level only, keyed by registry key
   qsv: 24                  # -global_quality (ICQ), 1-51
   vaapi: 24                # -qp (constant QP), 1-52
   amf: 24                  # -qp_i and -qp_p under -rc cqp, 0-51
+  h264_nvenc: 24           # -cq, 1-51
+  h264_qsv: 24             # -global_quality (ICQ), 1-51
+  h264_vaapi: 24           # -qp (constant QP), 1-51
+  h264_amf: 24             # -qp_i and -qp_p under -rc cqp, 0-51
+  av1_qsv: 24              # -global_quality (ICQ), 1-51
+  av1_vaapi: 100           # -global_quality under -rc_mode CQP (AV1 quantiser index), 1-255
+  av1_amf: 100             # -qp_i and -qp_p under -rc cqp (AV1 q_index), 0-255
 ```
 
 `crf` is a libx265 and libsvtav1 rate factor. Before this key, the same number was also
@@ -185,6 +192,35 @@ not recommendations.
   `HOLDFAST_QUALITY_NVENC=24`, `HOLDFAST_QUALITY_AV1_NVENC=30`. It is validated exactly as the
   file's value is.
 
+## H.264 and AV1 on every vendor - the T27 encoders
+
+```yaml
+encoder: x264              # libx264 (alias `libx264`) -> H.264, in software
+# encoder: h264_nvenc      # H.264 on NVIDIA; h264_qsv, h264_vaapi, h264_amf likewise
+# encoder: av1_qsv         # AV1 on Intel; av1_vaapi (Intel or AMD), av1_amf likewise
+```
+
+Each writes its codec through the same vendor path as its HEVC sibling: the same render node,
+the same device options, the same start-time probe at 8 and at 10 bits, the same `hw_fallback`
+(an H.264 hardware encoder falls back to `x264`, an AV1 one to `svtav1`), and in the container
+image `h264_amf` and `av1_amf` are refused exactly as `amf` is, naming `h264_vaapi` and
+`av1_vaapi`. Every output is held to the same gates as `cpu`'s; nothing is special-cased.
+
+- **The codec families.** A source already in a family ranked above the target is skipped as
+  `better-codec-family` rather than re-encoded down: H.264 < HEVC < AV1, so an H.264 target
+  leaves HEVC and AV1 sources alone and an HEVC target leaves AV1 sources alone. A source in the
+  target's own codec is skipped as `already-at-target-codec`, as before. A codec holdfast does
+  not write (MPEG-2, VC-1, MPEG-4 Part 2, VP9, FFV1 and the rest) has no rank and is decided as
+  it always was.
+- **8-bit only on two of them.** `h264_qsv` lists no 10-bit format, and `h264_vaapi` uploads
+  only `nv12` (ASSUMED: no VAAPI driver is documented taking a 10-bit H.264 surface), while the
+  derived `pixel_format` of every source is at least 10-bit. With `pixel_format: auto` they skip
+  every file as `exotic-pixel-format`; set `pixel_format: yuv420p` for them. Whether
+  `h264_nvenc` and `h264_amf` encode 10-bit is the device's to say: the start-time probe finds
+  out, and a 10-bit plan on a device that failed it is skipped as `hardware-unavailable`.
+- **`encoder: auto` is unchanged**: it chooses among the HEVC hardware encoders only, so a
+  file's target codec never depends on the host.
+
 ## `encoder: auto` and `hw_fallback` - hardware where it works
 
 `encoder: auto` (at the top level, on a library root, or in an encode profile) chooses per job
@@ -193,7 +229,8 @@ this host's start-time probe for the job's pixel format; every choice writes HEV
 `hw_fallback` decides what a job does where its hardware encoder (the one named, or every one
 `auto` may choose) is missing or fails: `skip` (the default) encodes it with nothing else and
 leaves the source as it is, and `software` encodes it with the software encoder of the same
-codec (`cpu`, or `svtav1` for `av1_nvenc`). It is a library root knob with a top-level default;
+codec (`cpu` for the HEVC ones, `svtav1` for the AV1 ones, `x264` for the H.264 ones). It is a
+library root knob with a top-level default;
 an encode profile carries none, since the root a file lives under decides it. Under `skip`, a
 named hardware encoder that does not work refuses the start, as it always did, and a job
 skipped for want of hardware records `hardware-unavailable` and is re-decided on every pass.

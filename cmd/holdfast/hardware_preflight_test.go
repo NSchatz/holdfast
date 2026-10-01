@@ -24,7 +24,7 @@ func hardwareRefusingFFmpeg(t *testing.T) (stub, log string) {
 	dir := t.TempDir()
 	stub, log = filepath.Join(dir, "ffmpeg"), filepath.Join(dir, "hardware.log")
 	script := "#!/bin/sh\nfor a in \"$@\"; do\n  case \"$a\" in\n" +
-		"    hevc_nvenc|av1_nvenc|hevc_qsv|hevc_vaapi|hevc_amf) printf '%s\\n' \"$*\" >> " + log + "; exit 1 ;;\n" +
+		"    *_nvenc|*_qsv|*_vaapi|*_amf) printf '%s\\n' \"$*\" >> " + log + "; exit 1 ;;\n" +
 		"  esac\ndone\nexec " + real + " \"$@\"\n"
 	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -267,8 +267,8 @@ func vaapiStandInFFmpeg(t *testing.T) string {
 hw=
 for a in "$@"; do
   case "$a" in
-    hevc_nvenc|av1_nvenc|hevc_qsv|hevc_amf) exit 1 ;;
     hevc_vaapi) hw=1 ;;
+    *_nvenc|*_qsv|*_vaapi|*_amf) exit 1 ;;
   esac
 done
 [ -z "$hw" ] && exec ` + real + ` "$@"

@@ -298,17 +298,28 @@ func TestS0161_AC4_NoOtherEncodersArgvMovesWithTheFigure(t *testing.T) {
 	mkH264(t, ffmpeg, src, "3M")
 	p := encoder.X265ParallelismFor(24)
 	checked := 0
+	// A hardware encoder's argv is taken at the observer from a stand-in that runs nothing:
+	// this host may have a device the real binary would open, and no test encodes on one
+	// (brief T9).
+	stub := goldenStub(t)
 	for _, key := range encoder.Known() {
 		if key == "cpu" {
 			continue
+		}
+		bin := ffmpeg
+		if spec, _ := encoder.Lookup(key); spec.Hardware {
+			bin = stub
 		}
 		for _, kbps := range []int{0, 1500} {
 			t.Run(fmt.Sprintf("%s at %d kbps", key, kbps), func(t *testing.T) {
 				cfg := baseCfg(d)
 				cfg.Encoder = key
 				cfg.BitrateKbps = kbps
+				if spec, _ := encoder.Lookup(key); !canCarry(spec, "yuv420p10le") {
+					cfg.PixelFormat = "yuv420p" // an encoder with no 10-bit format is handed an 8-bit plan
+				}
 				out := filepath.Join(d, fmt.Sprintf("%s-%d.mkv", key, kbps))
-				bare := FFmpegEncoder{FFmpeg: ffmpeg, Cfg: cfg, Probe: probe.New(ffmpeg, ffprobe)}
+				bare := FFmpegEncoder{FFmpeg: bin, Cfg: cfg, Probe: probe.New(ffmpeg, ffprobe)}
 				sized := bare
 				sized.X265 = p
 				without, _ := encodeArgv(t, bare, src, out)
@@ -407,4 +418,10 @@ func TestS0161_AC6_ABrokenInterfaceDerivesNoFigureAndNamesTheFile(t *testing.T) 
 			}
 		})
 	}
+}
+
+// canCarry reports whether spec lists a format carrying the plan pixel format pixFmt.
+func canCarry(spec encoder.Spec, pixFmt string) bool {
+	_, ok := spec.InputFormat(pixFmt)
+	return ok
 }

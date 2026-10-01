@@ -138,7 +138,7 @@ defaults to `skip`.**
   is. A hardware encode that fails at run time fails the job, as it always has: the source is
   untouched and `max_failures` decides the retries.
 - `software`: the software encoder of the same codec runs instead - `cpu` (libx265) for the HEVC
-  encoders and `auto`, `svtav1` for `av1_nvenc`. An unusable hardware encoder is stated at start
+  encoders and `auto`, `svtav1` for the AV1 ones, `x264` (libx264) for the H.264 ones. An unusable hardware encoder is stated at start
   and the run proceeds; a hardware encode that fails at run time is encoded once more in
   software, from a plan derived for that encoder, before any gate runs; the row records the
   software encoder.

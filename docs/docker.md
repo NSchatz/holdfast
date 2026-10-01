@@ -434,7 +434,7 @@ Only needed if `config.yaml` sets a hardware `encoder:`. Hardware encoders are a
 which stays the archival default. The output is held to the **identical** no-loss gate either
 way, so a bad hardware encode is rejected rather than shipped.
 
-**NVIDIA (`nvenc`, `av1_nvenc`).** Needs the [NVIDIA Container
+**NVIDIA (`nvenc`, `av1_nvenc`, `h264_nvenc`).** Needs the [NVIDIA Container
 Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/) on the host:
 
 ```yaml
@@ -473,7 +473,8 @@ Specialized Configurations for Docker](https://docs.nvidia.com/datacenter/cloud-
 (which variables Docker sets on the hook path, and the CDI driver it tries first).
 
 **Intel (`vaapi`, and `qsv` on Tiger Lake and newer) and AMD (`vaapi`) - the runtime is in the
-amd64 image.** ffmpeg is built with `--enable-vaapi` and `--enable-libvpl`, and each of these needs
+amd64 image.** The same holds for their H.264 and AV1 siblings (`h264_vaapi`, `av1_vaapi`,
+`h264_qsv`, `av1_qsv`), which open the same render node. ffmpeg is built with `--enable-vaapi` and `--enable-libvpl`, and each of these needs
 a vendor userspace library inside the container, which passing `/dev/dri` does not supply: that is
 only the kernel device node. The amd64 image carries that userspace, copied out of pinned Debian 13
 (trixie) packages:
@@ -513,7 +514,8 @@ install and use it and no right to redistribute it, so a published image cannot 
 hardware in this image use `encoder: vaapi`, which Mesa's `radeonsi` driver serves and which is
 AMD's own advice for Linux ("AMF users are advised to transition to VA-API / Mesa Multimedia",
 [AMD's Radeon Software for Linux 25.10.1 release notes](https://www.amd.com/en/resources/support-articles/release-notes/RN-AMDGPU-UNIFIED-LINUX-25-10-1.html),
-read 2026-09-29). `amf` keeps working in a host install that has AMD's runtime.
+read 2026-09-29). `amf` keeps working in a host install that has AMD's runtime. `h264_amf` and
+`av1_amf` are refused and kept on exactly the same terms, naming `h264_vaapi` and `av1_vaapi`.
 
 **arm64** carries no hardware runtime: its pinned ffmpeg is built without VAAPI and without libvpl,
 and Debian builds the QSV runtime for amd64 only.
@@ -539,7 +541,7 @@ this host, `holdfast` refuses to start and exits non-zero, naming the encoder, t
 the reason and the lever - as it always has, because the default `hw_fallback: skip` never
 substitutes another encoder. Set `hw_fallback: software` (at the top level or on one library
 root) to have such a root's jobs encoded by the software encoder of the same codec instead (`cpu`,
-or `svtav1` for `av1_nvenc`), at start and whenever a hardware encode fails; the row records the
+`svtav1` for the AV1 encoders, `x264` for the H.264 ones), at start and whenever a hardware encode fails; the row records the
 encoder that ran. `encoder: auto` picks, per job, the first of `nvenc`, `qsv`, `vaapi`, `amf`
 whose probe passed for that job's pixel format, and always writes HEVC; with no usable hardware
 it refuses to start under `skip` and uses `cpu` under `software`. A job no probed encoder can

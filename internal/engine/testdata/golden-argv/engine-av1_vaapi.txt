@@ -1,0 +1,100 @@
+== base
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=p010le,hwupload -rc_mode CQP -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== progress
+-hide_banner -nostdin -loglevel error -y -progress pipe:3 -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=p010le,hwupload -rc_mode CQP -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== bitrate-1500k
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=p010le,hwupload -b:v 1500k -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== bitrate-8000k/hdr10
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/hdr10.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -vf setparams=color_primaries=bt2020:color_trc=smpte2084,format=p010le,hwupload -b:v 8000k -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/hdr10.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== x265-3cpu/hdr10
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/hdr10.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -vf setparams=color_primaries=bt2020:color_trc=smpte2084,format=p010le,hwupload -rc_mode CQP -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/hdr10.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== container-mkv-to-mp4
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=p010le,hwupload -rc_mode CQP -global_quality 22 -f mp4 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mp4.holdfast-part
+row: failed temp missing or empty
+== source-422/every-encoder
+(no invocation)
+row: skipped exotic-pixel-format
+== source-444/every-encoder
+(no invocation)
+row: skipped exotic-pixel-format
+== source-12bit/every-encoder
+(no invocation)
+row: skipped exotic-pixel-format
+== pixel-format-yuv422p10le/every-encoder
+(no invocation)
+row: skipped exotic-pixel-format
+== pixel-format-yuv420p/every-encoder
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -rc_mode CQP -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-422/remux-only
+-hide_banner -nostdin -loglevel error -y -i <library>/422.mkv -map 0 -map -0:d? -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/422.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== quality-set
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=p010le,hwupload -rc_mode CQP -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== quality-set/encode-profile-crf-30
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=p010le,hwupload -rc_mode CQP -global_quality 30 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== quality-set/encode-profile-to-nvenc
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v hevc_nvenc -pix_fmt p010le -color_range tv -fps_mode passthrough -rc vbr -cq 24 -b:v 0 -preset p5 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== crf-0
+(no invocation)
+row: failed quality.av1_vaapi resolves to 0 (inherited from crf), outside av1_vaapi's scale (-global_quality 1-255): set quality.av1_vaapi to a value on that scale
+== deinterlace-yadif
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/interlaced.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf yadif=mode=send_frame:parity=auto:deint=all,format=p010le,hwupload -rc_mode CQP -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/interlaced.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== max-height-240
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/tall.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf scale=320:240:flags=lanczos,format=p010le,hwupload -rc_mode CQP -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/tall.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== max-height-240/deinterlace-yadif
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/tall-interlaced.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf yadif=mode=send_frame:parity=auto:deint=all,scale=320:240:flags=lanczos,format=p010le,hwupload -rc_mode CQP -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/tall-interlaced.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== streams/audio-eng
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/streams.mkv -map 0:0 -map 0:1 -map 0:3 -map 0:4 -map 0:5 -map 0:6 -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=p010le,hwupload -rc_mode CQP -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/streams.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== remux-only
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== cover-mp4
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/cover.mp4 -map 0 -map -0:d? -c copy -c:v av1_vaapi -c:v:1 copy -fps_mode passthrough -vf format=p010le,hwupload -rc_mode CQP -global_quality 22 -f mp4 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/cover.__transcoding__.mp4.holdfast-part
+row: failed temp missing or empty
+== pictures-font/audio-eng-fre
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures-font.mkv -map 0:10 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./pictures-font.__transcoding__.mkv.holdfast-part.picture0
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures-font.mkv -map 0:11 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./pictures-font.__transcoding__.mkv.holdfast-part.picture1
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/pictures-font.mkv -map 0:0 -map 0:1 -map 0:2 -map 0:4 -map 0:5 -map 0:6 -map 0:7 -map 0:8 -map 0:9 -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=p010le,hwupload -rc_mode CQP -global_quality 22 -f matroska -attach ./pictures-font.__transcoding__.mkv.holdfast-part.picture0 -metadata:s:t:1 mimetype=image/jpeg -metadata:s:t:1 filename=cover.jpg -attach ./pictures-font.__transcoding__.mkv.holdfast-part.picture1 -metadata:s:t:2 mimetype=image/jpeg -metadata:s:t:2 filename=cover_land.jpg -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/pictures-font.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== scratch/pictures
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures.mkv -map 0:9 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./pictures.<source-tag>.__transcoding__.mkv.picture0
+-hide_banner -nostdin -loglevel error -y -i <library>/pictures.mkv -map 0:10 -c copy -frames:v 1 -f image2 -update 1 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- ./pictures.<source-tag>.__transcoding__.mkv.picture1
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/pictures.mkv -map 0 -map -0:d? -map -0:9 -map -0:10 -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=p010le,hwupload -rc_mode CQP -global_quality 22 -f matroska -attach ./pictures.<source-tag>.__transcoding__.mkv.picture0 -metadata:s:t:0 mimetype=image/jpeg -metadata:s:t:0 filename=cover.jpg -attach ./pictures.<source-tag>.__transcoding__.mkv.picture1 -metadata:s:t:1 mimetype=image/jpeg -metadata:s:t:1 filename=cover_land.jpg -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <scratch>/pictures.<source-tag>.__transcoding__.mkv
+row: failed temp missing or empty
+== encode-profile/crf-30
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=p010le,hwupload -rc_mode CQP -global_quality 30 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== rules/band-crf-31
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=p010le,hwupload -rc_mode CQP -global_quality 31 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-mpeg4/every-encoder
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=p010le,hwupload -rc_mode CQP -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-mpeg4/pixel-format-yuv420p/every-encoder
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -rc_mode CQP -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-hevc/every-encoder
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/hevc.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=p010le,hwupload -rc_mode CQP -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/hevc.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-av1/every-encoder
+(no invocation)
+row: skipped already-at-target-codec
+== source-ffv1-pq/every-encoder
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/ffv1-pq.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -vf setparams=color_primaries=bt2020:color_trc=smpte2084,format=p010le,hwupload -rc_mode CQP -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/ffv1-pq.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== source-mpeg4/quality-set-t27
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -rc_mode CQP -global_quality 120 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty

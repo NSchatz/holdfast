@@ -354,6 +354,24 @@ func goldenFixtures(t *testing.T, ffmpeg, ffprobe, dir string) map[string]string
 	mkSourceWithStreams(t, ffmpeg, filepath.Join(dir, "jpn-only.mkv"), audioStream("jpn"), subtitleStream("jpn"))
 	mkMP4WithSubs(t, ffmpeg, filepath.Join(dir, "subs.mp4"), "8M")
 
+	// Sources in every codec family and outside them, for the codec-family guard: an H.264
+	// target skips an HEVC or AV1 source, an HEVC target an AV1 one, and a codec this build
+	// does not write (MPEG-4 Part 2, FFV1) is re-encoded by every encoder. The 10-bit source
+	// outside the families is FFV1 tagged bt2020/PQ on its frames (setparams, since -color_*
+	// does not reach them), so an H.264 target has a 10-bit PQ source it does not skip. It
+	// carries no mastering-display block: a Matroska file holding one at stream level, like an
+	// MPEG-2 stream's CPB properties, makes ffprobe print a trailing empty field the probe's
+	// shape parser refuses (skipped multi-video-stream; a finding of goal 6, not changed here).
+	lavfi := []string{"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=duration=1:size=320x240:rate=10"}
+	ff(t, ffmpeg, append(lavfi, "-c:v", "mpeg4", "-q:v", "2", "-pix_fmt", "yuv420p",
+		"--", filepath.Join(dir, "mpeg4.mkv"))...)
+	ff(t, ffmpeg, append(lavfi, "-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-x265-params", "log-level=error",
+		"--", filepath.Join(dir, "hevc.mkv"))...)
+	ff(t, ffmpeg, append(lavfi, "-c:v", "libsvtav1", "-pix_fmt", "yuv420p10le",
+		"--", filepath.Join(dir, "av1.mkv"))...)
+	ff(t, ffmpeg, append(lavfi, "-vf", "setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc:range=tv",
+		"-c:v", "ffv1", "-pix_fmt", "yuv420p10le", "--", filepath.Join(dir, "ffv1-pq.mkv"))...)
+
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read the fixture directory: %v", err)
@@ -501,7 +519,9 @@ func encoderArgvCases() []encoderArgvCase {
 	// that is off NVENC's and VAAPI's scales inherited by them, a target bitrate (which
 	// passes no quality at all), and the encoder named by its ffmpeg alias.
 	qualityAll := func(c *config.Config) {
-		c.Quality = map[string]int{"nvenc": 24, "av1_nvenc": 40, "qsv": 25, "vaapi": 26, "amf": 27}
+		c.Quality = map[string]int{"nvenc": 24, "av1_nvenc": 40, "qsv": 25, "vaapi": 26, "amf": 27,
+			"h264_nvenc": 28, "h264_qsv": 29, "h264_vaapi": 31, "h264_amf": 32,
+			"av1_qsv": 33, "av1_vaapi": 120, "av1_amf": 130}
 	}
 	qualityEdge := func(pick func(encoder.QualityScale) int) func(*config.Config) {
 		return func(c *config.Config) {
@@ -927,6 +947,21 @@ func engineArgvCases() []engineArgvCase {
 	add(engineArgvCase{name: "encode-profile/unmatched", top: "encode_profiles:\n  - name: tv\n    match: \"*.mp4\"\n    crf: 40"})
 	add(engineArgvCase{name: "rules/band-crf-31", root: "crf: 20\nrules:\n  - when:\n      max_source_height: 576\n    crf: 31", core: true})
 	add(engineArgvCase{name: "rules/unmatched-band", root: "crf: 29\nrules:\n  - when:\n      min_source_height: 2160\n    crf: 33"})
+
+	// The codec families, for every encoder: a source in each family and outside them, so
+	// each file shows which sources its encoder re-encodes and which it leaves as already at
+	// its target or already in a better family. The 8-bit plan of the MPEG-4 source is the one
+	// every H.264 hardware encoder carries; the FFV1 PQ source is the 10-bit PQ source an H.264
+	// target does not skip. Then the T27 encoders' own quality keys, set.
+	add(engineArgvCase{name: "source-mpeg4/every-encoder", source: "mpeg4.mkv", core: true})
+	add(engineArgvCase{name: "source-mpeg4/pixel-format-yuv420p/every-encoder", source: "mpeg4.mkv",
+		root: "pixel_format: yuv420p", core: true})
+	add(engineArgvCase{name: "source-hevc/every-encoder", source: "hevc.mkv", core: true})
+	add(engineArgvCase{name: "source-av1/every-encoder", source: "av1.mkv", core: true})
+	add(engineArgvCase{name: "source-ffv1-pq/every-encoder", source: "ffv1-pq.mkv", core: true})
+	add(engineArgvCase{name: "source-mpeg4/quality-set-t27", source: "mpeg4.mkv", root: "pixel_format: yuv420p",
+		top: "quality:\n  h264_nvenc: 28\n  h264_qsv: 29\n  h264_vaapi: 31\n  h264_amf: 32\n" +
+			"  av1_qsv: 33\n  av1_vaapi: 120\n  av1_amf: 130", core: true})
 	return cs
 }
 

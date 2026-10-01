@@ -37,8 +37,16 @@ const (
 		"yuv444p10msble yuv444p12msble yuv444p16le p410le p412le p416le bgr0 bgra rgb0 rgba " +
 		"x2rgb10le x2bgr10le gbrp gbrp10msble gbrp16le cuda cuarray"
 	pixFmtsQSV   = "nv12 p010le p012le yuyv422 y210le qsv bgra x2rgb10le vuyx xv30le"
-	pixFmtsVAAPI = "vaapi"
-	pixFmtsAMF   = "nv12 yuv420p p010le amf bgr0 rgb0 bgra argb rgba x2bgr10le rgbaf16le"
+	pixFmtsVAAPI = "vaapi" // hevc_vaapi, h264_vaapi and av1_vaapi print the same list
+	// hevc_amf, h264_amf and av1_amf print the same list.
+	pixFmtsAMF = "nv12 yuv420p p010le amf bgr0 rgb0 bgra argb rgba x2bgr10le rgbaf16le"
+
+	// The T27 encoders' lines, read the same way on 2026-09-30. libx264 is the build's
+	// 8- and 10-bit library (no 12-bit format); h264_qsv lists no 10-bit format.
+	pixFmtsLibx264 = "yuv420p yuvj420p yuv422p yuvj422p yuv444p yuvj444p nv12 nv16 nv21 " +
+		"yuv420p10le yuv422p10le yuv444p10le nv20le gray gray10le"
+	pixFmtsH264QSV = "nv12 qsv"
+	pixFmtsAV1QSV  = "nv12 p010le qsv"
 )
 
 // uploadFormatsVAAPI are the software formats a VAAPI encode uploads. hevc_vaapi lists only
@@ -55,6 +63,15 @@ const (
 // layout nobody has seen it take. A hardware report (NEEDS-OWNER, brief T43) confirms or
 // widens it.
 const uploadFormatsVAAPI = "nv12 p010le"
+
+// uploadFormatsH264VAAPI is h264_vaapi's upload: nv12 only. The encoder's profile table does
+// name High 10 (libavcodec/vaapi_encode_h264.c:950 at 5d4d3bdc61, read 2026-09-30), but the
+// wiki's H.264 encode examples upload nv12 and nothing documents a VAAPI driver taking a 10-bit
+// H.264 surface, so on the same terms as above a 10-bit H.264 plan is skipped on VAAPI rather
+// than handed to a driver nobody has seen take it. ASSUMED until a hardware report (brief T43)
+// says otherwise. av1_vaapi uploads what hevc_vaapi does: its profile table carries Main at 8
+// and at 10 bits (vaapi_encode_av1.c:842-844), so the surface's depth selects the profile.
+const uploadFormatsH264VAAPI = "nv12"
 
 // semiPlanar are the semi-planar spellings of each planar chroma and depth, little-endian:
 // the layout hardware encoders list in place of the planar one. Index: chroma, then depth.

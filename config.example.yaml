@@ -252,6 +252,18 @@ dry_run: false
 #                         #                                   AMD's runtime; refused in
 #                         #                                   the container image - use
 #                         #                                   vaapi on AMD there)
+#                         #   x264       libx264    -> h264  (CPU, no device needed)
+#                         #   h264_nvenc, h264_qsv, h264_vaapi, h264_amf -> h264
+#                         #   av1_qsv, av1_vaapi, av1_amf               -> av1
+#                         #              each on its HEVC sibling's device and
+#                         #              runtime (h264_amf and av1_amf refused in
+#                         #              the image like amf). A source already in
+#                         #              a better codec family than the target
+#                         #              (H.264 < HEVC < AV1) is skipped as
+#                         #              better-codec-family, never re-encoded
+#                         #              down. h264_qsv and h264_vaapi carry 8-bit
+#                         #              only: pair them with pixel_format: yuv420p
+#                         #              (the derived default is 10-bit).
 #                         # The raw ffmpeg -c:v codec name (e.g. libsvtav1) also
 #                         # works as an alias for its short key.
 #                         #   auto       the first of nvenc, qsv, vaapi, amf that
@@ -280,7 +292,8 @@ dry_run: false
 #                         # source stays as it is, and a named hardware encoder
 #                         # that does not work refuses the start. software: the
 #                         # software encoder of the same codec runs instead (cpu;
-#                         # svtav1 for av1_nvenc). A library root may override it.
+#                         # svtav1 for the AV1 ones, x264 for the H.264 ones). A
+#                         # library root may override it.
 #                         # See docs/design/hardware.md#fallback.
 # crf: 22                # quality knob (lower = bigger/better): libx265/libsvtav1
 #                         # constant-rate-factor, 0-51. A hardware encoder with no
@@ -293,8 +306,16 @@ dry_run: false
 #   qsv: 24              #   -global_quality (ICQ), 1-51
 #   vaapi: 24            #   -qp (constant QP), 1-52 (0 is VAAPI's "unset", refused)
 #   amf: 24              #   -qp_i and -qp_p under -rc cqp, 0-51
-#                         # cpu and svtav1 are set by crf, and quality.cpu,
-#                         # quality.svtav1 or any other key is refused, as is a value
+#   h264_nvenc: 24       #   -cq, 1-51
+#   h264_qsv: 24         #   -global_quality (ICQ), 1-51
+#   h264_vaapi: 24       #   -qp (constant QP), 1-51
+#   h264_amf: 24         #   -qp_i and -qp_p under -rc cqp, 0-51
+#   av1_qsv: 24          #   -global_quality (ICQ), 1-51
+#   av1_vaapi: 100       #   -global_quality under -rc_mode CQP: the AV1 quantiser
+#                         #   index, 1-255
+#   av1_amf: 100         #   -qp_i and -qp_p under -rc cqp (AV1 q_index), 0-255
+#                         # cpu, svtav1 and x264 are set by crf, and quality.cpu,
+#                         # quality.svtav1, quality.x264 or any other key is refused, as is a value
 #                         # off its encoder's scale. An inherited crf off a scale
 #                         # (crf 0 on nvenc or vaapi) fails that job naming
 #                         # quality.<key>. The numbers above are placeholders, not
