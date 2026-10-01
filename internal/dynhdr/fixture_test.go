@@ -126,12 +126,12 @@ func asProfile7(t *testing.T, path string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p81 := []byte{1, 0, 8<<1 | 0, 1<<3 | 1<<2 | 0<<1 | 1, 1 << 4}
+	p81 := []byte{1, 0, 8 << 1, 1<<3 | 1<<2 | 1, 1 << 4}
 	if bytes.Count(data, p81) != 1 {
 		t.Fatalf("the source carries %d profile 8.1 records, want 1", bytes.Count(data, p81))
 	}
 	i := bytes.Index(data, p81)
-	copy(data[i:], []byte{1, 0, 7<<1 | 0, 1<<3 | 1<<2 | 1<<1 | 1, 6 << 4})
+	copy(data[i:], []byte{1, 0, 7 << 1, 1<<3 | 1<<2 | 1<<1 | 1, 6 << 4})
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
