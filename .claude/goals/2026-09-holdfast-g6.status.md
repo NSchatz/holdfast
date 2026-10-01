@@ -87,10 +87,10 @@ summed per directory):
 
 | # | Item | State |
 |---|---|---|
-| 4.1 | `libx264`, `h264_nvenc`, `h264_qsv`, `h264_vaapi`, `h264_amf`, `av1_qsv`, `av1_vaapi`, `av1_amf` in the registry with golden argv and quality scales | TODO |
-| 4.2 | Codec-family skip rules | TODO |
-| 4.3 | `holdfast validate` accepts a config naming each | TODO |
-| 4.4 | `NOTICE` names libx264 (GPL-2.0-or-later) | TODO |
+| 4.1 | `libx264`, `h264_nvenc`, `h264_qsv`, `h264_vaapi`, `h264_amf`, `av1_qsv`, `av1_vaapi`, `av1_amf` in the registry with golden argv and quality scales | DONE (PR #132, `0d8fce0`): keys `x264` (alias `libx264`) and the seven codec names; `Spec.API`; scales from the pinned binary and source (`TestQualityScales_*`, `TestPixelFormats_MatchThePinnedBinary`); golden files `encoder-<key>.txt`/`engine-<key>.txt` for each, every existing file byte-identical but appended blocks |
+| 4.2 | Codec-family skip rules | DONE (PR #132): `better-codec-family` (H.264 < HEVC < AV1), `TestBetterFamily_RanksH264BelowHEVCBelowAV1`, engine goldens `source-hevc`/`source-av1/every-encoder` |
+| 4.3 | `holdfast validate` accepts a config naming each | DONE (PR #132): `TestValidate_AcceptsAConfigNamingEachT27Encoder`, `TestPreflight_T27HardwareEncodersProbeTheirOwnCommandLine` |
+| 4.4 | `NOTICE` names libx264 (GPL-2.0-or-later) | DONE (PR #132): cited from the x264 source, read 2026-09-30 |
 
 ## Phase 5 - Hardware reports (line E)
 
@@ -154,14 +154,57 @@ summed per directory):
   would need hardware filters that change what the perceptual gate measures. Reasoning:
   `docs/design/hardware.md#decode`.
 
+- 2026-09-30: finding, NOT fixed (outside §10, and fixing it changes existing decisions). A source
+  whose video stream carries stream-level side data - an MPEG-2 stream's CPB properties, or a
+  Matroska file's container-level HDR10 mastering-display block (an FFV1 or VP9 HDR10 file) -
+  makes `ffprobe -select_streams v -show_entries stream=index:stream_disposition=attached_pic
+  -of csv=p=0` print `0,0,` (a trailing empty field for the side-data section), which
+  `probe.VideoStreams` refuses, so every such file is skipped `multi-video-stream`. Fail-safe,
+  but it means no MPEG-2 source is ever encoded; with goal 3's MPEG-TS finding it is the same
+  parser. The goal-6 fixtures use MPEG-4 Part 2 and a PQ FFV1 without a stream-level block
+  instead. Listed for the owner.
+- 2026-09-30: PR #132 (`holdfast-g6/encoders`) opened; goldens regenerated twice (the first set of
+  new fixtures, MPEG-2 and FFV1-HDR10, hit the finding above), every existing golden file
+  byte-identical but for appended blocks and `encoder-none.txt`'s list of known encoders.
+
+- 2026-10-01: PR #132 (encoders) merged as `0d8fce0`: gate round 1 red on two stray-temp tests
+  whose "codec no encoder writes" arm was H.264 (now written by x264 and h264_*; the sweep rightly
+  holds it), fixed by reading MPEG-4 Part 2 with every assertion kept; round 2 exit 0
+  (`internal/engine` 1612.5 s, 60% of `TEST_TIMEOUT`); mutation-diff 100% (18 killed, 0 lived);
+  CI green.
+- 2026-10-01: the stream-side-data finding above is FIXED after all, in PR #133. The hw-report
+  agent's HDR10 clip (FFV1 carrying the mastering-display block in its Matroska Colour element,
+  as real HDR10 Matroska files do) hit it, and it fixed `probe.VideoStreams` to accept trailing
+  fields only when they are empty (anything non-empty still refuses). Accepted rather than
+  reverted: the skip reason was false (one video stream, reported as several), the fix keeps the
+  fail-safe for every row it cannot read, and without it no HDR10 Matroska source and no MPEG-2
+  source is ever encoded - which also defeats this goal's own report clip and the H.264 targets'
+  natural sources. It changes decisions only for files not yet decided: a terminal
+  `multi-video-stream` row records no configuration input, so it stays skipped until the owner
+  requeues it (`holdfast requeue --guard multi-video-stream`, CLI-only). Goal 3's MPEG-TS
+  program-section case is a different shape and is unchanged. Listed in the GOAL REPORT.
+
 ## NEEDS-OWNER (this goal)
 
 ## Proposals awaiting the owner
 
+- MPEG-TS sources are still skipped `multi-video-stream` (goal 3's finding: a program section
+  precedes the stream in ffprobe's csv output). Reading the stream list as JSON would fix it; it
+  changes existing decisions, so it is not done here. Files a past run skipped
+  `multi-video-stream` for the trailing-field bug that PR #133 fixed stay skipped until requeued
+  (`holdfast requeue --guard multi-video-stream`).
+- The codec-family guard now skips an AV1 source under an HEVC target (it used to be re-encoded).
+  If the owner wants AV1 sources re-encoded to HEVC, the guard's rank table is the one place to
+  change (`internal/encoder.BetterFamily`).
+
 ## Resume here
 
-Phase 1 done. Branches: `holdfast-g6/encoders` (worktree `/cache/wt/holdfast/holdfast-g6-encoders`,
-code committed, golden argv to regenerate and diff), `holdfast-g6/hw-decode` (worktree
-`/cache/wt/holdfast/holdfast-g6-hw-decode`, cut from the encoders branch, code committed, goldens
-after the encoders branch's), `holdfast-g6/hw-report` (a build agent). Gates run one at a time under
+Phase 4 done (#132 merged). PR #133 (`holdfast-g6/hw-report`, worktree
+`/cache/wt/holdfast/holdfast-g6-hw-report`, head `92c3dd2` = branch merged up to `0d8fce0`) passed
+its gate once before #132 landed and has CI green; its re-gate after the merge-up was cut off twice
+by container restarts (2026-10-01) and is re-run. Then `holdfast-g6/hw-decode` (worktree
+`/cache/wt/holdfast/holdfast-g6-hw-decode`, head `4bf280b`, not yet pushed; it already merges the
+hw-report branch; goldens regenerated, `TestHWDecode_*` green under the lock) merges `main`, runs
+its new tests under the lock, gets a PR, gate and CI. Then the five `NEEDS-OWNER.md` rows, gate
+integrity, the adversarial review. Gates run one at a time under
 `/cache/locks/holdfast-heavy.lock` with `/cache/tmp/holdfast-g6/gate.sh <dir> <log>`.
