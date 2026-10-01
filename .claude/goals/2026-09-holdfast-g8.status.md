@@ -76,11 +76,11 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g8-ba
 
 | # | Item | State |
 |---|---|---|
-| 5.1 | Opt-in consensus crop (fractional limit, spread samples, invalid results discarded, disagreement refused) | TODO |
-| 5.2 | Blackness gate over the removed area of the source; VMAF against the identically cropped source; even 4:2:0 dimensions; crop rectangle on the job row | TODO |
-| 5.3 | Fixtures: letterbox, text in the bar, mixed aspect refused, 10-bit | TODO |
-| 5.4 | DV crop per P5 (c): refusal first, then crop to the RPU's own L5 rectangle with L5 zeroed and the L5 gate | TODO |
-| 5.5 | `docs/design/crop.md` with anchors | TODO |
+| 5.1 | Opt-in consensus crop (fractional limit, spread samples, invalid results discarded, disagreement refused) | DONE (PR #140, `6fa5379`): `crop: off|auto` per root, off by default; `internal/crop`; 10 samples of 4 frames skipping 5% at each end, `round=2`, fractional limit, quarter-frame and negative results discarded, 3-sample minimum (HandBrake `libhb/scan.c`), loose consensus within 9 px (`ASSUMED`/`LEAD`); `TestDecide_TheResearchWorkedLetterbox`, `TestAgree_AllBlackSamplesAreDiscarded`; gate exit 0 (2173 s, `internal/engine` 2060.7 s, 76%); mutation-diff 100% (226 killed, 0 lived); CI green |
+| 5.2 | Blackness gate over the removed area of the source; VMAF against the identically cropped source; even 4:2:0 dimensions; crop rectangle on the job row | DONE (PR #140): blackness checked before the encode and again as gate member on the declared rectangle (`TestCrop_TheGateRefusesBarsThatAreNotBlack`, source byte-identical; `TestCrop_TheGateHoldsTheOutputToTheDeclaredSize`); chain deinterlace, crop, scale, the VMAF reference through the same deinterlace and crop (`TestCrop_TheChainRunsDeinterlaceThenCropThenScale`); store v23 `crop` column |
+| 5.3 | Fixtures: letterbox, text in the bar, mixed aspect refused, 10-bit | DONE (PR #140): `TestCrop_LetterboxReachesTheArgvTheReferenceTheGatesAndTheRow`, `TestDetect_Letterbox`, `TestBlackness_TextInTheBarIsRefused`, `TestCrop_RefusalsEncodeUncroppedWithTheReason/{text_in_the_bar,mixed_aspect_ratio}`, `TestDetect_MixedAspectRatioIsRefused`, `TestDetect_TenBitPQ_FractionalLimitCropsAndAbsoluteDoesNot`, `TestBlackness_CalibrationOnTheTenBitFixture` |
+| 5.4 | DV crop per P5 (c): refusal first, then crop to the RPU's own L5 rectangle with L5 zeroed and the L5 gate | DOING: the refusal is DONE (PR #140: `TestCrop_ADolbyVisionSourceIsRefusedByTheDecisionItself`, `TestDecide_ADolbyVisionSourceIsRefusedWhateverItsPicture`); option (c) waits on `dynhdr` |
+| 5.5 | `docs/design/crop.md` with anchors | DONE (PR #140): `docs/design/crop.md`, CLAUDE.md rule link and Layout line, README crop posture, `docs/profiles.md`, `config.example.yaml`, `docs/requeue.md` |
 
 ## Phase 6 - Report
 
@@ -104,9 +104,21 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g8-ba
   crop to the RPU's own L5 rectangle) is a second crop phase built after `dynhdr` merges, on its
   pre-pass machinery, as P5's ship order says.
 
+- 2026-10-01: PR #140 (crop phase 1) merged as `6fa5379`. Its own decisions: blackness runs before the
+  encode (a refused crop costs no encode; the file encodes uncropped in the same attempt) and again
+  as a gate; the `crop` key is recorded on no row (like the audio keys), so turning it on re-opens
+  nothing and `holdfast requeue` is the lever; a startup notice per root with `crop: auto`; 10-bit
+  libx265 ringing keeps 1-2 near-black rows (asserted, conservative); "text in the bar" is white
+  glyph-sized boxes (no fonts for `drawtext` here). Deleted test lines: the newest-migration
+  wind-back fixtures moved from v22 to v23, and the `TestEncodePlan_RefusesWhatItCannotPerform`
+  case "a crop" (any crop refused) became three narrower refusal cases plus a remux crop, since a
+  crop is now performed.
+
 ## Proposals awaiting the owner
 
-(none yet)
+- Crop has no acknowledgement when the undo window is closed (unlike `max_height`'s
+  `downscale_acknowledged`): the blackness gate proves only black rows were removed, so none was
+  added; the owner may want one.
 
 ## Resume here
 
