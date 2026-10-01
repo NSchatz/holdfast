@@ -62,6 +62,21 @@ the key says, in a different order.
 
 Any other value, the empty string included, refuses to start and names the five it accepts.
 
+`holdfast run --queue-order <order>` overrides the configured value for that one run. It
+accepts exactly the values the key accepts, and a value the key does not accept is a usage
+error (exit 2) naming every accepted one. The precedence is the flag, then
+`HOLDFAST_QUEUE_ORDER`, then the file, then the default. The override is applied after the
+configuration is loaded and checked, so an invalid configured value still refuses to start
+with the flag present, and it changes the order in memory only: the config file is not
+written, and the next run without the flag runs in the configured order again. Because the
+order decides sequence and never membership, an overridden run decides every file exactly as
+the configured one would. Its startup record names the order in force as `queue_order` and
+where it came from as `queue_order_source` (`cli` or `config`). The proving pass an operator
+runs before trusting a library to this tool is
+`holdfast run --config config.yaml --queue-order smallest --limit-encodes 5`: the five smallest
+files that reach an encode, where `--limit-encodes` counts files that reached the encoder and
+a skip does not count.
+
 `newest` and `oldest` read the modification time at WHOLE-SECOND resolution, which is the
 granularity every attribute read in this repository carries. Two sources written inside the
 same second therefore hold the same key and are handed out on the path tie-break below, not
