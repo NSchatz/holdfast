@@ -56,11 +56,11 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g7-ba
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | Audio keys, off until configured; re-encode lossless or bulky tracks per an explicit codec and layout matrix, replace by default, `keep_original_audio` keeps both | TODO |
-| 3.2 | Added stereo downmix track | TODO |
-| 3.3 | Two-pass EBU R128 loudness, `aresample` to the source rate, the mode that ran recorded | TODO |
-| 3.4 | Audio gates (duration, channel layout, sample rate, full decode, loudness), one red fixture each; stream-count parity learns the declared changes | TODO |
-| 3.5 | Keys unset: argv and decisions equal the pre-goal ones (golden) | TODO |
+| 3.1 | Audio keys, off until configured; re-encode lossless or bulky tracks per an explicit codec and layout matrix, replace by default, `keep_original_audio` keeps both | DONE (PR #136, `a530a56`): `audio_reencode`, `audio_codec`, `audio_mono_kbps`/`audio_stereo_kbps`/`audio_51_kbps`/`audio_71_kbps`, `keep_original_audio`, `audio_downmix`, `audio_loudness`; `internal/audio`; `TestAudio_ReencodeReplacesTheTrackByDefault`, `TestAudio_KeepOriginalKeepsBothTracks`; gate exit 0 on the branch with `eb424d5` merged (run 1966 s, `internal/engine` 1853.8 s, 69%); mutation-diff 100% (191 killed, 0 lived); CI green |
+| 3.2 | Added stereo downmix track | DONE (PR #136): `TestAudio_StereoDownmixIsAdded` |
+| 3.3 | Two-pass EBU R128 loudness, `aresample` to the source rate, the mode that ran recorded | DONE (PR #136): `TestAudio_TwoPassLoudnessRunsLinearAndIsRecorded`, `TestAudioFFmpeg_TwoPassLoudnessRunsLinearAndMeetsR128`, `TestAudioFFmpeg_ADynamicFallbackIsReportedAndKeepsTheDeclaredRate`; the mode is read from each loudnorm's own report on an inherited descriptor (`stats_file`), the log level unchanged |
+| 3.4 | Audio gates (duration, channel layout, sample rate, full decode, loudness), one red fixture each; stream-count parity learns the declared changes | DONE (PR #136): `TestAudioGate_DurationReds`, `TestAudioGate_ChannelLayoutReds`, `TestAudioGate_SampleRateReds`, `TestAudioGate_FullDecodeReds`, `TestAudioGate_LoudnessReds` (each with the source byte-identical), control `TestAudioGate_LossyControlPasses`; `StreamPlan.CheckOutputAdding`; gate members `audio`, `loudness` |
+| 3.5 | Keys unset: argv and decisions equal the pre-goal ones (golden) | DONE (PR #136): `TestAudio_KeysUnsetChangeNoArgvNoDecisionAndRunNoProbe`, `TestGoldenArgv` (every existing golden file byte-identical; `engine-cpu.txt` gains 8 appended `audio/*` cases) |
 
 ## Phase 4 - Subtitles (line E)
 
@@ -135,8 +135,24 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g7-ba
   `sidecar-publish-failed`; store schema v21. Its agent once ran `go test ./cmd/holdfast/` outside
   the heavy lock, then re-ran it under the lock (a slip, recorded).
 
+- 2026-10-01: PR #136 (audio) merged as `a530a56`. Its own decisions: `EncodePlan.Audio` stays the
+  blanket `copy` and a new `AudioTracks` declares each track's operation; bitrates are four flat
+  keys (a `5.1` map key collides with koanf's delimiter); an AC-3 bitrate must be one of AC-3's
+  own rates, and one past a codec's ceiling copies the track `bitrate-beyond-codec`; only Matroska
+  and MP4 outputs transform audio (others copy, `container-not-supported`); one downmix per
+  language from its first carried non-commentary surround track; -23 LUFS and -1 dBTP cited from
+  EBU R 128-2023 with the gate at its +-1.0 LU, the LRA target 20 LU `ASSUMED`; a silent track is
+  re-encoded without normalisation (`loudness-unmeasurable`); a failed first pass refuses the
+  plan; duration tolerance two codec frames, cited from the ffmpeg sources; Opus and AC-3 mono and
+  stereo bitrates cited, the rest `ASSUMED` (the FFmpeg wiki's AAC page returned 403). Store
+  schema v22, after #135's v21.
+- 2026-10-01: review finding on #136, fixed in a follow-up (`holdfast-g7/docs-scope`): the audio
+  keys and `subtitle_sidecars` act only inside a job the guards let through and are recorded on no
+  row, so a file already in the target codec gets no audio rework and no sidecar - `remux_only`
+  included, since the codec guard runs before any remux. The docs now say so (`#which-files` in
+  both design files, `docs/requeue.md`). Listed for the owner under proposals.
+
 ## Resume here
 
-Baseline done. Two build agents run the tracks in `/cache/wt/holdfast/holdfast-g7-audio` and
-`/cache/wt/holdfast/holdfast-g7-subtitles`; each opens its PR without merging. Next: review each
-PR, merge by §0.3, then the report.
+#135 and #136 merged. The docs follow-up `holdfast-g7/docs-scope` is gating in the main checkout.
+Next: its PR and merge, docs rows 5.1, gate integrity, the adversarial review, the report.
