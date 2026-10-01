@@ -65,7 +65,7 @@ var knownKeys = map[string]bool{
 	queueOrderKey:   true,
 	excludePathsKey: true, includePathsKey: true,
 	audioLanguagesKey: true, subtitleLanguagesKey: true,
-	keepCommentaryKey: true, remuxOnlyKey: true, subtitleSidecarsKey: true,
+	keepCommentaryKey: true, remuxOnlyKey: true, subtitleSidecarsKey: true, dolbyVisionP7Key: true,
 	audioReencodeKey: true, audioCodecKey: true, audioMonoKbpsKey: true, audioStereoKbpsKey: true,
 	audio51KbpsKey: true, audio71KbpsKey: true, keepOriginalAudioKey: true, audioDownmixKey: true,
 	audioLoudnessKey: true,
@@ -172,6 +172,9 @@ func defaultLayer() map[string]any {
 		hwDecodeKey: HWDecodeSoftware,
 		// No sidecar is written until configured (docs/design/subtitles.md#sidecars).
 		subtitleSidecarsKey: SubtitleSidecarsOff,
+		// A Dolby Vision profile 7 source is skipped until conversion is configured
+		// (docs/design/dynamic-hdr.md#profile-7).
+		dolbyVisionP7Key: DolbyVisionP7Skip,
 		// No configured libx265 parallelism: the run derives it from the CPU quota of its
 		// own cgroup, or passes none where there is no quota to read.
 		x265CPUsKey: 0,
@@ -357,6 +360,10 @@ type Config struct {
 	// sidecar files beside the replacement: "off" (the default) or "text". A library root may
 	// override it. See docs/design/subtitles.md#sidecars.
 	SubtitleSidecars string `yaml:"subtitle_sidecars"`
+	// DolbyVisionP7 is what a job does to a Dolby Vision profile 7 source: "skip" (the
+	// default) or "convert" to profile 8.1 before the encode. A library root may override it.
+	// See docs/design/dynamic-hdr.md#profile-7.
+	DolbyVisionP7 string `yaml:"dolby_vision_p7"`
 	// CRF is the software encoders' quality knob (lower = bigger/better): libx265's
 	// and libsvtav1's constant rate factor, 0-51. Each hardware encoder's quality is
 	// set on its own scale by Quality below, and a hardware encoder with no entry there
@@ -949,6 +956,7 @@ func (c *Config) TopLevelProfile() Profile {
 		AudioDownmix:      c.AudioDownmix,
 		AudioLoudness:     c.AudioLoudness,
 		SubtitleSidecars:  c.SubtitleSidecars,
+		DolbyVisionP7:     c.DolbyVisionP7,
 	}
 }
 
