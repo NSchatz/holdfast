@@ -151,3 +151,25 @@ normalisation, with `loudness-unmeasurable` on the row.
 A figure that could not be established (a source track that would not decode for its length, a
 measurement that returned no report) refuses the output as transient: the source is kept, and
 the next attempt measures again.
+
+<a id="which-files"></a>
+
+## Which files the audio keys reach
+
+**The audio keys act only inside a job that already encodes or remuxes the file.** They add
+operations to that job's plan; they never start a job of their own. A file the guards skip -
+already in the target codec, under `min_bitrate_kbps`, or any other skip - keeps its audio as it
+is, whatever these keys say. That includes a `remux_only` root: its remux is a job only for a
+file the guards let through, and the codec guard skips a file already in the target codec before
+any remux is considered. So in this build a library already in the target codec gets no audio
+rework at all; an audio-only job for such files would be a new kind of job, not a reading of
+these keys.
+
+No terminal row records these keys (`docs/requeue.md`): a `done` row records the video settings the
+encode was taken under, and its file is now in the target codec, so turning a key on later does
+not re-open it, and `holdfast requeue` would only bring it back to the codec guard that skips it.
+Turning the keys on changes what the next jobs do, not what the past ones did.
+
+A downmix and a kept re-encode carry their source track's title tag unchanged (holdfast writes no
+title); a player names them by language, layout and codec. A title that named the source's
+layout now describes the source track, not the added one.

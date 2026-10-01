@@ -2,13 +2,12 @@ package engine
 
 import (
 	"context"
-
 	"fmt"
-	"github.com/NSchatz/holdfast/internal/audio"
 	"math"
 	"strconv"
 	"strings"
 
+	"github.com/NSchatz/holdfast/internal/audio"
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/downscale"
