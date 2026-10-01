@@ -1306,11 +1306,11 @@ func atShippedVersion(t *testing.T, path string, version int) {
 	}
 	// A fixture below this build's version must be recognisably an OLDER database rather
 	// than this one wearing an older number, and what says so is the shape the NEWEST step
-	// adds. That shape is a column on jobs again, so the question goes back to
-	// pragma_table_info.
-	if version < len(migrations) && hasColumn(t, db, newestStepColumn) {
-		t.Fatalf("a v%d fixture already carries the %s column, which the newest step adds - it is not an older database",
-			version, newestStepColumn)
+	// adds. That shape is a whole TABLE again (the health sweep's), so the question is
+	// asked of sqlite_master.
+	if version < len(migrations) && hasTable(t, db, newestStepTable) {
+		t.Fatalf("a v%d fixture already carries the %s table, which the newest step creates - it is not an older database",
+			version, newestStepTable)
 	}
 	// The stamp column arrives AT stampedFromVersion and every version from there on
 	// legitimately has it, so this sanity check is against THAT step and not against the end
@@ -1321,11 +1321,11 @@ func atShippedVersion(t *testing.T, path string, version int) {
 	}
 }
 
-// newestStepColumn is the jobs column the LAST migration adds. It tracks the END of the
+// newestStepTable is a table the LAST migration creates. It tracks the END of the
 // migrations slice: a step appended after this one moves it, along with the wind-back
-// fixtures. Where that step creates a table instead, this becomes a table name and the two
-// readers below ask sqlite_master rather than pragma_table_info.
-const newestStepColumn = "crop"
+// fixtures. Where that step adds a column instead, this becomes a column name and the two
+// readers ask pragma_table_info rather than sqlite_master.
+const newestStepTable = "health_sweeps"
 
 // stampedFromVersion is the step that added the per-record version stamp. It is looked up
 // in the history rather than written out, so appending a step cannot move it by accident.
@@ -1506,8 +1506,8 @@ func TestMigrate_AStepMatchingItsDeclarationCommitsAndAdvancesTheStampedVersion(
 			step.Version, step.Name, schemaVersion(), last.name)
 	}
 	// Committed, not merely attempted: the shape the step adds is there afterwards.
-	if !hasColumn(t, s.db, newestStepColumn) {
-		t.Errorf("the step was reported applied and the %s column is not there", newestStepColumn)
+	if !hasTable(t, s.db, newestStepTable) {
+		t.Errorf("the step was reported applied and the %s table is not there", newestStepTable)
 	}
 }
 

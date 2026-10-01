@@ -775,6 +775,9 @@ func TestScanEndpoint_AddsNoRouteBeyondScan(t *testing.T) {
 		// response types - paths, methods, status codes, media types, field names and
 		// field types - so it re-offers, overwrites and disposes of nothing.
 		"GET /api/schema": true,
+		// The health sweep's report is a READ: the sweep never changes a file, and nothing
+		// on this route starts, stops or acts on one.
+		"GET /api/health": true,
 	}
 	for _, r := range served {
 		if !strings.HasPrefix(r, "GET /api/") && !strings.HasPrefix(r, "POST /api/") {

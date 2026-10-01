@@ -45,6 +45,11 @@ var holdfastMetrics = []string{
 	"holdfast_encode_duration_seconds",
 	"holdfast_failures_total",
 	"holdfast_files_total",
+	// The library health sweep's four, added deliberately (docs/design/health-sweep.md).
+	"holdfast_health_sweep_corrupt_files",
+	"holdfast_health_sweep_files_checked_total",
+	"holdfast_health_sweep_last_completed_timestamp_seconds",
+	"holdfast_health_sweep_unreadable_files",
 	"holdfast_queue_depth",
 	"holdfast_skips_total",
 	"holdfast_vmaf_chroma",
@@ -183,6 +188,7 @@ func TestGrowth_TheMetricNamesPublishedTodayAreStillPublishedAndNoneWasRenamed(t
 
 	// Something in every series, so nothing is absent merely for want of a data point.
 	seedSkipped(t, st, t.TempDir(), 0, 3)
+	seedFinishedHealthSweep(t, st)
 	m.Observe(doneEvent(1024, 1000, 97.5))
 	m.Observe(engine.Event{Status: store.Skipped})
 	m.Observe(engine.Event{Status: store.Failed})

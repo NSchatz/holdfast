@@ -14,6 +14,7 @@ per-field reference `README.md` points at rather than restates.
 | `GET /api/queue` | read | pending + active jobs, capped, with `queue_total` - see *The total behind a cap* |
 | `GET /api/history?limit=N` | read | recent terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, capped, with `history_total` - see below |
 | `GET /api/events` | read | SSE: a fresh snapshot on every state change |
+| `GET /api/health` | read | the library health sweep: its state, the sweep under way and the last one that finished, each with its counts and the files it found corrupt or unreadable - see *`GET /api/health`* below. Report only: no route acts on a finding |
 | `GET /api/schema` | - | a machine-readable document of this surface, GENERATED from the router and the response types this build actually serves. Never gated: it carries endpoint paths, methods, status codes, media types, field names and field types, and no value of any kind - see below |
 | `GET /metrics` | - | Prometheus metrics (when `metrics_enable`, default on). Never gated: it names no file |
 | `POST /api/rescan` | control | start a library scan (409 if paused / scanning / outside the run window) |
@@ -319,6 +320,75 @@ submission naming either of them is refused - even in a deployment running with
 **On shutdown**, work already in flight is finished before the job store is closed, and
 submissions still waiting in the queue are discarded - unprocessed, and with no ledger row,
 because nothing looked at those files and a row would be a record of a decision nobody took.
+
+### `GET /api/health` - the library health sweep
+
+<a id="health"></a>
+
+What the report-only health sweep (`health_sweep_interval_hours`, off by default;
+[docs/design/health-sweep.md](design/health-sweep.md#health-sweep)) is doing and what it found.
+It is a read behind `server_read_token` like the others, and it is answered whether or not a
+sweep is configured. Nothing on this surface acts on a finding: the sweep never moves, renames,
+deletes or repairs a file, and there is no endpoint that does.
+
+| field | meaning |
+|---|---|
+| `enabled`, `interval_hours` | whether this daemon's configuration schedules a sweep, and `health_sweep_interval_hours` |
+| `state` | `off` (no sweep configured), `idle` (not due), `running`, or `waiting` - due or under way, and no new decode may start now |
+| `waiting` | why, while `state` is `waiting`: the pause, the run window, the load cap or the streaming pause, in the scheduler's words |
+| `next_due_at` | Unix seconds the next sweep is due: the last one's finish plus the interval. `null` while a sweep is under way, before any has finished, or with the sweep off |
+| `current` | the sweep under way - or interrupted and waiting to resume - or `null` |
+| `last_completed` | the newest sweep that ran to the end, or `null` |
+
+Each sweep carries `id`, `started_at`, `finished_at` (`null` while it runs), `checked` (the files
+it has recorded a result for; a sweep under way does not know how many are still to come),
+`ok`, `corrupt`, `unreadable`, and `problems`: the files it found corrupt or unreadable, by path,
+at most 500, with `problems_truncated` saying the list was cut. Each problem is `path`, `result`,
+`reason` (for `corrupt`, the last error ffmpeg printed), `checked_at` and `size`. Every time is
+Unix seconds.
+
+A sample, after one weekly sweep over a library holding a truncated episode and a text file
+under a video name (the paths are synthetic):
+
+```json
+{
+  "enabled": true,
+  "interval_hours": 168,
+  "state": "idle",
+  "next_due_at": 1791469938,
+  "current": null,
+  "last_completed": {
+    "id": 1,
+    "started_at": 1790865138,
+    "finished_at": 1790865138,
+    "checked": 4,
+    "ok": 2,
+    "corrupt": 2,
+    "unreadable": 0,
+    "problems": [
+      {
+        "path": "/media/Show/episode-03.mkv",
+        "result": "corrupt",
+        "reason": "[in#0/matroska,webm @ 0x55d9dcd94480] File ended prematurely",
+        "checked_at": 1790865138,
+        "size": 19562
+      },
+      {
+        "path": "/media/readme.mkv",
+        "result": "corrupt",
+        "reason": "Error opening input files: Invalid data found when processing input",
+        "checked_at": 1790865138,
+        "size": 12
+      }
+    ],
+    "problems_truncated": false
+  }
+}
+```
+
+That body is printed by `TestHealthEndpoint_ReportsASweepThroughTheReadAPI`
+(`go test -v -run TestHealthEndpoint_ReportsASweepThroughTheReadAPI ./internal/server/`), which
+runs a real sweep through the pinned ffmpeg and reads this endpoint.
 
 ### The decision inputs a row was taken under
 
@@ -670,8 +740,8 @@ response and no `holdfast export` line carries it, and the shapes documented abo
 
 - **Prometheus** (`/metrics`, default on): whether it is reachable is governed by `metrics_enable` and by
   nothing else - `server_read_token` does not gate it, and neither does `server_auth_token`. The exposition
-  carries counters, a byte total, three histograms and two gauges, labelled only by outcome, guard, gate and
-  state, so it **names no file**; a scrape credential is also the one thing a Prometheus deployment most
+  carries counters, a byte total, three histograms and five gauges, labelled only by outcome, guard, gate,
+  state and health result, so it **names no file**; a scrape credential is also the one thing a Prometheus deployment most
   often cannot supply. That premise is a test, so a later metric that labelled a series by path would fail
   the build. Metrics are read-only instrumentation - best-effort, never affecting file handling.
 
@@ -691,6 +761,10 @@ response and no `holdfast export` line carries it, and the shapes documented abo
   | `holdfast_vmaf_chroma` | the worst frame's chroma PSNR, **in dB** (not a 0-100 VMAF) | whether the COLOUR survived. The VMAF model is luma-only, so this is the only series that sees a flattened or desaturated encode. Around 40 dB is healthy; a fall toward `vmaf_min_chroma` (30 dB by default) is colour damage |
   | `holdfast_queue_depth{state}` | jobs in each status, read from the store at scrape time | live queue depth and ledger growth. A `pending` that only climbs means work is arriving faster than it is being done |
   | `holdfast_bytes_held_by_undo_window` | bytes the undo window is still HOLDING, read at scrape time | why free space has not gone up. A retained original is a second link to the source's bytes, so reclaimed space is not returned to the filesystem until the window releases it. Falls as originals age out |
+  | `holdfast_health_sweep_files_checked_total{result}` | files the library health sweep fully decoded and recorded, by result (`ok`, `corrupt`, `unreadable`; each pre-created at `0`) | the sweep's progress, and its findings as they arrive. A rise in `corrupt` is damage on disk the encode pipeline never looked for. Flat while a sweep is due means it is waiting on the run window, the load cap or a pause |
+  | `holdfast_health_sweep_corrupt_files` | files the newest FINISHED health sweep found corrupt, read at scrape time | the damage the library holds as of that sweep. Absent until a sweep has finished: nobody having looked is not zero. Alert on any rise |
+  | `holdfast_health_sweep_unreadable_files` | files the newest finished health sweep could not read at all, read at scrape time | permissions, a non-regular file under a video name, or a file that kept changing. Absent until a sweep has finished |
+  | `holdfast_health_sweep_last_completed_timestamp_seconds` | Unix time the newest health sweep finished, read at scrape time | whether the sweep is keeping up. Older than the interval plus a sweep's length means it is not; absent until one has finished |
 
   The `outcome` label set is `done | skipped | failed | would-transcode | indeterminate |
   applied-despite-error`. **`would-transcode` counts DECISIONS a dry run took, never transcodes that
@@ -714,7 +788,7 @@ response and no `holdfast export` line carries it, and the shapes documented abo
   remux, a disabled gate and a measurement that failed contribute nothing rather than a `0`: on these two
   series `0` is a destroyed frame and an obliterated colour plane, which is a reading and not an absence.
 
-  The two gauges are read from the store **on every scrape**, and they fail independently: a store read that
+  The gauges are read from the store **on every scrape**, and they fail independently: a store read that
   fails omits that one gauge from that one scrape, leaves every other series in place, and still answers the
   scrape `200`. The next scrape reads again, and the daemon logs the degraded read at `warn` rather than
   going quiet about it.

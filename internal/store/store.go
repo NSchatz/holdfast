@@ -13,7 +13,10 @@
 // as such rather than as a fabricated number.
 package store
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Status is a job's lifecycle state.
 type Status string
@@ -1152,6 +1155,31 @@ type Store interface {
 	// began: a withholding recorded while a scan is under way holds for the rest of it.
 	PathIsExcluded(ctx context.Context, path string) (bool, error)
 
+	// HealthLedger is the library health sweep's record (docs/design/health-sweep.md).
+	HealthLedger
+
 	// Close releases the underlying database handle.
 	Close() error
+}
+
+// HealthLedger is the health sweep's half of the store: the sweeps and the per-file checks
+// they recorded. Nothing in the encode pipeline reads it.
+type HealthLedger interface {
+	// StartHealthSweep opens a new sweep, after dropping the checks of every sweep older
+	// than the newest finished one.
+	StartHealthSweep(ctx context.Context, at time.Time) (HealthSweep, error)
+	// FinishHealthSweep marks a running sweep finished and writes its counts.
+	FinishHealthSweep(ctx context.Context, id int64, at time.Time) error
+	// LatestHealthSweep is the newest sweep, finished or not.
+	LatestHealthSweep(ctx context.Context) (HealthSweep, bool, error)
+	// LastFinishedHealthSweep is the newest sweep that ran to the end.
+	LastFinishedHealthSweep(ctx context.Context) (HealthSweep, bool, error)
+	// RecordHealthCheck writes, or replaces, one path's result in one sweep.
+	RecordHealthCheck(ctx context.Context, c HealthCheck) error
+	// HealthCheckOf is one path's result in one sweep, if it was checked.
+	HealthCheckOf(ctx context.Context, sweepID int64, path string) (HealthCheck, bool, error)
+	// HealthCountsOf counts one sweep's checks by result.
+	HealthCountsOf(ctx context.Context, sweepID int64) (HealthCounts, error)
+	// HealthProblems lists the files one sweep found corrupt or unreadable.
+	HealthProblems(ctx context.Context, sweepID int64, limit int) ([]HealthCheck, error)
 }
