@@ -253,8 +253,9 @@ func TestDynamicHDR_ACarriedProfile81UnderCropAutoIsEncodedUncroppedWithTheRefus
 	if argv := strings.Join(argvWith(calls, "libx265"), " "); strings.Contains(argv, "crop=") || !strings.Contains(argv, "-dolbyvision 1") {
 		t.Errorf("the encode cropped, or did not carry the RPU: %s", argv)
 	}
-	if w, h := row.Outcome.OutputWidth, row.Outcome.OutputHeight; w == nil || h == nil || *w != 320 || *h != 240 {
-		t.Errorf("the replacement is not the whole 320x240 frame: %v x %v", w, h)
+	_, ffprobe := tools(t)
+	if w, h, ok := probe.New("ffmpeg", ffprobe).Dimensions(context.Background(), src); !ok || w != 320 || h != 240 {
+		t.Errorf("the replacement is not the whole 320x240 frame: %dx%d (%v)", w, h, ok)
 	}
 	requireCarried(t, src, dynhdr.Expectation{DolbyVision: true, Profile: 8, CompatID: 1})
 }
