@@ -20,7 +20,7 @@ func shippedStreamSelectionDoc(t *testing.T) string {
 // repository's own mechanical documentation check carries a NEW fixed anchor introducing
 // one statement, and that statement owes a clause for each of the four keys and their
 // defaults, the untagged-stream rule, the never-a-silent-file fallback, the remux-only VMAF
-// skip with its identity check, and audio transcoding as a non-goal.
+// skip with its identity check, and that the keys select and copy (the audio keys transform).
 //
 // It is run over the CORPUS and not over one named file, which is the half a file-scoped
 // check cannot do: a statement can be lost by deleting the document that held it just as
@@ -79,6 +79,23 @@ func TestStreamSelectionDocs_TheCheckBites(t *testing.T) {
 			t.Fatal("a corpus in which NO document carries the anchor passed, on prose that merely " +
 				"happens to contain every phrase - which is exactly the check that can be made to " +
 				"pass by moving the goalposts")
+		}
+	})
+
+	// The statement this one replaced, which called audio transcoding a non-goal, no longer
+	// satisfies the check: a document still saying that is wrong about this build.
+	t.Run("the superseded audio non-goal wording", func(t *testing.T) {
+		start := strings.Index(doc, "These four keys select and copy")
+		const last = "these four keys carry."
+		end := strings.Index(doc, last)
+		if start < 0 || end < 0 {
+			t.Fatal("the shipped statement's audio sentence is not where this mutation expects it")
+		}
+		old := "Audio **transcoding is a non-goal**: this is selection and copy, and nothing here\n" +
+			"re-encodes a track, downmixes one, or adds an AAC stereo companion."
+		mutated := doc[:start] + old + doc[end+len(last):]
+		if err := CheckStreamSelectionStatement(mutated); err == nil {
+			t.Fatal("the superseded non-goal wording passed")
 		}
 	})
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -49,6 +50,18 @@ type Stream struct {
 	Filename string
 	MimeType string
 	Title    string
+
+	// The audio facts an audio re-encode is planned from (docs/design/audio.md#reencode):
+	// ffprobe's profile, channels, channel_layout and sample_rate, verbatim. Profile is how a
+	// DTS-HD Master Audio track is told from a lossy DTS core ("DTS-HD MA"), Channels and
+	// ChannelLayout which codec and layout can carry it, SampleRate the rate the plan keeps.
+	// Each is "" or 0 where ffprobe printed nothing for the stream - a video stream, or an
+	// audio stream whose layout ffprobe could not name - and nothing is guessed in its place:
+	// an audio track missing any of them is copied, never re-encoded.
+	Profile       string
+	Channels      int
+	ChannelLayout string
+	SampleRate    int
 }
 
 // The codec_type values this build names. They are ffprobe's own spelling and are
@@ -66,8 +79,8 @@ const (
 // spelled once and exported so nothing has to restate it: a caller that needed to name the
 // probe (a test driving the unenumerable path, say) names THIS rather than a copy that
 // would go on matching after the probe itself moved.
-const StreamEntries = "stream=index,codec_type,codec_name:stream_disposition=attached_pic,comment:" +
-	"stream_tags=language,filename,mimetype,title"
+const StreamEntries = "stream=index,codec_type,codec_name,profile,channels,channel_layout,sample_rate:" +
+	"stream_disposition=attached_pic,comment:stream_tags=language,filename,mimetype,title"
 
 // probeStreams is the JSON shape ffprobe answers with. It is JSON and not the csv the
 // scalar probes use for one reason: a csv row omits an entry the stream does not carry,
@@ -76,9 +89,14 @@ const StreamEntries = "stream=index,codec_type,codec_name:stream_disposition=att
 // the probe an intended stream map is derived from.
 type probeStreams struct {
 	Streams []struct {
-		Index       int    `json:"index"`
-		CodecType   string `json:"codec_type"`
-		CodecName   string `json:"codec_name"`
+		Index         int    `json:"index"`
+		CodecType     string `json:"codec_type"`
+		CodecName     string `json:"codec_name"`
+		Profile       string `json:"profile"`
+		Channels      int    `json:"channels"`
+		ChannelLayout string `json:"channel_layout"`
+		// sample_rate is a JSON string in ffprobe's answer ("48000").
+		SampleRate  string `json:"sample_rate"`
 		Disposition struct {
 			AttachedPic int `json:"attached_pic"`
 			Comment     int `json:"comment"`
@@ -129,9 +147,23 @@ func (p *Prober) Streams(ctx context.Context, f string) (streams []Stream, estab
 			Filename:          strings.TrimSpace(s.Tags["filename"]),
 			MimeType:          strings.TrimSpace(s.Tags["mimetype"]),
 			Title:             strings.TrimSpace(s.Tags["title"]),
+			Profile:           strings.TrimSpace(s.Profile),
+			Channels:          s.Channels,
+			ChannelLayout:     strings.TrimSpace(s.ChannelLayout),
+			SampleRate:        sampleRateOf(s.SampleRate),
 		})
 	}
 	return streams, true
+}
+
+// sampleRateOf reads ffprobe's sample_rate, and 0 where it is absent or not a positive
+// whole number: an unreadable rate is not a rate, and a track without one is copied.
+func sampleRateOf(v string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }
 
 // VideoStreamHashes returns a hash of the BITSTREAM of each of the file's video streams,

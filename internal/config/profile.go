@@ -95,6 +95,12 @@ var profileKnobs = []string{
 	// a digest with one that does not.
 	maxHeightKey,
 	downscaleAckKey,
+	// The audio keys (docs/design/audio.md), on the deinterlace knob's terms: each contributes
+	// only where it is not its shipped default, so a root that sets none of them digests as
+	// it did before they existed. They sit ahead of the two hardware knobs, which is where
+	// their conditional rule makes the position immaterial to every existing digest.
+	audioReencodeKey, audioCodecKey, audioMonoKbpsKey, audioStereoKbpsKey, audio51KbpsKey,
+	audio71KbpsKey, keepOriginalAudioKey, audioDownmixKey, audioLoudnessKey,
 	// Whether text subtitles are also copied to sidecars, on the deinterlace knob's terms:
 	// it contributes to the digest only where it is not the shipped `off`.
 	subtitleSidecarsKey,
@@ -191,6 +197,17 @@ type Profile struct {
 	MaxHeight    int   `yaml:"max_height"`
 	DownscaleAck *bool `yaml:"downscale_acknowledged"`
 
+	// The audio keys (see audio.go and docs/design/audio.md). "" and 0 and nil are each key's
+	// default, which is what a Profile assembled in Go carries: every audio track copied.
+	AudioReencode     string `yaml:"audio_reencode"`
+	AudioCodec        string `yaml:"audio_codec"`
+	AudioMonoKbps     int    `yaml:"audio_mono_kbps"`
+	AudioStereoKbps   int    `yaml:"audio_stereo_kbps"`
+	Audio51Kbps       int    `yaml:"audio_51_kbps"`
+	Audio71Kbps       int    `yaml:"audio_71_kbps"`
+	KeepOriginalAudio *bool  `yaml:"keep_original_audio"`
+	AudioDownmix      string `yaml:"audio_downmix"`
+	AudioLoudness     string `yaml:"audio_loudness"`
 	// SubtitleSidecars is whether a job under this root writes text subtitle sidecars:
 	// SubtitleSidecarsOff or SubtitleSidecarsText. "" is the default, off. See
 	// Config.SubtitleSidecars.
@@ -270,7 +287,7 @@ func (p Profile) DeinterlaceEnabled() bool {
 // are rendered RESOLVED, exactly as the two above them are.
 func (p Profile) values() []string {
 	f := func(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) }
-	return []string{
+	vals := []string{
 		p.Encoder,
 		strconv.Itoa(p.CRF),
 		p.Preset,
@@ -292,10 +309,9 @@ func (p Profile) values() []string {
 		renderDeinterlace(p.Deinterlace),
 		renderMaxHeight(p.MaxHeight),
 		strconv.FormatBool(p.DownscaleAcknowledged()),
-		p.SubtitleSidecarsMode(),
-		p.HWFallbackMode(),
-		p.HWDecodeMode(),
 	}
+	vals = append(vals, p.audioValues()...)
+	return append(vals, p.SubtitleSidecarsMode(), p.HWFallbackMode(), p.HWDecodeMode())
 }
 
 // renderDeinterlace is the deinterlace knob as `validate` prints it and as the digest reads
@@ -376,6 +392,9 @@ func (p Profile) Digest() string {
 // The test is the rendered VALUE and not "does this build accept it", so a value nobody can
 // resolve still digests apart from the default rather than collapsing into it.
 func digestSilent(knob, value string) bool {
+	if silent, ok := audioDigestSilent(knob, value); ok {
+		return silent
+	}
 	switch knob {
 	case deinterlaceKey:
 		return value == deinterlace.Off
@@ -409,6 +428,9 @@ func (p Profile) validate() error {
 		return err
 	}
 	if err := validateHWDecode(p.HWDecode); err != nil {
+		return err
+	}
+	if err := p.validateAudio(); err != nil {
 		return err
 	}
 	if err := validateSubtitleSidecars(p.SubtitleSidecars); err != nil {

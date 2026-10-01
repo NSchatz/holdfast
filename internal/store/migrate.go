@@ -591,6 +591,26 @@ ALTER TABLE jobs ADD COLUMN vmaf_scored_height INTEGER;
 ALTER TABLE jobs ADD COLUMN subtitle_sidecars TEXT;
 `,
 	},
+	{
+		// v22 - what a job did to its AUDIO (docs/design/audio.md): per output track, the
+		// source stream, whether it was re-encoded, kept, added or copied and why, what it was
+		// written as, and the loudness mode the encoder reported.
+		//
+		// A re-encode replaces a lossless track by default, which is v19's argument again:
+		// the source's track is not in the replacement, and this row is what says so after
+		// the source is gone. One JSON column rather than a column per figure, because the
+		// record is a list whose length is the job's track count.
+		//
+		// NULLABLE with NO DEFAULT, the rule every step since v2 has kept: NULL is not
+		// recorded, which every row already in the field is, and every row of a job whose
+		// configuration asked for no audio transformation stays.
+		name: "audio tracks",
+		// One nullable column: ADD COLUMN rewrites no row and creates none.
+		rows: noRowChange,
+		sql: `
+ALTER TABLE jobs ADD COLUMN audio_tracks TEXT;
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

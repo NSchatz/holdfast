@@ -392,6 +392,13 @@ type Outcome struct {
 	// what a failure - a verdict the configuration did not determine - carries too.
 	DecisionInputs DecisionInputs
 
+	// AudioTracks is what this job did to each audio track: re-encoded, kept, added, a
+	// downmix added or not, or copied and why, with what each encoded track was written as
+	// and the loudness mode that ran (see AudioTrack and docs/design/audio.md). Its zero
+	// value is NOT RECORDED, which is what every row of a job that transformed no audio
+	// carries, exactly as every row written before the column existed does.
+	AudioTracks AudioTracks
+
 	// Decision names the library profile that decided this file. It is embedded so a
 	// reader asks a row for o.LibraryRoot exactly as it asks for o.Encoder.
 	Decision

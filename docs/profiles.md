@@ -609,14 +609,63 @@ dropped bytes are not recoverable from the replacement, so that row is the only 
 there is - and a row written before this build existed reads as **not recorded** rather
 than as "dropped nothing".
 
-Audio **transcoding is a non-goal**: this is selection and copy, and nothing here
-re-encodes a track, downmixes one, or adds an AAC stereo companion. Transcoding audio
-reopens the fidelity question for a second medium, and it would need its own gate argument
-before this tool did it to somebody's only copy of a film.
+These four keys select and copy: nothing here re-encodes a track, downmixes one or changes
+its loudness. That is what [the audio keys](#audio) do, each off by default, on the tracks
+these four keys carry.
 
 `holdfast validate` prints, per library root, the resolved value of each of these four keys
 and which layer supplied it - the same way it prints every other knob, and for the same
 reason: the resolved value is the only thing that says what a root will actually do.
+
+## The audio keys - re-encode, downmix and loudness
+
+<a id="audio"></a>
+
+```yaml
+audio_reencode: on           # re-encode every carried lossless track; off (the default) copies it
+audio_codec: eac3            # aac | ac3 | eac3 | opus; required by a re-encode or a downmix
+audio_51_kbps: 640           # the bitrate per layout (also audio_mono_kbps, audio_stereo_kbps,
+                             # audio_71_kbps); 0 (the default) takes the codec's own default
+keep_original_audio: false   # true keeps the original beside its re-encode
+audio_downmix: stereo        # add a stereo downmix of a surround track; off is the default
+audio_loudness: ebu_r128     # normalise every re-encoded and added track; off is the default
+```
+
+Every key is a library root knob with a top-level default, and every one is **off** until
+configured: a root that sets none of them copies every carried audio track, builds the command
+line it always built and records nothing new. Each key away from its default moves the root's
+profile digest.
+
+- **`audio_reencode: on`** re-encodes each carried track in a lossless codec - TrueHD, DTS-HD
+  Master Audio (by ffprobe's `DTS-HD MA` profile, never a lossy DTS core), any PCM, FLAC - to
+  `audio_codec`, in its own place, **replacing** it. Every other track is copied.
+- **`audio_codec`** is `aac` (ffmpeg's native encoder), `ac3`, `eac3` or `opus` (libopus).
+  libfdk_aac is never used. The layout is named on the command line: mono, stereo, 5.1 and 7.1
+  for `aac` and `opus`; mono, stereo and 5.1 for `ac3` and `eac3`, which cannot carry 7.1 - a 7.1
+  track is then **copied**, with `layout-not-carried` on the row, never folded to 5.1. A layout
+  outside those four (7.1(wide), 6.1, a bare channel count) is copied the same way. The sample
+  rate is the source's where the codec takes it, and 48 kHz otherwise.
+- **`audio_mono_kbps`, `audio_stereo_kbps`, `audio_51_kbps`, `audio_71_kbps`** are the bitrate
+  per layout in kb/s. 0 takes the codec's default: Opus 64/128/256/450 (stereo, 5.1 and 7.1 from
+  the Xiph recommendation), AAC 64/128/384/512, AC-3 and E-AC-3 96/192/640. An AC-3 bitrate
+  must be one AC-3 carries (32 to 640); a bitrate past what the codec writes at the track's
+  channels and rate copies that track with `bitrate-beyond-codec`.
+- **`keep_original_audio: true`** keeps the original in place and adds its re-encode after
+  every carried track, never the default track.
+- **`audio_downmix: stereo`** adds one stereo track per language, from the first carried
+  surround track of it that is not commentary, unless a stereo track of that language is
+  already carried. It is folded by ffmpeg's default matrix (centre and surrounds at -3 dB, LFE
+  left out), written in `audio_codec`, and never the default track.
+- **`audio_loudness: ebu_r128`** normalises every re-encoded and added track to EBU R 128
+  (-23 LUFS, -1 dBTP) in two passes: one measuring the source track, one applying it linearly
+  where loudnorm can. The row records which mode the encoder reported (`linear`, `dynamic`,
+  or `not-recorded`).
+
+Every transformed track is held to its own gates before the swap - its decoded length, channel
+count and layout, sample rate and, where normalised, loudness - and every output audio stream
+must decode in full; the whole file must still pass every other gate, strictly-smaller included.
+The row's `audio_tracks` lists what was done to each track and why. The reasoning, the cited
+figures and the tolerances are in [docs/design/audio.md](design/audio.md).
 
 ## `watch` and `watch_settle_sec` - how a new file under this root is found
 

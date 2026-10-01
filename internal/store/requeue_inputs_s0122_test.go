@@ -26,6 +26,9 @@ var stepsSinceDecisionInputs = []struct {
 	version int
 	undo    []string
 }{
+	{22, []string{
+		`ALTER TABLE jobs DROP COLUMN audio_tracks`,
+	}},
 	{21, []string{`ALTER TABLE jobs DROP COLUMN subtitle_sidecars`}},
 	{20, []string{
 		`ALTER TABLE jobs DROP COLUMN downscaled`,

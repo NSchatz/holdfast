@@ -3,8 +3,10 @@ package engine
 import (
 	"fmt"
 	"strconv"
+	"sync"
 	"sync/atomic"
 
+	"github.com/NSchatz/holdfast/internal/audio"
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/downscale"
@@ -12,6 +14,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/hwdevice"
 	"github.com/NSchatz/holdfast/internal/probe"
+	"github.com/NSchatz/holdfast/internal/store"
 )
 
 // THE ENCODE PLAN: everything one job's encode does to its source, declared once, before the
@@ -49,11 +52,14 @@ const (
 	DecodeVAAPI    = "vaapi"
 )
 
-// StreamAction is what an encode does to every carried stream of one type.
+// StreamAction is what an encode does to every carried stream of one type that no
+// per-track declaration names.
 type StreamAction string
 
 // CopyStreams stream-copies a carried stream: the output carries the bytes the source did.
-// It is the only action this build takes on an audio or a subtitle stream.
+// It is the only blanket action this build takes on audio and subtitle streams; what an
+// encode does to one audio track in particular is declared track by track in
+// EncodePlan.AudioTracks.
 const CopyStreams StreamAction = "copy"
 
 // EncodePlan is one job's declared encode. It is derived once per job by deriveEncodePlan
@@ -86,8 +92,13 @@ type EncodePlan struct {
 	// Video is what the encode does to the video.
 	Video VideoPlan
 	// Audio and Subtitles are what the encode does to every carried audio and subtitle
-	// stream.
+	// stream that no per-track declaration names.
 	Audio, Subtitles StreamAction
+	// AudioTracks is what the encode does to the audio track by track: the re-encodes, the
+	// kept originals, the added downmixes and the loudness passes the audio keys ask for
+	// (docs/design/audio.md). The zero value copies every carried track and adds none, which
+	// is every job's whose configuration sets none of those keys.
+	AudioTracks audio.Plan
 	// Picture is what the encode does to the picture on its way to the encoder.
 	Picture PictureOps
 	// Metadata is the colour description and the metadata the output carries.
@@ -101,6 +112,63 @@ type EncodePlan struct {
 	// devices are the render-node assignment the plan's device was chosen from, so the
 	// command-line builder can refuse a plan whose device is not the one assigned.
 	devices hwdevice.Assignment
+
+	// audioSeen is where the encode and the gates leave what they OBSERVED of the audio:
+	// the second-pass loudness reports the encoder read back, and the output loudness the
+	// gate measured. It is never part of what the plan declares, and nothing builds a
+	// command line or a gate from it; it exists so the terminal row records what was
+	// observed rather than what was inferred. nil on a plan that normalises nothing.
+	audioSeen *audioObservations
+}
+
+// audioObservations are what one job's encode and gates observed of its audio.
+type audioObservations struct {
+	mu sync.Mutex
+	// reports are the second-pass loudnorm reports, by report channel (audio.StatsFD).
+	reports [][]byte
+	// achieved are the output loudness the gate measured, by output audio index.
+	achieved map[int]float64
+}
+
+// recordReports keeps the encoder's second-pass reports.
+func (p *EncodePlan) recordReports(r [][]byte) {
+	if p == nil || p.audioSeen == nil {
+		return
+	}
+	p.audioSeen.mu.Lock()
+	defer p.audioSeen.mu.Unlock()
+	p.audioSeen.reports = r
+}
+
+// recordAchieved keeps the gate's measurement of output track n.
+func (p *EncodePlan) recordAchieved(n int, lufs float64) {
+	if p == nil || p.audioSeen == nil {
+		return
+	}
+	p.audioSeen.mu.Lock()
+	defer p.audioSeen.mu.Unlock()
+	if p.audioSeen.achieved == nil {
+		p.audioSeen.achieved = map[int]float64{}
+	}
+	p.audioSeen.achieved[n] = lufs
+}
+
+// loudnessSeen is the mode the k-th normalised track's report names, and the loudness the
+// gate measured on output track n where it did.
+func (p *EncodePlan) loudnessSeen(k, n int) (mode string, achieved *float64) {
+	mode = audio.ModeNotRecorded
+	if p == nil || p.audioSeen == nil {
+		return mode, nil
+	}
+	p.audioSeen.mu.Lock()
+	defer p.audioSeen.mu.Unlock()
+	if k >= 0 && k < len(p.audioSeen.reports) {
+		mode = audio.Mode(p.audioSeen.reports[k])
+	}
+	if v, ok := p.audioSeen.achieved[n]; ok {
+		achieved = &v
+	}
+	return mode, achieved
 }
 
 // VideoPlan is what one encode does to the video.
@@ -266,6 +334,13 @@ type planInputs struct {
 	// derivation first needs the source's properties, so a plan refused before then never
 	// probes, and it is how the engine hands in the snapshot its guards already read.
 	snapshot func() (*probe.VideoProps, error)
+	// measureLoudness is the first loudness pass over one source track, called only where
+	// the plan normalises a track (audio.MeasureLoudness on the source, in production).
+	measureLoudness audio.MeasureFunc
+	// audio, where set, is an audio plan an earlier derivation for the same job already
+	// made - the software retry of a failed hardware encode - so the first passes are not
+	// run twice. It is checked against this derivation's map like any other.
+	audio *audio.Plan
 }
 
 // deriveEncodePlan is THE derivation of an encode plan, and the only one in this build. The
@@ -307,7 +382,7 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 	// encode for any of them to describe. Its video is what the source's was.
 	if in.streams.RemuxOnly() {
 		p.Video = VideoPlan{Copy: true, Codec: in.streams.SourceVideoCodec()}
-		return p, nil
+		return p, p.deriveAudio(in)
 	}
 
 	spec, ok := encoder.Lookup(ts.Encoder)
@@ -396,7 +471,87 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 	}
 	p.Metadata = MetadataPlan{Color: color, Fidelity: hdr.FidelityOf(pixFmt, color, props.SideData())}
 	p.coverArt.pinned = pinned
-	return p, nil
+	// The audio last: its first loudness passes are the one costly step of a derivation, so
+	// every refusal above is met before any runs.
+	return p, p.deriveAudio(in)
+}
+
+// deriveAudio declares what the encode does to the audio, from the profile's audio keys and
+// the intended map's carried audio tracks (docs/design/audio.md). Keys that transform nothing
+// - every configuration that sets none of them - declare the zero plan: every track copied,
+// no probe, no pass. A transformation with no intended map to read the tracks from is
+// refused: it cannot be planned, and an encode that silently left it out would not be what
+// the configuration asked for.
+func (p *EncodePlan) deriveAudio(in planInputs) error {
+	set := in.prof.AudioSettings()
+	if in.audio != nil {
+		p.AudioTracks = *in.audio
+	} else if set.Active() {
+		if in.streams == nil {
+			return fmt.Errorf("the audio keys ask for an audio transformation of %q, which needs the intended "+
+				"stream map to plan: refusing to encode without it", in.source)
+		}
+		measure := in.measureLoudness
+		if measure == nil {
+			measure = func(audio.Source, string) (audio.Stats, error) {
+				return audio.Stats{}, fmt.Errorf("no loudness measurement is available to this encode")
+			}
+		}
+		plan, err := audio.Derive(set, carriedAudio(in.streams), containerExtOf(in.output), measure)
+		if err != nil {
+			return err
+		}
+		p.AudioTracks = plan
+	}
+	if len(p.AudioTracks.Normalised()) > 0 {
+		p.audioSeen = &audioObservations{}
+	}
+	return nil
+}
+
+// audioRecord is what the terminal row records of this plan's audio: one entry per op, with
+// the loudness mode read off the encoder's own report and the loudness the gate measured. A
+// plan with no audio ops records nothing.
+func (p *EncodePlan) audioRecord() store.AudioTracks {
+	if p == nil || len(p.AudioTracks.Ops) == 0 {
+		return store.AudioTracks{}
+	}
+	list := make([]store.AudioTrack, 0, len(p.AudioTracks.Ops))
+	for _, o := range p.AudioTracks.Ops {
+		t := store.AudioTrack{SourceIndex: o.Source.Index, Action: string(o.Action), Reason: o.Reason}
+		if o.InOutput() {
+			n := o.Output
+			t.OutputIndex = &n
+		}
+		if o.Transformed() {
+			t.Codec, t.Layout, t.SampleRate, t.BitrateKbps = o.Codec, o.Layout, o.SampleRate, o.BitrateKbps
+		}
+		if o.Loudness != nil {
+			measured := o.Loudness.InputI
+			t.MeasuredLUFS = &measured
+			t.Loudness, t.AchievedLUFS = p.loudnessSeen(o.LoudnessIndex, o.Output)
+		}
+		list = append(list, t)
+	}
+	return store.RecordAudioTracks(list)
+}
+
+// carriedAudio are the audio tracks a stream map carries, in output order, as the audio plan
+// reads them.
+func carriedAudio(streams *StreamPlan) []audio.Source {
+	var out []audio.Source
+	for _, s := range streams.Intended() {
+		if s.Type != probe.TypeAudio {
+			continue
+		}
+		lang := s.Language
+		if untaggedLanguage(lang) {
+			lang = ""
+		}
+		out = append(out, audio.Source{Index: s.Index, Codec: s.Codec, Profile: s.Profile, Channels: s.Channels,
+			Layout: s.ChannelLayout, SampleRate: s.SampleRate, Language: lang, Commentary: s.Commentary})
+	}
+	return out
 }
 
 // carriedList is the list an encoder's input format is chosen from, for a refusal.
@@ -590,6 +745,9 @@ func (p *EncodePlan) buildable() error {
 	case p.Metadata.DolbyVision:
 		return &UnbuildablePlanError{What: "a Dolby Vision RPU carried into the output"}
 	}
+	if err := p.AudioTracks.Check(carriedAudio(p.Streams)); err != nil {
+		return &UnbuildablePlanError{What: "an audio plan its derivation could not have made (" + err.Error() + ")"}
+	}
 	wantDecode, wantNode := decodeFor(p.Video.Encoder, p.Profile, p.devices)
 	if p.Video.Copy {
 		// A copy re-encodes nothing, so no picture operation can run on it: a plan claiming
@@ -636,7 +794,7 @@ func (p *EncodePlan) args(x265 encoder.X265Parallelism) (pre, body []string, err
 	if p.Video.Copy {
 		// The intended stream map and `-c copy`, and nothing else: every structural gate an
 		// encode is held to still runs against what it produces.
-		return nil, append(body, "-c", "copy"), nil
+		return nil, append(append(body, "-c", "copy"), p.AudioTracks.Args()...), nil
 	}
 
 	// Every carried stream is copied - that is the whole of what this build does to audio,
@@ -668,6 +826,10 @@ func (p *EncodePlan) args(x265 encoder.X265Parallelism) (pre, body []string, err
 		video = withHeadFilter(video, p.Metadata.Color.SetParams())
 	}
 	body = append(body, withDeinterlace(withDownscale(video, p.Picture.Downscale), p.Picture.Deinterlace)...)
+	// The audio tracks the plan transforms, after everything else: the zero plan adds
+	// nothing, so a job whose configuration sets no audio key builds the command line it
+	// always did.
+	body = append(body, p.AudioTracks.Args()...)
 
 	// The device options are GLOBAL and must precede -i, so the hwupload filter (added by
 	// videoArgs for VAAPI) and the QSV encoder have a device to target.

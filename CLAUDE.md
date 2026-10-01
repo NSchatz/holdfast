@@ -55,6 +55,12 @@ reasoning lives in the document, not in this file.
   `hw_fallback: software`** - [`docs/design/hardware.md`](docs/design/hardware.md#fallback).
 - **A hardware decode hands the filters, the encoder and every gate the frames a software decode
   would** - [`docs/design/hardware.md`](docs/design/hardware.md#decode).
+- **An audio track is re-encoded only on request, only from a lossless codec, into a layout the
+  codec carries as declared** - [`docs/design/audio.md`](docs/design/audio.md#reencode).
+- **Loudness runs in two passes to EBU R 128, resampled to the declared rate, its mode read from the
+  encoder's report** - [`docs/design/audio.md`](docs/design/audio.md#loudness).
+- **A transformed audio track replaces nothing until its length, layout, rate and loudness match its
+  plan and every audio stream decodes** - [`docs/design/audio.md`](docs/design/audio.md#audio-gates).
 - **A subtitle sidecar is published only after the swap commits and its parse-back gate passes, and never over an existing file** - [`docs/design/subtitles.md`](docs/design/subtitles.md#sidecars).
 
 ## Layout
@@ -79,6 +85,8 @@ reasoning lives in the document, not in this file.
   value means: one filter expression the encoder, the perceptual gate and the terminal
   row all read.
 - `internal/vmaf` - libvmaf via ffmpeg; the perceptual gate.
+- `internal/audio` - the audio plan: which tracks are re-encoded or downmixed, the codec and layout
+  matrix, two-pass loudness, and the audio gates' arithmetic.
 - `internal/subtitle` - the text subtitle sidecars `subtitle_sidecars: text` writes, and their gate.
 - `internal/encoder` - the codec matrix registry.
 - `internal/hwdevice` - the render nodes a hardware encoder can open, and the one VAAPI and QSV

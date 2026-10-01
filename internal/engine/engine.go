@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/NSchatz/holdfast/internal/audio"
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/cpuquota"
 	"github.com/NSchatz/holdfast/internal/downscale"
@@ -332,8 +333,16 @@ const (
 	// depth, chroma subsampling, a colour tag, or an HDR10 static-metadata block the
 	// source carries - or that could not be established.
 	GateFidelity = "fidelity"
-	// GateDecode: the decode-integrity healthcheck - the output does not fully decode.
+	// GateDecode: the decode-integrity healthcheck - the output does not fully decode. On a
+	// job that transforms audio it covers every output audio stream too.
 	GateDecode = "decode"
+	// GateAudio: an audio track the job transformed is not what its plan declares - its
+	// codec, channel count, channel layout or sample rate - or decodes to a length too far
+	// from its source track's, or that could not be established (docs/design/audio.md#audio-gates).
+	GateAudio = "audio"
+	// GateLoudness: a loudness-normalised track's measured integrated loudness is outside
+	// the EBU R 128 tolerance of the target, or could not be measured.
+	GateLoudness = "loudness"
 	// GateVmafMean: the pooled harmonic mean fell below min_vmaf.
 	GateVmafMean = "vmaf-mean"
 	// GateVmafMin: the worst (sub)sampled frame fell below vmaf_min_pool - the encode is
@@ -373,6 +382,8 @@ var GateVocabulary = []string{
 	GateVmafUnmeasured,
 	GateSwap,
 	GateOther,
+	GateAudio,
+	GateLoudness,
 }
 
 // Engine drives the transcode over a set of library roots.
@@ -657,6 +668,11 @@ type Engine struct {
 	// goroutine and never written again. It runs inline on a worker, so it must be
 	// non-blocking and concurrency-safe - the same contract Observer carries.
 	onClaim func(worker, path string)
+
+	// audioMeasure, when non-nil, replaces audio.Measure for the audio gates: one full decode
+	// of one audio stream. Unexported test seam (a fixture drives a decode the pinned ffmpeg
+	// would never fail on demand through it); production leaves it nil.
+	audioMeasure func(ctx context.Context, file, spec string, loudness bool) (audio.Measurement, error)
 }
 
 // EnsureHoldBacks publishes a snapshot when none has been published yet: the
@@ -2389,9 +2405,15 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// have: this is the point the encoder used to derive the same answer and refuse, so the
 	// row, the gate and the reason are the ones that refusal always recorded. The encoder is
 	// then never called.
+	// The first loudness pass, where the plan normalises a track, reads the source itself: it
+	// is the one probe the audio keys add, and a configuration that sets none never runs it.
+	measureLoudness := func(src audio.Source, pre string) (audio.Stats, error) {
+		return audio.MeasureLoudness(ctx, e.Probe.FFmpeg, f, src.Index, pre)
+	}
 	job, err := deriveEncodePlan(planInputs{
 		settings: ts, prof: prof, source: f, output: work, streams: plan, devices: e.Devices,
-		snapshot: func() (*probe.VideoProps, error) { return props, nil },
+		snapshot:        func() (*probe.VideoProps, error) { return props, nil },
+		measureLoudness: measureLoudness,
 	})
 	if err != nil {
 		if ctx.Err() != nil { // interrupted: discard temp, DON'T finish - leave active for RecoverStale
@@ -2425,9 +2447,13 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		_ = os.Remove(work)
 		ts = e.Cfg.WithEncoder(ts, fb)
 		out.Encoder = ts.Encoder
+		// The audio is the same job's: the first plan's audio is carried over, so its first
+		// loudness passes are not run a second time.
+		sameAudio := job.AudioTracks
 		again, derr := deriveEncodePlan(planInputs{
 			settings: ts, prof: prof, source: f, output: work, streams: plan, devices: e.Devices,
-			snapshot: func() (*probe.VideoProps, error) { return props, nil },
+			snapshot:        func() (*probe.VideoProps, error) { return props, nil },
+			measureLoudness: measureLoudness, audio: &sameAudio,
 		})
 		if derr != nil {
 			err = derr
@@ -2515,6 +2541,14 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	// gets is "not measured, and here is why" - never a zero, which would be a fabricated
 	// measurement of a gate nobody ran.
 	out.VmafSkipped = proof.Skipped
+	// WHAT THIS JOB DID TO THE AUDIO, from the plan the command line was built from, the
+	// loudness reports the encoder read back and the loudness the gate measured - on the
+	// reject path as much as the accept path. A job whose configuration transforms no audio
+	// records nothing, exactly as every row before this column did.
+	out.AudioTracks = job.audioRecord()
+	if out.AudioTracks.Recorded() {
+		e.Log.Info("audio", "file", f, "tracks", out.AudioTracks.String())
+	}
 	if proof.Skipped != "" {
 		e.Log.Warn("the VMAF gate did not run on this job", "file", f, "why", proof.Skipped,
 			"established_instead", "every carried video stream is identical to the source stream it came from")

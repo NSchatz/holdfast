@@ -369,6 +369,17 @@ func goldenFixtures(t *testing.T, ffmpeg, ffprobe, dir string) map[string]string
 	ff(t, ffmpeg, append(lavfi, "-vf", "setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc:range=tv",
 		"-c:v", "ffv1", "-pix_fmt", "yuv420p10le", "--", filepath.Join(dir, "ffv1-pq.mkv"))...)
 
+	// A source the audio keys transform: a 5.1 FLAC track in English (lossless, so a
+	// re-encode takes it, and surround, so a downmix does) and an AC-3 stereo track in French
+	// (lossy, so it is copied, and stereo, so French needs no downmix).
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=1:size=320x240:rate=10",
+		"-f", "lavfi", "-i", "anoisesrc=c=pink:r=48000:a=0.1:d=1:seed=7,aformat=channel_layouts=5.1",
+		"-f", "lavfi", "-i", "anoisesrc=r=48000:a=0.1:d=1:seed=3,aformat=channel_layouts=stereo",
+		"-map", "0:v", "-map", "1:a", "-map", "2:a", "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "8M",
+		"-pix_fmt", "yuv420p", "-c:a:0", "flac", "-c:a:1", "ac3", "-metadata:s:a:0", "language=eng",
+		"-metadata:s:a:1", "language=fre", "--", filepath.Join(dir, "audio.mkv"))
+
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read the fixture directory: %v", err)
@@ -988,6 +999,24 @@ func engineArgvCases() []engineArgvCase {
 	add(engineArgvCase{name: "hw-decode/max-height-240/deinterlace-yadif", source: "tall-interlaced.mkv",
 		root: ceiling(240) + "\ndeinterlace: yadif\nhw_decode: hardware", core: true})
 	add(engineArgvCase{name: "hw-decode/remux-only", root: "remux_only: true\nhw_decode: hardware", core: true})
+
+	// The audio keys (docs/design/audio.md), appended: a source they would transform with
+	// every key unset builds the command line it always did, and each key set builds its own
+	// per-track options after everything else. The loudness passes are proven in
+	// internal/audio, whose first-pass figures are measurements rather than configuration.
+	add(engineArgvCase{name: "audio/keys-unset", source: "audio.mkv"})
+	add(engineArgvCase{name: "audio/reencode-ac3", source: "audio.mkv", root: "audio_reencode: on\naudio_codec: ac3"})
+	add(engineArgvCase{name: "audio/reencode-opus/keep-original", source: "audio.mkv",
+		root: "audio_reencode: on\naudio_codec: opus\nkeep_original_audio: true\naudio_51_kbps: 320"})
+	add(engineArgvCase{name: "audio/downmix-aac", source: "audio.mkv", root: "audio_downmix: stereo\naudio_codec: aac"})
+	add(engineArgvCase{name: "audio/reencode-eac3/downmix/into-mp4", source: "audio.mkv",
+		root: "audio_reencode: on\naudio_downmix: stereo\naudio_codec: eac3\ncontainer_ext: mp4"})
+	add(engineArgvCase{name: "audio/reencode-ac3/into-mov", source: "audio.mkv",
+		root: "audio_reencode: on\naudio_codec: ac3\ncontainer_ext: mov"})
+	add(engineArgvCase{name: "audio/remux-only/reencode-ac3", source: "audio.mkv",
+		root: "remux_only: true\naudio_reencode: on\naudio_codec: ac3"})
+	add(engineArgvCase{name: "audio/top-level-codec/root-reencode", source: "audio.mkv", top: "audio_codec: aac",
+		root: "audio_reencode: on"})
 	return cs
 }
 

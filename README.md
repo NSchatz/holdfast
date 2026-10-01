@@ -76,13 +76,14 @@ own licence text or project page.
 
 ## Non-goals
 
-Four boundaries, each stated in full below - three settled, and the Dolby Vision / HDR10+ skip
-[DEFERRED](#dynamic-hdr-deferred) rather than settled. Two of the settled three, audio transcoding and
-distributed processing, are reversed by the owner's decisions of 2026-09-29; the note under each says
-what changes, and until a release ships it each paragraph still describes this build. Exotic-chroma
-and `multi-video-stream` sources are **skipped, not converted**. Two things are NOT boundaries - they
+Three boundaries, each stated in full below - two settled, and the Dolby Vision / HDR10+ skip
+[DEFERRED](#dynamic-hdr-deferred) rather than settled. One of the settled two, distributed
+processing, is reversed by the owner's decision of 2026-09-29; the note under it says what changes,
+and until a release ships it the paragraph still describes this build. Exotic-chroma
+and `multi-video-stream` sources are **skipped, not converted**. Three things are NOT boundaries - they
 are the transformations this tool makes on request, each **off by default**:
-[interlacing](#interlacing-posture) and [the resolution ceiling](#downscaling-posture).
+[interlacing](#interlacing-posture), [the resolution ceiling](#downscaling-posture) and
+[audio](#audio-posture).
 
 <a id="interlacing-posture"></a>
 
@@ -110,18 +111,21 @@ against the source as it is, so the figures carry what was lost - scoring agains
 *down* would take that detail out of both sides and hide it, and the row says which resolution it
 measured at. Keys: [docs/profiles.md](docs/profiles.md#resolution-rules).
 
-**Audio transcoding is a non-goal.** A library root can say which audio and subtitle streams its
-replacements carry (`audio_languages`, `subtitle_languages`, `keep_commentary`, `remux_only` - see
-**[docs/profiles.md](docs/profiles.md#stream-selection)**), and that is selection and **copy**: no
-downmix, no re-encode, no AAC companion track. Transcoding audio reopens the fidelity question for a
-second medium, and would need its own gate argument first.
+<a id="audio-posture"></a>
 
-> **Reversed - decided 2026-09-29 by the owner (T13, T19, T20).** Audio transcoding stops being a
-> non-goal: lossless or bulky tracks can be re-encoded to a configured codec, a re-encoded track
-> replacing its source track unless `keep_original_audio: true` keeps both; a stereo downmix can be
-> added, always as an extra track; EBU R128 loudness normalisation applies to the tracks added or
-> re-encoded; and the whole file must still pass strictly-smaller. None of it is in this build: the release that ships it
-> rewrites the paragraph above, which until then is what holdfast does.
+**Audio is re-encoded on request, and copied otherwise.** Every audio key is **off by default**, so
+each carried track is stream-copied as it always was (a root still says which tracks it carries:
+`audio_languages`, `subtitle_languages`, `keep_commentary`, `remux_only` - see
+**[docs/profiles.md](docs/profiles.md#stream-selection)**). Set `audio_reencode: on` with an
+`audio_codec` (`aac`, `ac3`, `eac3` or `opus`) and a root's lossless tracks - TrueHD, DTS-HD MA, PCM,
+FLAC - are re-encoded at a bitrate per layout, **replacing** the source track unless
+`keep_original_audio: true` keeps both; `audio_downmix: stereo` adds a stereo track beside a surround
+one; `audio_loudness: ebu_r128` normalises the re-encoded and added tracks to EBU R 128 in two passes.
+A layout the codec cannot carry (7.1 into AC-3 or E-AC-3) is copied, and the row says why. Every
+transformed track passes its own gates before the swap - decoded length, channel count and layout,
+sample rate, a full decode of every audio stream, and loudness within tolerance - and the whole file
+must still be strictly smaller. Keys: [docs/profiles.md](docs/profiles.md#audio); the reasoning:
+[docs/design/audio.md](docs/design/audio.md).
 
 Text subtitles can also be copied out beside a replacement: with `subtitle_sidecars: text`, each
 carried SubRip, ASS and WebVTT stream is written, unconverted, to `<name>.<lang>[.forced].<ext>`

@@ -32,7 +32,7 @@
 # min_bitrate_kbps, min_savings_percent, skip_hardlinked, vmaf_enable, min_vmaf,
 # vmaf_min_pool, vmaf_min_chroma, vmaf_subsample, vmaf_model, audio_languages,
 # subtitle_languages, keep_commentary, remux_only, deinterlace, max_height,
-# downscale_acknowledged. Anything else inside an entry refuses to start: workers,
+# downscale_acknowledged, the audio keys below. Anything else inside an entry refuses to start: workers,
 # cores_per_worker, x265_cpus, state_dir, server_*, undo_window_hours,
 # history_retention_rows, run_window, max_load and the notification keys describe the
 # PROCESS, not a library, and stay at the top level.
@@ -229,12 +229,36 @@ dry_run: false
 # established identical to the source's. It may not be written beside `encoder` in the
 # same layer.
 #
-# Audio TRANSCODING is a non-goal: selection and copy only, no downmix and no re-encode.
+# Whatever is kept is stream-copied, unless the audio keys below say otherwise.
 #
 # audio_languages: [eng, jpn]
 # subtitle_languages: [eng]
 # keep_commentary: true
 # remux_only: false
+
+# --- audio: re-encode, downmix and loudness (docs/design/audio.md) ---
+# Every key is OFF by default, so every carried audio track is stream-copied as it always
+# was. Each is a library root knob with a top-level default. Every transformed track must
+# pass its own gates before the swap (decoded length, channel count and layout, sample
+# rate, a full decode, loudness), and the whole file must still be strictly smaller.
+#
+# audio_reencode: off     # on: re-encode every carried LOSSLESS track (TrueHD, DTS-HD MA,
+#                         # PCM, FLAC) to audio_codec, REPLACING it in its own place.
+#                         # A layout the codec cannot carry (7.1 into ac3/eac3) is
+#                         # copied, and the row says why.
+# audio_codec: aac        # aac | ac3 | eac3 | opus (libopus). Required by audio_reencode:
+#                         # on and by audio_downmix: stereo. libfdk_aac is never used.
+# audio_mono_kbps: 0      # the bitrate per layout, kb/s; 0 (default) takes the codec's
+# audio_stereo_kbps: 0    # own default: opus 64/128/256/450 (the Xiph recommendation),
+# audio_51_kbps: 0        # aac 64/128/384/512, ac3 and eac3 96/192/640 (mono, stereo,
+# audio_71_kbps: 0        # 5.1, 7.1). An ac3 bitrate must be one AC-3 carries (max 640).
+# keep_original_audio: false  # true: keep the original beside its re-encode, which is
+#                         # added as an extra track (never the default one).
+# audio_downmix: off      # stereo: add a stereo downmix of each surround track whose
+#                         # language carries no stereo track (commentary excluded).
+# audio_loudness: off     # ebu_r128: normalise every re-encoded and added track to
+#                         # -23 LUFS, -1 dBTP in two passes (linear where loudnorm can,
+#                         # and the row records which mode ran).
 
 # --- codec / quality: the codec matrix (TRANSCODE-6) ---
 # encoder: cpu           # cpu (libx265/hevc) is the ARCHIVAL DEFAULT — best

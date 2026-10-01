@@ -310,3 +310,27 @@ row: failed temp missing or empty
 == hw-decode/remux-only
 -hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
 row: failed temp missing or empty
+== audio/keys-unset
+-hide_banner -nostdin -loglevel error -y -i <library>/audio.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/audio.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== audio/reencode-ac3
+-hide_banner -nostdin -loglevel error -y -i <library>/audio.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -c:a:0 ac3 -b:a:0 640k -ch_layout:a:0 5.1(side) -ar:a:0 48000 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/audio.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== audio/reencode-opus/keep-original
+-hide_banner -nostdin -loglevel error -y -i <library>/audio.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -map 0:1 -c:a:2 libopus -b:a:2 320k -ch_layout:a:2 5.1 -ar:a:2 48000 -disposition:a:2 0 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/audio.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== audio/downmix-aac
+-hide_banner -nostdin -loglevel error -y -i <library>/audio.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -map 0:1 -c:a:2 aac -b:a:2 128k -ch_layout:a:2 stereo -ar:a:2 48000 -filter:a:2 aformat=channel_layouts=stereo -disposition:a:2 0 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/audio.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== audio/reencode-eac3/downmix/into-mp4
+-hide_banner -nostdin -loglevel error -y -i <library>/audio.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -map 0:1 -c:a:0 eac3 -b:a:0 640k -ch_layout:a:0 5.1(side) -ar:a:0 48000 -c:a:2 eac3 -b:a:2 192k -ch_layout:a:2 stereo -ar:a:2 48000 -filter:a:2 aformat=channel_layouts=stereo -disposition:a:2 0 -f mp4 -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/audio.__transcoding__.mp4.holdfast-part
+row: failed temp missing or empty
+== audio/reencode-ac3/into-mov
+-hide_banner -nostdin -loglevel error -y -i <library>/audio.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f mov -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/audio.__transcoding__.mov.holdfast-part
+row: failed temp missing or empty
+== audio/remux-only/reencode-ac3
+-hide_banner -nostdin -loglevel error -y -i <library>/audio.mkv -map 0 -map -0:d? -c copy -c:a:0 ac3 -b:a:0 640k -ch_layout:a:0 5.1(side) -ar:a:0 48000 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/audio.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== audio/top-level-codec/root-reencode
+-hide_banner -nostdin -loglevel error -y -i <library>/audio.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -c:a:0 aac -b:a:0 384k -ch_layout:a:0 5.1 -ar:a:0 48000 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/audio.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
