@@ -105,6 +105,7 @@ audio_loudness: ebu_r128
 hw_fallback: software
 hw_decode: hardware
 subtitle_sidecars: text
+crop: auto
 workers: 4
 state_dir: /var/lib/holdfast
 undo_window_hours: 24
@@ -151,6 +152,7 @@ max_load: 1.5
 		HWFallback:        "software",
 		HWDecode:          "hardware",
 		SubtitleSidecars:  "text",
+		Crop:              "auto",
 	}
 	roots := c.RootProfiles()
 	if len(roots) != 2 {
@@ -400,6 +402,10 @@ func TestProfileKnobSetIsClosedAndSingleSourced(t *testing.T) {
 		// files beside its replacement, so it is a knob; digested conditionally, so a root
 		// that sets nothing digests as it always did.
 		"subtitle_sidecars",
+		// Whether black bars are detected and cut away. It decides which pixels a replacement
+		// keeps, so it is a knob; digested conditionally, so a root that sets nothing digests as
+		// it always did.
+		"crop",
 		// What a job does where its hardware encoder is missing or fails. It decides which
 		// encoder writes a replacement, or whether one is written at all, so it is a knob;
 		// digested conditionally, so a root that sets nothing digests as it always did.

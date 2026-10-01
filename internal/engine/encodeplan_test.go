@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/crop"
 	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/probe"
@@ -216,7 +217,19 @@ func TestEncodePlan_RefusesWhatItCannotPerform(t *testing.T) {
 	}{
 		{"an audio action other than copy", false, func(p *EncodePlan) { p.Audio = "reencode" }, `audio action "reencode"`},
 		{"a subtitle action other than copy", false, func(p *EncodePlan) { p.Subtitles = "sidecar" }, `subtitle action "sidecar"`},
-		{"a crop", false, func(p *EncodePlan) { p.Picture.Crop = "crop=320:200:0:20" }, `crop "crop=320:200:0:20"`},
+		// A crop is performed now (docs/design/crop.md); what is refused is a crop its derivation
+		// could not have made - here an odd offset a 4:2:0 encode has no representation for, and
+		// a rectangle beside its own refusal.
+		{"a crop its derivation could not have made", false, func(p *EncodePlan) {
+			p.Picture.Crop = crop.Decision{Frame: crop.Frame{W: 320, H: 240}, Rect: crop.Rect{W: 320, H: 200, Y: 21}}
+		}, `crop "320:200:0:21"`},
+		{"a crop outside its frame", false, func(p *EncodePlan) {
+			p.Picture.Crop = crop.Decision{Frame: crop.Frame{W: 320, H: 240}, Rect: crop.Rect{W: 320, H: 200, Y: 60}}
+		}, `crop "320:200:0:60"`},
+		{"a crop beside its own refusal", false, func(p *EncodePlan) {
+			p.Picture.Crop = crop.Decision{Frame: crop.Frame{W: 320, H: 240}, Rect: crop.Rect{W: 320, H: 200, Y: 20},
+				Reason: crop.ReasonSamplesDisagree}
+		}, `crop "320:200:0:20" beside its own refusal`},
 		{"HDR10+ carried", false, func(p *EncodePlan) { p.Metadata.HDR10Plus = true }, "HDR10+"},
 		{"a Dolby Vision RPU carried", false, func(p *EncodePlan) { p.Metadata.DolbyVision = true }, "Dolby Vision"},
 		{"a hardware decode path", false, func(p *EncodePlan) { p.Video.Decode = "cuda" }, `decode path "cuda"`},
@@ -225,6 +238,9 @@ func TestEncodePlan_RefusesWhatItCannotPerform(t *testing.T) {
 		{"a remux declaring an audio action other than copy", true, func(p *EncodePlan) { p.Audio = "downmix" }, `audio action "downmix"`},
 		{"a remux declaring a picture operation", true, func(p *EncodePlan) {
 			p.Picture.Downscale = config.Profile{MaxHeight: 120}.DownscaleFor(320, 240)
+		}, "a picture operation on a stream copy"},
+		{"a remux declaring a crop", true, func(p *EncodePlan) {
+			p.Picture.Crop = crop.Decision{Frame: crop.Frame{W: 320, H: 240}, Rect: crop.Rect{W: 320, H: 200, Y: 20}}
 		}, "a picture operation on a stream copy"},
 		{"a plan no derivation made", false, func(p *EncodePlan) { p.id = 0 }, "no derivation this build made"},
 		{"an input format the encoder's list does not give for the plan", false,

@@ -19,6 +19,10 @@ The output fidelity gate joins them by addition: the replacement must carry the 
 chroma subsampling, colour tags and HDR10 static metadata its encode plan declares
 ([encode-plan](encode-plan.md#fidelity)).
 
+The crop gate joins them by addition on a job that crops: the replacement must be the size its
+plan declares, and the area the crop removed from the source must be black on every frame
+([crop](crop.md#crop-gate)).
+
 Any gate failure discards the temp and leaves the source byte-for-byte intact.
 There is no half-written state left behind to clean up, and no moment at which the
 source is gone and the replacement is not yet in place.

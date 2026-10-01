@@ -9,6 +9,7 @@ import (
 
 	"github.com/NSchatz/holdfast/internal/audio"
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/crop"
 	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/downscale"
 	"github.com/NSchatz/holdfast/internal/hdr"
@@ -242,6 +243,17 @@ func (e *Engine) verifyAgainst(ctx context.Context, job *EncodePlan) (vmafProof,
 		}
 	}
 
+	// 6c. THE CROP GATE, on a plan that crops and on no other: the output is the size the plan
+	// declares, and the area the crop removed from the SOURCE is black on every frame,
+	// measured again over the declared rectangle (docs/design/crop.md#crop-gate). A plan that
+	// crops nothing is not held to it, so every job whose root does not crop is gated exactly
+	// as it always was.
+	if job.Picture.Crop.Applied() {
+		if gate, class, err := e.cropGate(ctx, job); err != nil {
+			return none, gate, class, err
+		}
+	}
+
 	// 7. VMAF perceptual-quality gate, last because it costs a second full decode. The
 	// structural checks prove the output exists, decodes and carries the tracks; VMAF proves
 	// it still LOOKS like the source. Unavailable libvmaf or a failed measurement REJECTS.
@@ -267,7 +279,7 @@ func (e *Engine) verifyAgainst(ctx context.Context, job *EncodePlan) (vmafProof,
 		return vmafProof{Skipped: VmafSkippedRemuxOnly}, "", "", nil
 	}
 	if prof.VmafGate() {
-		return e.vmafGate(ctx, tmp, in, prof, job.Picture.Deinterlace, job.Picture.Downscale)
+		return e.vmafGateCropped(ctx, tmp, in, prof, job.Picture.Deinterlace, job.Picture.Crop.Rect, job.Picture.Downscale)
 	}
 	return none, "", "", nil
 }
@@ -524,6 +536,20 @@ func (e *Engine) lengthParity(ctx context.Context, in, out string) (store.Failur
 // they are the same number and this resolves exactly what it always did.
 func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof config.Profile,
 	film deinterlace.Filter, shrink downscale.Scale) (vmafProof, string, store.FailureClass, error) {
+	return e.vmafGateCropped(ctx, distorted, reference, prof, film, crop.Rect{}, shrink)
+}
+
+// vmafGateCropped is vmafGate for a job that may also crop: cut is the rectangle of the
+// source the encode kept, and the zero Rect where it kept the whole frame. Where it is set,
+// the REFERENCE is put through the same crop, after the same deinterlace, in the order the
+// encode ran them (referenceChain): the encode removed bars the source carried, so a score
+// against the uncropped source would compare two pictures of different sizes - or, scaled to
+// meet, two different pictures - and measure the crop rather than the encode. A crop is not a
+// resampling: it keeps the source's own pixels, so cropping the reference loses nothing the
+// encode did not also lose (docs/design/crop.md#reference). Where it is not set this is
+// vmafGate exactly.
+func (e *Engine) vmafGateCropped(ctx context.Context, distorted, reference string, prof config.Profile,
+	film deinterlace.Filter, cut crop.Rect, shrink downscale.Scale) (vmafProof, string, store.FailureClass, error) {
 	// The height the comparison is made at: the output's own on every job that scaled
 	// nothing, which is the one probe this line has always taken, and the SOURCE's where the
 	// distorted is about to be scaled back up to it. Nothing extra is probed on the ordinary
@@ -593,7 +619,7 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof
 		// source. A SCALE never rides here (see internal/vmaf) - a reference resampled down
 		// to meet a smaller output is a reference that lost the detail this gate exists to
 		// measure, and the source is deleted on the strength of what comes back.
-		ReferenceFilter: film.Spec,
+		ReferenceFilter: referenceChain(film.Spec, cut),
 		// The distorted's chain: the up-scale back to the source's own resolution that a
 		// downscaling job owes, and "" on every other job.
 		DistortedFilter: shrink.ScoreSpec(),
@@ -614,6 +640,12 @@ func (e *Engine) vmafGate(ctx context.Context, distorted, reference string, prof
 		Mean: &res.HarmonicMean, Min: &res.Min, Model: model,
 		PixFmt: res.PixelFormat, ChromaMin: &res.ChromaMin, ChromaMetric: res.ChromaMetric,
 		Stream: res.Stream, Deinterlace: res.ReferenceFilter,
+	}
+	// The deinterlace the reference was produced by is recorded on its own field; the crop that
+	// follows it in the chain is recorded on the row's own crop record, so it is taken off here
+	// rather than recorded as part of a deinterlace.
+	if !cut.Empty() {
+		proof.Deinterlace = strings.TrimSuffix(strings.TrimSuffix(res.ReferenceFilter, cut.Spec()), ",")
 	}
 	// The resolution the comparison was made at, recorded ONLY where the job scaled
 	// something. On every other job it is the output's own size, which the row already

@@ -80,10 +80,10 @@ Three boundaries, each stated in full below - two settled, and the Dolby Vision 
 [DEFERRED](#dynamic-hdr-deferred) rather than settled. One of the settled two, distributed
 processing, is reversed by the owner's decision of 2026-09-29; the note under it says what changes,
 and until a release ships it the paragraph still describes this build. Exotic-chroma
-and `multi-video-stream` sources are **skipped, not converted**. Three things are NOT boundaries - they
+and `multi-video-stream` sources are **skipped, not converted**. Four things are NOT boundaries - they
 are the transformations this tool makes on request, each **off by default**:
-[interlacing](#interlacing-posture), [the resolution ceiling](#downscaling-posture) and
-[audio](#audio-posture).
+[interlacing](#interlacing-posture), [the resolution ceiling](#downscaling-posture),
+[black bars](#crop-posture) and [audio](#audio-posture).
 
 <a id="interlacing-posture"></a>
 
@@ -110,6 +110,19 @@ No floor moves: the gate scales the **output back up** and is **scored at the so
 against the source as it is, so the figures carry what was lost - scoring against a source resampled
 *down* would take that detail out of both sides and hide it, and the row says which resolution it
 measured at. Keys: [docs/profiles.md](docs/profiles.md#resolution-rules).
+
+<a id="crop-posture"></a>
+
+**Black bars are cropped on request, and kept otherwise.** `crop` is **off by default**. Set
+`crop: auto` on a root and each source's bars are found by sampling it at ten points and cut away
+before encoding, so **the replacement is no longer the same content as the source**: those rows
+are gone and the swap deletes the original. It is cut only where the samples agree, the area
+removed is black on **every frame**, and the source is not Dolby Vision; samples that disagree (a
+mixed aspect ratio), bars with anything in them, and every case it cannot decide encode the whole
+frame, and the row says why. No floor moves: the gate scores the encode against the source put
+through the **same crop**, and a crop gate holds the output to the declared size and the removed
+area to black. Key: [docs/profiles.md](docs/profiles.md#crop); the reasoning:
+[docs/design/crop.md](docs/design/crop.md).
 
 <a id="audio-posture"></a>
 

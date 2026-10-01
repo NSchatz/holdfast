@@ -336,6 +336,13 @@ dry_run: false
 #                         # with the source stream's event count. Picture-based and
 #                         # mov_text subtitles are skipped with a reason. A library
 #                         # root may override it. See docs/design/subtitles.md.
+# crop: off              # off (default): every replacement keeps the whole frame.
+#                         # auto: sample each source with cropdetect and cut its
+#                         # black bars away, only where the samples agree, the
+#                         # removed area is black on every frame and the source
+#                         # is not Dolby Vision; anything else encodes the whole
+#                         # frame and the row says why. A library root may
+#                         # override it. See docs/design/crop.md.
 # crf: 22                # quality knob (lower = bigger/better): libx265/libsvtav1
 #                         # constant-rate-factor, 0-51. A hardware encoder with no
 #                         # quality.<key> below takes this value unchanged as its
