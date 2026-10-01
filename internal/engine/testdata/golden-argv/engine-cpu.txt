@@ -292,3 +292,21 @@ row: failed temp missing or empty
 == source-mpeg4/quality-set-t27
 -hide_banner -nostdin -loglevel error -y -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
 row: failed temp missing or empty
+== hw-decode/source-ffv1-pq/every-encoder
+-hide_banner -nostdin -loglevel error -y -i <library>/ffv1-pq.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:hdr10-opt=1:repeat-headers=1 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/ffv1-pq.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== hw-decode/source-mpeg4/pixel-format-yuv420p/every-encoder
+-hide_banner -nostdin -loglevel error -y -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== hw-decode/top-level/source-hdr10
+-hide_banner -nostdin -loglevel error -y -i <library>/hdr10.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400:hdr10-opt=1:repeat-headers=1 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/hdr10.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== hw-decode/top-level/root-software
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== hw-decode/max-height-240/deinterlace-yadif
+-hide_banner -nostdin -loglevel error -y -i <library>/tall-interlaced.mkv -map 0 -map -0:d? -c copy -c:v libx265 -pix_fmt yuv420p10le -color_range tv -fps_mode passthrough -preset slow -crf 22 -x265-params log-level=error -vf yadif=mode=send_frame:parity=auto:deint=all,scale=320:240:flags=lanczos -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/tall-interlaced.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== hw-decode/remux-only
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty

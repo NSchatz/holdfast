@@ -137,6 +137,10 @@ type VideoPlan struct {
 	Quality Quality
 }
 
+// HardwareDecode reports whether the source is decoded on a device (DecodeCUDA or
+// DecodeVAAPI). A copy declares no decode at all, and is not one.
+func (v VideoPlan) HardwareDecode() bool { return v.Decode == DecodeCUDA || v.Decode == DecodeVAAPI }
+
 // Quality is the rate control of one video encode.
 type Quality struct {
 	// CRF is the job's effective crf: the software encoders' quality target, and what a
@@ -482,7 +486,7 @@ func decodeFor(spec encoder.Spec, prof config.Profile, devices hwdevice.Assignme
 // (libavcodec/qsv.c), which is the X11 fallthrough again. Sources at
 // https://github.com/FFmpeg/FFmpeg/tree/5d4d3bdc61 , read 2026-09-30.
 func deviceArgs(v VideoPlan) []string {
-	if v.Decode != DecodeSoftware {
+	if v.HardwareDecode() {
 		return hwDecodeArgs(v)
 	}
 	if v.Device == "" {

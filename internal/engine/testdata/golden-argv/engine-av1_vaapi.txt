@@ -98,3 +98,21 @@ row: failed temp missing or empty
 == source-mpeg4/quality-set-t27
 -hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -rc_mode CQP -global_quality 120 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
 row: failed temp missing or empty
+== hw-decode/source-ffv1-pq/every-encoder
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -filter_hw_device hfva -hwaccel vaapi -hwaccel_device hfva -i <library>/ffv1-pq.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -vf setparams=color_primaries=bt2020:color_trc=smpte2084,format=p010le,hwupload -rc_mode CQP -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/ffv1-pq.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== hw-decode/source-mpeg4/pixel-format-yuv420p/every-encoder
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -filter_hw_device hfva -hwaccel vaapi -hwaccel_device hfva -i <library>/mpeg4.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=nv12,hwupload -rc_mode CQP -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/mpeg4.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== hw-decode/top-level/source-hdr10
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -filter_hw_device hfva -hwaccel vaapi -hwaccel_device hfva -i <library>/hdr10.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -fps_mode passthrough -vf setparams=color_primaries=bt2020:color_trc=smpte2084,format=p010le,hwupload -rc_mode CQP -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/hdr10.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== hw-decode/top-level/root-software
+-hide_banner -nostdin -loglevel error -y -vaapi_device /dev/dri/renderD128,connection_type=drm -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf format=p010le,hwupload -rc_mode CQP -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== hw-decode/max-height-240/deinterlace-yadif
+-hide_banner -nostdin -loglevel error -y -init_hw_device vaapi=hfva:/dev/dri/renderD128,connection_type=drm -filter_hw_device hfva -hwaccel vaapi -hwaccel_device hfva -i <library>/tall-interlaced.mkv -map 0 -map -0:d? -c copy -c:v av1_vaapi -color_range tv -fps_mode passthrough -vf yadif=mode=send_frame:parity=auto:deint=all,scale=320:240:flags=lanczos,format=p010le,hwupload -rc_mode CQP -global_quality 22 -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/tall-interlaced.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty
+== hw-decode/remux-only
+-hide_banner -nostdin -loglevel error -y -i <library>/sdr.mkv -map 0 -map -0:d? -c copy -f matroska -max_muxing_queue_size 128 -muxing_queue_data_threshold 52428800 -thread_queue_size 8 -- <library>/sdr.__transcoding__.mkv.holdfast-part
+row: failed temp missing or empty

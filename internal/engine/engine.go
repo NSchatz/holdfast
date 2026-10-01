@@ -2399,7 +2399,7 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		return nil
 	}
 
-	if job.Video.Decode != DecodeSoftware {
+	if job.Video.HardwareDecode() {
 		// Said only where it is not the default, so a job under hw_decode: software logs
 		// exactly what it always did (docs/design/hardware.md#decode).
 		e.Log.Info("hardware decode", "file", f, "decode", job.Video.Decode,
