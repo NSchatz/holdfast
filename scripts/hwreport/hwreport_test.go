@@ -22,7 +22,6 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -94,10 +93,7 @@ func needTool(t *testing.T, name string) string {
 // buildHoldfast builds this tree's holdfast into a temporary directory.
 func buildHoldfast(t *testing.T, root string) string {
 	t.Helper()
-	gobin := filepath.Join(runtime.GOROOT(), "bin", "go")
-	if _, err := os.Stat(gobin); err != nil {
-		gobin = needTool(t, "go")
-	}
+	gobin := needTool(t, "go")
 	bin := filepath.Join(t.TempDir(), "holdfast")
 	cmd := exec.Command(gobin, "build", "-o", bin, "./cmd/holdfast")
 	cmd.Dir = root
