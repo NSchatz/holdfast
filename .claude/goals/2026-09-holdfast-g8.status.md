@@ -79,15 +79,28 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g8-ba
 | 5.1 | Opt-in consensus crop (fractional limit, spread samples, invalid results discarded, disagreement refused) | DONE (PR #140, `6fa5379`): `crop: off|auto` per root, off by default; `internal/crop`; 10 samples of 4 frames skipping 5% at each end, `round=2`, fractional limit, quarter-frame and negative results discarded, 3-sample minimum (HandBrake `libhb/scan.c`), loose consensus within 9 px (`ASSUMED`/`LEAD`); `TestDecide_TheResearchWorkedLetterbox`, `TestAgree_AllBlackSamplesAreDiscarded`; gate exit 0 (2173 s, `internal/engine` 2060.7 s, 76%); mutation-diff 100% (226 killed, 0 lived); CI green |
 | 5.2 | Blackness gate over the removed area of the source; VMAF against the identically cropped source; even 4:2:0 dimensions; crop rectangle on the job row | DONE (PR #140): blackness checked before the encode and again as gate member on the declared rectangle (`TestCrop_TheGateRefusesBarsThatAreNotBlack`, source byte-identical; `TestCrop_TheGateHoldsTheOutputToTheDeclaredSize`); chain deinterlace, crop, scale, the VMAF reference through the same deinterlace and crop (`TestCrop_TheChainRunsDeinterlaceThenCropThenScale`); store v23 `crop` column |
 | 5.3 | Fixtures: letterbox, text in the bar, mixed aspect refused, 10-bit | DONE (PR #140): `TestCrop_LetterboxReachesTheArgvTheReferenceTheGatesAndTheRow`, `TestDetect_Letterbox`, `TestBlackness_TextInTheBarIsRefused`, `TestCrop_RefusalsEncodeUncroppedWithTheReason/{text_in_the_bar,mixed_aspect_ratio}`, `TestDetect_MixedAspectRatioIsRefused`, `TestDetect_TenBitPQ_FractionalLimitCropsAndAbsoluteDoesNot`, `TestBlackness_CalibrationOnTheTenBitFixture` |
-| 5.4 | DV crop per P5 (c): refusal first, then crop to the RPU's own L5 rectangle with L5 zeroed and the L5 gate | DOING: the refusal is DONE (PR #140: `TestCrop_ADolbyVisionSourceIsRefusedByTheDecisionItself`, `TestDecide_ADolbyVisionSourceIsRefusedWhateverItsPicture`); option (c) waits on `dynhdr` |
+| 5.4 | DV crop per P5 (c): refusal first, then crop to the RPU's own L5 rectangle with L5 zeroed and the L5 gate | DONE (PR #140 refusal; PR #141, `3bf286d`, option (c)): `TestCropDV_AProfile81LetterboxIsCroppedToItsL5WithL5ZeroedAndGated`, `TestDolbyVisionFixture_EveryOtherSourceIsRefused`, `TestCropDV_ARefusedL5EncodesUncroppedWithItsDolbyVision`, `TestRealFixture_TheL5ZeroingCropsAndItsGateRedsWithoutTheFlag`, `TestCropDV_TheL5GateRefusesAStaleL5AndTheNextAttemptIsUncropped`, `TestRealFixture_ADroppedL5IsRefusedAlthoughExportDReadsZero`, `TestDolbyVisionFixture_AFailingDoviToolIsNeverACrop`, `TestCropDV_AProfile7SourceIsZeroedByTheModeTwoConversion`, `TestParseDimensions_ADolbyVisionStreamsTrailingSeparatorIsASize`; gate exit 0 (2175 s, `internal/engine` 1982.5 s, 73%); mutation-diff 100% (80 killed, 0 lived); CI green (runs 36867776935, 36867776784) |
 | 5.5 | `docs/design/crop.md` with anchors | DONE (PR #140): `docs/design/crop.md`, CLAUDE.md rule link and Layout line, README crop posture, `docs/profiles.md`, `config.example.yaml`, `docs/requeue.md` |
 
 ## Phase 6 - Report
 
 | # | Item | State |
 |---|---|---|
-| 6.1 | Gate integrity counted from the goal-start SHA | TODO |
+| 6.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `3bf286d`): `func Test` 1542 -> 1634, no package fell (`internal/crop` 0 -> 31, `internal/dynhdr` 0 -> 31, `internal/engine` 521 -> 543, `internal/config` 131 -> 136, `internal/docscheck` 29 -> 30, `internal/probe` 24 -> 25, `internal/store` 154 -> 155, every other package unchanged); `docs/design/swap.md` 62 -> 66 and `docs/design/quality-gate.md` 76 -> 80 lines, `git diff --numstat 0d752f6 3bf286d` +4 -0 for each; 17 lines deleted in `*_test.go` (+4074 -17), each with its reason below |
 | 6.2 | Adversarial review of the report | TODO |
+
+### The 17 deleted `*_test.go` lines and why
+
+- `cmd/holdfast/export_test.go` (3), `internal/store/migrate_test.go` (1),
+  `internal/store/readonly_test.go` (2), `internal/store/resolution_migrate_test.go` (4): the
+  wind-back fixtures that undo exactly the newest store migration moved from v22 (`audio_tracks`)
+  to v23 (`crop`, #140); each line is replaced by its v23 counterpart.
+- `internal/docscheck/dynamichdr_test.go` (6): the old statement's failure message and the clause
+  count 3 -> 5. The statement and its check changed together (R4, #139), and
+  `TestDynamicHDR_TheOldDeferralWordingNowFails` proves the old wording now fails.
+- `internal/engine/encodeplan_test.go` (1): the case "a crop" (every crop refused as unbuildable).
+  A crop is now performed, so it became three refusals of crops no derivation could have made
+  plus a crop on a remux (#140).
 
 ## Decisions taken
 
@@ -126,6 +139,20 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g8-ba
   HDR guard runs, and every DV profile 7 and 8 source is HEVC (`docs/design/dynamic-hdr.md#reach`).
   Re-encoding HEVC sources would change decisions for existing configurations (I5), so nothing
   changed; the engine tests reach the path through a probe stand-in. Listed for the owner.
+- 2026-10-01: PR #141 (crop phase 2, P5 option (c)) merged as `3bf286d`. Its own decisions: L5 read
+  with `extract-rpu` from a pipe (`dovi_tool` chooses its reader by file extension and failed on
+  the `.holdfast-part` working file) and `export -l level5 -f json`; the DV crop decision runs
+  before the dynamic-HDR pre-pass, which is what zeroes L5, and the plan derivation refuses a crop
+  and a zeroing that disagree; 2 px tolerance (`ASSUMED`, P5) calibrated on the 10-bit fixture;
+  an L5 gate failure is transient, so the next attempt in the same process encodes uncropped and
+  after a restart it is gated again, bounded by `max_failures`; a failed zeroing pre-pass re-runs
+  without it and encodes uncropped; the API crop record gains `l5_zeroed`; no schema step. It
+  fixed `probe.Prober.Dimensions` on DV streams (ffprobe prints a trailing `x`). Profile 7 with
+  crop is proven at argv level over a record rewritten to 7 (`dovi_tool` cannot generate 7).
+- 2026-10-01: `NEEDS-OWNER.md` unchanged by this goal: the dynamic-HDR and crop work needs no GPU,
+  no live service and no homelab merge, so no step here is physically impossible for an agent.
+  No minor release is cut (T37 optional): the new carry is reachable only for non-HEVC sources and
+  crop is off by default; a later goal can release them.
 
 ## Proposals awaiting the owner
 
@@ -139,5 +166,6 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g8-ba
 
 ## Resume here
 
-Baselines done. Three agents building `holdfast-g8/tools`, `holdfast-g8/dynhdr`, `holdfast-g8/crop`
-in worktrees under `/cache/wt/holdfast/`. Next: review and merge each PR; then crop phase 2 (P5 (c)).
+All PRs merged: #138, #140, #139, #141; main CI green on `3bf286d` (run 36870359915). No branch,
+worktree or open PR of this goal remains. Next: the adversarial review of the report (6.2), then
+the COMPLETE line.
