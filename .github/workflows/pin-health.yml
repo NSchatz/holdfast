@@ -1,6 +1,7 @@
 name: pin health
 
-# Watch the ffmpeg pin, on a schedule, on no pull request.
+# Watch the ffmpeg pin, and the dovi_tool and hdr10plus_tool pins, on a schedule, on no
+# pull request.
 #
 # S0022: the pin was a mid-month daily build, upstream keeps only the last 14 dailies,
 # and it 404ed about a fortnight after it was chosen. Nothing was watching it, so the
@@ -39,5 +40,5 @@ jobs:
       # Through the Makefile, like every other gate in this repository, so the scheduled
       # run and a human typing `make check-pin-live` are the identical check rather than
       # two things that agree until one of them is edited.
-      - name: is the pinned ffmpeg still served?
+      - name: are the pinned ffmpeg, dovi_tool and hdr10plus_tool still served?
         run: make check-pin-live

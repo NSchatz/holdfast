@@ -18,7 +18,12 @@
 # guards - a package the image copies that NOTICE omits, one NOTICE names that the image
 # does not carry, a version drifted between the two, a shortened sha256, a fetch from the
 # live mirror or a floating snapshot, a missing pin block, and a NOTICE entry with no source
-# offer. Two of the S0057 cases assert a PASS
+# offer; cases 43-57 (goal 8) defeat the DYNAMIC-HDR TOOL guards - a floating or missing
+# version, a short or uppercase digest, a fetch URL that is not the pinned release asset or
+# a second unchecked one, and a NOTICE that omits a tool, drifts from its version, names one
+# the image does not carry, loses its MIT licence, source or permission notice, or carries a
+# stray version; case 57 asserts a coherent bump of both files still PASSES. Two of the
+# S0057 cases assert a PASS
 # rather than a bite (the local-action exemption, and a manifest whose decision is
 # recorded), because a guard that refuses everything is indistinguishable from a guard
 # that works and is impossible to comply with. One asserts that publishing `:latest` is
@@ -57,7 +62,7 @@ OLD_ENV="TRANSCODE""_SERVER_AUTH_TOKEN"
 OLD_CRF="TRANSCODE""_CRF"
 OLD_METRIC="transcode""_files_total"
 
-declared=43
+declared=58
 pass=0; failed=0
 repo="$work/repo"
 
@@ -490,6 +495,120 @@ sed -i '/^       source:  lm-sensors /d' "$repo/NOTICE"
 ! grep -q '^       source:  lm-sensors ' "$repo/NOTICE" \
   || { echo "::error::selftest: could not remove libsensors5's source line, so this case did NOT run" >&2; exit 1; }
 expect 1 "a Debian package in NOTICE with no corresponding source is caught" "no corresponding source on snapshot.debian.org.*libsensors5"
+reset
+
+# =====================================================================================
+# The dynamic-HDR tool guards (goal 8). The image bundles dovi_tool and hdr10plus_tool, and
+# NOTICE is the MIT copyright and permission notice that has to travel with them. Each
+# case below breaks one half of that in a way that still builds.
+# =====================================================================================
+
+# --- 43. A floating alias for the version.
+sed -i 's/^ARG DOVI_TOOL_VERSION=.*/ARG DOVI_TOOL_VERSION=latest/' "$repo/Dockerfile"
+grep -qx 'ARG DOVI_TOOL_VERSION=latest' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not float the dovi_tool version, so this case did NOT run" >&2; exit 1; }
+expect 1 "a dovi_tool version that is a floating alias is caught" "FLOATING dovi_tool PIN"
+reset
+
+# --- 44. A pin ARG gone: the installer would have nothing to parse.
+sed -i '/^ARG HDR10PLUS_TOOL_VERSION=/d' "$repo/Dockerfile"
+! grep -q '^ARG HDR10PLUS_TOOL_VERSION=' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not remove HDR10PLUS_TOOL_VERSION, so this case did NOT run" >&2; exit 1; }
+expect 1 "a missing HDR10PLUS_TOOL_VERSION ARG is caught" "no 'ARG HDR10PLUS_TOOL_VERSION='"
+reset
+
+# --- 45. A digest cut short.
+sed -i -E 's/^(ARG DOVI_TOOL_SHA256_ARM64=)[0-9a-f]([0-9a-f]{63})$/\1\2/' "$repo/Dockerfile"
+grep -qE '^ARG DOVI_TOOL_SHA256_ARM64=[0-9a-f]{63}$' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not shorten DOVI_TOOL_SHA256_ARM64, so this case did NOT run" >&2; exit 1; }
+expect 1 "a dovi_tool arm64 digest one character short is caught" "DOVI_TOOL_SHA256_ARM64 is not a 64-character lowercase sha256"
+reset
+
+# --- 46. A digest in uppercase: sha256sum prints lowercase, so the shape is exact.
+sed -i -E 's/^(ARG HDR10PLUS_TOOL_SHA256_AMD64=)(.*)$/\1\U\2/' "$repo/Dockerfile"
+grep -qE '^ARG HDR10PLUS_TOOL_SHA256_AMD64=[0-9A-F]{64}$' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not uppercase HDR10PLUS_TOOL_SHA256_AMD64, so this case did NOT run" >&2; exit 1; }
+expect 1 "an uppercase hdr10plus_tool amd64 digest is caught" "HDR10PLUS_TOOL_SHA256_AMD64 is not a 64-character lowercase sha256"
+reset
+
+# --- 47. The fetch moved to upstream's floating latest-release redirect.
+sed -i 's|https://github.com/quietvoid/hdr10plus_tool/releases/download/${HDR10PLUS_TOOL_VERSION}/|https://github.com/quietvoid/hdr10plus_tool/releases/latest/download/|' "$repo/Dockerfile"
+grep -qF 'quietvoid/hdr10plus_tool/releases/latest/download/' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not float the hdr10plus_tool URL, so this case did NOT run" >&2; exit 1; }
+expect 1 "an hdr10plus_tool fetch through the floating latest redirect is caught" "FLOATING hdr10plus_tool URL"
+reset
+
+# --- 48. The version written into the URL by hand: it agrees today and splits from the
+#         ARG on the next bump.
+sed -i 's|releases/download/${DOVI_TOOL_VERSION}/dovi_tool-${DOVI_TOOL_VERSION}-|releases/download/2.3.4/dovi_tool-2.3.4-|' "$repo/Dockerfile"
+grep -qF 'releases/download/2.3.4/dovi_tool-2.3.4-' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not hard-code the dovi_tool URL, so this case did NOT run" >&2; exit 1; }
+expect 1 "a dovi_tool URL not built from DOVI_TOOL_VERSION is caught" "FLOATING dovi_tool URL"
+reset
+
+# --- 49. A second fetch from upstream's owner, beside the checked one.
+sed -i 's|^    ls -l /dynhdr$|    curl -fsSL -o /tmp/x https://github.com/quietvoid/dovi_tool/releases/download/2.3.3/dovi_tool-2.3.3-x86_64-unknown-linux-musl.tar.gz; \\\n    ls -l /dynhdr|' "$repo/Dockerfile"
+grep -qF 'download/2.3.3/dovi_tool-2.3.3-x86_64' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not plant a second dovi_tool fetch, so this case did NOT run" >&2; exit 1; }
+expect 1 "a second, unchecked fetch from the tools' upstream is caught" "UNCHECKED dynamic-HDR tool URL"
+reset
+
+# --- 50. A bundled tool missing from NOTICE.
+sed -i '/^  tool: dovi_tool /,/^       SOFTWARE\.$/d' "$repo/NOTICE"
+! grep -q '^  tool: dovi_tool ' "$repo/NOTICE" \
+  || { echo "::error::selftest: could not remove dovi_tool from NOTICE, so this case did NOT run" >&2; exit 1; }
+expect 1 "a tool the image bundles but NOTICE omits is caught" "dovi_tool .* MISSING FROM NOTICE"
+reset
+
+# --- 51. A version moved in NOTICE only.
+sed -i 's/^  tool: hdr10plus_tool .*/  tool: hdr10plus_tool 1.7.1/' "$repo/NOTICE"
+grep -qx '  tool: hdr10plus_tool 1.7.1' "$repo/NOTICE" \
+  || { echo "::error::selftest: could not move hdr10plus_tool's version in NOTICE, so this case did NOT run" >&2; exit 1; }
+expect 1 "a tool version that drifted between the Dockerfile and NOTICE is caught" "hdr10plus_tool: VERSION DRIFT"
+reset
+
+# --- 52. A tool NOTICE names that the image does not carry.
+sed -i 's/^  tool: hdr10plus_tool \(.*\)$/  tool: hdr10plus_tool \1\n\n  tool: mkvextract 1.0.0\n       licence: MIT/' "$repo/NOTICE"
+grep -q '^  tool: mkvextract 1.0.0$' "$repo/NOTICE" \
+  || { echo "::error::selftest: could not plant a stray NOTICE tool, so this case did NOT run" >&2; exit 1; }
+expect 1 "a tool NOTICE names but the Dockerfile does not bundle is caught" "NOTICE names the tool mkvextract .*does NOT bundle"
+reset
+
+# --- 53. The licence line changed.
+awk '/^  tool: dovi_tool /{t=1} t && /^       licence: MIT$/{print "       licence: GPL-3.0"; t=0; next} {print}' "$repo/NOTICE" >"$repo/NOTICE.new" && mv "$repo/NOTICE.new" "$repo/NOTICE"
+grep -qx '       licence: GPL-3.0' "$repo/NOTICE" \
+  || { echo "::error::selftest: could not change dovi_tool's licence line, so this case did NOT run" >&2; exit 1; }
+expect 1 "a tool entry whose licence is not MIT is caught" "dovi_tool entry is incomplete: it lacks a 'licence: MIT' line"
+reset
+
+# --- 54. The source offer gone.
+sed -i '/releases\/tag\/1\.7\.2)$/d' "$repo/NOTICE"
+! grep -q 'hdr10plus_tool/releases/tag/' "$repo/NOTICE" \
+  || { echo "::error::selftest: could not remove hdr10plus_tool's release URL, so this case did NOT run" >&2; exit 1; }
+expect 1 "a tool entry with no source release URL is caught" "hdr10plus_tool entry is incomplete: it lacks its source"
+reset
+
+# --- 55. The MIT permission notice dropped from one entry: the binary would ship without
+#         the text its licence says must travel with it.
+awk '/^  tool: hdr10plus_tool /{t=1} t && /Permission is hereby granted, free of charge/{t=0; next} {print}' "$repo/NOTICE" >"$repo/NOTICE.new" && mv "$repo/NOTICE.new" "$repo/NOTICE"
+[ "$(grep -c 'Permission is hereby granted, free of charge' "$repo/NOTICE")" -eq 1 ] \
+  || { echo "::error::selftest: could not drop hdr10plus_tool's permission notice, so this case did NOT run" >&2; exit 1; }
+expect 1 "a tool entry without the MIT permission notice is caught" "hdr10plus_tool entry is incomplete: it lacks the MIT permission notice"
+reset
+
+# --- 56. A stray other version of a tool elsewhere in NOTICE, on a line no entry check reads.
+printf '\n  (an earlier image carried dovi_tool 2.3.3.)\n' >>"$repo/NOTICE"
+expect 1 "a stray other version of a tool elsewhere in NOTICE is caught" "stray: dovi_tool 2\.3\.3"
+reset
+
+# --- 57. A coherent bump of BOTH files passes: the guard is a comparison, not a freeze. The
+#         digests are left as they are; only upstream can say whether they match, and the
+#         build's sha256sum -c is what asks.
+sed -i 's/^ARG DOVI_TOOL_VERSION=.*/ARG DOVI_TOOL_VERSION=2.3.5/' "$repo/Dockerfile"
+sed -i 's|dovi_tool 2\.3\.4|dovi_tool 2.3.5|; s|release tag 2\.3\.4,|release tag 2.3.5,|; s|dovi_tool/releases/tag/2\.3\.4|dovi_tool/releases/tag/2.3.5|' "$repo/NOTICE"
+grep -qx '  tool: dovi_tool 2.3.5' "$repo/NOTICE" && grep -qx 'ARG DOVI_TOOL_VERSION=2.3.5' "$repo/Dockerfile" \
+  || { echo "::error::selftest: could not bump dovi_tool in both files, so this case did NOT run" >&2; exit 1; }
+expect 0 "a dovi_tool bump made in the Dockerfile AND NOTICE together passes" "dovi_tool 2\.3\.5 and hdr10plus_tool"
 reset
 
 echo

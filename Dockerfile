@@ -96,6 +96,88 @@ RUN set -eu; \
     test -x /ffmpeg/bin/ffmpeg; \
     test -x /ffmpeg/bin/ffprobe
 
+# --- dynamic-HDR tools: dovi_tool and hdr10plus_tool, verified by hash ---------
+# The Dolby Vision RPU and HDR10+ metadata toolchain (goal 8, T13, T25): dovi_tool reads,
+# converts and counts an RPU, hdr10plus_tool extracts SMPTE 2094-40 metadata for libx265's
+# dhdr10-info. Both are upstream's own static musl release builds, so they need nothing
+# from the runtime base and are COPYed into it like ffmpeg. Both are MIT; NOTICE names
+# each at the version pinned here, with its licence and source, and
+# scripts/check-pins.sh section 11 holds the two equal, in both directions.
+#
+# THESE SIX ARGs ARE THE PIN, and this is the only place it exists. CI does not restate
+# it: scripts/install-dynhdr-tools.sh PARSES it from here, so the tools the fixture suite
+# runs against are the tools the image ships. Each sha256 is the GitHub release asset's
+# own `digest`, confirmed by downloading the tarball and hashing it, and each tarball
+# holds exactly one entry, the binary. Read 2026-10-01:
+#   gh api repos/quietvoid/dovi_tool/releases/latest       (2.3.4, published 2026-09-10)
+#   gh api repos/quietvoid/hdr10plus_tool/releases/latest  (1.7.2, published 2025-12-27)
+#   https://github.com/quietvoid/dovi_tool/releases/tag/2.3.4
+#   https://github.com/quietvoid/hdr10plus_tool/releases/tag/1.7.2
+#   gh api repos/quietvoid/dovi_tool/license , .../hdr10plus_tool/license (MIT)
+# Upstream publishes no retention policy for GitHub release assets and keeps every tag so
+# far, so a plain release tag is the pin (no month-end rule as for ffmpeg);
+# `make check-pin-live` asks whether all four assets are still served.
+#
+# This stage runs on $BUILDPLATFORM, so the binary for the OTHER architecture cannot be
+# executed here. Each binary is proven to be an ELF executable for the TARGET machine
+# (x86-64 or AArch64, read from its own header) on every build, and is also run and made
+# to print its version whenever the build and target architectures agree.
+FROM --platform=$BUILDPLATFORM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a AS dynhdr
+# The same throwaway-fetcher reasoning as the ffmpeg stage: nothing from this stage but
+# the two verified binaries reaches the image.
+# hadolint ignore=DL3008
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+ARG TARGETARCH
+ARG BUILDARCH
+ARG DOVI_TOOL_VERSION=2.3.4
+ARG DOVI_TOOL_SHA256_AMD64=1844258e13c26607b32224bf1fa82b595d3b35949f5467405fda560daad32b3f
+ARG DOVI_TOOL_SHA256_ARM64=b4f22a7db56954efe4ed8d02276d0f991799e84602f3584711be6c9df950cb15
+ARG HDR10PLUS_TOOL_VERSION=1.7.2
+ARG HDR10PLUS_TOOL_SHA256_AMD64=06385f37a639d61ba21d4be3150c863846933bc3b58110e094d8fc8f1c2249f2
+ARG HDR10PLUS_TOOL_SHA256_ARM64=5fb90607cd94296640f1fc2355207b8107b67baac96d37481423d08a9fce437d
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) triple=x86_64-unknown-linux-musl;  machine="3e 00"; \
+             dovi_sha="${DOVI_TOOL_SHA256_AMD64}"; h10p_sha="${HDR10PLUS_TOOL_SHA256_AMD64}" ;; \
+      arm64) triple=aarch64-unknown-linux-musl; machine="b7 00"; \
+             dovi_sha="${DOVI_TOOL_SHA256_ARM64}"; h10p_sha="${HDR10PLUS_TOOL_SHA256_ARM64}" ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /dynhdr; \
+    fetch() { \
+      tool="$1"; version="$2"; sha="$3"; url="$4"; \
+      curl -fsSL --connect-timeout 30 --max-time 600 --retry 5 --retry-delay 10 --retry-all-errors \
+        -o "/tmp/${tool}.tar.gz" "${url}"; \
+      printf '%s  /tmp/%s.tar.gz\n' "${sha}" "${tool}" | sha256sum -c -; \
+      entries="$(tar -tzf "/tmp/${tool}.tar.gz" | tr '\n' ' ')"; \
+      case "${entries}" in \
+        "./${tool} "|"${tool} ") ;; \
+        *) echo "${url} holds '${entries}', not exactly ${tool}" >&2; exit 1 ;; \
+      esac; \
+      mkdir -p "/tmp/${tool}"; \
+      tar -C "/tmp/${tool}" -xzf "/tmp/${tool}.tar.gz"; \
+      test -f "/tmp/${tool}/${tool}"; \
+      test -x "/tmp/${tool}/${tool}"; \
+      test "$(od -An -tx1 -N4 "/tmp/${tool}/${tool}" | tr -s ' ' | sed 's/^ //;s/ $//')" = "7f 45 4c 46" \
+        || { echo "${tool} is not an ELF binary" >&2; exit 1; }; \
+      test "$(od -An -tx1 -j18 -N2 "/tmp/${tool}/${tool}" | tr -s ' ' | sed 's/^ //;s/ $//')" = "${machine}" \
+        || { echo "${tool} is not built for ${TARGETARCH}" >&2; exit 1; }; \
+      if [ "${TARGETARCH}" = "${BUILDARCH}" ]; then \
+        got="$("/tmp/${tool}/${tool}" --version)"; \
+        [ "${got}" = "${tool} ${version}" ] \
+          || { echo "${tool} --version printed '${got}', pinned as ${version}" >&2; exit 1; }; \
+      fi; \
+      mv "/tmp/${tool}/${tool}" "/dynhdr/${tool}"; \
+      rm -rf "/tmp/${tool}" "/tmp/${tool}.tar.gz"; \
+    }; \
+    fetch dovi_tool "${DOVI_TOOL_VERSION}" "${dovi_sha}" \
+      "https://github.com/quietvoid/dovi_tool/releases/download/${DOVI_TOOL_VERSION}/dovi_tool-${DOVI_TOOL_VERSION}-${triple}.tar.gz"; \
+    fetch hdr10plus_tool "${HDR10PLUS_TOOL_VERSION}" "${h10p_sha}" \
+      "https://github.com/quietvoid/hdr10plus_tool/releases/download/${HDR10PLUS_TOOL_VERSION}/hdr10plus_tool-${HDR10PLUS_TOOL_VERSION}-${triple}.tar.gz"; \
+    ls -l /dynhdr
+
 # --- hardware runtime: pinned Debian trixie packages, verified by hash --------
 # The userspace VAAPI and QSV need inside the container, per the approved P3 option (a)
 # (.claude/goals/2026-09-holdfast-research/proposal-amd-image.md): libva, libva-drm and
@@ -323,6 +405,9 @@ LABEL org.opencontainers.image.title="holdfast" \
 COPY --from=hwruntime /hwroot/ /
 COPY --from=ffmpeg /ffmpeg/bin/ffmpeg  /usr/local/bin/ffmpeg
 COPY --from=ffmpeg /ffmpeg/bin/ffprobe /usr/local/bin/ffprobe
+# The dynamic-HDR tools: static musl binaries, so they need nothing from this base.
+COPY --from=dynhdr /dynhdr/dovi_tool      /usr/local/bin/dovi_tool
+COPY --from=dynhdr /dynhdr/hdr10plus_tool /usr/local/bin/hdr10plus_tool
 # `run_window` is evaluated in LOCAL time, so the zone database has to be present for a
 # TZ= setting to mean anything at all. The distroless base does ship one today — this
 # COPY pins that fact down rather than depending on it, because if a base change ever

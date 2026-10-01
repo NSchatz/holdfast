@@ -818,5 +818,139 @@ if [ "$deb_bad" -eq 0 ]; then
   note "ok: ${#df_debs[@]} Debian package(s) pinned by version and sha256 at snapshot $deb_snapshot, and NOTICE names exactly those, at those versions"
 fi
 
+# --- 11. The dynamic-HDR tools: pinned, fetched from their release, and in NOTICE ----
+# The image bundles dovi_tool and hdr10plus_tool (the Dockerfile's dynhdr stage, goal 8),
+# and scripts/install-dynhdr-tools.sh installs the same builds for CI by PARSING the
+# Dockerfile's ARGs. What is checked here, offline:
+#   - each ARG exists: <TOOL>_VERSION, <TOOL>_SHA256_AMD64, <TOOL>_SHA256_ARM64;
+#   - the version is an exact release tag (MAJOR.MINOR.PATCH), never a floating alias
+#     such as `latest`, which would change the RPU and HDR10+ instruments under a green
+#     build;
+#   - each digest is a full 64-character lowercase sha256, or the build's sha256sum -c
+#     and the installer's digest gate would be vacuous;
+#   - the fetch goes to the upstream GitHub release asset built from those ARGs, and no
+#     other instruction fetches anything from that owner;
+#   - NOTICE names each tool at exactly the pinned version, with licence MIT, its source
+#     repository and release tag, and the copyright line and permission notice the MIT
+#     licence requires to travel with the binary - and names no tool, and no version of
+#     either tool, that the Dockerfile does not pin. Both directions are compared.
+# Upstream: https://github.com/quietvoid/dovi_tool and https://github.com/quietvoid/hdr10plus_tool,
+# each MIT (gh api repos/quietvoid/<repo>/license, read 2026-10-01).
+dyn_bad=0
+declare -A df_tools=()
+# The Dockerfile's instructions with comment lines removed, captured once: a comment that
+# quotes the URL must not satisfy the check, and a `grep | grep -q` pipeline can SIGPIPE
+# its writer and fail under pipefail on a match.
+df_instr="$(grep -vE '^[[:space:]]*#' "$here/Dockerfile" || true)"
+for tool in dovi_tool hdr10plus_tool; do
+  prefix="$(printf '%s' "$tool" | tr '[:lower:]' '[:upper:]')"
+  for a in VERSION SHA256_AMD64 SHA256_ARM64; do
+    if ! grep -qE "^ARG ${prefix}_${a}=" "$here/Dockerfile"; then
+      dyn_bad=$((dyn_bad + 1))
+      bad "the Dockerfile has no 'ARG ${prefix}_${a}=' - the ${tool} pin is incomplete, and scripts/install-dynhdr-tools.sh reads it from there."
+    fi
+  done
+  v="$(arg "${prefix}_VERSION")"
+  if [[ ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    dyn_bad=$((dyn_bad + 1))
+    bad "FLOATING ${tool} PIN: ${prefix}_VERSION is '$v', not an exact release tag (MAJOR.MINOR.PATCH). A floating alias such as 'latest' never 404s; it changes the tool that decides whether dynamic HDR metadata survived, under a green build."
+  fi
+  for a in AMD64 ARM64; do
+    d="$(arg "${prefix}_SHA256_$a")"
+    if [[ ! "$d" =~ ^[0-9a-f]{64}$ ]]; then
+      dyn_bad=$((dyn_bad + 1))
+      bad "${prefix}_SHA256_$a is not a 64-character lowercase sha256 digest (got '$d'). The build's sha256sum -c and the installer's digest gate would be vacuous."
+    fi
+  done
+  want_url="https://github.com/quietvoid/${tool}/releases/download/\${${prefix}_VERSION}/${tool}-\${${prefix}_VERSION}-\${triple}.tar.gz"
+  if ! grep -qF "\"${want_url}\"" <<<"$df_instr"; then
+    dyn_bad=$((dyn_bad + 1))
+    bad "FLOATING ${tool} URL: the Dockerfile's dynhdr stage no longer fetches
+       ${want_url}
+       which is the upstream release asset built from the pinned ARGs. A URL not built from
+       ${prefix}_VERSION fetches something the pin does not name."
+  fi
+  df_tools[$tool]="$v"
+done
+
+# No other instruction may fetch from upstream's owner: a second URL beside the checked one
+# is a second, unchecked pin. Comments are exempt; they cite release pages, never fetch.
+dyn_float="$(grep -nE 'https?://[^[:space:]"]*github\.com/quietvoid/' "$here/Dockerfile" \
+  | grep -vE '^[0-9]+:[[:space:]]*#' \
+  | grep -vF 'https://github.com/quietvoid/dovi_tool/releases/download/${DOVI_TOOL_VERSION}/dovi_tool-${DOVI_TOOL_VERSION}-${triple}.tar.gz' \
+  | grep -vF 'https://github.com/quietvoid/hdr10plus_tool/releases/download/${HDR10PLUS_TOOL_VERSION}/hdr10plus_tool-${HDR10PLUS_TOOL_VERSION}-${triple}.tar.gz' || true)"
+if [ -n "$dyn_float" ]; then
+  dyn_bad=$((dyn_bad + 1))
+  bad "UNCHECKED dynamic-HDR tool URL in a Dockerfile instruction (only the two pinned release-asset URLs are allowed):
+$(printf '%s\n' "$dyn_float" | sed 's/^/       /')"
+fi
+
+# NOTICE side: every `  tool: <name> <version>` line opens an entry that runs to the next
+# `  tool:` line or the next rule of dashes, and each entry must carry its licence, its
+# source and the MIT notice.
+declare -A no_tools=()
+while read -r name version; do
+  [ -n "$name" ] || continue
+  if [ -n "${no_tools[$name]:-}" ]; then
+    dyn_bad=$((dyn_bad + 1)); bad "NOTICE names the tool $name twice."
+  fi
+  no_tools[$name]="$version"
+done < <(sed -n 's/^  tool: \([^ ]*\) \([^ ]*\)[[:space:]]*$/\1 \2/p' "$here/NOTICE")
+
+for tool in "${!df_tools[@]}"; do
+  v="${df_tools[$tool]}"
+  if [ -z "${no_tools[$tool]:-}" ]; then
+    dyn_bad=$((dyn_bad + 1))
+    bad "$tool $v is bundled into the image but MISSING FROM NOTICE. The image would redistribute an MIT binary without the copyright and permission notice its licence requires. Add a '  tool: $tool $v' entry."
+    continue
+  fi
+  if [ "${no_tools[$tool]}" != "$v" ]; then
+    dyn_bad=$((dyn_bad + 1))
+    bad "$tool: VERSION DRIFT between the Dockerfile and NOTICE - the licence record names a build the image does not contain.
+       Dockerfile: $v
+       NOTICE:     ${no_tools[$tool]}"
+  fi
+  entry="$(awk -v t="$tool" '
+    /^  tool: / { inent = ($2 == t); if (inent) print; next }
+    /^-{10,}/   { inent = 0 }
+    inent       { print }
+  ' "$here/NOTICE")"
+  missing=()
+  grep -qE '^[[:space:]]+licence:[[:space:]]+MIT[[:space:]]*$' <<<"$entry" || missing+=("a 'licence: MIT' line")
+  grep -qF "https://github.com/quietvoid/${tool}/releases/tag/${v}" <<<"$entry" \
+    || missing+=("its source, https://github.com/quietvoid/${tool}/releases/tag/${v}")
+  grep -qE 'Copyright \(c\) [0-9]{4} ' <<<"$entry" || missing+=("the upstream copyright line")
+  grep -qF 'Permission is hereby granted, free of charge' <<<"$entry" || missing+=("the MIT permission notice")
+  if [ "${#missing[@]}" -ne 0 ]; then
+    dyn_bad=$((dyn_bad + 1))
+    bad "NOTICE's $tool entry is incomplete: it lacks $(printf '%s; ' "${missing[@]}")the MIT licence requires the copyright and permission notice to travel with the binary, and the record must say where the source is."
+  fi
+done
+for tool in "${!no_tools[@]}"; do
+  if [ -z "${df_tools[$tool]:-}" ]; then
+    dyn_bad=$((dyn_bad + 1))
+    bad "NOTICE names the tool $tool ${no_tools[$tool]}, which the Dockerfile does NOT bundle. A licence record for something the image does not carry hides which record is real."
+  fi
+done
+
+# Any other version of either tool written anywhere in NOTICE is a stray: it would drift
+# silently, the way the ffmpeg revision did before section 1 refused it.
+dyn_strays="$(grep -oE '(dovi_tool|hdr10plus_tool)([ -]|/releases/(tag|download)/)v?[0-9]+\.[0-9]+(\.[0-9]+)?' "$here/NOTICE" \
+  | while read -r hit; do
+      t="$(printf '%s' "$hit" | grep -oE '^(dovi_tool|hdr10plus_tool)')"
+      hv="$(printf '%s' "$hit" | grep -oE 'v?[0-9]+\.[0-9]+(\.[0-9]+)?$')"
+      [ "$hv" = "${df_tools[$t]:-}" ] || printf '%s\n' "$hit"
+    done | sort -u || true)"
+if [ -n "$dyn_strays" ]; then
+  dyn_bad=$((dyn_bad + 1))
+  bad "NOTICE names a dynamic-HDR tool at a version the Dockerfile does NOT pin:
+       stray: $(printf '%s' "$dyn_strays" | tr '\n' ' ')
+       pinned: dovi_tool ${df_tools[dovi_tool]:-?}, hdr10plus_tool ${df_tools[hdr10plus_tool]:-?}"
+fi
+
+if [ "$dyn_bad" -eq 0 ]; then
+  note "ok: dovi_tool ${df_tools[dovi_tool]} and hdr10plus_tool ${df_tools[hdr10plus_tool]} are pinned by exact version and per-arch sha256, fetched from their release, and NOTICE names exactly those, MIT, with source"
+fi
+
 [ "$fail" -eq 0 ] || exit 1
 echo "pins agree"
