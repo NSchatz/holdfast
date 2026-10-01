@@ -11,6 +11,7 @@ import (
 	"github.com/NSchatz/holdfast/internal/crop"
 	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/downscale"
+	"github.com/NSchatz/holdfast/internal/dynhdr"
 	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/hdr"
 	"github.com/NSchatz/holdfast/internal/hwdevice"
@@ -113,6 +114,12 @@ type EncodePlan struct {
 	// devices are the render-node assignment the plan's device was chosen from, so the
 	// command-line builder can refuse a plan whose device is not the one assigned.
 	devices hwdevice.Assignment
+	// dynamic is the dynamic HDR this plan carries, as the job's pre-pass established it
+	// (dynhdr.Prepare): the VBV ceiling, the HDR10+ file, the converted profile 7 stream. nil
+	// on every plan that carries none. Unexported and set only by deriveEncodePlan, so
+	// Metadata.DolbyVision and Metadata.HDR10Plus can be held to it: a plan declaring
+	// carriage its derivation did not make is refused (buildable).
+	dynamic *dynhdr.Prepared
 
 	// audioSeen is where the encode and the gates leave what they OBSERVED of the audio:
 	// the second-pass loudness reports the encoder read back, and the output loudness the
@@ -296,10 +303,11 @@ type MetadataPlan struct {
 	// to it (docs/design/encode-plan.md#fidelity). It is zero on a stream copy, which is
 	// held to bit-identity instead.
 	Fidelity hdr.Fidelity
-	// HDR10Plus and DolbyVision report whether the output carries that dynamic metadata.
-	// This build carries neither - the guards skip a source that has either before a plan
-	// is derived - so both are false, and a plan claiming either is refused rather than
-	// encoded without it.
+	// HDR10Plus and DolbyVision report whether the output carries that dynamic metadata:
+	// true only where the derivation was handed a pre-pass that carries it, on the cpu
+	// encoder (docs/design/dynamic-hdr.md). The command line codes it (`-dolbyvision 1` with
+	// the VBV ceiling, `dhdr10-info`) and the dynamic-HDR gate holds the output to it. A plan
+	// claiming either without that derivation is refused rather than encoded without it.
 	HDR10Plus, DolbyVision bool
 }
 
@@ -364,6 +372,9 @@ type planInputs struct {
 	// crop is recorded. The crop DECISION is taken here, by crop.Decide, from it and the
 	// snapshot (docs/design/crop.md#crop).
 	crop *crop.Consensus
+	// dynamic is the job's dynamic-HDR pre-pass, nil where the source carries none or the
+	// guards skipped it. Only a libx265 re-encode with an intended map takes one.
+	dynamic *dynhdr.Prepared
 }
 
 // deriveEncodePlan is THE derivation of an encode plan, and the only one in this build. The
@@ -404,6 +415,10 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 	// pixel format, no picture operation and no colour description, because there is no
 	// encode for any of them to describe. Its video is what the source's was.
 	if in.streams.RemuxOnly() {
+		if in.dynamic != nil && in.dynamic.Intent.Carries() {
+			return nil, fmt.Errorf("dynamic HDR metadata is carried only through a libx265 re-encode, and %q is a "+
+				"remux: refusing to plan it", in.source)
+		}
 		p.Video = VideoPlan{Copy: true, Codec: in.streams.SourceVideoCodec()}
 		if in.crop != nil {
 			p.Picture.Crop = crop.Refuse(crop.Frame{}, crop.ReasonRemuxOnly, "a remux-only root re-encodes nothing, "+
@@ -505,10 +520,87 @@ func deriveEncodePlan(in planInputs) (*EncodePlan, error) {
 			"encode without knowing which HDR10 metadata the output must carry", in.source)
 	}
 	p.Metadata = MetadataPlan{Color: color, Fidelity: hdr.FidelityOf(pixFmt, color, props.SideData())}
+	if err := p.deriveDynamic(in); err != nil {
+		return nil, err
+	}
 	p.coverArt.pinned = pinned
 	// The audio last: its first loudness passes are the one costly step of a derivation, so
 	// every refusal above is met before any runs.
 	return p, p.deriveAudio(in)
+}
+
+// deriveDynamic declares the dynamic HDR the output carries, from the job's pre-pass: what the
+// guards decided to carry (dynhdr.Decide) and what the pre-pass established for it. Only
+// libx265 codes it, the converted profile 7 stream needs the intended map to put it in the
+// source's video's place, and a Dolby Vision RPU needs the mastering display x265 refuses to
+// open without; a pre-pass the plan cannot honour is refused rather than encoded without it.
+func (p *EncodePlan) deriveDynamic(in planInputs) error {
+	d := in.dynamic
+	if d == nil || !d.Intent.Carries() {
+		return nil
+	}
+	switch {
+	case p.Video.Encoder.FFmpegCodec != "libx265":
+		return fmt.Errorf("dynamic HDR metadata is carried only by libx265 and %q is encoded by %s: refusing to "+
+			"encode it without its metadata", in.source, p.Video.Encoder.FFmpegCodec)
+	case d.Intent.DolbyVision && p.Metadata.Color.MasterDisplay == "":
+		return fmt.Errorf("a Dolby Vision RPU needs the mastering display x265 codes profile 8.1 with, and %q "+
+			"carries none: refusing to encode it", in.source)
+	case d.RawVideo != "" && in.streams == nil:
+		return fmt.Errorf("a converted Dolby Vision stream replaces the source's video in the intended map, and "+
+			"%q was planned with none", in.source)
+	}
+	p.dynamic = d
+	p.Metadata.DolbyVision, p.Metadata.HDR10Plus = d.Intent.DolbyVision, d.Intent.HDR10Plus
+	return nil
+}
+
+// dynamicBuildable refuses a dynamic-HDR declaration its derivation could not have made: a
+// flag without the pre-pass behind it, a pre-pass on a copy or on another encoder, or one
+// missing a part its command line needs.
+func (p *EncodePlan) dynamicBuildable() error {
+	d := p.dynamic
+	declared := func(what string) error {
+		return &UnbuildablePlanError{What: what + " (its derivation declared none)"}
+	}
+	switch {
+	case p.Metadata.HDR10Plus && (d == nil || !d.Intent.HDR10Plus):
+		return declared("HDR10+ dynamic metadata carried into the output")
+	case p.Metadata.DolbyVision && (d == nil || !d.Intent.DolbyVision):
+		return declared("a Dolby Vision RPU carried into the output")
+	case d == nil:
+		return nil
+	case p.Metadata.HDR10Plus != d.Intent.HDR10Plus || p.Metadata.DolbyVision != d.Intent.DolbyVision:
+		return &UnbuildablePlanError{What: "dynamic HDR metadata its declaration and its pre-pass disagree on"}
+	case p.Video.Copy || p.Video.Encoder.FFmpegCodec != "libx265":
+		return &UnbuildablePlanError{What: "dynamic HDR metadata carried by an encode that is not libx265"}
+	case d.Intent.DolbyVision && (d.VBV.MaxrateKbps <= 0 || d.VBV.BufsizeKbit <= 0 || p.Metadata.Color.MasterDisplay == ""):
+		return &UnbuildablePlanError{What: "a Dolby Vision RPU without its VBV ceiling or mastering display"}
+	case d.Intent.HDR10Plus && d.HDR10PlusJSON == "":
+		return &UnbuildablePlanError{What: "HDR10+ dynamic metadata without its metadata file"}
+	case d.Intent.Convert != (d.RawVideo != "") || (d.RawVideo != "" && (!d.FrameRate.Valid() || p.Streams == nil)):
+		return &UnbuildablePlanError{What: "a profile 7 conversion without its converted stream, its rate or its map"}
+	}
+	return nil
+}
+
+// convertedMapArgs is the intended map with the source's video replaced by the converted
+// stream, the second input (1:v:0), in the same position: every other stream is the
+// source's, by its index, so the output carries exactly the streams the map intends, in its
+// order. Attached pictures are left out where they travel as attachments.
+func convertedMapArgs(streams *StreamPlan, withoutPictures bool) []string {
+	var args []string
+	for _, s := range streams.Intended() {
+		switch {
+		case s.Type == probe.TypeVideo && s.AttachedPicture && withoutPictures:
+			continue
+		case s.Type == probe.TypeVideo && !s.AttachedPicture:
+			args = append(args, "-map", "1:v:0")
+		default:
+			args = append(args, "-map", "0:"+strconv.Itoa(s.Index))
+		}
+	}
+	return args
 }
 
 // deriveAudio declares what the encode does to the audio, from the profile's audio keys and
@@ -776,10 +868,9 @@ func (p *EncodePlan) buildable() error {
 	case p.Picture.Crop.Reason != "" && !p.Picture.Crop.Rect.Empty():
 		return &UnbuildablePlanError{What: fmt.Sprintf("the crop %q beside its own refusal %q",
 			p.Picture.Crop.Rect, p.Picture.Crop.Reason)}
-	case p.Metadata.HDR10Plus:
-		return &UnbuildablePlanError{What: "HDR10+ dynamic metadata carried into the output"}
-	case p.Metadata.DolbyVision:
-		return &UnbuildablePlanError{What: "a Dolby Vision RPU carried into the output"}
+	}
+	if err := p.dynamicBuildable(); err != nil {
+		return err
 	}
 	if err := p.AudioTracks.Check(carriedAudio(p.Streams)); err != nil {
 		return &UnbuildablePlanError{What: "an audio plan its derivation could not have made (" + err.Error() + ")"}
@@ -829,6 +920,12 @@ func (p *EncodePlan) args(x265 encoder.X265Parallelism) (pre, body []string, err
 	if len(p.coverArt.attached) > 0 {
 		mapArgs = p.Streams.MapArgsWithoutPictures()
 	}
+	// A converted profile 7 source is encoded from the converted stream, a second input read
+	// at the source's exact rate, which takes the source's video's place in the map; every
+	// other stream is still the source's (docs/design/dynamic-hdr.md#profile-7).
+	if raw := p.dynamic.InputArgs(); raw != nil {
+		mapArgs = append(raw, convertedMapArgs(p.Streams, len(p.coverArt.attached) > 0)...)
+	}
 	body = append([]string(nil), mapArgs...)
 	if p.Video.Copy {
 		// The intended stream map and `-c copy`, and nothing else: every structural gate an
@@ -860,7 +957,8 @@ func (p *EncodePlan) args(x265 encoder.X265Parallelism) (pre, body []string, err
 	// frames (hdr.Color.SetParams) at the head of the chain the picture operations prepend
 	// to - after them, and before any upload to a hardware surface. libx265 writes them from
 	// its own parameters, and its command line does not change.
-	video := videoArgs(p.Video, p.Metadata.Color.FFmpegFlags(), x265.Params()+p.Metadata.Color.X265Params())
+	video := videoArgs(p.Video, p.Metadata.Color.FFmpegFlags(),
+		x265.Params()+p.Metadata.Color.X265Params()+p.dynamic.X265Params())
 	if p.Video.Encoder.FFmpegCodec != "libx265" {
 		video = withHeadFilter(video, p.Metadata.Color.SetParams())
 	}
@@ -869,6 +967,9 @@ func (p *EncodePlan) args(x265 encoder.X265Parallelism) (pre, body []string, err
 	// the picture that is kept. Composed in reverse for the reason above.
 	body = append(body, withDeinterlace(withCrop(withDownscale(video, p.Picture.Downscale), p.Picture.Crop),
 		p.Picture.Deinterlace)...)
+	// The Dolby Vision RPU coding, set explicitly where the plan carries one, and nothing on
+	// every other plan, so their command lines do not move.
+	body = append(body, p.dynamic.CodecArgs()...)
 	// The audio tracks the plan transforms, after everything else: the zero plan adds
 	// nothing, so a job whose configuration sets no audio key builds the command line it
 	// always did.

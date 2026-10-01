@@ -31,6 +31,7 @@ import (
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/deinterlace"
+	"github.com/NSchatz/holdfast/internal/dynhdr"
 	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/engine"
 	"github.com/NSchatz/holdfast/internal/hwdevice"
@@ -717,6 +718,11 @@ func buildEngine(cfg *config.Config, log *slog.Logger, stderr io.Writer, scope c
 	eng := engine.New(*cfg, prober, enc, st, log)
 	eng.Devices = devices
 	eng.Hardware = checks.hardware
+	// The two dynamic-HDR tools, named as ffmpeg is: an environment override, else the
+	// binary's own name on PATH. Neither is required to start: a job that needs a missing one
+	// skips under dynamic-hdr-tool-missing (docs/design/dynamic-hdr.md#tools).
+	eng.DoviTool = envOr(dynhdr.EnvDoviTool, dynhdr.DefaultDoviTool)
+	eng.HDR10PlusTool = envOr(dynhdr.EnvHDR10PlusTool, dynhdr.DefaultHDR10PlusTool)
 	// The startup walk's coverage BOUNDS the run: this scan enumerates sources
 	// from exactly the directories that walk traversed successfully, so a
 	// subtree it declined, could not read or failed to traverse yields no file

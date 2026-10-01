@@ -76,8 +76,14 @@ build can record is here, and a token with no row fails the documentation check.
 | `interlaced` | the source is interlaced and no `deinterlace` is configured for its root (see the README's interlacing posture) |
 | `telecine-cadence` | a deinterlace was configured and the source is telecined, or its cadence could not be established either way. Both need inverse telecine rather than a deinterlace, which this build does not do |
 | `unknown-field-order` | ffprobe could not establish whether the source is progressive or interlaced, so encoding it either way would be a guess |
-| `dolby-vision` | a Dolby Vision RPU cannot survive a generic re-encode |
-| `hdr10-plus` | HDR10+ dynamic metadata cannot survive a generic re-encode |
+| `dolby-vision` | a Dolby Vision source this build does not carry: the job's encoder is not `cpu` (only libx265 carries the RPU), the root is remux-only, or it is profile 5, a profile 8 whose base layer is not HDR10-compatible, another profile, or a configuration record that could not be read ([docs/design/dynamic-hdr.md](design/dynamic-hdr.md)) |
+| `hdr10-plus` | an HDR10+ source under an encoder other than `cpu`, or a remux-only root |
+| `dolby-vision-profile-7` | a Dolby Vision profile 7 source under `dolby_vision_p7: skip`, the default; set it to `convert` and the file is offered back |
+| `dolby-vision-no-mastering-display` | a Dolby Vision source with no complete mastering display, which x265 needs to code profile 8.1 |
+| `dolby-vision-frame-rate` | a Dolby Vision source whose size and frame rate give no HEVC level for the VBV ceiling, or a profile 7 source to convert whose frame rate is not one constant rate starting at 0 |
+| `dynamic-hdr-tool-missing` | the `dovi_tool` or `hdr10plus_tool` the source needs is not installed; re-decided on every pass, so the file is offered again once the tool is there |
+| `hdr10-plus-unreadable` | the source's HDR10+ metadata could not be extracted, does not parse, or does not carry one entry per frame |
+| `dolby-vision-conversion-failed` | the opted-in profile 7 to 8.1 conversion did not complete |
 | `incomplete-hdr-metadata` | HDR10 static metadata is present but this build cannot fully parse it, so re-encoding would silently drop part of it |
 | `exotic-pixel-format` | the source's pixel format is one this build will not map, rather than silently subsample it; or the output pixel format (derived or a forced `pixel_format`) is one the job's encoder lists no format for with the same chroma subsampling and bit depth (4:2:2 into `svtav1`, 12-bit into `vaapi`), rather than let ffmpeg silently subsample or cut depth |
 | `multi-video-stream` | the source carries a moving-picture stream beyond the first, or its stream shape could not be established: every decision here reads `v:0` |
@@ -99,7 +105,7 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | Field | On | What it is |
 |---|---|---|
 | `reason` | failed | the error that rejected it (the encode error, or **which gate** refused the output) |
-| `reason` | skipped | **which guard** fired - `already-at-target-codec`, `better-codec-family`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `multi-video-stream`, `unreadable-stream-list`, `source-damaged`, `undetermined-source-height`, `downscale-unacknowledged`, `unknown-field-order`, `telecine-cadence`, `target-already-exists`, `undo-retention-failed`, `restored-original`, `operator-excluded`, `hardware-unavailable` |
+| `reason` | skipped | **which guard** fired - `already-at-target-codec`, `better-codec-family`, `low-bitrate`, `hardlinked`, `symlinked-source`, `interlaced`, `dolby-vision`, `hdr10-plus`, `incomplete-hdr-metadata`, `exotic-pixel-format`, `multi-video-stream`, `unreadable-stream-list`, `source-damaged`, `undetermined-source-height`, `downscale-unacknowledged`, `unknown-field-order`, `telecine-cadence`, `target-already-exists`, `undo-retention-failed`, `restored-original`, `operator-excluded`, `hardware-unavailable`, `dolby-vision-profile-7`, `dolby-vision-no-mastering-display`, `dolby-vision-frame-rate`, `dynamic-hdr-tool-missing`, `hdr10-plus-unreadable`, `dolby-vision-conversion-failed` |
 | `encoder` | any job that reached the encoder | the encoder that ran (`cpu`, `svtav1`, `nvenc`, …) - a skip, or a file with no readable video stream, never gets that far and records none |
 | `profile` | every terminal row | the `encode_profiles` entry that supplied this job's settings, `""` for the top-level ones. `encoder` alone stops answering "what ran" once two encoders can run in one scan, and a **skip** carries it too - the profile is what decided the file was already at its target codec. `""` is a **real value**, not a missing measurement, so the key is always present |
 | `vmaf_mean`, `vmaf_min` | done, and a VMAF-rejected failure | the pooled harmonic mean **and the worst frame** |
@@ -698,7 +704,7 @@ response and no `holdfast export` line carries it, and the shapes documented abo
   The `guard` label set is the skip vocabulary enumerated under [the recorded outcome](#the-recorded-outcome---the-proof-a-swap-was-safe),
   plus `unclassified` for a reason this build does not recognise. The `gate` label set is
   `probe | encode | codec | length | size | stream-parity | fidelity | decode | vmaf-mean | vmaf-min | vmaf-chroma |
-  vmaf-unmeasured | swap | other | audio | loudness | crop`, decided where the rejection is made and never read off the failure's
+  vmaf-unmeasured | swap | other | audio | loudness | crop | dolby-vision-record | dolby-vision-rpu | hdr10-plus`, decided where the rejection is made and never read off the failure's
   `reason` text. Both are CLOSED vocabularies pre-created at `0`, which is what lets an alert be written
   before the first such skip or rejection, and what keeps the number of series knowable in advance: a value
   outside the set is counted under its fallback (`unclassified`, `other`) and never becomes a label of its

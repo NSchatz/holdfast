@@ -144,9 +144,10 @@ func picturesBeside(temp string) []string {
 	return out
 }
 
-// pictureSuffix matches the ".picture<N>" a picture file, or the ".subtitle<N>" a subtitle
-// sidecar temp (sidecarTempPath), adds to its working file's name.
-var pictureSuffix = regexp.MustCompile(`\.(picture|subtitle)[0-9]+$`)
+// pictureSuffix matches the ".picture<N>" a picture file, the ".subtitle<N>" a subtitle
+// sidecar temp (sidecarTempPath), or the ".dynhdr<N>" (".dynhdr0.json" for the HDR10+ file) a
+// dynamic-HDR pre-pass file (dynamicTempPath) adds to its working file's name.
+var pictureSuffix = regexp.MustCompile(`\.(picture|subtitle)[0-9]+$|\.dynhdr[0-9]+(\.json)?$`)
 
 // subtitleTempsBeside is every subtitle sidecar temp a job whose swap reads temp names after
 // it (sidecarTempPath) that is on disk, in order. Unlike pictures they can have gaps (a

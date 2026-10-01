@@ -230,6 +230,19 @@ func (e *Engine) verifyAgainst(ctx context.Context, job *EncodePlan) (vmafProof,
 		return none, GateDecode, store.FailureTransient, fmt.Errorf("decode-integrity check failed (output does not fully decode)")
 	}
 
+	// 6a. THE DYNAMIC-HDR GATES, on a plan carrying Dolby Vision or HDR10+ and on no other:
+	// the output's DOVI configuration record names the profile and compatibility id the plan
+	// declares and every frame carries an RPU, and every frame carries HDR10+, as the plan
+	// declares (docs/design/dynamic-hdr.md#gates). None of it is visible to any gate above or
+	// to the perceptual gate below: an output that dropped its RPU decodes, scores and
+	// carries its HDR10 blocks exactly like one that kept it. After the decode-integrity
+	// check, because it is a decode of its own.
+	if job.Metadata.DolbyVision || job.Metadata.HDR10Plus {
+		if gate, class, err := e.dynamicGate(ctx, job); err != nil {
+			return none, gate, class, err
+		}
+	}
+
 	// 6b. THE AUDIO GATES, on a plan that transforms audio and on no other: a full decode of
 	// every output audio stream, and every transformed track held to its declaration - codec,
 	// channels, layout and sample rate, a decoded length within two codec frames of its

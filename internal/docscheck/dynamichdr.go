@@ -12,27 +12,30 @@ import (
 // corpus by a test the aggregate check target runs - a documentation obligation nothing
 // enforces is one that quietly lapses.
 //
-// holdfast skips Dolby Vision and HDR10+ sources, and the skip is right: a generic
-// libx265 re-encode strips an RPU or SMPTE2094-40 dynamic metadata, and that loss is
-// invisible until somebody watches the file. What the shipped text kept getting wrong is
-// the FRAMING. Read as a permanent boundary, the skip tells an operator with a library of
-// 4K Dolby Vision remuxes that this tool will never be for them; read as what it is - a
-// deferral with a named cost - it tells them why, and what would have to be true first.
+// holdfast used to skip every Dolby Vision and HDR10+ source, because a generic re-encode
+// strips an RPU or SMPTE2094-40 dynamic metadata and that loss is invisible until somebody
+// watches the file. Goal 8 lifted the skip for what this build can carry AND gate
+// (docs/design/dynamic-hdr.md), and kept it for everything else. The statement has to say
+// both halves, because either alone is a different and wrong claim: "carried" alone tells an
+// operator with a profile 5 library or a hardware encoder that their files will be carried;
+// "skipped" alone is the old wording, which now under-sells the tool and misdescribes it.
 //
-// So the statement owes three things and this checks all three, because any two of them
-// without the third is a different claim:
+// So the statement owes five things and this checks all five:
 //
-//   - deferred rather than permanent, or the reader takes it as settled;
-//   - an external RPU toolchain beside the bundled ffmpeg, or the reader is not told
-//     what lifting it would take;
-//   - and the verification gap, or the reader is left thinking the toolchain is the
-//     whole of it. The gate compares pixels, an RPU is not pixels, and a tool that
-//     deletes the source once a replacement passes cannot ship a step it did not check.
+//   - what is carried, and by what: profile 8.1 and HDR10+, through libx265, by default;
+//   - profile 7 is converted only on request, because the conversion discards the
+//     enhancement layer;
+//   - profile 5 stays skipped;
+//   - every other encoder (and a remux-only root) still skips such a source;
+//   - and the gates that license the swap: the output's DOVI configuration record and its
+//     per-frame metadata are checked, because the perceptual gate compares pixels and an
+//     RPU is not pixels - a tool that deletes the source cannot ship a step it did not check.
 //
 // The check is PRESENCE and a token per clause, like the multi-clause statements this
 // package has carried before. Whether the prose is well written is not a question any
 // mechanical check can answer, and one that pretended to would either fail good
-// documentation or pass bad.
+// documentation or pass bad. The old wording - the deferral - carries none of the four
+// clauses after the first, and fails (TestDynamicHDR_TheOldDeferralWordingNowFails).
 const (
 	// DynamicHDRDocFile is where the statement lives today. It is named so a failure
 	// points somewhere, and the check is not narrowed to it: the statement is satisfied
@@ -41,8 +44,8 @@ const (
 
 	// AnchorDynamicHDR introduces the statement. The anchor is a FIXED constant, because
 	// a check free to pick its own anchor per run is a check that can be made to pass by
-	// moving the goalposts.
-	AnchorDynamicHDR = "dynamic-hdr-deferred"
+	// moving the goalposts. It was dynamic-hdr-deferred while the skip was deferred.
+	AnchorDynamicHDR = "dynamic-hdr-carried"
 )
 
 // Clause is one of the things an anchored statement must say, and the case-insensitive
@@ -60,19 +63,29 @@ type Clause struct {
 // says the thing, which is the failure mode a documentation check has.
 var DynamicHDRClauses = []Clause{
 	{
-		Token:  "deferred, not permanent",
-		Clause: "the Dolby Vision and HDR10+ skip is DEFERRED rather than permanent",
+		Token: "carried through libx265",
+		Clause: "Dolby Vision profile 8.1 and HDR10+ are carried through libx265, the cpu encoder, by " +
+			"default, with their dynamic metadata",
 	},
 	{
-		Token: "external RPU toolchain",
-		Clause: "lifting the skip needs an external RPU toolchain beside the bundled " +
-			"ffmpeg, to extract the dynamic metadata and reinject it",
+		Token: "profile 7 only on request",
+		Clause: "Dolby Vision profile 7 is converted to 8.1 only on request (dolby_vision_p7: convert), " +
+			"discarding the enhancement layer",
 	},
 	{
-		Token: "an RPU is not pixels",
-		Clause: "it stays deferred because the gate compares pixels, an RPU is not " +
-			"pixels, and holdfast will not delete a source on the strength of a step it " +
-			"did not check",
+		Token:  "profile 5 stays skipped",
+		Clause: "Dolby Vision profile 5 stays skipped",
+	},
+	{
+		Token: "every other encoder skips",
+		Clause: "every encoder but cpu, and a remux-only root, still skips a Dolby Vision or HDR10+ " +
+			"source, because only libx265 carries the metadata",
+	},
+	{
+		Token: "DOVI configuration record",
+		Clause: "the swap is licensed by gates the perceptual gate cannot stand in for: the output's DOVI " +
+			"configuration record names the planned profile and compatibility id, and its frames carry " +
+			"the RPU and the HDR10+ metadata, one per frame",
 	},
 }
 
@@ -106,7 +119,7 @@ func (s Statement) Present() bool { return strings.TrimSpace(s.Text) != "" }
 //
 // Each way of failing is reported as its OWN named failure, because they are different
 // repairs: an anchor nobody wrote, an anchor with nothing under it, a statement missing a
-// clause, and three clauses that exist but in two documents rather than one.
+// clause, and clauses that exist but in two documents rather than one.
 func CheckDynamicHDR(files []string) error {
 	if len(files) == 0 {
 		return fmt.Errorf("docscheck: no documents to search - a check with no corpus passes everything")
@@ -117,9 +130,9 @@ func CheckDynamicHDR(files []string) error {
 	}
 	if len(sts) == 0 {
 		return fmt.Errorf("no shipped document carries the anchor %q, so the dynamic-HDR statement is MISSING: "+
-			"Dolby Vision and HDR10+ sources are skipped by a tool that deletes a source once a replacement "+
-			"passes, and nothing the repository ships now says that skip is deferred, what lifting it needs, or "+
-			"what keeps it deferred (it lived in %s)", AnchorDynamicHDR, DynamicHDRDocFile)
+			"Dolby Vision and HDR10+ sources are carried or skipped by a tool that deletes a source once a "+
+			"replacement passes, and nothing the repository ships now says which are carried, by what, which "+
+			"stay skipped, or which gates license the swap (it lived in %s)", AnchorDynamicHDR, DynamicHDRDocFile)
 	}
 
 	var present []Statement
@@ -140,9 +153,9 @@ func CheckDynamicHDR(files []string) error {
 		}
 	}
 
-	// Nothing carries all three. Before naming a near-miss, say so when the clauses exist
+	// Nothing carries them all. Before naming a near-miss, say so when the clauses exist
 	// but are SPLIT: that is a different defect with a different repair, and a reader
-	// weighing the skip has to find all three in one place rather than assemble them.
+	// weighing the carriage has to find every clause in one place rather than assemble them.
 	if len(present) > 1 && carriedBetweenThem(present, DynamicHDRClauses) {
 		var where []string
 		for _, s := range present {
@@ -155,7 +168,7 @@ func CheckDynamicHDR(files []string) error {
 			where = append(where, fmt.Sprintf("%s carries %s", s.File, strings.Join(carries, " and ")))
 		}
 		return fmt.Errorf("the dynamic-HDR statement is SPLIT across %d documents and no single statement carries "+
-			"all %d clauses (%s): a reader weighing the skip has to find all of them in one place, so the clauses "+
+			"all %d clauses (%s): a reader weighing the carriage has to find all of them in one place, so the clauses "+
 			"belong in one statement under %q",
 			len(present), len(DynamicHDRClauses), strings.Join(where, "; "), AnchorDynamicHDR)
 	}

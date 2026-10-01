@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/dynhdr"
 	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/engine"
 	"github.com/NSchatz/holdfast/internal/logging"
@@ -269,6 +270,10 @@ func planEngine(ctx context.Context, cfg *config.Config, res startup.Result, std
 	log := logging.To(stderr, cfg.LogLevel)
 	eng := engine.New(*cfg, prober, nil, nil, log)
 	eng.SetCoverage(res.Coverage, res.Entries)
+	// The dynamic-HDR tools as `run` names them, so a file whose tool is missing is reported
+	// as the skip a run would record.
+	eng.DoviTool = envOr(dynhdr.EnvDoviTool, dynhdr.DefaultDoviTool)
+	eng.HDR10PlusTool = envOr(dynhdr.EnvHDR10PlusTool, dynhdr.DefaultHDR10PlusTool)
 	// `encoder: auto` is decided per file from what this host's hardware probe found, so a
 	// plan that did not probe would report every such file as skipped for want of hardware
 	// (or as a cpu encode) where a run would hand it to the hardware. The plan runs the probe

@@ -22,7 +22,22 @@ configuration values **the decision that wrote it actually read**, and no others
 | `skipped / undetermined-source-height` | `rules` - the band list its root carries. That guard read no threshold at all: what it read was that the root selects thresholds by a height nobody could establish |
 | `skipped / interlaced` | `deinterlace`, where the root sets one. A root that leaves it `off` - the default - records nothing here, exactly as this guard always has |
 | `skipped / telecine-cadence` | `deinterlace` - that guard exists only because the key is on, so turning it off re-derives every row it wrote |
-| a guard that read no configuration (Dolby Vision, a symlinked source, `unknown-field-order`) | nothing, recorded **as** nothing read: a verdict no key can move |
+| `skipped / dolby-vision-profile-7` | `dolby_vision_p7` and `encoder`: setting `dolby_vision_p7: convert` offers the file back |
+| `skipped / dolby-vision`, `skipped / hdr10-plus` | `encoder` where the job's encoder was not `cpu` (only libx265 carries the metadata, so moving to `cpu` offers the file back); nothing where the source is a profile this build does not carry, or the root is remux-only |
+| `skipped / dolby-vision-no-mastering-display`, `dolby-vision-frame-rate`, `hdr10-plus-unreadable` | `encoder` |
+| `skipped / dolby-vision-conversion-failed` | `encoder` and `dolby_vision_p7` |
+| a guard that read no configuration (a symlinked source, `unknown-field-order`) | nothing, recorded **as** nothing read: a verdict no key can move |
+
+<a id="dynamic-hdr-rows"></a>
+
+**Rows an older build wrote under `dolby-vision` and `hdr10-plus` are not re-opened.** Before
+dynamic HDR was carried, those two guards read no configuration, so their rows recorded nothing
+read - a verdict no key can move - and upgrading to a build that carries Dolby Vision profile 8.1
+and HDR10+ on the `cpu` encoder changes nothing about them on its own. That is deliberate: nothing
+the operator configured has moved, and re-opening every such row on upgrade would be a decision
+the build took for them. `holdfast requeue --guard dolby-vision` (or `--guard hdr10-plus`) is the
+lever: the guards then run again under this build's rules, and a source this build carries is
+carried ([docs/design/dynamic-hdr.md](design/dynamic-hdr.md#rows)).
 
 The stream keys that add work to a job - the audio keys and `subtitle_sidecars` - are read by
 no guard and recorded on no row: they change what the next jobs do and re-open nothing

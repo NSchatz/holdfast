@@ -52,7 +52,7 @@ one value it derives, and refuses a plan carrying any other (below).
 | `Streams` | the intended stream map: which source streams the output carries (the same value the row's dropped streams are recorded from) | the command line; the stream-parity gate |
 | attached pictures | how the attached pictures the map carries travel: pinned to copy in the map, or copied out of the source and carried as Matroska attachments | the command line |
 | `Picture` | the deinterlace applied, the crop decision (the rectangle kept, or why none was; [docs/design/crop.md](crop.md)), and the `max_height` scale applied to the picture the crop kept | the filter chain; the reference and the scale the perceptual gate builds; the crop gate; the row's provenance |
-| `Metadata` | the colour description (`hdr.Color`): the source's tags and, for HDR10, its mastering display and content light level; HDR10+ and Dolby Vision are not carried, because the guards skip a source that has either before a plan is derived; and the fidelity declaration (`hdr.Fidelity`, [below](#fidelity)): the bit depth and chroma subsampling of the pixel format, the colour tags, and the HDR10 static-metadata blocks the source carries | the command line (`-color_*` and the libx265 parameters); the output fidelity gate |
+| `Metadata` | the colour description (`hdr.Color`): the source's tags and, for HDR10, its mastering display and content light level; whether HDR10+ and a Dolby Vision RPU are carried, declared only from the job's dynamic-HDR pre-pass and only for libx265 ([docs/design/dynamic-hdr.md](dynamic-hdr.md#dynamic-hdr)), with the VBV ceiling, the metadata file and, for a converted profile 7 source, the raw stream and its rate; and the fidelity declaration (`hdr.Fidelity`, [below](#fidelity)): the bit depth and chroma subsampling of the pixel format, the colour tags, and the HDR10 static-metadata blocks the source carries | the command line (`-color_*`, the libx265 parameters, `-dolbyvision 1` and a converted stream's input); the output fidelity gate; the dynamic-HDR gates |
 | `Profile`, `Settings` | the effective library profile, whose floors the size and perceptual gates apply, and the job's effective encode settings with the encode profile that supplied them | the size and perceptual gates (`Profile`); `Settings` is the record the plan's quality value (`Video.Quality`) was taken from, and nothing reads it after the derivation |
 | container | the muxer the output is written in, named from the working file's name | the command line |
 | `Source`, `Output` | the file the encode reads and the working file it writes: the two paths the plan was derived for | the command line (`-i` and the output); every gate, for the files it measures |
@@ -62,7 +62,8 @@ one value it derives, and refuses a plan carrying any other (below).
 The plan declares; the command-line builder (`EncodePlan.args`) performs what it declares
 and refuses what it cannot. A plan declaring an operation this build has no way to perform -
 an audio or subtitle action other than copy, a crop its derivation could not have made, a hardware decode path, a device an
-encoder does not open, dynamic HDR metadata carried - is refused with an `UnbuildablePlanError` before any
+encoder does not open, dynamic HDR metadata its derivation did not declare from a pre-pass or that
+an encoder other than libx265 would write - is refused with an `UnbuildablePlanError` before any
 subprocess runs. An operation silently left out would be an output that is not what its plan
 says, checked by gates that believe the plan.
 

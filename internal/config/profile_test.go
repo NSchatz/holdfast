@@ -106,6 +106,7 @@ hw_fallback: software
 hw_decode: hardware
 subtitle_sidecars: text
 crop: auto
+dolby_vision_p7: convert
 workers: 4
 state_dir: /var/lib/holdfast
 undo_window_hours: 24
@@ -153,6 +154,7 @@ max_load: 1.5
 		HWDecode:          "hardware",
 		SubtitleSidecars:  "text",
 		Crop:              "auto",
+		DolbyVisionP7:     "convert",
 	}
 	roots := c.RootProfiles()
 	if len(roots) != 2 {
@@ -406,6 +408,10 @@ func TestProfileKnobSetIsClosedAndSingleSourced(t *testing.T) {
 		// keeps, so it is a knob; digested conditionally, so a root that sets nothing digests as
 		// it always did.
 		"crop",
+		// What a job does to a Dolby Vision profile 7 source. It decides whether a source is
+		// converted and carried or skipped, so it is a knob; digested conditionally, so a root
+		// that sets nothing digests as it always did.
+		"dolby_vision_p7",
 		// What a job does where its hardware encoder is missing or fails. It decides which
 		// encoder writes a replacement, or whether one is written at all, so it is a knob;
 		// digested conditionally, so a root that sets nothing digests as it always did.

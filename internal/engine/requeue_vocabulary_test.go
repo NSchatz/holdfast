@@ -25,6 +25,10 @@ var mutableSkipGuards = map[string]bool{
 	// every pass: the lever is the hardware or the fallback, and a requeue would re-open
 	// nothing the next pass does not already re-decide.
 	"SkipHardwareUnavailable": true,
+	// A condition of this host too: the dovi_tool or hdr10plus_tool a carried dynamic-HDR
+	// source needs is not installed. The lever is installing it, and the next pass re-decides
+	// the file whatever a requeue does (docs/design/dynamic-hdr.md#tools).
+	"SkipDynamicHDRToolMissing": true,
 }
 
 // TestSkipGuards_EveryTerminalSkipTokenIsRequeueable grades [AC-9] of S0150: every

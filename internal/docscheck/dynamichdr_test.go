@@ -49,7 +49,7 @@ func writeCorpus(t *testing.T, docs ...string) []string {
 
 // TestDynamicHDRStatement_IsCarriedByOneShippedDocument grades [AC-1] of S0106: the check
 // passes only if ONE shipped document carries the dynamic-HDR statement and that single
-// statement says all three of its clauses.
+// statement says all of its clauses.
 //
 // It runs over the corpus this repository actually ships, not a fixture, because the
 // obligation is about the documents an operator reads. Every other test below proves this
@@ -57,14 +57,51 @@ func writeCorpus(t *testing.T, docs ...string) []string {
 func TestDynamicHDRStatement_IsCarriedByOneShippedDocument(t *testing.T) {
 	if err := docscheck.CheckDynamicHDR(shippedMarkdown(t)); err != nil {
 		t.Errorf("the shipped documentation does not carry the dynamic-HDR statement: %v\n"+
-			"Dolby Vision and HDR10+ sources are skipped by a tool that deletes a source once a "+
-			"replacement passes its gates, and a reader weighing that skip has to be told it is "+
-			"deferred, what lifting it needs, and what keeps it deferred - all three, in one place.", err)
+			"Dolby Vision and HDR10+ sources are carried or skipped by a tool that deletes a source once a "+
+			"replacement passes its gates, and a reader has to be told what is carried and by what, what "+
+			"stays skipped, and which gates license the swap - all of it, in one place.", err)
 	}
-	if len(docscheck.DynamicHDRClauses) != 3 {
-		t.Errorf("the dynamic-HDR statement owes 3 clauses, the table carries %d - a clause removed from "+
+	if len(docscheck.DynamicHDRClauses) != 5 {
+		t.Errorf("the dynamic-HDR statement owes 5 clauses, the table carries %d - a clause removed from "+
 			"the table is a clause the shipped text is no longer held to",
 			len(docscheck.DynamicHDRClauses))
+	}
+}
+
+// oldDeferralWording is README.md's dynamic-HDR statement as it stood before goal 8 lifted
+// the skip, verbatim, under its old anchor's text (the anchor itself is the check's own).
+const oldDeferralWording = `**The Dolby Vision and HDR10+ skip is deferred, not permanent.** A generic libx265 re-encode strips a
+Dolby Vision RPU or HDR10+ SMPTE2094-40 dynamic metadata, and that loss is invisible until somebody
+watches the file, so those sources are skipped rather than quietly flattened. Lifting the skip needs an
+external RPU toolchain beside the bundled ffmpeg to extract and reinject that metadata - and then the
+other half: the gate compares pixels, an RPU is not pixels, and holdfast will not delete a source on
+the strength of a step it did not check.
+
+> **Note - decided 2026-09-29 by the owner (T13, T25).** The deferral has an owner's answer: Dolby
+> Vision profile 8 and HDR10+ are to be carried through libx265 with their dynamic metadata, and
+> profile 7 converted to 8.1 on request only (dropping the enhancement layer); profile 5 stays
+> skipped; ` + "`dovi_tool` and `hdr10plus_tool`" + ` are pinned into the image. The skip above holds in this
+> build until the release that ships those tools and the metadata gates, which rewrites this
+> statement.`
+
+// TestDynamicHDR_TheOldDeferralWordingNowFails is the bite on the statement this build
+// replaced (brief §4, docscheck statements): the deferral, word for word and under the
+// anchor, no longer satisfies the check, and the failure names the clauses it never says -
+// that profile 7 is converted only on request, which encoders skip, and the gates.
+func TestDynamicHDR_TheOldDeferralWordingNowFails(t *testing.T) {
+	paths := writeCorpus(t, statementDoc(docscheck.AnchorDynamicHDR, []string{oldDeferralWording}))
+	err := docscheck.CheckDynamicHDR(paths)
+	if err == nil {
+		t.Fatal("the deferral wording passed the check of the statement that replaced it")
+	}
+	for _, token := range []string{"profile 7 only on request", "every other encoder skips", "DOVI configuration record"} {
+		if !strings.Contains(err.Error(), token) {
+			t.Errorf("the failure on the old wording does not name %q: %v", token, err)
+		}
+	}
+	// The one clause the old note did carry, word for word, is not reported missing.
+	if strings.Contains(err.Error(), `"carried through libx265"`) {
+		t.Errorf("the failure reports a clause the old wording carries: %v", err)
 	}
 }
 
