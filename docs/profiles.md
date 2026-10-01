@@ -278,6 +278,29 @@ does not is recorded and does not stop the swap. It is a library root knob with 
 default, like `hw_decode`. The rules, the names and the gate, with their reasoning, are in
 [docs/design/subtitles.md](design/subtitles.md#sidecars).
 
+## `crop` - cutting black bars away
+
+<a id="crop"></a>
+
+```yaml
+crop: off        # the default: every replacement keeps the source's whole frame
+# crop: auto     # find each source's black bars and cut them away where that is provably safe
+```
+
+Under `auto`, each source is sampled by ffmpeg's `cropdetect` at ten points spread over the file
+(skipping its first and last 5%), and its bars are cut away before encoding only where the
+samples agree on them within 9 px, at least three samples were valid, the area removed is black on
+every frame of the source, and the source is not Dolby Vision. Anything else - samples that
+disagree (a mixed aspect ratio), too few valid ones, bars with text or a logo in them, a Dolby
+Vision source - encodes the whole frame, exactly as `off` would, and the row records the reason
+(`crop` on the job row, [docs/api-reference.md](api-reference.md)). A crop runs after a
+deinterlace and before a `max_height` scale, which then scales the cropped picture. The
+perceptual gate scores the output against the source put through the same crop, and a crop gate
+holds the output to the declared size and the removed area to black. Detection and the blackness
+check each read the source once more, so a root under `auto` pays for them on every file it
+encodes. It is a library root knob with a top-level default, like `subtitle_sidecars`; an encode
+profile does not carry it. The rules, the constants and their sources are in
+[docs/design/crop.md](design/crop.md#crop).
 ## `dolby_vision_p7` - Dolby Vision profile 7, converted on request
 
 <a id="dolby-vision-p7"></a>

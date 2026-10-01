@@ -611,6 +611,25 @@ ALTER TABLE jobs ADD COLUMN subtitle_sidecars TEXT;
 ALTER TABLE jobs ADD COLUMN audio_tracks TEXT;
 `,
 	},
+	{
+		// v23 - what a job did about CROPPING its source under `crop: auto`
+		// (docs/design/crop.md#crop): the rectangle of the source it kept and the frame it was
+		// kept from, or the token and words saying why it kept the whole frame, as one JSON
+		// object.
+		//
+		// A crop is v19's argument again: the rows and columns it removes are not in the
+		// replacement, and this row is what says so after the source is gone.
+		//
+		// NULLABLE with NO DEFAULT, the rule every step since v2 has kept: NULL is not
+		// recorded, which every row already in the field is, and every row of a job whose
+		// root does not crop stays.
+		name: "crop",
+		// One nullable column: ADD COLUMN rewrites no row and creates none.
+		rows: noRowChange,
+		sql: `
+ALTER TABLE jobs ADD COLUMN crop TEXT;
+`,
+	},
 }
 
 // schemaVersion is the version this build expects a database to be at. It IS the

@@ -105,6 +105,7 @@ audio_loudness: ebu_r128
 hw_fallback: software
 hw_decode: hardware
 subtitle_sidecars: text
+crop: auto
 dolby_vision_p7: convert
 workers: 4
 state_dir: /var/lib/holdfast
@@ -152,6 +153,7 @@ max_load: 1.5
 		HWFallback:        "software",
 		HWDecode:          "hardware",
 		SubtitleSidecars:  "text",
+		Crop:              "auto",
 		DolbyVisionP7:     "convert",
 	}
 	roots := c.RootProfiles()
@@ -402,6 +404,10 @@ func TestProfileKnobSetIsClosedAndSingleSourced(t *testing.T) {
 		// files beside its replacement, so it is a knob; digested conditionally, so a root
 		// that sets nothing digests as it always did.
 		"subtitle_sidecars",
+		// Whether black bars are detected and cut away. It decides which pixels a replacement
+		// keeps, so it is a knob; digested conditionally, so a root that sets nothing digests as
+		// it always did.
+		"crop",
 		// What a job does to a Dolby Vision profile 7 source. It decides whether a source is
 		// converted and carried or skipped, so it is a knob; digested conditionally, so a root
 		// that sets nothing digests as it always did.

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/crop"
 	"github.com/NSchatz/holdfast/internal/dynhdr"
 	"github.com/NSchatz/holdfast/internal/encoder"
 	"github.com/NSchatz/holdfast/internal/probe"
@@ -232,6 +233,30 @@ func TestDynamicHDR_Profile81IsCarriedThroughTheEngine(t *testing.T) {
 	}
 	requireCarried(t, src, dynhdr.Expectation{DolbyVision: true, Profile: 8, CompatID: 1})
 	requireNoDynamicTemps(t, root)
+}
+
+// A CARRIED DOLBY VISION SOURCE UNDER crop: auto IS ENCODED UNCROPPED: the crop decision
+// refuses a Dolby Vision source by its own class (docs/design/crop.md#dolby-vision), so the
+// job is done with its RPU carried, the whole frame kept, and the refusal recorded on its row.
+func TestDynamicHDR_ACarriedProfile81UnderCropAutoIsEncodedUncroppedWithTheRefusalRecorded(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "movie.mkv")
+	mkDynamicSource(t, src, true, false)
+	st, calls := dynamicRun(t, root, func(c *config.Config) { c.Crop = crop.Auto }, "", nil)
+	row := rowForFile(t, st, "movie.mkv")
+	if row.Status != store.Done {
+		t.Fatalf("row %s %q, want done", row.Status, row.Outcome.Reason)
+	}
+	if rec := row.Outcome.Crop.Record(); !row.Outcome.Crop.Recorded() || rec.Applied || rec.Reason != crop.ReasonDolbyVision {
+		t.Errorf("the row's crop record is %s, want the dolby-vision refusal", row.Outcome.Crop)
+	}
+	if argv := strings.Join(argvWith(calls, "libx265"), " "); strings.Contains(argv, "crop=") || !strings.Contains(argv, "-dolbyvision 1") {
+		t.Errorf("the encode cropped, or did not carry the RPU: %s", argv)
+	}
+	if w, h := row.Outcome.OutputWidth, row.Outcome.OutputHeight; w == nil || h == nil || *w != 320 || *h != 240 {
+		t.Errorf("the replacement is not the whole 320x240 frame: %v x %v", w, h)
+	}
+	requireCarried(t, src, dynhdr.Expectation{DolbyVision: true, Profile: 8, CompatID: 1})
 }
 
 // HDR10+ IS CARRIED by default on the cpu encoder: extracted by hdr10plus_tool, handed to

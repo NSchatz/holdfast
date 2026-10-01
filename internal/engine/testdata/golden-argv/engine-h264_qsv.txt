@@ -112,3 +112,6 @@ row: skipped already-at-target-codec
 == hw-decode/remux-only
 (no invocation)
 row: skipped already-at-target-codec
+== crop/auto/letterbox
+(no invocation)
+row: skipped already-at-target-codec

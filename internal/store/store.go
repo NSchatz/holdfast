@@ -399,6 +399,12 @@ type Outcome struct {
 	// carries, exactly as every row written before the column existed does.
 	AudioTracks AudioTracks
 
+	// Crop is what this job did about cropping its source under `crop: auto`: the rectangle
+	// kept, or the reason the whole frame was (see CropRecord and docs/design/crop.md). Its
+	// zero value is NOT RECORDED, which is what every row of a job whose root does not crop
+	// carries, exactly as every row written before the column existed does.
+	Crop Crop
+
 	// Decision names the library profile that decided this file. It is embedded so a
 	// reader asks a row for o.LibraryRoot exactly as it asks for o.Encoder.
 	Decision

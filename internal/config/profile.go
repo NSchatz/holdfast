@@ -11,6 +11,7 @@ import (
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/knadh/koanf/v2"
 
+	"github.com/NSchatz/holdfast/internal/crop"
 	"github.com/NSchatz/holdfast/internal/deinterlace"
 	"github.com/NSchatz/holdfast/internal/encoder"
 )
@@ -104,6 +105,9 @@ var profileKnobs = []string{
 	// Whether text subtitles are also copied to sidecars, on the deinterlace knob's terms:
 	// it contributes to the digest only where it is not the shipped `off`.
 	subtitleSidecarsKey,
+	// Whether black bars are detected and cut away, on the deinterlace knob's terms: it
+	// contributes to the digest only where it is not the shipped `off`.
+	cropKey,
 	// What a job does to a Dolby Vision profile 7 source, on the same terms: it contributes
 	// only where it is not the shipped `skip`.
 	dolbyVisionP7Key,
@@ -215,6 +219,10 @@ type Profile struct {
 	// SubtitleSidecarsOff or SubtitleSidecarsText. "" is the default, off. See
 	// Config.SubtitleSidecars.
 	SubtitleSidecars string `yaml:"subtitle_sidecars"`
+
+	// Crop is whether a job under this root detects its source's black bars and cuts them
+	// away: crop.Off or crop.Auto. "" is the default, off. See Config.Crop.
+	Crop string `yaml:"crop"`
 	// DolbyVisionP7 is what a job under this root does to a Dolby Vision profile 7 source:
 	// DolbyVisionP7Skip or DolbyVisionP7Convert. "" is the default, skip. See
 	// Config.DolbyVisionP7.
@@ -318,7 +326,7 @@ func (p Profile) values() []string {
 		strconv.FormatBool(p.DownscaleAcknowledged()),
 	}
 	vals = append(vals, p.audioValues()...)
-	return append(vals, p.SubtitleSidecarsMode(), p.DolbyVisionP7Mode(), p.HWFallbackMode(), p.HWDecodeMode())
+	return append(vals, p.SubtitleSidecarsMode(), p.CropMode(), p.DolbyVisionP7Mode(), p.HWFallbackMode(), p.HWDecodeMode())
 }
 
 // renderDeinterlace is the deinterlace knob as `validate` prints it and as the digest reads
@@ -415,6 +423,8 @@ func digestSilent(knob, value string) bool {
 		return value == HWDecodeSoftware
 	case subtitleSidecarsKey:
 		return value == SubtitleSidecarsOff
+	case cropKey:
+		return value == crop.Off
 	case dolbyVisionP7Key:
 		return value == DolbyVisionP7Skip
 	}
@@ -443,6 +453,9 @@ func (p Profile) validate() error {
 		return err
 	}
 	if err := validateSubtitleSidecars(p.SubtitleSidecars); err != nil {
+		return err
+	}
+	if err := validateCrop(p.Crop); err != nil {
 		return err
 	}
 	if err := validateDolbyVisionP7(p.DolbyVisionP7); err != nil {

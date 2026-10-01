@@ -380,6 +380,12 @@ func goldenFixtures(t *testing.T, ffmpeg, ffprobe, dir string) map[string]string
 		"-pix_fmt", "yuv420p", "-c:a:0", "flac", "-c:a:1", "ac3", "-metadata:s:a:0", "language=eng",
 		"-metadata:s:a:1", "language=fre", "--", filepath.Join(dir, "audio.mkv"))
 
+	// A letterboxed source for `crop: auto` (docs/design/crop.md): a 320x160 picture with 40 px
+	// black bars top and bottom, long enough for every cropdetect sample to land on a frame.
+	ff(t, ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+		"-i", "testsrc2=duration=2:size=320x160:rate=10,pad=320:240:0:40:black", "-c:v", "libx264",
+		"-preset", "ultrafast", "-b:v", "8M", "-pix_fmt", "yuv420p", "--", filepath.Join(dir, "letterbox.mkv"))
+
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read the fixture directory: %v", err)
@@ -1017,6 +1023,18 @@ func engineArgvCases() []engineArgvCase {
 		root: "remux_only: true\naudio_reencode: on\naudio_codec: ac3"})
 	add(engineArgvCase{name: "audio/top-level-codec/root-reencode", source: "audio.mkv", top: "audio_codec: aac",
 		root: "audio_reencode: on"})
+
+	// The crop (docs/design/crop.md), appended: a letterboxed source with the key unset builds
+	// the command line it always did; under `crop: auto` the crop heads the chain on every
+	// encoder, ahead of anything that uploads to a device; a scale after it scales the cropped
+	// picture; a source with no bars and a remux crop nothing.
+	add(engineArgvCase{name: "crop/key-unset/letterbox", source: "letterbox.mkv"})
+	add(engineArgvCase{name: "crop/auto/letterbox", source: "letterbox.mkv", root: "crop: auto", core: true})
+	add(engineArgvCase{name: "crop/auto/letterbox/max-height-120", source: "letterbox.mkv",
+		root: "crop: auto\n" + ceiling(120)})
+	add(engineArgvCase{name: "crop/auto/no-bars", root: "crop: auto"})
+	add(engineArgvCase{name: "crop/auto/letterbox/remux-only", source: "letterbox.mkv", root: "crop: auto\nremux_only: true"})
+	add(engineArgvCase{name: "crop/top-level-auto/root-off", source: "letterbox.mkv", top: "crop: auto", root: "crop: off"})
 	return cs
 }
 

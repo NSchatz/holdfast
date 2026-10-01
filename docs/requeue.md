@@ -44,6 +44,12 @@ no guard and recorded on no row: they change what the next jobs do and re-open n
 ([docs/design/audio.md](design/audio.md#which-files),
 [docs/design/subtitles.md](design/subtitles.md#which-files)).
 
+`crop` is the same: no guard reads it and no row records it as an input, so turning it on crops
+the files the next jobs encode and re-opens no finished one. What a job did about its crop - the
+rectangle kept, or the reason it kept the whole frame - is recorded on its row as proof (`crop`),
+not as a decision input ([docs/design/crop.md](design/crop.md#which-files)); `holdfast requeue`
+is the lever for a finished file you want cropped.
+
 Where a library root carries [resolution rules](profiles.md#resolution-rules), the value a
 row records is the **effective** one the guard compared against - the floor the file's own
 band supplied, never the root's. So editing that rule offers the file back, and editing a
