@@ -20,6 +20,10 @@ decodes fine and carries the right duration, packets and streams. The mean floor
 zeroes all three with the gate still enabled is refused at startup rather than run
 as a gate that can never reject.
 
+On a job that crops, the reference is the source put through the same crop, after the same
+deinterlace, and nothing else: a crop keeps the source's own pixels, so it is reproduced on the
+reference the way a deinterlace is, and never resampled ([crop](crop.md#reference)).
+
 The luma-only VMAF model cannot see colour at all: it scores the luma plane and is
 structurally blind to chroma damage, which is why the chroma floor is separate
 from the other two and measured with its own metric rather than folded into the

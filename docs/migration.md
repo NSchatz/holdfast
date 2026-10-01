@@ -128,13 +128,13 @@ replacement of it. Read this before you switch.
   the server that owns the library re-runs every gate and makes the same-filesystem rename
   itself, and each node reaches media through a shared mount or over HTTP from the server. Until
   the release that ships them, this build is single-host as described above.
-- **Filters as a pipeline.** No cropping, no black-bar removal, no aspect-ratio changes, no
-  library management. What a root CAN say about streams is which to carry:
+- **Filters as a pipeline.** No aspect-ratio changes and no library management; black bars are
+  cut only under `crop: auto` ([docs/design/crop.md](design/crop.md)). What a root CAN say about streams is which to carry:
   `audio_languages`, `subtitle_languages` and `keep_commentary` select streams and
   `remux_only` copies the video as well, and whatever is kept is stream-copied untouched
   unless an audio key says otherwise ([docs/profiles.md](profiles.md#stream-selection)). The
-  transformations this tool will make on request are deinterlacing, an output height ceiling and
-  the audio keys - re-encoding lossless audio tracks, an added stereo downmix and two-pass EBU R128
+  transformations this tool will make on request are deinterlacing, an output height ceiling,
+  cropping black bars (`crop: auto`) and the audio keys - re-encoding lossless audio tracks, an added stereo downmix and two-pass EBU R128
   loudness ([docs/design/audio.md](design/audio.md)) - each off by default and each stated in full
   in the [README's non-goals](../README.md#non-goals).
 
