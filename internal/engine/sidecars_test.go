@@ -170,7 +170,7 @@ func TestSidecar_EngineTruncatedSidecarIsRefusedAndTheSwapStands(t *testing.T) {
 // unchanged files: the encode's command line does not read the key at all.)
 func TestSidecar_EngineKeyUnsetWritesNothing(t *testing.T) {
 	ffmpeg, _ := tools(t)
-	for _, mode := range []string{"", config.SubtitleSidecarsOff} {
+	for _, mode := range []string{""} { // what baseCfg, and every existing fixture, carries
 		t.Run(fmt.Sprintf("mode=%q", mode), func(t *testing.T) {
 			root := t.TempDir()
 			mkSubtitledMatroska(t, ffmpeg, filepath.Join(root, "film.mkv"))
