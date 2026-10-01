@@ -112,7 +112,7 @@ func Prepare(ctx context.Context, req Request) (*Prepared, error) {
 		if p.VBV, err = VBVFor(f.width, f.height, rate); err != nil {
 			return nil, refuse(ReasonFrameRate, err)
 		}
-		if in.Convert {
+		if in.Rewrites() {
 			p.FrameRate = rate
 		}
 	}
@@ -128,7 +128,9 @@ func Prepare(ctx context.Context, req Request) (*Prepared, error) {
 	}
 	if in.Convert {
 		p.ELType = ELType(ctx, req.Tools, req.Source, req.HeadPath)
-		if err := ConvertProfile7(ctx, req.Tools, req.Source, req.RawPath); err != nil {
+	}
+	if in.Rewrites() {
+		if err := rewrite(ctx, req.Tools, in, req.Source, req.RawPath); err != nil {
 			return nil, refuse(ReasonConversionFailed, err)
 		}
 		p.RawVideo = req.RawPath
@@ -140,7 +142,7 @@ func Prepare(ctx context.Context, req Request) (*Prepared, error) {
 // at its r_frame_rate; a profile 7 source to be converted needs one constant rate starting at
 // zero, because its converted raw stream is retimed at exactly that rate.
 func doviRate(in Intent, f facts) (Rate, error) {
-	if !in.Convert {
+	if !in.Rewrites() {
 		r, ok := ParseRate(f.rate)
 		if !ok {
 			return Rate{}, fmt.Errorf("the video's frame rate could not be established (r_frame_rate %q)", f.rate)
@@ -206,9 +208,19 @@ func ValidateHDR10Plus(data []byte, frames int) error {
 // (https://github.com/quietvoid/dovi_tool/blob/2.3.4/README.md , read 2026-10-01). The stream
 // is a lossless rewrite of the base layer and the RPU; nothing is decoded.
 func ConvertProfile7(ctx context.Context, t Tools, src, out string) error {
+	return rewrite(ctx, t, Intent{DolbyVision: true, Convert: true}, src, out)
+}
+
+// rewrite writes src's video as the raw stream the intent's encode reads (ConvertArgs): a
+// profile 7 conversion, an L5 zeroing, or both.
+func rewrite(ctx context.Context, t Tools, in Intent, src, out string) error {
+	what := "converting the Dolby Vision profile 7 stream"
+	if in.ZeroL5 {
+		what = "zeroing the Dolby Vision L5 active area"
+	}
 	if err := pipeline(annexB(ctx, t.FFmpeg, src),
-		exec.CommandContext(ctx, t.DoviTool, "-m", "2", "convert", "--discard", "-", "-o", out)); err != nil {
-		return fmt.Errorf("converting the Dolby Vision profile 7 stream: %w", err)
+		exec.CommandContext(ctx, t.DoviTool, ConvertArgs(in, out)...)); err != nil {
+		return fmt.Errorf("%s: %w", what, err)
 	}
 	st, err := os.Stat(out)
 	if err != nil || st.Size() == 0 {
@@ -257,4 +269,16 @@ func ELTypeFrom(summary string) string {
 		return ""
 	}
 	return strings.TrimSpace(m[1][open+1 : close])
+}
+
+// RewriteFacts are what the crop decision reads before it asks for an L5 zeroing: the source's
+// frame count, and why its frame rate is not one constant rate starting at zero - which the
+// raw stream an L5 zeroing writes is read at - or nil where it is.
+func RewriteFacts(ctx context.Context, ffprobe, src string) (frames int, rate error) {
+	f := probeFacts(ctx, ffprobe, src)
+	if !f.ok {
+		return 0, fmt.Errorf("ffprobe did not establish the size and frame count of %q", src)
+	}
+	_, err := doviRate(Intent{DolbyVision: true, ZeroL5: true}, f)
+	return f.frames, err
 }
