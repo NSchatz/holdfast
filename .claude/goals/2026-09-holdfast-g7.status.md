@@ -32,7 +32,9 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g7-ba
 
 | Gate | Value at goal start | Wall-clock |
 |---|---|---|
-| `make check` under `flock -o` (log `gate-baseline.log`) | running | - |
+| `make check` under `flock -o` (log `gate-baseline.log`) | exit 0 | 2002 s (33m22s) |
+| `internal/engine` under `go test -race` (from that run) | ok, 88.1% coverage | 1887.9 s (70% of `TEST_TIMEOUT` 45m) |
+| `cmd/holdfast` under `go test -race` (from that run) | ok, 89.2% coverage | 667.0 s |
 | `func Test` count, all packages | 1463 in 28 packages (`functest-start.txt`) | - |
 | `docs/design/swap.md`, `docs/design/quality-gate.md` lines (`wc -l`) | 62, 76 | - |
 
@@ -42,7 +44,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g7-ba
 |---|---|---|
 | 1.1 | Precondition checked (header above) | DONE (`3df6162`): goal 6's COMPLETE line is on `origin/main` |
 | 1.2 | Ledger created as the goal's first commit, straight to `main` | DONE (`ec02306`) |
-| 1.3 | Baselines with timings | DOING |
+| 1.3 | Baselines with timings | DONE (`3df6162`): the table above; `make check` exit 0 in 2002 s |
 
 ## Phase 2 - Triage (line B)
 
@@ -128,5 +130,6 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g7-ba
 
 ## Resume here
 
-Ledger created; baseline gate running. Next: read the encode plan, the argv builder and the gates,
-then plan the audio and subtitle tracks.
+Baseline done. Two build agents run the tracks in `/cache/wt/holdfast/holdfast-g7-audio` and
+`/cache/wt/holdfast/holdfast-g7-subtitles`; each opens its PR without merging. Next: review each
+PR, merge by §0.3, then the report.
