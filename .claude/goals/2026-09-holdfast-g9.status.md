@@ -67,10 +67,10 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g9-ba
 
 | # | Item | State |
 |---|---|---|
-| 4.1 | Scheduled full-decode sweep under `serve`, inside the run window | TODO |
-| 4.2 | Resumable after a restart (progress in the store) | TODO |
-| 4.3 | Results in the store, the read API, a notification on corruption, a metric | TODO |
-| 4.4 | Report-only: a test proves no file moved, renamed or deleted | TODO |
+| 4.1 | Scheduled full-decode sweep under `serve`, inside the run window | DONE (PR #144, `8c6084c`): `health_sweep_interval_hours` (0 = off, default), `health_sweep_workers`; due from the last finished sweep in the store; `TestHealthSweep_IsScheduledFromTheLedger`, `TestHealthSweep_HonoursTheRunWindow` (outside the window 0 decodes; a window closing mid-sweep holds the next decode until it reopens) |
+| 4.2 | Resumable after a restart (progress in the store) | DONE (PR #144, `8c6084c`): store v24 `health_sweeps`, `health_checks`; `TestHealthSweep_ResumesAfterARestartWithoutDecodingCheckedFilesAgain` (a file checked before the restart is not decoded again; one whose mtime changed is) |
+| 4.3 | Results in the store, the read API, a notification on corruption, a metric | DONE (PR #144, `8c6084c`): `GET /api/health` (read token; `TestHealthEndpoint_ReportsASweepThroughTheReadAPI`), one summary notification per sweep with problems, metrics `holdfast_health_sweep_files_checked_total{result}`, `holdfast_health_sweep_corrupt_files`, `holdfast_health_sweep_unreadable_files`, `holdfast_health_sweep_last_completed_timestamp_seconds` |
+| 4.4 | Report-only: a test proves no file moved, renamed or deleted | DONE (PR #144, `8c6084c`): `TestHealthSweep_IsReportOnly_NoFileMovedRenamedOrDeleted` (name, size, mtime, mode, inode, sha256 of 10 entries identical before and after a real pinned-ffmpeg sweep; 3 ok, 4 corrupt, a FIFO unreadable). Gate exit 0 (2259 s, `internal/engine` 2113.8 s = 78.3%, `cmd/holdfast` 665.9 s); mutation-diff 100% (92 killed, 0 lived); CI green (runs 36897212191, 36897212216) |
 
 ## Phase 5 - Docs (line E)
 
@@ -102,6 +102,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g9-ba
   `holdfast-g9/limit-encodes` (S0174) and `holdfast-g9/health-sweep`, each built by one agent in
   its own worktree and merged by the rule of §0.3.
 - 2026-10-01: PR #142 (S0174) merged as `80501dc`. Its own decisions: a per-file slot spent when the job enters the encoding state (dry run: at the would-transcode decision, before its row is written) and handed back if none was reached; both count bounds given -> the first reached stops the offer, recorded as `bound=limit,limit_encodes`; `--limit-encodes ""` refused; the `--queue-order` override is applied after `loadConfig`, so an invalid configured order still exits 1 (S0174 advisory F2), and only in memory.
+- 2026-10-01: PR #144 (health sweep) merged as `8c6084c`. Its own decisions: off by default; the first sweep is due when `serve` starts if none is on record; before each decode it asks pause, then the scheduler (window, `max_load`, Tautulli); decodes at nice 19 (the benefit `ASSUMED`); it runs beside encodes; ffmpeg's clean exit with an error printed marks a file corrupt (truncation); a FIFO is never opened; a file that changed under two attempts is unreadable; per-file results older than the last finished sweep are pruned at a sweep's start. Changed existing test lines: the newest-migration wind-back fixtures moved from v23 (`crop` column) to v24 (`health_sweeps`, `health_checks` tables) in `internal/store/migrate_test.go`, `readonly_test.go`, `resolution_migrate_test.go` and `cmd/holdfast/export_test.go` (`olderSchemaVersion` 22 -> 23); the rest are additions.
 - 2026-10-01: every gate in this goal runs with `TMPDIR` under `/cache/tmp/holdfast-g9/` (a tmpfs
   `TMPDIR` is refused by `fsclass`), goal shells use `command grep`, `rg` or `git grep`, and
   commits carry no trailer (T38).
