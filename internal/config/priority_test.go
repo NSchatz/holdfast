@@ -316,3 +316,20 @@ encode_profiles:
 		t.Error("an empty Config reports a priority")
 	}
 }
+
+// TestPriority_AnyOnePlaceNamingOneIsEnough: PriorityConfigured is true when exactly one of
+// the three places names a priority - each on its own - since any one of them is enough to
+// change the order a scan offers files in.
+func TestPriority_AnyOnePlaceNamingOneIsEnough(t *testing.T) {
+	for name, yaml := range map[string]string{
+		"a root":            "library_roots:\n  - path: /mnt/a\n    priority: 1\n",
+		"a rule":            "library_roots:\n  - path: /mnt/a\n    rules:\n      - crf: 20\n        priority: 1\n",
+		"a second rule":     "library_roots:\n  - path: /mnt/a\n    rules:\n      - {when: {max_source_height: 576}, crf: 20}\n      - priority: 1\n",
+		"a second root":     "library_roots:\n  - /mnt/a\n  - path: /mnt/b\n    priority: -1\n",
+		"an encode profile": "library_roots:\n  - /mnt/a\nencode_profiles:\n  - name: p\n    crf: 20\n  - name: q\n    priority: 0\n",
+	} {
+		if c := loadYAML(t, yaml); !c.PriorityConfigured() {
+			t.Errorf("%s names a priority and PriorityConfigured() is false", name)
+		}
+	}
+}
