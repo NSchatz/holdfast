@@ -336,6 +336,14 @@ dry_run: false
 #                         # with the source stream's event count. Picture-based and
 #                         # mov_text subtitles are skipped with a reason. A library
 #                         # root may override it. See docs/design/subtitles.md.
+# dolby_vision_p7: skip  # what the cpu encoder does with a Dolby Vision profile 7
+#                         # source. skip (default): skipped, as always. convert:
+#                         # rewritten to profile 8.1 with dovi_tool (mode 2, the
+#                         # enhancement layer discarded) and carried, behind the
+#                         # same gates as profile 8.1. Profile 8.1 and HDR10+ are
+#                         # carried by default on cpu; every other encoder skips
+#                         # all of them. A library root may override it. See
+#                         # docs/design/dynamic-hdr.md.
 # crf: 22                # quality knob (lower = bigger/better): libx265/libsvtav1
 #                         # constant-rate-factor, 0-51. A hardware encoder with no
 #                         # quality.<key> below takes this value unchanged as its

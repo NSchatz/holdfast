@@ -3,10 +3,11 @@
 // libx265 re-encode does NOT auto-carry HDR/colour signalling: HDR10 static
 // metadata (SMPTE ST 2086 mastering-display + MaxCLL/FALL) and the primaries/
 // transfer/matrix tags are dropped unless passed explicitly, and Dolby Vision RPUs
-// / HDR10+ dynamic metadata cannot be preserved by a generic ffmpeg+libx265
-// pipeline at all (they need an external RPU toolchain — out of scope). So this
-// package DETECTS DV/HDR10+ (the engine skips them) and derives the args to
-// PROPAGATE colour tags + HDR10 static metadata on everything else.
+// and HDR10+ dynamic metadata are stripped by a generic re-encode. So this package
+// DETECTS DV/HDR10+ and derives the args to PROPAGATE colour tags + HDR10 static
+// metadata. What happens to a DV/HDR10+ source is internal/dynhdr's: the cpu encoder
+// carries profile 8.1, an opted-in profile 7 and HDR10+ through libx265 behind their
+// own gates, and every other case is skipped (docs/design/dynamic-hdr.md).
 //
 // The pure functions here (ClassFrom, MasterDisplay, MaxCLL, StaticMetadataIncomplete)
 // take already-probed strings and are deterministic — no ffmpeg/ffprobe dependency,

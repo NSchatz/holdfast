@@ -278,6 +278,26 @@ does not is recorded and does not stop the swap. It is a library root knob with 
 default, like `hw_decode`. The rules, the names and the gate, with their reasoning, are in
 [docs/design/subtitles.md](design/subtitles.md#sidecars).
 
+## `dolby_vision_p7` - Dolby Vision profile 7, converted on request
+
+<a id="dolby-vision-p7"></a>
+
+```yaml
+dolby_vision_p7: skip         # the default: a profile 7 source is skipped (dolby-vision-profile-7)
+# dolby_vision_p7: convert    # convert it to profile 8.1 with dovi_tool, discarding the enhancement layer
+```
+
+On the `cpu` encoder, Dolby Vision profile 8.1 and HDR10+ sources are carried by default, behind
+gates of their own; profile 7 is not, because carrying it means converting it first, and the
+conversion discards the enhancement layer. Under `convert`, a profile 7 source is rewritten to
+profile 8.1 (`dovi_tool -m 2 convert --discard`, into a working file beside the job's, removed on
+every way out) and encoded from that stream at the source's exact frame rate; a source whose frame
+rate is not constant is skipped. Whether the layer was FEL or MEL is logged. Every other encoder
+skips a profile 7 source whatever this says. A row skipped under `skip` records the key, so
+switching to `convert` offers it back. It is a library root knob with a top-level default, like
+`subtitle_sidecars`. The rules and their reasoning are in
+[docs/design/dynamic-hdr.md](design/dynamic-hdr.md#profile-7).
+
 ## `exclude_paths` and `include_paths` - which paths this tool may touch
 
 <a id="path-filters"></a>

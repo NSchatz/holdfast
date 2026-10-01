@@ -62,6 +62,7 @@ reasoning lives in the document, not in this file.
 - **A transformed audio track replaces nothing until its length, layout, rate and loudness match its
   plan and every audio stream decodes** - [`docs/design/audio.md`](docs/design/audio.md#audio-gates).
 - **A subtitle sidecar is published only after the swap commits and its parse-back gate passes, and never over an existing file** - [`docs/design/subtitles.md`](docs/design/subtitles.md#sidecars).
+- **Dynamic HDR is carried only through libx265, and its output replaces the source only when its DOVI record and every frame's RPU and HDR10+ match its plan** - [`docs/design/dynamic-hdr.md`](docs/design/dynamic-hdr.md#dynamic-hdr).
 
 ## Layout
 
@@ -88,6 +89,8 @@ reasoning lives in the document, not in this file.
 - `internal/audio` - the audio plan: which tracks are re-encoded or downmixed, the codec and layout
   matrix, two-pass loudness, and the audio gates' arithmetic.
 - `internal/subtitle` - the text subtitle sidecars `subtitle_sidecars: text` writes, and their gate.
+- `internal/dynhdr` - which Dolby Vision and HDR10+ sources are carried, the dovi_tool and hdr10plus_tool
+  pre-passes, the Dolby Vision VBV ceiling, and the dynamic-HDR gates' arithmetic.
 - `internal/encoder` - the codec matrix registry.
 - `internal/hwdevice` - the render nodes a hardware encoder can open, and the one VAAPI and QSV
   are each assigned.

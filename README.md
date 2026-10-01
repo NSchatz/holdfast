@@ -76,8 +76,9 @@ own licence text or project page.
 
 ## Non-goals
 
-Three boundaries, each stated in full below - two settled, and the Dolby Vision / HDR10+ skip
-[DEFERRED](#dynamic-hdr-deferred) rather than settled. One of the settled two, distributed
+Two boundaries, each stated in full below, and both settled; Dolby Vision and HDR10+ are no longer
+one: they are [carried on the cpu encoder](#dynamic-hdr-carried), behind gates of their own, and
+skipped where they cannot be. One of the two boundaries, distributed
 processing, is reversed by the owner's decision of 2026-09-29; the note under it says what changes,
 and until a release ships it the paragraph still describes this build. Exotic-chroma
 and `multi-video-stream` sources are **skipped, not converted**. Three things are NOT boundaries - they
@@ -147,21 +148,22 @@ machine, raise `workers` (default 1 - see **[docs/docker.md](docs/docker.md)**).
 > chosen per node. None of it is in this build: the release that ships it rewrites the paragraph above,
 > which until then is what holdfast does.
 
-<a id="dynamic-hdr-deferred"></a>
+<a id="dynamic-hdr-carried"></a>
 
-**The Dolby Vision and HDR10+ skip is deferred, not permanent.** A generic libx265 re-encode strips a
-Dolby Vision RPU or HDR10+ SMPTE2094-40 dynamic metadata, and that loss is invisible until somebody
-watches the file, so those sources are skipped rather than quietly flattened. Lifting the skip needs an
-external RPU toolchain beside the bundled ffmpeg to extract and reinject that metadata - and then the
-other half: the gate compares pixels, an RPU is not pixels, and holdfast will not delete a source on
-the strength of a step it did not check.
-
-> **Note - decided 2026-09-29 by the owner (T13, T25).** The deferral has an owner's answer: Dolby
-> Vision profile 8 and HDR10+ are to be carried through libx265 with their dynamic metadata, and
-> profile 7 converted to 8.1 on request only (dropping the enhancement layer); profile 5 stays
-> skipped; `dovi_tool` and `hdr10plus_tool` are pinned into the image. The skip above holds in this
-> build until the release that ships those tools and the metadata gates, which rewrites this
-> statement.
+**Dolby Vision profile 8.1 and HDR10+ are carried through libx265, and only through it.** On the `cpu`
+encoder a profile 8.1 source keeps its RPU (`-dolbyvision 1`, with the VBV ceiling and mastering display
+x265 requires) and an HDR10+ source keeps its SMPTE2094-40 metadata (extracted by `hdr10plus_tool`,
+validated against the source's frame count, written back by x265), by default. holdfast converts Dolby Vision
+profile 7 only on request: `dolby_vision_p7: convert` rewrites it to 8.1 with `dovi_tool` before the
+encode, discarding the enhancement layer, and the default skips it. Profile 5 stays skipped, and so does
+any other profile. Every other encoder skips such a source, as does a remux-only root, because only
+libx265 is shown to carry the metadata. The perceptual gate compares pixels and an RPU is not pixels, so
+the swap waits on gates of its own: the output's DOVI configuration record must name the planned profile
+and compatibility id, and every frame must carry its RPU and its HDR10+ metadata. A source whose metadata
+cannot be read, or whose tool is not installed, is skipped by name, never encoded flat. One limit is
+stated rather than hidden: an HEVC source is skipped as already at the cpu encoder's target codec before
+any of this is asked, and every Dolby Vision profile 7 and 8 source is HEVC
+([docs/design/dynamic-hdr.md](docs/design/dynamic-hdr.md#reach)).
 
 <a id="non-goal-library-manager"></a>
 
