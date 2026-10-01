@@ -28,6 +28,10 @@ stream is the queue: nothing is held per candidate, nothing is read for ordering
 file reaches a worker while the library is still being listed. Every configuration written before
 either key existed is offered in exactly the sequence it was.
 
+The queue orders a SCAN's candidates. A file the filesystem watch offers once its size settles,
+and a path submitted over the API, goes to the pipeline on its own, in no queue, exactly as it did
+before either key existed.
+
 ## Priority
 
 <a id="priority"></a>

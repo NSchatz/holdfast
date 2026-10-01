@@ -48,12 +48,14 @@ type candidate struct {
 	// with a priority configured - the candidate's position in the traversal. Meaningless
 	// when unread is true.
 	key int64
-	// priority is the file's queue priority (config.PriorityOf): higher is offered first,
-	// ahead of the key. 0 where no priority is configured, which is every configuration
-	// written before the key existed - so it orders nothing there.
-	priority int
 	// path is the file, exactly as the enumeration produced it.
 	path string
+	// priority is the file's queue priority (config.PriorityOf): higher is offered first,
+	// ahead of the key. 0 where no priority is configured, which is every configuration
+	// written before the key existed - so it orders nothing there. An int32 (the accepted
+	// range is -1000 to 1000) placed beside unread, so the candidate weighs exactly the 32
+	// bytes it weighed before the key existed.
+	priority int32
 	// unread marks a candidate whose key or priority could not be read. It sorts after
 	// every candidate whose key WAS read, rather than being dropped: this decides sequence,
 	// and a file silently removed from a queue is a file that is never processed (AC-10).
@@ -230,7 +232,7 @@ func (e *Engine) candidateFor(ctx context.Context, order string, prioritised boo
 			}
 			height = facts.source.Height
 		}
-		c.priority = e.Cfg.PriorityOf(root, path, height)
+		c.priority = int32(e.Cfg.PriorityOf(root, path, height))
 	}
 	return c, true
 }

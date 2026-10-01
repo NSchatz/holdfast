@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/NSchatz/holdfast/internal/config"
 	"github.com/NSchatz/holdfast/internal/probe"
@@ -147,7 +148,7 @@ func TestQueueOrder_AC5_TheOperatorsCase(t *testing.T) {
 		"b/short-45min.mkv": facts(21_600, 1920, 1080, 45*60),
 	}
 	sizes := map[string]int64{
-		"a/long-180min.mkv": 6_100 * 1000 / 8 * 180 * 60,  // 8,235,000,000 bytes
+		"a/long-180min.mkv": 6_100 * 1000 / 8 * 180 * 60, // 8,235,000,000 bytes
 		"b/short-45min.mkv": 21_600 * 1000 / 8 * 45 * 60, // 7,290,000,000 bytes
 	}
 	for _, tc := range []struct {
@@ -178,7 +179,7 @@ func TestQueueOrder_AC5_TheOperatorsCase(t *testing.T) {
 // in path order among its kind.
 func TestQueueOrder_AC6_ANonPositiveSavingGoesAfterEveryPositiveOneAndIsStillOffered(t *testing.T) {
 	root, eng, _ := savingsLibrary(t, config.QueueOrderSavingsPerHour, map[string]sourceFacts{
-		"a/at-the-model.mkv":   facts(3_000, 1920, 1080, 3600),
+		"a/at-the-model.mkv":    facts(3_000, 1920, 1080, 3600),
 		"b/below-the-model.mkv": facts(1_000, 1920, 1080, 3600),
 		"c/barely-positive.mkv": facts(3_300, 1920, 1080, 3600),
 		"d/positive.mkv":        facts(5_000, 1920, 1080, 3600),
@@ -215,7 +216,7 @@ func TestQueueOrder_AC7_AnUnreadableKeyIsOfferedLastWithOneWarnEach(t *testing.T
 	noDims := facts(9_000, 0, 0, 3600)
 	noDims.dims = false
 	root, eng, _ := savingsLibrary(t, config.QueueOrderSavingsPerHour, map[string]sourceFacts{
-		"z/readable.mkv":     facts(9_000, 1920, 1080, 3600),
+		"z/readable.mkv":      facts(9_000, 1920, 1080, 3600),
 		"y/also-readable.mkv": facts(4_000, 1920, 1080, 3600),
 		"e/no-video.mkv":      {},
 		"d/no-dimensions.mkv": noDims,
@@ -821,5 +822,14 @@ encode_profiles:
 	}
 	if without.RootProfiles()[0].Profile.Digest() != with.RootProfiles()[0].Profile.Digest() {
 		t.Error("the root's profile digest moved with a priority")
+	}
+}
+
+// TestQueueOrder_ACandidateWeighsWhatItDidBeforePriority: the priority rides in the padding
+// beside the unread bit, so a keyed queue holds exactly what it held per candidate before
+// the key existed (docs/enumeration.md's figure is taken over that shape).
+func TestQueueOrder_ACandidateWeighsWhatItDidBeforePriority(t *testing.T) {
+	if got := unsafe.Sizeof(candidate{}); got != 32 {
+		t.Errorf("a queued candidate is %d bytes, want 32: anything more is multiplied by the library", got)
 	}
 }
