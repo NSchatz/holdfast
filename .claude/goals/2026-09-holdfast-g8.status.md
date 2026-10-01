@@ -35,18 +35,19 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g8-ba
 
 | Gate | Value at goal start | Wall-clock |
 |---|---|---|
-| `make check` under `flock -o` (log `gate-baseline.log`) | TODO | TODO |
-| `internal/engine` under `go test -race` | TODO | TODO |
-| `func Test` count, all packages | TODO | - |
-| `docs/design/swap.md`, `docs/design/quality-gate.md` lines (`wc -l`) | TODO | - |
+| `make check` under `flock -o` (log `gate-baseline.log`) | exit 0 | 1981 s (33m01s) |
+| `internal/engine` under `go test -race` (from that run) | ok, 88.4% coverage | 1859.2 s (69% of `TEST_TIMEOUT` 45m) |
+| `cmd/holdfast` under `go test -race` (from that run) | ok, 89.2% coverage | 653.8 s |
+| `func Test` count, all packages | 1542 in 30 packages (`functest-start.txt`) | - |
+| `docs/design/swap.md`, `docs/design/quality-gate.md` lines (`wc -l`) | 62, 76 | - |
 
 ## Phase 1 - Start-up
 
 | # | Item | State |
 |---|---|---|
 | 1.1 | Precondition checked (header above) | DONE (`0d752f6`): goal 7's COMPLETE line is on `origin/main` |
-| 1.2 | Ledger created as the goal's first commit, straight to `main` | DOING |
-| 1.3 | Baselines with timings | DOING |
+| 1.2 | Ledger created as the goal's first commit, straight to `main` | DONE (`ca9d9fc`) |
+| 1.3 | Baselines with timings | DONE (`0d752f6`): the table above; `make check` exit 0 in 1981 s |
 
 ## Phase 2 - Triage (line B)
 
@@ -96,11 +97,18 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g8-ba
 - 2026-10-01: commits carry no session-link trailer (T38; goal 7 recorded one such slip). PR
   bodies may end with the session link.
 
+- 2026-10-01: tracks. `holdfast-g8/tools` (pins, installer, check-pins, NOTICE), `holdfast-g8/dynhdr`
+  (P8, HDR10+, opt-in P7, the three gates, R4's statement and its check, `docs/design/dynamic-hdr.md`)
+  and `holdfast-g8/crop` (opt-in crop, blackness gate, cropped VMAF reference, the I7 refusal first),
+  each built by one agent in its own worktree and merged by the rule of §0.3. P5 option (c) (DV
+  crop to the RPU's own L5 rectangle) is a second crop phase built after `dynhdr` merges, on its
+  pre-pass machinery, as P5's ship order says.
+
 ## Proposals awaiting the owner
 
 (none yet)
 
 ## Resume here
 
-Ledger created; baseline gate running in `/cache/wt/holdfast/g8-baseline`. Next: tracks
-`holdfast-g8/tools`, then `holdfast-g8/dynhdr` and `holdfast-g8/crop`.
+Baselines done. Three agents building `holdfast-g8/tools`, `holdfast-g8/dynhdr`, `holdfast-g8/crop`
+in worktrees under `/cache/wt/holdfast/`. Next: review and merge each PR; then crop phase 2 (P5 (c)).
