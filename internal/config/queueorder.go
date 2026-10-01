@@ -20,8 +20,9 @@ import (
 const (
 	// QueueOrderPath is the enumeration's own hand-out order, and the default.
 	QueueOrderPath = "path"
-	// QueueOrderLargest offers the biggest source first: the most reclaimed bytes per hour
-	// of CPU, which is the figure this tool exists to move.
+	// QueueOrderLargest offers the biggest source first. Size is only a proxy for what an
+	// encode reclaims - that turns on the source's bitrate for its picture, which is what
+	// QueueOrderSavingsPerHour estimates - and it puts the longest jobs first.
 	QueueOrderLargest = "largest"
 	// QueueOrderSmallest offers the smallest source first: the most complete verdicts per
 	// hour, which is what validating a new configuration wants.
@@ -30,6 +31,12 @@ const (
 	QueueOrderNewest = "newest"
 	// QueueOrderOldest offers the least recently modified source first.
 	QueueOrderOldest = "oldest"
+	// QueueOrderSavingsPerHour offers first the source whose encode is estimated to reclaim
+	// the most bytes per hour of encode plus verify work: excess source bitrate for its
+	// picture, over work proportional to pixels times frames (S0164;
+	// docs/design/queue-order.md#savings-per-hour). It PROBES every candidate once before
+	// the first is offered. The estimate orders and is never published.
+	QueueOrderSavingsPerHour = "savings_per_hour"
 )
 
 // queueOrderKey is the configuration key, spelled once so the refusal, the defaults layer
@@ -42,13 +49,14 @@ const queueOrderKey = "queue_order"
 // asked for.
 var QueueOrders = []string{
 	QueueOrderPath, QueueOrderLargest, QueueOrderSmallest, QueueOrderNewest, QueueOrderOldest,
+	QueueOrderSavingsPerHour,
 }
 
 // QueueOrderList renders the accepted set for a message, so a refusal and the shipped
-// example configuration name the same five values in the same order.
+// example configuration name the same six values in the same order.
 func QueueOrderList() string { return strings.Join(QueueOrders, "|") }
 
-// ValidQueueOrder reports whether v is one of the five accepted values. The empty string is
+// ValidQueueOrder reports whether v is one of the six accepted values. The empty string is
 // NOT one of them: the defaults layer fills an ABSENT key, so an empty value in a loaded
 // configuration is one the operator wrote, and a written key that means nothing is a typo
 // rather than a request for the default.
@@ -90,7 +98,7 @@ func renderQueueOrder(raw any) string {
 	return fmt.Sprint(raw)
 }
 
-// queueOrderRefusal names BOTH the value that was rejected and the five that are accepted.
+// queueOrderRefusal names BOTH the value that was rejected and the six that are accepted.
 // An operator who has just been refused needs the spelling they should have written, and a
 // message naming only one of the two makes them go and find the other.
 func queueOrderRefusal(v string) error {

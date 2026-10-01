@@ -54,6 +54,12 @@ type EncodeProfile struct {
 	PixelFormat  *string `yaml:"pixel_format"`
 	ContainerExt *string `yaml:"container_ext"`
 	BitrateKbps  *int    `yaml:"bitrate_kbps"`
+
+	// Priority is the queue priority of the sources this profile decides (priority.go), nil
+	// where it names none. It is not an encode setting: TranscodeIn never reads it, so it is
+	// on no job's settings, no row and no digest, and decides only the order a file is
+	// offered in.
+	Priority *int `yaml:"priority"`
 }
 
 // Transcode is ONE JOB's effective encode settings: the profile of the library root
