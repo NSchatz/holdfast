@@ -24,6 +24,11 @@ configuration values **the decision that wrote it actually read**, and no others
 | `skipped / telecine-cadence` | `deinterlace` - that guard exists only because the key is on, so turning it off re-derives every row it wrote |
 | a guard that read no configuration (Dolby Vision, a symlinked source, `unknown-field-order`) | nothing, recorded **as** nothing read: a verdict no key can move |
 
+The stream keys that add work to a job - the audio keys and `subtitle_sidecars` - are read by
+no guard and recorded on no row: they change what the next jobs do and re-open nothing
+([docs/design/audio.md](design/audio.md#which-files),
+[docs/design/subtitles.md](design/subtitles.md#which-files)).
+
 Where a library root carries [resolution rules](profiles.md#resolution-rules), the value a
 row records is the **effective** one the guard compared against - the floor the file's own
 band supplied, never the root's. So editing that rule offers the file back, and editing a

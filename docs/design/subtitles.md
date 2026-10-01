@@ -108,3 +108,15 @@ carried no subtitle stream. The field is in `docs/api-reference.md`.
 
 Sidecars are written only by a job that encodes, so files already replaced before the key was
 turned on get none.
+
+<a id="which-files"></a>
+
+## Which files `subtitle_sidecars` reaches
+
+**Sidecars are written only by a job that swaps.** They are a step of that job, after its swap
+commits; they never start a job of their own. A file the guards skip, or a job that fails a gate,
+gets no sidecar. No terminal row records the key (`docs/requeue.md`), so turning it on later does
+not re-open a decided file; a `done` file is already in the target codec, and `holdfast requeue`
+would only bring it back to the codec guard that skips it. A `remux_only` root is no way
+round it: the codec guard skips a file already in the target codec before any remux is
+considered, so in this build such a file gets no sidecars.
