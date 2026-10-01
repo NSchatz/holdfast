@@ -5,6 +5,8 @@ devices and home programs, which live in other containers on the same host and s
 it but CPU (T6). Goal 1 ends at Checkpoint T; goals 2 to 15 then chain without further review
 (T3).
 
+**Amended 2026-10-01 by the goals program** (`AMENDMENT-2026-10-01-goals-g5-2026-09-holdfast.md`, carrying out W4, W7, W19, W20, W26, W30, W31 and W64): the goals supervisor replaces `claude-goal-chain` as holdfast's runner, with its checker, BLOCKED and INCOMPLETE as end states, later checkpoints to a fresh independent reviewer and the lock tool's names and order; it applies to goals whose ledger is created after it merged and never against a line of their goal file.
+
 Every goal reads §0-§4 in full plus its own section. §0-§4 are the contract; a goal section says
 *what* to build and *when it is done*. Where they disagree, §0-§4 win, except where
 `CHECKPOINT-T.approved` amends them: the owner's amendments beat this file.
