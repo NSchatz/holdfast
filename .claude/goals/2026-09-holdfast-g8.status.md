@@ -65,12 +65,12 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g8-ba
 
 | # | Item | State |
 |---|---|---|
-| 4.1 | DV profile 8 carried through libx265 (`-dolbyvision 1`, VBV, mastering display) on the `cpu` encoder | TODO |
-| 4.2 | HDR10+ extracted with `hdr10plus_tool` and passed as `dhdr10-info`; unextractable metadata skips | TODO |
-| 4.3 | Opt-in P7 to P8.1 (`dovi_tool -m 2 convert --discard` pre-pass, VFR refused, FEL or MEL logged); P5 stays skipped; non-`cpu` encoders keep skipping | TODO |
-| 4.4 | Gates: DOVI profile and compatibility id, RPU count, HDR10+ count; one red fixture each | TODO |
-| 4.5 | R4: `README.md` statement and `internal/docscheck/dynamichdr.go` rewritten in one PR, bite tests pass | TODO |
-| 4.6 | `docs/design/dynamic-hdr.md` with anchors | TODO |
+| 4.1 | DV profile 8 carried through libx265 (`-dolbyvision 1`, VBV, mastering display) on the `cpu` encoder | DONE (PR #139, `62f1c9c`): profile 8.1 only (8.2, 8.4, 5 and unreadable records skip `dolby-vision`); VBV from the lowest HEVC level that fits, from x265's own level table; `TestRealFixture_Profile81IsCarriedAndItsRecordGateRedsWithoutIt`, `TestDynamicHDR_Profile81IsCarriedThroughTheEngine`; gate exit 0 (2117 s, `internal/engine` 1992.5 s, 73.8%); mutation-diff 100% (121 killed, 0 lived); CI green (runs 36855952539, 36855952552) |
+| 4.2 | HDR10+ extracted with `hdr10plus_tool` and passed as `dhdr10-info`; unextractable metadata skips | DONE (PR #139): `TestRealFixture_HDR10PlusIsCarriedAndItsGateRedsWithoutIt`, `TestDynamicHDR_HDR10PlusIsCarriedThroughTheEngine`; unreadable skips `hdr10-plus-unreadable`, a missing tool `dynamic-hdr-tool-missing` (re-checked every pass); a DV plus HDR10+ source carries both, both gated |
+| 4.3 | Opt-in P7 to P8.1 (`dovi_tool -m 2 convert --discard` pre-pass, VFR refused, FEL or MEL logged); P5 stays skipped; non-`cpu` encoders keep skipping | DONE (PR #139): `dolby_vision_p7: skip|convert` (skip by default, recorded on the skip row); `TestRealFixture_Profile7IsConvertedTo81` (a source whose DOVI record reads profile 7 over 8.1 RPUs: `dovi_tool` cannot generate profile 7), `TestDynamicHDR_Profile7IsSkippedByDefaultAndConvertedWhenOptedIn`, `TestDynamicHDR_EveryOtherEncoderAndRemuxStillSkip` |
+| 4.4 | Gates: DOVI profile and compatibility id, RPU count, HDR10+ count; one red fixture each | DONE (PR #139): `TestRealFixture_AnOutputOfAnotherCompatibilityIDIsRefusedByTheRecordGate`, `TestRealFixture_AnOutputMissingRPUsIsRefusedByTheRPUGate`, the no-`dhdr10-info` case of `TestRealFixture_HDR10PlusIsCarriedAndItsGateRedsWithoutIt`, `TestDynamicHDR_AnEncodeThatDropsTheRPUIsRefusedAndTheSourceKept` (source unchanged); counts from ffprobe `-show_frames` on the output |
+| 4.5 | R4: `README.md` statement and `internal/docscheck/dynamichdr.go` rewritten in one PR, bite tests pass | DONE (PR #139): anchor `dynamic-hdr-carried`, five clauses; `TestDynamicHDR_TheOldDeferralWordingNowFails` holds the old wording verbatim and proves it fails |
+| 4.6 | `docs/design/dynamic-hdr.md` with anchors | DONE (PR #139): including `#reach`; CLAUDE.md rule links and the `internal/dynhdr` Layout line |
 
 ## Phase 5 - Crop (line F)
 
@@ -113,8 +113,25 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g8-ba
   wind-back fixtures moved from v22 to v23, and the `TestEncodePlan_RefusesWhatItCannotPerform`
   case "a crop" (any crop refused) became three narrower refusal cases plus a remux crop, since a
   crop is now performed.
+- 2026-10-01: PR #139 (dynhdr) merged as `62f1c9c`. Its own decisions: only profile 8.1 is carried;
+  six new skip reasons; non-cpu `dolby-vision`/`hdr10-plus` skips now record `encoder` (decision
+  unchanged); rows from older builds are not re-opened (`holdfast requeue --guard` is the lever,
+  `docs/requeue.md`); no store migration (what was carried goes in the job log line); x265 crashes
+  on a `dhdr10-info` path not ending in `.json`, so the file is `.dynhdr0.json`; a carried 8.1
+  source under `crop: auto` encodes uncropped with crop's refusal recorded. Deleted test lines:
+  `internal/docscheck/dynamichdr_test.go`'s message and the clause count 3 -> 5, because the
+  statement and its check changed together (R4).
+- 2026-10-01: finding, fallback taken (§0.2). The carry is reached in production only by a non-HEVC
+  source: the codec guard skips an HEVC source as already at the `cpu` encoder's target before the
+  HDR guard runs, and every DV profile 7 and 8 source is HEVC (`docs/design/dynamic-hdr.md#reach`).
+  Re-encoding HEVC sources would change decisions for existing configurations (I5), so nothing
+  changed; the engine tests reach the path through a probe stand-in. Listed for the owner.
 
 ## Proposals awaiting the owner
+
+- The dynamic-HDR carry and DV crop are unreachable for HEVC sources on the `cpu` encoder (the
+  codec guard runs first). An opt-in key that re-encodes a source already at the target codec (for
+  example above a bitrate) would make them reachable; it would be a new kind of job.
 
 - Crop has no acknowledgement when the undo window is closed (unlike `max_height`'s
   `downscale_acknowledged`): the blackness gate proves only black rows were removed, so none was
