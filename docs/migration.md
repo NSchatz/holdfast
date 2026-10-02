@@ -16,7 +16,7 @@ of them racing.
 
 ---
 
-## From the Bash transcoder (`homelab: media/transcoder/`)
+## From the Bash transcoder (its predecessor in a private repo)
 
 Same contract, same guards, same defaults — this is a port, not a rewrite. `transcode.conf`
 became YAML, and the environment-variable overrides became `HOLDFAST_<KEY>`.

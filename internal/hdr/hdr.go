@@ -1,5 +1,5 @@
 // Package hdr ports the bash transcoder's colour/HDR classification and metadata
-// extraction (media/transcoder/transcode.sh, HOMELAB-MEDIA-2-HDR) to Go. A generic
+// extraction (the private predecessor's transcode.sh and its HDR task) to Go. A generic
 // libx265 re-encode does NOT auto-carry HDR/colour signalling: HDR10 static
 // metadata (SMPTE ST 2086 mastering-display + MaxCLL/FALL) and the primaries/
 // transfer/matrix tags are dropped unless passed explicitly, and Dolby Vision RPUs
