@@ -38,3 +38,8 @@ control-token.txt
 # Editor / OS
 .DS_Store
 *.swp
+
+# Core dumps: a file named core or core.<pid>, never a directory named core.
+core
+!core/
+core.[0-9]*

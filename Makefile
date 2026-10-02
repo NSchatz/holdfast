@@ -52,7 +52,7 @@ LDFLAGS := -s -w \
 IMAGE    ?= holdfast:dev
 PLATFORM ?= linux/amd64
 
-.PHONY: build test check fmt vet staticcheck govulncheck govulncheck-selftest \
+.PHONY: build test check tier-fast tier-full fmt vet staticcheck govulncheck govulncheck-selftest \
         check-pins check-pins-selftest install-ffmpeg-selftest install-dynhdr-tools-selftest check-pin-live \
         secret-scan secret-scan-selftest identity-scan identity-scan-selftest \
         install-hooks snapshot-bench \
@@ -88,8 +88,11 @@ build:
 # release run the identical gate.
 TEST_TIMEOUT ?= 45m
 
+# The packages `test` runs: every package unless a caller narrows it (only tier-fast does).
+TEST_PKGS ?= ./...
+
 test:
-	go test -race -covermode=atomic -timeout $(TEST_TIMEOUT) ./...
+	go test -race -covermode=atomic -timeout $(TEST_TIMEOUT) $(TEST_PKGS)
 
 fmt:
 	@out="$$(gofmt -l .)"; if [ -n "$$out" ]; then echo "gofmt needs:"; echo "$$out"; exit 1; fi
@@ -305,6 +308,23 @@ install-hooks:
 # docs/mutation-testing.md still agree about the floor and the domain, and that the
 # workflow still plans an unscoped run with no diff scope - rides the gate.
 check: check-pins check-pins-selftest install-ffmpeg-selftest install-dynhdr-tools-selftest secret-scan secret-scan-selftest identity-scan identity-scan-selftest api-schema-diff mutation-shape fmt vet build test staticcheck govulncheck govulncheck-selftest
+
+# The gate tiers: tier-fast for a quick run while working, tier-full at a goal's end and nightly on
+# main; each prints its elapsed time. tier-full is `check`. tier-fast is `check` with every package
+# tested but internal/engine, the suite of real encodes behind the real verify gate: on a full run it
+# took 2033 s of the test step's 2066 s, the next package 694 s. Neither changes what `check` is, and
+# `check` stays the merge gate.
+FAST_TEST_PKGS = $(shell go list ./... | grep -v '/internal/engine$$')
+
+tier-fast:
+	@t0=$$(date +%s); if $(MAKE) --no-print-directory check TEST_PKGS='$(FAST_TEST_PKGS)'; then \
+	  echo "tier-fast: PASS in $$(( $$(date +%s) - t0 )) s"; \
+	else echo "tier-fast: FAIL in $$(( $$(date +%s) - t0 )) s"; exit 1; fi
+
+tier-full:
+	@t0=$$(date +%s); if $(MAKE) --no-print-directory check; then \
+	  echo "tier-full: PASS in $$(( $$(date +%s) - t0 )) s"; \
+	else echo "tier-full: FAIL in $$(( $$(date +%s) - t0 )) s"; exit 1; fi
 
 # Asks UPSTREAM whether the pinned ffmpeg release, and the pinned dovi_tool and
 # hdr10plus_tool release assets, are still served. Deliberately NOT part

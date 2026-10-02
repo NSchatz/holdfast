@@ -11,6 +11,8 @@ it but CPU (T6). Goal 1 ends at Checkpoint T; goals 2 to 15 then chain without f
 
 **Amended 2026-10-01 by the goals program** (`AMENDMENT-2026-10-01-goals-g8-2026-09-holdfast.md`, carrying out W7, W21, W25 and W37): each human-only step and request this program writes in its lists also becomes an issue in the owner's queue through `goals needs sync`, and requests addressed to holdfast are served from those issues too; the lists stay live; it applies to goals whose ledger is created after it merged and never against a line of their goal file.
 
+**Amended 2026-10-02 by the goals program** (`AMENDMENT-2026-10-02-goals-g9-2026-09-holdfast.md`, carrying out W7, W15 and W36): the Makefile has `make tier-fast` and `make tier-full` (= `make check`), and the full tier also runs nightly on main; every remaining goal file's merge gate (`make check` and PR CI green) stays as written; it applies to goals whose ledger is created after it merged and never against a line of their goal file.
+
 Every goal reads §0-§4 in full plus its own section. §0-§4 are the contract; a goal section says
 *what* to build and *when it is done*. Where they disagree, §0-§4 win, except where
 `CHECKPOINT-T.approved` amends them: the owner's amendments beat this file.
