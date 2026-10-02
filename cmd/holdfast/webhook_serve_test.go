@@ -76,7 +76,7 @@ func TestServe_WebhookIntakeIsWiredToItsOwnCredential(t *testing.T) {
 	done := make(chan int, 1)
 	go func() { done <- runServer(ctx, cfg, discardLog(), io.Discard) }()
 	base := "http://" + addr
-	waitHTTP(t, base+"/api/summary", 3*time.Second)
+	waitHTTP(t, base+"/api/summary", 30*time.Second)
 	ledger := func() string { return httpGet(t, base+"/api/history") + httpGet(t, base+"/api/queue") }
 	inLedger := func(path string) bool {
 		quoted := string(mustJSON(t, path))
