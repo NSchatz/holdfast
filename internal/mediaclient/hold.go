@@ -13,6 +13,12 @@ import (
 // than this.
 const HoldCacheTTL = 2 * time.Second
 
+// HoldFailureTTL is how long a FAILED question is reused. It is longer than HoldCacheTTL so
+// that a Plex which accepts connections and never answers costs the workers one request
+// timeout a minute rather than one per question; the price is that the hold comes back up to
+// this long after Plex does.
+const HoldFailureTTL = 60 * time.Second
+
 // HoldReason is why a held file is held, as the engine's record states it.
 const HoldReason = "the file is being played in Plex"
 
@@ -32,7 +38,9 @@ type PlayHold struct {
 	source sessionSource
 	log    *slog.Logger
 	ttl    time.Duration
-	now    func() time.Time
+	// failTTL is how long a failed question is reused (HoldFailureTTL outside a test).
+	failTTL time.Duration
+	now     func() time.Time
 
 	mu      sync.Mutex
 	at      time.Time
@@ -53,7 +61,7 @@ func newPlayHold(source sessionSource, ttl time.Duration, log *slog.Logger) *Pla
 	if ttl <= 0 {
 		ttl = HoldCacheTTL
 	}
-	return &PlayHold{source: source, log: log, ttl: ttl, now: time.Now}
+	return &PlayHold{source: source, log: log, ttl: ttl, failTTL: HoldFailureTTL, now: time.Now}
 }
 
 // Held reports whether path (a file as holdfast sees it) is being played, and why it is held
@@ -63,7 +71,11 @@ func newPlayHold(source sessionSource, ttl time.Duration, log *slog.Logger) *Pla
 func (h *PlayHold) Held(ctx context.Context, path string) (bool, string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.asked || h.now().Sub(h.at) >= h.ttl {
+	reuse := h.ttl
+	if h.failing {
+		reuse = h.failTTL
+	}
+	if !h.asked || h.now().Sub(h.at) >= reuse {
 		h.refresh(ctx)
 	}
 	if h.playing[filepath.Clean(path)] {

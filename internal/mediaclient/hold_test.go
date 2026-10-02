@@ -199,7 +199,8 @@ func TestPlayHold_FailsOpenAndWarnsOncePerOutage(t *testing.T) {
 				_, _ = io.WriteString(w, sessionsBody("/data/movies/Film/film.mkv"))
 			})
 			logs, log := newRecorder()
-			hold := NewPlayHold(plexAt(plex), time.Nanosecond, log) // every question asks Plex
+			hold := NewPlayHold(plexAt(plex), time.Nanosecond, log)
+			hold.failTTL = time.Nanosecond // every question asks Plex, failing or not
 
 			for i := 0; i < 4; i++ {
 				for _, f := range []string{file, "/mnt/media/tv/Show/e01.mkv"} {
@@ -254,6 +255,7 @@ func TestPlayHold_FailsOpenAndWarnsOncePerOutage(t *testing.T) {
 		dead.srv.Close()
 		logs, log := newRecorder()
 		hold := NewPlayHold(NewPlex(addr, secret.NewValue(plexSecret), plexPaths), time.Nanosecond, log)
+		hold.failTTL = time.Nanosecond
 		for i := 0; i < 3; i++ {
 			if held, _ := hold.Held(context.Background(), file); held {
 				t.Fatal("an unreachable Plex held a file")
@@ -270,17 +272,64 @@ func TestPlayHold_FailsOpenAndWarnsOncePerOutage(t *testing.T) {
 	})
 }
 
-// TestPlayHold_AFailureIsCachedLikeAnAnswer: an outage does not turn every question into a
-// request either; inside the window the failure is reused.
-func TestPlayHold_AFailureIsCachedLikeAnAnswer(t *testing.T) {
-	plex := sessionsFake(t, func(w http.ResponseWriter, _ request) { w.WriteHeader(http.StatusBadGateway) })
+// TestPlayHold_AFailedQuestionIsReusedForAMinute: a failed question is reused for
+// HoldFailureTTL, far longer than an answer is, so a Plex that accepts connections and never
+// answers costs one request timeout a minute rather than one per question. An answer is
+// still reused for HoldCacheTTL only.
+func TestPlayHold_AFailedQuestionIsReusedForAMinute(t *testing.T) {
+	var broken atomic.Bool
+	broken.Store(true)
+	plex := sessionsFake(t, func(w http.ResponseWriter, _ request) {
+		if broken.Load() {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = io.WriteString(w, sessionsBody("/data/movies/Film/film.mkv"))
+	})
 	_, log := newRecorder()
-	hold := NewPlayHold(plexAt(plex), time.Hour, log)
-	for i := 0; i < 5; i++ {
-		_, _ = hold.Held(context.Background(), "/mnt/media/movies/Film/film.mkv")
+	hold := NewPlayHold(plexAt(plex), 0, log)
+	if HoldFailureTTL != 60*time.Second || hold.failTTL != HoldFailureTTL || HoldFailureTTL <= HoldCacheTTL {
+		t.Fatalf("a failed question is reused for %s (default %s), want 60s", hold.failTTL, HoldFailureTTL)
 	}
-	if got := len(plex.seen()); got != 1 {
-		t.Errorf("a failing Plex was asked %d time(s) inside one window, want 1", got)
+	now := time.Unix(1_000_000, 0)
+	hold.now = func() time.Time { return now }
+	const file = "/mnt/media/movies/Film/film.mkv"
+	ask := func(want bool, wantRequests int, when string) {
+		t.Helper()
+		if held, _ := hold.Held(context.Background(), file); held != want {
+			t.Errorf("%s: Held = %v, want %v", when, held, want)
+		}
+		if got := len(plex.seen()); got != wantRequests {
+			t.Errorf("%s: Plex has been asked %d time(s), want %d", when, got, wantRequests)
+		}
+	}
+	ask(false, 1, "the first question, which fails")
+	broken.Store(false)
+	now = now.Add(HoldCacheTTL) // past an ANSWER's window, inside a failure's
+	ask(false, 1, "past the answer window")
+	now = now.Add(HoldFailureTTL - HoldCacheTTL - time.Millisecond)
+	ask(false, 1, "just inside the failure window")
+	now = now.Add(time.Millisecond)
+	ask(true, 2, "at the failure window's end") // asked again, and Plex answers
+	now = now.Add(HoldCacheTTL)
+	ask(true, 3, "an answer is reused for the short window only")
+}
+
+// TestPlayHold_ASessionFileOutsideAConfiguredPathMapIsDropped: with a path map configured, a
+// file Plex names that no entry covers is not one of holdfast's paths and holds nothing, even
+// when holdfast has a file at that very spelling. With no path map both sides share one view
+// and the file is taken as written.
+func TestPlayHold_ASessionFileOutsideAConfiguredPathMapIsDropped(t *testing.T) {
+	plex := sessionsFake(t, func(w http.ResponseWriter, _ request) {
+		_, _ = io.WriteString(w, sessionsBody("/elsewhere/Film/film.mkv", "/data/movies/Film/film.mkv", "/database/x.mkv"))
+	})
+	mapped, _, ok := plexAt(plex).Playing(context.Background())
+	if !ok || len(mapped) != 1 || !mapped["/mnt/media/movies/Film/film.mkv"] {
+		t.Errorf("with a path map, Playing() = %v; want only the file the map covers", mapped)
+	}
+	unmapped, _, ok := NewPlex(plex.srv.URL, testKey, nil).Playing(context.Background())
+	if !ok || len(unmapped) != 3 || !unmapped["/elsewhere/Film/film.mkv"] || !unmapped["/data/movies/Film/film.mkv"] {
+		t.Errorf("with no path map, Playing() = %v; want all three files as written", unmapped)
 	}
 }
 

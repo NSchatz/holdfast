@@ -103,9 +103,16 @@ func (p *Plex) Rescan(ctx context.Context, dir string) Result {
 		res.Failure = f
 		return res
 	}
-	key, found := owningSection(sections, mapped)
+	key, location, found := owningSection(sections, mapped)
 	if !found {
 		res.NoOwner = true
+		return res
+	}
+	if location == mapped {
+		// The file sits directly in a section's location. A refresh restricted to that
+		// location is a scan of everything under it, which is the whole-location scan this
+		// client never asks for, so nothing is sent.
+		res.WholeLocation = true
 		return res
 	}
 	res.Attempted = "POST /library/sections/" + key + "/refresh restricted to the directory"
@@ -153,7 +160,7 @@ func isSectionNumber(s string) bool {
 // whole-component boundary. A section whose key is not a section number owns nothing, and
 // two different sections tied on the winning location are an answer this build cannot choose
 // between, so neither is the owner.
-func owningSection(s plexSections, dir string) (key string, found bool) {
+func owningSection(s plexSections, dir string) (key, location string, found bool) {
 	bestLen, tied := -1, false
 	for _, d := range s.MediaContainer.Directory {
 		k := sectionKey(d.Key)
@@ -170,13 +177,13 @@ func owningSection(s plexSections, dir string) (key string, found bool) {
 			}
 			switch {
 			case len(p) > bestLen:
-				key, bestLen, tied = k, len(p), false
+				key, location, bestLen, tied = k, p, len(p), false
 			case len(p) == bestLen && k != key:
 				tied = true
 			}
 		}
 	}
-	return key, bestLen >= 0 && !tied
+	return key, location, bestLen >= 0 && !tied
 }
 
 // sectionKey reads a section's `key`, which the reference types as a string and which is
@@ -209,7 +216,10 @@ type plexSessions struct {
 
 // Playing asks Plex which files are being played right now and answers them as holdfast sees
 // them: each session part's `file`, mapped back through the path map and cleaned. A session
-// that names no absolute file contributes nothing. ok is false when Plex could not be asked
+// that names no absolute file contributes nothing. Where a path map is configured, a file no
+// entry covers is dropped too: it lies outside everything the map says holdfast shares with
+// Plex, and taking Plex's spelling for one of holdfast's own paths could hold an unrelated
+// file. With no map both sides see one path, and the file is taken as written. ok is false when Plex could not be asked
 // or its answer could not be read, and class then says why.
 func (p *Plex) Playing(ctx context.Context) (files map[string]bool, class string, ok bool) {
 	var sessions plexSessions
@@ -231,7 +241,11 @@ func (p *Plex) Playing(ctx context.Context) (files map[string]bool, class string
 				if part.File == "" || part.File[0] != '/' {
 					continue
 				}
-				files[p.paths.Reverse(part.File)] = true
+				file, covered := p.paths.ReverseMatched(part.File)
+				if len(p.paths) > 0 && !covered {
+					continue
+				}
+				files[file] = true
 			}
 		}
 	}

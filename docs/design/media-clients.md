@@ -71,6 +71,10 @@ Every request names exactly one thing:
   rescans every section. The one function that builds a refresh takes a section number - never
   `all` - and a non-empty absolute directory, or it refuses.
 
+A file that sits directly in a Plex section's location has that location as its directory, and
+a refresh restricted to a location is a scan of all of it. That request is not sent either; an
+`info` record says why, with a reason of its own.
+
 A request holdfast cannot make specific is not sent. Triggering a whole-library rescan on every
 swap would be the kind of load on a household's services that makes an operator turn the
 feature off, and it is exactly the unscoped action the fail-safe rule exists to prevent.
@@ -114,9 +118,11 @@ status and writes no row. A wait that is interrupted leaves the job exactly as a
 encode leaves it: the working file discarded, the row active for the next start to recover, the
 source untouched.
 
-It has no upper bound either, and that is a cost: a session left paused holds one worker, with a
+It has no upper bound either, and that is a cost: a session left paused pins one worker, with a
 finished encode, until it ends. A timeout would have to choose between swapping under a player
-and throwing away a finished encode, and neither is a decision to take on a guess.
+and throwing away a finished encode, and neither is a decision to take on a guess, so a bound is
+a proposal awaiting the owner. What is built is visibility: a waiting swap says so again every
+10 minutes, naming the file.
 
 ## Fail-open
 
@@ -128,6 +134,9 @@ from deletion. Failing closed would let the lesser of the two stop the tool enti
 unreachable, mis-tokened or upgraded-and-changed Plex would hold every file indefinitely, and
 would do it silently from the library's point of view. Failing open costs at worst one
 interrupted stream during an outage.
+
+A failed question is reused for 60 seconds where an answer is reused for 2, so an outage in
+which Plex accepts connections and never answers costs the workers one timeout a minute.
 
 The argument against it is real: an operator who enabled the hold expects it to hold. That is
 why the outage is a `warn`, why it is said again after every recovery, and why this choice is

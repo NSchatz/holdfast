@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/NSchatz/holdfast/internal/config"
+	"github.com/NSchatz/holdfast/internal/engine"
 	"github.com/NSchatz/holdfast/internal/mediaclient"
 	"github.com/NSchatz/holdfast/internal/store"
 )
@@ -909,6 +910,8 @@ func TestPostSwapHook_AC15_TheDeploymentDocumentStatesTheWarningAndTheFigures(t 
 		"holdfast changes no Radarr, Sonarr or Recyclarr setting",
 		"The drain bound is 30 seconds", "10 second timeout per request", "a queue of 64 swaps",
 		"asking again every 15 seconds", "reused for 2 seconds", ".holdfast-undo",
+		"every 10 minutes", "reused for 60 seconds", "A flat Plex library is not refreshed",
+		"a session left paused pins a worker",
 		"must be an admin token", "It fails open", "awaiting the owner's ratification",
 	} {
 		if !strings.Contains(doc, want) {
@@ -917,6 +920,8 @@ func TestPostSwapHook_AC15_TheDeploymentDocumentStatesTheWarningAndTheFigures(t 
 	}
 	if mediaclient.DrainBound != 30*time.Second || mediaclient.RequestTimeout != 10*time.Second ||
 		mediaclient.QueueSize != 64 || mediaclient.HoldCacheTTL != 2*time.Second ||
+		mediaclient.HoldFailureTTL != 60*time.Second || engine.PlayHoldReminder != 10*time.Minute ||
+		engine.DefaultPlayHoldPoll != 15*time.Second ||
 		mediaDrainBound != mediaclient.DrainBound || mediaHoldCacheTTL != mediaclient.HoldCacheTTL {
 		t.Errorf("the build's figures (drain %s, timeout %s, queue %d, cache %s) are not the ones the document states",
 			mediaclient.DrainBound, mediaclient.RequestTimeout, mediaclient.QueueSize, mediaclient.HoldCacheTTL)

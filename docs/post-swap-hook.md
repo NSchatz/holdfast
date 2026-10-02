@@ -60,6 +60,10 @@ puts an original back (restore is a local command and stays network-free).
   directory (the longest location, on whole components). The token travels in the
   `X-Plex-Token` header, never in a URL. holdfast never asks for a whole-section or an
   all-sections refresh.
+- **A flat Plex library is not refreshed.** When the file sits directly in a section's location
+  (`/movies/Film.mkv` with the location `/movies`), its directory IS the location, and a scan
+  restricted to it would be a scan of the whole location. holdfast sends nothing to Plex for
+  that swap and says so in one `info` record; Plex's own scheduled scan picks the file up.
 
 Sources, read 2026-10-02: the Plex Media Server API reference at <https://developer.plex.tv/pms/>
 (API version 1.2.3: `POST /library/sections/{sectionId}/refresh` with `path`, "Restrict refresh
@@ -182,18 +186,25 @@ asks `GET /status/sessions`, maps each file a session names back to its own view
   interrupt of any job in flight: the working file is discarded and the source is untouched.
 
 The hold only ever **delays**. It changes no gate, no verdict and nothing about the swap. It
-has no upper bound: a session left paused holds its file, and the worker that finished encoding
-it, until the session ends.
+has no upper bound: **a session left paused pins a worker** - the one that finished encoding
+that file - until the session ends. While a swap is waiting, holdfast repeats a "still waiting
+for playback to end" `info` record every 10 minutes, naming the file, so a pinned worker is
+visible in the log. A bound on the wait (after which the swap would proceed, or the encode be
+discarded) is a proposal **awaiting the owner**; none is built.
 
-One answer from Plex is reused for 2 seconds, so a burst of jobs costs one request. A Plex
-that accepts a connection and never answers costs each question the 10 second request timeout
-before the hold fails open.
+One answer from Plex is reused for 2 seconds, so a burst of jobs costs one request. A failed
+question is reused for 60 seconds: a Plex that accepts a connection and never answers costs one
+10 second request timeout a minute, not one per job, and the hold comes back up to a minute
+after Plex does.
 
 **It fails open.** When Plex cannot be asked - the connection refused, a non-2xx answer, an
 answer that does not parse, no answer in time - no file is held, and one `warn` record says so.
 Nothing more is said until Plex answers again. This mirrors the Tautulli pause, which also fails
 open, and it is **awaiting the owner's ratification**: the alternative, holding every file while
 Plex is unreachable, would stop all work for as long as Plex is down.
+
+With `plex_path_map` written, a file Plex names that no entry's `to` covers is ignored: it is
+outside what the map says the two share. With no map, Plex's path is taken as holdfast's.
 
 What it does not see: a session whose file Plex does not name (the hold then knows no path), a
 file played through a path that only matches after resolving a symbolic link, and any player
@@ -210,7 +221,7 @@ feed of new files while anything at all is streaming, and it runs under `serve` 
   config file or in `HOLDFAST_PLEX_TOKEN`, `HOLDFAST_SONARR_API_KEY` or
   `HOLDFAST_RADARR_API_KEY` refuses to start. See [`docs/secrets.md`](secrets.md).
 - Each address is a plain `http://` or `https://` URL: a scheme, a host and an optional base
-  path. Userinfo, a query or a fragment in it refuses to start.
+  path. Userinfo, a query or a fragment in it - or a bare `?` or `#` - refuses to start.
 - No log record carries a credential or a request URL. A failed request is reported as a target
   name and a failure class.
 - A redirect is not followed: it would carry the credential header to an address you did not
