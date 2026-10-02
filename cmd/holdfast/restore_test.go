@@ -229,6 +229,56 @@ func TestRestore_ReturnsTheSourceByteForByteAndRecordsIt(t *testing.T) {
 
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 
+// TestRestore_S0178_AC8_ReturnsTheOriginalsMtimeUnderEitherSetting: whatever
+// preserve_mtime did to the REPLACEMENT's modification time, a restore puts back the
+// original with the original's own - the retained original is the source inode itself,
+// and nothing between the swap and the restore may have touched its timestamps. The
+// source is given a fixed past mtime so that "the original's" cannot be confused with
+// "whenever this test ran".
+func TestRestore_S0178_AC8_ReturnsTheOriginalsMtimeUnderEitherSetting(t *testing.T) {
+	past := time.Date(2021, time.March, 4, 5, 6, 7, 0, time.UTC)
+	for _, setting := range []string{"true", "false"} {
+		t.Run("preserve_mtime="+setting, func(t *testing.T) {
+			cfgPath, _, _, src := undoLibrary(t, 24, "preserve_mtime: "+setting+"\n")
+			if err := os.Chtimes(src, past, past); err != nil {
+				t.Fatal(err)
+			}
+			before := sha256File(t, src)
+
+			if code, _, errOut := cli(t, "run", "--config", cfgPath); code != 0 {
+				t.Fatalf("run exited %d: %s", code, errOut)
+			}
+			if got := sha256File(t, src); got == before {
+				t.Fatal("the swap did not happen, so there is nothing to restore - the fixture proves nothing")
+			}
+			swapped, err := os.Stat(src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The fixture's own premise: the two settings really did publish different times.
+			if carried := swapped.ModTime().Equal(past); carried != (setting == "true") {
+				t.Fatalf("preserve_mtime: %s published a replacement at %s (source was %s) - the setting "+
+					"is not in force, so this proves nothing about it", setting, swapped.ModTime(), past)
+			}
+
+			if code, _, errOut := cli(t, "restore", "--config", cfgPath, src); code != 0 {
+				t.Fatalf("restore exited %d: %s", code, errOut)
+			}
+			if got := sha256File(t, src); got != before {
+				t.Errorf("the restored file is not the pre-swap source")
+			}
+			restored, err := os.Stat(src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !restored.ModTime().Equal(past) {
+				t.Errorf("the restored original carries mtime %s, want its own pre-swap %s",
+					restored.ModTime().UTC(), past)
+			}
+		})
+	}
+}
+
 // TestRestore_ARestoredFileIsNotImmediatelyReEncoded is the other half of recording
 // the restore, and it is the one an operator would find out about the hard way: the
 // scan that follows a restore must not swap the file again, through the very gates
