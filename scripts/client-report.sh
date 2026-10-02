@@ -162,7 +162,10 @@ out_dir="$(dirname -- "$OUT")"
 [ -d "$out_dir" ] && [ -w "$out_dir" ] || die "the report's directory $out_dir is not a writable directory"
 [ ! -e "$OUT" ] && [ ! -L "$OUT" ] || die "refusing to overwrite the existing report $OUT (a report is a record; move it or name another --out)"
 
-args=(--service "$SERVICE")
+# The date in the report is the date in its name: ONE reading of the clock, taken above and
+# handed to the Go half, so a run that straddles UTC midnight cannot write a report whose
+# name and content disagree.
+args=(--service "$SERVICE" --date "$stamp")
 [ -z "$REFRESH_DIR" ] || args+=(--refresh-dir "$REFRESH_DIR")
 [ -z "$RESCAN_DIR" ] || args+=(--rescan-dir "$RESCAN_DIR")
 if [ -n "$REFRESH_DIR$RESCAN_DIR" ]; then

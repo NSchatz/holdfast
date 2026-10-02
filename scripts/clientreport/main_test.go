@@ -987,8 +987,8 @@ func TestClientReport_EveryCommittedReportPassesTheIdentityCheck(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 			continue
 		}
-		if want := r.Service + "-" + r.Date; !strings.HasPrefix(name, want) {
-			t.Errorf("testdata/client-reports/%s is not named for its content: want %s[-<suffix>].json", name, want)
+		if !namedForItsContent(name, r) {
+			t.Errorf("testdata/client-reports/%s is not named for its content: want %s-%s[-<suffix>].json", name, r.Service, r.Date)
 		}
 	}
 	if !readme {
@@ -1022,7 +1022,7 @@ func TestClientReport_VerifyFlagChecksAnExistingReport(t *testing.T) {
 	if code, output := verify("--verify", filepath.Join(t.TempDir(), "absent.json")); code != exitRefused || !strings.Contains(output, "could not be read") {
 		t.Errorf("an absent report: exit %d, output %q", code, output)
 	}
-	for _, extra := range [][]string{{"--service", "plex"}, {"--config", l.cfg}, {"--out", bad}, {"--refresh-dir", "/x"}, {"--rescan-dir", "/x"}} {
+	for _, extra := range [][]string{{"--service", "plex"}, {"--config", l.cfg}, {"--out", bad}, {"--refresh-dir", "/x"}, {"--rescan-dir", "/x"}, {"--date", "2026-10-02"}} {
 		if code, output := verify(append([]string{"--verify", l.out}, extra...)...); code != exitUsage || !strings.Contains(output, "--verify takes no other flag") {
 			t.Errorf("--verify with %v: exit %d, output %q", extra, code, output)
 		}
@@ -1331,11 +1331,21 @@ func TestClientReport_ScriptImageModeRunsTheImagesOwnBinaryAsTheCaller(t *testin
 		t.Fatalf("the stand-in docker was never run: %v\n%s", err, output)
 	}
 	got := strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+	// The date the script named the report with is the date it hands the tool.
+	stamp := ""
+	for i, a := range got {
+		if a == "--date" && i+1 < len(got) {
+			stamp = got[i+1]
+		}
+	}
+	if !dateShape.MatchString(stamp) || !strings.Contains(output, "live check "+stamp+"'") {
+		t.Errorf("the script passed --date %q, want the date it stamps the report with:\n%s", stamp, output)
+	}
 	want := []string{"run", "--rm", "-u", strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid()),
 		"-v", l.cfg + ":/client-report/config.yaml:ro", "-v", filepath.Dir(l.out) + ":/client-report/out",
 		"-v", "/srv/synthetic/secrets:/run/secrets:ro",
 		"--entrypoint", "/usr/local/bin/holdfast-client-report", "holdfast:synthetic",
-		"--service", "plex", "--refresh-dir", "/mnt/synthetic/movies/Film",
+		"--service", "plex", "--date", stamp, "--refresh-dir", "/mnt/synthetic/movies/Film",
 		"--config", "/client-report/config.yaml", "--out", "/client-report/out/" + filepath.Base(l.out)}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("docker was run with\n%q\nwant\n%q", got, want)
@@ -1358,5 +1368,64 @@ func TestClientReport_ScriptImageModeRunsTheImagesOwnBinaryAsTheCaller(t *testin
 	dockerfile, _ := os.ReadFile(filepath.Join(root, "Dockerfile"))
 	if !strings.Contains(string(dockerfile), "-o /out/holdfast-client-report ./scripts/clientreport") {
 		t.Errorf("the Dockerfile does not build ./scripts/clientreport into the image")
+	}
+}
+
+// namedForItsContent is the name check TestClientReport_EveryCommittedReportPassesTheIdentityCheck
+// applies to a committed report.
+func namedForItsContent(name string, r Report) bool {
+	return strings.HasPrefix(name, r.Service+"-"+r.Date)
+}
+
+// The report's date and its file name come from ONE reading of the clock. The tool's own
+// clock here says another day than the caller's --date (a run that straddles UTC midnight),
+// and the report still carries the caller's date, so the committed-report name check holds.
+func TestClientReport_TheDateInTheReportIsTheDateItsNameWasStampedWith(t *testing.T) {
+	fixClock(t) // the tool's own clock reads 2026-10-03 UTC
+	sonarr := newService(t, sonarrRoutes())
+	l := newLab(t, serviceSonarr, sonarr.srv.URL, arrKey)
+	l.out = filepath.Join(filepath.Dir(l.out), "sonarr-2026-10-02.json")
+	code, output := l.run("--date", "2026-10-02")
+	r := l.writtenClean(code, output)
+	if r.Date != "2026-10-02" || !namedForItsContent(filepath.Base(l.out), r) {
+		t.Errorf("date = %q for a report named %s: the name check would refuse it", r.Date, filepath.Base(l.out))
+	}
+
+	// Without --date the tool reads its own clock, which is the straddle the flag closes.
+	l.out = filepath.Join(filepath.Dir(l.out), "sonarr-own-clock.json")
+	code, output = l.run()
+	if r := l.writtenClean(code, output); r.Date != "2026-10-03" {
+		t.Errorf("date = %q without --date, want the tool's own UTC date", r.Date)
+	}
+
+	before := len(sonarr.all())
+	for _, bad := range []string{"2026-13-01", "2026-02-30", "02-10-2026", "2026-10-02T00:00:00Z", "today", "2026-1-2"} {
+		l.out = filepath.Join(filepath.Dir(l.out), "bad-date.json")
+		code, output := l.run("--date", bad)
+		if code != exitUsage || !strings.Contains(output, "--date must be a calendar date written YYYY-MM-DD") {
+			t.Errorf("--date %q: exit %d, output %q", bad, code, output)
+		}
+		if _, err := os.Stat(l.out); !os.IsNotExist(err) {
+			t.Errorf("--date %q wrote a report", bad)
+		}
+	}
+	if len(sonarr.all()) != before {
+		t.Errorf("a refused --date still sent a request")
+	}
+
+	// The script: its `date` says one day, the tool's clock (the real one) another, and the
+	// report carries the day the script named it with.
+	root := repoRoot(t)
+	bin := buildTool(t, root)
+	tools := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tools, "date"), []byte("#!/bin/sh\necho 2001-02-03\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	l.out = filepath.Join(filepath.Dir(l.out), "sonarr-2001-02-03.json")
+	if code, output := script(t, root, tools, "--service", "sonarr", "--config", l.cfg, "--out", l.out, "--bin", bin); code != 0 {
+		t.Fatalf("exit %d:\n%s", code, output)
+	}
+	if _, r := l.report(); r.Date != "2001-02-03" || !namedForItsContent(filepath.Base(l.out), r) {
+		t.Errorf("the script's report is dated %q, want the 2001-02-03 its one clock reading said", r.Date)
 	}
 }

@@ -19,7 +19,8 @@ committed under `testdata/client-reports/`. It is the same pattern as
    headers, timeout (10 seconds a request), refusal to follow a redirect and failure classes - so
    a report proves the shipped path.
 3. Writes `testdata/client-reports/<service>-<date>.json` (UTC date), or `--out`. An existing
-   report is never overwritten.
+   report is never overwritten. The date in the name and the date in the report are one reading
+   of the clock: the script hands the tool the date it named the file with (`--date`).
 
 A request that fails is recorded, not fatal: the report is still written, with the failure's
 class (`timeout`, `unreachable`, `unauthorized`, `http-status`, `unparseable-response`) and its

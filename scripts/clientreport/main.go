@@ -52,6 +52,9 @@ Usage:
   --config CONFIG    the holdfast configuration; the address, the credential reference and
                      the path map are read from it exactly as holdfast reads them
   --out REPORT       the report to write; an existing file is never overwritten
+  --date YYYY-MM-DD  the report's date, from the caller that named REPORT with it, so the
+                     name and the content come from one reading of the clock (default:
+                     today, UTC)
   --verify REPORT    check that an existing report carries only what a report may carry
 
 The checks are read-only unless ONE write check is asked for by name:
@@ -82,6 +85,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	verify := fs.String("verify", "", "")
 	refreshDir := fs.String("refresh-dir", "", "")
 	rescanDir := fs.String("rescan-dir", "", "")
+	date := fs.String("date", "", "")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(stdout, usage)
@@ -99,7 +103,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 
 	if *verify != "" {
-		if *service != "" || *cfgPath != "" || *out != "" || *refreshDir != "" || *rescanDir != "" {
+		if *service != "" || *cfgPath != "" || *out != "" || *refreshDir != "" || *rescanDir != "" || *date != "" {
 			return fail(exitUsage, "--verify takes no other flag")
 		}
 		b, err := os.ReadFile(*verify)
@@ -120,6 +124,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	if *cfgPath == "" || *out == "" {
 		return fail(exitUsage, "--config and --out are both required")
+	}
+	// The report's date and the report's file name come from ONE reading of the clock: the
+	// caller that named the file passes the date it named it with. Without --date the date
+	// is this process's own UTC date.
+	day := now().UTC().Format(dateLayout)
+	if *date != "" {
+		if _, err := time.Parse(dateLayout, *date); err != nil || !dateShape.MatchString(*date) {
+			return fail(exitUsage, "--date must be a calendar date written YYYY-MM-DD")
+		}
+		day = *date
 	}
 	writeDir, err := writeCheckDir(*service, *refreshDir, *rescanDir)
 	if err != nil {
@@ -154,7 +168,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return fail(exitRefused, "%s resolved to an empty value", target.CredentialKey)
 	}
 
-	report := newReport(*service, target, len(cfg.LibraryRoots))
+	report := newReport(*service, day, target, len(cfg.LibraryRoots))
 	switch *service {
 	case servicePlex:
 		report.Plex = checkPlex(ctx, mediaclient.NewPlex(target.URL, credential, target.PathMap), cfg.LibraryRoots, writeDir)
@@ -224,11 +238,11 @@ func writeCheckDir(service, refreshDir, rescanDir string) (string, error) {
 	return dir, nil
 }
 
-func newReport(service string, target config.MediaTarget, roots int) *Report {
+func newReport(service, day string, target config.MediaTarget, roots int) *Report {
 	r := &Report{
 		Schema:  Schema,
 		Service: service,
-		Date:    now().UTC().Format(dateLayout),
+		Date:    day,
 		Holdfast: Build{
 			Version: shaped(buildVersionShape, version.Version),
 			Commit:  shaped(commitShape, version.Commit),
