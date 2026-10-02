@@ -735,9 +735,23 @@ dry_run: false
 # side effect. Set it to false if you would rather the replacement's mtime say when the
 # bytes were actually written - that is a legitimate meaning, and it is why the key exists.
 #
+# What each setting costs (docs/docker.md#swap-metadata has the table):
+#   true  (the default) - "Recently Added" and date-based sorts do not move, BUT a tool
+#          that detects change by modification time alone does not see the swap, although
+#          every byte of the file is different.
+#   false - a tool that reads only the modification time sees every swap, BUT "Recently
+#          Added" and date-based sorts move with every swap, and once a file's undo window
+#          has closed nothing puts the source's time back.
+#   either - a tool that compares size as well sees every swap, because a swap always
+#          makes the file strictly smaller; and `holdfast restore` returns the original
+#          with the original's modification time.
+# The default stays true by the owner's decision. `validate` prints a `note:` stating the
+# effective value and whether it is the default or was set, and `run` and `serve` log the
+# same line at startup. A value that is not true or false refuses to start.
+#
 # Either way a resume still works: the swap always makes the file smaller, so the
 # size:mtime identity holdfast keys a completed file under moves whatever this is set to.
-# preserve_mtime: true       # true = the replacement keeps the source's modification time
+# preserve_mtime: true       # true (default) = the replacement keeps the source's modification time
 
 # --- runtime ---
 # state_dir: state           # holds the resumable SQLite job store (jobs.db)
