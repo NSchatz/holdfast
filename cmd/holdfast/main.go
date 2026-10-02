@@ -1115,9 +1115,10 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	// Every configured reference is proved resolvable BEFORE the library is walked or a
 	// single frame is encoded, even though a oneshot run consumes none of the three
 	// itself: a configuration error an operator discovers after a four-hour pass is a
-	// configuration error that was reported too late (secrets K5). The set is discarded
-	// here, so no plaintext outlives this statement in `run`.
-	if _, code := resolveSecrets(context.Background(), cfg, stderr); code != 0 {
+	// configuration error that was reported too late (secrets K5). The only values `run`
+	// hands on are the media-server credentials, each to its one client (attachMediaClients).
+	secrets, code := resolveSecrets(context.Background(), cfg, stderr)
+	if code != 0 {
 		return code
 	}
 
@@ -1148,6 +1149,12 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	// long as the pass runs (S0173). It starts after the signal context exists so that an
 	// interrupt silences it at once.
 	stopProgress := startRunProgress(ctx, eng, stderr)
+	// The media-server clients, beside the reporter and only where one is configured: the
+	// post-swap rescan observes what the pass commits, and the Plex play hold stands at the
+	// door of each job and in front of each swap. The drain runs once the pass is over,
+	// interrupted or not, for at most its bound, and never changes the exit code.
+	drainMediaClients := attachMediaClients(eng, cfg, secrets, log)
+	defer drainMediaClients()
 
 	// One call for both shapes: an unbounded Bound is the whole-library pass this command
 	// has always run, so there is no second route into the engine to keep in step.
@@ -1342,6 +1349,10 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		ctrl.SetScanHooks(notifier.ScanStarted, notifier.ScanFinished)
 	}
 	eng.Observer = fanout(observers) // live job-state → SSE + metrics + notifications
+	// The media-server clients, beside those and only where one is configured: the post-swap
+	// rescan joins the fan-out, and the Plex play hold stands at the door of each job and in
+	// front of each swap. They are drained at shutdown, after the engine has stopped.
+	drainMediaClients := attachMediaClients(eng, cfg, secrets, log)
 
 	// Host-fair scheduler: run-window + CPU-load cap + optional Tautulli pause. It
 	// only ever DELAYS work. The engine consults it (throttled) between files; Rescan
@@ -1460,6 +1471,9 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	// ever named.
 	srv.Wait()
 	bg.Wait()
+	// Every swap this daemon will commit has been committed and observed: keep attempting
+	// the rescan requests still pending for at most the drain bound, then exit regardless.
+	drainMediaClients()
 	return 0
 }
 
