@@ -1212,12 +1212,20 @@ func Load(path string) (*Config, error) {
 	}
 
 	// preserve_mtime is a BOOLEAN, and the weakly typed decoder below would read `3` as
-	// true and a key written with no value as the default without a word - on the knob
+	// true without a word - on the knob
 	// that decides what a media server and a backup see of every swap. Checked against the
 	// value the file or the environment CARRIED, for queue_order's reason.
+	//
+	// A key written with NO value (a YAML null) is the exception and is not a value at all:
+	// it has always loaded as the default, an existing configuration must keep deciding what
+	// it decided, and so it reads as unset - the default, and stated as the default.
+	preserveMtimeWritten := false
 	if explicitTop[preserveMtimeKey] {
-		if err := requireBool(carriedValue(preserveMtimeKey, k, kf, ke), preserveMtimeKey, path); err != nil {
-			return nil, err
+		if raw := carriedValue(preserveMtimeKey, k, kf, ke); raw != nil {
+			if err := requireBool(raw, preserveMtimeKey, path); err != nil {
+				return nil, err
+			}
+			preserveMtimeWritten = true
 		}
 	}
 
@@ -1341,7 +1349,7 @@ func Load(path string) (*Config, error) {
 	// one every other cgroup reading of this process takes (cpuquota.RootEnv).
 	c.WorkersAuto = workersAuto
 	c.coresPerWorkerSet = explicitTop[coresPerWorkerKey]
-	c.preserveMtimeDefaulted = !explicitTop[preserveMtimeKey]
+	c.preserveMtimeDefaulted = !preserveMtimeWritten
 	if c.WorkersAuto {
 		c.autoPlan = resolveAutoWorkers(c.EffectiveCoresPerWorker(), os.Getenv(cpuquota.RootEnv), numCPU())
 	}
@@ -1478,8 +1486,7 @@ func requireWholeRows(raw any, key, path string) error {
 
 // requireBool refuses a RAW layered value that is not a boolean, naming the key. A YAML
 // boolean arrives as a bool and an environment override as a string, so both spellings of
-// a genuine boolean are accepted; a number, a word, a list, or a key present with no value
-// at all is refused rather than coerced.
+// a genuine boolean are accepted; a number, a word or a list is refused rather than coerced.
 func requireBool(raw any, key, path string) error {
 	switch v := raw.(type) {
 	case bool:

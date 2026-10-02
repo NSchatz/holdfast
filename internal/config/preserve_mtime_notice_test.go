@@ -132,7 +132,7 @@ func TestNotices_S0178_AC5_StatesTheEffectivePreserveMtimeChoice(t *testing.T) {
 }
 
 // TestLoad_S0178_AC6_ANonBooleanPreserveMtimeIsRefusedNamingTheKey: the weakly typed
-// decoder would read `3` as true and a key written with no value as the default, so the
+// decoder would read `3` as true, so the
 // raw value is refused before it can be coerced - in the file and in the environment.
 func TestLoad_S0178_AC6_ANonBooleanPreserveMtimeIsRefusedNamingTheKey(t *testing.T) {
 	refused := func(t *testing.T, body, env string) {
@@ -148,13 +148,27 @@ func TestLoad_S0178_AC6_ANonBooleanPreserveMtimeIsRefusedNamingTheKey(t *testing
 			t.Errorf("the refusal does not name %s: %v", preserveMtimeKey, err)
 		}
 	}
-	for _, v := range []string{"banana", "3", "0.5", "", "[true]", "{a: true}", `"yes please"`} {
+	for _, v := range []string{"banana", "3", "0.5", "[true]", "{a: true}", `"yes please"`} {
 		t.Run("file="+v, func(t *testing.T) { refused(t, "preserve_mtime: "+v, "") })
 	}
 	for _, v := range []string{"banana", "3", "maybe", " false "} {
 		t.Run("env="+v, func(t *testing.T) { refused(t, "", v) })
 		t.Run("env="+v+" over a valid file", func(t *testing.T) { refused(t, "preserve_mtime: true", v) })
 	}
+
+	// An EMPTY environment value is a value, and not a boolean one. The decoder read it as
+	// false - the opposite of the default, from a variable that says nothing - so it is
+	// refused. (An empty key in the FILE is a null, which is no value: see the next test.)
+	t.Run("env set to the empty string", func(t *testing.T) {
+		t.Setenv("HOLDFAST_PRESERVE_MTIME", "")
+		c, err := Load(writeConfig(t, ""))
+		if err == nil {
+			t.Fatalf("Load accepted an empty HOLDFAST_PRESERVE_MTIME and resolved it to %v", c.PreserveMtimeEnabled())
+		}
+		if !strings.Contains(err.Error(), preserveMtimeKey) {
+			t.Errorf("the refusal does not name %s: %v", preserveMtimeKey, err)
+		}
+	})
 
 	// The control: every genuine boolean spelling still loads, to the value it names.
 	for body, want := range map[string]bool{
@@ -181,5 +195,47 @@ func TestLoad_S0178_AC6_ANonBooleanPreserveMtimeIsRefusedNamingTheKey(t *testing
 				t.Errorf("HOLDFAST_PRESERVE_MTIME=%q resolved to %v, want %v", env, c.PreserveMtimeEnabled(), want)
 			}
 		})
+	}
+}
+
+// TestLoad_S0178_AnEmptyPreserveMtimeStillLoadsAsTheDefault: a key written with no value
+// is not a non-boolean VALUE, it is no value. It loaded as the default before the
+// statement existed and an existing configuration must keep deciding what it decided, so
+// it still loads, still preserves, reads as unset and is stated as the default.
+func TestLoad_S0178_AnEmptyPreserveMtimeStillLoadsAsTheDefault(t *testing.T) {
+	for _, body := range []string{"preserve_mtime:", "preserve_mtime: null", "preserve_mtime: ~"} {
+		t.Run(body, func(t *testing.T) {
+			c, err := Load(writeConfig(t, body))
+			if err != nil {
+				t.Fatalf("an empty preserve_mtime was refused: %v", err)
+			}
+			if !c.PreserveMtimeEnabled() {
+				t.Error("an empty preserve_mtime resolved to OFF; the default is true")
+			}
+			if c.PreserveMtimeExplicit() {
+				t.Error("an empty preserve_mtime reads as set explicitly; nothing was set")
+			}
+			got := preserveMtimeNotices(c)
+			if len(got) != 1 {
+				t.Fatalf("%d notice(s) naming preserve_mtime, want exactly 1: %v", len(got), got)
+			}
+			if !strings.HasPrefix(got[0], "preserve_mtime is true (the default: neither") {
+				t.Errorf("the notice is not the default's:\n%s", got[0])
+			}
+			if strings.Contains(got[0], "set explicitly") {
+				t.Errorf("the notice claims the value was set:\n%s", got[0])
+			}
+		})
+	}
+
+	// And the environment still decides over an empty key in the file, as an explicit value.
+	t.Setenv("HOLDFAST_PRESERVE_MTIME", "false")
+	c, err := Load(writeConfig(t, "preserve_mtime:"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PreserveMtimeEnabled() || !c.PreserveMtimeExplicit() {
+		t.Errorf("HOLDFAST_PRESERVE_MTIME=false over an empty key: enabled=%v explicit=%v, want false and true",
+			c.PreserveMtimeEnabled(), c.PreserveMtimeExplicit())
 	}
 }
