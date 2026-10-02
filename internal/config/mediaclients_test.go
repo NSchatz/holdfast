@@ -67,11 +67,22 @@ func TestSecretKeys_PlexSonarrRadarrAreSecretBearingAndRefuseALiteral(t *testing
 			_, err := loadValidated(t, mediaBase+cred.urlKey+": http://media.invalid:1\n"+cred.key+": "+literal+"\n")
 			refuses("in the YAML file", err)
 
-			// In the HOLDFAST_* variable.
-			t.Setenv("HOLDFAST_"+strings.ToUpper(cred.key), literal)
-			_, err = loadValidated(t, mediaBase+cred.urlKey+": http://media.invalid:1\n")
-			refuses("in HOLDFAST_"+strings.ToUpper(cred.key), err)
-			t.Setenv("HOLDFAST_"+strings.ToUpper(cred.key), "")
+			// In the HOLDFAST_* variable, in a subtest of its own so the variable is gone
+			// again before the reference case below reads the file.
+			t.Run("in the environment", func(t *testing.T) {
+				t.Setenv("HOLDFAST_"+strings.ToUpper(cred.key), literal)
+				_, err := loadValidated(t, mediaBase+cred.urlKey+": http://media.invalid:1\n")
+				if err == nil {
+					t.Fatalf("a literal in HOLDFAST_%s was ACCEPTED", strings.ToUpper(cred.key))
+				}
+				if !strings.Contains(err.Error(), cred.key) || strings.Contains(err.Error(), literal) {
+					t.Errorf("the refusal must name %s and never echo the value: %v", cred.key, err)
+				}
+				var lit *secret.ErrLiteral
+				if !errorsAsLiteral(err, &lit) {
+					t.Errorf("the refusal is not a literal-credential refusal: %v", err)
+				}
+			})
 
 			// A file: reference is accepted, and resolves to the file's contents.
 			secretFile := filepath.Join(t.TempDir(), "credential")
