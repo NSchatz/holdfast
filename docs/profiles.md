@@ -910,7 +910,7 @@ terminal row. They are read by `run` and `serve` alike. What each sends, the pat
 hold and the warning to read before enabling an arr target are in
 [docs/post-swap-hook.md](post-swap-hook.md).
 
-`webhook_token` is a tenth daemon-wide key on the same terms, read by `serve` only: a credential
+`webhook_token` is a tenth daemon-wide key on the same terms, used by `serve` only: a credential
 reference that turns on the Sonarr and Radarr webhook intake, which reads `sonarr_path_map` and
 `radarr_path_map` in reverse ([docs/docker.md](docker.md#telling-holdfast-about-one-file-sonarr--radarr)).
 
