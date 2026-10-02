@@ -185,7 +185,9 @@ The hold only ever **delays**. It changes no gate, no verdict and nothing about 
 has no upper bound: a session left paused holds its file, and the worker that finished encoding
 it, until the session ends.
 
-One answer from Plex is reused for 2 seconds, so a burst of jobs costs one request.
+One answer from Plex is reused for 2 seconds, so a burst of jobs costs one request. A Plex
+that accepts a connection and never answers costs each question the 10 second request timeout
+before the hold fails open.
 
 **It fails open.** When Plex cannot be asked - the connection refused, a non-2xx answer, an
 answer that does not parse, no answer in time - no file is held, and one `warn` record says so.
@@ -211,6 +213,9 @@ feed of new files while anything at all is streaming, and it runs under `serve` 
   path. Userinfo, a query or a fragment in it refuses to start.
 - No log record carries a credential or a request URL. A failed request is reported as a target
   name and a failure class.
+- A redirect is not followed: it would carry the credential header to an address you did not
+  configure. Point each address at the service itself (an `http` address that redirects to
+  `https` is reported as `http-status 301`).
 
 ## Risks
 

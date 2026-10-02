@@ -24,6 +24,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/NSchatz/holdfast/internal/secret"
 )
 
 // RequestTimeout bounds every single request this package sends. A target that accepts a
@@ -75,19 +77,26 @@ func (f *failure) String() string {
 	return f.class
 }
 
-// caller sends one target's requests: a base address, the headers that authenticate it, and
-// an HTTP client that never follows a redirect (a redirect would carry the credential header
-// to an address the operator did not configure).
+// caller sends one target's requests: a base address, the header its credential travels in,
+// its other headers, and an HTTP client that never follows a redirect (a redirect would carry
+// the credential header to an address the operator did not configure).
+//
+// The credential stays a secret.Value, which renders as `<redacted>` wherever a caller might
+// be formatted; it is exposed once per request, into that request's header and nowhere else.
 type caller struct {
-	base    string
-	headers map[string]string
-	client  *http.Client
+	base       string
+	authHeader string
+	credential secret.Value
+	headers    map[string]string
+	client     *http.Client
 }
 
-func newCaller(base string, headers map[string]string) *caller {
+func newCaller(base, authHeader string, credential secret.Value, headers map[string]string) *caller {
 	return &caller{
-		base:    base,
-		headers: headers,
+		base:       base,
+		authHeader: authHeader,
+		credential: credential,
+		headers:    headers,
 		client: &http.Client{
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
@@ -105,6 +114,9 @@ func (c *caller) do(ctx context.Context, method, pathAndQuery string, body io.Re
 	}
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
+	}
+	if c.authHeader != "" {
+		req.Header.Set(c.authHeader, c.credential.Expose())
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")

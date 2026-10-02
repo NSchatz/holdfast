@@ -64,7 +64,7 @@ func NewSonarr(baseURL string, key secret.Value, paths config.PathMap) *Arr {
 
 func newArr(kind arrKind, baseURL string, key secret.Value, paths config.PathMap) *Arr {
 	return &Arr{kind: kind, paths: paths,
-		call: newCaller(baseURL, map[string]string{"X-Api-Key": key.Expose(), "Accept": "application/json"})}
+		call: newCaller(baseURL, "X-Api-Key", key, map[string]string{"Accept": "application/json"})}
 }
 
 // Name is radarr or sonarr.

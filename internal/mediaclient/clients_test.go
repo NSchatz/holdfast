@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/NSchatz/holdfast/internal/secret"
 )
 
 // TestArr_NoCommandIsEverSentWithoutAnOwnerID proves the rule the whole Arr client is built
@@ -274,7 +277,7 @@ func TestCaller_StatusBoundaries(t *testing.T) {
 	} {
 		f := newFake(t, func(w http.ResponseWriter, _ request) { w.WriteHeader(status) })
 		got := ""
-		if fail := newCaller(f.srv.URL, nil).do(context.Background(), "GET", "/x", nil, nil); fail != nil {
+		if fail := newCaller(f.srv.URL, "", secret.Value{}, nil).do(context.Background(), "GET", "/x", nil, nil); fail != nil {
 			got = fail.String()
 		}
 		if got != want {
@@ -282,16 +285,22 @@ func TestCaller_StatusBoundaries(t *testing.T) {
 		}
 	}
 	// A request that cannot be built is refused, not sent.
-	if fail := newCaller("http://host.invalid", nil).do(context.Background(), "BAD METHOD", "/x", nil, nil); fail == nil ||
+	if fail := newCaller("http://host.invalid", "", secret.Value{}, nil).do(context.Background(), "BAD METHOD", "/x", nil, nil); fail == nil ||
 		fail.String() != ClassRefused {
 		t.Errorf("an unbuildable request: %v, want %s", fail, ClassRefused)
 	}
 	// A body is sent as JSON; a request with none carries no content type.
 	f := newFake(t, func(w http.ResponseWriter, _ request) {})
-	c := newCaller(f.srv.URL, map[string]string{"X-Test": "v"})
+	c := newCaller(f.srv.URL, "X-Credential", secret.NewValue("the-credential"), map[string]string{"X-Test": "v"})
+	if printed := fmt.Sprintf("%v %+v %#v", c, *c, c.credential); strings.Contains(printed, "the-credential") {
+		t.Errorf("a formatted caller prints its credential: %s", printed)
+	}
 	_ = c.do(context.Background(), "POST", "/with", strings.NewReader("{}"), nil)
 	_ = c.do(context.Background(), "POST", "/without", nil, nil)
 	seen := f.seen()
+	if seen[0].Header.Get("X-Credential") != "the-credential" || seen[1].Header.Get("X-Credential") != "the-credential" {
+		t.Errorf("the credential did not travel in its header: %+v", seen)
+	}
 	if seen[0].Header.Get("Content-Type") != "application/json" || seen[0].Body != "{}" || seen[0].Header.Get("X-Test") != "v" {
 		t.Errorf("the request with a body arrived as %+v", seen[0])
 	}
@@ -307,11 +316,11 @@ func TestCaller_ACancelledCallerIsNotATimeout(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if fail := newCaller(f.srv.URL, nil).do(ctx, "GET", "/x", nil, nil); fail == nil || fail.String() != ClassUnreachable {
+	if fail := newCaller(f.srv.URL, "", secret.Value{}, nil).do(ctx, "GET", "/x", nil, nil); fail == nil || fail.String() != ClassUnreachable {
 		t.Errorf("a cancelled request: %v, want %s", fail, ClassUnreachable)
 	}
 	shortTimeout(t, 100*time.Millisecond)
-	if fail := newCaller(f.srv.URL, nil).do(context.Background(), "GET", "/x", nil, nil); fail == nil || fail.String() != ClassTimeout {
+	if fail := newCaller(f.srv.URL, "", secret.Value{}, nil).do(context.Background(), "GET", "/x", nil, nil); fail == nil || fail.String() != ClassTimeout {
 		t.Errorf("a request with no answer: %v, want %s", fail, ClassTimeout)
 	}
 }

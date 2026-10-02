@@ -62,8 +62,7 @@ const plexClientIdentifier = "holdfast"
 
 // NewPlex builds the Plex client from its address, its RESOLVED token and its path map.
 func NewPlex(baseURL string, token secret.Value, paths config.PathMap) *Plex {
-	return &Plex{paths: paths, call: newCaller(baseURL, map[string]string{
-		"X-Plex-Token":             token.Expose(),
+	return &Plex{paths: paths, call: newCaller(baseURL, "X-Plex-Token", token, map[string]string{
 		"X-Plex-Client-Identifier": plexClientIdentifier,
 		"Accept":                   "application/json",
 	})}
