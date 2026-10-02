@@ -204,7 +204,7 @@ func TestPlex_SectionLookup(t *testing.T) {
 			dir:  "/data/movies/Film", noOwner: true},
 		{name: "the longest location wins, whatever the order",
 			body: `{"MediaContainer": {"Directory": [{"key": "5", "Location": [{"path": "/data/movies/Film"}]}, {"key": "1", "Location": [{"path": "/data"}]}, {"key": "2", "Location": [{"path": "/data/movies/"}]}]}}`,
-			dir:  "/data/movies/Film", want: "/library/sections/5/refresh"},
+			dir:  "/data/movies/Film/extras", want: "/library/sections/5/refresh"},
 		{name: "two sections on one location are ambiguous",
 			body: `{"MediaContainer": {"Directory": [{"key": "1", "Location": [{"path": "/data/movies"}]}, {"key": "2", "Location": [{"path": "/data/movies"}]}]}}`,
 			dir:  "/data/movies/Film", noOwner: true},

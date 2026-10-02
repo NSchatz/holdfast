@@ -187,6 +187,45 @@ func TestHook_AC4_PlexGetsAPartialScanOfTheDirectoryAndNeverAWholeSection(t *tes
 	}
 }
 
+// TestHook_AC4_ADirectoryThatIsTheSectionLocationItselfIsNeverRefreshed: a file that sits
+// directly in a section's location (a flat library) has that location as its directory, and a
+// refresh restricted to it would scan the whole location. Nothing is sent to Plex, and one
+// info record says why - a reason distinct from "nothing owns this directory".
+func TestHook_AC4_ADirectoryThatIsTheSectionLocationItselfIsNeverRefreshed(t *testing.T) {
+	for _, file := range []string{"/mnt/media/movies/film.mkv", "/mnt/media/more tv/e01.mkv"} {
+		t.Run(file, func(t *testing.T) {
+			plex := newFake(t, plexSectionsHandler(sectionList))
+			logs, log := newRecorder()
+			run(t, []Target{plexAt(plex)}, log, swapped(file))
+
+			if posts := plex.posts(); len(posts) != 0 {
+				t.Fatalf("plex was sent %+v for a file in a section location's root", posts)
+			}
+			recs := logs.all()
+			if len(recs) != 1 || recs[0].Level != slog.LevelInfo {
+				t.Fatalf("want exactly one info record, got %+v", recs)
+			}
+			if !strings.Contains(recs[0].Msg, "section location itself") || !strings.Contains(recs[0].Msg, "whole location") {
+				t.Errorf("the record does not give the whole-location reason: %s", recs[0].Msg)
+			}
+			if strings.Contains(recs[0].Msg, "nothing that owns") {
+				t.Errorf("the record gives the no-owner reason: %s", recs[0].Msg)
+			}
+			if recs[0].Attrs["target"] != "plex" || recs[0].Attrs["file"] != file ||
+				recs[0].Attrs["directory"] != plexPaths.Map(file[:strings.LastIndex(file, "/")]) {
+				t.Errorf("the record's fields are %+v", recs[0].Attrs)
+			}
+		})
+	}
+	// One level down, the same library is refreshed as before.
+	plex := newFake(t, plexSectionsHandler(sectionList))
+	_, log := newRecorder()
+	run(t, []Target{plexAt(plex)}, log, swapped("/mnt/media/movies/Film/film.mkv"))
+	if len(plex.posts()) != 1 {
+		t.Errorf("a file one directory below the location was not refreshed: %+v", plex.seen())
+	}
+}
+
 func mustQuery(t *testing.T, raw string) url.Values {
 	t.Helper()
 	q, err := url.ParseQuery(raw)

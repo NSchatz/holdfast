@@ -645,6 +645,10 @@ type Engine struct {
 	// DefaultPlayHoldPoll.
 	PlayHoldPoll time.Duration
 
+	// playHoldNow, when non-nil, replaces the clock the pre-swap wait reads, so a test can
+	// pass the reminder interval without waiting it out.
+	playHoldNow func() time.Time
+
 	// --- the three FILESYSTEM-1 seams --------------------------------------------
 	//
 	// The gate has no network mount and no second real filesystem, and it never will: a test

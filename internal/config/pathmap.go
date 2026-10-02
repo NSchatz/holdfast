@@ -37,18 +37,27 @@ type PathMap []PathMapEntry
 
 // Map translates a path from holdfast's view to the target service's view.
 func (m PathMap) Map(holdfastPath string) string {
-	return m.translate(holdfastPath, func(e PathMapEntry) (string, string) { return e.From, e.To })
+	out, _ := m.translate(holdfastPath, func(e PathMapEntry) (string, string) { return e.From, e.To })
+	return out
 }
 
 // Reverse translates a path from the target service's view back to holdfast's view. It is
 // the inverse of Map for every path under a mapped prefix.
 func (m PathMap) Reverse(targetPath string) string {
+	out, _ := m.ReverseMatched(targetPath)
+	return out
+}
+
+// ReverseMatched is Reverse, and also reports whether an entry's To covered the path. A
+// caller that must not take an uncovered path for one of holdfast's own asks it; Reverse
+// itself passes such a path through unchanged.
+func (m PathMap) ReverseMatched(targetPath string) (holdfastPath string, matched bool) {
 	return m.translate(targetPath, func(e PathMapEntry) (string, string) { return e.To, e.From })
 }
 
-// translate rewrites the longest matching prefix of p. sides picks which half of an entry is
-// matched and which replaces it.
-func (m PathMap) translate(p string, sides func(PathMapEntry) (match, replace string)) string {
+// translate rewrites the longest matching prefix of p, and reports whether one matched.
+// sides picks which half of an entry is matched and which replaces it.
+func (m PathMap) translate(p string, sides func(PathMapEntry) (match, replace string)) (string, bool) {
 	p = path.Clean(p)
 	best, bestLen := -1, -1
 	for i, e := range m {
@@ -59,11 +68,11 @@ func (m PathMap) translate(p string, sides func(PathMapEntry) (match, replace st
 		}
 	}
 	if best < 0 {
-		return p
+		return p, false
 	}
 	match, replace := sides(m[best])
 	rest, _ := UnderPrefix(p, path.Clean(match))
-	return path.Join(path.Clean(replace), rest)
+	return path.Join(path.Clean(replace), rest), true
 }
 
 // UnderPrefix reports whether the cleaned path p is prefix itself or lies beneath it, on a
