@@ -1,6 +1,6 @@
 # holdfast - the Tdarr replacement at feature parity, without trading away the gate (brief v2, 2026-09-29)
 
-**Spec:** NSchatz/goals spec v1.1 (the `/goals:spec` skill; `spec/` at tag v1.1.0).
+**Spec:** the goals program's spec v1.1 (the `/goals:spec` skill; `spec/` at tag v1.1.0).
 
 This program is fifteen `/goal` runs, in order, goal 1 to goal 15. It runs beside the shopkit, 3d,
 devices and home programs, which live in other containers on the same host and share nothing with
@@ -85,10 +85,12 @@ owner's port, 2026-10-02).
     ledger names it and the PR goal 2 opened there) - **PRs only, never merged by an agent**
     (T32). Clone it to `/cache/wt/homelab/holdfast-g<n>` only when a goal opens its PR.
   - The owner's private umbrella repository (the SDD specs) - **read only** (T32): never branched,
-    PR'd or pushed. Goals 10-15 need no clone of it: the approved P1's rows are served from
-    `proposal-triage.md` and this repo. This public brief names no private repository (spec
-    contract §6, which since the spec pin wins over the v1 review's L9); the owner's container
-    holds the checkouts. The owner's queue (§0.6) is filed only through the goals CLI.
+    PR'd or pushed. A goal that needs a spec's full text reads the read-only clone goal 1 made (its
+    ledger names the path); a fresh clone gets `git remote set-url --push origin DISABLED` before
+    anything else, so a push cannot happen by accident. §0 and the remaining goal files name no
+    private repository (spec contract §6, which since the spec pin wins over the v1 review's L9);
+    §1-§3, §5 and §23 keep their wording byte for byte, and the owner's container holds the
+    checkouts. The owner's queue (§0.6) is filed only through the goals CLI.
   - Every other repo: never touched.
 - **First actions** are the spec's (`contract.md` §1), plus: read the `CHECKPOINT-T.approved`
   amendments (goals 2-15), the approved P1's rows for this goal and the owner's open items
@@ -126,7 +128,7 @@ Spec `contract.md` §3 and `gates.md` apply, with these rules of holdfast's:
   last gate result still stands; any other change on `main` means the gate runs again.
 - **The merge rule (T36, T52):** a PR is self-merged with `gh pr merge --squash --delete-branch`
   only when BOTH hold on the branch up to date with `origin/main`:
-  1. the local gate passes: `timeout 10800 /cache/goals/<container>/bin/goals lock goals-heavy --
+  1. the local gate passes: `timeout 10800 /cache/goals/<container>/bin/goals lock -w 10800 goals-heavy --
      flock -o /cache/locks/holdfast-heavy.lock mise exec go@1.25.14 -- make check` (the heavy
      locks of §0.4), with its last 20 lines, its wall-clock and the `internal/engine` seconds
      pasted in the PR body;
@@ -161,13 +163,15 @@ Spec `contract.md` §4 and `locks.md` apply, with holdfast's budget and locks:
   `/cache/goals/<container>/bin/goals admit --agents <N>` allows. The maker container has 28 CPUs,
   shared by its 9 Claude sessions, and the host is shared.
 - **Heavy jobs** (`make check`, `make mutation-diff`, any real encode loop, `pnpm build`) hold
-  `goals-heavy`, then `holdfast-heavy`: `/cache/goals/<container>/bin/goals lock goals-heavy --
+  `goals-heavy`, then `holdfast-heavy`: `/cache/goals/<container>/bin/goals lock -w 10800 goals-heavy --
   flock -o /cache/locks/holdfast-heavy.lock <cmd>`. `holdfast-heavy` stays exclusive, so holdfast
   runs one heavy job at a time (T40); how many run in the container at once is `goals-heavy`'s
   slots and headroom (spec 1.1), not this brief's. **Always `-o`** (I10): plain
   `flock <lock> <cmd>` hands the lock file to the child as a read-only fd 3.
 - Every agent prompt states a time budget (research 30 min, review 40 min, a build track at most
   4 hours); a hung agent is stopped and its track re-run once, then recorded `DROPPED (why)`.
+  Agent worktrees are removed when their PR merges or closes; a claim most verifiers refute is
+  dropped.
 
 ### 0.5 The ledger
 
@@ -195,8 +199,8 @@ arises: holdfast files no requests between programs (T6, §0.13).
   item in the goals program's private repository, filed with
   `/cache/goals/<container>/bin/goals needs add --repo holdfast --kind <kind> ...`, which asks
   once; the item's `--do` gives the exact command. T42 and I1 made the list a file in this repo
-  (the old list of §0.3); the owner's later decisions moved it to the queue (W21, by
-  `AMENDMENT-2026-10-01-goals-g8-2026-09-holdfast.md`, and the port of 2026-10-02).
+  (the old list of §0.3); `AMENDMENT-2026-10-01-goals-g8-2026-09-holdfast.md` mirrored it into the
+  queue (W21), and the owner's port of 2026-10-02 made the queue the place to file.
 - **Speed:** the owner acts within days (T42), so no goal waits. Hardware and live-service work
   proceeds on fakes; the goal that consumes a result re-checks for it and re-runs when it is
   there.
@@ -232,8 +236,10 @@ Spec `contract.md` §6 applies; holdfast's limits beyond it:
   name and email part mechanically.
 - **Private repositories** are named by role only (spec `contract.md` §6): "the owner's private
   homelab repository", "the goals program's private repository" (its issues are the owner's
-  queue), "the owner's other private repositories". The queue's label carries a personal name
-  and is never written.
+  queue), "the owner's private umbrella repository", "the owner's other private repositories".
+  The queue's label carries a personal name
+  and is never written. Cite a queue item as "queue #<n>", never by its URL (`goals needs list` and
+  `add` print URLs that name the private repository).
 - **Secrets:** every new credential is reached by reference and joins
   `config.SecretBearingKeys` (§4). `make secret-scan` runs in the gate; the container's global
   `core.hooksPath` means the repo's pre-commit hook is not active here, so the gate is the check.
@@ -294,7 +300,7 @@ Spec `report.md` and `contract.md` §10 apply; holdfast's own:
 | A `docker` CLI is on PATH but there is no daemon or socket; no `sudo`; `apt` needs root | image builds and smokes happen only in CI (T36); rootless installs only |
 | `make check` on `main` (3c229da) under `flock -o`: exit 0 in 25m35.7s; `internal/engine` 1339.8 s, `cmd/holdfast` 398.9 s | `timeout 10800` on the gate; batch PRs (T52); the engine is at 74% of `TEST_TIMEOUT` (30m, `Makefile:82`), see §4 |
 | `flock <lock> <cmd>` leaks the lock as a read-only fd 3; `TestEncodeWithProgress_FailurePathIsByteIdentical` then fails 6/6 | always `flock -o` (I10); goal 1 hardens the fixture |
-| `gh` is authenticated with admin on holdfast and on the owner's private repositories; `main` has no branch protection; `delete_branch_on_merge` is on | ledger commits to `main` work; §0.1, not `gh`'s reach, decides what a goal may touch |
+| `gh` is authenticated with admin on holdfast and on the owner's private repositories; `main` has no branch protection; `delete_branch_on_merge` is on | ledger commits to `main` work; the umbrella clone's push URL is disabled (§0.1); §0.1, not `gh`'s reach, decides what a goal may touch |
 | GitHub Actions: the last 25 runs green apart from 2 superseded cancels; PR CI 10-13 min | wait for CI before merging (T36) |
 | `git config --global core.hooksPath` = `/home/claude/.claude-hooks` | the repo's pre-commit secret scan is inactive here; the gate's `secret-scan` is the check |
 | `/cache/locks/` exists and holds other programs' locks (shopkit, 3d, home, dev, inventory) | this program's own lock is `/cache/locks/holdfast-heavy.lock`; of the others a heavy job takes only `goals-heavy` (§0.4) |
@@ -940,7 +946,7 @@ A. The precondition checks, printed with their output
 B. Every row the approved P1 (path@sha printed) assigns to goal 10 is listed with DONE (PR URL) or DROPPED (why), or P1 assigns none
 C. After a swap Plex gets a partial refresh of the section path and a file being played is held, and Sonarr/Radarr get RescanSeries/RescanMovie: tests against httptest fakes (tail)
 D. Authenticated webhook intake accepts both Sonarr Download shapes and Radarr's and queues the file (test tail), and `make api-schema-diff` passes with .api-schema-breaks.yaml still []
-E. Each new credential key is in config.SecretBearingKeys and refuses a literal (test tail), and the owner's queue has an item with live-check commands for Plex, Sonarr and Radarr
+E. Each new credential key is in config.SecretBearingKeys and refuses a literal (test tail), and the owner's queue has live-check commands for Plex, Sonarr and Radarr
 F. Gate integrity since the ledger's goal-start SHA: every deleted `*_test.go` line has a reason, no package's `func Test` count fell, no line of docs/design/swap.md or quality-gate.md was removed (counts printed)
 G. All repos are clean and pushed, no open PR of this goal, zero `co-authored-by` in `git log <goal-start>..origin/main --format=%B`; the owner's queue is current; the ledger ends with its COMPLETE line
 H. A fresh adversarial subagent checked every line above against the repos and found none false (its verdict pasted)

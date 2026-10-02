@@ -3,8 +3,10 @@
 The owner decided this on 2026-10-02, in the goals session's own chat. After an audit of every repo
 against the goal-process spec (spec v1.1), the owner wrote **"Everything needs to get ported over"**.
 Asked how far to go for the programs with goals left, the owner chose **"Swap + compact briefs"**:
-"rewrite each running brief onto the spec: drop its copied contract and keep only its own parameters
-(lint's 'planned' profile)". That session wrote this change, and it merges into holdfast during a
+the swap ("change only the lines that name [the old lists] to the spec's issue wording; every other
+line word for word; recorded as an amendment [...] pinning spec 1.1")
+"plus rewrite each running brief onto the spec: drop its copied contract and keep only its own
+parameters (lint's 'planned' profile)". That session wrote this change, and it merges into holdfast during a
 drain of this program. The owner holds the program; goal 9 is complete and no goal is running. These
 are the owner's later words, so they beat the brief and the earlier amendments where they disagree
 (spec amendment.md, "Precedence"). Unlike those amendments, this one changes the remaining goal files
@@ -33,14 +35,16 @@ themselves, by the owner's choice.
      - the environment table.
    - §21, the report formats, points at spec report.md and keeps this program's own words.
    - §1-§13, §20, §22 and §23 are byte for byte unchanged.
-2. **The state word stays this program's own.** NEEDS-OWNER is the spec's state for a step physically
-   impossible for an agent. holdfast files no requests between programs. "The owner's queue" is the
+2. **The state word stays this program's own.** NEEDS-OWNER is this program's word for the spec's
+   state for a step physically impossible for an agent. holdfast files no requests between programs. "The owner's queue" is the
    issues in the goals program's private repository (`goals needs add --repo holdfast`,
    `/goals:needs`). Its label is never written here.
-3. **No private repository is named in this public brief or its remaining goal files.** Spec contract
-   §6 wins over the v1 review's L9 since the spec pin. Access stays exactly as T32 decided:
-   - the owner's private umbrella repository: read only, never branched, PR'd or pushed. Goals 10-15
-     need no clone of it, because the approved P1 rows are in `proposal-triage.md`;
+3. **§0 and the remaining goal files name no private repository.** Spec contract §6 wins over the v1
+   review's L9 since the spec pin; §1-§3, §5 and §23 keep their wording byte for byte. Access stays
+   exactly as T32 decided:
+   - the owner's private umbrella repository: read only, never branched, PR'd or pushed. A goal that
+     needs a spec's full text reads goal 1's read-only clone, and a fresh clone gets its push URL
+     disabled first;
    - the owner's private homelab repository: PRs only, never merged by an agent.
 4. **Rules the owner's port retires, or the spec settles, are gone from §0:**
    - "§0-§4 win";
@@ -57,21 +61,24 @@ themselves, by the owner's choice.
    - Physical steps go on the owner's queue.
    - The private repositories are named by role, as above.
    - Every other line keeps its meaning. Goals 1 to 9 are unchanged.
-6. **NEEDS-OWNER.md** was the queue's mirror. No remaining goal file names it as the place to write,
-   so it becomes a pointer to the owner's queue. §0.3's straight-to-main permission covers the pointer
-   and its generated mirror.
+6. **NEEDS-OWNER.md** stays as it is, with its open rows (each already an item in the owner's queue),
+   until this change merges. Then no remaining goal file names it as the place to write, it leaves
+   `named_by` in the goals program's `oldlists.toml`, and `goals needs pointer` allows it to become a
+   pointer to the owner's queue. §0.3's straight-to-main permission covers that pointer and its
+   generated mirror.
 
 ## What it supersedes
 
 The "Left in force (goal files win)" lists of the goals-g5, g6, g8, g9 and g10 amendments, where they
-quote goal-file wording this change replaced: "Physical steps go on NEEDS-OWNER.md", "NEEDS-OWNER.md
+quote goal-file wording this change replaced, among them g6's "each goal file's first line, which
+reads the brief's §0-§4 in full", and "Physical steps go on NEEDS-OWNER.md", "NEEDS-OWNER.md
 is current", g10's live-check commands in NEEDS-OWNER.md, and g15's NEEDS-OWNER entry. The
 NEEDS-OWNER state word they left in force stays. Their other rules stand, and their top notes stay in
 the brief.
 
 ## The lettered lines changed (goal, letter)
 
-- **g10 E:** "the owner's queue has an item with live-check commands for Plex, Sonarr and Radarr".
+- **g10 E:** "the owner's queue has live-check commands for Plex, Sonarr and Radarr".
 - **g10-g14 G and g15 I:** "the owner's queue is current".
 - **g15 E:** "its item in the owner's queue".
 
@@ -79,6 +86,6 @@ the brief.
 
 - `goals lint` on the branch: "spec 1.1 planned, manifest ... 0 failed".
 - Must-read per goal (`goals lint --must-read`): goals 10-15 went from 58,236-59,231 bytes to
-  43,898-44,893 bytes; the after figure includes the spec's 12,253 bytes.
+  44,563-45,558 bytes; the after figure includes the spec's 12,253 bytes.
 - The largest goal file is goal 15, at 3,518 characters.
 - `identity-scan`: clean.

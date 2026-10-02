@@ -5,7 +5,7 @@ A. The precondition checks, printed with their output
 B. Every row the approved P1 (path@sha printed) assigns to goal 10 is listed with DONE (PR URL) or DROPPED (why), or P1 assigns none
 C. After a swap Plex gets a partial refresh of the section path and a file being played is held, and Sonarr/Radarr get RescanSeries/RescanMovie: tests against httptest fakes (tail)
 D. Authenticated webhook intake accepts both Sonarr Download shapes and Radarr's and queues the file (test tail), and `make api-schema-diff` passes with .api-schema-breaks.yaml still []
-E. Each new credential key is in config.SecretBearingKeys and refuses a literal (test tail), and the owner's queue has an item with live-check commands for Plex, Sonarr and Radarr
+E. Each new credential key is in config.SecretBearingKeys and refuses a literal (test tail), and the owner's queue has live-check commands for Plex, Sonarr and Radarr
 F. Gate integrity since the ledger's goal-start SHA: every deleted `*_test.go` line has a reason, no package's `func Test` count fell, no line of docs/design/swap.md or quality-gate.md was removed (counts printed)
 G. All repos are clean and pushed, no open PR of this goal, zero `co-authored-by` in `git log <goal-start>..origin/main --format=%B`; the owner's queue is current; the ledger ends with its COMPLETE line
 H. A fresh adversarial subagent checked every line above against the repos and found none false (its verdict pasted)
