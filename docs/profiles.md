@@ -892,6 +892,24 @@ else refuses to start, naming the key. Neither is a library root knob or an enco
 neither moves a profile digest. The reasoning, and what each result means, is in
 [docs/design/health-sweep.md](design/health-sweep.md#health-sweep).
 
+## The media-server keys - Radarr, Sonarr and Plex
+
+<a id="media-clients"></a>
+
+```yaml
+radarr_url: ""        # with radarr_api_key: RescanMovie for the owning movie after a swap
+sonarr_url: ""        # with sonarr_api_key: RescanSeries for the owning series after a swap
+plex_url: ""          # with plex_token: a partial scan after a swap, and the play hold
+```
+
+Nine daemon-wide keys, all off by default: `radarr_url`, `radarr_api_key`, `radarr_path_map`,
+`sonarr_url`, `sonarr_api_key`, `sonarr_path_map`, `plex_url`, `plex_token` and `plex_path_map`.
+A target is on when its address and its credential reference are both set. None of them is a
+profile knob: a library root cannot carry one, none moves a profile digest, and none re-opens a
+terminal row. They are read by `run` and `serve` alike. What each sends, the path maps, the play
+hold and the warning to read before enabling an arr target are in
+[docs/post-swap-hook.md](post-swap-hook.md).
+
 ## Where the working file lives
 
 `scratch_dir` is a separate question - it moves where the encode WORKS, not what it

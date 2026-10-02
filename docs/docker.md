@@ -319,8 +319,9 @@ secrets:
 A literal token in `config.yaml` **or** in `HOLDFAST_SERVER_AUTH_TOKEN` refuses to start.
 That is deliberate: holdfast starts `ffmpeg` as a child process, a child inherits its
 parent's environment, and a credential in the environment is readable from every encoder
-invocation's `/proc/<pid>/environ`. The same applies to `server_read_token`, `notify_url`
-and `tautulli_api_key`. `docs/secrets.md` has the reference forms and the migration.
+invocation's `/proc/<pid>/environ`. The same applies to `server_read_token`, `notify_url`,
+`tautulli_api_key`, `radarr_api_key`, `sonarr_api_key` and `plex_token`. `docs/secrets.md` has
+the reference forms and the migration.
 
 ## Telling holdfast about one file: Sonarr / Radarr
 

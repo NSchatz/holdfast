@@ -69,6 +69,15 @@ and fixes the trust gaps:
   read API (`GET /api/health`), the `holdfast_health_sweep_*` metrics and a notification. It
   **never moves, renames, deletes or repairs a file**: what to do about one is the operator's call
   ([docs/design/health-sweep.md](docs/design/health-sweep.md#health-sweep)).
+- **Radarr, Sonarr and Plex are told, and a file being played is left alone.** Off by default.
+  With a target's address and credential set, a committed swap asks the one Radarr movie or
+  Sonarr series that owns the file's directory to rescan (`RescanMovie`, `RescanSeries`) and asks
+  Plex for a partial scan of that directory - once each, off the encode workers, and a failed
+  request is a warning that changes nothing about the job. With Plex configured, a file Plex is
+  playing is not started and not swapped until it stops; the hold only delays, and it fails open.
+  Read the re-download warning first
+  ([docs/post-swap-hook.md](docs/post-swap-hook.md#x265-warning),
+  [docs/design/media-clients.md](docs/design/media-clients.md#media-clients)).
 - **Config-as-code.** YAML, validated, in git - not clickops that vanishes on rebuild.
 - **Open source** (AGPL-3.0).
 
