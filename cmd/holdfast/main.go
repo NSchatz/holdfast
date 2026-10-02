@@ -1391,6 +1391,9 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	srv := server.New(ctx, *cfg, secrets.Get("server_auth_token"), secrets.Get("server_read_token"),
 		st, ctrl, hub, metricsHandler, log)
 	srv.SetSubmissions(subs)
+	// The webhook intake's one credential, handed to its one consumer. Unset, both intake
+	// endpoints answer 403.
+	srv.SetWebhookToken(secrets.Get(config.WebhookTokenKey))
 
 	// The library health sweep (docs/design/health-sweep.md), OFF unless
 	// health_sweep_interval_hours is set. It reads the engine's own enumeration and asks the
@@ -1428,6 +1431,7 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 			"addr", addr,
 			"control_enabled", !secrets.Get("server_auth_token").Empty(),
 			"read_gated", !secrets.Get("server_read_token").Empty(),
+			"webhook_enabled", !secrets.Get(config.WebhookTokenKey).Empty(),
 			"scan_interval_sec", cfg.ScanIntervalSec,
 			"health_sweep_interval_hours", cfg.HealthSweepIntervalHours,
 			"queue_order", cfg.EffectiveQueueOrder(),

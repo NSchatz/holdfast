@@ -1,0 +1,71 @@
+{
+  "series": {
+    "id": 7,
+    "title": "Synthetic Series",
+    "titleSlug": "synthetic-series",
+    "path": "/tv/Synthetic Series",
+    "tvdbId": 900001,
+    "tvMazeId": 0,
+    "tmdbId": 0,
+    "imdbId": "tt0000000",
+    "type": "standard",
+    "year": 2001,
+    "genres": [
+      "Fixture"
+    ],
+    "images": [],
+    "tags": [
+      "fixture"
+    ],
+    "originalLanguage": {
+      "id": 1,
+      "name": "English"
+    }
+  },
+  "episodes": [
+    {
+      "id": 101,
+      "episodeNumber": 1,
+      "seasonNumber": 1,
+      "title": "Synthetic Episode 1",
+      "overview": "A synthetic episode.",
+      "airDate": "2001-01-01",
+      "airDateUtc": "2001-01-01T00:00:00Z",
+      "seriesId": 7,
+      "tvdbId": 910001
+    }
+  ],
+  "release": {
+    "quality": "WEBDL-1080p",
+    "qualityVersion": 1,
+    "releaseGroup": "FIXTURE",
+    "releaseTitle": "Synthetic.Series.S01E01.1080p.WEB-DL-FIXTURE",
+    "indexer": "Fixture Indexer",
+    "size": 734003200,
+    "customFormatScore": 0,
+    "customFormats": [
+      "Fixture Format"
+    ],
+    "languages": [
+      {
+        "id": 1,
+        "name": "English"
+      }
+    ]
+  },
+  "downloadClient": "Fixture Client",
+  "downloadClientType": "qBittorrent",
+  "downloadId": "FIXTURE0004",
+  "customFormatInfo": {
+    "customFormats": [
+      {
+        "id": 1,
+        "name": "Fixture Format"
+      }
+    ],
+    "customFormatScore": 0
+  },
+  "eventType": "Grab",
+  "instanceName": "Sonarr",
+  "applicationUrl": ""
+}
