@@ -78,13 +78,19 @@ and fixes the trust gaps:
   Read the re-download warning first
   ([docs/post-swap-hook.md](docs/post-swap-hook.md#x265-warning),
   [docs/design/media-clients.md](docs/design/media-clients.md#media-clients)).
+- **Sonarr and Radarr tell holdfast, natively.** Off by default. With `webhook_token` set, a
+  `Connect > Webhook` connection pointed at `/api/webhook/sonarr` or `/api/webhook/radarr` queues
+  every imported, upgraded or renamed file through the same targeted scan `POST /api/scan` feeds -
+  no script and no shim. The credential is one of its own that can only queue a file, sent as the
+  connection's Password or an `Authorization` header and never in the URL
+  ([docs/docker.md](docs/docker.md#telling-holdfast-about-one-file-sonarr--radarr)).
 - **Config-as-code.** YAML, validated, in git - not clickops that vanishes on rebuild.
 - **Open source** (AGPL-3.0).
 
 ### We are not the only tool that verifies before it replaces
 
 We are not, and the field is described rather than dismissed: **Alchemist** works the same axis and is
-ahead of holdfast on seven capabilities, **FileFlows** and **Unmanic** work this ground too, and the one
+ahead of holdfast on six capabilities, **FileFlows** and **Unmanic** work this ground too, and the one
 claim holdfast makes for itself is narrow - its verify gate is default-on, layered and fails closed.
 **[docs/comparison.md](docs/comparison.md)** has all of it, each claim checked against that project's
 own licence text or project page.
@@ -376,8 +382,10 @@ reading before you give holdfast a hostname);
 the mutating endpoints require a bearer token, reached **by reference**
 (`server_auth_token: file:/run/secrets/holdfast-token` - a literal token there, or in
 `HOLDFAST_SERVER_AUTH_TOKEN`, refuses to start; see [docs/secrets.md](docs/secrets.md)) and
-are **disabled entirely when no token is configured**; pause only ever
-*delays* work - it never interrupts an encode or the atomic swap. **Known limitation:** two
+are **disabled entirely when no token is configured**; the Sonarr/Radarr webhook intake takes a
+third credential of its own (`webhook_token`) that opens nothing else, and is likewise disabled
+without it; pause only ever
+*delays* work - it never interrupts an encode or the atomic swap. **Known limitation:** three
 single-value tokens and no per-user accounts; the queue/history endpoints are capped at the most recent rows, not the whole ledger -
 but they now say what they were capped *against*, and `holdfast export` gives you the whole thing.
 

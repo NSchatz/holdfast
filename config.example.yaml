@@ -1043,15 +1043,33 @@ dry_run: false
 # the exit code. At the end of `run` and at `serve` shutdown, pending requests are
 # attempted for at most 30 seconds. A path map has no HOLDFAST_* form.
 
-# --- THE SEVEN SECRET KEYS (secrets K1) ---------------------------------------
+# --- THE SONARR / RADARR WEBHOOK INTAKE (docs/docker.md) -------------------------
+# OFF by default: with no webhook_token, POST /api/webhook/sonarr and /api/webhook/radarr
+# answer 403 and queue nothing. With one, a Sonarr or Radarr `Connect > Webhook`
+# connection pointed at those URLs queues every imported, upgraded or renamed file
+# through the same targeted scan POST /api/scan feeds.
+#
+# webhook_token: ""            # A SECRET REFERENCE to the intake's own credential:
+#                              #     webhook_token: file:/run/secrets/holdfast-webhook-token
+#                              #   The arr sends it as the Password of its Webhook
+#                              #   connection (HTTP Basic, any username) or as an
+#                              #   `Authorization: Bearer` header. It opens those two
+#                              #   endpoints and NOTHING else, and server_auth_token is
+#                              #   not accepted on them: it must be a secret of its own
+#                              #   (the same reference as server_auth_token or
+#                              #   server_read_token refuses to start).
+#                              #   The arr's paths are mapped back through sonarr_path_map
+#                              #   and radarr_path_map above, read in reverse.
+
+# --- THE EIGHT SECRET KEYS (secrets K1) ---------------------------------------
 # server_auth_token, server_read_token, notify_url, tautulli_api_key, radarr_api_key,
-# sonarr_api_key and plex_token carry a REFERENCE
+# sonarr_api_key, plex_token and webhook_token carry a REFERENCE
 # to a credential, never a credential. Two forms, and deliberately no third:
 #
 #   file:/run/secrets/holdfast-token     the file's CONTENTS are the value
 #   cmd:/usr/local/bin/fetch-my-secret   the command's STDOUT is the value
 #
-# A LITERAL credential in any of those seven keys - in this file OR in the matching
+# A LITERAL credential in any of those eight keys - in this file OR in the matching
 # HOLDFAST_* environment variable - REFUSES TO START, naming the key and how to convert
 # it. That is deliberate, and the reason is the encoder: holdfast starts ffmpeg and
 # ffprobe as child processes, and a child inherits its parent's environment, so a

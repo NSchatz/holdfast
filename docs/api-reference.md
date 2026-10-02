@@ -25,11 +25,14 @@ per-field reference `README.md` points at rather than restates.
 | `GET /api/exclusions` | control | the paths this daemon is **withholding** from the pipeline - runtime state it holds, never a configuration key |
 | `POST /api/exclusions` | control | withhold one path. It only ever takes a file OUT; nothing here writes `config.yaml` |
 | `DELETE /api/exclusions` | control | stop withholding one path, after which it is eligible again on the next scan |
+| `POST /api/webhook/sonarr`, `POST /api/webhook/radarr` (each also `PUT`) | webhook | the native intake for a Sonarr or Radarr `Connect > Webhook` connection: an import, an upgrade or a rename queues the file through the same targeted scan `POST /api/scan` feeds - see *The webhook intake* below |
 
 **read** = required only while `server_read_token` is set, which it is not by default;
 **control** = always required, and the endpoint answers 403 until `server_auth_token` is
 configured. The control token is accepted on a read; a read token is never accepted for a
-mutation.
+mutation. **webhook** = always required, and the endpoint answers 403 until `webhook_token`
+is configured. The webhook token opens the two intake endpoints and nothing else, and
+neither the control token nor the read token is accepted on them.
 
 ### `GET /api/schema` - the surface describing itself
 
@@ -54,7 +57,7 @@ narrowed, a status code removed, or the response recorded for a status code chan
 Additions pass: the baseline describes a release, and additive drift between releases is the
 normal state.
 
-`POST /api/scan` has a section of its own below. The control-guarded endpoints are disabled
+`POST /api/scan` and the webhook intake each have a section of their own below. The control-guarded endpoints are disabled
 entirely until a control token is configured, and the read surface is open until
 `server_read_token` is set: the posture that follows from that is in
 [docs/docker.md](docker.md#reverse-proxy-posture).
@@ -320,6 +323,112 @@ submission naming either of them is refused - even in a deployment running with
 **On shutdown**, work already in flight is finished before the job store is closed, and
 submissions still waiting in the queue are discarded - unprocessed, and with no ledger row,
 because nothing looked at those files and a row would be a record of a decision nobody took.
+
+### The webhook intake - `POST /api/webhook/sonarr` and `POST /api/webhook/radarr`
+
+<a id="webhook-intake"></a>
+
+The native intake for a Sonarr or Radarr `Connect > Webhook` connection. The arr posts its own
+JSON; holdfast reads the event type and the imported files' paths out of it, maps each path back
+from the arr's view of the library to its own, and hands the paths to the **same targeted scan**
+`POST /api/scan` feeds. Both endpoints also route `PUT`, because an arr's Webhook connection sends
+one or the other. The setup, field by field, is in
+[docs/docker.md](docker.md#telling-holdfast-about-one-file-sonarr--radarr), and the rule is in
+[docs/design/media-clients.md](design/media-clients.md#webhook-intake).
+
+It adds **no gate and skips none**, exactly as `POST /api/scan` does not: an accepted file goes
+through the same eligibility rules, the same claim and the same swap discipline, it is **not**
+`requeue`, and the per-request limits are the same two (256 files, a 262144-byte body).
+
+**Authentication.** The credential is the value `webhook_token` points at - a key of its own,
+reached by reference like every other credential ([docs/secrets.md](secrets.md)). A request
+presents it in one of two ways, the two an arr's Webhook connection can send:
+
+- `Authorization: Bearer <token>` - the connection's advanced **Headers** field; or
+- `Authorization: Basic ...` with the token as the **password** and any username - the
+  connection's **Username** and **Password** fields.
+
+Nothing is read from the URL: a credential in a query string or a path segment reaches access
+logs, so there is no such form. With no `webhook_token` configured both endpoints answer **403**
+and queue nothing. With one configured, a request without it answers **401** with the body
+`unauthorized` and a `WWW-Authenticate` challenge for each scheme, as the other gates do.
+
+The credential is **least privilege**: it opens these two endpoints and no other, so the secret
+an arr holds can queue a file inside a configured library root and do nothing else. It is refused
+(401) on every control and read endpoint. The reverse holds too: `server_auth_token` and
+`server_read_token` are **not** accepted here (401), so the arr is never handed the control token,
+and a `webhook_token` written as the same reference as either of them refuses to start.
+
+**What it reads.** Property names are matched exactly as the arr serialises them (camelCase, the
+event type capitalised), from the payload classes at Sonarr `v4.0.20.3014` and Radarr
+`v6.4.4.10685` (`src/NzbDrone.Core/Notifications/Webhook/` in each; read 2026-10-02):
+
+| `eventType` | Sonarr | Radarr | What happens |
+|---|---|---|---|
+| `Download` | `episodeFile.path` (one imported file), or `episodeFiles[].path` (the import-complete shape) | `movieFile.path` | every file named is queued. An upgrade is a `Download` with `isUpgrade: true` and is handled the same way; the files it replaced (`deletedFiles`) are never read |
+| `Rename` | `renamedEpisodeFiles[].path` | `renamedMovieFiles[].path` | the file is queued under its **new** path. `previousPath` is read by nothing, and no queued job for the old path is dropped: when its turn comes the old path no longer exists, and it ends with nothing claimed and nothing recorded |
+| `Test` | - | - | **200**, nothing queued: the connection reached holdfast and its credential was accepted |
+| anything else | - | - | **200**, nothing queued |
+
+**Response.** JSON, in one envelope for every answer past the credential check:
+
+```json
+{
+  "app": "sonarr",
+  "event_type": "Download",
+  "accepted": 1,
+  "rejected": 1,
+  "retryable": false,
+  "results": [
+    { "path": "/tv/Show/Season 01/Show - S01E01.mkv", "mapped": "/library/tv/Show/Season 01/Show - S01E01.mkv",
+      "accepted": true, "resolved": "/library/tv/Show/Season 01/Show - S01E01.mkv", "retryable": false },
+    { "path": "/anime/Show/Show - 01.mkv", "mapped": "/anime/Show/Show - 01.mkv", "accepted": false,
+      "rule": "outside-library-roots", "retryable": false,
+      "detail": "/anime/Show/Show - 01.mkv does not lie at or beneath any configured library root (library_roots: /library)" }
+  ]
+}
+```
+
+`path` is the path as the arr sent it; `mapped` is that path in holdfast's view after
+`sonarr_path_map` or `radarr_path_map` was applied in reverse, and it is the path every rule was
+answered against; `resolved` is the path the pipeline will act on. A per-file `rule` is one of
+`POST /api/scan`'s tokens above, or `no-file-path` for a file entry that carries no path.
+`event_type` is the event type the payload carried where it is one either arr declares, and
+`unrecognised` otherwise. When nothing was queued, `rule` and `reason` at the top level say why.
+
+**Every status it can answer with:**
+
+| Status | `rule` | `retryable` | When |
+|---|---|---|---|
+| **202** | - | `false` | at least one file was accepted and enqueued. Files refused beside it are in `results` |
+| **200** | `test-event` | `false` | a `Test` event |
+| **200** | `event-not-consumed` | `false` | an event type other than `Download` and `Rename`, one neither arr declares, or none at all |
+| **200** | `wrong-app-shape` | `false` | the payload carries a key only the **other** arr sends (a Sonarr connection pointed at `/api/webhook/radarr`, or the reverse). Nothing is queued even where the endpoint's own key names a file |
+| **200** | `no-file-path` | `false` | a `Download` or `Rename` naming no file under the keys above |
+| **200** | `nothing-accepted` | `false` | every file was refused by a rule; `results` names the rule for each. A path outside every library root lands here, and usually means the path map is missing |
+| **200** | `paused` | `true` | holdfast is paused; nothing was enqueued |
+| **400** | `malformed-body` | `false` | the body is not a JSON object, or a key above carries the wrong JSON type |
+| **400** | `unreadable-body` | `false` | the body could not be read off the connection |
+| **400** | `wrong-app-shape` | `false` | a `Test` event carrying the other arr's shape, so the arr's own Test button reports the wrong URL |
+| **401** | - | - | a `webhook_token` is configured and the request did not carry it |
+| **403** | - | - | no `webhook_token` is configured, so the intake is disabled outright |
+| **413** | `body-too-large` | `false` | a body over 262144 bytes |
+| **413** | `too-many-paths` | `false` | the event names more than 256 files |
+| **503** | `submission-queue-full` | `true` | the queue could not take every accepted file. `results` names which were not taken |
+| **503** | `targeted-scanning-not-wired` | `false` | no submission queue is wired behind the route. Not reachable in the daemon |
+
+**Why nothing-queued is a 2xx here and a 4xx on `POST /api/scan`.** An arr treats any answer
+outside 2xx as a failed delivery, marks the connection unhealthy and backs off sending to it. An
+event holdfast does not act on, a file in a library holdfast is not pointed at, and a pause an
+operator chose are not failed deliveries, so each answers **200** with the rule and the reason and
+writes **one log record** (`webhook queued nothing`, carrying the arr, the event type, the rule and
+the status). A body that is not the arr's JSON, a full queue and a missing or wrong credential are
+answered as failures. While holdfast is paused, the file is found by the next whole-library scan
+after `POST /api/resume`; an arr does not send the event again.
+
+**The log** carries the arr's name, the event type, the rule and the counts at `info`, and the
+mapped paths at `debug`. It never carries the credential, and it never carries a title or any
+other payload field: an event type neither arr declares is logged as `unrecognised`, not echoed.
 
 ### `GET /api/health` - the library health sweep
 
@@ -808,4 +917,5 @@ response and no `holdfast export` line carries it, and the shapes documented abo
   an optional path map; all off by default): after a committed swap each enabled target is asked once to
   rescan the file's directory, and with Plex enabled a file being played is held until it stops. They add no
   HTTP endpoint, no response field and no metric: what they did is in the log. See
-  [docs/post-swap-hook.md](post-swap-hook.md).
+  [docs/post-swap-hook.md](post-swap-hook.md). The opposite direction - an arr telling holdfast about a file -
+  is the webhook intake above, which reads the same `sonarr_path_map` and `radarr_path_map` in reverse.

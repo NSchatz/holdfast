@@ -1,12 +1,12 @@
 # Secrets: a credential is reached by reference
 
-holdfast reads seven credential-bearing configuration keys, and none of them holds a
+holdfast reads eight credential-bearing configuration keys, and none of them holds a
 credential. Each holds a **reference** - the name of a secret and the kind of place it
 lives - and the value is resolved at the point of use. That is the whole design, and it
 exists because a secret an agent or an operator *read* is a secret in a transcript,
 whether or not it ever reached a file.
 
-The seven keys:
+The eight keys:
 
 | key | what the credential is | what happens when it is absent |
 |---|---|---|
@@ -17,6 +17,7 @@ The seven keys:
 | `radarr_api_key` | the Radarr API key, sent in the `X-Api-Key` header | Radarr is not asked to rescan after a swap |
 | `sonarr_api_key` | the Sonarr API key, sent in the `X-Api-Key` header | Sonarr is not asked to rescan after a swap |
 | `plex_token` | a Plex **admin** token, sent in the `X-Plex-Token` header | Plex is not asked for a partial scan after a swap, and no file is held for being played |
+| `webhook_token` | the credential a Sonarr or Radarr `Connect > Webhook` connection presents to `/api/webhook/sonarr` and `/api/webhook/radarr`, as a bearer token or as the password of HTTP Basic authentication | both intake endpoints answer 403 and queue nothing |
 
 `tautulli_url`, `radarr_url`, `sonarr_url`, `plex_url` and `server_addr` are addresses, not
 credentials. The three media-server addresses accept a scheme, a host and an optional base path
@@ -24,6 +25,13 @@ only: userinfo, a query or a fragment in one refuses to start, so a credential c
 into an address by mistake. Each of those three targets needs its address and its credential
 together, and one without the other refuses to start
 ([docs/post-swap-hook.md](post-swap-hook.md)).
+
+`webhook_token` is the one credential here that holdfast **receives** and an outside service
+holds. It is a key of its own so that the secret handed to an arr is the least privileged one
+there is: it opens the two intake endpoints and no other, the control token and the read token
+are not accepted on those endpoints, and a `webhook_token` written as the same reference as
+`server_auth_token` or `server_read_token` refuses to start. It is never read from a URL
+([docs/api-reference.md](api-reference.md#webhook-intake)).
 
 ## The reference forms
 
@@ -103,7 +111,7 @@ At **start**, before the library is walked and before a single frame is encoded:
 `holdfast validate` performs step 1 and not step 2: proving that a reference *resolves*
 means reaching into a secret store, which belongs to a run rather than to a configuration
 check. `run` and `serve` both do both - `run` consumes only the three media-server
-credentials itself, and still resolves all seven, because a configuration error an operator
+credentials itself, and still resolves all eight, because a configuration error an operator
 finds after a four-hour pass was reported too late.
 
 An **unresolvable reference is a configuration error and is not an outage**. A Tautulli
