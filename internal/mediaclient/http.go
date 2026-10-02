@@ -106,11 +106,19 @@ func newCaller(base, authHeader string, credential secret.Value, headers map[str
 // do sends one request under RequestTimeout and hands a 2xx body to read. Every way it can
 // fail comes back as a failure class; the error net/http returned is classified and dropped.
 func (c *caller) do(ctx context.Context, method, pathAndQuery string, body io.Reader, read func(io.Reader) error) *failure {
+	_, f := c.send(ctx, method, pathAndQuery, body, read)
+	return f
+}
+
+// send is do, and also answers the HTTP status the target gave: the 2xx of a success, the
+// status of a failure that had one, and 0 when the target never answered. The live check
+// (livecheck.go) records it; nothing else reads it.
+func (c *caller) send(ctx context.Context, method, pathAndQuery string, body io.Reader, read func(io.Reader) error) (int, *failure) {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, method, c.base+pathAndQuery, body)
 	if err != nil {
-		return &failure{class: ClassRefused}
+		return 0, &failure{class: ClassRefused}
 	}
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
@@ -123,25 +131,25 @@ func (c *caller) do(ctx context.Context, method, pathAndQuery string, body io.Re
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return &failure{class: classify(ctx, err)}
+		return 0, &failure{class: classify(ctx, err)}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		return &failure{class: ClassUnauthorized, status: resp.StatusCode}
+		return resp.StatusCode, &failure{class: ClassUnauthorized, status: resp.StatusCode}
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
-		return &failure{class: ClassStatus, status: resp.StatusCode}
+		return resp.StatusCode, &failure{class: ClassStatus, status: resp.StatusCode}
 	}
 	if read == nil {
-		return nil
+		return resp.StatusCode, nil
 	}
 	if err := read(io.LimitReader(resp.Body, maxBody)); err != nil {
 		if ctx.Err() != nil {
-			return &failure{class: classify(ctx, err)}
+			return resp.StatusCode, &failure{class: classify(ctx, err)}
 		}
-		return &failure{class: ClassUnparseable}
+		return resp.StatusCode, &failure{class: ClassUnparseable}
 	}
-	return nil
+	return resp.StatusCode, nil
 }
 
 // classify names a transport error without quoting it.

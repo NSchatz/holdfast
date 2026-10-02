@@ -81,36 +81,51 @@ type arrOwner struct {
 // The owner is the item whose path is the mapped directory or its NEAREST ancestor, on whole
 // path components. With no owner nothing is sent.
 func (a *Arr) Rescan(ctx context.Context, dir string) Result {
+	res, _ := a.rescan(ctx, dir, nil)
+	return res
+}
+
+// rescan is Rescan, and also answers what the command request itself came to, for the live
+// check: whether it was sent at all and the status it was answered with. readAnswer, when not
+// nil, is handed the body of a 2xx answer to the command.
+func (a *Arr) rescan(ctx context.Context, dir string, readAnswer func(io.Reader) error) (Result, commandOutcome) {
+	var out commandOutcome
 	mapped := a.paths.Map(dir)
 	res := Result{Dir: mapped, Attempted: "GET " + a.kind.listPath + " to find the " + a.kind.owner + " that owns the directory"}
 
 	var owners []arrOwner
-	if f := a.call.do(ctx, "GET", a.kind.listPath, nil, func(r io.Reader) error {
+	status, f := a.call.send(ctx, "GET", a.kind.listPath, nil, func(r io.Reader) error {
 		var err error
 		owners, err = decodeOwners(r)
 		return err
-	}); f != nil {
+	})
+	out.lookup = probeOf(status, f)
+	if f != nil {
 		res.Failure = f
-		return res
+		return res, out
 	}
 
 	id, found := nearestOwner(owners, mapped)
 	if !found {
 		res.NoOwner = true
-		return res
+		return res, out
 	}
+	out.ownerFound = true
 	res.Attempted = fmt.Sprintf("POST /api/v3/command %s for %s %d", a.kind.command, a.kind.owner, id)
 	body, err := rescanCommand(a.kind, id)
 	if err != nil {
 		res.Failure = &failure{class: ClassRefused}
-		return res
+		return res, out
 	}
-	if f := a.call.do(ctx, "POST", "/api/v3/command", bytes.NewReader(body), nil); f != nil {
+	out.requested = true
+	status, f = a.call.send(ctx, "POST", "/api/v3/command", bytes.NewReader(body), readAnswer)
+	out.status = status
+	if f != nil {
 		res.Failure = f
-		return res
+		return res, out
 	}
 	res.Sent = true
-	return res
+	return res, out
 }
 
 // errNoOwnerID is why rescanCommand refuses: the command would name no owner.

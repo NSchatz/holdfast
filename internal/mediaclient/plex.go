@@ -76,6 +76,7 @@ type plexSections struct {
 	MediaContainer *struct {
 		Directory []struct {
 			Key      json.RawMessage `json:"key"`
+			Type     string          `json:"type"`
 			Location []struct {
 				Path string `json:"path"`
 			} `json:"Location"`
@@ -87,11 +88,19 @@ type plexSections struct {
 // the one section whose location owns the mapped directory, restricted to that directory. It
 // never requests a refresh with no path, which would rescan a whole section.
 func (p *Plex) Rescan(ctx context.Context, dir string) Result {
+	res, _ := p.rescan(ctx, dir)
+	return res
+}
+
+// rescan is Rescan, and also answers what the refresh request itself came to, for the live
+// check: whether it was sent at all and the status it was answered with.
+func (p *Plex) rescan(ctx context.Context, dir string) (Result, commandOutcome) {
+	var out commandOutcome
 	mapped := p.paths.Map(dir)
 	res := Result{Dir: mapped, Attempted: "GET /library/sections/all to find the section that owns the directory"}
 
 	var sections plexSections
-	if f := p.call.do(ctx, "GET", "/library/sections/all", nil, func(r io.Reader) error {
+	status, f := p.call.send(ctx, "GET", "/library/sections/all", nil, func(r io.Reader) error {
 		if err := decodeObject(r, &sections); err != nil {
 			return err
 		}
@@ -99,27 +108,33 @@ func (p *Plex) Rescan(ctx context.Context, dir string) Result {
 			return errNoContainer
 		}
 		return nil
-	}); f != nil {
+	})
+	out.lookup = probeOf(status, f)
+	if f != nil {
 		res.Failure = f
-		return res
+		return res, out
 	}
 	key, found := owningSection(sections, mapped)
 	if !found {
 		res.NoOwner = true
-		return res
+		return res, out
 	}
+	out.ownerFound = true
 	res.Attempted = "POST /library/sections/" + key + "/refresh restricted to the directory"
 	target, err := refreshTarget(key, mapped)
 	if err != nil {
 		res.Failure = &failure{class: ClassRefused}
-		return res
+		return res, out
 	}
-	if f := p.call.do(ctx, "POST", target, nil, nil); f != nil {
+	out.requested = true
+	status, f = p.call.send(ctx, "POST", target, nil, nil)
+	out.status = status
+	if f != nil {
 		res.Failure = f
-		return res
+		return res, out
 	}
 	res.Sent = true
-	return res
+	return res, out
 }
 
 // errUnspecificRefresh is why refreshTarget refuses: the request would not be a partial scan.
