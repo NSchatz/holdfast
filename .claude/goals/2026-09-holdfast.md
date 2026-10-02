@@ -84,10 +84,11 @@ owner's port, 2026-10-02).
   - The owner's private homelab repository (the deployment and the Bash predecessor; goal 2's
     ledger names it and the PR goal 2 opened there) - **PRs only, never merged by an agent**
     (T32). Clone it to `/cache/wt/homelab/holdfast-g<n>` only when a goal opens its PR.
-  - The owner's other private repositories: **never touched**, by the owner's standing rule,
-    stricter than T32's read-only clone of the umbrella's SDD specs; the approved P1's rows are
-    served from `proposal-triage.md` and this repo. The one exception is the owner's queue
-    (§0.6), filed only through the goals CLI.
+  - The owner's private umbrella repository (the SDD specs) - **read only** (T32): never branched,
+    PR'd or pushed. Goals 10-15 need no clone of it: the approved P1's rows are served from
+    `proposal-triage.md` and this repo. This public brief names no private repository (spec
+    contract §6, which since the spec pin wins over the v1 review's L9); the owner's container
+    holds the checkouts. The owner's queue (§0.6) is filed only through the goals CLI.
   - Every other repo: never touched.
 - **First actions** are the spec's (`contract.md` §1), plus: read the `CHECKPOINT-T.approved`
   amendments (goals 2-15), the approved P1's rows for this goal and the owner's open items
