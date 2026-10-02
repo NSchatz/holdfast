@@ -1,7 +1,7 @@
 package engine
 
 // The DATA-SAFETY proof for the transcode engine — a Go port of the bash suite
-// homelab/scripts/test-transcoder.sh (cases 1–17 plus the HDR/source-property cases
+// test-transcoder.sh of its private predecessor (cases 1-17 plus the HDR/source-property cases
 // 18–22 + (a)-(d), TRANSCODE-3). It drives the engine over REAL ffmpeg fixtures and
 // asserts the no-loss contract holds on every unhappy path. It is anti-advisory-only:
 // it exercises the code, reds on a regression, and FAILS LOUD (never skips) if
