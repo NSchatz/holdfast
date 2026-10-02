@@ -86,7 +86,13 @@ build:
 # which the clock is moved rather than waited on - on the gate of 52f96ed (goal 2 of the
 # program, PR #102). It is raised HERE and never by an environment override, so CI and a
 # release run the identical gate.
-TEST_TIMEOUT ?= 45m
+#
+# Raised from 45m to 60m when the baseline `make check` of goal 10 of the program, at
+# 6e1058f under -race with GOFLAGS=-p=4 on a host shared with other work, measured
+# internal/engine at 2283.9 s - 84.6% of 45m, past the same 80% line. Goal 9's gates had
+# measured 2036.9 s to 2176.5 s (75% to 81%) on the same tree a day earlier, so the spread
+# is the host's load and not a new fixture: the clock moves, no proof does.
+TEST_TIMEOUT ?= 60m
 
 # The packages `test` runs: every package unless a caller narrows it (only tier-fast does).
 TEST_PKGS ?= ./...
