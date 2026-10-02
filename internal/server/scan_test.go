@@ -784,9 +784,15 @@ func TestScanEndpoint_AddsNoRouteBeyondScan(t *testing.T) {
 		// restores an original or resolves a parked incident.
 		"POST /api/webhook/sonarr": true,
 		"POST /api/webhook/radarr": true,
+		// The same two handlers under PUT, the other method an arr's connection sends.
+		"PUT /api/webhook/sonarr": true,
+		"PUT /api/webhook/radarr": true,
 	}
 	for _, r := range served {
-		if !strings.HasPrefix(r, "GET /api/") && !strings.HasPrefix(r, "POST /api/") {
+		// EVERY method under /api/ is the surface this pins, so a route added under PUT,
+		// PATCH or any other method reds exactly as one under GET or POST does.
+		_, route, _ := strings.Cut(r, " ")
+		if !strings.HasPrefix(route, "/api/") {
 			continue // the root page and /metrics are not the API surface
 		}
 		if !want[r] {

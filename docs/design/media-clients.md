@@ -155,14 +155,18 @@ tells holdfast, and the code is `internal/server/webhook.go`.
 **One credential, one purpose.** The intake has a key of its own, `webhook_token`, and three
 properties follow from that choice:
 
-- It opens `/api/webhook/sonarr` and `/api/webhook/radarr` and no other route. The secret an arr
-  holds can queue a file that lies inside a configured library root, and nothing else: it cannot
-  pause, scan, withhold a path or read the ledger.
+- It authorises `/api/webhook/sonarr` and `/api/webhook/radarr` and nothing else. No other gate
+  compares against it, so the secret an arr holds can queue a file that lies inside a configured
+  library root and cannot pause, scan or withhold a path. On a control endpoint it is answered
+  401, or 403 while no control token is configured; on a read endpoint 401 while
+  `server_read_token` is set. While that key is unset the reads are open to every caller, as they
+  are without this key: the webhook token is not what opens them.
 - No other credential opens the intake. Accepting `server_auth_token` there would make the control
   token the convenient thing to paste into an arr, and the control token would then live in a
-  second service's database. It is refused, so there is no reason to hand it over. A
-  `webhook_token` written as the same reference as either server token refuses to start for the
-  same reason.
+  second service's database. It is refused, so there is no reason to hand it over. For the
+  same reason a `webhook_token` written as the same reference as either server token refuses to
+  start, and `serve` refuses one that resolves to the same value as either by another reference
+  (compared in constant time, naming the keys and no value).
 - It arrives in a header only. An arr's Webhook connection can send HTTP Basic credentials or
   custom headers, so the token is accepted as the Basic password (any username) or as a bearer
   token. A URL form was not built: a query string or a path segment reaches access logs and
@@ -180,6 +184,15 @@ stays answered.
 `sonarr_path_map` and `radarr_path_map` already state the relation for the rescan clients, so the
 intake reads the same maps in reverse; a path no entry matches is judged as it stands, and a path
 that lands outside every root is refused by name.
+
+**A path is never cleaned by spelling.** Rewriting a prefix is lexical; resolving `..` is not,
+because the filesystem resolves it through whatever the segment before it really is. With a link
+inside a root that points out of it, `/tv/link/../Show/x.mkv` names a file beside the link's
+target, and a lexical clean would turn it into `/tv/Show/x.mkv`, a file inside the root:
+`POST /api/scan` refuses that string and the intake would have queued it. So an absolute path
+that is not already in its clean form is refused per file (`path-not-clean`) without being mapped,
+cleaned or judged, and a clean one reaches the engine's judge exactly as `POST /api/scan` hands
+it one. Property names, the nested `path` included, are matched exactly.
 
 **A shape that is not recognised queues nothing.** Property names are matched exactly as the arr
 serialises them. A `Download` is read for `episodeFile` or `episodeFiles` (Sonarr) or `movieFile`

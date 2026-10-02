@@ -114,6 +114,15 @@ func (h *webhookHarness) want(t *testing.T, rel string) string {
 	return p
 }
 
+func mustMarshal(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 func hookFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("testdata", "webhook", name))
@@ -635,6 +644,14 @@ func TestWebhook_UnknownEventOrMissingPathQueuesNothing(t *testing.T) {
 			"nothing-accepted", "Download", 1},
 		{"a file with a null path", "sonarr", `{"eventType":"Download","episodeFile":{"path":null}}`,
 			"nothing-accepted", "Download", 1},
+		// The nested key is matched exactly, as every top-level key is: PATH and Path are not
+		// the key an arr sends, so the entry carries no path even though the file exists.
+		{"a file whose path key is PATH", "sonarr", `{"eventType":"Download","episodeFile":{"PATH":"` + good + `"}}`,
+			"nothing-accepted", "Download", 1},
+		{"a file whose path key is Path", "radarr", `{"eventType":"Download","movieFile":{"Path":"/` + hookFilm + `"}}`,
+			"nothing-accepted", "Download", 1},
+		{"a file list whose path keys are PATH", "sonarr", `{"eventType":"Rename","renamedEpisodeFiles":[{"PATH":"` + good + `"}]}`,
+			"nothing-accepted", "Rename", 1},
 		{"a file with an empty path", "radarr", `{"eventType":"Download","movieFile":{"path":""}}`,
 			"nothing-accepted", "Download", 1},
 		{"a relative path", "sonarr", `{"eventType":"Download","episodeFile":{"path":"` + hookEp1 + `"}}`,
@@ -675,14 +692,17 @@ func TestWebhook_UnknownEventOrMissingPathQueuesNothing(t *testing.T) {
 	h.file(t, "tv/notes.txt")
 	for payload, want := range map[string]string{
 		`{"eventType":"Download","episodeFile":{"relativePath":"x.mkv"}}`:                     "no-file-path",
+		`{"eventType":"Download","episodeFile":{"PATH":"/` + hookEp1 + `"}}`:                  "no-file-path",
 		`{"eventType":"Download","episodeFile":{"path":""}}`:                                  "no-file-path",
 		`{"eventType":"Download","episodeFile":{"path":"` + hookEp1 + `"}}`:                   engine.RuleNotAbsolute,
 		`{"eventType":"Download","episodeFile":{"path":"/tv/Synthetic Series/absent.mkv"}}`:   engine.RuleNotARegularFile,
 		`{"eventType":"Rename","renamedEpisodeFiles":[{"path":"/tv/notes.txt"}]}`:             engine.RuleNotAVideoFile,
 		`{"eventType":"Download","episodeFile":{"path":"/tv/Synthetic Series/a\tb.mkv"}}`:     engine.RuleUnsupportedCharacters,
 		`{"eventType":"Download","episodeFile":{"path":"/tv/Synthetic Series/Season 01"}}`:    engine.RuleNotARegularFile,
-		`{"eventType":"Download","episodeFile":{"path":"/tv/Synthetic Series/Season 01/"}}`:   engine.RuleNotARegularFile,
-		`{"eventType":"Download","episodeFile":{"path":"/tv/Synthetic Series/../notes.txt"}}`: engine.RuleNotAVideoFile,
+		`{"eventType":"Download","episodeFile":{"path":"/tv/Synthetic Series/Season 01/"}}`:   "path-not-clean",
+		`{"eventType":"Download","episodeFile":{"path":"/tv/Synthetic Series/../notes.txt"}}`: "path-not-clean",
+		`{"eventType":"Download","episodeFile":{"path":"/tv/./Synthetic Series/x.mkv"}}`:      "path-not-clean",
+		`{"eventType":"Download","episodeFile":{"path":"/tv//Synthetic Series/x.mkv"}}`:       "path-not-clean",
 	} {
 		a := h.post(t, "sonarr", []byte(payload))
 		if a.code != http.StatusOK || len(a.body.Results) != 1 || a.body.Results[0].Rule != want {
@@ -705,6 +725,10 @@ func TestWebhook_MalformedOrOversizedBodyIsRefused(t *testing.T) {
 	good := "/" + hookEp1
 	for name, payload := range map[string]string{
 		"not JSON":                     `not json`,
+		"a null body":                  `null`,
+		"a null body, padded":          " null\n",
+		"a number":                     `7`,
+		"a null entry in a file list":  `{"eventType":"Download","episodeFiles":[null]}`,
 		"an empty body":                ``,
 		"truncated JSON":               `{"eventType":"Download","episodeFile":{"path":"` + good,
 		"an array":                     `[{"eventType":"Download"}]`,
@@ -841,18 +865,30 @@ func TestWebhook_PathIsMappedBackThroughThePathMap(t *testing.T) {
 		// A path written in HOLDFAST's view of a mapped prefix is not the arr's view, and
 		// the forward direction is never applied to it: from /tv to root/tv, never back.
 		m := h.srv.cfg.SonarrPathMap
-		if got := mapWebhookPath(m, "/"+hookEp1); got != filepath.Join(h.root, hookEp1) {
-			t.Errorf("mapWebhookPath = %q, want the path under the root", got)
+		if got, ok := mapWebhookPath(m, "/"+hookEp1); !ok || got != filepath.Join(h.root, hookEp1) {
+			t.Errorf("mapWebhookPath = %q, %v, want the path under the root", got, ok)
 		}
-		if got := mapWebhookPath(m, filepath.Join(h.root, hookEp1)); got != filepath.Join(h.root, hookEp1) {
-			t.Errorf("a holdfast-view path was mapped forward to %q", got)
+		if got, ok := mapWebhookPath(m, filepath.Join(h.root, hookEp1)); !ok || got != filepath.Join(h.root, hookEp1) {
+			t.Errorf("a holdfast-view path was mapped forward to %q (ok=%v)", got, ok)
 		}
-		if got := mapWebhookPath(m, "/tv/a/../b.mkv"); got != filepath.Join(h.root, "tv/b.mkv") {
-			t.Errorf("mapWebhookPath = %q, want the cleaned path under the root", got)
+		// A path that is not absolute is handed on untouched, for the engine to refuse.
+		for _, sent := range []string{"", "tv/x.mkv", "./tv/x.mkv", "../tv/x.mkv", `C:\tv\x.mkv`, " /tv/x.mkv"} {
+			if got, ok := mapWebhookPath(m, sent); !ok || got != sent {
+				t.Errorf("mapWebhookPath(%q) = %q, %v, want it untouched", sent, got, ok)
+			}
 		}
-		for _, sent := range []string{"", "tv/x.mkv", "./tv/x.mkv", `C:\tv\x.mkv`, " /tv/x.mkv"} {
-			if got := mapWebhookPath(m, sent); got != sent {
-				t.Errorf("mapWebhookPath(%q) = %q, want it untouched", sent, got)
+		// An absolute path that is not clean is never mapped and never cleaned.
+		for _, sent := range []string{
+			"/tv/a/../b.mkv", "/tv/../b.mkv", "/tv/./b.mkv", "/tv//b.mkv", "//tv/b.mkv", "/tv/b.mkv/", "/tv/..", "/.", "/tv/b.mkv/.",
+		} {
+			if got, ok := mapWebhookPath(m, sent); ok || got != "" {
+				t.Errorf("mapWebhookPath(%q) = %q, %v, want it refused", sent, got, ok)
+			}
+		}
+		// The root itself and an ordinary clean path are clean.
+		for _, sent := range []string{"/", "/tv", "/other/b.mkv"} {
+			if _, ok := mapWebhookPath(m, sent); !ok {
+				t.Errorf("mapWebhookPath(%q) refused a clean path", sent)
 			}
 		}
 	})
@@ -881,10 +917,9 @@ func TestWebhook_PathOutsideEveryRootIsRefused(t *testing.T) {
 		return b
 	}
 	for name, sent := range map[string]string{
-		"an absolute path outside the roots":     outsideFile,
-		"a mapped path that lands outside":       "/elsewhere/Synthetic Series - S01E09.mkv",
-		"a path that climbs out of a mapped dir": "/tv/.." + outsideFile,
-		"a link inside the root pointing out":    "/tv/link.mkv",
+		"an absolute path outside the roots":  outsideFile,
+		"a mapped path that lands outside":    "/elsewhere/Synthetic Series - S01E09.mkv",
+		"a link inside the root pointing out": "/tv/link.mkv",
 	} {
 		t.Run(name, func(t *testing.T) {
 			before := h.skipRecords()
@@ -902,6 +937,45 @@ func TestWebhook_PathOutsideEveryRootIsRefused(t *testing.T) {
 			}
 		})
 	}
+
+	// A path that is not clean is never cleaned by spelling. /tv/out/.. is NOT /tv: "out" is a
+	// link to a directory outside the root, so the filesystem resolves the path through the
+	// link's target, and POST /api/scan refuses the same string for that reason. The intake
+	// refuses it without mapping, resolving or judging it, where a lexical clean would have
+	// turned it into a file inside the root and queued it.
+	if err := os.Symlink(outside, filepath.Join(h.root, "tv", "out")); err != nil {
+		t.Fatal(err)
+	}
+	for name, sent := range map[string]string{
+		"through a link out of the root and back by ..": "/tv/out/../Synthetic Series/Season 01/Synthetic Series - S01E01.mkv",
+		"climbing out of a mapped directory":            "/tv/.." + outsideFile,
+		"a . segment":                                   "/tv/./Synthetic Series/Season 01/Synthetic Series - S01E01.mkv",
+		"a doubled slash":                               "/tv//Synthetic Series/Season 01/Synthetic Series - S01E01.mkv",
+	} {
+		t.Run(name, func(t *testing.T) {
+			before := h.skipRecords()
+			a := h.post(t, "sonarr", download(sent))
+			h.assertQueuedNothing(t, a, http.StatusOK, "nothing-accepted", before)
+			if len(a.body.Results) != 1 {
+				t.Fatalf("%d results, want 1: %s", len(a.body.Results), a.raw)
+			}
+			res := a.body.Results[0]
+			if res.Rule != "path-not-clean" || res.Path != sent || res.Mapped != "" || res.Detail == "" || res.Retryable {
+				t.Errorf("the refusal is not the documented one: %+v", res)
+			}
+		})
+	}
+	// The same string in holdfast's own view is refused by POST /api/scan too: the two
+	// doors give one verdict on a path through that link.
+	viaLink := filepath.Join(h.root, "tv") + "/out/../Synthetic Series/Season 01/Synthetic Series - S01E01.mkv"
+	scanReq := httptest.NewRequest(http.MethodPost, "/api/scan", bytes.NewReader(mustMarshal(t, map[string]any{"paths": []string{viaLink}})))
+	bearer(hookControlTok)(scanReq)
+	scanResp := h.serve(scanReq)
+	scanBody, _ := io.ReadAll(scanResp.Body)
+	if scanResp.StatusCode != http.StatusBadRequest || !strings.Contains(string(scanBody), `"accepted":0`) {
+		t.Errorf("POST /api/scan took %s: %d %s", viaLink, scanResp.StatusCode, scanBody)
+	}
+	h.assertQueued(t)
 
 	// One event naming a file inside and a file outside: the inside one is queued, the
 	// outside one is refused in the per-path report, and the answer is the accepting one.

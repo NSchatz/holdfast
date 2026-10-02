@@ -353,11 +353,21 @@ logs, so there is no such form. With no `webhook_token` configured both endpoint
 and queue nothing. With one configured, a request without it answers **401** with the body
 `unauthorized` and a `WWW-Authenticate` challenge for each scheme, as the other gates do.
 
-The credential is **least privilege**: it opens these two endpoints and no other, so the secret
-an arr holds can queue a file inside a configured library root and do nothing else. It is refused
-(401) on every control and read endpoint. The reverse holds too: `server_auth_token` and
-`server_read_token` are **not** accepted here (401), so the arr is never handed the control token,
-and a `webhook_token` written as the same reference as either of them refuses to start.
+The credential is **least privilege**: it authorises these two endpoints and nothing else, so the
+secret an arr holds can queue a file inside a configured library root and do nothing more. No
+other gate compares against it, so presenting it elsewhere is the same as presenting no credential
+that gate knows:
+
+- on a **control** endpoint it is answered **401** while `server_auth_token` is configured, and
+  **403** while it is not (control is then disabled for every caller);
+- on a **read** endpoint it is answered **401** while `server_read_token` is configured. While
+  that key is unset the reads are open to every caller, with or without a credential, exactly as
+  they are without this key: the webhook token neither opens nor closes them.
+
+The reverse holds too: `server_auth_token` and `server_read_token` are **not** accepted here
+(401), so there is no reason to hand an arr the control token. A `webhook_token` written as the
+same reference as either of them refuses to start, and so does `serve` when it resolves to the
+same value as either by a different reference.
 
 **What it reads.** Property names are matched exactly as the arr serialises them (camelCase, the
 event type capitalised), from the payload classes at Sonarr `v4.0.20.3014` and Radarr
@@ -392,7 +402,13 @@ event type capitalised), from the payload classes at Sonarr `v4.0.20.3014` and R
 `path` is the path as the arr sent it; `mapped` is that path in holdfast's view after
 `sonarr_path_map` or `radarr_path_map` was applied in reverse, and it is the path every rule was
 answered against; `resolved` is the path the pipeline will act on. A per-file `rule` is one of
-`POST /api/scan`'s tokens above, or `no-file-path` for a file entry that carries no path.
+`POST /api/scan`'s tokens above, `no-file-path` for a file entry that carries no `path` (the key
+is matched exactly, like every other), or `path-not-clean` for an absolute path that is not in its
+clean form - a `.` or `..` segment, a doubled slash or a trailing slash. Such a path is not
+mapped, not cleaned and not judged: a path map rewrites a prefix by spelling, and `..` is resolved
+by the filesystem through whatever the segment before it really is, so cleaning one by spelling
+could name a different file from the one `POST /api/scan` would judge for the same string. An arr
+builds its paths by joining a folder and a relative path and sends none of these.
 `event_type` is the event type the payload carried where it is one either arr declares, and
 `unrecognised` otherwise. When nothing was queued, `rule` and `reason` at the top level say why.
 
@@ -407,7 +423,7 @@ answered against; `resolved` is the path the pipeline will act on. A per-file `r
 | **200** | `no-file-path` | `false` | a `Download` or `Rename` naming no file under the keys above |
 | **200** | `nothing-accepted` | `false` | every file was refused by a rule; `results` names the rule for each. A path outside every library root lands here, and usually means the path map is missing |
 | **200** | `paused` | `true` | holdfast is paused; nothing was enqueued |
-| **400** | `malformed-body` | `false` | the body is not a JSON object, or a key above carries the wrong JSON type |
+| **400** | `malformed-body` | `false` | the body is not a JSON object (`null` included), or a key above carries the wrong JSON type |
 | **400** | `unreadable-body` | `false` | the body could not be read off the connection |
 | **400** | `wrong-app-shape` | `false` | a `Test` event carrying the other arr's shape, so the arr's own Test button reports the wrong URL |
 | **401** | - | - | a `webhook_token` is configured and the request did not carry it |
@@ -426,9 +442,10 @@ the status). A body that is not the arr's JSON, a full queue and a missing or wr
 answered as failures. While holdfast is paused, the file is found by the next whole-library scan
 after `POST /api/resume`; an arr does not send the event again.
 
-**The log** carries the arr's name, the event type, the rule and the counts at `info`, and the
-mapped paths at `debug`. It never carries the credential, and it never carries a title or any
-other payload field: an event type neither arr declares is logged as `unrecognised`, not echoed.
+**The log** carries the arr's name, the event type, the rule and the counts at `info`. The mapped
+paths are logged at `debug` only, and a file name can spell a title, so a title can appear there
+and nowhere else. The log never carries the credential and never any other payload field: an event
+type neither arr declares is logged as `unrecognised`, not echoed.
 
 ### `GET /api/health` - the library health sweep
 

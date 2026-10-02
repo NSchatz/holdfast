@@ -46,6 +46,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path"
 	"strings"
 
 	"github.com/NSchatz/holdfast/internal/config"
@@ -130,6 +131,12 @@ const (
 	// ruleWebhookNoPath is a Download or Rename that names no file, and each file entry that
 	// carries no path.
 	ruleWebhookNoPath = "no-file-path"
+	// ruleWebhookNotClean is an absolute path that is not in its clean form: a `.` or `..`
+	// segment, a doubled slash or a trailing slash. Mapping a prefix is a lexical operation
+	// and resolving `..` is not - `/tv/link/../x` names whatever the link's target's parent
+	// holds - so such a path is neither mapped nor cleaned nor judged. An arr builds a path
+	// by joining a folder and a relative path and sends none of these.
+	ruleWebhookNotClean = "path-not-clean"
 	// ruleWebhookNothingAccepted is a Download or Rename whose every path was refused by a
 	// path rule. The per-path results carry the rule each one broke.
 	ruleWebhookNothingAccepted = "nothing-accepted"
@@ -179,9 +186,9 @@ type webhookResponse struct {
 // arr's Webhook connection can send: its Username and Password fields, or a custom header.
 // Nothing is read from the URL: a query string or a path segment reaches access logs.
 //
-// The control token and the read token are NOT accepted here, and this credential is
-// accepted nowhere else: the secret an arr holds can queue a file inside a library root and
-// do nothing more. Both comparisons are constant time and both always run. The credential
+// The control token and the read token are NOT accepted here, and this credential
+// authorises nothing anywhere else - the other gates compare against their own tokens only -
+// so the secret an arr holds can queue a file inside a library root and do nothing more. Both comparisons are constant time and both always run. The credential
 // never reaches a response body, a header or a log.
 func (s *Server) requireWebhookToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -232,6 +239,10 @@ func parseWebhook(app webhookApp, raw []byte) (webhookEvent, error) {
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return webhookEvent{}, fmt.Errorf("body must be the JSON object a %s Webhook connection sends: %w", app.name, err)
 	}
+	if obj == nil {
+		// JSON null decodes into a map without an error, and it is not an object.
+		return webhookEvent{}, fmt.Errorf("body must be the JSON object a %s Webhook connection sends: it is null", app.name)
+	}
 	present := func(key string) bool {
 		v, ok := obj[key]
 		return ok && string(v) != "null"
@@ -263,15 +274,24 @@ func parseWebhook(app webhookApp, raw []byte) (webhookEvent, error) {
 	case webhookEventRename:
 		lists = []string{app.renamed}
 	}
-	type entry struct {
-		Path *string `json:"path"`
-	}
-	add := func(e entry) {
-		if e.Path == nil || *e.Path == "" {
-			ev.files = append(ev.files, webhookFile{})
-			return
+	// An entry is read as a map and its "path" taken by that exact name: a struct field
+	// would match PATH and Path too, and every other key here is matched exactly.
+	type entry map[string]json.RawMessage
+	add := func(key string, e entry) error {
+		if e == nil {
+			return fmt.Errorf("%q carries null where a file object belongs", key)
 		}
-		ev.files = append(ev.files, webhookFile{path: *e.Path, hasPath: true})
+		rawPath, ok := e["path"]
+		if !ok || string(rawPath) == "null" {
+			ev.files = append(ev.files, webhookFile{})
+			return nil
+		}
+		var p string
+		if err := json.Unmarshal(rawPath, &p); err != nil {
+			return fmt.Errorf("%q carries a \"path\" that is not a string: %w", key, err)
+		}
+		ev.files = append(ev.files, webhookFile{path: p, hasPath: p != ""})
+		return nil
 	}
 	for _, key := range single {
 		if !present(key) {
@@ -281,7 +301,9 @@ func parseWebhook(app webhookApp, raw []byte) (webhookEvent, error) {
 		if err := json.Unmarshal(obj[key], &e); err != nil {
 			return webhookEvent{}, fmt.Errorf("%q must be an object carrying a string \"path\": %w", key, err)
 		}
-		add(e)
+		if err := add(key, e); err != nil {
+			return webhookEvent{}, err
+		}
 	}
 	for _, key := range lists {
 		if key == "" || !present(key) {
@@ -292,21 +314,32 @@ func parseWebhook(app webhookApp, raw []byte) (webhookEvent, error) {
 			return webhookEvent{}, fmt.Errorf("%q must be an array of objects carrying a string \"path\": %w", key, err)
 		}
 		for _, e := range es {
-			add(e)
+			if err := add(key, e); err != nil {
+				return webhookEvent{}, err
+			}
 		}
 	}
 	return ev, nil
 }
 
-// mapWebhookPath translates one path from the arr's view to holdfast's. An absolute path is
-// mapped back through the arr's path map (cleaned, and unchanged where no entry matches). A
-// path that is not absolute is handed on exactly as it was sent, so the engine's own rule
-// refuses it by name: a relative path is never resolved against anything.
-func mapWebhookPath(m config.PathMap, sent string) string {
+// mapWebhookPath translates one path from the arr's view to holdfast's, and reports false
+// for a path it will not hand on at all.
+//
+// An absolute path already in its clean form is mapped back through the arr's path map
+// (unchanged where no entry matches). The map never cleans anything here: an absolute path
+// that is NOT clean is refused (ok false), because cleaning it would resolve a `..` by
+// spelling where the filesystem resolves it through whatever the segment before it really
+// is, and the engine would then be judging a different file from the one POST /api/scan
+// judges for the same string. A path that is not absolute is handed on exactly as it was
+// sent, so the engine's own rule refuses it by name.
+func mapWebhookPath(m config.PathMap, sent string) (mapped string, ok bool) {
 	if !strings.HasPrefix(sent, "/") {
-		return sent
+		return sent, true
 	}
-	return m.Reverse(sent)
+	if path.Clean(sent) != sent {
+		return "", false
+	}
+	return m.Reverse(sent), true
 }
 
 // handleWebhook is the intake for one arr. It answers BEFORE anything is processed, as
@@ -410,18 +443,30 @@ func (s *Server) handleWebhook(app webhookApp) http.HandlerFunc {
 		// step. An entry with no path never reaches it.
 		pathMap := app.pathMap(s.cfg)
 		mapped := make([]string, 0, len(ev.files))
-		for _, f := range ev.files {
-			if f.hasPath {
-				mapped = append(mapped, mapWebhookPath(pathMap, f.path))
+		clean := make([]bool, len(ev.files))
+		for i, f := range ev.files {
+			if !f.hasPath {
+				continue
+			}
+			if m, ok := mapWebhookPath(pathMap, f.path); ok {
+				clean[i] = true
+				mapped = append(mapped, m)
 			}
 		}
 		admitted, full := s.admit(mapped)
 
 		next := 0
-		for _, f := range ev.files {
+		for i, f := range ev.files {
 			if !f.hasPath {
 				resp.Results = append(resp.Results, webhookResult{Rule: ruleWebhookNoPath,
 					Detail: "this file entry carries no path"})
+				resp.Rejected++
+				continue
+			}
+			if !clean[i] {
+				resp.Results = append(resp.Results, webhookResult{Path: f.path, Rule: ruleWebhookNotClean,
+					Detail: "the path is not in its clean form (a . or .. segment, a doubled or a trailing " +
+						"slash); it was not mapped, not resolved and not judged"})
 				resp.Rejected++
 				continue
 			}
@@ -439,7 +484,8 @@ func (s *Server) handleWebhook(app webhookApp) http.HandlerFunc {
 		}
 		// The paths, in holdfast's view, at debug: a refusal under a path rule is most often
 		// a path map that is missing or wrong, and this is where an operator sees what the
-		// map produced. No title and no other payload field is ever logged.
+		// map produced. A file name may spell a title, which is why these are at debug and
+		// nowhere else; no other payload field is ever logged.
 		s.log.Debug("webhook paths", "app", app.name, "event_type", ev.eventType, "paths", mapped)
 
 		switch {

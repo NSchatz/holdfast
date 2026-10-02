@@ -1053,7 +1053,7 @@ dry_run: false
 #                              #     webhook_token: file:/run/secrets/holdfast-webhook-token
 #                              #   The arr sends it as the Password of its Webhook
 #                              #   connection (HTTP Basic, any username) or as an
-#                              #   `Authorization: Bearer` header. It opens those two
+#                              #   `Authorization: Bearer` header. It authorises those two
 #                              #   endpoints and NOTHING else, and server_auth_token is
 #                              #   not accepted on them: it must be a secret of its own
 #                              #   (the same reference as server_auth_token or

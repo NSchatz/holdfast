@@ -28,9 +28,10 @@ together, and one without the other refuses to start
 
 `webhook_token` is the one credential here that holdfast **receives** and an outside service
 holds. It is a key of its own so that the secret handed to an arr is the least privileged one
-there is: it opens the two intake endpoints and no other, the control token and the read token
-are not accepted on those endpoints, and a `webhook_token` written as the same reference as
-`server_auth_token` or `server_read_token` refuses to start. It is never read from a URL
+there is: it authorises the two intake endpoints and nothing else, the control token and the read
+token are not accepted on those endpoints, a `webhook_token` written as the same reference as
+`server_auth_token` or `server_read_token` refuses to start, and `serve` refuses one that resolves
+to the same value as either. It is never read from a URL
 ([docs/api-reference.md](api-reference.md#webhook-intake)).
 
 ## The reference forms

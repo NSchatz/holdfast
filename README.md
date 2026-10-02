@@ -383,7 +383,7 @@ the mutating endpoints require a bearer token, reached **by reference**
 (`server_auth_token: file:/run/secrets/holdfast-token` - a literal token there, or in
 `HOLDFAST_SERVER_AUTH_TOKEN`, refuses to start; see [docs/secrets.md](docs/secrets.md)) and
 are **disabled entirely when no token is configured**; the Sonarr/Radarr webhook intake takes a
-third credential of its own (`webhook_token`) that opens nothing else, and is likewise disabled
+third credential of its own (`webhook_token`) that authorises nothing else, and is likewise disabled
 without it; pause only ever
 *delays* work - it never interrupts an encode or the atomic swap. **Known limitation:** three
 single-value tokens and no per-user accounts; the queue/history endpoints are capped at the most recent rows, not the whole ledger -

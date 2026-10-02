@@ -1307,6 +1307,12 @@ func runServer(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	if code != 0 {
 		return code
 	}
+	// The intake's credential must not be a server token by another route (the reference
+	// check is config.Validate's; this is the resolved half). Refused before anything opens.
+	if err := checkWebhookTokenDistinct(secrets); err != nil {
+		fmt.Fprintf(stderr, "holdfast: refusing to start: %v\n", err)
+		return 1
+	}
 
 	// The daemon serves the WHOLE library - it scans on an interval and takes submissions
 	// for any configured root - so its classification is never narrowed.

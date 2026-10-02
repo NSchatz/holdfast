@@ -367,10 +367,12 @@ secrets:
 Like every credential it is a **reference** (`file:` or `cmd:`), and a literal value in the file
 or in `HOLDFAST_WEBHOOK_TOKEN` refuses to start ([docs/secrets.md](secrets.md)). It is **not**
 `server_auth_token`, deliberately: the secret an arr holds can queue a file inside a configured
-library root and do nothing else - it cannot pause holdfast, start a scan, withhold a path or read
-the queue - and the control token is not accepted on the intake, so there is no reason to hand it
+library root and do nothing else - it cannot pause holdfast, start a scan or withhold a path, and
+it is not accepted where `server_read_token` gates the reads - and the control token is not accepted on the intake, so there is no reason to hand it
 to an arr. Writing `webhook_token` as the same reference as `server_auth_token` or
-`server_read_token` refuses to start.
+`server_read_token` refuses to start, and so does a `webhook_token` that resolves to the same
+value as either. (If `server_read_token` is unset the read endpoints are open to every caller
+anyway, as they are without this key - see [the control surface](#reverse-proxy-posture).)
 
 **2. Add the connection.** In each arr: `Settings > Connect > + > Webhook`.
 
@@ -452,9 +454,10 @@ Two ways out:
   holdfast will not guess a prefix that is not written down - guessing a path on a tool that
   replaces originals is not a trade worth making.
 
-The mapped path is then resolved (symbolic links followed, `..` resolved away) **before** it is
-checked against `library_roots`, exactly as a path sent to `POST /api/scan` is, so a path that
-climbs out of your library, or a link pointing outside it, is refused rather than acted on.
+The mapped path is then resolved (symbolic links followed) **before** it is checked against
+`library_roots`, exactly as a path sent to `POST /api/scan` is, so a link pointing outside your
+library is refused rather than acted on. A path carrying a `.` or `..` segment, a doubled slash or
+a trailing slash is refused outright (`path-not-clean`), unmapped: an arr does not send one.
 
 ### Anything else: `POST /api/scan`
 
