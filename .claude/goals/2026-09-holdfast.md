@@ -1,5 +1,7 @@
 # holdfast - the Tdarr replacement at feature parity, without trading away the gate (brief v2, 2026-09-29)
 
+**Spec:** NSchatz/goals spec v1.1 (the `/goals:spec` skill; `spec/` at tag v1.1.0).
+
 This program is fifteen `/goal` runs, in order, goal 1 to goal 15. It runs beside the shopkit, 3d,
 devices and home programs, which live in other containers on the same host and share nothing with
 it but CPU (T6). Goal 1 ends at Checkpoint T; goals 2 to 15 then chain without further review
@@ -15,9 +17,12 @@ it but CPU (T6). Goal 1 ends at Checkpoint T; goals 2 to 15 then chain without f
 
 **Amended 2026-10-02 by the goals program** (`AMENDMENT-2026-10-02-goals-g10-2026-09-holdfast.md`, carrying out W7, W22, W23 and W24): the owner's rule for shared libraries (any goal may change a shared package when its gate and every consumer's fast tier pass; one goal ships the change, its release and the consumers' pin bumps under one release lock) is recorded; holdfast owns and pins no shared package, so nothing changes for goals 10-15 and every goal file's merge gate stays as written; it applies to goals whose ledger is created after it merged and never against a line of their goal file.
 
-Every goal reads §0-§4 in full plus its own section. §0-§4 are the contract; a goal section says
-*what* to build and *when it is done*. Where they disagree, §0-§4 win, except where
-`CHECKPOINT-T.approved` amends them: the owner's amendments beat this file.
+**Amended 2026-10-02 by the owner** (`AMENDMENT-2026-10-02-owner-2026-09-holdfast.md`, carrying out the owner's words of 2026-10-02, "Everything needs to get ported over", and the choice "Swap + compact briefs"): this brief references spec v1.1 instead of copying the standing contract, §0 keeps only this program's parameters, and the goal files name the owner's queue instead of NEEDS-OWNER.md; it applies to goals whose ledger is created after it merged.
+
+Every goal reads the spec's contract, this brief's §0 and §4 and its own section in full; §1-§3
+when a choice touches them. A goal section says *what* to build and *when it is done*. Where this
+brief and the spec disagree, the spec wins, except where a goal file or an approval in the owner's
+own words says otherwise.
 
 **Where it comes from.** A planning interview with the owner on 2026-09-29: 14 rounds, 55
 questions, 55 decisions (T1-T55), plus planner inferences I1-I20 that Checkpoint T shows for
@@ -60,7 +65,13 @@ the source's own directory. Every capability below is additive to the gate set.
 
 ---
 
-## §0 How to run (every goal)
+## §0 Program parameters
+
+The standing contract and every format are the spec's (the `/goals:spec` skill). This section keeps
+only what the spec leaves open and holdfast's own rules, which win for this repo (spec
+`contract.md` §3: commit trailers, plain hyphens, identity, how a branch is updated). T7 (the
+standing contract inherited unchanged as §0) now reads: the spec's contract, by reference (the
+owner's port, 2026-10-02).
 
 ### 0.1 Where to start
 
@@ -70,33 +81,25 @@ the source's own directory. Every capability below is additive to the gate set.
   `.claude/settings.json`, so its `env` is loaded. Sibling repos and access:
   - `NSchatz/holdfast` - read and write (branches, PRs, self-merge, the T35 deletions, T37 minor
     releases).
-  - `NSchatz/super` (private umbrella; the SDD specs) - **read only** (T32). Clone to
-    `/cache/tmp/holdfast-super-ro` and immediately run
-    `git -C /cache/tmp/holdfast-super-ro remote set-url --push origin DISABLED`, so a push cannot
-    happen by accident. Never branch, PR or push there.
-  - `NSchatz/homelab` (private; the deployment and the Bash predecessor) - **PR, never merge**
-    (T32). Clone to `/cache/wt/homelab/holdfast-g<n>` only when a goal opens its PR.
+  - The owner's private homelab repository (the deployment and the Bash predecessor; goal 2's
+    ledger names it and the PR goal 2 opened there) - **PRs only, never merged by an agent**
+    (T32). Clone it to `/cache/wt/homelab/holdfast-g<n>` only when a goal opens its PR.
+  - The owner's other private repositories: **never touched**, by the owner's standing rule,
+    stricter than T32's read-only clone of the umbrella's SDD specs; the approved P1's rows are
+    served from `proposal-triage.md` and this repo. The one exception is the owner's queue
+    (§0.6), filed only through the goals CLI.
   - Every other repo: never touched.
-- **First actions of every goal**, in order:
-  1. `git pull --rebase` in the launch directory (§0.1) (and in any sibling clone this goal uses).
-  2. Check the precondition (the goal's own section). If it fails, print only the BLOCKED
-     report (§21) and stop.
-  3. Read the earlier goals' ledgers (`.claude/goals/2026-09-holdfast-g*.status.md`), the
-     `CHECKPOINT-T.approved` amendments (goals 2-15), proposal P1's rows for this goal, and
-     `.claude/goals/NEEDS-OWNER.md`.
-  4. Create this goal's ledger (§0.5) as the goal's first commit (straight to `main`); its header
-     records the **goal-start SHA** (`git rev-parse origin/main` before any work), which the
-     gate-integrity line counts from.
-  5. Re-baseline the gates the goal will change, with timings (§0.11 gives the last known).
-- **After a compaction:** re-read §0-§4, the goal's own section and its ledger before the next
-  action.
+- **First actions** are the spec's (`contract.md` §1), plus: read the `CHECKPOINT-T.approved`
+  amendments (goals 2-15), the approved P1's rows for this goal and the owner's open items
+  (`/cache/goals/<container>/bin/goals needs list`, or `/goals:needs`); the ledger's header records
+  the goal-start SHA (§0.5), and §0.11 gives the last known gate timings for the re-baseline.
 
 ### 0.2 Autonomy and fallbacks
 
-- Fully autonomous: never stop to ask. The owner is not watching the run.
-- An unsettled choice takes the option that keeps everything that exists building and valid (for
-  holdfast: an existing config produces the same decisions and argv as before; I5). It is
-  recorded in the ledger's "Decisions taken" with its reasoning, and the goal carries on.
+Spec `contract.md` §2 applies. holdfast's own:
+
+- The option that keeps everything that exists building and valid means, for holdfast, that an
+  existing config produces the same decisions and argv as before (I5).
 - A research-and-propose decision (T10, T30/T33, T45, T46, and the questions of I7 and I16) is
   written as a proposal in goal 1 (options, costs, recommendation) and decided at Checkpoint T
   (T48). Later goals build on the approved option, or on the recommendation where the approval
@@ -104,11 +107,10 @@ the source's own directory. Every capability below is additive to the gate set.
 - A finding after goal 1 that needs a decision only the owner can make does not stop the run:
   the goal takes the fallback above, records it under "Decisions taken", and lists it under
   "Proposals awaiting the owner" in its GOAL REPORT and in the finale report.
-- A missing tool is no blocker until a rootless install was tried (`mise use`, `uv`, a pinned
-  tarball) and its failure shown. There is no `sudo`, and `apt` needs root.
-- NEEDS-OWNER is only for steps physically impossible for an agent (§0.6).
 
 ### 0.3 Repos, branches, PRs
+
+Spec `contract.md` §3 and `gates.md` apply, with these rules of holdfast's:
 
 - **Branches:** `holdfast-g<n>/<topic>`, one per track, from up-to-date `origin/main`.
 - **Commits:** Conventional Commits (`feat(engine): ...`, `fix(encoder): ...`, `docs: ...`,
@@ -117,17 +119,16 @@ the source's own directory. Every capability below is additive to the gate set.
   session's attribution reminder (T38); `.claude/settings.json` sets `attribution.commit` to ""
   so the CLI adds none (I18). A PR body may end with the session's "Generated with Claude Code"
   line and session link, which are not co-author trailers.
-- `git pull --rebase` on `main` before every ledger commit. **Never force-push, never rewrite
-  history** (T7), never discard another session's commits.
 - **Updating a PR branch (I11):** when `origin/main` moves, merge it into the branch
   (`git merge origin/main`), never rebase a pushed branch. The squash merge keeps `main` linear.
   If `origin/main` moved only by ledger-only commits (paths under `.claude/goals/` only), the
   last gate result still stands; any other change on `main` means the gate runs again.
 - **The merge rule (T36, T52):** a PR is self-merged with `gh pr merge --squash --delete-branch`
   only when BOTH hold on the branch up to date with `origin/main`:
-  1. the local gate passes: `timeout 10800 flock -o /cache/locks/holdfast-heavy.lock mise exec
-     go@1.25.14 -- make check`, with its last 20 lines, its wall-clock and the `internal/engine`
-     seconds pasted in the PR body;
+  1. the local gate passes: `timeout 10800 /cache/goals/<container>/bin/goals lock goals-heavy --
+     flock -o /cache/locks/holdfast-heavy.lock mise exec go@1.25.14 -- make check` (the heavy
+     locks of §0.4), with its last 20 lines, its wall-clock and the `internal/engine` seconds
+     pasted in the PR body;
   2. the PR's CI is green (`build`, `package`, `mutation`), waited for with
      `timeout 3600 gh pr checks <n> --watch`. CI is the only place the image builds and smokes,
      because this container has no Docker daemon.
@@ -137,64 +138,64 @@ the source's own directory. Every capability below is additive to the gate set.
   case the goal ends INCOMPLETE (§0.10, I14).
 - **Batch the work (T52):** the local gate takes about 26 minutes here (§0.11), so a goal groups
   its work into a few larger PRs per track, not one per commit.
-- **Ledger-only commits** (the goal's `.status.md`, `NEEDS-OWNER.md`) go straight to `main` with
-  `chore(goals): ...`, after the fast docs checks of §4 pass on them; nothing else does.
+- **Ledger-only commits** (the goal's `.status.md`, and `NEEDS-OWNER.md`, the old list kept beside
+  the owner's queue until it becomes a pointer) go straight to `main` with `chore(goals): ...`,
+  after the fast docs checks of §4 pass on them; nothing else does.
 - **Releases (T37):** goals 5-14 may cut a minor release at their end when `main` is green
   (optional; the ledger says whether and why); goal 15 must.
 - **CI as it really behaves:** `ci.yml` (push and PR: `make check`, selftests, the config
   self-test, amd64 image smoke with a real encode, arm64 smoke with `--no-encode`; 10-13 minutes),
   `mutation.yml` (diff-scoped on PRs; full run Saturdays, which opens an issue when it fails),
   `pin-health.yml` (Mondays), `release.yml` (`v*` tags). GitGuardian also checks PRs.
-- The program runs alone in this repo, so no merge lock is needed beyond the heavy lock.
+- **No merge lock:** holdfast has none, so it merges only between its goals: another program's PR
+  lands here only in a drain between holdfast goals (spec `locks.md`, `amendment.md`).
 
 ### 0.4 Multi-agent orchestration
 
+Spec `contract.md` §4 and `locks.md` apply, with holdfast's budget and locks:
+
 - The owner opted in to Workflows and subagents for parallel tracks, research and adversarial
   review (this brief and every goal file restate it).
-- **At most 4 agents at once** (T40, raised 2026-09-30). The maker container has 28 CPUs, shared by its
-  9 Claude sessions, and the host is shared.
-- **One heavy job at a time** under `flock -o /cache/locks/holdfast-heavy.lock` (`make check`,
-  `make mutation-diff`, any real encode loop, `pnpm build`). **Always `-o`** (I10): plain
+- **At most 4 agents at once** (T40, raised 2026-09-30), and never more than
+  `/cache/goals/<container>/bin/goals admit --agents <N>` allows. The maker container has 28 CPUs,
+  shared by its 9 Claude sessions, and the host is shared.
+- **Heavy jobs** (`make check`, `make mutation-diff`, any real encode loop, `pnpm build`) hold
+  `goals-heavy`, then `holdfast-heavy`: `/cache/goals/<container>/bin/goals lock goals-heavy --
+  flock -o /cache/locks/holdfast-heavy.lock <cmd>`. `holdfast-heavy` stays exclusive, so holdfast
+  runs one heavy job at a time (T40); how many run in the container at once is `goals-heavy`'s
+  slots and headroom (spec 1.1), not this brief's. **Always `-o`** (I10): plain
   `flock <lock> <cmd>` hands the lock file to the child as a read-only fd 3.
-- Agents that write files work in worktrees under `/cache/wt/holdfast/<branch-name>`, removed
-  when their PR merges or closes.
-- Research claims a decision rests on get an adversarial verifier prompted to refute them; a
-  claim most verifiers refute is dropped.
-- Every GOAL REPORT is checked by a fresh adversarial subagent against the repos before it is
-  printed (§21).
 - Every agent prompt states a time budget (research 30 min, review 40 min, a build track at most
   4 hours); a hung agent is stopped and its track re-run once, then recorded `DROPPED (why)`.
-  Every long shell command runs under `timeout`.
 
 ### 0.5 The ledger
 
-`.claude/goals/2026-09-holdfast-g<n>.status.md`, created by the goal's first commit.
+Spec `ledger.md` applies to `.claude/goals/2026-09-holdfast-g<n>.status.md`, with holdfast's
+additions:
 
-- A header: the brief sections it runs, the start date, the goal-start SHA, the precondition as
-  checked (command and output).
-- A **Baselines** table: each gate the goal touches, its value and its wall-clock, including the
-  `internal/engine` seconds.
-- **One table per phase:** `| # | Item | State |`. States:
-  - `TODO`, `DOING`
-  - `DONE (repo@sha or PR#): evidence`
-  - `NEEDS-OWNER (why)`
-  - `PROPOSED (where)`
-  - `DROPPED (why)`
-- **Decisions taken:** dated entries, each saying where its reasoning lives.
-- **Resume here:** rewritten at every phase boundary and before any long wait.
-- Committed at every phase boundary. At the end no row is `TODO` or `DOING`, and the last commit
-  adds `COMPLETE (goal <n>): <date>`. An INCOMPLETE goal writes no such line.
+- The header records the **goal-start SHA** (`git rev-parse origin/main` before any work), which
+  the gate-integrity line counts from.
+- The **Baselines** table gives each gate the goal touches its value and its wall-clock, including
+  the `internal/engine` seconds.
+- The human-only state is `NEEDS-OWNER (why)` (§0.6).
 - Ledgers are docscheck input (§4): write identifiers in code spans.
 
 ### 0.6 Human-only steps (NEEDS-OWNER)
 
+The spec's format for human-only steps applies. Its state for a step physically impossible for an
+agent, which the spec names after the owner, is written **`NEEDS-OWNER`** here, in ledgers, goal
+files and reports. The spec's own `NEEDS-OWNER` (a request another program has not served) never
+arises: holdfast files no requests between programs (T6, §0.13).
+
 - **What counts:** only a step physically impossible for an agent here: a run on real GPU
   hardware (T9), a live check against the owner's Plex, Sonarr or Radarr (T49), merging the
   homelab PR (T32), committing a hardware report (T43). Nothing else.
-- **Where:** `.claude/goals/NEEDS-OWNER.md` in this repo (T42, I1). Search it before adding; ask
-  once.
-- **Each item says:** what to do, with what tool and the exact command, the expected result, and
-  which file or parameter changes with the answer.
+- **Where:** the owner's queue (`goals needs add --repo holdfast`, `/goals:needs`): one issue per
+  item in the goals program's private repository, filed with
+  `/cache/goals/<container>/bin/goals needs add --repo holdfast --kind <kind> ...`, which asks
+  once; the item's `--do` gives the exact command. T42 and I1 made the list a file in this repo
+  (the old list of §0.3); the owner's later decisions moved it to the queue (W21, by
+  `AMENDMENT-2026-10-01-goals-g8-2026-09-holdfast.md`, and the port of 2026-10-02).
 - **Speed:** the owner acts within days (T42), so no goal waits. Hardware and live-service work
   proceeds on fakes; the goal that consumes a result re-checks for it and re-runs when it is
   there.
@@ -207,17 +208,20 @@ the source's own directory. Every capability below is additive to the gate set.
 
 ### 0.7 Hardware, outward-facing limits and identity
 
+Spec `contract.md` §6 applies; holdfast's limits beyond it:
+
 - **GPUs:** no goal runs a real GPU (T9). Hardware paths are proven on fakes and golden argv
   tests. Guard in code: the hardware integration tests are behind a build tag no agent sets
   (`hwlive`), and `rg -n hwlive .github Makefile` must print nothing (goal 5 shows it).
 - **Live services:** no goal calls a real Plex, Sonarr, Radarr or worker node (T49). Clients are
   tested against `httptest` fakes.
 - **GitHub:** allowed are branches and PRs in `NSchatz/holdfast` (including closing PR #94 per
-  I12); PRs (never merged) in `NSchatz/homelab`; deleting exactly the 6 branches and 1 tag of
-  T35, by full refname; minor `v*` tags, the release dry-run dispatch, and the GitHub releases and
-  ghcr images `release.yml` publishes (T37). Goals never open issues; an issue a workflow opens is
-  fixed, then commented and closed with a link (I20). Nothing else is created, deleted, renamed or
-  made public.
+  I12); PRs (never merged) in the owner's private homelab repository; deleting exactly the 6
+  branches and 1 tag of T35, by full refname; minor `v*` tags, the release dry-run dispatch, and
+  the GitHub releases and ghcr images `release.yml` publishes (T37). Goals open no issue in this
+  repo; an issue a workflow opens is fixed, then commented and closed with a link (I20). The only
+  issues a goal files are the owner's queue items (§0.6). Nothing else is created, deleted,
+  renamed or made public.
 - **Never:** flash, order, spend, or create accounts, tokens or API keys.
 - **Identity and private data (T41, I1):** the repo is public (AGPL-3.0). Never in any tracked
   file: LAN addresses, hostnames, media paths or service URLs of the owner's hosts; real library
@@ -225,6 +229,10 @@ the source's own directory. Every capability below is additive to the gate set.
   author fields and the existing LICENSE/NOTICE lines. Program prose says "the owner". Fixtures
   are synthetic (lavfi-generated). From goal 1 on, an identity scan in `make check` enforces the
   name and email part mechanically.
+- **Private repositories** are named by role only (spec `contract.md` §6): "the owner's private
+  homelab repository", "the goals program's private repository" (its issues are the owner's
+  queue), "the owner's other private repositories". The queue's label carries a personal name
+  and is never written.
 - **Secrets:** every new credential is reached by reference and joins
   `config.SecretBearingKeys` (§4). `make secret-scan` runs in the gate; the container's global
   `core.hooksPath` means the repo's pre-commit hook is not active here, so the gate is the check.
@@ -246,40 +254,30 @@ the source's own directory. Every capability below is additive to the gate set.
 
 ### 0.9 Research, citations and pins
 
+Spec `contract.md` §5 applies; holdfast adds:
+
 - Primary sources first (T54): ffmpeg documentation and source, Intel/AMD/NVIDIA/Mesa docs, the
   dovi_tool and hdr10plus_tool repos, the Plex and Sonarr/Radarr API docs and source. Forums and
   secondary guides only as leads, marked `LEAD`.
-- Cite the URL and the date read for anything a version, number, price, code section, licence
-  or API rests on, in the doc or code comment that relies on it. A claim from memory is marked
-  `ASSUMED`.
 - Pins: every new tool, image, binary or package is pinned (version and digest or sha256) and
-  covered by `scripts/check-pins.sh`. Pinned versions are never upgraded silently: an upgrade is
-  its own commit saying why.
+  covered by `scripts/check-pins.sh`; an upgrade is its own commit saying why.
 - The planning research lives in `.claude/goals/2026-09-holdfast-research/` (§22); a goal
   re-verifies any claim it builds on before building on it.
 
 ### 0.10 Preconditions, BLOCKED, INCOMPLETE, and evidence for the evaluator
 
-- **Preconditions:** goal 1 needs this brief and its goal files on up-to-date `origin/main`,
-  plus the environment check that `echo "$GOFLAGS $GOMAXPROCS"` prints `-p=4 12` in the session.
-  Goal 1 never commits the brief or the settings itself. Goal 2 needs the goal-1 ledger's
-  `COMPLETE (goal 1)` line and `.claude/goals/CHECKPOINT-T.approved` on `origin/main`, and prints
-  the approval commit's verification (I19). Goals 3-15 need the previous ledger's `COMPLETE`
-  line. No goal ever writes a checkpoint file.
-- **BLOCKED:** a failed precondition means no other work; the final turn prints only the BLOCKED
-  report of §21.
+Spec `report.md` and `contract.md` §10 apply; holdfast's own:
+
+- **Preconditions** are each goal's own (its section and goal file); goal 2's printed the
+  approval commit's verification (I19). No goal ever writes a checkpoint file.
 - **INCOMPLETE (I14):** a line marked (foundation) that cannot be met within the bound of §0.3
   ends the goal: the final turn prints the INCOMPLETE report of §21, the ledger gets no COMPLETE
   line, and the next goal is BLOCKED until the owner acts.
-- **Evidence:** the `/goal` evaluator sees only the transcript; it runs nothing and reads no
-  files. Every done-when line is shown by output printed in the final turn: a command and its
-  5-20 line tail, a path, a PR URL, a SHA, or a count with the command that counted it. Counts are
-  computed when the report is written. A line that names a proposal or a section restates, in the
-  report, the one-line content it relies on (for example the P1 rows for the goal). "Works" or "is
-  complete" is never written without the check that shows it.
+- **Evidence:** a line that names a proposal or a section restates, in the report, the one-line
+  content it relies on (for example the P1 rows for the goal).
 - **Done-when states:** DONE; NEEDS-OWNER only when the step is physically impossible for an
-  agent (why, and where the entry is); DROPPED only after the 3 fix rounds of §0.3 (PR URL and
-  the red tails), never for a (foundation) line; PROPOSED only where this brief marks the
+  agent (why, and its item in the owner's queue); DROPPED only after the 3 fix rounds of §0.3 (PR
+  URL and the red tails), never for a (foundation) line; PROPOSED only where this brief marks the
   decision research-and-propose.
 
 ### 0.11 Environment facts (verified 2026-09-29; container rows updated 2026-09-30 for the move into maker)
@@ -295,32 +293,33 @@ the source's own directory. Every capability below is additive to the gate set.
 | A `docker` CLI is on PATH but there is no daemon or socket; no `sudo`; `apt` needs root | image builds and smokes happen only in CI (T36); rootless installs only |
 | `make check` on `main` (3c229da) under `flock -o`: exit 0 in 25m35.7s; `internal/engine` 1339.8 s, `cmd/holdfast` 398.9 s | `timeout 10800` on the gate; batch PRs (T52); the engine is at 74% of `TEST_TIMEOUT` (30m, `Makefile:82`), see §4 |
 | `flock <lock> <cmd>` leaks the lock as a read-only fd 3; `TestEncodeWithProgress_FailurePathIsByteIdentical` then fails 6/6 | always `flock -o` (I10); goal 1 hardens the fixture |
-| `gh` is authenticated with admin on holdfast, super and homelab; `main` has no branch protection; `delete_branch_on_merge` is on | ledger commits to `main` work; super's clone gets its push URL disabled (§0.1) |
+| `gh` is authenticated with admin on holdfast and on the owner's private repositories; `main` has no branch protection; `delete_branch_on_merge` is on | ledger commits to `main` work; §0.1, not `gh`'s reach, decides what a goal may touch |
 | GitHub Actions: the last 25 runs green apart from 2 superseded cancels; PR CI 10-13 min | wait for CI before merging (T36) |
 | `git config --global core.hooksPath` = `/home/claude/.claude-hooks` | the repo's pre-commit secret scan is inactive here; the gate's `secret-scan` is the check |
-| `/cache/locks/` exists and holds other programs' locks (shopkit, 3d, home, dev, inventory) | this program's lock is `/cache/locks/holdfast-heavy.lock`; never touch the others |
+| `/cache/locks/` exists and holds other programs' locks (shopkit, 3d, home, dev, inventory) | this program's own lock is `/cache/locks/holdfast-heavy.lock`; of the others a heavy job takes only `goals-heavy` (§0.4) |
 | pnpm 11 and later ignore `ignore-scripts` in `.npmrc`, including the container's `~/.npmrc` (verified with pnpm 11.27.1, 12.6.0, 12.8.1) | the UI goals set `ignoreScripts: true` in `pnpm-workspace.yaml` (§17) |
 | The Claude shell may alias `grep` through the CLI binary, which breaks while the CLI updates | use `command grep`, `rg` or `git grep` in goal shells |
 | `claude --version` = 2.1.284 | - |
 
 ### 0.12 Long-run hygiene
 
+Spec `contract.md` §8 applies, with holdfast's settings and bounds:
+
 - The worker variables live in the committed `.claude/settings.json` `env` (`GOFLAGS=-p=4`,
   `GOMAXPROCS=12`) with `autoMemoryEnabled: false` and `attribution.commit` "" (I18). They stay
   after the finale (I4); the finale report lists them for the owner to remove.
-- `timeout` on everything that can hang (`make check` 10800 s, `gh pr checks --watch` 3600 s,
-  a single encode test 1800 s).
-- Big output goes to files under `/cache/tmp/holdfast-g<n>/`, never into the context; paste
-  tails.
-- Keep the context small: agents return conclusions, not file dumps.
+- `timeout` bounds: `make check` 10800 s, `gh pr checks --watch` 3600 s, a single encode test
+  1800 s. Big output goes to files under `/cache/tmp/holdfast-g<n>/`.
 
 ### 0.13 Running beside other programs
 
 This program runs alone in `NSchatz/holdfast` and shares nothing with the shopkit, 3d, devices
-and home programs except host CPU (T6). There is no requests file and no shared list; the
-`NEEDS-OWNER` state here means only a step for the owner, never a request to another program. If
-another program starts working in this repo, the goal records it under "Decisions taken", touches
-none of that program's branches or files, and lists it in its GOAL REPORT.
+and home programs except host CPU (T6) and the owner's queue, where its items carry
+`repo:holdfast` (T6 chose a list of its own; the owner's later W21 put every program's items in
+one queue). There is no requests file, and holdfast files no requests between programs; the
+`NEEDS-OWNER` state here means only a step for the owner (§0.6). If another program starts
+working in this repo, the goal records it under "Decisions taken", touches none of that
+program's branches or files, and lists it in its GOAL REPORT.
 
 ---
 
@@ -940,9 +939,9 @@ A. The precondition checks, printed with their output
 B. Every row the approved P1 (path@sha printed) assigns to goal 10 is listed with DONE (PR URL) or DROPPED (why), or P1 assigns none
 C. After a swap Plex gets a partial refresh of the section path and a file being played is held, and Sonarr/Radarr get RescanSeries/RescanMovie: tests against httptest fakes (tail)
 D. Authenticated webhook intake accepts both Sonarr Download shapes and Radarr's and queues the file (test tail), and `make api-schema-diff` passes with .api-schema-breaks.yaml still []
-E. Each new credential key is in config.SecretBearingKeys and refuses a literal (test tail), and NEEDS-OWNER.md has live-check commands for Plex, Sonarr and Radarr
+E. Each new credential key is in config.SecretBearingKeys and refuses a literal (test tail), and the owner's queue has an item with live-check commands for Plex, Sonarr and Radarr
 F. Gate integrity since the ledger's goal-start SHA: every deleted `*_test.go` line has a reason, no package's `func Test` count fell, no line of docs/design/swap.md or quality-gate.md was removed (counts printed)
-G. All repos are clean and pushed, no open PR of this goal, zero `co-authored-by` in `git log <goal-start>..origin/main --format=%B`; NEEDS-OWNER.md is current; the ledger ends with its COMPLETE line
+G. All repos are clean and pushed, no open PR of this goal, zero `co-authored-by` in `git log <goal-start>..origin/main --format=%B`; the owner's queue is current; the ledger ends with its COMPLETE line
 H. A fresh adversarial subagent checked every line above against the repos and found none false (its verdict pasted)
 
 ## §15 Goal 11 - Worker nodes: protocol, shared mount, server re-gate
@@ -975,7 +974,7 @@ C. (foundation) `holdfast worker` encodes a fixture end to end on loopback over 
 D. Fixtures red for an expired-lease upload, a duplicate upload, a digest mismatch, a 404 body as media, a free-space reservation refusal and a server restart with live leases: test tail naming each
 E. `node_token` is by reference in config.SecretBearingKeys and cannot call a control endpoint: test tail
 F. Gate integrity since the ledger's goal-start SHA: every deleted `*_test.go` line has a reason, no package's `func Test` count fell, no line of docs/design/swap.md or quality-gate.md was removed (counts printed)
-G. All repos are clean and pushed, no open PR of this goal, zero `co-authored-by` in `git log <goal-start>..origin/main --format=%B`; NEEDS-OWNER.md is current; the ledger ends with its COMPLETE line
+G. All repos are clean and pushed, no open PR of this goal, zero `co-authored-by` in `git log <goal-start>..origin/main --format=%B`; the owner's queue is current; the ledger ends with its COMPLETE line
 H. A fresh adversarial subagent checked every line above against the repos and found none false (its verdict pasted)
 
 ## §16 Goal 12 - Worker nodes: HTTP streaming, TLS and deployment
@@ -998,7 +997,7 @@ C. HTTP-streaming mode encodes a fixture end to end on loopback with sha256 dige
 D. The worker refuses plain http to a non-loopback server unless explicitly allowed, and the approved P4's TLS stance is tested: test tail
 E. The distributed non-goal statement is rewritten in README and docs/migration.md, docs/design/nodes.md carries the rule, and docs/docker.md shows a worker deployment: `git grep` hits
 F. Gate integrity since the ledger's goal-start SHA: every deleted `*_test.go` line has a reason, no package's `func Test` count fell, no line of docs/design/swap.md or quality-gate.md was removed (counts printed)
-G. All repos are clean and pushed, no open PR of this goal, zero `co-authored-by` in `git log <goal-start>..origin/main --format=%B`; NEEDS-OWNER.md is current; the ledger ends with its COMPLETE line
+G. All repos are clean and pushed, no open PR of this goal, zero `co-authored-by` in `git log <goal-start>..origin/main --format=%B`; the owner's queue is current; the ledger ends with its COMPLETE line
 H. A fresh adversarial subagent checked every line above against the repos and found none false (its verdict pasted)
 
 ## §17 Goal 13 - Web UI: toolchain, gate, embed and image
@@ -1034,7 +1033,7 @@ C. (foundation) `make check` runs UI lint, typecheck, unit tests and build with 
 D. check-pins section 8 requires `ignoreScripts: true` in pnpm-workspace.yaml and refuses a minimumReleaseAgeExclude list, and its selftest fails an .npmrc-only setup: tail
 E. The UI is embedded and served at /, the AGPL source offer is still served, and the image builds the UI in a digest-pinned Node stage and stays distroless: sourceoffer test tail and the green CI `package` job
 F. Gate integrity since the ledger's goal-start SHA: every deleted `*_test.go` line has a reason, no package's `func Test` count fell, no line of docs/design/swap.md or quality-gate.md was removed (counts printed)
-G. All repos are clean and pushed, no open PR of this goal, zero `co-authored-by` in `git log <goal-start>..origin/main --format=%B`; NEEDS-OWNER.md is current; the ledger ends with its COMPLETE line
+G. All repos are clean and pushed, no open PR of this goal, zero `co-authored-by` in `git log <goal-start>..origin/main --format=%B`; the owner's queue is current; the ledger ends with its COMPLETE line
 H. A fresh adversarial subagent checked every line above against the repos and found none false (its verdict pasted)
 
 ## §18 Goal 14 - Web UI: views and controls
@@ -1059,7 +1058,7 @@ C. The UI shows summary and savings, queue with priority, history with filters a
 D. The UI drives pause, resume, scan and exclusions with the control token held for the session only, and `git grep` finds no restore or requeue route in web/ or internal/server: tails
 E. The no-frontend statement is rewritten in README, CLAUDE.md, docs/api-reference.md and docs/docker.md, and docs/design/web-ui.md exists: `git grep` hits
 F. Gate integrity since the ledger's goal-start SHA: every deleted `*_test.go` line has a reason, no package's `func Test` count fell, no line of docs/design/swap.md or quality-gate.md was removed (counts printed)
-G. All repos are clean and pushed, no open PR of this goal, zero `co-authored-by` in `git log <goal-start>..origin/main --format=%B`; NEEDS-OWNER.md is current; the ledger ends with its COMPLETE line
+G. All repos are clean and pushed, no open PR of this goal, zero `co-authored-by` in `git log <goal-start>..origin/main --format=%B`; the owner's queue is current; the ledger ends with its COMPLETE line
 H. A fresh adversarial subagent checked every line above against the repos and found none false (its verdict pasted)
 
 ## §19 Goal 15 - Finale: release, docs and the program report
@@ -1077,7 +1076,7 @@ H. A fresh adversarial subagent checked every line above against the repos and f
    (with `crane` installed rootless through mise, since there is no Docker daemon), the compose pin
    and the API schema baseline committed.
 5. **homelab (T32):** a PR, never merged, bringing its holdfast deployment and env example up to
-   the release and the new keys; a NEEDS-OWNER entry to review and merge it.
+   the release and the new keys; an item in the owner's queue to review and merge it.
 6. **Hardware reports:** re-check `testdata/hw-reports/`; list what arrived and what is still
    NEEDS-OWNER.
 7. **The program report:** `docs/program-report-2026-09-holdfast.md` - what was built and where,
@@ -1090,11 +1089,11 @@ A. The precondition checks, printed with their output
 B. Every P1 row is DONE or a listed follow-up (count printed)
 C. The full gate passes on a fresh clone of origin/main: tail and wall-clock
 D. (foundation) A minor release is out per docs/release.md: dry-run run URL, tag, green release run, `crane digest` of the pulled image, and the compose pin commit
-E. The homelab PR (never merged) is open with its NEEDS-OWNER entry: PR URL
+E. The homelab PR (never merged) is open with its item in the owner's queue: PR URL
 F. docs/program-report-2026-09-holdfast.md exists with sections for what was built, tests and runtimes, NEEDS-OWNER, proposals, follow-ups and the worker variables: path and its `## ` headings
 G. `ls testdata/hw-reports/` lists a report per hardware path, or the line reads NEEDS-OWNER naming the missing ones
 H. Gate integrity since the ledger's goal-start SHA: every deleted `*_test.go` line has a reason, no package's `func Test` count fell, no line of docs/design/swap.md or quality-gate.md was removed (counts printed)
-I. All repos are clean and pushed, no open PR of this goal, zero `co-authored-by` in `git log <goal-start>..origin/main --format=%B`; NEEDS-OWNER.md is current; the ledger ends with its COMPLETE line
+I. All repos are clean and pushed, no open PR of this goal, zero `co-authored-by` in `git log <goal-start>..origin/main --format=%B`; the owner's queue is current; the ledger ends with its COMPLETE line
 J. A fresh adversarial subagent checked every line above against the repos and found none false (its verdict pasted)
 
 ---
@@ -1121,31 +1120,31 @@ checkpoint (D, F, H and P are).
 
 ## §21 GOAL REPORT, BLOCKED and INCOMPLETE formats
 
+The formats are spec `report.md`'s, with its headings verbatim, and the goal runs
+`/cache/goals/<container>/bin/goals check /workspace/holdfast 2026-09-holdfast <n>` (the
+`/goals:check` skill; the launch directory of §0.1) before it prints its report. holdfast's own
+lines, kept verbatim, stand in for the spec's matching lines, and its GOAL REPORT has no Requests
+line (holdfast files no requests between programs). In the GOAL REPORT:
+
 ```
-GOAL REPORT (goal <n>): <title>
 A. <line text> - DONE | NEEDS-OWNER (why; entry) | DROPPED (why; PR; red tails) | PROPOSED (where)
-   evidence: <command> -> <5-20 line output tail>; PR <url>; <repo>@<sha>
-B. ...
 NEEDS-OWNER (this goal): <list, safety first, then what unblocks the most>
 Proposals awaiting the owner: <list with paths>
 Ledger: <path>@<sha> - <n> DONE, <n> NEEDS-OWNER, <n> DROPPED (reasons listed); COMPLETE line <sha>
-Adversarial review of this report: <verdict and what it checked>
 ```
 
-```
-BLOCKED (goal <n>): precondition not met
-check: <command> -> <output showing the failure>
-origin/main: <git log -1 --oneline origin/main>
-No other work was done in this goal.
-```
+In the INCOMPLETE report:
 
 ```
-INCOMPLETE (goal <n>): a foundation line could not be met
-line: <letter and text>
 attempts: <PR url> - <the three red gate tails, 5-20 lines each>
-state left: <branches, open PRs, main@sha>; ledger <path>@<sha>, no COMPLETE line
 The next goal will print BLOCKED until the owner acts.
 ```
+
+- `NEEDS-OWNER` is the human-only state of §0.6; a line's entry is its item in the owner's queue.
+- `DROPPED` only after the 3 fix rounds of §0.3, never for a (foundation) line; a (foundation)
+  line that cannot be met ends the goal with the INCOMPLETE report (§0.10).
+- Every goal file's line A reads "The precondition checks, printed with their output", and its
+  hygiene line counts zero `co-authored-by` in `git log <goal-start>..origin/main --format=%B`.
 
 ---
 

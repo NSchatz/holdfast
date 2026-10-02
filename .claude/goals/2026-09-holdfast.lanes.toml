@@ -1,0 +1,4 @@
+# The 2026-09-holdfast program (brief `2026-09-holdfast.md`): read by the goals supervisor from
+# origin/main. No [[goal]] entries: the goals run in order, goal n after goal n-1 (spec
+# lanes-manifest.md). Its only key pins the spec (the owner's port, 2026-10-02).
+spec = "1.1"
