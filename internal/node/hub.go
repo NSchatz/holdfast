@@ -230,6 +230,9 @@ type Hub struct {
 	// cooling is, per node, the leases that ended in a row with none succeeding between,
 	// and the instant until which the node is offered nothing.
 	cooling map[string]*coolState
+	// seen is, per node, what its most recent poll stated: its mode and its encoders. It is
+	// memory only and read by View alone (view.go); nothing that grants a lease reads it.
+	seen map[string]seenNode
 	// changed is closed and replaced whenever something WaitDemand waits on moves.
 	changed chan struct{}
 }
@@ -275,6 +278,7 @@ func New(o Options) *Hub {
 		o: o, tickets: map[*Ticket]struct{}{}, live: map[string]string{},
 		waits: map[string]*wait{}, uploads: map[string]*upload{}, changed: make(chan struct{}),
 		cooling: map[string]*coolState{}, sources: map[string]*leaseSource{},
+		seen: map[string]seenNode{},
 	}
 }
 

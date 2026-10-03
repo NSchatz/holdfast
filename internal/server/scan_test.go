@@ -778,6 +778,10 @@ func TestScanEndpoint_AddsNoRouteBeyondScan(t *testing.T) {
 		// The health sweep's report is a READ: the sweep never changes a file, and nothing
 		// on this route starts, stops or acts on one.
 		"GET /api/health": true,
+		// The worker nodes and their leases are a READ of the hub's view and the lease
+		// ledger: the route grants, ends, adopts and re-opens no lease, and it serves no
+		// lease id, so nothing read here can be used to act on one.
+		"GET /api/nodes": true,
 		// The Sonarr and Radarr webhook intake (T28). Each is a second CALLER of the
 		// targeted scan and nothing else: an accepted file goes through the same admission
 		// step POST /api/scan uses, so neither re-offers a row a terminal answer closed,

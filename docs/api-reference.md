@@ -13,9 +13,10 @@ per-field reference `README.md` points at rather than restates.
 | `GET /assets/*` | - | the static files the web UI's page names (its script and stylesheet), by exact name; `404` for anything else and on a build that embeds no UI. Never gated: they hold no library datum |
 | `GET /api/summary` | read | counts per status + bytes reclaimed (**lifetime** and this-run) + paused/scanning + the **whole-ledger aggregates** + `bytes_held_by_undo_window` (the figure the SSE snapshot and the `/metrics` gauge report) + the **per-root sizing figures** under `roots` and `roots_unattributed` (see *Sizing a run* below). With `dry_run: false` the per-status counts report `would-transcode` rows inside `pending` |
 | `GET /api/queue` | read | pending + active jobs, capped, with `queue_total` - see *The total behind a cap* |
-| `GET /api/history?limit=N` | read | recent terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, capped, with `history_total` - see below |
+| `GET /api/history?limit=N&status=S&cursor=C` | read | terminal jobs (done/skipped/failed, plus `would-transcode`, `indeterminate` and `applied-despite-error`) with their recorded outcome, newest first, one capped page at a time, optionally filtered by status, with `history_total` and `next_cursor` - see *`GET /api/history` - filtering and paging* |
 | `GET /api/events` | read | SSE: a fresh snapshot on every state change |
 | `GET /api/health` | read | the library health sweep: its state, the sweep under way and the last one that finished, each with its counts and the files it found corrupt or unreadable - see *`GET /api/health`* below. Report only: no route acts on a finding |
+| `GET /api/nodes` | read | the worker nodes this server knows of and the leases it has granted them, newest first, capped, with `leases_total` - see *`GET /api/nodes`* below. A read only: it serves no lease id and acts on no lease. The node token does not open it |
 | `GET /api/schema` | - | a machine-readable document of this surface, GENERATED from the router and the response types this build actually serves. Never gated: it carries endpoint paths, methods, status codes, media types, field names and field types, and no value of any kind - see below |
 | `GET /metrics` | - | Prometheus metrics (when `metrics_enable`, default on). Never gated: it names no file |
 | `POST /api/rescan` | control | start a library scan (409 if paused / scanning / outside the run window) |
@@ -140,6 +141,7 @@ instead of trusting it. Every terminal row in `/api/history` (and in the SSE sna
 | `swap_cause` | a swap failure with a distinct cause | today only `cross-filesystem` - the temp and the target were not on the same mounted filesystem. Absent for every other failure |
 | `library_root` | any row this build decided, and an encoding or verifying row | the **cleaned path of the library root** whose profile decided the file. `null` when it was not recorded: a row written before per-library profiles existed, one no profile decided (a `restored-original` skip is an operator's act, not a gate's), or a `probing` row, whose attempt has not decided yet |
 | `profile_digest` | as above | a stable identifier for that root's **resolved** overridable knobs. `null` on the same rows `library_root` is null on |
+| `priority` | every row, on `/api/queue`, `/api/history`, the SSE snapshot and `/api/search` | the file's **queue priority as the configuration states it now**: its deciding rule's, else its encode profile's, else its library root's, else `0` ([design](design/queue-order.md#priority)). It is not read from the row - a priority is recorded on no row - but worked out when the row is served, from the path and the `source_height` the row carries; serving it reads no file. `null` when it is not known: the path lies under no configured library root, or the root's rules band on the source height and name a priority while the row records no `source_height` (a queued file nothing has probed yet). `0` is a real priority and is never used for "not known". **Display only**: no request sets it, it orders nothing in this response, and `holdfast export` always writes it as `null`, because the export reads a ledger and no configuration |
 | `dropped_streams` | any job that reached the encoder | the source streams this job **selected away**, each as `{index, type, language}` - the index it sat at in the container, its ffprobe `codec_type`, and the language tag as the SOURCE spelled it (`null` when it carried none). `[]` means the job applied a selection and dropped **nothing**; `null` means **not recorded** - a row written before this existed, or one that never reached a selection. The two are different facts and the dropped bytes are not recoverable from the replacement, so this row is the only record there is. See [docs/profiles.md](profiles.md#stream-selection) |
 | `audio_tracks` | any job whose configuration transforms audio and that reached the encoder | what the job did to each audio track (see [docs/design/audio.md](design/audio.md)), each as `{source_index, output_index, action, reason, codec, layout, sample_rate, bitrate_kbps, loudness, measured_lufs, achieved_lufs}`. `action` is `copied`, `reencoded`, `kept`, `added`, `downmix` or `downmix-skipped` (no track added; `output_index` is then `null`); `reason` says why a track was copied or a downmix not added; `codec` to `bitrate_kbps` are `null` on a copied track; `loudness` is `linear` or `dynamic` as the encoder reported, `not-recorded` where no report came back, and `null` where the track was not normalised. `null` for the whole field means **not recorded**: every job whose configuration sets no audio key, and every row written before this existed |
 | `subtitle_sidecars` | a `done` job under `subtitle_sidecars: text` | per carried subtitle stream, `{index, codec, language, forced, path, skipped, detail, events, fonts_lost}`: `path` is the sidecar this job published, or `null` with `skipped` naming why none was (a token such as `bitmap-subtitle`, `mov-text-not-converted`, `sidecar-exists-never-overwritten` or `sidecar-event-count-mismatch`, with `detail` carrying the error of a failure); `events` is the event count the parse-back gate compared; `fonts_lost` marks an ASS sidecar of a source with font attachments. `[]` means the source carried no subtitle stream; `null` means **not recorded** - the key was off, or the row predates the field. See [docs/design/subtitles.md](design/subtitles.md#sidecars) |
@@ -365,6 +367,63 @@ recovered its leases after a start. An upload, a completion or a source request 
 server is not waiting on is **503** `not_ready` too. `node_max_transfers` counts source streams
 and uploads together. Every **410** carries `Cache-Control: no-store`. No endpoint
 here restores, requeues, resolves or re-opens anything.
+
+### `GET /api/nodes` - the worker nodes and their leases
+
+<a id="nodes-read"></a>
+
+Which nodes this server knows of, what each is doing, and how each lease it granted stood. A **read**
+endpoint, gated exactly as `GET /api/queue` is: open unless `server_read_token` is set, and then the
+read token or the control token. It is not one of the lease endpoints and `node_token` does not open
+it: with a read token set the node token is answered `401`.
+
+```json
+{
+  "enabled": true,
+  "now": 1700000000,
+  "nodes": [
+    { "node": "n1", "mode": "mapped", "encoders": ["libx265"], "waiting": false,
+      "cooling_until": null, "leases_active": 1 }
+  ],
+  "leases": [
+    { "node": "n1", "path": "/library/films/a.mkv", "state": "granted", "epoch": 3,
+      "granted_at": 1700000000, "updated_at": 1700000010, "expires_at": 1700000070,
+      "ended_at": null, "reason": null, "source_bytes": 123456, "output_bytes": null }
+  ],
+  "leases_total": { "available": true, "unavailable": "", "covers": "every lease in the ledger",
+                    "cap": 200, "age_seconds": 0, "count": 12 }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `enabled` | whether this server takes worker nodes: `true` once the lease protocol is wired (a `serve` with `node_token` set). `false` answers `nodes: []`, `leases: []` and a `leases_total` of 0 without reading the ledger |
+| `now` | the server's clock, unix seconds, the basis for every time below |
+| `nodes` | one entry per node name the server knows of or a listed lease names, by name ascending. Always an array |
+| `nodes[].mode` | the mode of the node's most recent poll, `"mapped"` or `"http"`. `null` when this server process has seen no poll from it, as after a restart, when a node is known only by its lease |
+| `nodes[].encoders` | the encoders that poll reported. `null` on the same terms as `mode` |
+| `nodes[].waiting` | a poll of the node's is open right now |
+| `nodes[].cooling_until` | the instant until which the node is offered nothing because its leases kept ending without an output; `null` when it is not cooling off |
+| `nodes[].leases_active` | the node's leases in a live state (`granted` or `uploaded`) as this server process holds them |
+| `leases` | at most **200** leases, live and ended alike, newest `granted_at` first, then `path` ascending, then `epoch` descending. Always an array |
+| `leases[].state` | `granted`, `uploaded`, `completed`, `failed` or `expired` |
+| `leases[].epoch` | the lease's fencing number: one more than the last lease of the same path carried |
+| `leases[].expires_at` | when the lease runs out without a heartbeat |
+| `leases[].ended_at` | when the lease became terminal; `null` while it is live |
+| `leases[].reason` | why a `failed` or `expired` lease ended: the server's word (`expired`, `digest_mismatch`, `source_digest_mismatch`, `canceled`, `server_restart`, `not_adopted`, `poll_gone`) or, on a `failed` lease, the word its node stated. `null` on every other lease |
+| `leases[].source_bytes` | the source's size when the lease was granted |
+| `leases[].output_bytes` | the admitted upload's size; `null` until an upload is admitted, never `0` |
+| `leases_total` | the count of every lease in the ledger, in the shape `queue_total` has: `count` is `null` and `available` is `false` when it could not be read, and the leases still ship |
+
+**Never served:** a lease id, the path of a working file, any digest and any token. A lease id is what
+a heartbeat, an upload and a completion are authorised by, so a reader of this endpoint is given
+nothing it could act on a lease with. A node that states its own lease id as its failure reason has
+that reason served as `node_failed`.
+
+The endpoint grants, ends, adopts and re-opens nothing, and writes no row. If the listed leases
+cannot be read it answers `500`, as the other reads do. Terminal leases older than seven days are
+pruned, except the newest of each path ([design](design/nodes.md#leases)), so the listing is recent
+history and not a full one.
 
 ### The webhook intake - `POST /api/webhook/sonarr` and `POST /api/webhook/radarr`
 
@@ -759,6 +818,81 @@ Beside the fields above the summary carries the held figure and a block per conf
   published on every state change, and a filesystem read per root per frame is a cost no subscriber asked
   for.
 
+### `GET /api/history` - filtering and paging
+
+One response carries at most **200** rows, and the whole ledger is readable through it, one page at a
+time. Three query parameters, all optional:
+
+| Parameter | Meaning |
+|---|---|
+| `limit` | rows per page, 1 to 200. Anything else (0, a negative, more than 200, not a number) keeps 200 |
+| `status` | serve only rows in these statuses. Terminal statuses only: `done`, `skipped`, `failed`, `would-transcode`, `indeterminate`, `applied-despite-error`. Repeat the parameter, separate values with commas, or both; the filter is their union, and `status=done,failed`, `status=failed&status=done` and `status=done&status=failed` are one request |
+| `cursor` | the `next_cursor` of the previous page, exactly as it was served. Opaque: do not build one, and do not read one |
+
+The 200 body:
+
+```json
+{
+  "history": [ ... ],
+  "history_total": { "available": true, "unavailable": "", "covers": "every row in the ledger with status done, failed",
+                     "cap": 200, "age_seconds": 0, "count": 41237 },
+  "next_cursor": "eyJ2IjoxLCJ1Ijox..."
+}
+```
+
+- **Order.** Newest transition first (`updated_at` descending), then `path` ascending, then the row's
+  internal key. The order is total: no two rows compare equal, so a page boundary always falls between
+  two rows.
+- **`next_cursor`** is a string while at least one more matching row follows the page, and JSON `null`
+  on the last page. The key is always present. A last page that is exactly full still carries `null`:
+  no cursor ever leads to an empty page. To read everything, send the request, then send it again with
+  `cursor` set to each `next_cursor` until one is `null`, keeping `status` the same throughout.
+- **`history_total`** is the count of matching rows in the whole ledger - under a filter, the rows in
+  the requested statuses; `covers` names them. It is never the number of rows returned, and `cap` is
+  the limit this response applied. If it cannot be read the page and its cursor still ship, with
+  `available: false` and `count: null`.
+- **`history`** is always an array. A valid filter that matches nothing answers 200 with `[]`,
+  `next_cursor: null` and a `count` of 0.
+
+**What a traversal guarantees.** A row that exists, stays in the requested statuses and is not
+re-transitioned from the first page's read to the last page's is served exactly once. No row is served
+twice when the changes made during the traversal are stamped in a later second than every row already
+served. A cursor is a position, not a row: if the row it was issued from has since been deleted, the
+next page is the rows that follow that position.
+
+**What it does not.** `updated_at` is in whole seconds. A row that is re-transitioned in the same
+second as the position a cursor stands at, and that sorts after it, can be served a second time in its
+new state. A row not yet served that transitions again moves to the newest end and is not in this
+traversal: it is at the top of the next one. A row the ledger retention deletes during a traversal is
+not served. A consumer that needs every row as it stood at one instant should use `holdfast export`.
+
+**Refusals.** A `status` or `cursor` this endpoint cannot accept is a `400` with a JSON body, and no
+rows. It is never read as "no filter" and never answered with an empty page: an empty page for a
+mistyped status reads as "no such rows". With `server_read_token` set, a request without a valid token
+is a `401` before either parameter is looked at.
+
+```json
+{
+  "rule": "invalid-query",
+  "error": "nothing was read: the request's status and cursor could not be accepted, ...",
+  "retryable": false,
+  "parameters": [
+    { "parameter": "status", "rule": "status-not-terminal", "error": "status takes the terminal statuses only (...)" },
+    { "parameter": "cursor", "rule": "cursor-undecodable", "error": "cursor is not a token this server issued: ..." }
+  ]
+}
+```
+
+Every parameter that was wrong is named in the one response, once each, `status` before `cursor`.
+`retryable` is always `false`. Branch on the tokens, never on the words:
+
+| Token | Where | Meaning |
+|---|---|---|
+| `invalid-query` | top-level `rule` | a query parameter was refused; `parameters` says which |
+| `status-not-terminal` | `status` | a value is not one of the six terminal statuses: an unknown word, a status the queue serves (`pending`, `probing`, `encoding`, `verifying`), or an empty element (`status=`, `status=done,`). Values are exact: no other case, no surrounding space |
+| `cursor-undecodable` | `cursor` | not a token this server issued: empty, truncated, altered beyond reading, or given more than once |
+| `cursor-filter-mismatch` | `cursor` | a readable token presented with a status set other than the one it was issued under, including a token from an unfiltered request presented with a filter and the reverse. The same set in another order or spelling is accepted. Reported only when `status` itself was accepted |
+
 ### The total behind a cap
 
 `GET /api/queue` returns at most **500** rows and `GET /api/history` at most **200**. A truncated view that
@@ -770,7 +904,7 @@ in the `jobs` table**:
 | Response | Field |
 |---|---|
 | `GET /api/queue` | `queue_total` |
-| `GET /api/history?limit=N` | `history_total` |
+| `GET /api/history` | `history_total` (over the requested statuses when `status` is given) |
 | the SSE snapshot | both |
 
 ```json

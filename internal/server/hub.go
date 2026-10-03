@@ -258,6 +258,21 @@ type jobDTO struct {
 	// (docs/design/crop.md#crop): the rectangle kept, or the token saying why the whole frame
 	// was. `null` is NOT RECORDED: the root does not crop, or the row predates the field.
 	Crop *cropDTO `json:"crop"`
+
+	// Priority is the queue priority the CONFIGURATION gives this file today
+	// (docs/design/queue-order.md#priority): its deciding rule's, else its encode profile's,
+	// else its root's, else 0. It is the one field here that is not read from the row - a
+	// priority is on no row, by design - so it is filled in by the hub's resolver
+	// (priority.go) and by nothing else.
+	//
+	// A POINTER and not omitempty: 0 is a real priority, the one every file has until a
+	// configuration names another, so "not known" has to be an explicit null. It is null
+	// where the path lies under no configured root, where the priority depends on a source
+	// height the row does not record, and on every row projected with no resolver (the
+	// export's, which reads a ledger and no configuration).
+	//
+	// DISPLAY ONLY. Nothing sets it through the API, and nothing reads it back.
+	Priority *int `json:"priority"`
 }
 
 // cropDTO is one job's crop on the wire. `rect` (`W:H:X:Y`) and `frame` (`WxH`) are non-null
@@ -689,6 +704,10 @@ type Hub struct {
 	// across the refresh interval without sleeping through it.
 	now func() time.Time
 
+	// priority answers a row's queue priority for display, set once with SetPriority
+	// before serving. nil leaves every row's `priority` null.
+	priority PriorityResolver
+
 	mu   sync.Mutex
 	subs map[chan []byte]struct{}
 }
@@ -825,7 +844,7 @@ func (h *Hub) liveProgressCount() int {
 // encoder has reported. Both the SSE snapshot and GET /api/queue go through here, so the
 // stream and the read endpoint cannot disagree about a running job.
 func (h *Hub) queueDTOs(jobs []store.Job) []jobDTO {
-	dtos := toDTOs(jobs)
+	dtos := h.rowDTOs(jobs)
 	live := h.liveProgressFor(jobs)
 	for i := range dtos {
 		p, ok := live[dtos[i].Path]
@@ -1034,7 +1053,7 @@ func (h *Hub) buildSnapshot(ctx context.Context, mayRefresh bool) (snapshot, err
 		Queue:   h.queueDTOs(queue),
 		// History rows are terminal, so they are projected WITHOUT live progress — a
 		// finished file carries the proof its swap was safe, never a running figure.
-		History:                toDTOs(hist),
+		History:                h.rowDTOs(hist),
 		QueueTotal:             rowTotalOf(figures.QueueTotal, queueLimit),
 		HistoryTotal:           rowTotalOf(figures.HistoryTotal, historyLimit),
 		BytesReclaimedSession:  h.bytesReclaimed.Load(),

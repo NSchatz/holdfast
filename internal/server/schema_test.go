@@ -282,8 +282,9 @@ func TestReadResponseTypes_EncodeTheBytesTheMapLiteralsDid(t *testing.T) {
 			named:   queueResponse{Now: now, Queue: jobs, QueueTotal: total},
 		},
 		{
+			// next_cursor is S0170's added key; the map sorts it last, where the type declares it.
 			name:    "GET /api/history",
-			literal: map[string]any{"history": jobs, "history_total": total},
+			literal: map[string]any{"history": jobs, "history_total": total, "next_cursor": nil},
 			named:   historyResponse{History: jobs, HistoryTotal: total},
 		},
 		{

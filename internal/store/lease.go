@@ -112,6 +112,13 @@ type LeaseLedger interface {
 	// of each path, and reports how many it deleted. The newest row of a path is what the
 	// next grant counts its epoch up from, so it is never pruned, and a live row never is.
 	PruneLeases(ctx context.Context, olderThan time.Time) (int64, error)
+	// RecentLeases lists at most limit leases, live and ended alike, newest grant first
+	// (then path ascending, then epoch descending). A pure read, for reporting: it is on no
+	// grant's path and writes nothing (lease_list.go).
+	RecentLeases(ctx context.Context, limit int) ([]Lease, error)
+	// CountLeases counts every lease row: the total a RecentLeases listing was capped
+	// against. A count that could not be read carries its own error, never a zero.
+	CountLeases(ctx context.Context) RowTotal
 }
 
 var _ LeaseLedger = (*SQLite)(nil)
