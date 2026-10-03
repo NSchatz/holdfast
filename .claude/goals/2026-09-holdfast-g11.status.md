@@ -97,7 +97,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g11-b
 | # | Item | State |
 |---|---|---|
 | 5.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `81d7c1b`): `func Test` 1834 -> 1958, no package fell (`cmd/holdfast` 259 -> 264, `internal/config` 163 -> 170, `internal/engine` 574 -> 597, `internal/node` 0 -> 54, `internal/nodeworker` 0 -> 23, `internal/server` 125 -> 129, `internal/store` 155 -> 163, every other package unchanged); `git diff --numstat 8d9c23b origin/main -- docs/design/swap.md docs/design/quality-gate.md` empty (66 and 80 lines); `*_test.go` +8471 -23, the 23 deleted lines in D12 and D17; zero `co-authored-by` in `git log 8d9c23b..origin/main --format=%B` |
-| 5.2 | Adversarial review of the report | TODO |
+| 5.2 | Adversarial review of the report | DONE: a fresh subagent (2026-10-03) checked lines A-G against `8629e94` and GitHub in its own copy of the tree, re-running the line C, D and E tests (`-count=1`), mutating the product code to see fixtures go red (the digest comparison, the free-space refusal at upload start, the duplicate upload: 6 fixtures failed by assertion), recounting `func Test` per directory, listing the 23 deleted test lines, and checking the merge rule of PRs #157 and #158: "VERDICT: none false". MEDIUM, recorded (D21): two fixtures go red only by hanging to their timeout, and the engine-level expired-lease fixture stayed green when only the expiry comparison was removed (its `internal/node` twin covers the item). LOW, taken: the report says under F that `waitHTTP` gained a one-minute floor, and keeps the cached final gate run visible. LOW, recorded: the read group is open when `server_read_token` is unset (as before this goal), so the node token is refused there only where a read token is set |
 
 ## Decisions taken
 
@@ -203,11 +203,23 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g11-b
 - D20 (2026-10-03): no minor release is cut (T37 optional): nodes are off by default and the
   HTTP mode, the TLS stance and the deployment docs are goal 12's.
 
+- D21 (2026-10-03): what the report's adversarial review left open, for goal 12, which works in
+  the same packages: `TestNodeFixture_UploadOnAnExpiredLeaseIs410AndLeavesNoFile` and
+  `TestWorkerFixture_AFreeSpaceReservationRefusalAtGrantIs503AndTheSourceIsUntouched` go red on
+  their regression by running into their timeout rather than by a named assertion, and
+  `TestWorkerFixture_AnExpiredLeaseUploadIsDiscardedAndTheJobIsRetried` did not go red when only
+  the expiry comparison in `checkLive` was removed (the sweep and the attached-wait check refuse
+  the same upload). Also noted: `worker_slots` above 1 needs `node_max_leases_per_node` raised
+  to match; `node_max_leases` and `node_gate_slots` are keys beyond the two P4 names (additions);
+  this goal created `docs/design/nodes.md` (goal 12 adds the transport warnings of P4 rule 10).
+
 ## Proposals awaiting the owner
 
 - Hardware encoders on a node (D4): a node's own start-time probe would have to gate the job.
 - Which lease endings count against a file's `max_failures` (D14): as built, only a lease that was
   really attempted; P4 rule 3 as written charges every `fail`.
+- At the retry bound the row is parked `failed` (P4 rule 3), where the goal file says "ends in a
+  SKIP" (D6).
 - No maximum lease lifetime: a node that keeps heartbeating holds its job, as a hung local encode
   holds a worker today.
 - Files queued by `POST /api/scan`, a webhook or the watch are encoded by the server; only a
@@ -216,5 +228,6 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g11-b
 ## Resume here
 
 Both PRs are merged (#157 at `7b434e1`, #158 at `81d7c1b`); no branch, worktree or open PR of this
-goal remains (#156 is another session's). Next: the adversarial review of the report (5.2), the
-COMPLETE line, `goals check`, the GOAL REPORT.
+goal remains (#156 is another session's). The adversarial review found none false. Goal complete.
+
+COMPLETE (goal 11): 2026-10-03
