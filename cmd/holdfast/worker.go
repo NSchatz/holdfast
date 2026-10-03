@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -33,12 +35,14 @@ const workerWorkDirName = "holdfast-worker"
 
 // cmdWorker is `holdfast worker`: the node side of the lease protocol
 // (docs/design/nodes.md#worker). It leases encodes from the server worker_server names, reads
-// each source through its own mount of the library, and uploads the output. It writes nothing
-// into the library and holds one credential, node_token, which can lease and upload and
-// nothing else.
+// each source through its own mount of the library (worker_mode: mapped) or downloads it on
+// the lease (worker_mode: http), and uploads the output. It writes nothing into the library
+// and holds one credential, node_token, which can lease and upload and nothing else.
 func cmdWorker(args []string, _, stderr io.Writer) int {
 	fs := flag.NewFlagSet("worker", flag.ContinueOnError)
-	cfg, code := loadConfig(fs, args, stderr)
+	// A worker in http mode names no library root, so its configuration is held to
+	// config.ValidateWorker; in mapped mode that is Validate itself.
+	cfg, code := loadConfigWith(fs, args, stderr, (*config.Config).ValidateWorker)
 	if cfg == nil {
 		return code
 	}
@@ -51,6 +55,66 @@ func cmdWorker(args []string, _, stderr io.Writer) int {
 		envOr("HOLDFAST_FFMPEG", "ffmpeg"), envOr("HOLDFAST_FFPROBE", "ffprobe"), nil)
 }
 
+// workerStart is what workerPreflight settled about a worker before anything is resolved or
+// probed.
+type workerStart struct {
+	server, mode, name string
+	// client is the HTTP client that trusts worker_tls_ca beside the system roots; nil when
+	// the key is unset. cleartext says worker_insecure_http is what let the address through.
+	client    *http.Client
+	cleartext bool
+}
+
+// workerPreflight is every start-or-refuse decision `holdfast worker` takes from its
+// configuration alone, before its credential is resolved and before ffmpeg is looked for:
+// the server's address, the transport, the mode, worker_tls_ca, the presence of node_token
+// and the node's name. `holdfast validate` runs the same function on an http worker's file,
+// so it never answers "config OK" for a file `worker` would refuse. Each refusal names the
+// key an operator has to set.
+func workerPreflight(cfg *config.Config) (workerStart, error) {
+	var w workerStart
+	w.server = strings.TrimSpace(cfg.WorkerServer)
+	if w.server == "" {
+		return w, errors.New("worker_server is not set: a worker needs the address of the server it leases from")
+	}
+	// The credential never crosses a network in cleartext unless the operator wrote
+	// worker_insecure_http: true (docs/design/nodes.md#transport), which nodeworker.New says
+	// at warn level at every start. Checked before the secret is even resolved.
+	cleartext, err := nodeworker.CheckTransport(w.server, cfg.WorkerInsecureHTTP)
+	if err != nil {
+		return w, err
+	}
+	w.cleartext = cleartext
+	w.mode = cfg.EffectiveWorkerMode()
+	if w.mode == config.WorkerModeHTTP && len(cfg.LibraryRoots) > 0 {
+		// config.ValidateWorker refuses this; a Config built another way is held to it too.
+		return w, errors.New("worker_mode is http and library_roots is set: a worker in http mode reads no library")
+	}
+	// worker_tls_ca: certificates trusted beside the system roots. An unreadable or empty
+	// bundle refuses here; nothing ever switches verification off.
+	if ca := strings.TrimSpace(cfg.WorkerTLSCA); ca != "" {
+		c, err := nodeworker.TrustingClient(ca)
+		if err != nil {
+			return w, err
+		}
+		w.client = c
+	}
+	if !cfg.NodesEnabled() {
+		return w, errors.New("node_token is not set: a worker needs the node credential, by reference " +
+			"(file:<path> or cmd:<argv>) - see docs/secrets.md")
+	}
+	w.name = cfg.WorkerName
+	if w.name == "" {
+		host, err := os.Hostname()
+		if err != nil || !config.ValidNodeName(host) {
+			return w, errors.New("worker_name is not set and this host's name is not one a node may give " +
+				"(1 to 64 characters from letters, digits, '.', '_' and '-'): set worker_name")
+		}
+		w.name = host
+	}
+	return w, nil
+}
+
 // runWorker checks what a worker needs, probes its encoders, and runs its loop until ctx
 // ends. Every refusal names the key an operator has to set. tune, nil in production, lets a
 // test shorten the loop's waits.
@@ -60,28 +124,11 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 		fmt.Fprintf(stderr, "holdfast: refusing to start: "+format+"\n", a...)
 		return 1
 	}
-	srv := strings.TrimSpace(cfg.WorkerServer)
-	if srv == "" {
-		return refuse("worker_server is not set: a worker needs the address of the server it leases from")
-	}
-	// D8: the credential never crosses a network in cleartext. Checked before the secret is
-	// even resolved.
-	if err := nodeworker.CheckServer(srv); err != nil {
+	pre, err := workerPreflight(cfg)
+	if err != nil {
 		return refuse("%v", err)
 	}
-	if !cfg.NodesEnabled() {
-		return refuse("node_token is not set: a worker needs the node credential, by reference " +
-			"(file:<path> or cmd:<argv>) - see docs/secrets.md")
-	}
-	name := cfg.WorkerName
-	if name == "" {
-		host, err := os.Hostname()
-		if err != nil || !config.ValidNodeName(host) {
-			return refuse("worker_name is not set and this host's name is not one a node may give " +
-				"(1 to 64 characters from letters, digits, '.', '_' and '-'): set worker_name")
-		}
-		name = host
-	}
+	srv, mode, name, client := pre.server, pre.mode, pre.name, pre.client
 	for _, bin := range []string{ffmpeg, ffprobe} {
 		if _, err := exec.LookPath(bin); err != nil {
 			fmt.Fprintf(stderr, "holdfast: required binary %q not found: %v\n", bin, err)
@@ -123,6 +170,7 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	opts := nodeworker.Options{
 		Server: srv, Token: secrets.Get(config.NodeTokenKey), Name: name, Version: version.Version,
 		Slots: cfg.EffectiveWorkerSlots(), PathMap: cfg.WorkerPathMap, WorkDir: workDir,
+		Mode: mode, InsecureHTTP: cfg.WorkerInsecureHTTP, HTTP: client, FreeSpace: diskfree.Bytes,
 		Encoders: encoders, Log: log,
 		// The command line is assembled by the engine's own function, the one every local
 		// encode goes through, so a node's argv and the server's cannot drift.
@@ -140,7 +188,7 @@ func runWorker(ctx context.Context, cfg *config.Config, log *slog.Logger, stderr
 	if err != nil {
 		return refuse("%v", err)
 	}
-	log.Info("worker starting", "server", srv, "name", name, "slots", opts.Slots,
+	log.Info("worker starting", "server", srv, "name", name, "mode", mode, "slots", opts.Slots,
 		"encoders", strings.Join(encoders, ","), "work_dir", workDir,
 		"path_map_entries", len(cfg.WorkerPathMap), "version", version.Version)
 	if err := w.Run(ctx); err != nil {

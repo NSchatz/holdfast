@@ -22,6 +22,30 @@ const (
 	workerSlotsKey   = "worker_slots"
 	workerPathMapKey = "worker_path_map"
 	workerWorkDirKey = "worker_work_dir"
+
+	workerModeKey         = "worker_mode"
+	workerInsecureHTTPKey = "worker_insecure_http"
+	workerTLSCAKey        = "worker_tls_ca"
+
+	serverTLSCertKey = "server_tls_cert"
+	serverTLSKeyKey  = "server_tls_key"
+)
+
+// The two ways a worker reaches a leased source (docs/design/nodes.md#http-mode).
+const (
+	// WorkerModeMapped reads the source through the worker's own mount of the library.
+	WorkerModeMapped = "mapped"
+	// WorkerModeHTTP downloads the source from the server on the lease.
+	WorkerModeHTTP = "http"
+)
+
+// ServerTLSKeyKey is the TLS private key's key, for the caller that hands the resolved
+// value to the listener, and WorkerTLSCAKey the key a refusal about the worker's extra
+// trust names.
+const (
+	ServerTLSKeyKey  = serverTLSKeyKey
+	ServerTLSCertKey = serverTLSCertKey
+	WorkerTLSCAKey   = workerTLSCAKey
 )
 
 // NodeTokenKey is the node credential's key, for the callers that hand the resolved value
@@ -105,6 +129,58 @@ func (c *Config) EffectiveNodeGateSlots() int {
 
 // EffectiveWorkerSlots is how many encodes this worker runs at once.
 func (c *Config) EffectiveWorkerSlots() int { return orDefault(c.WorkerSlots, DefaultWorkerSlots) }
+
+// EffectiveWorkerMode is the worker's mode: mapped where the key is unset, as a Config built
+// without Load leaves it.
+func (c *Config) EffectiveWorkerMode() string {
+	if c.WorkerMode == "" {
+		return WorkerModeMapped
+	}
+	return c.WorkerMode
+}
+
+// TLSEnabled reports whether `serve` listens with TLS: both server_tls_cert and
+// server_tls_key are written. Validate has refused one without the other.
+func (c *Config) TLSEnabled() bool {
+	return strings.TrimSpace(c.ServerTLSCert) != "" && strings.TrimSpace(c.ServerTLSKey) != ""
+}
+
+// validateTransport refuses a transport key outside its accepted values, naming the key
+// (docs/design/nodes.md#transport). It runs after the literal-credential refusal, so a
+// pasted server_tls_key is reported as one and never as a missing certificate.
+func (c *Config) validateTransport() error {
+	cert, key := strings.TrimSpace(c.ServerTLSCert), strings.TrimSpace(c.ServerTLSKey)
+	switch {
+	case cert != "" && key == "":
+		return fmt.Errorf("%s is set and %s is not: built-in TLS needs both, the certificate chain as a "+
+			"path and its private key by reference (%s: file:/run/secrets/holdfast-tls-key). Set %s, or "+
+			"remove %s to listen without TLS", serverTLSCertKey, serverTLSKeyKey, serverTLSKeyKey,
+			serverTLSKeyKey, serverTLSCertKey)
+	case key != "" && cert == "":
+		return fmt.Errorf("%s is set and %s is not: built-in TLS needs both, the private key by reference "+
+			"and the PEM certificate chain it belongs to as a path. Set %s, or remove %s to listen without TLS",
+			serverTLSKeyKey, serverTLSCertKey, serverTLSCertKey, serverTLSKeyKey)
+	case cert != "" && !strings.HasPrefix(cert, "/"):
+		return fmt.Errorf("%s %q must be an absolute path (it starts with /) to a PEM certificate chain",
+			serverTLSCertKey, cert)
+	}
+	if ca := strings.TrimSpace(c.WorkerTLSCA); ca != "" && !strings.HasPrefix(ca, "/") {
+		return fmt.Errorf("%s %q must be an absolute path (it starts with /) to a PEM bundle of the "+
+			"certificates the worker trusts beside the system roots", workerTLSCAKey, ca)
+	}
+	switch c.WorkerMode {
+	case "", WorkerModeMapped:
+	case WorkerModeHTTP:
+		if len(c.WorkerPathMap) > 0 {
+			return fmt.Errorf("%s is %s and %s is set: a worker in http mode downloads each source from "+
+				"its server and maps no path, so the two contradict each other. Remove %s, or set %s: %s",
+				workerModeKey, WorkerModeHTTP, workerPathMapKey, workerPathMapKey, workerModeKey, WorkerModeMapped)
+		}
+	default:
+		return fmt.Errorf("%s %q is not one of %s|%s", workerModeKey, c.WorkerMode, WorkerModeMapped, WorkerModeHTTP)
+	}
+	return nil
+}
 
 // ValidNodeName reports whether name is one a node may give: 1 to MaxNodeNameLen
 // characters from letters, digits, `.`, `_` and `-`. The name reaches the lease ledger and

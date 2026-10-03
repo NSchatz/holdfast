@@ -180,6 +180,7 @@ func TestNodeToken_OtherTokensCannotCallNodeEndpoints(t *testing.T) {
 		}
 	}
 	want := []string{
+		"GET /api/node/v1/leases/{id}/source",
 		"POST /api/node/v1/leases", "POST /api/node/v1/leases/{id}/complete", "POST /api/node/v1/leases/{id}/fail",
 		"POST /api/node/v1/leases/{id}/heartbeat", "PUT /api/node/v1/leases/{id}/output",
 	}
@@ -263,8 +264,8 @@ func TestNodeToken_UnsetAnswers403NamingTheKey(t *testing.T) {
 			}
 		}
 	}
-	if n != 5 {
-		t.Errorf("the walk found %d lease routes, want 5", n)
+	if n != 6 {
+		t.Errorf("the walk found %d lease routes, want 6", n)
 	}
 	// The other groups answer exactly as they do without this key.
 	if code, _ := h.send(t, "GET /api/summary", "", bearer(hookReadTok)); code != http.StatusOK {
@@ -296,13 +297,14 @@ func TestNodeEndpoints_AnswersMatchTheSurfaceDocument(t *testing.T) {
 		"PUT /api/node/v1/leases/{id}/output":     "[200 400 401 403 404 405 408 409 410 411 413 500 503]",
 		"POST /api/node/v1/leases/{id}/complete":  "[200 400 401 403 404 405 409 410 500 503]",
 		"POST /api/node/v1/leases/{id}/fail":      "[200 400 401 403 404 405 410 500 503]",
+		"GET /api/node/v1/leases/{id}/source":     "[200 206 400 401 403 404 405 409 410 416 500 503]",
 	} {
 		if declared[key] != want {
 			t.Errorf("%s declares %s, want %s", key, declared[key], want)
 		}
 	}
-	if len(declared) != 5 {
-		t.Errorf("the document declares %d lease endpoints, want 5: %v", len(declared), declared)
+	if len(declared) != 6 {
+		t.Errorf("the document declares %d lease endpoints, want 6: %v", len(declared), declared)
 	}
 
 	call := func(method, route, id string, body []byte, hdr map[string]string) (int, []byte) {

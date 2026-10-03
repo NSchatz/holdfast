@@ -796,6 +796,9 @@ func TestScanEndpoint_AddsNoRouteBeyondScan(t *testing.T) {
 		"PUT /api/node/v1/leases/{id}/output":     true,
 		"POST /api/node/v1/leases/{id}/complete":  true,
 		"POST /api/node/v1/leases/{id}/fail":      true,
+		// The source stream of http mode: a read of one leased source by the holder of that
+		// live lease. It offers no row again, restores nothing and resolves nothing.
+		"GET /api/node/v1/leases/{id}/source": true,
 	}
 	for _, r := range served {
 		// EVERY method under /api/ is the surface this pins, so a route added under PUT,

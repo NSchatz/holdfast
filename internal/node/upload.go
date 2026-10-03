@@ -85,7 +85,7 @@ func (h *Hub) serveUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !h.takeTransfer() {
-		h.unavailable(w, errTransfersFull, "as many uploads as the server takes at once (node_max_transfers) are in flight")
+		h.unavailable(w, errTransfersFull, "as many transfers as the server takes at once (node_max_transfers) are in flight")
 		return
 	}
 	defer h.releaseTransfer()

@@ -124,6 +124,11 @@ type Result struct {
 	OutputDigest string
 	OutputBytes  int64
 	SourceDigest string
+	// StreamedDigest is the sha-256 of the bytes the SERVER streamed on this lease, in the
+	// recorded form, where it streamed the whole source in one unranged response; "" where
+	// it did not. A completed lease that carries one has SourceDigest equal to it: the hub
+	// fails any other completion (ReasonSourceMismatch).
+	StreamedDigest string
 	// EncodeSeconds is the encode time the node reported, 0 when it reported none.
 	EncodeSeconds float64
 }
@@ -150,7 +155,7 @@ func (e *LeaseError) Error() string {
 // leaseErrorOf is the typed error a terminal row that is not completed stands for.
 func leaseErrorOf(l Lease) *LeaseError {
 	e := &LeaseError{LeaseID: l.ID, Node: l.Node, Epoch: l.Epoch, Reason: Reason(l.Reason)}
-	if l.State == store.LeaseFailed && e.Reason != ReasonDigestMismatch {
+	if l.State == store.LeaseFailed && e.Reason != ReasonDigestMismatch && e.Reason != ReasonSourceMismatch {
 		e.Reason, e.Detail = ReasonNodeFailed, l.Reason
 	}
 	return e
@@ -215,8 +220,13 @@ type Hub struct {
 	// waits is the engine call waiting on each attached lease.
 	waits map[string]*wait
 	// uploads is the upload writing each working file, by path.
-	uploads   map[string]*upload
+	uploads map[string]*upload
+	// transfers counts the source streams and the uploads in flight.
 	transfers int
+	// sources is, per lease granted by this process, the mode it was granted in and what
+	// the server streamed on it. It is memory only: a lease a restart recovered has no
+	// entry, so its mode is unknown and its source is not served (serveSource).
+	sources map[string]*leaseSource
 	// cooling is, per node, the leases that ended in a row with none succeeding between,
 	// and the instant until which the node is offered nothing.
 	cooling map[string]*coolState
@@ -264,8 +274,26 @@ func New(o Options) *Hub {
 	return &Hub{
 		o: o, tickets: map[*Ticket]struct{}{}, live: map[string]string{},
 		waits: map[string]*wait{}, uploads: map[string]*upload{}, changed: make(chan struct{}),
-		cooling: map[string]*coolState{},
+		cooling: map[string]*coolState{}, sources: map[string]*leaseSource{},
 	}
+}
+
+// leaseSource is what the hub remembers about one lease's source: the mode the lease was
+// granted in, and the sha-256 of the bytes the server streamed where it streamed the whole
+// source in one unranged response.
+type leaseSource struct {
+	mode     string
+	streamed string
+}
+
+// streamedDigest is the digest of the source the server streamed on the lease, or "".
+func (h *Hub) streamedDigest(id string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if s := h.sources[id]; s != nil {
+		return s.streamed
+	}
+	return ""
 }
 
 // wait is one engine call blocked on a lease.
@@ -327,7 +355,9 @@ const (
 
 // poll is one acquire request waiting for work.
 type poll struct {
-	node     string
+	node string
+	// mode is the mode the request asked for work in.
+	mode     string
 	encoders []string
 	reply    chan pollReply
 	state    pollState
@@ -335,8 +365,10 @@ type poll struct {
 
 // pollReply is what an acquire request is answered with: a grant, or a refusal.
 type pollReply struct {
-	lease  *Lease
-	job    Job
+	lease *Lease
+	job   Job
+	// mode is the mode a grant was made in.
+	mode   string
 	status int
 	reason string
 	detail string
@@ -353,6 +385,9 @@ type Ticket struct {
 
 // Node is the name of the node the ticket's poll came from.
 func (t *Ticket) Node() string { return t.p.node }
+
+// Mode is the mode that node asked for work in.
+func (t *Ticket) Mode() string { return t.p.mode }
 
 // Encoders is the encoders that node's own probe found, as it reported them.
 func (t *Ticket) Encoders() []string { return append([]string(nil), t.p.encoders...) }
@@ -445,6 +480,11 @@ func (h *Hub) Report(node, reason string) {
 	defer h.mu.Unlock()
 	if reason == "" {
 		delete(h.cooling, node)
+		return
+	}
+	if reason == ReasonSourceWithdrawn {
+		// The server withdrew the source; the node did nothing wrong. The run is neither
+		// lengthened nor cleared.
 		return
 	}
 	c := h.cooling[node]
@@ -635,16 +675,18 @@ func (h *Hub) Encode(ctx context.Context, t *Ticket, job Job, progress func(frac
 	h.takeLocked(t)
 	h.live[lease.ID] = lease.Node
 	h.waits[lease.ID] = w
+	h.sources[lease.ID] = &leaseSource{mode: t.p.mode}
 	gone := t.p.state != pollReserved
 	if !gone {
 		t.p.state = pollAnswered
 		granted := lease
-		t.p.reply <- pollReply{lease: &granted, job: job}
+		t.p.reply <- pollReply{lease: &granted, job: job, mode: t.p.mode}
 	}
 	h.notifyLocked()
 	h.mu.Unlock()
 	h.life.Unlock()
-	h.o.Log.Info("node lease granted", "node", lease.Node, "lease", lease.ID, "epoch", lease.Epoch, "path", lease.Path)
+	h.o.Log.Info("node lease granted", "node", lease.Node, "lease", lease.ID, "epoch", lease.Epoch, "path", lease.Path,
+		"mode", t.p.mode)
 	if gone {
 		// The node stopped waiting between the reservation and the grant. Nobody holds
 		// this lease's id, so it is ended now rather than left to run out.
@@ -830,7 +872,7 @@ func (h *Hub) cancel(lease Lease, w *wait) (Result, error) {
 	defer stop()
 	row, err := h.end(ctx, lease.ID, ReasonCanceled)
 	if err == nil {
-		w.finish(h.outcomeOf(row, w))
+		w.finish(h.outcomeOf(row, w, nil))
 		out := <-w.done
 		return out.res, out.err
 	}
@@ -850,6 +892,7 @@ func (h *Hub) cancel(lease Lease, w *wait) (Result, error) {
 	// ending removes nothing - and the working file it owned until now is removed here.
 	h.mu.Lock()
 	delete(h.waits, lease.ID)
+	delete(h.sources, lease.ID)
 	h.mu.Unlock()
 	h.removeTemp(lease.Temp)
 	return Result{}, fmt.Errorf("%w: %w", &LeaseError{LeaseID: lease.ID, Node: lease.Node,
@@ -857,12 +900,15 @@ func (h *Hub) cancel(lease Lease, w *wait) (Result, error) {
 }
 
 // outcomeOf is what a terminal row means to the engine call waiting on it.
-func (h *Hub) outcomeOf(l Lease, w *wait) outcome {
+func (h *Hub) outcomeOf(l Lease, w *wait, src *leaseSource) outcome {
 	if l.State != store.LeaseCompleted {
 		return outcome{err: leaseErrorOf(l)}
 	}
 	res := Result{LeaseID: l.ID, Node: l.Node, Epoch: l.Epoch, OutputDigest: l.OutputDigest,
 		OutputBytes: l.OutputBytes, SourceDigest: l.SourceDigest}
+	if src != nil {
+		res.StreamedDigest = src.streamed
+	}
 	if w != nil {
 		w.mu.Lock()
 		res.EncodeSeconds = w.encodeSec
@@ -902,8 +948,10 @@ func (h *Hub) applyLocked(ctx context.Context, id string, decide func(Lease) (Le
 func (h *Hub) settleLocked(row Lease) {
 	h.mu.Lock()
 	w := h.waits[row.ID]
+	src := h.sources[row.ID]
 	delete(h.waits, row.ID)
 	delete(h.live, row.ID)
+	delete(h.sources, row.ID)
 	h.notifyLocked()
 	h.mu.Unlock()
 	if row.State != store.LeaseCompleted {
@@ -914,7 +962,7 @@ func (h *Hub) settleLocked(row Lease) {
 			"epoch", row.Epoch, "state", string(row.State), "reason", row.Reason, "attached", w != nil)
 	}
 	if w != nil {
-		w.finish(h.outcomeOf(row, w))
+		w.finish(h.outcomeOf(row, w, src))
 	}
 }
 

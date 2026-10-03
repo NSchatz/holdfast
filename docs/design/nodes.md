@@ -10,11 +10,13 @@ ledger is `internal/store/lease.go`, and the route group and its credential chec
 
 **What this build has.** The protocol, its durable lease rows, the `node_token` credential, the
 configuration keys, the engine's hand-off of a job to a node ([the seam](#seam)) and the
-`holdfast worker` command ([the worker](#worker)). Only **mapped mode** exists: a node reads the
-source through its own mount of the library and uploads the output over HTTP. The mode in which
-the server streams the source over HTTP, built-in TLS and the deployment guide land in a
-following change. A `serve` with `node_token` set leases work as soon as its start-up recovery
-has run; `run` leases nothing.
+`holdfast worker` command ([the worker](#worker)). A node works in one of two modes, its own
+choice, stated in every request for work: **mapped mode**, in which it reads the source through
+its own mount of the library, and **http mode**, in which the server streams the source on the
+lease ([the source stream](#http-mode)). Either way the output is uploaded over HTTP. `serve`
+can listen with TLS on a certificate of its own, and a worker refuses to send its credential in
+the clear ([the transport](#transport)). A `serve` with `node_token` set leases work as soon as
+its start-up recovery has run; `run` leases nothing.
 
 ## The rule
 
@@ -49,6 +51,9 @@ restarted server can tell a live node's work from a stale one's.
 | working file | the path the server named for this grant. An upload is written there and nowhere else; no request carries a path |
 | argument-list digest, source size and mtime | what the restarted server compares a re-derived job with before it takes a lease back |
 | recorded figures | the admitted output's sha-256 and length, and the source sha-256 the node reported |
+
+The mode a lease was granted in, and the sha-256 of what the server streamed on it, are not in
+the row: they are the memory of the server process that granted it ([below](#http-mode)).
 
 **Every call carries the lease id and the epoch, and both are checked with the expiry inside the
 transaction that acts.** The ledger reads the row, hands it to a decision (`internal/node`,
@@ -91,7 +96,8 @@ source.
    is opened**, so an expired or superseded lease writes no byte anywhere.
 4. The declared length is at most the source size minus one (`413` otherwise). The
    strictly-smaller gate accepts nothing else, so anything larger could only be discarded.
-5. A transfer slot is free (`node_max_transfers`) and the filesystem holding the working file
+5. A transfer slot is free (`node_max_transfers`, which counts source streams and uploads
+   together) and the filesystem holding the working file
    has room for the declared length. Either refusal is `503` with `Retry-After`, and the lease
    stays live. A failed free-space lookup refuses nothing, as the engine's own check does not.
 6. The body, hashed while it is written, has exactly the declared length and the declared
@@ -125,9 +131,11 @@ disowned under it: when it finally fails it removes nothing.
 ## Completion, failure and the engine
 
 `POST .../complete` reports the output digest and length (which must be the ones the upload
-recorded) and the sha-256 of the source bytes the node read. That source digest is recorded and
-handed to the engine, which compares it with its own hash of the source before the gates: it is
-what catches a wrong path map or a stale network-mount cache. `POST .../fail` ends the lease with
+recorded) and the sha-256 of the source bytes the node read. Where the server streamed the whole
+source on that lease, the completion is held to the digest of what it streamed, in the
+transaction that would record it ([below](#http-mode)). The source digest is recorded and handed
+to the engine, which compares it with its own hash of the source before the gates, in both modes:
+it is what catches a wrong path map or a stale network-mount cache. `POST .../fail` ends the lease with
 the node's typed reason. Either way the engine call waiting on the lease returns - with the
 figures, or with a typed error naming the node, the epoch and the reason.
 
@@ -136,8 +144,8 @@ figures, or with a typed error naming the node, the epoch and the reason.
 A node asks for work with a bounded long-poll (30 s, **ASSUMED**), answered `204` with
 `Retry-After` when none arrived. The poll returns as soon as the server starts draining, so a
 graceful shutdown never waits one out. The caps - live leases across every node
-(`node_max_leases`, 4), per node (`node_max_leases_per_node`, 1) and uploads in flight
-(`node_max_transfers`, 2), all **ASSUMED** - answer `503` with `Retry-After` and a typed reason,
+(`node_max_leases`, 4), per node (`node_max_leases_per_node`, 1) and source streams plus uploads
+in flight (`node_max_transfers`, 2), all **ASSUMED** - answer `503` with `Retry-After` and a typed reason,
 and are enforced again inside the grant transaction. `node_gate_slots` (1, **ASSUMED**) is
 enforced by the engine ([the gate slots](#gate-slots)). A node whose build version is not the server's is answered `409` naming both
 versions. Not `426`: RFC 9110 section 15.5.22 says "The server MUST send an Upgrade header field
@@ -145,6 +153,146 @@ in a 426 response to indicate the required protocol(s)", and no protocol is on o
 
 A node reports the encoders its own probe found, and a job is leased only to a node that reports
 the job's encoder.
+
+## The source stream (http mode)
+
+<a id="http-mode"></a>
+
+**A node with no mount of the library is streamed the source of its own live lease, and of
+nothing else; the server hashes what it streams, and a completion that reports another digest
+fails the job before any gate.**
+
+A node asks for work in a mode, `mapped` or `http`, and its lease is granted in that mode; the
+answer says which. The mode is per node and is the node's own choice (the owner's decision that
+a node either shares a mount or is streamed the source): the server has no key that permits or
+forbids http mode, and what that means for whoever holds a `node_token` is stated under
+[the transport](#transport). A plan that is leasable in mapped mode is leasable in http mode and
+nothing else becomes leasable ([which jobs are leased](#leasable)).
+
+`GET /api/node/v1/leases/{id}/source` carries the epoch in `Holdfast-Lease-Epoch`, as the upload
+does. **No request names a path.** The file served is the source the lease row records, and only
+when all of these hold:
+
+1. The lease is live at that epoch: otherwise `410` with `Cache-Control: no-store`.
+2. An engine call in this process is waiting on it: otherwise `503 not_ready`, as for an upload.
+3. It was granted in http mode **by this server process** and has admitted no output yet:
+   otherwise `409 source_not_offered`. A mapped lease's source is never served.
+4. A transfer slot is free: otherwise `503 transfers_full` with `Retry-After`, and the lease
+   stays live.
+5. The file, once opened, is a regular file of exactly the size and modification time the lease
+   was granted on: otherwise `409 source_changed`. It is opened without following a symbolic
+   link at the leased path (`O_NOFOLLOW`): the engine refuses a source that is itself a link,
+   so one found there was put there after the grant, and what it points at is not the leased
+   file however its size and time read. The lease stays live - the node fails it
+   `source_withdrawn`, and the server's own guards then decide about the file it finds.
+
+The body is sent by `http.ServeContent`, which "handles Range requests properly", under
+`Content-Type: application/octet-stream` set **before** the call: "If the response's Content-Type
+header is not set, ServeContent first tries to deduce the type from name's file extension and,
+if that fails, falls back to reading the first block of the content and passing it to
+DetectContentType". A sniffed head would be read twice, so the type is fixed, no name is given
+and no modification time (so no `Last-Modified`). `ServeContent` also "handles If-Match,
+If-Unmodified-Since, If-None-Match, If-Modified-Since, and If-Range requests", which would
+answer `304` or `412`; this endpoint has neither answer, so those five request headers are
+dropped before it is called and a conditional request is served like any other. The reader the server hands `ServeContent` hashes only bytes read in order from the first
+one, each once.
+
+**What the server streamed, it hashed.** One unranged `GET` that sent the whole source leaves
+its sha-256 with the lease. When the node later reports `source_digest` in `complete`, the two
+are compared inside the transaction that would complete the lease: a different digest **fails
+the lease** (`source_digest_mismatch`, answered `409`), the admitted working file is removed, the
+engine call returns the typed ending, the job fails at the encode gate - before any gate ran -
+and the source is untouched. `max_failures` counts it, as it counts a source digest the server's
+own hash refuses.
+
+**A ranged response leaves no digest**, even one that spans the whole source: it is not one
+response carrying the whole representation. Nor does a stream that was cut. The proof is then
+the engine's own hash of its own copy of the source, taken before the gates in **both** modes, so
+a ranged read is never unchecked. The worker itself never sends `Range`: a failed download
+starts again from the first byte.
+
+**The mode and the streamed digest are not in the lease row.** They live in the server process
+that granted the lease. Recovery after a restart is correct without them, and no schema change
+was made for them: a recovered lease's mode is unknown, so its source is **not served** (rule
+3) rather than served on a guess; a node that already holds the whole source carries on, uploads
+and completes, and is held to the server's own hash; a node that was still downloading fails
+its lease `source_withdrawn`, and the server encodes that job itself, charging the file nothing
+and - because the withdrawal was the server's own doing - not counting it toward that node's
+cool-off. The streamed digest is transport integrity for one process's stream and nothing else
+relies on it.
+
+**A stalled download cannot hold a transfer slot.** The stream is written under a deadline set
+through `http.ResponseController.SetWriteDeadline` - which "sets the deadline for writing the
+response" - and moved on as the stream advances: no write may take longer than 30 s, and the
+whole stream no longer than 30 s plus one second for every 64 KiB of the source (both
+**ASSUMED**, the upload's own figures). A stream also ends when its lease does: a source is sent
+only while the lease is live, for the whole of the stream.
+
+**`Repr-Digest` is sent where it can be, and nothing rests on it.** After a whole source the
+server sets the RFC 9530 `Repr-Digest` trailer. Over HTTP/2 - which a TLS listener negotiates -
+it arrives beside the declared length; over HTTP/1.1 the response has a `Content-Length`, is not
+chunked, and carries no trailer. Go's own documentation says "Few HTTP clients, servers, or
+proxies support HTTP trailers", so the comparison in `complete` is the load-bearing one. A
+worker that does receive a readable trailer that disagrees with what it read stops before it
+encodes.
+
+## The transport
+
+<a id="transport"></a>
+
+**A worker speaks to its server over TLS or to loopback; plain HTTP to any other host is refused
+unless the operator wrote `worker_insecure_http: true`, which is logged at every start; and a
+node's source is streamed only on a live lease, with its sha-256 compared on the server before
+any gate.**
+
+**The server.** `server_tls_cert` is a plain path to a PEM certificate chain and
+`server_tls_key` a secret reference (`file:` or `cmd:`) to its PEM private key
+([docs/secrets.md](../secrets.md)). Both or neither: one without the other refuses to start
+naming the missing key, a literal key refuses as every literal credential does, and a pair that
+does not parse or does not belong together refuses with an error that names the key at fault
+and prints nothing of the key. With both set, `serve` listens with TLS on `server_addr` - the
+whole surface, not only the node endpoints - and answers nothing in the clear. With neither it
+listens exactly as it always has. The minimum version is TLS 1.2, written into the listener's
+configuration rather than left to the toolchain's default ("By default, TLS 1.2 is currently
+used as the minimum", which "can be reverted to TLS 1.0" by a `GODEBUG` setting). There is no
+client certificate and no user login: the credentials are the bearer tokens they were, and a
+reverse proxy that terminates TLS in front of a plain listener remains a supported deployment.
+
+With TLS on, anything that probes the listener - a container health check, a monitor, a
+Prometheus scrape of `/metrics` - must speak `https://` and trust the certificate; a plain-HTTP
+probe gets no answer from the API.
+
+**The worker.** `worker_server` is `https://`, or `http://` to a loopback host (`127.0.0.0/8`,
+`::1`, `localhost`). Plain `http://` to any other host refuses to start, before the credential
+is even resolved, unless `worker_insecure_http: true` is written; the worker then starts, and
+says what that costs in one `warn` record at **every** start. With `https://` or a loopback
+server the key does nothing and says nothing. `worker_tls_ca` is a plain path to a PEM bundle the
+worker trusts **in addition to** the system roots, for a server whose certificate is private; an
+unreadable bundle, or one holding no certificate, refuses to start naming the key. **Nothing
+switches certificate verification off**: there is no such key, and a server whose certificate
+the worker does not trust fails the TLS handshake before any request - and so before the
+credential, a source request or an upload - is sent.
+
+**What plain HTTP costs.** These are the consequences `worker_insecure_http: true` accepts, and
+equally those of a TLS-terminating proxy that is bypassed:
+
+- Over plain HTTP the `node_token` crosses the network **in cleartext on every request**.
+- Whoever captures it can lease jobs and upload outputs. Those outputs still face every gate, so
+  no source is replaced by them, but each costs the server a decode and a VMAF run, and each
+  lease holds a free-space reservation.
+- In **http mode** the same captured credential reads the library's media: a lease's source is
+  streamed to whoever holds the lease, and the media itself also crosses the network in the
+  clear.
+- **Digests do not help against that attacker.** RFC 9530 section 6.1: "an on-path malicious
+  actor can either remove a digest value entirely or substitute it with a new digest value
+  computed over manipulated representation data or content", mitigated by "Transport Layer
+  Security (TLS) or digital signatures". The digests here are transport integrity against
+  accident; TLS is the defence against someone on the path.
+- Nodes on other hosts need an explicit non-loopback `server_addr`. Without `server_read_token`
+  that address serves every media path in the read API to that network, without a credential
+  (the start-up notice says so). **A worker deployment sets `server_read_token` too.**
+- **No mTLS.** A node is authenticated by `node_token` and by nothing else; the server asks for
+  no client certificate.
 
 ## The seam
 
@@ -214,13 +362,15 @@ file must also be the length the lease recorded.
 fact about the file.
 
 - **The node could not run it**: the worker failed the lease `unmapped_source`,
-  `source_mismatch`, `source_unreadable`, `unsupported_encoder`, `refused_plan` or
-  `worker_stopping`; or the re-derived job after a restart is not the leased one; or the hub
+  `source_mismatch`, `source_unreadable`, `unsupported_encoder`, `refused_plan`,
+  `worker_stopping`, or in http mode `source_download_failed`, `work_dir_full` or
+  `source_withdrawn`; or the re-derived job after a restart is not the leased one; or the hub
   granted nothing. **Nothing is recorded against the file.** The server encodes the job itself,
   in the same attempt, inside a gate slot, exactly as it does a plan that is not leasable, and
   one record names the node and the reason.
 - **The lease was really attempted**: it expired, the node's encode failed, its uploads failed
-  the digest bound, or the server refused the completed output before its gates. The job fails
+  the digest bound, it reported a source digest that is not what the server streamed, or the
+  server refused the completed output before its gates. The job fails
   at the encode gate, class transient, through the branch a failed local encode leaves by.
   `max_failures` counts it, and at the bound the existing claim holds the row out, so a poison
   job cannot loop across nodes; one record then names the node attempts this process saw since
@@ -234,7 +384,10 @@ is split off: a departure from the letter of the proposal's retry rule, recorded
 (either kind) with none succeeding between, that node is offered nothing for five minutes (both
 **ASSUMED**): its polls answer `503 node_cooling_off` with the time left as `Retry-After`, and
 one `warn` record names the node, the reasons and the cool-off. A lease whose output the server
-took clears the run. A poll that left before its grant counts for nothing.
+took clears the run. A poll that left before its grant counts for nothing, and neither does a
+lease the worker failed `source_withdrawn`: the server stopped offering that source itself (it
+restarted, or the file is no longer the leased one), which says nothing about the node, so it
+neither lengthens the node's run nor clears it.
 
 A cancelled pass, and a lease the server ended because it is stopping, record nothing against
 the file, exactly as an interrupted local encode does not.
@@ -267,15 +420,24 @@ the node, a restart of either side, or the pass being cancelled.
 ## The worker
 
 `holdfast worker --config <file>` is the node. It reads `worker_server`, `node_token` (by
-reference, resolved once), `worker_name` (default: the host name), `worker_slots`,
-`worker_path_map` and `worker_work_dir` (default: `holdfast-worker` under the OS temp directory),
-and it refuses to start naming the key when `worker_server` or `node_token` is missing. Its
-configuration is loaded and validated like every other command's, so it names `library_roots`:
-the worker's own mount of the library.
+reference, resolved once), `worker_name` (default: the host name), `worker_slots`, `worker_mode`
+(`mapped`, the default, or `http`), `worker_path_map`, `worker_work_dir` (default:
+`holdfast-worker` under the OS temp directory), `worker_insecure_http` and `worker_tls_ca`, and
+it refuses to start naming the key when `worker_server` or `node_token` is missing.
 
-**It refuses a plain `http://` server whose host is not loopback.** Over plain HTTP the node
-credential crosses the network in cleartext on every request. `https://` is accepted, which any
-reverse proxy in front of the server provides.
+**A mapped worker names its mount; an http worker names no library at all.** In mapped mode the
+configuration is loaded and validated like every other command's, so it names `library_roots`:
+the worker's own mount of the library. In http mode the worker reads no library, so its
+configuration carries no `library_roots` and no `worker_path_map` - no fake root is asked for -
+and one that names either beside `worker_mode: http` is refused by name, because a file that
+says both cannot mean both. `holdfast validate` accepts an http worker's file and says what it
+is - after taking every start-or-refuse decision `holdfast worker` takes from the file alone
+(the address, the transport, `worker_tls_ca`, the presence of `node_token`, the name), so it
+never says "config OK" of a file the worker would refuse; `run` and `serve` refuse it, having
+nothing to scan.
+
+**It refuses a plain `http://` server whose host is not loopback**, unless
+`worker_insecure_http: true` is written ([the transport](#transport)).
 
 At start it runs the start-up probe encode of every software encoder in the registry through its
 own ffmpeg and reports the ones that work, with its build version, in every request for work.
@@ -286,22 +448,46 @@ Each of its slots then loops:
    JSON and a failed call are backed off from exponentially with jitter, 5 s to 5 min
    (**ASSUMED**), never under a stated `Retry-After`; a `409 version_mismatch` stops the worker,
    naming both versions. An error page is never taken for a lease, whatever its status.
-2. **Check the lease.** The source path is mapped through `worker_path_map`; one no entry covers
+2. **Check the lease.** A lease in another mode than the one the worker asked in is no lease.
+   In mapped mode the source path is mapped through `worker_path_map`; one no entry covers
    fails the lease `unmapped_source`. An encoder the worker did not report fails it
    `unsupported_encoder`. A mapped source that is not exactly the size the lease was granted on,
    or whose modification time is more than two seconds away, fails it `source_mismatch`: one file
    read through two mounts can show two times (FAT keeps two-second stamps, SMB and NFS round),
    and this is only the early refusal - the proof is the source digest the server compares. A
    command line outside the shape the server's plans have fails it `refused_plan`, unrun (below).
+   In **http mode** there is no path to map: the worker first checks that the work directory
+   has room for the source and the largest output the lease admits, **beside what its other
+   slots' leases in flight have reserved there**, and reserves it until the lease ends - check
+   and reservation are one step under one lock, so two slots never both pass on the same free
+   bytes (a failed lookup refuses nothing; short of room, or on a write that fails for want of
+   space, the lease fails `work_dir_full`). It then **downloads** the source into
+   the work directory with one unranged `GET`, heartbeating all the while and hashing what
+   arrives as it writes it. **The response is media only when it is a `200` that delivers
+   exactly `source_size` bytes**: a `404` with a body, any other status, a `200` that declares
+   another length, a body that ends early, one that runs long and one under a content coding
+   are never encoded. A redirect is never followed. A download that broke off, or whose
+   `Repr-Digest` trailer disagrees, starts again from the first byte - at most three times in
+   all (**ASSUMED**), never resumed with `Range` - and one that receives no byte for 60 s
+   (**ASSUMED**) is cut; a `410` ends the lease there. What cannot be cured fails the lease
+   `source_download_failed`. **A `503` is not a failed download and is not counted**: the
+   server has no transfer slot free (`node_max_transfers` is below the number of nodes
+   downloading, which is ordinary) or is not ready, so the worker asks again after the
+   server's `Retry-After`, jittered, heartbeating all the while, for as long as the lease
+   lives. A `409 source_not_offered` or `source_changed` is the server withdrawing the source:
+   the lease fails `source_withdrawn` at once.
 3. **Encode** into the work directory, heartbeating every `heartbeat_sec` with its progress. A
-   `410` stops the encode at once and discards the output.
-4. **Hash** the source it read and the output (sha-256), and **upload** the output with its
+   `410` stops the encode at once and discards the output. In http mode the input is the
+   downloaded file, and the command line is assembled by the same function as in mapped mode.
+4. **Hash** the source it read and the output (sha-256) - in http mode the source's digest is
+   the one taken while it arrived - and **upload** the output with its
    `Content-Length`, `Content-Digest` and the epoch. A digest mismatch and a `503` are sent again
    while the lease lives, at most five times (**ASSUMED**); the server's own bound ends the lease
    first.
-5. **Complete**, and remove the local output - which it does on every way out it lives through.
-   A killed worker leaves its output in the work directory; the next start removes the files
-   there that carry its own output naming (32 hex characters, the epoch, `.out`) and nothing
+5. **Complete**, and remove the local output and, in http mode, the downloaded source - which
+   it does on every way out it lives through. A killed worker leaves them in the work
+   directory; the next start removes the files there that carry its own naming (32 hex
+   characters, the epoch, then `.out`, or `.src` with an optional short extension) and nothing
    else.
 
 After a lease it failed itself the worker backs off before it asks again, exponentially: what
@@ -316,7 +502,7 @@ options carry `-i`, `-attach`, `-dump_attachment`, `-y`, `-progress`, `-filter_s
 that is an absolute path, or one that climbs out of its directory with `..`. The server's
 leasable plans emit none of these.
 
-**Mount the library read-only on a node.** A worker only ever reads the library: the output goes
+**Mount the library read-only on a mapped node.** A worker only ever reads the library: the output goes
 to its work directory and from there over HTTP, and the server is the only writer beside the
 sources. The refusal above is a second line, not the first - a filter or a muxer option this
 list does not name could still name a file - so the mount should not let the node's ffmpeg write
@@ -390,15 +576,15 @@ still face every gate, but cost the server a decode and a VMAF run each - and ca
 exclude, search, scan or queue. No lease endpoint restores, requeues, resolves or re-opens
 anything.
 
-Digests are no defence against someone on the path: RFC 9530 section 6.1 says "an on-path
-malicious actor can either remove a digest value entirely or substitute it with a new digest
-value computed over manipulated representation data or content", mitigated by "Transport Layer
-Security (TLS) or digital signatures". TLS for nodes is not built in this change.
+In http mode a node token also reads the source of every lease it is granted, which over a pass
+is the library's leasable media. Digests are no defence against someone on the path, and what
+keeps the credential and the media off the wire in the clear is TLS: both are stated, with the
+RFC's own words, under [the transport](#transport).
 
 ## The worker's path map
 
-`worker_path_map` translates a source path as the server names it into the path the worker reads
-it at. A source no entry covers is **refused, never passed through**: a path handed back
+In mapped mode `worker_path_map` translates a source path as the server names it into the path
+the worker reads it at. A source no entry covers is **refused, never passed through**: a path handed back
 unchanged because nothing matched would be read from wherever that name leads on the worker. A
 worker that mounts the library at the server's own paths says so with an entry that maps the
 directory to itself.
@@ -418,6 +604,24 @@ Read 2026-10-03.
   *MaxBytesError for a Read beyond the limit" and "tells the ResponseWriter to close the
   connection after the limit has been reached"; `ResponseController.SetReadDeadline` "sets the
   deadline for reading the entire request, including the body", and "Setting the read deadline
-  after it has been exceeded will not extend it".
+  after it has been exceeded will not extend it". `ServeContent` "handles Range requests
+  properly, sets the MIME type, and handles If-Match, If-Unmodified-Since, If-None-Match,
+  If-Modified-Since, and If-Range requests", and its Content-Type rule is quoted in full under
+  [the source stream](#http-mode). `ResponseController.SetWriteDeadline` "sets the deadline for
+  writing the response. Writes to the response body after the deadline has been exceeded will
+  not block, but may succeed if the data has been buffered", and "Setting the write deadline
+  after it has been exceeded will not extend it". `Server.ServeTLS` and
+  `Server.ListenAndServeTLS` need certificate and key files only "if neither the Server's
+  TLSConfig.Certificates nor TLSConfig.GetCertificate are populated" (`ServeTLS` adds
+  `config.GetConfigForClient` to that list). `TrailerPrefix` "is a magic prefix for
+  ResponseWriter.Header map keys that, if present, signals that the map entry is actually for
+  the response trailers"; a client reads them from `Response.Trailer`, which "After Body.Read has
+  returned io.EOF ... will contain any trailer values sent by the server"; and `Request.Trailer`
+  carries the caution "Few HTTP clients, servers, or proxies support HTTP trailers".
+- `crypto/tls`, from `go doc` of the same toolchain (https://pkg.go.dev/crypto/tls):
+  `X509KeyPair` "parses a public/private key pair from a pair of PEM encoded data";
+  `Config.MinVersion`: "By default, TLS 1.2 is currently used as the minimum. TLS 1.0 is the
+  minimum supported by this package. The server-side default can be reverted to TLS 1.0 by
+  including the value "tls10server=1" in the GODEBUG environment variable."
 - The approved proposal this implements: `.claude/goals/2026-09-holdfast-research/proposal-node-protocol.md`
-  (option (a), rules 1 to 9 and 11 in mapped mode).
+  (option (a): rules 1 to 9 and 11, and rule 10's TLS stance).
