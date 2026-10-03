@@ -93,7 +93,13 @@ build:
 # internal/engine at 2283.9 s - 84.6% of 45m, past the same 80% line. Goal 9's gates had
 # measured 2036.9 s to 2176.5 s (75% to 81%) on the same tree a day earlier, so the spread
 # is the host's load and not a new fixture: the clock moves, no proof does.
-TEST_TIMEOUT ?= 60m
+#
+# Raised from 60m to 90m when the baseline `make check` of goal 14 of the program, at
+# dfaca59 under -race with GOFLAGS=-p=4 while four builders ran package tests on the same
+# CPUs, measured internal/engine at 2984.4 s - 82.9% of 60m, past the same 80% line. Goal
+# 13's last gate had measured 1983.0 s (55.1%) on the same tree hours earlier, so again
+# the spread is the host's load: the clock moves, no proof does.
+TEST_TIMEOUT ?= 90m
 
 # The packages `test` runs: every package unless a caller narrows it (only tier-fast does).
 TEST_PKGS ?= ./...
