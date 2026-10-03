@@ -756,7 +756,10 @@ secrets:
 **Size the work volume for a source plus its output, per slot.** The source is downloaded into
 `worker_work_dir` before the encode and the output is written beside it, so the directory needs
 room for the largest source in the library and for its output, which is never as large as the
-source - twice the largest source, times `worker_slots`, is the bound that cannot run out.
+source - twice the largest source, times `worker_slots`, is the bound that cannot run out. The
+worker checks the room before each download, counting what its other slots have reserved; a
+lease it has no room for is failed `work_dir_full`, nothing is recorded against the file, and the
+server encodes that job itself.
 
 **What it costs.** Every job moves a whole source across the network to the node and an output
 back, where a mapped node moves only the output. The digests are the same in both modes: the
@@ -813,8 +816,9 @@ recorded against those files: the server encodes each one itself in the same att
 network that went away - stops heartbeating. Its lease expires after `node_lease_ttl_sec`
 (60 s, **ASSUMED**), the server removes the working file that lease recorded and nothing else,
 and the job is offered again at the next epoch, counted by `max_failures` like any failed encode.
-On the node, the output it was writing stays in `worker_work_dir`; the next start removes the
-files there that carry its own output naming and nothing else
+On the node, the output it was writing - and, in http mode, the source it had downloaded - stays
+in `worker_work_dir`; the next start removes the files there that carry its own naming and
+nothing else
 ([docs/design/nodes.md](design/nodes.md#worker)), which is the reason to give that directory to
 the worker alone.
 
@@ -852,7 +856,7 @@ needs none. A worker has no port to probe: watch its log and its exit status.
   ([docs/design/nodes.md](design/nodes.md#leasable)). GPU passthrough on a worker container buys
   nothing.
 - **Resumable transfers.** An upload that fails is sent again from its first byte, inside the
-  same lease.
+  same lease, and so is an http-mode source download.
 - **mTLS**, and any per-node credential or login.
 - **A maximum lease lifetime.** A worker that keeps heartbeating keeps its job, as a hung local
   encode keeps its worker ([docs/design/nodes.md](design/nodes.md#gate-slots)).
