@@ -25,20 +25,27 @@ import (
 const (
 	RouteLeases    = "/leases"
 	RouteHeartbeat = "/leases/{id}/heartbeat"
+	RouteSource    = "/leases/{id}/source"
 	RouteOutput    = "/leases/{id}/output"
 	RouteComplete  = "/leases/{id}/complete"
 	RouteFail      = "/leases/{id}/fail"
 )
 
-// EpochHeader carries the lease epoch on an upload, whose body is the output itself.
+// EpochHeader carries the lease epoch on an upload, whose body is the output itself, and on
+// a source request, which has no body.
 const EpochHeader = "Holdfast-Lease-Epoch"
 
-// ModeMapped is the one mode this build serves: the node reads the source through its own
-// mount of the library. ModeHTTP, the server streaming the source, is not built.
+// The two modes a node asks for work in (docs/design/nodes.md#http-mode). In ModeMapped the
+// node reads the source through its own mount of the library; in ModeHTTP the server streams
+// it on the lease (RouteSource). The mode is the node's own choice, stated in every request
+// for work, and a lease is granted in the mode its poll asked for.
 const (
 	ModeMapped = "mapped"
 	ModeHTTP   = "http"
 )
+
+// validMode reports whether mode is one this build serves.
+func validMode(mode string) bool { return mode == ModeMapped || mode == ModeHTTP }
 
 // The typed reasons an ErrorResponse carries. The vocabulary is closed.
 const (
@@ -64,6 +71,9 @@ const (
 	errShortBody        = "short_body"
 	errUploadStalled    = "upload_stalled"
 	errUploadInProgress = "upload_in_progress"
+	errSourceNotOffered = "source_not_offered"
+	errSourceChanged    = "source_changed"
+	errSourceMismatch   = "source_digest_mismatch"
 	errInternal         = "internal"
 )
 
@@ -103,7 +113,7 @@ type AcquireRequest struct {
 	// Slots is how many more encodes the node could start now. One request is answered
 	// with at most one lease; a node with several free slots asks several times.
 	Slots int `json:"slots"`
-	// Mode is how the node reaches the source: ModeMapped.
+	// Mode is how the node reaches the source: ModeMapped or ModeHTTP.
 	Mode string `json:"mode"`
 	// Encoders is the encoder registry keys the node's own probe found.
 	Encoders []string `json:"encoders"`
@@ -113,12 +123,14 @@ type AcquireRequest struct {
 type AcquireResponse struct {
 	LeaseID string `json:"lease_id"`
 	// Epoch is the fencing token. Every later call on this lease carries it.
-	Epoch        int64  `json:"epoch"`
-	TTLSec       int    `json:"ttl_sec"`
-	HeartbeatSec int    `json:"heartbeat_sec"`
-	Mode         string `json:"mode"`
-	// Path is the source as the SERVER names it; the node maps it through its own path
-	// map. SourceSize and SourceMtimeNS are the source as the server found it.
+	Epoch        int64 `json:"epoch"`
+	TTLSec       int   `json:"ttl_sec"`
+	HeartbeatSec int   `json:"heartbeat_sec"`
+	// Mode is the mode the lease was granted in: the one the request asked for.
+	Mode string `json:"mode"`
+	// Path is the source as the SERVER names it. A mapped node maps it through its own
+	// path map; an http node never opens it and downloads the source from RouteSource.
+	// SourceSize and SourceMtimeNS are the source as the server found it.
 	Path          string `json:"path"`
 	SourceSize    int64  `json:"source_size"`
 	SourceMtimeNS int64  `json:"source_mtime_ns"`
@@ -194,7 +206,7 @@ type ErrorResponse struct {
 	WorkerVersion string `json:"worker_version,omitempty"`
 }
 
-// Mount registers the five lease endpoints on r. hub is asked on every request, so the
+// Mount registers the six lease endpoints on r. hub is asked on every request, so the
 // routes exist - and the served surface is the same - whether or not a Hub has been
 // wired; with none they answer 503 `not_ready`.
 func Mount(r chi.Router, hub func() *Hub) {
@@ -211,6 +223,7 @@ func Mount(r chi.Router, hub func() *Hub) {
 	}
 	r.Post(RouteLeases, with((*Hub).serveAcquire))
 	r.Post(RouteHeartbeat, with((*Hub).serveHeartbeat))
+	r.Get(RouteSource, with((*Hub).serveSource))
 	r.Put(RouteOutput, with((*Hub).serveUpload))
 	r.Post(RouteComplete, with((*Hub).serveComplete))
 	r.Post(RouteFail, with((*Hub).serveFail))
@@ -349,9 +362,10 @@ func (h *Hub) serveAcquire(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if req.Mode != ModeMapped {
+	if !validMode(req.Mode) {
 		writeError(w, http.StatusBadRequest, errUnsupportedMode,
-			"this build serves mapped mode only: the node reads the source through its own mount of the library")
+			"mode must be mapped (the node reads the source through its own mount of the library) or "+
+				"http (the server streams the source on the lease)")
 		return
 	}
 
@@ -378,7 +392,7 @@ func (h *Hub) serveAcquire(w http.ResponseWriter, r *http.Request) {
 		h.unavailable(w, errNodeCap, refusalDetail[errNodeCap])
 		return
 	}
-	p := &poll{node: req.Node, encoders: append([]string(nil), req.Encoders...), reply: make(chan pollReply, 1)}
+	p := &poll{node: req.Node, mode: req.Mode, encoders: append([]string(nil), req.Encoders...), reply: make(chan pollReply, 1)}
 	h.polls = append(h.polls, p)
 	h.notifyLocked()
 	h.mu.Unlock()
@@ -484,7 +498,7 @@ func (h *Hub) answerPoll(w http.ResponseWriter, rep pollReply) {
 			LeaseID: l.ID, Epoch: l.Epoch,
 			TTLSec:       wholeSeconds(h.o.TTL),
 			HeartbeatSec: wholeSeconds(h.o.TTL / 4),
-			Mode:         ModeMapped,
+			Mode:         rep.mode,
 			Path:         l.Path, SourceSize: l.SourceSize, SourceMtimeNS: l.SourceModTime.UnixNano(),
 			Encoder: rep.job.Encoder, Pre: nonNil(rep.job.Pre), Body: nonNil(rep.job.Body),
 			MaxOutputBytes: MaxOutputBytes(l.SourceSize),
@@ -587,13 +601,15 @@ func (h *Hub) serveComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	row, err := h.apply(r.Context(), id, func(cur Lease) (Lease, error) {
-		next, err := decideComplete(cur, req.Epoch, h.o.Now(), outDigest, req.OutputBytes, srcDigest)
+		// What the server itself streamed on this lease, where it streamed the whole
+		// source: the completion is held to it inside the transaction that records it.
+		next, err := decideCompleteStreamed(cur, req.Epoch, h.o.Now(), outDigest, req.OutputBytes, srcDigest, h.streamedDigest(id))
 		if err == nil && !h.attached(id) {
 			// Nothing waits on this lease, so nothing would gate its output: it is not
 			// recorded as completed.
 			return cur, errUnattached
 		}
-		if err == nil {
+		if err == nil && next.State == store.LeaseCompleted {
 			// Only a completion the decision accepted reports an encode time, and it is
 			// noted before the settlement that hands the engine its Result.
 			h.noteEncodeSeconds(id, req.EncodeSec)
@@ -606,6 +622,13 @@ func (h *Hub) serveComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil && !errors.Is(err, errAlready) {
 		h.leaseRefusal(w, err)
+		return
+	}
+	if row.State == store.LeaseFailed && row.Reason == string(ReasonSourceMismatch) {
+		// The source the node read is not the source the server streamed to it. The lease
+		// has failed, its working file is removed, and nothing is gated.
+		writeError(w, http.StatusConflict, errSourceMismatch,
+			"source_digest is not the sha-256 of the bytes the server streamed on this lease; the lease has failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, CompleteResponse{State: string(row.State), OutputBytes: row.OutputBytes,

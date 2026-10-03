@@ -1,12 +1,12 @@
 # Secrets: a credential is reached by reference
 
-holdfast reads nine credential-bearing configuration keys, and none of them holds a
+holdfast reads ten credential-bearing configuration keys, and none of them holds a
 credential. Each holds a **reference** - the name of a secret and the kind of place it
 lives - and the value is resolved at the point of use. That is the whole design, and it
 exists because a secret an agent or an operator *read* is a secret in a transcript,
 whether or not it ever reached a file.
 
-The nine keys:
+The ten keys:
 
 | key | what the credential is | what happens when it is absent |
 |---|---|---|
@@ -19,6 +19,7 @@ The nine keys:
 | `plex_token` | a Plex **admin** token, sent in the `X-Plex-Token` header | Plex is not asked for a partial scan after a swap, and no file is held for being played |
 | `webhook_token` | the credential a Sonarr or Radarr `Connect > Webhook` connection presents to `/api/webhook/sonarr` and `/api/webhook/radarr`, as a bearer token or as the password of HTTP Basic authentication | both intake endpoints answer 403 and queue nothing |
 | `node_token` | the bearer token a worker node presents to the lease endpoints under `/api/node/v1`, and the one a `holdfast worker` reads to present it | worker nodes are off: no lease is granted and those endpoints answer 403 |
+| `server_tls_key` | the PEM private key of the certificate `serve` presents (`server_tls_cert`) | with `server_tls_cert` absent too, `serve` listens without TLS, as it always has; with `server_tls_cert` set it refuses to start |
 
 `tautulli_url`, `radarr_url`, `sonarr_url`, `plex_url` and `server_addr` are addresses, not
 credentials. The three media-server addresses accept a scheme, a host and an optional base path
@@ -40,6 +41,16 @@ else, no other token is accepted on them, a `node_token` written as the same ref
 `server_auth_token`, `server_read_token` or `webhook_token` refuses to start, and `serve` refuses
 one that resolves to the same value as any of them
 ([docs/design/nodes.md](design/nodes.md#leases)).
+
+`server_tls_key` is the one key here that is not a token. It is the private key of the TLS
+certificate `serve` presents, and it is on this list for the reason the tokens are: whoever reads
+it can stand in for the server, and a literal PEM block in the file or in `HOLDFAST_SERVER_TLS_KEY`
+would be inherited by every `ffmpeg` child. A `file:` reference to the PEM file is the form to
+reach for; the whole file is the value, every line of it. The resolved key is handed to the TLS
+listener and to nothing else, and a key that does not parse, or does not belong to the
+certificate, refuses to start with an error that names `server_tls_key` and prints nothing of
+it. `server_tls_cert` and `worker_tls_ca` are plain paths to public certificates and are not
+credentials ([docs/design/nodes.md](design/nodes.md#transport)).
 
 ## The reference forms
 
@@ -119,7 +130,7 @@ At **start**, before the library is walked and before a single frame is encoded:
 `holdfast validate` performs step 1 and not step 2: proving that a reference *resolves*
 means reaching into a secret store, which belongs to a run rather than to a configuration
 check. `run` and `serve` both do both - `run` consumes only the three media-server
-credentials itself, and still resolves all nine, because a configuration error an operator
+credentials itself, and still resolves all ten, because a configuration error an operator
 finds after a four-hour pass was reported too late.
 
 An **unresolvable reference is a configuration error and is not an outage**. A Tautulli

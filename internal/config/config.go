@@ -72,6 +72,8 @@ var knownKeys = map[string]bool{
 	nodeTokenKey:    true, nodeLeaseTTLKey: true, nodeMaxLeasesKey: true, nodeMaxLeasesPerNodeKey: true,
 	nodeMaxTransfersKey: true, nodeGateSlotsKey: true,
 	workerServerKey: true, workerNameKey: true, workerSlotsKey: true, workerPathMapKey: true, workerWorkDirKey: true,
+	workerModeKey: true, workerInsecureHTTPKey: true, workerTLSCAKey: true,
+	serverTLSCertKey: true, serverTLSKeyKey: true,
 	excludePathsKey: true, includePathsKey: true,
 	audioLanguagesKey: true, subtitleLanguagesKey: true,
 	keepCommentaryKey: true, remuxOnlyKey: true, subtitleSidecarsKey: true, cropKey: true, dolbyVisionP7Key: true,
@@ -173,6 +175,12 @@ func defaultLayer() map[string]any {
 		nodeGateSlotsKey:        DefaultNodeGateSlots,
 		// What a `holdfast worker` reads. None of them is read by `run` or `serve`.
 		workerServerKey: "", workerNameKey: "", workerSlotsKey: DefaultWorkerSlots, workerWorkDirKey: "",
+		// mapped is what a worker did before the key existed, so an existing worker
+		// configuration behaves exactly as it did. The other two are off.
+		workerModeKey: WorkerModeMapped, workerInsecureHTTPKey: false, workerTLSCAKey: "",
+		// Built-in TLS is OFF until both keys are written: `serve` then listens exactly
+		// as it always has.
+		serverTLSCertKey: "", serverTLSKeyKey: "",
 		// Stream selection, every value reproducing what this tool did before the keys
 		// existed: carry every audio and subtitle stream, keep commentary, re-encode the
 		// video. A knob in profileKnobs is seeded from the top-level value of the same
@@ -839,6 +847,29 @@ type Config struct {
 	WorkerSlots   int     `yaml:"worker_slots"`
 	WorkerPathMap PathMap `yaml:"worker_path_map"`
 	WorkerWorkDir string  `yaml:"worker_work_dir"`
+	// WorkerMode is how the worker reaches a leased source: `mapped` (the default), through
+	// its own mount of the library and WorkerPathMap, or `http`, downloaded from the server
+	// on the lease (docs/design/nodes.md#http-mode). An http worker has no mount, no path
+	// map and no library root of its own.
+	WorkerMode string `yaml:"worker_mode"`
+	// WorkerInsecureHTTP lets the worker speak plain http:// to a server that is not
+	// loopback. The node credential, and in http mode the media, then cross the network in
+	// cleartext, which the worker says at warn level at every start
+	// (docs/design/nodes.md#transport). With https or a loopback server it does nothing.
+	WorkerInsecureHTTP bool `yaml:"worker_insecure_http"`
+	// WorkerTLSCA is a plain path to a PEM bundle of certificates the worker trusts IN
+	// ADDITION to the system roots, for a server whose certificate is private. It is a
+	// path to public certificates and not a credential. There is no key that switches
+	// certificate verification off.
+	WorkerTLSCA string `yaml:"worker_tls_ca"`
+
+	// ServerTLSCert is a plain path to the PEM certificate chain `serve` presents, and
+	// ServerTLSKey a SECRET REFERENCE (secrets K1) to its PEM private key. Both or neither:
+	// with both set `serve` listens with TLS, with neither it listens exactly as before
+	// (docs/design/nodes.md#transport). A literal key here, or in HOLDFAST_SERVER_TLS_KEY,
+	// is a startup REFUSAL.
+	ServerTLSCert string `yaml:"server_tls_cert"`
+	ServerTLSKey  string `yaml:"server_tls_key"`
 }
 
 // SecretBearingKeys is the closed list of configuration keys whose value is a credential,
@@ -863,8 +894,14 @@ type Config struct {
 // `node_token` is the credential a worker node presents to the lease endpoints, and the one
 // a `holdfast worker` reads to present it. It is a bearer credential too, and a worker runs
 // ffmpeg children of its own.
+//
+// `server_tls_key` is the private key of the certificate `serve` presents. It is not a
+// bearer token, and it is here on the same terms: whoever reads it can stand in for the
+// server, and a literal PEM block in the file or in HOLDFAST_SERVER_TLS_KEY would be
+// readable from every ffmpeg child. `server_tls_cert` is a path to public certificates and
+// is not here.
 var SecretBearingKeys = []string{"server_auth_token", "server_read_token", "notify_url", "tautulli_api_key",
-	radarrAPIKeyKey, sonarrAPIKeyKey, plexTokenKey, webhookTokenKey, nodeTokenKey}
+	radarrAPIKeyKey, sonarrAPIKeyKey, plexTokenKey, webhookTokenKey, nodeTokenKey, serverTLSKeyKey}
 
 // SecretRefs parses every secret-bearing key into a reference, and is the ONE place
 // that reading happens: Validate calls it so every subcommand refuses a literal at start,
@@ -875,7 +912,7 @@ var SecretBearingKeys = []string{"server_auth_token", "server_read_token", "noti
 // naming the key and how to convert it, with no part of the value in the message.
 func (c *Config) SecretRefs() ([]secret.Ref, error) {
 	raw := []string{c.ServerAuthToken, c.ServerReadToken, c.NotifyURL, c.TautulliAPIKey,
-		c.RadarrAPIKey, c.SonarrAPIKey, c.PlexToken, c.WebhookToken, c.NodeToken}
+		c.RadarrAPIKey, c.SonarrAPIKey, c.PlexToken, c.WebhookToken, c.NodeToken, c.ServerTLSKey}
 	refs := make([]secret.Ref, 0, len(SecretBearingKeys))
 	for i, key := range SecretBearingKeys {
 		r, err := secret.ParseRef(key, raw[i])
@@ -1665,6 +1702,32 @@ func normalizeExts(exts []string) []string {
 // The rules are conservative on purpose: the tool is delete-capable, so an
 // ambiguous or dangerous root is a hard error, never a guessed default.
 func (c *Config) Validate() error {
+	if err := c.validateRoots(); err != nil {
+		return err
+	}
+	return c.validateRest()
+}
+
+// ValidateWorker is Validate for `holdfast worker`. A worker in mapped mode names its own
+// mount of the library as a library root and is validated exactly as every other command's
+// configuration is. A worker in http mode reads no library: it has no root to name, so the
+// root rules are not applied - and a library root or a path map written beside
+// `worker_mode: http` is refused by name rather than read as something it cannot mean.
+func (c *Config) ValidateWorker() error {
+	if c.EffectiveWorkerMode() != WorkerModeHTTP {
+		return c.Validate()
+	}
+	if len(c.LibraryRoots) > 0 {
+		return fmt.Errorf("%s is %s and library_roots is set: a worker in http mode downloads each "+
+			"source from its server and reads no library, so it names no library root. Remove library_roots "+
+			"from the worker's configuration, or set %s: %s to read the library through a mount",
+			workerModeKey, WorkerModeHTTP, workerModeKey, WorkerModeMapped)
+	}
+	return c.validateRest()
+}
+
+// validateRoots is the library-root half of Validate.
+func (c *Config) validateRoots() error {
 	if len(c.LibraryRoots) == 0 {
 		return errors.New("library_roots is empty: refusing to run with nothing to scan")
 	}
@@ -1753,6 +1816,11 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	return nil
+}
+
+// validateRest is every rule of Validate that is not about a library root.
+func (c *Config) validateRest() error {
 	switch c.LogLevel {
 	case "", "debug", "info", "warn", "error":
 		// ok
@@ -1877,6 +1945,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.validateNodes(); err != nil {
+		return err
+	}
+	if err := c.validateTransport(); err != nil {
 		return err
 	}
 

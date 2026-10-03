@@ -31,6 +31,9 @@ const (
 	// ReasonDigestMismatch is a lease whose uploads failed the digest check as many times
 	// as the bound allows.
 	ReasonDigestMismatch Reason = "digest_mismatch"
+	// ReasonSourceMismatch is a lease whose node reported a source digest that is not the
+	// digest of the bytes the server streamed to it on that lease.
+	ReasonSourceMismatch Reason = "source_digest_mismatch"
 	// ReasonCanceled is a lease the server ended because the job waiting on it ended.
 	ReasonCanceled Reason = "canceled"
 	// ReasonRestart is a lease whose output was uploaded and not completed when the
@@ -42,6 +45,12 @@ const (
 	// ReasonPollGone is a lease granted to a poll that had left before it was answered.
 	ReasonPollGone Reason = "poll_gone"
 )
+
+// ReasonSourceWithdrawn is the typed reason a WORKER fails an http-mode lease with when the
+// server itself stopped offering the lease's source (409 source_not_offered after a restart,
+// or 409 source_changed). It says nothing about the node, so Hub.Report does not count it
+// toward the node's cool-off, and nothing about the file, so the engine does not charge it.
+const ReasonSourceWithdrawn = "source_withdrawn"
 
 // The refusals a decision returns.
 var (
@@ -232,6 +241,21 @@ func decideComplete(cur Lease, epoch int64, now time.Time, outDigest string, out
 	}
 	cur.State, cur.SourceDigest, cur.UpdatedAt, cur.EndedAt = store.LeaseCompleted, srcDigest, now, now
 	return cur, nil
+}
+
+// decideCompleteStreamed is decideComplete held to what the server itself streamed.
+// streamed is the sha-256 of the bytes the server sent on this lease, and "" where it sent
+// no whole source (mapped mode, a ranged request, a restart since). A completion whose
+// source digest is not streamed is a source that changed between the server and the node's
+// encoder: the lease FAILS, in the transaction that would have completed it, and the row
+// keeps the digest the node reported.
+func decideCompleteStreamed(cur Lease, epoch int64, now time.Time, outDigest string, outBytes int64, srcDigest, streamed string) (Lease, error) {
+	next, err := decideComplete(cur, epoch, now, outDigest, outBytes, srcDigest)
+	if err != nil || streamed == "" || srcDigest == streamed {
+		return next, err
+	}
+	next.State, next.Reason = store.LeaseFailed, string(ReasonSourceMismatch)
+	return next, nil
 }
 
 // decideFail ends a live lease on its node's stated failure. A repeat on a lease that

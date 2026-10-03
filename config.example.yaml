@@ -1078,9 +1078,9 @@ dry_run: false
 # --- WORKER NODES (docs/design/nodes.md) -----------------------------------------
 # OFF by default: with no node_token the server leases nothing and every endpoint under
 # /api/node/v1 answers 403. A node only ENCODES: the server names the working file, takes
-# the node's output as a candidate, and re-runs every gate and the rename itself. In this
-# build only mapped mode exists (the node reads the source through its own mount), and the
-# `holdfast worker` command lands in a following change.
+# the node's output as a candidate, and re-runs every gate and the rename itself. A node
+# reads the source through its own mount of the library (mapped mode) or is streamed it on
+# its lease (http mode); `holdfast worker` is the node.
 #
 # node_token: ""               # A SECRET REFERENCE to the nodes' own credential:
 #                              #     node_token: file:/run/secrets/holdfast-node-token
@@ -1097,16 +1097,40 @@ dry_run: false
 #                              #   node heartbeats every quarter of it.
 # node_max_leases: 4           # Live leases across every node (1-256).
 # node_max_leases_per_node: 1  # Live leases one node may hold (1-256).
-# node_max_transfers: 2        # Uploads in flight across every node (1-256).
+# node_max_transfers: 2        # Source streams and uploads in flight across every node
+#                              #   (1-256).
 # node_gate_slots: 1           # Node outputs the server gates at once (1-256).
+#
+# Built-in TLS for `serve` (docs/design/nodes.md#transport). BOTH OR NEITHER: with both set
+# the listener on server_addr speaks TLS (1.2 at least) for the whole surface, and a probe
+# must speak https:// and trust the certificate; with neither, serve listens as it always
+# has. There is no client certificate and no user login.
+# server_tls_cert: ""          # A plain, absolute path to the PEM certificate chain:
+#                              #     server_tls_cert: /etc/holdfast/tls/fullchain.pem
+# server_tls_key: ""           # A SECRET REFERENCE to its PEM private key, never the key:
+#                              #     server_tls_key: file:/run/secrets/holdfast-tls-key
 #
 # The worker's side, read by `holdfast worker` only.
 # worker_server: ""            # The server's address, e.g. https://holdfast.example.test
 # worker_name: ""              # This node's name: letters, digits, '.', '_', '-'; 64 at most.
 # worker_slots: 1              # Encodes this worker runs at once (1-256).
 # worker_work_dir: ""          # An absolute directory the worker writes an encode into
-#                              #   before it uploads it.
-# worker_path_map: []          # The server's view of the library to this worker's mounts:
+#                              #   before it uploads it, and in http mode the downloaded
+#                              #   source: it needs room for both.
+# worker_mode: mapped          # mapped: read each source through this worker's own mount
+#                              #   of the library (worker_path_map, and library_roots
+#                              #   naming the mount). http: no mount - the server streams
+#                              #   the source on the lease; the file then names NO
+#                              #   library_roots and NO worker_path_map.
+# worker_insecure_http: false  # Plain http:// to a server that is not loopback REFUSES to
+#                              #   start. true accepts it: the node credential, and in
+#                              #   http mode the media, then cross the network in
+#                              #   CLEARTEXT, and the worker says so at every start.
+# worker_tls_ca: ""            # An absolute path to a PEM bundle trusted IN ADDITION to
+#                              #   the system roots, for a server with a private
+#                              #   certificate. Nothing switches verification off.
+# worker_path_map: []          # Mapped mode. The server's view of the library to this
+#                              #   worker's mounts:
 #                              #     worker_path_map:
 #                              #       - {from: /media, to: /mnt/library}
 #                              #   A source no entry covers is REFUSED, never read at its

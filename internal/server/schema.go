@@ -84,6 +84,8 @@ const (
 	kindText   = "text"
 	kindEmpty  = "empty"
 	kindStream = "event-stream"
+	// kindBytes is a body that is a file's own bytes: a leased source.
+	kindBytes = "bytes"
 	// kindShape is this format describing ITSELF: the body of GET /api/schema carries
 	// shape declarations, which are written in this same kind/fields/elem vocabulary. A
 	// self-referential format has to terminate somewhere and this is where.
@@ -463,6 +465,15 @@ func declaredResponses() (map[string][]Response, error) {
 	declared["POST "+NodePathPrefix+node.RouteHeartbeat] = append([]Response{
 		jsonOK(http.StatusOK, node.HeartbeatResponse{}),
 	}, nodeRefusal(http.StatusBadRequest, http.StatusNotFound, http.StatusGone,
+		http.StatusInternalServerError, http.StatusServiceUnavailable)...)
+	// The source stream of http mode: the leased source's own bytes on a 200 (or the part
+	// a Range asked for on a 206), and one typed JSON body on every refusal. 416 is
+	// http.ServeContent's own plain-text answer to a range outside the source.
+	declared["GET "+NodePathPrefix+node.RouteSource] = append([]Response{
+		{Status: http.StatusOK, MediaType: node.SourceMediaType, Body: Shape{Kind: kindBytes}},
+		{Status: http.StatusPartialContent, MediaType: node.SourceMediaType, Body: Shape{Kind: kindBytes}},
+		text(http.StatusRequestedRangeNotSatisfiable),
+	}, nodeRefusal(http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusGone,
 		http.StatusInternalServerError, http.StatusServiceUnavailable)...)
 	declared["PUT "+NodePathPrefix+node.RouteOutput] = append([]Response{
 		jsonOK(http.StatusOK, node.UploadResponse{}),

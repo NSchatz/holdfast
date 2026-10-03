@@ -96,6 +96,7 @@ func TestSchemaEndpoint_ServesItsOwnFormatVersionAndEveryRoutedEndpoint(t *testi
 		kindObject: true, kindArray: true, kindMap: true, kindString: true,
 		kindInteger: true, kindNumber: true, kindBoolean: true,
 		kindText: true, kindEmpty: true, kindStream: true, kindShape: true,
+		kindBytes: true,
 	}
 	for _, ep := range doc.Endpoints {
 		if ep.Method == "" || ep.Path == "" {

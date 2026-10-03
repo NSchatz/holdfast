@@ -333,28 +333,33 @@ because nothing looked at those files and a row would be a record of a decision 
 
 The worker-node lease protocol. A node only encodes: an upload lands in a working file the server
 named and is a candidate for the server's own gates, never more. The rule and its reasons are in
-[docs/design/nodes.md](design/nodes.md#leases). In this build only **mapped mode** exists (the
-node reads the source through its own mount). A `serve` with `node_token` set answers these
+[docs/design/nodes.md](design/nodes.md#leases). A node asks for work in **mapped mode** (it
+reads the source through its own mount) or **http mode** (the server streams the source on the
+lease: [docs/design/nodes.md](design/nodes.md#http-mode)). A `serve` with `node_token` set answers these
 endpoints 503 `not_ready` only until its start-up recovery has run; `holdfast worker` is the client.
+With `server_tls_cert` and `server_tls_key` set the whole surface is served over TLS
+([docs/design/nodes.md](design/nodes.md#transport)).
 
 **Authentication.** `Authorization: Bearer <token>` with the value `node_token` points at, and
-nothing else: no Basic form, nothing from the URL. With no `node_token` configured all five answer
+nothing else: no Basic form, nothing from the URL. With no `node_token` configured all six answer
 **403** naming the key; a missing or wrong credential - the control, read and webhook tokens
 included - is **401**. Every refusal past the credential check is JSON,
 `{"error": "<typed reason>", "detail": "..."}`.
 
 | endpoint | request | answers |
 |---|---|---|
-| `POST /leases` | `{"node", "version", "slots", "mode": "mapped", "encoders": [...]}` | **200** one lease: `lease_id`, `epoch`, `ttl_sec`, `heartbeat_sec`, `mode`, `path`, `source_size`, `source_mtime_ns`, `encoder`, `pre`, `body`, `max_output_bytes`. **204** with `Retry-After`: no work arrived inside the long-poll. **400** `bad_request`, or `unsupported_mode` for any mode but `mapped`. **409** `version_mismatch`, with `server_version` and `worker_version`. **503** with `Retry-After`: `not_ready`, `node_cap`, `global_cap`, `no_room`, `refused`, `draining`, `node_cooling_off` (this node's leases kept ending without an output; `Retry-After` is the time left) |
+| `POST /leases` | `{"node", "version", "slots", "mode", "encoders": [...]}`, where `mode` is `"mapped"` or `"http"` | **200** one lease: `lease_id`, `epoch`, `ttl_sec`, `heartbeat_sec`, `mode` (the mode it was granted in: the one asked for), `path`, `source_size`, `source_mtime_ns`, `encoder`, `pre`, `body`, `max_output_bytes`. **204** with `Retry-After`: no work arrived inside the long-poll. **400** `bad_request`, or `unsupported_mode` for any mode but `mapped` and `http`. **409** `version_mismatch`, with `server_version` and `worker_version`. **503** with `Retry-After`: `not_ready`, `node_cap`, `global_cap`, `no_room`, `refused`, `draining`, `node_cooling_off` (this node's leases kept ending without an output; `Retry-After` is the time left) |
 | `POST /leases/{id}/heartbeat` | `{"epoch", "progress"}` (progress 0 to 1) | **200** `{"ttl_sec"}`. **410** `lease_gone` |
+| `GET /leases/{id}/source` | no body; `Holdfast-Lease-Epoch`, and optionally `Range`. No request names a path: the source is the lease's own. `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since` and `If-Range` are ignored: there is no `304` and no `412` | **200** the whole source as `application/octet-stream`, with `Content-Length` and `Cache-Control: no-store`; the server records the sha-256 of what it sent and holds the lease's `complete` to it (over HTTP/2 a `Repr-Digest` trailer carries it too). **206** the part a `Range` asked for; a ranged response records no digest. **409** `source_not_offered` (the lease was not granted in http mode by this server process, or has already admitted an output), `source_changed` (the file is not the size and modification time the lease was granted on, or a symbolic link stands at its path; the lease stays live). **410** `lease_gone`. **416** (plain text) a range outside the source. **503** with `Retry-After`: `transfers_full`, `not_ready` |
 | `PUT /leases/{id}/output` | the output as the body, with `Content-Length`, `Content-Digest: sha-256=:<base64>:` and `Holdfast-Lease-Epoch` | **200** `{"state", "output_bytes", "output_digest"}`, also for a repeat of the accepted upload, which rewrites nothing. **400** `digest_mismatch` (the working file is deleted; the upload may be sent again, and the third mismatch fails the lease), `bad_digest`, `short_body`, `bad_request`. **408** `upload_stalled`. **409** `digest_conflict` (a different output after acceptance), `upload_in_progress`. **410** `lease_gone`. **411** `length_required`. **413** `too_large` (past `max_output_bytes`, one byte under the source). **503** with `Retry-After`: `transfers_full`, `no_room`, `not_ready` |
-| `POST /leases/{id}/complete` | `{"epoch", "output_digest", "source_digest", "output_bytes", "encode_sec"}` | **200** `{"state", "output_bytes", "output_digest", "source_digest"}`, idempotent on a repeat. **409** `not_uploaded`, `digest_conflict`. **410** `lease_gone` |
+| `POST /leases/{id}/complete` | `{"epoch", "output_digest", "source_digest", "output_bytes", "encode_sec"}` | **200** `{"state", "output_bytes", "output_digest", "source_digest"}`, idempotent on a repeat. **409** `not_uploaded`, `digest_conflict`, `source_digest_mismatch` (`source_digest` is not the sha-256 of what the server streamed on this lease: the lease has failed and nothing is gated). **410** `lease_gone` |
 | `POST /leases/{id}/fail` | `{"epoch", "reason"}` (1 to 64 characters from a-z, 0-9 and `_`) | **200** `{"state", "reason"}`, idempotent on a repeat. **410** `lease_gone` |
 
 Every call on one lease also answers **404** `unknown_lease` for an id no lease carries, **500**
 `internal` when the ledger could not record it, and **503** `not_ready` until the server has
-recovered its leases after a start. An upload or a completion on a lease the server is not
-waiting on is **503** `not_ready` too. Every **410** carries `Cache-Control: no-store`. No endpoint
+recovered its leases after a start. An upload, a completion or a source request on a lease the
+server is not waiting on is **503** `not_ready` too. `node_max_transfers` counts source streams
+and uploads together. Every **410** carries `Cache-Control: no-store`. No endpoint
 here restores, requeues, resolves or re-opens anything.
 
 ### The webhook intake - `POST /api/webhook/sonarr` and `POST /api/webhook/radarr`

@@ -74,6 +74,8 @@ type fakeServer struct {
 	replies map[string][]reply
 	// idle is the acquire answer once the acquire queue has run out: no work.
 	hang chan struct{}
+	// source, when set, answers the source route itself (source_test.go).
+	source http.HandlerFunc
 }
 
 func newFakeServer(t *testing.T) *fakeServer {
@@ -104,6 +106,8 @@ func routeOf(r *http.Request) string {
 		return "heartbeat"
 	case strings.HasSuffix(p, "/output"):
 		return "output"
+	case strings.HasSuffix(p, "/source"):
+		return "source"
 	case strings.HasSuffix(p, "/complete"):
 		return "complete"
 	case strings.HasSuffix(p, "/fail"):
@@ -118,6 +122,12 @@ func (f *fakeServer) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.calls = append(f.calls, call{method: r.Method, path: r.URL.Path, auth: r.Header.Get("Authorization"),
 		header: r.Header.Clone(), body: body, length: r.ContentLength})
+	source := f.source
+	if route == "source" && source != nil {
+		f.mu.Unlock()
+		source(w, r)
+		return
+	}
 	q := f.replies[route]
 	var rep reply
 	switch {

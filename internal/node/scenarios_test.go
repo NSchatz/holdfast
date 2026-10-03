@@ -143,23 +143,21 @@ func TestNodeFixture_UploadOnAnExpiredLeaseIs410AndLeavesNoFile(t *testing.T) {
 	t.Run("expired while the body arrived", func(t *testing.T) {
 		f.clk.advance(-ttl) // live again
 		pr, pw := io.Pipe()
+		// Whatever way this case leaves, the body ends: an open body holds its connection.
+		t.Cleanup(func() { _ = pw.Close() })
 		req, _ := http.NewRequest(http.MethodPut, f.srv.URL+leasePath("/output", a.LeaseID), pr)
 		req.ContentLength = int64(len(output))
 		req.Header.Set(EpochHeader, "1")
 		req.Header.Set("Content-Digest", digestOf(output))
 		answered := make(chan reply, 1)
 		go func() { answered <- f.do(req) }()
-		if _, err := pw.Write(output[:300]); err != nil {
-			t.Fatal(err)
-		}
+		feed(t, pw, output[:300], answered)
 		eventually(t, "the first half to reach the working file", func() bool {
 			fi, err := os.Stat(job.Temp)
 			return err == nil && fi.Size() == 300
 		})
 		f.clk.advance(ttl) // the lease runs out mid-body
-		if _, err := pw.Write(output[300:]); err != nil {
-			t.Fatal(err)
-		}
+		feed(t, pw, output[300:], answered)
 		_ = pw.Close()
 		is410(t, "an upload whose lease ran out mid-body", <-answered)
 		f.onlySources("film")
@@ -1053,17 +1051,20 @@ func TestNodeFixture_AVersionMismatchIs409NamingBothVersions(t *testing.T) {
 	}
 }
 
-// TestNodeFixture_HTTPModeIsRefusedNamingMappedMode: this build serves mapped mode only.
-func TestNodeFixture_HTTPModeIsRefusedNamingMappedMode(t *testing.T) {
+// TestNodeFixture_AnUnknownModeIsRefusedNamingBothModes: a mode that is neither mapped nor
+// http is refused typed, naming the two this build serves. (Until http mode was built this
+// fixture also held that `http` was refused; TestNodeFixture_AnHTTPModeLeaseIsGrantedInHTTPMode
+// now holds that it is served.)
+func TestNodeFixture_AnUnknownModeIsRefusedNamingBothModes(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, nil)
-	for _, mode := range []string{"http", "", "carrier-pigeon"} {
+	for _, mode := range []string{"HTTP", "", "carrier-pigeon"} {
 		body := acquireBody("node-a")
 		body.Mode = mode
 		r := f.post(RouteLeases, body)
 		isTyped(t, "mode "+mode, r, http.StatusBadRequest, "unsupported_mode")
-		if !strings.Contains(string(r.body), "mapped mode only") {
-			t.Errorf("the refusal of mode %q does not say this build serves mapped mode only: %s", mode, r.body)
+		if !strings.Contains(string(r.body), "mode must be mapped") || !strings.Contains(string(r.body), "or http") {
+			t.Errorf("the refusal of mode %q does not name the two modes this build serves: %s", mode, r.body)
 		}
 	}
 	if n := f.queuedPolls(); n != 0 {
