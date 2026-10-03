@@ -279,4 +279,84 @@ ok "no temp files left behind"
 [ -f "$work/state/jobs.db" ] || fail "no job store written to the mounted state dir"
 ok "the job store persisted to the mounted state volume"
 
-echo "== smoke PASSED: the image encoded a real file, verified it, and swapped it safely"
+# 6. The web UI. The image's binary embeds the UI its own `ui` stage built, and the only
+#    proof that it did is to ask the running daemon: start the real `serve` on the state
+#    the encode above left, and read the root path the two ways a client can.
+#      - a request that asks for HTML gets the page, with the AGPL section 13 source offer
+#        written into it by the server and the script it names actually served;
+#      - a request that states no preference gets the plain-text page it always got, with
+#        the same offer.
+#    A binary built without the UI passes every other step here and serves the plain-text
+#    page to both, which is why this one exists. The port is published on loopback only,
+#    on a port Docker picks.
+cat >"$work/serve.yaml" <<'YAML'
+library_roots:
+  - /media
+state_dir: /state
+server_addr: 0.0.0.0:8080
+YAML
+cid="$(docker run -d "${PLATFORM_ARGS[@]}" -u "$uid:$gid" -p 127.0.0.1::8080 \
+  -v "$work/media:/media" -v "$work/state:/state" \
+  -v "$work/serve.yaml:/config/config.yaml:ro" \
+  "$IMAGE" serve --config /config/config.yaml)" \
+  || fail "could not start 'holdfast serve' in the image"
+trap 'docker rm -f "$cid" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
+port="$(docker port "$cid" 8080/tcp 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -1 || true)"
+[ -n "$port" ] || fail "'holdfast serve' published no port:
+$(docker logs "$cid" 2>&1 | tail -20)"
+base="http://127.0.0.1:${port}"
+up=no
+for _ in $(seq 1 60); do
+  if curl -fsS -o /dev/null --max-time 2 "$base/" 2>/dev/null; then up=yes; break; fi
+  [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ] \
+    || fail "'holdfast serve' exited before it answered:
+$(docker logs "$cid" 2>&1 | tail -30)"
+  sleep 1
+done
+[ "$up" = yes ] || fail "'holdfast serve' did not answer on / within 60 s:
+$(docker logs "$cid" 2>&1 | tail -30)"
+
+page="$(curl -fsS --max-time 10 -H 'Accept: text/html' -D "$work/page.headers" "$base/")" \
+  || fail "GET / asking for HTML failed"
+grep -qi '^content-type: text/html' "$work/page.headers" \
+  || fail "GET / asking for HTML was not answered with HTML - the image's binary embeds no web UI:
+$(cat "$work/page.headers")
+$(docker logs "$cid" 2>&1 | grep -i 'web UI' || true)"
+grep -q '<div id="app"></div>' <<<"$page" || fail "the page has no element for the UI to mount in:
+$page"
+grep -q '<footer id="source-offer">.*AGPL-3.0-only.*Corresponding Source: <a href="https\{0,1\}://[^"]*"' <<<"$page" \
+  || fail "the page does not carry the Corresponding Source offer:
+$page"
+grep -qi "^content-security-policy: default-src 'none'" "$work/page.headers" \
+  || fail "the page was sent without its Content-Security-Policy:
+$(cat "$work/page.headers")"
+ok "serve answers a request for HTML at / with the web UI's page, carrying the Corresponding Source offer"
+
+script="$(grep -oE '/assets/[A-Za-z0-9._-]+\.js' <<<"$page" | head -1 || true)"
+[ -n "$script" ] || fail "the page names no script under /assets/:
+$page"
+script_meta="$(curl -fsS --max-time 10 -o "$work/script.js" -w '%{http_code} %{content_type}' "$base$script")" \
+  || fail "GET $script failed"
+[ "$script_meta" = "200 text/javascript; charset=utf-8" ] \
+  || fail "GET $script answered '$script_meta', want '200 text/javascript; charset=utf-8'"
+[ -s "$work/script.js" ] || fail "GET $script answered an empty body"
+ok "the script the page names is served ($script, $(stat -c %s "$work/script.js") bytes)"
+
+plain="$(curl -fsS --max-time 10 -D "$work/plain.headers" "$base/")" || fail "GET / failed"
+grep -qi '^content-type: text/plain' "$work/plain.headers" \
+  || fail "GET / with no Accept preference was not answered with the plain-text page:
+$(cat "$work/plain.headers")"
+grep -q 'AGPL-3.0-only' <<<"$plain" && grep -q '^Corresponding Source: https\{0,1\}://' <<<"$plain" \
+  || fail "the plain-text root page lost the Corresponding Source offer:
+$plain"
+ok "serve still answers / with the plain-text page and its source offer to a request that does not ask for HTML"
+
+# Captured, then searched: `grep -q` leaves at its first match, and under pipefail a
+# `docker logs` still writing into the closed pipe would fail this step on a line it found.
+serve_log="$(docker logs "$cid" 2>&1 || true)"
+grep -q 'web UI embedded' <<<"$serve_log" \
+  || fail "'holdfast serve' did not log that it embeds a web UI:
+$(tail -20 <<<"$serve_log")"
+docker rm -f "$cid" >/dev/null 2>&1 || true
+
+echo "== smoke PASSED: the image encoded a real file, verified it, and swapped it safely, and serves its web UI with the source offer"

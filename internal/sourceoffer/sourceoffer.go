@@ -15,6 +15,7 @@ package sourceoffer
 
 import (
 	"fmt"
+	"html"
 	"strings"
 
 	"github.com/NSchatz/holdfast/internal/version"
@@ -90,4 +91,16 @@ func Resolve() (Offer, error) {
 func (o Offer) Text() string {
 	return o.Build + ", free software you may redistribute and modify under " + o.License +
 		".\n" + Label + ": " + o.SourceURL + "\n"
+}
+
+// HTML renders the same offer for the web UI's page, as the footer internal/ui writes
+// into it: the same three facts in the same order as Text, the literal Label before the
+// URL, and the URL both shown and linked. Every value is escaped here, at render time,
+// for element content and for a double-quoted attribute alike; Validate has already
+// held the URL to http:// or https://, so the link can carry no other scheme.
+func (o Offer) HTML() string {
+	u := html.EscapeString(o.SourceURL)
+	return `<footer id="source-offer">` + html.EscapeString(o.Build) +
+		", free software you may redistribute and modify under " + html.EscapeString(o.License) +
+		".<br>" + Label + `: <a href="` + u + `" rel="noopener noreferrer">` + u + "</a></footer>"
 }

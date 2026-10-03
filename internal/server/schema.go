@@ -62,9 +62,12 @@ const (
 // The media types this surface answers with, named once so the document and the handlers
 // cannot spell them differently.
 const (
-	mediaJSON   = "application/json; charset=utf-8"
-	mediaText   = "text/plain; charset=utf-8"
-	mediaSSE    = "text/event-stream"
+	mediaJSON = "application/json; charset=utf-8"
+	mediaText = "text/plain; charset=utf-8"
+	mediaSSE  = "text/event-stream"
+	// mediaAsset stands for "the file's own type": a static asset of the web UI is sent as
+	// what its extension says it is (internal/ui), so no one type describes the route.
+	mediaAsset  = "*/*"
 	mediaMetric = "text/plain" // Prometheus exposition; the parameters are negotiated
 )
 
@@ -352,6 +355,18 @@ func declaredResponses() (map[string][]Response, error) {
 			// The source offer could not be resolved, so the root page refuses rather
 			// than serving a page carrying no offer.
 			text(http.StatusServiceUnavailable),
+		},
+		// "GET /" above describes the answer to a request that states no preference, which
+		// is the plain-text page on every build. A request that asks for HTML by name is
+		// answered with the web UI's page (text/html) where the build embeds one; the
+		// format keys a response by its status, so that second representation of the same
+		// 200 is stated here and in docs/design/web-ui.md rather than as a second entry.
+
+		// The web UI's static assets: the script and stylesheet its page names. The media
+		// type is each file's own, from the closed list in internal/ui.
+		"GET " + UIAssetsPrefix + "*": {
+			{Status: http.StatusOK, MediaType: mediaAsset, Body: Shape{Kind: kindBytes}},
+			text(http.StatusNotFound),
 		},
 
 		"GET /api/summary": append([]Response{

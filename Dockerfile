@@ -300,6 +300,52 @@ RUN set -eu; \
     rm -rf /tmp/deb /tmp/x; \
     du -sh /hwroot
 
+# --- build the web UI ----------------------------------------------------------
+# The UI (web/) is built here, by the same commands `make check` proves it with, on the
+# Node that web/.node-version pins: scripts/check-pins.sh section 12 holds this tag to
+# that file, and section 7 holds the reference to a tag and a digest written on this line.
+# The digest is the multi-arch index node:24.21.0-trixie-slim resolved to on
+# registry-1.docker.io, read 2026-10-03 (and unchanged from the reading of 2026-09-29).
+# Node 24 is the Active LTS line until 2026-10-20 and maintained until 2028-04-30
+# (https://raw.githubusercontent.com/nodejs/Release/main/schedule.json, read 2026-09-29).
+#
+# $BUILDPLATFORM, like every stage that RUNs: the build's output is JavaScript, CSS and
+# HTML, the same bytes for every target architecture, so the arm64 image needs no QEMU
+# here either. Nothing of this stage reaches the runtime image but those files, embedded
+# in the Go binary: no Node, no pnpm and no node_modules ship.
+FROM --platform=$BUILDPLATFORM node:24.21.0-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe AS ui
+
+# The same question the build stage asks of its Go image, for the same reason: the digest
+# is what Docker pulls and the tag beside it is a label nothing enforces, so ask the image
+# which Node it is and hold that to the pin the gate ran on.
+WORKDIR /src/web
+COPY web/.node-version ./
+RUN set -eu; \
+    want="v$(tr -d '[:space:]' < .node-version)"; \
+    got="$(node --version)"; \
+    if [ "$got" != "$want" ]; then \
+      echo "web/.node-version pins ${want} and this stage's pinned digest ships ${got}" >&2; \
+      exit 1; \
+    fi; \
+    echo "node in the image matches web/.node-version (${got})"
+
+# pnpm comes from corepack, which reads the `packageManager` field of package.json and
+# refuses a package that does not hash to the sha512 written there. pnpm 12's package is a
+# launcher that fetches the native pnpm of the same version and checks it against npm's
+# registry signatures. Lifecycle scripts do
+# not run: web/pnpm-workspace.yaml says so, and it is copied before the install reads it.
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 CI=true
+RUN corepack enable pnpm
+COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY web/ ./
+RUN set -eu; \
+    pnpm run build; \
+    test -f dist/index.html; \
+    grep -q '<footer id="source-offer"></footer>' dist/index.html \
+      || { echo "the built page has no slot for the Corresponding Source offer" >&2; exit 1; }; \
+    ls -lR dist
+
 # --- build the binary --------------------------------------------------------
 FROM --platform=$BUILDPLATFORM golang:1.25.14-trixie@sha256:2c4c60ef415fbfa5e90300722293bef36c5e63fae17570ce18f580af933dbd73 AS build
 
@@ -326,6 +372,16 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+# The web UI, into the directory the binary embeds (internal/ui). The context carries only
+# that directory's committed placeholder (.dockerignore), so what is embedded is this
+# build's own UI and nothing a developer's tree happened to hold. A binary whose embed
+# directory has no page serves the plain-text root page and says so at startup; the image
+# is not allowed to be that binary, so the copy is checked.
+COPY --from=ui /src/web/dist/ ./internal/ui/dist/
+RUN set -eu; \
+    test -f internal/ui/dist/index.html; \
+    test -f internal/ui/dist/.gitkeep; \
+    test -n "$(ls internal/ui/dist/assets)"
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=0.0.0-dev

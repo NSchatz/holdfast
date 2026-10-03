@@ -161,3 +161,37 @@ func TestText_CarriesTheSameThreeFactsVerbatim(t *testing.T) {
 		t.Errorf("a fork build's text body names upstream: %q", body)
 	}
 }
+
+// The HTML rendering carries the same three facts as the text one, the literal label
+// immediately before the link, and the URL both as the link's target and as its text -
+// escaped for both, so a value that is markup stays a value.
+func TestOfferHTML_CarriesTheSameFactsEscaped(t *testing.T) {
+	o := Offer{SourceURL: "https://git.example.org/fork/holdfast", License: License, Build: "holdfast v1.2.3 (commit abc, built now)"}
+	got := o.HTML()
+	want := `<footer id="source-offer">holdfast v1.2.3 (commit abc, built now), free software you may redistribute and modify under ` +
+		License + `.<br>` + Label + `: <a href="https://git.example.org/fork/holdfast" rel="noopener noreferrer">https://git.example.org/fork/holdfast</a></footer>`
+	if got != want {
+		t.Errorf("HTML() =\n%s\nwant\n%s", got, want)
+	}
+
+	hostile := Offer{SourceURL: `https://x.invalid/?a="><script>1</script>&b='`, License: License, Build: `<b>build</b>`}
+	got = hostile.HTML()
+	for _, raw := range []string{"<script>", `a="`, "<b>", "'"} {
+		if strings.Contains(got, raw) {
+			t.Errorf("HTML() carries %q unescaped: %s", raw, got)
+		}
+	}
+	for _, escaped := range []string{
+		`href="https://x.invalid/?a=&#34;&gt;&lt;script&gt;1&lt;/script&gt;&amp;b=&#39;"`,
+		`>https://x.invalid/?a=&#34;&gt;&lt;script&gt;1&lt;/script&gt;&amp;b=&#39;</a>`,
+		"&lt;b&gt;build&lt;/b&gt;",
+	} {
+		if !strings.Contains(got, escaped) {
+			t.Errorf("HTML() lacks %q: %s", escaped, got)
+		}
+	}
+	// One element, whatever the values: the page has exactly one place for the offer.
+	if strings.Count(got, "<footer") != 1 || !strings.HasSuffix(got, "</footer>") {
+		t.Errorf("HTML() is not one footer element: %s", got)
+	}
+}
