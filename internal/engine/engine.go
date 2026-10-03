@@ -633,6 +633,22 @@ type Engine struct {
 	// interrupted, and paused work is left pending for the next scan after resume.
 	Paused func() bool
 
+	// PlayHold, when non-nil, answers whether a media server is playing path right now, and
+	// why the file is held when it is (docs/design/media-clients.md#play-hold). A file being
+	// played is not started and, where its encode has already passed every gate, is not
+	// swapped until it stops. It only ever DELAYS: it changes no gate, no verdict and nothing
+	// about the swap, and it answers false whenever it cannot find out. nil holds nothing,
+	// which is what every engine built without a configured media server is.
+	PlayHold func(ctx context.Context, path string) (held bool, why string)
+
+	// PlayHoldPoll is how often a swap waiting on PlayHold asks again; 0 uses
+	// DefaultPlayHoldPoll.
+	PlayHoldPoll time.Duration
+
+	// playHoldNow, when non-nil, replaces the clock the pre-swap wait reads, so a test can
+	// pass the reminder interval without waiting it out.
+	playHoldNow func() time.Time
+
 	// --- the three FILESYSTEM-1 seams --------------------------------------------
 	//
 	// The gate has no network mount and no second real filesystem, and it never will: a test
@@ -2024,6 +2040,13 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		return nil
 	}
 
+	// THE PLAY HOLD, at the door: a file a media server is playing right now is not started.
+	// It is left exactly as a held-back file is - no claim, no row, nothing written - so it
+	// stays a candidate and the next scan offers it again.
+	if e.playHeld(ctx, f) {
+		return nil
+	}
+
 	// WHICH PROFILE DECIDES THIS FILE, resolved ONCE, here, from the root it was enumerated
 	// under, and threaded through everything below: the hardlink guard, the bitrate floor,
 	// the pixel-format derivation, the output container, the encode's argv and every gate in
@@ -2746,6 +2769,17 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 		out.Reason = failureReason(class, reason.Error())
 		e.fail(ctx, f, key, gate, out)
 		return nil
+	}
+
+	// THE PLAY HOLD, before the swap: every gate has passed, and a playback that began while
+	// the encode ran must not have its file replaced under it. The swap WAITS here until the
+	// file is no longer being played. It waits ahead of the collision re-check, the retention
+	// and the source re-fingerprint, so each of those still runs immediately before the
+	// rename, against the file as it is once the wait is over. An interrupt during the wait
+	// is the interrupt of any job in flight: the temp is discarded and the row stays active.
+	if err := e.waitWhilePlayed(ctx, f); err != nil {
+		_ = os.Remove(tmp)
+		return err
 	}
 
 	// Re-check the collision guard right before the swap: an encode can take hours, and a

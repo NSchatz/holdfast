@@ -1,12 +1,12 @@
 # Secrets: a credential is reached by reference
 
-holdfast reads four credential-bearing configuration keys, and none of them holds a
+holdfast reads seven credential-bearing configuration keys, and none of them holds a
 credential. Each holds a **reference** - the name of a secret and the kind of place it
 lives - and the value is resolved at the point of use. That is the whole design, and it
 exists because a secret an agent or an operator *read* is a secret in a transcript,
 whether or not it ever reached a file.
 
-The four keys:
+The seven keys:
 
 | key | what the credential is | what happens when it is absent |
 |---|---|---|
@@ -14,8 +14,16 @@ The four keys:
 | `server_read_token` | the bearer token the READ endpoints under `/api` require | those four endpoints are OPEN, which is the shipped default. They carry the full path of every file holdfast has seen, so on a non-loopback bind that is the whole library served without a credential, and holdfast says so at startup. It does not gate the plain-text root page or `/metrics` |
 | `notify_url` | a shoutrrr service URL, which carries its credential in its own userinfo, host, path or query | notifications are off |
 | `tautulli_api_key` | the Tautulli API key | the Plex-aware pause is off |
+| `radarr_api_key` | the Radarr API key, sent in the `X-Api-Key` header | Radarr is not asked to rescan after a swap |
+| `sonarr_api_key` | the Sonarr API key, sent in the `X-Api-Key` header | Sonarr is not asked to rescan after a swap |
+| `plex_token` | a Plex **admin** token, sent in the `X-Plex-Token` header | Plex is not asked for a partial scan after a swap, and no file is held for being played |
 
-`tautulli_url` and `server_addr` are addresses, not credentials, and are unchanged.
+`tautulli_url`, `radarr_url`, `sonarr_url`, `plex_url` and `server_addr` are addresses, not
+credentials. The three media-server addresses accept a scheme, a host and an optional base path
+only: userinfo, a query or a fragment in one refuses to start, so a credential cannot be pasted
+into an address by mistake. Each of those three targets needs its address and its credential
+together, and one without the other refuses to start
+([docs/post-swap-hook.md](post-swap-hook.md)).
 
 ## The reference forms
 
@@ -94,9 +102,9 @@ At **start**, before the library is walked and before a single frame is encoded:
 
 `holdfast validate` performs step 1 and not step 2: proving that a reference *resolves*
 means reaching into a secret store, which belongs to a run rather than to a configuration
-check. `run` and `serve` both do both - `run` consumes none of the four keys itself, and
-still resolves them, because a configuration error an operator finds after a four-hour pass
-was reported too late.
+check. `run` and `serve` both do both - `run` consumes only the three media-server
+credentials itself, and still resolves all seven, because a configuration error an operator
+finds after a four-hour pass was reported too late.
 
 An **unresolvable reference is a configuration error and is not an outage**. A Tautulli
 outage at runtime still fails OPEN and never halts transcoding; a Tautulli api key that
@@ -116,7 +124,9 @@ rather than the value so there is nothing in it to print.
 An outbound request that fails names the **key and its reference**, never the value and
 never a credential-bearing part of the destination. For `notify_url` that means not even
 the scheme; for Tautulli it means not the request URL, which carries the api key in its
-query string.
+query string. For Radarr, Sonarr and Plex the credential travels in a request header and never
+in a URL, and a failed request is still reported as a target name and a failure class, never
+as the request error's own text, which quotes the request URL.
 
 <a id="credential-rotation"></a>
 

@@ -1023,14 +1023,49 @@ dry_run: false
 #                              #   plain; tautulli_api_key is a SECRET REFERENCE:
 #                              #     tautulli_api_key: file:/run/secrets/tautulli-key
 
-# --- THE FOUR SECRET KEYS (secrets K1) ----------------------------------------
-# server_auth_token, server_read_token, notify_url and tautulli_api_key carry a REFERENCE
+# --- RADARR, SONARR AND PLEX (docs/post-swap-hook.md) ---------------------------
+# All OFF by default: with none of these nine keys written holdfast sends no request to
+# any of the three and decides exactly as it always did. A target is ON when its address
+# and its credential are BOTH set; one without the other refuses to start.
+#
+# READ docs/post-swap-hook.md BEFORE ENABLING radarr_url OR sonarr_url: with the TRaSH
+# "x265 (HD)" custom format (default score -10000) and a naming format that carries
+# {MediaInfo VideoCodec}, a rescan can make an arr re-download a file holdfast already
+# replaced. holdfast changes no arr or Recyclarr setting.
+#
+# radarr_url: ""               # e.g. http://radarr:7878. After a swap, the ONE movie that
+# radarr_api_key: ""           #   owns the file's directory gets RescanMovie. The key is a
+#                              #   SECRET REFERENCE: file:/run/secrets/radarr-api-key
+# radarr_path_map: []          # holdfast's view of the library -> Radarr's, a list of
+#                              #   absolute prefix pairs; the longest `from` wins, on
+#                              #   whole path components; an unmapped path is unchanged:
+#                              #     radarr_path_map:
+#                              #       - {from: /media/movies, to: /movies}
+# sonarr_url: ""               # e.g. http://sonarr:8989. After a swap, the ONE series that
+# sonarr_api_key: ""           #   owns the file's directory gets RescanSeries.
+# sonarr_path_map: []          #   Same forms as the Radarr keys.
+# plex_url: ""                 # e.g. http://plex:32400. After a swap, Plex gets a PARTIAL
+# plex_token: ""               #   scan of the file's directory (never a whole section).
+# plex_path_map: []            #   And a file Plex is PLAYING is held: not started, and not
+#                              #   swapped until it stops. The hold only delays; if Plex
+#                              #   cannot be asked, nothing is held (it fails open) and one
+#                              #   warning says so. plex_token is a SECRET REFERENCE and
+#                              #   must be an ADMIN token (the server owner's).
+#
+# One attempt per target per swap, off the encode workers, 10s per request, no retry: a
+# failure is one warning and changes nothing about the job, the swap, the undo window or
+# the exit code. At the end of `run` and at `serve` shutdown, pending requests are
+# attempted for at most 30 seconds. A path map has no HOLDFAST_* form.
+
+# --- THE SEVEN SECRET KEYS (secrets K1) ---------------------------------------
+# server_auth_token, server_read_token, notify_url, tautulli_api_key, radarr_api_key,
+# sonarr_api_key and plex_token carry a REFERENCE
 # to a credential, never a credential. Two forms, and deliberately no third:
 #
 #   file:/run/secrets/holdfast-token     the file's CONTENTS are the value
 #   cmd:/usr/local/bin/fetch-my-secret   the command's STDOUT is the value
 #
-# A LITERAL credential in any of those four keys - in this file OR in the matching
+# A LITERAL credential in any of those seven keys - in this file OR in the matching
 # HOLDFAST_* environment variable - REFUSES TO START, naming the key and how to convert
 # it. That is deliberate, and the reason is the encoder: holdfast starts ffmpeg and
 # ffprobe as child processes, and a child inherits its parent's environment, so a

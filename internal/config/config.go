@@ -65,6 +65,9 @@ var knownKeys = map[string]bool{
 	"scratch_dir": true, "scratch_min_free_gb": true,
 	queueOrderKey:          true,
 	healthSweepIntervalKey: true, healthSweepWorkersKey: true,
+	radarrURLKey: true, radarrAPIKeyKey: true, radarrPathMapKey: true,
+	sonarrURLKey: true, sonarrAPIKeyKey: true, sonarrPathMapKey: true,
+	plexURLKey: true, plexTokenKey: true, plexPathMapKey: true,
 	excludePathsKey: true, includePathsKey: true,
 	audioLanguagesKey: true, subtitleLanguagesKey: true,
 	keepCommentaryKey: true, remuxOnlyKey: true, subtitleSidecarsKey: true, cropKey: true, dolbyVisionP7Key: true,
@@ -147,6 +150,11 @@ func defaultLayer() map[string]any {
 		// configuration schedules no decode it did not schedule before.
 		healthSweepIntervalKey: 0,
 		healthSweepWorkersKey:  1,
+		// The media-server clients are OFF until a target's address and credential are both
+		// written (I5): an existing configuration sends no request it did not send before.
+		radarrURLKey: "", radarrAPIKeyKey: "",
+		sonarrURLKey: "", sonarrAPIKeyKey: "",
+		plexURLKey: "", plexTokenKey: "",
 		// Stream selection, every value reproducing what this tool did before the keys
 		// existed: carry every audio and subtitle stream, keep commentary, re-encode the
 		// video. A knob in profileKnobs is seeded from the top-level value of the same
@@ -752,6 +760,29 @@ type Config struct {
 	HealthSweepIntervalHours int `yaml:"health_sweep_interval_hours"`
 	// HealthSweepWorkers is how many sweep decodes run at once (default 1).
 	HealthSweepWorkers int `yaml:"health_sweep_workers"`
+
+	// --- the media-server clients (docs/design/media-clients.md, docs/post-swap-hook.md) ---
+
+	// RadarrURL + RadarrAPIKey, SonarrURL + SonarrAPIKey and PlexURL + PlexToken each enable
+	// one target, and only when BOTH are set (default off). After a swap an enabled Radarr or
+	// Sonarr is asked to rescan the one movie or series that owns the file's directory, and an
+	// enabled Plex is asked for a partial scan of that directory; an enabled Plex is also asked
+	// which files are being played, and a file being played is not replaced until it stops.
+	//
+	// Each address is NOT a secret and stays plain. Each credential is a SECRET REFERENCE
+	// (secrets K1): a literal here, or in its HOLDFAST_* variable, is a startup REFUSAL.
+	//
+	// Each path map translates holdfast's view of the library to that target's (see PathMap).
+	// It is written in the file only: a path map has no environment form.
+	RadarrURL     string  `yaml:"radarr_url"`
+	RadarrAPIKey  string  `yaml:"radarr_api_key"`
+	RadarrPathMap PathMap `yaml:"radarr_path_map"`
+	SonarrURL     string  `yaml:"sonarr_url"`
+	SonarrAPIKey  string  `yaml:"sonarr_api_key"`
+	SonarrPathMap PathMap `yaml:"sonarr_path_map"`
+	PlexURL       string  `yaml:"plex_url"`
+	PlexToken     string  `yaml:"plex_token"`
+	PlexPathMap   PathMap `yaml:"plex_path_map"`
 }
 
 // SecretBearingKeys is the closed list of configuration keys whose value is a credential,
@@ -764,7 +795,12 @@ type Config struct {
 // /proc/<pid>/environ. Membership here is what makes that a startup refusal, and it is
 // what the AC-7 suite in cmd/holdfast enumerates, so a key added here is graded by the
 // literal-refusal cases without being named in them.
-var SecretBearingKeys = []string{"server_auth_token", "server_read_token", "notify_url", "tautulli_api_key"}
+//
+// The three media-server credentials (`radarr_api_key`, `sonarr_api_key`, `plex_token`) are
+// here on the same terms: each is sent in a request header and never in a URL, and a literal
+// one would be inherited by every ffmpeg child.
+var SecretBearingKeys = []string{"server_auth_token", "server_read_token", "notify_url", "tautulli_api_key",
+	radarrAPIKeyKey, sonarrAPIKeyKey, plexTokenKey}
 
 // SecretRefs parses every secret-bearing key into a reference, and is the ONE place
 // that reading happens: Validate calls it so every subcommand refuses a literal at start,
@@ -774,7 +810,8 @@ var SecretBearingKeys = []string{"server_auth_token", "server_read_token", "noti
 // It returns the first refusal, which for a pasted credential is a *secret.ErrLiteral
 // naming the key and how to convert it, with no part of the value in the message.
 func (c *Config) SecretRefs() ([]secret.Ref, error) {
-	raw := []string{c.ServerAuthToken, c.ServerReadToken, c.NotifyURL, c.TautulliAPIKey}
+	raw := []string{c.ServerAuthToken, c.ServerReadToken, c.NotifyURL, c.TautulliAPIKey,
+		c.RadarrAPIKey, c.SonarrAPIKey, c.PlexToken}
 	refs := make([]secret.Ref, 0, len(SecretBearingKeys))
 	for i, key := range SecretBearingKeys {
 		r, err := secret.ParseRef(key, raw[i])
@@ -1146,6 +1183,13 @@ func Load(path string) (*Config, error) {
 		if isWatchKey(top) {
 			return nil, misplacedWatchError(top, envPrefix+strings.ToUpper(top))
 		}
+		// A path map is a list of pairs and has no environment spelling; one written there
+		// would otherwise be decoded as nothing, and a rescan would name the wrong directory.
+		for _, key := range pathMapKeys {
+			if top == key {
+				return nil, misplacedPathMapError(key)
+			}
+		}
 		explicitTop[top] = true
 	}
 	if err := k.Merge(ke); err != nil {
@@ -1319,6 +1363,17 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
+	// The three path maps, read as the file CARRIED them and before the weakly typed decoder
+	// below could drop a misspelled side: an entry is exactly a from and a to.
+	pathMaps := make(map[string]PathMap, len(pathMapKeys))
+	for _, key := range pathMapKeys {
+		m, err := parsePathMap(k.Get(key), key, path)
+		if err != nil {
+			return nil, err
+		}
+		pathMaps[key] = m
+	}
+
 	var c Config
 	if err := k.UnmarshalWithConf("", &c, koanf.UnmarshalConf{
 		Tag: "yaml",
@@ -1339,6 +1394,7 @@ func Load(path string) (*Config, error) {
 	// and surrounding whitespace were not.
 	c.VideoExts = normalizeExts(c.VideoExts)
 	c.Roots = roots
+	c.RadarrPathMap, c.SonarrPathMap, c.PlexPathMap = pathMaps[radarrPathMapKey], pathMaps[sonarrPathMapKey], pathMaps[plexPathMapKey]
 
 	if err := checkX265CPUs(c.X265CPUs); err != nil {
 		return nil, fmt.Errorf("%w, in %s", err, path)
@@ -1744,6 +1800,12 @@ func (c *Config) Validate() error {
 	// SHAPE only, because proving a reference RESOLVES means touching a secret store and
 	// that belongs to the run, not to `validate`.
 	if _, err := c.SecretRefs(); err != nil {
+		return err
+	}
+	// The media-server targets, after the literal refusal above so a pasted credential is
+	// reported as one: a half-configured target, an address that is not an absolute http or
+	// https URL, or a path-map side that is not absolute refuses here, naming the key.
+	if err := c.validateMediaTargets(); err != nil {
 		return err
 	}
 

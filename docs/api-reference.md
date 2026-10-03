@@ -804,3 +804,8 @@ response and no `holdfast export` line carries it, and the shapes documented abo
   Scheduling only ever **delays** new work - it never interrupts an in-flight encode or bypasses a gate, and
   a Tautulli outage **fails open** (never halts transcoding). **Known limitation:** Plex-aware pause needs an
   operator-supplied Tautulli endpoint; otherwise the run-window + load cap are the fairness mechanism.
+- **Media-server clients** (`radarr_url`, `sonarr_url`, `plex_url`, each with a credential **reference** and
+  an optional path map; all off by default): after a committed swap each enabled target is asked once to
+  rescan the file's directory, and with Plex enabled a file being played is held until it stops. They add no
+  HTTP endpoint, no response field and no metric: what they did is in the log. See
+  [docs/post-swap-hook.md](post-swap-hook.md).

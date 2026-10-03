@@ -66,6 +66,7 @@ reasoning lives in the document, not in this file.
 - **Dynamic HDR is carried only through libx265, and its output replaces the source only when its DOVI record and every frame's RPU and HDR10+ match its plan** - [`docs/design/dynamic-hdr.md`](docs/design/dynamic-hdr.md#dynamic-hdr).
 - **The queue decides only the order files are offered in: priority, then the declared order, never which files** - [`docs/design/queue-order.md`](docs/design/queue-order.md#queue-order).
 - **The health sweep reads every source and reports; it never moves, renames, deletes or repairs a file** - [`docs/design/health-sweep.md`](docs/design/health-sweep.md#health-sweep).
+- **A media server is told about a swap only after it has committed, once, by directory; and a file being played is held, which only ever delays** - [`docs/design/media-clients.md`](docs/design/media-clients.md#media-clients).
 
 ## Layout
 
@@ -98,6 +99,7 @@ reasoning lives in the document, not in this file.
   pre-passes, the Dolby Vision VBV ceiling, and the dynamic-HDR gates' arithmetic.
 - `internal/queuekey` - the `savings_per_hour` ordering key: estimated bytes saved per hour of work.
 - `internal/health` - the report-only health sweep: its schedule, resumable full decode and read-API report.
+- `internal/mediaclient` - the Radarr, Sonarr and Plex clients: the post-swap rescan and the Plex play hold.
 - `internal/encoder` - the codec matrix registry.
 - `internal/hwdevice` - the render nodes a hardware encoder can open, and the one VAAPI and QSV
   are each assigned.
@@ -159,14 +161,14 @@ tool proves its unhappy paths.
   `make install-hooks` (the one setup step) puts it on the pre-commit path. Both
   `secret-scan` and its self-test ride `make check`. Synthetic
   `config.example.yaml` only; real `config.yaml` is gitignored.
-- A credential is reached BY REFERENCE. `server_auth_token`, `server_read_token`,
-  `notify_url` and `tautulli_api_key` carry `file:<path>` or `cmd:<argv>`, never a value,
-  and a literal in the file or in `HOLDFAST_*` refuses to start - a credential in
-  holdfast's environment is inherited by every `ffmpeg` child. `config.SecretBearingKeys`
+- A credential is reached BY REFERENCE. `server_auth_token`, `server_read_token`, `notify_url`,
+  `tautulli_api_key`, `radarr_api_key`, `sonarr_api_key` and `plex_token` carry `file:<path>` or
+  `cmd:<argv>`, never a value, and a literal in the file or in `HOLDFAST_*` refuses to start - a
+  credential in holdfast's environment is inherited by every `ffmpeg` child. `config.SecretBearingKeys`
   is the closed list; a new credential-bearing key joins it or it is not one. A resolved value is a
-  `secret.Value`, which renders as `<redacted>` through `fmt`, `slog`, JSON and text;
-  `Expose()` is the only route to the plaintext, so grep for it to find every site
-  that reads one. `docs/secrets.md` is the reference.
+  `secret.Value`, which renders as `<redacted>` through `fmt`, `slog`, JSON and text; `Expose()` is the
+  only route to the plaintext, so grep for it to find every site that reads one. `docs/secrets.md` is
+  the reference.
 - Commit as the repository's configured git identity; no `Co-Authored-By` and no AI
   co-author trailer.
 - No owner identity in a tracked file: the owner's name and email appear only in `LICENSE`
@@ -181,19 +183,17 @@ tool proves its unhappy paths.
 
 ## References
 
-`docs/secrets.md` the reference forms, the resolver contract and its documented timeout
-bound, the scanner's ruleset, exit codes and one setup step, and the identity scan ·
-`docs/docker.md` deployment (volumes, permissions, TZ, GPU passthrough, security
-posture) · `docs/migration.md` the cutover from the Bash transcoder and Tdarr ·
-`docs/requeue.md` what a terminal row
-records about the configuration it was decided under, and the lever for the rows a
-configuration change cannot reason about ·
-`docs/test-mass.md` how much of this repository is test code, what `scripts/test-mass.sh`
-counts, what was retired for grading presentation rather than behaviour, and why line
-coverage is not assertion ·
-`docs/mutation-testing.md` the mutation score floor, the figure it is applied to, which
-packages are in the mutation domain and why each exclusion is there, what a pull request
-runs against what the schedule runs, and how to reproduce either by hand ·
+`docs/secrets.md` the reference forms, the resolver contract and its documented timeout bound, the
+scanner's ruleset, exit codes and one setup step, and the identity scan · `docs/docker.md` deployment
+(volumes, permissions, TZ, GPU passthrough, security posture) · `docs/migration.md` the cutover from the
+Bash transcoder and Tdarr · `docs/post-swap-hook.md` the Radarr, Sonarr and Plex clients: their keys and
+requests, the arr re-download warning, the drain bound and the Plex play hold · `docs/requeue.md` what a
+terminal row records about the configuration it was decided under, and the lever for the rows a
+configuration change cannot reason about · `docs/test-mass.md` how much of this repository is test code,
+what `scripts/test-mass.sh` counts, what was retired for grading presentation rather than behaviour, and
+why line coverage is not assertion · `docs/mutation-testing.md` the mutation score floor, the figure it
+is applied to, which packages are in the mutation domain and why each exclusion is there, what a pull
+request runs against what the schedule runs, and how to reproduce either by hand ·
 `docs/hardware-reports.md` how a hardware report is run, what it records and what it redacts ·
-`docs/encode-memory.md` the encode memory watchdog, the mux-queue bounds on every ffmpeg
-argv, and the reproduction attempt behind them.
+`docs/encode-memory.md` the encode memory watchdog, the mux-queue bounds on every ffmpeg argv, and the
+reproduction attempt behind them.
