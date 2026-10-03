@@ -160,9 +160,31 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g11-b
 - D13 (2026-10-03): the `holdfast-g11/worker` branch was started on the protocol branch before
   #157 merged (to save hours); it takes `origin/main` by the checked merge of goal 10's D10.
 
+- D14 (2026-10-03): the retry bound, refined after the worker branch's adversarial review proved
+  that one node with a wrong path map fails every lease in milliseconds and so parks the library
+  (HIGH for availability, no data risk). P4 rule 3 charges "an expiry, a `fail`, or a refused
+  upload" to the job. As built: a lease that was really attempted (expiry, an encode failure on
+  the node, the digest-mismatch bound, a source digest or output size the server finds wrong) is
+  charged, as P4 says; a lease the node could not run at all (unmapped or mismatched source,
+  unsupported encoder, a refused plan, the worker stopping, a poll that left) is NOT charged: the
+  server encodes that job itself in the same attempt, and a node with 3 such endings in a row
+  (`ASSUMED`) is offered nothing for 5 minutes (`ASSUMED`). This departs from the letter of P4
+  rule 3 for the second kind and is listed under "Proposals awaiting the owner".
+- D15 (2026-10-03): the same review's other findings are fixed on the branch before its gate: a
+  poll that left while reserved never costs the file a failure; `Ready` re-graces recovered
+  leases and adoption runs them concurrently; the worker refuses a lease whose argument list
+  names another input, an attachment, an absolute path or anything before the input; the worker
+  refuses redirects and a `worker_server` with userinfo; its work directory is swept at start.
+
 ## Proposals awaiting the owner
 
 - Hardware encoders on a node (D4): a node's own start-time probe would have to gate the job.
+- Which lease endings count against a file's `max_failures` (D14): as built, only a lease that was
+  really attempted; P4 rule 3 as written charges every `fail`.
+- No maximum lease lifetime: a node that keeps heartbeating holds its job, as a hung local encode
+  holds a worker today.
+- Files queued by `POST /api/scan`, a webhook or the watch are encoded by the server; only a
+  pass's feed is offered to nodes.
 
 ## Resume here
 
