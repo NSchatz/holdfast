@@ -149,7 +149,7 @@ CI adds two things `check` deliberately does not: the config-schema self-test (p
 reds on a bad config) and the image smoke gate (`scripts/smoke-image.sh`, needs Docker).
 
 The gate needs the pinned ffmpeg (`scripts/install-ffmpeg.sh`), and it is not
-skipped when absent - a grader that skips is a false green.
+skipped when absent - a grader that skips is a false green. On a shared host a whole-package or `-race` suite, the gate and a mutation run take the `goals-heavy` lock (one focused test needs none); a mutation run uses at most 4 workers (`.gremlins.yaml`) and a tmpfs temp dir where one has room.
 
 Never claim green without running it. Every change that touches the engine
 extends the fixture suite so it reds on that specific regression: a data-safety

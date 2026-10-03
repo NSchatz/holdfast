@@ -129,6 +129,15 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g14-b
   file later gains a second hard link is skipped before the claim and its row is not rewritten,
   so under a live engine it keeps being counted in `pending` (S0172's builder; the row and the
   file are untouched).
+- D8 (2026-10-03): request #229 is served in this goal although §0.13 expected none: the spec's
+  `requests.md` has every goal serve what is addressed to its program, and the spec wins. It is
+  one commit on the UI track's branch, not a third PR, because a third PR is a third 40-minute
+  gate on the disk the request is about. From its arrival, no whole-package or `-race` run of
+  this goal happens outside the heavy locks.
+- D9 (2026-10-03): the session died at about 20:45Z with the API branch's gate at
+  `internal/engine`; the supervisor relaunched it and the gate went with it. Gates now run
+  detached from the session (`/cache/tmp/holdfast-g14/run-gate.sh`, `setsid nohup`), so a second
+  loss leaves the gate running and its log readable.
 - D5 (2026-10-03): the baseline's `internal/engine` took 2984.4 s, 82.9% of `TEST_TIMEOUT`, against
   1983.0 s in goal 13's last gate on the same tree. The difference is load: the four builders ran
   package tests beside it. §4 says to raise `TEST_TIMEOUT` once the engine passes 80%, in its own
@@ -137,16 +146,24 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g14-b
 
 ## Requests
 
-None filed, none addressed to holdfast (T6, §0.13). The owner's queue: no new item so far.
+Filed: none. Addressed to holdfast: request #229 from the goals program (2026-10-03, opened
+during this goal): a mutation run's temp files on a tmpfs, its workers capped, and no
+whole-package suite outside `goals-heavy`. State: ACCEPTED (goal 14); it rides the
+`holdfast-g14/ui-views` PR (D8). The owner's queue: no new item so far.
 
 ## Resume here
 
-Phase 2: the three API builders finished; their work is merged into `holdfast-g14/api-facts`
-(worktree `/cache/wt/holdfast/g14-api`, local only), with the branch review's four findings fixed
-and `TEST_TIMEOUT` raised to 90m in its own commit. Running now, in that worktree, under the
-heavy locks: `make mutation-diff REF=origin/main` (log `/cache/tmp/holdfast-g14/api-mutation.log`),
-then `make check` (log `api-gate.log`, the gated SHA in `api-gate.sha`). Next: push the branch,
-open its PR with the gate tail, wait for CI, squash-merge. Phase 3: the UI builder finished on
-`holdfast-g14/ui-views` (worktree `/cache/wt/holdfast/g14-ui`, local only); a branch review is
-running; after the API PR merges, merge `origin/main` into it, align it with the served shapes
-(the node `mode` words are `mapped` and `http`), gate, PR, CI, merge.
+Phase 2: PR #167 (`holdfast-g14/api-facts`, head `9ecc04c`) is open; its CI is running; its local
+gate is running detached (`/cache/tmp/holdfast-g14/api-gate.log`, ends with an `exit <n> WALL`
+line; the gated SHA is in `api-gate.sha`). When both are green: put the gate's last 20 lines, its
+wall-clock and the `internal/engine` seconds in the PR body, then
+`gh pr merge 167 --squash --delete-branch`. Phase 3: `holdfast-g14/ui-views` (worktree
+`/cache/wt/holdfast/g14-ui`, local only, head `68cadf0`) holds the views, the controls, the docs
+rewrite, the review's fixes and request #229's commit. After #167 merges: merge `origin/main` into
+it, run `make mutation-diff REF=origin/main` under the locks with the write volume measured (the
+request's acceptance check), then the gate, PR, CI, merge; then set request #229 done.
+
+## Supervisor actions
+
+- 2026-10-03T20:48:24Z relaunched dead session 8d62d37d-3da2-4a4f-b9e4-3d2f6483ab9a in window holdfast-g14 with --resume (try 1 of 2)
+- 2026-10-03T20:49:33Z re-issued the goal in the relaunched session

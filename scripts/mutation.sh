@@ -71,11 +71,44 @@ case "$mode" in
   *) die_usage "--mode must be 'diff' or 'full'" ;;
 esac
 
+# WHERE THE RUN'S TEMP FILES GO. The runner copies the module once per worker into the temp
+# dir and every mutant links a test binary there, so the temp dir takes almost all of this
+# run's writes, and the build cache takes the rest. Where the host has a RAM-backed scratch
+# directory with room, the run uses it for both: nothing in there outlives the run, and on a shared disk those writes are what every
+# other job waits behind. It is used only when it is a tmpfs, writable and has
+# MUTATION_SCRATCH_MIN_KB free; otherwise the caller's TMPDIR stands, and the line below
+# says which. HOLDFAST_MUTATION_SCRATCH names the directory (default /scratch); setting it
+# to an empty value keeps the caller's TMPDIR.
+MUTATION_SCRATCH_MIN_KB=3145728
+scratch="${HOLDFAST_MUTATION_SCRATCH-/scratch}"
+scratch_tmp=""
+bin=""
+cleanup() {
+  [ -z "$bin" ] || rm -f "$bin"
+  [ -z "$scratch_tmp" ] || rm -rf "$scratch_tmp"
+}
+trap cleanup EXIT
+if [ -n "$scratch" ] && [ -d "$scratch" ] && [ -w "$scratch" ] \
+   && [ "$(stat -f -c %T "$scratch" 2>/dev/null)" = "tmpfs" ] \
+   && [ "$(df -Pk "$scratch" 2>/dev/null | awk 'NR==2 {print $4}')" -ge "$MUTATION_SCRATCH_MIN_KB" ] 2>/dev/null \
+   && scratch_tmp="$(mktemp -d "$scratch/holdfast-mutation.XXXXXX")"; then
+  export TMPDIR="$scratch_tmp"
+  # The build cache goes there too. Every mutant is a package compiled once and never
+  # again, and the shared cache keeps each of them: measured, a diff-scoped run with only
+  # its temp files moved still wrote 545 MB to the disk in 89 seconds, all of it cache
+  # entries nothing will ever read. The price is that this run compiles the module from
+  # cold, in memory.
+  export GOCACHE="$scratch_tmp/go-build"
+  echo "mutation: temp files and the build cache go to $TMPDIR (a tmpfs with room; removed when the run ends)"
+else
+  scratch_tmp=""
+  echo "mutation: temp files go to ${TMPDIR:-/tmp} (no tmpfs scratch directory with $((MUTATION_SCRATCH_MIN_KB / 1048576)) GiB free at '${scratch}')"
+fi
+
 bin="$(mktemp "${TMPDIR:-/tmp}/holdfast-mutation-gate.XXXXXX")" || {
   echo "::error::mutation: could not create a temporary file for the gate binary" >&2
   exit 4
 }
-trap 'rm -f "$bin"' EXIT
 
 if ! go build -o "$bin" ./scripts/mutation-gate; then
   echo "::error::mutation: the mutation gate did not build. Nothing has been measured, and no score is being reported in its place." >&2

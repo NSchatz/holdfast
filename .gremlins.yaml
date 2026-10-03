@@ -51,6 +51,15 @@ unleash:
     # Measured at 23 seconds: collector registration and scrape fixtures, once per mutant.
     - '^internal/metrics/'
 
+  # AT MOST FOUR WORKERS, whatever the machine has. The runner's default is one worker per
+  # core, and each worker copies the module into the temp dir and links a test binary there:
+  # on a 56-core host shared with other work that was 56 copied trees and about twenty
+  # links at once, 878 MB written to one disk in a minute (measured 2026-10-03), which
+  # starved every other job on the host. Four is the gate's own `-p`, and it is what a
+  # hosted CI runner's four cores gave this run already, so the pull-request and scheduled
+  # runs are unchanged. The number is restated in CLAUDE.md.
+  workers: 4
+
   # Each mutated test process gets ONE CPU, and this is measured rather than tidy. Gremlins
   # runs one worker per core; letting each of those workers also take every core is 56
   # times 56 on the machine this was written on, and the oversubscription turns
