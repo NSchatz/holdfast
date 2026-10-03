@@ -77,10 +77,10 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g14-b
 
 | # | Item | State |
 |---|---|---|
-| 3.1 | Views: summary and savings, queue with priority, history with filters and paging, health results, nodes; unit tests | TODO |
-| 3.2 | Controls: pause, resume, scan and exclusions, with the control token held in memory for the session only; no `restore` or `requeue` route in `web/` or `internal/server` | TODO |
-| 3.3 | The no-frontend statement rewritten in `README.md`, `CLAUDE.md`, `docs/api-reference.md` and `docs/docker.md`; `docs/design/web-ui.md` describes the views and controls | TODO |
-| 3.4 | Adversarial review of each branch before its gate | TODO |
+| 3.1 | Views: summary and savings, queue with priority, history with filters and paging, health results, nodes; unit tests | DONE (PR #169, `7bcfbcd`): `web/src/views/Summary.svelte`, `Queue.svelte`, `History.svelte`, `Health.svelte`, `Nodes.svelte`, each with its `*.test.ts` ("summary view: ...", "queue view: ...", "history view: ...", "health view: ...", "nodes view: ..."); vitest 241 of 241 in 16 files; the parsers accept the merged API's real bodies (D11); gate exit 0 in 2015 s on `c42c008` (`internal/engine` 1779.5 s, 33.0% of `TEST_TIMEOUT` 90m; `cmd/holdfast` 751.4 s); CI green (`build`, `package`, `mutation`); mutation-diff: no mutant in scope; 0 fix rounds |
+| 3.2 | Controls: pause, resume, scan and exclusions, with the control token held in memory for the session only; no `restore` or `requeue` route in `web/` or `internal/server` | DONE (PR #169, `7bcfbcd`): `web/src/views/Controls.svelte` and `TokenField.svelte`, `web/src/lib/token.ts`; "controls: ..." and "token: ..." tests (the token in no storage, cookie, address, history state or log; one header; no redirect followed); `TestRoutes_NoRestoreOrRequeueRouteIsRegistered` and its bite test; `git grep -n -i -E 'restore|requeue' -- web/` prints nothing; the same gate and CI |
+| 3.3 | The no-frontend statement rewritten in `README.md`, `CLAUDE.md`, `docs/api-reference.md` and `docs/docker.md`; `docs/design/web-ui.md` describes the views and controls | DONE (PR #169, `7bcfbcd`): rewritten in `README.md`, `CLAUDE.md` (199 lines), `docs/api-reference.md` and `docs/docker.md`; `docs/design/web-ui.md` gains `#views`, `#controls` and `#token`; `git grep -n -i 'no frontend'` over the four prints nothing; the same gate and CI |
+| 3.4 | Adversarial review of each branch before its gate | DONE (commits `478d020` in #167 and `1663507`, `53cf7d7`, `738728d`, `d988f60` in #169): a fresh agent per branch; the API branch no data-safety fault, 1 MED and 3 LOW (D6); the UI branch no HIGH, 1 MED, 7 LOW and 4 test gaps (D11); each fixed with a test |
 
 ## Phase 3b - Request #229 (track `holdfast-g14/io-request`)
 
@@ -92,7 +92,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g14-b
 
 | # | Item | State |
 |---|---|---|
-| 4.1 | Gate integrity counted from the goal-start SHA | TODO |
+| 4.1 | Gate integrity counted from the goal-start SHA | DONE (counted at `7bcfbcd`): `func Test` 2033 -> 2145, no package fell (`cmd/holdfast` 280 -> 282, `internal/engine` 598 -> 615, `internal/metrics` 21 -> 25, `internal/node` 73 -> 83, `internal/server` 137 -> 196, `internal/store` 163 -> 183, every other package unchanged); `git diff --numstat dfaca59 origin/main -- docs/design/swap.md docs/design/quality-gate.md` empty (66 and 80 lines); `*_test.go` +7618 -27, the 27 deleted lines in D12; zero `co-authored-by` in `git log dfaca59..origin/main --format=%B` |
 | 4.2 | Adversarial review of the report | TODO |
 
 ## Decisions taken
@@ -155,6 +155,38 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g14-b
   run over one is refused. That is the gate's environment and not the branch (unchanged at
   `e61df2d`), so it is no fix round. Gates now run with `GOTMPDIR` on the tmpfs and `TMPDIR` on
   disk, and are not declared io-light (the gate wrote 3.8 GB, `locks.log`).
+- D11 (2026-10-03): the branch review of `holdfast-g14/ui-views` (a fresh agent, before the
+  gate) found the UI's requests and shape guards matching the real handlers, no HIGH, and these,
+  each fixed with a test: the server's `age_seconds` on a cached total was dropped, so a stale
+  total read as fresh (MED); a followed redirect could carry the token off `/api/`; a refusal
+  over 300 characters was discarded; a pause answer that did not say was shown as success; a
+  thrown fetch error was rendered verbatim; a stale phrase in `config.example.yaml`; the design
+  record overstated when the controls are disabled (the code now enables them only on a 2xx gate
+  read); and four surviving mutants (a late answer of a superseded read, the token in a second
+  header, `cache: no-store`, re-reading on a token change). After #167 merged, the parsers were
+  run over real bodies from the merged server (summary, queue, history and its 400, health,
+  nodes, exclusions, the control answers) and accepted each.
+- D12 (2026-10-03): the 27 deleted `*_test.go` lines since the goal-start SHA, with their
+  reasons. 15 lines are `RecordSkip` call sites and one test double's signature and pass-through
+  (`cmd/holdfast/requeue_test.go` 1, `internal/engine/engine_test.go` 2, `reopen_test.go` 1,
+  `requeue_inputs_s0122_test.go` 1, `internal/store/profile_test.go` 2, `reopen_test.go` 2,
+  `sqlite_test.go` 6): S0167 gave `RecordSkip` a trailing `SourceFacts`, each call gained
+  `SourceFacts{}`, nothing graded changed. 10 lines are comments that said holdfast ships no
+  frontend (`cmd/holdfast/main_test.go` 2, `cmd/holdfast/sourceoffer_test.go` 2,
+  `internal/server/read_token_test.go` 2, `internal/server/sourceoffer_test.go` 4), reworded;
+  no assertion changed. 1 line in `internal/server/broadcast_cost_test.go`:
+  `countingStore.reads()` gained `+ c.rootTotals`, so the read-only-handle test also holds the
+  new summary read. 1 line in `internal/server/schema_test.go`: the byte-identity literal for
+  the history body gained `"next_cursor": nil`, the added key. Outside `*_test.go`, in
+  `web/src`: the vitest option that undoes spies is spelled from parts in `web/vite.config.ts`
+  (same option, same value; its literal spelling contains a word line D greps for), and six
+  existing vitest expectations followed the review's fixes (D11: the long-refusal case, the
+  unreachable sentence, `ageSeconds`, a pause fixture, the node and history fixtures' words).
+- D13 (2026-10-03): no release at this goal's end (T37 makes it optional for goals 5 to 14):
+  goal 15 must cut one, it is the next goal, and it releases the UI with its documentation pass.
+- D14 (2026-10-03): #170 (`owner/public-ci`) and its worktree are another session's, opened
+  during this goal; #156 and the Dependabot PRs #108 to #110 and #162 to #164 are not this
+  goal's either. None was touched (§0.13).
 - D5 (2026-10-03): the baseline's `internal/engine` took 2984.4 s, 82.9% of `TEST_TIMEOUT`, against
   1983.0 s in goal 13's last gate on the same tree. The difference is load: the four builders ran
   package tests beside it. §4 says to raise `TEST_TIMEOUT` once the engine passes 80%, in its own
@@ -166,19 +198,15 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g14-b
 Filed: none. Addressed to holdfast: request #229 from the goals program (2026-10-03, opened
 during this goal): a mutation run's temp files on a tmpfs, its workers capped, and no
 whole-package suite outside `goals-heavy`. State: DONE (PR #168, `59a73f3`; D8, D10), set with
-`goals request state 229 done`. The owner's queue: no new item so far.
+`goals request state 229 done`.
+The owner's queue: no new item; nothing in this goal needs the owner's hands (no hardware, no live
+service). The open holdfast items are still queue #50 to #56, #202 to #204 and #219.
 
 ## Resume here
 
-Merged: #168 (`59a73f3`, request #229, DONE) and #167 (`eb2dd01`, the API facts). Phase 3: PR #169
-(`holdfast-g14/ui-views`, worktree `/cache/wt/holdfast/g14-ui`, head `c42c008`, merged up to
-`main`) is open; its CI is running; running detached under the heavy locks
-(`/cache/tmp/holdfast-g14/ui-chain.sh`): `make mutation-diff REF=origin/main` (log
-`ui-mutation.log`), then the gate (log `ui-gate.log`, ends with an `exit <n> WALL` line; the
-gated SHA in `ui-gate.sha`). When both are green: put the gate's last 20 lines, its wall-clock
-and the `internal/engine` seconds in the PR body, then `gh pr merge 169 --squash --delete-branch`.
-Then phase 4: the gate-integrity counts from `dfaca59`, the COMPLETE line, the adversarial review
-of the report, `goals check`, the GOAL REPORT.
+Merged: #168 (`59a73f3`), #167 (`eb2dd01`), #169 (`7bcfbcd`). No branch, worktree or PR of this
+goal is open. Left: `main`'s CI on `7bcfbcd`, the fresh adversarial review of the GOAL REPORT (row
+4.2), the COMPLETE line, `goals check`, the report.
 
 ## Supervisor actions
 
