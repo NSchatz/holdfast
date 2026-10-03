@@ -313,7 +313,7 @@ RUN set -eu; \
 # HTML, the same bytes for every target architecture, so the arm64 image needs no QEMU
 # here either. Nothing of this stage reaches the runtime image but those files, embedded
 # in the Go binary: no Node, no pnpm and no node_modules ship.
-FROM --platform=$BUILDPLATFORM node:24.21.0-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe AS ui
+FROM --platform=$BUILDPLATFORM node:26.10.0-trixie-slim@sha256:ec7758ee051e457b468b32bde57b0879010b325bb9862718e9615225ce4aaae1 AS ui
 
 # The same question the build stage asks of its Go image, for the same reason: the digest
 # is what Docker pulls and the tag beside it is a label nothing enforces, so ask the image
