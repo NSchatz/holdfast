@@ -2587,6 +2587,17 @@ func (e *Engine) ProcessFile(ctx context.Context, worker, f string) error {
 	e.Log.Info("transcode", "file", f, "codec", codec, "-> ", targetCodec, "worker", worker,
 		"library_root", root.Clean, "crf", ts.CRF, "encoder", ts.Encoder,
 		"encode_profile", ts.Profile, "working_file", work)
+	// THE DECISION FACTS, on the row from the moment it is encoding: how big the running job
+	// is, what it is and which root it is under, which is what an operator needs when a
+	// drive is filling or an encode has to be stopped. Every one of them is a value this
+	// function already holds - the size off the stat the row is keyed from, the codec the
+	// guards judged, the snapshot's dimensions, the decision's root and digest - so nothing
+	// is probed or read again for it.
+	e.admitToEncoder(ctx, f, key, store.DecisionFacts{
+		Source:      sourceFactsOf(props),
+		SourceBytes: ptr(fi.Size()),
+		Decision:    by,
+	})
 	e.advance(ctx, f, key, store.Encoding)
 	// The file has REACHED AN ENCODE, which is what `--limit-encodes` counts (S0174): from
 	// here its terminal row names the encoder, whatever that outcome turns out to be.
@@ -3665,6 +3676,22 @@ func (e *Engine) advance(ctx context.Context, path, key string, s store.Status) 
 	e.emit(Event{Path: path, Status: s})
 }
 
+// admitToEncoder records the decision facts on the row this job holds, as it leaves probing.
+//
+// It is REPORTING and never the decision: the facts are what the queue shows about a running
+// job, and no guard, gate or swap reads them back. A store error is therefore survived
+// exactly as advance survives one - the encode, the gates and the terminal write run as
+// they would have, advance moves the row on, and the queue shows those facts as not
+// recorded, which is the truth about a row nothing was written to.
+func (e *Engine) admitToEncoder(ctx context.Context, path, key string, d store.DecisionFacts) {
+	if err := e.Store.AdmitToEncoder(ctx, path, key, d); err != nil {
+		e.Log.Warn("the store could not record this job's decision facts on its in-flight row, so the "+
+			"queue shows them as not recorded; the job continues", "dependency", "store",
+			"attempted", "record decision facts", "next", "the encode, the gates and the terminal write run as usual",
+			"file", path, "err", err)
+	}
+}
+
 // recordUndeterminedHeight writes the source-height guard's terminal row: this root's
 // configuration needs to know how tall the source is and the probe could not establish it,
 // so no rule and no ceiling decides this file.
@@ -3845,9 +3872,10 @@ func (e *Engine) because(reason string, by store.Decision, prof config.Profile, 
 // so it never spawns a process, and a nil snapshot - a verdict reached before any was taken
 // - answers with nothing at all.
 //
-// It is the one reading of those facts: the skip a guard records after the claim and the
-// skip recorded before it both take theirs from here, so the two cannot describe one source
-// two ways. The dimensions are both or neither, the rule withSourceDimensions keeps.
+// It is the one reading of those facts: the skip a guard records after the claim, the skip
+// recorded before it and the row of a job admitted to the encoder all take theirs from
+// here, so the three cannot describe one source three ways. The dimensions are both or
+// neither, the rule withSourceDimensions keeps.
 func sourceFactsOf(props *probe.VideoProps) store.SourceFacts {
 	if props == nil {
 		return store.SourceFacts{}

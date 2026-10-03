@@ -686,6 +686,30 @@ func (s *SQLite) Advance(ctx context.Context, path, fingerprint string, st Statu
 	return nil
 }
 
+// AdmitToEncoder is documented on the Store interface. The status match in the WHERE is
+// what keeps it to a row its caller still holds in probing: a row that has since been
+// finished, reset or deleted matches nothing and is left exactly as it is, so this write
+// can never put a size on a terminal row or take a status back.
+//
+// It names its six columns and no others, so it cannot grow into a second writer of an
+// outcome: the reason, the encoder and every measurement of an encode stay whatever the
+// claim left them, which is NULL.
+func (s *SQLite) AdmitToEncoder(ctx context.Context, path, fingerprint string, d DecisionFacts) error {
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE jobs SET status = ?, updated_at = ?, schema_version = ?,
+			source_bytes = ?, source_codec = ?, source_width = ?, source_height = ?,
+			library_root = ?, profile_digest = ?
+		 WHERE path = ? AND fingerprint = ? AND status = ?`,
+		string(Encoding), now(), currentStamp(),
+		nullInt(d.SourceBytes), nullString(d.Source.Codec),
+		nullPixels(d.Source.Width), nullPixels(d.Source.Height),
+		nullString(d.Decision.LibraryRoot), nullString(d.Decision.ProfileDigest),
+		path, fingerprint, string(Probing)); err != nil {
+		return fmt.Errorf("store: admit to encoder: %w", err)
+	}
+	return nil
+}
+
 // Finish is documented on the Store interface. Failed increments fail_count.
 //
 // The outcome columns are written UNCONDITIONALLY from o (nil o => all NULL), never

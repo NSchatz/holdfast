@@ -295,7 +295,8 @@ type Outcome struct {
 	// ffprobe named it. It is recorded on a dry-run decision, whose whole purpose is to say
 	// what a real run WOULD do to that file (an operator sizing the job needs to know what
 	// is being re-encoded); on every skipped row decided off a probe snapshot, so the ledger
-	// can say what a skipped source was without probing it again. "" is NOT RECORDED: the
+	// can say what a skipped source was without probing it again; and on a row that is
+	// encoding or verifying, from the decision that admitted it. "" is NOT RECORDED: the
 	// decision was taken before any snapshot, or the snapshot named no codec. A done or a
 	// failed row records none.
 	SourceCodec string
@@ -451,6 +452,18 @@ type SourceFacts struct {
 	Codec  string
 	Width  *int
 	Height *int
+}
+
+// DecisionFacts is what the decision that admitted one attempt to the encoder established,
+// and what its row carries while it is encoding and verifying: the source's size, codec and
+// dimensions, and the profile that decided it. Every field is one the decision already
+// held; none is measured for this record.
+//
+// "" and nil are NOT RECORDED and are stored NULL, never "" and never 0.
+type DecisionFacts struct {
+	Source      SourceFacts
+	SourceBytes *int64
+	Decision    Decision
 }
 
 // GuardRestoredOriginal is the one skip-guard token this package has to know by name.
@@ -928,6 +941,21 @@ type Store interface {
 	// Advance records a non-terminal state transition for a job the caller already
 	// holds (e.g. probing -> encoding -> verifying).
 	Advance(ctx context.Context, path, fingerprint string, s Status) error
+
+	// AdmitToEncoder moves a row the caller holds in probing to encoding and records, in the
+	// same statement, the DECISION FACTS of the attempt that admitted it: what the source is
+	// and which profile decided it. They are what an operator reads off the in-flight row,
+	// and they stay on it through verifying until the terminal write, which defines the
+	// row's whole proof as it always has.
+	//
+	// It writes the six decision columns and nothing else an outcome carries, and only onto a
+	// row that is still probing: a row any other writer has since moved is left exactly as
+	// that writer left it. One statement, so no reader sees an encoding row without its
+	// facts or a probing row with them. A fact the decision did not establish is recorded
+	// NULL, never "" and never 0.
+	//
+	// It is REPORTING. The caller survives its error and advances the row by Advance.
+	AdmitToEncoder(ctx context.Context, path, fingerprint string, d DecisionFacts) error
 
 	// Finish records a terminal outcome for path+fingerprint. Failed increments
 	// fail_count (retry accounting); Done/Skipped do not.
