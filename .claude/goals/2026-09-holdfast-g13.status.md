@@ -63,7 +63,7 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g13-b
 
 | # | Item | State |
 |---|---|---|
-| 2.1 | S0175 `server-warning-scope`: the two read-surface statements are emitted by `serve`, hedged by `validate`, and not at all by `run`; the set-token statement says what `/` serves once the UI is embedded (track `holdfast-g13/notices`) | DOING |
+| 2.1 | S0175 `server-warning-scope`: the two read-surface statements are emitted by `serve`, hedged by `validate`, and not at all by `run`; the set-token statement says what `/` serves once the UI is embedded (track `holdfast-g13/notices`) | DONE (PR #165, `ff3f4f5`): `Config.ReadSurfaceNotices(scope)`; `cmd/holdfast/server_notice_scope_test.go` grades AC-1 to AC-8 on the real CLI (`TestS0175_AC1_RunSaysNothingAboutAReadSurfaceItDoesNotOpen` to `TestS0175_AC8_AMalformedServerAddrStillRefusesRunAndValidate`), each shown red by a named assertion under nine mutations of the product code (D14); gate exit 0 in 2286 s on `9048c56` (`internal/engine` 1991.8 s, 55.3% of `TEST_TIMEOUT`; `cmd/holdfast` 806.2 s), AC-9; CI green (`build`, `package`, `mutation`); mutation-diff 100.00% (killed 31, lived 0); 1 fix round |
 
 ## Phase 3 - Toolchain, gate, pin check, embed, image (track `holdfast-g13/ui`)
 
@@ -77,12 +77,18 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g13-b
 | 3.6 | CI: the `build` job runs the gate with the pinned Node and pnpm | DONE (PR #161, `0c3b25d`): `actions/setup-node` (the commit of `v7`) with `node-version-file: web/.node-version` in `ci.yml` and `release.yml`; CI `build` ran "ui: Node 24.21.0 and pnpm 12.8.1, as pinned" through corepack and passed in 23m22s |
 | 3.7 | Adversarial review of the branch before its gate | DONE (PR #161, `0c3b25d`, commit `ea2be7e` on the branch): a fresh agent found no HIGH, 5 MED, 11 LOW; fixed with a selftest case or a test each (D11) |
 
-## Phase 4 - Report
+## Phase 4 - A gate fix found on the way (track `holdfast-g13/node-flake`)
 
 | # | Item | State |
 |---|---|---|
-| 4.1 | Gate integrity counted from the goal-start SHA | TODO |
-| 4.2 | Adversarial review of the report | TODO |
+| 4.0 | `main`'s CI went red once on a race in a goal-12 test of `internal/node`; the three reads that expect a streamed digest wait for its record (D15) | DOING |
+
+## Phase 5 - Report
+
+| # | Item | State |
+|---|---|---|
+| 5.1 | Gate integrity counted from the goal-start SHA | TODO |
+| 5.2 | Adversarial review of the report | TODO |
 
 ## Decisions taken
 
@@ -167,19 +173,60 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g13-b
   #164 (the `web/` packages) after #161 merged. They are the bot's proposals under S0151
   ("opens PRs that are never merged" by an agent), not PRs of this goal, and are left open.
 
+- D14 (2026-10-03): S0175, as built and reviewed. The builder's mutations, each restored after
+  its red: `run` logging the read surface again (AC-1), `cmdServe` without `logReadSurface`
+  (AC-2, AC-6, AC-7), `validate` in the serving wording (AC-3), the loopback rule dropped
+  (AC-5), `validate` ignoring a token it can see (AC-4), `server_addr` validation skipped
+  (AC-8), a present-but-empty variable counted as set (AC-7), every notice suppressed (AC-1's
+  undo-window half), the old no-frontend wording (AC-2, AC-3, AC-6). A fresh adversarial review
+  of the branch found no HIGH: the only listener is `runServer`, its only caller `cmdServe`.
+  Fixed from it: the documents that said the read surface is stated "at startup" name `serve`
+  (`docs/docker.md`, `docs/secrets.md`, `docs/design/nodes.md`, `config.example.yaml`), and the
+  root statement says the page goes to a request that asks for HTML and its static files to any
+  client. The fix round: `7685d85` reworded that statement and dropped the phrase the tests
+  hold it to, red locally and in CI's `mutation` job; `9048c56` restores it. Left: `serve` with
+  an absent `server_addr` is graded at the unit and on `validate`, not on a live `serve`, which
+  would bind port 8080 on a shared host; the tests' child environment clears the two variables
+  they are about and not every `HOLDFAST_*` (a false red at worst).
+- D15 (2026-10-03): a flaky goal-12 test. `main`'s CI run for the ledger commit `25e0c9c` was
+  red in `build`: the mutation gate selftest's throwaway suite failed on
+  `TestNodeFixture_AConditionalSourceRequestIsAnsweredWithTheWholeSource` ("the whole source
+  was sent and "" recorded for it"). The source handler records the streamed digest after
+  `http.ServeContent` returns, so a test that reads the record straight after the response
+  races it. Outside §17, and fixed here because a gate that flakes costs every later goal a fix
+  round: the three reads that expect a digest wait for the record (at most 5 s); with the
+  record delayed 30 ms the tests as on `main` fail by CI's message and the fixed ones pass. No
+  product change. For the owner's eye, not built on: a completion that arrives before the
+  record exists is not held to the transport comparison (`decideCompleteStreamed` skips an
+  empty streamed digest); the engine's own hash of the source still is, and a real worker
+  encodes between the two.
+- D16 (2026-10-03): the deleted `*_test.go` lines since the goal-start SHA, with their reasons.
+  In `internal/config/read_token_test.go` (PR #165), 8 lines: the 5-line comment of the
+  `readTokenNotices` helper and its `for _, n := range c.Notices()` line, because the two
+  statements moved from `Notices()` to `ReadSurfaceNotices` and the helper now reads the
+  serving scope (same three directions graded); two `t.Fatalf` lines whose message named
+  `Notices()`, reworded to name `ReadSurfaceNotices(serving)` with the same condition. In
+  `internal/node/source_test.go` (the flake fix), 2 lines: `f.streamed(...)` became
+  `f.streamedOnceRecorded(...)` in two comparisons, same expected value and message. Outside
+  `*_test.go`: `scripts/check-pins-selftest.sh` case 55 (D10).
+- D17 (2026-10-03): no release at this goal's end (T37 makes it optional for goals 5 to 14).
+  What merged is the UI's shell with no views; goal 14 builds them, and a release that
+  announces a web UI is better cut with one.
+
 ## Requests
 
 None filed, none addressed to holdfast (T6, §0.13). The owner's queue: no new item so far; nothing in this goal needs the owner's hands (no hardware, no live service).
 
 ## Resume here
 
-- `holdfast-g13/ui`: merged, PR #161, `0c3b25d`. Its worktree and branch are gone.
-- `holdfast-g13/notices`: PR #165 is open at head `9cebf19` (S0175, merged up to `origin/main`
-  after #161, its statement about the root checked against the merged code). Running: its
-  `make mutation-diff` and then its full gate under the heavy locks in
-  `/cache/wt/holdfast/g13-notices` (logs `mutation-notices-1.log`, `gate-notices-1.log`), its
-  CI, and a fresh adversarial review of the branch. Next: apply the review (a change after the
-  gate started means the gate runs again), paste the gate tail into the PR body, wait for CI
-  green, merge.
-- Then: gate integrity counts (5.1), the owner's queue check, the COMPLETE line, `goals check`,
-  the adversarial review of the report.
+- Merged: PR #161 (`0c3b25d`, the UI track) and PR #165 (`ff3f4f5`, S0175). Their worktrees and
+  branches are gone.
+- Open: PR #166, `holdfast-g13/node-flake` in `/cache/wt/holdfast/g13-flake` (D15). Running:
+  its `make mutation-diff`, its full gate (logs `mutation-flake-1.log`, `gate-flake-1.log`) and
+  then its CI watch (`pr166-checks-1.log`). Next: paste the gate tail into the PR, merge when
+  both are green.
+- Then: row 5.1 with the counts at the final `origin/main` (so far: `func Test` 2004 to 2033,
+  no package fell; 8 deleted test lines, D16; the two design documents untouched), a check
+  that `main`'s CI is green, `goals needs list` (no new item), a ledger commit, a fresh
+  adversarial review of the report's lines against the repos, the COMPLETE line,
+  `goals check /workspace/holdfast 2026-09-holdfast 13`, the GOAL REPORT.
