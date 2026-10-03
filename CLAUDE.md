@@ -145,13 +145,22 @@ Go 1.25+. The gate is `make check`, and the `check:` target IS its definition -
 read the target rather than any prose about it (`make tier-full` is `check`; `make tier-fast` its quick subset). The Makefile owns the tool pins
 and CI invokes the same target, so a PR, a release and a human run the identical thing.
 
+**CI is where the gate runs, and the only place** (the owner, 2026-10-03: "Holdfast and chorus NEED to
+use the public CI and nothing local"; `.claude/goals/AMENDMENT-2026-10-03-owner-2026-09-holdfast.md`).
+On the development host no gate, tier, whole-package or `-race` suite or mutation run happens: push the
+branch, open the PR, and read CI (`build`, `package`, `mutation`; `ci.yml` also runs nightly on main).
+A PR merges when those checks are green on its branch with main merged in, with the run's link in the
+PR body. While working, one focused test (one package, one `-run` filter) is the inner loop, not a
+gate.
+
 CI adds two things `check` deliberately does not: the config-schema self-test (proves `validate`
 reds on a bad config) and the image smoke gate (`scripts/smoke-image.sh`, needs Docker).
 
 The gate needs the pinned ffmpeg (`scripts/install-ffmpeg.sh`), and it is not
-skipped when absent - a grader that skips is a false green. On a shared host a whole-package or `-race` suite, the gate and a mutation run take the `goals-heavy` lock (one focused test needs none); a mutation run uses at most 4 workers (`.gremlins.yaml`) and a tmpfs temp dir where one has room.
+skipped when absent - a grader that skips is a false green. A focused test that needs a real encode
+still takes the `goals-heavy` lock on the shared host; nothing larger runs there.
 
-Never claim green without running it. Every change that touches the engine
+Never claim green without a green CI run. Every change that touches the engine
 extends the fixture suite so it reds on that specific regression: a data-safety
 tool proves its unhappy paths.
 

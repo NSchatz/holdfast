@@ -1,16 +1,24 @@
 name: CI
 
+# CI is the whole gate (the owner, 2026-10-03: "Holdfast and chorus NEED to use the public CI and
+# nothing local"): no tier runs on the development host. A PR merges when `build`, `package` and
+# `mutation` are green on its branch with main merged in; main is gated again on every push and
+# nightly (the full tier the goals supervisor used to run on the host).
 on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: '37 7 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# Cancel superseded runs on the same ref.
+# Cancel superseded runs on the same ref; the nightly run has a group of its own, so a merge to main
+# never cancels it.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
   cancel-in-progress: true
 
 env:
