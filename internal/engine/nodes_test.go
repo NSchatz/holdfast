@@ -90,13 +90,19 @@ type nodeRig struct {
 	hub             *node.Hub
 	hubMu           sync.Mutex
 	hubStop         context.CancelFunc
-	hubTune         func(*node.Options)
-	ledger          *flakyLedger
-	log             *slog.Logger
-	srv             *httptest.Server
-	argv            *argvLog
-	logs            *lockedBuf
-	clock           *leaseClock
+	hubStops        []context.CancelFunc
+	// ctx ends when the test does, BEFORE the rig's server is closed: every job, feeder and
+	// fake-node request a test starts is made under it, so none can outlive the test.
+	ctx     context.Context
+	stopAll context.CancelFunc
+	client  *http.Client
+	hubTune func(*node.Options)
+	ledger  *flakyLedger
+	log     *slog.Logger
+	srv     *httptest.Server
+	argv    *argvLog
+	logs    *lockedBuf
+	clock   *leaseClock
 	// stages counts the plan announcements by stage, so a test can ask whether the gates
 	// ever ran.
 	stageMu sync.Mutex
@@ -132,8 +138,8 @@ func newNodeRig(t *testing.T, mutate func(*config.Config)) *nodeRig {
 // endpoints follow r.hub, so a rig can stand for a server that was restarted.
 func (r *nodeRig) startHub() {
 	ctx, cancel := context.WithCancel(context.Background())
-	r.t.Cleanup(cancel)
 	r.hubStop = cancel
+	r.hubStops = append(r.hubStops, cancel)
 	o := node.Options{
 		Ledger: r.ledger, BaseCtx: ctx, Version: "test", TTL: r.cfg.NodeLeaseTTL(),
 		MaxLeases: r.cfg.EffectiveNodeMaxLeases(), MaxLeasesPerNode: r.cfg.EffectiveNodeMaxLeasesPerNode(),
@@ -209,8 +215,117 @@ func newNodeRigHub(t *testing.T, mutate func(*config.Config), hubTune func(*node
 	mux := chi.NewRouter()
 	mux.Route(nodePrefix, func(sub chi.Router) { node.Mount(sub, r.currentHub) })
 	r.srv = httptest.NewServer(mux)
-	t.Cleanup(r.srv.Close)
+	r.ctx, r.stopAll = context.WithCancel(context.Background())
+	// A fake node's request is bounded twice: by the rig's context, and by a client timeout
+	// well above any long-poll bound a rig sets.
+	r.client = &http.Client{Timeout: rigWait + time.Minute}
+	// The ONE cleanup of the rig, registered here so that every cleanup a test registers
+	// afterwards runs before it (cleanups run last in, first out).
+	t.Cleanup(r.close)
 	return r
+}
+
+// cleanupWait bounds every wait a cleanup makes. A cleanup that cannot finish FAILS the test
+// with a message; it never blocks the package until its timeout.
+const cleanupWait = 60 * time.Second
+
+// close ends everything the rig started, in the order that cannot hang: the rig's context
+// (jobs, feeders, fake-node requests), then every hub's base context - which answers every
+// long-poll still open - then the client connections, and only then the server itself.
+func (r *nodeRig) close() {
+	r.stopAll()
+	for _, stop := range r.hubStops {
+		stop()
+	}
+	r.srv.CloseClientConnections()
+	bounded(r.t, "closing the rig's lease server", r.srv.Close)
+}
+
+// bounded runs wait and fails the test if it has not returned within cleanupWait.
+func bounded(t *testing.T, what string, wait func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { defer close(done); wait() }()
+	select {
+	case <-done:
+	case <-time.After(cleanupWait):
+		t.Errorf("%s did not finish within %s; the test goes on without it rather than hang", what, cleanupWait)
+	}
+}
+
+// boundedBody is bounded for a wait in a test's BODY, which may legitimately take as long as
+// real encodes on a loaded host do: rigWait, and the test stops there.
+func boundedBody(t *testing.T, what string, wait func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { defer close(done); wait() }()
+	select {
+	case <-done:
+	case <-time.After(rigWait):
+		t.Fatalf("%s did not finish within %s", what, rigWait)
+	}
+}
+
+// pass runs one oneshot pass under the rig's context, bounded.
+func (r *nodeRig) pass() {
+	r.t.Helper()
+	ctx, cancel := context.WithTimeout(r.ctx, rigWait)
+	defer cancel()
+	if err := r.eng.RunOneshot(ctx); err != nil {
+		r.t.Fatalf("RunOneshot: %v", err)
+	}
+}
+
+// countingNodes is the rig's hub with its Release calls counted: how a test observes a
+// feeder letting a poll go without having to win a race for that poll itself.
+type countingNodes struct {
+	Nodes
+	unused atomic.Int64
+}
+
+func (c *countingNodes) Release(t *node.Ticket, refusal error) {
+	if refusal == nil {
+		c.unused.Add(1)
+	}
+	c.Nodes.Release(t, refusal)
+}
+
+// recv takes one value from ch, and fails the test if none arrives within rigWait.
+func recv[T any](t *testing.T, what string, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(rigWait):
+		t.Fatalf("timed out waiting for %s", what)
+		panic("unreachable")
+	}
+}
+
+// context is a context of this test: a child of the rig's, cancelled by the returned func
+// and, whatever the test does, before the rig is closed.
+func (r *nodeRig) context() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(r.ctx)
+	r.t.Cleanup(cancel)
+	return ctx, cancel
+}
+
+// feeders starts the engine's node feeders under ctx. stopFeed tells them the feed has
+// closed, and join waits for them, bounded. Whatever the test does - a failed assertion
+// included - they are stopped and joined before the rig's server is closed, so a feeder
+// re-reserving a poll can never hold that close up.
+func (r *nodeRig) feeders(ctx context.Context, feed <-chan string,
+	process func(context.Context, string, string) bool) (stopFeed func(), join func()) {
+	fctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	stopFeed = r.eng.startFeeders(fctx, &wg, feed, process)
+	join = func() { bounded(r.t, "joining the node feeders", wg.Wait) }
+	r.t.Cleanup(func() {
+		cancel()
+		stopFeed()
+		join()
+	})
+	return stopFeed, join
 }
 
 func (r *nodeRig) stage(name string) int {
@@ -237,7 +352,12 @@ type answer struct {
 
 func (r *nodeRig) post(route string, in any) answer {
 	payload, _ := json.Marshal(in)
-	resp, err := http.Post(r.srv.URL+nodePrefix+route, "application/json", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(r.ctx, http.MethodPost, r.srv.URL+nodePrefix+route, bytes.NewReader(payload))
+	if err != nil {
+		return answer{err: err}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.client.Do(req)
 	if err != nil {
 		return answer{err: err}
 	}
@@ -269,10 +389,10 @@ func (r *nodeRig) poll(name string, encoders ...string) <-chan answer {
 }
 
 func (r *nodeRig) put(l node.AcquireResponse, body []byte, digest string) answer {
-	req, _ := http.NewRequest(http.MethodPut, r.srv.URL+nodePrefix+leasePath(node.RouteOutput, l.LeaseID), bytes.NewReader(body))
+	req, _ := http.NewRequestWithContext(r.ctx, http.MethodPut, r.srv.URL+nodePrefix+leasePath(node.RouteOutput, l.LeaseID), bytes.NewReader(body))
 	req.Header.Set("Content-Digest", digest)
 	req.Header.Set(node.EpochHeader, strconv.FormatInt(l.Epoch, 10))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := r.client.Do(req)
 	if err != nil {
 		return answer{err: err}
 	}
@@ -306,7 +426,7 @@ func fileDigestOf(t *testing.T, path string) string {
 // of the node that is polling, and carries it to the seam.
 func (r *nodeRig) offer(src string) <-chan error {
 	r.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), rigWait)
+	ctx, cancel := context.WithTimeout(r.ctx, rigWait)
 	tk, err := r.hub.WaitDemand(ctx)
 	if err != nil {
 		cancel()
@@ -424,10 +544,13 @@ func (r *nodeRig) realWorker(name string, tune func(*nodeworker.Options)) (workD
 	if err != nil {
 		r.t.Fatalf("nodeworker.New: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(r.ctx)
 	stopped := make(chan struct{})
 	go func() { defer close(stopped); _ = w.Run(ctx) }()
-	r.t.Cleanup(func() { cancel(); <-stopped })
+	r.t.Cleanup(func() {
+		cancel()
+		bounded(r.t, "stopping the real worker", func() { <-stopped })
+	})
 	return workDir
 }
 
@@ -467,9 +590,7 @@ func TestNodes_OffByDefaultThePoolAndArgvAreUnchanged(t *testing.T) {
 			mu.Unlock()
 		}
 		before := runtime.NumGoroutine()
-		if err := r.eng.RunOneshot(context.Background()); err != nil {
-			t.Fatalf("RunOneshot: %v", err)
-		}
+		r.pass()
 		if nodesOn {
 			// No node asked for work, so no feeder took a file and none outlived the pass.
 			settleGoroutines(t, before)
@@ -645,9 +766,7 @@ func TestNodes_FeedersLeakNoGoroutineAndNoTicket(t *testing.T) {
 		lease := r.poll("nodeA")
 		waitQueued(t, r)
 		before := runtime.NumGoroutine()
-		if err := r.eng.RunOneshot(context.Background()); err != nil {
-			t.Fatalf("RunOneshot: %v", err)
-		}
+		r.pass()
 		settleGoroutines(t, before)
 		if n := len(r.liveLeases()); n != 0 {
 			t.Errorf("%d lease(s) live after a pass that encoded nothing", n)
@@ -659,11 +778,10 @@ func TestNodes_FeedersLeakNoGoroutineAndNoTicket(t *testing.T) {
 		lease := r.poll("nodeA")
 		waitQueued(t, r)
 		before := runtime.NumGoroutine()
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := r.context()
 		feed := make(chan string)
-		var wg sync.WaitGroup
 		r.eng.nodeFeederIdle = time.Hour
-		stop := r.eng.startFeeders(ctx, &wg, feed, func(context.Context, string, string) bool {
+		stop, join := r.feeders(ctx, feed, func(context.Context, string, string) bool {
 			t.Error("a feeder processed a file nobody fed")
 			return true
 		})
@@ -671,7 +789,7 @@ func TestNodes_FeedersLeakNoGoroutineAndNoTicket(t *testing.T) {
 		// rest on demand.
 		waitReserved(t, r)
 		cancel()
-		wg.Wait()
+		join()
 		stop()
 		settleGoroutines(t, before)
 		assertPollNotStranded(t, r, lease)
@@ -681,13 +799,12 @@ func TestNodes_FeedersLeakNoGoroutineAndNoTicket(t *testing.T) {
 		lease := r.poll("nodeA")
 		waitQueued(t, r)
 		feed := make(chan string)
-		var wg sync.WaitGroup
 		r.eng.nodeFeederIdle = time.Hour
-		stop := r.eng.startFeeders(context.Background(), &wg, feed, func(context.Context, string, string) bool { return false })
+		stop, join := r.feeders(r.ctx, feed, func(context.Context, string, string) bool { return false })
 		waitReserved(t, r)
 		close(feed)
 		stop()
-		wg.Wait()
+		join()
 		assertPollNotStranded(t, r, lease)
 	})
 }
@@ -794,7 +911,7 @@ func TestNodes_TheNodeGateBoundsTheServersOwnWork(t *testing.T) {
 	}
 	release()
 	release() // releasing twice gives one slot back, not two
-	second := <-got
+	second := recv(t, "the second job's slot", got)
 	if g.full() {
 		t.Error("the gate reads full with one slot held and nobody waiting")
 	}
@@ -818,11 +935,10 @@ func TestNodes_TheNodeGateBoundsTheServersOwnWork(t *testing.T) {
 	}
 	lease := r.poll("nodeA")
 	waitQueued(t, r)
-	ctx, cancel = context.WithCancel(context.Background())
+	ctx, cancel = r.context()
 	feed := make(chan string)
-	var wg sync.WaitGroup
 	r.eng.nodeFeederIdle = time.Hour
-	stop := r.eng.startFeeders(ctx, &wg, feed, func(context.Context, string, string) bool { return false })
+	stop, join := r.feeders(ctx, feed, func(context.Context, string, string) bool { return false })
 	// Every feeder is parked at the full gate queue, and none has reserved the node's poll:
 	// it is still there to reserve.
 	parked := func() int {
@@ -845,10 +961,10 @@ func TestNodes_TheNodeGateBoundsTheServersOwnWork(t *testing.T) {
 	}
 	r.hub.Release(tk, nil)
 	hold()
-	(<-waiter)()
+	recv(t, "the waiting job's slot", waiter)()
 	waitReserved(t, r) // the queue has room again, so a feeder asks for demand
 	cancel()
-	wg.Wait()
+	join()
 	stop()
 	assertPollNotStranded(t, r, lease)
 }
@@ -1299,9 +1415,7 @@ func TestNodes_ANodesCommandLineIsTheServersOwn(t *testing.T) {
 	withPools(local)
 	local.eng.Nodes = nil
 	lsrc := local.source("movie.mkv")
-	if err := local.eng.RunOneshot(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	local.pass()
 	own := local.argv.forSource(t, lsrc)
 
 	r := newNodeRig(t, nil)
@@ -1362,7 +1476,9 @@ func TestNodes_ANodesCommandLineIsTheServersOwn(t *testing.T) {
 func (r *nodeRig) reencode(l node.AcquireResponse) []byte {
 	r.t.Helper()
 	out := filepath.Join(r.t.TempDir(), "node-output")
-	if err := (FFmpegEncoder{FFmpeg: r.ffmpeg}).RunLeased(context.Background(), l.Path, out, l.Pre, l.Body, nil); err != nil {
+	ctx, cancel := context.WithTimeout(r.ctx, rigWait)
+	defer cancel()
+	if err := (FFmpegEncoder{FFmpeg: r.ffmpeg}).RunLeased(ctx, l.Path, out, l.Pre, l.Body, nil); err != nil {
 		r.t.Fatalf("the fake node's encode: %v", err)
 	}
 	b, err := os.ReadFile(out)
@@ -1487,9 +1603,7 @@ func TestNodes_OneMisconfiguredWorkerDoesNotParkTheLibrary(t *testing.T) {
 		o.PathMap = config.PathMap{{From: "/somewhere/else", To: "/mnt"}}
 	})
 	waitQueued(t, r)
-	if err := r.eng.RunOneshot(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	r.pass()
 	for _, s := range srcs {
 		j, _ := r.row(s)
 		if j.Status != store.Done || j.FailCount != 0 {
@@ -1508,7 +1622,7 @@ func TestNodes_OneMisconfiguredWorkerDoesNotParkTheLibrary(t *testing.T) {
 
 // cancelledPoll is a fake node's poll whose request can be ended by the test.
 func (r *nodeRig) cancelledPoll(name string) (end func()) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(r.ctx)
 	payload, _ := json.Marshal(node.AcquireRequest{Node: name, Version: "test", Slots: 1,
 		Mode: node.ModeMapped, Encoders: []string{"cpu"}})
 	left := make(chan struct{})
@@ -1516,11 +1630,11 @@ func (r *nodeRig) cancelledPoll(name string) (end func()) {
 		defer close(left)
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, r.srv.URL+nodePrefix+node.RouteLeases, bytes.NewReader(payload))
 		req.Header.Set("Content-Type", "application/json")
-		if resp, err := http.DefaultClient.Do(req); err == nil {
+		if resp, err := r.client.Do(req); err == nil {
 			_ = resp.Body.Close()
 		}
 	}()
-	return func() { cancel(); <-left }
+	return func() { cancel(); recv(r.t, "the cancelled poll's request to end", left) }
 }
 
 // TestNodes_APollThatLeftCostsTheFileNothing: a node whose request ended - its client's
@@ -1545,8 +1659,8 @@ func TestNodes_APollThatLeftCostsTheFileNothing(t *testing.T) {
 		done := make(chan error, 1)
 		go func() {
 			nj := &nodeJob{ticket: tk}
-			err := r.eng.ProcessFile(withNodeJob(context.Background(), nj), "n0", src)
-			r.eng.settle(context.Background(), nj)
+			err := r.eng.ProcessFile(withNodeJob(r.ctx, nj), "n0", src)
+			r.eng.settle(r.ctx, nj)
 			done <- err
 		}()
 		return done
@@ -1600,51 +1714,56 @@ func TestNodes_APollThatLeftCostsTheFileNothing(t *testing.T) {
 // it is paused, or every file is with a local worker - a feeder lets the node's poll go after
 // a short bound instead of holding it reserved, and the poll is answered with no work at its
 // own long-poll bound.
+//
+// The releases are COUNTED, through a wrapper on the hub, rather than observed by reserving
+// the poll from the test: the hub wakes every WaitDemand at once and makes no promise about
+// which wins, so with several feeders releasing and re-reserving one poll a late waiter can
+// lose that race for as long as it lasts. That is fine for feeders, which are interchangeable,
+// and nothing here depends on it.
 func TestNodes_AFeederDoesNotSitOnAPollWhileTheFeedIsIdle(t *testing.T) {
 	if (&Engine{}).feederIdle() != time.Second {
 		t.Errorf("the default idle bound is %s, want 1s", (&Engine{}).feederIdle())
 	}
-	r := newNodeRigHub(t, nil, func(o *node.Options) { o.LongPoll = 2 * time.Second })
-	r.eng.nodeFeederIdle = 20 * time.Millisecond
-	lease := r.poll("nodeA")
-	waitQueued(t, r)
-	ctx, cancel := context.WithCancel(context.Background())
-	feed := make(chan string)
-	var wg sync.WaitGroup
-	stop := r.eng.startFeeders(ctx, &wg, feed, func(context.Context, string, string) bool {
+	idleProcess := func(context.Context, string, string) bool {
 		t.Error("a feeder processed a file nobody fed")
 		return true
-	})
-	// The poll is answered 204 at its bound, though feeders reserved it again and again.
+	}
+
+	// A poll with its long-poll bound far away: the idle feeders let it go, again and again.
+	r := newNodeRig(t, nil)
+	counted := &countingNodes{Nodes: r.hub}
+	r.eng.Nodes = counted
+	r.eng.nodeFeederIdle = 20 * time.Millisecond
+	held := r.poll("nodeA")
+	waitQueued(t, r)
+	ctx, cancel := r.context()
+	_, join := r.feeders(ctx, make(chan string), idleProcess)
+	const want = 5
+	for deadline := time.Now().Add(rigWait); counted.unused.Load() < want; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("idle feeders let the poll go %d time(s) in %s, want at least %d: a feeder sat on it",
+				counted.unused.Load(), rigWait, want)
+		}
+	}
+	select {
+	case a := <-held:
+		t.Fatalf("the poll was answered %d %s while its bound was far away", a.status, a.body)
+	default:
+	}
+	// With the feeders stopped, the poll they kept letting go is in the queue, not stranded.
+	cancel()
+	join()
+	assertPollNotStranded(t, r, held)
+
+	// And at its long-poll bound a poll the idle feeders keep reserving is answered 204.
+	short := newNodeRigHub(t, nil, func(o *node.Options) { o.LongPoll = 2 * time.Second })
+	short.eng.nodeFeederIdle = 20 * time.Millisecond
+	lease := short.poll("nodeB")
+	waitQueued(t, short)
+	short.feeders(short.ctx, make(chan string), idleProcess)
 	if a := waitAnswer(t, lease); a.status != http.StatusNoContent {
 		t.Errorf("the idle poll answered %d %s, want 204", a.status, a.body)
 	}
-	// And a poll held by an idle feeder comes back to the queue: with a long-poll bound far
-	// away, the test itself can reserve it.
-	slow := newNodeRig(t, nil)
-	slow.eng.nodeFeederIdle = 20 * time.Millisecond
-	held := slow.poll("nodeB")
-	waitQueued(t, slow)
-	sctx, scancel := context.WithCancel(context.Background())
-	var swg sync.WaitGroup
-	sstop := slow.eng.startFeeders(sctx, &swg, make(chan string), func(context.Context, string, string) bool { return false })
-	waitReserved(t, slow)
-	wctx, wcancel := context.WithTimeout(context.Background(), rigWait)
-	tk, err := slow.hub.WaitDemand(wctx)
-	wcancel()
-	if err != nil {
-		t.Fatal("an idle feeder never let its poll go")
-	}
-	slow.hub.Release(tk, node.ErrNoRoom)
-	if a := waitAnswer(t, held); a.reason != "no_room" {
-		t.Errorf("poll answered %d %q", a.status, a.reason)
-	}
-	cancel()
-	scancel()
-	wg.Wait()
-	swg.Wait()
-	stop()
-	sstop()
 }
 
 // crashWithLeases grants one lease per source, each to its own fake node, then kills the
@@ -1699,11 +1818,13 @@ func TestNodes_ARestartTakesTwoLiveLeasesBackAtOnce(t *testing.T) {
 	secondBack := make(chan struct{})
 	r.eng.onClaim = func(worker, _ string) {
 		if worker == "adopt0" {
-			<-secondBack
+			select {
+			case <-secondBack:
+			case <-r.ctx.Done():
+			}
 		}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, _ := r.context()
 	adopted := make(chan func(), 1)
 	go func() { adopted <- r.eng.AdoptLeases(ctx, live, time.Hour) }()
 	r.untilLog("the second lease's adoption", "node lease adopted after a restart", "lease="+live[1].ID)
@@ -1713,7 +1834,7 @@ func TestNodes_ARestartTakesTwoLiveLeasesBackAtOnce(t *testing.T) {
 	default:
 	}
 	close(secondBack)
-	wait := <-adopted
+	wait := recv(t, "AdoptLeases to return", adopted)
 	r.untilLog("the first lease's adoption", "node lease adopted after a restart", "lease="+live[0].ID)
 	// The engine's start-up took most of a TTL. Ready gives both leases a whole one again.
 	r.clock.advance(r.cfg.NodeLeaseTTL() - 2*time.Second)
@@ -1727,7 +1848,7 @@ func TestNodes_ARestartTakesTwoLiveLeasesBackAtOnce(t *testing.T) {
 	for _, l := range leases {
 		r.deliver(l)
 	}
-	wait()
+	boundedBody(t, "joining the adopted jobs", wait)
 	for _, src := range []string{a, b} {
 		if j, _ := r.row(src); j.Status != store.Done || j.FailCount != 0 {
 			t.Errorf("%s: status = %s, fail_count = %d (%s); want done", filepath.Base(src), j.Status, j.FailCount, j.Outcome.Reason)
@@ -1777,7 +1898,7 @@ func TestNodes_ARecoveredLeaseWhoseJobDoesNotComeBackIsAbandonedBeforeReady(t *t
 			if len(live) != 1 {
 				t.Fatalf("Recover returned %d lease(s), want 1", len(live))
 			}
-			wait := r.eng.AdoptLeases(context.Background(), live, time.Hour)
+			wait := r.eng.AdoptLeases(r.ctx, live, rigWait)
 			// BEFORE Ready: the lease is ended already.
 			if row := r.leaseRow(l.LeaseID); row.State != store.LeaseExpired || row.Reason != string(node.ReasonNotAdopted) {
 				t.Fatalf("before Ready the lease is %s (%s), want it abandoned", row.State, row.Reason)
@@ -1786,7 +1907,7 @@ func TestNodes_ARecoveredLeaseWhoseJobDoesNotComeBackIsAbandonedBeforeReady(t *t
 			if hb := r.post(leasePath(node.RouteHeartbeat, l.LeaseID), node.HeartbeatRequest{Epoch: l.Epoch}); hb.status != http.StatusGone {
 				t.Errorf("the node's next heartbeat answered %d, want 410", hb.status)
 			}
-			wait()
+			boundedBody(t, "joining the recovered job", wait)
 			if strings.Contains(r.logs.String(), "node lease adopted") {
 				t.Error("the lease was taken back")
 			}
@@ -1828,8 +1949,13 @@ func TestNodes_ARecoveredLeaseNotTakenBackInTimeIsAbandonedAndStartUpIsNotHeld(t
 	l := r.crashWithLeases(src)[0]
 	live := r.restart()
 	held := make(chan struct{})
-	r.eng.onClaim = func(string, string) { <-held }
-	wait := r.eng.AdoptLeases(context.Background(), live, 100*time.Millisecond)
+	r.eng.onClaim = func(string, string) {
+		select {
+		case <-held:
+		case <-r.ctx.Done():
+		}
+	}
+	wait := r.eng.AdoptLeases(r.ctx, live, 100*time.Millisecond)
 	if row := r.leaseRow(l.LeaseID); row.State != store.LeaseExpired || row.Reason != string(node.ReasonNotAdopted) {
 		t.Fatalf("at the bound the lease is %s (%s), want it abandoned", row.State, row.Reason)
 	}
@@ -1839,7 +1965,7 @@ func TestNodes_ARecoveredLeaseNotTakenBackInTimeIsAbandonedAndStartUpIsNotHeld(t
 		t.Errorf("the node's next heartbeat answered %d, want 410", hb.status)
 	}
 	close(held)
-	wait()
+	boundedBody(t, "joining the job whose lease was abandoned", wait)
 	j, _ := r.row(src)
 	if j.Status != store.Done || j.FailCount != 0 {
 		t.Fatalf("status = %s, fail_count = %d (%s); want done and 0", j.Status, j.FailCount, j.Outcome.Reason)

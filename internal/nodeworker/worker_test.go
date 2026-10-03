@@ -79,7 +79,19 @@ type fakeServer struct {
 func newFakeServer(t *testing.T) *fakeServer {
 	f := &fakeServer{t: t, replies: map[string][]reply{}, hang: make(chan struct{})}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
-	t.Cleanup(func() { close(f.hang); f.srv.Close() })
+	// The held polls are let go first and the client connections dropped, so closing the
+	// server cannot wait on a request; and the close is bounded all the same.
+	t.Cleanup(func() {
+		close(f.hang)
+		f.srv.CloseClientConnections()
+		closed := make(chan struct{})
+		go func() { defer close(closed); f.srv.Close() }()
+		select {
+		case <-closed:
+		case <-time.After(time.Minute):
+			t.Error("the fake server did not close within a minute; the test goes on without it rather than hang")
+		}
+	})
 	return f
 }
 
@@ -270,7 +282,7 @@ func (r *rig) run() (stop func() error) {
 			select {
 			case runErr = <-done:
 			case <-time.After(waitFor):
-				r.t.Fatal("the worker did not stop")
+				r.t.Error("the worker did not stop; the test goes on without it rather than hang")
 			}
 		})
 		return runErr
@@ -517,7 +529,10 @@ func TestWorker_RunsALeaseEndToEndAgainstTheProtocol(t *testing.T) {
 	inner := r.opts.Encode
 	r.opts.Encode = func(ctx context.Context, in, out string, pre, body []string, progress func(float64)) error {
 		err := inner(ctx, in, out, pre, body, progress)
-		<-gate // hold the encode until a heartbeat has gone out
+		select { // hold the encode until a heartbeat has gone out
+		case <-gate:
+		case <-ctx.Done():
+		}
 		return err
 	}
 	stop := r.run()
@@ -774,7 +789,11 @@ func TestWorker_StoppingFailsTheLeaseAndExitsCleanly(t *testing.T) {
 		return ctx.Err()
 	}
 	stop := r.run()
-	<-started
+	select {
+	case <-started:
+	case <-time.After(waitFor):
+		t.Fatal("the encode never started")
+	}
 	if err := stop(); err != nil {
 		t.Fatalf("Run = %v, want nil: a stop is a clean exit", err)
 	}

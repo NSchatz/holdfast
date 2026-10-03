@@ -863,7 +863,7 @@ func TestNodeFixture_TheLongPollAnswers204WithRetryAfterWhenNoWorkArrives(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := <-answered; r.status != http.StatusNoContent || r.header.Get("Retry-After") != "7" {
+	if r := take(t, answered); r.status != http.StatusNoContent || r.header.Get("Retry-After") != "7" {
 		t.Fatalf("a reserved poll at its long-poll bound answered %d Retry-After=%q, want 204 and 7", r.status, r.header.Get("Retry-After"))
 	}
 	job := f.job("reserved-then-gone", 1000)
@@ -893,7 +893,7 @@ func TestNodeFixture_TheLongPollAnswers204WithRetryAfterWhenNoWorkArrives(t *tes
 		t.Fatal(err)
 	}
 	f.hub.Release(tk2, ErrNoRoom)
-	is503(t, "the next poll of the same node", <-again, errNoRoom)
+	is503(t, "the next poll of the same node", take(t, again), errNoRoom)
 
 	// A poll whose REQUEST ended while it was reserved is dead the same way.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -912,13 +912,26 @@ func TestNodeFixture_TheLongPollAnswers204WithRetryAfterWhenNoWorkArrives(t *tes
 		t.Fatal(err)
 	}
 	cancel()
-	<-left
+	take(t, left)
 	eventually(t, "the handler to see its request end", func() bool { return !f.hub.pollWaiting(tk3) })
 	if _, err := f.hub.Encode(context.Background(), tk3, f.job("left", 1000), nil); !errors.Is(err, ErrPollGone) {
 		t.Fatalf("Encode on a ticket whose request ended = %v, want ErrPollGone", err)
 	}
 	if live, _ := f.st.LiveLeases(context.Background()); len(live) != 0 {
 		t.Errorf("a ticket whose request ended left %d live lease(s)", len(live))
+	}
+}
+
+// take receives one value, and fails the test rather than wait for ever on one that never
+// comes.
+func take[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(2 * time.Minute):
+		t.Fatal("timed out waiting for an answer")
+		panic("unreachable")
 	}
 }
 
@@ -946,7 +959,7 @@ func TestNodeFixture_ANodeWhoseLeasesKeepEndingCoolsOff(t *testing.T) {
 
 	// The third in a row: the queued poll is answered now, with the whole cool-off to wait.
 	f.hub.Report("node-a", "encode_failed")
-	r := <-queued
+	r := take(t, queued)
 	isTyped(t, "the cooling node's queued poll", r, http.StatusServiceUnavailable, errCoolingOff)
 	if got := r.header.Get("Retry-After"); got != "300" {
 		t.Errorf("Retry-After = %q, want 300", got)
@@ -969,7 +982,7 @@ func TestNodeFixture_ANodeWhoseLeasesKeepEndingCoolsOff(t *testing.T) {
 		t.Fatalf("WaitDemand = %v, %v; want node-b's poll", tk, err)
 	}
 	f.hub.Release(tk, ErrNoRoom)
-	is503(t, "node-b's poll", <-other, errNoRoom)
+	is503(t, "node-b's poll", take(t, other), errNoRoom)
 
 	// At the cool-off's end the node is served again, and its run starts from nothing: two
 	// more endings do not cool it off.
@@ -983,7 +996,7 @@ func TestNodeFixture_ANodeWhoseLeasesKeepEndingCoolsOff(t *testing.T) {
 		t.Fatalf("after the cool-off WaitDemand = %v, %v; want node-a's poll", tk, err)
 	}
 	f.hub.Release(tk, ErrNoRoom)
-	is503(t, "node-a's poll after the cool-off", <-back, errNoRoom)
+	is503(t, "node-a's poll after the cool-off", take(t, back), errNoRoom)
 }
 
 // TestNodeFixture_ReadyGivesEveryRecoveredLeaseItsGraceAgain: the grace Recover gave runs

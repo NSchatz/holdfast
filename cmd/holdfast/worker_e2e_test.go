@@ -44,6 +44,10 @@ import (
 // gate runs these under -race on a loaded host, and a wait that passes returns at once.
 const labWait = 10 * time.Minute
 
+// labClient is the fake node's HTTP client: bounded, well above the server's long-poll, so
+// a server that never answers fails a test instead of hanging it.
+var labClient = &http.Client{Timeout: labWait}
+
 type nodeLab struct {
 	t                *testing.T
 	dir, lib, mount  string
@@ -174,7 +178,11 @@ func (l *nodeLab) start(name, ffmpeg string, args ...string) *proc {
 // kill is a crash: SIGKILL to the whole process group, ffmpeg children included.
 func (p *proc) kill() {
 	_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
-	<-p.done
+	select {
+	case <-p.done:
+	case <-time.After(time.Minute):
+		p.t.Error("a killed process was not reaped within a minute; the test goes on without it rather than hang")
+	}
 }
 
 // stop is a graceful stop: SIGTERM, and the exit code.
@@ -291,7 +299,7 @@ func (l *nodeLab) call(method, route string, header map[string]string, body []by
 	for k, v := range header {
 		req.Header.Set(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := labClient.Do(req)
 	if err != nil {
 		l.t.Fatalf("%s %s: %v", method, route, err)
 	}
@@ -667,7 +675,7 @@ func TestWorkerFixture_AServerRestartWithLiveLeasesAdoptsOrAbandonsBeforeAnyGran
 					req, _ := http.NewRequest(http.MethodPost, l.base+"/api/node/v1"+leaseAt(node.RouteHeartbeat, lease), bytes.NewReader(b))
 					req.Header.Set("Authorization", "Bearer "+l.token)
 					req.Header.Set("Content-Type", "application/json")
-					if resp, err := http.DefaultClient.Do(req); err == nil {
+					if resp, err := labClient.Do(req); err == nil {
 						_ = resp.Body.Close()
 					}
 				}
@@ -677,7 +685,11 @@ func TestWorkerFixture_AServerRestartWithLiveLeasesAdoptsOrAbandonsBeforeAnyGran
 		temp = regexp.MustCompile(`working_file=(\S+)`).FindStringSubmatch(transcode)[1]
 		first.kill()
 		close(stopBeating)
-		<-beating
+		select {
+		case <-beating:
+		case <-time.After(time.Minute):
+			t.Fatal("the fake node's heartbeats did not stop")
+		}
 		// What the dead process left: a partial upload in the lease's working file, and - for
 		// comparison - the working file of the local encode it was killed in.
 		writeFile(t, temp, "half an upload", 0o644)
