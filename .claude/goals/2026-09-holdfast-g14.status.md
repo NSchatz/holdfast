@@ -66,12 +66,12 @@ Measured at the goal-start SHA in a detached worktree (`/cache/wt/holdfast/g14-b
 
 | # | Item | State |
 |---|---|---|
-| 2.1 | S0167 `scan-records-source-facts`: a skipped row records the source codec and dimensions the probe already read, with no extra probe | TODO |
-| 2.2 | S0171 `queue-row-decision-facts`: an encoding or verifying row carries this attempt's decision facts | TODO |
-| 2.3 | S0169 `summary-per-root-totals`: `/api/summary` gains the per-root block and the top-level held figure | TODO |
-| 2.4 | S0172 `would-transcode-state-label`: a live engine reports dry-run rows inside `pending` on the summary, the SSE snapshot and the queue-depth gauge | TODO |
-| 2.5 | S0170 `history-filter-paging`: `/api/history` takes a terminal-status filter and an opaque cursor | TODO |
-| 2.6 | The two reads the views need and the API lacks: a queue row's `priority`, and a read of the worker nodes and their leases (D2) | TODO |
+| 2.1 | S0167 `scan-records-source-facts`: a skipped row records the source codec and dimensions the probe already read, with no extra probe | DONE (PR #167, `eb2dd01`): `TestS0167_AC1_...` to `TestS0167_AC8_...` in `internal/engine/skip_source_facts_test.go`, `internal/store/source_facts_test.go` and `internal/server/history_source_facts_test.go`; `RecordSkip` takes the snapshot's `SourceFacts`; gate exit 0 in 1932 s on `64c655f` (`internal/engine` 1756.0 s, 32.5% of `TEST_TIMEOUT` 90m; `cmd/holdfast` 735.2 s); CI green (`build`, `package`, `mutation`); 0 fix rounds |
+| 2.2 | S0171 `queue-row-decision-facts`: an encoding or verifying row carries this attempt's decision facts | DONE (PR #167, `eb2dd01`): `TestS0171_AC1_...` to `TestS0171_AC8_...` in `internal/engine/queue_decision_facts_test.go`, `internal/store/decision_facts_test.go` and `internal/server/queue_decision_facts_test.go`; `AdmitToEncoder` writes the six facts and the status in one statement, onto a row still `probing`; the same gate and CI |
+| 2.3 | S0169 `summary-per-root-totals`: `/api/summary` gains the per-root block and the top-level held figure | DONE (PR #167, `eb2dd01`): `TestS0169_AC1_...` to `TestS0169_AC16_...` in `internal/server/summary_roots_test.go`, `summary_roots_sizing_test.go`, `summary_roots_readonly_test.go` and `internal/store/roots_test.go`; `make api-schema-diff` additions only; the same gate and CI |
+| 2.4 | S0172 `would-transcode-state-label`: a live engine reports dry-run rows inside `pending` on the summary, the SSE snapshot and the queue-depth gauge | DONE (PR #167, `eb2dd01`): `TestS0172_AC1_...` to `TestS0172_AC13_...` in `internal/server/server_test.go`, `internal/metrics/metrics_test.go`, `internal/engine/engine_test.go`, `internal/store/reported_test.go` and `cmd/holdfast/main_test.go`; `serve` calls `SetLiveEngine` on the hub and the metrics; the same gate and CI |
+| 2.5 | S0170 `history-filter-paging`: `/api/history` takes a terminal-status filter and an opaque cursor | DONE (PR #167, `eb2dd01`): `TestS0170_AC1_...` to `TestS0170_AC13_...` in `internal/server/history_paging_test.go`, `TestListPage_*` in `internal/store`; the cursor carries the path as bytes (D6); the same gate and CI |
+| 2.6 | The two reads the views need and the API lacks: a queue row's `priority`, and a read of the worker nodes and their leases (D2) | DONE (PR #167, `eb2dd01`): `priority` on every job row (`TestPriority_*`, `TestConfigPriority_IsPriorityOfOrNull`, `TestServe_CarriesTheConfiguredPriorityToTheJobRows`) and `GET /api/nodes` (`TestNodesRead_*`, `TestView_*`, `TestRecentLeases_*`); mutation-diff 100.00% against the 70% floor (killed 10, lived 0); the same gate and CI |
 
 ## Phase 3 - Views, controls and the statement (lines C, D, E; track `holdfast-g14/ui-views`)
 
@@ -170,15 +170,15 @@ whole-package suite outside `goals-heavy`. State: DONE (PR #168, `59a73f3`; D8, 
 
 ## Resume here
 
-Request #229 is DONE (PR #168, `59a73f3`). Phase 2: PR #167 (`holdfast-g14/api-facts`) is merged up
-to `main` at `64c655f` and pushed; its CI reruns on that head; its local gate is running detached
-(`/cache/tmp/holdfast-g14/run-gate.sh`; log `api-gate.log`, ends with an `exit <n> WALL` line; the
-gated SHA in `api-gate.sha`). When both are green: put the gate's last 20 lines, its wall-clock
-and the `internal/engine` seconds in the PR body, then `gh pr merge 167 --squash --delete-branch`.
-Phase 3: `holdfast-g14/ui-views` (worktree `/cache/wt/holdfast/g14-ui`, local only, head
-`68cadf0`, which also carries the first commit of #168) holds the views, the controls, the docs
-rewrite and the review's fixes. After #167 merges: merge `origin/main` into it, check it against
-the merged API on a real `serve`, `make mutation-diff REF=origin/main`, the gate, PR, CI, merge.
+Merged: #168 (`59a73f3`, request #229, DONE) and #167 (`eb2dd01`, the API facts). Phase 3: PR #169
+(`holdfast-g14/ui-views`, worktree `/cache/wt/holdfast/g14-ui`, head `c42c008`, merged up to
+`main`) is open; its CI is running; running detached under the heavy locks
+(`/cache/tmp/holdfast-g14/ui-chain.sh`): `make mutation-diff REF=origin/main` (log
+`ui-mutation.log`), then the gate (log `ui-gate.log`, ends with an `exit <n> WALL` line; the
+gated SHA in `ui-gate.sha`). When both are green: put the gate's last 20 lines, its wall-clock
+and the `internal/engine` seconds in the PR body, then `gh pr merge 169 --squash --delete-branch`.
+Then phase 4: the gate-integrity counts from `dfaca59`, the COMPLETE line, the adversarial review
+of the report, `goals check`, the GOAL REPORT.
 
 ## Supervisor actions
 
